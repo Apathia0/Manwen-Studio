@@ -16,7 +16,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(message
 
 load_dotenv()
 
-IMAGE_API_BASE_URL = os.getenv("IMAGE_API_BASE_URL", "https://api.duojie.games/v1").rstrip("/")
+IMAGE_API_BASE_URL = os.getenv("IMAGE_API_BASE_URL", "https://api.xbyjs.top/v1").rstrip("/")
 IMAGE_API_KEY = os.getenv("IMAGE_API_KEY", "")
 IMAGE_MODEL = "gpt-image-2"
 IMAGE_SIZE = "1024x1536"

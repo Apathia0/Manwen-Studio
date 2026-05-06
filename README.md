@@ -63,7 +63,7 @@ copy .env.example .env
 
 ```env
 DATABASE_URL=postgresql://postgres:postgres@localhost:5432/manga_novel
-IMAGE_API_BASE_URL=https://api.duojie.games/v1
+IMAGE_API_BASE_URL=https://api.xbyjs.top/v1
 HOST=127.0.0.1
 PORT=8000
 ```
@@ -171,7 +171,7 @@ https://platform.deepseek.com/usage
 充值入口：
 
 ```text
-https://api.duojie.games/console/token
+https://api.xbyjs.top/console/token
 ```
 
 购买后，把两个 API Key 分别填入网页里的 API Key 设置窗口，然后点击保存。
