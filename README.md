@@ -63,7 +63,7 @@ copy .env.example .env
 
 ```env
 DATABASE_URL=postgresql://postgres:postgres@localhost:5432/manga_novel
-IMAGE_API_BASE_URL=https://api.xbyjs.top/v1
+    IMAGE_API_BASE_URL=https://api.xbyjs.top/v1
 HOST=127.0.0.1
 PORT=8000
 ```
