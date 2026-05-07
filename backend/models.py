@@ -1,6 +1,7 @@
 import datetime
+from typing import Any
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, func
+from sqlalchemy import DateTime, ForeignKey, Integer, JSON, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from database import Base
@@ -14,6 +15,9 @@ class Story(Base):
     description: Mapped[str | None] = mapped_column(Text, nullable=True, default="")
     cover_image: Mapped[str | None] = mapped_column(String(500), nullable=True)
     character_profiles: Mapped[str | None] = mapped_column(Text, nullable=True, default="")
+    tags: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    outline: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    characters: Mapped[list[dict[str, Any]] | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now())
 
     chapters: Mapped[list["Chapter"]] = relationship("Chapter", back_populates="story", order_by="Chapter.chapter_number", cascade="all, delete-orphan")
@@ -30,8 +34,14 @@ class Chapter(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     story_id: Mapped[int] = mapped_column(Integer, ForeignKey("stories.id"), nullable=False)
     chapter_number: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    title: Mapped[str | None] = mapped_column(String(255), nullable=True)
     novel_content: Mapped[str | None] = mapped_column(Text, nullable=True)
     content_source: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    act: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    key_events: Mapped[list[Any] | None] = mapped_column(JSON, nullable=True)
+    quality_score: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    status: Mapped[str] = mapped_column(String(20), default="pending")
+    word_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now())
 
     story: Mapped["Story"] = relationship("Story", back_populates="chapters")

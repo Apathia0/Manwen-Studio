@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from pydantic import BaseModel, model_validator
 
@@ -16,6 +16,9 @@ class StoryCreate(BaseModel):
 class StoryUpdate(BaseModel):
     title: Optional[str] = None
     description: Optional[str] = None
+    tags: Optional[dict[str, Any]] = None
+    outline: Optional[dict[str, Any]] = None
+    characters: Optional[list[dict[str, Any]]] = None
 
 
 class StoryOut(BaseModel):
@@ -23,6 +26,9 @@ class StoryOut(BaseModel):
     title: str
     description: Optional[str] = ""
     cover_image: Optional[str] = None
+    tags: Optional[dict[str, Any]] = None
+    outline: Optional[dict[str, Any]] = None
+    characters: Optional[list[dict[str, Any]]] = None
     has_character_profiles: bool = False
     has_ref_image: bool = False
     created_at: datetime.datetime
@@ -55,8 +61,14 @@ class ChapterOut(BaseModel):
     id: int
     story_id: int
     chapter_number: int
+    title: Optional[str] = None
     novel_content: Optional[str] = None
     content_source: Optional[str] = None
+    act: Optional[str] = None
+    key_events: Optional[list[Any]] = None
+    quality_score: Optional[dict[str, Any]] = None
+    status: str = "pending"
+    word_count: Optional[int] = None
     created_at: datetime.datetime
     messages: list[ChatMessageOut] = []
     images: list[MangaImageOut] = []
@@ -97,6 +109,70 @@ class GenerateNovelRequest(BaseModel):
 
 class GenerateMangaRequest(BaseModel):
     pass
+
+
+# --- Framework (InkAI) ---
+class TagsSchema(BaseModel):
+    type: Optional[str] = None
+    theme: Optional[str] = None
+    style: Optional[str] = None
+    audience: Optional[str] = None
+
+
+class CharacterSchema(BaseModel):
+    name: str = ""
+    role: str = ""
+    big_five: Optional[dict[str, Any]] = None
+    arc: Optional[dict[str, Any]] = None
+    relationships: Optional[list[dict[str, Any]]] = None
+
+
+class OutlineSchema(BaseModel):
+    three_acts: Optional[list[dict[str, Any]]] = None
+    themes: Optional[list[str]] = None
+    foreshadowing: Optional[list[str]] = None
+
+
+class QualityScoreSchema(BaseModel):
+    content: Optional[int] = None
+    writing: Optional[int] = None
+    character: Optional[int] = None
+    plot: Optional[int] = None
+    overall: Optional[int] = None
+
+
+class FrameworkGenerateResponse(BaseModel):
+    tags: Optional[dict[str, Any]] = None
+    characters: Optional[list[dict[str, Any]]] = None
+    outline: Optional[dict[str, Any]] = None
+    chapters: Optional[list[dict[str, Any]]] = None
+
+
+class RewriteSelectionRequest(BaseModel):
+    selected_text: str
+    chapter_context: Optional[str] = None
+    instruction: Optional[str] = None
+
+
+class ChapterContentUpdate(BaseModel):
+    content: str
+
+
+class QualityAssessResponse(BaseModel):
+    scores: Optional[QualityScoreSchema] = None
+    suggestions: Optional[list[str]] = None
+    overall_comment: Optional[str] = None
+
+
+class ScenesFromSelectionRequest(BaseModel):
+    selected_text: str
+    chapter_context: Optional[str] = None
+    character_profiles: Optional[str] = None
+    page_count: int = 4
+
+
+class ScenesFromSelectionResponse(BaseModel):
+    scenes: list[dict[str, Any]] = []
 
 
 # Resolve forward references

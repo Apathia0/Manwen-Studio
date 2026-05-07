@@ -48,11 +48,29 @@ def _migrate():
                 conn.execute(text("ALTER TABLE stories ADD COLUMN cover_image VARCHAR(500)"))
             if "character_profiles" not in cols:
                 conn.execute(text("ALTER TABLE stories ADD COLUMN character_profiles TEXT DEFAULT ''"))
+            if "tags" not in cols:
+                conn.execute(text("ALTER TABLE stories ADD COLUMN tags JSON"))
+            if "outline" not in cols:
+                conn.execute(text("ALTER TABLE stories ADD COLUMN outline JSON"))
+            if "characters" not in cols:
+                conn.execute(text("ALTER TABLE stories ADD COLUMN characters JSON"))
     if "chapters" in insp.get_table_names():
         cols = {c["name"] for c in insp.get_columns("chapters")}
         with engine.begin() as conn:
+            if "title" not in cols:
+                conn.execute(text("ALTER TABLE chapters ADD COLUMN title VARCHAR(255)"))
             if "content_source" not in cols:
                 conn.execute(text("ALTER TABLE chapters ADD COLUMN content_source VARCHAR(20)"))
+            if "act" not in cols:
+                conn.execute(text("ALTER TABLE chapters ADD COLUMN act VARCHAR(20)"))
+            if "key_events" not in cols:
+                conn.execute(text("ALTER TABLE chapters ADD COLUMN key_events JSON"))
+            if "quality_score" not in cols:
+                conn.execute(text("ALTER TABLE chapters ADD COLUMN quality_score JSON"))
+            if "status" not in cols:
+                conn.execute(text("ALTER TABLE chapters ADD COLUMN status VARCHAR(20) DEFAULT 'pending'"))
+            if "word_count" not in cols:
+                conn.execute(text("ALTER TABLE chapters ADD COLUMN word_count INTEGER"))
         with engine.begin() as conn:
             conn.execute(text("""
                 UPDATE chapters

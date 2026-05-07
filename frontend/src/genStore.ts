@@ -8,13 +8,13 @@ export interface GenImage {
 }
 
 export interface GenState {
-  active: boolean;        // true while SSE is streaming
+  active: boolean;
   current: number;
   total: number;
   statusMsg: string;
   images: GenImage[];
   errorMsg: string;
-  lastEventAt: number;    // epoch ms of most recent SSE event for stall detection
+  lastEventAt: number;
 }
 
 const states = new Map<number, GenState>();
@@ -24,17 +24,24 @@ function emit() {
   listeners.forEach((fn) => fn());
 }
 
+function dedupeImages(images: GenImage[]): GenImage[] {
+  return [...images]
+    .sort((a, b) => a.image_number - b.image_number)
+    .filter((img, index, arr) => index === 0 || arr[index - 1].image_number !== img.image_number);
+}
+
 export const genStore = {
   get(chapterId: number): GenState | undefined {
     return states.get(chapterId);
   },
-  start(chapterId: number, total = 10) {
+  start(chapterId: number, total = 10, seedImages: GenImage[] = []) {
+    const images = dedupeImages(seedImages);
     states.set(chapterId, {
       active: true,
-      current: 0,
+      current: images.length,
       total,
-      statusMsg: '正在生成漫画…',
-      images: [],
+      statusMsg: '正在生成漫画...',
+      images,
       errorMsg: '',
       lastEventAt: Date.now(),
     });
@@ -49,7 +56,13 @@ export const genStore = {
   pushImage(chapterId: number, img: GenImage) {
     const cur = states.get(chapterId);
     if (!cur) return;
-    states.set(chapterId, { ...cur, images: [...cur.images, img], lastEventAt: Date.now() });
+    const images = dedupeImages([...cur.images, img]);
+    states.set(chapterId, {
+      ...cur,
+      current: Math.max(cur.current, img.image_number),
+      images,
+      lastEventAt: Date.now(),
+    });
     emit();
   },
   finish(chapterId: number, errorMsg?: string) {

@@ -3,12 +3,14 @@ import { ChevronLeft, ChevronRight, Plus, BookOpenText, Trash2, Home, MessageSqu
 import ChatPanel from './components/ChatPanel';
 import MangaPanel from './components/MangaPanel';
 import HomePage from './components/HomePage';
+import WorkspaceLayout from './components/WorkspaceLayout';
 import {
   listChapters,
   listStories,
   createNextChapter,
   deleteChapter,
   getChapter,
+  getStory,
   type Story,
   type Chapter,
   getApiKeySettings,
@@ -46,6 +48,17 @@ function useIsMobile() {
     return () => mq.removeEventListener('change', handler);
   }, []);
   return isMobile;
+}
+
+function useIsLargeScreen() {
+  const [isLarge, setIsLarge] = useState(window.innerWidth >= 1024);
+  useEffect(() => {
+    const mq = window.matchMedia('(min-width: 1024px)');
+    const handler = (e: MediaQueryListEvent) => setIsLarge(e.matches);
+    mq.addEventListener('change', handler);
+    return () => mq.removeEventListener('change', handler);
+  }, []);
+  return isLarge;
 }
 
 function useApiKeyConfigured() {
@@ -209,6 +222,7 @@ function ApiKeyButton({ onClick, compact = false }: { onClick: () => void; compa
 
 function App() {
   const isMobile = useIsMobile();
+  const isLargeScreen = useIsLargeScreen();
   const [view, setView] = useState<View>('home');
   const [story, setStory] = useState<Story | null>(null);
   const [chapters, setChapters] = useState<Chapter[]>([]);
@@ -216,6 +230,7 @@ function App() {
   const [mobileTab, setMobileTab] = useState<MobileTab>('chat');
   const [chapterNavOpen, setChapterNavOpen] = useState(true);
   const [apiKeyModalOpen, setApiKeyModalOpen] = useState(false);
+  const [workspaceMode, setWorkspaceMode] = useState(false);
 
   const persistSelectedChapter = (chapter: Chapter | null | undefined) => {
     if (!chapter) return;
@@ -313,6 +328,34 @@ function App() {
     if (!currentChapter) return;
     const updated = await getChapter(currentChapter.id);
     setChapters((prev) => prev.map((c) => (c.id === updated.id ? updated : c)));
+  };
+
+  const refreshStory = async () => {
+    if (!story) return;
+    const updated = await getStory(story.id);
+    setStory(updated);
+  };
+
+  const refreshStoryChapters = async () => {
+    if (!story) return;
+    const nextChapters = await listChapters(story.id);
+    setChapters(nextChapters);
+    if (!currentChapter) return;
+    const nextIdx = nextChapters.findIndex((chapter) => chapter.id === currentChapter.id);
+    if (nextIdx >= 0) {
+      _setCurrentIdx(nextIdx);
+      persistSelectedChapter(nextChapters[nextIdx]);
+      return;
+    }
+    const fallbackIdx = nextChapters.findIndex((chapter) => chapter.chapter_number === currentChapter.chapter_number);
+    if (fallbackIdx >= 0) {
+      _setCurrentIdx(fallbackIdx);
+      persistSelectedChapter(nextChapters[fallbackIdx]);
+    }
+  };
+
+  const refreshWorkspaceData = async () => {
+    await Promise.all([refreshStory(), refreshStoryChapters()]);
   };
 
   const refreshChapter = async (chapterId: number) => {
@@ -468,6 +511,23 @@ function App() {
           </span>
         </div>
         <div className="flex items-center gap-2 text-xs text-gray-500 shrink-0">
+          {!isMobile && (
+            <button
+              onClick={() => setWorkspaceMode((prev) => {
+                const next = !prev;
+                if (next && !isLargeScreen) return false;
+                return next;
+              })}
+              className={`px-2.5 py-1.5 rounded-md text-xs font-medium transition-colors shrink-0 ${
+                workspaceMode
+                  ? 'bg-violet-600/20 text-violet-300 border border-violet-700/50'
+                  : 'bg-gray-800 hover:bg-gray-700 text-gray-300 border border-transparent hover:border-gray-600'
+              }`}
+              title={workspaceMode ? '切换到对话模式' : '切换到三栏工作台'}
+            >
+              {workspaceMode ? '💬 对话' : '📋 工作台'}
+            </button>
+          )}
           <ApiKeyButton onClick={() => setApiKeyModalOpen(true)} compact={isMobile} />
           <span>第 {currentChapter?.chapter_number ?? '–'} 话</span>
           {!isMobile && <span>·</span>}
@@ -537,15 +597,30 @@ function App() {
         </main>
       ) : (
         <main className="flex-1 flex min-h-0">
-          {chapterNav}
-          <div className="flex flex-1 min-w-0">
-            <div className="w-1/2 border-r border-gray-800">
-              <ChatPanel chapter={currentChapter} onMessageSent={refreshCurrentChapter} onChapterRefresh={refreshChapter} />
-            </div>
-            <div className="w-1/2">
-              <MangaPanel chapter={currentChapter} onChapterRefresh={refreshChapter} />
-            </div>
-          </div>
+          {workspaceMode && isLargeScreen ? (
+            <WorkspaceLayout
+              story={story!}
+              chapters={chapters}
+              currentChapter={currentChapter}
+              onChapterChange={(chapter) => {
+                const idx = chapters.findIndex((c) => c.id === chapter.id);
+                if (idx >= 0) setCurrentIdx(idx);
+              }}
+              onContentUpdated={refreshWorkspaceData}
+            />
+          ) : (
+            <>
+              {chapterNav}
+              <div className="flex flex-1 min-w-0">
+                <div className="w-1/2 border-r border-gray-800">
+                  <ChatPanel chapter={currentChapter} onMessageSent={refreshCurrentChapter} onChapterRefresh={refreshChapter} />
+                </div>
+                <div className="w-1/2">
+                  <MangaPanel chapter={currentChapter} onChapterRefresh={refreshChapter} />
+                </div>
+              </div>
+            </>
+          )}
         </main>
       )}
 

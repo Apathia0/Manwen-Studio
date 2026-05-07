@@ -49,6 +49,57 @@ function apiHeaders(json = false): HeadersInit {
   };
 }
 
+// ─── InkAI Framework Types ──────────────────────────────────
+
+export interface Tags {
+  type?: string;
+  theme?: string;
+  style?: string;
+  audience?: string;
+}
+
+export interface BigFiveScores {
+  O?: number;
+  C?: number;
+  E?: number;
+  A?: number;
+  N?: number;
+  openness?: number;
+  conscientiousness?: number;
+  extraversion?: number;
+  agreeableness?: number;
+  neuroticism?: number;
+}
+
+export interface Character {
+  name?: string;
+  role?: string;
+  big_five?: BigFiveScores;
+  arc?: Record<string, any>;
+  relationships?: Record<string, any>[];
+}
+
+export interface Outline {
+  three_acts?: Record<string, any>[];
+  themes?: string[];
+  foreshadowing?: Record<string, any>[];
+}
+
+export interface QualityScore {
+  content?: number;
+  writing?: number;
+  character?: number;
+  plot?: number;
+  overall?: number;
+}
+
+export interface FrameworkGenerateResponse {
+  tags?: Tags;
+  characters?: Character[];
+  outline?: Outline;
+  chapters?: { act: string; chapter_number: number; title: string }[];
+}
+
 export interface Story {
   id: number;
   title: string;
@@ -56,6 +107,9 @@ export interface Story {
   cover_image?: string | null;
   has_character_profiles?: boolean;
   has_ref_image?: boolean;
+  tags?: Tags;
+  outline?: Outline;
+  characters?: Character[];
   created_at: string;
 }
 
@@ -80,8 +134,14 @@ export interface Chapter {
   id: number;
   story_id: number;
   chapter_number: number;
+  title?: string | null;
   novel_content: string | null;
   content_source?: 'chat' | 'import' | null;
+  act?: string;
+  key_events?: any[];
+  quality_score?: QualityScore;
+  status?: string;
+  word_count?: number;
   created_at: string;
   messages: ChatMessage[];
   images: MangaImage[];
@@ -105,7 +165,22 @@ export async function listStories(): Promise<Story[]> {
   return res.json();
 }
 
-export async function updateStory(storyId: number, data: { title?: string; description?: string }): Promise<Story> {
+export async function getStory(storyId: number): Promise<Story> {
+  const res = await fetch(`${BASE}/api/stories/${storyId}`, { headers: apiHeaders() });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function updateStory(
+  storyId: number,
+  data: {
+    title?: string;
+    description?: string;
+    tags?: Tags;
+    outline?: Outline;
+    characters?: Character[];
+  },
+): Promise<Story> {
   const res = await fetch(`${BASE}/api/stories/${storyId}`, {
     method: 'PUT',
     headers: apiHeaders(true),
@@ -257,20 +332,33 @@ export async function importNovel(chapterId: number, content: string): Promise<C
   return res.json();
 }
 
-// ─── Scenes ─────────────────────────────────────────────────
-
-export async function generateScenes(chapterId: number, signal?: AbortSignal): Promise<string[]> {
-  const res = await fetch(`${BASE}/api/chapters/${chapterId}/generate-scenes`, { method: 'POST', headers: apiHeaders(), signal });
+export async function saveChapterContent(chapterId: number, content: string): Promise<Chapter> {
+  const res = await fetch(`${BASE}/api/chapters/${chapterId}/content`, {
+    method: 'PUT',
+    headers: apiHeaders(true),
+    body: JSON.stringify({ content }),
+  });
   if (!res.ok) throw new Error(await res.text());
-  const data = await res.json();
-  return data.scenes;
+  return res.json();
 }
 
-export async function getScenes(chapterId: number): Promise<string[]> {
+// ─── Scenes ─────────────────────────────────────────────────
+
+export interface ScenesPayload {
+  scenes: string[];
+  sanitized_indices?: number[];
+}
+
+export async function generateScenes(chapterId: number, signal?: AbortSignal): Promise<ScenesPayload> {
+  const res = await fetch(`${BASE}/api/chapters/${chapterId}/generate-scenes`, { method: 'POST', headers: apiHeaders(), signal });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function getScenes(chapterId: number): Promise<ScenesPayload> {
   const res = await fetch(`${BASE}/api/chapters/${chapterId}/scenes`, { headers: apiHeaders() });
   if (!res.ok) throw new Error(await res.text());
-  const data = await res.json();
-  return data.scenes;
+  return res.json();
 }
 
 export async function updateScenes(chapterId: number, scenes: string[]): Promise<void> {
@@ -458,6 +546,14 @@ export interface MangaProgress {
   data: any;
 }
 
+export async function resetMangaImages(chapterId: number): Promise<void> {
+  const res = await fetch(`${BASE}/api/chapters/${chapterId}/manga-images`, {
+    method: 'DELETE',
+    headers: apiHeaders(),
+  });
+  if (!res.ok) throw new Error(await res.text());
+}
+
 export function generateMangaStream(
   chapterId: number,
   onEvent: (event: MangaProgress) => void,
@@ -517,6 +613,99 @@ export function generateMangaStream(
     });
 
   return controller;
+}
+
+// ─── InkAI Framework ────────────────────────────────────────
+
+export async function generateFramework(storyId: number, description: string): Promise<FrameworkGenerateResponse> {
+  const res = await fetch(`${BASE}/api/stories/${storyId}/framework/generate`, {
+    method: 'POST',
+    headers: apiHeaders(true),
+    body: JSON.stringify({ description }),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function regenerateTags(storyId: number): Promise<Tags> {
+  const res = await fetch(`${BASE}/api/stories/${storyId}/framework/tags`, {
+    method: 'POST',
+    headers: apiHeaders(),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  const data = await res.json();
+  return data.tags ?? data;
+}
+
+export async function regenerateCharacters(storyId: number): Promise<Character[]> {
+  const res = await fetch(`${BASE}/api/stories/${storyId}/framework/characters`, {
+    method: 'POST',
+    headers: apiHeaders(),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  const data = await res.json();
+  return data.characters ?? data;
+}
+
+export async function regenerateOutline(storyId: number): Promise<Outline> {
+  const res = await fetch(`${BASE}/api/stories/${storyId}/framework/outline`, {
+    method: 'POST',
+    headers: apiHeaders(),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  const data = await res.json();
+  return data.outline ?? data;
+}
+
+export async function expandChapter(
+  storyId: number,
+  data: { act: string; chapter_number: number; chapter_title: string; key_events?: string[] },
+): Promise<Chapter> {
+  const res = await fetch(`${BASE}/api/stories/${storyId}/expand-chapter`, {
+    method: 'POST',
+    headers: apiHeaders(true),
+    body: JSON.stringify(data),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function rewriteSelection(
+  chapterId: number,
+  selectedText: string,
+  context?: string,
+): Promise<string> {
+  const res = await fetch(`${BASE}/api/chapters/${chapterId}/rewrite-selection`, {
+    method: 'POST',
+    headers: apiHeaders(true),
+    body: JSON.stringify({ selected_text: selectedText, chapter_context: context }),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  const data = await res.json();
+  return data.rewritten_text ?? data;
+}
+
+export async function assessQuality(chapterId: number): Promise<QualityScore> {
+  const res = await fetch(`${BASE}/api/chapters/${chapterId}/quality-assess`, {
+    method: 'POST',
+    headers: apiHeaders(),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  const data = await res.json();
+  return data.scores ?? data;
+}
+
+export async function scenesFromSelection(
+  chapterId: number,
+  data: { selected_text: string; character_profiles?: any[]; page_count?: number },
+): Promise<ScenesPayload & { page_count?: number }> {
+  const res = await fetch(`${BASE}/api/chapters/${chapterId}/scenes-from-selection`, {
+    method: 'POST',
+    headers: apiHeaders(true),
+    body: JSON.stringify(data),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
 }
 
 export function mangaImageUrl(imagePath: string, cacheBust?: number): string {

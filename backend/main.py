@@ -18,6 +18,7 @@ from sse_starlette.sse import EventSourceResponse
 from database import get_db, init_db
 from models import Chapter, ChatMessage, MangaImage, Story
 from schemas import (
+    ChapterContentUpdate,
     ChapterOut,
     ChatMessageIn,
     ChatMessageOut,
@@ -26,9 +27,22 @@ from schemas import (
     StoryOut,
     StoryUpdate,
 )
-from services.deepseek import chat_stream, generate_novel, split_scenes
-from services.errors import MissingApiKeyError
+from services.deepseek import (
+    chat_stream,
+    expand_chapter_to_content,
+    generate_framework,
+    generate_novel,
+    quality_assess,
+    regenerate_characters,
+    regenerate_outline,
+    regenerate_tags,
+    rewrite_selection,
+    scenes_from_selection,
+    split_scenes,
+)
+from services.errors import MangaImageGenerationError, MissingApiKeyError
 from services.image2 import generate_manga_image
+from services.scene_safety import sanitize_scene_list
 
 load_dotenv()
 
@@ -103,6 +117,158 @@ def _character_profile_text(body: dict) -> str:
     return text
 
 
+def _build_framework_context(story: Story | None, chapter: Chapter | None = None) -> str:
+    """Assemble framework constraints from story tags, characters, outline and chapter metadata."""
+    if not story:
+        return ""
+    parts = []
+    if story.tags:
+        parts.append(f"故事标签: {json.dumps(story.tags, ensure_ascii=False)}")
+    if story.characters:
+        parts.append(f"角色设定: {json.dumps(story.characters, ensure_ascii=False)}")
+    if story.outline:
+        parts.append(f"故事大纲: {json.dumps(story.outline, ensure_ascii=False)}")
+    if chapter:
+        if chapter.act:
+            parts.append(f"当前章节所属幕: {chapter.act}")
+        if chapter.key_events:
+            parts.append(f"本章关键事件: {json.dumps(chapter.key_events, ensure_ascii=False)}")
+    return "\n".join(parts)
+
+
+def _count_words(text: str | None) -> int | None:
+    if not text:
+        return None
+    stripped = text.strip()
+    if not stripped:
+        return None
+    return len("".join(stripped.split()))
+
+
+def _normalize_key_events(raw) -> list[str] | None:
+    if not raw:
+        return None
+    if isinstance(raw, list):
+        items = [str(item).strip() for item in raw if str(item).strip()]
+        return items or None
+    if isinstance(raw, str):
+        text = raw.strip()
+        return [text] if text else None
+    return [str(raw).strip()] if str(raw).strip() else None
+
+
+def _normalize_framework_outline(outline: dict | None, chapters: list | None) -> dict:
+    normalized = dict(outline or {})
+    acts = normalized.get("three_acts")
+    if not isinstance(acts, list):
+        acts = []
+
+    chapter_groups: dict[str, list[dict]] = {}
+    if isinstance(chapters, list):
+        for item in chapters:
+            if not isinstance(item, dict):
+                continue
+            act_key = str(item.get("act") or "").strip()
+            chapter_number = item.get("chapter_number")
+            title = str(item.get("title") or "").strip()
+            if not isinstance(chapter_number, int) or chapter_number < 1 or not title:
+                continue
+            chapter_entry = {
+                "chapter_number": chapter_number,
+                "title": title,
+            }
+            key_events = _normalize_key_events(item.get("key_events"))
+            if key_events:
+                chapter_entry["key_events"] = key_events
+            summary = item.get("summary")
+            if isinstance(summary, str) and summary.strip():
+                chapter_entry["summary"] = summary.strip()
+            chapter_groups.setdefault(act_key, []).append(chapter_entry)
+
+    next_unassigned: list[dict] = chapter_groups.pop("", [])
+    merged_acts: list[dict] = []
+    for index, act in enumerate(acts, start=1):
+        if isinstance(act, dict):
+            act_entry = dict(act)
+        else:
+            act_entry = {"title": str(act)}
+        act_label = act_entry.get("act", index)
+        act_entry["act"] = act_label
+        candidates = chapter_groups.pop(str(act_label), None) or chapter_groups.pop(str(index), None)
+        if not candidates and next_unassigned:
+            candidates = next_unassigned
+            next_unassigned = []
+        act_entry["chapters"] = sorted(candidates or [], key=lambda item: item["chapter_number"])
+        merged_acts.append(act_entry)
+
+    leftover = []
+    for items in chapter_groups.values():
+        leftover.extend(items)
+    leftover.extend(next_unassigned)
+    if leftover:
+        merged_acts.append({
+            "act": len(merged_acts) + 1,
+            "title": "章节规划",
+            "summary": "",
+            "chapters": sorted(leftover, key=lambda item: item["chapter_number"]),
+        })
+
+    normalized["three_acts"] = merged_acts
+    return normalized
+
+
+def _apply_chapter_content(chapter: Chapter, content: str, *, status: str | None = None) -> None:
+    chapter.novel_content = content
+    chapter.word_count = _count_words(content)
+    if status:
+        chapter.status = status
+
+
+def _normalize_big_five_scores(raw):
+    if not isinstance(raw, dict):
+        return raw
+    key_map = {
+        "O": "O",
+        "C": "C",
+        "E": "E",
+        "A": "A",
+        "N": "N",
+        "openness": "O",
+        "conscientiousness": "C",
+        "extraversion": "E",
+        "agreeableness": "A",
+        "neuroticism": "N",
+    }
+    normalized = {}
+    for key, value in raw.items():
+        target = key_map.get(str(key))
+        if not target:
+            continue
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            continue
+        if numeric <= 10:
+            numeric *= 10
+        normalized[target] = max(0, min(100, int(round(numeric))))
+    return normalized or raw
+
+
+def _normalize_characters_payload(raw):
+    if not isinstance(raw, list):
+        return raw
+    normalized = []
+    for item in raw:
+        if not isinstance(item, dict):
+            normalized.append(item)
+            continue
+        character = dict(item)
+        if "big_five" in character:
+            character["big_five"] = _normalize_big_five_scores(character.get("big_five"))
+        normalized.append(character)
+    return normalized
+
+
 def _unlink_file(path: Path, label: str) -> None:
     if not path.exists():
         return
@@ -134,6 +300,39 @@ def _chapter_dir(chapter_id: int) -> Path:
     return Path(__file__).resolve().parent / "manga_outputs" / f"chapter_{chapter_id}"
 
 
+def _scene_meta_path(chapter_id: int) -> Path:
+    return _chapter_dir(chapter_id) / "scenes_meta.json"
+
+
+def _write_scenes_file(chapter_id: int, scenes: list[str], sanitized_indices: list[int] | None = None) -> None:
+    prompts_dir = _chapter_dir(chapter_id)
+    prompts_dir.mkdir(parents=True, exist_ok=True)
+    prompts_file = prompts_dir / "scenes.txt"
+    with open(prompts_file, "w", encoding="utf-8") as f:
+        for idx, scene in enumerate(scenes, start=1):
+            f.write(f"=== 第{idx}格 ===\n{scene.strip()}\n\n")
+    meta_path = _scene_meta_path(chapter_id)
+    payload = {"sanitized_indices": sorted(set(sanitized_indices or []))}
+    meta_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+
+def _parse_scenes_text(raw: str) -> list[str]:
+    import re
+
+    parts = [p.strip() for p in re.split(r"(?m)^=== .*? ===\n", raw) if p.strip()]
+    return parts
+
+
+def _load_scene_meta(chapter_id: int) -> dict:
+    meta_path = _scene_meta_path(chapter_id)
+    if not meta_path.exists():
+        return {"sanitized_indices": []}
+    try:
+        return json.loads(meta_path.read_text(encoding="utf-8"))
+    except Exception:
+        return {"sanitized_indices": []}
+
+
 def _clear_chapter_manga_state(chapter: Chapter, db: Session) -> None:
     chapter_dir = _chapter_dir(chapter.id)
     if chapter_dir.exists():
@@ -146,6 +345,14 @@ def _clear_chapter_manga_state(chapter: Chapter, db: Session) -> None:
             if img_path.exists():
                 _unlink_file(img_path, "manga image")
             db.delete(img)
+
+
+def _clear_chapter_images_only(chapter: Chapter, db: Session) -> None:
+    for img in list(chapter.images):
+        img_path = Path(__file__).resolve().parent / img.image_path
+        if img_path.exists():
+            _unlink_file(img_path, "manga image")
+        db.delete(img)
 
 
 def _decode_png_upload(b64: str) -> bytes:
@@ -234,6 +441,12 @@ def update_story(story_id: int, body: StoryUpdate, db: Session = Depends(get_db)
         story.title = body.title
     if body.description is not None:
         story.description = body.description
+    if body.tags is not None:
+        story.tags = body.tags
+    if body.outline is not None:
+        story.outline = body.outline
+    if body.characters is not None:
+        story.characters = _normalize_characters_payload(body.characters)
     db.commit()
     db.refresh(story)
     return story
@@ -331,7 +544,7 @@ def create_next_chapter(story_id: int, db: Session = Depends(get_db)):
         .first()
     )
     next_num = (max_num[0] + 1) if max_num else 1
-    chapter = Chapter(story_id=story_id, chapter_number=next_num)
+    chapter = Chapter(story_id=story_id, chapter_number=next_num, title=f"第{next_num}话", status="pending")
     db.add(chapter)
     db.commit()
     db.refresh(chapter)
@@ -386,6 +599,8 @@ async def chat(chapter_id: int, body: ChatMessageIn, request: Request, db: Sessi
         for m in ch.messages:
             history.append({"role": m.role, "content": m.content})
 
+    framework_context = _build_framework_context(chapter.story, chapter)
+
     collected: list[str] = []
 
     def save_interrupted_assistant() -> None:
@@ -402,7 +617,7 @@ async def chat(chapter_id: int, body: ChatMessageIn, request: Request, db: Sessi
 
     async def event_generator():
         try:
-            async for token in chat_stream(history, api_key=_user_deepseek_api_key(request)):
+            async for token in chat_stream(history, api_key=_user_deepseek_api_key(request), framework_context=framework_context):
                 collected.append(token)
                 yield {"event": "token", "data": json.dumps({"content": token}, ensure_ascii=False)}
             # Save assistant message
@@ -440,8 +655,15 @@ async def generate_novel_endpoint(chapter_id: int, request: Request, db: Session
     if not history:
         raise HTTPException(400, "No chat history to generate novel from")
 
-    novel_content = await generate_novel(history, api_key=_user_deepseek_api_key(request))
-    chapter.novel_content = novel_content
+    # Build framework context from story outline, characters, tags and chapter metadata
+    framework_context = _build_framework_context(chapter.story, chapter)
+
+    novel_content = await generate_novel(
+        history,
+        api_key=_user_deepseek_api_key(request),
+        framework_context=framework_context,
+    )
+    _apply_chapter_content(chapter, novel_content, status="completed")
     chapter.content_source = "chat"
 
     # Also save as assistant message
@@ -483,8 +705,20 @@ async def import_novel_endpoint(chapter_id: int, request: Request, db: Session =
     _clear_chapter_manga_state(chapter, db)
     db.query(ChatMessage).filter(ChatMessage.chapter_id == chapter_id).delete()
     db.add(ChatMessage(chapter_id=chapter_id, role="user", content=text))
-    chapter.novel_content = text
+    _apply_chapter_content(chapter, text, status="draft")
     chapter.content_source = "import"
+    db.commit()
+    db.refresh(chapter)
+    return chapter
+
+
+@app.put("/api/chapters/{chapter_id}/content", response_model=ChapterOut)
+def update_chapter_content(chapter_id: int, body: ChapterContentUpdate, db: Session = Depends(get_db)):
+    chapter = _require_chapter(chapter_id, db)
+    text = body.content.strip()
+    if not text:
+        raise HTTPException(400, "content is empty")
+    _apply_chapter_content(chapter, text, status="draft")
     db.commit()
     db.refresh(chapter)
     return chapter
@@ -855,16 +1089,9 @@ async def generate_scenes_endpoint(chapter_id: int, request: Request, db: Sessio
             split_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await split_task
-
-    # Save to file
-    prompts_dir = Path(__file__).resolve().parent / "manga_outputs" / f"chapter_{chapter_id}"
-    prompts_dir.mkdir(parents=True, exist_ok=True)
-    prompts_file = prompts_dir / "scenes.txt"
-    with open(prompts_file, "w", encoding="utf-8") as f:
-        for idx, s in enumerate(scenes, 1):
-            f.write(f"=== 第{idx}格 ===\n{s}\n\n")
-
-    return {"scenes": scenes}
+    sanitized_scenes, sanitized_indices = sanitize_scene_list(scenes)
+    _write_scenes_file(chapter_id, sanitized_scenes, sanitized_indices)
+    return {"scenes": sanitized_scenes, "sanitized_indices": sanitized_indices}
 
 
 @app.get("/api/chapters/{chapter_id}/scenes")
@@ -873,15 +1100,16 @@ async def get_scenes_endpoint(chapter_id: int, db: Session = Depends(get_db)):
     _require_chapter(chapter_id, db)
     prompts_file = Path(__file__).resolve().parent / "manga_outputs" / f"chapter_{chapter_id}" / "scenes.txt"
     if not prompts_file.exists():
-        return {"scenes": []}
+        return {"scenes": [], "sanitized_indices": []}
     try:
-        import re
         raw = prompts_file.read_text(encoding="utf-8")
-        parts = re.split(r"=== 第\d+格 ===\n", raw)
-        parts = [p.strip() for p in parts if p.strip()]
-        return {"scenes": parts}
+        parts = _parse_scenes_text(raw)
+        meta = _load_scene_meta(chapter_id)
+        if parts:
+            _write_scenes_file(chapter_id, parts, meta.get("sanitized_indices", []))
+        return {"scenes": parts, "sanitized_indices": meta.get("sanitized_indices", [])}
     except Exception:
-        return {"scenes": []}
+        return {"scenes": [], "sanitized_indices": []}
 
 
 @app.put("/api/chapters/{chapter_id}/scenes")
@@ -893,17 +1121,21 @@ async def update_scenes_endpoint(chapter_id: int, body: dict, db: Session = Depe
     if not isinstance(scenes, list) or len(scenes) != image_count or not all(isinstance(s, str) and s.strip() for s in scenes):
         raise HTTPException(400, f"Must provide exactly {image_count} scenes")
 
-    prompts_dir = Path(__file__).resolve().parent / "manga_outputs" / f"chapter_{chapter_id}"
-    prompts_dir.mkdir(parents=True, exist_ok=True)
-    prompts_file = prompts_dir / "scenes.txt"
-    with open(prompts_file, "w", encoding="utf-8") as f:
-        for idx, s in enumerate(scenes, 1):
-            f.write(f"=== 第{idx}格 ===\n{s}\n\n")
-
+    _write_scenes_file(chapter_id, scenes, [])
     return {"ok": True}
 
 
 # ─── SSE for manga image generation ─────────────────────
+
+@app.delete("/api/chapters/{chapter_id}/manga-images")
+async def reset_manga_images(chapter_id: int, db: Session = Depends(get_db)):
+    chapter = _require_chapter(chapter_id, db)
+    if chapter_id in ACTIVE_MANGA_GENERATIONS:
+        raise HTTPException(409, "Manga generation is already running for this chapter")
+    _clear_chapter_images_only(chapter, db)
+    db.commit()
+    return {"ok": True}
+
 
 @app.post("/api/chapters/{chapter_id}/generate-manga-stream")
 async def generate_manga_stream(chapter_id: int, request: Request, db: Session = Depends(get_db)):
@@ -912,14 +1144,13 @@ async def generate_manga_stream(chapter_id: int, request: Request, db: Session =
         raise HTTPException(404, "Chapter not found")
 
     # Load scenes from file (must exist - user should generate/confirm scenes first)
-    import re
     prompts_file = Path(__file__).resolve().parent / "manga_outputs" / f"chapter_{chapter_id}" / "scenes.txt"
     if not prompts_file.exists():
         raise HTTPException(400, "No scene prompts found. Generate scenes first.")
     image_count = _load_image_count(chapter_id)
+
     raw = prompts_file.read_text(encoding="utf-8")
-    parts = re.split(r"=== 第\d+格 ===\n", raw)
-    scenes = [p.strip() for p in parts if p.strip()]
+    scenes = _parse_scenes_text(raw)
     if len(scenes) != image_count:
         raise HTTPException(400, f"Expected {image_count} scenes, found {len(scenes)}")
     if chapter_id in ACTIVE_MANGA_GENERATIONS:
@@ -952,10 +1183,9 @@ async def generate_manga_stream(chapter_id: int, request: Request, db: Session =
                     "event": "progress",
                     "data": json.dumps({"current": i, "total": image_count, "prompt": scene_prompt}, ensure_ascii=False),
                 }
-
                 try:
                     ref_imgs = _effective_ref_image_paths(chapter_id, db)
-                    image_path = await generate_manga_image(
+                    image_result = await generate_manga_image(
                         scene_prompt,
                         chapter_id,
                         i,
@@ -965,17 +1195,29 @@ async def generate_manga_stream(chapter_id: int, request: Request, db: Session =
                         color_mode=_load_color_mode(chapter_id),
                         api_key=_user_image_api_key(request),
                     )
+                    if image_result.prompt_sanitized and image_result.final_prompt != scene_prompt:
+                        scenes[i - 1] = image_result.final_prompt
+                        meta = _load_scene_meta(chapter_id)
+                        sanitized_indices = sorted(set((meta.get("sanitized_indices", []) or []) + [i - 1]))
+                        _write_scenes_file(chapter_id, scenes, sanitized_indices)
+                        scene_prompt = image_result.final_prompt
+                except MangaImageGenerationError as img_err:
+                    payload = img_err.to_payload()
+                    payload["error"] = f"第{i}张生成失败: {payload['error']}"
+                    payload["image_number"] = i
+                    yield {"event": "error", "data": json.dumps(payload, ensure_ascii=False)}
+                    return
                 except Exception as img_err:
                     yield {
                         "event": "error",
-                        "data": json.dumps({"error": f"第{i}张生成失败: {img_err}"}, ensure_ascii=False),
+                        "data": json.dumps({"error": f"第{i}张生成失败: {str(img_err) or repr(img_err)}", "code": "unknown_error", "image_number": i}, ensure_ascii=False),
                     }
                     return
 
                 manga = MangaImage(
                     chapter_id=chapter_id,
                     image_number=i,
-                    image_path=image_path,
+                    image_path=image_result.image_path,
                     prompt=scene_prompt,
                 )
                 db.add(manga)
@@ -986,7 +1228,7 @@ async def generate_manga_stream(chapter_id: int, request: Request, db: Session =
                     "data": json.dumps({
                         "id": manga.id,
                         "image_number": i,
-                        "image_path": image_path,
+                        "image_path": image_result.image_path,
                         "prompt": scene_prompt,
                     }, ensure_ascii=False),
                 }
@@ -1017,20 +1259,16 @@ async def regenerate_single_image(chapter_id: int, image_number: int, body: dict
         raise HTTPException(400, "prompt is required")
 
     # Load all scenes for context
-    import re as _re
     prompts_file = Path(__file__).resolve().parent / "manga_outputs" / f"chapter_{chapter_id}" / "scenes.txt"
     all_scenes = None
     if prompts_file.exists():
         raw = prompts_file.read_text(encoding="utf-8")
-        parts = _re.split(r"=== 第\d+格 ===\n", raw)
-        parts = [p.strip() for p in parts if p.strip()]
+        parts = _parse_scenes_text(raw)
         if len(parts) == image_count:
             # Update the scene in file
             parts[image_number - 1] = prompt
             all_scenes = parts
-            with open(prompts_file, "w", encoding="utf-8") as f:
-                for idx, s in enumerate(parts, 1):
-                    f.write(f"=== 第{idx}格 ===\n{s}\n\n")
+            _write_scenes_file(chapter_id, parts, _load_scene_meta(chapter_id).get("sanitized_indices", []))
 
     # Keep old DB/file intact until the new image is generated successfully.
     old_img = db.query(MangaImage).filter(
@@ -1041,33 +1279,42 @@ async def regenerate_single_image(chapter_id: int, image_number: int, body: dict
 
     # Generate new image
     ref_imgs = _effective_ref_image_paths(chapter_id, db)
-    image_path = await generate_manga_image(
-        prompt,
-        chapter_id,
-        image_number,
-        all_scenes=all_scenes,
-        character_profiles=_load_characters(chapter_id, db),
-        ref_image_paths=[str(p) for p in ref_imgs] if ref_imgs else None,
-        color_mode=_load_color_mode(chapter_id),
-        api_key=_user_image_api_key(request),
-    )
+    try:
+        image_result = await generate_manga_image(
+            prompt,
+            chapter_id,
+            image_number,
+            all_scenes=all_scenes,
+            character_profiles=_load_characters(chapter_id, db),
+            ref_image_paths=[str(p) for p in ref_imgs] if ref_imgs else None,
+            color_mode=_load_color_mode(chapter_id),
+            api_key=_user_image_api_key(request),
+        )
+    except MangaImageGenerationError as exc:
+        raise HTTPException(502, exc.to_payload()) from exc
+    if image_result.prompt_sanitized and image_result.final_prompt != prompt and all_scenes and len(all_scenes) == image_count:
+        all_scenes[image_number - 1] = image_result.final_prompt
+        meta = _load_scene_meta(chapter_id)
+        sanitized_indices = sorted(set((meta.get("sanitized_indices", []) or []) + [image_number - 1]))
+        _write_scenes_file(chapter_id, all_scenes, sanitized_indices)
+        prompt = image_result.final_prompt
 
     if old_img:
         manga = old_img
-        manga.image_path = image_path
+        manga.image_path = image_result.image_path
         manga.prompt = prompt
     else:
         manga = MangaImage(
             chapter_id=chapter_id,
             image_number=image_number,
-            image_path=image_path,
+            image_path=image_result.image_path,
             prompt=prompt,
         )
         db.add(manga)
     db.commit()
     db.refresh(manga)
 
-    if old_path and old_path.exists() and old_path != Path(__file__).resolve().parent / image_path:
+    if old_path and old_path.exists() and old_path != Path(__file__).resolve().parent / image_result.image_path:
         try:
             old_path.unlink()
         except OSError as exc:
@@ -1076,9 +1323,228 @@ async def regenerate_single_image(chapter_id: int, image_number: int, body: dict
     return {
         "id": manga.id,
         "image_number": image_number,
-        "image_path": image_path,
+                        "image_path": image_result.image_path,
         "prompt": prompt,
     }
+
+
+# ─── Framework (InkAI) ─────────────────────────────────────
+
+@app.post("/api/stories/{story_id}/framework/generate")
+async def generate_framework_endpoint(story_id: int, request: Request, db: Session = Depends(get_db)):
+    story = db.get(Story, story_id)
+    if not story:
+        raise HTTPException(404, "Story not found")
+    body = await request.json()
+    description = body.get("description", "")
+    if not isinstance(description, str) or not description.strip():
+        description = story.description or ""
+    if not description.strip():
+        raise HTTPException(400, "description is required")
+
+    framework = await generate_framework(description.strip(), api_key=_user_deepseek_api_key(request))
+
+    story.tags = framework.get("tags")
+    story.characters = _normalize_characters_payload(framework.get("characters"))
+    story.outline = _normalize_framework_outline(framework.get("outline"), framework.get("chapters"))
+    db.commit()
+    db.refresh(story)
+    return {
+        "tags": story.tags,
+        "characters": story.characters,
+        "outline": story.outline,
+        "chapters": framework.get("chapters"),
+    }
+
+
+@app.post("/api/stories/{story_id}/framework/tags")
+async def regenerate_tags_endpoint(story_id: int, request: Request, db: Session = Depends(get_db)):
+    story = db.get(Story, story_id)
+    if not story:
+        raise HTTPException(404, "Story not found")
+
+    story_context = {
+        "description": story.description or "",
+        "tags": story.tags,
+        "characters": story.characters,
+        "outline": story.outline,
+    }
+    result = await regenerate_tags(story_context, api_key=_user_deepseek_api_key(request))
+
+    tags = result if isinstance(result, dict) and "type" in result else result
+    story.tags = tags
+    db.commit()
+    db.refresh(story)
+    return {"tags": story.tags}
+
+
+@app.post("/api/stories/{story_id}/framework/characters")
+async def regenerate_characters_endpoint(story_id: int, request: Request, db: Session = Depends(get_db)):
+    story = db.get(Story, story_id)
+    if not story:
+        raise HTTPException(404, "Story not found")
+
+    story_context = {
+        "description": story.description or "",
+        "tags": story.tags,
+        "characters": story.characters,
+        "outline": story.outline,
+    }
+    result = await regenerate_characters(story_context, api_key=_user_deepseek_api_key(request))
+
+    characters = _normalize_characters_payload(result if isinstance(result, list) else result)
+    story.characters = characters
+    db.commit()
+    db.refresh(story)
+    return {"characters": story.characters}
+
+
+@app.post("/api/stories/{story_id}/framework/outline")
+async def regenerate_outline_endpoint(story_id: int, request: Request, db: Session = Depends(get_db)):
+    story = db.get(Story, story_id)
+    if not story:
+        raise HTTPException(404, "Story not found")
+
+    story_context = {
+        "description": story.description or "",
+        "tags": story.tags,
+        "characters": story.characters,
+        "outline": story.outline,
+    }
+    result = await regenerate_outline(story_context, api_key=_user_deepseek_api_key(request))
+
+    outline = result if isinstance(result, dict) and "three_acts" in result else result
+    story.outline = outline
+    db.commit()
+    db.refresh(story)
+    return {"outline": story.outline}
+
+
+@app.post("/api/stories/{story_id}/expand-chapter", response_model=ChapterOut)
+async def expand_chapter_endpoint(story_id: int, request: Request, db: Session = Depends(get_db)):
+    story = db.get(Story, story_id)
+    if not story:
+        raise HTTPException(404, "Story not found")
+    body = await request.json()
+    act = body.get("act", "")
+    chapter_title = body.get("chapter_title", "")
+    chapter_number_val = body.get("chapter_number")
+
+    if not chapter_title or not isinstance(chapter_title, str) or not chapter_title.strip():
+        raise HTTPException(400, "chapter_title is required")
+
+    story_context = {
+        "description": story.description or "",
+        "tags": story.tags,
+        "characters": story.characters,
+        "outline": story.outline,
+    }
+    chapter_info = {
+        "title": chapter_title.strip(),
+        "act": act if isinstance(act, str) else "",
+        "chapter_number": chapter_number_val,
+    }
+
+    novel_content = await expand_chapter_to_content(
+        story_context,
+        chapter_info,
+        api_key=_user_deepseek_api_key(request),
+    )
+
+    # Determine chapter number
+    if isinstance(chapter_number_val, int) and chapter_number_val > 0:
+        chapter_num = chapter_number_val
+    else:
+        max_num = (
+            db.query(Chapter.chapter_number)
+            .filter(Chapter.story_id == story_id)
+            .order_by(Chapter.chapter_number.desc())
+            .first()
+        )
+        chapter_num = (max_num[0] + 1) if max_num else 1
+
+    existing = (
+        db.query(Chapter)
+        .filter(Chapter.story_id == story_id, Chapter.chapter_number == chapter_num)
+        .first()
+    )
+    chapter = existing or Chapter(story_id=story_id, chapter_number=chapter_num)
+    chapter.title = chapter_title.strip()
+    chapter.content_source = "chat"
+    chapter.act = act if isinstance(act, str) else None
+    chapter.key_events = _normalize_key_events(body.get("key_events"))
+    _apply_chapter_content(chapter, novel_content, status="completed")
+    if existing is None:
+        db.add(chapter)
+        db.flush()
+    db.add(ChatMessage(chapter_id=chapter.id, role="assistant", content=novel_content))
+    db.commit()
+    db.refresh(chapter)
+    return chapter
+
+
+@app.post("/api/chapters/{chapter_id}/rewrite-selection")
+async def rewrite_selection_endpoint(chapter_id: int, request: Request, db: Session = Depends(get_db)):
+    chapter = _require_chapter(chapter_id, db)
+    body = await request.json()
+    selected_text = body.get("selected_text", "")
+    chapter_context = body.get("chapter_context", body.get("context", ""))
+
+    if not isinstance(selected_text, str) or not selected_text.strip():
+        raise HTTPException(400, "selected_text is required")
+    if not isinstance(chapter_context, str):
+        chapter_context = ""
+
+    rewritten = await rewrite_selection(
+        selected_text.strip(),
+        chapter_context.strip() or (chapter.novel_content or "")[:4000],
+        api_key=_user_deepseek_api_key(request),
+    )
+    return {"rewritten_text": rewritten}
+
+
+@app.post("/api/chapters/{chapter_id}/quality-assess")
+async def quality_assess_endpoint(chapter_id: int, request: Request, db: Session = Depends(get_db)):
+    chapter = _require_chapter(chapter_id, db)
+    content = chapter.novel_content or ""
+    if not content.strip():
+        raise HTTPException(400, "Chapter has no novel content to assess")
+
+    assessment = await quality_assess(content, api_key=_user_deepseek_api_key(request))
+
+    chapter.quality_score = assessment.get("scores", assessment)
+    if chapter.novel_content and chapter.novel_content.strip():
+        chapter.status = "reviewed"
+    db.commit()
+    db.refresh(chapter)
+    return assessment
+
+
+@app.post("/api/chapters/{chapter_id}/scenes-from-selection")
+async def scenes_from_selection_endpoint(chapter_id: int, request: Request, db: Session = Depends(get_db)):
+    _require_chapter(chapter_id, db)
+    body = await request.json()
+    selected_text = body.get("selected_text", "")
+    character_profiles = body.get("character_profiles", body.get("characters", ""))
+    page_count = body.get("page_count", 4)
+
+    if not isinstance(selected_text, str) or not selected_text.strip():
+        raise HTTPException(400, "selected_text is required")
+    if not isinstance(character_profiles, str):
+        character_profiles = str(character_profiles) if character_profiles else ""
+    if not isinstance(page_count, int) or page_count < 1:
+        page_count = 4
+    if page_count > 20:
+        page_count = 20
+
+    scenes = await scenes_from_selection(
+        selected_text.strip(),
+        character_profiles=character_profiles,
+        page_count=page_count,
+        api_key=_user_deepseek_api_key(request),
+    )
+    sanitized_scenes, sanitized_indices = sanitize_scene_list(scenes)
+    return {"scenes": sanitized_scenes, "page_count": page_count, "sanitized_indices": sanitized_indices}
 
 
 if __name__ == "__main__":
