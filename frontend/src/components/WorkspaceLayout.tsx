@@ -21,11 +21,12 @@ export default function WorkspaceLayout({
 }: Props) {
   const [selectedText, setSelectedText] = useState('');
   const [chapterContext, setChapterContext] = useState<object | undefined>(undefined);
+  const resolvedChapter = currentChapter ? mergeChapterWithFramework(story, currentChapter) : null;
 
   useEffect(() => {
     setSelectedText('');
     setChapterContext(undefined);
-  }, [currentChapter?.id]);
+  }, [resolvedChapter?.id]);
 
   const handleChapterSelect = useCallback(
     (chapterNumber: number) => {
@@ -50,7 +51,7 @@ export default function WorkspaceLayout({
         <EditorPanel
           story={story}
           chapters={chapters}
-          currentChapter={currentChapter}
+          currentChapter={resolvedChapter}
           onChapterChange={onChapterChange}
           onContentUpdated={onContentUpdated}
           onTextSelected={(text, context) => {
@@ -62,7 +63,7 @@ export default function WorkspaceLayout({
 
       <div className="w-[380px] shrink-0 border-l border-gray-800 overflow-y-auto">
         <MangaPanel
-          chapter={currentChapter}
+          chapter={resolvedChapter}
           onChapterRefresh={onContentUpdated}
           selectedText={selectedText}
           chapterContext={chapterContext as { characters?: any[] } | undefined}
@@ -74,4 +75,35 @@ export default function WorkspaceLayout({
       </div>
     </div>
   );
+}
+
+function mergeChapterWithFramework(story: Story, chapter: Chapter): Chapter {
+  const plan = findPlannedChapter(story, chapter.chapter_number);
+  if (!plan) return chapter;
+  return {
+    ...chapter,
+    title: chapter.title || plan.title || chapter.title,
+    act: chapter.act || plan.act || chapter.act,
+    key_events: Array.isArray(chapter.key_events) && chapter.key_events.length > 0
+      ? chapter.key_events
+      : (plan.key_events ?? chapter.key_events),
+  };
+}
+
+function findPlannedChapter(story: Story, chapterNumber: number): { title?: string; act?: string; key_events?: any[] } | null {
+  const acts = story.outline?.three_acts;
+  if (!Array.isArray(acts)) return null;
+  for (let index = 0; index < acts.length; index += 1) {
+    const act = acts[index] as any;
+    const chapters = Array.isArray(act?.chapters) ? act.chapters : [];
+    const match = chapters.find((item: any) => Number(item?.chapter_number) === chapterNumber);
+    if (match) {
+      return {
+        title: typeof match?.title === 'string' ? match.title : undefined,
+        act: String(act?.act ?? index + 1),
+        key_events: Array.isArray(match?.key_events) ? match.key_events : undefined,
+      };
+    }
+  }
+  return null;
 }

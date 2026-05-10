@@ -100,6 +100,31 @@ export interface FrameworkGenerateResponse {
   chapters?: { act: string; chapter_number: number; title: string }[];
 }
 
+export interface OutlineChapterPlanInput {
+  title: string;
+  summary?: string;
+  key_events?: string[];
+  act?: string;
+}
+
+export interface FrameworkChatMessage {
+  role: 'user' | 'assistant';
+  content: string;
+}
+
+export interface FrameworkAdjustResponse {
+  reply: string;
+  story: {
+    description?: string;
+    tags?: Tags;
+    characters?: Character[];
+    outline?: Outline;
+  };
+  chapters?: { act: string; chapter_number: number; title: string }[];
+}
+
+export interface FrameworkContinueResponse extends FrameworkAdjustResponse {}
+
 export interface Story {
   id: number;
   title: string;
@@ -342,6 +367,16 @@ export async function saveChapterContent(chapterId: number, content: string): Pr
   return res.json();
 }
 
+export async function adjustChapterContent(chapterId: number, instruction: string): Promise<Chapter> {
+  const res = await fetch(`${BASE}/api/chapters/${chapterId}/adjust-content`, {
+    method: 'POST',
+    headers: apiHeaders(true),
+    body: JSON.stringify({ instruction }),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
 // ─── Scenes ─────────────────────────────────────────────────
 
 export interface ScenesPayload {
@@ -413,6 +448,15 @@ export async function resetChapterCharacters(chapterId: number): Promise<void> {
   if (!res.ok) throw new Error(await res.text());
 }
 
+export async function generateStoryCharactersFromFramework(storyId: number): Promise<{ characters: string }> {
+  const res = await fetch(`${BASE}/api/stories/${storyId}/characters/generate`, {
+    method: 'POST',
+    headers: apiHeaders(),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return await res.json();
+}
+
 // ─── Reference Images (垫图，支持多图) ────────────────────────
 
 export type RefSource = 'chapter' | 'story' | 'none';
@@ -421,6 +465,8 @@ export interface RefImage {
   filename: string;
   image_path: string;
   size_kb: number;
+  label?: string;
+  kind?: string;
 }
 
 export interface RefImagesPayload {
@@ -655,6 +701,58 @@ export async function regenerateOutline(storyId: number): Promise<Outline> {
   if (!res.ok) throw new Error(await res.text());
   const data = await res.json();
   return data.outline ?? data;
+}
+
+export async function saveOutlineChapterPlan(
+  storyId: number,
+  data:
+    | { mode: 'append'; chapter: OutlineChapterPlanInput }
+    | { mode: 'insert_after'; after_chapter_number: number; chapter: OutlineChapterPlanInput }
+    | { mode: 'update'; target_chapter_number: number; chapter: OutlineChapterPlanInput },
+): Promise<Outline> {
+  const res = await fetch(`${BASE}/api/stories/${storyId}/framework/chapters/manual`, {
+    method: 'POST',
+    headers: apiHeaders(true),
+    body: JSON.stringify(data),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  const payload = await res.json();
+  return payload.outline ?? payload;
+}
+
+export async function adjustFramework(
+  storyId: number,
+  messages: FrameworkChatMessage[],
+): Promise<FrameworkAdjustResponse> {
+  const res = await fetch(`${BASE}/api/stories/${storyId}/framework/adjust`, {
+    method: 'POST',
+    headers: apiHeaders(true),
+    body: JSON.stringify({ messages }),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function generateStoryCharacterRefImages(
+  storyId: number,
+  data?: { character_name?: string; overwrite?: boolean },
+): Promise<RefImagesPayload & { generated?: string[]; skipped?: string[] }> {
+  const res = await fetch(`${BASE}/api/stories/${storyId}/character-ref-images/generate`, {
+    method: 'POST',
+    headers: apiHeaders(true),
+    body: JSON.stringify(data ?? {}),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function continueFramework(storyId: number): Promise<FrameworkContinueResponse> {
+  const res = await fetch(`${BASE}/api/stories/${storyId}/framework/continue`, {
+    method: 'POST',
+    headers: apiHeaders(),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
 }
 
 export async function expandChapter(

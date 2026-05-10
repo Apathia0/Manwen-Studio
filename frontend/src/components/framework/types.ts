@@ -3,6 +3,7 @@ export interface FrameworkChapter {
   act: string;
   chapter_number: number;
   title: string;
+  summary?: string;
   status?: string;
   key_events?: string[];
 }

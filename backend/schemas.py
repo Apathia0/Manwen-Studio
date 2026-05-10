@@ -21,6 +21,20 @@ class StoryUpdate(BaseModel):
     characters: Optional[list[dict[str, Any]]] = None
 
 
+class OutlineChapterPlanPayload(BaseModel):
+    title: str
+    summary: Optional[str] = None
+    key_events: Optional[list[str]] = None
+    act: Optional[str] = None
+
+
+class OutlineChapterPlanUpdate(BaseModel):
+    mode: str
+    target_chapter_number: Optional[int] = None
+    after_chapter_number: Optional[int] = None
+    chapter: OutlineChapterPlanPayload
+
+
 class StoryOut(BaseModel):
     id: int
     title: str

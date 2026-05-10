@@ -230,7 +230,6 @@ function App() {
   const [mobileTab, setMobileTab] = useState<MobileTab>('chat');
   const [chapterNavOpen, setChapterNavOpen] = useState(true);
   const [apiKeyModalOpen, setApiKeyModalOpen] = useState(false);
-  const [workspaceMode, setWorkspaceMode] = useState(false);
 
   const persistSelectedChapter = (chapter: Chapter | null | undefined) => {
     if (!chapter) return;
@@ -511,23 +510,6 @@ function App() {
           </span>
         </div>
         <div className="flex items-center gap-2 text-xs text-gray-500 shrink-0">
-          {!isMobile && (
-            <button
-              onClick={() => setWorkspaceMode((prev) => {
-                const next = !prev;
-                if (next && !isLargeScreen) return false;
-                return next;
-              })}
-              className={`px-2.5 py-1.5 rounded-md text-xs font-medium transition-colors shrink-0 ${
-                workspaceMode
-                  ? 'bg-violet-600/20 text-violet-300 border border-violet-700/50'
-                  : 'bg-gray-800 hover:bg-gray-700 text-gray-300 border border-transparent hover:border-gray-600'
-              }`}
-              title={workspaceMode ? '切换到对话模式' : '切换到三栏工作台'}
-            >
-              {workspaceMode ? '💬 对话' : '📋 工作台'}
-            </button>
-          )}
           <ApiKeyButton onClick={() => setApiKeyModalOpen(true)} compact={isMobile} />
           <span>第 {currentChapter?.chapter_number ?? '–'} 话</span>
           {!isMobile && <span>·</span>}
@@ -597,7 +579,7 @@ function App() {
         </main>
       ) : (
         <main className="flex-1 flex min-h-0">
-          {workspaceMode && isLargeScreen ? (
+          {isLargeScreen ? (
             <WorkspaceLayout
               story={story!}
               chapters={chapters}

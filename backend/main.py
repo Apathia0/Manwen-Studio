@@ -3,6 +3,7 @@ import contextlib
 import json
 import logging
 import os
+import re
 import shutil
 import uuid
 from pathlib import Path
@@ -23,13 +24,18 @@ from schemas import (
     ChatMessageIn,
     ChatMessageOut,
     MangaImageOut,
+    OutlineChapterPlanUpdate,
     StoryCreate,
     StoryOut,
     StoryUpdate,
 )
 from services.deepseek import (
+    adjust_chapter_content,
+    adjust_framework_with_chat,
     chat_stream,
+    continue_framework,
     expand_chapter_to_content,
+    generate_character_profiles_from_framework,
     generate_framework,
     generate_novel,
     quality_assess,
@@ -41,7 +47,7 @@ from services.deepseek import (
     split_scenes,
 )
 from services.errors import MangaImageGenerationError, MissingApiKeyError
-from services.image2 import generate_manga_image
+from services.image2 import generate_manga_image, generate_reference_image
 from services.scene_safety import sanitize_scene_list
 
 load_dotenv()
@@ -115,6 +121,38 @@ def _character_profile_text(body: dict) -> str:
     if len(text) > MAX_CHARACTER_PROFILE_CHARS:
         raise HTTPException(413, f"Character profile is too long. Max length is {MAX_CHARACTER_PROFILE_CHARS} characters")
     return text
+
+
+def _parse_character_profile_cards(text: str) -> list[dict]:
+    normalized = (text or "").replace("\r\n", "\n").strip()
+    if not normalized:
+        return []
+
+    blocks = [block.strip() for block in re.split(r"(?=^角色名[:：])", normalized, flags=re.MULTILINE) if block.strip()]
+    cards: list[dict] = []
+    for index, block in enumerate(blocks, start=1):
+        name = f"角色 {index}"
+        fields: list[dict[str, str]] = []
+        for raw_line in block.split("\n"):
+            line = raw_line.strip()
+            if not line:
+                continue
+            match = re.match(r"^([^:：]{1,20})[:：]\s*(.+)$", line)
+            if match:
+                label, value = match.groups()
+                label = label.strip()
+                value = value.strip()
+                if not value:
+                    continue
+                if label == "角色名":
+                    name = value
+                fields.append({"label": label, "value": value})
+            elif fields:
+                fields[-1]["value"] = f"{fields[-1]['value']}\n{line}"
+            else:
+                fields.append({"label": "描述", "value": line})
+        cards.append({"name": name, "raw": block, "fields": fields})
+    return cards
 
 
 def _build_framework_context(story: Story | None, chapter: Chapter | None = None) -> str:
@@ -217,6 +255,272 @@ def _normalize_framework_outline(outline: dict | None, chapters: list | None) ->
     return normalized
 
 
+def _extract_outline_chapters(outline: dict | None) -> list[dict]:
+    if not isinstance(outline, dict):
+        return []
+    acts = outline.get("three_acts")
+    if not isinstance(acts, list):
+        return []
+    extracted: list[dict] = []
+    for index, act in enumerate(acts, start=1):
+        if not isinstance(act, dict):
+            continue
+        act_label = act.get("act", index)
+        chapters = act.get("chapters")
+        if not isinstance(chapters, list):
+            continue
+        for item in chapters:
+            if not isinstance(item, dict):
+                continue
+            chapter_number = item.get("chapter_number")
+            title = str(item.get("title") or "").strip()
+            if not isinstance(chapter_number, int) or chapter_number < 1 or not title:
+                continue
+            chapter_entry = dict(item)
+            chapter_entry["chapter_number"] = chapter_number
+            chapter_entry["title"] = title
+            chapter_entry["act"] = item.get("act", act_label)
+            extracted.append(chapter_entry)
+    return extracted
+
+
+def _merge_chapter_plans(existing: list[dict] | None, incoming: list[dict] | None) -> list[dict]:
+    merged: dict[int, dict] = {}
+
+    def _ingest(items: list[dict] | None, *, prefer_existing: bool) -> None:
+        if not isinstance(items, list):
+            return
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            chapter_number = item.get("chapter_number")
+            title = str(item.get("title") or "").strip()
+            if not isinstance(chapter_number, int) or chapter_number < 1 or not title:
+                continue
+            normalized = dict(item)
+            normalized["chapter_number"] = chapter_number
+            normalized["title"] = title
+            if prefer_existing and chapter_number in merged:
+                current = dict(merged[chapter_number])
+                current.update({k: v for k, v in normalized.items() if v not in (None, "", [], {})})
+                merged[chapter_number] = current
+            else:
+                current = dict(merged.get(chapter_number, {}))
+                current.update(normalized)
+                merged[chapter_number] = current
+
+    _ingest(existing, prefer_existing=False)
+    _ingest(incoming, prefer_existing=True)
+    return [merged[key] for key in sorted(merged)]
+
+
+def _merge_framework_outline(existing_outline: dict | None, incoming_outline: dict | None, incoming_chapters: list | None) -> dict:
+    existing_outline = existing_outline if isinstance(existing_outline, dict) else {}
+    incoming_outline = incoming_outline if isinstance(incoming_outline, dict) else {}
+
+    existing_chapters = _extract_outline_chapters(existing_outline)
+    incoming_outline_chapters = _extract_outline_chapters(incoming_outline)
+    combined_incoming = _merge_chapter_plans(incoming_outline_chapters, incoming_chapters)
+    merged_chapters = _merge_chapter_plans(existing_chapters, combined_incoming)
+
+    existing_acts = existing_outline.get("three_acts") if isinstance(existing_outline.get("three_acts"), list) else []
+    incoming_acts = incoming_outline.get("three_acts") if isinstance(incoming_outline.get("three_acts"), list) else []
+
+    merged_acts: list[dict] = []
+    act_index: dict[str, int] = {}
+
+    def _push_act(raw_act, fallback_index: int, *, prefer_incoming: bool) -> None:
+        if isinstance(raw_act, dict):
+            act_entry = dict(raw_act)
+        else:
+            act_entry = {"title": str(raw_act)}
+        act_label = str(act_entry.get("act", fallback_index))
+        act_entry["act"] = act_entry.get("act", fallback_index)
+        act_entry.pop("chapters", None)
+        if act_label in act_index:
+            idx = act_index[act_label]
+            current = dict(merged_acts[idx])
+            update_data = {k: v for k, v in act_entry.items() if v not in (None, "", [], {})}
+            if prefer_incoming:
+                current.update(update_data)
+            else:
+                for key, value in update_data.items():
+                    current.setdefault(key, value)
+            merged_acts[idx] = current
+            return
+        act_index[act_label] = len(merged_acts)
+        merged_acts.append(act_entry)
+
+    for idx, act in enumerate(existing_acts, start=1):
+        _push_act(act, idx, prefer_incoming=False)
+    for idx, act in enumerate(incoming_acts, start=1):
+        _push_act(act, idx, prefer_incoming=True)
+
+    base_outline = dict(existing_outline)
+    base_outline.update({k: v for k, v in incoming_outline.items() if k != "three_acts"})
+    base_outline["three_acts"] = merged_acts
+    return _normalize_framework_outline(base_outline, merged_chapters)
+
+
+def _has_complete_tags(tags: dict | None) -> bool:
+    if not isinstance(tags, dict):
+        return False
+    return all(str(tags.get(key) or "").strip() for key in ("type", "theme", "style", "audience"))
+
+
+def _has_complete_big_five(scores) -> bool:
+    if not isinstance(scores, dict):
+        return False
+    alias_map = {
+        "openness": ("openness", "O"),
+        "conscientiousness": ("conscientiousness", "C"),
+        "extraversion": ("extraversion", "E"),
+        "agreeableness": ("agreeableness", "A"),
+        "neuroticism": ("neuroticism", "N"),
+    }
+    for aliases in alias_map.values():
+        value = None
+        for key in aliases:
+            if scores.get(key) not in (None, ""):
+                value = scores.get(key)
+                break
+        if value in (None, ""):
+            return False
+    return True
+
+
+def _has_complete_characters(characters) -> bool:
+    if not isinstance(characters, list) or len(characters) == 0:
+        return False
+    for item in characters:
+        if not isinstance(item, dict):
+            return False
+        if not str(item.get("name") or "").strip():
+            return False
+        if not str(item.get("role") or "").strip():
+            return False
+        if not _has_complete_big_five(item.get("big_five")):
+            return False
+    return True
+
+
+def _has_complete_outline(outline: dict | None) -> bool:
+    if not isinstance(outline, dict):
+        return False
+    acts = outline.get("three_acts")
+    if not isinstance(acts, list) or len(acts) < 3:
+        return False
+    if not _extract_outline_chapters(outline):
+        return False
+    for act in acts:
+        if not isinstance(act, dict):
+            return False
+        if not str(act.get("title") or "").strip():
+            return False
+        if not str(act.get("summary") or "").strip():
+            return False
+        chapters = act.get("chapters")
+        if not isinstance(chapters, list) or len(chapters) == 0:
+            return False
+    return True
+
+
+async def _complete_framework_payload(framework: dict | None, description: str, api_key: str | None = None) -> dict:
+    payload = dict(framework or {})
+    payload["tags"] = payload.get("tags") if isinstance(payload.get("tags"), dict) else {}
+    payload["characters"] = _normalize_characters_payload(payload.get("characters") if isinstance(payload.get("characters"), list) else [])
+    payload["outline"] = _merge_framework_outline({}, payload.get("outline"), payload.get("chapters"))
+    payload["chapters"] = _extract_outline_chapters(payload["outline"])
+
+    story_context = {
+        "description": description,
+        "tags": payload["tags"],
+        "characters": payload["characters"],
+        "outline": payload["outline"],
+    }
+
+    if not _has_complete_tags(payload["tags"]):
+        try:
+            payload["tags"] = _merge_tags(payload["tags"], await regenerate_tags(story_context, api_key=api_key))
+            story_context["tags"] = payload["tags"]
+        except Exception as exc:
+            logger.warning("Failed to backfill framework tags: %s", exc)
+
+    if not _has_complete_characters(payload["characters"]):
+        try:
+            payload["characters"] = _merge_characters_payload(
+                payload["characters"],
+                await regenerate_characters(story_context, api_key=api_key),
+            )
+            story_context["characters"] = payload["characters"]
+        except Exception as exc:
+            logger.warning("Failed to backfill framework characters: %s", exc)
+
+    if not _has_complete_outline(payload["outline"]):
+        try:
+            incoming_outline = await regenerate_outline(story_context, api_key=api_key)
+            payload["outline"] = _merge_framework_outline(
+                payload["outline"],
+                incoming_outline,
+                _extract_outline_chapters(incoming_outline),
+            )
+            story_context["outline"] = payload["outline"]
+        except Exception as exc:
+            logger.warning("Failed to backfill framework outline: %s", exc)
+
+    payload["chapters"] = _extract_outline_chapters(payload["outline"])
+    return payload
+
+
+def _sort_story_chapters_for_shift(story: Story, start_number: int, delta: int) -> list[Chapter]:
+    if delta == 0:
+        return []
+    candidates = [chapter for chapter in story.chapters if chapter.chapter_number >= start_number]
+    return sorted(candidates, key=lambda chapter: chapter.chapter_number, reverse=delta > 0)
+
+
+def _shift_story_chapter_numbers(story: Story, start_number: int, delta: int) -> None:
+    for chapter in _sort_story_chapters_for_shift(story, start_number, delta):
+        chapter.chapter_number += delta
+
+
+def _normalize_outline_plan_payload(raw: dict | None, *, fallback_title: str, fallback_act: str) -> dict:
+    raw = raw if isinstance(raw, dict) else {}
+    title = str(raw.get("title") or "").strip() or fallback_title
+    summary = str(raw.get("summary") or "").strip()
+    key_events = _normalize_key_events(raw.get("key_events"))
+    act = str(raw.get("act") or fallback_act or "").strip() or fallback_act
+
+    payload = {
+        "title": title,
+        "act": act,
+    }
+    if summary:
+        payload["summary"] = summary
+    if key_events:
+        payload["key_events"] = key_events
+    return payload
+
+
+def _infer_manual_plan_act(chapters: list[dict], *, after_chapter_number: int | None = None, target_chapter_number: int | None = None) -> str:
+    if isinstance(target_chapter_number, int):
+        for item in chapters:
+            if item.get("chapter_number") == target_chapter_number:
+                return str(item.get("act") or "").strip() or "1"
+
+    if isinstance(after_chapter_number, int):
+        for item in chapters:
+            if item.get("chapter_number") == after_chapter_number:
+                return str(item.get("act") or "").strip() or "1"
+        for item in chapters:
+            if item.get("chapter_number") == after_chapter_number + 1:
+                return str(item.get("act") or "").strip() or "1"
+
+    if chapters:
+        return str(chapters[-1].get("act") or "").strip() or "1"
+    return "1"
+
+
 def _apply_chapter_content(chapter: Chapter, content: str, *, status: str | None = None) -> None:
     chapter.novel_content = content
     chapter.word_count = _count_words(content)
@@ -267,6 +571,60 @@ def _normalize_characters_payload(raw):
             character["big_five"] = _normalize_big_five_scores(character.get("big_five"))
         normalized.append(character)
     return normalized
+
+
+def _merge_tags(existing, incoming):
+    existing = existing if isinstance(existing, dict) else {}
+    incoming = incoming if isinstance(incoming, dict) else {}
+    merged = dict(existing)
+    for key, value in incoming.items():
+        if value not in (None, "", [], {}):
+            merged[key] = value
+    return merged or existing or incoming
+
+
+def _merge_characters_payload(existing, incoming):
+    existing_list = _normalize_characters_payload(existing if isinstance(existing, list) else [])
+    incoming_list = _normalize_characters_payload(incoming if isinstance(incoming, list) else [])
+    merged: list[dict] = []
+    index_by_name: dict[str, int] = {}
+
+    for item in existing_list:
+        if isinstance(item, dict):
+            record = dict(item)
+            merged.append(record)
+            name = str(record.get("name") or "").strip().lower()
+            if name:
+                index_by_name[name] = len(merged) - 1
+        else:
+            merged.append(item)
+
+    for item in incoming_list:
+        if not isinstance(item, dict):
+            merged.append(item)
+            continue
+        record = dict(item)
+        name = str(record.get("name") or "").strip().lower()
+        if name and name in index_by_name:
+            idx = index_by_name[name]
+            current = dict(merged[idx]) if isinstance(merged[idx], dict) else {}
+            current.update({k: v for k, v in record.items() if v not in (None, "", [], {})})
+            merged[idx] = current
+        else:
+            merged.append(record)
+            if name:
+                index_by_name[name] = len(merged) - 1
+
+    return merged
+
+
+def _story_framework_context(story: Story) -> dict:
+    return {
+        "description": story.description or "",
+        "tags": story.tags,
+        "characters": story.characters,
+        "outline": story.outline,
+    }
 
 
 def _unlink_file(path: Path, label: str) -> None:
@@ -770,6 +1128,23 @@ async def save_story_characters(story_id: int, body: dict, db: Session = Depends
     return {"ok": True}
 
 
+@app.post("/api/stories/{story_id}/characters/generate")
+async def generate_story_characters_from_framework(story_id: int, request: Request, db: Session = Depends(get_db)):
+    story = db.get(Story, story_id)
+    if not story:
+        raise HTTPException(404, "Story not found")
+    if not isinstance(story.characters, list) or len(story.characters) == 0:
+        raise HTTPException(400, "Story has no framework characters to convert")
+
+    generated = await generate_character_profiles_from_framework(
+        _story_framework_context(story),
+        api_key=_user_deepseek_api_key(request),
+    )
+    story.character_profiles = _character_profile_text({"characters": generated})
+    db.commit()
+    return {"characters": story.character_profiles.strip()}
+
+
 # Chapter-level character profiles (with fallback info)
 @app.get("/api/chapters/{chapter_id}/characters")
 async def get_characters(chapter_id: int, db: Session = Depends(get_db)):
@@ -814,6 +1189,10 @@ def _chapter_ref_dir(chapter_id: int) -> Path:
     return Path(__file__).resolve().parent / "manga_outputs" / f"chapter_{chapter_id}" / "ref_images"
 
 
+def _ref_meta_path(ref_dir: Path) -> Path:
+    return ref_dir / "ref_meta.json"
+
+
 def _legacy_story_ref_image(story_id: int) -> Path:
     """Old single-file location, kept for backward compat / lazy migration."""
     return Path(__file__).resolve().parent / "manga_outputs" / f"story_{story_id}" / "ref_image.png"
@@ -844,6 +1223,22 @@ def _list_ref_files(ref_dir: Path) -> list[Path]:
     return sorted([p for p in ref_dir.iterdir() if p.is_file() and p.suffix.lower() == ".png"])
 
 
+def _load_ref_meta(ref_dir: Path) -> dict[str, dict]:
+    meta_path = _ref_meta_path(ref_dir)
+    if not meta_path.exists():
+        return {}
+    try:
+        payload = json.loads(meta_path.read_text(encoding="utf-8"))
+        return payload if isinstance(payload, dict) else {}
+    except Exception:
+        return {}
+
+
+def _save_ref_meta(ref_dir: Path, meta: dict[str, dict]) -> None:
+    ref_dir.mkdir(parents=True, exist_ok=True)
+    _ref_meta_path(ref_dir).write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
 def _ref_static_path(ref_dir: Path, filename: str, kind: str, owner_id: int) -> str:
     """Build the static URL-relative path for a ref image."""
     if kind == "story":
@@ -852,29 +1247,86 @@ def _ref_static_path(ref_dir: Path, filename: str, kind: str, owner_id: int) -> 
 
 
 def _serialize_refs(ref_dir: Path, kind: str, owner_id: int) -> list[dict]:
+    meta = _load_ref_meta(ref_dir)
     out = []
     for p in _list_ref_files(ref_dir):
-        out.append({
+        item = {
             "filename": p.name,
             "image_path": _ref_static_path(ref_dir, p.name, kind, owner_id),
             "size_kb": round(p.stat().st_size / 1024),
-        })
+        }
+        extra = meta.get(p.name)
+        if isinstance(extra, dict):
+            if isinstance(extra.get("label"), str) and extra["label"].strip():
+                item["label"] = extra["label"].strip()
+            if isinstance(extra.get("kind"), str) and extra["kind"].strip():
+                item["kind"] = extra["kind"].strip()
+        out.append(item)
     return out
 
 
-def _effective_ref_image_paths(chapter_id: int, db: Session) -> list[Path]:
-    """Return the effective ref image list: chapter-level first, else story-level fallback."""
+def _build_ref_entries(ref_dir: Path, kind: str, owner_id: int) -> list[dict]:
+    meta = _load_ref_meta(ref_dir)
+    entries: list[dict] = []
+    for p in _list_ref_files(ref_dir):
+        item = {
+            "filename": p.name,
+            "path": p,
+            "image_path": _ref_static_path(ref_dir, p.name, kind, owner_id),
+            "kind": "",
+            "label": "",
+        }
+        extra = meta.get(p.name)
+        if isinstance(extra, dict):
+            if isinstance(extra.get("label"), str):
+                item["label"] = extra["label"].strip()
+            if isinstance(extra.get("kind"), str):
+                item["kind"] = extra["kind"].strip()
+        entries.append(item)
+    return entries
+
+
+def _effective_ref_entries(chapter_id: int, db: Session) -> list[dict]:
     chapter_dir = _chapter_ref_dir(chapter_id)
     _migrate_legacy_ref(_legacy_chapter_ref_image(chapter_id), chapter_dir)
-    chapter_refs = _list_ref_files(chapter_dir)
+    chapter_refs = _build_ref_entries(chapter_dir, "chapter", chapter_id)
     if chapter_refs:
         return chapter_refs
     chapter = db.get(Chapter, chapter_id)
     if chapter:
         story_dir = _story_ref_dir(chapter.story_id)
         _migrate_legacy_ref(_legacy_story_ref_image(chapter.story_id), story_dir)
-        return _list_ref_files(story_dir)
+        return _build_ref_entries(story_dir, "story", chapter.story_id)
     return []
+
+
+def _effective_ref_image_paths(chapter_id: int, db: Session) -> list[Path]:
+    """Return the effective ref image list: chapter-level first, else story-level fallback."""
+    return [entry["path"] for entry in _effective_ref_entries(chapter_id, db)]
+
+
+def _select_ref_image_paths_for_scene(scene_prompt: str, ref_entries: list[dict]) -> list[Path]:
+    if not ref_entries:
+        return []
+
+    scene_text = (scene_prompt or "").strip()
+    unlabeled = [entry["path"] for entry in ref_entries if not entry.get("label")]
+    labeled_matches = [
+        entry["path"]
+        for entry in ref_entries
+        if entry.get("label") and entry["label"] in scene_text
+    ]
+    if labeled_matches:
+        seen: set[str] = set()
+        selected: list[Path] = []
+        for path in [*unlabeled, *labeled_matches]:
+            key = str(path)
+            if key in seen:
+                continue
+            seen.add(key)
+            selected.append(path)
+        return selected
+    return unlabeled or [entry["path"] for entry in ref_entries]
 
 
 def _save_uploaded_ref(ref_dir: Path, img_bytes: bytes, label: str) -> str:
@@ -886,7 +1338,89 @@ def _save_uploaded_ref(ref_dir: Path, img_bytes: bytes, label: str) -> str:
     return filename
 
 
+def _slugify_ref_label(label: str) -> str:
+    slug = re.sub(r"[^0-9A-Za-z\u4e00-\u9fff]+", "_", (label or "").strip())
+    slug = slug.strip("_")
+    return slug[:40] or "character"
+
+
+def _build_character_ref_prompt(story: Story, card: dict) -> str:
+    tags = json.dumps(story.tags, ensure_ascii=False) if story.tags else "漫画角色设定"
+    return (
+        "请生成一张单人漫画角色参考图，用于后续固定角色形象。\n"
+        f"题材标签：{tags}\n"
+        f"角色名：{card['name']}\n"
+        f"角色外貌卡：\n{card['raw']}\n\n"
+        "要求：只出现该角色一人；突出稳定五官、发型、服装和体型特征；"
+        "采用角色设定图或干净半身立绘构图；背景简洁；不要对话框、不要文字、不要分镜、不要多人物。"
+    )
+
+
 # ─── Story-level multi ref images ───────────────────────────
+
+@app.post("/api/stories/{story_id}/character-ref-images/generate")
+async def generate_story_character_ref_images(story_id: int, request: Request, db: Session = Depends(get_db)):
+    story = db.get(Story, story_id)
+    if not story:
+        raise HTTPException(404, "Story not found")
+
+    cards = _parse_character_profile_cards(story.character_profiles or "")
+    if not cards:
+        raise HTTPException(400, "Story has no character appearance cards to convert")
+
+    body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
+    target_name = (body.get("character_name") or "").strip() if isinstance(body, dict) else ""
+    overwrite = bool(body.get("overwrite")) if isinstance(body, dict) else False
+
+    targets = [card for card in cards if not target_name or card["name"] == target_name]
+    if not targets:
+        raise HTTPException(404, f"Character '{target_name}' not found in appearance cards")
+
+    ref_dir = _story_ref_dir(story_id)
+    _migrate_legacy_ref(_legacy_story_ref_image(story_id), ref_dir)
+    ref_dir.mkdir(parents=True, exist_ok=True)
+    meta = _load_ref_meta(ref_dir)
+    generated: list[str] = []
+    skipped: list[str] = []
+
+    for card in targets:
+        existing = [
+            filename
+            for filename, item in meta.items()
+            if isinstance(item, dict)
+            and item.get("kind") == "character_generated"
+            and item.get("label") == card["name"]
+        ]
+        if existing and not overwrite:
+            skipped.append(card["name"])
+            continue
+
+        for filename in existing:
+            path = ref_dir / filename
+            if path.exists():
+                _unlink_file(path, "story character ref image")
+            meta.pop(filename, None)
+
+        if len(_list_ref_files(ref_dir)) >= MAX_REF_IMAGES_PER_LEVEL:
+            raise HTTPException(409, f"Maximum {MAX_REF_IMAGES_PER_LEVEL} reference images allowed")
+
+        filename = f"char_{_slugify_ref_label(card['name'])}_{uuid.uuid4().hex[:8]}.png"
+        await generate_reference_image(
+            _build_character_ref_prompt(story, card),
+            ref_dir / filename,
+            api_key=_user_image_api_key(request),
+        )
+        meta[filename] = {"label": card["name"], "kind": "character_generated"}
+        generated.append(card["name"])
+
+    _save_ref_meta(ref_dir, meta)
+    return {
+        "images": _serialize_refs(ref_dir, "story", story_id),
+        "max": MAX_REF_IMAGES_PER_LEVEL,
+        "generated": generated,
+        "skipped": skipped,
+    }
+
 
 @app.get("/api/stories/{story_id}/ref-images")
 async def list_story_ref_images(story_id: int, db: Session = Depends(get_db)):
@@ -920,6 +1454,10 @@ async def delete_story_ref_image(story_id: int, filename: str, db: Session = Dep
         raise HTTPException(400, "invalid filename")
     p = _story_ref_dir(story_id) / filename
     _unlink_file(p, "story ref image")
+    meta = _load_ref_meta(_story_ref_dir(story_id))
+    if filename in meta:
+        meta.pop(filename, None)
+        _save_ref_meta(_story_ref_dir(story_id), meta)
     return {"images": _serialize_refs(_story_ref_dir(story_id), "story", story_id), "max": MAX_REF_IMAGES_PER_LEVEL}
 
 
@@ -959,6 +1497,10 @@ async def delete_chapter_ref_image(chapter_id: int, filename: str, db: Session =
         raise HTTPException(400, "invalid filename")
     p = _chapter_ref_dir(chapter_id) / filename
     _unlink_file(p, "chapter ref image")
+    meta = _load_ref_meta(_chapter_ref_dir(chapter_id))
+    if filename in meta:
+        meta.pop(filename, None)
+        _save_ref_meta(_chapter_ref_dir(chapter_id), meta)
     return {"images": _serialize_refs(_chapter_ref_dir(chapter_id), "chapter", chapter_id), "source": "chapter", "max": MAX_REF_IMAGES_PER_LEVEL}
 
 
@@ -1184,7 +1726,8 @@ async def generate_manga_stream(chapter_id: int, request: Request, db: Session =
                     "data": json.dumps({"current": i, "total": image_count, "prompt": scene_prompt}, ensure_ascii=False),
                 }
                 try:
-                    ref_imgs = _effective_ref_image_paths(chapter_id, db)
+                    ref_entries = _effective_ref_entries(chapter_id, db)
+                    ref_imgs = _select_ref_image_paths_for_scene(scene_prompt, ref_entries)
                     image_result = await generate_manga_image(
                         scene_prompt,
                         chapter_id,
@@ -1278,7 +1821,8 @@ async def regenerate_single_image(chapter_id: int, image_number: int, body: dict
     old_path = Path(__file__).resolve().parent / old_img.image_path if old_img else None
 
     # Generate new image
-    ref_imgs = _effective_ref_image_paths(chapter_id, db)
+    ref_entries = _effective_ref_entries(chapter_id, db)
+    ref_imgs = _select_ref_image_paths_for_scene(prompt, ref_entries)
     try:
         image_result = await generate_manga_image(
             prompt,
@@ -1343,10 +1887,16 @@ async def generate_framework_endpoint(story_id: int, request: Request, db: Sessi
         raise HTTPException(400, "description is required")
 
     framework = await generate_framework(description.strip(), api_key=_user_deepseek_api_key(request))
+    framework = await _complete_framework_payload(
+        framework,
+        description.strip(),
+        api_key=_user_deepseek_api_key(request),
+    )
 
+    story.description = description.strip()
     story.tags = framework.get("tags")
     story.characters = _normalize_characters_payload(framework.get("characters"))
-    story.outline = _normalize_framework_outline(framework.get("outline"), framework.get("chapters"))
+    story.outline = _merge_framework_outline(story.outline, framework.get("outline"), framework.get("chapters"))
     db.commit()
     db.refresh(story)
     return {
@@ -1414,10 +1964,140 @@ async def regenerate_outline_endpoint(story_id: int, request: Request, db: Sessi
     result = await regenerate_outline(story_context, api_key=_user_deepseek_api_key(request))
 
     outline = result if isinstance(result, dict) and "three_acts" in result else result
-    story.outline = outline
+    story.outline = _merge_framework_outline(story.outline, outline, _extract_outline_chapters(outline))
     db.commit()
     db.refresh(story)
     return {"outline": story.outline}
+
+
+@app.post("/api/stories/{story_id}/framework/chapters/manual")
+def update_outline_chapter_plan(story_id: int, body: OutlineChapterPlanUpdate, db: Session = Depends(get_db)):
+    story = db.get(Story, story_id)
+    if not story:
+        raise HTTPException(404, "Story not found")
+
+    mode = (body.mode or "").strip().lower()
+    if mode not in {"append", "insert_after", "update"}:
+        raise HTTPException(400, "Invalid mode")
+
+    chapters = _extract_outline_chapters(story.outline)
+    plan_map = {item["chapter_number"]: dict(item) for item in chapters}
+
+    if mode == "update":
+        target_number = body.target_chapter_number
+        if not isinstance(target_number, int) or target_number < 1:
+            raise HTTPException(400, "target_chapter_number is required for update")
+        existing = plan_map.get(target_number)
+        if not existing:
+            raise HTTPException(404, "Planned chapter not found")
+        fallback_title = existing.get("title") or f"Chapter {target_number}"
+        fallback_act = str(existing.get("act") or _infer_manual_plan_act(chapters, target_chapter_number=target_number))
+        normalized = _normalize_outline_plan_payload(body.chapter.model_dump(), fallback_title=fallback_title, fallback_act=fallback_act)
+        existing.update(normalized)
+        existing["chapter_number"] = target_number
+        plan_map[target_number] = existing
+        next_plans = [plan_map[key] for key in sorted(plan_map)]
+    else:
+        if mode == "append":
+            after_number = max((item["chapter_number"] for item in chapters), default=0)
+        else:
+            after_number = body.after_chapter_number
+            if not isinstance(after_number, int) or after_number < 1:
+                raise HTTPException(400, "after_chapter_number is required for insert_after")
+            if after_number not in plan_map:
+                raise HTTPException(404, "Insert anchor chapter not found")
+
+        new_number = after_number + 1
+        fallback_act = _infer_manual_plan_act(chapters, after_chapter_number=after_number)
+        normalized = _normalize_outline_plan_payload(
+            body.chapter.model_dump(),
+            fallback_title=f"Chapter {new_number}",
+            fallback_act=fallback_act,
+        )
+
+        shifted_plans: list[dict] = []
+        for item in chapters:
+            current = dict(item)
+            if current["chapter_number"] >= new_number:
+                current["chapter_number"] += 1
+            shifted_plans.append(current)
+
+        _shift_story_chapter_numbers(story, new_number, 1)
+
+        normalized["chapter_number"] = new_number
+        shifted_plans.append(normalized)
+        next_plans = sorted(shifted_plans, key=lambda item: item["chapter_number"])
+
+    story.outline = _normalize_framework_outline(story.outline, next_plans)
+    db.commit()
+    db.refresh(story)
+    return {"outline": story.outline}
+
+
+@app.post("/api/stories/{story_id}/framework/adjust")
+async def adjust_framework_endpoint(story_id: int, request: Request, db: Session = Depends(get_db)):
+    story = db.get(Story, story_id)
+    if not story:
+        raise HTTPException(404, "Story not found")
+
+    body = await request.json()
+    messages = body.get("messages", [])
+    if not isinstance(messages, list) or not messages:
+        raise HTTPException(400, "messages is required")
+
+    result = await adjust_framework_with_chat(
+        _story_framework_context(story),
+        messages,
+        api_key=_user_deepseek_api_key(request),
+    )
+
+    framework = result.get("framework", {})
+    description = str(framework.get("description") or story.description or "").strip()
+    story.description = description
+    story.tags = _merge_tags(story.tags, framework.get("tags"))
+    story.characters = _merge_characters_payload(story.characters, framework.get("characters"))
+    story.outline = _merge_framework_outline(story.outline, framework.get("outline"), framework.get("chapters"))
+    db.commit()
+    db.refresh(story)
+    return {
+        "reply": result.get("reply", ""),
+        "story": {
+            "description": story.description,
+            "tags": story.tags,
+            "characters": story.characters,
+            "outline": story.outline,
+        },
+        "chapters": framework.get("chapters"),
+    }
+
+
+@app.post("/api/stories/{story_id}/framework/continue")
+async def continue_framework_endpoint(story_id: int, request: Request, db: Session = Depends(get_db)):
+    story = db.get(Story, story_id)
+    if not story:
+        raise HTTPException(404, "Story not found")
+
+    result = await continue_framework(
+        _story_framework_context(story),
+        api_key=_user_deepseek_api_key(request),
+    )
+    framework = result.get("framework", {})
+    story.description = str(framework.get("description") or story.description or "").strip()
+    story.tags = _merge_tags(story.tags, framework.get("tags"))
+    story.characters = _merge_characters_payload(story.characters, framework.get("characters"))
+    story.outline = _merge_framework_outline(story.outline, framework.get("outline"), framework.get("chapters"))
+    db.commit()
+    db.refresh(story)
+    return {
+        "reply": result.get("reply", ""),
+        "story": {
+            "description": story.description,
+            "tags": story.tags,
+            "characters": story.characters,
+            "outline": story.outline,
+        },
+        "chapters": framework.get("chapters"),
+    }
 
 
 @app.post("/api/stories/{story_id}/expand-chapter", response_model=ChapterOut)
@@ -1501,6 +2181,36 @@ async def rewrite_selection_endpoint(chapter_id: int, request: Request, db: Sess
         api_key=_user_deepseek_api_key(request),
     )
     return {"rewritten_text": rewritten}
+
+
+@app.post("/api/chapters/{chapter_id}/adjust-content", response_model=ChapterOut)
+async def adjust_chapter_content_endpoint(chapter_id: int, request: Request, db: Session = Depends(get_db)):
+    chapter = _require_chapter(chapter_id, db)
+    body = await request.json()
+    instruction = body.get("instruction", "")
+
+    if not isinstance(instruction, str) or not instruction.strip():
+        raise HTTPException(400, "instruction is required")
+    if not chapter.novel_content or not chapter.novel_content.strip():
+        raise HTTPException(400, "Chapter has no novel content to adjust")
+
+    chapter_info = {
+        "title": chapter.title or f"第{chapter.chapter_number}话",
+        "act": chapter.act or "",
+        "chapter_number": chapter.chapter_number,
+        "key_events": chapter.key_events or [],
+    }
+    updated_content = await adjust_chapter_content(
+        _story_framework_context(chapter.story),
+        chapter_info,
+        chapter.novel_content,
+        instruction.strip(),
+        api_key=_user_deepseek_api_key(request),
+    )
+    _apply_chapter_content(chapter, updated_content, status="completed")
+    db.commit()
+    db.refresh(chapter)
+    return chapter
 
 
 @app.post("/api/chapters/{chapter_id}/quality-assess")

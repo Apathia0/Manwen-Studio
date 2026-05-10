@@ -29,6 +29,18 @@ OUTPUT_DIR = Path(__file__).resolve().parent.parent / "manga_outputs"
 
 MAX_RETRIES = 3
 RETRY_DELAY = 5
+DOWNLOAD_RETRIES = 3
+DOWNLOAD_RETRY_DELAY = 3
+PROMPT_TOO_LONG_KEYWORDS = (
+    "message too long",
+    "prompt too long",
+    "messages too long",
+    "消息过长",
+    "提交的消息过长",
+    "上下文过长",
+    "context length",
+    "maximum context length",
+)
 
 CONTENT_POLICY_KEYWORDS = (
     "违反平台政策",
@@ -60,6 +72,40 @@ class ImageGenerationResult:
     image_path: str
     final_prompt: str
     prompt_sanitized: bool = False
+
+
+def _pending_download_path(output_path: Path) -> Path:
+    return output_path.with_suffix(output_path.suffix + ".pending.json")
+
+
+def _save_pending_download(output_path: Path, source_url: str) -> None:
+    try:
+        _pending_download_path(output_path).write_text(
+            json.dumps({"url": source_url, "saved_at": int(time.time())}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+    except OSError as exc:
+        logger.warning("Failed to save pending download metadata for %s: %s", output_path, exc)
+
+
+def _clear_pending_download(output_path: Path) -> None:
+    try:
+        _pending_download_path(output_path).unlink(missing_ok=True)
+    except OSError as exc:
+        logger.warning("Failed to clear pending download metadata for %s: %s", output_path, exc)
+
+
+def _load_pending_download(output_path: Path) -> str:
+    pending_path = _pending_download_path(output_path)
+    if not pending_path.exists():
+        return ""
+    try:
+        payload = json.loads(pending_path.read_text(encoding="utf-8"))
+        if isinstance(payload, dict) and isinstance(payload.get("url"), str):
+            return payload["url"].strip()
+    except Exception:
+        return ""
+    return ""
 
 
 def _image_auth_headers(api_key: str | None = None, json_content: bool = False) -> dict[str, str]:
@@ -170,6 +216,15 @@ def _classify_response_error(
             status_code=resp.status_code,
         )
 
+    if _contains_any(provider_message, PROMPT_TOO_LONG_KEYWORDS):
+        return MangaImageGenerationError(
+            code="prompt_too_long",
+            user_message="当前绘图提示词过长，请缩短分镜描述或改用角色参考图后再试。",
+            retryable=False,
+            provider_message=provider_message,
+            status_code=resp.status_code,
+        )
+
     if resp.status_code >= 500:
         return MangaImageGenerationError(
             code="upstream_server_error",
@@ -260,10 +315,20 @@ async def _download_generated_image(image_entry: dict, progress_label: str) -> b
         return image_bytes
     if image_entry.get("url"):
         logger.info("[%s] 收到图片 URL，开始下载", progress_label)
-        async with httpx.AsyncClient(timeout=120) as client:
-            img_resp = await client.get(image_entry["url"])
-            img_resp.raise_for_status()
-            image_bytes = img_resp.content
+        try:
+            async with httpx.AsyncClient(timeout=120, follow_redirects=True) as client:
+                img_resp = await client.get(image_entry["url"])
+                img_resp.raise_for_status()
+                image_bytes = img_resp.content
+        except httpx.ConnectError as exc:
+            err_text = repr(exc)
+            if "CERTIFICATE_VERIFY_FAILED" not in err_text and "Hostname mismatch" not in err_text:
+                raise
+            logger.warning("[%s] 图片下载证书校验失败，尝试关闭校验后重试: %s", progress_label, err_text)
+            async with httpx.AsyncClient(timeout=120, follow_redirects=True, verify=False) as insecure_client:
+                img_resp = await insecure_client.get(image_entry["url"])
+                img_resp.raise_for_status()
+                image_bytes = img_resp.content
         logger.info("[%s] 图片下载完成，大小 %s bytes", progress_label, len(image_bytes))
         return image_bytes
     raise MangaImageGenerationError(
@@ -272,6 +337,118 @@ async def _download_generated_image(image_entry: dict, progress_label: str) -> b
         retryable=True,
         provider_message="No b64_json or url in image response",
     )
+
+async def _download_image_from_url(url: str, progress_label: str) -> bytes:
+    last_exc: Exception | None = None
+    for attempt in range(1, DOWNLOAD_RETRIES + 1):
+        try:
+            logger.info("[%s] 开始下载图片 URL（尝试 %s/%s）", progress_label, attempt, DOWNLOAD_RETRIES)
+            timeout = httpx.Timeout(connect=45, read=180, write=30, pool=30)
+            async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+                img_resp = await client.get(url)
+                img_resp.raise_for_status()
+                return img_resp.content
+        except httpx.ConnectError as exc:
+            last_exc = exc
+            err_text = repr(exc)
+            if "CERTIFICATE_VERIFY_FAILED" in err_text or "Hostname mismatch" in err_text:
+                logger.warning("[%s] 图片下载证书校验失败，尝试关闭校验后重试: %s", progress_label, err_text)
+                try:
+                    timeout = httpx.Timeout(connect=45, read=180, write=30, pool=30)
+                    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True, verify=False) as insecure_client:
+                        img_resp = await insecure_client.get(url)
+                        img_resp.raise_for_status()
+                        return img_resp.content
+                except Exception as insecure_exc:
+                    last_exc = insecure_exc
+            if attempt < DOWNLOAD_RETRIES:
+                await asyncio.sleep(DOWNLOAD_RETRY_DELAY)
+                continue
+        except (httpx.TimeoutException, httpx.TransportError) as exc:
+            last_exc = exc
+            logger.warning("[%s] 图片下载失败（尝试 %s/%s）: %s", progress_label, attempt, DOWNLOAD_RETRIES, repr(exc))
+            if attempt < DOWNLOAD_RETRIES:
+                await asyncio.sleep(DOWNLOAD_RETRY_DELAY)
+                continue
+        except Exception as exc:
+            last_exc = exc
+            break
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError("image download failed without a specific exception")
+
+
+async def generate_reference_image(
+    prompt: str,
+    output_path: Path,
+    *,
+    api_key: str | None = None,
+    size: str = "1024x1024",
+) -> str:
+    progress_label = f"ref:{output_path.stem}"
+    current_prompt = prompt.strip()
+    last_err: MangaImageGenerationError | None = None
+
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            logger.info("[%s] 开始生成角色参考图（尝试 %s/%s）", progress_label, attempt, MAX_RETRIES)
+            async with httpx.AsyncClient(timeout=httpx.Timeout(connect=30, read=600, write=120, pool=30)) as client:
+                resp = await client.post(
+                    f"{IMAGE_API_BASE_URL}/images/generations",
+                    json={"model": IMAGE_MODEL, "prompt": current_prompt, "size": size},
+                    headers=_image_auth_headers(api_key, json_content=True),
+                )
+
+            if not resp.is_success:
+                raise _classify_response_error(resp, progress_label, current_prompt, False)
+
+            data = resp.json()
+            image_entry = data["data"][0]
+            image_bytes = normalize_image_bytes(await _download_generated_image(image_entry, progress_label))
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_bytes(image_bytes)
+            logger.info("[%s] 角色参考图已保存到 %s", progress_label, output_path)
+            return str(output_path)
+        except httpx.TimeoutException as exc:
+            last_err = MangaImageGenerationError(
+                code="timeout",
+                user_message="角色参考图生成超时，请稍后重试。",
+                retryable=True,
+                provider_message=repr(exc),
+            )
+        except httpx.TransportError as exc:
+            last_err = MangaImageGenerationError(
+                code="network_error",
+                user_message="角色参考图生成时网络异常，请稍后重试。",
+                retryable=True,
+                provider_message=repr(exc),
+            )
+        except MangaImageGenerationError as exc:
+            last_err = exc
+        except Exception as exc:
+            last_err = MangaImageGenerationError(
+                code="unknown_error",
+                user_message="角色参考图生成失败，请稍后重试。",
+                retryable=True,
+                provider_message=repr(exc),
+            )
+
+        assert last_err is not None
+        logger.error(
+            "[%s] 角色参考图尝试 %s 失败: code=%s retryable=%s provider=%s",
+            progress_label,
+            attempt,
+            last_err.code,
+            last_err.retryable,
+            last_err.provider_message,
+        )
+        if attempt < MAX_RETRIES and last_err.retryable:
+            await asyncio.sleep(RETRY_DELAY)
+            continue
+        break
+
+    assert last_err is not None
+    raise last_err
 
 
 async def generate_manga_image(

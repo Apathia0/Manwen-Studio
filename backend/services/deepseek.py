@@ -491,6 +491,214 @@ async def regenerate_outline(story_context: dict, api_key: str | None = None) ->
         raise ValueError(f"Outline regeneration failed: {e}")
 
 
+async def generate_character_profiles_from_framework(story_context: dict, api_key: str | None = None) -> str:
+    """Generate manga-facing appearance cards from framework characters."""
+    snapshot = _build_story_snapshot(story_context)
+    user_prompt = f"""以下是当前故事的框架信息，请把其中的角色设定扩写成可直接用于漫画分镜与生图的固定角色外貌卡。
+
+{snapshot}
+
+要求：
+1. 只输出纯文本，不要输出 JSON，不要解释。
+2. 每个角色单独成段，必须覆盖当前故事里的所有核心角色。
+3. 每个角色都要包含：角色名、性别/年龄感、体型、脸部特征、发色与发型、眼睛、常穿服装、配饰/武器、神态气质、动作习惯、漫画绘制注意点。
+4. 要把小说角色性格映射成稳定外貌特征，例如冷静的人更克制、张扬的人更有攻击性视觉符号。
+5. 描述必须具体、可视化、便于后续所有章节保持角色一致。
+6. 如果原始框架没写明某个外貌细节，请基于题材和角色定位合理补全，但保持统一风格。
+
+输出格式示例：
+角色名：林墨
+身份定位：主角
+外貌描述：……
+服装要点：……
+气质与表情：……
+绘制注意：……
+"""
+
+    payload = {
+        "model": DEEPSEEK_MODEL,
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    "你是专业漫画角色设定师，擅长把小说角色设定转成稳定、具体、可复用的角色外貌卡。"
+                    "你输出的内容会直接作为分镜和生图提示词的一部分，所以必须高度具体、统一、可视化。"
+                ),
+            },
+            {"role": "user", "content": user_prompt},
+        ],
+        "stream": False,
+        "max_tokens": 8192,
+    }
+
+    async with httpx.AsyncClient(timeout=300) as client:
+        resp = await client.post(
+            f"{DEEPSEEK_BASE_URL}/chat/completions",
+            json=payload,
+            headers=_deepseek_auth_headers(api_key),
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        return str(data["choices"][0]["message"]["content"] or "").strip()
+
+
+async def adjust_framework_with_chat(story_context: dict, messages: list[dict], api_key: str | None = None) -> dict:
+    """Adjust the existing framework based on iterative chat feedback."""
+    snapshot = _build_story_snapshot(story_context)
+    safe_messages = [
+        {
+            "role": "assistant" if str(item.get("role")) == "assistant" else "user",
+            "content": str(item.get("content") or "").strip(),
+        }
+        for item in messages
+        if isinstance(item, dict) and str(item.get("content") or "").strip()
+    ]
+    if not safe_messages:
+        raise ValueError("At least one chat message is required")
+
+    user_prompt = f"""请根据下面的小说创意，生成一个完整可用的小说框架 JSON。
+
+故事创意：
+{description}
+
+硬性要求：
+1. 顶层必须完整返回 `tags`、`characters`、`outline`、`chapters` 四个字段。
+2. `tags` 里必须有非空的 `type`、`theme`、`style`、`audience`。
+3. `characters` 必须有 3-6 个核心角色；每个角色都必须包含 `name`、`role`、`big_five`、`arc`、`relationships`。
+4. `big_five` 必须完整包含 `openness`、`conscientiousness`、`extraversion`、`agreeableness`、`neuroticism`，分值为 1-10。
+5. `outline.three_acts` 必须有 3 幕；每一幕都必须包含 `act`、`title`、`summary`、`key_events`、`chapters`。
+6. 每一幕的 `chapters` 至少生成 2 个章节，章节对象必须包含 `chapter_number`、`title`、`summary`、`key_events`。
+7. 顶层 `chapters` 必须是完整平铺的章节列表，覆盖所有幕中的章节，`chapter_number` 从 1 连续递增。
+8. 不要返回空字符串、空数组占位，也不要省略任何字段。
+9. 只输出 JSON，不要输出解释。
+"""
+
+    payload = {
+        "model": DEEPSEEK_MODEL,
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    "你是一位小说策划编辑，正在和用户一起迭代小说框架。"
+                    "你必须参考现有框架和对话历史，做增量调整，而不是完全偏离原设定。"
+                    "请始终输出一个 JSON 对象，格式为"
+                    '{"reply": "给用户的简短说明", "framework": {"description": "...", "tags": {...}, "characters": [...], "outline": {...}, "chapters": [...]}}。'
+                    "reply 用自然中文简要说明这次改了什么、保留了什么。"
+                    "framework 必须返回完整可用的最新框架。"
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    "以下是当前故事框架，请以此为基础进行修改。\n\n"
+                    f"{snapshot}\n\n"
+                    "下面是我和你的最新讨论，请根据这些讨论调整框架。"
+                ),
+            },
+            *safe_messages,
+        ],
+        "stream": False,
+        "max_tokens": 16384,
+        "response_format": {"type": "json_object"},
+    }
+
+    async with httpx.AsyncClient(timeout=600) as client:
+        resp = await client.post(
+            f"{DEEPSEEK_BASE_URL}/chat/completions",
+            json=payload,
+            headers=_deepseek_auth_headers(api_key),
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        content = data["choices"][0]["message"]["content"]
+
+    try:
+        result = _extract_json_object(content)
+    except ValueError as e:
+        raise ValueError(f"Framework adjustment failed: {e}")
+
+    framework = result.get("framework")
+    if not isinstance(framework, dict):
+        raise ValueError("Framework adjustment failed: missing framework object")
+
+    reply = str(result.get("reply") or "").strip() or "已根据你的建议调整框架。"
+    framework["description"] = str(framework.get("description") or story_context.get("description") or "").strip()
+    return {"reply": reply, "framework": framework}
+
+
+async def continue_framework(story_context: dict, api_key: str | None = None) -> dict:
+    """Continue the existing story framework with new arcs, chapters, and characters when needed."""
+    snapshot = _build_story_snapshot(story_context)
+    user_prompt = f"""以下是当前故事的完整框架信息。请基于这些信息，重新生成一个完整的 `outline`。
+
+{snapshot}
+
+硬性要求：
+1. 只输出一个包含 `outline` 的 JSON 对象。
+2. `outline.three_acts` 必须包含 3 幕。
+3. 每一幕都必须包含 `act`、`title`、`summary`、`key_events`、`chapters`。
+4. 每一幕里的 `chapters` 至少有 2 个章节，每个章节都必须包含 `chapter_number`、`title`、`summary`、`key_events`。
+5. 所有章节编号必须从 1 连续递增，且和三幕结构一致。
+6. 不要省略章节列表。
+"""
+
+    payload = {
+        "model": DEEPSEEK_MODEL,
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    "你是一位资深小说策划编辑。请基于现有故事框架继续往后扩展剧情，"
+                    "补充后续大纲、后续章节规划，并在确有必要时新增角色或更新标签。"
+                    "请始终输出一个 JSON 对象，格式为 "
+                    '{"reply":"...", "framework":{"description":"...", "tags":{...}, "characters":[...], "outline":{...}, "chapters":[...]}}。'
+                    "framework 中至少要包含可新增到现有故事后的大纲和章节规划。"
+                    "章节编号必须严格延续现有最大 chapter_number 之后继续编号，不能重置或回退。"
+                    "不要删掉原有设定，不要缩减已有章节，只做续写扩展。"
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    "请在以下现有故事框架的基础上继续续写后续发展。\n\n"
+                    f"{snapshot}\n\n"
+                    "要求：\n"
+                    "1. 继续补完后续幕、后续剧情推进和章节列表；\n"
+                    "2. 如果后续剧情需要新人物，请把新人物加入 characters；\n"
+                    "3. 如果故事方向因此扩展，也可以微调 tags；\n"
+                    "4. 不要删除现有章节和现有角色，只向后扩展。"
+                ),
+            },
+        ],
+        "stream": False,
+        "max_tokens": 16384,
+        "response_format": {"type": "json_object"},
+    }
+
+    async with httpx.AsyncClient(timeout=600) as client:
+        resp = await client.post(
+            f"{DEEPSEEK_BASE_URL}/chat/completions",
+            json=payload,
+            headers=_deepseek_auth_headers(api_key),
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        content = data["choices"][0]["message"]["content"]
+
+    try:
+        result = _extract_json_object(content)
+    except ValueError as e:
+        raise ValueError(f"Framework continuation failed: {e}")
+
+    framework = result.get("framework")
+    if not isinstance(framework, dict):
+        raise ValueError("Framework continuation failed: missing framework object")
+
+    reply = str(result.get("reply") or "").strip() or "已续写后续大纲与章节规划。"
+    framework["description"] = str(framework.get("description") or story_context.get("description") or "").strip()
+    return {"reply": reply, "framework": framework}
+
+
 async def expand_chapter_to_content(story_context: dict, chapter_info: dict, api_key: str | None = None) -> str:
     """Expand a chapter outline entry into full novel content using story framework constraints."""
     snapshot = _build_story_snapshot(story_context)
@@ -563,6 +771,58 @@ async def rewrite_selection(selected_text: str, chapter_context: str, api_key: s
     }
 
     async with httpx.AsyncClient(timeout=300) as client:
+        resp = await client.post(
+            f"{DEEPSEEK_BASE_URL}/chat/completions",
+            json=payload,
+            headers=_deepseek_auth_headers(api_key),
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        return data["choices"][0]["message"]["content"]
+
+
+async def adjust_chapter_content(
+    story_context: dict,
+    chapter_info: dict,
+    chapter_content: str,
+    instruction: str,
+    api_key: str | None = None,
+) -> str:
+    """Adjust the full chapter content according to a user instruction."""
+    snapshot = _build_story_snapshot(story_context)
+    chapter_details = json.dumps(chapter_info, ensure_ascii=False)
+
+    user_prompt = f"""请根据以下故事框架、章节信息、当前正文和修改要求，直接改写整章正文。
+
+## 故事框架
+{snapshot}
+
+## 本章信息
+{chapter_details}
+
+## 当前正文
+{chapter_content}
+
+## 用户修改要求
+{instruction}
+
+## 改写要求
+- 保留当前章节已经成立的主要剧情信息，除非用户明确要求重做
+- 优先根据用户要求调整节奏、情绪、冲突、人物互动、伏笔、描写重点
+- 保持人物设定、世界观和大纲约束一致
+- 直接输出修改后的完整正文，不要解释，不要摘要，不要额外说明"""
+
+    payload = {
+        "model": DEEPSEEK_MODEL,
+        "messages": [
+            {"role": "system", "content": "你是一位资深网文编辑，擅长根据编辑意见直接修改整章正文，并保持剧情与设定统一。"},
+            {"role": "user", "content": user_prompt},
+        ],
+        "stream": False,
+        "max_tokens": 16384,
+    }
+
+    async with httpx.AsyncClient(timeout=600) as client:
         resp = await client.post(
             f"{DEEPSEEK_BASE_URL}/chat/completions",
             json=payload,

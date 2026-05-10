@@ -1,5 +1,6 @@
 ﻿import { useCallback, useEffect, useRef, useState } from 'react';
 import { ChevronUp, ChevronDown, Download, ImageIcon, Loader2, Sparkles, Pencil, RefreshCw, Check, X, ImagePlus, Trash2, Square } from 'lucide-react';
+import { useMemo as useMemoValue } from 'react';
 import {
   generateMangaStream,
   generateScenes, scenesFromSelection,
@@ -8,6 +9,8 @@ import {
   regenerateImage,
   resetMangaImages,
   getCharacters,
+  generateStoryCharactersFromFramework,
+  generateStoryCharacterRefImages,
   saveCharacters,
   resetChapterCharacters,
   getChapterRefImages,
@@ -42,12 +45,58 @@ interface ImageItem {
   prompt: string;
 }
 
+interface CharacterCardField {
+  label: string;
+  value: string;
+}
+
+interface CharacterAppearanceCard {
+  name: string;
+  fields: CharacterCardField[];
+  raw: string;
+}
+
 function mergeImages(...groups: ImageItem[][]): ImageItem[] {
   const merged = new Map<number, ImageItem>();
   groups.flat().forEach((img) => {
     merged.set(img.image_number, img);
   });
   return Array.from(merged.values()).sort((a, b) => a.image_number - b.image_number);
+}
+
+function parseCharacterAppearanceCards(raw: string): CharacterAppearanceCard[] {
+  const text = raw.trim();
+  if (!text) return [];
+
+  const blocks = text
+    .replace(/\r\n/g, '\n')
+    .split(/(?=^角色名[:：])/m)
+    .map((block) => block.trim())
+    .filter(Boolean);
+
+  return blocks.map((block, index) => {
+    const fields: CharacterCardField[] = [];
+    let fallbackName = `角色 ${index + 1}`;
+
+    for (const line of block.split('\n').map((item) => item.trim()).filter(Boolean)) {
+      const match = line.match(/^([^:：]{1,20})[:：]\s*(.+)$/);
+      if (match) {
+        const [, label, value] = match;
+        const cleanLabel = label.trim();
+        const cleanValue = value.trim();
+        if (!cleanValue) continue;
+        if (cleanLabel === '角色名') fallbackName = cleanValue;
+        fields.push({ label: cleanLabel, value: cleanValue });
+      } else if (fields.length > 0) {
+        const last = fields[fields.length - 1];
+        last.value = `${last.value}\n${line}`;
+      } else {
+        fields.push({ label: '描述', value: line });
+      }
+    }
+
+    return { name: fallbackName, fields, raw: block };
+  });
 }
 
 type Phase = 'idle' | 'generating-scenes' | 'editing-scenes' | 'generating-images';
@@ -72,7 +121,10 @@ export default function MangaPanel({ chapter, onChapterRefresh, selectedText, ch
   const [charEditing, setCharEditing] = useState(false);
   const [charDraft, setCharDraft] = useState('');
   const [charSaving, setCharSaving] = useState(false);
+  const [charGenerating, setCharGenerating] = useState(false);
+  const [charRefGeneratingKey, setCharRefGeneratingKey] = useState<string>('');
   const [charExpanded, setCharExpanded] = useState(false);
+  const [expandedAppearanceCards, setExpandedAppearanceCards] = useState<Record<string, boolean>>({});
   const [refImages, setRefImages] = useState<RefImage[]>([]);
   const [refSource, setRefSource] = useState<RefSource>('none');
   const [refMax, setRefMax] = useState(4);
@@ -91,6 +143,18 @@ export default function MangaPanel({ chapter, onChapterRefresh, selectedText, ch
   const [scenesFromSelectionFlag, setScenesFromSelectionFlag] = useState(false);
   const [ignorePersistedImages, setIgnorePersistedImages] = useState(false);
   const mangaAbortRef = useRef<Map<number, AbortController>>(new Map());
+  const parsedCharacterCards = useMemoValue(() => parseCharacterAppearanceCards(charText), [charText]);
+  const refImageByLabel = useMemoValue(() => {
+    const map = new Map<string, RefImage>();
+    refImages.forEach((img) => {
+      if (img.label) map.set(img.label, img);
+    });
+    return map;
+  }, [refImages]);
+  const isAppearanceCardExpanded = useCallback(
+    (key: string) => expandedAppearanceCards[key] ?? true,
+    [expandedAppearanceCards],
+  );
 
   // Subscribe to module-level generation store so we re-render when any chapter's gen state changes
   const [, setStoreTick] = useState(0);
@@ -122,6 +186,7 @@ export default function MangaPanel({ chapter, onChapterRefresh, selectedText, ch
     setCharSource('none');
     setCharEditing(false);
     setCharExpanded(false);
+    setExpandedAppearanceCards({});
     setRefImages([]);
     setRefSource('none');
     setRefModalOpen(false);
@@ -324,9 +389,28 @@ export default function MangaPanel({ chapter, onChapterRefresh, selectedText, ch
         return updated.sort((a, b) => a.image_number - b.image_number);
       });
     } catch (err: any) {
-      setErrorMsg(`绗?{imageNumber}寮犻噸鏂扮敓鎴愬け璐? ${err.message}`);
+      setErrorMsg(`第 ${imageNumber} 张重新生成失败：${err.message}`);
     } finally {
       setRegenIdx(-1);
+    }
+  };
+
+  const handleGenerateCharacterRefImage = async (characterName: string, overwrite = false) => {
+    if (!chapter) return;
+    setCharRefGeneratingKey(characterName);
+    setErrorMsg('');
+    try {
+      const result = await generateStoryCharacterRefImages(chapter.story_id, {
+        character_name: characterName,
+        overwrite,
+      });
+      setRefImages(result.images);
+      setRefSource('story');
+      setRefMax(result.max);
+    } catch (err: any) {
+      setErrorMsg(`角色参考图生成失败：${err.message}`);
+    } finally {
+      setCharRefGeneratingKey('');
     }
   };
 
@@ -864,7 +948,7 @@ export default function MangaPanel({ chapter, onChapterRefresh, selectedText, ch
               <span className="flex items-center gap-1.5">
                  角色外貌卡
                 {charText && charSource === 'story' && (
-                  <span className="text-[10px] font-normal normal-case px-1.5 py-0.5 rounded bg-blue-900/50 text-blue-400 border border-blue-800/50">继承首页</span>
+                  <span className="text-[10px] font-normal normal-case px-1.5 py-0.5 rounded bg-blue-900/50 text-blue-400 border border-blue-800/50">继承全局</span>
                 )}
                 {charText && charSource === 'chapter' && (
                   <span className="text-[10px] font-normal normal-case px-1.5 py-0.5 rounded bg-emerald-900/50 text-emerald-400 border border-emerald-800/50">本话自定义</span>
@@ -889,7 +973,7 @@ export default function MangaPanel({ chapter, onChapterRefresh, selectedText, ch
                       <button
                         onClick={() => setCharEditing(false)}
                         className="px-2 py-1 text-xs rounded text-gray-500 hover:text-gray-300 hover:bg-gray-700 transition-colors"
-                      >鍙栨秷</button>
+                      >取消</button>
                       <button
                         disabled={charSaving}
                         onClick={async () => {
@@ -912,12 +996,127 @@ export default function MangaPanel({ chapter, onChapterRefresh, selectedText, ch
                   </>
                 ) : charText ? (
                   <>
-                    <pre className="text-xs text-gray-400 leading-relaxed whitespace-pre-wrap max-h-48 overflow-y-auto">{charText}</pre>
+                    <div className="space-y-2 max-h-64 overflow-y-auto pr-1">
+                      {parsedCharacterCards.length > 0 ? (
+                        parsedCharacterCards.map((card, idx) => {
+                          const cardKey = `${card.name}-${idx}`;
+                          const expanded = isAppearanceCardExpanded(cardKey);
+                          const refImage = refImageByLabel.get(card.name);
+                          const generatingRef = charRefGeneratingKey === card.name;
+                          return (
+                            <div key={cardKey} className="rounded-lg border border-gray-800 bg-gray-950/60">
+                              <button
+                                type="button"
+                                onClick={() => setExpandedAppearanceCards((prev) => ({ ...prev, [cardKey]: !expanded }))}
+                                className="flex w-full items-center justify-between gap-2 px-3 py-2 text-left hover:bg-gray-900/50 transition-colors"
+                              >
+                                <div className="min-w-0">
+                                  <h4 className="truncate text-sm font-semibold text-gray-100">{card.name}</h4>
+                                  <div className="text-[10px] text-gray-500">角色卡 {idx + 1}</div>
+                                </div>
+                                {expanded ? <ChevronUp size={14} className="text-gray-500" /> : <ChevronDown size={14} className="text-gray-500" />}
+                              </button>
+                              {expanded && (
+                                <div className="border-t border-gray-800 px-3 py-3 space-y-2">
+                                  {refImage ? (
+                                    <div className="rounded-lg border border-emerald-900/60 bg-emerald-950/20 p-2 space-y-2">
+                                      <div className="text-[10px] font-medium uppercase tracking-wide text-emerald-400">角色参考图</div>
+                                      <img
+                                        src={`${refImageUrl(refImage.image_path)}?t=${chapter?.id ?? ''}`}
+                                        alt={`${card.name} 角色参考图`}
+                                        className="w-full rounded-md border border-emerald-900/40 object-cover aspect-square bg-gray-900"
+                                      />
+                                    </div>
+                                  ) : (
+                                    <div className="rounded-lg border border-dashed border-gray-800 px-3 py-4 text-xs text-gray-500">
+                                      还没有该角色的参考图，生成后本话及后续生图会优先引用角色图。
+                                    </div>
+                                  )}
+                                  {card.fields.map((field, fieldIdx) => (
+                                    <div key={`${field.label}-${fieldIdx}`} className="space-y-0.5">
+                                      <div className="text-[10px] font-medium uppercase tracking-wide text-gray-500">
+                                        {field.label}
+                                      </div>
+                                      <div className="whitespace-pre-wrap text-xs leading-relaxed text-gray-300">
+                                        {field.value}
+                                      </div>
+                                    </div>
+                                  ))}
+                                  {chapter && (
+                                    <div className="flex items-center gap-3 pt-1">
+                                      <button
+                                        onClick={() => handleGenerateCharacterRefImage(card.name, !!refImage)}
+                                        disabled={!!charRefGeneratingKey}
+                                        className="flex items-center gap-1 text-xs text-amber-400 hover:text-amber-300 disabled:opacity-40 transition-colors"
+                                      >
+                                        {generatingRef ? <Loader2 size={11} className="animate-spin" /> : <ImageIcon size={11} />}
+                                        {generatingRef ? '生成中...' : refImage ? '重生成参考图' : '生成参考图'}
+                                      </button>
+                                      {refImage && (
+                                        <button
+                                          onClick={() => setRefModalOpen(true)}
+                                          className="flex items-center gap-1 text-xs text-emerald-400 hover:text-emerald-300 transition-colors"
+                                        >
+                                          <ImagePlus size={11} />
+                                          查看垫图
+                                        </button>
+                                      )}
+                                    </div>
+                                  )}
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })
+                      ) : (
+                        <pre className="text-xs text-gray-400 leading-relaxed whitespace-pre-wrap">{charText}</pre>
+                      )}
+                    </div>
                     <div className="mt-2 flex items-center gap-2 flex-wrap">
+                      {chapter && (
+                        <button
+                          onClick={async () => {
+                            setCharGenerating(true);
+                            try {
+                              const result = await generateStoryCharactersFromFramework(chapter.story_id);
+                              setCharText(result.characters || '');
+                              setCharSource(result.characters ? 'story' : 'none');
+                            } catch (err: any) {
+                              setErrorMsg(err.message);
+                            } finally {
+                              setCharGenerating(false);
+                            }
+                          }}
+                          disabled={charGenerating || charSaving}
+                          className="flex items-center gap-1 text-xs text-amber-400 hover:text-amber-300 disabled:opacity-40 transition-colors"
+                        ><Sparkles size={11} /> {charGenerating ? '生成中...' : '根据角色设定重生成'}</button>
+                      )}
+                      {chapter && parsedCharacterCards.length > 0 && (
+                        <button
+                          onClick={async () => {
+                            setCharRefGeneratingKey('__all__');
+                            try {
+                              const result = await generateStoryCharacterRefImages(chapter.story_id, { overwrite: false });
+                              setRefImages(result.images);
+                              setRefSource('story');
+                              setRefMax(result.max);
+                            } catch (err: any) {
+                              setErrorMsg(`生成角色参考图失败：${err.message}`);
+                            } finally {
+                              setCharRefGeneratingKey('');
+                            }
+                          }}
+                          disabled={!!charRefGeneratingKey}
+                          className="flex items-center gap-1 text-xs text-emerald-400 hover:text-emerald-300 disabled:opacity-40 transition-colors"
+                        >
+                          {charRefGeneratingKey === '__all__' ? <Loader2 size={11} className="animate-spin" /> : <ImagePlus size={11} />}
+                          {charRefGeneratingKey === '__all__' ? '生成中...' : '生成全部参考图'}
+                        </button>
+                      )}
                       <button
                         onClick={() => { setCharDraft(charText); setCharEditing(true); }}
                         className="flex items-center gap-1 text-xs text-violet-400 hover:text-violet-300 transition-colors"
-                      ><Pencil size={11} /> 缂栬緫</button>
+                      ><Pencil size={11} /> 编辑</button>
                       {charSource === 'chapter' && (
                         <button
                           onClick={async () => {
@@ -937,10 +1136,33 @@ export default function MangaPanel({ chapter, onChapterRefresh, selectedText, ch
                     </div>
                   </>
                 ) : (
-                  <button
-                    onClick={() => { setCharDraft(''); setCharEditing(true); }}
-                    className="text-xs text-violet-400 hover:text-violet-300 transition-colors"
-                  >+ 添加角色卡（粘贴 AI 生成的角色外貌描述）</button>
+                  <div className="flex flex-col items-start gap-2">
+                    {chapter && (
+                      <button
+                        onClick={async () => {
+                          setCharGenerating(true);
+                          try {
+                            const result = await generateStoryCharactersFromFramework(chapter.story_id);
+                            setCharText(result.characters || '');
+                            setCharSource(result.characters ? 'story' : 'none');
+                          } catch (err: any) {
+                            setErrorMsg(err.message);
+                          } finally {
+                            setCharGenerating(false);
+                          }
+                        }}
+                        disabled={charGenerating}
+                        className="inline-flex items-center gap-1 text-xs text-amber-400 hover:text-amber-300 disabled:opacity-40 transition-colors"
+                      >
+                        {charGenerating ? <Loader2 size={11} className="animate-spin" /> : <Sparkles size={11} />}
+                        {charGenerating ? '正在生成角色外貌卡...' : '根据 AI 角色设定生成角色卡'}
+                      </button>
+                    )}
+                    <button
+                      onClick={() => { setCharDraft(''); setCharEditing(true); }}
+                      className="text-xs text-violet-400 hover:text-violet-300 transition-colors"
+                    >+ 添加角色卡（粘贴 AI 生成的角色外貌描述）</button>
+                  </div>
                 )}
               </div>
             )}
@@ -1198,7 +1420,7 @@ export default function MangaPanel({ chapter, onChapterRefresh, selectedText, ch
                         {isEditing ? (
                           <>
                             <button onClick={() => handleSceneSave(sceneIdx)} className="p-1 rounded hover:bg-gray-700 text-green-400 transition-colors" title="淇濆瓨"><Check size={13} /></button>
-                            <button onClick={() => setEditingIdx(-1)} className="p-1 rounded hover:bg-gray-700 text-gray-500 transition-colors" title="鍙栨秷"><X size={13} /></button>
+                            <button onClick={() => setEditingIdx(-1)} className="p-1 rounded hover:bg-gray-700 text-gray-500 transition-colors" title="取消"><X size={13} /></button>
                           </>
                         ) : (
                           <>
@@ -1211,12 +1433,12 @@ export default function MangaPanel({ chapter, onChapterRefresh, selectedText, ch
                                 优化降敏
                               </button>
                             )}
-                            <button onClick={() => handleSceneEdit(sceneIdx)} className="p-1 rounded hover:bg-gray-700 text-gray-600 hover:text-gray-300 transition-colors" title="缂栬緫鍒嗛暅"><Pencil size={12} /></button>
+                            <button onClick={() => handleSceneEdit(sceneIdx)} className="p-1 rounded hover:bg-gray-700 text-gray-600 hover:text-gray-300 transition-colors" title="编辑分镜"><Pencil size={12} /></button>
                             <button
                               onClick={() => handleRegenImage(image_number)}
                               disabled={isRegenerating || generating}
                               className="p-1 rounded hover:bg-gray-700 text-gray-600 hover:text-amber-400 disabled:opacity-30 transition-colors"
-                              title="閲嶆柊鐢熸垚姝ゅ浘"
+                              title="重新生成此图"
                             >
                               <RefreshCw size={12} />
                             </button>
