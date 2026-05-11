@@ -11,7 +11,23 @@ export interface ApiKeySettings {
 // Stored in localStorage so multiple tabs share the same API key settings.
 const LS_DEEPSEEK_API_KEY = 'lorevista.deepseekApiKey';
 const LS_IMAGE_API_KEY = 'lorevista.imageApiKey';
+const LS_AUTH_TOKEN = 'lorevista.authToken';
 export const API_KEY_CHANGE_EVENT = 'lorevista:api-key-change';
+export const AUTH_CHANGE_EVENT = 'lorevista:auth-change';
+
+export type UserRole = 'user' | 'admin';
+
+export interface AuthUser {
+  id: number;
+  name: string;
+  email: string;
+  role: UserRole;
+}
+
+export interface AuthSession {
+  token: string;
+  user: AuthUser;
+}
 
 export function getApiKeySettings(): ApiKeySettings {
   return {
@@ -41,12 +57,32 @@ export function clearApiKeySettings(): void {
 
 function apiHeaders(json = false): HeadersInit {
   const keys = getApiKeySettings();
+  const token = getAuthToken();
   return {
     ...(json ? { 'Content-Type': 'application/json' } : {}),
     ...(API_TOKEN ? { 'X-API-Token': API_TOKEN } : {}),
+    ...(token ? { Authorization: `Bearer ${token}` } : {}),
     ...(keys.deepseekApiKey ? { 'X-DeepSeek-API-Key': keys.deepseekApiKey } : {}),
     ...(keys.imageApiKey ? { 'X-Image-API-Key': keys.imageApiKey } : {}),
   };
+}
+
+export function getAuthToken(): string {
+  return localStorage.getItem(LS_AUTH_TOKEN) || '';
+}
+
+export function setAuthToken(token: string): void {
+  if (token) localStorage.setItem(LS_AUTH_TOKEN, token);
+  else localStorage.removeItem(LS_AUTH_TOKEN);
+  try {
+    window.dispatchEvent(new Event(AUTH_CHANGE_EVENT));
+  } catch {
+    // ignore for non-browser
+  }
+}
+
+export function clearAuthToken(): void {
+  setAuthToken('');
 }
 
 // ─── InkAI Framework Types ──────────────────────────────────
@@ -170,6 +206,539 @@ export interface Chapter {
   created_at: string;
   messages: ChatMessage[];
   images: MangaImage[];
+}
+
+export interface PublicPlan {
+  id: number;
+  code: string;
+  name: string;
+  description?: string;
+  monthly_price: number;
+  yearly_price?: number | null;
+  currency: string;
+  is_recommended: boolean;
+  features: Record<string, any>;
+}
+
+export interface PaymentMethodOption {
+  key: string;
+  label: string;
+  enabled: boolean;
+  provider: string;
+}
+
+export interface PaymentSettings {
+  enabled: boolean;
+  mode: string;
+  default_method: string;
+  order_expire_minutes: number;
+  auto_activate_free_plan?: boolean;
+  instructions: string;
+  methods: PaymentMethodOption[];
+  mock_enabled?: boolean;
+  wechat_enabled?: boolean;
+  wechat_app_id?: string;
+  wechat_mch_id?: string;
+  wechat_notify_url?: string;
+  alipay_enabled?: boolean;
+  alipay_app_id?: string;
+  alipay_pid?: string;
+  alipay_gateway?: string;
+  alipay_sign_type?: string;
+  alipay_app_private_key?: string;
+  alipay_public_key?: string;
+  alipay_notify_url?: string;
+}
+
+export interface BillingCheckout {
+  mode: string;
+  method: string;
+  provider: string;
+  instructions: string;
+  amount: number;
+  currency: string;
+  plan_name: string;
+  billing_cycle: 'monthly' | 'yearly';
+  expires_at: string;
+  qr_code_text: string;
+  payment_url: string;
+  can_mock_confirm: boolean;
+}
+
+export interface UsageItem {
+  feature_key: string;
+  limit: number;
+  used: number;
+  remaining: number;
+}
+
+export interface UsageResponse {
+  period_key: string;
+  plan_code: string;
+  items: UsageItem[];
+}
+
+export interface EntitlementResponse {
+  plan: { id: number; code: string; name: string };
+  entitlements: Record<string, any>;
+}
+
+export interface SubscriptionSummary {
+  status: string;
+  plan: {
+    id: number;
+    code: string;
+    name: string;
+    monthly_price: number;
+    yearly_price?: number | null;
+    currency: string;
+  };
+}
+
+export interface AdminPlan {
+  id: number;
+  code: string;
+  name: string;
+  description?: string;
+  monthly_price: number;
+  yearly_price?: number | null;
+  currency: string;
+  is_visible: boolean;
+  is_recommended: boolean;
+}
+
+export interface AdminFeatureCatalogItem {
+  key: string;
+  name: string;
+  description: string;
+  category: string;
+  value_type: 'number' | 'boolean' | 'text';
+  default_rule?: {
+    reset_period: string;
+    deduct_mode: string;
+  };
+}
+
+export interface AdminFeatureItem {
+  feature_key: string;
+  value: any;
+}
+
+export interface AdminQuotaRule {
+  feature_key: string;
+  reset_period: string;
+  deduct_mode: string;
+  extra_config: Record<string, any>;
+}
+
+export interface AdminOrderItem {
+  order_no: string;
+  user_id: number;
+  user_name?: string | null;
+  plan_id: number;
+  plan_name?: string | null;
+  amount: number;
+  currency: string;
+  status: string;
+  source?: string;
+  billing_cycle?: string;
+  payment_provider?: string;
+  payment_method?: string;
+  operator?: {
+    id: number | null;
+    name: string;
+    email?: string;
+  } | null;
+  note?: string;
+  extra?: Record<string, any>;
+  paid_at?: string | null;
+  expired_at?: string | null;
+  created_at: string;
+}
+
+export interface AdminAuditLogItem {
+  id: number;
+  actor_user_id: number | null;
+  actor_name: string | null;
+  action: string;
+  target_type: string;
+  target_id: string | null;
+  summary: string | null;
+  detail: Record<string, any>;
+  created_at: string;
+}
+
+export interface AdminUserItem {
+  id: number;
+  name: string;
+  email: string;
+  role: UserRole;
+  status: 'active' | 'disabled';
+  created_at: string;
+  plan_name: string;
+}
+
+export interface PlatformSettings {
+  basic: {
+    site_name: string;
+    site_slogan: string;
+    support_email: string;
+    icp: string;
+    copyright: string;
+    notice: string;
+    icon_url: string;
+    icon_data?: string;
+    icon_mime?: string;
+    clear_icon?: boolean;
+  };
+  api: {
+    deepseek_base_url: string;
+    deepseek_model: string;
+    deepseek_api_key: string;
+    image_base_url: string;
+    image_model: string;
+    image_api_key: string;
+    enable_user_override: boolean;
+  };
+  payment: PaymentSettings;
+}
+
+export interface PublicPlatformSettings {
+  site_name: string;
+  site_slogan: string;
+  support_email: string;
+  icp: string;
+  copyright: string;
+  notice: string;
+  icon_url: string;
+}
+
+export interface MySubscriptionResponse {
+  user: AuthUser;
+  subscription: SubscriptionSummary;
+  latest_order: AdminOrderItem | null;
+}
+
+export async function register(payload: { name: string; email: string; password: string }): Promise<AuthSession> {
+  const res = await fetch(`${BASE}/api/auth/register`, {
+    method: 'POST',
+    headers: apiHeaders(true),
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function login(payload: { email: string; password: string }): Promise<AuthSession> {
+  const res = await fetch(`${BASE}/api/auth/login`, {
+    method: 'POST',
+    headers: apiHeaders(true),
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function logout(): Promise<void> {
+  const res = await fetch(`${BASE}/api/auth/logout`, { method: 'POST', headers: apiHeaders() });
+  if (!res.ok) throw new Error(await res.text());
+}
+
+export async function me(): Promise<AuthUser> {
+  const res = await fetch(`${BASE}/api/auth/me`, { headers: apiHeaders() });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function getPublicPlans(): Promise<PublicPlan[]> {
+  const res = await fetch(`${BASE}/api/plans/public`, { headers: apiHeaders() });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function getMyUsage(): Promise<UsageResponse> {
+  const res = await fetch(`${BASE}/api/me/usage`, { headers: apiHeaders() });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function getMyEntitlements(): Promise<EntitlementResponse> {
+  const res = await fetch(`${BASE}/api/me/entitlements`, { headers: apiHeaders() });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function getMySubscription(): Promise<MySubscriptionResponse> {
+  const res = await fetch(`${BASE}/api/me/subscription`, { headers: apiHeaders() });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function getMyOrders(): Promise<AdminOrderItem[]> {
+  const res = await fetch(`${BASE}/api/me/orders`, { headers: apiHeaders() });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function subscribePlan(planId: number, billingCycle: 'monthly' | 'yearly' = 'monthly'): Promise<{
+  ok: boolean;
+  message: string;
+  status: string;
+  subscription: SubscriptionSummary;
+  order: AdminOrderItem;
+  checkout: BillingCheckout;
+}> {
+  const res = await fetch(`${BASE}/api/billing/subscribe`, {
+    method: 'POST',
+    headers: apiHeaders(true),
+    body: JSON.stringify({ plan_id: planId, billing_cycle: billingCycle }),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function confirmMyOrderMock(orderNo: string): Promise<{
+  ok: boolean;
+  status: string;
+  order: AdminOrderItem;
+  subscription: SubscriptionSummary;
+}> {
+  const res = await fetch(`${BASE}/api/me/orders/${orderNo}/mock-confirm`, {
+    method: 'POST',
+    headers: apiHeaders(),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function cancelMyOrder(orderNo: string): Promise<{
+  ok: boolean;
+  status: string;
+  order: AdminOrderItem;
+}> {
+  const res = await fetch(`${BASE}/api/me/orders/${orderNo}/cancel`, {
+    method: 'POST',
+    headers: apiHeaders(),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function getAdminPlans(): Promise<AdminPlan[]> {
+  const res = await fetch(`${BASE}/api/admin/plans`, { headers: apiHeaders() });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function createAdminPlan(payload: {
+  code: string;
+  name: string;
+  description?: string;
+  monthly_price?: number;
+  yearly_price?: number;
+  currency?: string;
+  is_visible?: boolean;
+  is_recommended?: boolean;
+}): Promise<void> {
+  const res = await fetch(`${BASE}/api/admin/plans`, {
+    method: 'POST',
+    headers: apiHeaders(true),
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(await res.text());
+}
+
+export async function deleteAdminPlan(planId: number): Promise<void> {
+  const res = await fetch(`${BASE}/api/admin/plans/${planId}`, {
+    method: 'DELETE',
+    headers: apiHeaders(),
+  });
+  if (!res.ok) throw new Error(await res.text());
+}
+
+export async function getAdminFeatureCatalog(): Promise<AdminFeatureCatalogItem[]> {
+  const res = await fetch(`${BASE}/api/admin/feature-catalog`, { headers: apiHeaders() });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function updateAdminPlan(planId: number, payload: Partial<AdminPlan> & { description?: string }): Promise<void> {
+  const res = await fetch(`${BASE}/api/admin/plans/${planId}`, {
+    method: 'PUT',
+    headers: apiHeaders(true),
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(await res.text());
+}
+
+export async function getAdminPlanFeatures(planId: number): Promise<AdminFeatureItem[]> {
+  const res = await fetch(`${BASE}/api/admin/plans/${planId}/features`, { headers: apiHeaders() });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function saveAdminPlanFeatures(planId: number, items: AdminFeatureItem[]): Promise<void> {
+  const res = await fetch(`${BASE}/api/admin/plans/${planId}/features`, {
+    method: 'PUT',
+    headers: apiHeaders(true),
+    body: JSON.stringify({ items }),
+  });
+  if (!res.ok) throw new Error(await res.text());
+}
+
+export async function getAdminQuotaRules(planId: number): Promise<AdminQuotaRule[]> {
+  const res = await fetch(`${BASE}/api/admin/plans/${planId}/quota-rules`, { headers: apiHeaders() });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function saveAdminQuotaRules(planId: number, items: AdminQuotaRule[]): Promise<void> {
+  const res = await fetch(`${BASE}/api/admin/plans/${planId}/quota-rules`, {
+    method: 'PUT',
+    headers: apiHeaders(true),
+    body: JSON.stringify({ items }),
+  });
+  if (!res.ok) throw new Error(await res.text());
+}
+
+export async function getAdminUserEntitlements(userId: number): Promise<{
+  user: AuthUser;
+  subscription: { status: string };
+  plan: { id: number; code: string; name: string };
+  entitlements: Record<string, any>;
+  usage: UsageItem[];
+}> {
+  const res = await fetch(`${BASE}/api/admin/users/${userId}/entitlements`, { headers: apiHeaders() });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function adminUpdateUserSubscription(userId: number, planId: number): Promise<void> {
+  const res = await fetch(`${BASE}/api/admin/users/${userId}/subscription`, {
+    method: 'POST',
+    headers: apiHeaders(true),
+    body: JSON.stringify({ plan_id: planId }),
+  });
+  if (!res.ok) throw new Error(await res.text());
+}
+
+export async function adminGrantUserQuota(userId: number, featureKey: string, amount: number): Promise<{
+  ok: boolean;
+  feature_key: string;
+  granted_amount: number;
+  before_granted: number;
+  after_granted: number;
+  usage: UsageItem[];
+}> {
+  const res = await fetch(`${BASE}/api/admin/users/${userId}/quota-grants`, {
+    method: 'POST',
+    headers: apiHeaders(true),
+    body: JSON.stringify({ feature_key: featureKey, amount }),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function getAdminOrders(): Promise<AdminOrderItem[]> {
+  const res = await fetch(`${BASE}/api/admin/orders`, { headers: apiHeaders() });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function updateAdminOrderStatus(
+  orderNo: string,
+  status: 'paid' | 'cancelled' | 'expired',
+  note = '',
+): Promise<{ ok: boolean; order: AdminOrderItem }> {
+  const res = await fetch(`${BASE}/api/admin/orders/${orderNo}/status`, {
+    method: 'POST',
+    headers: apiHeaders(true),
+    body: JSON.stringify({ status, note }),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function getAdminAuditLogs(params?: {
+  action?: string;
+  actor_name?: string;
+  target_type?: string;
+  target_id?: string;
+  limit?: number;
+}): Promise<AdminAuditLogItem[]> {
+  const query = new URLSearchParams();
+  if (params?.action) query.set('action', params.action);
+  if (params?.actor_name) query.set('actor_name', params.actor_name);
+  if (params?.target_type) query.set('target_type', params.target_type);
+  if (params?.target_id) query.set('target_id', params.target_id);
+  if (params?.limit) query.set('limit', String(params.limit));
+  const suffix = query.toString() ? `?${query.toString()}` : '';
+  const res = await fetch(`${BASE}/api/admin/audit-logs${suffix}`, { headers: apiHeaders() });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function getAdminUsers(): Promise<AdminUserItem[]> {
+  const res = await fetch(`${BASE}/api/admin/users`, { headers: apiHeaders() });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function createAdminUser(payload: {
+  name: string;
+  email: string;
+  password: string;
+  role?: UserRole;
+}): Promise<void> {
+  const res = await fetch(`${BASE}/api/admin/users`, {
+    method: 'POST',
+    headers: apiHeaders(true),
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(await res.text());
+}
+
+export async function updateAdminUser(
+  userId: number,
+  payload: Partial<{ name: string; email: string; password: string; role: UserRole; status: 'active' | 'disabled' }>,
+): Promise<void> {
+  const res = await fetch(`${BASE}/api/admin/users/${userId}`, {
+    method: 'PUT',
+    headers: apiHeaders(true),
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(await res.text());
+}
+
+export async function deleteAdminUser(userId: number): Promise<void> {
+  const res = await fetch(`${BASE}/api/admin/users/${userId}`, {
+    method: 'DELETE',
+    headers: apiHeaders(),
+  });
+  if (!res.ok) throw new Error(await res.text());
+}
+
+export async function getAdminPlatformSettings(): Promise<PlatformSettings> {
+  const res = await fetch(`${BASE}/api/admin/platform/settings`, { headers: apiHeaders() });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function updateAdminPlatformSettings(payload: PlatformSettings): Promise<PlatformSettings> {
+  const res = await fetch(`${BASE}/api/admin/platform/settings`, {
+    method: 'PUT',
+    headers: apiHeaders(true),
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  const data = await res.json();
+  return data.settings;
+}
+
+export async function getPublicPlatformSettings(): Promise<PublicPlatformSettings> {
+  const res = await fetch(`${BASE}/api/platform/settings/public`, { headers: apiHeaders() });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
 }
 
 // ─── Story ──────────────────────────────────────────────────

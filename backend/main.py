@@ -1,23 +1,44 @@
 import asyncio
 import contextlib
+import datetime
+import hashlib
 import json
 import logging
 import os
 import re
+import secrets
 import shutil
 import uuid
 from pathlib import Path
+from urllib.parse import parse_qsl
 
+import httpx
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
 from sse_starlette.sse import EventSourceResponse
 
-from database import get_db, init_db
-from models import Chapter, ChatMessage, MangaImage, Story
+from database import SessionLocal, get_db, init_db
+from models import (
+    AuditLog,
+    BillingOrder,
+    Chapter,
+    ChatMessage,
+    MangaImage,
+    Plan,
+    PlanFeature,
+    PlanQuotaRule,
+    PlatformSetting,
+    Story,
+    User,
+    UserQuotaGrantMonthly,
+    UserSession,
+    UserSubscription,
+    UserUsageMonthly,
+)
 from schemas import (
     ChapterContentUpdate,
     ChapterOut,
@@ -49,11 +70,75 @@ from services.deepseek import (
 from services.errors import MangaImageGenerationError, MissingApiKeyError
 from services.image2 import generate_manga_image, generate_reference_image
 from services.scene_safety import sanitize_scene_list
+from services import deepseek as deepseek_service
+from services import image2 as image_service
+from services import alipay_f2f
 
 load_dotenv()
 
 logger = logging.getLogger("main")
 ACTIVE_MANGA_GENERATIONS: set[int] = set()
+
+FEATURE_CATALOG: list[dict] = [
+    {
+        "key": "framework.generate.monthly_limit",
+        "name": "小说框架生成次数",
+        "description": "用户每月可生成世界观、角色与大纲的次数。",
+        "category": "小说创作",
+        "value_type": "number",
+        "default_rule": {"reset_period": "monthly", "deduct_mode": "on_success"},
+    },
+    {
+        "key": "chapter.expand.monthly_limit",
+        "name": "章节扩写次数",
+        "description": "用户每月可将章节计划扩写成正文的次数。",
+        "category": "小说创作",
+        "value_type": "number",
+        "default_rule": {"reset_period": "monthly", "deduct_mode": "on_success"},
+    },
+    {
+        "key": "scene.generate.monthly_limit",
+        "name": "分镜生成次数",
+        "description": "用户每月可将文本拆分为漫画分镜的次数。",
+        "category": "漫画生成",
+        "value_type": "number",
+        "default_rule": {"reset_period": "monthly", "deduct_mode": "on_success"},
+    },
+    {
+        "key": "manga.image.monthly_limit",
+        "name": "漫画图片生成张数",
+        "description": "用户每月可生成的漫画图片总张数。",
+        "category": "漫画生成",
+        "value_type": "number",
+        "default_rule": {"reset_period": "monthly", "deduct_mode": "on_success"},
+    },
+    {
+        "key": "manga.regenerate.monthly_limit",
+        "name": "漫画重绘次数",
+        "description": "用户每月可重新生成单张漫画图片的次数。",
+        "category": "漫画生成",
+        "value_type": "number",
+        "default_rule": {"reset_period": "monthly", "deduct_mode": "on_success"},
+    },
+    {
+        "key": "manga.max_image_count_per_chapter",
+        "name": "单章节最大出图数",
+        "description": "单个章节允许生成的最大漫画页数。",
+        "category": "漫画生成",
+        "value_type": "number",
+        "default_rule": {"reset_period": "monthly", "deduct_mode": "on_success"},
+    },
+    {
+        "key": "manga.allow_color_mode",
+        "name": "允许彩漫模式",
+        "description": "控制该套餐用户是否可切换彩色漫画输出。",
+        "category": "漫画生成",
+        "value_type": "boolean",
+        "default_rule": {"reset_period": "monthly", "deduct_mode": "on_success"},
+    },
+]
+
+FEATURE_CATALOG_MAP = {item["key"]: item for item in FEATURE_CATALOG}
 
 app = FastAPI(title="Novel & Manga Generator")
 
@@ -89,13 +174,26 @@ app.mount("/static/manga", StaticFiles(directory=str(manga_dir)), name="manga")
 @app.middleware("http")
 async def require_api_token(request: Request, call_next):
     if API_TOKEN and request.url.path.startswith("/api") and request.method != "OPTIONS":
-        supplied = request.headers.get("x-api-token", "")
-        auth = request.headers.get("authorization", "")
-        if auth.lower().startswith("bearer "):
-            supplied = auth[7:].strip()
+        supplied = request.headers.get("x-api-token", "").strip()
+        if not supplied:
+            auth = request.headers.get("authorization", "")
+            if auth.lower().startswith("bearer "):
+                bearer = auth[7:].strip()
+                if bearer == API_TOKEN:
+                    supplied = bearer
         if supplied != API_TOKEN:
             return JSONResponse({"detail": "Invalid or missing API token"}, status_code=401)
     return await call_next(request)
+
+
+@app.middleware("http")
+async def bind_request_db(request: Request, call_next):
+    db = SessionLocal()
+    request.state.db = db
+    try:
+        return await call_next(request)
+    finally:
+        db.close()
 
 
 def _require_chapter(chapter_id: int, db: Session) -> Chapter:
@@ -105,12 +203,683 @@ def _require_chapter(chapter_id: int, db: Session) -> Chapter:
     return chapter
 
 
+def _get_platform_setting(key: str, db: Session, default=None):
+    setting = db.query(PlatformSetting).filter(PlatformSetting.setting_key == key).first()
+    if not setting:
+        return default
+    payload = setting.value_json or {}
+    return payload.get("value", default)
+
+
+def _set_platform_setting(key: str, value, db: Session) -> None:
+    setting = db.query(PlatformSetting).filter(PlatformSetting.setting_key == key).first()
+    if setting:
+        setting.value_json = {"value": value}
+    else:
+        db.add(PlatformSetting(setting_key=key, value_json={"value": value}))
+
+
+def _platform_settings_snapshot(db: Session) -> dict:
+    return {
+        "basic": {
+            "site_name": _get_platform_setting("platform.site_name", db, "LoreVista"),
+            "site_slogan": _get_platform_setting("platform.site_slogan", db, "AI 小说漫画创作平台"),
+            "support_email": _get_platform_setting("platform.support_email", db, ""),
+            "icp": _get_platform_setting("platform.icp", db, ""),
+            "copyright": _get_platform_setting("platform.copyright", db, ""),
+            "notice": _get_platform_setting("platform.notice", db, ""),
+            "icon_url": _platform_icon_url(db),
+        },
+        "api": {
+            "deepseek_base_url": _get_platform_setting("api.deepseek.base_url", db, "https://api.deepseek.com"),
+            "deepseek_model": _get_platform_setting("api.deepseek.model", db, "deepseek-chat"),
+            "deepseek_api_key": _get_platform_setting("api.deepseek.api_key", db, ""),
+            "image_base_url": _get_platform_setting("api.image.base_url", db, "https://api.xbyjs.top/v1"),
+            "image_model": _get_platform_setting("api.image.model", db, "default"),
+            "image_api_key": _get_platform_setting("api.image.api_key", db, ""),
+            "enable_user_override": bool(_get_platform_setting("api.enable_user_override", db, True)),
+        },
+        "payment": {
+            "enabled": bool(_get_platform_setting("payment.enabled", db, True)),
+            "mode": str(_get_platform_setting("payment.mode", db, "mock")),
+            "default_method": str(_get_platform_setting("payment.default_method", db, "mock_qr")),
+            "order_expire_minutes": int(_get_platform_setting("payment.order_expire_minutes", db, 30) or 30),
+            "auto_activate_free_plan": bool(_get_platform_setting("payment.auto_activate_free_plan", db, True)),
+            "instructions": str(_get_platform_setting("payment.instructions", db, "测试环境可使用模拟支付；正式上线时请切换到真实支付网关。") or ""),
+            "mock_enabled": bool(_get_platform_setting("payment.mock_enabled", db, True)),
+            "wechat_enabled": bool(_get_platform_setting("payment.wechat_enabled", db, False)),
+            "wechat_app_id": str(_get_platform_setting("payment.wechat_app_id", db, "") or ""),
+            "wechat_mch_id": str(_get_platform_setting("payment.wechat_mch_id", db, "") or ""),
+            "wechat_notify_url": str(_get_platform_setting("payment.wechat_notify_url", db, "") or ""),
+            "alipay_enabled": bool(_get_platform_setting("payment.alipay_enabled", db, False)),
+            "alipay_app_id": str(_get_platform_setting("payment.alipay_app_id", db, "") or ""),
+            "alipay_pid": str(_get_platform_setting("payment.alipay_pid", db, "") or ""),
+            "alipay_gateway": str(_get_platform_setting("payment.alipay_gateway", db, "https://openapi.alipay.com/gateway.do") or ""),
+            "alipay_sign_type": str(_get_platform_setting("payment.alipay_sign_type", db, "RSA2") or "RSA2"),
+            "alipay_app_private_key": str(_get_platform_setting("payment.alipay_app_private_key", db, "") or ""),
+            "alipay_public_key": str(_get_platform_setting("payment.alipay_public_key", db, "") or ""),
+            "alipay_notify_url": str(_get_platform_setting("payment.alipay_notify_url", db, "") or ""),
+        },
+    }
+
+
+def _payment_settings_snapshot(db: Session) -> dict:
+    return _platform_settings_snapshot(db)["payment"]
+
+
+def _platform_icon_url(db: Session) -> str:
+    icon_data = _get_platform_setting("platform.icon_data", db, "")
+    if not icon_data:
+        return "/favicon.svg"
+    version = _get_platform_setting("platform.icon_updated_at", db, "") or "1"
+    return f"/api/platform/icon?v={version}"
+
+
+def _public_platform_settings_snapshot(db: Session) -> dict:
+    basic = _platform_settings_snapshot(db)["basic"]
+    return {
+        "site_name": basic.get("site_name") or "LoreVista",
+        "site_slogan": basic.get("site_slogan") or "",
+        "support_email": basic.get("support_email") or "",
+        "icp": basic.get("icp") or "",
+        "copyright": basic.get("copyright") or "",
+        "notice": basic.get("notice") or "",
+        "icon_url": _platform_icon_url(db),
+    }
+
+
+def _payment_method_options(db: Session) -> list[dict]:
+    payment = _payment_settings_snapshot(db)
+    methods = [
+        {"key": "mock_qr", "label": "模拟支付", "enabled": bool(payment.get("mock_enabled")), "provider": "mock"},
+        {"key": "wechat_qr", "label": "微信扫码", "enabled": bool(payment.get("wechat_enabled")), "provider": "wechat"},
+        {"key": "alipay_qr", "label": "支付宝扫码", "enabled": bool(payment.get("alipay_enabled")), "provider": "alipay"},
+    ]
+    return [item for item in methods if item["enabled"]]
+
+
+def _public_payment_config(db: Session) -> dict:
+    payment = _payment_settings_snapshot(db)
+    return {
+        "enabled": bool(payment.get("enabled")),
+        "mode": str(payment.get("mode") or "mock"),
+        "default_method": str(payment.get("default_method") or "mock_qr"),
+        "order_expire_minutes": int(payment.get("order_expire_minutes") or 30),
+        "instructions": str(payment.get("instructions") or ""),
+        "methods": _payment_method_options(db),
+    }
+
+
 def _user_deepseek_api_key(request: Request) -> str | None:
-    return request.headers.get("x-deepseek-api-key") or None
+    override = request.headers.get("x-deepseek-api-key") or None
+    db = getattr(request.state, "db", None)
+    if db is None:
+        return override
+    deepseek_service.DEEPSEEK_BASE_URL = str(_get_platform_setting("api.deepseek.base_url", db, deepseek_service.DEEPSEEK_BASE_URL)).rstrip("/")
+    deepseek_service.DEEPSEEK_MODEL = str(_get_platform_setting("api.deepseek.model", db, deepseek_service.DEEPSEEK_MODEL)).strip() or deepseek_service.DEEPSEEK_MODEL
+    allow_override = bool(_get_platform_setting("api.enable_user_override", db, True))
+    if allow_override and override:
+        return override
+    return _get_platform_setting("api.deepseek.api_key", db, "") or override
 
 
 def _user_image_api_key(request: Request) -> str | None:
-    return request.headers.get("x-image-api-key") or None
+    override = request.headers.get("x-image-api-key") or None
+    db = getattr(request.state, "db", None)
+    if db is None:
+        return override
+    image_service.IMAGE_API_BASE_URL = str(_get_platform_setting("api.image.base_url", db, image_service.IMAGE_API_BASE_URL)).rstrip("/")
+    image_service.IMAGE_MODEL = str(_get_platform_setting("api.image.model", db, image_service.IMAGE_MODEL)).strip() or image_service.IMAGE_MODEL
+    allow_override = bool(_get_platform_setting("api.enable_user_override", db, True))
+    if allow_override and override:
+        return override
+    return _get_platform_setting("api.image.api_key", db, "") or override
+
+
+def _password_hash(raw: str) -> str:
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _new_session_token() -> str:
+    return f"lv_{secrets.token_urlsafe(32)}"
+
+
+def _current_period_key(now: datetime.datetime | None = None) -> str:
+    now = now or datetime.datetime.utcnow()
+    return now.strftime("%Y%m")
+
+
+def _parse_auth_token(request: Request) -> str | None:
+    auth = request.headers.get("authorization", "")
+    if auth.lower().startswith("bearer "):
+        token = auth[7:].strip()
+        return token or None
+    return None
+
+
+def _ensure_platform_seed(db: Session) -> None:
+    admin = db.query(User).filter(User.email == "admin@lorevista.ai").first()
+    if not admin:
+        db.add(User(
+            email="admin@lorevista.ai",
+            password_hash=_password_hash("admin123"),
+            name="运营管理员",
+            role="admin",
+            status="active",
+        ))
+        db.commit()
+
+    if db.query(Plan).count() > 0:
+        if not db.query(PlatformSetting).first():
+            _seed_platform_settings(db)
+            db.commit()
+        return
+
+    free = Plan(
+        code="free",
+        name="Free",
+        description="适合体验",
+        monthly_price=0,
+        yearly_price=0,
+        is_recommended=False,
+        is_visible=True,
+    )
+    pro = Plan(
+        code="pro",
+        name="Pro",
+        description="适合稳定创作",
+        monthly_price=59,
+        yearly_price=599,
+        is_recommended=True,
+        is_visible=True,
+    )
+    premium = Plan(
+        code="premium",
+        name="Premium",
+        description="适合高频创作",
+        monthly_price=199,
+        yearly_price=1999,
+        is_recommended=False,
+        is_visible=True,
+    )
+    db.add_all([free, pro, premium])
+    db.flush()
+
+    defaults = {
+        "free": {
+            "framework.generate.monthly_limit": 5,
+            "chapter.expand.monthly_limit": 20,
+            "scene.generate.monthly_limit": 15,
+            "manga.image.monthly_limit": 80,
+            "manga.regenerate.monthly_limit": 20,
+            "manga.max_image_count_per_chapter": 6,
+            "manga.allow_color_mode": False,
+        },
+        "pro": {
+            "framework.generate.monthly_limit": 50,
+            "chapter.expand.monthly_limit": 200,
+            "scene.generate.monthly_limit": 120,
+            "manga.image.monthly_limit": 800,
+            "manga.regenerate.monthly_limit": 300,
+            "manga.max_image_count_per_chapter": 12,
+            "manga.allow_color_mode": True,
+        },
+        "premium": {
+            "framework.generate.monthly_limit": 200,
+            "chapter.expand.monthly_limit": 1000,
+            "scene.generate.monthly_limit": 500,
+            "manga.image.monthly_limit": 4000,
+            "manga.regenerate.monthly_limit": 1500,
+            "manga.max_image_count_per_chapter": 20,
+            "manga.allow_color_mode": True,
+        },
+    }
+    for plan in [free, pro, premium]:
+        for key, value in defaults[plan.code].items():
+            db.add(
+                PlanFeature(
+                    plan_id=plan.id,
+                    feature_key=key,
+                    value_json={"value": value},
+                )
+            )
+            db.add(
+                PlanQuotaRule(
+                    plan_id=plan.id,
+                    feature_key=key,
+                    reset_period="monthly",
+                    deduct_mode="on_success",
+                    extra_config={"carry_over_enabled": False},
+                )
+            )
+
+    db.commit()
+    _seed_platform_settings(db)
+    db.commit()
+
+
+def _seed_platform_settings(db: Session) -> None:
+    defaults = {
+        "platform.site_name": "LoreVista",
+        "platform.site_slogan": "AI 小说漫画创作平台",
+        "platform.support_email": "support@lorevista.ai",
+        "platform.icp": "",
+        "platform.copyright": "© LoreVista",
+        "platform.notice": "欢迎使用企业级 AI 小说漫画创作平台。",
+        "api.deepseek.base_url": "https://api.deepseek.com",
+        "api.deepseek.model": "deepseek-chat",
+        "api.deepseek.api_key": "",
+        "api.image.base_url": "https://api.xbyjs.top/v1",
+        "api.image.model": "default",
+        "api.image.api_key": "",
+        "api.enable_user_override": True,
+        "payment.enabled": True,
+        "payment.mode": "mock",
+        "payment.default_method": "mock_qr",
+        "payment.order_expire_minutes": 30,
+        "payment.auto_activate_free_plan": True,
+        "payment.instructions": "测试环境可使用模拟支付；正式上线时请切换到真实支付网关。",
+        "payment.mock_enabled": True,
+        "payment.wechat_enabled": False,
+        "payment.wechat_app_id": "",
+        "payment.wechat_mch_id": "",
+        "payment.wechat_notify_url": "",
+        "payment.alipay_enabled": False,
+        "payment.alipay_app_id": "",
+        "payment.alipay_pid": "",
+        "payment.alipay_gateway": "https://openapi.alipay.com/gateway.do",
+        "payment.alipay_sign_type": "RSA2",
+        "payment.alipay_app_private_key": "",
+        "payment.alipay_public_key": "",
+        "payment.alipay_notify_url": "",
+    }
+    for key, value in defaults.items():
+        if db.query(PlatformSetting).filter(PlatformSetting.setting_key == key).first():
+            continue
+        db.add(PlatformSetting(setting_key=key, value_json={"value": value}))
+
+
+def _require_user(request: Request, db: Session) -> User:
+    token = _parse_auth_token(request)
+    if not token:
+        raise HTTPException(401, "Unauthorized")
+    session = db.query(UserSession).filter(UserSession.token == token, UserSession.revoked_at.is_(None)).first()
+    if not session:
+        raise HTTPException(401, "Session expired or invalid token")
+    user = db.get(User, session.user_id)
+    if not user or user.status != "active":
+        raise HTTPException(403, "User unavailable")
+    return user
+
+
+def _require_admin(request: Request, db: Session) -> User:
+    user = _require_user(request, db)
+    if user.role != "admin":
+        raise HTTPException(403, "Admin permission required")
+    return user
+
+
+def _active_plan_for_user(user_id: int, db: Session) -> Plan:
+    sub = db.query(UserSubscription).filter(UserSubscription.user_id == user_id).first()
+    if sub:
+        plan = db.get(Plan, sub.plan_id)
+        if plan:
+            return plan
+    free = db.query(Plan).filter(Plan.code == "free").first()
+    if not free:
+        raise HTTPException(500, "Seed plan missing")
+    return free
+
+
+def _require_story_for_user(story_id: int, user: User, db: Session) -> Story:
+    story = db.get(Story, story_id)
+    if not story:
+        raise HTTPException(404, "Story not found")
+    if user.role != "admin" and story.owner_user_id != user.id:
+        raise HTTPException(403, "Story access denied")
+    return story
+
+
+def _require_chapter_for_user(chapter_id: int, user: User, db: Session) -> Chapter:
+    chapter = _require_chapter(chapter_id, db)
+    story = chapter.story
+    if not story:
+        raise HTTPException(404, "Story not found")
+    if user.role != "admin" and story.owner_user_id != user.id:
+        raise HTTPException(403, "Chapter access denied")
+    return chapter
+
+
+def _plan_feature_map(plan_id: int, db: Session) -> dict[str, object]:
+    features = db.query(PlanFeature).filter(PlanFeature.plan_id == plan_id).all()
+    result: dict[str, object] = {}
+    for item in features:
+        payload = item.value_json or {}
+        result[item.feature_key] = payload.get("value")
+    return result
+
+
+def _coerce_int(value: object, default: int = 0) -> int:
+    try:
+        if value is None:
+            return default
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _check_and_consume_quota(
+    user_id: int,
+    feature_key: str,
+    amount: int,
+    db: Session,
+    *,
+    deduct: bool,
+) -> dict:
+    if amount <= 0:
+        amount = 1
+    plan = _active_plan_for_user(user_id, db)
+    limits = _plan_feature_map(plan.id, db)
+    period_key = _current_period_key()
+    base_limit = _coerce_int(limits.get(feature_key), default=0)
+    granted = _extra_grant_amount(user_id, feature_key, period_key, db)
+    limit = base_limit + granted
+    usage = db.query(UserUsageMonthly).filter(
+        UserUsageMonthly.user_id == user_id,
+        UserUsageMonthly.feature_key == feature_key,
+        UserUsageMonthly.period_key == period_key,
+    ).first()
+    used = _coerce_int(usage.used_amount if usage else 0, default=0)
+    if limit <= 0:
+        raise HTTPException(403, f"Feature not available in your current plan: {feature_key}")
+    if used + amount > limit:
+        raise HTTPException(429, f"Quota exceeded for {feature_key} ({used}/{limit})")
+    if deduct:
+        if usage:
+            usage.used_amount = used + amount
+        else:
+            db.add(UserUsageMonthly(
+                user_id=user_id,
+                feature_key=feature_key,
+                period_key=period_key,
+                used_amount=amount,
+            ))
+        db.commit()
+    return {"feature_key": feature_key, "used": used, "base_limit": base_limit, "granted": granted, "limit": limit, "period_key": period_key}
+
+
+def _serialize_order(order: BillingOrder) -> dict:
+    operator = None
+    user_name = None
+    plan_name = None
+    db = getattr(_serialize_order, "_db", None)
+    if db is not None:
+        if order.operator_user_id:
+            op = db.get(User, order.operator_user_id)
+            if op:
+                operator = {"id": op.id, "name": op.name, "email": op.email}
+        user = db.get(User, order.user_id)
+        if user:
+            user_name = user.name
+        plan = db.get(Plan, order.plan_id)
+        if plan:
+            plan_name = plan.name
+    return {
+        "order_no": order.order_no,
+        "user_id": order.user_id,
+        "user_name": user_name,
+        "plan_id": order.plan_id,
+        "plan_name": plan_name,
+        "amount": order.amount,
+        "currency": order.currency,
+        "status": order.status,
+        "source": order.source or "system",
+        "billing_cycle": order.billing_cycle or "monthly",
+        "payment_provider": order.payment_provider or "mock",
+        "payment_method": order.payment_method or "mock_qr",
+        "operator": operator,
+        "note": order.note or "",
+        "extra": order.extra_json or {},
+        "paid_at": order.paid_at,
+        "expired_at": order.expired_at,
+        "created_at": order.created_at,
+    }
+
+
+def _serialize_order_with_db(order: BillingOrder, db: Session) -> dict:
+    setattr(_serialize_order, "_db", db)
+    try:
+        return _serialize_order(order)
+    finally:
+        setattr(_serialize_order, "_db", None)
+
+
+def _write_audit_log(
+    actor: User | None,
+    action: str,
+    target_type: str,
+    target_id: str | int | None,
+    summary: str,
+    db: Session,
+    detail: dict | None = None,
+) -> None:
+    db.add(
+        AuditLog(
+            actor_user_id=actor.id if actor else None,
+            actor_name=actor.name if actor else None,
+            action=action,
+            target_type=target_type,
+            target_id=str(target_id) if target_id is not None else None,
+            summary=summary,
+            detail_json=detail or {},
+        )
+    )
+
+
+def _extra_grant_amount(user_id: int, feature_key: str, period_key: str, db: Session) -> int:
+    grant = db.query(UserQuotaGrantMonthly).filter(
+        UserQuotaGrantMonthly.user_id == user_id,
+        UserQuotaGrantMonthly.feature_key == feature_key,
+        UserQuotaGrantMonthly.period_key == period_key,
+    ).first()
+    return int(grant.granted_amount if grant else 0)
+
+
+def _usage_entries_for_user(user_id: int, db: Session) -> list[dict]:
+    plan = _active_plan_for_user(user_id, db)
+    limits = _plan_feature_map(plan.id, db)
+    period = _current_period_key()
+    usage_items = db.query(UserUsageMonthly).filter(
+        UserUsageMonthly.user_id == user_id,
+        UserUsageMonthly.period_key == period,
+    ).all()
+    used_map = {item.feature_key: item.used_amount for item in usage_items}
+    grant_items = db.query(UserQuotaGrantMonthly).filter(
+        UserQuotaGrantMonthly.user_id == user_id,
+        UserQuotaGrantMonthly.period_key == period,
+    ).all()
+    grant_map = {item.feature_key: item.granted_amount for item in grant_items}
+    tracked = [
+        "framework.generate.monthly_limit",
+        "chapter.expand.monthly_limit",
+        "scene.generate.monthly_limit",
+        "manga.image.monthly_limit",
+        "manga.regenerate.monthly_limit",
+    ]
+    entries = []
+    for key in tracked:
+        base_limit = int(limits.get(key, 0) or 0)
+        granted = int(grant_map.get(key, 0) or 0)
+        limit = base_limit + granted
+        used = int(used_map.get(key, 0))
+        entries.append({
+            "feature_key": key,
+            "base_limit": base_limit,
+            "granted": granted,
+            "limit": limit,
+            "used": used,
+            "remaining": max(0, limit - used),
+        })
+    return entries
+
+
+def _upsert_user_subscription(user_id: int, plan_id: int, db: Session) -> UserSubscription:
+    sub = db.query(UserSubscription).filter(UserSubscription.user_id == user_id).first()
+    if sub:
+        sub.plan_id = plan_id
+        sub.status = "active"
+        return sub
+    sub = UserSubscription(user_id=user_id, plan_id=plan_id, status="active")
+    db.add(sub)
+    db.flush()
+    return sub
+
+
+def _mark_order_paid(order: BillingOrder, db: Session, *, operator_user_id: int | None = None, note: str = "") -> BillingOrder:
+    if order.status != "paid":
+        order.status = "paid"
+        order.paid_at = datetime.datetime.utcnow()
+    if operator_user_id is not None:
+        order.operator_user_id = operator_user_id
+    if note:
+        order.note = note
+    _upsert_user_subscription(order.user_id, order.plan_id, db)
+    db.flush()
+    return order
+
+
+def _mark_order_cancelled(order: BillingOrder, db: Session, *, operator_user_id: int | None = None, note: str = "") -> BillingOrder:
+    if order.status not in {"paid", "cancelled", "expired"}:
+        order.status = "cancelled"
+    if operator_user_id is not None:
+        order.operator_user_id = operator_user_id
+    if note:
+        order.note = note
+    db.flush()
+    return order
+
+
+def _mark_order_expired(order: BillingOrder, db: Session, *, note: str = "") -> BillingOrder:
+    if order.status not in {"paid", "cancelled", "expired"}:
+        order.status = "expired"
+    if note:
+        order.note = note
+    db.flush()
+    return order
+
+
+def _sync_order_status(order: BillingOrder, db: Session) -> BillingOrder:
+    if order.status == "pending" and order.expired_at and order.expired_at <= datetime.datetime.utcnow():
+        _mark_order_expired(order, db, note=order.note or "Order expired before payment confirmation")
+        db.commit()
+        db.refresh(order)
+    return order
+
+
+def _order_checkout_payload(order: BillingOrder, plan: Plan, db: Session) -> dict:
+    payment = _payment_settings_snapshot(db)
+    expire_minutes = int(payment.get("order_expire_minutes") or 30)
+    expires_at = order.expired_at or (datetime.datetime.utcnow() + datetime.timedelta(minutes=expire_minutes))
+    method = order.payment_method or str(payment.get("default_method") or "mock_qr")
+    provider = order.payment_provider or "mock"
+    extra = order.extra_json or {}
+    qr_code_text = f"LOREVISTA:{method}:{order.order_no}:{order.amount}"
+    payment_url = f"/mock-pay/{order.order_no}" if method == "mock_qr" else ""
+    can_mock_confirm = method == "mock_qr"
+    if method == "alipay_qr":
+        qr_code_text = str(extra.get("alipay_qr_code") or "")
+        payment_url = str(extra.get("alipay_payment_url") or qr_code_text or "")
+        can_mock_confirm = False
+    return {
+        "mode": str(payment.get("mode") or "mock"),
+        "method": method,
+        "provider": provider,
+        "instructions": str(payment.get("instructions") or ""),
+        "amount": order.amount,
+        "currency": order.currency,
+        "plan_name": plan.name,
+        "billing_cycle": order.billing_cycle or "monthly",
+        "expires_at": expires_at,
+        "qr_code_text": qr_code_text,
+        "payment_url": payment_url,
+        "can_mock_confirm": can_mock_confirm,
+    }
+
+
+def _alipay_config(payment: dict) -> dict:
+    config = {
+        "app_id": str(payment.get("alipay_app_id") or "").strip(),
+        "seller_id": str(payment.get("alipay_pid") or "").strip(),
+        "gateway": str(payment.get("alipay_gateway") or "https://openapi.alipay.com/gateway.do").strip(),
+        "sign_type": str(payment.get("alipay_sign_type") or "RSA2").strip() or "RSA2",
+        "app_private_key": str(payment.get("alipay_app_private_key") or "").strip(),
+        "alipay_public_key": str(payment.get("alipay_public_key") or "").strip(),
+        "notify_url": str(payment.get("alipay_notify_url") or "").strip(),
+    }
+    return config
+
+
+def _validate_alipay_config(payment: dict) -> dict:
+    config = _alipay_config(payment)
+    required = {
+        "app_id": "payment.alipay_app_id",
+        "gateway": "payment.alipay_gateway",
+        "app_private_key": "payment.alipay_app_private_key",
+        "alipay_public_key": "payment.alipay_public_key",
+        "notify_url": "payment.alipay_notify_url",
+    }
+    missing = [setting_key for field, setting_key in required.items() if not config.get(field)]
+    if missing:
+        raise HTTPException(400, f"Alipay configuration incomplete: {', '.join(missing)}")
+    if config["sign_type"].upper() != "RSA2":
+        raise HTTPException(400, "Only RSA2 is supported for Alipay face-to-face payment")
+    return config
+
+
+def _alipay_precreate(order: BillingOrder, plan: Plan, payment: dict) -> dict:
+    config = _validate_alipay_config(payment)
+    timeout_express = f"{max(1, int(payment.get('order_expire_minutes') or 30))}m"
+    subject = f"{plan.name} {('年付' if (order.billing_cycle or 'monthly') == 'yearly' else '月付')}"
+    body = plan.description or f"LoreVista subscription for {plan.name}"
+    total_amount = f"{float(order.amount or 0):.2f}"
+    result = alipay_f2f.precreate(
+        gateway=config["gateway"],
+        app_id=config["app_id"],
+        private_key=config["app_private_key"],
+        notify_url=config["notify_url"],
+        out_trade_no=order.order_no,
+        total_amount=total_amount,
+        subject=subject[:256],
+        seller_id=config["seller_id"] or None,
+        timeout_express=timeout_express,
+        body=body[:128],
+        store_id="LoreVista",
+    )
+    qr_code = result["result"].get("qr_code") or ""
+    payment_url = qr_code
+    extra = dict(order.extra_json or {})
+    extra.update({
+        "payment_method": order.payment_method,
+        "billing_cycle": order.billing_cycle,
+        "alipay_qr_code": qr_code,
+        "alipay_payment_url": payment_url,
+        "alipay_precreate_response": result["result"],
+    })
+    order.extra_json = extra
+    return {
+        "provider": "alipay",
+        "method": "alipay_qr",
+        "qr_code_text": qr_code,
+        "payment_url": payment_url,
+        "provider_response": result["result"],
+    }
+
+
+def _order_for_user(order_no: str, user_id: int, db: Session) -> BillingOrder:
+    order = db.query(BillingOrder).filter(BillingOrder.order_no == order_no, BillingOrder.user_id == user_id).first()
+    if not order:
+        raise HTTPException(404, "Order not found")
+    return _sync_order_status(order, db)
 
 
 def _character_profile_text(body: dict) -> str:
@@ -764,9 +1533,899 @@ def on_startup():
 
 # ─── Story CRUD ─────────────────────────────────────────────
 
+@app.post("/api/auth/register")
+def register(body: dict, db: Session = Depends(get_db)):
+    _ensure_platform_seed(db)
+    email = str(body.get("email") or "").strip().lower()
+    password = str(body.get("password") or "").strip()
+    name = str(body.get("name") or "").strip() or "User"
+    if not email or not password:
+        raise HTTPException(400, "email and password are required")
+    if db.query(User).filter(User.email == email).first():
+        raise HTTPException(409, "email already exists")
+
+    user = User(email=email, password_hash=_password_hash(password), name=name, role="user", status="active")
+    db.add(user)
+    db.flush()
+    free_plan = db.query(Plan).filter(Plan.code == "free").first()
+    if free_plan:
+        db.add(UserSubscription(user_id=user.id, plan_id=free_plan.id, status="active"))
+    token = _new_session_token()
+    db.add(UserSession(user_id=user.id, token=token))
+    db.commit()
+    return {"token": token, "user": {"id": user.id, "name": user.name, "role": user.role, "email": user.email}}
+
+
+@app.post("/api/auth/login")
+def login(body: dict, db: Session = Depends(get_db)):
+    _ensure_platform_seed(db)
+    email = str(body.get("email") or "").strip().lower()
+    password = str(body.get("password") or "").strip()
+    user = db.query(User).filter(User.email == email).first()
+    if not user or user.password_hash != _password_hash(password):
+        raise HTTPException(401, "invalid email or password")
+    token = _new_session_token()
+    db.add(UserSession(user_id=user.id, token=token))
+    db.commit()
+    return {"token": token, "user": {"id": user.id, "name": user.name, "role": user.role, "email": user.email}}
+
+
+@app.get("/api/auth/me")
+def me(request: Request, db: Session = Depends(get_db)):
+    _ensure_platform_seed(db)
+    user = _require_user(request, db)
+    return {"id": user.id, "name": user.name, "role": user.role, "email": user.email}
+
+
+@app.post("/api/auth/logout")
+def logout(request: Request, db: Session = Depends(get_db)):
+    token = _parse_auth_token(request)
+    if token:
+        sess = db.query(UserSession).filter(UserSession.token == token, UserSession.revoked_at.is_(None)).first()
+        if sess:
+            sess.revoked_at = datetime.datetime.utcnow()
+            db.commit()
+    return {"ok": True}
+
+
+@app.get("/api/plans/public")
+def plans_public(db: Session = Depends(get_db)):
+    _ensure_platform_seed(db)
+    plans = db.query(Plan).filter(Plan.is_visible.is_(True)).order_by(Plan.monthly_price.asc()).all()
+    result = []
+    for plan in plans:
+        result.append({
+            "id": plan.id,
+            "code": plan.code,
+            "name": plan.name,
+            "description": plan.description,
+            "monthly_price": plan.monthly_price,
+            "yearly_price": plan.yearly_price,
+            "currency": plan.currency,
+            "is_recommended": plan.is_recommended,
+            "features": _plan_feature_map(plan.id, db),
+        })
+    return result
+
+
+@app.get("/api/me/entitlements")
+def my_entitlements(request: Request, db: Session = Depends(get_db)):
+    _ensure_platform_seed(db)
+    user = _require_user(request, db)
+    plan = _active_plan_for_user(user.id, db)
+    return {
+        "plan": {"id": plan.id, "code": plan.code, "name": plan.name},
+        "entitlements": _plan_feature_map(plan.id, db),
+    }
+
+
+@app.get("/api/me/subscription")
+def my_subscription(request: Request, db: Session = Depends(get_db)):
+    _ensure_platform_seed(db)
+    user = _require_user(request, db)
+    plan = _active_plan_for_user(user.id, db)
+    sub = db.query(UserSubscription).filter(UserSubscription.user_id == user.id).first()
+    latest_order = (
+        db.query(BillingOrder)
+        .filter(BillingOrder.user_id == user.id)
+        .order_by(BillingOrder.created_at.desc())
+        .first()
+    )
+    if latest_order:
+        latest_order = _sync_order_status(latest_order, db)
+    return {
+        "user": {"id": user.id, "name": user.name, "email": user.email, "role": user.role},
+        "subscription": {
+            "status": sub.status if sub else "active",
+            "plan": {
+                "id": plan.id,
+                "code": plan.code,
+                "name": plan.name,
+                "monthly_price": plan.monthly_price,
+                "yearly_price": plan.yearly_price,
+                "currency": plan.currency,
+            },
+        },
+        "latest_order": _serialize_order_with_db(latest_order, db) if latest_order else None,
+    }
+
+
+@app.get("/api/me/orders")
+def my_orders(request: Request, db: Session = Depends(get_db)):
+    _ensure_platform_seed(db)
+    user = _require_user(request, db)
+    orders = (
+        db.query(BillingOrder)
+        .filter(BillingOrder.user_id == user.id)
+        .order_by(BillingOrder.created_at.desc())
+        .limit(20)
+        .all()
+    )
+    for order in orders:
+        _sync_order_status(order, db)
+    return [_serialize_order_with_db(order, db) for order in orders]
+
+
+@app.post("/api/billing/subscribe")
+def subscribe_plan(body: dict, request: Request, db: Session = Depends(get_db)):
+    _ensure_platform_seed(db)
+    user = _require_user(request, db)
+    payment = _payment_settings_snapshot(db)
+    if not bool(payment.get("enabled")):
+        raise HTTPException(400, "Payment is currently disabled")
+    plan_id = int(body.get("plan_id") or 0)
+    billing_cycle = str(body.get("billing_cycle") or "monthly").strip().lower()
+    payment_method = str(body.get("payment_method") or payment.get("default_method") or "mock_qr").strip()
+    if billing_cycle not in {"monthly", "yearly"}:
+        raise HTTPException(400, "billing_cycle must be monthly or yearly")
+    plan = db.get(Plan, plan_id)
+    if not plan or not plan.is_visible:
+        raise HTTPException(404, "Plan not found")
+    method_options = _payment_method_options(db)
+    selected_method = next((item for item in method_options if item["key"] == payment_method), None)
+    if not selected_method:
+        raise HTTPException(400, "Payment method unavailable")
+
+    amount = plan.yearly_price if billing_cycle == "yearly" and plan.yearly_price is not None else plan.monthly_price
+    expire_minutes = int(payment.get("order_expire_minutes") or 30)
+    expires_at = datetime.datetime.utcnow() + datetime.timedelta(minutes=expire_minutes)
+    stale_orders = (
+        db.query(BillingOrder)
+        .filter(BillingOrder.user_id == user.id, BillingOrder.status == "pending")
+        .all()
+    )
+    for stale_order in stale_orders:
+        _mark_order_cancelled(stale_order, db, operator_user_id=user.id, note="Superseded by a newer checkout request")
+    order = BillingOrder(
+        order_no=f"LV{datetime.datetime.utcnow().strftime('%Y%m%d%H%M%S')}{secrets.randbelow(10000):04d}",
+        user_id=user.id,
+        plan_id=plan.id,
+        amount=int(amount or 0),
+        currency=plan.currency,
+        status="pending",
+        source="user_purchase",
+        billing_cycle=billing_cycle,
+        payment_provider=str(selected_method["provider"]),
+        payment_method=str(selected_method["key"]),
+        operator_user_id=user.id,
+        note=f"Checkout created for {plan.name}",
+        extra_json={"billing_cycle": billing_cycle, "payment_method": payment_method},
+        expired_at=expires_at,
+    )
+    db.add(order)
+    checkout_override = None
+    if int(amount or 0) <= 0 and bool(payment.get("auto_activate_free_plan", True)):
+        _mark_order_paid(order, db, operator_user_id=user.id, note=f"Auto-activated free plan {plan.name}")
+    elif payment_method == "alipay_qr":
+        try:
+            checkout_override = _alipay_precreate(order, plan, payment)
+        except alipay_f2f.AlipayApiError as exc:
+            raise HTTPException(502, f"Alipay precreate failed: {exc}") from exc
+        except alipay_f2f.AlipayConfigError as exc:
+            raise HTTPException(400, f"Alipay config invalid: {exc}") from exc
+        except httpx.HTTPError as exc:
+            raise HTTPException(502, f"Alipay gateway request failed: {exc}") from exc
+    _write_audit_log(user, "subscribe_plan", "billing_order", order.order_no, f"Created checkout for {plan.name}", db, {
+        "plan_id": plan.id,
+        "plan_name": plan.name,
+        "billing_cycle": billing_cycle,
+        "amount": int(amount or 0),
+        "payment_method": payment_method,
+    })
+    db.commit()
+    db.refresh(order)
+    current_plan = _active_plan_for_user(user.id, db)
+    return {
+        "ok": True,
+        "message": "subscription updated" if order.status == "paid" else "checkout created",
+        "status": order.status,
+        "subscription": {
+            "status": "active",
+            "plan": {
+                "id": current_plan.id,
+                "code": current_plan.code,
+                "name": current_plan.name,
+                "monthly_price": current_plan.monthly_price,
+                "yearly_price": current_plan.yearly_price,
+                "currency": current_plan.currency,
+            },
+        },
+        "order": _serialize_order_with_db(order, db),
+        "checkout": checkout_override or _order_checkout_payload(order, plan, db),
+    }
+
+
+@app.post("/api/me/orders/{order_no}/mock-confirm")
+def my_order_mock_confirm(order_no: str, request: Request, db: Session = Depends(get_db)):
+    _ensure_platform_seed(db)
+    user = _require_user(request, db)
+    order = _order_for_user(order_no, user.id, db)
+    if order.status != "pending":
+        raise HTTPException(400, f"Order cannot be confirmed from status {order.status}")
+    if order.payment_method != "mock_qr":
+        raise HTTPException(400, "Only mock payment orders can be manually confirmed here")
+    plan = db.get(Plan, order.plan_id)
+    if not plan:
+        raise HTTPException(404, "Plan not found")
+    _mark_order_paid(order, db, operator_user_id=user.id, note=f"Mock payment confirmed by {user.name}")
+    _write_audit_log(user, "confirm_mock_payment", "billing_order", order.order_no, f"Confirmed mock payment for {plan.name}", db, {
+        "order_no": order.order_no,
+        "plan_id": order.plan_id,
+    })
+    db.commit()
+    db.refresh(order)
+    return {
+        "ok": True,
+        "status": order.status,
+        "order": _serialize_order_with_db(order, db),
+        "subscription": {
+            "status": "active",
+            "plan": {
+                "id": plan.id,
+                "code": plan.code,
+                "name": plan.name,
+                "monthly_price": plan.monthly_price,
+                "yearly_price": plan.yearly_price,
+                "currency": plan.currency,
+            },
+        },
+    }
+
+
+@app.post("/api/me/orders/{order_no}/cancel")
+def my_order_cancel(order_no: str, request: Request, db: Session = Depends(get_db)):
+    _ensure_platform_seed(db)
+    user = _require_user(request, db)
+    order = _order_for_user(order_no, user.id, db)
+    if order.status != "pending":
+        raise HTTPException(400, f"Order cannot be cancelled from status {order.status}")
+    plan = db.get(Plan, order.plan_id)
+    _mark_order_cancelled(order, db, operator_user_id=user.id, note=f"Cancelled by {user.name}")
+    _write_audit_log(user, "cancel_order", "billing_order", order.order_no, "User cancelled checkout", db, {
+        "order_no": order.order_no,
+        "plan_id": order.plan_id,
+        "plan_name": plan.name if plan else "",
+    })
+    db.commit()
+    db.refresh(order)
+    return {"ok": True, "status": order.status, "order": _serialize_order_with_db(order, db)}
+
+
+@app.post("/api/payments/alipay/notify")
+async def alipay_notify(request: Request, db: Session = Depends(get_db)):
+    _ensure_platform_seed(db)
+    raw_body = (await request.body()).decode("utf-8", errors="ignore")
+    payload = {key: value for key, value in parse_qsl(raw_body, keep_blank_values=True)}
+    signature = payload.get("sign", "")
+    if not signature:
+        return Response("failure", media_type="text/plain", status_code=400)
+    params = {key: value for key, value in payload.items() if key not in {"sign", "sign_type"}}
+    sign_content = "&".join(
+        f"{key}={params[key]}"
+        for key in sorted(params.keys())
+        if params[key] is not None and params[key] != ""
+    )
+    payment = _payment_settings_snapshot(db)
+    config = _validate_alipay_config(payment)
+    try:
+        alipay_f2f.rsa2_verify(sign_content, signature, config["alipay_public_key"])
+    except Exception:
+        return Response("failure", media_type="text/plain", status_code=400)
+
+    order_no = payload.get("out_trade_no", "").strip()
+    trade_status = payload.get("trade_status", "").strip()
+    trade_no = payload.get("trade_no", "").strip()
+    total_amount = payload.get("total_amount", "").strip()
+    order = db.query(BillingOrder).filter(BillingOrder.order_no == order_no).first()
+    if not order:
+        return Response("failure", media_type="text/plain", status_code=404)
+    plan = db.get(Plan, order.plan_id)
+    extra = dict(order.extra_json or {})
+    extra.update({
+        "alipay_trade_no": trade_no,
+        "alipay_notify_payload": payload,
+    })
+    order.extra_json = extra
+    if trade_status in {"TRADE_SUCCESS", "TRADE_FINISHED"}:
+        expected_amount = f"{float(order.amount or 0):.2f}"
+        if total_amount and total_amount != expected_amount:
+            return Response("failure", media_type="text/plain", status_code=400)
+        _mark_order_paid(order, db, note=f"Alipay notify confirmed trade {trade_no}")
+        _write_audit_log(None, "alipay_notify_paid", "billing_order", order.order_no, f"Alipay async notify marked order paid", db, {
+            "order_no": order.order_no,
+            "trade_no": trade_no,
+            "plan_name": plan.name if plan else "",
+        })
+    elif trade_status in {"TRADE_CLOSED"}:
+        _mark_order_cancelled(order, db, note=f"Alipay notify closed trade {trade_no}")
+    db.commit()
+    return Response("success", media_type="text/plain")
+
+
+@app.get("/api/me/usage")
+def my_usage(request: Request, db: Session = Depends(get_db)):
+    _ensure_platform_seed(db)
+    user = _require_user(request, db)
+    plan = _active_plan_for_user(user.id, db)
+    return {"period_key": _current_period_key(), "plan_code": plan.code, "items": _usage_entries_for_user(user.id, db)}
+
+
+@app.get("/api/admin/plans")
+def admin_plans(request: Request, db: Session = Depends(get_db)):
+    _ensure_platform_seed(db)
+    _require_admin(request, db)
+    plans = db.query(Plan).order_by(Plan.monthly_price.asc()).all()
+    return [{
+        "id": plan.id,
+        "code": plan.code,
+        "name": plan.name,
+        "description": plan.description or "",
+        "monthly_price": plan.monthly_price,
+        "yearly_price": plan.yearly_price,
+        "currency": plan.currency,
+        "is_visible": plan.is_visible,
+        "is_recommended": plan.is_recommended,
+    } for plan in plans]
+
+
+@app.get("/api/admin/feature-catalog")
+def admin_feature_catalog(request: Request, db: Session = Depends(get_db)):
+    _require_admin(request, db)
+    return FEATURE_CATALOG
+
+
+@app.post("/api/admin/plans")
+def admin_create_plan(body: dict, request: Request, db: Session = Depends(get_db)):
+    _require_admin(request, db)
+    code = str(body.get("code") or "").strip().lower()
+    name = str(body.get("name") or "").strip()
+    if not code or not name:
+        raise HTTPException(400, "code and name are required")
+    if db.query(Plan).filter(Plan.code == code).first():
+        raise HTTPException(409, "Plan code already exists")
+    plan = Plan(
+        code=code,
+        name=name,
+        description=str(body.get("description") or ""),
+        monthly_price=int(body.get("monthly_price") or 0),
+        yearly_price=int(body.get("yearly_price") or 0),
+        currency=str(body.get("currency") or "CNY"),
+        is_visible=bool(body.get("is_visible", True)),
+        is_recommended=bool(body.get("is_recommended", False)),
+    )
+    db.add(plan)
+    db.flush()
+    for feature in FEATURE_CATALOG:
+        db.add(PlanFeature(plan_id=plan.id, feature_key=feature["key"], value_json={"value": 0}))
+        rule = feature.get("default_rule") or {}
+        db.add(
+            PlanQuotaRule(
+                plan_id=plan.id,
+                feature_key=feature["key"],
+                reset_period=str(rule.get("reset_period") or "monthly"),
+                deduct_mode=str(rule.get("deduct_mode") or "on_success"),
+                extra_config={},
+            )
+        )
+    db.commit()
+    return {"ok": True, "plan_id": plan.id}
+
+
+@app.delete("/api/admin/plans/{plan_id}")
+def admin_delete_plan(plan_id: int, request: Request, db: Session = Depends(get_db)):
+    _require_admin(request, db)
+    plan = db.get(Plan, plan_id)
+    if not plan:
+        raise HTTPException(404, "Plan not found")
+    if db.query(UserSubscription).filter(UserSubscription.plan_id == plan.id).count() > 0:
+        raise HTTPException(409, "Plan has active subscriptions and cannot be deleted")
+    db.delete(plan)
+    db.commit()
+    return {"ok": True}
+
+
+@app.put("/api/admin/plans/{plan_id}")
+def admin_update_plan(plan_id: int, body: dict, request: Request, db: Session = Depends(get_db)):
+    _require_admin(request, db)
+    plan = db.get(Plan, plan_id)
+    if not plan:
+        raise HTTPException(404, "Plan not found")
+    plan.name = str(body.get("name") or plan.name)
+    plan.description = str(body.get("description") or plan.description or "")
+    if body.get("monthly_price") is not None:
+        plan.monthly_price = int(body.get("monthly_price"))
+    if body.get("yearly_price") is not None:
+        plan.yearly_price = int(body.get("yearly_price"))
+    if body.get("is_visible") is not None:
+        plan.is_visible = bool(body.get("is_visible"))
+    if body.get("is_recommended") is not None:
+        plan.is_recommended = bool(body.get("is_recommended"))
+    db.commit()
+    return {"ok": True}
+
+
+@app.get("/api/admin/plans/{plan_id}/features")
+def admin_plan_features(plan_id: int, request: Request, db: Session = Depends(get_db)):
+    _require_admin(request, db)
+    if not db.get(Plan, plan_id):
+        raise HTTPException(404, "Plan not found")
+    return [{
+        "feature_key": f.feature_key,
+        "value": (f.value_json or {}).get("value"),
+    } for f in db.query(PlanFeature).filter(PlanFeature.plan_id == plan_id).order_by(PlanFeature.feature_key.asc()).all()]
+
+
+@app.put("/api/admin/plans/{plan_id}/features")
+def admin_save_plan_features(plan_id: int, body: dict, request: Request, db: Session = Depends(get_db)):
+    _require_admin(request, db)
+    if not db.get(Plan, plan_id):
+        raise HTTPException(404, "Plan not found")
+    items = body.get("items", [])
+    if not isinstance(items, list):
+        raise HTTPException(400, "items must be list")
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        feature_key = str(item.get("feature_key") or "").strip()
+        if not feature_key:
+            continue
+        value = item.get("value")
+        current = db.query(PlanFeature).filter(PlanFeature.plan_id == plan_id, PlanFeature.feature_key == feature_key).first()
+        if current:
+            current.value_json = {"value": value}
+        else:
+            db.add(PlanFeature(plan_id=plan_id, feature_key=feature_key, value_json={"value": value}))
+    db.commit()
+    return {"ok": True}
+
+
+@app.get("/api/admin/plans/{plan_id}/quota-rules")
+def admin_quota_rules(plan_id: int, request: Request, db: Session = Depends(get_db)):
+    _require_admin(request, db)
+    if not db.get(Plan, plan_id):
+        raise HTTPException(404, "Plan not found")
+    rules = db.query(PlanQuotaRule).filter(PlanQuotaRule.plan_id == plan_id).order_by(PlanQuotaRule.feature_key.asc()).all()
+    return [{
+        "feature_key": item.feature_key,
+        "reset_period": item.reset_period,
+        "deduct_mode": item.deduct_mode,
+        "extra_config": item.extra_config or {},
+    } for item in rules]
+
+
+@app.put("/api/admin/plans/{plan_id}/quota-rules")
+def admin_save_quota_rules(plan_id: int, body: dict, request: Request, db: Session = Depends(get_db)):
+    _require_admin(request, db)
+    if not db.get(Plan, plan_id):
+        raise HTTPException(404, "Plan not found")
+    items = body.get("items", [])
+    if not isinstance(items, list):
+        raise HTTPException(400, "items must be list")
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        feature_key = str(item.get("feature_key") or "").strip()
+        if not feature_key:
+            continue
+        current = db.query(PlanQuotaRule).filter(PlanQuotaRule.plan_id == plan_id, PlanQuotaRule.feature_key == feature_key).first()
+        reset_period = str(item.get("reset_period") or "monthly")
+        deduct_mode = str(item.get("deduct_mode") or "on_success")
+        extra = item.get("extra_config")
+        if current:
+            current.reset_period = reset_period
+            current.deduct_mode = deduct_mode
+            current.extra_config = extra if isinstance(extra, dict) else {}
+        else:
+            db.add(PlanQuotaRule(plan_id=plan_id, feature_key=feature_key, reset_period=reset_period, deduct_mode=deduct_mode, extra_config=extra if isinstance(extra, dict) else {}))
+    db.commit()
+    return {"ok": True}
+
+
+@app.get("/api/admin/users")
+def admin_users(request: Request, db: Session = Depends(get_db)):
+    _require_admin(request, db)
+    users = db.query(User).order_by(User.created_at.desc()).all()
+    subscription_map = {item.user_id: item.plan_id for item in db.query(UserSubscription).all()}
+    plan_map = {plan.id: plan for plan in db.query(Plan).all()}
+    result = []
+    for user in users:
+        plan = plan_map.get(subscription_map.get(user.id))
+        result.append({
+            "id": user.id,
+            "name": user.name,
+            "email": user.email,
+            "role": user.role,
+            "status": user.status,
+            "created_at": user.created_at,
+            "plan_name": plan.name if plan else "Free",
+        })
+    return result
+
+
+@app.post("/api/admin/users")
+def admin_create_user(body: dict, request: Request, db: Session = Depends(get_db)):
+    admin = _require_admin(request, db)
+    email = str(body.get("email") or "").strip().lower()
+    password = str(body.get("password") or "").strip()
+    name = str(body.get("name") or "").strip() or "新用户"
+    role = str(body.get("role") or "user").strip().lower()
+    if not email or not password:
+        raise HTTPException(400, "email and password are required")
+    if role not in {"user", "admin"}:
+        raise HTTPException(400, "role must be user or admin")
+    if db.query(User).filter(User.email == email).first():
+        raise HTTPException(409, "Email already exists")
+    user = User(email=email, password_hash=_password_hash(password), name=name, role=role, status="active")
+    db.add(user)
+    _write_audit_log(admin, "create_user", "user", email, f"创建用户 {email}", db, {"email": email, "name": name, "role": role})
+    db.commit()
+    return {"ok": True, "user_id": user.id}
+
+
+@app.put("/api/admin/users/{user_id}")
+def admin_update_user(user_id: int, body: dict, request: Request, db: Session = Depends(get_db)):
+    admin = _require_admin(request, db)
+    user = db.get(User, user_id)
+    if not user:
+        raise HTTPException(404, "User not found")
+    if body.get("name") is not None:
+        user.name = str(body.get("name") or user.name).strip() or user.name
+    if body.get("email") is not None:
+        email = str(body.get("email") or "").strip().lower()
+        existing = db.query(User).filter(User.email == email, User.id != user.id).first()
+        if existing:
+            raise HTTPException(409, "Email already exists")
+        if email:
+            user.email = email
+    if body.get("role") is not None:
+        role = str(body.get("role") or "").strip().lower()
+        if role not in {"user", "admin"}:
+            raise HTTPException(400, "role must be user or admin")
+        user.role = role
+    if body.get("status") is not None:
+        status = str(body.get("status") or "").strip().lower()
+        if status not in {"active", "disabled"}:
+            raise HTTPException(400, "status must be active or disabled")
+        user.status = status
+    if body.get("password"):
+        user.password_hash = _password_hash(str(body.get("password")))
+    _write_audit_log(admin, "update_user", "user", user.id, f"更新用户 {user.email}", db, {
+        "name": user.name,
+        "email": user.email,
+        "role": user.role,
+        "status": user.status,
+        "password_changed": bool(body.get("password")),
+    })
+    db.commit()
+    return {"ok": True}
+
+
+@app.delete("/api/admin/users/{user_id}")
+def admin_delete_user(user_id: int, request: Request, db: Session = Depends(get_db)):
+    admin = _require_admin(request, db)
+    user = db.get(User, user_id)
+    if not user:
+        raise HTTPException(404, "User not found")
+    if user.id == admin.id:
+        raise HTTPException(400, "Cannot delete current admin")
+    user.status = "disabled"
+    _write_audit_log(admin, "disable_user", "user", user.id, f"停用用户 {user.email}", db, {"email": user.email})
+    db.commit()
+    return {"ok": True}
+
+
+@app.get("/api/admin/users/{user_id}/entitlements")
+def admin_user_entitlements(user_id: int, request: Request, db: Session = Depends(get_db)):
+    _require_admin(request, db)
+    user = db.get(User, user_id)
+    if not user:
+        raise HTTPException(404, "User not found")
+    plan = _active_plan_for_user(user.id, db)
+    sub = db.query(UserSubscription).filter(UserSubscription.user_id == user.id).first()
+    return {
+        "user": {"id": user.id, "name": user.name, "email": user.email, "role": user.role},
+        "subscription": {"status": sub.status if sub else "active"},
+        "plan": {"id": plan.id, "code": plan.code, "name": plan.name},
+        "entitlements": _plan_feature_map(plan.id, db),
+        "usage": _usage_entries_for_user(user.id, db),
+    }
+
+
+@app.post("/api/admin/users/{user_id}/subscription")
+def admin_update_user_subscription(user_id: int, body: dict, request: Request, db: Session = Depends(get_db)):
+    admin = _require_admin(request, db)
+    user = db.get(User, user_id)
+    if not user:
+        raise HTTPException(404, "User not found")
+    plan_id = int(body.get("plan_id") or 0)
+    plan = db.get(Plan, plan_id)
+    if not plan:
+        raise HTTPException(404, "Plan not found")
+    _upsert_user_subscription(user.id, plan.id, db)
+    order = BillingOrder(
+        order_no=f"LVADM{datetime.datetime.utcnow().strftime('%Y%m%d%H%M%S')}{secrets.randbelow(10000):04d}",
+        user_id=user.id,
+        plan_id=plan.id,
+        amount=int(plan.monthly_price or 0),
+        currency=plan.currency,
+        status="admin_adjusted",
+        source="admin_adjustment",
+        billing_cycle="monthly",
+        operator_user_id=admin.id,
+        note=f"管理员 {admin.name} 调整用户套餐为 {plan.name}",
+        extra_json={"action": "subscription_adjustment"},
+    )
+    db.add(order)
+    _write_audit_log(admin, "update_user_subscription", "user", user.id, f"将 {user.email} 套餐调整为 {plan.name}", db, {
+        "plan_id": plan.id,
+        "plan_name": plan.name,
+        "order_no": order.order_no,
+    })
+    db.commit()
+    return {
+        "ok": True,
+        "user": {"id": user.id, "email": user.email, "name": user.name},
+        "plan": {"id": plan.id, "code": plan.code, "name": plan.name},
+        "order": _serialize_order_with_db(order, db),
+    }
+
+
+@app.post("/api/admin/users/{user_id}/quota-grants")
+def admin_grant_user_quota(user_id: int, body: dict, request: Request, db: Session = Depends(get_db)):
+    admin = _require_admin(request, db)
+    user = db.get(User, user_id)
+    if not user:
+        raise HTTPException(404, "User not found")
+    feature_key = str(body.get("feature_key") or "").strip()
+    amount = int(body.get("amount") or 0)
+    if not feature_key:
+        raise HTTPException(400, "feature_key is required")
+    if amount <= 0:
+        raise HTTPException(400, "amount must be greater than 0")
+    period_key = _current_period_key()
+    grant = db.query(UserQuotaGrantMonthly).filter(
+        UserQuotaGrantMonthly.user_id == user.id,
+        UserQuotaGrantMonthly.feature_key == feature_key,
+        UserQuotaGrantMonthly.period_key == period_key,
+    ).first()
+    before = int(grant.granted_amount if grant else 0)
+    after = before + amount
+    if grant:
+        grant.granted_amount = after
+    else:
+        grant = UserQuotaGrantMonthly(
+            user_id=user.id,
+            feature_key=feature_key,
+            period_key=period_key,
+            granted_amount=amount,
+        )
+        db.add(grant)
+    order = BillingOrder(
+        order_no=f"LVGRT{datetime.datetime.utcnow().strftime('%Y%m%d%H%M%S')}{secrets.randbelow(10000):04d}",
+        user_id=user.id,
+        plan_id=_active_plan_for_user(user.id, db).id,
+        amount=0,
+        currency="CNY",
+        status="admin_adjusted",
+        source="quota_grant",
+        billing_cycle="monthly",
+        payment_provider="system",
+        payment_method="manual_adjustment",
+        operator_user_id=admin.id,
+        note=f"管理员 {admin.name} 补发 {feature_key} 额度 {amount}",
+        extra_json={
+            "action": "quota_grant",
+            "feature_key": feature_key,
+            "feature_name": FEATURE_CATALOG_MAP.get(feature_key, {}).get("name", feature_key),
+            "amount": amount,
+            "period_key": period_key,
+            "before_granted": before,
+            "after_granted": after,
+        },
+        paid_at=datetime.datetime.utcnow(),
+    )
+    db.add(order)
+    _write_audit_log(admin, "grant_user_quota", "user", user.id, f"为 {user.email} 补发 {feature_key} 额度", db, {
+        "feature_key": feature_key,
+        "amount": amount,
+        "period_key": period_key,
+        "before_granted": before,
+        "after_granted": after,
+    })
+    db.commit()
+    return {
+        "ok": True,
+        "feature_key": feature_key,
+        "granted_amount": amount,
+        "before_granted": before,
+        "after_granted": after,
+        "usage": _usage_entries_for_user(user.id, db),
+    }
+
+
+@app.get("/api/admin/platform/settings")
+def admin_platform_settings(request: Request, db: Session = Depends(get_db)):
+    _ensure_platform_seed(db)
+    _require_admin(request, db)
+    return _platform_settings_snapshot(db)
+
+
+@app.get("/api/platform/settings/public")
+def public_platform_settings(db: Session = Depends(get_db)):
+    _ensure_platform_seed(db)
+    return _public_platform_settings_snapshot(db)
+
+
+@app.get("/api/platform/icon")
+def public_platform_icon(db: Session = Depends(get_db)):
+    _ensure_platform_seed(db)
+    icon_data = _get_platform_setting("platform.icon_data", db, "")
+    icon_mime = _get_platform_setting("platform.icon_mime", db, "image/png") or "image/png"
+    if not icon_data:
+        raise HTTPException(404, "Platform icon not configured")
+    try:
+        import base64
+
+        icon_bytes = base64.b64decode(icon_data, validate=True)
+    except Exception:
+        raise HTTPException(500, "Stored platform icon is invalid")
+    return Response(content=icon_bytes, media_type=str(icon_mime))
+
+
+@app.put("/api/admin/platform/settings")
+def admin_save_platform_settings(body: dict, request: Request, db: Session = Depends(get_db)):
+    _require_admin(request, db)
+    basic = body.get("basic") if isinstance(body.get("basic"), dict) else {}
+    api = body.get("api") if isinstance(body.get("api"), dict) else {}
+    payment = body.get("payment") if isinstance(body.get("payment"), dict) else {}
+    mappings = {
+        "platform.site_name": basic.get("site_name", "LoreVista"),
+        "platform.site_slogan": basic.get("site_slogan", ""),
+        "platform.support_email": basic.get("support_email", ""),
+        "platform.icp": basic.get("icp", ""),
+        "platform.copyright": basic.get("copyright", ""),
+        "platform.notice": basic.get("notice", ""),
+        "api.deepseek.base_url": api.get("deepseek_base_url", "https://api.deepseek.com"),
+        "api.deepseek.model": api.get("deepseek_model", "deepseek-chat"),
+        "api.deepseek.api_key": api.get("deepseek_api_key", ""),
+        "api.image.base_url": api.get("image_base_url", "https://api.xbyjs.top/v1"),
+        "api.image.model": api.get("image_model", "default"),
+        "api.image.api_key": api.get("image_api_key", ""),
+        "api.enable_user_override": bool(api.get("enable_user_override", True)),
+        "payment.enabled": bool(payment.get("enabled", True)),
+        "payment.mode": str(payment.get("mode", "mock") or "mock"),
+        "payment.default_method": str(payment.get("default_method", "mock_qr") or "mock_qr"),
+        "payment.order_expire_minutes": int(payment.get("order_expire_minutes", 30) or 30),
+        "payment.auto_activate_free_plan": bool(payment.get("auto_activate_free_plan", True)),
+        "payment.instructions": str(payment.get("instructions", "") or ""),
+        "payment.mock_enabled": bool(payment.get("mock_enabled", True)),
+        "payment.wechat_enabled": bool(payment.get("wechat_enabled", False)),
+        "payment.wechat_app_id": str(payment.get("wechat_app_id", "") or ""),
+        "payment.wechat_mch_id": str(payment.get("wechat_mch_id", "") or ""),
+        "payment.wechat_notify_url": str(payment.get("wechat_notify_url", "") or ""),
+        "payment.alipay_enabled": bool(payment.get("alipay_enabled", False)),
+        "payment.alipay_app_id": str(payment.get("alipay_app_id", "") or ""),
+        "payment.alipay_pid": str(payment.get("alipay_pid", "") or ""),
+        "payment.alipay_gateway": str(payment.get("alipay_gateway", "https://openapi.alipay.com/gateway.do") or "https://openapi.alipay.com/gateway.do"),
+        "payment.alipay_sign_type": str(payment.get("alipay_sign_type", "RSA2") or "RSA2"),
+        "payment.alipay_app_private_key": str(payment.get("alipay_app_private_key", "") or ""),
+        "payment.alipay_public_key": str(payment.get("alipay_public_key", "") or ""),
+        "payment.alipay_notify_url": str(payment.get("alipay_notify_url", "") or ""),
+    }
+    icon_data = basic.get("icon_data")
+    icon_mime = basic.get("icon_mime", "image/png")
+    clear_icon = bool(basic.get("clear_icon", False))
+    for key, value in mappings.items():
+        _set_platform_setting(key, value, db)
+    if clear_icon:
+        _set_platform_setting("platform.icon_data", "", db)
+        _set_platform_setting("platform.icon_mime", "", db)
+        _set_platform_setting("platform.icon_updated_at", "", db)
+    elif isinstance(icon_data, str) and icon_data.strip():
+        _set_platform_setting("platform.icon_data", icon_data.strip(), db)
+        _set_platform_setting("platform.icon_mime", str(icon_mime or "image/png"), db)
+        _set_platform_setting("platform.icon_updated_at", datetime.datetime.utcnow().isoformat(), db)
+    db.commit()
+    return {"ok": True, "settings": _platform_settings_snapshot(db)}
+
+
+@app.get("/api/admin/audit-logs")
+def admin_audit_logs(
+    request: Request,
+    action: str | None = Query(default=None),
+    actor_name: str | None = Query(default=None),
+    target_type: str | None = Query(default=None),
+    target_id: str | None = Query(default=None),
+    limit: int = Query(default=200, ge=1, le=500),
+    db: Session = Depends(get_db),
+):
+    _require_admin(request, db)
+    query = db.query(AuditLog)
+    if action:
+        query = query.filter(AuditLog.action == action.strip())
+    if actor_name:
+        query = query.filter(AuditLog.actor_name.ilike(f"%{actor_name.strip()}%"))
+    if target_type:
+        query = query.filter(AuditLog.target_type == target_type.strip())
+    if target_id:
+        query = query.filter(AuditLog.target_id == target_id.strip())
+    logs = query.order_by(AuditLog.created_at.desc()).limit(limit).all()
+    return [{
+        "id": item.id,
+        "actor_user_id": item.actor_user_id,
+        "actor_name": item.actor_name,
+        "action": item.action,
+        "target_type": item.target_type,
+        "target_id": item.target_id,
+        "summary": item.summary,
+        "detail": item.detail_json or {},
+        "created_at": item.created_at,
+    } for item in logs]
+
+
+@app.get("/api/admin/orders")
+def admin_orders(request: Request, db: Session = Depends(get_db)):
+    _require_admin(request, db)
+    orders = db.query(BillingOrder).order_by(BillingOrder.created_at.desc()).limit(100).all()
+    for order in orders:
+        _sync_order_status(order, db)
+    return [_serialize_order_with_db(order, db) for order in orders]
+
+
+@app.post("/api/admin/orders/{order_no}/status")
+def admin_update_order_status(order_no: str, body: dict, request: Request, db: Session = Depends(get_db)):
+    _ensure_platform_seed(db)
+    admin = _require_admin(request, db)
+    order = db.query(BillingOrder).filter(BillingOrder.order_no == order_no).first()
+    if not order:
+        raise HTTPException(404, "Order not found")
+    order = _sync_order_status(order, db)
+    next_status = str(body.get("status") or "").strip().lower()
+    note = str(body.get("note") or "").strip()
+    plan = db.get(Plan, order.plan_id)
+    if next_status == "paid":
+        _mark_order_paid(order, db, operator_user_id=admin.id, note=note or f"Marked paid by admin {admin.name}")
+    elif next_status == "cancelled":
+        _mark_order_cancelled(order, db, operator_user_id=admin.id, note=note or f"Cancelled by admin {admin.name}")
+    elif next_status == "expired":
+        _mark_order_expired(order, db, note=note or f"Expired by admin {admin.name}")
+    else:
+        raise HTTPException(400, "status must be paid, cancelled, or expired")
+    _write_audit_log(admin, "admin_update_order_status", "billing_order", order.order_no, f"Updated order to {order.status}", db, {
+        "order_no": order.order_no,
+        "status": order.status,
+        "plan_id": order.plan_id,
+        "plan_name": plan.name if plan else "",
+    })
+    db.commit()
+    db.refresh(order)
+    return {"ok": True, "order": _serialize_order_with_db(order, db)}
+
+
 @app.post("/api/stories", response_model=StoryOut)
-def create_story(body: StoryCreate, db: Session = Depends(get_db)):
-    story = Story(title=body.title, description=body.description)
+def create_story(body: StoryCreate, request: Request, db: Session = Depends(get_db)):
+    user = _require_user(request, db)
+    story = Story(title=body.title, description=body.description, owner_user_id=user.id)
     db.add(story)
     db.flush()
     # Auto-create first chapter
@@ -778,23 +2437,25 @@ def create_story(body: StoryCreate, db: Session = Depends(get_db)):
 
 
 @app.get("/api/stories", response_model=list[StoryOut])
-def list_stories(db: Session = Depends(get_db)):
-    return db.query(Story).order_by(Story.created_at.desc()).all()
+def list_stories(request: Request, db: Session = Depends(get_db)):
+    user = _require_user(request, db)
+    query = db.query(Story)
+    if user.role != "admin":
+        query = query.filter(Story.owner_user_id == user.id)
+    return query.order_by(Story.created_at.desc()).all()
 
 
 @app.get("/api/stories/{story_id}", response_model=StoryOut)
-def get_story(story_id: int, db: Session = Depends(get_db)):
-    story = db.get(Story, story_id)
-    if not story:
-        raise HTTPException(404, "Story not found")
+def get_story(story_id: int, request: Request, db: Session = Depends(get_db)):
+    user = _require_user(request, db)
+    story = _require_story_for_user(story_id, user, db)
     return story
 
 
 @app.put("/api/stories/{story_id}", response_model=StoryOut)
-def update_story(story_id: int, body: StoryUpdate, db: Session = Depends(get_db)):
-    story = db.get(Story, story_id)
-    if not story:
-        raise HTTPException(404, "Story not found")
+def update_story(story_id: int, body: StoryUpdate, request: Request, db: Session = Depends(get_db)):
+    user = _require_user(request, db)
+    story = _require_story_for_user(story_id, user, db)
     if body.title is not None:
         story.title = body.title
     if body.description is not None:
@@ -811,10 +2472,9 @@ def update_story(story_id: int, body: StoryUpdate, db: Session = Depends(get_db)
 
 
 @app.delete("/api/stories/{story_id}")
-def delete_story(story_id: int, db: Session = Depends(get_db)):
-    story = db.get(Story, story_id)
-    if not story:
-        raise HTTPException(404, "Story not found")
+def delete_story(story_id: int, request: Request, db: Session = Depends(get_db)):
+    user = _require_user(request, db)
+    story = _require_story_for_user(story_id, user, db)
     # Delete all chapters and their data
     for chapter in story.chapters:
         chapter_dir = Path(__file__).resolve().parent / "manga_outputs" / f"chapter_{chapter.id}"
@@ -839,9 +2499,8 @@ def delete_story(story_id: int, db: Session = Depends(get_db)):
 
 @app.post("/api/stories/{story_id}/upload-cover")
 async def upload_story_cover(story_id: int, request: Request, db: Session = Depends(get_db)):
-    story = db.get(Story, story_id)
-    if not story:
-        raise HTTPException(404, "Story not found")
+    user = _require_user(request, db)
+    story = _require_story_for_user(story_id, user, db)
     body = await request.json()
     b64 = body.get("image", "")
     import uuid
@@ -866,9 +2525,9 @@ async def upload_story_cover(story_id: int, request: Request, db: Session = Depe
 # ─── Chapter CRUD ───────────────────────────────────────────
 
 @app.get("/api/stories/{story_id}/chapters", response_model=list[ChapterOut])
-def list_chapters(story_id: int, db: Session = Depends(get_db)):
-    if not db.get(Story, story_id):
-        raise HTTPException(404, "Story not found")
+def list_chapters(story_id: int, request: Request, db: Session = Depends(get_db)):
+    user = _require_user(request, db)
+    story = _require_story_for_user(story_id, user, db)
     return (
         db.query(Chapter)
         .filter(Chapter.story_id == story_id)
@@ -878,23 +2537,17 @@ def list_chapters(story_id: int, db: Session = Depends(get_db)):
 
 
 @app.get("/api/chapters/{chapter_id}", response_model=ChapterOut)
-def get_chapter(chapter_id: int, db: Session = Depends(get_db)):
-    chapter = db.get(Chapter, chapter_id)
-    if not chapter:
-        raise HTTPException(404, "Chapter not found")
+def get_chapter(chapter_id: int, request: Request, db: Session = Depends(get_db)):
+    user = _require_user(request, db)
+    chapter = _require_chapter_for_user(chapter_id, user, db)
     return chapter
 
 
 @app.post("/api/stories/{story_id}/chapters", response_model=ChapterOut)
-def create_next_chapter(story_id: int, db: Session = Depends(get_db)):
-    story = (
-        db.query(Story)
-        .filter(Story.id == story_id)
-        .with_for_update()
-        .first()
-    )
-    if not story:
-        raise HTTPException(404, "Story not found")
+def create_next_chapter(story_id: int, request: Request, db: Session = Depends(get_db)):
+    user = _require_user(request, db)
+    story = _require_story_for_user(story_id, user, db)
+    story = db.query(Story).filter(Story.id == story.id).with_for_update().first()
     max_num = (
         db.query(Chapter.chapter_number)
         .filter(Chapter.story_id == story_id)
@@ -910,10 +2563,9 @@ def create_next_chapter(story_id: int, db: Session = Depends(get_db)):
 
 
 @app.delete("/api/chapters/{chapter_id}")
-def delete_chapter(chapter_id: int, db: Session = Depends(get_db)):
-    chapter = db.get(Chapter, chapter_id)
-    if not chapter:
-        raise HTTPException(404, "Chapter not found")
+def delete_chapter(chapter_id: int, request: Request, db: Session = Depends(get_db)):
+    user = _require_user(request, db)
+    chapter = _require_chapter_for_user(chapter_id, user, db)
 
     # Delete image files from disk
     chapter_dir = Path(__file__).resolve().parent / "manga_outputs" / f"chapter_{chapter_id}"
@@ -1111,18 +2763,16 @@ def _has_chapter_characters(chapter_id: int) -> bool:
 
 # Story-level character profiles
 @app.get("/api/stories/{story_id}/characters")
-async def get_story_characters(story_id: int, db: Session = Depends(get_db)):
-    story = db.get(Story, story_id)
-    if not story:
-        raise HTTPException(404, "Story not found")
+async def get_story_characters(story_id: int, request: Request, db: Session = Depends(get_db)):
+    user = _require_user(request, db)
+    story = _require_story_for_user(story_id, user, db)
     return {"characters": (story.character_profiles or "").strip()}
 
 
 @app.put("/api/stories/{story_id}/characters")
-async def save_story_characters(story_id: int, body: dict, db: Session = Depends(get_db)):
-    story = db.get(Story, story_id)
-    if not story:
-        raise HTTPException(404, "Story not found")
+async def save_story_characters(story_id: int, body: dict, request: Request, db: Session = Depends(get_db)):
+    user = _require_user(request, db)
+    story = _require_story_for_user(story_id, user, db)
     story.character_profiles = _character_profile_text(body)
     db.commit()
     return {"ok": True}
@@ -1130,9 +2780,8 @@ async def save_story_characters(story_id: int, body: dict, db: Session = Depends
 
 @app.post("/api/stories/{story_id}/characters/generate")
 async def generate_story_characters_from_framework(story_id: int, request: Request, db: Session = Depends(get_db)):
-    story = db.get(Story, story_id)
-    if not story:
-        raise HTTPException(404, "Story not found")
+    user = _require_user(request, db)
+    story = _require_story_for_user(story_id, user, db)
     if not isinstance(story.characters, list) or len(story.characters) == 0:
         raise HTTPException(400, "Story has no framework characters to convert")
 
@@ -1147,8 +2796,9 @@ async def generate_story_characters_from_framework(story_id: int, request: Reque
 
 # Chapter-level character profiles (with fallback info)
 @app.get("/api/chapters/{chapter_id}/characters")
-async def get_characters(chapter_id: int, db: Session = Depends(get_db)):
-    chapter = _require_chapter(chapter_id, db)
+async def get_characters(chapter_id: int, request: Request, db: Session = Depends(get_db)):
+    user = _require_user(request, db)
+    chapter = _require_chapter_for_user(chapter_id, user, db)
     has_own = _has_chapter_characters(chapter_id)
     if has_own:
         text = _characters_path(chapter_id).read_text(encoding="utf-8").strip()
@@ -1158,8 +2808,9 @@ async def get_characters(chapter_id: int, db: Session = Depends(get_db)):
 
 
 @app.put("/api/chapters/{chapter_id}/characters")
-async def save_characters(chapter_id: int, body: dict, db: Session = Depends(get_db)):
-    _require_chapter(chapter_id, db)
+async def save_characters(chapter_id: int, body: dict, request: Request, db: Session = Depends(get_db)):
+    user = _require_user(request, db)
+    _require_chapter_for_user(chapter_id, user, db)
     text = _character_profile_text(body)
     p = _characters_path(chapter_id)
     p.parent.mkdir(parents=True, exist_ok=True)
@@ -1168,9 +2819,10 @@ async def save_characters(chapter_id: int, body: dict, db: Session = Depends(get
 
 
 @app.delete("/api/chapters/{chapter_id}/characters")
-async def reset_chapter_characters(chapter_id: int, db: Session = Depends(get_db)):
+async def reset_chapter_characters(chapter_id: int, request: Request, db: Session = Depends(get_db)):
     """Delete chapter-level override so it falls back to story-level."""
-    _require_chapter(chapter_id, db)
+    user = _require_user(request, db)
+    _require_chapter_for_user(chapter_id, user, db)
     p = _characters_path(chapter_id)
     _unlink_file(p, "character profile")
     return {"ok": True}
@@ -1360,9 +3012,8 @@ def _build_character_ref_prompt(story: Story, card: dict) -> str:
 
 @app.post("/api/stories/{story_id}/character-ref-images/generate")
 async def generate_story_character_ref_images(story_id: int, request: Request, db: Session = Depends(get_db)):
-    story = db.get(Story, story_id)
-    if not story:
-        raise HTTPException(404, "Story not found")
+    user = _require_user(request, db)
+    story = _require_story_for_user(story_id, user, db)
 
     cards = _parse_character_profile_cards(story.character_profiles or "")
     if not cards:
@@ -1423,10 +3074,9 @@ async def generate_story_character_ref_images(story_id: int, request: Request, d
 
 
 @app.get("/api/stories/{story_id}/ref-images")
-async def list_story_ref_images(story_id: int, db: Session = Depends(get_db)):
-    story = db.get(Story, story_id)
-    if not story:
-        raise HTTPException(404, "Story not found")
+async def list_story_ref_images(story_id: int, request: Request, db: Session = Depends(get_db)):
+    user = _require_user(request, db)
+    story = _require_story_for_user(story_id, user, db)
     ref_dir = _story_ref_dir(story_id)
     _migrate_legacy_ref(_legacy_story_ref_image(story_id), ref_dir)
     return {"images": _serialize_refs(ref_dir, "story", story_id), "max": MAX_REF_IMAGES_PER_LEVEL}
@@ -1434,9 +3084,8 @@ async def list_story_ref_images(story_id: int, db: Session = Depends(get_db)):
 
 @app.post("/api/stories/{story_id}/ref-images")
 async def add_story_ref_image(story_id: int, request: Request, db: Session = Depends(get_db)):
-    story = db.get(Story, story_id)
-    if not story:
-        raise HTTPException(404, "Story not found")
+    user = _require_user(request, db)
+    story = _require_story_for_user(story_id, user, db)
     body = await request.json()
     img_bytes = _decode_png_upload(body.get("image", ""))
     ref_dir = _story_ref_dir(story_id)
@@ -1446,10 +3095,9 @@ async def add_story_ref_image(story_id: int, request: Request, db: Session = Dep
 
 
 @app.delete("/api/stories/{story_id}/ref-images/{filename}")
-async def delete_story_ref_image(story_id: int, filename: str, db: Session = Depends(get_db)):
-    story = db.get(Story, story_id)
-    if not story:
-        raise HTTPException(404, "Story not found")
+async def delete_story_ref_image(story_id: int, filename: str, request: Request, db: Session = Depends(get_db)):
+    user = _require_user(request, db)
+    story = _require_story_for_user(story_id, user, db)
     if "/" in filename or "\\" in filename or ".." in filename:
         raise HTTPException(400, "invalid filename")
     p = _story_ref_dir(story_id) / filename
@@ -1464,8 +3112,9 @@ async def delete_story_ref_image(story_id: int, filename: str, db: Session = Dep
 # ─── Chapter-level multi ref images (with story fallback) ───
 
 @app.get("/api/chapters/{chapter_id}/ref-images")
-async def list_chapter_ref_images(chapter_id: int, db: Session = Depends(get_db)):
-    chapter = _require_chapter(chapter_id, db)
+async def list_chapter_ref_images(chapter_id: int, request: Request, db: Session = Depends(get_db)):
+    user = _require_user(request, db)
+    chapter = _require_chapter_for_user(chapter_id, user, db)
     ref_dir = _chapter_ref_dir(chapter_id)
     _migrate_legacy_ref(_legacy_chapter_ref_image(chapter_id), ref_dir)
     chapter_refs = _serialize_refs(ref_dir, "chapter", chapter_id)
@@ -1481,7 +3130,8 @@ async def list_chapter_ref_images(chapter_id: int, db: Session = Depends(get_db)
 
 @app.post("/api/chapters/{chapter_id}/ref-images")
 async def add_chapter_ref_image(chapter_id: int, request: Request, db: Session = Depends(get_db)):
-    _require_chapter(chapter_id, db)
+    user = _require_user(request, db)
+    _require_chapter_for_user(chapter_id, user, db)
     body = await request.json()
     img_bytes = _decode_png_upload(body.get("image", ""))
     ref_dir = _chapter_ref_dir(chapter_id)
@@ -1491,8 +3141,9 @@ async def add_chapter_ref_image(chapter_id: int, request: Request, db: Session =
 
 
 @app.delete("/api/chapters/{chapter_id}/ref-images/{filename}")
-async def delete_chapter_ref_image(chapter_id: int, filename: str, db: Session = Depends(get_db)):
-    _require_chapter(chapter_id, db)
+async def delete_chapter_ref_image(chapter_id: int, filename: str, request: Request, db: Session = Depends(get_db)):
+    user = _require_user(request, db)
+    _require_chapter_for_user(chapter_id, user, db)
     if "/" in filename or "\\" in filename or ".." in filename:
         raise HTTPException(400, "invalid filename")
     p = _chapter_ref_dir(chapter_id) / filename
@@ -1572,14 +3223,16 @@ def _chapter_has_scene_file(chapter_id: int) -> bool:
 
 
 @app.get("/api/chapters/{chapter_id}/image-count")
-async def get_image_count(chapter_id: int, db: Session = Depends(get_db)):
-    _require_chapter(chapter_id, db)
+async def get_image_count(chapter_id: int, request: Request, db: Session = Depends(get_db)):
+    user = _require_user(request, db)
+    _require_chapter_for_user(chapter_id, user, db)
     return {"image_count": _load_image_count(chapter_id)}
 
 
 @app.put("/api/chapters/{chapter_id}/image-count")
-async def set_image_count(chapter_id: int, body: dict, db: Session = Depends(get_db)):
-    chapter = _require_chapter(chapter_id, db)
+async def set_image_count(chapter_id: int, body: dict, request: Request, db: Session = Depends(get_db)):
+    user = _require_user(request, db)
+    chapter = _require_chapter_for_user(chapter_id, user, db)
     if chapter.images or _chapter_has_scene_file(chapter_id):
         raise HTTPException(409, "Cannot change image count after scenes or images have been created")
     count = body.get("image_count", DEFAULT_IMAGE_COUNT)
@@ -1596,14 +3249,14 @@ async def set_image_count(chapter_id: int, body: dict, db: Session = Depends(get
 @app.post("/api/chapters/{chapter_id}/generate-scenes")
 async def generate_scenes_endpoint(chapter_id: int, request: Request, db: Session = Depends(get_db)):
     """Generate scene prompts from chat history. Returns them for user review."""
-    chapter = db.get(Chapter, chapter_id)
-    if not chapter:
-        raise HTTPException(404, "Chapter not found")
+    user = _require_user(request, db)
+    chapter = _require_chapter_for_user(chapter_id, user, db)
     if not chapter.messages:
         raise HTTPException(400, "No chat messages yet")
 
     image_count = _load_image_count(chapter_id)
     chat_history = [{"role": m.role, "content": m.content} for m in chapter.messages]
+    _check_and_consume_quota(user.id, "scene.generate.monthly_limit", 1, db, deduct=False)
     split_task = asyncio.create_task(
         split_scenes(
             chat_history,
@@ -1633,13 +3286,15 @@ async def generate_scenes_endpoint(chapter_id: int, request: Request, db: Sessio
                 await split_task
     sanitized_scenes, sanitized_indices = sanitize_scene_list(scenes)
     _write_scenes_file(chapter_id, sanitized_scenes, sanitized_indices)
+    _check_and_consume_quota(user.id, "scene.generate.monthly_limit", 1, db, deduct=True)
     return {"scenes": sanitized_scenes, "sanitized_indices": sanitized_indices}
 
 
 @app.get("/api/chapters/{chapter_id}/scenes")
-async def get_scenes_endpoint(chapter_id: int, db: Session = Depends(get_db)):
+async def get_scenes_endpoint(chapter_id: int, request: Request, db: Session = Depends(get_db)):
     """Load saved scene prompts from file."""
-    _require_chapter(chapter_id, db)
+    user = _require_user(request, db)
+    _require_chapter_for_user(chapter_id, user, db)
     prompts_file = Path(__file__).resolve().parent / "manga_outputs" / f"chapter_{chapter_id}" / "scenes.txt"
     if not prompts_file.exists():
         return {"scenes": [], "sanitized_indices": []}
@@ -1655,9 +3310,10 @@ async def get_scenes_endpoint(chapter_id: int, db: Session = Depends(get_db)):
 
 
 @app.put("/api/chapters/{chapter_id}/scenes")
-async def update_scenes_endpoint(chapter_id: int, body: dict, db: Session = Depends(get_db)):
+async def update_scenes_endpoint(chapter_id: int, body: dict, request: Request, db: Session = Depends(get_db)):
     """Save user-edited scene prompts."""
-    _require_chapter(chapter_id, db)
+    user = _require_user(request, db)
+    _require_chapter_for_user(chapter_id, user, db)
     scenes = body.get("scenes", [])
     image_count = _load_image_count(chapter_id)
     if not isinstance(scenes, list) or len(scenes) != image_count or not all(isinstance(s, str) and s.strip() for s in scenes):
@@ -1670,8 +3326,9 @@ async def update_scenes_endpoint(chapter_id: int, body: dict, db: Session = Depe
 # ─── SSE for manga image generation ─────────────────────
 
 @app.delete("/api/chapters/{chapter_id}/manga-images")
-async def reset_manga_images(chapter_id: int, db: Session = Depends(get_db)):
-    chapter = _require_chapter(chapter_id, db)
+async def reset_manga_images(chapter_id: int, request: Request, db: Session = Depends(get_db)):
+    user = _require_user(request, db)
+    chapter = _require_chapter_for_user(chapter_id, user, db)
     if chapter_id in ACTIVE_MANGA_GENERATIONS:
         raise HTTPException(409, "Manga generation is already running for this chapter")
     _clear_chapter_images_only(chapter, db)
@@ -1681,9 +3338,8 @@ async def reset_manga_images(chapter_id: int, db: Session = Depends(get_db)):
 
 @app.post("/api/chapters/{chapter_id}/generate-manga-stream")
 async def generate_manga_stream(chapter_id: int, request: Request, db: Session = Depends(get_db)):
-    chapter = db.get(Chapter, chapter_id)
-    if not chapter:
-        raise HTTPException(404, "Chapter not found")
+    user = _require_user(request, db)
+    chapter = _require_chapter_for_user(chapter_id, user, db)
 
     # Load scenes from file (must exist - user should generate/confirm scenes first)
     prompts_file = Path(__file__).resolve().parent / "manga_outputs" / f"chapter_{chapter_id}" / "scenes.txt"
@@ -1697,6 +3353,7 @@ async def generate_manga_stream(chapter_id: int, request: Request, db: Session =
         raise HTTPException(400, f"Expected {image_count} scenes, found {len(scenes)}")
     if chapter_id in ACTIVE_MANGA_GENERATIONS:
         raise HTTPException(409, "Manga generation is already running for this chapter")
+    _check_and_consume_quota(user.id, "manga.image.monthly_limit", len(scenes), db, deduct=False)
     ACTIVE_MANGA_GENERATIONS.add(chapter_id)
 
     # Check which images already exist
@@ -1765,6 +3422,7 @@ async def generate_manga_stream(chapter_id: int, request: Request, db: Session =
                 )
                 db.add(manga)
                 db.commit()
+                _check_and_consume_quota(user.id, "manga.image.monthly_limit", 1, db, deduct=True)
                 db.refresh(manga)
                 yield {
                     "event": "image",
@@ -1790,9 +3448,8 @@ async def generate_manga_stream(chapter_id: int, request: Request, db: Session =
 @app.post("/api/chapters/{chapter_id}/regenerate-image/{image_number}")
 async def regenerate_single_image(chapter_id: int, image_number: int, body: dict, request: Request, db: Session = Depends(get_db)):
     """Regenerate a single panel image with an updated prompt."""
-    chapter = db.get(Chapter, chapter_id)
-    if not chapter:
-        raise HTTPException(404, "Chapter not found")
+    user = _require_user(request, db)
+    chapter = _require_chapter_for_user(chapter_id, user, db)
     image_count = _load_image_count(chapter_id)
     if image_number < 1 or image_number > image_count:
         raise HTTPException(400, f"image_number must be 1-{image_count}")
@@ -1824,6 +3481,7 @@ async def regenerate_single_image(chapter_id: int, image_number: int, body: dict
     ref_entries = _effective_ref_entries(chapter_id, db)
     ref_imgs = _select_ref_image_paths_for_scene(prompt, ref_entries)
     try:
+        _check_and_consume_quota(user.id, "manga.regenerate.monthly_limit", 1, db, deduct=False)
         image_result = await generate_manga_image(
             prompt,
             chapter_id,
@@ -1856,6 +3514,7 @@ async def regenerate_single_image(chapter_id: int, image_number: int, body: dict
         )
         db.add(manga)
     db.commit()
+    _check_and_consume_quota(user.id, "manga.regenerate.monthly_limit", 1, db, deduct=True)
     db.refresh(manga)
 
     if old_path and old_path.exists() and old_path != Path(__file__).resolve().parent / image_result.image_path:
@@ -1876,9 +3535,8 @@ async def regenerate_single_image(chapter_id: int, image_number: int, body: dict
 
 @app.post("/api/stories/{story_id}/framework/generate")
 async def generate_framework_endpoint(story_id: int, request: Request, db: Session = Depends(get_db)):
-    story = db.get(Story, story_id)
-    if not story:
-        raise HTTPException(404, "Story not found")
+    user = _require_user(request, db)
+    story = _require_story_for_user(story_id, user, db)
     body = await request.json()
     description = body.get("description", "")
     if not isinstance(description, str) or not description.strip():
@@ -1886,6 +3544,7 @@ async def generate_framework_endpoint(story_id: int, request: Request, db: Sessi
     if not description.strip():
         raise HTTPException(400, "description is required")
 
+    _check_and_consume_quota(user.id, "framework.generate.monthly_limit", 1, db, deduct=False)
     framework = await generate_framework(description.strip(), api_key=_user_deepseek_api_key(request))
     framework = await _complete_framework_payload(
         framework,
@@ -1909,9 +3568,8 @@ async def generate_framework_endpoint(story_id: int, request: Request, db: Sessi
 
 @app.post("/api/stories/{story_id}/framework/tags")
 async def regenerate_tags_endpoint(story_id: int, request: Request, db: Session = Depends(get_db)):
-    story = db.get(Story, story_id)
-    if not story:
-        raise HTTPException(404, "Story not found")
+    user = _require_user(request, db)
+    story = _require_story_for_user(story_id, user, db)
 
     story_context = {
         "description": story.description or "",
@@ -1930,9 +3588,8 @@ async def regenerate_tags_endpoint(story_id: int, request: Request, db: Session 
 
 @app.post("/api/stories/{story_id}/framework/characters")
 async def regenerate_characters_endpoint(story_id: int, request: Request, db: Session = Depends(get_db)):
-    story = db.get(Story, story_id)
-    if not story:
-        raise HTTPException(404, "Story not found")
+    user = _require_user(request, db)
+    story = _require_story_for_user(story_id, user, db)
 
     story_context = {
         "description": story.description or "",
@@ -1951,9 +3608,8 @@ async def regenerate_characters_endpoint(story_id: int, request: Request, db: Se
 
 @app.post("/api/stories/{story_id}/framework/outline")
 async def regenerate_outline_endpoint(story_id: int, request: Request, db: Session = Depends(get_db)):
-    story = db.get(Story, story_id)
-    if not story:
-        raise HTTPException(404, "Story not found")
+    user = _require_user(request, db)
+    story = _require_story_for_user(story_id, user, db)
 
     story_context = {
         "description": story.description or "",
@@ -1971,10 +3627,9 @@ async def regenerate_outline_endpoint(story_id: int, request: Request, db: Sessi
 
 
 @app.post("/api/stories/{story_id}/framework/chapters/manual")
-def update_outline_chapter_plan(story_id: int, body: OutlineChapterPlanUpdate, db: Session = Depends(get_db)):
-    story = db.get(Story, story_id)
-    if not story:
-        raise HTTPException(404, "Story not found")
+def update_outline_chapter_plan(story_id: int, body: OutlineChapterPlanUpdate, request: Request, db: Session = Depends(get_db)):
+    user = _require_user(request, db)
+    story = _require_story_for_user(story_id, user, db)
 
     mode = (body.mode or "").strip().lower()
     if mode not in {"append", "insert_after", "update"}:
@@ -2036,9 +3691,8 @@ def update_outline_chapter_plan(story_id: int, body: OutlineChapterPlanUpdate, d
 
 @app.post("/api/stories/{story_id}/framework/adjust")
 async def adjust_framework_endpoint(story_id: int, request: Request, db: Session = Depends(get_db)):
-    story = db.get(Story, story_id)
-    if not story:
-        raise HTTPException(404, "Story not found")
+    user = _require_user(request, db)
+    story = _require_story_for_user(story_id, user, db)
 
     body = await request.json()
     messages = body.get("messages", [])
@@ -2058,6 +3712,7 @@ async def adjust_framework_endpoint(story_id: int, request: Request, db: Session
     story.characters = _merge_characters_payload(story.characters, framework.get("characters"))
     story.outline = _merge_framework_outline(story.outline, framework.get("outline"), framework.get("chapters"))
     db.commit()
+    _check_and_consume_quota(user.id, "framework.generate.monthly_limit", 1, db, deduct=True)
     db.refresh(story)
     return {
         "reply": result.get("reply", ""),
@@ -2073,9 +3728,8 @@ async def adjust_framework_endpoint(story_id: int, request: Request, db: Session
 
 @app.post("/api/stories/{story_id}/framework/continue")
 async def continue_framework_endpoint(story_id: int, request: Request, db: Session = Depends(get_db)):
-    story = db.get(Story, story_id)
-    if not story:
-        raise HTTPException(404, "Story not found")
+    user = _require_user(request, db)
+    story = _require_story_for_user(story_id, user, db)
 
     result = await continue_framework(
         _story_framework_context(story),
@@ -2102,9 +3756,8 @@ async def continue_framework_endpoint(story_id: int, request: Request, db: Sessi
 
 @app.post("/api/stories/{story_id}/expand-chapter", response_model=ChapterOut)
 async def expand_chapter_endpoint(story_id: int, request: Request, db: Session = Depends(get_db)):
-    story = db.get(Story, story_id)
-    if not story:
-        raise HTTPException(404, "Story not found")
+    user = _require_user(request, db)
+    story = _require_story_for_user(story_id, user, db)
     body = await request.json()
     act = body.get("act", "")
     chapter_title = body.get("chapter_title", "")
@@ -2125,6 +3778,7 @@ async def expand_chapter_endpoint(story_id: int, request: Request, db: Session =
         "chapter_number": chapter_number_val,
     }
 
+    _check_and_consume_quota(user.id, "chapter.expand.monthly_limit", 1, db, deduct=False)
     novel_content = await expand_chapter_to_content(
         story_context,
         chapter_info,
@@ -2159,13 +3813,15 @@ async def expand_chapter_endpoint(story_id: int, request: Request, db: Session =
         db.flush()
     db.add(ChatMessage(chapter_id=chapter.id, role="assistant", content=novel_content))
     db.commit()
+    _check_and_consume_quota(user.id, "chapter.expand.monthly_limit", 1, db, deduct=True)
     db.refresh(chapter)
     return chapter
 
 
 @app.post("/api/chapters/{chapter_id}/rewrite-selection")
 async def rewrite_selection_endpoint(chapter_id: int, request: Request, db: Session = Depends(get_db)):
-    chapter = _require_chapter(chapter_id, db)
+    user = _require_user(request, db)
+    chapter = _require_chapter_for_user(chapter_id, user, db)
     body = await request.json()
     selected_text = body.get("selected_text", "")
     chapter_context = body.get("chapter_context", body.get("context", ""))
@@ -2185,7 +3841,8 @@ async def rewrite_selection_endpoint(chapter_id: int, request: Request, db: Sess
 
 @app.post("/api/chapters/{chapter_id}/adjust-content", response_model=ChapterOut)
 async def adjust_chapter_content_endpoint(chapter_id: int, request: Request, db: Session = Depends(get_db)):
-    chapter = _require_chapter(chapter_id, db)
+    user = _require_user(request, db)
+    chapter = _require_chapter_for_user(chapter_id, user, db)
     body = await request.json()
     instruction = body.get("instruction", "")
 
@@ -2215,7 +3872,8 @@ async def adjust_chapter_content_endpoint(chapter_id: int, request: Request, db:
 
 @app.post("/api/chapters/{chapter_id}/quality-assess")
 async def quality_assess_endpoint(chapter_id: int, request: Request, db: Session = Depends(get_db)):
-    chapter = _require_chapter(chapter_id, db)
+    user = _require_user(request, db)
+    chapter = _require_chapter_for_user(chapter_id, user, db)
     content = chapter.novel_content or ""
     if not content.strip():
         raise HTTPException(400, "Chapter has no novel content to assess")
@@ -2232,7 +3890,8 @@ async def quality_assess_endpoint(chapter_id: int, request: Request, db: Session
 
 @app.post("/api/chapters/{chapter_id}/scenes-from-selection")
 async def scenes_from_selection_endpoint(chapter_id: int, request: Request, db: Session = Depends(get_db)):
-    _require_chapter(chapter_id, db)
+    user = _require_user(request, db)
+    _require_chapter_for_user(chapter_id, user, db)
     body = await request.json()
     selected_text = body.get("selected_text", "")
     character_profiles = body.get("character_profiles", body.get("characters", ""))
@@ -2247,12 +3906,14 @@ async def scenes_from_selection_endpoint(chapter_id: int, request: Request, db: 
     if page_count > 20:
         page_count = 20
 
+    _check_and_consume_quota(user.id, "scene.generate.monthly_limit", 1, db, deduct=False)
     scenes = await scenes_from_selection(
         selected_text.strip(),
         character_profiles=character_profiles,
         page_count=page_count,
         api_key=_user_deepseek_api_key(request),
     )
+    _check_and_consume_quota(user.id, "scene.generate.monthly_limit", 1, db, deduct=True)
     sanitized_scenes, sanitized_indices = sanitize_scene_list(scenes)
     return {"scenes": sanitized_scenes, "page_count": page_count, "sanitized_indices": sanitized_indices}
 

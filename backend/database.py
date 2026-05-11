@@ -42,6 +42,8 @@ def _migrate():
     if "stories" in insp.get_table_names():
         cols = {c["name"] for c in insp.get_columns("stories")}
         with engine.begin() as conn:
+            if "owner_user_id" not in cols:
+                conn.execute(text("ALTER TABLE stories ADD COLUMN owner_user_id INTEGER"))
             if "description" not in cols:
                 conn.execute(text("ALTER TABLE stories ADD COLUMN description TEXT DEFAULT ''"))
             if "cover_image" not in cols:
@@ -96,6 +98,27 @@ def _migrate():
                 END
                 WHERE content_source IS NULL
             """))
+    if "billing_orders" in insp.get_table_names():
+        cols = {c["name"] for c in insp.get_columns("billing_orders")}
+        with engine.begin() as conn:
+            if "source" not in cols:
+                conn.execute(text("ALTER TABLE billing_orders ADD COLUMN source VARCHAR(32) DEFAULT 'system'"))
+            if "billing_cycle" not in cols:
+                conn.execute(text("ALTER TABLE billing_orders ADD COLUMN billing_cycle VARCHAR(20) DEFAULT 'monthly'"))
+            if "payment_provider" not in cols:
+                conn.execute(text("ALTER TABLE billing_orders ADD COLUMN payment_provider VARCHAR(32) DEFAULT 'mock'"))
+            if "payment_method" not in cols:
+                conn.execute(text("ALTER TABLE billing_orders ADD COLUMN payment_method VARCHAR(32) DEFAULT 'mock_qr'"))
+            if "operator_user_id" not in cols:
+                conn.execute(text("ALTER TABLE billing_orders ADD COLUMN operator_user_id INTEGER"))
+            if "note" not in cols:
+                conn.execute(text("ALTER TABLE billing_orders ADD COLUMN note TEXT"))
+            if "extra_json" not in cols:
+                conn.execute(text("ALTER TABLE billing_orders ADD COLUMN extra_json JSON"))
+            if "paid_at" not in cols:
+                conn.execute(text("ALTER TABLE billing_orders ADD COLUMN paid_at TIMESTAMP"))
+            if "expired_at" not in cols:
+                conn.execute(text("ALTER TABLE billing_orders ADD COLUMN expired_at TIMESTAMP"))
     _cleanup_duplicate_chapters()
     _cleanup_duplicate_manga_images()
     _add_unique_constraints()

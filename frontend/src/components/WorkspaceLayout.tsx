@@ -37,8 +37,8 @@ export default function WorkspaceLayout({
   );
 
   return (
-    <div className="flex flex-1 min-h-0">
-      <div className="w-[280px] shrink-0 border-r border-gray-800 overflow-y-auto">
+    <div className="flex h-full min-h-0 gap-4 bg-[linear-gradient(180deg,_#f4f8ff_0%,_#eef4ff_100%)] p-4">
+      <div className="w-[320px] shrink-0 overflow-y-auto rounded-[24px] border border-[#d7e3f4] bg-[rgba(255,255,255,0.92)] shadow-[0_18px_42px_rgba(59,130,246,0.12)] backdrop-blur-xl">
         <FrameworkPanel
           story={story}
           chapters={chapters}
@@ -47,7 +47,7 @@ export default function WorkspaceLayout({
         />
       </div>
 
-      <div className="flex-1 min-w-0 overflow-hidden">
+      <div className="flex-1 min-w-0 overflow-hidden rounded-[24px] border border-[#d7e3f4] bg-[rgba(255,255,255,0.92)] shadow-[0_18px_42px_rgba(59,130,246,0.12)] backdrop-blur-xl">
         <EditorPanel
           story={story}
           chapters={chapters}
@@ -61,7 +61,7 @@ export default function WorkspaceLayout({
         />
       </div>
 
-      <div className="w-[380px] shrink-0 border-l border-gray-800 overflow-y-auto">
+      <div className="w-[400px] shrink-0 overflow-y-auto rounded-[24px] border border-[#d7e3f4] bg-[rgba(255,255,255,0.92)] shadow-[0_18px_42px_rgba(59,130,246,0.12)] backdrop-blur-xl">
         <MangaPanel
           chapter={resolvedChapter}
           onChapterRefresh={onContentUpdated}

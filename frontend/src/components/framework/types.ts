@@ -13,7 +13,7 @@ export const BIG_FIVE_LABELS: Record<string, string> = {
   C: '尽责性',
   E: '外向性',
   A: '宜人性',
-  N: '神经质',
+  N: '情绪性',
 };
 
 export const BIG_FIVE_COLORS: Record<string, string> = {
@@ -25,17 +25,17 @@ export const BIG_FIVE_COLORS: Record<string, string> = {
 };
 
 export const STATUS_COLORS: Record<string, string> = {
-  pending: 'bg-gray-600 text-gray-200',
-  draft: 'bg-yellow-600/80 text-yellow-100',
-  completed: 'bg-emerald-600/80 text-emerald-100',
-  reviewed: 'bg-blue-600/80 text-blue-100',
+  pending: 'bg-slate-100 text-slate-600',
+  draft: 'bg-amber-100 text-amber-700',
+  completed: 'bg-emerald-100 text-emerald-700',
+  reviewed: 'bg-blue-100 text-blue-700',
 };
 
 export const STATUS_LABELS: Record<string, string> = {
   pending: '待处理',
   draft: '草稿',
   completed: '已完成',
-  reviewed: '已审核',
+  reviewed: '已校对',
 };
 
 export function actPercentage(act: string): string {

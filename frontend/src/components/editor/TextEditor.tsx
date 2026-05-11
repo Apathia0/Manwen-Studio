@@ -59,21 +59,21 @@ export default function TextEditor({
 
   if (loading) {
     return (
-      <div className="flex-1 flex flex-col min-h-0 bg-gray-900/40">
+      <div className="flex-1 flex flex-col min-h-0 bg-[#fbfcf8]">
         <div className="flex-1 p-6 space-y-4">
           {Array.from({ length: 8 }, (_, i) => (
             <div key={i} className="flex gap-4">
               <div
-                className="h-4 bg-gray-800/60 rounded animate-pulse"
+                className="h-4 bg-[#edf1ec] rounded animate-pulse"
                 style={{ width: `${60 + Math.random() * 40}%` }}
               />
             </div>
           ))}
         </div>
-        <div className="absolute inset-0 flex items-center justify-center bg-gray-950/20">
-          <div className="flex items-center gap-3 px-4 py-3 rounded-xl bg-gray-900/90 border border-gray-800 shadow-lg">
-            <Loader2 size={18} className="animate-spin text-amber-400" />
-            <span className="text-sm text-gray-300 font-medium">内容生成中…</span>
+        <div className="absolute inset-0 flex items-center justify-center bg-[#fcfcfa]/20">
+          <div className="flex items-center gap-3 px-4 py-3 rounded-xl bg-white/95 border border-[#d9dfd7] shadow-lg">
+            <Loader2 size={18} className="animate-spin text-blue-500" />
+            <span className="text-sm text-slate-700 font-medium">内容生成中...</span>
           </div>
         </div>
       </div>
@@ -82,18 +82,18 @@ export default function TextEditor({
 
   if (editing) {
     return (
-      <div className="flex-1 min-h-0 bg-gray-900/40 relative">
+      <div className="flex-1 min-h-0 bg-[#fbfcf8] relative">
         <textarea
           value={draftContent}
           onChange={(e) => onDraftChange?.(e.target.value)}
-          className="w-full h-full resize-none bg-transparent px-6 md:px-10 py-8 text-base leading-8 text-gray-200
+          className="w-full h-full resize-none bg-transparent px-6 md:px-10 py-8 text-base leading-8 text-slate-800
                      whitespace-pre-wrap font-['Lora',Georgia,serif] outline-none"
-          placeholder="输入或编辑正文内容…"
+          placeholder="输入或编辑正文内容..."
         />
         {saving && (
-          <div className="absolute top-4 right-4 inline-flex items-center gap-2 rounded-full bg-gray-900/95 border border-gray-800 px-3 py-1.5 text-xs text-amber-300">
+          <div className="absolute top-4 right-4 inline-flex items-center gap-2 rounded-full bg-white/95 border border-[#d9dfd7] px-3 py-1.5 text-xs text-blue-600">
             <Loader2 size={13} className="animate-spin" />
-            保存中…
+            保存中...
           </div>
         )}
       </div>
@@ -102,11 +102,11 @@ export default function TextEditor({
 
   if (!content) {
     return (
-      <div className="flex-1 flex items-center justify-center bg-gray-900/40">
+      <div className="flex-1 flex items-center justify-center bg-[#fbfcf8]">
         <div className="flex flex-col items-center gap-3 text-center max-w-sm px-6">
-          <div className="w-14 h-14 rounded-2xl bg-gray-800/60 flex items-center justify-center border border-gray-700/50">
+          <div className="w-14 h-14 rounded-2xl bg-[#edf1ec] flex items-center justify-center border border-[#d9dfd7]">
             <svg
-              className="w-7 h-7 text-gray-600"
+              className="w-7 h-7 text-slate-500"
               fill="none"
               viewBox="0 0 24 24"
               stroke="currentColor"
@@ -120,8 +120,8 @@ export default function TextEditor({
             </svg>
           </div>
           <div>
-            <p className="text-sm text-gray-500 font-medium">尚无小说内容</p>
-            <p className="text-xs text-gray-600 mt-1 leading-relaxed">
+            <p className="text-sm text-slate-500 font-medium">尚无小说内容</p>
+            <p className="text-xs text-slate-500 mt-1 leading-relaxed">
               点击左侧大纲节点或章节生成内容
             </p>
           </div>
@@ -133,11 +133,11 @@ export default function TextEditor({
   return (
     <div
       ref={containerRef}
-      className="flex-1 overflow-y-auto bg-gray-900/40 select-text"
+      className="flex-1 overflow-y-auto bg-[#fbfcf8] select-text"
       onMouseUp={handleMouseUp}
     >
       <div
-        className="max-w-3xl mx-auto px-6 md:px-10 py-8 text-base leading-8 text-gray-200 whitespace-pre-wrap font-['Lora',Georgia,serif] selection:bg-amber-500/30"
+        className="max-w-3xl mx-auto px-6 md:px-10 py-8 text-base leading-8 text-slate-800 whitespace-pre-wrap font-['Lora',Georgia,serif] selection:bg-blue-200"
         style={{ fontVariantLigatures: 'common' }}
       >
         {content}

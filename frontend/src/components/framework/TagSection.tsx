@@ -10,10 +10,10 @@ interface Props {
 }
 
 const TAG_ENTRIES: { key: keyof Tags; label: string; color: string }[] = [
-  { key: 'type', label: '类型', color: 'bg-blue-500/20 text-blue-300 border-blue-600/30' },
-  { key: 'theme', label: '主题', color: 'bg-emerald-500/20 text-emerald-300 border-emerald-600/30' },
-  { key: 'style', label: '风格', color: 'bg-amber-500/20 text-amber-300 border-amber-600/30' },
-  { key: 'audience', label: '受众', color: 'bg-violet-500/20 text-violet-300 border-violet-600/30' },
+  { key: 'type', label: '类型', color: 'bg-blue-50 text-blue-700 border-blue-200' },
+  { key: 'theme', label: '主题', color: 'bg-emerald-50 text-emerald-700 border-emerald-200' },
+  { key: 'style', label: '风格', color: 'bg-amber-50 text-amber-700 border-amber-200' },
+  { key: 'audience', label: '受众', color: 'bg-violet-50 text-violet-700 border-violet-200' },
 ];
 
 export default function TagSection({ tags, storyId, onUpdate }: Props) {
@@ -36,9 +36,9 @@ export default function TagSection({ tags, storyId, onUpdate }: Props) {
     try {
       const result = await regenerateTags(storyId);
       setLocalTags(result);
-      onUpdate();
+      await onUpdate();
     } catch (err: any) {
-      setError(err.message || '生成失败');
+      setError(err.message || '生成标签失败');
     } finally {
       setLoading(false);
     }
@@ -59,14 +59,10 @@ export default function TagSection({ tags, storyId, onUpdate }: Props) {
       setEditingKey(null);
       await onUpdate();
     } catch (err: any) {
-      setError(err.message || '保存失败');
+      setError(err.message || '保存标签失败');
     } finally {
       setLoading(false);
     }
-  };
-
-  const cancelEdit = () => {
-    setEditingKey(null);
   };
 
   const handleKeyDown = (e: React.KeyboardEvent, key: keyof Tags) => {
@@ -75,29 +71,25 @@ export default function TagSection({ tags, storyId, onUpdate }: Props) {
       void saveEdit(key);
     }
     if (e.key === 'Escape') {
-      cancelEdit();
+      setEditingKey(null);
     }
   };
 
   if (!hasContent && !loading) {
     return (
       <div className="space-y-3">
-        <p className="text-xs text-gray-600">点击下方按钮，AI 将自动分析并生成故事的标签设定。</p>
+        <p className="text-xs text-slate-600">点击下方按钮，AI 将自动分析并生成故事的标签设定。</p>
         <button
           onClick={handleRegenerate}
           disabled={loading}
           className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg
-                     bg-violet-600/20 hover:bg-violet-600/30 text-violet-300 border border-violet-700/40
+                     bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-200
                      disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
         >
-          {loading ? (
-            <RefreshCw size={13} className="animate-spin" />
-          ) : (
-            <Sparkles size={13} />
-          )}
+          {loading ? <RefreshCw size={13} className="animate-spin" /> : <Sparkles size={13} />}
           AI 生成标签
         </button>
-        {error && <p className="text-xs text-red-400">{error}</p>}
+        {error && <p className="text-xs text-red-500">{error}</p>}
       </div>
     );
   }
@@ -108,7 +100,7 @@ export default function TagSection({ tags, storyId, onUpdate }: Props) {
         const value = displayTags?.[key];
         return (
           <div key={key} className="flex items-center gap-2.5">
-            <span className="text-[11px] font-medium text-gray-500 w-8 shrink-0 text-right">{label}</span>
+            <span className="text-[11px] font-medium text-slate-500 w-8 shrink-0 text-right">{label}</span>
             <div className="flex-1 min-w-0">
               {editingKey === key ? (
                 <div className="flex items-center gap-1">
@@ -118,19 +110,19 @@ export default function TagSection({ tags, storyId, onUpdate }: Props) {
                     onChange={(e) => setEditValue(e.target.value)}
                     onKeyDown={(e) => handleKeyDown(e, key)}
                     placeholder="输入标签值"
-                    className="w-full max-w-[180px] bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs
-                               text-gray-200 placeholder-gray-600 outline-none focus:border-violet-500 transition-colors"
+                    className="w-full max-w-[180px] rounded-md border border-slate-200 bg-white px-2 py-1 text-xs
+                               text-slate-700 placeholder-slate-400 outline-none focus:border-blue-400 transition-colors"
                   />
                   <button
                     onClick={() => void saveEdit(key)}
-                    className="p-0.5 text-emerald-400 hover:text-emerald-300 transition-colors"
+                    className="p-0.5 text-emerald-600 hover:text-emerald-500 transition-colors"
                     title="确认"
                   >
                     <Check size={12} />
                   </button>
                   <button
-                    onClick={cancelEdit}
-                    className="p-0.5 text-gray-500 hover:text-gray-300 transition-colors"
+                    onClick={() => setEditingKey(null)}
+                    className="p-0.5 text-slate-400 hover:text-slate-600 transition-colors"
                     title="取消"
                   >
                     <X size={12} />
@@ -139,12 +131,11 @@ export default function TagSection({ tags, storyId, onUpdate }: Props) {
               ) : (
                 <span
                   onClick={() => startEdit(key)}
-                  className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-medium
-                              border cursor-pointer transition-opacity hover:opacity-80 ${color}`}
+                  className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-medium border cursor-pointer transition-opacity hover:opacity-80 ${color}`}
                   title="点击编辑"
                 >
                   {value || '未设置'}
-                  {value && <Pencil size={9} className="opacity-50" />}
+                  {value && <Pencil size={9} className="opacity-60" />}
                 </span>
               )}
             </div>
@@ -157,13 +148,13 @@ export default function TagSection({ tags, storyId, onUpdate }: Props) {
           onClick={handleRegenerate}
           disabled={loading}
           className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg
-                     bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-gray-200 border border-gray-700
+                     bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-200
                      disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
         >
           <RefreshCw size={12} className={loading ? 'animate-spin' : ''} />
           重新生成
         </button>
-        {error && <span className="text-xs text-red-400">{error}</span>}
+        {error && <span className="text-xs text-red-500">{error}</span>}
       </div>
     </div>
   );

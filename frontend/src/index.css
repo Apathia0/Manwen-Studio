@@ -2,28 +2,30 @@
 
 body {
   margin: 0;
-  font-family: 'Inter', 'Segoe UI', system-ui, -apple-system, sans-serif;
+  font-family: "IBM Plex Sans", "Source Han Sans SC", "PingFang SC", "Noto Sans CJK SC", "Segoe UI", sans-serif;
+  background: linear-gradient(180deg, #f4f8ff 0%, #eef4ff 42%, #f8fbff 100%);
+  color: #0f172a;
 }
 
 /* Custom scrollbar */
 ::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
+  width: 8px;
+  height: 8px;
 }
 ::-webkit-scrollbar-track {
-  background: transparent;
+  background: #edf3ff;
 }
 ::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.1);
-  border-radius: 3px;
+  background: #bfd0ea;
+  border-radius: 4px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: rgba(255, 255, 255, 0.2);
+  background: #9fb6da;
 }
 /* Firefox */
 * {
   scrollbar-width: thin;
-  scrollbar-color: rgba(255, 255, 255, 0.1) transparent;
+  scrollbar-color: #bfd0ea #edf3ff;
 }
 
 @keyframes barbershop {

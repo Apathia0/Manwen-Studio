@@ -1,671 +1,1978 @@
-import { useEffect, useState } from 'react';
-import { ChevronLeft, ChevronRight, Plus, BookOpenText, Trash2, Home, MessageSquare, Image, PanelLeftClose, PanelLeftOpen, KeyRound, ExternalLink, X } from 'lucide-react';
-import ChatPanel from './components/ChatPanel';
-import MangaPanel from './components/MangaPanel';
-import HomePage from './components/HomePage';
+import { useEffect, useMemo, useState } from 'react';
+import {
+  Brush,
+  Check,
+  CreditCard,
+  Gauge,
+  Home,
+  LogOut,
+  MessageSquareQuote,
+  Pencil,
+  Plus,
+  ScrollText,
+  Settings2,
+  ShieldCheck,
+  Trash2,
+  UserCircle2,
+  WandSparkles,
+  X,
+} from 'lucide-react';
+import PublicLanding from './components/PublicLanding';
 import WorkspaceLayout from './components/WorkspaceLayout';
 import {
+  AdminAuditLogsPage,
+  AdminOrdersPage,
+  AdminPlanManagementPage,
+  AdminPlatformSettingsPage,
+  AdminUserManagementPage,
+} from './components/admin/AdminPages';
+import {
+  adminGrantUserQuota,
+  adminUpdateUserSubscription,
+  cancelMyOrder,
+  clearAuthToken,
+  confirmMyOrderMock,
+  createStory,
+  getAdminOrders,
+  getAdminPlanFeatures,
+  getAdminPlans,
+  getAdminQuotaRules,
+  getAdminUserEntitlements,
+  getMyEntitlements,
+  getMyOrders,
+  getPublicPlatformSettings,
+  getMySubscription,
+  getMyUsage,
+  getPublicPlans,
+  getStory,
   listChapters,
   listStories,
-  createNextChapter,
-  deleteChapter,
-  getChapter,
-  getStory,
-  type Story,
+  login,
+  logout as logoutApi,
+  me,
+  register,
+  saveAdminPlanFeatures,
+  saveAdminQuotaRules,
+  setAuthToken,
+  subscribePlan,
+  updateStory,
+  deleteStory,
+  type AdminFeatureItem,
+  type AdminOrderItem,
+  type AdminPlan,
+  type AdminQuotaRule,
+  type AuthUser,
   type Chapter,
-  getApiKeySettings,
-  saveApiKeySettings,
-  clearApiKeySettings,
-  API_KEY_CHANGE_EVENT,
-  DEEPSEEK_USAGE_URL,
-  IMAGE2_CONSOLE_URL,
+  type EntitlementResponse,
+  type MySubscriptionResponse,
+  type PublicPlatformSettings,
+  type PublicPlan,
+  type Story,
+  type UsageResponse,
 } from './api';
 
-type View = 'home' | 'editor';
-type MobileTab = 'chat' | 'manga';
+type RouteKey =
+  | 'landing'
+  | 'login'
+  | 'register'
+  | 'pricing'
+  | 'stories'
+  | 'workspace'
+  | 'account'
+  | 'plan-config'
+  | 'quota-rules'
+  | 'entitlements'
+  | 'orders'
+  | 'audit-logs';
 
-const LS_STORY_ID = 'lorevista.currentStoryId';
-const LS_CHAPTER_ID = 'lorevista.currentChapterId';
-const LS_CHAPTER_IDX = 'lorevista.currentChapterIdx';
-const MOBILE_BREAKPOINT = 768;
+type NavItem = {
+  key: RouteKey;
+  label: string;
+  icon: React.ComponentType<{ size?: number; className?: string }>;
+};
 
-function chapterHash(chapterNumber: number) {
-  return `chapter-${chapterNumber}`;
-}
+const USER_NAV: NavItem[] = [
+  { key: 'stories', label: '作品', icon: Home },
+  { key: 'workspace', label: '创作工作台', icon: Brush },
+  { key: 'account', label: '账户与用量', icon: UserCircle2 },
+  { key: 'pricing', label: '套餐订阅', icon: CreditCard },
+];
 
-function parseChapterNumberHash(): number | null {
-  const raw = window.location.hash.replace(/^#/, '');
-  const match = raw.match(/^chapter-(\d+)$/);
-  return match ? Number(match[1]) : null;
-}
+const ADMIN_NAV: NavItem[] = [
+  { key: 'plan-config', label: '套餐配置', icon: Settings2 },
+  { key: 'quota-rules', label: '配额规则', icon: Gauge },
+  { key: 'entitlements', label: '用户权益', icon: ShieldCheck },
+  { key: 'orders', label: '订单订阅', icon: ScrollText },
+  { key: 'audit-logs', label: '操作审计', icon: MessageSquareQuote },
+];
 
-function useIsMobile() {
-  const [isMobile, setIsMobile] = useState(window.innerWidth < MOBILE_BREAKPOINT);
-  useEffect(() => {
-    const mq = window.matchMedia(`(max-width: ${MOBILE_BREAKPOINT - 1}px)`);
-    const handler = (e: MediaQueryListEvent) => setIsMobile(e.matches);
-    mq.addEventListener('change', handler);
-    return () => mq.removeEventListener('change', handler);
-  }, []);
-  return isMobile;
-}
-
-function useIsLargeScreen() {
-  const [isLarge, setIsLarge] = useState(window.innerWidth >= 1024);
-  useEffect(() => {
-    const mq = window.matchMedia('(min-width: 1024px)');
-    const handler = (e: MediaQueryListEvent) => setIsLarge(e.matches);
-    mq.addEventListener('change', handler);
-    return () => mq.removeEventListener('change', handler);
-  }, []);
-  return isLarge;
-}
-
-function useApiKeyConfigured() {
-  const read = () => {
-    const s = getApiKeySettings();
-    return { deepseek: !!s.deepseekApiKey, image: !!s.imageApiKey };
-  };
-  const [state, setState] = useState(read);
-  useEffect(() => {
-    const sync = () => setState(read());
-    window.addEventListener(API_KEY_CHANGE_EVENT, sync);
-    window.addEventListener('storage', sync);
-    return () => {
-      window.removeEventListener(API_KEY_CHANGE_EVENT, sync);
-      window.removeEventListener('storage', sync);
-    };
-  }, []);
-  return state;
-}
-
-function ApiKeySettingsModal({ open, onClose }: { open: boolean; onClose: () => void }) {
-  const [deepseekApiKey, setDeepseekApiKey] = useState('');
-  const [imageApiKey, setImageApiKey] = useState('');
-
-  useEffect(() => {
-    if (!open) return;
-    const settings = getApiKeySettings();
-    setDeepseekApiKey(settings.deepseekApiKey);
-    setImageApiKey(settings.imageApiKey);
-  }, [open]);
-
-  if (!open) return null;
-
-  const handleSave = () => {
-    saveApiKeySettings({ deepseekApiKey, imageApiKey });
-    onClose();
-  };
-
-  const handleClear = () => {
-    if (!window.confirm('确定要清除已保存的两个 API Key 吗？')) return;
-    clearApiKeySettings();
-    setDeepseekApiKey('');
-    setImageApiKey('');
-  };
-
-  const hasAny = !!(deepseekApiKey || imageApiKey);
-
-  return (
-    <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/70 p-4" onClick={onClose}>
-      <div
-        className="w-full max-w-lg rounded-xl border border-gray-800 bg-gray-950 shadow-2xl"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="flex items-center justify-between border-b border-gray-800 px-5 py-4">
-          <div className="flex items-center gap-2">
-            <KeyRound size={18} className="text-violet-400" />
-            <h2 className="text-sm font-semibold text-gray-100">API Key 设置</h2>
-          </div>
-          <button onClick={onClose} className="rounded-lg p-1.5 text-gray-500 hover:bg-gray-800 hover:text-white">
-            <X size={16} />
-          </button>
-        </div>
-
-        <div className="space-y-5 px-5 py-5">
-          <div className="space-y-2">
-            <div className="flex items-center justify-between gap-3">
-              <label className="text-xs font-medium text-gray-300">DeepSeek API Key</label>
-              <a
-                href={DEEPSEEK_USAGE_URL}
-                target="_blank"
-                rel="noreferrer"
-                className="inline-flex items-center gap-1 text-xs text-violet-300 hover:text-violet-200"
-              >
-                充值 / 用量
-                <ExternalLink size={12} />
-              </a>
-            </div>
-            <input
-              type="password"
-              value={deepseekApiKey}
-              onChange={(e) => setDeepseekApiKey(e.target.value)}
-              placeholder="sk-..."
-              className="w-full rounded-lg border border-gray-800 bg-gray-900 px-3 py-2 text-sm text-gray-100 outline-none focus:border-violet-500"
-            />
-            <p className="text-xs text-gray-500">用于 AI 对话、生成小说正文和生成分镜。</p>
-          </div>
-
-          <div className="space-y-2">
-            <div className="flex items-center justify-between gap-3">
-              <label className="text-xs font-medium text-gray-300">Image2 API Key</label>
-              <a
-                href={IMAGE2_CONSOLE_URL}
-                target="_blank"
-                rel="noreferrer"
-                className="inline-flex items-center gap-1 text-xs text-amber-300 hover:text-amber-200"
-              >
-                充值链接
-                <ExternalLink size={12} />
-              </a>
-            </div>
-            <input
-              type="password"
-              value={imageApiKey}
-              onChange={(e) => setImageApiKey(e.target.value)}
-              placeholder="填入图片生成 API Key"
-              className="w-full rounded-lg border border-gray-800 bg-gray-900 px-3 py-2 text-sm text-gray-100 outline-none focus:border-amber-500"
-            />
-            <p className="text-xs text-gray-500">用于生成漫画图片和重新生成单张图片。</p>
-          </div>
-        </div>
-
-        <div className="flex items-center justify-between gap-2 border-t border-gray-800 px-5 py-4">
-          <button
-            onClick={handleClear}
-            disabled={!hasAny}
-            className="rounded-lg px-3 py-2 text-xs text-rose-400 hover:bg-rose-500/10 hover:text-rose-300 disabled:cursor-not-allowed disabled:text-gray-600 disabled:hover:bg-transparent"
-          >
-            清除已保存
-          </button>
-          <div className="flex gap-2">
-            <button onClick={onClose} className="rounded-lg px-4 py-2 text-sm text-gray-400 hover:bg-gray-800 hover:text-white">
-              取消
-            </button>
-            <button onClick={handleSave} className="rounded-lg bg-violet-600 px-4 py-2 text-sm font-medium text-white hover:bg-violet-500">
-              保存
-            </button>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function ApiKeyButton({ onClick, compact = false }: { onClick: () => void; compact?: boolean }) {
-  const { deepseek, image } = useApiKeyConfigured();
-  const status: 'ok' | 'partial' | 'none' =
-    deepseek && image ? 'ok' : deepseek || image ? 'partial' : 'none';
-  const dotColor =
-    status === 'ok' ? 'bg-emerald-400' : status === 'partial' ? 'bg-amber-400' : 'bg-rose-500';
-  const tipText =
-    status === 'ok'
-      ? '已配置 DeepSeek + Image2 API Key'
-      : status === 'partial'
-      ? `仅配置了 ${deepseek ? 'DeepSeek' : 'Image2'} API Key`
-      : '未配置 API Key — 点击设置';
-  return (
-    <button
-      onClick={onClick}
-      className="relative inline-flex items-center gap-1.5 rounded-lg border border-gray-800 bg-gray-900 px-3 py-2 text-xs font-medium text-gray-300 hover:border-violet-600 hover:text-white"
-      title={tipText}
-    >
-      <KeyRound size={14} />
-      {!compact && 'API Key'}
-      <span
-        className={`absolute -top-1 -right-1 h-2.5 w-2.5 rounded-full ring-2 ring-gray-950 ${dotColor}`}
-        aria-hidden
-      />
-    </button>
-  );
-}
+ADMIN_NAV[0].label = '套餐管理';
+ADMIN_NAV[1].label = '平台配置';
+ADMIN_NAV[2].label = '用户管理';
+ADMIN_NAV[3].label = '订单中心';
+ADMIN_NAV[4].label = '操作审计';
 
 function App() {
-  const isMobile = useIsMobile();
-  const isLargeScreen = useIsLargeScreen();
-  const [view, setView] = useState<View>('home');
-  const [story, setStory] = useState<Story | null>(null);
+  const [session, setSession] = useState<AuthUser | null>(null);
+  const [route, setRoute] = useState<RouteKey>('landing');
+  const [stories, setStories] = useState<Story[]>([]);
+  const [activeStory, setActiveStory] = useState<Story | null>(null);
   const [chapters, setChapters] = useState<Chapter[]>([]);
-  const [currentIdx, _setCurrentIdx] = useState(0);
-  const [mobileTab, setMobileTab] = useState<MobileTab>('chat');
-  const [chapterNavOpen, setChapterNavOpen] = useState(true);
-  const [apiKeyModalOpen, setApiKeyModalOpen] = useState(false);
+  const [activeChapterId, setActiveChapterId] = useState<number | null>(null);
+  const [loadingStories, setLoadingStories] = useState(false);
+  const [loadingWorkspace, setLoadingWorkspace] = useState(false);
+  const [plans, setPlans] = useState<PublicPlan[]>([]);
+  const [platform, setPlatform] = useState<PublicPlatformSettings>({
+    site_name: 'LoreVista',
+    site_slogan: 'AI 小说与漫画创作平台',
+    support_email: '',
+    icp: '',
+    copyright: '',
+    notice: '',
+    icon_url: '/favicon.svg',
+  });
+  const [usage, setUsage] = useState<UsageResponse | null>(null);
+  const [myEntitlements, setMyEntitlements] = useState<EntitlementResponse | null>(null);
+  const [mySubscription, setMySubscription] = useState<MySubscriptionResponse | null>(null);
+  const [myOrders, setMyOrders] = useState<AdminOrderItem[]>([]);
+  const [subscribingPlanId, setSubscribingPlanId] = useState<number | null>(null);
+  const [actioningOrderNo, setActioningOrderNo] = useState<string | null>(null);
+  const [adminPlans, setAdminPlans] = useState<AdminPlan[]>([]);
+  const [adminPlanId, setAdminPlanId] = useState<number | null>(null);
+  const [adminFeatures, setAdminFeatures] = useState<AdminFeatureItem[]>([]);
+  const [adminRules, setAdminRules] = useState<AdminQuotaRule[]>([]);
+  const [adminOrders, setAdminOrders] = useState<AdminOrderItem[]>([]);
+  const [entitlementLookupUserId, setEntitlementLookupUserId] = useState('1');
+  const [entitlementPreview, setEntitlementPreview] = useState<any>(null);
+  const [grantFeatureKey, setGrantFeatureKey] = useState('manga.image.monthly_limit');
+  const [grantAmount, setGrantAmount] = useState('10');
+  const [globalError, setGlobalError] = useState<string | null>(null);
+  void adminPlans;
+  void adminOrders;
+  void entitlementPreview;
+  void setEntitlementLookupUserId;
+  void setGrantFeatureKey;
+  void setGrantAmount;
 
-  const persistSelectedChapter = (chapter: Chapter | null | undefined) => {
-    if (!chapter) return;
-    window.location.hash = chapterHash(chapter.chapter_number);
-    localStorage.setItem(LS_CHAPTER_ID, String(chapter.id));
-    localStorage.removeItem(LS_CHAPTER_IDX);
-  };
+  const activeChapter = useMemo(
+    () => chapters.find((chapter) => chapter.id === activeChapterId) ?? null,
+    [chapters, activeChapterId],
+  );
+  const isWorkspaceRoute = route === 'workspace';
 
-  const setCurrentIdx = (idx: number | ((prev: number) => number), sourceChapters = chapters) => {
-    _setCurrentIdx((prev) => {
-      const rawNext = typeof idx === 'function' ? idx(prev) : idx;
-      const next = Math.max(0, Math.min(rawNext, sourceChapters.length - 1));
-      persistSelectedChapter(sourceChapters[next]);
-      return next;
-    });
-  };
-
-  const selectChapterNumber = (chapterNumber: number, sourceChapters = chapters) => {
-    const idx = sourceChapters.findIndex((c) => c.chapter_number === chapterNumber);
-    if (idx >= 0) setCurrentIdx(idx, sourceChapters);
-  };
-  const [loading, setLoading] = useState(true);
-  const [creatingChapter, setCreatingChapter] = useState(false);
-
-  // ─── Restore session from localStorage on mount ─────────
   useEffect(() => {
-    const savedStoryId = localStorage.getItem(LS_STORY_ID);
-    if (!savedStoryId) {
-      setLoading(false);
-      return;
-    }
-    (async () => {
-      try {
-        const stories = await listStories();
-        const s = stories.find((x) => x.id === Number(savedStoryId));
-        if (!s) {
-          localStorage.removeItem(LS_STORY_ID);
-          localStorage.removeItem(LS_CHAPTER_ID);
-          localStorage.removeItem(LS_CHAPTER_IDX);
-          setLoading(false);
-          return;
-        }
-        const chs = await listChapters(s.id);
-        const hashChapterNumber = parseChapterNumberHash();
-        const savedChapterId = Number(localStorage.getItem(LS_CHAPTER_ID) || '');
-        const preferredIdx = hashChapterNumber
-          ? chs.findIndex((c) => c.chapter_number === hashChapterNumber)
-          : savedChapterId
-            ? chs.findIndex((c) => c.id === savedChapterId)
-          : -1;
-        const idx = preferredIdx >= 0 ? preferredIdx : Math.max(0, chs.length - 1);
-        setStory(s);
-        setChapters(chs);
-        _setCurrentIdx(idx);
-        persistSelectedChapter(chs[idx]);
-        setView('editor');
-      } catch (err) {
-        console.error('Failed to restore session:', err);
-      } finally {
-        setLoading(false);
-      }
-    })();
+    void bootstrapSession();
+    void refreshPlans();
+    void refreshPlatformSettings();
   }, []);
 
-  const currentChapter = chapters[currentIdx] ?? null;
-
-  const enterStory = async (s: Story) => {
-    setLoading(true);
-    try {
-      setStory(s);
-      localStorage.setItem(LS_STORY_ID, String(s.id));
-      const chs = await listChapters(s.id);
-      setChapters(chs);
-      setCurrentIdx(Math.max(0, chs.length - 1), chs);
-      setView('editor');
-    } catch (err) {
-      console.error('Failed to load story:', err);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const goHome = () => {
-    setView('home');
-    setStory(null);
-    setChapters([]);
-    _setCurrentIdx(0);
-    window.location.hash = '';
-    localStorage.removeItem(LS_STORY_ID);
-    localStorage.removeItem(LS_CHAPTER_ID);
-    localStorage.removeItem(LS_CHAPTER_IDX);
-  };
-
-  const refreshCurrentChapter = async () => {
-    if (!currentChapter) return;
-    const updated = await getChapter(currentChapter.id);
-    setChapters((prev) => prev.map((c) => (c.id === updated.id ? updated : c)));
-  };
-
-  const refreshStory = async () => {
-    if (!story) return;
-    const updated = await getStory(story.id);
-    setStory(updated);
-  };
-
-  const refreshStoryChapters = async () => {
-    if (!story) return;
-    const nextChapters = await listChapters(story.id);
-    setChapters(nextChapters);
-    if (!currentChapter) return;
-    const nextIdx = nextChapters.findIndex((chapter) => chapter.id === currentChapter.id);
-    if (nextIdx >= 0) {
-      _setCurrentIdx(nextIdx);
-      persistSelectedChapter(nextChapters[nextIdx]);
-      return;
-    }
-    const fallbackIdx = nextChapters.findIndex((chapter) => chapter.chapter_number === currentChapter.chapter_number);
-    if (fallbackIdx >= 0) {
-      _setCurrentIdx(fallbackIdx);
-      persistSelectedChapter(nextChapters[fallbackIdx]);
-    }
-  };
-
-  const refreshWorkspaceData = async () => {
-    await Promise.all([refreshStory(), refreshStoryChapters()]);
-  };
-
-  const refreshChapter = async (chapterId: number) => {
-    try {
-      const updated = await getChapter(chapterId);
-      setChapters((prev) => prev.map((c) => (c.id === updated.id ? updated : c)));
-    } catch {
-      // ignore
-    }
-  };
-
-  const handlePrev = () => {
-    if (currentIdx > 0) setCurrentIdx(currentIdx - 1);
-  };
-
-  const handleNext = async () => {
-    if (creatingChapter) return;
-    if (currentIdx < chapters.length - 1) {
-      setCurrentIdx(currentIdx + 1);
-    } else if (story) {
-      setCreatingChapter(true);
-      try {
-        const newCh = await createNextChapter(story.id);
-        const nextChapters = [...chapters, newCh];
-        setChapters(nextChapters);
-        setCurrentIdx(nextChapters.length - 1, nextChapters);
-      } catch (err: any) {
-        alert(`创建下一话失败: ${err.message}`);
-      } finally {
-        setCreatingChapter(false);
-      }
-    }
-  };
-
-  const handleDelete = async () => {
-    if (!currentChapter) return;
-    if (!confirm(`确定删除第 ${currentChapter.chapter_number} 话？对话和漫画都将被删除。`)) return;
-    try {
-      await deleteChapter(currentChapter.id);
-      const remaining = chapters.filter((c) => c.id !== currentChapter.id);
-      if (remaining.length === 0 && story) {
-        const newCh = await createNextChapter(story.id);
-        setChapters([newCh]);
-        setCurrentIdx(0, [newCh]);
-      } else {
-        setChapters(remaining);
-        setCurrentIdx(Math.min(currentIdx, remaining.length - 1), remaining);
-      }
-    } catch (err: any) {
-      alert(`删除失败: ${err.message}`);
-    }
-  };
+  useEffect(() => {
+    const siteName = platform.site_name?.trim() || 'LoreVista';
+    const siteSlogan = platform.site_slogan?.trim();
+    document.title = siteSlogan ? `${siteName} - ${siteSlogan}` : siteName;
+  }, [platform]);
 
   useEffect(() => {
-    if (view !== 'editor') return;
-    const onHashChange = () => {
-      const chapterNumber = parseChapterNumberHash();
-      if (chapterNumber) selectChapterNumber(chapterNumber);
-    };
-    window.addEventListener('hashchange', onHashChange);
-    return () => window.removeEventListener('hashchange', onHashChange);
-  }, [view, chapters]);
+    const iconHref = platform.icon_url?.trim() || '/favicon.svg';
+    let link = document.querySelector("link[rel='icon']") as HTMLLinkElement | null;
+    if (!link) {
+      link = document.createElement('link');
+      link.rel = 'icon';
+      document.head.appendChild(link);
+    }
+    link.type = iconHref.endsWith('.svg') ? 'image/svg+xml' : 'image/png';
+    link.href = iconHref;
+  }, [platform.icon_url]);
 
-  const chapterNav = (
-    <aside
-      className={`${
-        chapterNavOpen ? 'w-64' : 'w-0'
-      } hidden md:flex shrink-0 overflow-hidden border-r border-gray-800 bg-gray-950/95 transition-[width] duration-200`}
-    >
-      <div className="flex w-64 flex-col">
-        <div className="flex h-11 items-center justify-between border-b border-gray-800 px-3">
-          <span className="text-xs font-semibold uppercase tracking-wide text-gray-500">目录</span>
-          <span className="text-[11px] text-gray-600">{chapters.length} 话</span>
-        </div>
-        <div className="flex-1 overflow-y-auto p-2">
-          {chapters.map((chapter, idx) => {
-            const active = chapter.id === currentChapter?.id;
-            return (
-              <button
-                key={chapter.id}
-                onClick={() => setCurrentIdx(idx)}
-                className={`mb-1 w-full rounded-lg px-3 py-2 text-left transition-colors ${
-                  active
-                    ? 'bg-violet-600/20 text-violet-200 border border-violet-700/50'
-                    : 'text-gray-400 hover:bg-gray-900 hover:text-gray-200 border border-transparent'
-                }`}
-              >
-                <div className="text-xs font-medium">第 {chapter.chapter_number} 话</div>
-                <div className="mt-0.5 truncate text-[11px] text-gray-600">
-                  {chapter.novel_content ? '已有正文' : chapter.messages.length ? '创作中' : '未开始'}
-                </div>
-              </button>
-            );
-          })}
-        </div>
-      </div>
-    </aside>
-  );
+  useEffect(() => {
+    if (!session) return;
+    void refreshStories();
+    void refreshUsage();
+    void refreshSubscriptionData();
+    if (session.role === 'admin') {
+      void refreshAdminData();
+    }
+  }, [session]);
 
-  // ─── Loading ───────────────────────────────────────────
-  if (loading) {
+  async function bootstrapSession() {
+    try {
+      const user = await me();
+      setSession(user);
+      setRoute('stories');
+    } catch {
+      setSession(null);
+      setRoute('landing');
+    }
+  }
+
+  async function refreshStories() {
+    setLoadingStories(true);
+    try {
+      const data = await listStories();
+      setStories(data);
+    } catch (error: any) {
+      setGlobalError(error.message || '加载作品失败');
+    } finally {
+      setLoadingStories(false);
+    }
+  }
+
+  async function openWorkspace(story: Story) {
+    setLoadingWorkspace(true);
+    try {
+      const [detail, chapterList] = await Promise.all([getStory(story.id), listChapters(story.id)]);
+      setActiveStory(detail);
+      setChapters(chapterList);
+      setActiveChapterId(chapterList[0]?.id ?? null);
+      setRoute('workspace');
+    } catch (error: any) {
+      setGlobalError(error.message || '进入工作台失败');
+    } finally {
+      setLoadingWorkspace(false);
+    }
+  }
+
+  async function refreshWorkspaceData() {
+    if (!activeStory) return;
+    const [detail, chapterList] = await Promise.all([getStory(activeStory.id), listChapters(activeStory.id)]);
+    setActiveStory(detail);
+    setChapters(chapterList);
+    if (!chapterList.find((chapter) => chapter.id === activeChapterId)) {
+      setActiveChapterId(chapterList[0]?.id ?? null);
+    }
+  }
+
+  async function createNewStory() {
+    try {
+      const next = await createStory(`新故事 ${stories.length + 1}`, '从这里开始你的下一段创作旅程');
+      setStories((prev) => [next, ...prev]);
+      await openWorkspace(next);
+    } catch (error: any) {
+      setGlobalError(error.message || '新建作品失败');
+    }
+  }
+
+  async function createStoryDraft(title: string, description: string) {
+    const next = await createStory(title, description);
+    setStories((prev) => [next, ...prev]);
+    setGlobalError(null);
+    return next;
+  }
+
+  async function updateStoryDraft(storyId: number, payload: { title?: string; description?: string }) {
+    const updated = await updateStory(storyId, payload);
+    setStories((prev) => prev.map((story) => (story.id === updated.id ? updated : story)));
+    setActiveStory((prev) => (prev?.id === updated.id ? updated : prev));
+    setGlobalError(null);
+    return updated;
+  }
+
+  async function deleteStoryDraft(story: Story) {
+    await deleteStory(story.id);
+    setStories((prev) => prev.filter((item) => item.id !== story.id));
+    setActiveStory((prev) => (prev?.id === story.id ? null : prev));
+    if (activeStory?.id === story.id) {
+      setChapters([]);
+      setActiveChapterId(null);
+      setRoute('stories');
+    }
+    setGlobalError(null);
+  }
+
+  async function doLogin(email: string, password: string) {
+    try {
+      const result = await login({ email, password });
+      setAuthToken(result.token);
+      setSession(result.user);
+      setRoute('stories');
+      setGlobalError(null);
+    } catch (error: any) {
+      setGlobalError(error.message || '登录失败');
+    }
+  }
+
+  async function doRegister(name: string, email: string, password: string) {
+    try {
+      const result = await register({ name, email, password });
+      setAuthToken(result.token);
+      setSession(result.user);
+      setRoute('stories');
+      setGlobalError(null);
+    } catch (error: any) {
+      setGlobalError(error.message || '注册失败');
+    }
+  }
+
+  async function doLogout() {
+    try {
+      await logoutApi();
+    } catch {
+      // ignore network errors
+    } finally {
+      clearAuthToken();
+      setSession(null);
+      setStories([]);
+      setActiveStory(null);
+      setChapters([]);
+      setActiveChapterId(null);
+      setRoute('landing');
+    }
+  }
+
+  async function refreshPlans() {
+    try {
+      const data = await getPublicPlans();
+      setPlans(data);
+    } catch {
+      setPlans([]);
+    }
+  }
+
+  async function refreshUsage() {
+    try {
+      const data = await getMyUsage();
+      setUsage(data);
+    } catch {
+      setUsage(null);
+    }
+  }
+
+  async function refreshSubscriptionData() {
+    try {
+      const [subscription, entitlements, orders] = await Promise.all([
+        getMySubscription(),
+        getMyEntitlements(),
+        getMyOrders(),
+      ]);
+      setMySubscription(subscription);
+      setMyEntitlements(entitlements);
+      setMyOrders(orders);
+    } catch {
+      setMySubscription(null);
+      setMyEntitlements(null);
+      setMyOrders([]);
+    }
+  }
+
+  async function purchasePlan(planId: number, billingCycle: 'monthly' | 'yearly' = 'monthly') {
+    setSubscribingPlanId(planId);
+    try {
+      const result = await subscribePlan(planId, billingCycle);
+      await Promise.all([refreshSubscriptionData(), refreshUsage(), refreshAdminDataIfNeeded()]);
+      setGlobalError(null);
+      if (result.status === 'pending') {
+        setRoute('account');
+      }
+    } catch (error: any) {
+      setGlobalError(error.message || '订阅套餐失败');
+    } finally {
+      setSubscribingPlanId(null);
+    }
+  }
+
+  async function refreshPlatformSettings() {
+    try {
+      const data = await getPublicPlatformSettings();
+      setPlatform(data);
+    } catch {
+      setPlatform((prev) => prev);
+    }
+  }
+
+  async function confirmPendingOrder(orderNo: string) {
+    setActioningOrderNo(orderNo);
+    try {
+      await confirmMyOrderMock(orderNo);
+      await Promise.all([refreshSubscriptionData(), refreshUsage(), refreshAdminDataIfNeeded()]);
+      setGlobalError(null);
+    } catch (error: any) {
+      setGlobalError(error.message || '确认支付失败');
+    } finally {
+      setActioningOrderNo(null);
+    }
+  }
+
+  async function cancelPendingOrder(orderNo: string) {
+    setActioningOrderNo(orderNo);
+    try {
+      await cancelMyOrder(orderNo);
+      await Promise.all([refreshSubscriptionData(), refreshAdminDataIfNeeded()]);
+      setGlobalError(null);
+    } catch (error: any) {
+      setGlobalError(error.message || '取消订单失败');
+    } finally {
+      setActioningOrderNo(null);
+    }
+  }
+
+  async function refreshAdminDataIfNeeded() {
+    if (session?.role === 'admin') {
+      await refreshAdminData();
+    }
+  }
+
+  async function refreshAdminData() {
+    try {
+      const data = await getAdminPlans();
+      setAdminPlans(data);
+      const firstPlan = data[0];
+      if (firstPlan) {
+        setAdminPlanId(firstPlan.id);
+        const [features, rules, orders] = await Promise.all([
+          getAdminPlanFeatures(firstPlan.id),
+          getAdminQuotaRules(firstPlan.id),
+          getAdminOrders(),
+        ]);
+        setAdminFeatures(features);
+        setAdminRules(rules);
+        setAdminOrders(orders);
+      }
+    } catch (error: any) {
+      setGlobalError(error.message || '加载管理员配置失败');
+    }
+  }
+
+  async function switchAdminPlan(planId: number) {
+    setAdminPlanId(planId);
+    const [features, rules] = await Promise.all([getAdminPlanFeatures(planId), getAdminQuotaRules(planId)]);
+    setAdminFeatures(features);
+    setAdminRules(rules);
+  }
+
+  async function saveAdminFeatures() {
+    if (!adminPlanId) return;
+    await saveAdminPlanFeatures(adminPlanId, adminFeatures);
+    await refreshAdminData();
+  }
+
+  async function saveAdminRules() {
+    if (!adminPlanId) return;
+    await saveAdminQuotaRules(adminPlanId, adminRules);
+    await refreshAdminData();
+  }
+
+  async function lookupEntitlement() {
+    const userId = Number(entitlementLookupUserId);
+    if (!Number.isFinite(userId) || userId < 1) return;
+    try {
+      const data = await getAdminUserEntitlements(userId);
+      setEntitlementPreview(data);
+    } catch (error: any) {
+      setGlobalError(error.message || '查询用户权益失败');
+      setEntitlementPreview(null);
+    }
+  }
+
+  async function applyAdminPlanToUser() {
+    const userId = Number(entitlementLookupUserId);
+    if (!Number.isFinite(userId) || userId < 1 || !adminPlanId) return;
+    try {
+      await adminUpdateUserSubscription(userId, adminPlanId);
+      await Promise.all([lookupEntitlement(), refreshAdminData()]);
+      setGlobalError(null);
+    } catch (error: any) {
+      setGlobalError(error.message || '更新用户套餐失败');
+    }
+  }
+
+  async function grantQuotaToUser() {
+    const userId = Number(entitlementLookupUserId);
+    const amount = Number(grantAmount);
+    if (!Number.isFinite(userId) || userId < 1 || !grantFeatureKey.trim() || !Number.isFinite(amount) || amount <= 0) return;
+    try {
+      await adminGrantUserQuota(userId, grantFeatureKey.trim(), amount);
+      await lookupEntitlement();
+      setGlobalError(null);
+    } catch (error: any) {
+      setGlobalError(error.message || '补发额度失败');
+    }
+  }
+
+  void switchAdminPlan;
+  void saveAdminFeatures;
+  void saveAdminRules;
+  void applyAdminPlanToUser;
+  void grantQuotaToUser;
+
+  if (!session && route === 'login') {
     return (
-      <div className="h-screen bg-gray-950 flex items-center justify-center text-gray-400">
-        <div className="flex flex-col items-center gap-3">
-          <BookOpenText size={40} className="animate-pulse" />
-          <span className="text-sm">加载中…</span>
-        </div>
-      </div>
+      <LoginPage
+        title={platform.site_name}
+        subtitle={platform.site_slogan}
+        onBack={() => setRoute('landing')}
+        onLogin={doLogin}
+        toRegister={() => setRoute('register')}
+        error={globalError}
+      />
+    );
+  }
+  if (!session && route === 'register') {
+    return (
+      <RegisterPage
+        title={platform.site_name}
+        subtitle={platform.site_slogan}
+        onBack={() => setRoute('landing')}
+        onRegister={doRegister}
+        toLogin={() => setRoute('login')}
+        error={globalError}
+      />
+    );
+  }
+  if (!session && route === 'pricing') {
+    return <PricingPublicPage onBack={() => setRoute('landing')} plans={plans} onRegister={() => setRoute('register')} />;
+  }
+  if (!session) {
+    return (
+      <PublicSite
+        platform={platform}
+        onLogin={() => setRoute('login')}
+        onRegister={() => setRoute('register')}
+        onPricing={() => setRoute('pricing')}
+      />
     );
   }
 
-  // ─── Home page ─────────────────────────────────────────
-  if (view === 'home') {
-    return (
-      <>
-        <div className="fixed bottom-4 right-4 z-40">
-          <ApiKeyButton onClick={() => setApiKeyModalOpen(true)} />
-        </div>
-        <HomePage onSelectStory={enterStory} />
-        <ApiKeySettingsModal open={apiKeyModalOpen} onClose={() => setApiKeyModalOpen(false)} />
-      </>
-    );
-  }
-
-  // ─── Editor view ───────────────────────────────────────
   return (
-    <div className="h-screen flex flex-col bg-gray-950 text-gray-100">
-      {/* Top bar */}
-      <header className="h-12 border-b border-gray-800 flex items-center justify-between px-3 md:px-5 shrink-0 bg-gray-950/80 backdrop-blur-sm">
-        <div className="flex items-center gap-2 md:gap-3 min-w-0">
-          <button
-            onClick={goHome}
-            className="flex items-center gap-1 px-2 py-1.5 text-xs text-gray-400 hover:text-white
-                       hover:bg-gray-800 rounded-lg transition-colors shrink-0"
-            title="返回首页"
-          >
-            <Home size={14} />
-            {!isMobile && '首页'}
-          </button>
-          <div className="w-px h-5 bg-gray-800 shrink-0" />
-          <button
-            onClick={() => setChapterNavOpen((open) => !open)}
-            className="hidden md:flex items-center justify-center w-8 h-8 text-gray-500 hover:text-white
-                       hover:bg-gray-800 rounded-lg transition-colors shrink-0"
-            title={chapterNavOpen ? '收起目录' : '展开目录'}
-            aria-label={chapterNavOpen ? '收起目录' : '展开目录'}
-          >
-            {chapterNavOpen ? <PanelLeftClose size={16} /> : <PanelLeftOpen size={16} />}
-          </button>
-          <BookOpenText size={16} className="text-violet-400 shrink-0" />
-          <span className="text-sm font-semibold tracking-wide truncate max-w-[120px] md:max-w-xs">
-            {story?.title ?? '小说漫画生成器'}
-          </span>
-        </div>
-        <div className="flex items-center gap-2 text-xs text-gray-500 shrink-0">
-          <ApiKeyButton onClick={() => setApiKeyModalOpen(true)} compact={isMobile} />
-          <span>第 {currentChapter?.chapter_number ?? '–'} 话</span>
-          {!isMobile && <span>·</span>}
-          {!isMobile && <span>共 {chapters.length} 话</span>}
+    <div className="min-h-screen bg-[radial-gradient(circle_at_top_left,_rgba(96,165,250,0.18),_transparent_22%),linear-gradient(180deg,_#f4f8ff_0%,_#eef4ff_46%,_#f8fbff_100%)] text-slate-900">
+      <header className="sticky top-0 z-20 border-b border-[#d7e3f4] bg-[rgba(248,251,255,0.82)] backdrop-blur-xl">
+        <div className="flex h-14 items-center justify-between px-5 lg:px-8">
+          <div className="flex items-center gap-3">
+            <div className="flex h-9 w-9 items-center justify-center rounded-2xl border border-[#d7e3f4] bg-[linear-gradient(180deg,_#fafdff_0%,_#e8f1ff_100%)] text-[#2563eb] shadow-[0_10px_24px_rgba(59,130,246,0.14)]">
+              <WandSparkles size={16} />
+            </div>
+            <div>
+              <div className="text-sm font-semibold tracking-wide">{platform.site_name || 'LoreVista'}</div>
+              <div className="text-[11px] text-slate-500">{platform.site_slogan || 'AI 小说与漫画创作平台'}</div>
+            </div>
+          </div>
+          <div className="flex items-center gap-3 text-sm">
+            <span className="rounded-full border border-[#d7e3f4] bg-white/90 px-3 py-1 text-xs font-medium text-slate-600 shadow-[0_6px_18px_rgba(59,130,246,0.08)]">
+              {session.role === 'admin' ? '管理员' : '用户'}
+            </span>
+            <span>{session.name}</span>
+            <button
+              onClick={() => void doLogout()}
+              className="inline-flex items-center gap-1 rounded-full border border-[#d7e3f4] bg-white/90 px-3 py-1.5 text-xs text-slate-700 shadow-[0_6px_18px_rgba(59,130,246,0.08)] transition hover:bg-[#eef5ff]"
+            >
+              <LogOut size={14} />
+              退出
+            </button>
+          </div>
         </div>
       </header>
-      <ApiKeySettingsModal open={apiKeyModalOpen} onClose={() => setApiKeyModalOpen(false)} />
 
-      {/* Mobile tab bar */}
-      {isMobile && (
-        <div className="flex border-b border-gray-800 shrink-0">
-          <button
-            onClick={() => setMobileTab('chat')}
-            className={`flex-1 flex items-center justify-center gap-1.5 py-2.5 text-xs font-medium transition-colors
-              ${mobileTab === 'chat'
-                ? 'text-violet-400 border-b-2 border-violet-400 bg-gray-900/50'
-                : 'text-gray-500 hover:text-gray-300'}`}
-          >
-            <MessageSquare size={14} />
-            对话
-          </button>
-          <button
-            onClick={() => setMobileTab('manga')}
-            className={`flex-1 flex items-center justify-center gap-1.5 py-2.5 text-xs font-medium transition-colors
-              ${mobileTab === 'manga'
-                ? 'text-amber-400 border-b-2 border-amber-400 bg-gray-900/50'
-                : 'text-gray-500 hover:text-gray-300'}`}
-          >
-            <Image size={14} />
-            漫画
-          </button>
-        </div>
-      )}
+      <div className="grid min-h-[calc(100vh-56px)] grid-cols-1 lg:grid-cols-[220px_minmax(0,1fr)]">
+        <aside className="border-r border-[#d7e3f4] bg-[linear-gradient(180deg,_rgba(248,251,255,0.94)_0%,_rgba(238,244,255,0.92)_100%)] px-4 py-5 backdrop-blur-xl">
+          <div className="mb-4 px-2 text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">应用菜单</div>
+          <nav className="space-y-1.5">
+            {USER_NAV.map((item) => {
+              const Icon = item.icon;
+              const active = route === item.key;
+              return (
+                <button
+                  key={item.key}
+                  onClick={() => setRoute(item.key)}
+                  className={`flex w-full items-center gap-2 rounded-2xl px-3 py-2.5 text-left text-sm transition ${
+                    active
+                      ? 'bg-[linear-gradient(180deg,_#fafdff_0%,_#e8f1ff_100%)] text-[#1d4ed8] shadow-[0_10px_24px_rgba(59,130,246,0.14)]'
+                      : 'text-slate-700 hover:bg-white/80'
+                  }`}
+                >
+                  <Icon size={16} />
+                  {item.label}
+                </button>
+              );
+            })}
+          </nav>
 
-      {isMobile && chapters.length > 0 && (
-        <div className="flex gap-1 overflow-x-auto border-b border-gray-800 bg-gray-950 px-2 py-2 shrink-0">
-          {chapters.map((chapter, idx) => (
-            <button
-              key={chapter.id}
-              onClick={() => setCurrentIdx(idx)}
-              className={`shrink-0 rounded-full border px-3 py-1.5 text-xs transition-colors ${
-                chapter.id === currentChapter?.id
-                  ? 'border-violet-500 bg-violet-600/20 text-violet-200'
-                  : 'border-gray-800 bg-gray-900 text-gray-500 hover:text-gray-300'
-              }`}
-            >
-              第 {chapter.chapter_number} 话
-            </button>
-          ))}
-        </div>
-      )}
+          {session.role === 'admin' && (
+            <>
+              <div className="mb-3 mt-6 px-2 text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">运营配置</div>
+              <nav className="space-y-1.5">
+                {ADMIN_NAV.map((item) => {
+                  const Icon = item.icon;
+                  const active = route === item.key;
+                  return (
+                    <button
+                      key={item.key}
+                      onClick={() => setRoute(item.key)}
+                      className={`flex w-full items-center gap-2 rounded-2xl px-3 py-2.5 text-left text-sm transition ${
+                        active
+                          ? 'bg-[linear-gradient(180deg,_#fafdff_0%,_#e8f1ff_100%)] text-[#1d4ed8] shadow-[0_10px_24px_rgba(59,130,246,0.14)]'
+                          : 'text-slate-700 hover:bg-white/80'
+                      }`}
+                    >
+                      <Icon size={16} />
+                      {item.label}
+                    </button>
+                  );
+                })}
+              </nav>
+            </>
+          )}
+        </aside>
 
-      {/* Main content */}
-      {isMobile ? (
-        <main className="flex-1 min-h-0">
-          <div className={`h-full ${mobileTab === 'chat' ? '' : 'hidden'}`}>
-            <ChatPanel
-              chapter={currentChapter}
-              onMessageSent={refreshCurrentChapter}
-              onChapterRefresh={refreshChapter}
-              onGoToManga={() => setMobileTab('manga')}
+        <main className={`min-h-[calc(100vh-56px)] bg-transparent ${isWorkspaceRoute ? 'p-2 lg:p-3' : 'p-5 lg:p-7'}`}>
+          {globalError && (
+
+            <div className="mb-3 rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700">
+              {globalError}
+            </div>
+          )}
+
+          {route === 'stories' && (
+            <StoriesPage
+              stories={stories}
+              loading={loadingStories}
+              onRefresh={refreshStories}
+              onCreate={createNewStory}
+              onCreateDraft={createStoryDraft}
+              onUpdateStory={updateStoryDraft}
+              onDeleteStory={deleteStoryDraft}
+              onOpen={openWorkspace}
+              loadingWorkspace={loadingWorkspace}
             />
-          </div>
-          <div className={`h-full ${mobileTab === 'manga' ? '' : 'hidden'}`}>
-            <MangaPanel chapter={currentChapter} onChapterRefresh={refreshChapter} />
-          </div>
-        </main>
-      ) : (
-        <main className="flex-1 flex min-h-0">
-          {isLargeScreen ? (
-            <WorkspaceLayout
-              story={story!}
+          )}
+          {route === 'workspace' && (
+            <WorkspacePage
+              story={activeStory}
               chapters={chapters}
-              currentChapter={currentChapter}
-              onChapterChange={(chapter) => {
-                const idx = chapters.findIndex((c) => c.id === chapter.id);
-                if (idx >= 0) setCurrentIdx(idx);
-              }}
+              currentChapter={activeChapter}
+              onChapterChange={(chapter) => setActiveChapterId(chapter.id)}
               onContentUpdated={refreshWorkspaceData}
             />
-          ) : (
-            <>
-              {chapterNav}
-              <div className="flex flex-1 min-w-0">
-                <div className="w-1/2 border-r border-gray-800">
-                  <ChatPanel chapter={currentChapter} onMessageSent={refreshCurrentChapter} onChapterRefresh={refreshChapter} />
-                </div>
-                <div className="w-1/2">
-                  <MangaPanel chapter={currentChapter} onChapterRefresh={refreshChapter} />
-                </div>
-              </div>
-            </>
+          )}
+          {route === 'account' && (
+            <UserAccountUsagePage
+              usage={usage}
+              subscription={mySubscription}
+              entitlements={myEntitlements}
+              orders={myOrders}
+              actioningOrderNo={actioningOrderNo}
+              onConfirmMockPayment={confirmPendingOrder}
+              onCancelOrder={cancelPendingOrder}
+            />
+          )}
+          {route === 'pricing' && (
+            <UserPricingPage
+              plans={plans}
+              subscription={mySubscription}
+              onSubscribe={(planId: number, billingCycle: 'monthly' | 'yearly') => void purchasePlan(planId, billingCycle)}
+              subscribingPlanId={subscribingPlanId}
+            />
+          )}
+          {route === 'plan-config' && session.role === 'admin' && (
+            <AdminPlanManagementPage onError={(message) => setGlobalError(message)} />
+          )}
+          {route === 'quota-rules' && session.role === 'admin' && (
+            <AdminPlatformSettingsPage
+              onError={(message) => setGlobalError(message)}
+              onSaved={(settings) => setPlatform(settings.basic)}
+            />
+          )}
+          {route === 'entitlements' && session.role === 'admin' && (
+            <AdminUserManagementPage onError={(message) => setGlobalError(message)} />
+          )}
+          {route === 'orders' && session.role === 'admin' && <AdminOrdersPage onError={(message) => setGlobalError(message)} />}
+          {route === 'audit-logs' && session.role === 'admin' && (
+            <AdminAuditLogsPage onError={(message: string) => setGlobalError(message)} />
           )}
         </main>
-      )}
-
-      {/* Bottom navigation */}
-      <footer className="h-14 border-t border-gray-800 flex items-center justify-center gap-2 md:gap-4 shrink-0 bg-gray-950/80 backdrop-blur-sm px-2">
-        <button
-          onClick={handlePrev}
-          disabled={currentIdx === 0}
-          className="flex items-center gap-1 px-3 md:px-5 py-2 text-sm font-medium rounded-lg
-                     bg-gray-800 hover:bg-gray-700 text-gray-300 disabled:opacity-30
-                     disabled:cursor-not-allowed transition-colors"
-        >
-          <ChevronLeft size={16} />
-          {!isMobile && '上一话'}
-        </button>
-
-        <button
-          onClick={handleDelete}
-          disabled={!currentChapter}
-          className="flex items-center gap-1.5 px-3 py-2 text-sm font-medium rounded-lg
-                     bg-red-900/50 hover:bg-red-800 text-red-300 disabled:opacity-30
-                     disabled:cursor-not-allowed transition-colors"
-          title="删除当前话"
-          aria-label="删除当前话"
-        >
-          <Trash2 size={14} />
-        </button>
-
-        <div className="flex items-center gap-1 text-xs text-gray-600">
-          {chapters.map((chapter, i) => (
-            <button
-              key={chapter.id}
-              onClick={() => setCurrentIdx(i)}
-              aria-label={`跳转到第 ${chapter.chapter_number} 话`}
-              className={`w-2 h-2 rounded-full transition-colors ${
-                i === currentIdx ? 'bg-violet-500' : 'bg-gray-700 hover:bg-gray-600'
-              }`}
-            />
-          ))}
-        </div>
-
-        <button
-          onClick={handleNext}
-          disabled={creatingChapter}
-          className="flex items-center gap-1 px-3 md:px-5 py-2 text-sm font-medium rounded-lg
-                     bg-violet-600 hover:bg-violet-500 text-white disabled:opacity-40
-                     disabled:cursor-not-allowed transition-colors"
-        >
-          {currentIdx === chapters.length - 1 ? (
-            <>
-              <Plus size={16} />
-              {creatingChapter ? '新建…' : (isMobile ? '新建' : '下一话（新建）')}
-            </>
-          ) : (
-            <>
-              {!isMobile && '下一话'}
-              <ChevronRight size={16} />
-            </>
-          )}
-        </button>
-      </footer>
+      </div>
     </div>
   );
 }
+
+function PublicSite({
+  platform,
+  onLogin,
+  onRegister,
+  onPricing,
+}: {
+  platform: PublicPlatformSettings;
+  onLogin: () => void;
+  onRegister: () => void;
+  onPricing: () => void;
+}) {
+  return <PublicLanding platform={platform} onLogin={onLogin} onRegister={onRegister} onPricing={onPricing} />;
+}
+
+function AuthLayout({
+  brandName,
+  brandSlogan,
+  title,
+  subtitle,
+  children,
+  onBack,
+}: {
+  brandName: string;
+  brandSlogan: string;
+  title: string;
+  subtitle: string;
+  children: React.ReactNode;
+  onBack: () => void;
+}) {
+  return (
+    <div className="min-h-screen bg-[radial-gradient(circle_at_top_left,_rgba(59,130,246,0.18),_transparent_24%),linear-gradient(180deg,_#eef4ff_0%,_#f5f9ff_45%,_#f8fbff_100%)]">
+      <div className="mx-auto max-w-md px-4 py-16">
+        <button
+          onClick={onBack}
+          className="mb-6 inline-flex items-center rounded-full border border-[#d7e3f4] bg-white/88 px-4 py-2 text-sm text-slate-600 shadow-[0_10px_24px_rgba(59,130,246,0.08)] transition hover:bg-white hover:text-[#2563eb]"
+        >
+          返回首页
+        </button>
+        <div className="rounded-[28px] border border-[#d7e3f4] bg-white/96 p-7 shadow-[0_24px_60px_rgba(59,130,246,0.12)] backdrop-blur">
+          <div className="mb-5 inline-flex h-11 w-11 items-center justify-center rounded-2xl border border-[#d7e3f4] bg-[linear-gradient(180deg,_#fafdff_0%,_#e8f1ff_100%)] text-[#2563eb] shadow-[0_12px_28px_rgba(59,130,246,0.14)]">
+            <WandSparkles size={18} />
+          </div>
+          <div className="mb-3">
+            <div className="text-[17px] font-semibold tracking-tight text-slate-950">{brandName}</div>
+            <div className="mt-1 text-xs text-slate-500">{brandSlogan}</div>
+          </div>
+          <h1 className="text-2xl font-semibold tracking-tight text-slate-950">{title}</h1>
+          <p className="mt-2 text-sm leading-6 text-slate-600">{subtitle}</p>
+          <div className="mt-6">{children}</div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function LoginPage({
+  title,
+  subtitle,
+  onBack,
+  onLogin,
+  toRegister,
+  error,
+}: {
+  title: string;
+  subtitle: string;
+  onBack: () => void;
+  onLogin: (email: string, password: string) => Promise<void>;
+  toRegister: () => void;
+  error: string | null;
+}) {
+  const [email, setEmail] = useState('admin@lorevista.ai');
+  const [password, setPassword] = useState('admin123');
+  const brandName = title || 'LoreVista';
+  const brandSlogan = subtitle || 'AI 小说与漫画创作平台';
+  return (
+    <AuthLayout
+      brandName={brandName}
+      brandSlogan={brandSlogan}
+      title="登录"
+      subtitle={`登录后进入 ${brandName}，按角色展示可用菜单。`}
+      onBack={onBack}
+    >
+      <div className="space-y-3">
+        <input
+          value={email}
+          onChange={(e) => setEmail(e.target.value)}
+          className="w-full rounded-2xl border border-[#d7e3f4] bg-[#fafdff] px-4 py-3 text-sm text-slate-900 outline-none transition placeholder:text-slate-400 focus:border-[#93c5fd] focus:bg-white focus:ring-4 focus:ring-[#dbeafe]"
+          placeholder="邮箱"
+        />
+        <input
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+          className="w-full rounded-2xl border border-[#d7e3f4] bg-[#fafdff] px-4 py-3 text-sm text-slate-900 outline-none transition placeholder:text-slate-400 focus:border-[#93c5fd] focus:bg-white focus:ring-4 focus:ring-[#dbeafe]"
+          placeholder="密码"
+          type="password"
+        />
+        <button
+          onClick={() => void onLogin(email, password)}
+          className="w-full rounded-2xl bg-[#2563eb] py-3 text-sm font-medium text-white shadow-[0_16px_34px_rgba(59,130,246,0.24)] transition hover:bg-[#1d4ed8]"
+        >
+          登录
+        </button>
+        {error && <div className="text-xs text-rose-600">{error}</div>}
+      </div>
+      <button onClick={toRegister} className="mt-5 text-xs font-medium text-slate-600 transition hover:text-[#2563eb]">没有账号？去注册</button>
+    </AuthLayout>
+  );
+}
+
+function RegisterPage({
+  title,
+  subtitle,
+  onBack,
+  onRegister,
+  toLogin,
+  error,
+}: {
+  title: string;
+  subtitle: string;
+  onBack: () => void;
+  onRegister: (name: string, email: string, password: string) => Promise<void>;
+  toLogin: () => void;
+  error: string | null;
+}) {
+  const [name, setName] = useState('');
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const brandName = title || 'LoreVista';
+  const brandSlogan = subtitle || 'AI 小说与漫画创作平台';
+  return (
+    <AuthLayout
+      brandName={brandName}
+      brandSlogan={brandSlogan}
+      title="注册"
+      subtitle={`创建账号后即可开始 ${brandName} 的小说与漫画创作。`}
+      onBack={onBack}
+    >
+      <div className="space-y-3">
+        <input
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          className="w-full rounded-2xl border border-[#d7e3f4] bg-[#fafdff] px-4 py-3 text-sm text-slate-900 outline-none transition placeholder:text-slate-400 focus:border-[#93c5fd] focus:bg-white focus:ring-4 focus:ring-[#dbeafe]"
+          placeholder="昵称"
+        />
+        <input
+          value={email}
+          onChange={(e) => setEmail(e.target.value)}
+          className="w-full rounded-2xl border border-[#d7e3f4] bg-[#fafdff] px-4 py-3 text-sm text-slate-900 outline-none transition placeholder:text-slate-400 focus:border-[#93c5fd] focus:bg-white focus:ring-4 focus:ring-[#dbeafe]"
+          placeholder="邮箱"
+        />
+        <input
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+          className="w-full rounded-2xl border border-[#d7e3f4] bg-[#fafdff] px-4 py-3 text-sm text-slate-900 outline-none transition placeholder:text-slate-400 focus:border-[#93c5fd] focus:bg-white focus:ring-4 focus:ring-[#dbeafe]"
+          placeholder="设置密码"
+          type="password"
+        />
+        <button
+          onClick={() => void onRegister(name, email, password)}
+          className="w-full rounded-2xl bg-[#2563eb] py-3 text-sm font-medium text-white shadow-[0_16px_34px_rgba(59,130,246,0.24)] transition hover:bg-[#1d4ed8]"
+        >
+          注册并进入
+        </button>
+        {error && <div className="text-xs text-rose-600">{error}</div>}
+      </div>
+      <button onClick={toLogin} className="mt-5 text-xs font-medium text-slate-600 transition hover:text-[#2563eb]">已有账号？去登录</button>
+    </AuthLayout>
+  );
+}
+
+function PricingPublicPage({
+  onBack,
+  plans,
+  onRegister,
+}: {
+  onBack: () => void;
+  plans: PublicPlan[];
+  onRegister: () => void;
+}) {
+  return (
+    <div className="min-h-screen bg-[#f7f8f5] px-4 py-10">
+      <div className="mx-auto max-w-6xl">
+        <button onClick={onBack} className="mb-6 text-sm text-slate-600 hover:text-slate-900">返回首页</button>
+        <UserPricingPage plans={plans} onPrimary={onRegister} />
+      </div>
+    </div>
+  );
+}
+
+function PricingPage({
+  plans,
+  onPrimary,
+  subscription,
+  onSubscribe,
+  subscribingPlanId,
+}: {
+  plans: PublicPlan[];
+  onPrimary?: () => void;
+  subscription?: MySubscriptionResponse | null;
+  onSubscribe?: (planId: number, billingCycle: 'monthly' | 'yearly') => void;
+  subscribingPlanId?: number | null;
+}) {
+  const fallback = [
+    {
+      id: 0,
+      name: 'Free',
+      monthly_price: 0,
+      description: '适合体验',
+      features: {
+        'framework.generate.monthly_limit': 5,
+        'chapter.expand.monthly_limit': 20,
+        'scene.generate.monthly_limit': 15,
+        'manga.image.monthly_limit': 80,
+        'manga.regenerate.monthly_limit': 20,
+        'manga.max_image_count_per_chapter': 6,
+        'manga.allow_color_mode': false,
+      },
+    },
+    {
+      id: 1,
+      name: 'Pro',
+      monthly_price: 59,
+      description: '适合稳定创作',
+      features: {
+        'framework.generate.monthly_limit': 50,
+        'chapter.expand.monthly_limit': 200,
+        'scene.generate.monthly_limit': 120,
+        'manga.image.monthly_limit': 800,
+        'manga.regenerate.monthly_limit': 300,
+        'manga.max_image_count_per_chapter': 12,
+        'manga.allow_color_mode': true,
+      },
+    },
+    {
+      id: 2,
+      name: 'Premium',
+      monthly_price: 199,
+      description: '适合高频创作',
+      features: {
+        'framework.generate.monthly_limit': 200,
+        'chapter.expand.monthly_limit': 1000,
+        'scene.generate.monthly_limit': 500,
+        'manga.image.monthly_limit': 4000,
+        'manga.regenerate.monthly_limit': 1500,
+        'manga.max_image_count_per_chapter': 20,
+        'manga.allow_color_mode': true,
+      },
+    },
+  ];
+  const data = plans.length > 0 ? plans : (fallback as any[]);
+
+  return (
+    <div>
+      <h2 className="text-xl font-semibold">套餐订阅</h2>
+      <p className="mt-1 text-sm text-slate-600">套餐能力、小说框架额度、漫画生成额度都由后台套餐配置中心统一驱动。</p>
+      <div className="mt-4 grid gap-3 md:grid-cols-3">
+        {data.map((plan: any) => {
+          const isCurrent = subscription?.subscription.plan.id === plan.id;
+          const featureEntries = getPlanFeatureEntries(plan.features);
+          return (
+            <div key={plan.id ?? plan.name} className="flex h-full flex-col rounded-md border border-[#d9dfd7] bg-white p-4">
+              <div className="flex items-center justify-between">
+                <div className="text-sm font-semibold">{plan.name}</div>
+                {isCurrent && <span className="rounded-md bg-[#f6ede2] px-2 py-1 text-xs text-[#8b5a21]">当前套餐</span>}
+              </div>
+              <div className="mt-2 text-2xl font-semibold">
+                ¥{plan.monthly_price}
+                <span className="text-sm font-normal text-slate-500">/月</span>
+              </div>
+              <div className="mt-1 text-xs text-slate-500">{plan.description || ''}</div>
+              <div className="mt-3 space-y-2">
+                {featureEntries.map(({ key, value }) => (
+                  <div
+                    key={key}
+                    className="flex items-center justify-between gap-3 rounded-md border border-[#edf1ea] bg-[#f8faf7] px-3 py-2 text-xs"
+                    title={featureDescription(key)}
+                  >
+                    <span className="text-slate-600">{featureLabel(key)}</span>
+                    <span className="shrink-0 font-medium text-[#1f5f58]">{formatFeatureValue(key, value)}</span>
+                  </div>
+                ))}
+              </div>
+              {onSubscribe ? (
+                <button
+                  onClick={() => onSubscribe(plan.id, 'monthly')}
+                  disabled={isCurrent || subscribingPlanId === plan.id}
+                  className="mt-4 w-full rounded-md bg-[#1f5f58] py-2 text-sm text-white disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  {isCurrent ? '已生效' : subscribingPlanId === plan.id ? '处理中...' : '立即订阅'}
+                </button>
+              ) : null}
+              {!onSubscribe && onPrimary ? (
+                <button onClick={onPrimary} className="mt-4 w-full rounded-md bg-[#1f5f58] py-2 text-sm text-white">开始使用</button>
+              ) : null}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function StoriesPage({
+  stories,
+  loading,
+  onRefresh,
+  onCreate,
+  onCreateDraft,
+  onUpdateStory,
+  onDeleteStory,
+  onOpen,
+  loadingWorkspace,
+}: {
+  stories: Story[];
+  loading: boolean;
+  onRefresh: () => Promise<void>;
+  onCreate: () => Promise<void>;
+  onCreateDraft: (title: string, description: string) => Promise<Story>;
+  onUpdateStory: (storyId: number, payload: { title?: string; description?: string }) => Promise<Story>;
+  onDeleteStory: (story: Story) => Promise<void>;
+  onOpen: (story: Story) => Promise<void>;
+  loadingWorkspace: boolean;
+}) {
+  const [showCreateForm, setShowCreateForm] = useState(false);
+  const [draftTitle, setDraftTitle] = useState('');
+  const [draftDescription, setDraftDescription] = useState('');
+  const [editingId, setEditingId] = useState<number | null>(null);
+  const [editTitle, setEditTitle] = useState('');
+  const [editDescription, setEditDescription] = useState('');
+  const [savingId, setSavingId] = useState<number | null>(null);
+  const [deletingId, setDeletingId] = useState<number | null>(null);
+
+  const resetCreateForm = () => {
+    setDraftTitle('');
+    setDraftDescription('');
+    setShowCreateForm(false);
+  };
+
+  const startEdit = (story: Story) => {
+    setEditingId(story.id);
+    setEditTitle(story.title);
+    setEditDescription(story.description || '');
+  };
+
+  const cancelEdit = () => {
+    setEditingId(null);
+    setEditTitle('');
+    setEditDescription('');
+  };
+
+  const handleCreateDraft = async () => {
+    const title = draftTitle.trim() || `新故事 ${stories.length + 1}`;
+    const description = draftDescription.trim();
+    setSavingId(-1);
+    try {
+      await onCreateDraft(title, description);
+      resetCreateForm();
+    } finally {
+      setSavingId(null);
+    }
+  };
+
+  const handleSaveEdit = async () => {
+    if (editingId === null) return;
+    setSavingId(editingId);
+    try {
+      await onUpdateStory(editingId, {
+        title: editTitle.trim() || '未命名故事',
+        description: editDescription.trim(),
+      });
+      cancelEdit();
+    } finally {
+      setSavingId(null);
+    }
+  };
+
+  const handleDelete = async (story: Story) => {
+    const confirmed = window.confirm(`确定删除《${story.title}》吗？作品下的章节、对话和漫画资源也会一起删除。`);
+    if (!confirmed) return;
+    setDeletingId(story.id);
+    try {
+      await onDeleteStory(story);
+      if (editingId === story.id) cancelEdit();
+    } finally {
+      setDeletingId(null);
+    }
+  };
+
+  return (
+    <div>
+      <div className="mb-4 flex items-center justify-between">
+        <div>
+          <h2 className="text-xl font-semibold">作品首页</h2>
+          <p className="text-sm text-slate-600">管理你的小说项目并进入创作工作台。</p>
+        </div>
+        <div className="flex gap-2">
+          <button onClick={() => void onRefresh()} className="rounded-md border border-[#d9dfd7] bg-white px-3 py-2 text-sm">刷新</button>
+          <button
+            onClick={() => {
+              setShowCreateForm((prev) => !prev);
+              if (showCreateForm) {
+                resetCreateForm();
+              }
+            }}
+            className="inline-flex items-center gap-1 rounded-md bg-[#1f5f58] px-3 py-2 text-sm text-white"
+          >
+            <Plus size={14} />
+            新建作品
+          </button>
+        </div>
+      </div>
+      {showCreateForm && (
+        <div className="mb-4 rounded-md border border-[#d9dfd7] bg-white p-4">
+          <div className="text-sm font-semibold text-slate-800">创建作品</div>
+          <div className="mt-3 grid gap-3">
+            <input
+              value={draftTitle}
+              onChange={(e) => setDraftTitle(e.target.value)}
+              placeholder="输入作品名称"
+              className="rounded-md border border-[#d9dfd7] bg-[#fcfcfa] px-3 py-2 text-sm text-slate-800 outline-none focus:border-[#1f5f58]"
+            />
+            <textarea
+              value={draftDescription}
+              onChange={(e) => setDraftDescription(e.target.value)}
+              rows={3}
+              placeholder="输入作品简介，可留空"
+              className="rounded-md border border-[#d9dfd7] bg-[#fcfcfa] px-3 py-2 text-sm text-slate-800 outline-none focus:border-[#1f5f58] resize-y"
+            />
+            <div className="flex flex-wrap justify-end gap-2">
+              <button
+                onClick={() => void onCreate()}
+                disabled={savingId !== null}
+                className="rounded-md border border-[#d9dfd7] bg-white px-3 py-2 text-sm text-slate-700 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                快速创建并进入
+              </button>
+              <button
+                onClick={resetCreateForm}
+                disabled={savingId !== null}
+                className="rounded-md border border-[#d9dfd7] bg-white px-3 py-2 text-sm text-slate-700 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                取消
+              </button>
+              <button
+                onClick={() => void handleCreateDraft()}
+                disabled={savingId !== null}
+                className="rounded-md bg-[#1f5f58] px-3 py-2 text-sm text-white disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {savingId === -1 ? '创建中...' : '保存作品'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {loading ? (
+        <div className="rounded-md border border-[#d9dfd7] bg-white p-5 text-sm text-slate-600">加载中...</div>
+      ) : (
+        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+          {stories.map((story) => {
+            const isEditing = editingId === story.id;
+            const isSaving = savingId === story.id;
+            const isDeleting = deletingId === story.id;
+            return (
+              <div
+                key={story.id}
+                className="rounded-md border border-[#d9dfd7] bg-white p-4 transition-colors hover:border-[#9fb3ad]"
+              >
+                {isEditing ? (
+                  <div className="space-y-3">
+                    <input
+                      autoFocus
+                      value={editTitle}
+                      onChange={(e) => setEditTitle(e.target.value)}
+                      className="w-full rounded-md border border-[#d9dfd7] bg-[#fcfcfa] px-3 py-2 text-sm text-slate-800 outline-none focus:border-[#1f5f58]"
+                    />
+                    <textarea
+                      value={editDescription}
+                      onChange={(e) => setEditDescription(e.target.value)}
+                      rows={3}
+                      className="w-full rounded-md border border-[#d9dfd7] bg-[#fcfcfa] px-3 py-2 text-sm text-slate-800 outline-none focus:border-[#1f5f58] resize-y"
+                      placeholder="输入作品简介，可留空"
+                    />
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="text-xs text-slate-500">创建于 {new Date(story.created_at).toLocaleDateString('zh-CN')}</div>
+                      <div className="flex items-center gap-2">
+                        <button
+                          onClick={cancelEdit}
+                          disabled={isSaving}
+                          className="inline-flex items-center gap-1 rounded-md border border-[#d9dfd7] bg-white px-2 py-1.5 text-xs text-slate-700 disabled:cursor-not-allowed disabled:opacity-60"
+                        >
+                          <X size={12} />
+                          取消
+                        </button>
+                        <button
+                          onClick={() => void handleSaveEdit()}
+                          disabled={isSaving}
+                          className="inline-flex items-center gap-1 rounded-md bg-[#1f5f58] px-2 py-1.5 text-xs text-white disabled:cursor-not-allowed disabled:opacity-60"
+                        >
+                          <Check size={12} />
+                          {isSaving ? '保存中...' : '保存'}
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                ) : (
+                  <>
+                    <button onClick={() => void onOpen(story)} className="w-full text-left">
+                      <div className="text-sm font-semibold">{story.title}</div>
+                      <div className="mt-1 min-h-[40px] line-clamp-2 text-xs leading-5 text-slate-600">
+                        {story.description || '尚未填写简介，点击进入开始创作。'}
+                      </div>
+                    </button>
+                    <div className="mt-3 flex items-center justify-between gap-3">
+                      <div className="text-xs text-slate-500">创建于 {new Date(story.created_at).toLocaleDateString('zh-CN')}</div>
+                      <div className="flex items-center gap-2">
+                        <button
+                          onClick={() => startEdit(story)}
+                          disabled={savingId !== null || deletingId !== null}
+                          className="inline-flex items-center gap-1 rounded-md border border-[#d9dfd7] bg-white px-2 py-1.5 text-xs text-slate-700 hover:bg-[#f7f8f5] disabled:cursor-not-allowed disabled:opacity-60"
+                        >
+                          <Pencil size={12} />
+                          编辑
+                        </button>
+                        <button
+                          onClick={() => void handleDelete(story)}
+                          disabled={savingId !== null || deletingId !== null}
+                          className="inline-flex items-center gap-1 rounded-md border border-rose-200 bg-rose-50 px-2 py-1.5 text-xs text-rose-700 hover:bg-rose-100 disabled:cursor-not-allowed disabled:opacity-60"
+                        >
+                          <Trash2 size={12} />
+                          {isDeleting ? '删除中...' : '删除'}
+                        </button>
+                      </div>
+                    </div>
+                  </>
+                )}
+              </div>
+            );
+          })}
+          {stories.length === 0 && (
+            <div className="rounded-md border border-dashed border-[#c8d0c8] bg-white p-5 text-sm text-slate-500">
+              还没有作品，点击右上角新建作品开始创建，或用快速创建直接进入工作台。
+            </div>
+          )}
+        </div>
+      )}
+      {loadingWorkspace && <div className="mt-4 text-sm text-slate-600">正在进入工作台...</div>}
+    </div>
+  );
+}
+
+function WorkspacePage({
+  story,
+  chapters,
+  currentChapter,
+  onChapterChange,
+  onContentUpdated,
+}: {
+  story: Story | null;
+  chapters: Chapter[];
+  currentChapter: Chapter | null;
+  onChapterChange: (chapter: Chapter) => void;
+  onContentUpdated: () => Promise<void>;
+}) {
+  if (!story) {
+    return (
+      <div className="rounded-md border border-[#d9dfd7] bg-white p-6 text-sm text-slate-600">
+        请先在「作品」页面选择一个项目再进入工作台。
+      </div>
+    );
+  }
+  return (
+    <div className="h-[calc(100vh-120px)] overflow-hidden rounded-md border border-[#d9dfd7] bg-white">
+      <WorkspaceLayout
+        story={story}
+        chapters={chapters}
+        currentChapter={currentChapter}
+        onChapterChange={onChapterChange}
+        onContentUpdated={onContentUpdated}
+      />
+    </div>
+  );
+}
+
+function AccountUsagePage({
+  usage,
+  subscription,
+  entitlements,
+  orders,
+}: {
+  usage: UsageResponse | null;
+  subscription: MySubscriptionResponse | null;
+  entitlements: EntitlementResponse | null;
+  orders: AdminOrderItem[];
+}) {
+  return (
+    <div>
+      <h2 className="text-xl font-semibold">账户与用量</h2>
+      <p className="mt-1 text-sm text-slate-600">查看当前套餐状态、本月核心用量，以及当前订单和权益明细。</p>
+      <div className="mt-4 grid gap-3 md:grid-cols-3">
+        <div className="rounded-md border border-[#d9dfd7] bg-white p-4">
+          <div className="text-xs text-slate-500">当前套餐</div>
+          <div className="mt-2 text-lg font-semibold">{subscription?.subscription.plan.name || '-'}</div>
+          <div className="mt-1 text-sm text-slate-600">状态：{subscription?.subscription.status || '-'}</div>
+        </div>
+        <div className="rounded-md border border-[#d9dfd7] bg-white p-4">
+          <div className="text-xs text-slate-500">月费</div>
+          <div className="mt-2 text-lg font-semibold">{subscription ? `¥${subscription.subscription.plan.monthly_price}` : '-'}</div>
+          <div className="mt-1 text-sm text-slate-600">{subscription?.subscription.plan.currency || '-'}</div>
+        </div>
+        <div className="rounded-md border border-[#d9dfd7] bg-white p-4">
+          <div className="text-xs text-slate-500">最近订单</div>
+          <div className="mt-2 text-sm font-medium">{subscription?.latest_order?.order_no || '-'}</div>
+          <div className="mt-1 text-sm text-slate-600">{subscription?.latest_order?.status || '暂无订单'}</div>
+        </div>
+      </div>
+      <div className="mt-4 overflow-hidden rounded-md border border-[#d9dfd7] bg-white">
+        <table className="w-full text-left text-sm">
+          <thead className="bg-[#f2f4ef] text-xs text-slate-500">
+            <tr>
+              <th className="px-3 py-2 font-semibold">能力键</th>
+              <th className="px-3 py-2 font-semibold">总量</th>
+              <th className="px-3 py-2 font-semibold">已用</th>
+              <th className="px-3 py-2 font-semibold">剩余</th>
+            </tr>
+          </thead>
+          <tbody>
+            {(usage?.items || []).map((item) => (
+              <tr key={item.feature_key} className="border-t border-[#eef1ec]">
+                <td className="px-3 py-2">{item.feature_key}</td>
+                <td className="px-3 py-2">{item.limit}</td>
+                <td className="px-3 py-2">{item.used}</td>
+                <td className="px-3 py-2">{item.remaining}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <div className="mt-4 grid gap-3 lg:grid-cols-[1.3fr_1fr]">
+        <div className="rounded-md border border-[#d9dfd7] bg-white p-4">
+          <div className="text-sm font-semibold">当前权益</div>
+          <pre className="mt-3 overflow-x-auto rounded-md bg-[#f5f7f3] p-3 text-xs text-slate-700">
+            {JSON.stringify(entitlements?.entitlements || {}, null, 2)}
+          </pre>
+        </div>
+        <div className="rounded-md border border-[#d9dfd7] bg-white p-4">
+          <div className="text-sm font-semibold">我的订单</div>
+          <div className="mt-3 space-y-2">
+            {orders.slice(0, 5).map((order) => (
+              <div key={order.order_no} className="rounded-md border border-[#eef1ec] px-3 py-2 text-sm">
+                <div className="font-medium">{order.order_no}</div>
+                <div className="mt-1 text-slate-600">¥{order.amount} · {order.status}</div>
+              </div>
+            ))}
+            {orders.length === 0 && <div className="text-sm text-slate-500">暂无订单记录</div>}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function UserPricingPage({
+  plans,
+  onPrimary,
+  subscription,
+  onSubscribe,
+  subscribingPlanId,
+}: {
+  plans: PublicPlan[];
+  onPrimary?: () => void;
+  subscription?: MySubscriptionResponse | null;
+  onSubscribe?: (planId: number, billingCycle: 'monthly' | 'yearly') => void;
+  subscribingPlanId?: number | null;
+}) {
+  const fallback = [
+    { id: 0, name: 'Free', monthly_price: 0, description: '适合体验和轻量创作', features: { 'manga.image.monthly_limit': 80, 'framework.generate.monthly_limit': 5, 'scene.generate.monthly_limit': 15, 'manga.max_image_count_per_chapter': 6, 'manga.allow_color_mode': false } },
+    { id: 1, name: 'Pro', monthly_price: 59, description: '适合稳定更新的个人创作者', features: { 'manga.image.monthly_limit': 800, 'framework.generate.monthly_limit': 50, 'scene.generate.monthly_limit': 120, 'manga.max_image_count_per_chapter': 12, 'manga.allow_color_mode': true } },
+    { id: 2, name: 'Premium', monthly_price: 199, description: '适合高频产出的团队和工作室', features: { 'manga.image.monthly_limit': 4000, 'framework.generate.monthly_limit': 200, 'scene.generate.monthly_limit': 500, 'manga.max_image_count_per_chapter': 20, 'manga.allow_color_mode': true } },
+  ];
+  const data = plans.length > 0 ? plans : (fallback as any[]);
+
+  return (
+    <div>
+      <h2 className="text-xl font-semibold">套餐订阅</h2>
+      <p className="mt-1 text-sm text-slate-600">所有小说创作、分镜生成和漫画出图能力都由平台套餐统一控制。你可以在这里直观看到不同套餐的额度差异和适用场景。</p>
+      <div className="mt-4 grid gap-4 md:grid-cols-3">
+        {data.map((plan: any) => {
+          const isCurrent = subscription?.subscription.plan.id === plan.id;
+          const highlights = [
+            ['framework.generate.monthly_limit', plan.features?.['framework.generate.monthly_limit'] ?? 0],
+            ['scene.generate.monthly_limit', plan.features?.['scene.generate.monthly_limit'] ?? 0],
+            ['manga.image.monthly_limit', plan.features?.['manga.image.monthly_limit'] ?? 0],
+          ] as const;
+
+          return (
+            <div key={plan.id ?? plan.name} className="rounded-3xl border border-[#d7e3f4] bg-white/95 p-5 shadow-[0_14px_34px_rgba(59,130,246,0.08)]">
+              <div className="flex items-center justify-between">
+                <div className="text-base font-semibold text-slate-900">{plan.name}</div>
+                {isCurrent ? <span className="rounded-full bg-[#eff6ff] px-3 py-1 text-xs text-[#1d4ed8]">当前套餐</span> : null}
+              </div>
+              <div className="mt-3 text-3xl font-semibold text-slate-900">
+                ¥{plan.monthly_price}
+                <span className="ml-1 text-sm font-normal text-slate-500">/月</span>
+              </div>
+              <div className="mt-2 text-sm leading-6 text-slate-500">{plan.description || '暂无套餐说明'}</div>
+              <div className="mt-4 space-y-2 rounded-2xl bg-[#f8fbff] p-3">
+                {highlights.map(([key, value]) => (
+                  <div key={key} className="flex items-center justify-between text-sm">
+                    <span className="text-slate-600">{featureLabel(key)}</span>
+                    <span className="font-medium text-slate-900">{formatFeatureValue(key, value)}</span>
+                  </div>
+                ))}
+              </div>
+              <div className="mt-4 rounded-2xl border border-dashed border-[#d7e3f4] px-3 py-3 text-xs leading-6 text-slate-500">
+                {plan.features?.['manga.allow_color_mode'] ? '支持彩漫模式' : '支持黑白漫画模式'}
+                ，单章节最多生成 {plan.features?.['manga.max_image_count_per_chapter'] ?? 0} 张图片。
+              </div>
+              {onSubscribe ? (
+                <button
+                  onClick={() => onSubscribe(plan.id, 'monthly')}
+                  disabled={isCurrent || subscribingPlanId === plan.id}
+                  className="mt-5 w-full rounded-2xl bg-[#1d4ed8] py-2.5 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  {isCurrent ? '已生效' : subscribingPlanId === plan.id ? '处理中...' : '立即订阅'}
+                </button>
+              ) : null}
+              {!onSubscribe && onPrimary ? (
+                <button onClick={onPrimary} className="mt-5 w-full rounded-2xl bg-[#1d4ed8] py-2.5 text-sm font-medium text-white">开始使用</button>
+              ) : null}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function UserAccountUsagePage({
+  usage,
+  subscription,
+  entitlements,
+  orders,
+  actioningOrderNo,
+  onConfirmMockPayment,
+  onCancelOrder,
+}: {
+  usage: UsageResponse | null;
+  subscription: MySubscriptionResponse | null;
+  entitlements: EntitlementResponse | null;
+  orders: AdminOrderItem[];
+  actioningOrderNo: string | null;
+  onConfirmMockPayment: (orderNo: string) => void;
+  onCancelOrder: (orderNo: string) => void;
+}) {
+  const entitlementEntries = Object.entries(entitlements?.entitlements || {});
+  const pendingOrder = orders.find((order) => order.status === 'pending') || null;
+
+  return (
+    <div>
+      <h2 className="text-xl font-semibold">账户与用量</h2>
+      <p className="mt-1 text-sm text-slate-600">查看当前套餐状态、本月核心能力剩余额度，以及当前套餐已经为你开放的能力项，方便判断是否需要升级套餐。</p>
+      <div className="mt-4 grid gap-4 md:grid-cols-3">
+        <div className="rounded-3xl border border-[#d7e3f4] bg-white/95 p-5 shadow-[0_14px_34px_rgba(59,130,246,0.08)]">
+          <div className="text-xs font-medium text-slate-500">当前套餐</div>
+          <div className="mt-2 text-2xl font-semibold text-slate-900">{subscription?.subscription.plan.name || '-'}</div>
+          <div className="mt-2 text-sm text-slate-600">状态：{statusLabel(subscription?.subscription.status)}</div>
+        </div>
+        <div className="rounded-3xl border border-[#d7e3f4] bg-white/95 p-5 shadow-[0_14px_34px_rgba(59,130,246,0.08)]">
+          <div className="text-xs font-medium text-slate-500">当前月费</div>
+          <div className="mt-2 text-2xl font-semibold text-slate-900">{subscription ? `¥${subscription.subscription.plan.monthly_price}` : '-'}</div>
+          <div className="mt-2 text-sm text-slate-600">{subscription?.subscription.plan.currency || '-'}</div>
+        </div>
+        <div className="rounded-3xl border border-[#d7e3f4] bg-white/95 p-5 shadow-[0_14px_34px_rgba(59,130,246,0.08)]">
+          <div className="text-xs font-medium text-slate-500">最近订单</div>
+          <div className="mt-2 text-sm font-semibold text-slate-900">{subscription?.latest_order?.order_no || '-'}</div>
+          <div className="mt-2 text-sm text-slate-600">{statusLabel(subscription?.latest_order?.status) || '暂无订单'}</div>
+          {pendingOrder ? (
+            <div className="mt-3 rounded-2xl bg-[#f8fbff] px-3 py-3 text-xs leading-6 text-slate-600">
+              <div>待支付金额：{pendingOrder.currency} {pendingOrder.amount}</div>
+              <div>支付方式：{paymentMethodLabel(pendingOrder.payment_method)}</div>
+              <div>失效时间：{formatDateTime(pendingOrder.expired_at)}</div>
+              {pendingOrder.extra?.alipay_qr_code ? <div className="break-all">支付宝付款码：{pendingOrder.extra.alipay_qr_code}</div> : null}
+            </div>
+          ) : null}
+        </div>
+      </div>
+
+      {pendingOrder ? (
+        <div className="mt-4 rounded-3xl border border-[#bfdbfe] bg-[#eff6ff] p-5 shadow-[0_14px_34px_rgba(59,130,246,0.08)]">
+          <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+            <div>
+              <div className="text-sm font-semibold text-slate-900">有一笔待支付订单</div>
+              <div className="mt-1 text-sm text-slate-600">
+                订单号 {pendingOrder.order_no}，金额 {pendingOrder.currency} {pendingOrder.amount}，方式 {paymentMethodLabel(pendingOrder.payment_method)}。
+              </div>
+              {pendingOrder.extra?.alipay_payment_url ? (
+                <a className="mt-2 inline-block text-sm text-[#1d4ed8] underline" href={pendingOrder.extra.alipay_payment_url} target="_blank" rel="noreferrer">
+                  打开支付宝收银二维码
+                </a>
+              ) : null}
+              <div className="mt-1 text-xs text-slate-500">当前先支持模拟支付确认，后续接真实网关时这里可以继续扩展为二维码跳转或回调状态轮询。</div>
+            </div>
+            <div className="flex flex-wrap gap-3">
+              {pendingOrder.payment_method === 'mock_qr' ? (
+                <button
+                  onClick={() => onConfirmMockPayment(pendingOrder.order_no)}
+                  disabled={actioningOrderNo === pendingOrder.order_no}
+                  className="rounded-2xl bg-[#1d4ed8] px-4 py-2 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  {actioningOrderNo === pendingOrder.order_no ? '处理中...' : '确认模拟支付'}
+                </button>
+              ) : null}
+              <button
+                onClick={() => onCancelOrder(pendingOrder.order_no)}
+                disabled={actioningOrderNo === pendingOrder.order_no}
+                className="rounded-2xl border border-[#bfdbfe] bg-white px-4 py-2 text-sm font-medium text-slate-700 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                取消订单
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      <div className="mt-4 overflow-hidden rounded-3xl border border-[#d7e3f4] bg-white/95 shadow-[0_14px_34px_rgba(59,130,246,0.08)]">
+        <div className="border-b border-[#e5edf8] px-4 py-3">
+          <div className="text-sm font-semibold text-slate-900">本月核心额度</div>
+          <div className="mt-1 text-xs text-slate-500">这里展示会直接影响创作效率的主要可消耗能力。</div>
+        </div>
+        <table className="w-full text-left text-sm">
+          <thead className="bg-[#f8fbff] text-slate-500">
+            <tr>
+              <th className="px-4 py-3 font-medium">能力项</th>
+              <th className="px-4 py-3 font-medium">总量</th>
+              <th className="px-4 py-3 font-medium">已用</th>
+              <th className="px-4 py-3 font-medium">剩余</th>
+            </tr>
+          </thead>
+          <tbody>
+            {(usage?.items || []).map((item) => {
+              const percent = item.limit > 0 ? Math.max(0, Math.min(100, Math.round((item.remaining / item.limit) * 100))) : 0;
+              return (
+                <tr key={item.feature_key} className="border-t border-[#e5edf8] align-top">
+                  <td className="px-4 py-3">
+                    <div className="font-medium text-slate-900">{featureLabel(item.feature_key)}</div>
+                    <div className="mt-1 text-xs text-slate-500">{featureDescription(item.feature_key)}</div>
+                  </td>
+                  <td className="px-4 py-3">{item.limit}</td>
+                  <td className="px-4 py-3">{item.used}</td>
+                  <td className="px-4 py-3">
+                    <div className="font-medium text-slate-900">{item.remaining}</div>
+                    <div className="mt-2 h-2.5 rounded-full bg-[#e5edf8]">
+                      <div className="h-2.5 rounded-full bg-[#3b82f6]" style={{ width: `${percent}%` }} />
+                    </div>
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+
+      <div className="mt-4 grid gap-4 lg:grid-cols-[1.4fr_1fr]">
+        <div className="rounded-3xl border border-[#d7e3f4] bg-white/95 p-5 shadow-[0_14px_34px_rgba(59,130,246,0.08)]">
+          <div className="text-sm font-semibold text-slate-900">当前权益说明</div>
+          <div className="mt-1 text-xs text-slate-500">这里展示你的套餐已经开通的能力项和对应额度，不再显示难理解的内部系统键名。</div>
+          <div className="mt-4 space-y-3">
+            {entitlementEntries.map(([key, value]) => (
+              <div key={key} className="rounded-2xl bg-[#f8fbff] px-4 py-3">
+                <div className="flex items-center justify-between gap-4">
+                  <div>
+                    <div className="font-medium text-slate-900">{featureLabel(key)}</div>
+                    <div className="mt-1 text-xs text-slate-500">{featureDescription(key)}</div>
+                  </div>
+                  <div className="text-sm font-semibold text-slate-900">{formatFeatureValue(key, value)}</div>
+                </div>
+              </div>
+            ))}
+            {entitlementEntries.length === 0 ? <div className="text-sm text-slate-500">暂无权益信息</div> : null}
+          </div>
+        </div>
+
+        <div className="rounded-3xl border border-[#d7e3f4] bg-white/95 p-5 shadow-[0_14px_34px_rgba(59,130,246,0.08)]">
+          <div className="text-sm font-semibold text-slate-900">我的订单</div>
+          <div className="mt-1 text-xs text-slate-500">最近 5 条订单或后台调整记录。</div>
+          <div className="mt-4 space-y-3">
+            {orders.slice(0, 5).map((order) => (
+              <div key={order.order_no} className="rounded-2xl border border-[#e5edf8] px-4 py-3 text-sm">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="font-medium text-slate-900">{order.order_no}</div>
+                  <span className="rounded-full bg-[#eff6ff] px-2 py-1 text-xs text-[#1d4ed8]">
+                    {orderSourceLabel(order.source)}
+                  </span>
+                </div>
+                <div className="mt-2 grid gap-1 text-slate-600">
+                  <div>金额：{order.currency} {order.amount}</div>
+                  <div>状态：{statusLabel(order.status)}</div>
+                  <div>方式：{paymentMethodLabel(order.payment_method)}</div>
+                  <div>套餐：{order.plan_name || `#${order.plan_id}`}</div>
+                  <div>时间：{formatDateTime(order.paid_at || order.created_at)}</div>
+                  {order.operator?.name ? <div>操作人：{order.operator.name}</div> : null}
+                  {order.note ? <div>说明：{order.note}</div> : null}
+                  {order.extra?.feature_name || order.extra?.feature_key ? (
+                    <div>
+                      补发内容：{order.extra?.feature_name || featureLabel(String(order.extra?.feature_key || ''))}
+                      {order.extra?.amount ? ` +${order.extra.amount}` : ''}
+                    </div>
+                  ) : null}
+                </div>
+                {order.status === 'pending' ? (
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    {order.payment_method === 'mock_qr' ? (
+                      <button
+                        onClick={() => onConfirmMockPayment(order.order_no)}
+                        disabled={actioningOrderNo === order.order_no}
+                        className="rounded-xl bg-[#1d4ed8] px-3 py-1.5 text-xs font-medium text-white disabled:cursor-not-allowed disabled:opacity-60"
+                      >
+                        {actioningOrderNo === order.order_no ? '处理中...' : '确认支付'}
+                      </button>
+                    ) : null}
+                    <button
+                      onClick={() => onCancelOrder(order.order_no)}
+                      disabled={actioningOrderNo === order.order_no}
+                      className="rounded-xl border border-[#d7e3f4] px-3 py-1.5 text-xs font-medium text-slate-700 disabled:cursor-not-allowed disabled:opacity-60"
+                    >
+                      取消
+                    </button>
+                  </div>
+                ) : null}
+              </div>
+            ))}
+            {orders.length === 0 ? <div className="text-sm text-slate-500">暂无订单记录</div> : null}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function PlanConfigPage({
+  plans,
+  selectedPlanId,
+  features,
+  onSelectPlan,
+  onFeaturesChange,
+  onSave,
+}: {
+  plans: AdminPlan[];
+  selectedPlanId: number | null;
+  features: AdminFeatureItem[];
+  onSelectPlan: (planId: number) => void;
+  onFeaturesChange: (items: AdminFeatureItem[]) => void;
+  onSave: () => void;
+}) {
+  return (
+    <div>
+      <h2 className="text-xl font-semibold">套餐配置</h2>
+      <div className="mt-3 flex flex-wrap gap-2">
+        {plans.map((plan) => (
+          <button
+            key={plan.id}
+            onClick={() => onSelectPlan(plan.id)}
+            className={`rounded-md border px-3 py-1.5 text-sm ${
+              selectedPlanId === plan.id ? 'border-[#1f5f58] bg-[#e7efea]' : 'border-[#d9dfd7] bg-white'
+            }`}
+          >
+            {plan.name}
+          </button>
+        ))}
+      </div>
+      <div className="mt-4 overflow-hidden rounded-md border border-[#d9dfd7] bg-white">
+        <table className="w-full text-left text-sm">
+          <thead className="bg-[#f2f4ef] text-xs text-slate-500">
+            <tr>
+              <th className="px-3 py-2 font-semibold">权益键</th>
+              <th className="px-3 py-2 font-semibold">值</th>
+            </tr>
+          </thead>
+          <tbody>
+            {features.map((item, idx) => (
+              <tr key={item.feature_key} className="border-t border-[#eef1ec]">
+                <td className="px-3 py-2">{item.feature_key}</td>
+                <td className="px-3 py-2">
+                  <input
+                    value={String(item.value ?? '')}
+                    onChange={(e) => {
+                      const next = [...features];
+                      next[idx] = { ...item, value: e.target.value };
+                      onFeaturesChange(next);
+                    }}
+                    className="w-full rounded-md border border-[#d9dfd7] px-2 py-1 text-sm"
+                  />
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <button onClick={onSave} className="mt-3 rounded-md bg-[#1f5f58] px-3 py-2 text-sm text-white">保存权益</button>
+    </div>
+  );
+}
+
+function QuotaRulesPage({
+  rules,
+  onRulesChange,
+  onSave,
+}: {
+  rules: AdminQuotaRule[];
+  onRulesChange: (items: AdminQuotaRule[]) => void;
+  onSave: () => void;
+}) {
+  return (
+    <div>
+      <h2 className="text-xl font-semibold">配额规则</h2>
+      <div className="mt-4 overflow-hidden rounded-md border border-[#d9dfd7] bg-white">
+        <table className="w-full text-left text-sm">
+          <thead className="bg-[#f2f4ef] text-xs text-slate-500">
+            <tr>
+              <th className="px-3 py-2 font-semibold">权益键</th>
+              <th className="px-3 py-2 font-semibold">重置周期</th>
+              <th className="px-3 py-2 font-semibold">扣减模式</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rules.map((item, idx) => (
+              <tr key={item.feature_key} className="border-t border-[#eef1ec]">
+                <td className="px-3 py-2">{item.feature_key}</td>
+                <td className="px-3 py-2">
+                  <input
+                    value={item.reset_period}
+                    onChange={(e) => {
+                      const next = [...rules];
+                      next[idx] = { ...item, reset_period: e.target.value };
+                      onRulesChange(next);
+                    }}
+                    className="w-full rounded-md border border-[#d9dfd7] px-2 py-1 text-sm"
+                  />
+                </td>
+                <td className="px-3 py-2">
+                  <input
+                    value={item.deduct_mode}
+                    onChange={(e) => {
+                      const next = [...rules];
+                      next[idx] = { ...item, deduct_mode: e.target.value };
+                      onRulesChange(next);
+                    }}
+                    className="w-full rounded-md border border-[#d9dfd7] px-2 py-1 text-sm"
+                  />
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <button onClick={onSave} className="mt-3 rounded-md bg-[#1f5f58] px-3 py-2 text-sm text-white">保存规则</button>
+    </div>
+  );
+}
+
+function EntitlementPage({
+  lookupId,
+  onLookupIdChange,
+  onLookup,
+  preview,
+  plans,
+  selectedPlanId,
+  onApplyPlan,
+  grantFeatureKey,
+  onGrantFeatureKeyChange,
+  grantAmount,
+  onGrantAmountChange,
+  onGrantQuota,
+}: {
+  lookupId: string;
+  onLookupIdChange: (value: string) => void;
+  onLookup: () => void;
+  preview: any;
+  plans: AdminPlan[];
+  selectedPlanId: number | null;
+  onApplyPlan: () => void;
+  grantFeatureKey: string;
+  onGrantFeatureKeyChange: (value: string) => void;
+  grantAmount: string;
+  onGrantAmountChange: (value: string) => void;
+  onGrantQuota: () => void;
+}) {
+  return (
+    <div>
+      <h2 className="text-xl font-semibold">用户权益</h2>
+      <div className="mt-3 flex items-center gap-2">
+        <input
+          value={lookupId}
+          onChange={(e) => onLookupIdChange(e.target.value)}
+          className="w-40 rounded-md border border-[#d9dfd7] px-3 py-2 text-sm"
+          placeholder="用户ID"
+        />
+        <button onClick={onLookup} className="rounded-md bg-[#1f5f58] px-3 py-2 text-sm text-white">查询</button>
+      </div>
+      <div className="mt-4 grid gap-3 lg:grid-cols-2">
+        <div className="rounded-md border border-[#d9dfd7] bg-white p-4">
+          <div className="text-sm font-semibold">切换用户套餐</div>
+          <div className="mt-3 flex flex-wrap gap-2">
+            {plans.map((plan) => (
+              <span
+                key={plan.id}
+                className={`rounded-md border px-3 py-1.5 text-sm ${
+                  selectedPlanId === plan.id ? 'border-[#1f5f58] bg-[#e7efea]' : 'border-[#d9dfd7] bg-[#f8faf7]'
+                }`}
+              >
+                {plan.name}
+              </span>
+            ))}
+          </div>
+          <button onClick={onApplyPlan} className="mt-3 rounded-md bg-[#1f5f58] px-3 py-2 text-sm text-white">
+            套用当前选中套餐
+          </button>
+        </div>
+        <div className="rounded-md border border-[#d9dfd7] bg-white p-4">
+          <div className="text-sm font-semibold">补发额度</div>
+          <div className="mt-3 grid gap-2 md:grid-cols-[1fr_120px_auto]">
+            <input
+              value={grantFeatureKey}
+              onChange={(e) => onGrantFeatureKeyChange(e.target.value)}
+              className="rounded-md border border-[#d9dfd7] px-3 py-2 text-sm"
+              placeholder="feature_key"
+            />
+            <input
+              value={grantAmount}
+              onChange={(e) => onGrantAmountChange(e.target.value)}
+              className="rounded-md border border-[#d9dfd7] px-3 py-2 text-sm"
+              placeholder="amount"
+            />
+            <button onClick={onGrantQuota} className="rounded-md bg-[#1f5f58] px-3 py-2 text-sm text-white">
+              发放
+            </button>
+          </div>
+          <div className="mt-2 text-xs text-slate-500">补发逻辑为冲减本月已用量，用户会立即获得更多剩余额度。</div>
+        </div>
+      </div>
+      {preview && (
+        <pre className="mt-3 overflow-x-auto rounded-md border border-[#d9dfd7] bg-white p-3 text-xs">
+          {JSON.stringify(preview, null, 2)}
+        </pre>
+      )}
+    </div>
+  );
+}
+
+function OrdersPage({ orders }: { orders: AdminOrderItem[] }) {
+  return (
+    <div>
+      <h2 className="text-xl font-semibold">订单订阅</h2>
+      <div className="mt-4 overflow-hidden rounded-md border border-[#d9dfd7] bg-white">
+        <table className="w-full text-left text-sm">
+          <thead className="bg-[#f2f4ef] text-xs text-slate-500">
+            <tr>
+              <th className="px-3 py-2 font-semibold">订单号</th>
+              <th className="px-3 py-2 font-semibold">用户ID</th>
+              <th className="px-3 py-2 font-semibold">金额</th>
+              <th className="px-3 py-2 font-semibold">状态</th>
+            </tr>
+          </thead>
+          <tbody>
+            {orders.map((order) => (
+              <tr key={order.order_no} className="border-t border-[#eef1ec]">
+                <td className="px-3 py-2">{order.order_no}</td>
+                <td className="px-3 py-2">{order.user_id}</td>
+                <td className="px-3 py-2">¥{order.amount}</td>
+                <td className="px-3 py-2">{order.status}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+const USER_FEATURE_META: Record<string, { label: string; description: string; unit: string; kind?: 'boolean' | 'number' }> = {
+  'framework.generate.monthly_limit': {
+    label: '小说框架生成',
+    description: '用于生成世界观、角色设定和故事大纲。',
+    unit: '次/月',
+  },
+  'chapter.expand.monthly_limit': {
+    label: '章节扩写',
+    description: '将章节规划一键扩写为完整正文。',
+    unit: '次/月',
+  },
+  'scene.generate.monthly_limit': {
+    label: '漫画分镜生成',
+    description: '将小说正文转换成分镜脚本。',
+    unit: '次/月',
+  },
+  'manga.image.monthly_limit': {
+    label: '漫画图片生成',
+    description: '每月可生成的漫画图片总张数。',
+    unit: '张/月',
+  },
+  'manga.regenerate.monthly_limit': {
+    label: '漫画重绘',
+    description: '对单张漫画图重新生成和修正。',
+    unit: '次/月',
+  },
+  'manga.max_image_count_per_chapter': {
+    label: '单章节最大出图',
+    description: '单个章节允许生成的最大图片数量。',
+    unit: '张/章',
+  },
+  'manga.allow_color_mode': {
+    label: '彩漫模式',
+    description: '是否支持彩色漫画生成。',
+    unit: '',
+    kind: 'boolean',
+  },
+};
+
+function featureLabel(key: string): string {
+  return USER_FEATURE_META[key]?.label || key;
+}
+
+function featureDescription(key: string): string {
+  return USER_FEATURE_META[key]?.description || '';
+}
+
+function featureUnit(key: string): string {
+  return USER_FEATURE_META[key]?.unit || '';
+}
+
+function formatFeatureValue(key: string, value: any): string {
+  const meta = USER_FEATURE_META[key];
+  if (meta?.kind === 'boolean') {
+    return value ? '已开启' : '未开启';
+  }
+  const unit = featureUnit(key);
+  return unit ? `${value}${unit}` : String(value ?? '-');
+}
+
+function getPlanFeatureEntries(features: Record<string, any> | null | undefined) {
+  const source = features || {};
+  const knownKeys = Object.keys(USER_FEATURE_META).filter((key) => key in source);
+  const extraKeys = Object.keys(source).filter((key) => !(key in USER_FEATURE_META)).sort();
+  return [...knownKeys, ...extraKeys].map((key) => ({ key, value: source[key] }));
+}
+
+function formatDateTime(value: string | null | undefined): string {
+  if (!value) return '-';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleString('zh-CN');
+}
+
+function paymentMethodLabel(method: string | null | undefined): string {
+  if (!method) return '-';
+  if (method === 'mock_qr') return '模拟支付';
+  if (method === 'wechat_qr') return '微信扫码';
+  if (method === 'alipay_qr') return '支付宝扫码';
+  if (method === 'manual_adjustment') return '后台人工调整';
+  return method;
+}
+
+function orderSourceLabel(source: string | null | undefined): string {
+  if (!source) return '-';
+  if (source === 'admin_adjustment') return '后台套餐调整';
+  if (source === 'quota_grant') return '额度补发';
+  if (source === 'mock_checkout') return '模拟支付下单';
+  return source;
+}
+
+const SUBSCRIPTION_STATUS_LABELS: Record<string, string> = {
+  active: '生效中',
+  pending: '待支付',
+  paid: '已支付',
+  admin_adjusted: '后台调整',
+  inactive: '未生效',
+  cancelled: '已取消',
+  expired: '已过期',
+};
+
+function statusLabel(status: string | null | undefined): string {
+  if (!status) return '-';
+  return SUBSCRIPTION_STATUS_LABELS[status] || status;
+}
+
+void PlanConfigPage;
+void QuotaRulesPage;
+void EntitlementPage;
+void OrdersPage;
+void PricingPage;
+void AccountUsagePage;
 
 export default App;

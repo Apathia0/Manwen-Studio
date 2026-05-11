@@ -11,17 +11,17 @@ export default function FrameworkContextBar({ chapter, story }: Props) {
 
   if (!hasFramework && storyCharacters.length === 0) {
     return (
-      <div className="flex items-center h-8 px-4 bg-gray-800/30 border-b border-gray-800/60">
-        <span className="text-[11px] text-gray-600">无大纲约束</span>
+      <div className="flex items-center h-8 px-4 bg-[#f3f5f0] border-b border-[#d9dfd7]">
+        <span className="text-[11px] text-slate-500">暂无大纲约束</span>
       </div>
     );
   }
 
   return (
-    <div className="flex items-center gap-3 h-8 px-4 bg-gray-800/30 border-b border-gray-800/60 overflow-x-auto scrollbar-none">
+    <div className="flex items-center gap-3 h-8 px-4 bg-[#f3f5f0] border-b border-[#d9dfd7] overflow-x-auto scrollbar-none">
       {chapter.act && (
-        <span className="flex items-center gap-1 text-[11px] text-amber-500 font-medium whitespace-nowrap shrink-0">
-          <span className="text-amber-600">📍</span>
+        <span className="flex items-center gap-1 text-[11px] text-blue-700 font-medium whitespace-nowrap shrink-0">
+          <span className="text-blue-500">•</span>
           大纲约束：{chapter.act}
         </span>
       )}
@@ -33,24 +33,25 @@ export default function FrameworkContextBar({ chapter, story }: Props) {
             return (
               <span
                 key={idx}
-                className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-amber-500/10 text-amber-400/80 border border-amber-500/20 whitespace-nowrap"
+                className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-blue-50 text-blue-700 border border-blue-200 whitespace-nowrap"
               >
                 {label}
               </span>
             );
           })}
           {chapter.key_events.length > 4 && (
-            <span className="text-[10px] text-gray-600 whitespace-nowrap">+{chapter.key_events.length - 4}项</span>
+            <span className="text-[10px] text-slate-500 whitespace-nowrap">+{chapter.key_events.length - 4}项</span>
           )}
         </div>
       )}
 
       {storyCharacters.length > 0 && (
         <div className="flex items-center gap-1.5">
-          <span className="text-[10px] text-gray-600 shrink-0">角色：</span>
+          <span className="text-[10px] text-slate-500 shrink-0">角色：</span>
           {storyCharacters.map((char, idx) => (
-            <span key={idx} className="text-[10px] text-gray-400 whitespace-nowrap">
-              {char.name}{idx < storyCharacters.length - 1 ? '、' : ''}
+            <span key={idx} className="text-[10px] text-slate-600 whitespace-nowrap">
+              {char.name}
+              {idx < storyCharacters.length - 1 ? '、' : ''}
             </span>
           ))}
         </div>
