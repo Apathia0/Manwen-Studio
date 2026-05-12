@@ -45,6 +45,12 @@ function formatDateTime(value: string | null | undefined) {
   return date.toLocaleString('zh-CN');
 }
 
+function formatMoney(value: number | string | null | undefined): string {
+  const amount = Number(value ?? 0);
+  if (!Number.isFinite(amount)) return '-';
+  return amount.toFixed(2).replace(/\.00$/, '').replace(/(\.\d)0$/, '$1');
+}
+
 function orderStatusLabel(status: string) {
   if (status === 'pending') return '待支付';
   if (status === 'paid') return '已支付';
@@ -299,7 +305,7 @@ export function AdminPlanManagementPage({ onError }: { onError: (message: string
                 >
                   <div className="flex items-center justify-between gap-2">
                     <div className="font-medium text-slate-900">{plan.name}</div>
-                    <span className="text-xs text-slate-500">¥{plan.monthly_price}/月</span>
+                    <span className="text-xs text-slate-500">¥{formatMoney(plan.monthly_price)}/月</span>
                   </div>
                   <div className="mt-1 text-xs text-slate-500">{plan.description || '暂无描述'}</div>
                 </button>
@@ -313,8 +319,8 @@ export function AdminPlanManagementPage({ onError }: { onError: (message: string
                 <TextInput placeholder="套餐名称" value={draftPlan.name} onChange={(e) => setDraftPlan((prev) => ({ ...prev, name: e.target.value }))} />
                 <TextArea placeholder="套餐描述" rows={3} value={draftPlan.description} onChange={(e) => setDraftPlan((prev) => ({ ...prev, description: e.target.value }))} />
                 <div className="grid gap-2 sm:grid-cols-2">
-                  <TextInput placeholder="月费" value={draftPlan.monthly_price} onChange={(e) => setDraftPlan((prev) => ({ ...prev, monthly_price: e.target.value }))} />
-                  <TextInput placeholder="年费" value={draftPlan.yearly_price} onChange={(e) => setDraftPlan((prev) => ({ ...prev, yearly_price: e.target.value }))} />
+                  <TextInput type="number" step="0.01" min="0" placeholder="月费" value={draftPlan.monthly_price} onChange={(e) => setDraftPlan((prev) => ({ ...prev, monthly_price: e.target.value }))} />
+                  <TextInput type="number" step="0.01" min="0" placeholder="年费" value={draftPlan.yearly_price} onChange={(e) => setDraftPlan((prev) => ({ ...prev, yearly_price: e.target.value }))} />
                 </div>
                 <PrimaryButton
                   disabled={busy}
@@ -341,8 +347,8 @@ export function AdminPlanManagementPage({ onError }: { onError: (message: string
           <div className="space-y-4">
             <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
               <TextInput value={planMeta.name} onChange={(e) => setPlanMeta((prev) => ({ ...prev, name: e.target.value }))} placeholder="套餐名称" />
-              <TextInput value={planMeta.monthly_price} onChange={(e) => setPlanMeta((prev) => ({ ...prev, monthly_price: e.target.value }))} placeholder="月费" />
-              <TextInput value={planMeta.yearly_price} onChange={(e) => setPlanMeta((prev) => ({ ...prev, yearly_price: e.target.value }))} placeholder="年费" />
+              <TextInput type="number" step="0.01" min="0" value={planMeta.monthly_price} onChange={(e) => setPlanMeta((prev) => ({ ...prev, monthly_price: e.target.value }))} placeholder="月费" />
+              <TextInput type="number" step="0.01" min="0" value={planMeta.yearly_price} onChange={(e) => setPlanMeta((prev) => ({ ...prev, yearly_price: e.target.value }))} placeholder="年费" />
               <div className="flex items-center gap-3 rounded-2xl border border-[#d7e3f4] bg-white px-3 py-2 text-sm text-slate-700">
                 <label className="flex items-center gap-2">
                   <input type="checkbox" checked={planMeta.is_visible} onChange={(e) => setPlanMeta((prev) => ({ ...prev, is_visible: e.target.checked }))} />
@@ -833,7 +839,7 @@ export function AdminPlatformSettingsPage({
           <div className="mt-1 text-xs text-slate-500">支持上传 png / jpg / svg，保存后会自动更新浏览器标签页图标。</div>
           <div className="mt-4 flex flex-col gap-4 sm:flex-row sm:items-center">
             <div className="flex h-16 w-16 items-center justify-center overflow-hidden rounded-2xl border border-[#d7e3f4] bg-white shadow-[0_8px_20px_rgba(59,130,246,0.08)]">
-              <img src={settings.basic.icon_url || '/favicon.svg'} alt="site icon" className="h-10 w-10 object-contain" />
+              <img src={settings.basic.icon_url || '/brand-mark.svg'} alt="site icon" className="h-10 w-10 object-contain" />
             </div>
             <div className="flex flex-wrap gap-2">
               <label className="inline-flex cursor-pointer items-center rounded-2xl bg-[#2563eb] px-4 py-2 text-sm font-medium text-white transition hover:bg-[#1d4ed8]">
@@ -878,7 +884,7 @@ export function AdminPlatformSettingsPage({
                     ...prev,
                     basic: {
                       ...prev.basic,
-                      icon_url: '/favicon.svg',
+                      icon_url: '/brand-mark.svg',
                       icon_data: '',
                       icon_mime: '',
                       clear_icon: true,
@@ -1082,7 +1088,7 @@ export function AdminOrdersPage({ onError }: { onError: (message: string) => voi
                   <div>#{order.user_id}</div>
                   <div className="text-xs text-slate-500">{order.user_name || '-'}</div>
                 </td>
-                <td className="px-3 py-3">{order.currency} {order.amount}</td>
+                <td className="px-3 py-3">{order.currency} {formatMoney(order.amount)}</td>
                 <td className="px-3 py-3">
                   <div>{orderStatusLabel(order.status)}</div>
                   <div className="text-xs text-slate-500">{order.payment_method || '-'}</div>

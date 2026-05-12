@@ -8,7 +8,6 @@ import {
   ChevronRight,
   X,
   Check,
-  Sparkles,
   Users,
   Loader2,
 } from 'lucide-react';
@@ -262,11 +261,9 @@ export default function HomePage({ onSelectStory }: Props) {
       <header className="border-b border-gray-800 bg-gray-950/80 backdrop-blur-sm sticky top-0 z-10">
         <div className="max-w-6xl mx-auto px-6 py-4 flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <div className="w-9 h-9 rounded-lg bg-violet-600 flex items-center justify-center">
-              <Sparkles size={18} className="text-white" />
-            </div>
+            <img src="/brand-mark.svg" alt="StoryCanvas logo" className="h-9 w-9 rounded-lg" />
             <div>
-              <h1 className="text-lg font-bold tracking-tight">LoreVista</h1>
+              <h1 className="text-lg font-bold tracking-tight">StoryCanvas</h1>
               <p className="text-xs text-gray-500">AI 小说 · 漫画工坊</p>
             </div>
           </div>

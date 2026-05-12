@@ -1,7 +1,8 @@
 ﻿import datetime
+from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, JSON, String, Text, UniqueConstraint, func
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, JSON, Numeric, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from database import Base
@@ -109,8 +110,8 @@ class Plan(Base):
     code: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
     name: Mapped[str] = mapped_column(String(128), nullable=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
-    monthly_price: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    yearly_price: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    monthly_price: Mapped[Decimal] = mapped_column(Numeric(10, 2), nullable=False, default=Decimal("0.00"))
+    yearly_price: Mapped[Decimal | None] = mapped_column(Numeric(10, 2), nullable=True)
     currency: Mapped[str] = mapped_column(String(16), nullable=False, default="CNY")
     is_visible: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     is_recommended: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
@@ -190,7 +191,7 @@ class BillingOrder(Base):
     order_no: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
     user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False)
     plan_id: Mapped[int] = mapped_column(Integer, ForeignKey("plans.id"), nullable=False)
-    amount: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    amount: Mapped[Decimal] = mapped_column(Numeric(10, 2), nullable=False, default=Decimal("0.00"))
     currency: Mapped[str] = mapped_column(String(16), nullable=False, default="CNY")
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="active")
     source: Mapped[str | None] = mapped_column(String(32), nullable=True, default="system")

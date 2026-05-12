@@ -1,0 +1,21 @@
+<svg width="256" height="256" viewBox="0 0 256 256" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="storycanvas-bg" x1="32" y1="24" x2="216" y2="232" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#60A5FA"/>
+      <stop offset="0.5" stop-color="#2563EB"/>
+      <stop offset="1" stop-color="#1D4ED8"/>
+    </linearGradient>
+    <linearGradient id="storycanvas-accent" x1="72" y1="72" x2="184" y2="184" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#DBEAFE"/>
+      <stop offset="1" stop-color="#93C5FD"/>
+    </linearGradient>
+  </defs>
+  <rect x="20" y="20" width="216" height="216" rx="56" fill="url(#storycanvas-bg)"/>
+  <rect x="40" y="40" width="176" height="176" rx="44" fill="white" fill-opacity="0.1"/>
+  <path d="M84 76C84 69.3726 89.3726 64 96 64H152C178.51 64 200 85.4903 200 112V180C200 186.627 194.627 192 188 192H132C105.49 192 84 170.51 84 144V76Z" fill="white" fill-opacity="0.92"/>
+  <path d="M72 92C72 85.3726 77.3726 80 84 80H138C163.405 80 184 100.595 184 126V188C184 194.627 178.627 200 172 200H118C92.5949 200 72 179.405 72 154V92Z" fill="url(#storycanvas-accent)"/>
+  <path d="M114 90H154C171.673 90 186 104.327 186 122V132H146C128.327 132 114 117.673 114 100V90Z" fill="#1D4ED8"/>
+  <path d="M92 112H132C149.673 112 164 126.327 164 144V154H124C106.327 154 92 139.673 92 122V112Z" fill="#2563EB"/>
+  <path d="M134.704 64L140.108 79.8918L156 85.2965L140.108 90.7012L134.704 106.593L129.299 90.7012L113.408 85.2965L129.299 79.8918L134.704 64Z" fill="#DBEAFE"/>
+  <circle cx="180" cy="72" r="12" fill="#BFDBFE"/>
+</svg>

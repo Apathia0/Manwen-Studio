@@ -524,6 +524,21 @@ export async function cancelMyOrder(orderNo: string): Promise<{
   return res.json();
 }
 
+export async function syncMyOrder(orderNo: string): Promise<{
+  ok: boolean;
+  status: string;
+  order: AdminOrderItem;
+  subscription: SubscriptionSummary;
+  checkout?: BillingCheckout | null;
+}> {
+  const res = await fetch(`${BASE}/api/me/orders/${orderNo}/sync`, {
+    method: 'POST',
+    headers: apiHeaders(),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
 export async function getAdminPlans(): Promise<AdminPlan[]> {
   const res = await fetch(`${BASE}/api/admin/plans`, { headers: apiHeaders() });
   if (!res.ok) throw new Error(await res.text());

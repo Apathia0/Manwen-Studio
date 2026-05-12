@@ -9,6 +9,7 @@ import re
 import secrets
 import shutil
 import uuid
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
 from urllib.parse import parse_qsl
 
@@ -78,6 +79,7 @@ load_dotenv()
 
 logger = logging.getLogger("main")
 ACTIVE_MANGA_GENERATIONS: set[int] = set()
+MONEY_QUANT = Decimal("0.01")
 
 FEATURE_CATALOG: list[dict] = [
     {
@@ -117,6 +119,14 @@ FEATURE_CATALOG: list[dict] = [
         "name": "漫画重绘次数",
         "description": "用户每月可重新生成单张漫画图片的次数。",
         "category": "漫画生成",
+        "value_type": "number",
+        "default_rule": {"reset_period": "monthly", "deduct_mode": "on_success"},
+    },
+    {
+        "key": "ai.text.advanced_calls.monthly_limit",
+        "name": "高级文本 AI 调用次数",
+        "description": "用于框架调整、继续扩展、文本改写、正文调整、质量评估与单项重生成等高级文本能力。",
+        "category": "灏忚鍒涗綔",
         "value_type": "number",
         "default_rule": {"reset_period": "monthly", "deduct_mode": "on_success"},
     },
@@ -222,7 +232,7 @@ def _set_platform_setting(key: str, value, db: Session) -> None:
 def _platform_settings_snapshot(db: Session) -> dict:
     return {
         "basic": {
-            "site_name": _get_platform_setting("platform.site_name", db, "LoreVista"),
+            "site_name": _get_platform_setting("platform.site_name", db, "StoryCanvas"),
             "site_slogan": _get_platform_setting("platform.site_slogan", db, "AI 小说漫画创作平台"),
             "support_email": _get_platform_setting("platform.support_email", db, ""),
             "icp": _get_platform_setting("platform.icp", db, ""),
@@ -270,7 +280,7 @@ def _payment_settings_snapshot(db: Session) -> dict:
 def _platform_icon_url(db: Session) -> str:
     icon_data = _get_platform_setting("platform.icon_data", db, "")
     if not icon_data:
-        return "/favicon.svg"
+        return "/brand-mark.svg"
     version = _get_platform_setting("platform.icon_updated_at", db, "") or "1"
     return f"/api/platform/icon?v={version}"
 
@@ -278,7 +288,7 @@ def _platform_icon_url(db: Session) -> str:
 def _public_platform_settings_snapshot(db: Session) -> dict:
     basic = _platform_settings_snapshot(db)["basic"]
     return {
-        "site_name": basic.get("site_name") or "LoreVista",
+        "site_name": basic.get("site_name") or "StoryCanvas",
         "site_slogan": basic.get("site_slogan") or "",
         "support_email": basic.get("support_email") or "",
         "icp": basic.get("icp") or "",
@@ -370,6 +380,7 @@ def _ensure_platform_seed(db: Session) -> None:
         db.commit()
 
     if db.query(Plan).count() > 0:
+        _ensure_plan_feature_seed(db)
         if not db.query(PlatformSetting).first():
             _seed_platform_settings(db)
             db.commit()
@@ -412,6 +423,7 @@ def _ensure_platform_seed(db: Session) -> None:
             "scene.generate.monthly_limit": 15,
             "manga.image.monthly_limit": 80,
             "manga.regenerate.monthly_limit": 20,
+            "ai.text.advanced_calls.monthly_limit": 20,
             "manga.max_image_count_per_chapter": 6,
             "manga.allow_color_mode": False,
         },
@@ -421,6 +433,7 @@ def _ensure_platform_seed(db: Session) -> None:
             "scene.generate.monthly_limit": 120,
             "manga.image.monthly_limit": 800,
             "manga.regenerate.monthly_limit": 300,
+            "ai.text.advanced_calls.monthly_limit": 180,
             "manga.max_image_count_per_chapter": 12,
             "manga.allow_color_mode": True,
         },
@@ -430,6 +443,7 @@ def _ensure_platform_seed(db: Session) -> None:
             "scene.generate.monthly_limit": 500,
             "manga.image.monthly_limit": 4000,
             "manga.regenerate.monthly_limit": 1500,
+            "ai.text.advanced_calls.monthly_limit": 600,
             "manga.max_image_count_per_chapter": 20,
             "manga.allow_color_mode": True,
         },
@@ -458,13 +472,51 @@ def _ensure_platform_seed(db: Session) -> None:
     db.commit()
 
 
+def _ensure_plan_feature_seed(db: Session) -> None:
+    default_limits = {
+        "free": {
+            "ai.text.advanced_calls.monthly_limit": 20,
+        },
+        "pro": {
+            "ai.text.advanced_calls.monthly_limit": 180,
+        },
+        "premium": {
+            "ai.text.advanced_calls.monthly_limit": 600,
+        },
+    }
+    changed = False
+    plans = db.query(Plan).all()
+    for plan in plans:
+        plan_defaults = default_limits.get(plan.code, {})
+        for feature in FEATURE_CATALOG:
+            feature_key = str(feature["key"])
+            feature_row = db.query(PlanFeature).filter(PlanFeature.plan_id == plan.id, PlanFeature.feature_key == feature_key).first()
+            if not feature_row:
+                default_value = plan_defaults.get(feature_key, 0)
+                db.add(PlanFeature(plan_id=plan.id, feature_key=feature_key, value_json={"value": default_value}))
+                changed = True
+            rule_row = db.query(PlanQuotaRule).filter(PlanQuotaRule.plan_id == plan.id, PlanQuotaRule.feature_key == feature_key).first()
+            if not rule_row:
+                default_rule = feature.get("default_rule") if isinstance(feature.get("default_rule"), dict) else {}
+                db.add(PlanQuotaRule(
+                    plan_id=plan.id,
+                    feature_key=feature_key,
+                    reset_period=str(default_rule.get("reset_period") or "monthly"),
+                    deduct_mode=str(default_rule.get("deduct_mode") or "on_success"),
+                    extra_config={"carry_over_enabled": False},
+                ))
+                changed = True
+    if changed:
+        db.commit()
+
+
 def _seed_platform_settings(db: Session) -> None:
     defaults = {
-        "platform.site_name": "LoreVista",
+        "platform.site_name": "StoryCanvas",
         "platform.site_slogan": "AI 小说漫画创作平台",
-        "platform.support_email": "support@lorevista.ai",
+        "platform.support_email": "support@storycanvas.ai",
         "platform.icp": "",
-        "platform.copyright": "© LoreVista",
+        "platform.copyright": "© StoryCanvas",
         "platform.notice": "欢迎使用企业级 AI 小说漫画创作平台。",
         "api.deepseek.base_url": "https://api.deepseek.com",
         "api.deepseek.model": "deepseek-chat",
@@ -568,6 +620,31 @@ def _coerce_int(value: object, default: int = 0) -> int:
         return default
 
 
+def _coerce_money(value: object, default: str = "0.00") -> Decimal:
+    if value is None or value == "":
+        return Decimal(default).quantize(MONEY_QUANT, rounding=ROUND_HALF_UP)
+    if isinstance(value, Decimal):
+        return value.quantize(MONEY_QUANT, rounding=ROUND_HALF_UP)
+    try:
+        return Decimal(str(value)).quantize(MONEY_QUANT, rounding=ROUND_HALF_UP)
+    except (InvalidOperation, TypeError, ValueError):
+        return Decimal(default).quantize(MONEY_QUANT, rounding=ROUND_HALF_UP)
+
+
+def _parse_money_input(value: object, field_name: str) -> Decimal:
+    try:
+        amount = Decimal(str(value if value is not None else "0")).quantize(MONEY_QUANT, rounding=ROUND_HALF_UP)
+    except (InvalidOperation, TypeError, ValueError) as exc:
+        raise HTTPException(400, f"{field_name} must be a valid number") from exc
+    if amount < 0:
+        raise HTTPException(400, f"{field_name} must be greater than or equal to 0")
+    return amount
+
+
+def _money_to_number(value: object) -> float:
+    return float(_coerce_money(value))
+
+
 def _check_and_consume_quota(
     user_id: int,
     feature_key: str,
@@ -630,7 +707,7 @@ def _serialize_order(order: BillingOrder) -> dict:
         "user_name": user_name,
         "plan_id": order.plan_id,
         "plan_name": plan_name,
-        "amount": order.amount,
+        "amount": _money_to_number(order.amount),
         "currency": order.currency,
         "status": order.status,
         "source": order.source or "system",
@@ -705,6 +782,7 @@ def _usage_entries_for_user(user_id: int, db: Session) -> list[dict]:
         "scene.generate.monthly_limit",
         "manga.image.monthly_limit",
         "manga.regenerate.monthly_limit",
+        "ai.text.advanced_calls.monthly_limit",
     ]
     entries = []
     for key in tracked:
@@ -721,6 +799,10 @@ def _usage_entries_for_user(user_id: int, db: Session) -> list[dict]:
             "remaining": max(0, limit - used),
         })
     return entries
+
+
+def _check_and_consume_advanced_text_quota(user_id: int, db: Session, *, deduct: bool) -> None:
+    _check_and_consume_quota(user_id, "ai.text.advanced_calls.monthly_limit", 1, db, deduct=deduct)
 
 
 def _upsert_user_subscription(user_id: int, plan_id: int, db: Session) -> UserSubscription:
@@ -795,7 +877,7 @@ def _order_checkout_payload(order: BillingOrder, plan: Plan, db: Session) -> dic
         "method": method,
         "provider": provider,
         "instructions": str(payment.get("instructions") or ""),
-        "amount": order.amount,
+        "amount": _money_to_number(order.amount),
         "currency": order.currency,
         "plan_name": plan.name,
         "billing_cycle": order.billing_cycle or "monthly",
@@ -838,9 +920,11 @@ def _validate_alipay_config(payment: dict) -> dict:
 
 def _alipay_precreate(order: BillingOrder, plan: Plan, payment: dict) -> dict:
     config = _validate_alipay_config(payment)
-    timeout_express = f"{max(1, int(payment.get('order_expire_minutes') or 30))}m"
+    expire_minutes = max(1, int(payment.get("order_expire_minutes") or 30))
+    timeout_express = f"{expire_minutes}m"
+    expires_at = order.expired_at or (datetime.datetime.utcnow() + datetime.timedelta(minutes=expire_minutes))
     subject = f"{plan.name} {('年付' if (order.billing_cycle or 'monthly') == 'yearly' else '月付')}"
-    body = plan.description or f"LoreVista subscription for {plan.name}"
+    body = plan.description or f"StoryCanvas subscription for {plan.name}"
     total_amount = f"{float(order.amount or 0):.2f}"
     result = alipay_f2f.precreate(
         gateway=config["gateway"],
@@ -853,7 +937,7 @@ def _alipay_precreate(order: BillingOrder, plan: Plan, payment: dict) -> dict:
         seller_id=config["seller_id"] or None,
         timeout_express=timeout_express,
         body=body[:128],
-        store_id="LoreVista",
+        store_id="StoryCanvas",
     )
     qr_code = result["result"].get("qr_code") or ""
     payment_url = qr_code
@@ -867,12 +951,61 @@ def _alipay_precreate(order: BillingOrder, plan: Plan, payment: dict) -> dict:
     })
     order.extra_json = extra
     return {
+        "mode": str(payment.get("mode") or "mock"),
         "provider": "alipay",
         "method": "alipay_qr",
+        "instructions": str(payment.get("instructions") or ""),
+        "amount": _money_to_number(order.amount),
+        "currency": order.currency,
+        "plan_name": plan.name,
+        "billing_cycle": order.billing_cycle or "monthly",
+        "expires_at": expires_at,
         "qr_code_text": qr_code,
         "payment_url": payment_url,
+        "can_mock_confirm": False,
         "provider_response": result["result"],
     }
+
+
+def _sync_alipay_order_status(order: BillingOrder, db: Session) -> BillingOrder:
+    if order.payment_method != "alipay_qr" or order.status != "pending":
+        return order
+
+    payment = _payment_settings_snapshot(db)
+    config = _validate_alipay_config(payment)
+    try:
+        result = alipay_f2f.trade_query(
+            gateway=config["gateway"],
+            app_id=config["app_id"],
+            private_key=config["app_private_key"],
+            out_trade_no=order.order_no,
+            seller_id=config["seller_id"] or None,
+        )
+    except (alipay_f2f.AlipayApiError, alipay_f2f.AlipayConfigError, httpx.HTTPError):
+        return order
+
+    query_result = result.get("result", {})
+    trade_status = str(query_result.get("trade_status") or "").strip()
+    total_amount = str(query_result.get("total_amount") or "").strip()
+    trade_no = str(query_result.get("trade_no") or "").strip()
+
+    extra = dict(order.extra_json or {})
+    extra.update({
+        "alipay_trade_query_result": query_result,
+        "alipay_trade_no": trade_no or str(extra.get("alipay_trade_no") or ""),
+    })
+    order.extra_json = extra
+
+    if trade_status in {"TRADE_SUCCESS", "TRADE_FINISHED"}:
+        expected_amount = f"{float(order.amount or 0):.2f}"
+        if total_amount and total_amount == expected_amount:
+            _mark_order_paid(order, db, note=f"Alipay trade query confirmed trade {trade_no or order.order_no}")
+    elif trade_status == "TRADE_CLOSED":
+        _mark_order_cancelled(order, db, note=f"Alipay trade query closed trade {trade_no or order.order_no}")
+
+    db.commit()
+    db.refresh(order)
+    return order
 
 
 def _order_for_user(order_no: str, user_id: int, db: Session) -> BillingOrder:
@@ -1599,8 +1732,8 @@ def plans_public(db: Session = Depends(get_db)):
             "code": plan.code,
             "name": plan.name,
             "description": plan.description,
-            "monthly_price": plan.monthly_price,
-            "yearly_price": plan.yearly_price,
+            "monthly_price": _money_to_number(plan.monthly_price),
+            "yearly_price": _money_to_number(plan.yearly_price) if plan.yearly_price is not None else None,
             "currency": plan.currency,
             "is_recommended": plan.is_recommended,
             "features": _plan_feature_map(plan.id, db),
@@ -1641,8 +1774,8 @@ def my_subscription(request: Request, db: Session = Depends(get_db)):
                 "id": plan.id,
                 "code": plan.code,
                 "name": plan.name,
-                "monthly_price": plan.monthly_price,
-                "yearly_price": plan.yearly_price,
+                "monthly_price": _money_to_number(plan.monthly_price),
+                "yearly_price": _money_to_number(plan.yearly_price) if plan.yearly_price is not None else None,
                 "currency": plan.currency,
             },
         },
@@ -1664,6 +1797,34 @@ def my_orders(request: Request, db: Session = Depends(get_db)):
     for order in orders:
         _sync_order_status(order, db)
     return [_serialize_order_with_db(order, db) for order in orders]
+
+
+@app.post("/api/me/orders/{order_no}/sync")
+def my_order_sync(order_no: str, request: Request, db: Session = Depends(get_db)):
+    _ensure_platform_seed(db)
+    user = _require_user(request, db)
+    order = _order_for_user(order_no, user.id, db)
+    if order.payment_method == "alipay_qr" and order.status == "pending":
+        order = _sync_alipay_order_status(order, db)
+    plan = db.get(Plan, order.plan_id)
+    current_plan = _active_plan_for_user(user.id, db)
+    return {
+        "ok": True,
+        "status": order.status,
+        "order": _serialize_order_with_db(order, db),
+        "subscription": {
+            "status": "active",
+            "plan": {
+                "id": current_plan.id,
+                "code": current_plan.code,
+                "name": current_plan.name,
+                "monthly_price": _money_to_number(current_plan.monthly_price),
+                "yearly_price": _money_to_number(current_plan.yearly_price) if current_plan.yearly_price is not None else None,
+                "currency": current_plan.currency,
+            },
+        },
+        "checkout": _order_checkout_payload(order, plan, db) if plan else None,
+    }
 
 
 @app.post("/api/billing/subscribe")
@@ -1700,7 +1861,7 @@ def subscribe_plan(body: dict, request: Request, db: Session = Depends(get_db)):
         order_no=f"LV{datetime.datetime.utcnow().strftime('%Y%m%d%H%M%S')}{secrets.randbelow(10000):04d}",
         user_id=user.id,
         plan_id=plan.id,
-        amount=int(amount or 0),
+        amount=_coerce_money(amount),
         currency=plan.currency,
         status="pending",
         source="user_purchase",
@@ -1714,7 +1875,7 @@ def subscribe_plan(body: dict, request: Request, db: Session = Depends(get_db)):
     )
     db.add(order)
     checkout_override = None
-    if int(amount or 0) <= 0 and bool(payment.get("auto_activate_free_plan", True)):
+    if _coerce_money(amount) <= Decimal("0.00") and bool(payment.get("auto_activate_free_plan", True)):
         _mark_order_paid(order, db, operator_user_id=user.id, note=f"Auto-activated free plan {plan.name}")
     elif payment_method == "alipay_qr":
         try:
@@ -1729,7 +1890,7 @@ def subscribe_plan(body: dict, request: Request, db: Session = Depends(get_db)):
         "plan_id": plan.id,
         "plan_name": plan.name,
         "billing_cycle": billing_cycle,
-        "amount": int(amount or 0),
+        "amount": _money_to_number(amount),
         "payment_method": payment_method,
     })
     db.commit()
@@ -1745,8 +1906,8 @@ def subscribe_plan(body: dict, request: Request, db: Session = Depends(get_db)):
                 "id": current_plan.id,
                 "code": current_plan.code,
                 "name": current_plan.name,
-                "monthly_price": current_plan.monthly_price,
-                "yearly_price": current_plan.yearly_price,
+                "monthly_price": _money_to_number(current_plan.monthly_price),
+                "yearly_price": _money_to_number(current_plan.yearly_price) if current_plan.yearly_price is not None else None,
                 "currency": current_plan.currency,
             },
         },
@@ -1784,8 +1945,8 @@ def my_order_mock_confirm(order_no: str, request: Request, db: Session = Depends
                 "id": plan.id,
                 "code": plan.code,
                 "name": plan.name,
-                "monthly_price": plan.monthly_price,
-                "yearly_price": plan.yearly_price,
+                "monthly_price": _money_to_number(plan.monthly_price),
+                "yearly_price": _money_to_number(plan.yearly_price) if plan.yearly_price is not None else None,
                 "currency": plan.currency,
             },
         },
@@ -1812,6 +1973,7 @@ def my_order_cancel(order_no: str, request: Request, db: Session = Depends(get_d
 
 
 @app.post("/api/payments/alipay/notify")
+@app.post("/alipay/notify")
 async def alipay_notify(request: Request, db: Session = Depends(get_db)):
     _ensure_platform_seed(db)
     raw_body = (await request.body()).decode("utf-8", errors="ignore")
@@ -1880,8 +2042,8 @@ def admin_plans(request: Request, db: Session = Depends(get_db)):
         "code": plan.code,
         "name": plan.name,
         "description": plan.description or "",
-        "monthly_price": plan.monthly_price,
-        "yearly_price": plan.yearly_price,
+        "monthly_price": _money_to_number(plan.monthly_price),
+        "yearly_price": _money_to_number(plan.yearly_price) if plan.yearly_price is not None else None,
         "currency": plan.currency,
         "is_visible": plan.is_visible,
         "is_recommended": plan.is_recommended,
@@ -1907,8 +2069,8 @@ def admin_create_plan(body: dict, request: Request, db: Session = Depends(get_db
         code=code,
         name=name,
         description=str(body.get("description") or ""),
-        monthly_price=int(body.get("monthly_price") or 0),
-        yearly_price=int(body.get("yearly_price") or 0),
+        monthly_price=_parse_money_input(body.get("monthly_price"), "monthly_price"),
+        yearly_price=_parse_money_input(body.get("yearly_price"), "yearly_price"),
         currency=str(body.get("currency") or "CNY"),
         is_visible=bool(body.get("is_visible", True)),
         is_recommended=bool(body.get("is_recommended", False)),
@@ -1937,8 +2099,12 @@ def admin_delete_plan(plan_id: int, request: Request, db: Session = Depends(get_
     plan = db.get(Plan, plan_id)
     if not plan:
         raise HTTPException(404, "Plan not found")
-    if db.query(UserSubscription).filter(UserSubscription.plan_id == plan.id).count() > 0:
-        raise HTTPException(409, "Plan has active subscriptions and cannot be deleted")
+    subscription_count = db.query(UserSubscription).filter(UserSubscription.plan_id == plan.id).count()
+    if subscription_count > 0:
+        raise HTTPException(409, f"Plan has {subscription_count} active subscription(s) and cannot be deleted")
+    order_count = db.query(BillingOrder).filter(BillingOrder.plan_id == plan.id).count()
+    if order_count > 0:
+        raise HTTPException(409, f"Plan has {order_count} historical order(s) and cannot be deleted")
     db.delete(plan)
     db.commit()
     return {"ok": True}
@@ -1953,9 +2119,9 @@ def admin_update_plan(plan_id: int, body: dict, request: Request, db: Session = 
     plan.name = str(body.get("name") or plan.name)
     plan.description = str(body.get("description") or plan.description or "")
     if body.get("monthly_price") is not None:
-        plan.monthly_price = int(body.get("monthly_price"))
+        plan.monthly_price = _parse_money_input(body.get("monthly_price"), "monthly_price")
     if body.get("yearly_price") is not None:
-        plan.yearly_price = int(body.get("yearly_price"))
+        plan.yearly_price = _parse_money_input(body.get("yearly_price"), "yearly_price")
     if body.get("is_visible") is not None:
         plan.is_visible = bool(body.get("is_visible"))
     if body.get("is_recommended") is not None:
@@ -2166,7 +2332,7 @@ def admin_update_user_subscription(user_id: int, body: dict, request: Request, d
         order_no=f"LVADM{datetime.datetime.utcnow().strftime('%Y%m%d%H%M%S')}{secrets.randbelow(10000):04d}",
         user_id=user.id,
         plan_id=plan.id,
-        amount=int(plan.monthly_price or 0),
+        amount=_coerce_money(plan.monthly_price),
         currency=plan.currency,
         status="admin_adjusted",
         source="admin_adjustment",
@@ -2299,7 +2465,7 @@ def admin_save_platform_settings(body: dict, request: Request, db: Session = Dep
     api = body.get("api") if isinstance(body.get("api"), dict) else {}
     payment = body.get("payment") if isinstance(body.get("payment"), dict) else {}
     mappings = {
-        "platform.site_name": basic.get("site_name", "LoreVista"),
+        "platform.site_name": basic.get("site_name", "StoryCanvas"),
         "platform.site_slogan": basic.get("site_slogan", ""),
         "platform.support_email": basic.get("support_email", ""),
         "platform.icp": basic.get("icp", ""),
@@ -3577,11 +3743,13 @@ async def regenerate_tags_endpoint(story_id: int, request: Request, db: Session 
         "characters": story.characters,
         "outline": story.outline,
     }
+    _check_and_consume_advanced_text_quota(user.id, db, deduct=False)
     result = await regenerate_tags(story_context, api_key=_user_deepseek_api_key(request))
 
     tags = result if isinstance(result, dict) and "type" in result else result
     story.tags = tags
     db.commit()
+    _check_and_consume_advanced_text_quota(user.id, db, deduct=True)
     db.refresh(story)
     return {"tags": story.tags}
 
@@ -3597,11 +3765,13 @@ async def regenerate_characters_endpoint(story_id: int, request: Request, db: Se
         "characters": story.characters,
         "outline": story.outline,
     }
+    _check_and_consume_advanced_text_quota(user.id, db, deduct=False)
     result = await regenerate_characters(story_context, api_key=_user_deepseek_api_key(request))
 
     characters = _normalize_characters_payload(result if isinstance(result, list) else result)
     story.characters = characters
     db.commit()
+    _check_and_consume_advanced_text_quota(user.id, db, deduct=True)
     db.refresh(story)
     return {"characters": story.characters}
 
@@ -3617,11 +3787,13 @@ async def regenerate_outline_endpoint(story_id: int, request: Request, db: Sessi
         "characters": story.characters,
         "outline": story.outline,
     }
+    _check_and_consume_advanced_text_quota(user.id, db, deduct=False)
     result = await regenerate_outline(story_context, api_key=_user_deepseek_api_key(request))
 
     outline = result if isinstance(result, dict) and "three_acts" in result else result
     story.outline = _merge_framework_outline(story.outline, outline, _extract_outline_chapters(outline))
     db.commit()
+    _check_and_consume_advanced_text_quota(user.id, db, deduct=True)
     db.refresh(story)
     return {"outline": story.outline}
 
@@ -3699,6 +3871,7 @@ async def adjust_framework_endpoint(story_id: int, request: Request, db: Session
     if not isinstance(messages, list) or not messages:
         raise HTTPException(400, "messages is required")
 
+    _check_and_consume_advanced_text_quota(user.id, db, deduct=False)
     result = await adjust_framework_with_chat(
         _story_framework_context(story),
         messages,
@@ -3712,7 +3885,7 @@ async def adjust_framework_endpoint(story_id: int, request: Request, db: Session
     story.characters = _merge_characters_payload(story.characters, framework.get("characters"))
     story.outline = _merge_framework_outline(story.outline, framework.get("outline"), framework.get("chapters"))
     db.commit()
-    _check_and_consume_quota(user.id, "framework.generate.monthly_limit", 1, db, deduct=True)
+    _check_and_consume_advanced_text_quota(user.id, db, deduct=True)
     db.refresh(story)
     return {
         "reply": result.get("reply", ""),
@@ -3731,6 +3904,7 @@ async def continue_framework_endpoint(story_id: int, request: Request, db: Sessi
     user = _require_user(request, db)
     story = _require_story_for_user(story_id, user, db)
 
+    _check_and_consume_advanced_text_quota(user.id, db, deduct=False)
     result = await continue_framework(
         _story_framework_context(story),
         api_key=_user_deepseek_api_key(request),
@@ -3741,6 +3915,7 @@ async def continue_framework_endpoint(story_id: int, request: Request, db: Sessi
     story.characters = _merge_characters_payload(story.characters, framework.get("characters"))
     story.outline = _merge_framework_outline(story.outline, framework.get("outline"), framework.get("chapters"))
     db.commit()
+    _check_and_consume_advanced_text_quota(user.id, db, deduct=True)
     db.refresh(story)
     return {
         "reply": result.get("reply", ""),
@@ -3831,11 +4006,13 @@ async def rewrite_selection_endpoint(chapter_id: int, request: Request, db: Sess
     if not isinstance(chapter_context, str):
         chapter_context = ""
 
+    _check_and_consume_advanced_text_quota(user.id, db, deduct=False)
     rewritten = await rewrite_selection(
         selected_text.strip(),
         chapter_context.strip() or (chapter.novel_content or "")[:4000],
         api_key=_user_deepseek_api_key(request),
     )
+    _check_and_consume_advanced_text_quota(user.id, db, deduct=True)
     return {"rewritten_text": rewritten}
 
 
@@ -3857,6 +4034,7 @@ async def adjust_chapter_content_endpoint(chapter_id: int, request: Request, db:
         "chapter_number": chapter.chapter_number,
         "key_events": chapter.key_events or [],
     }
+    _check_and_consume_advanced_text_quota(user.id, db, deduct=False)
     updated_content = await adjust_chapter_content(
         _story_framework_context(chapter.story),
         chapter_info,
@@ -3866,6 +4044,7 @@ async def adjust_chapter_content_endpoint(chapter_id: int, request: Request, db:
     )
     _apply_chapter_content(chapter, updated_content, status="completed")
     db.commit()
+    _check_and_consume_advanced_text_quota(user.id, db, deduct=True)
     db.refresh(chapter)
     return chapter
 
@@ -3878,12 +4057,14 @@ async def quality_assess_endpoint(chapter_id: int, request: Request, db: Session
     if not content.strip():
         raise HTTPException(400, "Chapter has no novel content to assess")
 
+    _check_and_consume_advanced_text_quota(user.id, db, deduct=False)
     assessment = await quality_assess(content, api_key=_user_deepseek_api_key(request))
 
     chapter.quality_score = assessment.get("scores", assessment)
     if chapter.novel_content and chapter.novel_content.strip():
         chapter.status = "reviewed"
     db.commit()
+    _check_and_consume_advanced_text_quota(user.id, db, deduct=True)
     db.refresh(chapter)
     return assessment
 

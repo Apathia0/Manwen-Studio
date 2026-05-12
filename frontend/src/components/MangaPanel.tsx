@@ -4,6 +4,7 @@ import { useMemo as useMemoValue } from 'react';
 import {
   generateMangaStream,
   generateScenes, scenesFromSelection,
+  getChapter,
   getScenes,
   updateScenes,
   regenerateImage,
@@ -55,6 +56,8 @@ interface CharacterAppearanceCard {
   fields: CharacterCardField[];
   raw: string;
 }
+
+type ImageLoadStatus = 'loading' | 'ready' | 'error';
 
 function mergeImages(...groups: ImageItem[][]): ImageItem[] {
   const merged = new Map<number, ImageItem>();
@@ -142,7 +145,9 @@ export default function MangaPanel({ chapter, onChapterRefresh, selectedText, ch
   const [selectionLoading, setSelectionLoading] = useState(false);
   const [scenesFromSelectionFlag, setScenesFromSelectionFlag] = useState(false);
   const [ignorePersistedImages, setIgnorePersistedImages] = useState(false);
+  const [imageLoadStates, setImageLoadStates] = useState<Record<string, ImageLoadStatus>>({});
   const mangaAbortRef = useRef<Map<number, AbortController>>(new Map());
+  const imagePreloadAttemptsRef = useRef<Record<string, number>>({});
   const parsedCharacterCards = useMemoValue(() => parseCharacterAppearanceCards(charText), [charText]);
   const refImageByLabel = useMemoValue(() => {
     const map = new Map<string, RefImage>();
@@ -194,6 +199,8 @@ export default function MangaPanel({ chapter, onChapterRefresh, selectedText, ch
     setImageCountState(DEFAULT_IMAGE_COUNT);
     setShowColorMenu(false);
     setIgnorePersistedImages(false);
+    setImageLoadStates({});
+    imagePreloadAttemptsRef.current = {};
     // Load existing scenes and characters if available
     if (chapter) {
       getChapterRefImages(chapter.id).then((r) => {
@@ -253,6 +260,51 @@ export default function MangaPanel({ chapter, onChapterRefresh, selectedText, ch
       img,
     }));
   const lightboxImg = lightboxIdx >= 0 ? displayImages[lightboxIdx] : null;
+  const imageReadyMap = useMemoValue(
+    () =>
+      new Map(
+        displayImages.map((img) => [
+          img.image_path,
+          imageLoadStates[img.image_path] === 'ready',
+        ]),
+      ),
+    [displayImages, imageLoadStates],
+  );
+
+  useEffect(() => {
+    const pendingTimers: number[] = [];
+    displayImages.forEach((img) => {
+      const key = img.image_path;
+      if (!key || imageLoadStates[key] === 'ready' || imageLoadStates[key] === 'loading') return;
+      if (imageLoadStates[key] === 'error' && (imagePreloadAttemptsRef.current[key] ?? 0) >= 8) return;
+
+      setImageLoadStates((prev) => (prev[key] ? prev : { ...prev, [key]: 'loading' }));
+
+      const attempt = (tryIndex: number) => {
+        const preload = new window.Image();
+        preload.onload = () => {
+          imagePreloadAttemptsRef.current[key] = tryIndex;
+          setImageLoadStates((prev) => ({ ...prev, [key]: 'ready' }));
+        };
+        preload.onerror = () => {
+          if (tryIndex < 5) {
+            const timer = window.setTimeout(() => attempt(tryIndex + 1), 450);
+            pendingTimers.push(timer);
+            return;
+          }
+          imagePreloadAttemptsRef.current[key] = tryIndex;
+          setImageLoadStates((prev) => ({ ...prev, [key]: 'error' }));
+        };
+        preload.src = mangaImageUrl(img.image_path, tryIndex);
+      };
+
+      const nextAttempt = (imagePreloadAttemptsRef.current[key] ?? 0) + 1;
+      imagePreloadAttemptsRef.current[key] = nextAttempt;
+      attempt(nextAttempt);
+    });
+
+    return () => pendingTimers.forEach((timer) => window.clearTimeout(timer));
+  }, [displayImages, imageLoadStates]);
 
   // 鈹€鈹€ Scene generation 鈹€鈹€
   const handleGenerateScenes = async () => {
@@ -434,6 +486,45 @@ export default function MangaPanel({ chapter, onChapterRefresh, selectedText, ch
     setColorModeState(mode);
   };
 
+  const syncChapterImagesFromServer = useCallback(async (chapterId: number) => {
+    const latest = await getChapter(chapterId);
+    const latestImages: ImageItem[] = latest.images.map((img) => ({
+      image_number: img.image_number,
+      image_path: img.image_path,
+      prompt: img.prompt || '',
+    }));
+    setImages(latestImages);
+    setIgnorePersistedImages(false);
+    return latestImages;
+  }, []);
+
+  const reconcileGenerationAfterStreamIssue = useCallback(
+    async (chapterId: number, targetTotal: number, fallbackImages: ImageItem[], fallbackError: string) => {
+      try {
+        const latestImages = await syncChapterImagesFromServer(chapterId);
+        if (latestImages.length >= targetTotal) {
+          setErrorMsg('');
+          setFailedSceneIdx(-1);
+          genStore.finish(chapterId);
+          onChapterRefresh?.(chapterId);
+          window.setTimeout(() => genStore.clear(chapterId), 800);
+          return;
+        }
+
+        const mergedImages = mergeImages(fallbackImages, latestImages);
+        setImages(mergedImages);
+        genStore.finish(chapterId, fallbackError);
+        onChapterRefresh?.(chapterId);
+      } catch {
+        setImages(fallbackImages);
+        if (fallbackImages.length > 0) setIgnorePersistedImages(false);
+        genStore.finish(chapterId, fallbackError);
+        onChapterRefresh?.(chapterId);
+      }
+    },
+    [onChapterRefresh, syncChapterImagesFromServer],
+  );
+
   // 鈹€鈹€ Image generation 鈹€鈹€
 
   const startMangaGeneration = async (mode: 'continue' | 'restart' = 'continue') => {
@@ -501,8 +592,11 @@ export default function MangaPanel({ chapter, onChapterRefresh, selectedText, ch
           mangaAbortRef.current.delete(targetId);
           setImages(genStore.get(targetId)?.images ?? seedImages);
           setIgnorePersistedImages(false);
+          setErrorMsg('');
+          setFailedSceneIdx(-1);
           genStore.finish(targetId);
           onChapterRefresh?.(targetId);
+          void syncChapterImagesFromServer(targetId);
           setTimeout(() => genStore.clear(targetId), 800);
           break;
         case 'error': {
@@ -525,8 +619,9 @@ export default function MangaPanel({ chapter, onChapterRefresh, selectedText, ch
           }
           const errorParts = [event.data.error || '未知错误'];
           if (event.data.suggestion) errorParts.push(event.data.suggestion);
-          genStore.finish(targetId, errorParts.join(' '));
-          onChapterRefresh?.(targetId);
+          const nextError = errorParts.join(' ');
+          setErrorMsg(nextError);
+          void reconcileGenerationAfterStreamIssue(targetId, targetTotal, generatedImages, nextError);
           break;
         }
       }
@@ -548,6 +643,7 @@ export default function MangaPanel({ chapter, onChapterRefresh, selectedText, ch
       setImages(mergeImages(existingImages, state.images));
       setIgnorePersistedImages(false);
     }
+    setErrorMsg('');
     genStore.finish(targetId, '已中止生成');
     window.setTimeout(() => onChapterRefresh?.(targetId), 700);
   };
@@ -1338,6 +1434,8 @@ export default function MangaPanel({ chapter, onChapterRefresh, selectedText, ch
             const isEditing = editingIdx === sceneIdx;
             const isRegenerating = regenIdx === image_number;
             const isSanitized = sanitizedSceneIdxs.includes(sceneIdx);
+            const imgReady = img ? imageReadyMap.get(img.image_path) === true : false;
+            const imgLoadFailed = img ? imageLoadStates[img.image_path] === 'error' : false;
             return (
               <div
                 key={image_number}
@@ -1346,7 +1444,7 @@ export default function MangaPanel({ chapter, onChapterRefresh, selectedText, ch
                   sceneDetailRefs.current[sceneIdx] = node;
                 }}
               >
-                {img ? (
+                {img && imgReady ? (
                 <div
                   className="relative rounded-xl overflow-hidden border border-[#d9dfd7] bg-white cursor-pointer
                              hover:border-[#d9dfd7] transition-colors"
@@ -1356,10 +1454,10 @@ export default function MangaPanel({ chapter, onChapterRefresh, selectedText, ch
                   }}
                 >
                   <img
-                    src={mangaImageUrl(img.image_path, isRegenerating ? Date.now() : undefined)}
+                    src={mangaImageUrl(img.image_path)}
                     alt={`Panel ${image_number}`}
                     className={`w-full object-contain ${isRegenerating ? 'opacity-30' : ''}`}
-                    loading="lazy"
+                    loading="eager"
                   />
                   <div className="absolute top-3 left-3 px-2 py-0.5 bg-black/70 rounded text-[10px] text-slate-700 font-mono">
                     {image_number}/{imageCount}
@@ -1384,8 +1482,14 @@ export default function MangaPanel({ chapter, onChapterRefresh, selectedText, ch
                     {image_number}/{imageCount}
                   </div>
                   <div className="flex flex-col items-center gap-2 text-slate-500">
-                    {generating ? <Loader2 size={24} className="animate-spin" /> : <ImageIcon size={28} strokeWidth={1.5} />}
-                    <span className="text-xs">{generating ? '等待生成...' : '未生成'}</span>
+                    {img ? (
+                      imgLoadFailed ? <ImageIcon size={28} strokeWidth={1.5} /> : <Loader2 size={24} className="animate-spin" />
+                    ) : (
+                      generating ? <Loader2 size={24} className="animate-spin" /> : <ImageIcon size={28} strokeWidth={1.5} />
+                    )}
+                    <span className="text-xs">
+                      {img ? (imgLoadFailed ? '图片加载失败，稍后会自动同步' : '图片载入中...') : (generating ? '等待生成...' : '未生成')}
+                    </span>
                   </div>
                 </div>
                 )}
@@ -1513,12 +1617,6 @@ export default function MangaPanel({ chapter, onChapterRefresh, selectedText, ch
             >
               <ChevronDown size={20} />
             </button>
-          )}
-          {/* Prompt */}
-          {lightboxImg.prompt && (
-            <div className="absolute bottom-4 left-4 right-4 text-center text-sm text-slate-600 bg-black/60 rounded-lg px-4 py-2">
-              {lightboxImg.prompt}
-            </div>
           )}
         </div>
       )}

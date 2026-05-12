@@ -152,3 +152,25 @@ def precreate(
         biz_content=biz_content,
         notify_url=notify_url,
     )
+
+
+def trade_query(
+    *,
+    gateway: str,
+    app_id: str,
+    private_key: str,
+    out_trade_no: str,
+    seller_id: str | None = None,
+) -> dict[str, Any]:
+    biz_content: dict[str, Any] = {
+        "out_trade_no": out_trade_no,
+    }
+    if seller_id:
+        biz_content["seller_id"] = seller_id.strip()
+    return call_api(
+        gateway=gateway,
+        app_id=app_id,
+        private_key=private_key,
+        method="alipay.trade.query",
+        biz_content=biz_content,
+    )

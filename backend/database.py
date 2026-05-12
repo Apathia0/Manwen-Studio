@@ -119,9 +119,39 @@ def _migrate():
                 conn.execute(text("ALTER TABLE billing_orders ADD COLUMN paid_at TIMESTAMP"))
             if "expired_at" not in cols:
                 conn.execute(text("ALTER TABLE billing_orders ADD COLUMN expired_at TIMESTAMP"))
+    _migrate_money_columns()
     _cleanup_duplicate_chapters()
     _cleanup_duplicate_manga_images()
     _add_unique_constraints()
+
+
+def _migrate_money_columns():
+    """Migrate price/amount columns to fixed-point decimals for billing accuracy."""
+    from sqlalchemy import text
+
+    if engine.dialect.name != "postgresql":
+        logger.warning("Skipping money column migration for non-PostgreSQL database: %s", engine.dialect.name)
+        return
+
+    with engine.begin() as conn:
+        conn.execute(text("""
+            ALTER TABLE plans
+            ALTER COLUMN monthly_price TYPE NUMERIC(10,2)
+            USING ROUND(COALESCE(monthly_price, 0)::numeric, 2)
+        """))
+        conn.execute(text("""
+            ALTER TABLE plans
+            ALTER COLUMN yearly_price TYPE NUMERIC(10,2)
+            USING CASE
+                WHEN yearly_price IS NULL THEN NULL
+                ELSE ROUND(yearly_price::numeric, 2)
+            END
+        """))
+        conn.execute(text("""
+            ALTER TABLE billing_orders
+            ALTER COLUMN amount TYPE NUMERIC(10,2)
+            USING ROUND(COALESCE(amount, 0)::numeric, 2)
+        """))
 
 
 def _safe_unlink(path: Path):

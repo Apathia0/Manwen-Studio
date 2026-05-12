@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
+import QRCode from 'qrcode';
 import {
   Brush,
   Check,
@@ -14,7 +15,6 @@ import {
   ShieldCheck,
   Trash2,
   UserCircle2,
-  WandSparkles,
   X,
 } from 'lucide-react';
 import PublicLanding from './components/PublicLanding';
@@ -55,8 +55,10 @@ import {
   saveAdminQuotaRules,
   setAuthToken,
   subscribePlan,
+  syncMyOrder,
   updateStory,
   deleteStory,
+  type BillingCheckout,
   type AdminFeatureItem,
   type AdminOrderItem,
   type AdminPlan,
@@ -91,6 +93,10 @@ type NavItem = {
   icon: React.ComponentType<{ size?: number; className?: string }>;
 };
 
+const DEFAULT_SITE_NAME = 'StoryCanvas';
+const DEFAULT_SITE_SLOGAN = 'AI 小说与漫画创作平台';
+const DEFAULT_ICON_URL = '/brand-mark.svg';
+
 const USER_NAV: NavItem[] = [
   { key: 'stories', label: '作品', icon: Home },
   { key: 'workspace', label: '创作工作台', icon: Brush },
@@ -123,13 +129,13 @@ function App() {
   const [loadingWorkspace, setLoadingWorkspace] = useState(false);
   const [plans, setPlans] = useState<PublicPlan[]>([]);
   const [platform, setPlatform] = useState<PublicPlatformSettings>({
-    site_name: 'LoreVista',
-    site_slogan: 'AI 小说与漫画创作平台',
+    site_name: DEFAULT_SITE_NAME,
+    site_slogan: DEFAULT_SITE_SLOGAN,
     support_email: '',
     icp: '',
     copyright: '',
     notice: '',
-    icon_url: '/favicon.svg',
+    icon_url: DEFAULT_ICON_URL,
   });
   const [usage, setUsage] = useState<UsageResponse | null>(null);
   const [myEntitlements, setMyEntitlements] = useState<EntitlementResponse | null>(null);
@@ -137,6 +143,7 @@ function App() {
   const [myOrders, setMyOrders] = useState<AdminOrderItem[]>([]);
   const [subscribingPlanId, setSubscribingPlanId] = useState<number | null>(null);
   const [actioningOrderNo, setActioningOrderNo] = useState<string | null>(null);
+  const [activeCheckout, setActiveCheckout] = useState<(BillingCheckout & { orderNo: string }) | null>(null);
   const [adminPlans, setAdminPlans] = useState<AdminPlan[]>([]);
   const [adminPlanId, setAdminPlanId] = useState<number | null>(null);
   const [adminFeatures, setAdminFeatures] = useState<AdminFeatureItem[]>([]);
@@ -147,6 +154,7 @@ function App() {
   const [grantFeatureKey, setGrantFeatureKey] = useState('manga.image.monthly_limit');
   const [grantAmount, setGrantAmount] = useState('10');
   const [globalError, setGlobalError] = useState<string | null>(null);
+  const [globalSuccess, setGlobalSuccess] = useState<string | null>(null);
   void adminPlans;
   void adminOrders;
   void entitlementPreview;
@@ -167,13 +175,13 @@ function App() {
   }, []);
 
   useEffect(() => {
-    const siteName = platform.site_name?.trim() || 'LoreVista';
+    const siteName = platform.site_name?.trim() || DEFAULT_SITE_NAME;
     const siteSlogan = platform.site_slogan?.trim();
     document.title = siteSlogan ? `${siteName} - ${siteSlogan}` : siteName;
   }, [platform]);
 
   useEffect(() => {
-    const iconHref = platform.icon_url?.trim() || '/favicon.svg';
+    const iconHref = platform.icon_url?.trim() || DEFAULT_ICON_URL;
     let link = document.querySelector("link[rel='icon']") as HTMLLinkElement | null;
     if (!link) {
       link = document.createElement('link');
@@ -193,6 +201,49 @@ function App() {
       void refreshAdminData();
     }
   }, [session]);
+
+  useEffect(() => {
+    const checkoutOrderNo = activeCheckout?.orderNo;
+    if (!session || !checkoutOrderNo) return;
+
+    let cancelled = false;
+
+    async function syncCheckoutStatus() {
+      const orderNo = checkoutOrderNo!;
+      try {
+        const syncResult = await syncMyOrder(orderNo);
+        if (cancelled) return;
+        const orders = await getMyOrders();
+        if (cancelled) return;
+        setMyOrders(orders);
+        const currentOrder = orders.find((order) => order.order_no === orderNo) || syncResult.order;
+        if (!currentOrder) {
+          return;
+        }
+        if (currentOrder.status !== 'pending') {
+          await Promise.all([refreshSubscriptionData(), refreshUsage(), refreshAdminDataIfNeeded()]);
+          if (!cancelled) {
+            setActiveCheckout(null);
+            setRoute('account');
+            setGlobalError(null);
+            setGlobalSuccess(`支付成功，${syncResult.subscription.plan.name} 已生效。`);
+          }
+        }
+      } catch {
+        // Ignore transient polling failures and keep the dialog open.
+      }
+    }
+
+    void syncCheckoutStatus();
+    const timer = window.setInterval(() => {
+      void syncCheckoutStatus();
+    }, 5000);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [session, activeCheckout?.orderNo]);
 
   async function bootstrapSession() {
     try {
@@ -360,8 +411,14 @@ function App() {
       const result = await subscribePlan(planId, billingCycle);
       await Promise.all([refreshSubscriptionData(), refreshUsage(), refreshAdminDataIfNeeded()]);
       setGlobalError(null);
+      setGlobalSuccess(null);
       if (result.status === 'pending') {
+        setActiveCheckout({ ...result.checkout, orderNo: result.order.order_no });
         setRoute('account');
+      } else {
+        setActiveCheckout(null);
+        setRoute('account');
+        setGlobalSuccess(`支付成功，${result.subscription.plan.name} 已生效。`);
       }
     } catch (error: any) {
       setGlobalError(error.message || '订阅套餐失败');
@@ -384,7 +441,10 @@ function App() {
     try {
       await confirmMyOrderMock(orderNo);
       await Promise.all([refreshSubscriptionData(), refreshUsage(), refreshAdminDataIfNeeded()]);
+      setActiveCheckout((prev) => (prev?.orderNo === orderNo ? null : prev));
       setGlobalError(null);
+      setGlobalSuccess('支付成功，套餐已生效。');
+      setRoute('account');
     } catch (error: any) {
       setGlobalError(error.message || '确认支付失败');
     } finally {
@@ -397,7 +457,9 @@ function App() {
     try {
       await cancelMyOrder(orderNo);
       await Promise.all([refreshSubscriptionData(), refreshAdminDataIfNeeded()]);
+      setActiveCheckout((prev) => (prev?.orderNo === orderNo ? null : prev));
       setGlobalError(null);
+      setGlobalSuccess(null);
     } catch (error: any) {
       setGlobalError(error.message || '取消订单失败');
     } finally {
@@ -537,11 +599,13 @@ function App() {
       <header className="sticky top-0 z-20 border-b border-[#d7e3f4] bg-[rgba(248,251,255,0.82)] backdrop-blur-xl">
         <div className="flex h-14 items-center justify-between px-5 lg:px-8">
           <div className="flex items-center gap-3">
-            <div className="flex h-9 w-9 items-center justify-center rounded-2xl border border-[#d7e3f4] bg-[linear-gradient(180deg,_#fafdff_0%,_#e8f1ff_100%)] text-[#2563eb] shadow-[0_10px_24px_rgba(59,130,246,0.14)]">
-              <WandSparkles size={16} />
-            </div>
+            <img
+              src="/brand-mark.svg"
+              alt={`${platform.site_name || DEFAULT_SITE_NAME} logo`}
+              className="h-9 w-9 rounded-2xl shadow-[0_10px_24px_rgba(59,130,246,0.14)]"
+            />
             <div>
-              <div className="text-sm font-semibold tracking-wide">{platform.site_name || 'LoreVista'}</div>
+              <div className="text-sm font-semibold tracking-wide">{platform.site_name || DEFAULT_SITE_NAME}</div>
               <div className="text-[11px] text-slate-500">{platform.site_slogan || 'AI 小说与漫画创作平台'}</div>
             </div>
           </div>
@@ -619,6 +683,11 @@ function App() {
               {globalError}
             </div>
           )}
+          {globalSuccess && (
+            <div className="mb-3 rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-700">
+              {globalSuccess}
+            </div>
+          )}
 
           {route === 'stories' && (
             <StoriesPage
@@ -679,6 +748,16 @@ function App() {
           )}
         </main>
       </div>
+      <PaymentCheckoutDialog
+        checkout={activeCheckout}
+        onClose={() => setActiveCheckout(null)}
+        onSuccess={(message) => {
+          setActiveCheckout(null);
+          setRoute('account');
+          setGlobalError(null);
+          setGlobalSuccess(message);
+        }}
+      />
     </div>
   );
 }
@@ -722,9 +801,7 @@ function AuthLayout({
           返回首页
         </button>
         <div className="rounded-[28px] border border-[#d7e3f4] bg-white/96 p-7 shadow-[0_24px_60px_rgba(59,130,246,0.12)] backdrop-blur">
-          <div className="mb-5 inline-flex h-11 w-11 items-center justify-center rounded-2xl border border-[#d7e3f4] bg-[linear-gradient(180deg,_#fafdff_0%,_#e8f1ff_100%)] text-[#2563eb] shadow-[0_12px_28px_rgba(59,130,246,0.14)]">
-            <WandSparkles size={18} />
-          </div>
+          <img src="/brand-mark.svg" alt={`${brandName} logo`} className="mb-5 h-11 w-11 rounded-2xl shadow-[0_12px_28px_rgba(59,130,246,0.14)]" />
           <div className="mb-3">
             <div className="text-[17px] font-semibold tracking-tight text-slate-950">{brandName}</div>
             <div className="mt-1 text-xs text-slate-500">{brandSlogan}</div>
@@ -753,10 +830,10 @@ function LoginPage({
   toRegister: () => void;
   error: string | null;
 }) {
-  const [email, setEmail] = useState('admin@lorevista.ai');
+  const [email, setEmail] = useState('admin@storycanvas.ai');
   const [password, setPassword] = useState('admin123');
-  const brandName = title || 'LoreVista';
-  const brandSlogan = subtitle || 'AI 小说与漫画创作平台';
+  const brandName = title || DEFAULT_SITE_NAME;
+  const brandSlogan = subtitle || DEFAULT_SITE_SLOGAN;
   return (
     <AuthLayout
       brandName={brandName}
@@ -810,8 +887,8 @@ function RegisterPage({
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
-  const brandName = title || 'LoreVista';
-  const brandSlogan = subtitle || 'AI 小说与漫画创作平台';
+  const brandName = title || DEFAULT_SITE_NAME;
+  const brandSlogan = subtitle || DEFAULT_SITE_SLOGAN;
   return (
     <AuthLayout
       brandName={brandName}
@@ -897,6 +974,7 @@ function PricingPage({
         'scene.generate.monthly_limit': 15,
         'manga.image.monthly_limit': 80,
         'manga.regenerate.monthly_limit': 20,
+        'ai.text.advanced_calls.monthly_limit': 20,
         'manga.max_image_count_per_chapter': 6,
         'manga.allow_color_mode': false,
       },
@@ -912,6 +990,7 @@ function PricingPage({
         'scene.generate.monthly_limit': 120,
         'manga.image.monthly_limit': 800,
         'manga.regenerate.monthly_limit': 300,
+        'ai.text.advanced_calls.monthly_limit': 180,
         'manga.max_image_count_per_chapter': 12,
         'manga.allow_color_mode': true,
       },
@@ -927,6 +1006,7 @@ function PricingPage({
         'scene.generate.monthly_limit': 500,
         'manga.image.monthly_limit': 4000,
         'manga.regenerate.monthly_limit': 1500,
+        'ai.text.advanced_calls.monthly_limit': 600,
         'manga.max_image_count_per_chapter': 20,
         'manga.allow_color_mode': true,
       },
@@ -949,7 +1029,7 @@ function PricingPage({
                 {isCurrent && <span className="rounded-md bg-[#f6ede2] px-2 py-1 text-xs text-[#8b5a21]">当前套餐</span>}
               </div>
               <div className="mt-2 text-2xl font-semibold">
-                ¥{plan.monthly_price}
+                ¥{formatMoney(plan.monthly_price)}
                 <span className="text-sm font-normal text-slate-500">/月</span>
               </div>
               <div className="mt-1 text-xs text-slate-500">{plan.description || ''}</div>
@@ -1266,6 +1346,149 @@ function WorkspacePage({
   );
 }
 
+function PaymentCheckoutDialog({
+  checkout,
+  onClose,
+  onSuccess,
+}: {
+  checkout: (BillingCheckout & { orderNo: string }) | null;
+  onClose: () => void;
+  onSuccess: (message: string) => void;
+}) {
+  const [qrDataUrl, setQrDataUrl] = useState<string>('');
+  const [checkingPayment, setCheckingPayment] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function renderQr() {
+      if (!checkout?.qr_code_text) {
+        setQrDataUrl('');
+        return;
+      }
+      try {
+        const url = await QRCode.toDataURL(checkout.qr_code_text, {
+          width: 280,
+          margin: 1,
+          color: {
+            dark: '#0f172a',
+            light: '#ffffff',
+          },
+        });
+        if (!cancelled) setQrDataUrl(url);
+      } catch {
+        if (!cancelled) setQrDataUrl('');
+      }
+    }
+    void renderQr();
+    return () => {
+      cancelled = true;
+    };
+  }, [checkout]);
+
+  async function confirmAlipayPaid() {
+    if (!checkout?.orderNo || checkingPayment) return;
+    setCheckingPayment(true);
+    try {
+      const result = await syncMyOrder(checkout.orderNo);
+      if (result.status === 'paid') {
+        onSuccess(`支付成功，${result.subscription.plan.name} 已生效。`);
+      }
+    } finally {
+      setCheckingPayment(false);
+    }
+  }
+
+  if (!checkout) return null;
+
+  return (
+    <div className="fixed inset-0 z-40 flex items-center justify-center bg-[rgba(15,23,42,0.48)] px-4">
+      <div className="w-full max-w-4xl rounded-[28px] border border-[#d7e3f4] bg-white p-6 shadow-[0_24px_60px_rgba(15,23,42,0.2)]">
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <div className="text-lg font-semibold text-slate-900">支付订单</div>
+            <div className="mt-1 text-sm text-slate-500">
+              订单号 {checkout.orderNo}，请使用{paymentMethodLabel(checkout.method)}完成支付。
+            </div>
+          </div>
+          <button
+            onClick={onClose}
+            className="rounded-full border border-[#d7e3f4] bg-white p-2 text-slate-500 transition hover:bg-[#f8fbff] hover:text-slate-900"
+          >
+            <X size={16} />
+          </button>
+        </div>
+
+        <div className="mt-6 grid gap-6 lg:grid-cols-[320px_minmax(0,1fr)]">
+          <div className="rounded-3xl border border-[#d7e3f4] bg-[#f8fbff] p-5">
+            <div className="rounded-3xl bg-white p-4 shadow-[0_10px_24px_rgba(59,130,246,0.08)]">
+              {qrDataUrl ? (
+                <img src={qrDataUrl} alt="支付二维码" className="mx-auto h-[280px] w-[280px] rounded-2xl" />
+              ) : (
+                <div className="flex h-[280px] items-center justify-center rounded-2xl bg-[#f8fbff] text-sm text-slate-500">
+                  正在生成二维码...
+                </div>
+              )}
+            </div>
+            <div className="mt-4 text-center text-sm text-slate-600">
+              {checkout.provider === 'alipay' ? '打开支付宝扫一扫完成付款' : '请使用对应支付 App 扫码完成付款'}
+            </div>
+          </div>
+
+          <div className="space-y-4">
+            <div className="rounded-3xl border border-[#d7e3f4] bg-white p-5">
+              <div className="text-sm font-semibold text-slate-900">订单信息</div>
+              <div className="mt-4 grid gap-3 sm:grid-cols-2">
+                <div className="rounded-2xl bg-[#f8fbff] px-4 py-3">
+                  <div className="text-xs text-slate-500">套餐</div>
+                  <div className="mt-1 text-sm font-medium text-slate-900">{checkout.plan_name}</div>
+                </div>
+                <div className="rounded-2xl bg-[#f8fbff] px-4 py-3">
+                  <div className="text-xs text-slate-500">金额</div>
+                  <div className="mt-1 text-sm font-medium text-slate-900">{checkout.currency} {formatMoney(checkout.amount)}</div>
+                </div>
+                <div className="rounded-2xl bg-[#f8fbff] px-4 py-3">
+                  <div className="text-xs text-slate-500">计费周期</div>
+                  <div className="mt-1 text-sm font-medium text-slate-900">{checkout.billing_cycle === 'yearly' ? '年付' : '月付'}</div>
+                </div>
+                <div className="rounded-2xl bg-[#f8fbff] px-4 py-3">
+                  <div className="text-xs text-slate-500">失效时间</div>
+                  <div className="mt-1 text-sm font-medium text-slate-900">{formatDateTime(checkout.expires_at)}</div>
+                </div>
+              </div>
+            </div>
+
+            <div className="rounded-3xl border border-[#d7e3f4] bg-white p-5">
+              <div className="text-sm font-semibold text-slate-900">支付说明</div>
+              <div className="mt-3 whitespace-pre-wrap text-sm leading-7 text-slate-600">
+                {checkout.instructions || '请在二维码失效前完成支付，支付成功后系统会通过官方回调自动更新订单状态。'}
+              </div>
+              {checkout.payment_url ? (
+                <a
+                  href={checkout.payment_url}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="mt-4 inline-flex rounded-2xl bg-[#1d4ed8] px-4 py-2 text-sm font-medium text-white transition hover:bg-[#1e40af]"
+                >
+                  在新窗口打开支付链接
+                </a>
+              ) : null}
+              {checkout.method === 'alipay_qr' ? (
+                <button
+                  onClick={() => void confirmAlipayPaid()}
+                  disabled={checkingPayment}
+                  className="mt-4 ml-3 inline-flex rounded-2xl border border-[#bfdbfe] bg-white px-4 py-2 text-sm font-medium text-[#1d4ed8] transition hover:bg-[#eff6ff] disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  {checkingPayment ? '正在确认支付...' : '我已完成支付'}
+                </button>
+              ) : null}
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function AccountUsagePage({
   usage,
   subscription,
@@ -1289,7 +1512,7 @@ function AccountUsagePage({
         </div>
         <div className="rounded-md border border-[#d9dfd7] bg-white p-4">
           <div className="text-xs text-slate-500">月费</div>
-          <div className="mt-2 text-lg font-semibold">{subscription ? `¥${subscription.subscription.plan.monthly_price}` : '-'}</div>
+          <div className="mt-2 text-lg font-semibold">{subscription ? `¥${formatMoney(subscription.subscription.plan.monthly_price)}` : '-'}</div>
           <div className="mt-1 text-sm text-slate-600">{subscription?.subscription.plan.currency || '-'}</div>
         </div>
         <div className="rounded-md border border-[#d9dfd7] bg-white p-4">
@@ -1333,7 +1556,7 @@ function AccountUsagePage({
             {orders.slice(0, 5).map((order) => (
               <div key={order.order_no} className="rounded-md border border-[#eef1ec] px-3 py-2 text-sm">
                 <div className="font-medium">{order.order_no}</div>
-                <div className="mt-1 text-slate-600">¥{order.amount} · {order.status}</div>
+                <div className="mt-1 text-slate-600">¥{formatMoney(order.amount)} · {order.status}</div>
               </div>
             ))}
             {orders.length === 0 && <div className="text-sm text-slate-500">暂无订单记录</div>}
@@ -1358,9 +1581,9 @@ function UserPricingPage({
   subscribingPlanId?: number | null;
 }) {
   const fallback = [
-    { id: 0, name: 'Free', monthly_price: 0, description: '适合体验和轻量创作', features: { 'manga.image.monthly_limit': 80, 'framework.generate.monthly_limit': 5, 'scene.generate.monthly_limit': 15, 'manga.max_image_count_per_chapter': 6, 'manga.allow_color_mode': false } },
-    { id: 1, name: 'Pro', monthly_price: 59, description: '适合稳定更新的个人创作者', features: { 'manga.image.monthly_limit': 800, 'framework.generate.monthly_limit': 50, 'scene.generate.monthly_limit': 120, 'manga.max_image_count_per_chapter': 12, 'manga.allow_color_mode': true } },
-    { id: 2, name: 'Premium', monthly_price: 199, description: '适合高频产出的团队和工作室', features: { 'manga.image.monthly_limit': 4000, 'framework.generate.monthly_limit': 200, 'scene.generate.monthly_limit': 500, 'manga.max_image_count_per_chapter': 20, 'manga.allow_color_mode': true } },
+    { id: 0, name: 'Free', monthly_price: 0, description: '适合体验和轻量创作', features: { 'manga.image.monthly_limit': 80, 'framework.generate.monthly_limit': 5, 'scene.generate.monthly_limit': 15, 'ai.text.advanced_calls.monthly_limit': 20, 'manga.max_image_count_per_chapter': 6, 'manga.allow_color_mode': false } },
+    { id: 1, name: 'Pro', monthly_price: 59, description: '适合稳定更新的个人创作者', features: { 'manga.image.monthly_limit': 800, 'framework.generate.monthly_limit': 50, 'scene.generate.monthly_limit': 120, 'ai.text.advanced_calls.monthly_limit': 180, 'manga.max_image_count_per_chapter': 12, 'manga.allow_color_mode': true } },
+    { id: 2, name: 'Premium', monthly_price: 199, description: '适合高频产出的团队和工作室', features: { 'manga.image.monthly_limit': 4000, 'framework.generate.monthly_limit': 200, 'scene.generate.monthly_limit': 500, 'ai.text.advanced_calls.monthly_limit': 600, 'manga.max_image_count_per_chapter': 20, 'manga.allow_color_mode': true } },
   ];
   const data = plans.length > 0 ? plans : (fallback as any[]);
 
@@ -1384,7 +1607,7 @@ function UserPricingPage({
                 {isCurrent ? <span className="rounded-full bg-[#eff6ff] px-3 py-1 text-xs text-[#1d4ed8]">当前套餐</span> : null}
               </div>
               <div className="mt-3 text-3xl font-semibold text-slate-900">
-                ¥{plan.monthly_price}
+                ¥{formatMoney(plan.monthly_price)}
                 <span className="ml-1 text-sm font-normal text-slate-500">/月</span>
               </div>
               <div className="mt-2 text-sm leading-6 text-slate-500">{plan.description || '暂无套餐说明'}</div>
@@ -1452,7 +1675,7 @@ function UserAccountUsagePage({
         </div>
         <div className="rounded-3xl border border-[#d7e3f4] bg-white/95 p-5 shadow-[0_14px_34px_rgba(59,130,246,0.08)]">
           <div className="text-xs font-medium text-slate-500">当前月费</div>
-          <div className="mt-2 text-2xl font-semibold text-slate-900">{subscription ? `¥${subscription.subscription.plan.monthly_price}` : '-'}</div>
+          <div className="mt-2 text-2xl font-semibold text-slate-900">{subscription ? `¥${formatMoney(subscription.subscription.plan.monthly_price)}` : '-'}</div>
           <div className="mt-2 text-sm text-slate-600">{subscription?.subscription.plan.currency || '-'}</div>
         </div>
         <div className="rounded-3xl border border-[#d7e3f4] bg-white/95 p-5 shadow-[0_14px_34px_rgba(59,130,246,0.08)]">
@@ -1461,7 +1684,7 @@ function UserAccountUsagePage({
           <div className="mt-2 text-sm text-slate-600">{statusLabel(subscription?.latest_order?.status) || '暂无订单'}</div>
           {pendingOrder ? (
             <div className="mt-3 rounded-2xl bg-[#f8fbff] px-3 py-3 text-xs leading-6 text-slate-600">
-              <div>待支付金额：{pendingOrder.currency} {pendingOrder.amount}</div>
+              <div>待支付金额：{pendingOrder.currency} {formatMoney(pendingOrder.amount)}</div>
               <div>支付方式：{paymentMethodLabel(pendingOrder.payment_method)}</div>
               <div>失效时间：{formatDateTime(pendingOrder.expired_at)}</div>
               {pendingOrder.extra?.alipay_qr_code ? <div className="break-all">支付宝付款码：{pendingOrder.extra.alipay_qr_code}</div> : null}
@@ -1476,7 +1699,7 @@ function UserAccountUsagePage({
             <div>
               <div className="text-sm font-semibold text-slate-900">有一笔待支付订单</div>
               <div className="mt-1 text-sm text-slate-600">
-                订单号 {pendingOrder.order_no}，金额 {pendingOrder.currency} {pendingOrder.amount}，方式 {paymentMethodLabel(pendingOrder.payment_method)}。
+                订单号 {pendingOrder.order_no}，金额 {pendingOrder.currency} {formatMoney(pendingOrder.amount)}，方式 {paymentMethodLabel(pendingOrder.payment_method)}。
               </div>
               {pendingOrder.extra?.alipay_payment_url ? (
                 <a className="mt-2 inline-block text-sm text-[#1d4ed8] underline" href={pendingOrder.extra.alipay_payment_url} target="_blank" rel="noreferrer">
@@ -1578,7 +1801,7 @@ function UserAccountUsagePage({
                   </span>
                 </div>
                 <div className="mt-2 grid gap-1 text-slate-600">
-                  <div>金额：{order.currency} {order.amount}</div>
+                  <div>金额：{order.currency} {formatMoney(order.amount)}</div>
                   <div>状态：{statusLabel(order.status)}</div>
                   <div>方式：{paymentMethodLabel(order.payment_method)}</div>
                   <div>套餐：{order.plan_name || `#${order.plan_id}`}</div>
@@ -1851,7 +2074,7 @@ function OrdersPage({ orders }: { orders: AdminOrderItem[] }) {
               <tr key={order.order_no} className="border-t border-[#eef1ec]">
                 <td className="px-3 py-2">{order.order_no}</td>
                 <td className="px-3 py-2">{order.user_id}</td>
-                <td className="px-3 py-2">¥{order.amount}</td>
+                <td className="px-3 py-2">¥{formatMoney(order.amount)}</td>
                 <td className="px-3 py-2">{order.status}</td>
               </tr>
             ))}
@@ -1886,6 +2109,11 @@ const USER_FEATURE_META: Record<string, { label: string; description: string; un
   'manga.regenerate.monthly_limit': {
     label: '漫画重绘',
     description: '对单张漫画图重新生成和修正。',
+    unit: '次/月',
+  },
+  'ai.text.advanced_calls.monthly_limit': {
+    label: '高级文本 AI',
+    description: '用于框架调整、继续扩展、文本改写、正文调整、质量评估与单项重生成。',
     unit: '次/月',
   },
   'manga.max_image_count_per_chapter': {
@@ -1934,6 +2162,12 @@ function formatDateTime(value: string | null | undefined): string {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return value;
   return date.toLocaleString('zh-CN');
+}
+
+function formatMoney(value: number | string | null | undefined): string {
+  const amount = Number(value ?? 0);
+  if (!Number.isFinite(amount)) return '-';
+  return amount.toFixed(2).replace(/\.00$/, '').replace(/(\.\d)0$/, '$1');
 }
 
 function paymentMethodLabel(method: string | null | undefined): string {

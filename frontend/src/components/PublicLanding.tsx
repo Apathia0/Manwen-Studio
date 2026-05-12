@@ -11,9 +11,7 @@ import {
   PlayCircle,
   ScrollText,
   ShieldCheck,
-  Sparkles,
   Users,
-  WandSparkles,
 } from 'lucide-react';
 import type { PublicPlatformSettings } from '../api';
 
@@ -48,7 +46,7 @@ export default function PublicLanding({
   onPricing,
   platform,
 }: PublicLandingProps) {
-  const siteName = platform.site_name || 'LoreVista';
+  const siteName = platform.site_name || 'StoryCanvas';
   const siteSlogan = platform.site_slogan || 'AI 小说与漫画创作平台';
   const workflowSteps = [
     {
@@ -104,9 +102,11 @@ export default function PublicLanding({
       <header className="sticky top-0 z-20 border-b border-[#d9dfd7]/80 bg-[rgba(252,253,251,0.82)] backdrop-blur-xl">
         <div className="mx-auto flex h-18 max-w-7xl items-center justify-between px-4 sm:px-6">
           <button onClick={() => window.scrollTo({ top: 0, behavior: 'smooth' })} className="flex items-center gap-3 text-left">
-            <div className="flex h-10 w-10 items-center justify-center rounded-2xl border border-[#d7e3f4] bg-[linear-gradient(180deg,_#fafdff_0%,_#e8f1ff_100%)] text-[#2563eb] shadow-[0_12px_30px_rgba(59,130,246,0.14)]">
-              <Sparkles size={18} />
-            </div>
+            <img
+              src="/brand-mark.svg"
+              alt={`${siteName} logo`}
+              className="h-10 w-10 rounded-2xl shadow-[0_12px_30px_rgba(59,130,246,0.14)]"
+            />
             <div>
               <div className="text-[17px] font-semibold tracking-tight">{siteName}</div>
               <div className="text-[11px] text-slate-500">{siteSlogan}</div>
@@ -133,7 +133,7 @@ export default function PublicLanding({
         <section className="mx-auto grid max-w-7xl gap-10 px-4 pb-18 pt-10 sm:px-6 lg:grid-cols-[minmax(0,1.08fr)_520px] lg:items-center lg:pt-18">
           <div>
             <div className="inline-flex items-center gap-2 rounded-full border border-[#d7e3f4] bg-white/80 px-3 py-1 text-xs font-medium text-[#2563eb] shadow-[0_10px_24px_rgba(59,130,246,0.08)]">
-              <WandSparkles size={14} />
+              <img src="/brand-mark.svg" alt="" className="h-4 w-4 rounded-md" />
               用一条完整工作流把灵感变成可持续更新的内容 IP
             </div>
             <h1 className="mt-6 max-w-3xl text-4xl font-semibold leading-[1.08] tracking-tight text-slate-950 sm:text-5xl lg:text-[62px]">
