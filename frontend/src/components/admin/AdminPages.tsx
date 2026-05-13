@@ -2,6 +2,7 @@ import type * as React from 'react';
 import { useEffect, useMemo, useState } from 'react';
 import {
   adminGrantUserQuota,
+  getAdminStoryChapters,
   adminUpdateUserSubscription,
   createAdminPlan,
   createAdminUser,
@@ -15,6 +16,7 @@ import {
   getAdminPlatformSettings,
   getAdminQuotaRules,
   getAdminUserEntitlements,
+  getAdminUserStories,
   getAdminUsers,
   saveAdminPlanFeatures,
   saveAdminQuotaRules,
@@ -28,6 +30,8 @@ import {
   type AdminOrderItem,
   type AdminPlan,
   type AdminQuotaRule,
+  type AdminReviewChapter,
+  type AdminReviewStory,
   type AdminUserItem,
   type PlatformSettings,
 } from '../../api';
@@ -509,13 +513,24 @@ export function AdminUserManagementPage({ onError }: { onError: (message: string
   const [grantFeatureKey, setGrantFeatureKey] = useState('manga.image.monthly_limit');
   const [grantAmount, setGrantAmount] = useState('10');
   const [selectedPlanId, setSelectedPlanId] = useState<number | null>(null);
+  const [reviewStories, setReviewStories] = useState<AdminReviewStory[]>([]);
+  const [selectedReviewStoryId, setSelectedReviewStoryId] = useState<number | null>(null);
+  const [reviewChapters, setReviewChapters] = useState<AdminReviewChapter[]>([]);
+  const [selectedReviewChapterId, setSelectedReviewChapterId] = useState<number | null>(null);
   const [grantFeedback, setGrantFeedback] = useState<null | {
     feature_key: string;
     granted_amount: number;
     before_granted: number;
     after_granted: number;
   }>(null);
-  const [newUser, setNewUser] = useState({ name: '', email: '', password: '', role: 'user' as 'user' | 'admin' });
+  const [newUser, setNewUser] = useState({
+    name: '',
+    email: '',
+    password: '',
+    role: 'user' as 'user' | 'admin',
+    allow_api_key_override: false,
+    allow_api_url_override: false,
+  });
   const { busy, run } = useBusyAction(onError);
 
   const catalogMap = useMemo(
@@ -534,6 +549,14 @@ export function AdminUserManagementPage({ onError }: { onError: (message: string
     [selectedUserId, users],
   );
   const usageItems = useMemo(() => (entitlementPreview?.usage || []) as Array<any>, [entitlementPreview]);
+  const selectedReviewStory = useMemo(
+    () => reviewStories.find((item) => item.id === selectedReviewStoryId) || null,
+    [reviewStories, selectedReviewStoryId],
+  );
+  const selectedReviewChapter = useMemo(
+    () => reviewChapters.find((item) => item.id === selectedReviewChapterId) || null,
+    [reviewChapters, selectedReviewChapterId],
+  );
 
   async function loadData() {
     const [userList, planList, featureCatalog] = await Promise.all([
@@ -554,6 +577,27 @@ export function AdminUserManagementPage({ onError }: { onError: (message: string
     setSelectedPlanId(data.plan?.id || null);
   }
 
+  async function loadReviewStories(userId: number) {
+    const stories = await getAdminUserStories(userId);
+    setReviewStories(stories);
+    const nextStoryId = stories.some((item) => item.id === selectedReviewStoryId) ? selectedReviewStoryId : stories[0]?.id ?? null;
+    setSelectedReviewStoryId(nextStoryId);
+    if (!nextStoryId) {
+      setReviewChapters([]);
+      setSelectedReviewChapterId(null);
+      return;
+    }
+    const detail = await getAdminStoryChapters(nextStoryId);
+    setReviewChapters(detail.chapters);
+    setSelectedReviewChapterId((current) => (detail.chapters.some((item) => item.id === current) ? current : detail.chapters[0]?.id ?? null));
+  }
+
+  async function loadReviewChapters(storyId: number) {
+    const detail = await getAdminStoryChapters(storyId);
+    setReviewChapters(detail.chapters);
+    setSelectedReviewChapterId((current) => (detail.chapters.some((item) => item.id === current) ? current : detail.chapters[0]?.id ?? null));
+  }
+
   useEffect(() => {
     void run(async () => {
       await loadData();
@@ -564,6 +608,7 @@ export function AdminUserManagementPage({ onError }: { onError: (message: string
     if (!selectedUserId) return;
     void run(async () => {
       await loadEntitlements(selectedUserId);
+      await loadReviewStories(selectedUserId);
     });
   }, [selectedUserId]);
 
@@ -614,13 +659,38 @@ export function AdminUserManagementPage({ onError }: { onError: (message: string
                   <option value="admin">管理员</option>
                 </Select>
               </div>
+              <div className="mt-3 flex flex-wrap gap-3 rounded-2xl border border-[#d7e3f4] bg-[#f8fbff] px-4 py-3 text-sm text-slate-700">
+                <label className="flex items-center gap-2">
+                  <input
+                    type="checkbox"
+                    checked={newUser.allow_api_key_override}
+                    onChange={(e) => setNewUser((prev) => ({ ...prev, allow_api_key_override: e.target.checked }))}
+                  />
+                  允许自定义 API Key
+                </label>
+                <label className="flex items-center gap-2">
+                  <input
+                    type="checkbox"
+                    checked={newUser.allow_api_url_override}
+                    onChange={(e) => setNewUser((prev) => ({ ...prev, allow_api_url_override: e.target.checked }))}
+                  />
+                  允许自定义 URL/模型
+                </label>
+              </div>
               <div className="mt-3">
                 <PrimaryButton
                   disabled={busy}
                   onClick={() =>
                     void run(async () => {
                       await createAdminUser(newUser);
-                      setNewUser({ name: '', email: '', password: '', role: 'user' });
+                      setNewUser({
+                        name: '',
+                        email: '',
+                        password: '',
+                        role: 'user',
+                        allow_api_key_override: false,
+                        allow_api_url_override: false,
+                      });
                       await loadData();
                     })
                   }
@@ -645,6 +715,24 @@ export function AdminUserManagementPage({ onError }: { onError: (message: string
                       <option value="disabled">停用</option>
                     </Select>
                   </div>
+                  <div className="mt-3 flex flex-wrap gap-3 rounded-2xl border border-[#d7e3f4] bg-[#f8fbff] px-4 py-3 text-sm text-slate-700">
+                    <label className="flex items-center gap-2">
+                      <input
+                        type="checkbox"
+                        checked={Boolean(selectedUser.allow_api_key_override)}
+                        onChange={(e) => setUsers((prev) => prev.map((item) => item.id === selectedUser.id ? { ...item, allow_api_key_override: e.target.checked } : item))}
+                      />
+                      允许自定义 API Key
+                    </label>
+                    <label className="flex items-center gap-2">
+                      <input
+                        type="checkbox"
+                        checked={Boolean(selectedUser.allow_api_url_override)}
+                        onChange={(e) => setUsers((prev) => prev.map((item) => item.id === selectedUser.id ? { ...item, allow_api_url_override: e.target.checked } : item))}
+                      />
+                      允许自定义 URL/模型
+                    </label>
+                  </div>
                   <div className="mt-3 flex flex-wrap gap-2">
                     <PrimaryButton
                       disabled={busy}
@@ -657,6 +745,8 @@ export function AdminUserManagementPage({ onError }: { onError: (message: string
                             email: current.email,
                             role: current.role,
                             status: current.status,
+                            allow_api_key_override: Boolean(current.allow_api_key_override),
+                            allow_api_url_override: Boolean(current.allow_api_url_override),
                           });
                           await loadData();
                           await loadEntitlements(selectedUser.id);
@@ -783,6 +873,100 @@ export function AdminUserManagementPage({ onError }: { onError: (message: string
                       <pre className="mt-3 max-h-[420px] overflow-auto rounded-2xl bg-white p-3 text-xs text-slate-700">
                         {JSON.stringify(entitlementPreview?.entitlements || {}, null, 2)}
                       </pre>
+                    </div>
+                  </div>
+                </SectionCard>
+
+                <SectionCard title="作品审查" description="管理员可在这里按用户查看其作品与章节内容，但普通作品页仍然只显示自己的作品。">
+                  <div className="grid gap-4 xl:grid-cols-[300px_280px_minmax(0,1fr)]">
+                    <div className="rounded-2xl border border-[#e5edf8] bg-[#f8fbff] p-3">
+                      <div className="mb-3 text-sm font-semibold text-slate-900">该用户的作品</div>
+                      <div className="max-h-[420px] space-y-2 overflow-y-auto pr-1">
+                        {reviewStories.length ? reviewStories.map((story) => (
+                          <button
+                            key={story.id}
+                            onClick={() =>
+                              void run(async () => {
+                                setSelectedReviewStoryId(story.id);
+                                await loadReviewChapters(story.id);
+                              })
+                            }
+                            className={cn(
+                              'w-full rounded-2xl border px-3 py-3 text-left transition',
+                              selectedReviewStoryId === story.id ? 'border-[#60a5fa] bg-white shadow-sm' : 'border-[#d7e3f4] bg-white/80 hover:bg-white',
+                            )}
+                          >
+                            <div className="font-medium text-slate-900">{story.title}</div>
+                            <div className="mt-1 line-clamp-2 text-xs text-slate-500">{story.description || '暂无简介'}</div>
+                            <div className="mt-2 flex items-center justify-between text-xs text-slate-500">
+                              <span>{formatDateTime(story.created_at)}</span>
+                              <span>{story.chapter_count} 章</span>
+                            </div>
+                          </button>
+                        )) : (
+                          <div className="rounded-2xl bg-white px-3 py-6 text-center text-sm text-slate-500">该用户暂时还没有作品。</div>
+                        )}
+                      </div>
+                    </div>
+
+                    <div className="rounded-2xl border border-[#e5edf8] bg-[#f8fbff] p-3">
+                      <div className="mb-3 text-sm font-semibold text-slate-900">章节列表</div>
+                      <div className="max-h-[420px] space-y-2 overflow-y-auto pr-1">
+                        {reviewChapters.length ? reviewChapters.map((chapter) => (
+                          <button
+                            key={chapter.id}
+                            onClick={() => setSelectedReviewChapterId(chapter.id)}
+                            className={cn(
+                              'w-full rounded-2xl border px-3 py-3 text-left transition',
+                              selectedReviewChapterId === chapter.id ? 'border-[#60a5fa] bg-white shadow-sm' : 'border-[#d7e3f4] bg-white/80 hover:bg-white',
+                            )}
+                          >
+                            <div className="font-medium text-slate-900">
+                              第 {chapter.chapter_number} 章 · {chapter.title || '未命名章节'}
+                            </div>
+                            <div className="mt-1 text-xs text-slate-500">
+                              {chapter.word_count || 0} 字 · {chapter.status || 'pending'}
+                            </div>
+                            <div className="mt-1 text-xs text-slate-400">{formatDateTime(chapter.created_at)}</div>
+                          </button>
+                        )) : (
+                          <div className="rounded-2xl bg-white px-3 py-6 text-center text-sm text-slate-500">
+                            {selectedReviewStory ? '这部作品还没有章节。' : '先从左侧选择一部作品。'}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+
+                    <div className="rounded-2xl border border-[#e5edf8] bg-white p-4">
+                      <div className="flex flex-wrap items-start justify-between gap-3">
+                        <div>
+                          <div className="text-sm font-semibold text-slate-900">
+                            {selectedReviewStory ? selectedReviewStory.title : '章节内容预览'}
+                          </div>
+                          <div className="mt-1 text-xs text-slate-500">
+                            {selectedReviewStory ? `${selectedReviewStory.chapter_count} 章 · 创建于 ${formatDateTime(selectedReviewStory.created_at)}` : '选择作品和章节后，可在这里只读审查内容。'}
+                          </div>
+                        </div>
+                      </div>
+                      {selectedReviewChapter ? (
+                        <div className="mt-4 space-y-3">
+                          <div className="rounded-2xl bg-[#f8fbff] px-4 py-3">
+                            <div className="text-sm font-medium text-slate-900">
+                              第 {selectedReviewChapter.chapter_number} 章 · {selectedReviewChapter.title || '未命名章节'}
+                            </div>
+                            <div className="mt-1 text-xs text-slate-500">
+                              {selectedReviewChapter.word_count || 0} 字 · {selectedReviewChapter.status || 'pending'} · {formatDateTime(selectedReviewChapter.created_at)}
+                            </div>
+                          </div>
+                          <div className="max-h-[420px] overflow-y-auto rounded-2xl border border-[#e5edf8] bg-[#f8fbff] p-4 text-sm leading-7 text-slate-700 whitespace-pre-wrap">
+                            {selectedReviewChapter.novel_content?.trim() || '该章节暂时还没有正文内容。'}
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="mt-4 rounded-2xl border border-dashed border-[#d7e3f4] bg-[#f8fbff] px-4 py-10 text-center text-sm text-slate-500">
+                          先选择一部作品和章节，再查看只读内容。
+                        </div>
+                      )}
                     </div>
                   </div>
                 </SectionCard>
@@ -923,7 +1107,7 @@ export function AdminPlatformSettingsPage({
           </div>
         </div>
 
-        <div className="mt-4 flex items-center gap-3 rounded-2xl border border-[#d7e3f4] bg-white px-4 py-3 text-sm text-slate-700">
+        <div className="mt-4 flex flex-wrap items-center gap-3 rounded-2xl border border-[#d7e3f4] bg-white px-4 py-3 text-sm text-slate-700">
           <label className="flex items-center gap-2">
             <input
               type="checkbox"
@@ -932,6 +1116,95 @@ export function AdminPlatformSettingsPage({
             />
             允许用户临时覆盖自己的 API Key
           </label>
+        </div>
+
+        <div className="mt-3 rounded-2xl border border-[#d7e3f4] bg-white px-4 py-3 text-sm text-slate-700">
+          <label className="flex items-center gap-2">
+            <input
+              type="checkbox"
+              checked={settings.api.enable_user_url_override ?? false}
+              onChange={(e) => setSettings((prev) => prev ? { ...prev, api: { ...prev.api, enable_user_url_override: e.target.checked } } : prev)}
+            />
+            允许用户覆盖自己的 URL/模型
+          </label>
+        </div>
+
+        <div className="mt-4 grid gap-4 xl:grid-cols-2">
+          <div className="rounded-3xl border border-[#d7e3f4] bg-white p-4">
+            <div className="text-sm font-semibold text-slate-900">登录注册验证</div>
+            <div className="mt-1 text-xs text-slate-500">可分别控制注册和登录是否必须通过邮箱验证码校验。</div>
+            <div className="mt-4 space-y-3">
+              <label className="flex items-center gap-2 rounded-2xl border border-[#e5edf8] px-3 py-3 text-sm text-slate-700">
+                <input
+                  type="checkbox"
+                  checked={settings.auth.require_email_code_for_register}
+                  onChange={(e) => setSettings((prev) => prev ? { ...prev, auth: { ...prev.auth, require_email_code_for_register: e.target.checked } } : prev)}
+                />
+                注册必须验证邮箱验证码
+              </label>
+              <label className="flex items-center gap-2 rounded-2xl border border-[#e5edf8] px-3 py-3 text-sm text-slate-700">
+                <input
+                  type="checkbox"
+                  checked={settings.auth.require_email_code_for_login}
+                  onChange={(e) => setSettings((prev) => prev ? { ...prev, auth: { ...prev.auth, require_email_code_for_login: e.target.checked } } : prev)}
+                />
+                登录必须验证邮箱验证码
+              </label>
+              <div className="grid gap-3 md:grid-cols-2">
+                <TextInput
+                  value={String(settings.auth.email_code_expire_minutes ?? 10)}
+                  onChange={(e) => setSettings((prev) => prev ? { ...prev, auth: { ...prev.auth, email_code_expire_minutes: Number(e.target.value || 10) } } : prev)}
+                  placeholder="验证码有效期（分钟）"
+                />
+                <TextInput
+                  value={String(settings.auth.email_code_length ?? 6)}
+                  onChange={(e) => setSettings((prev) => prev ? { ...prev, auth: { ...prev.auth, email_code_length: Number(e.target.value || 6) } } : prev)}
+                  placeholder="验证码位数"
+                />
+              </div>
+            </div>
+          </div>
+
+          <div className="rounded-3xl border border-[#d7e3f4] bg-white p-4">
+            <div className="text-sm font-semibold text-slate-900">邮箱发信配置</div>
+            <div className="mt-1 text-xs text-slate-500">用于注册、登录验证码发送。建议先完成配置，再开启上面的验证码开关。</div>
+            <div className="mt-4 space-y-3">
+              <label className="flex items-center gap-2 rounded-2xl border border-[#e5edf8] px-3 py-3 text-sm text-slate-700">
+                <input
+                  type="checkbox"
+                  checked={settings.email.smtp_enabled}
+                  onChange={(e) => setSettings((prev) => prev ? { ...prev, email: { ...prev.email, smtp_enabled: e.target.checked } } : prev)}
+                />
+                启用 SMTP 发信
+              </label>
+              <div className="grid gap-3 md:grid-cols-2">
+                <TextInput value={settings.email.smtp_host} onChange={(e) => setSettings((prev) => prev ? { ...prev, email: { ...prev.email, smtp_host: e.target.value } } : prev)} placeholder="SMTP Host" />
+                <TextInput value={String(settings.email.smtp_port ?? 587)} onChange={(e) => setSettings((prev) => prev ? { ...prev, email: { ...prev.email, smtp_port: Number(e.target.value || 587) } } : prev)} placeholder="SMTP Port" />
+                <TextInput value={settings.email.smtp_username} onChange={(e) => setSettings((prev) => prev ? { ...prev, email: { ...prev.email, smtp_username: e.target.value } } : prev)} placeholder="SMTP 用户名" />
+                <TextInput type="password" value={settings.email.smtp_password} onChange={(e) => setSettings((prev) => prev ? { ...prev, email: { ...prev.email, smtp_password: e.target.value } } : prev)} placeholder="SMTP 密码 / 授权码" />
+                <TextInput value={settings.email.smtp_from_email} onChange={(e) => setSettings((prev) => prev ? { ...prev, email: { ...prev.email, smtp_from_email: e.target.value } } : prev)} placeholder="发件邮箱" />
+                <TextInput value={settings.email.smtp_from_name} onChange={(e) => setSettings((prev) => prev ? { ...prev, email: { ...prev.email, smtp_from_name: e.target.value } } : prev)} placeholder="发件人名称" />
+              </div>
+              <div className="grid gap-3 md:grid-cols-2">
+                <label className="flex items-center gap-2 rounded-2xl border border-[#e5edf8] px-3 py-3 text-sm text-slate-700">
+                  <input
+                    type="checkbox"
+                    checked={settings.email.smtp_use_tls}
+                    onChange={(e) => setSettings((prev) => prev ? { ...prev, email: { ...prev.email, smtp_use_tls: e.target.checked } } : prev)}
+                  />
+                  使用 STARTTLS
+                </label>
+                <label className="flex items-center gap-2 rounded-2xl border border-[#e5edf8] px-3 py-3 text-sm text-slate-700">
+                  <input
+                    type="checkbox"
+                    checked={settings.email.smtp_use_ssl}
+                    onChange={(e) => setSettings((prev) => prev ? { ...prev, email: { ...prev.email, smtp_use_ssl: e.target.checked } } : prev)}
+                  />
+                  使用 SSL 直连
+                </label>
+              </div>
+            </div>
+          </div>
         </div>
 
         <div className="mt-4 rounded-3xl border border-[#d7e3f4] bg-white p-4">

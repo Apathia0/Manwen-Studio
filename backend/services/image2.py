@@ -451,6 +451,110 @@ async def generate_reference_image(
     raise last_err
 
 
+async def edit_existing_image(
+    prompt: str,
+    source_image_path: Path,
+    output_path: Path,
+    *,
+    mask_bytes: bytes | None = None,
+    api_key: str | None = None,
+    size: str | None = None,
+) -> str:
+    progress_label = f"edit:{source_image_path.stem}"
+    current_prompt = prompt.strip()
+    if not current_prompt:
+        raise MangaImageGenerationError(
+            code="missing_prompt",
+            user_message="重绘提示词不能为空，请补充你希望修改的内容。",
+            retryable=False,
+            provider_message="missing prompt",
+        )
+    if not source_image_path.exists():
+        raise MangaImageGenerationError(
+            code="missing_source_image",
+            user_message="找不到要重绘的原图，请刷新后重试。",
+            retryable=False,
+            provider_message=str(source_image_path),
+        )
+
+    source_bytes = normalize_image_bytes(source_image_path.read_bytes())
+    if not size:
+        try:
+            with Image.open(io.BytesIO(source_bytes)) as img:
+                size = f"{img.width}x{img.height}"
+        except Exception:
+            size = IMAGE_SIZE
+
+    last_err: MangaImageGenerationError | None = None
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            logger.info("[%s] 开始编辑原图（尝试 %s/%s）", progress_label, attempt, MAX_RETRIES)
+            files = [
+                ("image", (source_image_path.name or "source.png", io.BytesIO(source_bytes), "image/png")),
+            ]
+            if mask_bytes:
+                files.append(("mask", ("mask.png", io.BytesIO(mask_bytes), "image/png")))
+
+            async with httpx.AsyncClient(timeout=httpx.Timeout(connect=30, read=600, write=120, pool=30)) as client:
+                resp = await client.post(
+                    f"{IMAGE_API_BASE_URL}/images/edits",
+                    files=files,
+                    data={"model": IMAGE_MODEL, "prompt": current_prompt, "size": size},
+                    headers=_image_auth_headers(api_key),
+                )
+
+            if not resp.is_success:
+                raise _classify_response_error(resp, progress_label, current_prompt, False)
+
+            data = resp.json()
+            image_entry = data["data"][0]
+            image_bytes = normalize_image_bytes(await _download_generated_image(image_entry, progress_label))
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_bytes(image_bytes)
+            logger.info("[%s] 图片编辑完成并保存到 %s", progress_label, output_path)
+            return str(output_path)
+        except httpx.TimeoutException as exc:
+            last_err = MangaImageGenerationError(
+                code="timeout",
+                user_message="图片重绘超时，请稍后重试。",
+                retryable=True,
+                provider_message=repr(exc),
+            )
+        except httpx.TransportError as exc:
+            last_err = MangaImageGenerationError(
+                code="network_error",
+                user_message="图片重绘时网络异常，请稍后重试。",
+                retryable=True,
+                provider_message=repr(exc),
+            )
+        except MangaImageGenerationError as exc:
+            last_err = exc
+        except Exception as exc:
+            last_err = MangaImageGenerationError(
+                code="unknown_error",
+                user_message="图片重绘失败，请稍后重试。",
+                retryable=True,
+                provider_message=repr(exc),
+            )
+
+        assert last_err is not None
+        logger.error(
+            "[%s] 图片编辑尝试 %s 失败: code=%s retryable=%s provider=%s",
+            progress_label,
+            attempt,
+            last_err.code,
+            last_err.retryable,
+            last_err.provider_message,
+        )
+        if attempt < MAX_RETRIES and last_err.retryable:
+            await asyncio.sleep(RETRY_DELAY)
+            continue
+        break
+
+    assert last_err is not None
+    raise last_err
+
+
 async def generate_manga_image(
     prompt: str,
     chapter_id: int,

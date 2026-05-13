@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { type Story, type Chapter } from '../api';
+import { type Story, type Chapter, type EntitlementResponse } from '../api';
 import FrameworkPanel from './FrameworkPanel';
 import EditorPanel from './EditorPanel';
 import MangaPanel from './MangaPanel';
@@ -8,6 +8,7 @@ interface Props {
   story: Story;
   chapters: Chapter[];
   currentChapter: Chapter | null;
+  entitlements?: EntitlementResponse | null;
   onChapterChange: (chapter: Chapter) => void;
   onContentUpdated: () => void | Promise<void>;
 }
@@ -16,16 +17,19 @@ export default function WorkspaceLayout({
   story,
   chapters,
   currentChapter,
+  entitlements,
   onChapterChange,
   onContentUpdated,
 }: Props) {
   const [selectedText, setSelectedText] = useState('');
   const [chapterContext, setChapterContext] = useState<object | undefined>(undefined);
+  const [mangaPreviewMode, setMangaPreviewMode] = useState(false);
   const resolvedChapter = currentChapter ? mergeChapterWithFramework(story, currentChapter) : null;
 
   useEffect(() => {
     setSelectedText('');
     setChapterContext(undefined);
+    setMangaPreviewMode(false);
   }, [resolvedChapter?.id]);
 
   const handleChapterSelect = useCallback(
@@ -38,6 +42,7 @@ export default function WorkspaceLayout({
 
   return (
     <div className="flex h-full min-h-0 gap-4 bg-[linear-gradient(180deg,_#f4f8ff_0%,_#eef4ff_100%)] p-4">
+      {!mangaPreviewMode && (
       <div className="w-[320px] shrink-0 overflow-y-auto rounded-[24px] border border-[#d7e3f4] bg-[rgba(255,255,255,0.92)] shadow-[0_18px_42px_rgba(59,130,246,0.12)] backdrop-blur-xl">
         <FrameworkPanel
           story={story}
@@ -46,7 +51,9 @@ export default function WorkspaceLayout({
           onFrameworkUpdate={onContentUpdated}
         />
       </div>
+      )}
 
+      {!mangaPreviewMode && (
       <div className="flex-1 min-w-0 overflow-hidden rounded-[24px] border border-[#d7e3f4] bg-[rgba(255,255,255,0.92)] shadow-[0_18px_42px_rgba(59,130,246,0.12)] backdrop-blur-xl">
         <EditorPanel
           story={story}
@@ -60,13 +67,17 @@ export default function WorkspaceLayout({
           }}
         />
       </div>
+      )}
 
-      <div className="w-[400px] shrink-0 overflow-y-auto rounded-[24px] border border-[#d7e3f4] bg-[rgba(255,255,255,0.92)] shadow-[0_18px_42px_rgba(59,130,246,0.12)] backdrop-blur-xl">
+      <div className={`${mangaPreviewMode ? 'flex-1' : 'w-[400px] shrink-0'} min-w-0 overflow-y-auto rounded-[24px] border border-[#d7e3f4] bg-[rgba(255,255,255,0.92)] shadow-[0_18px_42px_rgba(59,130,246,0.12)] backdrop-blur-xl`}>
         <MangaPanel
           chapter={resolvedChapter}
+          entitlements={entitlements}
           onChapterRefresh={onContentUpdated}
           selectedText={selectedText}
           chapterContext={chapterContext as { characters?: any[] } | undefined}
+          isWorkspacePreviewMode={mangaPreviewMode}
+          onWorkspacePreviewModeChange={setMangaPreviewMode}
           onClearSelection={() => {
             setSelectedText('');
             setChapterContext(undefined);

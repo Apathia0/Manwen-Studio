@@ -5,12 +5,20 @@ export const IMAGE2_CONSOLE_URL = 'https://api.xbyjs.top/console/token';
 
 export interface ApiKeySettings {
   deepseekApiKey: string;
+  deepseekBaseUrl: string;
+  deepseekModel: string;
   imageApiKey: string;
+  imageBaseUrl: string;
+  imageModel: string;
 }
 
 // Stored in localStorage so multiple tabs share the same API key settings.
 const LS_DEEPSEEK_API_KEY = 'lorevista.deepseekApiKey';
+const LS_DEEPSEEK_BASE_URL = 'lorevista.deepseekBaseUrl';
+const LS_DEEPSEEK_MODEL = 'lorevista.deepseekModel';
 const LS_IMAGE_API_KEY = 'lorevista.imageApiKey';
+const LS_IMAGE_BASE_URL = 'lorevista.imageBaseUrl';
+const LS_IMAGE_MODEL = 'lorevista.imageModel';
 const LS_AUTH_TOKEN = 'lorevista.authToken';
 export const API_KEY_CHANGE_EVENT = 'lorevista:api-key-change';
 export const AUTH_CHANGE_EVENT = 'lorevista:auth-change';
@@ -22,6 +30,8 @@ export interface AuthUser {
   name: string;
   email: string;
   role: UserRole;
+  can_override_api_key?: boolean;
+  can_override_api_url?: boolean;
 }
 
 export interface AuthSession {
@@ -32,17 +42,33 @@ export interface AuthSession {
 export function getApiKeySettings(): ApiKeySettings {
   return {
     deepseekApiKey: localStorage.getItem(LS_DEEPSEEK_API_KEY) || '',
+    deepseekBaseUrl: localStorage.getItem(LS_DEEPSEEK_BASE_URL) || '',
+    deepseekModel: localStorage.getItem(LS_DEEPSEEK_MODEL) || '',
     imageApiKey: localStorage.getItem(LS_IMAGE_API_KEY) || '',
+    imageBaseUrl: localStorage.getItem(LS_IMAGE_BASE_URL) || '',
+    imageModel: localStorage.getItem(LS_IMAGE_MODEL) || '',
   };
 }
 
 export function saveApiKeySettings(settings: ApiKeySettings): void {
   const deepseek = settings.deepseekApiKey.trim();
+  const deepseekBaseUrl = settings.deepseekBaseUrl.trim();
+  const deepseekModel = settings.deepseekModel.trim();
   const image = settings.imageApiKey.trim();
+  const imageBaseUrl = settings.imageBaseUrl.trim();
+  const imageModel = settings.imageModel.trim();
   if (deepseek) localStorage.setItem(LS_DEEPSEEK_API_KEY, deepseek);
   else localStorage.removeItem(LS_DEEPSEEK_API_KEY);
+  if (deepseekBaseUrl) localStorage.setItem(LS_DEEPSEEK_BASE_URL, deepseekBaseUrl);
+  else localStorage.removeItem(LS_DEEPSEEK_BASE_URL);
+  if (deepseekModel) localStorage.setItem(LS_DEEPSEEK_MODEL, deepseekModel);
+  else localStorage.removeItem(LS_DEEPSEEK_MODEL);
   if (image) localStorage.setItem(LS_IMAGE_API_KEY, image);
   else localStorage.removeItem(LS_IMAGE_API_KEY);
+  if (imageBaseUrl) localStorage.setItem(LS_IMAGE_BASE_URL, imageBaseUrl);
+  else localStorage.removeItem(LS_IMAGE_BASE_URL);
+  if (imageModel) localStorage.setItem(LS_IMAGE_MODEL, imageModel);
+  else localStorage.removeItem(LS_IMAGE_MODEL);
   // Notify same-tab listeners. Other tabs receive the browser 'storage' event.
   try {
     window.dispatchEvent(new Event(API_KEY_CHANGE_EVENT));
@@ -52,7 +78,14 @@ export function saveApiKeySettings(settings: ApiKeySettings): void {
 }
 
 export function clearApiKeySettings(): void {
-  saveApiKeySettings({ deepseekApiKey: '', imageApiKey: '' });
+  saveApiKeySettings({
+    deepseekApiKey: '',
+    deepseekBaseUrl: '',
+    deepseekModel: '',
+    imageApiKey: '',
+    imageBaseUrl: '',
+    imageModel: '',
+  });
 }
 
 function apiHeaders(json = false): HeadersInit {
@@ -63,8 +96,25 @@ function apiHeaders(json = false): HeadersInit {
     ...(API_TOKEN ? { 'X-API-Token': API_TOKEN } : {}),
     ...(token ? { Authorization: `Bearer ${token}` } : {}),
     ...(keys.deepseekApiKey ? { 'X-DeepSeek-API-Key': keys.deepseekApiKey } : {}),
+    ...(keys.deepseekBaseUrl ? { 'X-DeepSeek-Base-URL': keys.deepseekBaseUrl } : {}),
+    ...(keys.deepseekModel ? { 'X-DeepSeek-Model': keys.deepseekModel } : {}),
     ...(keys.imageApiKey ? { 'X-Image-API-Key': keys.imageApiKey } : {}),
+    ...(keys.imageBaseUrl ? { 'X-Image-Base-URL': keys.imageBaseUrl } : {}),
+    ...(keys.imageModel ? { 'X-Image-Model': keys.imageModel } : {}),
   };
+}
+
+async function readErrorMessage(res: Response, fallback: string): Promise<string> {
+  const text = await res.text();
+  if (!text) return fallback;
+  try {
+    const parsed = JSON.parse(text);
+    if (typeof parsed?.detail === 'string' && parsed.detail.trim()) return parsed.detail.trim();
+    if (typeof parsed?.message === 'string' && parsed.message.trim()) return parsed.message.trim();
+  } catch {
+    // Fall through to plain text handling.
+  }
+  return text.trim() || fallback;
 }
 
 export function getAuthToken(): string {
@@ -172,6 +222,36 @@ export interface Story {
   outline?: Outline;
   characters?: Character[];
   created_at: string;
+}
+
+export interface AdminReviewStory {
+  id: number;
+  title: string;
+  description?: string;
+  cover_image?: string | null;
+  created_at: string;
+  chapter_count: number;
+}
+
+export interface AdminReviewChapter {
+  id: number;
+  chapter_number: number;
+  title: string;
+  status?: string | null;
+  word_count?: number | null;
+  created_at: string;
+  novel_content: string;
+}
+
+export interface AdminReviewStoryChaptersResponse {
+  story: {
+    id: number;
+    title: string;
+    description?: string;
+    created_at: string;
+    owner_user_id?: number | null;
+  };
+  chapters: AdminReviewChapter[];
 }
 
 export interface ChatMessage {
@@ -374,6 +454,8 @@ export interface AdminUserItem {
   email: string;
   role: UserRole;
   status: 'active' | 'disabled';
+  allow_api_key_override?: boolean;
+  allow_api_url_override?: boolean;
   created_at: string;
   plan_name: string;
 }
@@ -399,6 +481,24 @@ export interface PlatformSettings {
     image_model: string;
     image_api_key: string;
     enable_user_override: boolean;
+    enable_user_url_override?: boolean;
+  };
+  auth: {
+    require_email_code_for_register: boolean;
+    require_email_code_for_login: boolean;
+    email_code_expire_minutes: number;
+    email_code_length: number;
+  };
+  email: {
+    smtp_enabled: boolean;
+    smtp_host: string;
+    smtp_port: number;
+    smtp_username: string;
+    smtp_password: string;
+    smtp_from_email: string;
+    smtp_from_name: string;
+    smtp_use_tls: boolean;
+    smtp_use_ssl: boolean;
   };
   payment: PaymentSettings;
 }
@@ -411,6 +511,17 @@ export interface PublicPlatformSettings {
   copyright: string;
   notice: string;
   icon_url: string;
+  api?: {
+    deepseek_base_url?: string;
+    deepseek_model?: string;
+    image_base_url?: string;
+    image_model?: string;
+  };
+  auth?: {
+    require_email_code_for_register?: boolean;
+    require_email_code_for_login?: boolean;
+    email_code_expire_minutes?: number;
+  };
 }
 
 export interface MySubscriptionResponse {
@@ -419,23 +530,33 @@ export interface MySubscriptionResponse {
   latest_order: AdminOrderItem | null;
 }
 
-export async function register(payload: { name: string; email: string; password: string }): Promise<AuthSession> {
+export async function sendEmailVerificationCode(payload: { email: string; purpose: 'register' | 'login' }): Promise<{ ok: boolean; expires_in_seconds: number }> {
+  const res = await fetch(`${BASE}/api/auth/send-email-code`, {
+    method: 'POST',
+    headers: apiHeaders(true),
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '验证码发送失败，请稍后重试。'));
+  return res.json();
+}
+
+export async function register(payload: { name: string; email: string; password: string; verification_code?: string }): Promise<AuthSession> {
   const res = await fetch(`${BASE}/api/auth/register`, {
     method: 'POST',
     headers: apiHeaders(true),
     body: JSON.stringify(payload),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, '注册失败，请稍后重试。'));
   return res.json();
 }
 
-export async function login(payload: { email: string; password: string }): Promise<AuthSession> {
+export async function login(payload: { email: string; password: string; verification_code?: string }): Promise<AuthSession> {
   const res = await fetch(`${BASE}/api/auth/login`, {
     method: 'POST',
     headers: apiHeaders(true),
     body: JSON.stringify(payload),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, '登录失败，请检查账号或密码。'));
   return res.json();
 }
 
@@ -628,6 +749,18 @@ export async function getAdminUserEntitlements(userId: number): Promise<{
   return res.json();
 }
 
+export async function getAdminUserStories(userId: number): Promise<AdminReviewStory[]> {
+  const res = await fetch(`${BASE}/api/admin/users/${userId}/stories`, { headers: apiHeaders() });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function getAdminStoryChapters(storyId: number): Promise<AdminReviewStoryChaptersResponse> {
+  const res = await fetch(`${BASE}/api/admin/stories/${storyId}/chapters`, { headers: apiHeaders() });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
 export async function adminUpdateUserSubscription(userId: number, planId: number): Promise<void> {
   const res = await fetch(`${BASE}/api/admin/users/${userId}/subscription`, {
     method: 'POST',
@@ -704,6 +837,8 @@ export async function createAdminUser(payload: {
   email: string;
   password: string;
   role?: UserRole;
+  allow_api_key_override?: boolean;
+  allow_api_url_override?: boolean;
 }): Promise<void> {
   const res = await fetch(`${BASE}/api/admin/users`, {
     method: 'POST',
@@ -715,7 +850,15 @@ export async function createAdminUser(payload: {
 
 export async function updateAdminUser(
   userId: number,
-  payload: Partial<{ name: string; email: string; password: string; role: UserRole; status: 'active' | 'disabled' }>,
+  payload: Partial<{
+    name: string;
+    email: string;
+    password: string;
+    role: UserRole;
+    status: 'active' | 'disabled';
+    allow_api_key_override: boolean;
+    allow_api_url_override: boolean;
+  }>,
 ): Promise<void> {
   const res = await fetch(`${BASE}/api/admin/users/${userId}`, {
     method: 'PUT',
@@ -1059,6 +1202,8 @@ export interface RefImagesPayload {
   source?: RefSource;
 }
 
+export type ImageRedrawMode = 'regenerate' | 'full' | 'partial';
+
 export function refImageUrl(imagePath: string): string {
   return `${BASE}/static/manga/${imagePath.replace('manga_outputs/', '')}`;
 }
@@ -1089,6 +1234,23 @@ export async function deleteStoryRefImage(storyId: number, filename: string): Pr
   return res.json();
 }
 
+export async function redrawStoryRefImage(
+  storyId: number,
+  filename: string,
+  data: { prompt: string; mode: ImageRedrawMode; mask?: string },
+): Promise<RefImagesPayload> {
+  const res = await fetch(
+    `${BASE}/api/stories/${storyId}/ref-images/${encodeURIComponent(filename)}/redraw`,
+    {
+      method: 'POST',
+      headers: apiHeaders(true),
+      body: JSON.stringify(data),
+    },
+  );
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
 // Chapter-level (with story fallback)
 export async function getChapterRefImages(chapterId: number): Promise<RefImagesPayload> {
   const res = await fetch(`${BASE}/api/chapters/${chapterId}/ref-images`, { headers: apiHeaders() });
@@ -1110,6 +1272,23 @@ export async function deleteChapterRefImage(chapterId: number, filename: string)
   const res = await fetch(
     `${BASE}/api/chapters/${chapterId}/ref-images/${encodeURIComponent(filename)}`,
     { method: 'DELETE', headers: apiHeaders() },
+  );
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function redrawChapterRefImage(
+  chapterId: number,
+  filename: string,
+  data: { prompt: string; mode: ImageRedrawMode; mask?: string },
+): Promise<RefImagesPayload> {
+  const res = await fetch(
+    `${BASE}/api/chapters/${chapterId}/ref-images/${encodeURIComponent(filename)}/redraw`,
+    {
+      method: 'POST',
+      headers: apiHeaders(true),
+      body: JSON.stringify(data),
+    },
   );
   if (!res.ok) throw new Error(await res.text());
   return res.json();
@@ -1159,11 +1338,12 @@ export async function regenerateImage(
   chapterId: number,
   imageNumber: number,
   prompt: string,
+  options?: { mode?: ImageRedrawMode; mask?: string },
 ): Promise<{ id: number; image_number: number; image_path: string; prompt: string }> {
   const res = await fetch(`${BASE}/api/chapters/${chapterId}/regenerate-image/${imageNumber}`, {
     method: 'POST',
     headers: apiHeaders(true),
-    body: JSON.stringify({ prompt }),
+    body: JSON.stringify({ prompt, mode: options?.mode, mask: options?.mask }),
   });
   if (!res.ok) throw new Error(await res.text());
   return res.json();

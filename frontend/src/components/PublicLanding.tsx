@@ -116,6 +116,7 @@ export default function PublicLanding({
             <a href="#workflow" className="transition hover:text-[#2563eb]">创作流程</a>
             <a href="#advantages" className="transition hover:text-[#2563eb]">平台优势</a>
             <a href="#scenarios" className="transition hover:text-[#2563eb]">适合谁用</a>
+            <a href="#contact" className="transition hover:text-[#2563eb]">联系信息</a>
             <button onClick={onPricing} className="transition hover:text-[#2563eb]">套餐方案</button>
           </nav>
           <div className="flex items-center gap-2">
@@ -389,7 +390,7 @@ export default function PublicLanding({
           </div>
         </section>
 
-        <footer className="mx-auto max-w-7xl px-4 pb-12 sm:px-6">
+        <footer id="contact" className="mx-auto max-w-7xl px-4 pb-12 sm:px-6">
           <div className="rounded-[28px] border border-[#d7e3f4] bg-white/88 px-6 py-5 shadow-[0_16px_36px_rgba(59,130,246,0.08)]">
             <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
               <div>

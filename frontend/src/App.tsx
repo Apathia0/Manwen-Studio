@@ -31,8 +31,10 @@ import {
   adminUpdateUserSubscription,
   cancelMyOrder,
   clearAuthToken,
+  clearApiKeySettings,
   confirmMyOrderMock,
   createStory,
+  getApiKeySettings,
   getAdminOrders,
   getAdminPlanFeatures,
   getAdminPlans,
@@ -51,6 +53,8 @@ import {
   logout as logoutApi,
   me,
   register,
+  sendEmailVerificationCode,
+  saveApiKeySettings,
   saveAdminPlanFeatures,
   saveAdminQuotaRules,
   setAuthToken,
@@ -136,6 +140,11 @@ function App() {
     copyright: '',
     notice: '',
     icon_url: DEFAULT_ICON_URL,
+    auth: {
+      require_email_code_for_register: false,
+      require_email_code_for_login: false,
+      email_code_expire_minutes: 10,
+    },
   });
   const [usage, setUsage] = useState<UsageResponse | null>(null);
   const [myEntitlements, setMyEntitlements] = useState<EntitlementResponse | null>(null);
@@ -251,6 +260,7 @@ function App() {
       setSession(user);
       setRoute('stories');
     } catch {
+      clearAuthToken();
       setSession(null);
       setRoute('landing');
     }
@@ -330,27 +340,44 @@ function App() {
     setGlobalError(null);
   }
 
-  async function doLogin(email: string, password: string) {
+  async function doLogin(email: string, password: string, verificationCode?: string) {
     try {
-      const result = await login({ email, password });
+      const result = await login({ email, password, verification_code: verificationCode });
       setAuthToken(result.token);
       setSession(result.user);
       setRoute('stories');
       setGlobalError(null);
     } catch (error: any) {
+      clearAuthToken();
+      setSession(null);
       setGlobalError(error.message || '登录失败');
     }
   }
 
-  async function doRegister(name: string, email: string, password: string) {
+  async function doRegister(name: string, email: string, password: string, verificationCode?: string) {
     try {
-      const result = await register({ name, email, password });
+      const result = await register({ name, email, password, verification_code: verificationCode });
       setAuthToken(result.token);
       setSession(result.user);
       setRoute('stories');
       setGlobalError(null);
     } catch (error: any) {
+      clearAuthToken();
+      setSession(null);
       setGlobalError(error.message || '注册失败');
+    }
+  }
+
+  async function doSendAuthCode(email: string, purpose: 'register' | 'login') {
+    try {
+      const result = await sendEmailVerificationCode({ email, purpose });
+      const minutes = Math.max(1, Math.round((result.expires_in_seconds || 600) / 60));
+      setGlobalError(null);
+      setGlobalSuccess(`验证码已发送，请在 ${minutes} 分钟内完成${purpose === 'register' ? '注册' : '登录'}。`);
+    } catch (error: any) {
+      setGlobalSuccess(null);
+      setGlobalError(error.message || '验证码发送失败');
+      throw error;
     }
   }
 
@@ -558,26 +585,32 @@ function App() {
 
   if (!session && route === 'login') {
     return (
-      <LoginPage
-        title={platform.site_name}
-        subtitle={platform.site_slogan}
-        onBack={() => setRoute('landing')}
-        onLogin={doLogin}
-        toRegister={() => setRoute('register')}
-        error={globalError}
-      />
+        <LoginPage
+          title={platform.site_name}
+          subtitle={platform.site_slogan}
+          onBack={() => setRoute('landing')}
+          onLogin={doLogin}
+          onSendCode={doSendAuthCode}
+          requireEmailCode={Boolean(platform.auth?.require_email_code_for_login)}
+          codeExpireMinutes={platform.auth?.email_code_expire_minutes || 10}
+          toRegister={() => setRoute('register')}
+          error={globalError}
+        />
     );
   }
   if (!session && route === 'register') {
     return (
-      <RegisterPage
-        title={platform.site_name}
-        subtitle={platform.site_slogan}
-        onBack={() => setRoute('landing')}
-        onRegister={doRegister}
-        toLogin={() => setRoute('login')}
-        error={globalError}
-      />
+        <RegisterPage
+          title={platform.site_name}
+          subtitle={platform.site_slogan}
+          onBack={() => setRoute('landing')}
+          onRegister={doRegister}
+          onSendCode={doSendAuthCode}
+          requireEmailCode={Boolean(platform.auth?.require_email_code_for_register)}
+          codeExpireMinutes={platform.auth?.email_code_expire_minutes || 10}
+          toLogin={() => setRoute('login')}
+          error={globalError}
+        />
     );
   }
   if (!session && route === 'pricing') {
@@ -598,7 +631,11 @@ function App() {
     <div className="min-h-screen bg-[radial-gradient(circle_at_top_left,_rgba(96,165,250,0.18),_transparent_22%),linear-gradient(180deg,_#f4f8ff_0%,_#eef4ff_46%,_#f8fbff_100%)] text-slate-900">
       <header className="sticky top-0 z-20 border-b border-[#d7e3f4] bg-[rgba(248,251,255,0.82)] backdrop-blur-xl">
         <div className="flex h-14 items-center justify-between px-5 lg:px-8">
-          <div className="flex items-center gap-3">
+          <button
+            type="button"
+            onClick={() => setRoute('stories')}
+            className="flex items-center gap-3 text-left transition hover:opacity-90"
+          >
             <img
               src="/brand-mark.svg"
               alt={`${platform.site_name || DEFAULT_SITE_NAME} logo`}
@@ -608,7 +645,7 @@ function App() {
               <div className="text-sm font-semibold tracking-wide">{platform.site_name || DEFAULT_SITE_NAME}</div>
               <div className="text-[11px] text-slate-500">{platform.site_slogan || 'AI 小说与漫画创作平台'}</div>
             </div>
-          </div>
+          </button>
           <div className="flex items-center gap-3 text-sm">
             <span className="rounded-full border border-[#d7e3f4] bg-white/90 px-3 py-1 text-xs font-medium text-slate-600 shadow-[0_6px_18px_rgba(59,130,246,0.08)]">
               {session.role === 'admin' ? '管理员' : '用户'}
@@ -707,12 +744,15 @@ function App() {
               story={activeStory}
               chapters={chapters}
               currentChapter={activeChapter}
+              entitlements={myEntitlements}
               onChapterChange={(chapter) => setActiveChapterId(chapter.id)}
               onContentUpdated={refreshWorkspaceData}
             />
           )}
           {route === 'account' && (
             <UserAccountUsagePage
+              session={session}
+              platform={platform}
               usage={usage}
               subscription={mySubscription}
               entitlements={myEntitlements}
@@ -736,7 +776,9 @@ function App() {
           {route === 'quota-rules' && session.role === 'admin' && (
             <AdminPlatformSettingsPage
               onError={(message) => setGlobalError(message)}
-              onSaved={(settings) => setPlatform(settings.basic)}
+              onSaved={() => {
+                void refreshPlatformSettings();
+              }}
             />
           )}
           {route === 'entitlements' && session.role === 'admin' && (
@@ -820,20 +862,36 @@ function LoginPage({
   subtitle,
   onBack,
   onLogin,
+  onSendCode,
+  requireEmailCode,
+  codeExpireMinutes,
   toRegister,
   error,
 }: {
   title: string;
   subtitle: string;
   onBack: () => void;
-  onLogin: (email: string, password: string) => Promise<void>;
+  onLogin: (email: string, password: string, verificationCode?: string) => Promise<void>;
+  onSendCode: (email: string, purpose: 'register' | 'login') => Promise<void>;
+  requireEmailCode: boolean;
+  codeExpireMinutes: number;
   toRegister: () => void;
   error: string | null;
 }) {
-  const [email, setEmail] = useState('admin@storycanvas.ai');
-  const [password, setPassword] = useState('admin123');
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [verificationCode, setVerificationCode] = useState('');
+  const [sendingCode, setSendingCode] = useState(false);
+  const [codeCooldown, setCodeCooldown] = useState(0);
   const brandName = title || DEFAULT_SITE_NAME;
   const brandSlogan = subtitle || DEFAULT_SITE_SLOGAN;
+
+  useEffect(() => {
+    if (codeCooldown <= 0) return;
+    const timer = window.setTimeout(() => setCodeCooldown((prev) => Math.max(0, prev - 1)), 1000);
+    return () => window.clearTimeout(timer);
+  }, [codeCooldown]);
+
   return (
     <AuthLayout
       brandName={brandName}
@@ -856,8 +914,35 @@ function LoginPage({
           placeholder="密码"
           type="password"
         />
+        {requireEmailCode ? (
+          <div className="flex gap-2">
+            <input
+              value={verificationCode}
+              onChange={(e) => setVerificationCode(e.target.value)}
+              className="min-w-0 flex-1 rounded-2xl border border-[#d7e3f4] bg-[#fafdff] px-4 py-3 text-sm text-slate-900 outline-none transition placeholder:text-slate-400 focus:border-[#93c5fd] focus:bg-white focus:ring-4 focus:ring-[#dbeafe]"
+              placeholder={`邮箱验证码（${codeExpireMinutes}分钟内有效）`}
+            />
+            <button
+              onClick={() =>
+                void (async () => {
+                  setSendingCode(true);
+                  try {
+                    await onSendCode(email, 'login');
+                    setCodeCooldown(60);
+                  } finally {
+                    setSendingCode(false);
+                  }
+                })()
+              }
+              className="shrink-0 rounded-2xl border border-[#bfdbfe] bg-white px-4 py-3 text-sm font-medium text-[#2563eb] transition hover:bg-[#eff6ff] disabled:cursor-not-allowed disabled:opacity-60"
+              disabled={sendingCode || codeCooldown > 0}
+            >
+              {sendingCode ? '发送中...' : codeCooldown > 0 ? `${codeCooldown}s 后重发` : '发送验证码'}
+            </button>
+          </div>
+        ) : null}
         <button
-          onClick={() => void onLogin(email, password)}
+          onClick={() => void onLogin(email, password, verificationCode)}
           className="w-full rounded-2xl bg-[#2563eb] py-3 text-sm font-medium text-white shadow-[0_16px_34px_rgba(59,130,246,0.24)] transition hover:bg-[#1d4ed8]"
         >
           登录
@@ -874,21 +959,37 @@ function RegisterPage({
   subtitle,
   onBack,
   onRegister,
+  onSendCode,
+  requireEmailCode,
+  codeExpireMinutes,
   toLogin,
   error,
 }: {
   title: string;
   subtitle: string;
   onBack: () => void;
-  onRegister: (name: string, email: string, password: string) => Promise<void>;
+  onRegister: (name: string, email: string, password: string, verificationCode?: string) => Promise<void>;
+  onSendCode: (email: string, purpose: 'register' | 'login') => Promise<void>;
+  requireEmailCode: boolean;
+  codeExpireMinutes: number;
   toLogin: () => void;
   error: string | null;
 }) {
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [verificationCode, setVerificationCode] = useState('');
+  const [sendingCode, setSendingCode] = useState(false);
+  const [codeCooldown, setCodeCooldown] = useState(0);
   const brandName = title || DEFAULT_SITE_NAME;
   const brandSlogan = subtitle || DEFAULT_SITE_SLOGAN;
+
+  useEffect(() => {
+    if (codeCooldown <= 0) return;
+    const timer = window.setTimeout(() => setCodeCooldown((prev) => Math.max(0, prev - 1)), 1000);
+    return () => window.clearTimeout(timer);
+  }, [codeCooldown]);
+
   return (
     <AuthLayout
       brandName={brandName}
@@ -917,8 +1018,35 @@ function RegisterPage({
           placeholder="设置密码"
           type="password"
         />
+        {requireEmailCode ? (
+          <div className="flex gap-2">
+            <input
+              value={verificationCode}
+              onChange={(e) => setVerificationCode(e.target.value)}
+              className="min-w-0 flex-1 rounded-2xl border border-[#d7e3f4] bg-[#fafdff] px-4 py-3 text-sm text-slate-900 outline-none transition placeholder:text-slate-400 focus:border-[#93c5fd] focus:bg-white focus:ring-4 focus:ring-[#dbeafe]"
+              placeholder={`邮箱验证码（${codeExpireMinutes}分钟内有效）`}
+            />
+            <button
+              onClick={() =>
+                void (async () => {
+                  setSendingCode(true);
+                  try {
+                    await onSendCode(email, 'register');
+                    setCodeCooldown(60);
+                  } finally {
+                    setSendingCode(false);
+                  }
+                })()
+              }
+              className="shrink-0 rounded-2xl border border-[#bfdbfe] bg-white px-4 py-3 text-sm font-medium text-[#2563eb] transition hover:bg-[#eff6ff] disabled:cursor-not-allowed disabled:opacity-60"
+              disabled={sendingCode || codeCooldown > 0}
+            >
+              {sendingCode ? '发送中...' : codeCooldown > 0 ? `${codeCooldown}s 后重发` : '发送验证码'}
+            </button>
+          </div>
+        ) : null}
         <button
-          onClick={() => void onRegister(name, email, password)}
+          onClick={() => void onRegister(name, email, password, verificationCode)}
           className="w-full rounded-2xl bg-[#2563eb] py-3 text-sm font-medium text-white shadow-[0_16px_34px_rgba(59,130,246,0.24)] transition hover:bg-[#1d4ed8]"
         >
           注册并进入
@@ -1317,12 +1445,14 @@ function WorkspacePage({
   story,
   chapters,
   currentChapter,
+  entitlements,
   onChapterChange,
   onContentUpdated,
 }: {
   story: Story | null;
   chapters: Chapter[];
   currentChapter: Chapter | null;
+  entitlements: EntitlementResponse | null;
   onChapterChange: (chapter: Chapter) => void;
   onContentUpdated: () => Promise<void>;
 }) {
@@ -1339,6 +1469,7 @@ function WorkspacePage({
         story={story}
         chapters={chapters}
         currentChapter={currentChapter}
+        entitlements={entitlements}
         onChapterChange={onChapterChange}
         onContentUpdated={onContentUpdated}
       />
@@ -1644,6 +1775,8 @@ function UserPricingPage({
 }
 
 function UserAccountUsagePage({
+  session,
+  platform,
   usage,
   subscription,
   entitlements,
@@ -1652,6 +1785,8 @@ function UserAccountUsagePage({
   onConfirmMockPayment,
   onCancelOrder,
 }: {
+  session: AuthUser | null;
+  platform: PublicPlatformSettings;
   usage: UsageResponse | null;
   subscription: MySubscriptionResponse | null;
   entitlements: EntitlementResponse | null;
@@ -1660,8 +1795,11 @@ function UserAccountUsagePage({
   onConfirmMockPayment: (orderNo: string) => void;
   onCancelOrder: (orderNo: string) => void;
 }) {
+  const [apiSettings, setApiSettings] = useState(() => getApiKeySettings());
   const entitlementEntries = Object.entries(entitlements?.entitlements || {});
   const pendingOrder = orders.find((order) => order.status === 'pending') || null;
+  const canOverrideApiKey = Boolean(session?.can_override_api_key);
+  const canOverrideApiUrl = Boolean(session?.can_override_api_url);
 
   return (
     <div>
@@ -1726,6 +1864,99 @@ function UserAccountUsagePage({
                 取消订单
               </button>
             </div>
+          </div>
+        </div>
+      ) : null}
+
+      {canOverrideApiKey || canOverrideApiUrl ? (
+        <div className="mt-4 rounded-3xl border border-[#d7e3f4] bg-white/95 p-5 shadow-[0_14px_34px_rgba(59,130,246,0.08)]">
+          <div className="text-sm font-semibold text-slate-900">自定义模型对接</div>
+          <div className="mt-1 text-xs text-slate-500">
+            这里的配置只对当前浏览器生效。没有权限的字段即使填写，服务端也会继续使用管理员配置。
+          </div>
+          <div className="mt-2 text-xs text-[#1d4ed8]">
+            启用自定义中转地址后，对应请求将不再扣减平台套餐配额。
+          </div>
+          <div className="mt-4 grid gap-4 xl:grid-cols-2">
+            <div className="rounded-2xl border border-[#e5edf8] bg-[#f8fbff] p-4">
+              <div className="mb-3 text-sm font-semibold text-slate-900">文本模型</div>
+              <div className="mb-3 rounded-2xl border border-[#d7e3f4] bg-white px-3 py-3 text-xs text-slate-600">
+                <div>平台地址：{platform.api?.deepseek_base_url || '-'}</div>
+                <div className="mt-1">平台模型：{platform.api?.deepseek_model || '-'}</div>
+              </div>
+              <div className="space-y-3">
+                <input
+                  value={apiSettings.deepseekBaseUrl}
+                  onChange={(e) => setApiSettings((prev) => ({ ...prev, deepseekBaseUrl: e.target.value }))}
+                  disabled={!canOverrideApiUrl}
+                  placeholder={platform.api?.deepseek_base_url || '自定义 DeepSeek Base URL'}
+                  className="w-full rounded-2xl border border-[#d7e3f4] px-3 py-2 text-sm outline-none transition focus:border-[#60a5fa] focus:ring-2 focus:ring-[#bfdbfe] disabled:cursor-not-allowed disabled:bg-slate-100"
+                />
+                <input
+                  value={apiSettings.deepseekModel}
+                  onChange={(e) => setApiSettings((prev) => ({ ...prev, deepseekModel: e.target.value }))}
+                  disabled={!canOverrideApiUrl}
+                  placeholder={platform.api?.deepseek_model || '自定义 DeepSeek 模型名'}
+                  className="w-full rounded-2xl border border-[#d7e3f4] px-3 py-2 text-sm outline-none transition focus:border-[#60a5fa] focus:ring-2 focus:ring-[#bfdbfe] disabled:cursor-not-allowed disabled:bg-slate-100"
+                />
+                <input
+                  value={apiSettings.deepseekApiKey}
+                  onChange={(e) => setApiSettings((prev) => ({ ...prev, deepseekApiKey: e.target.value }))}
+                  disabled={!canOverrideApiKey}
+                  type="password"
+                  placeholder="自定义 DeepSeek API Key"
+                  className="w-full rounded-2xl border border-[#d7e3f4] px-3 py-2 text-sm outline-none transition focus:border-[#60a5fa] focus:ring-2 focus:ring-[#bfdbfe] disabled:cursor-not-allowed disabled:bg-slate-100"
+                />
+              </div>
+            </div>
+            <div className="rounded-2xl border border-[#e5edf8] bg-[#f8fbff] p-4">
+              <div className="mb-3 text-sm font-semibold text-slate-900">图片模型</div>
+              <div className="mb-3 rounded-2xl border border-[#d7e3f4] bg-white px-3 py-3 text-xs text-slate-600">
+                <div>平台地址：{platform.api?.image_base_url || '-'}</div>
+                <div className="mt-1">平台模型：{platform.api?.image_model || '-'}</div>
+              </div>
+              <div className="space-y-3">
+                <input
+                  value={apiSettings.imageBaseUrl}
+                  onChange={(e) => setApiSettings((prev) => ({ ...prev, imageBaseUrl: e.target.value }))}
+                  disabled={!canOverrideApiUrl}
+                  placeholder={platform.api?.image_base_url || '自定义图片服务 Base URL'}
+                  className="w-full rounded-2xl border border-[#d7e3f4] px-3 py-2 text-sm outline-none transition focus:border-[#60a5fa] focus:ring-2 focus:ring-[#bfdbfe] disabled:cursor-not-allowed disabled:bg-slate-100"
+                />
+                <input
+                  value={apiSettings.imageModel}
+                  onChange={(e) => setApiSettings((prev) => ({ ...prev, imageModel: e.target.value }))}
+                  disabled={!canOverrideApiUrl}
+                  placeholder={platform.api?.image_model || '自定义图片模型名'}
+                  className="w-full rounded-2xl border border-[#d7e3f4] px-3 py-2 text-sm outline-none transition focus:border-[#60a5fa] focus:ring-2 focus:ring-[#bfdbfe] disabled:cursor-not-allowed disabled:bg-slate-100"
+                />
+                <input
+                  value={apiSettings.imageApiKey}
+                  onChange={(e) => setApiSettings((prev) => ({ ...prev, imageApiKey: e.target.value }))}
+                  disabled={!canOverrideApiKey}
+                  type="password"
+                  placeholder="自定义图片 API Key"
+                  className="w-full rounded-2xl border border-[#d7e3f4] px-3 py-2 text-sm outline-none transition focus:border-[#60a5fa] focus:ring-2 focus:ring-[#bfdbfe] disabled:cursor-not-allowed disabled:bg-slate-100"
+                />
+              </div>
+            </div>
+          </div>
+          <div className="mt-4 flex flex-wrap gap-3">
+            <button
+              onClick={() => saveApiKeySettings(apiSettings)}
+              className="rounded-2xl bg-[#1d4ed8] px-4 py-2 text-sm font-medium text-white"
+            >
+              保存本地对接配置
+            </button>
+            <button
+              onClick={() => {
+                clearApiKeySettings();
+                setApiSettings(getApiKeySettings());
+              }}
+              className="rounded-2xl border border-[#d7e3f4] bg-white px-4 py-2 text-sm font-medium text-slate-700"
+            >
+              清空本地配置
+            </button>
           </div>
         </div>
       ) : null}

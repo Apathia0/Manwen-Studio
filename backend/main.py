@@ -8,8 +8,10 @@ import os
 import re
 import secrets
 import shutil
+import smtplib
 import uuid
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+from email.message import EmailMessage
 from pathlib import Path
 from urllib.parse import parse_qsl
 
@@ -19,6 +21,8 @@ from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
+from PIL import Image
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 from sse_starlette.sse import EventSourceResponse
 
@@ -27,6 +31,7 @@ from models import (
     AuditLog,
     BillingOrder,
     Chapter,
+    EmailVerificationCode,
     ChatMessage,
     MangaImage,
     Plan,
@@ -69,7 +74,7 @@ from services.deepseek import (
     split_scenes,
 )
 from services.errors import MangaImageGenerationError, MissingApiKeyError
-from services.image2 import generate_manga_image, generate_reference_image
+from services.image2 import edit_existing_image, generate_manga_image, generate_reference_image
 from services.scene_safety import sanitize_scene_list
 from services import deepseek as deepseek_service
 from services import image2 as image_service
@@ -84,65 +89,65 @@ MONEY_QUANT = Decimal("0.01")
 FEATURE_CATALOG: list[dict] = [
     {
         "key": "framework.generate.monthly_limit",
-        "name": "小说框架生成次数",
-        "description": "用户每月可生成世界观、角色与大纲的次数。",
-        "category": "小说创作",
+        "name": "\u5c0f\u8bf4\u6846\u67b6\u751f\u6210\u6b21\u6570",
+        "description": "\u7528\u6237\u6bcf\u6708\u53ef\u751f\u6210\u4e16\u754c\u89c2\u3001\u89d2\u8272\u4e0e\u5927\u7eb2\u7684\u6b21\u6570\u3002",
+        "category": "\u5c0f\u8bf4\u521b\u4f5c",
         "value_type": "number",
         "default_rule": {"reset_period": "monthly", "deduct_mode": "on_success"},
     },
     {
         "key": "chapter.expand.monthly_limit",
-        "name": "章节扩写次数",
-        "description": "用户每月可将章节计划扩写成正文的次数。",
-        "category": "小说创作",
+        "name": "\u7ae0\u8282\u6269\u5199\u6b21\u6570",
+        "description": "\u7528\u6237\u6bcf\u6708\u53ef\u5c06\u7ae0\u8282\u8ba1\u5212\u6269\u5199\u6210\u6b63\u6587\u7684\u6b21\u6570\u3002",
+        "category": "\u5c0f\u8bf4\u521b\u4f5c",
         "value_type": "number",
         "default_rule": {"reset_period": "monthly", "deduct_mode": "on_success"},
     },
     {
         "key": "scene.generate.monthly_limit",
-        "name": "分镜生成次数",
-        "description": "用户每月可将文本拆分为漫画分镜的次数。",
-        "category": "漫画生成",
+        "name": "\u5206\u955c\u751f\u6210\u6b21\u6570",
+        "description": "\u7528\u6237\u6bcf\u6708\u53ef\u5c06\u6587\u672c\u62c6\u5206\u4e3a\u6f2b\u753b\u5206\u955c\u7684\u6b21\u6570\u3002",
+        "category": "\u6f2b\u753b\u751f\u6210",
         "value_type": "number",
         "default_rule": {"reset_period": "monthly", "deduct_mode": "on_success"},
     },
     {
         "key": "manga.image.monthly_limit",
-        "name": "漫画图片生成张数",
-        "description": "用户每月可生成的漫画图片总张数。",
-        "category": "漫画生成",
+        "name": "\u6f2b\u753b\u56fe\u7247\u751f\u6210\u5f20\u6570",
+        "description": "\u7528\u6237\u6bcf\u6708\u53ef\u751f\u6210\u7684\u6f2b\u753b\u56fe\u7247\u603b\u5f20\u6570\u3002",
+        "category": "\u6f2b\u753b\u751f\u6210",
         "value_type": "number",
         "default_rule": {"reset_period": "monthly", "deduct_mode": "on_success"},
     },
     {
         "key": "manga.regenerate.monthly_limit",
-        "name": "漫画重绘次数",
-        "description": "用户每月可重新生成单张漫画图片的次数。",
-        "category": "漫画生成",
+        "name": "\u6f2b\u753b\u91cd\u7ed8\u6b21\u6570",
+        "description": "\u7528\u6237\u6bcf\u6708\u53ef\u91cd\u65b0\u751f\u6210\u5355\u5f20\u6f2b\u753b\u56fe\u7247\u7684\u6b21\u6570\u3002",
+        "category": "\u6f2b\u753b\u751f\u6210",
         "value_type": "number",
         "default_rule": {"reset_period": "monthly", "deduct_mode": "on_success"},
     },
     {
         "key": "ai.text.advanced_calls.monthly_limit",
-        "name": "高级文本 AI 调用次数",
-        "description": "用于框架调整、继续扩展、文本改写、正文调整、质量评估与单项重生成等高级文本能力。",
-        "category": "灏忚鍒涗綔",
+        "name": "\u9ad8\u7ea7\u6587\u672c AI \u8c03\u7528\u6b21\u6570",
+        "description": "\u7528\u4e8e\u6846\u67b6\u8c03\u6574\u3001\u7ee7\u7eed\u6269\u5c55\u3001\u6587\u672c\u6539\u5199\u3001\u6b63\u6587\u8c03\u6574\u3001\u8d28\u91cf\u8bc4\u4f30\u4e0e\u5355\u9879\u91cd\u751f\u6210\u7b49\u9ad8\u7ea7\u6587\u672c\u80fd\u529b\u3002",
+        "category": "\u9ad8\u7ea7\u6587\u672c\u80fd\u529b",
         "value_type": "number",
         "default_rule": {"reset_period": "monthly", "deduct_mode": "on_success"},
     },
     {
         "key": "manga.max_image_count_per_chapter",
-        "name": "单章节最大出图数",
-        "description": "单个章节允许生成的最大漫画页数。",
-        "category": "漫画生成",
+        "name": "\u5355\u7ae0\u8282\u6700\u5927\u51fa\u56fe\u6570",
+        "description": "\u5355\u4e2a\u7ae0\u8282\u5141\u8bb8\u751f\u6210\u7684\u6700\u5927\u6f2b\u753b\u9875\u6570\u3002",
+        "category": "\u6f2b\u753b\u751f\u6210",
         "value_type": "number",
         "default_rule": {"reset_period": "monthly", "deduct_mode": "on_success"},
     },
     {
         "key": "manga.allow_color_mode",
-        "name": "允许彩漫模式",
-        "description": "控制该套餐用户是否可切换彩色漫画输出。",
-        "category": "漫画生成",
+        "name": "\u5141\u8bb8\u5f69\u6f2b\u6a21\u5f0f",
+        "description": "\u63a7\u5236\u8be5\u5957\u9910\u7528\u6237\u662f\u5426\u53ef\u5207\u6362\u5f69\u8272\u6f2b\u753b\u8f93\u51fa\u3002",
+        "category": "\u6f2b\u753b\u751f\u6210",
         "value_type": "boolean",
         "default_rule": {"reset_period": "monthly", "deduct_mode": "on_success"},
     },
@@ -248,6 +253,24 @@ def _platform_settings_snapshot(db: Session) -> dict:
             "image_model": _get_platform_setting("api.image.model", db, "default"),
             "image_api_key": _get_platform_setting("api.image.api_key", db, ""),
             "enable_user_override": bool(_get_platform_setting("api.enable_user_override", db, True)),
+            "enable_user_url_override": bool(_get_platform_setting("api.enable_user_url_override", db, False)),
+        },
+        "auth": {
+            "require_email_code_for_register": bool(_get_platform_setting("auth.require_email_code_for_register", db, False)),
+            "require_email_code_for_login": bool(_get_platform_setting("auth.require_email_code_for_login", db, False)),
+            "email_code_expire_minutes": int(_get_platform_setting("auth.email_code_expire_minutes", db, 10) or 10),
+            "email_code_length": int(_get_platform_setting("auth.email_code_length", db, 6) or 6),
+        },
+        "email": {
+            "smtp_enabled": bool(_get_platform_setting("email.smtp_enabled", db, False)),
+            "smtp_host": str(_get_platform_setting("email.smtp_host", db, "") or ""),
+            "smtp_port": int(_get_platform_setting("email.smtp_port", db, 587) or 587),
+            "smtp_username": str(_get_platform_setting("email.smtp_username", db, "") or ""),
+            "smtp_password": str(_get_platform_setting("email.smtp_password", db, "") or ""),
+            "smtp_from_email": str(_get_platform_setting("email.smtp_from_email", db, "") or ""),
+            "smtp_from_name": str(_get_platform_setting("email.smtp_from_name", db, "StoryCanvas") or "StoryCanvas"),
+            "smtp_use_tls": bool(_get_platform_setting("email.smtp_use_tls", db, True)),
+            "smtp_use_ssl": bool(_get_platform_setting("email.smtp_use_ssl", db, False)),
         },
         "payment": {
             "enabled": bool(_get_platform_setting("payment.enabled", db, True)),
@@ -277,6 +300,14 @@ def _payment_settings_snapshot(db: Session) -> dict:
     return _platform_settings_snapshot(db)["payment"]
 
 
+def _auth_settings_snapshot(db: Session) -> dict:
+    return _platform_settings_snapshot(db)["auth"]
+
+
+def _email_settings_snapshot(db: Session) -> dict:
+    return _platform_settings_snapshot(db)["email"]
+
+
 def _platform_icon_url(db: Session) -> str:
     icon_data = _get_platform_setting("platform.icon_data", db, "")
     if not icon_data:
@@ -286,7 +317,10 @@ def _platform_icon_url(db: Session) -> str:
 
 
 def _public_platform_settings_snapshot(db: Session) -> dict:
-    basic = _platform_settings_snapshot(db)["basic"]
+    snapshot = _platform_settings_snapshot(db)
+    basic = snapshot["basic"]
+    api = snapshot["api"]
+    auth = snapshot["auth"]
     return {
         "site_name": basic.get("site_name") or "StoryCanvas",
         "site_slogan": basic.get("site_slogan") or "",
@@ -295,6 +329,17 @@ def _public_platform_settings_snapshot(db: Session) -> dict:
         "copyright": basic.get("copyright") or "",
         "notice": basic.get("notice") or "",
         "icon_url": _platform_icon_url(db),
+        "api": {
+            "deepseek_base_url": api.get("deepseek_base_url") or "",
+            "deepseek_model": api.get("deepseek_model") or "",
+            "image_base_url": api.get("image_base_url") or "",
+            "image_model": api.get("image_model") or "",
+        },
+        "auth": {
+            "require_email_code_for_register": bool(auth.get("require_email_code_for_register")),
+            "require_email_code_for_login": bool(auth.get("require_email_code_for_login")),
+            "email_code_expire_minutes": int(auth.get("email_code_expire_minutes") or 10),
+        },
     }
 
 
@@ -320,30 +365,104 @@ def _public_payment_config(db: Session) -> dict:
     }
 
 
+def _user_api_override_capabilities(user: User | None, db: Session) -> dict[str, bool]:
+    key_global = bool(_get_platform_setting("api.enable_user_override", db, True))
+    url_global = bool(_get_platform_setting("api.enable_user_url_override", db, False))
+    return {
+        "can_override_api_key": key_global and bool(user and user.allow_api_key_override),
+        "can_override_api_url": url_global and bool(user and user.allow_api_url_override),
+    }
+
+
+def _serialize_auth_user(user: User, db: Session) -> dict:
+    capabilities = _user_api_override_capabilities(user, db)
+    return {
+        "id": user.id,
+        "name": user.name,
+        "role": user.role,
+        "email": user.email,
+        "can_override_api_key": capabilities["can_override_api_key"],
+        "can_override_api_url": capabilities["can_override_api_url"],
+    }
+
+
+def _custom_text_provider_active(request: Request) -> bool:
+    db = getattr(request.state, "db", None)
+    if db is None:
+        return False
+    user = getattr(request.state, "current_user", None)
+    capabilities = _user_api_override_capabilities(user, db)
+    if not capabilities["can_override_api_url"]:
+        return False
+    return bool((request.headers.get("x-deepseek-base-url") or "").strip())
+
+
+def _custom_image_provider_active(request: Request) -> bool:
+    db = getattr(request.state, "db", None)
+    if db is None:
+        return False
+    user = getattr(request.state, "current_user", None)
+    capabilities = _user_api_override_capabilities(user, db)
+    if not capabilities["can_override_api_url"]:
+        return False
+    return bool((request.headers.get("x-image-base-url") or "").strip())
+
+
+def _check_and_consume_feature_quota(
+    request: Request,
+    user_id: int,
+    feature_key: str,
+    amount: int,
+    db: Session,
+    *,
+    deduct: bool,
+    provider_kind: str | None = None,
+) -> dict:
+    if provider_kind == "text" and _custom_text_provider_active(request):
+        return {"skipped": True, "reason": "custom_text_provider", "feature_key": feature_key}
+    if provider_kind == "image" and _custom_image_provider_active(request):
+        return {"skipped": True, "reason": "custom_image_provider", "feature_key": feature_key}
+    return _check_and_consume_quota(user_id, feature_key, amount, db, deduct=deduct)
+
+
 def _user_deepseek_api_key(request: Request) -> str | None:
     override = request.headers.get("x-deepseek-api-key") or None
+    override_base_url = request.headers.get("x-deepseek-base-url") or None
+    override_model = request.headers.get("x-deepseek-model") or None
     db = getattr(request.state, "db", None)
     if db is None:
         return override
-    deepseek_service.DEEPSEEK_BASE_URL = str(_get_platform_setting("api.deepseek.base_url", db, deepseek_service.DEEPSEEK_BASE_URL)).rstrip("/")
-    deepseek_service.DEEPSEEK_MODEL = str(_get_platform_setting("api.deepseek.model", db, deepseek_service.DEEPSEEK_MODEL)).strip() or deepseek_service.DEEPSEEK_MODEL
-    allow_override = bool(_get_platform_setting("api.enable_user_override", db, True))
-    if allow_override and override:
+    user = getattr(request.state, "current_user", None)
+    capabilities = _user_api_override_capabilities(user, db)
+    admin_base_url = str(_get_platform_setting("api.deepseek.base_url", db, deepseek_service.DEEPSEEK_BASE_URL)).strip()
+    admin_model = str(_get_platform_setting("api.deepseek.model", db, deepseek_service.DEEPSEEK_MODEL)).strip()
+    resolved_base_url = override_base_url.strip() if capabilities["can_override_api_url"] and override_base_url and override_base_url.strip() else admin_base_url
+    resolved_model = override_model.strip() if capabilities["can_override_api_url"] and override_model and override_model.strip() else admin_model
+    deepseek_service.DEEPSEEK_BASE_URL = resolved_base_url.rstrip("/") or deepseek_service.DEEPSEEK_BASE_URL
+    deepseek_service.DEEPSEEK_MODEL = resolved_model or deepseek_service.DEEPSEEK_MODEL
+    if capabilities["can_override_api_key"] and override:
         return override
-    return _get_platform_setting("api.deepseek.api_key", db, "") or override
+    return _get_platform_setting("api.deepseek.api_key", db, "") or None
 
 
 def _user_image_api_key(request: Request) -> str | None:
     override = request.headers.get("x-image-api-key") or None
+    override_base_url = request.headers.get("x-image-base-url") or None
+    override_model = request.headers.get("x-image-model") or None
     db = getattr(request.state, "db", None)
     if db is None:
         return override
-    image_service.IMAGE_API_BASE_URL = str(_get_platform_setting("api.image.base_url", db, image_service.IMAGE_API_BASE_URL)).rstrip("/")
-    image_service.IMAGE_MODEL = str(_get_platform_setting("api.image.model", db, image_service.IMAGE_MODEL)).strip() or image_service.IMAGE_MODEL
-    allow_override = bool(_get_platform_setting("api.enable_user_override", db, True))
-    if allow_override and override:
+    user = getattr(request.state, "current_user", None)
+    capabilities = _user_api_override_capabilities(user, db)
+    admin_base_url = str(_get_platform_setting("api.image.base_url", db, image_service.IMAGE_API_BASE_URL)).strip()
+    admin_model = str(_get_platform_setting("api.image.model", db, image_service.IMAGE_MODEL)).strip()
+    resolved_base_url = override_base_url.strip() if capabilities["can_override_api_url"] and override_base_url and override_base_url.strip() else admin_base_url
+    resolved_model = override_model.strip() if capabilities["can_override_api_url"] and override_model and override_model.strip() else admin_model
+    image_service.IMAGE_API_BASE_URL = resolved_base_url.rstrip("/") or image_service.IMAGE_API_BASE_URL
+    image_service.IMAGE_MODEL = resolved_model or image_service.IMAGE_MODEL
+    if capabilities["can_override_api_key"] and override:
         return override
-    return _get_platform_setting("api.image.api_key", db, "") or override
+    return _get_platform_setting("api.image.api_key", db, "") or None
 
 
 def _password_hash(raw: str) -> str:
@@ -365,6 +484,140 @@ def _parse_auth_token(request: Request) -> str | None:
         token = auth[7:].strip()
         return token or None
     return None
+
+
+def _normalize_email(raw: object) -> str:
+    return str(raw or "").strip().lower()
+
+
+def _validate_email_format(email: str) -> None:
+    if not email or not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", email):
+        raise HTTPException(400, "邮箱格式不正确")
+
+
+def _verification_code_hash(email: str, purpose: str, code: str) -> str:
+    payload = f"{email}|{purpose}|{code}".encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _generate_verification_code(length: int) -> str:
+    digits = max(4, min(int(length or 6), 8))
+    return "".join(secrets.choice("0123456789") for _ in range(digits))
+
+
+def _send_platform_email(to_email: str, subject: str, text_body: str, db: Session) -> None:
+    settings = _email_settings_snapshot(db)
+    if not settings.get("smtp_enabled"):
+        raise HTTPException(503, "邮箱发信服务未启用")
+    host = str(settings.get("smtp_host") or "").strip()
+    username = str(settings.get("smtp_username") or "").strip()
+    password = str(settings.get("smtp_password") or "")
+    from_email = str(settings.get("smtp_from_email") or username or "").strip()
+    if not host or not from_email:
+        raise HTTPException(503, "邮箱发信配置不完整，请先填写 SMTP 主机和发件邮箱")
+    port = int(settings.get("smtp_port") or 587)
+    use_ssl = bool(settings.get("smtp_use_ssl"))
+    use_tls = bool(settings.get("smtp_use_tls"))
+    msg = EmailMessage()
+    from_name = str(settings.get("smtp_from_name") or "StoryCanvas").strip() or "StoryCanvas"
+    msg["From"] = f"{from_name} <{from_email}>"
+    msg["To"] = to_email
+    msg["Subject"] = subject
+    msg.set_content(text_body)
+    try:
+        if use_ssl:
+            with smtplib.SMTP_SSL(host, port, timeout=20) as server:
+                if username:
+                    server.login(username, password)
+                server.send_message(msg)
+        else:
+            with smtplib.SMTP(host, port, timeout=20) as server:
+                server.ehlo()
+                if use_tls:
+                    server.starttls()
+                    server.ehlo()
+                if username:
+                    server.login(username, password)
+                server.send_message(msg)
+    except Exception as exc:
+        logger.exception("Failed to send verification email to %s", to_email)
+        raise HTTPException(502, f"邮件发送失败：{exc}")
+
+
+def _issue_email_verification_code(email: str, purpose: str, db: Session) -> dict:
+    _validate_email_format(email)
+    auth = _auth_settings_snapshot(db)
+    code_length = int(auth.get("email_code_length") or 6)
+    expire_minutes = int(auth.get("email_code_expire_minutes") or 10)
+    now = datetime.datetime.utcnow()
+    latest = (
+        db.query(EmailVerificationCode)
+        .filter(
+            EmailVerificationCode.email == email,
+            EmailVerificationCode.purpose == purpose,
+        )
+        .order_by(EmailVerificationCode.created_at.desc())
+        .first()
+    )
+    if latest and latest.created_at and (now - latest.created_at).total_seconds() < 60:
+        raise HTTPException(429, "验证码发送过于频繁，请稍后再试")
+    code = _generate_verification_code(code_length)
+    expires_at = now + datetime.timedelta(minutes=max(1, expire_minutes))
+    (
+        db.query(EmailVerificationCode)
+        .filter(
+            EmailVerificationCode.email == email,
+            EmailVerificationCode.purpose == purpose,
+            EmailVerificationCode.consumed_at.is_(None),
+        )
+        .update({"consumed_at": now}, synchronize_session=False)
+    )
+    db.add(
+        EmailVerificationCode(
+            email=email,
+            purpose=purpose,
+            code_hash=_verification_code_hash(email, purpose, code),
+            expires_at=expires_at,
+        )
+    )
+    subject_action = "注册" if purpose == "register" else "登录"
+    subject = f"{_get_platform_setting('platform.site_name', db, 'StoryCanvas')} {subject_action}验证码"
+    body = (
+        f"您好，\n\n"
+        f"您本次用于{subject_action}的验证码是：{code}\n"
+        f"验证码将在 {expire_minutes} 分钟后失效。\n"
+        f"如果这不是您的操作，请忽略这封邮件。\n"
+    )
+    _send_platform_email(email, subject, body, db)
+    db.commit()
+    return {"ok": True, "expires_in_seconds": expire_minutes * 60}
+
+
+def _consume_email_verification_code(email: str, purpose: str, code: str, db: Session) -> None:
+    normalized_code = str(code or "").strip()
+    if not normalized_code:
+        raise HTTPException(400, "请输入邮箱验证码")
+    now = datetime.datetime.utcnow()
+    record = (
+        db.query(EmailVerificationCode)
+        .filter(
+            EmailVerificationCode.email == email,
+            EmailVerificationCode.purpose == purpose,
+            EmailVerificationCode.consumed_at.is_(None),
+        )
+        .order_by(EmailVerificationCode.created_at.desc())
+        .first()
+    )
+    if not record:
+        raise HTTPException(400, "未找到可用验证码，请先发送验证码")
+    if record.expires_at < now:
+        record.consumed_at = now
+        db.commit()
+        raise HTTPException(400, "验证码已过期，请重新发送")
+    if record.code_hash != _verification_code_hash(email, purpose, normalized_code):
+        raise HTTPException(400, "邮箱验证码不正确")
+    record.consumed_at = now
+    db.commit()
 
 
 def _ensure_platform_seed(db: Session) -> None:
@@ -525,6 +778,20 @@ def _seed_platform_settings(db: Session) -> None:
         "api.image.model": "default",
         "api.image.api_key": "",
         "api.enable_user_override": True,
+        "api.enable_user_url_override": False,
+        "auth.require_email_code_for_register": False,
+        "auth.require_email_code_for_login": False,
+        "auth.email_code_expire_minutes": 10,
+        "auth.email_code_length": 6,
+        "email.smtp_enabled": False,
+        "email.smtp_host": "",
+        "email.smtp_port": 587,
+        "email.smtp_username": "",
+        "email.smtp_password": "",
+        "email.smtp_from_email": "",
+        "email.smtp_from_name": "StoryCanvas",
+        "email.smtp_use_tls": True,
+        "email.smtp_use_ssl": False,
         "payment.enabled": True,
         "payment.mode": "mock",
         "payment.default_method": "mock_qr",
@@ -561,6 +828,7 @@ def _require_user(request: Request, db: Session) -> User:
     user = db.get(User, session.user_id)
     if not user or user.status != "active":
         raise HTTPException(403, "User unavailable")
+    request.state.current_user = user
     return user
 
 
@@ -587,7 +855,7 @@ def _require_story_for_user(story_id: int, user: User, db: Session) -> Story:
     story = db.get(Story, story_id)
     if not story:
         raise HTTPException(404, "Story not found")
-    if user.role != "admin" and story.owner_user_id != user.id:
+    if story.owner_user_id != user.id:
         raise HTTPException(403, "Story access denied")
     return story
 
@@ -597,7 +865,7 @@ def _require_chapter_for_user(chapter_id: int, user: User, db: Session) -> Chapt
     story = chapter.story
     if not story:
         raise HTTPException(404, "Story not found")
-    if user.role != "admin" and story.owner_user_id != user.id:
+    if story.owner_user_id != user.id:
         raise HTTPException(403, "Chapter access denied")
     return chapter
 
@@ -618,6 +886,20 @@ def _coerce_int(value: object, default: int = 0) -> int:
         return int(value)
     except (TypeError, ValueError):
         return default
+
+
+def _coerce_bool(value: object, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"1", "true", "yes", "on"}:
+            return True
+        if lowered in {"0", "false", "no", "off", ""}:
+            return False
+    return default
 
 
 def _coerce_money(value: object, default: str = "0.00") -> Decimal:
@@ -643,6 +925,19 @@ def _parse_money_input(value: object, field_name: str) -> Decimal:
 
 def _money_to_number(value: object) -> float:
     return float(_coerce_money(value))
+
+
+def _plan_feature_value(user_id: int, feature_key: str, db: Session):
+    plan = _active_plan_for_user(user_id, db)
+    return _plan_feature_map(plan.id, db).get(feature_key)
+
+
+def _plan_feature_int(user_id: int, feature_key: str, db: Session, default: int = 0) -> int:
+    return _coerce_int(_plan_feature_value(user_id, feature_key, db), default=default)
+
+
+def _plan_feature_bool(user_id: int, feature_key: str, db: Session, default: bool = False) -> bool:
+    return _coerce_bool(_plan_feature_value(user_id, feature_key, db), default=default)
 
 
 def _check_and_consume_quota(
@@ -801,8 +1096,16 @@ def _usage_entries_for_user(user_id: int, db: Session) -> list[dict]:
     return entries
 
 
-def _check_and_consume_advanced_text_quota(user_id: int, db: Session, *, deduct: bool) -> None:
-    _check_and_consume_quota(user_id, "ai.text.advanced_calls.monthly_limit", 1, db, deduct=deduct)
+def _check_and_consume_advanced_text_quota(request: Request, user_id: int, db: Session, *, deduct: bool) -> None:
+    _check_and_consume_feature_quota(
+        request,
+        user_id,
+        "ai.text.advanced_calls.monthly_limit",
+        1,
+        db,
+        deduct=deduct,
+        provider_kind="text",
+    )
 
 
 def _upsert_user_subscription(user_id: int, plan_id: int, db: Session) -> UserSubscription:
@@ -1560,6 +1863,11 @@ def _chapter_dir(chapter_id: int) -> Path:
     return Path(__file__).resolve().parent / "manga_outputs" / f"chapter_{chapter_id}"
 
 
+def _initialize_empty_chapter_workspace(chapter_id: int) -> None:
+    chapter_dir = _chapter_dir(chapter_id)
+    _rmtree_best_effort(chapter_dir, "stale chapter workspace")
+
+
 def _scene_meta_path(chapter_id: int) -> Path:
     return _chapter_dir(chapter_id) / "scenes_meta.json"
 
@@ -1647,6 +1955,45 @@ def _decode_png_upload(b64: str) -> bytes:
         raise HTTPException(400, "Uploaded file is not a valid image")
 
 
+def _decode_edit_mask_upload(b64: str, target_size: tuple[int, int]) -> bytes:
+    if not b64:
+        raise HTTPException(400, "No mask provided")
+    if "," in b64 and b64.lstrip().startswith("data:"):
+        b64 = b64.split(",", 1)[1]
+    try:
+        import base64
+        import binascii
+        import io
+
+        from PIL import Image, UnidentifiedImageError
+
+        mask_bytes = base64.b64decode(b64, validate=True)
+        with Image.open(io.BytesIO(mask_bytes)) as img:
+            rgba = img.convert("RGBA")
+            if rgba.size != target_size:
+                rgba = rgba.resize(target_size, Image.NEAREST)
+            alpha = rgba.getchannel("A")
+            opaque_bg = Image.new("RGBA", target_size, (255, 255, 255, 255))
+            pixels = opaque_bg.load()
+            alpha_pixels = alpha.load()
+            for y in range(target_size[1]):
+                for x in range(target_size[0]):
+                    if alpha_pixels[x, y] > 10:
+                        pixels[x, y] = (255, 255, 255, 0)
+            output = io.BytesIO()
+            opaque_bg.save(output, format="PNG", optimize=True)
+            normalized = output.getvalue()
+        if len(normalized) > MAX_UPLOAD_BYTES:
+            raise HTTPException(413, f"Mask is too large after processing. Max size is {MAX_UPLOAD_BYTES // (1024 * 1024)}MB")
+        return normalized
+    except HTTPException:
+        raise
+    except (binascii.Error, ValueError):
+        raise HTTPException(400, "Invalid base64 mask data")
+    except UnidentifiedImageError:
+        raise HTTPException(400, "Uploaded mask is not a valid image")
+
+
 @app.on_event("startup")
 def on_startup():
     init_db()
@@ -1669,15 +2016,19 @@ def on_startup():
 @app.post("/api/auth/register")
 def register(body: dict, db: Session = Depends(get_db)):
     _ensure_platform_seed(db)
-    email = str(body.get("email") or "").strip().lower()
+    email = _normalize_email(body.get("email"))
     password = str(body.get("password") or "").strip()
+    verification_code = str(body.get("verification_code") or "").strip()
     name = str(body.get("name") or "").strip() or "User"
+    _validate_email_format(email)
     if not email or not password:
-        raise HTTPException(400, "email and password are required")
+        raise HTTPException(400, "请输入邮箱和密码")
     if db.query(User).filter(User.email == email).first():
-        raise HTTPException(409, "email already exists")
+        raise HTTPException(409, "该邮箱已注册")
+    if bool(_auth_settings_snapshot(db).get("require_email_code_for_register")):
+        _consume_email_verification_code(email, "register", verification_code, db)
 
-    user = User(email=email, password_hash=_password_hash(password), name=name, role="user", status="active")
+    user = User(email=email, password_hash=_password_hash(password), name=name, role="user", status="active", email_verified=True)
     db.add(user)
     db.flush()
     free_plan = db.query(Plan).filter(Plan.code == "free").first()
@@ -1686,28 +2037,53 @@ def register(body: dict, db: Session = Depends(get_db)):
     token = _new_session_token()
     db.add(UserSession(user_id=user.id, token=token))
     db.commit()
-    return {"token": token, "user": {"id": user.id, "name": user.name, "role": user.role, "email": user.email}}
+    return {"token": token, "user": _serialize_auth_user(user, db)}
 
 
 @app.post("/api/auth/login")
 def login(body: dict, db: Session = Depends(get_db)):
     _ensure_platform_seed(db)
-    email = str(body.get("email") or "").strip().lower()
+    email = _normalize_email(body.get("email"))
     password = str(body.get("password") or "").strip()
+    verification_code = str(body.get("verification_code") or "").strip()
     user = db.query(User).filter(User.email == email).first()
     if not user or user.password_hash != _password_hash(password):
-        raise HTTPException(401, "invalid email or password")
+        raise HTTPException(401, "邮箱或密码错误")
+    if user.status != "active":
+        raise HTTPException(403, "账号已被停用")
+    if bool(_auth_settings_snapshot(db).get("require_email_code_for_login")):
+        _consume_email_verification_code(email, "login", verification_code, db)
     token = _new_session_token()
     db.add(UserSession(user_id=user.id, token=token))
     db.commit()
-    return {"token": token, "user": {"id": user.id, "name": user.name, "role": user.role, "email": user.email}}
+    return {"token": token, "user": _serialize_auth_user(user, db)}
+
+
+@app.post("/api/auth/send-email-code")
+def send_email_code(body: dict, db: Session = Depends(get_db)):
+    _ensure_platform_seed(db)
+    email = _normalize_email(body.get("email"))
+    purpose = str(body.get("purpose") or "").strip().lower()
+    _validate_email_format(email)
+    if purpose not in {"register", "login"}:
+        raise HTTPException(400, "验证码用途不正确")
+    if purpose == "register":
+        if db.query(User).filter(User.email == email).first():
+            raise HTTPException(409, "该邮箱已注册")
+    else:
+        user = db.query(User).filter(User.email == email).first()
+        if not user:
+            raise HTTPException(404, "该邮箱尚未注册")
+        if user.status != "active":
+            raise HTTPException(403, "账号已被停用")
+    return _issue_email_verification_code(email, purpose, db)
 
 
 @app.get("/api/auth/me")
 def me(request: Request, db: Session = Depends(get_db)):
     _ensure_platform_seed(db)
     user = _require_user(request, db)
-    return {"id": user.id, "name": user.name, "role": user.role, "email": user.email}
+    return _serialize_auth_user(user, db)
 
 
 @app.post("/api/auth/logout")
@@ -2222,6 +2598,8 @@ def admin_users(request: Request, db: Session = Depends(get_db)):
             "email": user.email,
             "role": user.role,
             "status": user.status,
+            "allow_api_key_override": bool(user.allow_api_key_override),
+            "allow_api_url_override": bool(user.allow_api_url_override),
             "created_at": user.created_at,
             "plan_name": plan.name if plan else "Free",
         })
@@ -2235,13 +2613,24 @@ def admin_create_user(body: dict, request: Request, db: Session = Depends(get_db
     password = str(body.get("password") or "").strip()
     name = str(body.get("name") or "").strip() or "新用户"
     role = str(body.get("role") or "user").strip().lower()
+    allow_api_key_override = bool(body.get("allow_api_key_override", False))
+    allow_api_url_override = bool(body.get("allow_api_url_override", False))
     if not email or not password:
         raise HTTPException(400, "email and password are required")
     if role not in {"user", "admin"}:
         raise HTTPException(400, "role must be user or admin")
     if db.query(User).filter(User.email == email).first():
         raise HTTPException(409, "Email already exists")
-    user = User(email=email, password_hash=_password_hash(password), name=name, role=role, status="active")
+    user = User(
+        email=email,
+        password_hash=_password_hash(password),
+        name=name,
+        role=role,
+        status="active",
+        email_verified=True,
+        allow_api_key_override=allow_api_key_override,
+        allow_api_url_override=allow_api_url_override,
+    )
     db.add(user)
     _write_audit_log(admin, "create_user", "user", email, f"创建用户 {email}", db, {"email": email, "name": name, "role": role})
     db.commit()
@@ -2273,6 +2662,10 @@ def admin_update_user(user_id: int, body: dict, request: Request, db: Session = 
         if status not in {"active", "disabled"}:
             raise HTTPException(400, "status must be active or disabled")
         user.status = status
+    if body.get("allow_api_key_override") is not None:
+        user.allow_api_key_override = bool(body.get("allow_api_key_override"))
+    if body.get("allow_api_url_override") is not None:
+        user.allow_api_url_override = bool(body.get("allow_api_url_override"))
     if body.get("password"):
         user.password_hash = _password_hash(str(body.get("password")))
     _write_audit_log(admin, "update_user", "user", user.id, f"更新用户 {user.email}", db, {
@@ -2280,6 +2673,8 @@ def admin_update_user(user_id: int, body: dict, request: Request, db: Session = 
         "email": user.email,
         "role": user.role,
         "status": user.status,
+        "allow_api_key_override": bool(user.allow_api_key_override),
+        "allow_api_url_override": bool(user.allow_api_url_override),
         "password_changed": bool(body.get("password")),
     })
     db.commit()
@@ -2314,6 +2709,75 @@ def admin_user_entitlements(user_id: int, request: Request, db: Session = Depend
         "plan": {"id": plan.id, "code": plan.code, "name": plan.name},
         "entitlements": _plan_feature_map(plan.id, db),
         "usage": _usage_entries_for_user(user.id, db),
+    }
+
+
+@app.get("/api/admin/users/{user_id}/stories")
+def admin_user_stories(user_id: int, request: Request, db: Session = Depends(get_db)):
+    _require_admin(request, db)
+    user = db.get(User, user_id)
+    if not user:
+        raise HTTPException(404, "User not found")
+    stories = (
+        db.query(Story)
+        .filter(Story.owner_user_id == user.id)
+        .order_by(Story.created_at.desc())
+        .all()
+    )
+    chapter_counts = {
+        story_id: count
+        for story_id, count in (
+            db.query(Chapter.story_id, func.count(Chapter.id))
+            .filter(Chapter.story_id.in_([story.id for story in stories] or [0]))
+            .group_by(Chapter.story_id)
+            .all()
+        )
+    }
+    return [
+        {
+            "id": story.id,
+            "title": story.title,
+            "description": story.description or "",
+            "cover_image": story.cover_image,
+            "created_at": story.created_at,
+            "chapter_count": int(chapter_counts.get(story.id, 0)),
+        }
+        for story in stories
+    ]
+
+
+@app.get("/api/admin/stories/{story_id}/chapters")
+def admin_story_chapters(story_id: int, request: Request, db: Session = Depends(get_db)):
+    _require_admin(request, db)
+    story = db.get(Story, story_id)
+    if not story:
+        raise HTTPException(404, "Story not found")
+    chapters = (
+        db.query(Chapter)
+        .filter(Chapter.story_id == story.id)
+        .order_by(Chapter.chapter_number.asc())
+        .all()
+    )
+    return {
+        "story": {
+            "id": story.id,
+            "title": story.title,
+            "description": story.description or "",
+            "created_at": story.created_at,
+            "owner_user_id": story.owner_user_id,
+        },
+        "chapters": [
+            {
+                "id": chapter.id,
+                "chapter_number": chapter.chapter_number,
+                "title": chapter.title or f"第{chapter.chapter_number}话",
+                "status": chapter.status,
+                "word_count": chapter.word_count or 0,
+                "created_at": chapter.created_at,
+                "novel_content": chapter.novel_content or "",
+            }
+            for chapter in chapters
+        ],
     }
 
 
@@ -2463,6 +2927,8 @@ def admin_save_platform_settings(body: dict, request: Request, db: Session = Dep
     _require_admin(request, db)
     basic = body.get("basic") if isinstance(body.get("basic"), dict) else {}
     api = body.get("api") if isinstance(body.get("api"), dict) else {}
+    auth = body.get("auth") if isinstance(body.get("auth"), dict) else {}
+    email = body.get("email") if isinstance(body.get("email"), dict) else {}
     payment = body.get("payment") if isinstance(body.get("payment"), dict) else {}
     mappings = {
         "platform.site_name": basic.get("site_name", "StoryCanvas"),
@@ -2478,6 +2944,20 @@ def admin_save_platform_settings(body: dict, request: Request, db: Session = Dep
         "api.image.model": api.get("image_model", "default"),
         "api.image.api_key": api.get("image_api_key", ""),
         "api.enable_user_override": bool(api.get("enable_user_override", True)),
+        "api.enable_user_url_override": bool(api.get("enable_user_url_override", False)),
+        "auth.require_email_code_for_register": bool(auth.get("require_email_code_for_register", False)),
+        "auth.require_email_code_for_login": bool(auth.get("require_email_code_for_login", False)),
+        "auth.email_code_expire_minutes": int(auth.get("email_code_expire_minutes", 10) or 10),
+        "auth.email_code_length": int(auth.get("email_code_length", 6) or 6),
+        "email.smtp_enabled": bool(email.get("smtp_enabled", False)),
+        "email.smtp_host": str(email.get("smtp_host", "") or ""),
+        "email.smtp_port": int(email.get("smtp_port", 587) or 587),
+        "email.smtp_username": str(email.get("smtp_username", "") or ""),
+        "email.smtp_password": str(email.get("smtp_password", "") or ""),
+        "email.smtp_from_email": str(email.get("smtp_from_email", "") or ""),
+        "email.smtp_from_name": str(email.get("smtp_from_name", "StoryCanvas") or "StoryCanvas"),
+        "email.smtp_use_tls": bool(email.get("smtp_use_tls", True)),
+        "email.smtp_use_ssl": bool(email.get("smtp_use_ssl", False)),
         "payment.enabled": bool(payment.get("enabled", True)),
         "payment.mode": str(payment.get("mode", "mock") or "mock"),
         "payment.default_method": str(payment.get("default_method", "mock_qr") or "mock_qr"),
@@ -2597,6 +3077,8 @@ def create_story(body: StoryCreate, request: Request, db: Session = Depends(get_
     # Auto-create first chapter
     chapter = Chapter(story_id=story.id, chapter_number=1)
     db.add(chapter)
+    db.flush()
+    _initialize_empty_chapter_workspace(chapter.id)
     db.commit()
     db.refresh(story)
     return story
@@ -2605,9 +3087,7 @@ def create_story(body: StoryCreate, request: Request, db: Session = Depends(get_
 @app.get("/api/stories", response_model=list[StoryOut])
 def list_stories(request: Request, db: Session = Depends(get_db)):
     user = _require_user(request, db)
-    query = db.query(Story)
-    if user.role != "admin":
-        query = query.filter(Story.owner_user_id == user.id)
+    query = db.query(Story).filter(Story.owner_user_id == user.id)
     return query.order_by(Story.created_at.desc()).all()
 
 
@@ -2723,6 +3203,8 @@ def create_next_chapter(story_id: int, request: Request, db: Session = Depends(g
     next_num = (max_num[0] + 1) if max_num else 1
     chapter = Chapter(story_id=story_id, chapter_number=next_num, title=f"第{next_num}话", status="pending")
     db.add(chapter)
+    db.flush()
+    _initialize_empty_chapter_workspace(chapter.id)
     db.commit()
     db.refresh(chapter)
     return chapter
@@ -2951,12 +3433,14 @@ async def generate_story_characters_from_framework(story_id: int, request: Reque
     if not isinstance(story.characters, list) or len(story.characters) == 0:
         raise HTTPException(400, "Story has no framework characters to convert")
 
+    _check_and_consume_advanced_text_quota(request, user.id, db, deduct=False)
     generated = await generate_character_profiles_from_framework(
         _story_framework_context(story),
         api_key=_user_deepseek_api_key(request),
     )
     story.character_profiles = _character_profile_text({"characters": generated})
     db.commit()
+    _check_and_consume_advanced_text_quota(request, user.id, db, deduct=True)
     return {"characters": story.character_profiles.strip()}
 
 
@@ -3199,6 +3683,7 @@ async def generate_story_character_ref_images(story_id: int, request: Request, d
     meta = _load_ref_meta(ref_dir)
     generated: list[str] = []
     skipped: list[str] = []
+    pending_targets: list[dict] = []
 
     for card in targets:
         existing = [
@@ -3211,7 +3696,27 @@ async def generate_story_character_ref_images(story_id: int, request: Request, d
         if existing and not overwrite:
             skipped.append(card["name"])
             continue
+        pending_targets.append(card)
 
+    if pending_targets:
+        _check_and_consume_feature_quota(
+            request,
+            user.id,
+            "manga.image.monthly_limit",
+            len(pending_targets),
+            db,
+            deduct=False,
+            provider_kind="image",
+        )
+
+    for card in pending_targets:
+        existing = [
+            filename
+            for filename, item in meta.items()
+            if isinstance(item, dict)
+            and item.get("kind") == "character_generated"
+            and item.get("label") == card["name"]
+        ]
         for filename in existing:
             path = ref_dir / filename
             if path.exists():
@@ -3231,6 +3736,16 @@ async def generate_story_character_ref_images(story_id: int, request: Request, d
         generated.append(card["name"])
 
     _save_ref_meta(ref_dir, meta)
+    if generated:
+        _check_and_consume_feature_quota(
+            request,
+            user.id,
+            "manga.image.monthly_limit",
+            len(generated),
+            db,
+            deduct=True,
+            provider_kind="image",
+        )
     return {
         "images": _serialize_refs(ref_dir, "story", story_id),
         "max": MAX_REF_IMAGES_PER_LEVEL,
@@ -3258,6 +3773,31 @@ async def add_story_ref_image(story_id: int, request: Request, db: Session = Dep
     _migrate_legacy_ref(_legacy_story_ref_image(story_id), ref_dir)
     _save_uploaded_ref(ref_dir, img_bytes, "story ref image")
     return {"images": _serialize_refs(ref_dir, "story", story_id), "max": MAX_REF_IMAGES_PER_LEVEL}
+
+
+@app.post("/api/stories/{story_id}/ref-images/{filename}/redraw")
+async def redraw_story_ref_image(story_id: int, filename: str, request: Request, db: Session = Depends(get_db)):
+    user = _require_user(request, db)
+    _require_story_for_user(story_id, user, db)
+    if "/" in filename or "\\" in filename or ".." in filename:
+        raise HTTPException(400, "invalid filename")
+    body = await request.json()
+    prompt = str(body.get("prompt") or "").strip()
+    mode = str(body.get("mode") or "full").strip().lower()
+    path = _story_ref_dir(story_id) / filename
+    if not path.exists():
+        raise HTTPException(404, "reference image not found")
+    try:
+        _check_and_consume_feature_quota(request, user.id, "manga.regenerate.monthly_limit", 1, db, deduct=False, provider_kind="image")
+        mask_bytes = None
+        if mode == "partial":
+            with Image.open(path) as img:
+                mask_bytes = _decode_edit_mask_upload(str(body.get("mask") or ""), img.size)
+        await edit_existing_image(prompt, path, path, mask_bytes=mask_bytes, api_key=_user_image_api_key(request))
+    except MangaImageGenerationError as exc:
+        raise HTTPException(502, exc.to_payload()) from exc
+    _check_and_consume_feature_quota(request, user.id, "manga.regenerate.monthly_limit", 1, db, deduct=True, provider_kind="image")
+    return {"images": _serialize_refs(_story_ref_dir(story_id), "story", story_id), "max": MAX_REF_IMAGES_PER_LEVEL}
 
 
 @app.delete("/api/stories/{story_id}/ref-images/{filename}")
@@ -3306,6 +3846,31 @@ async def add_chapter_ref_image(chapter_id: int, request: Request, db: Session =
     return {"images": _serialize_refs(ref_dir, "chapter", chapter_id), "source": "chapter", "max": MAX_REF_IMAGES_PER_LEVEL}
 
 
+@app.post("/api/chapters/{chapter_id}/ref-images/{filename}/redraw")
+async def redraw_chapter_ref_image(chapter_id: int, filename: str, request: Request, db: Session = Depends(get_db)):
+    user = _require_user(request, db)
+    _require_chapter_for_user(chapter_id, user, db)
+    if "/" in filename or "\\" in filename or ".." in filename:
+        raise HTTPException(400, "invalid filename")
+    body = await request.json()
+    prompt = str(body.get("prompt") or "").strip()
+    mode = str(body.get("mode") or "full").strip().lower()
+    path = _chapter_ref_dir(chapter_id) / filename
+    if not path.exists():
+        raise HTTPException(404, "reference image not found")
+    try:
+        _check_and_consume_feature_quota(request, user.id, "manga.regenerate.monthly_limit", 1, db, deduct=False, provider_kind="image")
+        mask_bytes = None
+        if mode == "partial":
+            with Image.open(path) as img:
+                mask_bytes = _decode_edit_mask_upload(str(body.get("mask") or ""), img.size)
+        await edit_existing_image(prompt, path, path, mask_bytes=mask_bytes, api_key=_user_image_api_key(request))
+    except MangaImageGenerationError as exc:
+        raise HTTPException(502, exc.to_payload()) from exc
+    _check_and_consume_feature_quota(request, user.id, "manga.regenerate.monthly_limit", 1, db, deduct=True, provider_kind="image")
+    return {"images": _serialize_refs(_chapter_ref_dir(chapter_id), "chapter", chapter_id), "source": "chapter", "max": MAX_REF_IMAGES_PER_LEVEL}
+
+
 @app.delete("/api/chapters/{chapter_id}/ref-images/{filename}")
 async def delete_chapter_ref_image(chapter_id: int, filename: str, request: Request, db: Session = Depends(get_db)):
     user = _require_user(request, db)
@@ -3340,18 +3905,32 @@ def _save_color_mode(chapter_id: int, mode: str):
     p.write_text(mode, encoding="utf-8")
 
 
+def _effective_color_mode(chapter_id: int, user_id: int, db: Session) -> str:
+    stored_mode = _load_color_mode(chapter_id)
+    if stored_mode == "color" and not _plan_feature_bool(user_id, "manga.allow_color_mode", db, default=False):
+        return "bw"
+    return stored_mode if stored_mode in ("bw", "color") else "bw"
+
+
 @app.get("/api/chapters/{chapter_id}/color-mode")
-async def get_color_mode(chapter_id: int, db: Session = Depends(get_db)):
-    _require_chapter(chapter_id, db)
-    return {"color_mode": _load_color_mode(chapter_id)}
+async def get_color_mode(chapter_id: int, request: Request, db: Session = Depends(get_db)):
+    user = _require_user(request, db)
+    _require_chapter_for_user(chapter_id, user, db)
+    color_mode = _effective_color_mode(chapter_id, user.id, db)
+    if color_mode != _load_color_mode(chapter_id):
+        _save_color_mode(chapter_id, color_mode)
+    return {"color_mode": color_mode}
 
 
 @app.put("/api/chapters/{chapter_id}/color-mode")
-async def set_color_mode(chapter_id: int, body: dict, db: Session = Depends(get_db)):
-    _require_chapter(chapter_id, db)
+async def set_color_mode(chapter_id: int, body: dict, request: Request, db: Session = Depends(get_db)):
+    user = _require_user(request, db)
+    _require_chapter_for_user(chapter_id, user, db)
     mode = body.get("color_mode", "bw")
     if mode not in ("bw", "color"):
         raise HTTPException(400, "color_mode must be 'bw' or 'color'")
+    if mode == "color" and not _plan_feature_bool(user.id, "manga.allow_color_mode", db, default=False):
+        raise HTTPException(403, "Current plan does not support color manga mode")
     _save_color_mode(chapter_id, mode)
     return {"ok": True}
 
@@ -3378,6 +3957,19 @@ def _load_image_count(chapter_id: int) -> int:
     return DEFAULT_IMAGE_COUNT
 
 
+def _max_image_count_for_user(user_id: int, db: Session) -> int:
+    configured = _plan_feature_int(user_id, "manga.max_image_count_per_chapter", db, default=DEFAULT_IMAGE_COUNT)
+    allowed_values = [value for value in ALLOWED_IMAGE_COUNTS if value <= configured]
+    if allowed_values:
+        return max(allowed_values)
+    return min(ALLOWED_IMAGE_COUNTS)
+
+
+def _effective_image_count(chapter_id: int, user_id: int, db: Session) -> int:
+    stored = _load_image_count(chapter_id)
+    return min(stored, _max_image_count_for_user(user_id, db))
+
+
 def _chapter_has_scene_file(chapter_id: int) -> bool:
     prompts_file = Path(__file__).resolve().parent / "manga_outputs" / f"chapter_{chapter_id}" / "scenes.txt"
     if not prompts_file.exists():
@@ -3388,11 +3980,20 @@ def _chapter_has_scene_file(chapter_id: int) -> bool:
         return True
 
 
+def _chapter_is_blank(chapter: Chapter) -> bool:
+    return not chapter.messages and not chapter.images and not (chapter.novel_content or "").strip()
+
+
 @app.get("/api/chapters/{chapter_id}/image-count")
 async def get_image_count(chapter_id: int, request: Request, db: Session = Depends(get_db)):
     user = _require_user(request, db)
     _require_chapter_for_user(chapter_id, user, db)
-    return {"image_count": _load_image_count(chapter_id)}
+    image_count = _effective_image_count(chapter_id, user.id, db)
+    if image_count != _load_image_count(chapter_id):
+        p = _image_count_path(chapter_id)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(str(image_count), encoding="utf-8")
+    return {"image_count": image_count}
 
 
 @app.put("/api/chapters/{chapter_id}/image-count")
@@ -3404,6 +4005,9 @@ async def set_image_count(chapter_id: int, body: dict, request: Request, db: Ses
     count = body.get("image_count", DEFAULT_IMAGE_COUNT)
     if count not in ALLOWED_IMAGE_COUNTS:
         raise HTTPException(400, f"image_count must be one of {ALLOWED_IMAGE_COUNTS}")
+    max_allowed = _max_image_count_for_user(user.id, db)
+    if count > max_allowed:
+        raise HTTPException(403, f"Current plan allows at most {max_allowed} images per chapter")
     p = _image_count_path(chapter_id)
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(str(count), encoding="utf-8")
@@ -3420,9 +4024,9 @@ async def generate_scenes_endpoint(chapter_id: int, request: Request, db: Sessio
     if not chapter.messages:
         raise HTTPException(400, "No chat messages yet")
 
-    image_count = _load_image_count(chapter_id)
+    image_count = _effective_image_count(chapter_id, user.id, db)
     chat_history = [{"role": m.role, "content": m.content} for m in chapter.messages]
-    _check_and_consume_quota(user.id, "scene.generate.monthly_limit", 1, db, deduct=False)
+    _check_and_consume_feature_quota(request, user.id, "scene.generate.monthly_limit", 1, db, deduct=False, provider_kind="text")
     split_task = asyncio.create_task(
         split_scenes(
             chat_history,
@@ -3452,7 +4056,7 @@ async def generate_scenes_endpoint(chapter_id: int, request: Request, db: Sessio
                 await split_task
     sanitized_scenes, sanitized_indices = sanitize_scene_list(scenes)
     _write_scenes_file(chapter_id, sanitized_scenes, sanitized_indices)
-    _check_and_consume_quota(user.id, "scene.generate.monthly_limit", 1, db, deduct=True)
+    _check_and_consume_feature_quota(request, user.id, "scene.generate.monthly_limit", 1, db, deduct=True, provider_kind="text")
     return {"scenes": sanitized_scenes, "sanitized_indices": sanitized_indices}
 
 
@@ -3460,9 +4064,12 @@ async def generate_scenes_endpoint(chapter_id: int, request: Request, db: Sessio
 async def get_scenes_endpoint(chapter_id: int, request: Request, db: Session = Depends(get_db)):
     """Load saved scene prompts from file."""
     user = _require_user(request, db)
-    _require_chapter_for_user(chapter_id, user, db)
+    chapter = _require_chapter_for_user(chapter_id, user, db)
     prompts_file = Path(__file__).resolve().parent / "manga_outputs" / f"chapter_{chapter_id}" / "scenes.txt"
     if not prompts_file.exists():
+        return {"scenes": [], "sanitized_indices": []}
+    if _chapter_is_blank(chapter):
+        _rmtree_best_effort(_chapter_dir(chapter_id), "stale blank chapter workspace")
         return {"scenes": [], "sanitized_indices": []}
     try:
         raw = prompts_file.read_text(encoding="utf-8")
@@ -3481,7 +4088,7 @@ async def update_scenes_endpoint(chapter_id: int, body: dict, request: Request, 
     user = _require_user(request, db)
     _require_chapter_for_user(chapter_id, user, db)
     scenes = body.get("scenes", [])
-    image_count = _load_image_count(chapter_id)
+    image_count = _effective_image_count(chapter_id, user.id, db)
     if not isinstance(scenes, list) or len(scenes) != image_count or not all(isinstance(s, str) and s.strip() for s in scenes):
         raise HTTPException(400, f"Must provide exactly {image_count} scenes")
 
@@ -3511,15 +4118,17 @@ async def generate_manga_stream(chapter_id: int, request: Request, db: Session =
     prompts_file = Path(__file__).resolve().parent / "manga_outputs" / f"chapter_{chapter_id}" / "scenes.txt"
     if not prompts_file.exists():
         raise HTTPException(400, "No scene prompts found. Generate scenes first.")
-    image_count = _load_image_count(chapter_id)
+    image_count = _effective_image_count(chapter_id, user.id, db)
 
     raw = prompts_file.read_text(encoding="utf-8")
     scenes = _parse_scenes_text(raw)
     if len(scenes) != image_count:
+        if len(scenes) > image_count:
+            raise HTTPException(403, f"Current plan allows at most {image_count} images per chapter. Please reduce page count or upgrade your plan.")
         raise HTTPException(400, f"Expected {image_count} scenes, found {len(scenes)}")
     if chapter_id in ACTIVE_MANGA_GENERATIONS:
         raise HTTPException(409, "Manga generation is already running for this chapter")
-    _check_and_consume_quota(user.id, "manga.image.monthly_limit", len(scenes), db, deduct=False)
+    _check_and_consume_feature_quota(request, user.id, "manga.image.monthly_limit", len(scenes), db, deduct=False, provider_kind="image")
     ACTIVE_MANGA_GENERATIONS.add(chapter_id)
 
     # Check which images already exist
@@ -3558,7 +4167,7 @@ async def generate_manga_stream(chapter_id: int, request: Request, db: Session =
                         all_scenes=scenes,
                         character_profiles=_load_characters(chapter_id, db),
                         ref_image_paths=[str(p) for p in ref_imgs] if ref_imgs else None,
-                        color_mode=_load_color_mode(chapter_id),
+                        color_mode=_effective_color_mode(chapter_id, user.id, db),
                         api_key=_user_image_api_key(request),
                     )
                     if image_result.prompt_sanitized and image_result.final_prompt != scene_prompt:
@@ -3588,7 +4197,7 @@ async def generate_manga_stream(chapter_id: int, request: Request, db: Session =
                 )
                 db.add(manga)
                 db.commit()
-                _check_and_consume_quota(user.id, "manga.image.monthly_limit", 1, db, deduct=True)
+                _check_and_consume_feature_quota(request, user.id, "manga.image.monthly_limit", 1, db, deduct=True, provider_kind="image")
                 db.refresh(manga)
                 yield {
                     "event": "image",
@@ -3613,16 +4222,17 @@ async def generate_manga_stream(chapter_id: int, request: Request, db: Session =
 
 @app.post("/api/chapters/{chapter_id}/regenerate-image/{image_number}")
 async def regenerate_single_image(chapter_id: int, image_number: int, body: dict, request: Request, db: Session = Depends(get_db)):
-    """Regenerate a single panel image with an updated prompt."""
+    """Regenerate or edit a single panel image."""
     user = _require_user(request, db)
     chapter = _require_chapter_for_user(chapter_id, user, db)
-    image_count = _load_image_count(chapter_id)
+    image_count = _effective_image_count(chapter_id, user.id, db)
     if image_number < 1 or image_number > image_count:
         raise HTTPException(400, f"image_number must be 1-{image_count}")
 
     prompt = body.get("prompt", "").strip()
     if not prompt:
         raise HTTPException(400, "prompt is required")
+    mode = str(body.get("mode") or "regenerate").strip().lower()
 
     # Load all scenes for context
     prompts_file = Path(__file__).resolve().parent / "manga_outputs" / f"chapter_{chapter_id}" / "scenes.txt"
@@ -3647,17 +4257,41 @@ async def regenerate_single_image(chapter_id: int, image_number: int, body: dict
     ref_entries = _effective_ref_entries(chapter_id, db)
     ref_imgs = _select_ref_image_paths_for_scene(prompt, ref_entries)
     try:
-        _check_and_consume_quota(user.id, "manga.regenerate.monthly_limit", 1, db, deduct=False)
-        image_result = await generate_manga_image(
-            prompt,
-            chapter_id,
-            image_number,
-            all_scenes=all_scenes,
-            character_profiles=_load_characters(chapter_id, db),
-            ref_image_paths=[str(p) for p in ref_imgs] if ref_imgs else None,
-            color_mode=_load_color_mode(chapter_id),
-            api_key=_user_image_api_key(request),
-        )
+        _check_and_consume_feature_quota(request, user.id, "manga.regenerate.monthly_limit", 1, db, deduct=False, provider_kind="image")
+        if mode in {"full", "partial"}:
+            if not old_path or not old_path.exists():
+                raise HTTPException(404, "source image not found")
+            mask_bytes = None
+            if mode == "partial":
+                with Image.open(old_path) as img:
+                    mask_bytes = _decode_edit_mask_upload(str(body.get("mask") or ""), img.size)
+            chapter_dir = Path(__file__).resolve().parent / "manga_outputs" / f"chapter_{chapter_id}"
+            chapter_dir.mkdir(parents=True, exist_ok=True)
+            filename = f"panel_{image_number:02d}_{uuid.uuid4().hex[:8]}.png"
+            output_path = chapter_dir / filename
+            await edit_existing_image(
+                prompt,
+                old_path,
+                output_path,
+                mask_bytes=mask_bytes,
+                api_key=_user_image_api_key(request),
+            )
+            image_result = image_service.ImageGenerationResult(
+                image_path=f"manga_outputs/chapter_{chapter_id}/{filename}",
+                final_prompt=prompt,
+                prompt_sanitized=False,
+            )
+        else:
+            image_result = await generate_manga_image(
+                prompt,
+                chapter_id,
+                image_number,
+                all_scenes=all_scenes,
+                character_profiles=_load_characters(chapter_id, db),
+                ref_image_paths=[str(p) for p in ref_imgs] if ref_imgs else None,
+                color_mode=_effective_color_mode(chapter_id, user.id, db),
+                api_key=_user_image_api_key(request),
+            )
     except MangaImageGenerationError as exc:
         raise HTTPException(502, exc.to_payload()) from exc
     if image_result.prompt_sanitized and image_result.final_prompt != prompt and all_scenes and len(all_scenes) == image_count:
@@ -3680,7 +4314,7 @@ async def regenerate_single_image(chapter_id: int, image_number: int, body: dict
         )
         db.add(manga)
     db.commit()
-    _check_and_consume_quota(user.id, "manga.regenerate.monthly_limit", 1, db, deduct=True)
+    _check_and_consume_feature_quota(request, user.id, "manga.regenerate.monthly_limit", 1, db, deduct=True, provider_kind="image")
     db.refresh(manga)
 
     if old_path and old_path.exists() and old_path != Path(__file__).resolve().parent / image_result.image_path:
@@ -3710,7 +4344,7 @@ async def generate_framework_endpoint(story_id: int, request: Request, db: Sessi
     if not description.strip():
         raise HTTPException(400, "description is required")
 
-    _check_and_consume_quota(user.id, "framework.generate.monthly_limit", 1, db, deduct=False)
+    _check_and_consume_feature_quota(request, user.id, "framework.generate.monthly_limit", 1, db, deduct=False, provider_kind="text")
     framework = await generate_framework(description.strip(), api_key=_user_deepseek_api_key(request))
     framework = await _complete_framework_payload(
         framework,
@@ -3723,6 +4357,7 @@ async def generate_framework_endpoint(story_id: int, request: Request, db: Sessi
     story.characters = _normalize_characters_payload(framework.get("characters"))
     story.outline = _merge_framework_outline(story.outline, framework.get("outline"), framework.get("chapters"))
     db.commit()
+    _check_and_consume_feature_quota(request, user.id, "framework.generate.monthly_limit", 1, db, deduct=True, provider_kind="text")
     db.refresh(story)
     return {
         "tags": story.tags,
@@ -3743,13 +4378,13 @@ async def regenerate_tags_endpoint(story_id: int, request: Request, db: Session 
         "characters": story.characters,
         "outline": story.outline,
     }
-    _check_and_consume_advanced_text_quota(user.id, db, deduct=False)
+    _check_and_consume_advanced_text_quota(request, user.id, db, deduct=False)
     result = await regenerate_tags(story_context, api_key=_user_deepseek_api_key(request))
 
     tags = result if isinstance(result, dict) and "type" in result else result
     story.tags = tags
     db.commit()
-    _check_and_consume_advanced_text_quota(user.id, db, deduct=True)
+    _check_and_consume_advanced_text_quota(request, user.id, db, deduct=True)
     db.refresh(story)
     return {"tags": story.tags}
 
@@ -3765,13 +4400,13 @@ async def regenerate_characters_endpoint(story_id: int, request: Request, db: Se
         "characters": story.characters,
         "outline": story.outline,
     }
-    _check_and_consume_advanced_text_quota(user.id, db, deduct=False)
+    _check_and_consume_advanced_text_quota(request, user.id, db, deduct=False)
     result = await regenerate_characters(story_context, api_key=_user_deepseek_api_key(request))
 
     characters = _normalize_characters_payload(result if isinstance(result, list) else result)
     story.characters = characters
     db.commit()
-    _check_and_consume_advanced_text_quota(user.id, db, deduct=True)
+    _check_and_consume_advanced_text_quota(request, user.id, db, deduct=True)
     db.refresh(story)
     return {"characters": story.characters}
 
@@ -3787,13 +4422,13 @@ async def regenerate_outline_endpoint(story_id: int, request: Request, db: Sessi
         "characters": story.characters,
         "outline": story.outline,
     }
-    _check_and_consume_advanced_text_quota(user.id, db, deduct=False)
+    _check_and_consume_advanced_text_quota(request, user.id, db, deduct=False)
     result = await regenerate_outline(story_context, api_key=_user_deepseek_api_key(request))
 
     outline = result if isinstance(result, dict) and "three_acts" in result else result
     story.outline = _merge_framework_outline(story.outline, outline, _extract_outline_chapters(outline))
     db.commit()
-    _check_and_consume_advanced_text_quota(user.id, db, deduct=True)
+    _check_and_consume_advanced_text_quota(request, user.id, db, deduct=True)
     db.refresh(story)
     return {"outline": story.outline}
 
@@ -3871,7 +4506,7 @@ async def adjust_framework_endpoint(story_id: int, request: Request, db: Session
     if not isinstance(messages, list) or not messages:
         raise HTTPException(400, "messages is required")
 
-    _check_and_consume_advanced_text_quota(user.id, db, deduct=False)
+    _check_and_consume_advanced_text_quota(request, user.id, db, deduct=False)
     result = await adjust_framework_with_chat(
         _story_framework_context(story),
         messages,
@@ -3885,7 +4520,7 @@ async def adjust_framework_endpoint(story_id: int, request: Request, db: Session
     story.characters = _merge_characters_payload(story.characters, framework.get("characters"))
     story.outline = _merge_framework_outline(story.outline, framework.get("outline"), framework.get("chapters"))
     db.commit()
-    _check_and_consume_advanced_text_quota(user.id, db, deduct=True)
+    _check_and_consume_advanced_text_quota(request, user.id, db, deduct=True)
     db.refresh(story)
     return {
         "reply": result.get("reply", ""),
@@ -3904,7 +4539,7 @@ async def continue_framework_endpoint(story_id: int, request: Request, db: Sessi
     user = _require_user(request, db)
     story = _require_story_for_user(story_id, user, db)
 
-    _check_and_consume_advanced_text_quota(user.id, db, deduct=False)
+    _check_and_consume_advanced_text_quota(request, user.id, db, deduct=False)
     result = await continue_framework(
         _story_framework_context(story),
         api_key=_user_deepseek_api_key(request),
@@ -3915,7 +4550,7 @@ async def continue_framework_endpoint(story_id: int, request: Request, db: Sessi
     story.characters = _merge_characters_payload(story.characters, framework.get("characters"))
     story.outline = _merge_framework_outline(story.outline, framework.get("outline"), framework.get("chapters"))
     db.commit()
-    _check_and_consume_advanced_text_quota(user.id, db, deduct=True)
+    _check_and_consume_advanced_text_quota(request, user.id, db, deduct=True)
     db.refresh(story)
     return {
         "reply": result.get("reply", ""),
@@ -3953,7 +4588,7 @@ async def expand_chapter_endpoint(story_id: int, request: Request, db: Session =
         "chapter_number": chapter_number_val,
     }
 
-    _check_and_consume_quota(user.id, "chapter.expand.monthly_limit", 1, db, deduct=False)
+    _check_and_consume_feature_quota(request, user.id, "chapter.expand.monthly_limit", 1, db, deduct=False, provider_kind="text")
     novel_content = await expand_chapter_to_content(
         story_context,
         chapter_info,
@@ -3986,9 +4621,10 @@ async def expand_chapter_endpoint(story_id: int, request: Request, db: Session =
     if existing is None:
         db.add(chapter)
         db.flush()
+        _initialize_empty_chapter_workspace(chapter.id)
     db.add(ChatMessage(chapter_id=chapter.id, role="assistant", content=novel_content))
     db.commit()
-    _check_and_consume_quota(user.id, "chapter.expand.monthly_limit", 1, db, deduct=True)
+    _check_and_consume_feature_quota(request, user.id, "chapter.expand.monthly_limit", 1, db, deduct=True, provider_kind="text")
     db.refresh(chapter)
     return chapter
 
@@ -4006,13 +4642,13 @@ async def rewrite_selection_endpoint(chapter_id: int, request: Request, db: Sess
     if not isinstance(chapter_context, str):
         chapter_context = ""
 
-    _check_and_consume_advanced_text_quota(user.id, db, deduct=False)
+    _check_and_consume_advanced_text_quota(request, user.id, db, deduct=False)
     rewritten = await rewrite_selection(
         selected_text.strip(),
         chapter_context.strip() or (chapter.novel_content or "")[:4000],
         api_key=_user_deepseek_api_key(request),
     )
-    _check_and_consume_advanced_text_quota(user.id, db, deduct=True)
+    _check_and_consume_advanced_text_quota(request, user.id, db, deduct=True)
     return {"rewritten_text": rewritten}
 
 
@@ -4034,7 +4670,7 @@ async def adjust_chapter_content_endpoint(chapter_id: int, request: Request, db:
         "chapter_number": chapter.chapter_number,
         "key_events": chapter.key_events or [],
     }
-    _check_and_consume_advanced_text_quota(user.id, db, deduct=False)
+    _check_and_consume_advanced_text_quota(request, user.id, db, deduct=False)
     updated_content = await adjust_chapter_content(
         _story_framework_context(chapter.story),
         chapter_info,
@@ -4044,7 +4680,7 @@ async def adjust_chapter_content_endpoint(chapter_id: int, request: Request, db:
     )
     _apply_chapter_content(chapter, updated_content, status="completed")
     db.commit()
-    _check_and_consume_advanced_text_quota(user.id, db, deduct=True)
+    _check_and_consume_advanced_text_quota(request, user.id, db, deduct=True)
     db.refresh(chapter)
     return chapter
 
@@ -4057,14 +4693,14 @@ async def quality_assess_endpoint(chapter_id: int, request: Request, db: Session
     if not content.strip():
         raise HTTPException(400, "Chapter has no novel content to assess")
 
-    _check_and_consume_advanced_text_quota(user.id, db, deduct=False)
+    _check_and_consume_advanced_text_quota(request, user.id, db, deduct=False)
     assessment = await quality_assess(content, api_key=_user_deepseek_api_key(request))
 
     chapter.quality_score = assessment.get("scores", assessment)
     if chapter.novel_content and chapter.novel_content.strip():
         chapter.status = "reviewed"
     db.commit()
-    _check_and_consume_advanced_text_quota(user.id, db, deduct=True)
+    _check_and_consume_advanced_text_quota(request, user.id, db, deduct=True)
     db.refresh(chapter)
     return assessment
 
@@ -4087,14 +4723,14 @@ async def scenes_from_selection_endpoint(chapter_id: int, request: Request, db: 
     if page_count > 20:
         page_count = 20
 
-    _check_and_consume_quota(user.id, "scene.generate.monthly_limit", 1, db, deduct=False)
+    _check_and_consume_feature_quota(request, user.id, "scene.generate.monthly_limit", 1, db, deduct=False, provider_kind="text")
     scenes = await scenes_from_selection(
         selected_text.strip(),
         character_profiles=character_profiles,
         page_count=page_count,
         api_key=_user_deepseek_api_key(request),
     )
-    _check_and_consume_quota(user.id, "scene.generate.monthly_limit", 1, db, deduct=True)
+    _check_and_consume_feature_quota(request, user.id, "scene.generate.monthly_limit", 1, db, deduct=True, provider_kind="text")
     sanitized_scenes, sanitized_indices = sanitize_scene_list(scenes)
     return {"scenes": sanitized_scenes, "page_count": page_count, "sanitized_indices": sanitized_indices}
 

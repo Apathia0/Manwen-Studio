@@ -119,6 +119,16 @@ def _migrate():
                 conn.execute(text("ALTER TABLE billing_orders ADD COLUMN paid_at TIMESTAMP"))
             if "expired_at" not in cols:
                 conn.execute(text("ALTER TABLE billing_orders ADD COLUMN expired_at TIMESTAMP"))
+    if "users" in insp.get_table_names():
+        cols = {c["name"] for c in insp.get_columns("users")}
+        with engine.begin() as conn:
+            if "email_verified" not in cols:
+                conn.execute(text("ALTER TABLE users ADD COLUMN email_verified BOOLEAN DEFAULT TRUE"))
+                conn.execute(text("UPDATE users SET email_verified = TRUE WHERE email_verified IS NULL"))
+            if "allow_api_key_override" not in cols:
+                conn.execute(text("ALTER TABLE users ADD COLUMN allow_api_key_override BOOLEAN DEFAULT FALSE"))
+            if "allow_api_url_override" not in cols:
+                conn.execute(text("ALTER TABLE users ADD COLUMN allow_api_url_override BOOLEAN DEFAULT FALSE"))
     _migrate_money_columns()
     _cleanup_duplicate_chapters()
     _cleanup_duplicate_manga_images()

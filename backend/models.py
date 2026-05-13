@@ -86,6 +86,9 @@ class User(Base):
     name: Mapped[str] = mapped_column(String(120), nullable=False, default="User")
     role: Mapped[str] = mapped_column(String(20), nullable=False, default="user")
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="active")
+    email_verified: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    allow_api_key_override: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    allow_api_url_override: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     created_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now())
 
     sessions: Mapped[list["UserSession"]] = relationship("UserSession", back_populates="user", cascade="all, delete-orphan")
@@ -101,6 +104,18 @@ class UserSession(Base):
     revoked_at: Mapped[datetime.datetime | None] = mapped_column(DateTime, nullable=True)
 
     user: Mapped["User"] = relationship("User", back_populates="sessions")
+
+
+class EmailVerificationCode(Base):
+    __tablename__ = "email_verification_codes"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    email: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    purpose: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    code_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    expires_at: Mapped[datetime.datetime] = mapped_column(DateTime, nullable=False)
+    consumed_at: Mapped[datetime.datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now())
 
 
 class Plan(Base):
