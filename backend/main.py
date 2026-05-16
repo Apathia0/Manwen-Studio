@@ -272,6 +272,11 @@ def _platform_settings_snapshot(db: Session) -> dict:
             "smtp_use_tls": bool(_get_platform_setting("email.smtp_use_tls", db, True)),
             "smtp_use_ssl": bool(_get_platform_setting("email.smtp_use_ssl", db, False)),
         },
+        "announcement": {
+            "enabled": bool(_get_platform_setting("platform.announcement.enabled", db, False)),
+            "title": str(_get_platform_setting("platform.announcement.title", db, "") or ""),
+            "content": str(_get_platform_setting("platform.announcement.content", db, "") or ""),
+        },
         "payment": {
             "enabled": bool(_get_platform_setting("payment.enabled", db, True)),
             "mode": str(_get_platform_setting("payment.mode", db, "mock")),
@@ -339,6 +344,11 @@ def _public_platform_settings_snapshot(db: Session) -> dict:
             "require_email_code_for_register": bool(auth.get("require_email_code_for_register")),
             "require_email_code_for_login": bool(auth.get("require_email_code_for_login")),
             "email_code_expire_minutes": int(auth.get("email_code_expire_minutes") or 10),
+        },
+        "announcement": {
+            "enabled": bool(_get_platform_setting("platform.announcement.enabled", db, False)),
+            "title": str(_get_platform_setting("platform.announcement.title", db, "") or ""),
+            "content": str(_get_platform_setting("platform.announcement.content", db, "") or ""),
         },
     }
 
@@ -783,6 +793,9 @@ def _seed_platform_settings(db: Session) -> None:
         "auth.require_email_code_for_login": False,
         "auth.email_code_expire_minutes": 10,
         "auth.email_code_length": 6,
+        "platform.announcement.enabled": False,
+        "platform.announcement.title": "",
+        "platform.announcement.content": "",
         "email.smtp_enabled": False,
         "email.smtp_host": "",
         "email.smtp_port": 587,
@@ -2930,6 +2943,7 @@ def admin_save_platform_settings(body: dict, request: Request, db: Session = Dep
     auth = body.get("auth") if isinstance(body.get("auth"), dict) else {}
     email = body.get("email") if isinstance(body.get("email"), dict) else {}
     payment = body.get("payment") if isinstance(body.get("payment"), dict) else {}
+    announcement = body.get("announcement") if isinstance(body.get("announcement"), dict) else {}
     mappings = {
         "platform.site_name": basic.get("site_name", "StoryCanvas"),
         "platform.site_slogan": basic.get("site_slogan", ""),
@@ -2977,6 +2991,9 @@ def admin_save_platform_settings(body: dict, request: Request, db: Session = Dep
         "payment.alipay_app_private_key": str(payment.get("alipay_app_private_key", "") or ""),
         "payment.alipay_public_key": str(payment.get("alipay_public_key", "") or ""),
         "payment.alipay_notify_url": str(payment.get("alipay_notify_url", "") or ""),
+        "platform.announcement.enabled": bool(announcement.get("enabled", False)),
+        "platform.announcement.title": announcement.get("title", ""),
+        "platform.announcement.content": announcement.get("content", ""),
     }
     icon_data = basic.get("icon_data")
     icon_mime = basic.get("icon_mime", "image/png")
@@ -2993,6 +3010,46 @@ def admin_save_platform_settings(body: dict, request: Request, db: Session = Dep
         _set_platform_setting("platform.icon_updated_at", datetime.datetime.utcnow().isoformat(), db)
     db.commit()
     return {"ok": True, "settings": _platform_settings_snapshot(db)}
+
+
+@app.get("/api/admin/platform/announcement")
+def admin_get_announcement(request: Request, db: Session = Depends(get_db)):
+    _require_admin(request, db)
+    return {
+        "enabled": bool(_get_platform_setting("platform.announcement.enabled", db, False)),
+        "title": str(_get_platform_setting("platform.announcement.title", db, "") or ""),
+        "content": str(_get_platform_setting("platform.announcement.content", db, "") or ""),
+    }
+
+
+@app.put("/api/admin/platform/announcement")
+def admin_save_announcement(body: dict, request: Request, db: Session = Depends(get_db)):
+    _require_admin(request, db)
+    _set_platform_setting("platform.announcement.enabled", bool(body.get("enabled", False)), db)
+    _set_platform_setting("platform.announcement.title", str(body.get("title", "") or ""), db)
+    _set_platform_setting("platform.announcement.content", str(body.get("content", "") or ""), db)
+    db.commit()
+    return {
+        "ok": True,
+        "announcement": {
+            "enabled": bool(_get_platform_setting("platform.announcement.enabled", db, False)),
+            "title": str(_get_platform_setting("platform.announcement.title", db, "") or ""),
+            "content": str(_get_platform_setting("platform.announcement.content", db, "") or ""),
+        },
+    }
+
+
+@app.get("/api/platform/announcement")
+def public_announcement(db: Session = Depends(get_db)):
+    _ensure_platform_seed(db)
+    enabled = bool(_get_platform_setting("platform.announcement.enabled", db, False))
+    if not enabled:
+        return {"enabled": False, "title": "", "content": ""}
+    return {
+        "enabled": True,
+        "title": str(_get_platform_setting("platform.announcement.title", db, "") or ""),
+        "content": str(_get_platform_setting("platform.announcement.content", db, "") or ""),
+    }
 
 
 @app.get("/api/admin/audit-logs")

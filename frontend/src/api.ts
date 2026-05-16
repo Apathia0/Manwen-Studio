@@ -530,6 +530,12 @@ export interface MySubscriptionResponse {
   latest_order: AdminOrderItem | null;
 }
 
+export interface PlatformAnnouncement {
+  enabled: boolean;
+  title: string;
+  content: string;
+}
+
 export async function sendEmailVerificationCode(payload: { email: string; purpose: 'register' | 'login' }): Promise<{ ok: boolean; expires_in_seconds: number }> {
   const res = await fetch(`${BASE}/api/auth/send-email-code`, {
     method: 'POST',
@@ -891,6 +897,28 @@ export async function updateAdminPlatformSettings(payload: PlatformSettings): Pr
   if (!res.ok) throw new Error(await res.text());
   const data = await res.json();
   return data.settings;
+}
+
+export async function getAdminAnnouncement(): Promise<PlatformAnnouncement> {
+  const res = await fetch(`${BASE}/api/admin/platform/announcement`, { headers: apiHeaders() });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function updateAdminAnnouncement(payload: PlatformAnnouncement): Promise<{ ok: boolean; announcement: PlatformAnnouncement }> {
+  const res = await fetch(`${BASE}/api/admin/platform/announcement`, {
+    method: 'PUT',
+    headers: apiHeaders(true),
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function getPublicAnnouncement(): Promise<PlatformAnnouncement> {
+  const res = await fetch(`${BASE}/api/platform/announcement`, { headers: apiHeaders() });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
 }
 
 export async function getPublicPlatformSettings(): Promise<PublicPlatformSettings> {

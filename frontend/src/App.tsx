@@ -20,6 +20,7 @@ import {
 import PublicLanding from './components/PublicLanding';
 import WorkspaceLayout from './components/WorkspaceLayout';
 import {
+  AdminAnnouncementPage,
   AdminAuditLogsPage,
   AdminOrdersPage,
   AdminPlanManagementPage,
@@ -42,6 +43,7 @@ import {
   getAdminUserEntitlements,
   getMyEntitlements,
   getMyOrders,
+  getPublicAnnouncement,
   getPublicPlatformSettings,
   getMySubscription,
   getMyUsage,
@@ -71,6 +73,7 @@ import {
   type Chapter,
   type EntitlementResponse,
   type MySubscriptionResponse,
+  type PlatformAnnouncement,
   type PublicPlatformSettings,
   type PublicPlan,
   type Story,
@@ -89,7 +92,8 @@ type RouteKey =
   | 'quota-rules'
   | 'entitlements'
   | 'orders'
-  | 'audit-logs';
+  | 'audit-logs'
+  | 'announcement';
 
 type NavItem = {
   key: RouteKey;
@@ -114,6 +118,7 @@ const ADMIN_NAV: NavItem[] = [
   { key: 'entitlements', label: '用户权益', icon: ShieldCheck },
   { key: 'orders', label: '订单订阅', icon: ScrollText },
   { key: 'audit-logs', label: '操作审计', icon: MessageSquareQuote },
+  { key: 'announcement', label: '公告管理', icon: MessageSquareQuote },
 ];
 
 ADMIN_NAV[0].label = '套餐管理';
@@ -121,6 +126,7 @@ ADMIN_NAV[1].label = '平台配置';
 ADMIN_NAV[2].label = '用户管理';
 ADMIN_NAV[3].label = '订单中心';
 ADMIN_NAV[4].label = '操作审计';
+ADMIN_NAV[5].label = '公告管理';
 
 function App() {
   const [session, setSession] = useState<AuthUser | null>(null);
@@ -164,6 +170,8 @@ function App() {
   const [grantAmount, setGrantAmount] = useState('10');
   const [globalError, setGlobalError] = useState<string | null>(null);
   const [globalSuccess, setGlobalSuccess] = useState<string | null>(null);
+  const [announcement, setAnnouncement] = useState<PlatformAnnouncement | null>(null);
+  const [announcementDismissed, setAnnouncementDismissed] = useState(false);
   void adminPlans;
   void adminOrders;
   void entitlementPreview;
@@ -259,6 +267,7 @@ function App() {
       const user = await me();
       setSession(user);
       setRoute('stories');
+      void fetchAnnouncement();
     } catch {
       clearAuthToken();
       setSession(null);
@@ -347,6 +356,7 @@ function App() {
       setSession(result.user);
       setRoute('stories');
       setGlobalError(null);
+      void fetchAnnouncement();
     } catch (error: any) {
       clearAuthToken();
       setSession(null);
@@ -361,6 +371,7 @@ function App() {
       setSession(result.user);
       setRoute('stories');
       setGlobalError(null);
+      void fetchAnnouncement();
     } catch (error: any) {
       clearAuthToken();
       setSession(null);
@@ -460,6 +471,16 @@ function App() {
       setPlatform(data);
     } catch {
       setPlatform((prev) => prev);
+    }
+  }
+
+  async function fetchAnnouncement() {
+    try {
+      const data = await getPublicAnnouncement();
+      setAnnouncement(data.enabled && data.content ? data : null);
+      setAnnouncementDismissed(false);
+    } catch {
+      setAnnouncement(null);
     }
   }
 
@@ -788,8 +809,38 @@ function App() {
           {route === 'audit-logs' && session.role === 'admin' && (
             <AdminAuditLogsPage onError={(message: string) => setGlobalError(message)} />
           )}
+          {route === 'announcement' && session.role === 'admin' && (
+            <AdminAnnouncementPage onError={(message) => setGlobalError(message)} />
+          )}
         </main>
       </div>
+      {announcement && !announcementDismissed && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/40 p-4">
+          <div className="relative max-h-[80vh] w-full max-w-lg overflow-y-auto rounded-3xl bg-white p-6 shadow-2xl">
+            <button
+              onClick={() => setAnnouncementDismissed(true)}
+              className="absolute right-4 top-4 rounded-full p-1 text-slate-400 transition hover:bg-slate-100 hover:text-slate-600"
+            >
+              <X size={20} />
+            </button>
+            {announcement.title && (
+              <h2 className="pr-8 text-lg font-bold text-slate-900">{announcement.title}</h2>
+            )}
+            <div
+              className="mt-4 text-sm text-slate-700 leading-relaxed"
+              dangerouslySetInnerHTML={{ __html: announcement.content }}
+            />
+            <div className="mt-6 flex justify-end">
+              <button
+                onClick={() => setAnnouncementDismissed(true)}
+                className="rounded-2xl bg-[#2563eb] px-5 py-2 text-sm font-medium text-white transition hover:bg-[#1d4ed8]"
+              >
+                我知道了
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       <PaymentCheckoutDialog
         checkout={activeCheckout}
         onClose={() => setActiveCheckout(null)}
