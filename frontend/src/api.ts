@@ -10,6 +10,9 @@ export interface ApiKeySettings {
   imageApiKey: string;
   imageBaseUrl: string;
   imageModel: string;
+  videoApiKey: string;
+  videoBaseUrl: string;
+  videoModel: string;
 }
 
 // Stored in localStorage so multiple tabs share the same API key settings.
@@ -19,6 +22,9 @@ const LS_DEEPSEEK_MODEL = 'lorevista.deepseekModel';
 const LS_IMAGE_API_KEY = 'lorevista.imageApiKey';
 const LS_IMAGE_BASE_URL = 'lorevista.imageBaseUrl';
 const LS_IMAGE_MODEL = 'lorevista.imageModel';
+const LS_VIDEO_API_KEY = 'lorevista.videoApiKey';
+const LS_VIDEO_BASE_URL = 'lorevista.videoBaseUrl';
+const LS_VIDEO_MODEL = 'lorevista.videoModel';
 const LS_AUTH_TOKEN = 'lorevista.authToken';
 export const API_KEY_CHANGE_EVENT = 'lorevista:api-key-change';
 export const AUTH_CHANGE_EVENT = 'lorevista:auth-change';
@@ -47,6 +53,9 @@ export function getApiKeySettings(): ApiKeySettings {
     imageApiKey: localStorage.getItem(LS_IMAGE_API_KEY) || '',
     imageBaseUrl: localStorage.getItem(LS_IMAGE_BASE_URL) || '',
     imageModel: localStorage.getItem(LS_IMAGE_MODEL) || '',
+    videoApiKey: localStorage.getItem(LS_VIDEO_API_KEY) || '',
+    videoBaseUrl: localStorage.getItem(LS_VIDEO_BASE_URL) || '',
+    videoModel: localStorage.getItem(LS_VIDEO_MODEL) || '',
   };
 }
 
@@ -69,6 +78,15 @@ export function saveApiKeySettings(settings: ApiKeySettings): void {
   else localStorage.removeItem(LS_IMAGE_BASE_URL);
   if (imageModel) localStorage.setItem(LS_IMAGE_MODEL, imageModel);
   else localStorage.removeItem(LS_IMAGE_MODEL);
+  const video = settings.videoApiKey.trim();
+  if (video) localStorage.setItem(LS_VIDEO_API_KEY, video);
+  else localStorage.removeItem(LS_VIDEO_API_KEY);
+  const videoBaseUrl = settings.videoBaseUrl.trim();
+  if (videoBaseUrl) localStorage.setItem(LS_VIDEO_BASE_URL, videoBaseUrl);
+  else localStorage.removeItem(LS_VIDEO_BASE_URL);
+  const videoModel = settings.videoModel.trim();
+  if (videoModel) localStorage.setItem(LS_VIDEO_MODEL, videoModel);
+  else localStorage.removeItem(LS_VIDEO_MODEL);
   // Notify same-tab listeners. Other tabs receive the browser 'storage' event.
   try {
     window.dispatchEvent(new Event(API_KEY_CHANGE_EVENT));
@@ -85,6 +103,9 @@ export function clearApiKeySettings(): void {
     imageApiKey: '',
     imageBaseUrl: '',
     imageModel: '',
+    videoApiKey: '',
+    videoBaseUrl: '',
+    videoModel: '',
   });
 }
 
@@ -101,6 +122,9 @@ export function apiHeaders(json = false): HeadersInit {
     ...(keys.imageApiKey ? { 'X-Image-API-Key': keys.imageApiKey } : {}),
     ...(keys.imageBaseUrl ? { 'X-Image-Base-URL': keys.imageBaseUrl } : {}),
     ...(keys.imageModel ? { 'X-Image-Model': keys.imageModel } : {}),
+    ...(keys.videoApiKey ? { 'X-Video-API-Key': keys.videoApiKey } : {}),
+    ...(keys.videoBaseUrl ? { 'X-Video-Base-URL': keys.videoBaseUrl } : {}),
+    ...(keys.videoModel ? { 'X-Video-Model': keys.videoModel } : {}),
   };
 }
 
@@ -630,6 +654,9 @@ export interface PlatformSettings {
     image_base_url: string;
     image_model: string;
     image_api_key: string;
+    video_base_url: string;
+    video_model: string;
+    video_api_key: string;
     enable_user_override: boolean;
     enable_user_url_override?: boolean;
   };
@@ -666,6 +693,8 @@ export interface PublicPlatformSettings {
     deepseek_model?: string;
     image_base_url?: string;
     image_model?: string;
+    video_base_url?: string;
+    video_model?: string;
   };
   auth?: {
     require_email_code_for_register?: boolean;
@@ -2095,4 +2124,255 @@ export async function agentRollbackChanges(storyId: number): Promise<void> {
     headers: apiHeaders(true),
   });
   if (!res.ok) throw new Error(await res.text());
+}
+
+// ─── Video Workflow Types ──────────────────────────────────
+
+export interface ScriptScene {
+  id: number;
+  chapter_id: number;
+  scene_number: number;
+  title: string;
+  location?: string | null;
+  time_of_day?: string | null;
+  characters: string[];
+  summary: string;
+  dialogue: { speaker: string; text: string }[];
+  voiceover?: string | null;
+  mood?: string | null;
+  estimated_duration_seconds?: number | null;
+  source_type: string;
+  status: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface VideoShot {
+  id: number;
+  scene_id: number;
+  shot_number: number;
+  title: string;
+  shot_type?: string | null;
+  camera_angle?: string | null;
+  camera_movement?: string | null;
+  composition?: string | null;
+  action_description?: string | null;
+  dialogue?: string | null;
+  sound_design?: string | null;
+  duration_seconds?: number | null;
+  storyboard_prompt?: string | null;
+  video_prompt?: string | null;
+  negative_prompt?: string | null;
+  continuity_notes?: string | null;
+  status: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface VideoAsset {
+  id: number;
+  story_id?: number | null;
+  chapter_id?: number | null;
+  scene_id?: number | null;
+  shot_id?: number | null;
+  asset_type: string;
+  name: string;
+  file_path: string;
+  provider?: string | null;
+  prompt?: string | null;
+  meta?: Record<string, any> | null;
+  created_at: string;
+}
+
+export interface VideoGenerationJob {
+  id: number;
+  shot_id: number;
+  provider: string;
+  provider_job_id?: string | null;
+  model?: string | null;
+  status: string;
+  progress: number;
+  duration_seconds?: number | null;
+  aspect_ratio?: string | null;
+  request_payload?: Record<string, any> | null;
+  error_message?: string | null;
+  submitted_at: string;
+  completed_at?: string | null;
+  clip?: RenderedClip | null;
+}
+
+export interface RenderedClip {
+  id: number;
+  shot_id: number;
+  job_id?: number | null;
+  video_path: string;
+  thumbnail_path?: string | null;
+  duration_seconds?: number | null;
+  resolution?: string | null;
+  version: number;
+  is_active: boolean;
+  meta?: Record<string, any> | null;
+  created_at: string;
+}
+
+export interface VideoProject {
+  id: number;
+  story_id: number;
+  chapter_id: number;
+  name: string;
+  status: string;
+  timeline: Array<{ shot_id: number; clip_id: number; order: number; enabled: boolean }>;
+  subtitle: Array<{ start_ms: number; end_ms: number; text: string }>;
+  bgm_path?: string | null;
+  cover_path?: string | null;
+  output_path?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+// ─── Screenplay ────────────────────────────────────────────
+export async function generateScreenplay(chapterId: number, payload: {
+  mode?: string; style?: string; target_duration_seconds?: number;
+  scene_count_hint?: number; regenerate?: boolean;
+}): Promise<{ chapter_id: number; screenplay: string; scenes: ScriptScene[]; usage?: { feature_key: string; consumed: number } }> {
+  const res = await fetch(`${BASE}/api/chapters/${chapterId}/screenplay/generate`, { method: 'POST', headers: apiHeaders(true), body: JSON.stringify(payload) });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '生成剧本失败'));
+  return res.json();
+}
+
+export async function listScreenplayScenes(chapterId: number): Promise<{ chapter_id: number; screenplay: string; scenes: ScriptScene[] }> {
+  const res = await fetch(`${BASE}/api/chapters/${chapterId}/screenplay/scenes`, { headers: apiHeaders() });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '获取场次列表失败'));
+  return res.json();
+}
+
+export async function regenerateScenes(chapterId: number, payload: { instruction?: string; scene_count_hint?: number }): Promise<{ chapter_id: number; scenes: ScriptScene[] }> {
+  const res = await fetch(`${BASE}/api/chapters/${chapterId}/screenplay/scenes/regenerate`, { method: 'POST', headers: apiHeaders(true), body: JSON.stringify(payload) });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '重新生成场次失败'));
+  return res.json();
+}
+
+export async function updateScene(sceneId: number, payload: Partial<ScriptScene>): Promise<ScriptScene> {
+  const res = await fetch(`${BASE}/api/scenes/${sceneId}`, { method: 'PATCH', headers: apiHeaders(true), body: JSON.stringify(payload) });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '更新场次失败'));
+  return res.json();
+}
+
+// ─── Shots ─────────────────────────────────────────────────
+export async function generateSceneShots(sceneId: number, payload: { style?: string; shot_count_hint?: number; duration_budget_seconds?: number; regenerate?: boolean }): Promise<{ scene_id: number; shots: VideoShot[]; usage?: { feature_key: string; consumed: number } }> {
+  const res = await fetch(`${BASE}/api/scenes/${sceneId}/shots/generate`, { method: 'POST', headers: apiHeaders(true), body: JSON.stringify(payload) });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '生成镜头失败'));
+  return res.json();
+}
+
+export async function listSceneShots(sceneId: number): Promise<{ scene_id: number; shots: VideoShot[] }> {
+  const res = await fetch(`${BASE}/api/scenes/${sceneId}/shots`, { headers: apiHeaders() });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '获取镜头列表失败'));
+  return res.json();
+}
+
+export async function updateVideoShot(shotId: number, payload: Partial<VideoShot>): Promise<VideoShot> {
+  const res = await fetch(`${BASE}/api/shots/${shotId}`, { method: 'PATCH', headers: apiHeaders(true), body: JSON.stringify(payload) });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '更新镜头失败'));
+  return res.json();
+}
+
+export async function generateShotPrompts(shotId: number, payload: { style?: string; provider?: string; include_references?: boolean; instruction?: string }): Promise<{ shot: VideoShot; reference_assets?: Array<{ id: number; asset_type: string; file_path: string }> }> {
+  const res = await fetch(`${BASE}/api/shots/${shotId}/prompts/generate`, { method: 'POST', headers: apiHeaders(true), body: JSON.stringify(payload) });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '生成提示词失败'));
+  return res.json();
+}
+
+export async function renderStoryboardFrame(shotId: number, payload: { provider?: string; aspect_ratio?: string; overwrite?: boolean }): Promise<{ shot_id: number; asset: VideoAsset; shot_status: string }> {
+  const res = await fetch(`${BASE}/api/shots/${shotId}/storyboard/render`, { method: 'POST', headers: apiHeaders(true), body: JSON.stringify(payload) });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '生成关键帧失败'));
+  return res.json();
+}
+
+export async function renderShotVideo(shotId: number, payload: {
+  provider: string; model?: string; duration_seconds: number; aspect_ratio?: string;
+  fps?: number; use_reference_assets?: boolean; reference_asset_ids?: number[];
+  seed?: number; overwrite_active_clip?: boolean;
+}): Promise<{ job: VideoGenerationJob; shot_status: string; usage?: { feature_key: string; consumed: number } }> {
+  const res = await fetch(`${BASE}/api/shots/${shotId}/video/render`, { method: 'POST', headers: apiHeaders(true), body: JSON.stringify(payload) });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '提交视频任务失败'));
+  return res.json();
+}
+
+// ─── Video Jobs ────────────────────────────────────────────
+export async function getVideoJob(jobId: number): Promise<VideoGenerationJob> {
+  const res = await fetch(`${BASE}/api/video-jobs/${jobId}`, { headers: apiHeaders() });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '查询视频任务失败'));
+  return res.json();
+}
+
+export async function retryVideoJob(jobId: number, payload?: { provider?: string; model?: string; duration_seconds?: number; aspect_ratio?: string; seed?: number }): Promise<{ job: VideoGenerationJob }> {
+  const res = await fetch(`${BASE}/api/video-jobs/${jobId}/retry`, { method: 'POST', headers: apiHeaders(true), body: JSON.stringify(payload ?? {}) });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '重试视频任务失败'));
+  return res.json();
+}
+
+// ─── Clips ─────────────────────────────────────────────────
+export async function listShotClips(shotId: number): Promise<{ shot_id: number; active_clip_id?: number | null; clips: RenderedClip[] }> {
+  const res = await fetch(`${BASE}/api/shots/${shotId}/clips`, { headers: apiHeaders() });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '获取片段列表失败'));
+  return res.json();
+}
+
+export async function activateShotClip(shotId: number, clipId: number): Promise<{ shot_id: number; active_clip_id: number; ok: boolean }> {
+  const res = await fetch(`${BASE}/api/shots/${shotId}/clips/${clipId}/activate`, { method: 'POST', headers: apiHeaders() });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '切换片段失败'));
+  return res.json();
+}
+
+// ─── Video Assets ──────────────────────────────────────────
+export async function listVideoAssets(chapterId: number, assetType?: string): Promise<{ chapter_id: number; assets: VideoAsset[] }> {
+  const query = assetType ? `?asset_type=${encodeURIComponent(assetType)}` : '';
+  const res = await fetch(`${BASE}/api/chapters/${chapterId}/video-assets${query}`, { headers: apiHeaders() });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '获取视频资源失败'));
+  return res.json();
+}
+
+export async function createVideoAsset(chapterId: number, payload: {
+  scene_id?: number; shot_id?: number; asset_type: string; name: string;
+  file_path: string; provider?: string; prompt?: string; meta?: Record<string, any>;
+}): Promise<VideoAsset> {
+  const res = await fetch(`${BASE}/api/chapters/${chapterId}/video-assets`, { method: 'POST', headers: apiHeaders(true), body: JSON.stringify(payload) });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '创建视频资源失败'));
+  return res.json();
+}
+
+export async function deleteVideoAsset(assetId: number): Promise<{ ok: boolean; asset_id: number }> {
+  const res = await fetch(`${BASE}/api/video-assets/${assetId}`, { method: 'DELETE', headers: apiHeaders() });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '删除视频资源失败'));
+  return res.json();
+}
+
+// ─── Video Projects ────────────────────────────────────────
+export async function createVideoProject(chapterId: number, payload: {
+  name: string; timeline: Array<{ shot_id: number; clip_id: number; order: number; enabled: boolean }>;
+}): Promise<VideoProject> {
+  const res = await fetch(`${BASE}/api/chapters/${chapterId}/video-projects`, { method: 'POST', headers: apiHeaders(true), body: JSON.stringify(payload) });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '创建视频项目失败'));
+  return res.json();
+}
+
+export async function getVideoProject(projectId: number): Promise<VideoProject> {
+  const res = await fetch(`${BASE}/api/video-projects/${projectId}`, { headers: apiHeaders() });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '获取视频项目失败'));
+  return res.json();
+}
+
+export async function updateVideoProject(projectId: number, payload: Partial<VideoProject>): Promise<VideoProject> {
+  const res = await fetch(`${BASE}/api/video-projects/${projectId}`, { method: 'PATCH', headers: apiHeaders(true), body: JSON.stringify(payload) });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '更新视频项目失败'));
+  return res.json();
+}
+
+export async function compileVideoProject(projectId: number, payload: {
+  resolution?: string; fps?: number; burn_subtitle?: boolean; include_bgm?: boolean;
+}): Promise<{ project: VideoProject }> {
+  const res = await fetch(`${BASE}/api/video-projects/${projectId}/compile`, { method: 'POST', headers: apiHeaders(true), body: JSON.stringify(payload) });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '编译视频失败'));
+  return res.json();
 }

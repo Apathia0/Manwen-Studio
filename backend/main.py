@@ -46,6 +46,7 @@ from models import (
     UserSession,
     UserSubscription,
     UserUsageMonthly,
+    VideoGenerationJob,
 )
 from schemas import (
     ChapterContentUpdate,
@@ -99,6 +100,7 @@ from services.scene_safety import sanitize_scene_list
 from services import deepseek as deepseek_service
 from services import image2 as image_service
 from services import alipay_f2f
+from routers.video import router as video_router
 
 load_dotenv()
 
@@ -165,6 +167,30 @@ FEATURE_CATALOG: list[dict] = [
         "default_rule": {"reset_period": "monthly", "deduct_mode": "on_success"},
     },
     {
+        "key": "screenplay.generate.monthly_limit",
+        "name": "\u5f71\u89c6\u5267\u672c\u751f\u6210\u6b21\u6570",
+        "description": "\u7528\u6237\u6bcf\u6708\u53ef\u5c06\u7ae0\u8282\u6b63\u6587\u751f\u6210\u4e3a\u5f71\u89c6\u5267\u672c\u7684\u6b21\u6570\u3002",
+        "category": "\u89c6\u9891\u521b\u4f5c",
+        "value_type": "number",
+        "default_rule": {"reset_period": "monthly", "deduct_mode": "on_success"},
+    },
+    {
+        "key": "shot.generate.monthly_limit",
+        "name": "\u89c6\u9891\u955c\u5934\u62c6\u89e3\u6b21\u6570",
+        "description": "\u7528\u6237\u6bcf\u6708\u53ef\u5c06\u573a\u6b21\u62c6\u89e3\u4e3a\u955c\u5934\u5217\u8868\u7684\u6b21\u6570\u3002",
+        "category": "\u89c6\u9891\u521b\u4f5c",
+        "value_type": "number",
+        "default_rule": {"reset_period": "monthly", "deduct_mode": "on_success"},
+    },
+    {
+        "key": "video.generate.seconds.monthly_limit",
+        "name": "\u89c6\u9891\u751f\u6210\u603b\u65f6\u957f",
+        "description": "\u7528\u6237\u6bcf\u6708\u53ef\u751f\u6210\u7684\u89c6\u9891\u603b\u79d2\u6570\u3002",
+        "category": "\u89c6\u9891\u521b\u4f5c",
+        "value_type": "number",
+        "default_rule": {"reset_period": "monthly", "deduct_mode": "on_success"},
+    },
+    {
         "key": "manga.max_image_count_per_chapter",
         "name": "\u5355\u7ae0\u8282\u6700\u5927\u51fa\u56fe\u6570",
         "description": "\u5355\u4e2a\u7ae0\u8282\u5141\u8bb8\u751f\u6210\u7684\u6700\u5927\u6f2b\u753b\u9875\u6570\u3002",
@@ -185,6 +211,7 @@ FEATURE_CATALOG: list[dict] = [
 FEATURE_CATALOG_MAP = {item["key"]: item for item in FEATURE_CATALOG}
 
 app = FastAPI(title="Novel & Manga Generator")
+app.include_router(video_router)
 
 DEFAULT_CORS_ORIGINS = "http://localhost:5173,http://127.0.0.1:5173"
 CORS_ORIGINS = [
@@ -283,6 +310,9 @@ def _platform_settings_snapshot(db: Session) -> dict:
             "image_base_url": _get_platform_setting("api.image.base_url", db, "https://api.xbyjs.top/v1"),
             "image_model": _get_platform_setting("api.image.model", db, "default"),
             "image_api_key": _get_platform_setting("api.image.api_key", db, ""),
+            "video_base_url": _get_platform_setting("api.video.base_url", db, "https://api.xbyjs.top/v1"),
+            "video_model": _get_platform_setting("api.video.model", db, "veo3.1-fast"),
+            "video_api_key": _get_platform_setting("api.video.api_key", db, ""),
             "enable_user_override": bool(_get_platform_setting("api.enable_user_override", db, True)),
             "enable_user_url_override": bool(_get_platform_setting("api.enable_user_url_override", db, False)),
         },
@@ -370,6 +400,8 @@ def _public_platform_settings_snapshot(db: Session) -> dict:
             "deepseek_model": api.get("deepseek_model") or "",
             "image_base_url": api.get("image_base_url") or "",
             "image_model": api.get("image_model") or "",
+            "video_base_url": api.get("video_base_url") or "https://api.xbyjs.top/v1",
+            "video_model": api.get("video_model") or "veo3.1-fast",
         },
         "auth": {
             "require_email_code_for_register": bool(auth.get("require_email_code_for_register")),
@@ -753,6 +785,9 @@ def _ensure_platform_seed(db: Session) -> None:
             "manga.image.monthly_limit": 80,
             "manga.regenerate.monthly_limit": 20,
             "ai.text.advanced_calls.monthly_limit": 20,
+            "screenplay.generate.monthly_limit": 5,
+            "shot.generate.monthly_limit": 15,
+            "video.generate.seconds.monthly_limit": 60,
             "manga.max_image_count_per_chapter": 6,
             "manga.allow_color_mode": False,
         },
@@ -763,6 +798,9 @@ def _ensure_platform_seed(db: Session) -> None:
             "manga.image.monthly_limit": 800,
             "manga.regenerate.monthly_limit": 300,
             "ai.text.advanced_calls.monthly_limit": 180,
+            "screenplay.generate.monthly_limit": 60,
+            "shot.generate.monthly_limit": 180,
+            "video.generate.seconds.monthly_limit": 900,
             "manga.max_image_count_per_chapter": 12,
             "manga.allow_color_mode": True,
         },
@@ -773,6 +811,9 @@ def _ensure_platform_seed(db: Session) -> None:
             "manga.image.monthly_limit": 4000,
             "manga.regenerate.monthly_limit": 1500,
             "ai.text.advanced_calls.monthly_limit": 600,
+            "screenplay.generate.monthly_limit": 240,
+            "shot.generate.monthly_limit": 720,
+            "video.generate.seconds.monthly_limit": 3600,
             "manga.max_image_count_per_chapter": 20,
             "manga.allow_color_mode": True,
         },
@@ -804,13 +845,43 @@ def _ensure_platform_seed(db: Session) -> None:
 def _ensure_plan_feature_seed(db: Session) -> None:
     default_limits = {
         "free": {
+            "framework.generate.monthly_limit": 5,
+            "chapter.expand.monthly_limit": 20,
+            "scene.generate.monthly_limit": 15,
+            "manga.image.monthly_limit": 80,
+            "manga.regenerate.monthly_limit": 20,
             "ai.text.advanced_calls.monthly_limit": 20,
+            "screenplay.generate.monthly_limit": 5,
+            "shot.generate.monthly_limit": 15,
+            "video.generate.seconds.monthly_limit": 60,
+            "manga.max_image_count_per_chapter": 6,
+            "manga.allow_color_mode": False,
         },
         "pro": {
+            "framework.generate.monthly_limit": 50,
+            "chapter.expand.monthly_limit": 200,
+            "scene.generate.monthly_limit": 120,
+            "manga.image.monthly_limit": 800,
+            "manga.regenerate.monthly_limit": 300,
             "ai.text.advanced_calls.monthly_limit": 180,
+            "screenplay.generate.monthly_limit": 60,
+            "shot.generate.monthly_limit": 180,
+            "video.generate.seconds.monthly_limit": 900,
+            "manga.max_image_count_per_chapter": 12,
+            "manga.allow_color_mode": True,
         },
         "premium": {
+            "framework.generate.monthly_limit": 200,
+            "chapter.expand.monthly_limit": 1000,
+            "scene.generate.monthly_limit": 500,
+            "manga.image.monthly_limit": 4000,
+            "manga.regenerate.monthly_limit": 1500,
             "ai.text.advanced_calls.monthly_limit": 600,
+            "screenplay.generate.monthly_limit": 240,
+            "shot.generate.monthly_limit": 720,
+            "video.generate.seconds.monthly_limit": 3600,
+            "manga.max_image_count_per_chapter": 20,
+            "manga.allow_color_mode": True,
         },
     }
     changed = False
@@ -853,6 +924,9 @@ def _seed_platform_settings(db: Session) -> None:
         "api.image.base_url": "https://api.xbyjs.top/v1",
         "api.image.model": "default",
         "api.image.api_key": "",
+        "api.video.base_url": "https://api.xbyjs.top/v1",
+        "api.video.model": "veo3.1-fast",
+        "api.video.api_key": "",
         "api.enable_user_override": True,
         "api.enable_user_url_override": False,
         "auth.require_email_code_for_register": False,
@@ -1429,6 +1503,9 @@ def _usage_entries_for_user(user_id: int, db: Session) -> list[dict]:
         "manga.image.monthly_limit",
         "manga.regenerate.monthly_limit",
         "ai.text.advanced_calls.monthly_limit",
+        "screenplay.generate.monthly_limit",
+        "shot.generate.monthly_limit",
+        "video.generate.seconds.monthly_limit",
     ]
     entries = []
     for key in tracked:
@@ -4250,6 +4327,9 @@ def admin_save_platform_settings(body: dict, request: Request, db: Session = Dep
         "api.image.base_url": api.get("image_base_url", "https://api.xbyjs.top/v1"),
         "api.image.model": api.get("image_model", "default"),
         "api.image.api_key": api.get("image_api_key", ""),
+        "api.video.base_url": api.get("video_base_url", "https://api.xbyjs.top/v1"),
+        "api.video.model": api.get("video_model", "veo3.1-fast"),
+        "api.video.api_key": api.get("video_api_key", ""),
         "api.enable_user_override": bool(api.get("enable_user_override", True)),
         "api.enable_user_url_override": bool(api.get("enable_user_url_override", False)),
         "auth.require_email_code_for_register": bool(auth.get("require_email_code_for_register", False)),

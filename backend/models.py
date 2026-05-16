@@ -49,6 +49,7 @@ class Chapter(Base):
     chapter_number: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     title: Mapped[str | None] = mapped_column(String(255), nullable=True)
     novel_content: Mapped[str | None] = mapped_column(Text, nullable=True)
+    screenplay_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     content_source: Mapped[str | None] = mapped_column(String(20), nullable=True)
     act: Mapped[str | None] = mapped_column(String(20), nullable=True)
     key_events: Mapped[list[Any] | None] = mapped_column(JSON, nullable=True)
@@ -61,6 +62,7 @@ class Chapter(Base):
     story: Mapped["Story"] = relationship("Story", back_populates="chapters")
     messages: Mapped[list["ChatMessage"]] = relationship("ChatMessage", back_populates="chapter", order_by="ChatMessage.created_at", cascade="all, delete-orphan")
     images: Mapped[list["MangaImage"]] = relationship("MangaImage", back_populates="chapter", order_by="MangaImage.image_number", cascade="all, delete-orphan")
+    script_scenes: Mapped[list["ScriptScene"]] = relationship("ScriptScene", back_populates="chapter", cascade="all, delete-orphan")
 
 
 class ChatMessage(Base):
@@ -296,3 +298,127 @@ class AuditLog(Base):
     summary: Mapped[str | None] = mapped_column(String(255), nullable=True)
     detail_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class ScriptScene(Base):
+    __tablename__ = "script_scenes"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    chapter_id: Mapped[int] = mapped_column(Integer, ForeignKey("chapters.id"), nullable=False, index=True)
+    scene_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    title: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    location: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    time_of_day: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    characters_json: Mapped[list[Any] | None] = mapped_column(JSON, nullable=True)
+    summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    dialogue_json: Mapped[list[Any] | None] = mapped_column(JSON, nullable=True)
+    voiceover: Mapped[str | None] = mapped_column(Text, nullable=True)
+    mood: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    estimated_duration_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    source_type: Mapped[str] = mapped_column(String(20), default="chapter")
+    status: Mapped[str] = mapped_column(String(20), default="draft")
+    created_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+    chapter: Mapped["Chapter"] = relationship("Chapter", back_populates="script_scenes")
+    shots: Mapped[list["VideoShot"]] = relationship("VideoShot", back_populates="scene", cascade="all, delete-orphan")
+
+
+class VideoShot(Base):
+    __tablename__ = "video_shots"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    scene_id: Mapped[int] = mapped_column(Integer, ForeignKey("script_scenes.id"), nullable=False, index=True)
+    shot_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    title: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    shot_type: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    camera_angle: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    camera_movement: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    composition: Mapped[str | None] = mapped_column(Text, nullable=True)
+    action_description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    dialogue: Mapped[str | None] = mapped_column(Text, nullable=True)
+    sound_design: Mapped[str | None] = mapped_column(Text, nullable=True)
+    duration_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    storyboard_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
+    video_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
+    negative_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
+    continuity_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(String(20), default="draft")
+    created_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+    scene: Mapped["ScriptScene"] = relationship("ScriptScene", back_populates="shots")
+    generation_jobs: Mapped[list["VideoGenerationJob"]] = relationship("VideoGenerationJob", back_populates="shot", cascade="all, delete-orphan")
+    rendered_clips: Mapped[list["RenderedClip"]] = relationship("RenderedClip", back_populates="shot", cascade="all, delete-orphan")
+
+
+class VideoAsset(Base):
+    __tablename__ = "video_assets"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    story_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("stories.id"), nullable=True)
+    chapter_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("chapters.id"), nullable=True)
+    scene_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("script_scenes.id"), nullable=True)
+    shot_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("video_shots.id"), nullable=True)
+    asset_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    file_path: Mapped[str] = mapped_column(String(500), nullable=False)
+    provider: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
+    meta_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class VideoGenerationJob(Base):
+    __tablename__ = "video_generation_jobs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    shot_id: Mapped[int] = mapped_column(Integer, ForeignKey("video_shots.id"), nullable=False, index=True)
+    provider: Mapped[str] = mapped_column(String(50), nullable=False)
+    provider_job_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    model: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    request_payload_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    status: Mapped[str] = mapped_column(String(20), default="pending")
+    progress: Mapped[int] = mapped_column(Integer, default=0)
+    duration_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    aspect_ratio: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    submitted_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now())
+    completed_at: Mapped[datetime.datetime | None] = mapped_column(DateTime, nullable=True)
+
+    shot: Mapped["VideoShot"] = relationship("VideoShot", back_populates="generation_jobs")
+
+
+class RenderedClip(Base):
+    __tablename__ = "rendered_clips"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    shot_id: Mapped[int] = mapped_column(Integer, ForeignKey("video_shots.id"), nullable=False, index=True)
+    job_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("video_generation_jobs.id"), nullable=True)
+    video_path: Mapped[str] = mapped_column(String(500), nullable=False)
+    thumbnail_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    duration_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    resolution: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    meta_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now())
+
+    shot: Mapped["VideoShot"] = relationship("VideoShot", back_populates="rendered_clips")
+
+
+class VideoProject(Base):
+    __tablename__ = "video_projects"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    story_id: Mapped[int] = mapped_column(Integer, ForeignKey("stories.id"), nullable=False, index=True)
+    chapter_id: Mapped[int] = mapped_column(Integer, ForeignKey("chapters.id"), nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    timeline_json: Mapped[list[Any] | None] = mapped_column(JSON, nullable=True)
+    subtitle_json: Mapped[list[Any] | None] = mapped_column(JSON, nullable=True)
+    bgm_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    cover_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    status: Mapped[str] = mapped_column(String(20), default="draft")
+    output_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    created_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
