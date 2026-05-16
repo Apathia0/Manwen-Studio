@@ -1,0 +1,214 @@
+<template id="scene4-cta-template">
+  <div data-composition-id="scene4-cta" data-width="1920" data-height="1080">
+    <div class="scene-shell">
+      <div class="glow glow-left"></div>
+      <div class="glow glow-right"></div>
+
+      <div class="center-card">
+        <img src="../assets/brand-logo.svg" alt="StoryCanvas" class="brand-logo" />
+        <div class="eyebrow">适合持续连载的创作平台</div>
+        <h2 class="headline">给小说作者、漫画团队与内容创业者，一条真正可持续的生产链路。</h2>
+        <p class="summary">
+          你不用再把文案、分镜、角色设定和出图拆散在不同工具里。StoryCanvas 把创作、生成、重绘、订阅与后台配置收拢到同一个项目上下文中。
+        </p>
+        <div class="audience-row">
+          <div class="audience-chip">小说作者</div>
+          <div class="audience-chip">漫画工作室</div>
+          <div class="audience-chip">IP 内容团队</div>
+        </div>
+        <div class="cta-row">
+          <div class="cta-primary">从一句灵感开始，逐步长成作品</div>
+          <div class="cta-secondary">StoryCanvas</div>
+        </div>
+      </div>
+    </div>
+
+    <style>
+      [data-composition-id="scene4-cta"] {
+        width: 1920px;
+        height: 1080px;
+        overflow: hidden;
+      }
+
+      [data-composition-id="scene4-cta"] .scene-shell {
+        position: relative;
+        width: 100%;
+        height: 100%;
+        padding: 96px;
+        box-sizing: border-box;
+      }
+
+      [data-composition-id="scene4-cta"] .glow {
+        position: absolute;
+        border-radius: 50%;
+        filter: blur(48px);
+      }
+
+      [data-composition-id="scene4-cta"] .glow-left {
+        left: 110px;
+        top: 120px;
+        width: 300px;
+        height: 300px;
+        background: rgba(247, 234, 214, 0.78);
+      }
+
+      [data-composition-id="scene4-cta"] .glow-right {
+        right: 120px;
+        bottom: 120px;
+        width: 340px;
+        height: 340px;
+        background: rgba(23, 166, 162, 0.2);
+      }
+
+      [data-composition-id="scene4-cta"] .center-card {
+        position: relative;
+        z-index: 2;
+        width: 100%;
+        height: 100%;
+        border-radius: 44px;
+        padding: 74px 110px;
+        box-sizing: border-box;
+        background: linear-gradient(145deg, rgba(15, 63, 63, 0.96), rgba(18, 88, 86, 0.94));
+        box-shadow: 0 42px 100px rgba(15, 63, 63, 0.24);
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        text-align: center;
+        color: #eef2e8;
+      }
+
+      [data-composition-id="scene4-cta"] .brand-logo {
+        width: 320px;
+        height: auto;
+        margin-bottom: 28px;
+        filter: drop-shadow(0 18px 28px rgba(0, 0, 0, 0.24));
+      }
+
+      [data-composition-id="scene4-cta"] .eyebrow {
+        padding: 10px 18px;
+        border-radius: 999px;
+        background: rgba(255, 255, 255, 0.12);
+        border: 1px solid rgba(255, 255, 255, 0.18);
+        font-size: 15px;
+        letter-spacing: 0.08em;
+      }
+
+      [data-composition-id="scene4-cta"] .headline {
+        margin-top: 28px;
+        max-width: 1380px;
+        font-family: "Noto Serif SC", serif;
+        font-size: 56px;
+        line-height: 1.34;
+        letter-spacing: -0.03em;
+      }
+
+      [data-composition-id="scene4-cta"] .summary {
+        margin-top: 22px;
+        max-width: 1180px;
+        font-size: 23px;
+        line-height: 1.9;
+        color: rgba(238, 242, 232, 0.76);
+      }
+
+      [data-composition-id="scene4-cta"] .audience-row {
+        margin-top: 34px;
+        display: flex;
+        gap: 14px;
+        flex-wrap: wrap;
+        justify-content: center;
+      }
+
+      [data-composition-id="scene4-cta"] .audience-chip {
+        padding: 12px 18px;
+        border-radius: 999px;
+        background: rgba(255, 255, 255, 0.1);
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        font-size: 18px;
+      }
+
+      [data-composition-id="scene4-cta"] .cta-row {
+        margin-top: 42px;
+        display: flex;
+        align-items: center;
+        gap: 18px;
+      }
+
+      [data-composition-id="scene4-cta"] .cta-primary {
+        padding: 18px 28px;
+        border-radius: 999px;
+        background: #eef2e8;
+        color: #0f3f3f;
+        font-size: 20px;
+        font-weight: 700;
+        box-shadow: 0 16px 32px rgba(0, 0, 0, 0.16);
+      }
+
+      [data-composition-id="scene4-cta"] .cta-secondary {
+        padding: 18px 26px;
+        border-radius: 999px;
+        background: rgba(255, 255, 255, 0.08);
+        border: 1px solid rgba(255, 255, 255, 0.16);
+        font-size: 20px;
+      }
+    </style>
+
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+    <script>
+      (function () {
+        const tl = gsap.timeline({ paused: true });
+        const root = '[data-composition-id="scene4-cta"]';
+
+        tl.from(`${root} .center-card`, {
+          scale: 0.96,
+          opacity: 0,
+          duration: 0.9,
+          ease: "power3.out",
+        });
+        tl.from(`${root} .brand-logo`, {
+          y: 26,
+          opacity: 0,
+          duration: 0.72,
+          ease: "power3.out",
+        }, 0.16);
+        tl.from(`${root} .eyebrow`, {
+          y: 16,
+          opacity: 0,
+          duration: 0.46,
+          ease: "power2.out",
+        }, 0.34);
+        tl.from(`${root} .headline`, {
+          y: 24,
+          opacity: 0,
+          duration: 0.84,
+          ease: "power3.out",
+        }, 0.48);
+        tl.from(`${root} .summary`, {
+          y: 18,
+          opacity: 0,
+          duration: 0.72,
+          ease: "power2.out",
+        }, 0.84);
+        tl.from(`${root} .audience-chip`, {
+          y: 18,
+          opacity: 0,
+          duration: 0.48,
+          stagger: 0.08,
+          ease: "back.out(1.2)",
+        }, 1.08);
+        tl.from(`${root} .cta-row > *`, {
+          y: 20,
+          opacity: 0,
+          duration: 0.5,
+          stagger: 0.1,
+          ease: "back.out(1.15)",
+        }, 1.4);
+        tl.to(`${root} .center-card`, { scale: 1.01, duration: 2.8, ease: "sine.inOut" }, 1.6);
+        tl.to(`${root} .center-card`, { scale: 1, duration: 2.1, ease: "sine.inOut" }, 4.4);
+
+        window.__timelines = window.__timelines || {};
+        window.__timelines["scene4-cta"] = tl;
+      })();
+    </script>
+  </div>
+</template>

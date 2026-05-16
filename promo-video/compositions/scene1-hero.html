@@ -1,0 +1,405 @@
+<template id="scene1-hero-template">
+  <div data-composition-id="scene1-hero" data-width="1920" data-height="1080">
+    <div class="scene-shell">
+      <div class="brand-row">
+        <img src="../assets/brand-mark.svg" alt="" class="brand-mark" />
+        <div class="brand-text">
+          <div class="brand-name">StoryCanvas</div>
+          <div class="brand-sub">AI 驱动的小说与漫画创作平台</div>
+        </div>
+      </div>
+
+      <div class="content-grid">
+        <div class="copy-column">
+          <div class="eyebrow">从灵感到成图，一站式闭环创作</div>
+          <h1 class="headline">
+            让故事策划、
+            <span>角色设定、章节扩写、分镜脚本与漫画生成</span>
+            在同一条工作流里完成。
+          </h1>
+          <p class="summary">
+            StoryCanvas 不只是帮你写一段文字，而是把持续创作真正需要的上下文、人物一致性和出图链路整合在一起。
+          </p>
+          <div class="pill-row">
+            <div class="pill">AI 小说框架</div>
+            <div class="pill">多参考图</div>
+            <div class="pill">漫画重绘</div>
+          </div>
+        </div>
+
+        <div class="visual-column">
+          <div class="hero-stage">
+            <div class="glow-orb orb-a"></div>
+            <div class="glow-orb orb-b"></div>
+            <div class="book-card">
+              <div class="book-spine"></div>
+              <div class="book-pages"></div>
+            </div>
+            <div class="floating-card card-story">
+              <div class="card-label">故事框架</div>
+              <div class="card-line w-1"></div>
+              <div class="card-line w-2"></div>
+              <div class="card-line w-3"></div>
+            </div>
+            <div class="floating-card card-characters">
+              <div class="card-label">角色设定</div>
+              <div class="avatar-row">
+                <div class="avatar"></div>
+                <div class="avatar"></div>
+                <div class="avatar"></div>
+              </div>
+            </div>
+            <div class="floating-card card-panels">
+              <div class="card-label">漫画分镜</div>
+              <div class="panel-grid">
+                <div class="panel"></div>
+                <div class="panel"></div>
+                <div class="panel wide"></div>
+              </div>
+            </div>
+            <div class="arc-path"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <style>
+      [data-composition-id="scene1-hero"] {
+        width: 1920px;
+        height: 1080px;
+        overflow: hidden;
+      }
+
+      [data-composition-id="scene1-hero"] .scene-shell {
+        width: 100%;
+        height: 100%;
+        padding: 72px 92px;
+        box-sizing: border-box;
+        color: #1f2937;
+        display: flex;
+        flex-direction: column;
+        gap: 42px;
+      }
+
+      [data-composition-id="scene1-hero"] .brand-row {
+        display: flex;
+        align-items: center;
+        gap: 18px;
+      }
+
+      [data-composition-id="scene1-hero"] .brand-mark {
+        width: 56px;
+        height: 56px;
+        filter: drop-shadow(0 18px 26px rgba(23, 166, 162, 0.22));
+      }
+
+      [data-composition-id="scene1-hero"] .brand-name {
+        font-family: "Noto Serif SC", serif;
+        font-size: 30px;
+        font-weight: 700;
+        color: #0f3f3f;
+      }
+
+      [data-composition-id="scene1-hero"] .brand-sub {
+        margin-top: 2px;
+        font-size: 15px;
+        color: rgba(31, 41, 55, 0.72);
+      }
+
+      [data-composition-id="scene1-hero"] .content-grid {
+        flex: 1;
+        display: grid;
+        grid-template-columns: minmax(0, 0.94fr) minmax(0, 1.06fr);
+        gap: 36px;
+        align-items: center;
+      }
+
+      [data-composition-id="scene1-hero"] .copy-column {
+        display: flex;
+        flex-direction: column;
+        gap: 24px;
+        padding-right: 30px;
+      }
+
+      [data-composition-id="scene1-hero"] .eyebrow {
+        width: fit-content;
+        padding: 10px 18px;
+        border-radius: 999px;
+        background: rgba(255, 255, 255, 0.62);
+        border: 1px solid rgba(15, 63, 63, 0.08);
+        color: #0f3f3f;
+        font-size: 15px;
+        font-weight: 700;
+        box-shadow: 0 16px 40px rgba(15, 63, 63, 0.08);
+      }
+
+      [data-composition-id="scene1-hero"] .headline {
+        font-family: "Noto Serif SC", serif;
+        font-size: 72px;
+        line-height: 1.18;
+        letter-spacing: -0.04em;
+        color: #183232;
+      }
+
+      [data-composition-id="scene1-hero"] .headline span {
+        color: #17a6a2;
+      }
+
+      [data-composition-id="scene1-hero"] .summary {
+        max-width: 760px;
+        font-size: 25px;
+        line-height: 1.8;
+        color: rgba(31, 41, 55, 0.76);
+      }
+
+      [data-composition-id="scene1-hero"] .pill-row {
+        display: flex;
+        gap: 16px;
+        flex-wrap: wrap;
+      }
+
+      [data-composition-id="scene1-hero"] .pill {
+        padding: 14px 22px;
+        border-radius: 999px;
+        background: rgba(15, 63, 63, 0.92);
+        box-shadow: 0 18px 34px rgba(15, 63, 63, 0.14);
+        color: #eef2e8;
+        font-size: 20px;
+        letter-spacing: 0.02em;
+      }
+
+      [data-composition-id="scene1-hero"] .visual-column {
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        height: 100%;
+      }
+
+      [data-composition-id="scene1-hero"] .hero-stage {
+        position: relative;
+        width: 820px;
+        height: 760px;
+      }
+
+      [data-composition-id="scene1-hero"] .glow-orb {
+        position: absolute;
+        border-radius: 50%;
+        filter: blur(40px);
+      }
+
+      [data-composition-id="scene1-hero"] .orb-a {
+        width: 240px;
+        height: 240px;
+        left: 130px;
+        top: 180px;
+        background: rgba(247, 234, 214, 0.88);
+      }
+
+      [data-composition-id="scene1-hero"] .orb-b {
+        width: 280px;
+        height: 280px;
+        right: 70px;
+        bottom: 90px;
+        background: rgba(23, 166, 162, 0.18);
+      }
+
+      [data-composition-id="scene1-hero"] .book-card {
+        position: absolute;
+        left: 210px;
+        top: 190px;
+        width: 400px;
+        height: 280px;
+        border-radius: 34px;
+        background:
+          linear-gradient(135deg, rgba(255, 255, 255, 0.95), rgba(246, 236, 220, 0.92));
+        border: 1px solid rgba(15, 63, 63, 0.08);
+        box-shadow: 0 40px 80px rgba(15, 63, 63, 0.12);
+        overflow: hidden;
+      }
+
+      [data-composition-id="scene1-hero"] .book-spine {
+        position: absolute;
+        left: 190px;
+        top: 0;
+        width: 20px;
+        height: 100%;
+        background: linear-gradient(180deg, rgba(15, 63, 63, 0.1), rgba(15, 63, 63, 0.02));
+      }
+
+      [data-composition-id="scene1-hero"] .book-pages {
+        position: absolute;
+        inset: 28px;
+        border-radius: 24px;
+        background:
+          linear-gradient(90deg, rgba(15, 63, 63, 0.04) 0 2px, transparent 2px 24px),
+          linear-gradient(180deg, rgba(23, 166, 162, 0.1), transparent 60%);
+        background-size: 24px 100%, 100% 100%;
+      }
+
+      [data-composition-id="scene1-hero"] .floating-card {
+        position: absolute;
+        border-radius: 28px;
+        background: rgba(255, 255, 255, 0.86);
+        border: 1px solid rgba(15, 63, 63, 0.08);
+        box-shadow: 0 26px 50px rgba(15, 63, 63, 0.12);
+        backdrop-filter: blur(16px);
+        overflow: hidden;
+      }
+
+      [data-composition-id="scene1-hero"] .card-story {
+        left: 0;
+        top: 130px;
+        width: 250px;
+        padding: 22px;
+      }
+
+      [data-composition-id="scene1-hero"] .card-characters {
+        right: 24px;
+        top: 74px;
+        width: 232px;
+        padding: 22px;
+      }
+
+      [data-composition-id="scene1-hero"] .card-panels {
+        right: 10px;
+        bottom: 120px;
+        width: 292px;
+        padding: 22px;
+      }
+
+      [data-composition-id="scene1-hero"] .card-label {
+        font-size: 20px;
+        font-weight: 700;
+        color: #0f3f3f;
+        margin-bottom: 16px;
+      }
+
+      [data-composition-id="scene1-hero"] .card-line {
+        height: 14px;
+        border-radius: 999px;
+        background: rgba(15, 63, 63, 0.08);
+        margin-bottom: 12px;
+      }
+
+      [data-composition-id="scene1-hero"] .w-1 {
+        width: 92%;
+      }
+
+      [data-composition-id="scene1-hero"] .w-2 {
+        width: 74%;
+      }
+
+      [data-composition-id="scene1-hero"] .w-3 {
+        width: 82%;
+      }
+
+      [data-composition-id="scene1-hero"] .avatar-row {
+        display: flex;
+        gap: 14px;
+      }
+
+      [data-composition-id="scene1-hero"] .avatar {
+        width: 52px;
+        height: 52px;
+        border-radius: 18px;
+        background:
+          linear-gradient(180deg, rgba(23, 166, 162, 0.9), rgba(15, 63, 63, 0.84));
+        box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.28);
+      }
+
+      [data-composition-id="scene1-hero"] .panel-grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 10px;
+      }
+
+      [data-composition-id="scene1-hero"] .panel {
+        height: 74px;
+        border-radius: 16px;
+        background:
+          linear-gradient(135deg, rgba(31, 41, 55, 0.14), rgba(23, 166, 162, 0.22));
+      }
+
+      [data-composition-id="scene1-hero"] .panel.wide {
+        grid-column: span 2;
+        height: 92px;
+      }
+
+      [data-composition-id="scene1-hero"] .arc-path {
+        position: absolute;
+        left: 112px;
+        top: 468px;
+        width: 540px;
+        height: 160px;
+        border-top: 2px dashed rgba(23, 166, 162, 0.38);
+        border-radius: 50%;
+        transform: rotate(-5deg);
+      }
+    </style>
+
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+    <script>
+      (function () {
+        const tl = gsap.timeline({ paused: true });
+        const root = '[data-composition-id="scene1-hero"]';
+
+        tl.from(`${root} .brand-row`, {
+          y: -28,
+          opacity: 0,
+          duration: 0.7,
+          ease: "power3.out",
+        });
+        tl.from(
+          `${root} .eyebrow`,
+          { y: 18, opacity: 0, duration: 0.55, ease: "power2.out" },
+          0.2,
+        );
+        tl.from(
+          `${root} .headline`,
+          { y: 48, opacity: 0, duration: 0.9, ease: "power3.out" },
+          0.3,
+        );
+        tl.from(
+          `${root} .summary`,
+          { y: 26, opacity: 0, duration: 0.7, ease: "power2.out" },
+          0.7,
+        );
+        tl.from(
+          `${root} .pill`,
+          { y: 24, opacity: 0, duration: 0.5, stagger: 0.08, ease: "back.out(1.4)" },
+          1.0,
+        );
+        tl.from(
+          `${root} .book-card`,
+          { scale: 0.9, y: 44, opacity: 0, duration: 0.9, ease: "power3.out" },
+          0.5,
+        );
+        tl.from(
+          `${root} .floating-card`,
+          {
+            scale: 0.86,
+            opacity: 0,
+            y: 20,
+            duration: 0.8,
+            stagger: 0.16,
+            ease: "back.out(1.3)",
+          },
+          0.95,
+        );
+        tl.from(
+          `${root} .arc-path`,
+          { scaleX: 0, opacity: 0, duration: 0.8, ease: "power2.out", transformOrigin: "left center" },
+          1.15,
+        );
+        tl.to(`${root} .card-story`, { y: -10, duration: 1.5, ease: "sine.inOut" }, 1.5);
+        tl.to(`${root} .card-story`, { y: 0, duration: 1.5, ease: "sine.inOut" }, 3.0);
+        tl.to(`${root} .card-characters`, { y: 12, duration: 1.7, ease: "sine.inOut" }, 1.6);
+        tl.to(`${root} .card-panels`, { y: -8, duration: 1.5, ease: "sine.inOut" }, 1.9);
+        tl.to(`${root} .book-card`, { scale: 1.03, duration: 1.3, ease: "sine.inOut" }, 2.2);
+
+        window.__timelines = window.__timelines || {};
+        window.__timelines["scene1-hero"] = tl;
+      })();
+    </script>
+  </div>
+</template>

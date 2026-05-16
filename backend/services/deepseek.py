@@ -75,6 +75,85 @@ def _extract_json_array(raw: str) -> list:
             raise ValueError("Scene split response was not valid JSON") from second_error
 
 
+def _extract_json_like_string_array(raw: str) -> list[str] | None:
+    match = re.search(r"\[[\s\S]*\]", raw)
+    if not match:
+        return None
+    text = match.group(0)
+    items: list[str] = []
+    in_string = False
+    escape = False
+    current: list[str] = []
+
+    for ch in text:
+        if not in_string:
+            if ch == '"':
+                in_string = True
+                current = []
+            continue
+
+        if escape:
+            if ch == "n":
+                current.append("\n")
+            elif ch == "r":
+                current.append("\r")
+            elif ch == "t":
+                current.append("\t")
+            else:
+                current.append(ch)
+            escape = False
+            continue
+
+        if ch == "\\":
+            escape = True
+            continue
+
+        if ch == '"':
+            items.append("".join(current).strip())
+            in_string = False
+            current = []
+            continue
+
+        current.append(ch)
+
+    cleaned = [item for item in items if item]
+    return cleaned or None
+
+
+def _extract_balanced_json_object_text(raw: str) -> str | None:
+    start = raw.find("{")
+    if start < 0:
+        return None
+
+    depth = 0
+    in_string = False
+    escape = False
+
+    for idx in range(start, len(raw)):
+        ch = raw[idx]
+        if in_string:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_string = False
+            continue
+
+        if ch == '"':
+            in_string = True
+            continue
+        if ch == "{":
+            depth += 1
+            continue
+        if ch == "}":
+            depth -= 1
+            if depth == 0:
+                return raw[start : idx + 1]
+
+    return None
+
+
 def _extract_scenes_payload(raw: str) -> list[str]:
     """Accept either a raw JSON array or an object like {"scenes": [...]}."""
     raw = raw.strip()
@@ -104,7 +183,9 @@ def _extract_scenes_payload(raw: str) -> list[str]:
             if isinstance(parsed, list) and all(isinstance(scene, str) for scene in parsed):
                 return parsed
         except json.JSONDecodeError:
-            pass
+            fallback = _extract_json_like_string_array(match.group(0))
+            if fallback and all(isinstance(scene, str) for scene in fallback):
+                return fallback
 
     raise ValueError("Scene split response must be a JSON array of strings")
 
@@ -280,14 +361,23 @@ def _extract_json_object(raw: str) -> dict:
         raise ValueError("Response is valid JSON but not an object")
     except json.JSONDecodeError as first_error:
         match = re.search(r"\{[\s\S]*\}", raw)
-        if not match:
+        candidate = match.group(0) if match else _extract_balanced_json_object_text(raw)
+        if not candidate:
             raise ValueError("Response did not contain a JSON object") from first_error
         try:
-            result = _loads_json_lenient(match.group(0))
+            result = _loads_json_lenient(candidate)
             if isinstance(result, dict):
                 return result
             raise ValueError("Extracted JSON is not an object")
         except json.JSONDecodeError as second_error:
+            balanced = _extract_balanced_json_object_text(candidate)
+            if balanced and balanced != candidate:
+                try:
+                    result = _loads_json_lenient(balanced)
+                    if isinstance(result, dict):
+                        return result
+                except json.JSONDecodeError:
+                    pass
             raise ValueError("Response was not valid JSON") from second_error
 
 
@@ -545,6 +635,7 @@ async def generate_character_profiles_from_framework(story_context: dict, api_ke
 async def adjust_framework_with_chat(story_context: dict, messages: list[dict], api_key: str | None = None) -> dict:
     """Adjust the existing framework based on iterative chat feedback."""
     snapshot = _build_story_snapshot(story_context)
+    description = str(story_context.get("description") or "").strip()
     safe_messages = [
         {
             "role": "assistant" if str(item.get("role")) == "assistant" else "user",
