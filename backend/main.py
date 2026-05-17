@@ -13,6 +13,7 @@ import uuid
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from email.message import EmailMessage
 from pathlib import Path
+from typing import Any
 from urllib.parse import parse_qsl
 
 import httpx
@@ -64,6 +65,7 @@ from schemas import (
 from services.deepseek import (
     adjust_chapter_content,
     adjust_framework_with_chat,
+    analyze_import_material,
     analyze_content_framework,
     chat_stream,
     continue_framework,
@@ -4969,6 +4971,53 @@ def _parse_import_text_into_chapters(text: str) -> list[ImportChapterInfo]:
     return chapters
 
 
+def _single_import_source(text: str) -> list[ImportChapterInfo]:
+    source_text = text.strip()
+    return [
+        ImportChapterInfo(
+            chapter_number=1,
+            title="导入原文",
+            content=source_text,
+            detection_method="raw_text",
+        )
+    ]
+
+
+def _normalize_ai_import_chapters(chapters_payload: Any) -> list[dict[str, Any]]:
+    normalized: list[dict[str, Any]] = []
+    if not isinstance(chapters_payload, list):
+        return normalized
+
+    for index, item in enumerate(chapters_payload, start=1):
+        if not isinstance(item, dict):
+            continue
+        chapter_number = item.get("chapter_number")
+        try:
+            chapter_number = int(chapter_number)
+        except Exception:
+            chapter_number = index
+        title = str(item.get("title") or "").strip() or f"第{chapter_number}话"
+        act = str(item.get("act") or "").strip() or None
+        key_events_raw = item.get("key_events")
+        if isinstance(key_events_raw, list):
+            key_events = [str(event).strip() for event in key_events_raw if str(event).strip()]
+        else:
+            key_events = []
+        normalized.append(
+            {
+                "chapter_number": max(1, chapter_number),
+                "title": title,
+                "act": act,
+                "key_events": key_events,
+            }
+        )
+
+    normalized.sort(key=lambda item: item["chapter_number"])
+    for index, item in enumerate(normalized, start=1):
+        item["chapter_number"] = index
+    return normalized
+
+
 @app.post("/api/import/parse", response_model=ImportParseResponse)
 async def import_parse(request: Request, file: UploadFile = File(...), db: Session = Depends(get_db)):
     """Parse an uploaded novel file (.txt, .md, .docx) and detect chapters."""
@@ -5006,7 +5055,7 @@ async def import_parse(request: Request, file: UploadFile = File(...), db: Sessi
     total_word_count_text = "".join(text.split())
     total_word_count = len(total_word_count_text)
 
-    chapters = _parse_import_text_into_chapters(text)
+    chapters = _single_import_source(text)
 
     return ImportParseResponse(
         detected_title=detected_title,
@@ -5020,61 +5069,80 @@ async def import_create(body: ImportCreateRequest, request: Request, db: Session
     """Create a story with chapters from parsed import data."""
     _ensure_platform_seed(db)
     user = _require_user(request, db)
+    combined = "\n\n".join(
+        str(ch_data.content or "").strip()
+        for ch_data in body.chapters
+        if str(ch_data.content or "").strip()
+    ).strip()
+    if not combined:
+        raise HTTPException(400, "导入内容为空，无法创建作品")
 
-    # Create story
-    story = Story(title=body.title, description=body.description, owner_user_id=user.id)
+    _check_and_consume_advanced_text_quota(request, user.id, db, deduct=False)
+    api_key = _user_deepseek_api_key(request)
+    try:
+        framework = await analyze_import_material(combined, api_key=api_key)
+    except Exception as exc:
+        logger.error("Import AI analysis failed: %s", exc)
+        raise HTTPException(502, f"AI分析导入内容失败: {exc}")
+
+    content_type = str(framework.get("content_type") or "chapter_manuscript").strip().lower()
+    tags = framework.get("tags") if isinstance(framework.get("tags"), dict) else {}
+    characters = framework.get("characters") if isinstance(framework.get("characters"), list) else []
+    outline = framework.get("outline") if isinstance(framework.get("outline"), dict) else {}
+    ai_chapters = _normalize_ai_import_chapters(framework.get("chapters"))
+
+    story = Story(
+        title=body.title,
+        description=body.description or ("导入内容已通过 AI 分析生成框架" if outline else ""),
+        owner_user_id=user.id,
+    )
+    if tags:
+        story.tags = tags
+    if characters:
+        story.characters = _normalize_characters_payload(characters)
+    if outline:
+        story.outline = outline
     db.add(story)
     db.flush()
 
-    # Create chapters
-    for ch_data in body.chapters:
-        chapter = Chapter(
-            story_id=story.id,
-            chapter_number=ch_data.chapter_number,
-            title=ch_data.title or f"第{ch_data.chapter_number}话",
-            novel_content=ch_data.content,
-            content_source="import",
-            status="draft",
-            word_count=_count_words(ch_data.content),
-            act=ch_data.act,
-            key_events=ch_data.key_events if ch_data.key_events else None,
-        )
-        db.add(chapter)
-        db.flush()
-        _initialize_empty_chapter_workspace(chapter.id)
+    if content_type == "outline_source":
+        for ch_data in ai_chapters:
+            chapter = Chapter(
+                story_id=story.id,
+                chapter_number=ch_data["chapter_number"],
+                title=ch_data["title"],
+                novel_content="",
+                content_source="import",
+                status="draft",
+                word_count=0,
+                act=ch_data.get("act"),
+                key_events=ch_data.get("key_events") or None,
+            )
+            db.add(chapter)
+            db.flush()
+            _initialize_empty_chapter_workspace(chapter.id)
+    else:
+        ai_meta_by_number = {item["chapter_number"]: item for item in ai_chapters}
+        for index, ch_data in enumerate(body.chapters, start=1):
+            ai_meta = ai_meta_by_number.get(index, {})
+            chapter = Chapter(
+                story_id=story.id,
+                chapter_number=index,
+                title=ai_meta.get("title") or ch_data.title or f"第{index}话",
+                novel_content=ch_data.content,
+                content_source="import",
+                status="draft",
+                word_count=_count_words(ch_data.content),
+                act=ai_meta.get("act") or ch_data.act,
+                key_events=ai_meta.get("key_events") or ch_data.key_events or None,
+            )
+            db.add(chapter)
+            db.flush()
+            _initialize_empty_chapter_workspace(chapter.id)
 
     db.commit()
+    _check_and_consume_advanced_text_quota(request, user.id, db, deduct=True)
     db.refresh(story)
-
-    # Optionally analyze framework
-    if body.analyze_framework:
-        try:
-            # Concatenate first 5 chapters' content for analysis
-            content_parts = []
-            for ch in story.chapters[:5]:
-                if ch.novel_content:
-                    content_parts.append(ch.novel_content)
-            combined = "\n\n".join(content_parts)
-            if combined.strip():
-                api_key = _user_deepseek_api_key(request)
-                framework = await analyze_content_framework(combined, api_key=api_key)
-
-                tags = framework.get("tags") if isinstance(framework.get("tags"), dict) else {}
-                characters = framework.get("characters") if isinstance(framework.get("characters"), list) else []
-                outline = framework.get("outline") if isinstance(framework.get("outline"), dict) else {}
-
-                if tags:
-                    story.tags = tags
-                if characters:
-                    story.characters = _normalize_characters_payload(characters)
-                if outline:
-                    story.outline = outline
-                db.commit()
-                db.refresh(story)
-        except Exception as exc:
-            logger.warning("Framework analysis after import failed: %s", exc)
-            # Non-blocking; story + chapters are already created
-
     return story
 
 

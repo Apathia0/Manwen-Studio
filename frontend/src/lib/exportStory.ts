@@ -11,32 +11,33 @@ export async function exportStoryAsZip(data: ExportData): Promise<void> {
   const { story, chapters } = data;
   const dateStr = new Date().toISOString().slice(0, 10);
   const zip = new JSZip();
-  const folderName = `${sanitizeName(story.title || 'story')}_export_${dateStr}`;
+  const baseTitle = sanitizeName(story.title || '未命名作品');
+  const folderName = `${baseTitle}_导出文件_${dateStr}`;
 
-  zip.file(`${folderName}/story.json`, JSON.stringify(buildJsonBackup(story, chapters), null, 2));
-  zip.file(`${folderName}/novel.md`, buildMainNovelMd(story, chapters));
+  zip.file(`${folderName}/小说数据备份.json`, JSON.stringify(buildJsonBackup(story, chapters), null, 2));
+  zip.file(`${folderName}/小说正文.md`, buildMainNovelMd(story, chapters));
 
   if (story.outline) {
-    zip.file(`${folderName}/01_outline.md`, buildOutlineMd(story));
+    zip.file(`${folderName}/01_故事大纲.md`, buildOutlineMd(story));
   }
 
   if (story.characters && story.characters.length > 0) {
-    zip.file(`${folderName}/02_characters.md`, buildCharactersMd(story));
+    zip.file(`${folderName}/02_角色设定.md`, buildCharactersMd(story));
   }
 
-  const chapterFolder = zip.folder(`${folderName}/03_chapters`);
+  const chapterFolder = zip.folder(`${folderName}/03_章节正文`);
   if (chapterFolder) {
     for (const chapter of chapters) {
-      const chapterTitle = chapter.title || `Chapter ${chapter.chapter_number}`;
+      const chapterTitle = chapter.title || `第${chapter.chapter_number}章`;
       const safeName = sanitizeName(
-        `${String(chapter.chapter_number).padStart(2, '0')}_${chapterTitle}.md`,
+        `第${String(chapter.chapter_number).padStart(2, '0')}章_${chapterTitle}.md`,
       );
       chapterFolder.file(safeName, buildChapterMd(chapter));
     }
   }
 
   const blob = await zip.generateAsync({ type: 'blob' });
-  saveAs(blob, `${sanitizeName(story.title || 'story')}_export_${dateStr}.zip`);
+  saveAs(blob, `${baseTitle}_导出文件_${dateStr}.zip`);
 }
 
 function sanitizeName(value: string): string {

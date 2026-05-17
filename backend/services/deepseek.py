@@ -1558,6 +1558,122 @@ JSON输出格式示例：
         raise ValueError(f"Content framework analysis failed: {e}")
 
 
+async def analyze_import_material(content: str, api_key: str | None = None) -> dict:
+    """Analyze imported outline/manuscript material and generate a usable framework."""
+    content_sample = content[:48000] if len(content) > 48000 else content
+    user_prompt = f"""请分析以下导入材料，并将其整理成可直接用于小说创作的完整框架。
+
+材料类型可能是：
+1. 小说正文或章节初稿
+2. 小说大纲、策划案、设定稿
+3. 世界观、角色、分卷规划混合文档
+
+请先判断它属于哪一类：
+- `outline_source`：大纲、设定稿、策划案，不应把小标题误判成真实章节
+- `chapter_manuscript`：真实小说正文或按章节整理的正文稿
+
+无论属于哪一类，都要输出一版完整可用的小说框架。
+
+特别要求：
+1. 如果它是 `outline_source`，不要把“故事总览 / 世界观设定 / 角色设定 / 分卷大纲 / 节奏建议 / 亮点 / 写作提醒”之类标题当成真实章节。
+2. 如果它是 `outline_source`，你需要根据材料内容重新拟出真正的故事大纲和章节规划。
+3. 如果它是 `chapter_manuscript`，你需要基于正文提炼大纲与角色，并给出合理的章节规划。
+4. `chapters` 字段必须是可以直接用于创作的章节规划，不能照抄目录型标题。
+5. 只输出 JSON，不要输出解释。
+
+导入材料：
+{content_sample}
+
+JSON 顶层必须包含：
+{{
+  "content_type": "outline_source" | "chapter_manuscript",
+  "tags": {{
+    "type": "...",
+    "theme": "...",
+    "style": "...",
+    "audience": "..."
+  }},
+  "characters": [
+    {{
+      "name": "...",
+      "role": "...",
+      "big_five": {{
+        "openness": 1-10,
+        "conscientiousness": 1-10,
+        "extraversion": 1-10,
+        "agreeableness": 1-10,
+        "neuroticism": 1-10
+      }},
+      "arc": {{}},
+      "relationships": []
+    }}
+  ],
+  "outline": {{
+    "three_acts": [
+      {{
+        "act": "阶段1",
+        "title": "...",
+        "summary": "...",
+        "key_events": ["..."],
+        "chapters": [
+          {{
+            "chapter_number": 1,
+            "title": "...",
+            "summary": "...",
+            "key_events": ["..."]
+          }}
+        ]
+      }}
+    ],
+    "themes": ["..."],
+    "foreshadowing": ["..."]
+  }},
+  "chapters": [
+    {{
+      "chapter_number": 1,
+      "title": "...",
+      "act": "阶段1",
+      "key_events": ["..."]
+    }}
+  ]
+}}
+"""
+
+    payload = {
+        "model": DEEPSEEK_MODEL,
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    "你是一位资深小说策划编辑，擅长把导入材料整理成可用的小说框架。"
+                    "你必须先判断它是大纲源材料还是正文稿。"
+                    "如果是大纲、设定稿或策划案，绝对不能把小标题误判成真实章节。"
+                    "只输出 JSON。"
+                ),
+            },
+            {"role": "user", "content": user_prompt},
+        ],
+        "stream": False,
+        "max_tokens": 16384,
+        "response_format": {"type": "json_object"},
+    }
+
+    async with httpx.AsyncClient(timeout=600) as client:
+        resp = await client.post(
+            f"{DEEPSEEK_BASE_URL}/chat/completions",
+            json=payload,
+            headers=_deepseek_auth_headers(api_key),
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        response_content = data["choices"][0]["message"]["content"]
+
+    try:
+        return _extract_json_object(response_content)
+    except ValueError as e:
+        raise ValueError(f"Import material analysis failed: {e}")
+
+
 async def scenes_from_selection(selected_text: str, character_profiles: str = "", page_count: int = 4, api_key: str | None = None) -> list[str]:
     """Generate manga scene descriptions from selected novel text.
     

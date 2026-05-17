@@ -2,22 +2,19 @@ import { useEffect, useMemo, useState } from 'react';
 import QRCode from 'qrcode';
 import {
   Brush,
-  Check,
   CreditCard,
   Gauge,
   Home,
   LogOut,
   MessageSquareQuote,
-  Pencil,
-  Plus,
   ScrollText,
   Settings2,
   ShieldCheck,
-  Trash2,
   UserCircle2,
   X,
 } from 'lucide-react';
 import PublicLanding from './components/PublicLanding';
+import StoryLibraryPage from './components/StoryLibraryPage';
 import WorkspaceLayout from './components/WorkspaceLayout';
 import {
   AdminAnnouncementPage,
@@ -327,6 +324,27 @@ function App() {
     setStories((prev) => [next, ...prev]);
     setGlobalError(null);
     return next;
+  }
+
+  async function openImportedStory(storyId: number) {
+    try {
+      setLoadingWorkspace(true);
+      const [storyList, detail, chapterList] = await Promise.all([
+        listStories(),
+        getStory(storyId),
+        listChapters(storyId),
+      ]);
+      setStories(storyList);
+      setActiveStory(detail);
+      setChapters(chapterList);
+      setActiveChapterId(chapterList[0]?.id ?? null);
+      setRoute('workspace');
+      setGlobalError(null);
+    } catch (error: any) {
+      setGlobalError(error.message || '导入作品后打开失败');
+    } finally {
+      setLoadingWorkspace(false);
+    }
   }
 
   async function updateStoryDraft(storyId: number, payload: { title?: string; description?: string }) {
@@ -748,12 +766,13 @@ function App() {
           )}
 
           {route === 'stories' && (
-            <StoriesPage
+            <StoryLibraryPage
               stories={stories}
               loading={loadingStories}
               onRefresh={refreshStories}
               onCreate={createNewStory}
               onCreateDraft={createStoryDraft}
+              onImportComplete={openImportedStory}
               onUpdateStory={updateStoryDraft}
               onDeleteStory={deleteStoryDraft}
               onOpen={openWorkspace}
@@ -1244,12 +1263,14 @@ function PricingPage({
   );
 }
 
+/*
 function StoriesPage({
   stories,
   loading,
   onRefresh,
   onCreate,
   onCreateDraft,
+  onImportComplete,
   onUpdateStory,
   onDeleteStory,
   onOpen,
@@ -1260,12 +1281,14 @@ function StoriesPage({
   onRefresh: () => Promise<void>;
   onCreate: () => Promise<void>;
   onCreateDraft: (title: string, description: string) => Promise<Story>;
+  onImportComplete: (storyId: number) => Promise<void>;
   onUpdateStory: (storyId: number, payload: { title?: string; description?: string }) => Promise<Story>;
   onDeleteStory: (story: Story) => Promise<void>;
   onOpen: (story: Story) => Promise<void>;
   loadingWorkspace: boolean;
 }) {
   const [showCreateForm, setShowCreateForm] = useState(false);
+  const [showImportDialog, setShowImportDialog] = useState(false);
   const [draftTitle, setDraftTitle] = useState('');
   const [draftDescription, setDraftDescription] = useState('');
   const [editingId, setEditingId] = useState<number | null>(null);
@@ -1273,6 +1296,7 @@ function StoriesPage({
   const [editDescription, setEditDescription] = useState('');
   const [savingId, setSavingId] = useState<number | null>(null);
   const [deletingId, setDeletingId] = useState<number | null>(null);
+  const [exportingStoryId, setExportingStoryId] = useState<number | null>(null);
 
   const resetCreateForm = () => {
     setDraftTitle('');
@@ -1328,6 +1352,21 @@ function StoriesPage({
     } finally {
       setDeletingId(null);
     }
+  };
+
+  const handleExport = async (story: Story) => {
+    setExportingStoryId(story.id);
+    try {
+      const chapters = await listChapters(story.id);
+      await exportStoryAsZip({ story, chapters });
+    } finally {
+      setExportingStoryId(null);
+    }
+  };
+
+  const handleImportDone = async (storyId: number) => {
+    setShowImportDialog(false);
+    await onImportComplete(storyId);
   };
 
   return (
@@ -1492,6 +1531,7 @@ function StoriesPage({
   );
 }
 
+*/
 function WorkspacePage({
   story,
   chapters,

@@ -29,7 +29,6 @@ export default function ImportDialog({ open, onClose, onImportComplete }: Import
   const [parseResult, setParseResult] = useState<ImportParseResponse | null>(null);
   const [storyTitle, setStoryTitle] = useState('');
   const [chapters, setChapters] = useState<ImportChapterInfo[]>([]);
-  const [analyzeFramework, setAnalyzeFramework] = useState(true);
 
   useEffect(() => {
     if (!open) {
@@ -41,7 +40,6 @@ export default function ImportDialog({ open, onClose, onImportComplete }: Import
       setParseResult(null);
       setStoryTitle('');
       setChapters([]);
-      setAnalyzeFramework(true);
     }
   }, [open]);
 
@@ -130,7 +128,7 @@ export default function ImportDialog({ open, onClose, onImportComplete }: Import
       const story = await createImportStory({
         title: storyTitle.trim() || parseResult.detected_title,
         chapters,
-        analyze_framework: analyzeFramework,
+        analyze_framework: true,
       });
       setStep('done');
       onImportComplete(story.id);
@@ -238,15 +236,9 @@ export default function ImportDialog({ open, onClose, onImportComplete }: Import
               </div>
             </div>
 
-            <label className="flex items-center gap-3 rounded-xl border border-slate-200 px-4 py-3 text-sm text-slate-700">
-              <input
-                type="checkbox"
-                checked={analyzeFramework}
-                onChange={(event) => setAnalyzeFramework(event.target.checked)}
-                className="h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500"
-              />
-              导入完成后自动分析标签、角色与故事大纲
-            </label>
+            <div className="rounded-xl border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-800">
+              当前导入会强制接入 AI 分析原文，并自动生成标签、角色、大纲与章节规划，不再按本地规则直接拆章。
+            </div>
 
             <div className="max-h-[360px] overflow-y-auto rounded-2xl border border-slate-200">
               {chapters.map((chapter) => (
