@@ -17,7 +17,7 @@ from urllib.parse import parse_qsl
 
 import httpx
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, HTTPException, Query, Request
+from fastapi import Depends, FastAPI, File, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -50,6 +50,11 @@ from schemas import (
     ChapterOut,
     ChatMessageIn,
     ChatMessageOut,
+    FrameworkAnalyzeResponse,
+    ImportChapterCreate,
+    ImportChapterInfo,
+    ImportCreateRequest,
+    ImportParseResponse,
     MangaImageOut,
     OutlineChapterPlanUpdate,
     StoryCreate,
@@ -59,6 +64,7 @@ from schemas import (
 from services.deepseek import (
     adjust_chapter_content,
     adjust_framework_with_chat,
+    analyze_content_framework,
     chat_stream,
     continue_framework,
     expand_chapter_to_content,
@@ -1413,18 +1419,86 @@ def _normalize_key_events(raw) -> list[str] | None:
     return [str(raw).strip()] if str(raw).strip() else None
 
 
+def _normalize_act_token(value) -> str:
+    text = str(value or "").strip().lower()
+    if not text:
+        return ""
+    text = re.sub(r"[\s_\-:：,.，。、()（）\[\]【】]+", "", text)
+    replacements = {
+        "第一幕": "1",
+        "第二幕": "2",
+        "第三幕": "3",
+        "第一章": "1",
+        "第二章": "2",
+        "第三章": "3",
+        "第一部分": "1",
+        "第二部分": "2",
+        "第三部分": "3",
+        "第一卷": "1",
+        "第二卷": "2",
+        "第三卷": "3",
+        "actone": "1",
+        "acttwo": "2",
+        "actthree": "3",
+        "act1": "1",
+        "act2": "2",
+        "act3": "3",
+    }
+    if text in replacements:
+        return replacements[text]
+    match = re.search(r"act(\d+)", text)
+    if match:
+        return match.group(1)
+    match = re.search(r"第([123])幕", text)
+    if match:
+        return match.group(1)
+    match = re.search(r"([123])幕", text)
+    if match:
+        return match.group(1)
+    if text in {"1", "2", "3"}:
+        return text
+    return text
+
+
+def _build_act_alias_map(acts: list) -> dict[str, str]:
+    alias_map: dict[str, str] = {}
+    for index, raw_act in enumerate(acts, start=1):
+        if isinstance(raw_act, dict):
+            act_entry = raw_act
+        else:
+            act_entry = {"title": str(raw_act)}
+        canonical = str(act_entry.get("act", index))
+        aliases = {
+            canonical,
+            str(index),
+            act_entry.get("title", ""),
+            act_entry.get("name", ""),
+            f"第{index}幕",
+            f"{index}幕",
+            f"act {index}",
+            f"act{index}",
+        }
+        for alias in aliases:
+            normalized = _normalize_act_token(alias)
+            if normalized:
+                alias_map[normalized] = canonical
+    return alias_map
+
+
 def _normalize_framework_outline(outline: dict | None, chapters: list | None) -> dict:
     normalized = dict(outline or {})
     acts = normalized.get("three_acts")
     if not isinstance(acts, list):
         acts = []
+    act_alias_map = _build_act_alias_map(acts)
 
     chapter_groups: dict[str, list[dict]] = {}
     if isinstance(chapters, list):
         for item in chapters:
             if not isinstance(item, dict):
                 continue
-            act_key = str(item.get("act") or "").strip()
+            raw_act_key = str(item.get("act") or "").strip()
+            act_key = act_alias_map.get(_normalize_act_token(raw_act_key), raw_act_key)
             chapter_number = item.get("chapter_number")
             title = str(item.get("title") or "").strip()
             if not isinstance(chapter_number, int) or chapter_number < 1 or not title:
@@ -1432,6 +1506,7 @@ def _normalize_framework_outline(outline: dict | None, chapters: list | None) ->
             chapter_entry = {
                 "chapter_number": chapter_number,
                 "title": title,
+                "act": act_key or raw_act_key,
             }
             key_events = _normalize_key_events(item.get("key_events"))
             if key_events:
@@ -1450,7 +1525,18 @@ def _normalize_framework_outline(outline: dict | None, chapters: list | None) ->
             act_entry = {"title": str(act)}
         act_label = act_entry.get("act", index)
         act_entry["act"] = act_label
-        candidates = chapter_groups.pop(str(act_label), None) or chapter_groups.pop(str(index), None)
+        candidates = None
+        for candidate_key in {
+            str(act_label),
+            str(index),
+            _normalize_act_token(act_label),
+            _normalize_act_token(index),
+            _normalize_act_token(act_entry.get("title")),
+            _normalize_act_token(act_entry.get("name")),
+        }:
+            if candidate_key in chapter_groups:
+                candidates = chapter_groups.pop(candidate_key)
+                break
         if not candidates and next_unassigned:
             candidates = next_unassigned
             next_unassigned = []
@@ -1626,7 +1712,7 @@ def _has_complete_outline(outline: dict | None) -> bool:
     if not isinstance(outline, dict):
         return False
     acts = outline.get("three_acts")
-    if not isinstance(acts, list) or len(acts) < 3:
+    if not isinstance(acts, list) or len(acts) < 2:
         return False
     if not _extract_outline_chapters(outline):
         return False
@@ -4570,7 +4656,11 @@ async def adjust_framework_endpoint(story_id: int, request: Request, db: Session
         api_key=_user_deepseek_api_key(request),
     )
 
-    framework = result.get("framework", {})
+    framework = await _complete_framework_payload(
+        result.get("framework", {}),
+        str(result.get("framework", {}).get("description") or story.description or "").strip(),
+        api_key=_user_deepseek_api_key(request),
+    )
     description = str(framework.get("description") or story.description or "").strip()
     story.description = description
     story.tags = _merge_tags(story.tags, framework.get("tags"))
@@ -4601,7 +4691,11 @@ async def continue_framework_endpoint(story_id: int, request: Request, db: Sessi
         _story_framework_context(story),
         api_key=_user_deepseek_api_key(request),
     )
-    framework = result.get("framework", {})
+    framework = await _complete_framework_payload(
+        result.get("framework", {}),
+        str(result.get("framework", {}).get("description") or story.description or "").strip(),
+        api_key=_user_deepseek_api_key(request),
+    )
     story.description = str(framework.get("description") or story.description or "").strip()
     story.tags = _merge_tags(story.tags, framework.get("tags"))
     story.characters = _merge_characters_payload(story.characters, framework.get("characters"))
@@ -4790,6 +4884,250 @@ async def scenes_from_selection_endpoint(chapter_id: int, request: Request, db: 
     _check_and_consume_feature_quota(request, user.id, "scene.generate.monthly_limit", 1, db, deduct=True, provider_kind="text")
     sanitized_scenes, sanitized_indices = sanitize_scene_list(scenes)
     return {"scenes": sanitized_scenes, "page_count": page_count, "sanitized_indices": sanitized_indices}
+
+
+# ─── Import/Export ────────────────────────────────────────────
+
+MAX_IMPORT_FILE_BYTES = int(os.getenv("MAX_IMPORT_FILE_BYTES", str(10 * 1024 * 1024)))
+
+
+def _chapter_split_patterns() -> list[tuple[re.Pattern, str]]:
+    """Return (regex_pattern, label) for known chapter delimiters, ordered by priority."""
+    return [
+        (re.compile(r"第[零一二三四五六七八九十百千\d]+[章话节回]"), "chinese_chapter"),
+        (re.compile(r"^#{1,3}\s+.+", re.MULTILINE), "markdown_heading"),
+        (re.compile(r"^第\s*\d+\s*[章话节回]", re.MULTILINE), "chinese_chapter_space"),
+        (re.compile(r"^Chapter\s+\d+", re.IGNORECASE | re.MULTILINE), "english_chapter"),
+    ]
+
+
+def _parse_import_text_into_chapters(text: str) -> list[ImportChapterInfo]:
+    """Detect chapter boundaries in raw text and return chapter infos."""
+    patterns = _chapter_split_patterns()
+    boundaries: list[tuple[int, str, str]] = []  # (position, method, title)
+
+    for pattern, method_name in patterns:
+        for match in pattern.finditer(text):
+            title = match.group().strip()
+            # Strip leading '#' from markdown headings
+            if method_name == "markdown_heading":
+                title = re.sub(r"^#+\s*", "", title)
+            boundaries.append((match.start(), "regex", title))
+
+    if boundaries:
+        # Deduplicate: keep the earliest match at each position (±10 char window)
+        boundaries.sort(key=lambda x: x[0])
+        deduped: list[tuple[int, str, str]] = []
+        for pos, method, title in boundaries:
+            if not deduped or pos - deduped[-1][0] > 10:
+                deduped.append((pos, method, title))
+        boundaries = deduped
+
+    chapters: list[ImportChapterInfo] = []
+    if len(boundaries) >= 2:
+        for i, (pos, method, title) in enumerate(boundaries):
+            start = pos
+            end = boundaries[i + 1][0] if i + 1 < len(boundaries) else len(text)
+            raw_content = text[start:end].strip()
+            if not raw_content:
+                continue
+            chapters.append(ImportChapterInfo(
+                chapter_number=i + 1,
+                title=title,
+                content=raw_content,
+                detection_method="regex",
+            ))
+    elif len(boundaries) == 1:
+        # Single boundary: split into chapter + remaining
+        pos, method, title = boundaries[0]
+        header_content = text[:pos].strip()
+        chapter_content = text[pos:].strip()
+        if header_content:
+            chapters.append(ImportChapterInfo(
+                chapter_number=1,
+                title="",
+                content=header_content,
+                detection_method="regex",
+            ))
+        if chapter_content:
+            chapters.append(ImportChapterInfo(
+                chapter_number=len(chapters) + 1,
+                title=title,
+                content=chapter_content,
+                detection_method="regex",
+            ))
+
+    # If still no structural detection, return as single chapter
+    if not chapters:
+        chapters.append(ImportChapterInfo(
+            chapter_number=1,
+            title="",
+            content=text.strip(),
+            detection_method="regex",
+        ))
+
+    return chapters
+
+
+@app.post("/api/import/parse", response_model=ImportParseResponse)
+async def import_parse(request: Request, file: UploadFile = File(...), db: Session = Depends(get_db)):
+    """Parse an uploaded novel file (.txt, .md, .docx) and detect chapters."""
+    _ensure_platform_seed(db)
+    user = _require_user(request, db)
+
+    # Read file content
+    contents = await file.read()
+    if len(contents) > MAX_IMPORT_FILE_BYTES:
+        raise HTTPException(413, f"文件过大，最大支持 {MAX_IMPORT_FILE_BYTES // (1024 * 1024)}MB")
+
+    filename = file.filename or ""
+    ext = Path(filename).suffix.lower()
+
+    # Extract text based on file type
+    text = ""
+    if ext == ".docx":
+        try:
+            from docx import Document
+            import io
+            doc = Document(io.BytesIO(contents))
+            text = "\n".join(p.text for p in doc.paragraphs)
+        except Exception as exc:
+            raise HTTPException(400, f"无法解析 .docx 文件: {exc}")
+    elif ext in (".txt", ".md", ""):
+        text = contents.decode("utf-8", errors="replace")
+    else:
+        raise HTTPException(400, f"不支持的文件类型: {ext}，仅支持 .txt, .md, .docx")
+
+    text = text.strip()
+    if not text:
+        raise HTTPException(400, "文件内容为空")
+
+    detected_title = Path(filename).stem or "未命名小说"
+    total_word_count_text = "".join(text.split())
+    total_word_count = len(total_word_count_text)
+
+    chapters = _parse_import_text_into_chapters(text)
+
+    return ImportParseResponse(
+        detected_title=detected_title,
+        chapters=chapters,
+        total_word_count=total_word_count,
+    )
+
+
+@app.post("/api/import/create", response_model=StoryOut)
+async def import_create(body: ImportCreateRequest, request: Request, db: Session = Depends(get_db)):
+    """Create a story with chapters from parsed import data."""
+    _ensure_platform_seed(db)
+    user = _require_user(request, db)
+
+    # Create story
+    story = Story(title=body.title, description=body.description, owner_user_id=user.id)
+    db.add(story)
+    db.flush()
+
+    # Create chapters
+    for ch_data in body.chapters:
+        chapter = Chapter(
+            story_id=story.id,
+            chapter_number=ch_data.chapter_number,
+            title=ch_data.title or f"第{ch_data.chapter_number}话",
+            novel_content=ch_data.content,
+            content_source="import",
+            status="draft",
+            word_count=_count_words(ch_data.content),
+            act=ch_data.act,
+            key_events=ch_data.key_events if ch_data.key_events else None,
+        )
+        db.add(chapter)
+        db.flush()
+        _initialize_empty_chapter_workspace(chapter.id)
+
+    db.commit()
+    db.refresh(story)
+
+    # Optionally analyze framework
+    if body.analyze_framework:
+        try:
+            # Concatenate first 5 chapters' content for analysis
+            content_parts = []
+            for ch in story.chapters[:5]:
+                if ch.novel_content:
+                    content_parts.append(ch.novel_content)
+            combined = "\n\n".join(content_parts)
+            if combined.strip():
+                api_key = _user_deepseek_api_key(request)
+                framework = await analyze_content_framework(combined, api_key=api_key)
+
+                tags = framework.get("tags") if isinstance(framework.get("tags"), dict) else {}
+                characters = framework.get("characters") if isinstance(framework.get("characters"), list) else []
+                outline = framework.get("outline") if isinstance(framework.get("outline"), dict) else {}
+
+                if tags:
+                    story.tags = tags
+                if characters:
+                    story.characters = _normalize_characters_payload(characters)
+                if outline:
+                    story.outline = outline
+                db.commit()
+                db.refresh(story)
+        except Exception as exc:
+            logger.warning("Framework analysis after import failed: %s", exc)
+            # Non-blocking; story + chapters are already created
+
+    return story
+
+
+@app.post("/api/stories/{story_id}/framework/analyze", response_model=FrameworkAnalyzeResponse)
+async def framework_analyze_endpoint(story_id: int, request: Request, db: Session = Depends(get_db)):
+    """Analyze existing story chapter content to extract tags, characters, and outline."""
+    _ensure_platform_seed(db)
+    user = _require_user(request, db)
+    story = _require_story_for_user(story_id, user, db)
+
+    # Read all chapters, concatenate first 5 chapters' novel_content
+    chapters = (
+        db.query(Chapter)
+        .filter(Chapter.story_id == story_id)
+        .order_by(Chapter.chapter_number.asc())
+        .all()
+    )
+    content_parts = []
+    for ch in chapters[:5]:
+        if ch.novel_content:
+            content_parts.append(ch.novel_content)
+    combined = "\n\n".join(content_parts)
+    if not combined.strip():
+        raise HTTPException(400, "故事还没有正文内容可分析，请先创作至少一个章节")
+
+    _check_and_consume_advanced_text_quota(request, user.id, db, deduct=False)
+    try:
+        api_key = _user_deepseek_api_key(request)
+        framework = await analyze_content_framework(combined, api_key=api_key)
+
+        tags = framework.get("tags") if isinstance(framework.get("tags"), dict) else {}
+        characters = framework.get("characters") if isinstance(framework.get("characters"), list) else []
+        outline = framework.get("outline") if isinstance(framework.get("outline"), dict) else {}
+
+        if tags:
+            story.tags = tags
+        if characters:
+            story.characters = _normalize_characters_payload(characters)
+        if outline:
+            story.outline = outline
+        db.commit()
+        _check_and_consume_advanced_text_quota(request, user.id, db, deduct=True)
+        db.refresh(story)
+
+        return FrameworkAnalyzeResponse(
+            tags=story.tags,
+            characters=story.characters,
+            outline=story.outline,
+        )
+    except Exception as exc:
+        db.rollback()
+        logger.error("Framework analysis failed for story %s: %s", story_id, exc)
+        raise HTTPException(502, f"AI分析失败: {exc}")
 
 
 if __name__ == "__main__":

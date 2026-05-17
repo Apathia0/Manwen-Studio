@@ -5,6 +5,8 @@ import {
   Pencil,
   Trash2,
   ImagePlus,
+  Upload,
+  Download,
   ChevronRight,
   X,
   Check,
@@ -13,6 +15,7 @@ import {
 } from 'lucide-react';
 import {
   listStories,
+  listChapters,
   createStory,
   updateStory,
   deleteStory,
@@ -27,6 +30,8 @@ import {
   type Story,
   type RefImage,
 } from '../api';
+import { exportStoryAsZip } from '../lib/exportStory';
+import ImportDialog from './ImportDialog';
 
 interface Props {
   onSelectStory: (story: Story) => void;
@@ -38,8 +43,10 @@ export default function HomePage({ onSelectStory }: Props) {
 
   // New story dialog
   const [showNew, setShowNew] = useState(false);
+  const [showImportDialog, setShowImportDialog] = useState(false);
   const [newTitle, setNewTitle] = useState('');
   const [newDesc, setNewDesc] = useState('');
+  const [exportingStoryId, setExportingStoryId] = useState<number | null>(null);
 
   // Edit mode
   const [editingId, setEditingId] = useState<number | null>(null);
@@ -154,7 +161,7 @@ export default function HomePage({ onSelectStory }: Props) {
     loadStories();
   }, []);
 
-  const loadStories = async () => {
+  const loadStories = async (): Promise<Story[]> => {
     try {
       const list = await listStories();
       setStories(list);
@@ -166,6 +173,7 @@ export default function HomePage({ onSelectStory }: Props) {
         list.map((s) => [s.id, !!s.has_ref_image])
       );
       setStoryRefFlags(refFlags);
+      return list;
     } finally {
       setLoading(false);
     }
@@ -187,6 +195,29 @@ export default function HomePage({ onSelectStory }: Props) {
     if (!confirm('确定要删除这本小说吗？所有章节、对话、漫画都将被永久删除！')) return;
     await deleteStory(id);
     setStories((prev) => prev.filter((s) => s.id !== id));
+  };
+
+  const handleExport = async (story: Story) => {
+    setExportingStoryId(story.id);
+    try {
+      const chapters = await listChapters(story.id);
+      await exportStoryAsZip({ story, chapters });
+    } catch (err: any) {
+      alert(`导出失败: ${err.message}`);
+    } finally {
+      setExportingStoryId(null);
+    }
+  };
+
+  const handleImportComplete = async (storyId: number) => {
+    try {
+      const list = await loadStories();
+      const imported = list.find((story) => story.id === storyId);
+      setShowImportDialog(false);
+      if (imported) onSelectStory(imported);
+    } catch (err: any) {
+      alert(`导入完成后刷新失败: ${err.message}`);
+    }
   };
 
   const startEdit = (s: Story) => {
@@ -280,6 +311,16 @@ export default function HomePage({ onSelectStory }: Props) {
 
       {/* Content */}
       <main className="max-w-6xl mx-auto px-6 py-8">
+        <div className="mb-6 flex justify-end">
+          <button
+            onClick={() => setShowImportDialog(true)}
+            className="flex items-center gap-2 px-4 py-2.5 bg-gray-900 hover:bg-gray-800
+                       text-gray-200 text-sm font-medium rounded-lg transition-colors border border-gray-700"
+          >
+            <Upload size={16} />
+            导入小说
+          </button>
+        </div>
         {/* New story dialog */}
         {showNew && (
           <div className="mb-8 bg-gray-900 border border-gray-700 rounded-xl p-6 shadow-2xl">
@@ -443,6 +484,17 @@ export default function HomePage({ onSelectStory }: Props) {
                             title={storyRefFlags[s.id] ? '默认垫图（已设定）' : '设置默认垫图'}
                           >
                             <ImagePlus size={13} />
+                          </button>
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              void handleExport(s);
+                            }}
+                            disabled={exportingStoryId === s.id}
+                            className="p-1.5 text-gray-600 hover:text-sky-300 transition-colors rounded disabled:opacity-50 disabled:cursor-not-allowed"
+                            title="导出"
+                          >
+                            {exportingStoryId === s.id ? <Loader2 size={13} className="animate-spin" /> : <Download size={13} />}
                           </button>
                           <button
                             onClick={(e) => {
@@ -651,6 +703,11 @@ export default function HomePage({ onSelectStory }: Props) {
           </div>
         </div>
       )}
+      <ImportDialog
+        open={showImportDialog}
+        onClose={() => setShowImportDialog(false)}
+        onImportComplete={handleImportComplete}
+      />
     </div>
   );
 }

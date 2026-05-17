@@ -186,6 +186,32 @@ export interface FrameworkGenerateResponse {
   chapters?: { act: string; chapter_number: number; title: string }[];
 }
 
+export interface ImportChapterInfo {
+  chapter_number: number;
+  title: string;
+  content: string;
+  detection_method?: string;
+}
+
+export interface ImportParseResponse {
+  detected_title: string;
+  chapters: ImportChapterInfo[];
+  total_word_count?: number;
+}
+
+export interface ImportCreateRequest {
+  title: string;
+  chapters: ImportChapterInfo[];
+  analyze_framework?: boolean;
+}
+
+export interface FrameworkAnalyzeResponse {
+  tags?: Tags;
+  characters?: Character[];
+  outline?: Outline;
+  chapters?: { act: string; chapter_number: number; title: string }[];
+}
+
 export interface OutlineChapterPlanInput {
   title: string;
   summary?: string;
@@ -1462,6 +1488,37 @@ export async function generateFramework(storyId: number, description: string): P
     body: JSON.stringify({ description }),
   });
   if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function parseImportFile(file: File): Promise<ImportParseResponse> {
+  const formData = new FormData();
+  formData.append('file', file);
+  const res = await fetch(`${BASE}/api/import/parse`, {
+    method: 'POST',
+    headers: apiHeaders(),
+    body: formData,
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '导入解析失败'));
+  return res.json();
+}
+
+export async function createImportStory(payload: ImportCreateRequest): Promise<Story> {
+  const res = await fetch(`${BASE}/api/import/create`, {
+    method: 'POST',
+    headers: apiHeaders(true),
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '导入创建失败'));
+  return res.json();
+}
+
+export async function analyzeFramework(storyId: number): Promise<FrameworkAnalyzeResponse> {
+  const res = await fetch(`${BASE}/api/stories/${storyId}/framework/analyze`, {
+    method: 'POST',
+    headers: apiHeaders(),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '框架分析失败'));
   return res.json();
 }
 

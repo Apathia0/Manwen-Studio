@@ -189,5 +189,40 @@ class ScenesFromSelectionResponse(BaseModel):
     scenes: list[dict[str, Any]] = []
 
 
+# --- Import/Export ---
+class ImportParseResponse(BaseModel):
+    detected_title: str = ""
+    chapters: list[ImportChapterInfo] = []
+    total_word_count: int = 0
+
+
+class ImportChapterInfo(BaseModel):
+    chapter_number: int
+    title: str = ""
+    content: str = ""
+    detection_method: str = "regex"  # "regex" | "ai"
+
+
+class ImportCreateRequest(BaseModel):
+    title: str
+    description: str = ""
+    chapters: list[ImportChapterCreate] = []
+    analyze_framework: bool = True
+
+
+class ImportChapterCreate(BaseModel):
+    chapter_number: int
+    title: str = ""
+    content: str = ""
+    act: str | None = None
+    key_events: list[str] = []
+
+
+class FrameworkAnalyzeResponse(BaseModel):
+    tags: dict | None = None
+    characters: list[dict] | None = None
+    outline: dict | None = None
+
+
 # Resolve forward references
 ChapterOut.model_rebuild()
