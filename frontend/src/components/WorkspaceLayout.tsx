@@ -3,6 +3,7 @@ import { type Story, type Chapter, type EntitlementResponse } from '../api';
 import FrameworkPanel from './FrameworkPanel';
 import EditorPanel from './EditorPanel';
 import MangaPanel from './MangaPanel';
+import StoryBibleSummaryCard from './StoryBibleSummaryCard';
 
 interface Props {
   story: Story;
@@ -41,48 +42,59 @@ export default function WorkspaceLayout({
   );
 
   return (
-    <div className="flex h-full min-h-0 gap-4 bg-[linear-gradient(180deg,_#f4f8ff_0%,_#eef4ff_100%)] p-4">
-      {!mangaPreviewMode && (
-      <div className="w-[320px] shrink-0 overflow-y-auto rounded-[24px] border border-[#d7e3f4] bg-[rgba(255,255,255,0.92)] shadow-[0_18px_42px_rgba(59,130,246,0.12)] backdrop-blur-xl">
-        <FrameworkPanel
-          story={story}
-          chapters={chapters}
-          onChapterSelect={handleChapterSelect}
-          onFrameworkUpdate={onContentUpdated}
-        />
-      </div>
+    <div className="flex h-full min-h-0 flex-col gap-3 bg-[linear-gradient(180deg,_#f4f8ff_0%,_#eef4ff_100%)] p-4">
+      {story.story_bible?.creative_brief && (
+        <div className="shrink-0">
+          <StoryBibleSummaryCard
+            storyId={story.id}
+            storyBible={story.story_bible}
+            onUpdated={onContentUpdated}
+          />
+        </div>
       )}
+      <div className="flex min-h-0 flex-1 gap-4">
+        {!mangaPreviewMode && (
+        <div className="w-[320px] shrink-0 overflow-y-auto rounded-[24px] border border-[#d7e3f4] bg-[rgba(255,255,255,0.92)] shadow-[0_18px_42px_rgba(59,130,246,0.12)] backdrop-blur-xl">
+          <FrameworkPanel
+            story={story}
+            chapters={chapters}
+            onChapterSelect={handleChapterSelect}
+            onFrameworkUpdate={onContentUpdated}
+          />
+        </div>
+        )}
 
-      {!mangaPreviewMode && (
-      <div className="flex-1 min-w-0 overflow-hidden rounded-[24px] border border-[#d7e3f4] bg-[rgba(255,255,255,0.92)] shadow-[0_18px_42px_rgba(59,130,246,0.12)] backdrop-blur-xl">
-        <EditorPanel
-          story={story}
-          chapters={chapters}
-          currentChapter={resolvedChapter}
-          onChapterChange={onChapterChange}
-          onContentUpdated={onContentUpdated}
-          onTextSelected={(text, context) => {
-            setSelectedText(text);
-            setChapterContext(context);
-          }}
-        />
-      </div>
-      )}
+        {!mangaPreviewMode && (
+        <div className="flex-1 min-w-0 overflow-hidden rounded-[24px] border border-[#d7e3f4] bg-[rgba(255,255,255,0.92)] shadow-[0_18px_42px_rgba(59,130,246,0.12)] backdrop-blur-xl">
+          <EditorPanel
+            story={story}
+            chapters={chapters}
+            currentChapter={resolvedChapter}
+            onChapterChange={onChapterChange}
+            onContentUpdated={onContentUpdated}
+            onTextSelected={(text, context) => {
+              setSelectedText(text);
+              setChapterContext(context);
+            }}
+          />
+        </div>
+        )}
 
-      <div className={`${mangaPreviewMode ? 'flex-1' : 'w-[400px] shrink-0'} min-w-0 overflow-y-auto rounded-[24px] border border-[#d7e3f4] bg-[rgba(255,255,255,0.92)] shadow-[0_18px_42px_rgba(59,130,246,0.12)] backdrop-blur-xl`}>
-        <MangaPanel
-          chapter={resolvedChapter}
-          entitlements={entitlements}
-          onChapterRefresh={onContentUpdated}
-          selectedText={selectedText}
-          chapterContext={chapterContext as { characters?: any[] } | undefined}
-          isWorkspacePreviewMode={mangaPreviewMode}
-          onWorkspacePreviewModeChange={setMangaPreviewMode}
-          onClearSelection={() => {
-            setSelectedText('');
-            setChapterContext(undefined);
-          }}
-        />
+        <div className={`${mangaPreviewMode ? 'flex-1' : 'w-[400px] shrink-0'} min-w-0 overflow-y-auto rounded-[24px] border border-[#d7e3f4] bg-[rgba(255,255,255,0.92)] shadow-[0_18px_42px_rgba(59,130,246,0.12)] backdrop-blur-xl`}>
+          <MangaPanel
+            chapter={resolvedChapter}
+            entitlements={entitlements}
+            onChapterRefresh={onContentUpdated}
+            selectedText={selectedText}
+            chapterContext={chapterContext as { characters?: any[] } | undefined}
+            isWorkspacePreviewMode={mangaPreviewMode}
+            onWorkspacePreviewModeChange={setMangaPreviewMode}
+            onClearSelection={() => {
+              setSelectedText('');
+              setChapterContext(undefined);
+            }}
+          />
+        </div>
       </div>
     </div>
   );

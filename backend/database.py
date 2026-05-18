@@ -56,6 +56,19 @@ def _migrate():
                 conn.execute(text("ALTER TABLE stories ADD COLUMN outline JSON"))
             if "characters" not in cols:
                 conn.execute(text("ALTER TABLE stories ADD COLUMN characters JSON"))
+            if "story_bible" not in cols:
+                conn.execute(text("ALTER TABLE stories ADD COLUMN story_bible JSON"))
+            if "story_memory" not in cols:
+                conn.execute(text("ALTER TABLE stories ADD COLUMN story_memory JSON"))
+            if "onboarding_completed" not in cols:
+                conn.execute(text("ALTER TABLE stories ADD COLUMN onboarding_completed BOOLEAN DEFAULT FALSE"))
+                conn.execute(text("UPDATE stories SET onboarding_completed = FALSE WHERE onboarding_completed IS NULL"))
+            if "source_type" not in cols:
+                conn.execute(text("ALTER TABLE stories ADD COLUMN source_type VARCHAR(20) DEFAULT 'manual'"))
+                conn.execute(text("UPDATE stories SET source_type = 'manual' WHERE source_type IS NULL"))
+            if "import_context_completed" not in cols:
+                conn.execute(text("ALTER TABLE stories ADD COLUMN import_context_completed BOOLEAN DEFAULT TRUE"))
+                conn.execute(text("UPDATE stories SET import_context_completed = TRUE WHERE import_context_completed IS NULL"))
     if "chapters" in insp.get_table_names():
         cols = {c["name"] for c in insp.get_columns("chapters")}
         with engine.begin() as conn:
@@ -69,6 +82,8 @@ def _migrate():
                 conn.execute(text("ALTER TABLE chapters ADD COLUMN key_events JSON"))
             if "quality_score" not in cols:
                 conn.execute(text("ALTER TABLE chapters ADD COLUMN quality_score JSON"))
+            if "memory_summary" not in cols:
+                conn.execute(text("ALTER TABLE chapters ADD COLUMN memory_summary JSON"))
             if "status" not in cols:
                 conn.execute(text("ALTER TABLE chapters ADD COLUMN status VARCHAR(20) DEFAULT 'pending'"))
             if "word_count" not in cols:

@@ -33,14 +33,17 @@ function getBigFiveValue(scores: BigFiveScores | undefined, trait: 'O' | 'C' | '
 }
 
 function BigFiveBar({ label, value, colorClass }: { label: string; value?: number; colorClass: string }) {
-  const pct = value !== undefined ? Math.max(0, Math.min(100, value)) : 50;
+  const pct = value !== undefined ? Math.max(0, Math.min(100, value)) : undefined;
   return (
     <div className="flex items-center gap-2 group">
       <span className="text-[11px] font-medium text-slate-500 w-6 shrink-0 text-center">{label}</span>
       <div className="flex-1 h-2 bg-slate-100 rounded-full overflow-hidden">
-        <div className={`h-full rounded-full transition-all duration-500 ${colorClass}`} style={{ width: `${pct}%` }} />
+        <div
+          className={`h-full rounded-full transition-all duration-500 ${colorClass}`}
+          style={{ width: `${pct ?? 0}%`, opacity: pct === undefined ? 0.25 : 1 }}
+        />
       </div>
-      <span className="text-[10px] text-slate-500 w-7 text-right tabular-nums">{pct}</span>
+      <span className="text-[10px] text-slate-500 w-7 text-right tabular-nums">{pct ?? '--'}</span>
     </div>
   );
 }

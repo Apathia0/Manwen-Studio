@@ -6,6 +6,11 @@ export interface FrameworkChapter {
   summary?: string;
   status?: string;
   key_events?: string[];
+  goal?: string;
+  conflict?: string;
+  hook?: string;
+  payoff?: string;
+  highlight?: string;
 }
 
 export const BIG_FIVE_LABELS: Record<string, string> = {

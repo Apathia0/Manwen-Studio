@@ -15,6 +15,8 @@ import {
 } from 'lucide-react';
 import PublicLanding from './components/PublicLanding';
 import StoryLibraryPage from './components/StoryLibraryPage';
+import ImportGuidancePage from './components/ImportGuidancePage';
+import OnboardingPage from './components/OnboardingPage';
 import WorkspaceLayout from './components/WorkspaceLayout';
 import {
   AdminAnnouncementPage,
@@ -83,6 +85,8 @@ type RouteKey =
   | 'register'
   | 'pricing'
   | 'stories'
+  | 'onboarding'
+  | 'import-guidance'
   | 'workspace'
   | 'account'
   | 'plan-config'
@@ -130,6 +134,8 @@ function App() {
   const [route, setRoute] = useState<RouteKey>('landing');
   const [stories, setStories] = useState<Story[]>([]);
   const [activeStory, setActiveStory] = useState<Story | null>(null);
+  const [onboardingStory, setOnboardingStory] = useState<Story | null>(null);
+  const [importGuidanceStory, setImportGuidanceStory] = useState<Story | null>(null);
   const [chapters, setChapters] = useState<Chapter[]>([]);
   const [activeChapterId, setActiveChapterId] = useState<number | null>(null);
   const [loadingStories, setLoadingStories] = useState(false);
@@ -288,6 +294,16 @@ function App() {
     setLoadingWorkspace(true);
     try {
       const [detail, chapterList] = await Promise.all([getStory(story.id), listChapters(story.id)]);
+      if (needsImportGuidance(detail)) {
+        setImportGuidanceStory(detail);
+        setRoute('import-guidance');
+        return;
+      }
+      if (!detail.onboarding_completed) {
+        setOnboardingStory(detail);
+        setRoute('onboarding');
+        return;
+      }
       setActiveStory(detail);
       setChapters(chapterList);
       setActiveChapterId(chapterList[0]?.id ?? null);
@@ -313,10 +329,25 @@ function App() {
     try {
       const next = await createStory(`新故事 ${stories.length + 1}`, '从这里开始你的下一段创作旅程');
       setStories((prev) => [next, ...prev]);
-      await openWorkspace(next);
+      setOnboardingStory(next);
+      setRoute('onboarding');
     } catch (error: any) {
       setGlobalError(error.message || '新建作品失败');
     }
+  }
+
+  async function handleOnboardingComplete(storyId: number) {
+    setOnboardingStory(null);
+    const story = await getStory(storyId);
+    setStories((prev) => prev.map((item) => (item.id === story.id ? story : item)));
+    await openWorkspace(story);
+  }
+
+  async function handleImportGuidanceComplete(storyId: number) {
+    setImportGuidanceStory(null);
+    const story = await getStory(storyId);
+    setStories((prev) => prev.map((item) => (item.id === story.id ? story : item)));
+    await openWorkspace(story);
   }
 
   async function createStoryDraft(title: string, description: string) {
@@ -324,27 +355,6 @@ function App() {
     setStories((prev) => [next, ...prev]);
     setGlobalError(null);
     return next;
-  }
-
-  async function openImportedStory(storyId: number) {
-    try {
-      setLoadingWorkspace(true);
-      const [storyList, detail, chapterList] = await Promise.all([
-        listStories(),
-        getStory(storyId),
-        listChapters(storyId),
-      ]);
-      setStories(storyList);
-      setActiveStory(detail);
-      setChapters(chapterList);
-      setActiveChapterId(chapterList[0]?.id ?? null);
-      setRoute('workspace');
-      setGlobalError(null);
-    } catch (error: any) {
-      setGlobalError(error.message || '导入作品后打开失败');
-    } finally {
-      setLoadingWorkspace(false);
-    }
   }
 
   async function updateStoryDraft(storyId: number, payload: { title?: string; description?: string }) {
@@ -772,11 +782,30 @@ function App() {
               onRefresh={refreshStories}
               onCreate={createNewStory}
               onCreateDraft={createStoryDraft}
-              onImportComplete={openImportedStory}
               onUpdateStory={updateStoryDraft}
               onDeleteStory={deleteStoryDraft}
               onOpen={openWorkspace}
               loadingWorkspace={loadingWorkspace}
+            />
+          )}
+          {route === 'onboarding' && onboardingStory && (
+            <OnboardingPage
+              story={onboardingStory}
+              onComplete={handleOnboardingComplete}
+              onBack={() => {
+                setOnboardingStory(null);
+                setRoute('stories');
+              }}
+            />
+          )}
+          {route === 'import-guidance' && importGuidanceStory && (
+            <ImportGuidancePage
+              story={importGuidanceStory}
+              onComplete={handleImportGuidanceComplete}
+              onBack={() => {
+                setImportGuidanceStory(null);
+                setRoute('stories');
+              }}
             />
           )}
           {route === 'workspace' && (
@@ -872,6 +901,18 @@ function App() {
       />
     </div>
   );
+}
+
+function needsImportGuidance(story: Story | null | undefined): boolean {
+  if (!story || story.source_type !== 'import') return false;
+  if (story.import_context_completed) return false;
+  const creativeBrief = story.story_bible?.creative_brief;
+  const hasSummary = Boolean(
+    creativeBrief?.one_line_premise ||
+    creativeBrief?.project_positioning ||
+    creativeBrief?.main_conflict,
+  );
+  return !hasSummary || !story.story_bible?.import_guidance;
 }
 
 function PublicSite({

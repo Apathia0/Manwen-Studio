@@ -51,13 +51,18 @@ from schemas import (
     ChapterOut,
     ChatMessageIn,
     ChatMessageOut,
+    CreativeBriefOut,
     FrameworkAnalyzeResponse,
     ImportChapterCreate,
     ImportChapterInfo,
     ImportCreateRequest,
     ImportParseResponse,
     MangaImageOut,
+    OnboardingConfirmIn,
+    OnboardingMessageIn,
+    OnboardingMessageOut,
     OutlineChapterPlanUpdate,
+    StoryBibleUpdate,
     StoryCreate,
     StoryOut,
     StoryUpdate,
@@ -67,19 +72,25 @@ from services.deepseek import (
     adjust_framework_with_chat,
     analyze_import_material,
     analyze_content_framework,
+    build_creative_brief,
+    build_import_creative_brief,
+    build_story_bible,
     chat_stream,
     continue_framework,
     expand_chapter_to_content,
     generate_character_profiles_from_framework,
     generate_framework,
+    generate_import_guidance_response,
+    generate_onboarding_response,
     generate_novel,
     quality_assess,
-    regenerate_characters,
+    regenerate_characters_with_variance,
     regenerate_outline,
     regenerate_tags,
     rewrite_selection,
     scenes_from_selection,
     split_scenes,
+    summarize_chapter_memory,
 )
 from services.errors import MangaImageGenerationError, MissingApiKeyError
 from services.image2 import edit_existing_image, generate_manga_image, generate_reference_image
@@ -91,8 +102,17 @@ from services import alipay_f2f
 load_dotenv()
 
 logger = logging.getLogger("main")
+logging.getLogger("watchfiles.main").setLevel(logging.WARNING)
+logging.getLogger("watchfiles.watcher").setLevel(logging.WARNING)
 ACTIVE_MANGA_GENERATIONS: set[int] = set()
 MONEY_QUANT = Decimal("0.01")
+
+
+def _default_reload_enabled() -> bool:
+    env_value = os.getenv("RELOAD")
+    if env_value is not None:
+        return env_value.lower() == "true"
+    return os.name != "nt"
 
 FEATURE_CATALOG: list[dict] = [
     {
@@ -254,8 +274,8 @@ def _platform_settings_snapshot(db: Session) -> dict:
             "icon_url": _platform_icon_url(db),
         },
         "api": {
-            "deepseek_base_url": _get_platform_setting("api.deepseek.base_url", db, "https://api.deepseek.com"),
-            "deepseek_model": _get_platform_setting("api.deepseek.model", db, "deepseek-chat"),
+            "deepseek_base_url": _get_platform_setting("api.deepseek.base_url", db, deepseek_service.DEEPSEEK_BASE_URL),
+            "deepseek_model": _get_platform_setting("api.deepseek.model", db, deepseek_service.DEEPSEEK_MODEL),
             "deepseek_api_key": _get_platform_setting("api.deepseek.api_key", db, ""),
             "image_base_url": _get_platform_setting("api.image.base_url", db, "https://api.xbyjs.top/v1"),
             "image_model": _get_platform_setting("api.image.model", db, "default"),
@@ -456,8 +476,10 @@ def _user_deepseek_api_key(request: Request) -> str | None:
     admin_model = str(_get_platform_setting("api.deepseek.model", db, deepseek_service.DEEPSEEK_MODEL)).strip()
     resolved_base_url = override_base_url.strip() if capabilities["can_override_api_url"] and override_base_url and override_base_url.strip() else admin_base_url
     resolved_model = override_model.strip() if capabilities["can_override_api_url"] and override_model and override_model.strip() else admin_model
-    deepseek_service.DEEPSEEK_BASE_URL = resolved_base_url.rstrip("/") or deepseek_service.DEEPSEEK_BASE_URL
-    deepseek_service.DEEPSEEK_MODEL = resolved_model or deepseek_service.DEEPSEEK_MODEL
+    deepseek_service.configure_runtime(
+        base_url=resolved_base_url.rstrip("/") or deepseek_service.DEEPSEEK_BASE_URL,
+        model=resolved_model or deepseek_service.DEEPSEEK_MODEL,
+    )
     if capabilities["can_override_api_key"] and override:
         return override
     return _get_platform_setting("api.deepseek.api_key", db, "") or None
@@ -789,8 +811,8 @@ def _seed_platform_settings(db: Session) -> None:
         "platform.icp": "",
         "platform.copyright": "© StoryCanvas",
         "platform.notice": "欢迎使用企业级 AI 小说漫画创作平台。",
-        "api.deepseek.base_url": "https://api.deepseek.com",
-        "api.deepseek.model": "deepseek-chat",
+        "api.deepseek.base_url": deepseek_service.DEEPSEEK_BASE_URL,
+        "api.deepseek.model": deepseek_service.DEEPSEEK_MODEL,
         "api.deepseek.api_key": "",
         "api.image.base_url": "https://api.xbyjs.top/v1",
         "api.image.model": "default",
@@ -879,6 +901,129 @@ def _require_story_for_user(story_id: int, user: User, db: Session) -> Story:
     if story.owner_user_id != user.id:
         raise HTTPException(403, "Story access denied")
     return story
+
+
+def _is_import_story(story: Story) -> bool:
+    return str(getattr(story, "source_type", "manual") or "manual").strip().lower() == "import"
+
+
+def _truncate_text(value: str, limit: int = 180) -> str:
+    text = str(value or "").strip()
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 1)].rstrip() + "…"
+
+
+def _build_import_guidance_context(story: Story, db: Session) -> dict[str, Any]:
+    chapters = (
+        db.query(Chapter)
+        .filter(Chapter.story_id == story.id)
+        .order_by(Chapter.chapter_number.asc())
+        .all()
+    )
+    non_empty_chapters = [chapter for chapter in chapters if str(chapter.novel_content or "").strip()]
+    content_kind = "chapter_manuscript" if non_empty_chapters else "outline_source"
+    chapter_cards: list[dict[str, Any]] = []
+    for chapter in chapters[:12]:
+        memory_summary = chapter.memory_summary if isinstance(chapter.memory_summary, dict) else {}
+        chapter_cards.append(
+            {
+                "chapter_number": chapter.chapter_number,
+                "title": chapter.title or f"第{chapter.chapter_number}章",
+                "act": chapter.act or "",
+                "summary": memory_summary.get("summary")
+                or _truncate_text(chapter.novel_content or "", 180),
+                "key_events": chapter.key_events or [],
+            }
+        )
+
+    creative_brief = {}
+    if isinstance(story.story_bible, dict):
+        creative_brief = story.story_bible.get("creative_brief") if isinstance(story.story_bible.get("creative_brief"), dict) else {}
+
+    return {
+        "story_id": story.id,
+        "title": story.title,
+        "description": story.description or "",
+        "import_material_type_hint": content_kind,
+        "chapter_count": len(chapters),
+        "has_outline": bool(story.outline),
+        "has_characters": isinstance(story.characters, list) and len(story.characters) > 0,
+        "tags": story.tags or {},
+        "outline_compact": _build_outline_compact(story.outline or {}, recent_chapter_limit=16),
+        "characters_compact": [
+            {
+                "name": str(item.get("name") or "").strip(),
+                "role": str(item.get("role") or "").strip(),
+            }
+            for item in (story.characters or [])[:8]
+            if isinstance(item, dict) and (item.get("name") or item.get("role"))
+        ],
+        "chapter_cards": chapter_cards,
+        "existing_creative_brief": creative_brief,
+    }
+
+
+def _compose_import_raw_input(
+    import_context: dict[str, Any],
+    collected_info: dict[str, Any],
+    messages_raw: list[dict[str, Any]],
+) -> dict[str, str]:
+    all_raw = "\n".join(
+        f"{'作者' if m.get('role') == 'user' else 'AI'}: {m.get('content', '')}"
+        for m in messages_raw
+        if isinstance(m, dict)
+    )
+    return {
+        "raw_idea": str(collected_info.get("author_goal") or import_context.get("description") or "").strip(),
+        "raw_length_goal": str(collected_info.get("longline_plan") or "").strip(),
+        "raw_must_keep": str(collected_info.get("must_keep") or "").strip(),
+        "raw_hidden_setting": str(collected_info.get("tone_guardrails") or "").strip(),
+        "raw_notes": (
+            "【导入作品上下文】\n"
+            + json.dumps(import_context, ensure_ascii=False, indent=2)
+            + "\n\n【作者补充要求】\n"
+            + json.dumps(collected_info, ensure_ascii=False, indent=2)
+            + "\n\n【对话记录】\n"
+            + all_raw
+        ).strip(),
+    }
+
+
+def _build_import_guidance_payload(collected_info: dict[str, Any], import_context: dict[str, Any]) -> dict[str, Any]:
+    guidance: dict[str, Any] = {
+        "context_source": "import_guidance",
+        "import_material_type": str(
+            collected_info.get("import_material_type") or import_context.get("import_material_type_hint") or ""
+        ).strip(),
+        "must_keep": str(collected_info.get("must_keep") or "").strip(),
+        "author_goal": str(collected_info.get("author_goal") or "").strip(),
+        "adjustment_scope": str(collected_info.get("adjustment_scope") or "").strip(),
+        "longline_plan": str(collected_info.get("longline_plan") or "").strip(),
+        "tone_guardrails": str(collected_info.get("tone_guardrails") or "").strip(),
+    }
+    return {key: value for key, value in guidance.items() if value}
+
+
+async def _build_import_provisional_story_bible(
+    story: Story,
+    db: Session,
+    api_key: str | None = None,
+) -> dict[str, Any] | None:
+    import_context = _build_import_guidance_context(story, db)
+    raw_input = _compose_import_raw_input(import_context, {}, [])
+    creative_brief = await build_import_creative_brief(
+        import_context,
+        {},
+        api_key=api_key,
+    )
+    story_bible = await build_story_bible(
+        creative_brief,
+        raw_input,
+        api_key=api_key,
+    )
+    story_bible["import_guidance"] = _build_import_guidance_payload({}, import_context)
+    return story_bible
 
 
 def _require_chapter_for_user(chapter_id: int, user: User, db: Session) -> Chapter:
@@ -1386,6 +1531,53 @@ def _build_framework_context(story: Story | None, chapter: Chapter | None = None
     if not story:
         return ""
     parts = []
+    story_bible = story.story_bible if isinstance(story.story_bible, dict) else {}
+    creative_brief = story_bible.get("creative_brief") if isinstance(story_bible.get("creative_brief"), dict) else {}
+    writing_guidance = story_bible.get("writing_guidance") if isinstance(story_bible.get("writing_guidance"), dict) else {}
+    import_guidance = story_bible.get("import_guidance") if isinstance(story_bible.get("import_guidance"), dict) else {}
+    if creative_brief:
+        bible_summary = {
+            "作品定位": creative_brief.get("project_positioning"),
+            "一句话梗概": creative_brief.get("one_line_premise"),
+            "核心卖点": creative_brief.get("core_hook"),
+            "主角核心": creative_brief.get("protagonist_core"),
+            "主线矛盾": creative_brief.get("main_conflict"),
+            "长线悬念": creative_brief.get("longline_mystery"),
+            "目标篇幅": creative_brief.get("serial_length_target"),
+            "揭秘策略": creative_brief.get("reveal_strategy"),
+            "节奏策略": creative_brief.get("pacing_strategy"),
+            "必保留设定": creative_brief.get("must_keep_rules"),
+        }
+        parts.append(f"作品圣经摘要: {json.dumps(bible_summary, ensure_ascii=False)}")
+    if writing_guidance:
+        guidance_summary = {
+            "开书策略": writing_guidance.get("opening_strategy"),
+            "章节密度策略": writing_guidance.get("chapter_density_strategy"),
+            "中段驱动力": writing_guidance.get("midgame_engine"),
+            "后期方向": writing_guidance.get("late_game_direction"),
+            "避免模式": writing_guidance.get("forbidden_patterns"),
+            "推荐情节模式": writing_guidance.get("preferred_plot_patterns"),
+        }
+        parts.append(f"作品圣经写作指导: {json.dumps(guidance_summary, ensure_ascii=False)}")
+    if import_guidance:
+        import_summary = {
+            "导入材料类型": import_guidance.get("import_material_type"),
+            "必须保留": import_guidance.get("must_keep"),
+            "后续创作目标": import_guidance.get("author_goal"),
+            "允许调整范围": import_guidance.get("adjustment_scope"),
+            "长线计划": import_guidance.get("longline_plan"),
+            "风格边界": import_guidance.get("tone_guardrails"),
+        }
+        parts.append(
+            "导入作品作者约束: "
+            + json.dumps(import_summary, ensure_ascii=False)
+            + "。如与自由发挥冲突，优先遵守这些导入作品约束。"
+        )
+    story_memory = story.story_memory if isinstance(story.story_memory, dict) else {}
+    if story_memory:
+        memory_summary = _build_story_memory_compact(story_memory)
+        if memory_summary:
+            parts.append(f"作品连续性记忆: {json.dumps(memory_summary, ensure_ascii=False)}")
     if story.tags:
         parts.append(f"故事标签: {json.dumps(story.tags, ensure_ascii=False)}")
     if story.characters:
@@ -1397,6 +1589,10 @@ def _build_framework_context(story: Story | None, chapter: Chapter | None = None
             parts.append(f"当前章节所属幕: {chapter.act}")
         if chapter.key_events:
             parts.append(f"本章关键事件: {json.dumps(chapter.key_events, ensure_ascii=False)}")
+        raw_goal_card = getattr(chapter, "goal_card", None)
+        goal_card = raw_goal_card if isinstance(raw_goal_card, dict) else {}
+        if goal_card:
+            parts.append(f"本章目标卡: {json.dumps(goal_card, ensure_ascii=False)}")
     return "\n".join(parts)
 
 
@@ -1419,6 +1615,46 @@ def _normalize_key_events(raw) -> list[str] | None:
         text = raw.strip()
         return [text] if text else None
     return [str(raw).strip()] if str(raw).strip() else None
+
+
+def _coerce_chapter_number(raw) -> int | None:
+    if isinstance(raw, bool):
+        return None
+    if isinstance(raw, int):
+        return raw if raw > 0 else None
+    if isinstance(raw, float):
+        return int(raw) if raw.is_integer() and raw > 0 else None
+    if isinstance(raw, str):
+        text = raw.strip()
+        if not text:
+            return None
+        if text.isdigit():
+            value = int(text)
+            return value if value > 0 else None
+        match = re.search(r"\d+", text)
+        if match:
+            value = int(match.group(0))
+            return value if value > 0 else None
+    return None
+
+
+def _normalize_chapter_plan_meta(raw: dict | None) -> dict[str, Any]:
+    raw = raw if isinstance(raw, dict) else {}
+    payload: dict[str, Any] = {}
+
+    summary = str(raw.get("summary") or "").strip()
+    if summary:
+        payload["summary"] = summary
+
+    key_events = _normalize_key_events(raw.get("key_events"))
+    if key_events:
+        payload["key_events"] = key_events
+
+    for field in ("goal", "conflict", "hook", "payoff", "highlight"):
+        value = str(raw.get(field) or "").strip()
+        if value:
+            payload[field] = value
+    return payload
 
 
 def _normalize_act_token(value) -> str:
@@ -1501,21 +1737,16 @@ def _normalize_framework_outline(outline: dict | None, chapters: list | None) ->
                 continue
             raw_act_key = str(item.get("act") or "").strip()
             act_key = act_alias_map.get(_normalize_act_token(raw_act_key), raw_act_key)
-            chapter_number = item.get("chapter_number")
+            chapter_number = _coerce_chapter_number(item.get("chapter_number"))
             title = str(item.get("title") or "").strip()
-            if not isinstance(chapter_number, int) or chapter_number < 1 or not title:
+            if chapter_number is None or not title:
                 continue
             chapter_entry = {
                 "chapter_number": chapter_number,
                 "title": title,
                 "act": act_key or raw_act_key,
             }
-            key_events = _normalize_key_events(item.get("key_events"))
-            if key_events:
-                chapter_entry["key_events"] = key_events
-            summary = item.get("summary")
-            if isinstance(summary, str) and summary.strip():
-                chapter_entry["summary"] = summary.strip()
+            chapter_entry.update(_normalize_chapter_plan_meta(item))
             chapter_groups.setdefault(act_key, []).append(chapter_entry)
 
     next_unassigned: list[dict] = chapter_groups.pop("", [])
@@ -1578,9 +1809,9 @@ def _extract_outline_chapters(outline: dict | None) -> list[dict]:
         for item in chapters:
             if not isinstance(item, dict):
                 continue
-            chapter_number = item.get("chapter_number")
+            chapter_number = _coerce_chapter_number(item.get("chapter_number"))
             title = str(item.get("title") or "").strip()
-            if not isinstance(chapter_number, int) or chapter_number < 1 or not title:
+            if chapter_number is None or not title:
                 continue
             chapter_entry = dict(item)
             chapter_entry["chapter_number"] = chapter_number
@@ -1599,9 +1830,9 @@ def _merge_chapter_plans(existing: list[dict] | None, incoming: list[dict] | Non
         for item in items:
             if not isinstance(item, dict):
                 continue
-            chapter_number = item.get("chapter_number")
+            chapter_number = _coerce_chapter_number(item.get("chapter_number"))
             title = str(item.get("title") or "").strip()
-            if not isinstance(chapter_number, int) or chapter_number < 1 or not title:
+            if chapter_number is None or not title:
                 continue
             normalized = dict(item)
             normalized["chapter_number"] = chapter_number
@@ -1731,8 +1962,503 @@ def _has_complete_outline(outline: dict | None) -> bool:
     return True
 
 
-async def _complete_framework_payload(framework: dict | None, description: str, api_key: str | None = None) -> dict:
+def _character_big_five_vector(character: dict | None) -> dict[str, int] | None:
+    if not isinstance(character, dict):
+        return None
+    scores = character.get("big_five")
+    if not isinstance(scores, dict) or not _has_complete_big_five(scores):
+        return None
+    vector: dict[str, int] = {}
+    alias_map = {
+        "O": ("O", "openness"),
+        "C": ("C", "conscientiousness"),
+        "E": ("E", "extraversion"),
+        "A": ("A", "agreeableness"),
+        "N": ("N", "neuroticism"),
+    }
+    for target, aliases in alias_map.items():
+        value = None
+        for key in aliases:
+            if scores.get(key) not in (None, ""):
+                value = scores.get(key)
+                break
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            return None
+        if numeric <= 10:
+            numeric *= 10
+        vector[target] = max(0, min(100, int(round(numeric))))
+    return vector
+
+
+def _characters_big_five_feel_generic(characters) -> bool:
+    if not isinstance(characters, list) or len(characters) < 2:
+        return False
+    vectors: list[dict[str, int]] = []
+    for item in characters:
+        vector = _character_big_five_vector(item)
+        if vector:
+            vectors.append(vector)
+    if len(vectors) < 2:
+        return False
+
+    unique_vectors = {
+        tuple(vector[key] for key in ("O", "C", "E", "A", "N"))
+        for vector in vectors
+    }
+    if len(unique_vectors) <= 1:
+        return True
+
+    dimensions = ("O", "C", "E", "A", "N")
+    spread_by_dimension = {
+        key: max(vector[key] for vector in vectors) - min(vector[key] for vector in vectors)
+        for key in dimensions
+    }
+    # If every trait differs only a little across the cast, the result is still too flat.
+    return max(spread_by_dimension.values()) < 15
+
+
+def _has_opening_ready_outline(outline: dict | None) -> bool:
+    if not isinstance(outline, dict):
+        return False
+    acts = outline.get("three_acts")
+    if not isinstance(acts, list) or len(acts) < 2:
+        return False
+    chapters = _extract_outline_chapters(outline)
+    if len(chapters) < 10:
+        return False
+    strategy = _read_serial_strategy(outline)
+    required_strategy_fields = [
+        "positioning",
+        "opening_hook",
+        "first_3_chapter_hook",
+        "chapter_10_climax",
+    ]
+    if any(not str(strategy.get(field) or "").strip() for field in required_strategy_fields):
+        return False
+    first_chapter = next((item for item in chapters if item.get("chapter_number") == 1), None)
+    if not first_chapter:
+        return False
+    if not str(first_chapter.get("summary") or "").strip():
+        return False
+    if not str(first_chapter.get("hook") or "").strip():
+        return False
+    if _count_detailed_opening_chapters(chapters, upto=10) < 6:
+        return False
+    return True
+
+
+def _count_framework_chapters(framework: dict | None) -> int:
+    if not isinstance(framework, dict):
+        return 0
+    chapters = framework.get("chapters")
+    if isinstance(chapters, list) and chapters:
+        return len([item for item in chapters if isinstance(item, dict)])
+    return len(_extract_outline_chapters(framework.get("outline")))
+
+
+def _read_serial_strategy(outline: dict | None) -> dict[str, Any]:
+    if not isinstance(outline, dict):
+        return {}
+    raw = outline.get("serial_strategy")
+    return raw if isinstance(raw, dict) else {}
+
+
+def _count_detailed_opening_chapters(chapters: list[dict], upto: int = 10) -> int:
+    count = 0
+    for chapter in sorted(chapters, key=lambda item: int(item.get("chapter_number", 0))):
+        chapter_number = chapter.get("chapter_number")
+        if not isinstance(chapter_number, int) or chapter_number < 1 or chapter_number > upto:
+            continue
+        has_summary = bool(str(chapter.get("summary") or "").strip())
+        has_goal_like = any(
+            bool(str(chapter.get(field) or "").strip())
+            for field in ("goal", "conflict", "hook", "payoff", "highlight")
+        )
+        key_events = chapter.get("key_events")
+        has_events = isinstance(key_events, list) and any(str(item).strip() for item in key_events)
+        if has_summary and (has_goal_like or has_events):
+            count += 1
+    return count
+
+
+def _framework_launch_quality_issues(framework: dict | None) -> list[str]:
+    issues: list[str] = []
+    if not isinstance(framework, dict):
+        return ["返回结果不是有效框架对象"]
+
+    outline = framework.get("outline")
+    if not isinstance(outline, dict):
+        issues.append("故事大纲缺失")
+        return issues
+
+    acts = outline.get("three_acts") if isinstance(outline, dict) else None
+    if not isinstance(acts, list) or len(acts) < 2:
+        issues.append("主要阶段不足，至少需要 2 个以上阶段来支撑开书和后续扩写")
+
+    chapters = _extract_outline_chapters(outline)
+    if len(chapters) < 10:
+        issues.append("开书规划不足，至少需要覆盖前 10 章的章节规划")
+
+    detailed_first_10 = _count_detailed_opening_chapters(chapters, upto=10)
+    if detailed_first_10 < 6:
+        issues.append("前 10 章不够细，至少应有 6 章具备摘要和目标/冲突/钩子等执行信息")
+
+    strategy = _read_serial_strategy(outline)
+    required_strategy_fields = [
+        "positioning",
+        "opening_hook",
+        "first_3_chapter_hook",
+        "chapter_10_climax",
+    ]
+    missing_strategy = [field for field in required_strategy_fields if not str(strategy.get(field) or "").strip()]
+    if missing_strategy:
+        issues.append("开书策略不完整，缺少：" + "、".join(missing_strategy))
+
+    if chapters:
+        first_chapter = next((item for item in chapters if item.get("chapter_number") == 1), None)
+        if first_chapter:
+            if not str(first_chapter.get("hook") or "").strip():
+                issues.append("第 1 章缺少明确开篇钩子")
+            if not str(first_chapter.get("goal") or "").strip():
+                issues.append("第 1 章缺少明确章节目标")
+            if not str(first_chapter.get("summary") or "").strip():
+                issues.append("第 1 章缺少明确章节摘要")
+
+    return issues
+
+
+def _parse_chapter_count_token(raw: str) -> int | None:
+    token = str(raw or "").strip()
+    if not token:
+        return None
+    if token.isdigit():
+        return int(token)
+
+    token = token.replace("两", "二")
+    digits = {"零": 0, "一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
+    units = {"十": 10, "百": 100, "千": 1000}
+
+    total = 0
+    current = 0
+    for char in token:
+        if char in digits:
+            current = digits[char]
+            continue
+        if char in units:
+            total += (current or 1) * units[char]
+            current = 0
+            continue
+        return None
+
+    value = total + current
+    return value if value > 0 else None
+
+
+def _extract_requested_min_chapters(messages: list[dict] | None) -> int | None:
+    if not isinstance(messages, list):
+        return None
+
+    count_token = r"(\d{2,4}|[零一二两三四五六七八九十百千]{2,})"
+    unit = r"[章节话回]"
+    patterns = [
+        re.compile(rf"至少\s*{count_token}\s*{unit}"),
+        re.compile(rf"{count_token}\s*{unit}\s*起"),
+        re.compile(rf"不低于\s*{count_token}\s*{unit}"),
+        re.compile(rf"扩展到\s*{count_token}\s*{unit}"),
+        re.compile(rf"扩展至\s*{count_token}\s*{unit}"),
+        re.compile(rf"拉到\s*{count_token}\s*{unit}"),
+        re.compile(rf"写到\s*{count_token}\s*{unit}"),
+    ]
+
+    requested: int | None = None
+    for item in messages:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("role") or "") != "user":
+            continue
+        content = str(item.get("content") or "").strip()
+        if not content:
+            continue
+        for pattern in patterns:
+            match = pattern.search(content)
+            if not match:
+                continue
+            value = _parse_chapter_count_token(match.group(1))
+            if value is None:
+                continue
+            if value >= 20:
+                requested = max(requested or 0, value)
+    return requested
+
+
+def _extract_requested_min_chapters_from_text(text: str | None) -> int | None:
+    content = str(text or "").strip()
+    if not content:
+        return None
+    return _extract_requested_min_chapters([{"role": "user", "content": content}])
+
+
+def _infer_story_bible_min_chapters(story_bible: dict | None) -> int | None:
+    if not isinstance(story_bible, dict):
+        return None
+    creative_brief = story_bible.get("creative_brief")
+    raw_input = story_bible.get("raw_input")
+    candidates: list[str] = []
+    if isinstance(creative_brief, dict):
+        candidates.append(str(creative_brief.get("serial_length_target") or "").strip())
+    if isinstance(raw_input, dict):
+        candidates.append(str(raw_input.get("raw_length_goal") or "").strip())
+    requested = None
+    for text in candidates:
+        value = _extract_requested_min_chapters_from_text(text)
+        if value and value >= 20:
+            requested = max(requested or 0, value)
+    return requested
+
+
+def _is_generic_framework_instruction(text: str | None) -> bool:
+    normalized = re.sub(r"\s+", "", str(text or "").strip().lower())
+    if not normalized:
+        return True
+    generic_tokens = (
+        "根据作品圣经生成",
+        "根据圣经生成",
+        "生成小说框架",
+        "生成框架",
+        "生成大纲",
+        "根据作品圣经构建",
+        "根据故事圣经生成",
+        "请生成框架",
+    )
+    return any(token in normalized for token in generic_tokens) and len(normalized) <= 30
+
+
+def _build_framework_seed_description(story: Story) -> str:
+    story_bible = story.story_bible if isinstance(story.story_bible, dict) else {}
+    creative_brief = story_bible.get("creative_brief") if isinstance(story_bible.get("creative_brief"), dict) else {}
+    raw_input = story_bible.get("raw_input") if isinstance(story_bible.get("raw_input"), dict) else {}
+
+    segments: list[str] = []
+    if str(creative_brief.get("project_positioning") or "").strip():
+        segments.append(f"作品定位：{str(creative_brief.get('project_positioning')).strip()}")
+    if str(creative_brief.get("one_line_premise") or "").strip():
+        segments.append(f"一句话梗概：{str(creative_brief.get('one_line_premise')).strip()}")
+    if str(creative_brief.get("core_hook") or "").strip():
+        segments.append(f"核心卖点：{str(creative_brief.get('core_hook')).strip()}")
+    if str(creative_brief.get("main_conflict") or "").strip():
+        segments.append(f"主线冲突：{str(creative_brief.get('main_conflict')).strip()}")
+    if str(creative_brief.get("longline_mystery") or "").strip():
+        segments.append(f"长线悬念：{str(creative_brief.get('longline_mystery')).strip()}")
+    if str(creative_brief.get("serial_length_target") or "").strip():
+        segments.append(f"目标篇幅：{str(creative_brief.get('serial_length_target')).strip()}")
+    must_keep = creative_brief.get("must_keep_rules")
+    if isinstance(must_keep, list):
+        cleaned = [str(item).strip() for item in must_keep if str(item).strip()]
+        if cleaned:
+            segments.append("必保留设定：" + "；".join(cleaned))
+    raw_idea = str(raw_input.get("raw_idea") or "").strip()
+    if raw_idea:
+        segments.append(f"作者原始创意：{raw_idea}")
+    fallback_description = str(story.description or "").strip()
+    if not segments and fallback_description:
+        segments.append(fallback_description)
+    return "\n".join(segments).strip()
+
+
+def _build_story_bible_compact(story_bible: dict | None) -> dict[str, Any]:
+    if not isinstance(story_bible, dict):
+        return {}
+    creative_brief = story_bible.get("creative_brief") if isinstance(story_bible.get("creative_brief"), dict) else {}
+    raw_input = story_bible.get("raw_input") if isinstance(story_bible.get("raw_input"), dict) else {}
+    writing_guidance = story_bible.get("writing_guidance") if isinstance(story_bible.get("writing_guidance"), dict) else {}
+    import_guidance = story_bible.get("import_guidance") if isinstance(story_bible.get("import_guidance"), dict) else {}
+
+    compact: dict[str, Any] = {}
+    for key in (
+        "project_positioning",
+        "one_line_premise",
+        "core_hook",
+        "protagonist_core",
+        "main_conflict",
+        "longline_mystery",
+        "serial_length_target",
+        "reveal_strategy",
+        "pacing_strategy",
+    ):
+        value = str(creative_brief.get(key) or "").strip()
+        if value:
+            compact[key] = value
+
+    must_keep_rules = creative_brief.get("must_keep_rules")
+    if isinstance(must_keep_rules, list):
+        cleaned = [str(item).strip() for item in must_keep_rules if str(item).strip()]
+        if cleaned:
+            compact["must_keep_rules"] = cleaned[:8]
+
+    for key in (
+        "opening_strategy",
+        "chapter_density_strategy",
+        "midgame_engine",
+        "late_game_direction",
+    ):
+        value = str(writing_guidance.get(key) or "").strip()
+        if value:
+            compact[key] = value
+
+    for key in ("forbidden_patterns", "preferred_plot_patterns"):
+        raw = writing_guidance.get(key)
+        if isinstance(raw, list):
+            cleaned = [str(item).strip() for item in raw if str(item).strip()]
+            if cleaned:
+                compact[key] = cleaned[:8]
+
+    for key in ("raw_idea", "raw_length_goal", "raw_must_keep", "raw_hidden_setting"):
+        value = str(raw_input.get(key) or "").strip()
+        if value:
+            compact[key] = value
+
+    for key in (
+        "import_material_type",
+        "must_keep",
+        "author_goal",
+        "adjustment_scope",
+        "longline_plan",
+        "tone_guardrails",
+    ):
+        value = str(import_guidance.get(key) or "").strip()
+        if value:
+            compact[f"import_{key}"] = value
+
+    return compact
+
+
+def _build_story_memory_compact(story_memory: dict | None) -> dict[str, Any]:
+    if not isinstance(story_memory, dict):
+        return {}
+    compact: dict[str, Any] = {}
+    for key in ("story_state", "current_arc_focus", "current_tone", "next_payoff_target"):
+        value = str(story_memory.get(key) or "").strip()
+        if value:
+            compact[key] = value
+    for key in ("continuity_facts", "open_loops", "resolved_loops"):
+        raw = story_memory.get(key)
+        if isinstance(raw, list):
+            cleaned = [str(item).strip() for item in raw if str(item).strip()]
+            if cleaned:
+                compact[key] = cleaned[:12]
+    recent_chapter_summaries = story_memory.get("recent_chapter_summaries")
+    if isinstance(recent_chapter_summaries, list):
+        compact["recent_chapter_summaries"] = [
+            item for item in recent_chapter_summaries[-8:]
+            if isinstance(item, dict)
+        ]
+    return compact
+
+
+def _build_outline_compact(outline: dict | None, recent_chapter_limit: int = 12) -> dict[str, Any]:
+    if not isinstance(outline, dict):
+        return {}
+
+    acts = outline.get("three_acts") if isinstance(outline.get("three_acts"), list) else []
+    compact_acts: list[dict[str, Any]] = []
+    for index, act in enumerate(acts, start=1):
+        if not isinstance(act, dict):
+            continue
+        compact_acts.append(
+            {
+                "act": act.get("act", index),
+                "title": str(act.get("title") or act.get("name") or "").strip(),
+                "summary": str(act.get("summary") or "").strip(),
+                "chapter_count": len([item for item in (act.get("chapters") or []) if isinstance(item, dict)]),
+            }
+        )
+
+    all_chapters = _extract_outline_chapters(outline)
+    recent_chapters = sorted(all_chapters, key=lambda item: item["chapter_number"])[-recent_chapter_limit:]
+    recent_cards: list[dict[str, Any]] = []
+    for chapter in recent_chapters:
+        card = {
+            "chapter_number": chapter.get("chapter_number"),
+            "title": chapter.get("title"),
+            "act": chapter.get("act"),
+        }
+        for key in ("summary", "goal", "conflict", "hook", "payoff", "highlight"):
+            value = str(chapter.get(key) or "").strip()
+            if value:
+                card[key] = value
+        key_events = chapter.get("key_events")
+        if isinstance(key_events, list):
+            cleaned = [str(item).strip() for item in key_events if str(item).strip()]
+            if cleaned:
+                card["key_events"] = cleaned[:6]
+        recent_cards.append(card)
+
+    compact: dict[str, Any] = {
+        "stage_count": len(compact_acts),
+        "chapter_count": len(all_chapters),
+        "acts": compact_acts,
+        "recent_chapter_cards": recent_cards,
+    }
+    serial_strategy = outline.get("serial_strategy")
+    if isinstance(serial_strategy, dict) and serial_strategy:
+        compact["serial_strategy"] = serial_strategy
+    themes = outline.get("themes")
+    if isinstance(themes, list) and themes:
+        compact["themes"] = [str(item).strip() for item in themes if str(item).strip()][:8]
+    foreshadowing = outline.get("foreshadowing")
+    if isinstance(foreshadowing, list) and foreshadowing:
+        compact["foreshadowing"] = [str(item).strip() for item in foreshadowing if str(item).strip()][:8]
+    return compact
+
+
+def _build_framework_ai_context(story: Story, mode: str = "general", user_instruction: str = "") -> dict:
+    outline = story.outline if isinstance(story.outline, dict) else {}
+    chapters = _extract_outline_chapters(outline)
+    chapter_numbers = [item["chapter_number"] for item in chapters if isinstance(item.get("chapter_number"), int)]
+    return {
+        "description": story.description or "",
+        "tags": story.tags,
+        "characters": story.characters,
+        "outline": outline,
+        "story_bible": story.story_bible,
+        "story_bible_compact": _build_story_bible_compact(story.story_bible),
+        "story_memory": story.story_memory,
+        "story_memory_compact": _build_story_memory_compact(story.story_memory),
+        "outline_compact": _build_outline_compact(outline),
+        "framework_stats": {
+            "mode": mode,
+            "stage_count": len(outline.get("three_acts") or []) if isinstance(outline.get("three_acts"), list) else 0,
+            "chapter_count": len(chapters),
+            "last_chapter_number": max(chapter_numbers) if chapter_numbers else 0,
+        },
+        "user_instruction": user_instruction.strip(),
+    }
+
+
+async def _complete_framework_payload(
+    framework: dict | None,
+    description: str,
+    api_key: str | None = None,
+    story_bible: dict | None = None,
+    require_launch_ready: bool = False,
+    allow_partial_outline: bool = False,
+    fields_to_check: list[str] | None = None,
+) -> dict:
+    """Normalize and optionally complete framework fields.
+
+    fields_to_check controls which fields get AI backfill:
+    - None or ["all"]: check all fields (tags, characters, outline)
+    - ["outline"] or ["outline", "chapters"]: only check outline
+    - [] or other combos: check only specified fields
+
+    No longer cascades - each field is checked independently.
+    No longer runs rescue generate_framework on failure.
+    """
     payload = dict(framework or {})
+    if isinstance(story_bible, dict) and story_bible:
+        payload["story_bible"] = story_bible
     payload["tags"] = payload.get("tags") if isinstance(payload.get("tags"), dict) else {}
     payload["characters"] = _normalize_characters_payload(payload.get("characters") if isinstance(payload.get("characters"), list) else [])
     payload["outline"] = _merge_framework_outline({}, payload.get("outline"), payload.get("chapters"))
@@ -1743,38 +2469,58 @@ async def _complete_framework_payload(framework: dict | None, description: str, 
         "tags": payload["tags"],
         "characters": payload["characters"],
         "outline": payload["outline"],
+        "story_bible": payload.get("story_bible"),
     }
 
-    if not _has_complete_tags(payload["tags"]):
-        try:
-            payload["tags"] = _merge_tags(payload["tags"], await regenerate_tags(story_context, api_key=api_key))
-            story_context["tags"] = payload["tags"]
-        except Exception as exc:
-            logger.warning("Failed to backfill framework tags: %s", exc)
+    if fields_to_check is None:
+        fields_to_check = ["all"]
 
-    if not _has_complete_characters(payload["characters"]):
-        try:
-            payload["characters"] = _merge_characters_payload(
-                payload["characters"],
-                await regenerate_characters(story_context, api_key=api_key),
-            )
-            story_context["characters"] = payload["characters"]
-        except Exception as exc:
-            logger.warning("Failed to backfill framework characters: %s", exc)
+    check_all = "all" in fields_to_check
 
-    if not _has_complete_outline(payload["outline"]):
-        try:
-            incoming_outline = await regenerate_outline(story_context, api_key=api_key)
-            payload["outline"] = _merge_framework_outline(
-                payload["outline"],
-                incoming_outline,
-                _extract_outline_chapters(incoming_outline),
-            )
-            story_context["outline"] = payload["outline"]
-        except Exception as exc:
-            logger.warning("Failed to backfill framework outline: %s", exc)
+    if check_all or "tags" in fields_to_check:
+        if not _has_complete_tags(payload["tags"]):
+            try:
+                payload["tags"] = _merge_tags(payload["tags"], await regenerate_tags(story_context, api_key=api_key))
+                story_context["tags"] = payload["tags"]
+            except Exception as exc:
+                logger.warning("Failed to backfill framework tags: %s", exc)
 
-    payload["chapters"] = _extract_outline_chapters(payload["outline"])
+    if check_all or "characters" in fields_to_check:
+        if not _has_complete_characters(payload["characters"]) or _characters_big_five_feel_generic(payload["characters"]):
+            try:
+                payload["characters"] = _merge_characters_payload(
+                    payload["characters"],
+                    await regenerate_characters_with_variance(story_context, api_key=api_key),
+                )
+                story_context["characters"] = payload["characters"]
+            except Exception as exc:
+                logger.warning("Failed to backfill framework characters: %s", exc)
+
+    if check_all or "outline" in fields_to_check:
+        outline_ready = _has_opening_ready_outline if require_launch_ready else _has_complete_outline
+        if not outline_ready(payload["outline"]):
+            try:
+                incoming_outline = await regenerate_outline(story_context, api_key=api_key)
+                payload["outline"] = _merge_framework_outline(
+                    payload["outline"],
+                    incoming_outline,
+                    _extract_outline_chapters(incoming_outline),
+                )
+                story_context["outline"] = payload["outline"]
+            except Exception as exc:
+                logger.warning("Failed to backfill framework outline for story_context outline keys=%s acts=%d: %s",
+                    list(payload.get("outline", {}).keys()),
+                    len(payload.get("outline", {}).get("three_acts") or []),
+                    exc)
+
+        payload["chapters"] = _extract_outline_chapters(payload["outline"])
+        if not outline_ready(payload["outline"]):
+            if allow_partial_outline:
+                logger.info("Allowing partial framework update without full outline readiness")
+                return payload
+            if require_launch_ready:
+                raise ValueError("Framework opening structure is still not launch-ready after backfill")
+            raise ValueError("Framework outline is still incomplete after backfill")
     return payload
 
 
@@ -1793,18 +2539,13 @@ def _shift_story_chapter_numbers(story: Story, start_number: int, delta: int) ->
 def _normalize_outline_plan_payload(raw: dict | None, *, fallback_title: str, fallback_act: str) -> dict:
     raw = raw if isinstance(raw, dict) else {}
     title = str(raw.get("title") or "").strip() or fallback_title
-    summary = str(raw.get("summary") or "").strip()
-    key_events = _normalize_key_events(raw.get("key_events"))
     act = str(raw.get("act") or fallback_act or "").strip() or fallback_act
 
     payload = {
         "title": title,
         "act": act,
     }
-    if summary:
-        payload["summary"] = summary
-    if key_events:
-        payload["key_events"] = key_events
+    payload.update(_normalize_chapter_plan_meta(raw))
     return payload
 
 
@@ -1832,6 +2573,92 @@ def _apply_chapter_content(chapter: Chapter, content: str, *, status: str | None
     chapter.word_count = _count_words(content)
     if status:
         chapter.status = status
+
+
+def _merge_story_memory(existing: dict | None, update: dict | None, chapter: Chapter, chapter_summary: dict | None) -> dict:
+    memory = dict(existing or {})
+    update = update if isinstance(update, dict) else {}
+    chapter_summary = chapter_summary if isinstance(chapter_summary, dict) else {}
+
+    for key in ("story_state", "current_arc_focus", "current_tone", "next_payoff_target"):
+        value = str(update.get(key) or "").strip()
+        if value:
+            memory[key] = value
+
+    def merge_string_list(field: str, limit: int = 20) -> None:
+        current = memory.get(field)
+        current_items = [str(item).strip() for item in current] if isinstance(current, list) else []
+        incoming = update.get(field)
+        incoming_items = [str(item).strip() for item in incoming] if isinstance(incoming, list) else []
+        merged: list[str] = []
+        seen: set[str] = set()
+        for item in current_items + incoming_items:
+            if not item:
+                continue
+            key = item.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(item)
+        if merged:
+            memory[field] = merged[-limit:]
+
+    merge_string_list("continuity_facts", limit=24)
+    merge_string_list("open_loops", limit=24)
+    merge_string_list("resolved_loops", limit=24)
+
+    open_loops = memory.get("open_loops")
+    resolved_loops = memory.get("resolved_loops")
+    if isinstance(open_loops, list) and isinstance(resolved_loops, list):
+        resolved_keys = {str(item).strip().casefold() for item in resolved_loops if str(item).strip()}
+        if resolved_keys:
+            memory["open_loops"] = [
+                str(item).strip()
+                for item in open_loops
+                if str(item).strip() and str(item).strip().casefold() not in resolved_keys
+            ]
+
+    recent = memory.get("recent_chapter_summaries")
+    recent_entries = [dict(item) for item in recent if isinstance(item, dict)] if isinstance(recent, list) else []
+    summary_text = str(chapter_summary.get("summary") or "").strip()
+    if summary_text:
+        entry = {
+            "chapter_number": chapter.chapter_number,
+            "title": chapter.title or f"第{chapter.chapter_number}话",
+            "summary": summary_text,
+        }
+        recent_entries = [item for item in recent_entries if item.get("chapter_number") != chapter.chapter_number]
+        recent_entries.append(entry)
+        recent_entries = sorted(recent_entries, key=lambda item: int(item.get("chapter_number") or 0))[-12:]
+        memory["recent_chapter_summaries"] = recent_entries
+
+    return memory
+
+
+async def _refresh_chapter_memory(chapter: Chapter, request: Request, db: Session) -> None:
+    if not chapter.novel_content or not chapter.novel_content.strip():
+        return
+    chapter_info = {
+        "chapter_number": chapter.chapter_number,
+        "title": chapter.title or f"第{chapter.chapter_number}话",
+        "act": chapter.act or "",
+        "key_events": chapter.key_events or [],
+    }
+    try:
+        memory_payload = await summarize_chapter_memory(
+            _story_framework_context(chapter.story),
+            chapter_info,
+            chapter.novel_content,
+            api_key=_user_deepseek_api_key(request),
+        )
+    except Exception as exc:
+        logger.warning("Failed to refresh chapter memory for chapter %s: %s", chapter.id, exc)
+        return
+
+    chapter_summary = memory_payload.get("chapter_summary") if isinstance(memory_payload.get("chapter_summary"), dict) else {}
+    story_memory_update = memory_payload.get("story_memory_update") if isinstance(memory_payload.get("story_memory_update"), dict) else {}
+    chapter.memory_summary = chapter_summary or None
+    chapter.story.story_memory = _merge_story_memory(chapter.story.story_memory, story_memory_update, chapter, chapter_summary)
 
 
 def _normalize_big_five_scores(raw):
@@ -1925,12 +2752,7 @@ def _merge_characters_payload(existing, incoming):
 
 
 def _story_framework_context(story: Story) -> dict:
-    return {
-        "description": story.description or "",
-        "tags": story.tags,
-        "characters": story.characters,
-        "outline": story.outline,
-    }
+    return _build_framework_ai_context(story)
 
 
 def _unlink_file(path: Path, label: str) -> None:
@@ -3039,8 +3861,8 @@ def admin_save_platform_settings(body: dict, request: Request, db: Session = Dep
         "platform.icp": basic.get("icp", ""),
         "platform.copyright": basic.get("copyright", ""),
         "platform.notice": basic.get("notice", ""),
-        "api.deepseek.base_url": api.get("deepseek_base_url", "https://api.deepseek.com"),
-        "api.deepseek.model": api.get("deepseek_model", "deepseek-chat"),
+        "api.deepseek.base_url": api.get("deepseek_base_url", deepseek_service.DEEPSEEK_BASE_URL),
+        "api.deepseek.model": api.get("deepseek_model", deepseek_service.DEEPSEEK_MODEL),
         "api.deepseek.api_key": api.get("deepseek_api_key", ""),
         "api.image.base_url": api.get("image_base_url", "https://api.xbyjs.top/v1"),
         "api.image.model": api.get("image_model", "default"),
@@ -3216,7 +4038,13 @@ def admin_update_order_status(order_no: str, body: dict, request: Request, db: S
 @app.post("/api/stories", response_model=StoryOut)
 def create_story(body: StoryCreate, request: Request, db: Session = Depends(get_db)):
     user = _require_user(request, db)
-    story = Story(title=body.title, description=body.description, owner_user_id=user.id)
+    story = Story(
+        title=body.title,
+        description=body.description,
+        owner_user_id=user.id,
+        source_type="manual",
+        import_context_completed=True,
+    )
     db.add(story)
     db.flush()
     # Auto-create first chapter
@@ -3468,6 +4296,7 @@ async def generate_novel_endpoint(chapter_id: int, request: Request, db: Session
     )
     _apply_chapter_content(chapter, novel_content, status="completed")
     chapter.content_source = "chat"
+    await _refresh_chapter_memory(chapter, request, db)
 
     # Also save as assistant message
     msg = ChatMessage(chapter_id=chapter_id, role="assistant", content=novel_content)
@@ -3510,6 +4339,7 @@ async def import_novel_endpoint(chapter_id: int, request: Request, db: Session =
     db.add(ChatMessage(chapter_id=chapter_id, role="user", content=text))
     _apply_chapter_content(chapter, text, status="draft")
     chapter.content_source = "import"
+    await _refresh_chapter_memory(chapter, request, db)
     db.commit()
     db.refresh(chapter)
     return chapter
@@ -4476,34 +5306,441 @@ async def regenerate_single_image(chapter_id: int, image_number: int, body: dict
     }
 
 
+# ─── Onboarding / Story Bible ───────────────────────────────
+
+
+@app.post("/api/stories/{story_id}/onboarding/message", response_model=OnboardingMessageOut)
+async def onboarding_send_message(story_id: int, request: Request, db: Session = Depends(get_db)):
+    """发送引导对话消息，获取 AI 回复"""
+    user = _require_user(request, db)
+    story = _require_story_for_user(story_id, user, db)
+    body = await request.json()
+    messages_raw = body.get("messages", [])
+    previous_collected_info = body.get("collected_info", {})
+    current_step = body.get("step")
+    if not isinstance(messages_raw, list) or len(messages_raw) == 0:
+        raise HTTPException(400, "messages is required")
+    if not isinstance(previous_collected_info, dict):
+        previous_collected_info = {}
+    if current_step is not None:
+        try:
+            current_step = int(current_step)
+        except (TypeError, ValueError):
+            current_step = None
+
+    safe_messages = [
+        {"role": msg["role"], "content": str(msg["content"])}
+        for msg in messages_raw
+        if isinstance(msg, dict) and msg.get("role") in ("user", "assistant") and str(msg.get("content", "")).strip()
+    ]
+    if not safe_messages:
+        raise HTTPException(400, "No valid messages")
+
+    creative_brief = None
+    try:
+        result = await generate_onboarding_response(
+            safe_messages,
+            previous_collected_info=previous_collected_info,
+            current_step=current_step,
+            api_key=_user_deepseek_api_key(request),
+        )
+        if bool(result.get("is_complete")):
+            try:
+                creative_brief = await build_creative_brief(
+                    result.get("collected_info", {}),
+                    api_key=_user_deepseek_api_key(request),
+                )
+            except Exception as exc:
+                logger.warning("Failed to preview creative brief during onboarding: %s", exc)
+    except Exception as e:
+        raise HTTPException(502, f"AI 服务调用失败: {e}")
+
+    return OnboardingMessageOut(
+        reply=result.get("reply", ""),
+        collected_info=result.get("collected_info", {}),
+        step=int(result.get("step", 1)),
+        total_steps=int(result.get("total_steps", 5)),
+        is_complete=bool(result.get("is_complete", False)),
+        creative_brief=creative_brief,
+    )
+
+
+@app.post("/api/stories/{story_id}/onboarding/confirm")
+async def onboarding_confirm(story_id: int, request: Request, db: Session = Depends(get_db)):
+    """确认引导结果，生成 Story Bible 并保存"""
+    user = _require_user(request, db)
+    story = _require_story_for_user(story_id, user, db)
+    body = await request.json()
+    collected_info = body.get("collected_info", {})
+    messages_raw = body.get("messages", [])
+
+    raw_input = {
+        "raw_idea": collected_info.get("story_concept", ""),
+        "raw_length_goal": collected_info.get("target_length", ""),
+        "raw_must_keep": collected_info.get("must_keep", ""),
+        "raw_hidden_setting": "",
+        "raw_notes": "",
+    }
+
+    # Captura todas as mensagens como texto bruto
+    all_raw = "\n".join(
+        f"{'作者' if m.get('role') == 'user' else 'AI'}: {m.get('content', '')}"
+        for m in messages_raw
+        if isinstance(m, dict)
+    )
+    raw_input["raw_notes"] = all_raw
+
+    try:
+        creative_brief = await build_creative_brief(
+            collected_info,
+            api_key=_user_deepseek_api_key(request),
+        )
+        story_bible = await build_story_bible(
+            creative_brief,
+            raw_input,
+            api_key=_user_deepseek_api_key(request),
+        )
+    except Exception as e:
+        raise HTTPException(502, f"Story Bible 生成失败: {e}")
+
+    story.story_bible = story_bible
+    story.description = story_bible.get("creative_brief", {}).get("one_line_premise", story.description or "")
+    story.onboarding_completed = True
+    db.commit()
+    db.refresh(story)
+
+    return {
+        "story_id": story.id,
+        "story_bible": story_bible,
+        "creative_brief": creative_brief,
+    }
+
+
+@app.post("/api/stories/{story_id}/import-context/message", response_model=OnboardingMessageOut)
+async def import_context_send_message(story_id: int, request: Request, db: Session = Depends(get_db)):
+    user = _require_user(request, db)
+    story = _require_story_for_user(story_id, user, db)
+    if not _is_import_story(story):
+        raise HTTPException(400, "Only imported stories support import context guidance")
+
+    body = await request.json()
+    messages_raw = body.get("messages", [])
+    previous_collected_info = body.get("collected_info", {})
+    current_step = body.get("step")
+    if not isinstance(messages_raw, list) or not messages_raw:
+        raise HTTPException(400, "messages is required")
+    if not isinstance(previous_collected_info, dict):
+        previous_collected_info = {}
+    if current_step is not None:
+        try:
+            current_step = int(current_step)
+        except (TypeError, ValueError):
+            current_step = None
+
+    safe_messages = [
+        {"role": msg["role"], "content": str(msg["content"])}
+        for msg in messages_raw
+        if isinstance(msg, dict) and msg.get("role") in ("user", "assistant") and str(msg.get("content", "")).strip()
+    ]
+    if not safe_messages:
+        raise HTTPException(400, "No valid messages")
+
+    import_context = _build_import_guidance_context(story, db)
+    creative_brief = None
+    try:
+        result = await generate_import_guidance_response(
+            safe_messages,
+            import_context,
+            previous_collected_info=previous_collected_info,
+            current_step=current_step,
+            api_key=_user_deepseek_api_key(request),
+        )
+        if bool(result.get("is_complete")):
+            try:
+                creative_brief = await build_import_creative_brief(
+                    import_context,
+                    result.get("collected_info", {}),
+                    api_key=_user_deepseek_api_key(request),
+                )
+            except Exception as exc:
+                logger.warning("Failed to preview creative brief during import guidance: %s", exc)
+    except Exception as exc:
+        raise HTTPException(502, f"AI 导入补充调用失败: {exc}")
+
+    return OnboardingMessageOut(
+        reply=result.get("reply", ""),
+        collected_info=result.get("collected_info", {}),
+        step=int(result.get("step", 1)),
+        total_steps=int(result.get("total_steps", 4)),
+        is_complete=bool(result.get("is_complete", False)),
+        creative_brief=creative_brief,
+    )
+
+
+@app.post("/api/stories/{story_id}/import-context/confirm")
+async def import_context_confirm(story_id: int, request: Request, db: Session = Depends(get_db)):
+    user = _require_user(request, db)
+    story = _require_story_for_user(story_id, user, db)
+    if not _is_import_story(story):
+        raise HTTPException(400, "Only imported stories support import context guidance")
+
+    body = await request.json()
+    collected_info = body.get("collected_info", {})
+    messages_raw = body.get("messages", [])
+    if not isinstance(collected_info, dict):
+        collected_info = {}
+    if not isinstance(messages_raw, list):
+        messages_raw = []
+
+    import_context = _build_import_guidance_context(story, db)
+    raw_input = _compose_import_raw_input(import_context, collected_info, messages_raw)
+    try:
+        creative_brief = await build_import_creative_brief(
+            import_context,
+            collected_info,
+            api_key=_user_deepseek_api_key(request),
+        )
+        story_bible = await build_story_bible(
+            creative_brief,
+            raw_input,
+            api_key=_user_deepseek_api_key(request),
+        )
+        story_bible["import_guidance"] = _build_import_guidance_payload(collected_info, import_context)
+    except Exception as exc:
+        raise HTTPException(502, f"导入作品上下文补充失败: {exc}")
+
+    story.story_bible = story_bible
+    story.description = story_bible.get("creative_brief", {}).get("one_line_premise", story.description or "")
+    story.import_context_completed = True
+    db.commit()
+    db.refresh(story)
+    return {
+        "story_id": story.id,
+        "story_bible": story_bible,
+        "creative_brief": creative_brief,
+    }
+
+
+@app.post("/api/stories/{story_id}/import-context/skip")
+async def import_context_skip(story_id: int, request: Request, db: Session = Depends(get_db)):
+    user = _require_user(request, db)
+    story = _require_story_for_user(story_id, user, db)
+    if not _is_import_story(story):
+        raise HTTPException(400, "Only imported stories support import context guidance")
+    story.import_context_completed = True
+    db.commit()
+    return {"ok": True, "story_id": story.id}
+
+
+@app.get("/api/stories/{story_id}/story-bible")
+def get_story_bible(story_id: int, request: Request, db: Session = Depends(get_db)):
+    """获取作品圣经"""
+    user = _require_user(request, db)
+    story = _require_story_for_user(story_id, user, db)
+    return {"story_bible": story.story_bible or {}}
+
+
+@app.patch("/api/stories/{story_id}/story-bible")
+async def update_story_bible(story_id: int, request: Request, db: Session = Depends(get_db)):
+    """更新作品圣经"""
+    user = _require_user(request, db)
+    story = _require_story_for_user(story_id, user, db)
+    body = await request.json()
+    bible_update = body.get("story_bible", {})
+    current = dict(story.story_bible or {})
+    current.update(bible_update)
+    story.story_bible = current
+    creative_brief = current.get("creative_brief") if isinstance(current.get("creative_brief"), dict) else {}
+    next_description = str(creative_brief.get("one_line_premise") or "").strip()
+    if not next_description:
+        next_description = str(creative_brief.get("project_positioning") or "").strip()
+    if next_description:
+        story.description = next_description
+    db.commit()
+    db.refresh(story)
+    return {"story_bible": story.story_bible}
+
+
 # ─── Framework (InkAI) ─────────────────────────────────────
+
+async def _background_quality_check(
+    story_id: int,
+    story_description: str,
+    api_key: str | None,
+    captured_tags: dict,
+    captured_characters: list,
+    captured_outline: dict,
+):
+    """Async background quality gate for framework generate.
+
+    Runs after response is returned. Checks framework quality and,
+    if issues found and framework hasn't been modified by the user,
+    applies fixes using generate_framework with quality feedback.
+
+    Uses content-based optimistic locking: compares current DB state
+    against captured snapshot. If different, skips silently.
+    """
+    try:
+        await asyncio.sleep(2)
+        db = SessionLocal()
+        try:
+            story = db.query(Story).filter(Story.id == story_id).first()
+            if not story:
+                return
+
+            current_tags = (story.tags or {}) if isinstance(story.tags, dict) else {}
+            current_characters = (story.characters or []) if isinstance(story.characters, list) else []
+            current_outline = (story.outline or {}) if isinstance(story.outline, dict) else {}
+
+            if current_tags != captured_tags:
+                return
+            if current_characters != captured_characters:
+                return
+            if current_outline != captured_outline:
+                return
+
+            current_framework = {
+                "description": story_description,
+                "tags": current_tags,
+                "characters": current_characters,
+                "outline": current_outline,
+            }
+
+            quality_issues = _framework_launch_quality_issues(current_framework)
+            if not quality_issues:
+                return
+
+            logger.info("Background quality check found %d issues for story %d, fixing...", len(quality_issues), story_id)
+            runtime_context = _build_framework_ai_context(story, mode="repair", user_instruction="后台开书质量修复")
+            fixed_framework = await generate_framework(
+                story_description,
+                api_key=api_key,
+                required_min_chapters=20,
+                story_bible=story.story_bible,
+                story_context=runtime_context,
+                launch_ready_required=True,
+                quality_feedback=quality_issues,
+            )
+            fixed_framework = await _complete_framework_payload(
+                fixed_framework,
+                story_description,
+                api_key=api_key,
+                story_bible=story.story_bible,
+                require_launch_ready=True,
+            )
+            remaining = _framework_launch_quality_issues(fixed_framework)
+            if remaining:
+                logger.warning("Background quality fix for story %d still has %d issues", story_id, len(remaining))
+                return
+
+            db.refresh(story)
+            recheck_tags = (story.tags or {}) if isinstance(story.tags, dict) else {}
+            recheck_chars = (story.characters or []) if isinstance(story.characters, list) else []
+            recheck_outline = (story.outline or {}) if isinstance(story.outline, dict) else {}
+            if recheck_tags == current_tags and recheck_chars == current_characters and recheck_outline == current_outline:
+                story.tags = fixed_framework.get("tags")
+                story.characters = _normalize_characters_payload(fixed_framework.get("characters"))
+                story.outline = _merge_framework_outline(story.outline, fixed_framework.get("outline"), fixed_framework.get("chapters"))
+                db.commit()
+                logger.info("Background quality fix applied to story %d", story_id)
+        finally:
+            db.close()
+    except Exception as exc:
+        logger.warning("Background quality check failed for story %d: %s", story_id, exc)
+
 
 @app.post("/api/stories/{story_id}/framework/generate")
 async def generate_framework_endpoint(story_id: int, request: Request, db: Session = Depends(get_db)):
     user = _require_user(request, db)
     story = _require_story_for_user(story_id, user, db)
     body = await request.json()
-    description = body.get("description", "")
-    if not isinstance(description, str) or not description.strip():
-        description = story.description or ""
+    raw_description = body.get("description", "")
+    if not isinstance(raw_description, str):
+        raw_description = ""
+    raw_description = raw_description.strip()
+    description = raw_description
+    if not description or _is_generic_framework_instruction(description):
+        description = _build_framework_seed_description(story) or (story.description or "").strip()
     if not description.strip():
         raise HTTPException(400, "description is required")
+    story_context = _build_framework_ai_context(story, mode="initial_generate", user_instruction=raw_description or description)
+
+    requested_min_chapters = _extract_requested_min_chapters([{"role": "user", "content": raw_description or description.strip()}])
 
     _check_and_consume_feature_quota(request, user.id, "framework.generate.monthly_limit", 1, db, deduct=False, provider_kind="text")
-    framework = await generate_framework(description.strip(), api_key=_user_deepseek_api_key(request))
-    framework = await _complete_framework_payload(
-        framework,
-        description.strip(),
-        api_key=_user_deepseek_api_key(request),
-    )
+    try:
+        framework = await generate_framework(
+            description.strip(),
+            api_key=_user_deepseek_api_key(request),
+            required_min_chapters=requested_min_chapters,
+            story_bible=story.story_bible,
+            story_context=story_context,
+            launch_ready_required=True,
+        )
+        framework = await _complete_framework_payload(
+            framework,
+            description.strip(),
+            api_key=_user_deepseek_api_key(request),
+            story_bible=story.story_bible,
+            require_launch_ready=True,
+        )
+    except ValueError as exc:
+        raise HTTPException(502, f"AI 初始框架生成不完整：{exc}") from exc
+    quality_issues = _framework_launch_quality_issues(framework)
+    if quality_issues:
+        try:
+            framework = await generate_framework(
+                description.strip(),
+                api_key=_user_deepseek_api_key(request),
+                required_min_chapters=max(requested_min_chapters or 0, 20),
+                story_bible=story.story_bible,
+                story_context=story_context,
+                launch_ready_required=True,
+                quality_feedback=quality_issues,
+            )
+            framework = await _complete_framework_payload(
+                framework,
+                description.strip(),
+                api_key=_user_deepseek_api_key(request),
+                story_bible=story.story_bible,
+                require_launch_ready=True,
+            )
+            quality_issues = _framework_launch_quality_issues(framework)
+        except ValueError as exc:
+            raise HTTPException(502, f"AI 开书框架二次修正失败：{exc}") from exc
+    if quality_issues:
+        raise HTTPException(502, "AI 首次框架未达到开书可发布标准：" + "；".join(quality_issues))
+    if requested_min_chapters and _count_framework_chapters(framework) < requested_min_chapters:
+        raise HTTPException(502, f"AI 未能满足至少 {requested_min_chapters} 章的初始框架要求，请换一种更明确的故事描述后重试。")
 
-    story.description = description.strip()
-    story.tags = framework.get("tags")
+    if raw_description and not _is_generic_framework_instruction(raw_description):
+        story.description = raw_description
+    elif not str(story.description or "").strip():
+        story.description = description.strip()
+    saved_tags = story.tags
+    saved_characters = story.characters
+    saved_outline = story.outline
+    story.tags = saved_tags
     story.characters = _normalize_characters_payload(framework.get("characters"))
-    story.outline = _merge_framework_outline(story.outline, framework.get("outline"), framework.get("chapters"))
+    story.outline = _merge_framework_outline(saved_outline, framework.get("outline"), framework.get("chapters"))
     db.commit()
     _check_and_consume_feature_quota(request, user.id, "framework.generate.monthly_limit", 1, db, deduct=True, provider_kind="text")
     db.refresh(story)
+
+    # Fire async background quality check
+    captured_tags = dict(story.tags or {})
+    captured_chars = list(story.characters or [])
+    captured_outline = dict(story.outline or {})
+    _api_key = _user_deepseek_api_key(request)
+    asyncio.create_task(_background_quality_check(
+        story.id,
+        str(story.description or "").strip(),
+        _api_key,
+        captured_tags,
+        captured_chars,
+        captured_outline,
+    ))
+
     return {
         "tags": story.tags,
         "characters": story.characters,
@@ -4517,12 +5754,7 @@ async def regenerate_tags_endpoint(story_id: int, request: Request, db: Session 
     user = _require_user(request, db)
     story = _require_story_for_user(story_id, user, db)
 
-    story_context = {
-        "description": story.description or "",
-        "tags": story.tags,
-        "characters": story.characters,
-        "outline": story.outline,
-    }
+    story_context = _story_framework_context(story)
     _check_and_consume_advanced_text_quota(request, user.id, db, deduct=False)
     result = await regenerate_tags(story_context, api_key=_user_deepseek_api_key(request))
 
@@ -4539,14 +5771,9 @@ async def regenerate_characters_endpoint(story_id: int, request: Request, db: Se
     user = _require_user(request, db)
     story = _require_story_for_user(story_id, user, db)
 
-    story_context = {
-        "description": story.description or "",
-        "tags": story.tags,
-        "characters": story.characters,
-        "outline": story.outline,
-    }
+    story_context = _story_framework_context(story)
     _check_and_consume_advanced_text_quota(request, user.id, db, deduct=False)
-    result = await regenerate_characters(story_context, api_key=_user_deepseek_api_key(request))
+    result = await regenerate_characters_with_variance(story_context, api_key=_user_deepseek_api_key(request))
 
     characters = _normalize_characters_payload(result if isinstance(result, list) else result)
     story.characters = characters
@@ -4561,12 +5788,7 @@ async def regenerate_outline_endpoint(story_id: int, request: Request, db: Sessi
     user = _require_user(request, db)
     story = _require_story_for_user(story_id, user, db)
 
-    story_context = {
-        "description": story.description or "",
-        "tags": story.tags,
-        "characters": story.characters,
-        "outline": story.outline,
-    }
+    story_context = _story_framework_context(story)
     _check_and_consume_advanced_text_quota(request, user.id, db, deduct=False)
     result = await regenerate_outline(story_context, api_key=_user_deepseek_api_key(request))
 
@@ -4641,6 +5863,224 @@ def update_outline_chapter_plan(story_id: int, body: OutlineChapterPlanUpdate, r
     return {"outline": story.outline}
 
 
+def _merge_framework_changes(existing: dict, changes: dict) -> dict:
+    """Merge patch-mode changes into existing framework (destructive merge).
+
+    Only fields present in `changes` are updated; all others stay untouched.
+    """
+    merged = dict(existing)
+    if "description" in changes:
+        merged["description"] = str(changes["description"]).strip()
+    if "tags" in changes and isinstance(changes["tags"], dict):
+        merged["tags"] = _merge_tags(merged.get("tags"), changes["tags"])
+    if "characters" in changes and isinstance(changes["characters"], list):
+        merged["characters"] = _merge_characters_payload(merged.get("characters"), changes["characters"])
+    if "outline" in changes or "chapters" in changes:
+        merged_outline, merged_chapters = _merge_framework_outline_and_chapters(
+            merged.get("outline"),
+            changes.get("outline"),
+            changes.get("chapters"),
+        )
+        merged["outline"] = merged_outline
+        merged["chapters"] = merged_chapters
+    return merged
+
+
+def _merge_framework_outline_and_chapters(
+    existing_outline: dict | None,
+    incoming_outline: dict | None,
+    incoming_chapters: list | None,
+) -> tuple[dict, list]:
+    merged = _merge_framework_outline(existing_outline, incoming_outline, incoming_chapters)
+    chapters = _extract_outline_chapters(merged)
+    return merged, chapters
+
+
+def _find_outline_act_index(acts: list[dict], act_key) -> int | None:
+    normalized_key = _normalize_act_token(act_key)
+    if not normalized_key:
+        return None
+    for index, act in enumerate(acts):
+        if not isinstance(act, dict):
+            continue
+        candidates = {
+            act.get("act"),
+            act.get("title"),
+            act.get("name"),
+            index + 1,
+        }
+        if any(_normalize_act_token(candidate) == normalized_key for candidate in candidates):
+            return index
+    return None
+
+
+def _ensure_outline_act(outline: dict, act_key: str, value: dict | None = None) -> list[dict]:
+    acts = outline.get("three_acts")
+    if not isinstance(acts, list):
+        acts = []
+    normalized_acts = [dict(act) for act in acts if isinstance(act, dict)]
+    outline["three_acts"] = normalized_acts
+
+    index = _find_outline_act_index(normalized_acts, act_key)
+    if index is None:
+        act_value = dict(value or {})
+        act_value["act"] = str(act_value.get("act") or act_key or len(normalized_acts) + 1)
+        act_value.setdefault("title", f"阶段 {act_value['act']}")
+        act_value.setdefault("summary", "")
+        act_value.setdefault("chapters", [])
+        normalized_acts.append(act_value)
+    return normalized_acts
+
+
+def _apply_framework_edit_operations(existing: dict, operations: list) -> tuple[dict, list[dict]]:
+    framework = {
+        "description": str(existing.get("description") or ""),
+        "tags": dict(existing.get("tags") or {}),
+        "characters": [dict(item) for item in (existing.get("characters") or []) if isinstance(item, dict)],
+        "outline": dict(existing.get("outline") or {}),
+    }
+    framework["outline"]["three_acts"] = [
+        dict(act) for act in (framework["outline"].get("three_acts") or []) if isinstance(act, dict)
+    ]
+    applied: list[dict] = []
+
+    def record(op_name: str, target: str) -> None:
+        applied.append({"op": op_name, "target": target})
+
+    for raw_op in operations:
+        if not isinstance(raw_op, dict):
+            continue
+        op_name = str(raw_op.get("op") or "").strip()
+        value = raw_op.get("value")
+
+        if op_name == "set_description":
+            if isinstance(value, str):
+                framework["description"] = value.strip()
+                record(op_name, "description")
+            continue
+
+        if op_name == "set_tags":
+            if isinstance(value, dict):
+                framework["tags"] = _merge_tags(framework.get("tags"), value)
+                record(op_name, "tags")
+            continue
+
+        if op_name == "upsert_character":
+            if not isinstance(value, dict):
+                continue
+            name = str(raw_op.get("name") or value.get("name") or "").strip()
+            if not name:
+                continue
+            value = dict(value)
+            value["name"] = str(value.get("name") or name).strip()
+            normalized_name = name.casefold()
+            characters = framework["characters"]
+            for index, character in enumerate(characters):
+                if str(character.get("name") or "").strip().casefold() == normalized_name:
+                    merged = dict(character)
+                    merged.update({k: v for k, v in value.items() if v not in (None, "", [], {})})
+                    characters[index] = merged
+                    break
+            else:
+                characters.append(value)
+            record(op_name, name)
+            continue
+
+        if op_name == "delete_character":
+            name = str(raw_op.get("name") or "").strip()
+            if not name:
+                continue
+            normalized_name = name.casefold()
+            before = len(framework["characters"])
+            framework["characters"] = [
+                character for character in framework["characters"]
+                if str(character.get("name") or "").strip().casefold() != normalized_name
+            ]
+            if len(framework["characters"]) != before:
+                record(op_name, name)
+            continue
+
+        outline = framework["outline"]
+        if op_name == "replace_outline_meta":
+            if isinstance(value, dict):
+                for key in ("themes", "foreshadowing", "serial_strategy"):
+                    if key in value:
+                        outline[key] = value[key]
+                record(op_name, "outline_meta")
+            continue
+
+        if op_name == "upsert_act":
+            if not isinstance(value, dict):
+                value = {}
+            act_key = str(raw_op.get("act") or value.get("act") or "").strip()
+            if not act_key:
+                continue
+            acts = _ensure_outline_act(outline, act_key, value)
+            index = _find_outline_act_index(acts, act_key)
+            if index is not None:
+                current = dict(acts[index])
+                incoming = {k: v for k, v in dict(value).items() if k != "chapters" and v not in (None, "", [], {})}
+                incoming["act"] = incoming.get("act", current.get("act", act_key))
+                current.update(incoming)
+                current.setdefault("chapters", [])
+                acts[index] = current
+                record(op_name, act_key)
+            continue
+
+        if op_name == "delete_act":
+            act_key = str(raw_op.get("act") or "").strip()
+            acts = outline.get("three_acts") if isinstance(outline.get("three_acts"), list) else []
+            index = _find_outline_act_index(acts, act_key)
+            if index is not None:
+                del acts[index]
+                outline["three_acts"] = acts
+                record(op_name, act_key)
+            continue
+
+        if op_name == "upsert_chapter":
+            chapter_number = _coerce_chapter_number(raw_op.get("chapter_number"))
+            if chapter_number is None:
+                continue
+            if not isinstance(value, dict):
+                value = {}
+            existing_chapters = [dict(item) for item in _extract_outline_chapters(outline)]
+            previous_chapter = next((item for item in existing_chapters if item.get("chapter_number") == chapter_number), {})
+            chapters = [item for item in existing_chapters if item.get("chapter_number") != chapter_number]
+            merged_value = dict(previous_chapter)
+            merged_value.update({k: v for k, v in dict(value).items() if v not in (None, "", [], {})})
+            fallback_act = str(
+                raw_op.get("act")
+                or merged_value.get("act")
+                or _infer_manual_plan_act(existing_chapters, target_chapter_number=chapter_number)
+            ).strip() or "1"
+            _ensure_outline_act(outline, fallback_act)
+            normalized = _normalize_outline_plan_payload(
+                merged_value,
+                fallback_title=f"Chapter {chapter_number}",
+                fallback_act=fallback_act,
+            )
+            normalized["chapter_number"] = chapter_number
+            normalized["act"] = str(normalized.get("act") or fallback_act)
+            chapters.append(normalized)
+            outline = _normalize_framework_outline(outline, chapters)
+            framework["outline"] = outline
+            record(op_name, f"chapter:{chapter_number}")
+            continue
+
+        if op_name == "delete_chapter":
+            chapter_number = _coerce_chapter_number(raw_op.get("chapter_number"))
+            if chapter_number is None:
+                continue
+            chapters = [dict(item) for item in _extract_outline_chapters(outline) if item.get("chapter_number") != chapter_number]
+            if len(chapters) != len(_extract_outline_chapters(outline)):
+                framework["outline"] = _normalize_framework_outline(outline, chapters)
+                record(op_name, f"chapter:{chapter_number}")
+            continue
+
+    framework["chapters"] = _extract_outline_chapters(framework["outline"])
+    return framework, applied
+
+
 @app.post("/api/stories/{story_id}/framework/adjust")
 async def adjust_framework_endpoint(story_id: int, request: Request, db: Session = Depends(get_db)):
     user = _require_user(request, db)
@@ -4650,24 +6090,69 @@ async def adjust_framework_endpoint(story_id: int, request: Request, db: Session
     messages = body.get("messages", [])
     if not isinstance(messages, list) or not messages:
         raise HTTPException(400, "messages is required")
+    requested_min_chapters = _extract_requested_min_chapters(messages)
+
+    existing_framework = {
+        "description": story.description or "",
+        "tags": story.tags or {},
+        "characters": story.characters or [],
+        "outline": story.outline or {},
+    }
+    context_story = _build_framework_ai_context(
+        story,
+        mode="adjust",
+        user_instruction=str(messages[-1].get("content") or "") if messages else "",
+    )
 
     _check_and_consume_advanced_text_quota(request, user.id, db, deduct=False)
-    result = await adjust_framework_with_chat(
-        _story_framework_context(story),
-        messages,
-        api_key=_user_deepseek_api_key(request),
-    )
+    try:
+        result = await adjust_framework_with_chat(
+            context_story,
+            messages,
+            api_key=_user_deepseek_api_key(request),
+            required_min_chapters=requested_min_chapters,
+            existing_framework=existing_framework,
+        )
+    except ValueError as exc:
+        raise HTTPException(502, f"AI 框架调整返回格式无效：{exc}") from exc
 
-    framework = await _complete_framework_payload(
-        result.get("framework", {}),
-        str(result.get("framework", {}).get("description") or story.description or "").strip(),
-        api_key=_user_deepseek_api_key(request),
-    )
+    framework, applied_operations = _apply_framework_edit_operations(existing_framework, result.get("operations", []))
+    if not applied_operations:
+        raise HTTPException(502, "AI 没有返回可执行的框架修改操作，请换一种更明确的指令。")
+
+    if requested_min_chapters and _count_framework_chapters(framework) < requested_min_chapters:
+        retry_messages = list(messages) + [
+            {
+                "role": "user",
+                "content": (
+                    f'硬性修正：你上一版没有满足我"至少 {requested_min_chapters} 章"的要求。'
+                    f"请重新输出 operations，用足够多的 upsert_chapter 操作确保章节规划不少于 {requested_min_chapters} 章。"
+                    "不要只在 reply 里说已经扩展，必须返回真实可执行操作。"
+                ),
+            }
+        ]
+        try:
+            result = await adjust_framework_with_chat(
+                context_story,
+                retry_messages,
+                api_key=_user_deepseek_api_key(request),
+                required_min_chapters=requested_min_chapters,
+                existing_framework=existing_framework,
+            )
+        except ValueError as exc:
+            raise HTTPException(502, f"AI 二次修正返回格式无效：{exc}") from exc
+        framework, applied_operations = _apply_framework_edit_operations(existing_framework, result.get("operations", []))
+        if _count_framework_chapters(framework) < requested_min_chapters:
+            raise HTTPException(
+                502,
+                f"AI 未能满足至少 {requested_min_chapters} 章的硬性要求，请重试或换一种更明确的扩写指令。",
+            )
+
     description = str(framework.get("description") or story.description or "").strip()
     story.description = description
-    story.tags = _merge_tags(story.tags, framework.get("tags"))
-    story.characters = _merge_characters_payload(story.characters, framework.get("characters"))
-    story.outline = _merge_framework_outline(story.outline, framework.get("outline"), framework.get("chapters"))
+    story.tags = framework.get("tags") if isinstance(framework.get("tags"), dict) else {}
+    story.characters = _normalize_characters_payload(framework.get("characters"))
+    story.outline = framework.get("outline") if isinstance(framework.get("outline"), dict) else {}
     db.commit()
     _check_and_consume_advanced_text_quota(request, user.id, db, deduct=True)
     db.refresh(story)
@@ -4680,6 +6165,7 @@ async def adjust_framework_endpoint(story_id: int, request: Request, db: Session
             "outline": story.outline,
         },
         "chapters": framework.get("chapters"),
+        "applied_operations": applied_operations,
     }
 
 
@@ -4689,19 +6175,52 @@ async def continue_framework_endpoint(story_id: int, request: Request, db: Sessi
     story = _require_story_for_user(story_id, user, db)
 
     _check_and_consume_advanced_text_quota(request, user.id, db, deduct=False)
-    result = await continue_framework(
-        _story_framework_context(story),
-        api_key=_user_deepseek_api_key(request),
+
+    existing_framework = {
+        "description": story.description or "",
+        "tags": story.tags or {},
+        "characters": story.characters or [],
+        "outline": story.outline or {},
+    }
+    before_chapter_count = len(_extract_outline_chapters(story.outline))
+    continue_instruction = (
+        "一键续写：请基于当前框架继续向后扩展后续阶段和真实章节规划。"
+        "必须返回 upsert_act 和 upsert_chapter 操作；至少新增 10 个后续章节任务卡。"
+        "不要只在 reply 里描述扩展到了多少章，必须用 operations 写入大纲 JSON。"
+        "每个新增章节尽量包含 title、summary、goal、conflict、hook、payoff、highlight、key_events。"
+        "保留原有主线、角色成长与代价平衡，不要删除现有内容。"
     )
-    framework = await _complete_framework_payload(
-        result.get("framework", {}),
-        str(result.get("framework", {}).get("description") or story.description or "").strip(),
-        api_key=_user_deepseek_api_key(request),
-    )
+    context_story = _build_framework_ai_context(story, mode="continue", user_instruction=continue_instruction)
+
+    messages = [
+        {
+            "role": "user",
+            "content": continue_instruction,
+        }
+    ]
+
+    try:
+        result = await adjust_framework_with_chat(
+            context_story,
+            messages,
+            api_key=_user_deepseek_api_key(request),
+            existing_framework=existing_framework,
+        )
+    except ValueError as exc:
+        raise HTTPException(502, f"AI 续写返回格式无效：{exc}") from exc
+
+    framework, applied_operations = _apply_framework_edit_operations(existing_framework, result.get("operations", []))
+    after_chapter_count = _count_framework_chapters(framework)
+    if after_chapter_count <= before_chapter_count:
+        raise HTTPException(
+            502,
+            "AI 续写没有写入任何新增章节。请重试，或直接输入“新增第X到第Y章，并列出每章任务卡”。",
+        )
+
     story.description = str(framework.get("description") or story.description or "").strip()
-    story.tags = _merge_tags(story.tags, framework.get("tags"))
-    story.characters = _merge_characters_payload(story.characters, framework.get("characters"))
-    story.outline = _merge_framework_outline(story.outline, framework.get("outline"), framework.get("chapters"))
+    story.tags = framework.get("tags") if isinstance(framework.get("tags"), dict) else {}
+    story.characters = _normalize_characters_payload(framework.get("characters"))
+    story.outline = framework.get("outline") if isinstance(framework.get("outline"), dict) else {}
     db.commit()
     _check_and_consume_advanced_text_quota(request, user.id, db, deduct=True)
     db.refresh(story)
@@ -4714,6 +6233,7 @@ async def continue_framework_endpoint(story_id: int, request: Request, db: Sessi
             "outline": story.outline,
         },
         "chapters": framework.get("chapters"),
+        "applied_operations": applied_operations,
     }
 
 
@@ -4729,16 +6249,18 @@ async def expand_chapter_endpoint(story_id: int, request: Request, db: Session =
     if not chapter_title or not isinstance(chapter_title, str) or not chapter_title.strip():
         raise HTTPException(400, "chapter_title is required")
 
-    story_context = {
-        "description": story.description or "",
-        "tags": story.tags,
-        "characters": story.characters,
-        "outline": story.outline,
-    }
+    story_context = _story_framework_context(story)
     chapter_info = {
         "title": chapter_title.strip(),
         "act": act if isinstance(act, str) else "",
         "chapter_number": chapter_number_val,
+        "summary": str(body.get("summary") or "").strip(),
+        "goal": str(body.get("goal") or "").strip(),
+        "conflict": str(body.get("conflict") or "").strip(),
+        "hook": str(body.get("hook") or "").strip(),
+        "payoff": str(body.get("payoff") or "").strip(),
+        "highlight": str(body.get("highlight") or "").strip(),
+        "key_events": _normalize_key_events(body.get("key_events")),
     }
 
     _check_and_consume_feature_quota(request, user.id, "chapter.expand.monthly_limit", 1, db, deduct=False, provider_kind="text")
@@ -4775,6 +6297,7 @@ async def expand_chapter_endpoint(story_id: int, request: Request, db: Session =
         db.add(chapter)
         db.flush()
         _initialize_empty_chapter_workspace(chapter.id)
+    await _refresh_chapter_memory(chapter, request, db)
     db.add(ChatMessage(chapter_id=chapter.id, role="assistant", content=novel_content))
     db.commit()
     _check_and_consume_feature_quota(request, user.id, "chapter.expand.monthly_limit", 1, db, deduct=True, provider_kind="text")
@@ -4799,6 +6322,7 @@ async def rewrite_selection_endpoint(chapter_id: int, request: Request, db: Sess
     rewritten = await rewrite_selection(
         selected_text.strip(),
         chapter_context.strip() or (chapter.novel_content or "")[:4000],
+        story_context=_story_framework_context(chapter.story),
         api_key=_user_deepseek_api_key(request),
     )
     _check_and_consume_advanced_text_quota(request, user.id, db, deduct=True)
@@ -4832,6 +6356,7 @@ async def adjust_chapter_content_endpoint(chapter_id: int, request: Request, db:
         api_key=_user_deepseek_api_key(request),
     )
     _apply_chapter_content(chapter, updated_content, status="completed")
+    await _refresh_chapter_memory(chapter, request, db)
     db.commit()
     _check_and_consume_advanced_text_quota(request, user.id, db, deduct=True)
     db.refresh(chapter)
@@ -5095,6 +6620,9 @@ async def import_create(body: ImportCreateRequest, request: Request, db: Session
         title=body.title,
         description=body.description or ("导入内容已通过 AI 分析生成框架" if outline else ""),
         owner_user_id=user.id,
+        onboarding_completed=True,
+        source_type="import",
+        import_context_completed=False,
     )
     if tags:
         story.tags = tags
@@ -5139,6 +6667,21 @@ async def import_create(body: ImportCreateRequest, request: Request, db: Session
             db.add(chapter)
             db.flush()
             _initialize_empty_chapter_workspace(chapter.id)
+
+    try:
+        provisional_story_bible = await _build_import_provisional_story_bible(
+            story,
+            db,
+            api_key=api_key,
+        )
+        if provisional_story_bible:
+            story.story_bible = provisional_story_bible
+            creative_brief = provisional_story_bible.get("creative_brief") if isinstance(provisional_story_bible.get("creative_brief"), dict) else {}
+            next_description = str(creative_brief.get("one_line_premise") or creative_brief.get("project_positioning") or "").strip()
+            if next_description:
+                story.description = next_description
+    except Exception as exc:
+        logger.warning("Import provisional story bible generation failed for story %s: %s", story.id, exc)
 
     db.commit()
     _check_and_consume_advanced_text_quota(request, user.id, db, deduct=True)
@@ -5204,5 +6747,16 @@ if __name__ == "__main__":
         "main:app",
         host=os.getenv("HOST", "127.0.0.1"),
         port=int(os.getenv("PORT", "8000")),
-        reload=os.getenv("RELOAD", "true").lower() == "true",
+        reload=_default_reload_enabled(),
+        reload_excludes=[
+            "*.log",
+            "*.err",
+            "*.pyc",
+            ".env",
+            "__pycache__",
+            "__pycache__/*",
+            "manga_outputs/*",
+            "backend.log",
+            "backend.err",
+        ],
     )

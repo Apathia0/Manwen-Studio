@@ -16,6 +16,12 @@ const TAG_ENTRIES: { key: keyof Tags; label: string; color: string }[] = [
   { key: 'audience', label: '受众', color: 'bg-violet-50 text-violet-700 border-violet-200' },
 ];
 
+function normalizeTagValue(value: unknown): string {
+  if (typeof value === 'string') return value.trim();
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+  return '';
+}
+
 export default function TagSection({ tags, storyId, onUpdate }: Props) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -28,7 +34,7 @@ export default function TagSection({ tags, storyId, onUpdate }: Props) {
   }, [tags]);
 
   const displayTags = localTags ?? tags;
-  const hasContent = displayTags && Object.values(displayTags).some((v) => v && v.trim());
+  const hasContent = Boolean(displayTags && Object.values(displayTags).some((value) => normalizeTagValue(value)));
 
   const handleRegenerate = async () => {
     setLoading(true);
@@ -46,7 +52,7 @@ export default function TagSection({ tags, storyId, onUpdate }: Props) {
 
   const startEdit = (key: keyof Tags) => {
     setEditingKey(key);
-    setEditValue(displayTags?.[key] || '');
+    setEditValue(normalizeTagValue(displayTags?.[key]));
   };
 
   const saveEdit = async (key: keyof Tags) => {
@@ -97,7 +103,7 @@ export default function TagSection({ tags, storyId, onUpdate }: Props) {
   return (
     <div className="space-y-2.5">
       {TAG_ENTRIES.map(({ key, label, color }) => {
-        const value = displayTags?.[key];
+        const value = normalizeTagValue(displayTags?.[key]);
         return (
           <div key={key} className="flex items-center gap-2.5">
             <span className="text-[11px] font-medium text-slate-500 w-8 shrink-0 text-right">{label}</span>
