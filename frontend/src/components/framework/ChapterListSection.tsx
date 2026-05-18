@@ -13,7 +13,17 @@ interface Props {
   onGenerateChapters: () => Promise<void>;
   onSaveChapterPlan: (
     mode: 'append' | 'insert_after' | 'update',
-    chapter: { title: string; summary?: string; key_events?: string[]; act?: string },
+    chapter: {
+      title: string;
+      summary?: string;
+      key_events?: string[];
+      act?: string;
+      goal?: string;
+      conflict?: string;
+      hook?: string;
+      payoff?: string;
+      highlight?: string;
+    },
     targetChapterNumber?: number,
   ) => Promise<void>;
 }
@@ -26,6 +36,11 @@ interface PlanEditorState {
     summary: string;
     keyEventsText: string;
     act?: string;
+    goal: string;
+    conflict: string;
+    hook: string;
+    payoff: string;
+    highlight: string;
   };
 }
 
@@ -34,6 +49,15 @@ function StatusBadge({ status }: { status?: string }) {
   const colorClass = STATUS_COLORS[status] || 'bg-slate-100 text-slate-600';
   const label = STATUS_LABELS[status] || status;
   return <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-medium ${colorClass}`}>{label}</span>;
+}
+
+function MetaPill({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded-md border border-slate-200 bg-white px-2 py-1">
+      <div className="text-[10px] font-medium text-slate-500">{label}</div>
+      <div className="mt-0.5 text-[11px] leading-relaxed text-slate-700">{value}</div>
+    </div>
+  );
 }
 
 function hasGeneratedChapterContent(chapter: Chapter | undefined): boolean {
@@ -50,6 +74,11 @@ function buildEditorDraft(chapter?: FrameworkChapter): PlanEditorState['draft'] 
     summary: chapter?.summary ?? '',
     keyEventsText: Array.isArray(chapter?.key_events) ? chapter.key_events.join('\n') : '',
     act: chapter?.act,
+    goal: chapter?.goal ?? '',
+    conflict: chapter?.conflict ?? '',
+    hook: chapter?.hook ?? '',
+    payoff: chapter?.payoff ?? '',
+    highlight: chapter?.highlight ?? '',
   };
 }
 
@@ -95,6 +124,38 @@ function PlanEditorCard({
         placeholder="关键剧情点，一行一条"
         rows={4}
         className="w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-xs text-slate-700 outline-none resize-y focus:border-blue-400"
+      />
+      <div className="grid gap-2 md:grid-cols-2">
+        <input
+          value={draft.goal}
+          onChange={(e) => onChange({ ...draft, goal: e.target.value })}
+          placeholder="本章目标"
+          className="w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-xs text-slate-700 outline-none focus:border-blue-400"
+        />
+        <input
+          value={draft.conflict}
+          onChange={(e) => onChange({ ...draft, conflict: e.target.value })}
+          placeholder="本章冲突"
+          className="w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-xs text-slate-700 outline-none focus:border-blue-400"
+        />
+        <input
+          value={draft.hook}
+          onChange={(e) => onChange({ ...draft, hook: e.target.value })}
+          placeholder="章末钩子"
+          className="w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-xs text-slate-700 outline-none focus:border-blue-400"
+        />
+        <input
+          value={draft.payoff}
+          onChange={(e) => onChange({ ...draft, payoff: e.target.value })}
+          placeholder="本章回报"
+          className="w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-xs text-slate-700 outline-none focus:border-blue-400"
+        />
+      </div>
+      <input
+        value={draft.highlight}
+        onChange={(e) => onChange({ ...draft, highlight: e.target.value })}
+        placeholder="爽点 / 情绪点 / 记忆点"
+        className="w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-xs text-slate-700 outline-none focus:border-blue-400"
       />
       <div className="flex items-center justify-end gap-2">
         <button onClick={onCancel} disabled={saving} className="rounded-md border border-slate-200 px-3 py-1.5 text-[11px] text-slate-600 hover:bg-slate-100 transition-colors disabled:opacity-40">
@@ -144,6 +205,12 @@ export default function ChapterListSection({
         chapter_number: chapter.chapter_number,
         chapter_title: chapter.title,
         key_events: chapter.key_events,
+        summary: chapter.summary,
+        goal: chapter.goal,
+        conflict: chapter.conflict,
+        hook: chapter.hook,
+        payoff: chapter.payoff,
+        highlight: chapter.highlight,
       });
       await onUpdate();
       onChapterSelect(chapter.chapter_number);
@@ -188,6 +255,11 @@ export default function ChapterListSection({
           summary: editorState.draft.summary.trim() || undefined,
           key_events: parseKeyEvents(editorState.draft.keyEventsText),
           act: editorState.draft.act,
+          goal: editorState.draft.goal.trim() || undefined,
+          conflict: editorState.draft.conflict.trim() || undefined,
+          hook: editorState.draft.hook.trim() || undefined,
+          payoff: editorState.draft.payoff.trim() || undefined,
+          highlight: editorState.draft.highlight.trim() || undefined,
         },
         editorState.targetChapterNumber,
       );
@@ -266,6 +338,16 @@ export default function ChapterListSection({
 
             {(chapter.summary || (chapter.key_events && chapter.key_events.length > 0)) && (
               <p className="mt-2 text-[11px] leading-relaxed text-slate-500">{chapter.summary || chapter.key_events?.join('；')}</p>
+            )}
+
+            {(chapter.goal || chapter.conflict || chapter.hook || chapter.payoff || chapter.highlight) && (
+              <div className="mt-2 grid gap-1.5 md:grid-cols-2">
+                {chapter.goal && <MetaPill label="目标" value={chapter.goal} />}
+                {chapter.conflict && <MetaPill label="冲突" value={chapter.conflict} />}
+                {chapter.hook && <MetaPill label="钩子" value={chapter.hook} />}
+                {chapter.payoff && <MetaPill label="回报" value={chapter.payoff} />}
+                {chapter.highlight && <MetaPill label="亮点" value={chapter.highlight} />}
+              </div>
             )}
 
             <div className="mt-2 flex flex-wrap items-center gap-2">

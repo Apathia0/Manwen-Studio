@@ -1,7 +1,6 @@
 import { useState } from 'react';
 import { Check, Pencil, Plus, ScrollText, Trash2, X } from 'lucide-react';
 import { listChapters, type Story } from '../api';
-import ImportDialog from './ImportDialog';
 import { exportStoryAsZip } from '../lib/exportStory';
 
 interface Props {
@@ -10,7 +9,6 @@ interface Props {
   onRefresh: () => Promise<void>;
   onCreate: () => Promise<void>;
   onCreateDraft: (title: string, description: string) => Promise<Story>;
-  onImportComplete: (storyId: number) => Promise<void>;
   onUpdateStory: (storyId: number, payload: { title?: string; description?: string }) => Promise<Story>;
   onDeleteStory: (story: Story) => Promise<void>;
   onOpen: (story: Story) => Promise<void>;
@@ -23,14 +21,12 @@ export default function StoryLibraryPage({
   onRefresh,
   onCreate,
   onCreateDraft,
-  onImportComplete,
   onUpdateStory,
   onDeleteStory,
   onOpen,
   loadingWorkspace,
 }: Props) {
   const [showCreateForm, setShowCreateForm] = useState(false);
-  const [showImportDialog, setShowImportDialog] = useState(false);
   const [draftTitle, setDraftTitle] = useState('');
   const [draftDescription, setDraftDescription] = useState('');
   const [editingId, setEditingId] = useState<number | null>(null);
@@ -106,11 +102,6 @@ export default function StoryLibraryPage({
     }
   };
 
-  const handleImportDone = async (storyId: number) => {
-    setShowImportDialog(false);
-    await onImportComplete(storyId);
-  };
-
   return (
     <div>
       <div className="mb-4 flex items-center justify-between">
@@ -124,12 +115,6 @@ export default function StoryLibraryPage({
             className="rounded-md border border-[#d9dfd7] bg-white px-3 py-2 text-sm"
           >
             刷新
-          </button>
-          <button
-            onClick={() => setShowImportDialog(true)}
-            className="rounded-md border border-[#d9dfd7] bg-white px-3 py-2 text-sm text-slate-700"
-          >
-            导入作品
           </button>
           <button
             onClick={() => {
@@ -294,12 +279,6 @@ export default function StoryLibraryPage({
       )}
 
       {loadingWorkspace && <div className="mt-4 text-sm text-slate-600">正在进入工作台...</div>}
-
-      <ImportDialog
-        open={showImportDialog}
-        onClose={() => setShowImportDialog(false)}
-        onImportComplete={handleImportDone}
-      />
     </div>
   );
 }

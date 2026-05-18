@@ -183,7 +183,7 @@ export interface FrameworkGenerateResponse {
   tags?: Tags;
   characters?: Character[];
   outline?: Outline;
-  chapters?: { act: string; chapter_number: number; title: string }[];
+  chapters?: FrameworkChapterPlan[];
 }
 
 export interface ImportChapterInfo {
@@ -209,7 +209,20 @@ export interface FrameworkAnalyzeResponse {
   tags?: Tags;
   characters?: Character[];
   outline?: Outline;
-  chapters?: { act: string; chapter_number: number; title: string }[];
+  chapters?: FrameworkChapterPlan[];
+}
+
+export interface FrameworkChapterPlan {
+  act: string;
+  chapter_number: number;
+  title: string;
+  summary?: string;
+  key_events?: string[];
+  goal?: string;
+  conflict?: string;
+  hook?: string;
+  payoff?: string;
+  highlight?: string;
 }
 
 export interface OutlineChapterPlanInput {
@@ -217,6 +230,11 @@ export interface OutlineChapterPlanInput {
   summary?: string;
   key_events?: string[];
   act?: string;
+  goal?: string;
+  conflict?: string;
+  hook?: string;
+  payoff?: string;
+  highlight?: string;
 }
 
 export interface FrameworkChatMessage {
@@ -232,10 +250,77 @@ export interface FrameworkAdjustResponse {
     characters?: Character[];
     outline?: Outline;
   };
-  chapters?: { act: string; chapter_number: number; title: string }[];
+  chapters?: FrameworkChapterPlan[];
+  applied_operations?: { op: string; target: string }[];
 }
 
 export interface FrameworkContinueResponse extends FrameworkAdjustResponse {}
+
+// ─── Onboarding / Story Bible ─────────────────────────────
+
+export interface OnboardingChatMessage {
+  role: 'user' | 'assistant';
+  content: string;
+}
+
+export interface OnboardingMessageOut {
+  reply: string;
+  collected_info: Record<string, string>;
+  step: number;
+  total_steps: number;
+  is_complete: boolean;
+  creative_brief?: Record<string, any>;
+}
+
+export interface CreativeBrief {
+  project_positioning: string;
+  genre: string;
+  audience: string;
+  tone: string;
+  core_hook: string;
+  one_line_premise: string;
+  protagonist_core: string;
+  main_conflict: string;
+  longline_mystery: string;
+  serial_length_target: string;
+  must_keep_rules: string[];
+  reveal_strategy: string;
+  pacing_strategy: string;
+}
+
+export interface StoryBible {
+  raw_input?: {
+    raw_idea: string;
+    raw_length_goal: string;
+    raw_must_keep: string;
+    raw_hidden_setting: string;
+    raw_notes: string;
+  };
+  creative_brief?: CreativeBrief;
+  writing_guidance?: {
+    opening_strategy: string;
+    chapter_density_strategy: string;
+    midgame_engine: string;
+    late_game_direction: string;
+    forbidden_patterns: string[];
+    preferred_plot_patterns: string[];
+  };
+  import_guidance?: {
+    context_source?: string;
+    import_material_type?: string;
+    must_keep?: string;
+    author_goal?: string;
+    adjustment_scope?: string;
+    longline_plan?: string;
+    tone_guardrails?: string;
+  };
+}
+
+export interface OnboardingConfirmResponse {
+  story_id: number;
+  story_bible: StoryBible;
+  creative_brief: CreativeBrief;
+}
 
 export interface Story {
   id: number;
@@ -247,6 +332,10 @@ export interface Story {
   tags?: Tags;
   outline?: Outline;
   characters?: Character[];
+  story_bible?: StoryBible;
+  onboarding_completed?: boolean;
+  source_type?: 'manual' | 'import' | string;
+  import_context_completed?: boolean;
   created_at: string;
 }
 
@@ -1479,6 +1568,93 @@ export function generateMangaStream(
   return controller;
 }
 
+// ─── Onboarding / Story Bible ────────────────────────────────
+
+export async function sendOnboardingMessage(
+  storyId: number,
+  messages: { role: string; content: string }[],
+  collectedInfo: Record<string, string> = {},
+  step = 1,
+): Promise<OnboardingMessageOut> {
+  const res = await fetch(`${BASE}/api/stories/${storyId}/onboarding/message`, {
+    method: 'POST',
+    headers: apiHeaders(true),
+    body: JSON.stringify({ messages, collected_info: collectedInfo, step }),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '引导对话失败'));
+  return res.json();
+}
+
+export async function confirmOnboarding(
+  storyId: number,
+  collectedInfo: Record<string, string>,
+  messages: { role: string; content: string }[],
+): Promise<OnboardingConfirmResponse> {
+  const res = await fetch(`${BASE}/api/stories/${storyId}/onboarding/confirm`, {
+    method: 'POST',
+    headers: apiHeaders(true),
+    body: JSON.stringify({ collected_info: collectedInfo, messages }),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '确认引导失败'));
+  return res.json();
+}
+
+export async function sendImportGuidanceMessage(
+  storyId: number,
+  messages: { role: string; content: string }[],
+  collectedInfo: Record<string, string> = {},
+  step = 1,
+): Promise<OnboardingMessageOut> {
+  const res = await fetch(`${BASE}/api/stories/${storyId}/import-context/message`, {
+    method: 'POST',
+    headers: apiHeaders(true),
+    body: JSON.stringify({ messages, collected_info: collectedInfo, step }),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '导入补充对话失败'));
+  return res.json();
+}
+
+export async function confirmImportGuidance(
+  storyId: number,
+  collectedInfo: Record<string, string>,
+  messages: { role: string; content: string }[],
+): Promise<OnboardingConfirmResponse> {
+  const res = await fetch(`${BASE}/api/stories/${storyId}/import-context/confirm`, {
+    method: 'POST',
+    headers: apiHeaders(true),
+    body: JSON.stringify({ collected_info: collectedInfo, messages }),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '确认导入补充失败'));
+  return res.json();
+}
+
+export async function skipImportGuidance(storyId: number): Promise<{ ok: true; story_id: number }> {
+  const res = await fetch(`${BASE}/api/stories/${storyId}/import-context/skip`, {
+    method: 'POST',
+    headers: apiHeaders(true),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '跳过导入补充失败'));
+  return res.json();
+}
+
+export async function getStoryBible(storyId: number): Promise<{ story_bible: StoryBible }> {
+  const res = await fetch(`${BASE}/api/stories/${storyId}/story-bible`, {
+    headers: apiHeaders(),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function updateStoryBible(storyId: number, storyBible: Partial<StoryBible>): Promise<{ story_bible: StoryBible }> {
+  const res = await fetch(`${BASE}/api/stories/${storyId}/story-bible`, {
+    method: 'PATCH',
+    headers: apiHeaders(true),
+    body: JSON.stringify({ story_bible: storyBible }),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '更新作品圣经失败'));
+  return res.json();
+}
+
 // ─── InkAI Framework ────────────────────────────────────────
 
 export async function generateFramework(storyId: number, description: string): Promise<FrameworkGenerateResponse> {
@@ -1606,7 +1782,18 @@ export async function continueFramework(storyId: number): Promise<FrameworkConti
 
 export async function expandChapter(
   storyId: number,
-  data: { act: string; chapter_number: number; chapter_title: string; key_events?: string[] },
+  data: {
+    act: string;
+    chapter_number: number;
+    chapter_title: string;
+    key_events?: string[];
+    summary?: string;
+    goal?: string;
+    conflict?: string;
+    hook?: string;
+    payoff?: string;
+    highlight?: string;
+  },
 ): Promise<Chapter> {
   const res = await fetch(`${BASE}/api/stories/${storyId}/expand-chapter`, {
     method: 'POST',

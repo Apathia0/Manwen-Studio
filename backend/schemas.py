@@ -26,6 +26,11 @@ class OutlineChapterPlanPayload(BaseModel):
     summary: Optional[str] = None
     key_events: Optional[list[str]] = None
     act: Optional[str] = None
+    goal: Optional[str] = None
+    conflict: Optional[str] = None
+    hook: Optional[str] = None
+    payoff: Optional[str] = None
+    highlight: Optional[str] = None
 
 
 class OutlineChapterPlanUpdate(BaseModel):
@@ -43,6 +48,11 @@ class StoryOut(BaseModel):
     tags: Optional[dict[str, Any]] = None
     outline: Optional[dict[str, Any]] = None
     characters: Optional[list[dict[str, Any]]] = None
+    story_bible: Optional[dict[str, Any]] = None
+    story_memory: Optional[dict[str, Any]] = None
+    onboarding_completed: bool = False
+    source_type: str = "manual"
+    import_context_completed: bool = True
     has_character_profiles: bool = False
     has_ref_image: bool = False
     created_at: datetime.datetime
@@ -81,6 +91,7 @@ class ChapterOut(BaseModel):
     act: Optional[str] = None
     key_events: Optional[list[Any]] = None
     quality_score: Optional[dict[str, Any]] = None
+    memory_summary: Optional[dict[str, Any]] = None
     status: str = "pending"
     word_count: Optional[int] = None
     created_at: datetime.datetime
@@ -222,6 +233,56 @@ class FrameworkAnalyzeResponse(BaseModel):
     tags: dict | None = None
     characters: list[dict] | None = None
     outline: dict | None = None
+
+
+# ─── Onboarding / Story Bible ────────────────────────────────
+
+
+class OnboardingMessageIn(BaseModel):
+    """用户发送的引导对话消息"""
+    messages: list[dict[str, str]]  # [{role, content}, ...]
+
+
+class OnboardingConfirmIn(BaseModel):
+    """确认引导结果"""
+    messages: list[dict[str, str]]
+
+
+class OnboardingMessageOut(BaseModel):
+    """AI 引导回复"""
+    reply: str
+    collected_info: dict[str, Any] = {}
+    step: int = 1
+    total_steps: int = 5
+    is_complete: bool = False
+    creative_brief: dict[str, Any] | None = None
+
+
+class CreativeBriefOut(BaseModel):
+    """创意理解卡（用户确认前预览）"""
+    project_positioning: str = ""
+    genre: str = ""
+    audience: str = ""
+    tone: str = ""
+    core_hook: str = ""
+    one_line_premise: str = ""
+    protagonist_core: str = ""
+    main_conflict: str = ""
+    longline_mystery: str = ""
+    serial_length_target: str = ""
+    must_keep_rules: list[str] = []
+    reveal_strategy: str = ""
+    pacing_strategy: str = ""
+
+
+class StoryBibleSchema(BaseModel):
+    """完整的 Story Bible 数据结构"""
+    story_bible: dict[str, Any] = {}
+
+
+class StoryBibleUpdate(BaseModel):
+    """更新 Story Bible"""
+    story_bible: dict[str, Any]
 
 
 # Resolve forward references

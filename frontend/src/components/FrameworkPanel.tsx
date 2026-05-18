@@ -98,7 +98,8 @@ export default function FrameworkPanel({ story, chapters, onChapterSelect, onFra
         ]);
       } else {
         const result = await adjustFramework(story.id, nextMessages);
-        setChatMessages((prev) => [...prev, { role: 'assistant', content: result.reply }]);
+        const operationHint = formatAppliedOperations(result.applied_operations);
+        setChatMessages((prev) => [...prev, { role: 'assistant', content: `${result.reply}${operationHint}` }]);
       }
       await onFrameworkUpdate();
     } catch (err: any) {
@@ -130,10 +131,17 @@ export default function FrameworkPanel({ story, chapters, onChapterSelect, onFra
     setContinueLoading(true);
     setChatError('');
     try {
+      const beforeCount = countOutlineChapters(story.outline);
       const result = await continueFramework(story.id);
+      const afterCount = countOutlineChapters(result.story?.outline);
+      const delta = Math.max(0, afterCount - beforeCount);
+      const visibilityHint = afterCount > beforeCount
+        ? `\n\n已从 ${beforeCount} 章扩展到 ${afterCount} 章，新增 ${delta} 章。请在下方“故事大纲/章节列表”里查看新增规划。`
+        : '\n\n已完成续写请求，但章节数量没有增加；建议查看“故事大纲”是否更新了阶段内容，或输入更明确的扩展章数再试。';
+      const operationHint = formatAppliedOperations(result.applied_operations);
       setChatMessages((prev) => [
         ...prev,
-        { role: 'assistant', content: result.reply || '已续写后续大纲、章节与可能出现的新角色。' },
+        { role: 'assistant', content: `${result.reply || '已续写后续大纲、章节与可能出现的新角色。'}${visibilityHint}${operationHint}` },
       ]);
       await onFrameworkUpdate();
     } catch (err: any) {
@@ -365,6 +373,11 @@ export default function FrameworkPanel({ story, chapters, onChapterSelect, onFra
                   summary: chapter.summary,
                   key_events: chapter.key_events,
                   act: chapter.act,
+                  goal: chapter.goal,
+                  conflict: chapter.conflict,
+                  hook: chapter.hook,
+                  payoff: chapter.payoff,
+                  highlight: chapter.highlight,
                 };
                 if (mode === 'append') {
                   await saveOutlineChapterPlan(story.id, { mode, chapter: payload });
@@ -468,12 +481,35 @@ function parseFrameworkDraft(raw: string): {
 }
 
 function hasFrameworkContent(story: Story): boolean {
-  return Boolean(
-    (story.description && story.description.trim()) ||
-      (story.tags && Object.values(story.tags).some((value) => String(value || '').trim())) ||
-      (story.characters && story.characters.length > 0) ||
-      story.outline?.three_acts?.length,
+  const acts = Array.isArray(story.outline?.three_acts) ? story.outline?.three_acts : [];
+  const hasPlannedChapters = acts.some(
+    (act: any) => Array.isArray(act?.chapters) && act.chapters.some((chapter: any) => Number(chapter?.chapter_number) > 0),
   );
+  return Boolean(
+    acts.length >= 2 && hasPlannedChapters,
+  );
+}
+
+function countOutlineChapters(outline: Story['outline'] | undefined): number {
+  const acts = Array.isArray(outline?.three_acts) ? outline?.three_acts : [];
+  const numbers = new Set<number>();
+  acts.forEach((act: any) => {
+    const actChapters = Array.isArray(act?.chapters) ? act.chapters : [];
+    actChapters.forEach((chapter: any) => {
+      const chapterNumber = Number(chapter?.chapter_number);
+      if (Number.isInteger(chapterNumber) && chapterNumber > 0) {
+        numbers.add(chapterNumber);
+      }
+    });
+  });
+  return numbers.size;
+}
+
+function formatAppliedOperations(operations: { op: string; target: string }[] | undefined): string {
+  if (!operations?.length) return '';
+  const preview = operations.slice(0, 5).map((item) => `${item.op}:${item.target}`).join('、');
+  const suffix = operations.length > 5 ? ` 等 ${operations.length} 项` : '';
+  return `\n\n已精准写入 ${operations.length} 项框架修改：${preview}${suffix}。`;
 }
 
 function SectionShell({
@@ -544,6 +580,11 @@ function buildFrameworkChapters(story: Story, chapters: Chapter[]): FrameworkCha
           summary: typeof chapter?.summary === 'string' ? chapter.summary : undefined,
           status: actual?.status ?? (actual?.novel_content ? 'completed' : 'pending'),
           key_events: keyEvents,
+          goal: typeof chapter?.goal === 'string' ? chapter.goal : undefined,
+          conflict: typeof chapter?.conflict === 'string' ? chapter.conflict : undefined,
+          hook: typeof chapter?.hook === 'string' ? chapter.hook : undefined,
+          payoff: typeof chapter?.payoff === 'string' ? chapter.payoff : undefined,
+          highlight: typeof chapter?.highlight === 'string' ? chapter.highlight : undefined,
         });
       });
     });

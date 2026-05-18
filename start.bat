@@ -9,7 +9,7 @@ echo ==========================================
 echo.
 
 echo [1/3] Starting backend (FastAPI) ...
-start "LoreVista Backend" /MIN cmd /c "cd /d %~dp0backend && python main.py"
+start "LoreVista Backend" /MIN cmd /c "cd /d %~dp0backend && set RELOAD=false && python main.py"
 
 echo [2/3] Waiting for backend (2s) ...
 timeout /t 2 /nobreak >nul

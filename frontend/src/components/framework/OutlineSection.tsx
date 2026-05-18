@@ -15,6 +15,11 @@ interface PlannedChapter {
   title: string;
   summary?: string;
   key_events?: string[];
+  goal?: string;
+  conflict?: string;
+  hook?: string;
+  payoff?: string;
+  highlight?: string;
 }
 
 interface ActNode {
@@ -22,6 +27,16 @@ interface ActNode {
   name: string;
   summary?: string;
   chapters: PlannedChapter[];
+}
+
+interface SerialStrategy {
+  positioning?: string;
+  opening_hook?: string;
+  first_3_chapter_hook?: string;
+  chapter_10_climax?: string;
+  chapter_20_payoff?: string;
+  midgame_engine?: string;
+  late_game_direction?: string;
 }
 
 function flattenActs(outline: Outline | null): ActNode[] {
@@ -41,10 +56,34 @@ function flattenActs(outline: Outline | null): ActNode[] {
             key_events: Array.isArray(chapter?.key_events)
               ? chapter.key_events.map((item: unknown) => String(item)).filter(Boolean)
               : undefined,
+            goal: typeof chapter?.goal === 'string' ? chapter.goal : undefined,
+            conflict: typeof chapter?.conflict === 'string' ? chapter.conflict : undefined,
+            hook: typeof chapter?.hook === 'string' ? chapter.hook : undefined,
+            payoff: typeof chapter?.payoff === 'string' ? chapter.payoff : undefined,
+            highlight: typeof chapter?.highlight === 'string' ? chapter.highlight : undefined,
           }))
           .filter((chapter: PlannedChapter) => Number.isInteger(chapter.chapter_number) && chapter.chapter_number > 0)
       : [],
   }));
+}
+
+function readSerialStrategy(outline: Outline | null): SerialStrategy | null {
+  const raw = (outline as any)?.serial_strategy;
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const pick = (key: keyof SerialStrategy) => {
+    const value = raw[key];
+    return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+  };
+  const strategy: SerialStrategy = {
+    positioning: pick('positioning'),
+    opening_hook: pick('opening_hook'),
+    first_3_chapter_hook: pick('first_3_chapter_hook'),
+    chapter_10_climax: pick('chapter_10_climax'),
+    chapter_20_payoff: pick('chapter_20_payoff'),
+    midgame_engine: pick('midgame_engine'),
+    late_game_direction: pick('late_game_direction'),
+  };
+  return Object.values(strategy).some(Boolean) ? strategy : null;
 }
 
 const ACT_COLORS = ['border-l-blue-400', 'border-l-sky-400', 'border-l-emerald-400', 'border-l-amber-400', 'border-l-violet-400'];
@@ -61,6 +100,15 @@ function hasGeneratedChapterContent(chapter: Chapter | undefined): boolean {
   return Boolean(
     (chapter.novel_content && chapter.novel_content.trim()) ||
     (Array.isArray(chapter.messages) && chapter.messages.length > 0),
+  );
+}
+
+function StrategyItem({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded-lg border border-slate-200 bg-white px-2.5 py-2">
+      <div className="text-[10px] font-medium text-slate-500">{label}</div>
+      <div className="mt-1 text-[11px] leading-relaxed text-slate-700 whitespace-normal break-words">{value}</div>
+    </div>
   );
 }
 
@@ -103,6 +151,12 @@ function ActCard({
         chapter_number: chapter.chapter_number,
         chapter_title: chapter.title,
         key_events: chapter.key_events,
+        summary: chapter.summary,
+        goal: chapter.goal,
+        conflict: chapter.conflict,
+        hook: chapter.hook,
+        payoff: chapter.payoff,
+        highlight: chapter.highlight,
       });
       await onUpdate();
       onChapterSelect(chapter.chapter_number);
@@ -175,6 +229,14 @@ function ActCard({
                     {chapter.summary}
                   </p>
                 )}
+                {(chapter.goal || chapter.conflict || chapter.hook || chapter.payoff) && (
+                  <div className="px-2.5 pb-2 pl-8 grid gap-1">
+                    {chapter.goal && <p className="text-[10px] text-slate-500 leading-relaxed">目标：{chapter.goal}</p>}
+                    {chapter.conflict && <p className="text-[10px] text-slate-500 leading-relaxed">冲突：{chapter.conflict}</p>}
+                    {chapter.hook && <p className="text-[10px] text-slate-500 leading-relaxed">钩子：{chapter.hook}</p>}
+                    {chapter.payoff && <p className="text-[10px] text-slate-500 leading-relaxed">回报：{chapter.payoff}</p>}
+                  </div>
+                )}
               </div>
             );
           })}
@@ -195,6 +257,7 @@ export default function OutlineSection({ outline, chapters, storyId, onChapterSe
   const [expandedAll, setExpandedAll] = useState(true);
 
   const acts = useMemo(() => flattenActs(outline), [outline]);
+  const serialStrategy = useMemo(() => readSerialStrategy(outline), [outline]);
   const chapterMap = useMemo(
     () => new Map(chapters.map((chapter) => [chapter.chapter_number, chapter])),
     [chapters],
@@ -255,6 +318,20 @@ export default function OutlineSection({ outline, chapters, storyId, onChapterSe
       </div>
 
       <div className="space-y-1.5">
+        {serialStrategy && (
+          <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-3 space-y-2">
+            <div className="text-xs font-semibold text-slate-700">连载策略</div>
+            <div className="grid gap-2 md:grid-cols-2">
+              {serialStrategy.positioning && <StrategyItem label="定位" value={serialStrategy.positioning} />}
+              {serialStrategy.opening_hook && <StrategyItem label="开篇爆点" value={serialStrategy.opening_hook} />}
+              {serialStrategy.first_3_chapter_hook && <StrategyItem label="前三章钩子" value={serialStrategy.first_3_chapter_hook} />}
+              {serialStrategy.chapter_10_climax && <StrategyItem label="第十章小高潮" value={serialStrategy.chapter_10_climax} />}
+              {serialStrategy.chapter_20_payoff && <StrategyItem label="二十章回报" value={serialStrategy.chapter_20_payoff} />}
+              {serialStrategy.midgame_engine && <StrategyItem label="中段推进引擎" value={serialStrategy.midgame_engine} />}
+              {serialStrategy.late_game_direction && <StrategyItem label="后段方向" value={serialStrategy.late_game_direction} />}
+            </div>
+          </div>
+        )}
         {acts.map((act, index) => (
           <ActCard
             key={`${act.act}-${index}`}
