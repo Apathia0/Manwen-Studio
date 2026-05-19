@@ -6413,10 +6413,52 @@ async def expand_chapter_endpoint(story_id: int, request: Request, db: Session =
     }
 
     _check_and_consume_feature_quota(request, user.id, "chapter.expand.monthly_limit", 1, db, deduct=False, provider_kind="text")
+
+    previous_chapter_summary = ""
+    chapter_num_for_query = chapter_number_val
+    if not isinstance(chapter_num_for_query, int) or chapter_num_for_query <= 0:
+        max_num_row = (
+            db.query(Chapter.chapter_number)
+            .filter(Chapter.story_id == story_id)
+            .order_by(Chapter.chapter_number.desc())
+            .first()
+        )
+        chapter_num_for_query = (max_num_row[0] + 1) if max_num_row else 1
+
+    if isinstance(chapter_num_for_query, int) and chapter_num_for_query > 1:
+        prev_chapter = (
+            db.query(Chapter)
+            .filter(
+                Chapter.story_id == story_id,
+                Chapter.chapter_number < chapter_num_for_query,
+                Chapter.novel_content.isnot(None),
+                Chapter.status.in_(["completed", "draft"]),
+            )
+            .order_by(Chapter.chapter_number.desc())
+            .first()
+        )
+        if prev_chapter and prev_chapter.novel_content:
+            ending_text = prev_chapter.novel_content[-800:]
+            memory_compact = _build_story_memory_compact(
+                story.story_memory if isinstance(story.story_memory, dict) else {}
+            )
+            parts_list = [f"上一章《第{prev_chapter.chapter_number}章：{prev_chapter.title or ''}》结尾：\n{ending_text}"]
+            if memory_compact.get("story_state"):
+                parts_list.append(f"当前故事状态：{memory_compact['story_state']}")
+            if memory_compact.get("current_arc_focus"):
+                parts_list.append(f"当前剧情焦点：{memory_compact['current_arc_focus']}")
+            if memory_compact.get("open_loops"):
+                loops = memory_compact["open_loops"][:5]
+                parts_list.append("待回收伏笔：\n- " + "\n- ".join(loops))
+            previous_chapter_summary = "\n".join(parts_list)
+            if len(previous_chapter_summary) > 2000:
+                previous_chapter_summary = previous_chapter_summary[:2000]
+
     novel_content = await expand_chapter_to_content(
         story_context,
         chapter_info,
         api_key=_user_deepseek_api_key(request),
+        previous_chapter_summary=previous_chapter_summary,
     )
 
     # Determine chapter number

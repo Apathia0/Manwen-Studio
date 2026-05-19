@@ -1478,10 +1478,14 @@ async def summarize_chapter_memory(
         raise ValueError(f"Chapter memory summarization failed: {e}")
 
 
-async def expand_chapter_to_content(story_context: dict, chapter_info: dict, api_key: str | None = None) -> str:
+async def expand_chapter_to_content(story_context: dict, chapter_info: dict, api_key: str | None = None, previous_chapter_summary: str = "") -> str:
     """Expand a chapter outline entry into full novel content using story framework constraints."""
     snapshot = _build_story_snapshot(story_context)
     chapter_details = json.dumps(chapter_info, ensure_ascii=False)
+
+    previous_block = ""
+    if previous_chapter_summary and previous_chapter_summary.strip():
+        previous_block = f"\n## 上集回顾\n{previous_chapter_summary}\n"
 
     user_prompt = f"""请根据以下故事框架和章节信息，创作这一话的完整小说内容。
 
@@ -1490,7 +1494,7 @@ async def expand_chapter_to_content(story_context: dict, chapter_info: dict, api
 
 ## 本章信息
 {chapter_details}
-
+{previous_block}
 ## ★★★ 字数要求（最高优先级）★★★
 - 必须 4000-6000 中文字。这是硬性要求，不可商量。
 - 绝对禁止低于 3500 字。
