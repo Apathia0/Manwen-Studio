@@ -43,6 +43,14 @@ NOVEL_SYSTEM_PROMPT = """你是一位才华横溢、文笔细腻的网络小说�
 - 人物描写立体鲜活，注重微表情、小动作、心理独白
 - 避免流水账，避免大段无意义的抽象拒述
 
+## 核心约束：章节间连续性（最高优先级）
+- 本章开头必须自然衔接上一章结尾处的情境，不能出现剧情跳跃或角色状态无故重置
+- 必须严格参考"故事框架约束"中的"作品连续性记忆"，尤其是 recent_chapter_summaries 中的事件进展
+- 已解决的事件仅做必要引用，不可重复描述；未回收的伏笔应在本章适当推进
+- 角色状态（性格、关系、能力、情感）必须与连续性记忆保持一致
+- 不可在无铺垫的情况下让角色忘记前文发生的关键事件
+- 只能参考已实际发生的剧情事实，不得编造或虚构未发生的前情事件
+
 请直接输出小说正文，不要加额外说明或字数统计。"""
 
 
@@ -614,6 +622,28 @@ def _build_story_snapshot(story_context: dict) -> str:
         parts.append(f"现有大纲: {json.dumps(story_context['outline'], ensure_ascii=False)}")
     if story_context.get("description"):
         parts.append(f"故事描述: {story_context['description']}")
+    # Inject story_memory_compact (continuity memory)
+    story_memory_compact = story_context.get("story_memory_compact") if isinstance(story_context, dict) else None
+    if not isinstance(story_memory_compact, dict) or not story_memory_compact:
+        story_memory = story_context.get("story_memory") if isinstance(story_context, dict) else {}
+        if isinstance(story_memory, dict) and story_memory:
+            compact = {}
+            for key in ("story_state", "current_arc_focus", "current_tone", "next_payoff_target"):
+                value = str(story_memory.get(key) or "").strip()
+                if value:
+                    compact[key] = value
+            for key in ("continuity_facts", "open_loops", "resolved_loops"):
+                raw = story_memory.get(key)
+                if isinstance(raw, list):
+                    cleaned = [str(item).strip() for item in raw if str(item).strip()]
+                    if cleaned:
+                        compact[key] = cleaned[:12]
+            recent = story_memory.get("recent_chapter_summaries")
+            if isinstance(recent, list):
+                compact["recent_chapter_summaries"] = [item for item in recent[-8:] if isinstance(item, dict)]
+            story_memory_compact = compact
+    if isinstance(story_memory_compact, dict) and story_memory_compact:
+        parts.append(f"作品连续性记忆: {json.dumps(story_memory_compact, ensure_ascii=False)}")
     return "\n\n".join(parts)
 
 
@@ -863,6 +893,29 @@ def _build_story_snapshot_tiered(story_context: dict, tier: str = "auto") -> str
     description = story_context.get("description")
     if description:
         parts.append(f"故事描述: {description}")
+
+    # Inject story_memory_compact (continuity memory)
+    story_memory_compact = story_context.get("story_memory_compact") if isinstance(story_context, dict) else None
+    if not isinstance(story_memory_compact, dict) or not story_memory_compact:
+        story_memory = story_context.get("story_memory") if isinstance(story_context, dict) else {}
+        if isinstance(story_memory, dict) and story_memory:
+            compact = {}
+            for key in ("story_state", "current_arc_focus", "current_tone", "next_payoff_target"):
+                value = str(story_memory.get(key) or "").strip()
+                if value:
+                    compact[key] = value
+            for key in ("continuity_facts", "open_loops", "resolved_loops"):
+                raw = story_memory.get(key)
+                if isinstance(raw, list):
+                    cleaned = [str(item).strip() for item in raw if str(item).strip()]
+                    if cleaned:
+                        compact[key] = cleaned[:12]
+            recent = story_memory.get("recent_chapter_summaries")
+            if isinstance(recent, list):
+                compact["recent_chapter_summaries"] = [item for item in recent[-8:] if isinstance(item, dict)]
+            story_memory_compact = compact
+    if isinstance(story_memory_compact, dict) and story_memory_compact:
+        parts.append(f"作品连续性记忆: {json.dumps(story_memory_compact, ensure_ascii=False)}")
 
     return "\n\n".join(parts)
 
@@ -1452,7 +1505,16 @@ async def expand_chapter_to_content(story_context: dict, chapter_info: dict, api
     payload = {
         "model": DEEPSEEK_MODEL,
         "messages": [
-            {"role": "system", "content": "你是一位才华横溢、文笔细腻的网络小说家。请严格遵循故事框架约束，创作符合大纲要求的小说内容。"},
+            {
+                "role": "system",
+                "content": (
+                    "你是一位才华横溢、文笔细腻的网络小说家。请严格遵循故事框架约束，创作符合大纲要求的小说内容。\n\n"
+                    "## 章节间连续性\n"
+                    "本章开头必须自然衔接上一章结尾的情境。请参考下方\u201c前情提要\u201d中的故事状态和近期章节摘要，"
+                    "确保本章与已发布章节在剧情推进、角色状态、悬念等方面无缝衔接。"
+                    "只能参考已实际发生的剧情事实，不得编造或虚构未发生的前情事件。"
+                ),
+            },
             {"role": "user", "content": user_prompt},
         ],
         "stream": False,
