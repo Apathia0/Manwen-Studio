@@ -1,7 +1,8 @@
 import { useState } from 'react';
-import { Check, Pencil, Plus, ScrollText, Trash2, X } from 'lucide-react';
-import { listChapters, type Story } from '../api';
+import { Check, ImageIcon, Pencil, Plus, ScrollText, Trash2, X } from 'lucide-react';
+import { coverImageUrl, listChapters, type Story } from '../api';
 import { exportStoryAsZip } from '../lib/exportStory';
+import NovelCoverEditModal from './NovelCoverEditModal';
 
 interface Props {
   stories: Story[];
@@ -35,6 +36,7 @@ export default function StoryLibraryPage({
   const [savingId, setSavingId] = useState<number | null>(null);
   const [deletingId, setDeletingId] = useState<number | null>(null);
   const [exportingStoryId, setExportingStoryId] = useState<number | null>(null);
+  const [coverEditorStoryId, setCoverEditorStoryId] = useState<number | null>(null);
 
   const resetCreateForm = () => {
     setDraftTitle('');
@@ -228,6 +230,15 @@ export default function StoryLibraryPage({
                   </div>
                 ) : (
                   <>
+                    {story.cover_image ? (
+                      <div className="mb-3 overflow-hidden rounded-md border border-[#d9dfd7] bg-[#f7f8f5]">
+                        <img
+                          src={coverImageUrl(story.cover_image) || ''}
+                          alt={`${story.title} 封面`}
+                          className="h-36 w-full object-cover"
+                        />
+                      </div>
+                    ) : null}
                     <button onClick={() => void onOpen(story)} className="w-full text-left">
                       <div className="text-sm font-semibold">{story.title}</div>
                       <div className="mt-1 min-h-[40px] line-clamp-2 text-xs leading-5 text-slate-600">
@@ -246,6 +257,14 @@ export default function StoryLibraryPage({
                         >
                           <ScrollText size={12} />
                           {isExporting ? '导出中...' : '导出'}
+                        </button>
+                        <button
+                          onClick={() => setCoverEditorStoryId(story.id)}
+                          disabled={savingId !== null || deletingId !== null}
+                          className="inline-flex items-center gap-1 rounded-md border border-[#bfdbfe] bg-[#eff6ff] px-2 py-1.5 text-xs text-[#1d4ed8] hover:bg-[#dbeafe] disabled:cursor-not-allowed disabled:opacity-60"
+                        >
+                          <ImageIcon size={12} />
+                          小说封面编辑
                         </button>
                         <button
                           onClick={() => startEdit(story)}
@@ -279,6 +298,14 @@ export default function StoryLibraryPage({
       )}
 
       {loadingWorkspace && <div className="mt-4 text-sm text-slate-600">正在进入工作台...</div>}
+
+      {coverEditorStoryId !== null && (
+        <NovelCoverEditModal
+          story={stories.find((story) => story.id === coverEditorStoryId)!}
+          onClose={() => setCoverEditorStoryId(null)}
+          onUpdated={onRefresh}
+        />
+      )}
     </div>
   );
 }

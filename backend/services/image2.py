@@ -21,6 +21,10 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(message
 
 load_dotenv()
 
+# 禁用系统代理（部分 Windows 环境有代理配置但未运行，会导致 httpx 连接超时断开）
+os.environ["NO_PROXY"] = "*"
+os.environ["no_proxy"] = "*"
+
 IMAGE_API_BASE_URL = os.getenv("IMAGE_API_BASE_URL", "https://api.xbyjs.top/v1").rstrip("/")
 IMAGE_API_KEY = os.getenv("IMAGE_API_KEY", "")
 IMAGE_MODEL = "gpt-image-2"
@@ -436,6 +440,79 @@ async def generate_reference_image(
         assert last_err is not None
         logger.error(
             "[%s] 角色参考图尝试 %s 失败: code=%s retryable=%s provider=%s",
+            progress_label,
+            attempt,
+            last_err.code,
+            last_err.retryable,
+            last_err.provider_message,
+        )
+        if attempt < MAX_RETRIES and last_err.retryable:
+            await asyncio.sleep(RETRY_DELAY)
+            continue
+        break
+
+    assert last_err is not None
+    raise last_err
+
+
+async def generate_cover_image(
+    prompt: str,
+    output_path: Path,
+    *,
+    api_key: str | None = None,
+    size: str = "1024x1536",
+) -> str:
+    progress_label = f"cover:{output_path.stem}"
+    current_prompt = prompt.strip()
+    last_err: MangaImageGenerationError | None = None
+
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            logger.info("[%s] 开始生成小说封面（尝试 %s/%s）", progress_label, attempt, MAX_RETRIES)
+            async with httpx.AsyncClient(timeout=httpx.Timeout(connect=30, read=600, write=120, pool=30)) as client:
+                resp = await client.post(
+                    f"{IMAGE_API_BASE_URL}/images/generations",
+                    json={"model": IMAGE_MODEL, "prompt": current_prompt, "size": size},
+                    headers=_image_auth_headers(api_key, json_content=True),
+                )
+
+            if not resp.is_success:
+                raise _classify_response_error(resp, progress_label, current_prompt, False)
+
+            data = resp.json()
+            image_entry = data["data"][0]
+            image_bytes = normalize_image_bytes(await _download_generated_image(image_entry, progress_label))
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_bytes(image_bytes)
+            logger.info("[%s] 小说封面已保存到 %s", progress_label, output_path)
+            return str(output_path)
+        except httpx.TimeoutException as exc:
+            last_err = MangaImageGenerationError(
+                code="timeout",
+                user_message="封面生成超时，请稍后重试。",
+                retryable=True,
+                provider_message=repr(exc),
+            )
+        except httpx.TransportError as exc:
+            last_err = MangaImageGenerationError(
+                code="network_error",
+                user_message="封面生成时网络异常，请稍后重试。",
+                retryable=True,
+                provider_message=repr(exc),
+            )
+        except MangaImageGenerationError as exc:
+            last_err = exc
+        except Exception as exc:
+            last_err = MangaImageGenerationError(
+                code="unknown_error",
+                user_message="封面生成失败，请稍后重试。",
+                retryable=True,
+                provider_message=repr(exc),
+            )
+
+        assert last_err is not None
+        logger.error(
+            "[%s] 封面生成尝试 %s 失败: code=%s retryable=%s provider=%s",
             progress_label,
             attempt,
             last_err.code,

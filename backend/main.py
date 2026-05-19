@@ -93,7 +93,7 @@ from services.deepseek import (
     summarize_chapter_memory,
 )
 from services.errors import MangaImageGenerationError, MissingApiKeyError
-from services.image2 import edit_existing_image, generate_manga_image, generate_reference_image
+from services.image2 import edit_existing_image, generate_cover_image, generate_manga_image, generate_reference_image
 from services.scene_safety import sanitize_scene_list
 from services import deepseek as deepseek_service
 from services import image2 as image_service
@@ -912,6 +912,69 @@ def _truncate_text(value: str, limit: int = 180) -> str:
     if len(text) <= limit:
         return text
     return text[: max(0, limit - 1)].rstrip() + "…"
+
+
+def _story_cover_output_path(story_id: int) -> Path:
+    covers_dir = manga_dir / "covers"
+    covers_dir.mkdir(parents=True, exist_ok=True)
+    return covers_dir / f"cover_{story_id}_{uuid.uuid4().hex[:8]}.png"
+
+
+def _replace_story_cover_from_path(story: Story, generated_path: Path) -> str:
+    relative = f"manga_outputs/covers/{generated_path.name}"
+    if story.cover_image and story.cover_image != relative:
+        old = Path(__file__).resolve().parent / story.cover_image
+        try:
+            _unlink_file(old, "old story cover")
+        except HTTPException:
+            logger.warning("Old story cover remained after replacement: %s", old)
+    story.cover_image = relative
+    return relative
+
+
+def _build_story_cover_prompt(story: Story, instruction: str = "") -> str:
+    story_bible_compact = _build_story_bible_compact(story.story_bible)
+    outline_compact = _build_outline_compact(story.outline or {}, recent_chapter_limit=3)
+    title = str(story.title or "").strip() or "Untitled Story"
+    premise = str(
+        story_bible_compact.get("one_line_premise")
+        or story_bible_compact.get("project_positioning")
+        or story.description
+        or ""
+    ).strip()
+    core_hook = str(story_bible_compact.get("core_hook") or "").strip()
+    tone = str(story_bible_compact.get("pacing_strategy") or "").strip()
+    protagonist = str(story_bible_compact.get("protagonist_core") or "").strip()
+    main_conflict = str(story_bible_compact.get("main_conflict") or "").strip()
+    must_keep = story_bible_compact.get("must_keep_rules")
+    must_keep_text = "、".join(str(item).strip() for item in must_keep if str(item).strip()) if isinstance(must_keep, list) else ""
+    user_instruction = str(instruction or "").strip()
+
+    # 构建画面主体描述
+    scene_elements = []
+    if premise:
+        scene_elements.append(f"故事梗概：{premise}")
+    if protagonist:
+        scene_elements.append(f"主角特征：{protagonist}")
+    if main_conflict:
+        scene_elements.append(f"核心冲突：{main_conflict}")
+    if core_hook:
+        scene_elements.append(f"核心卖点：{core_hook}")
+    scene_text = "\n".join(scene_elements)
+
+    return (
+        "为网络小说《" + title + "》设计一张出版级竖版封面图。\n\n"
+        "【核心要求】\n"
+        "1. 在封面醒目位置加入书名文字《" + title + "》，字体设计有商业质感，可搭配英文副标题；\n"
+        "2. 画面必须紧扣小说主题，有人物/场景/世界观视觉呈现，让读者一眼看出题材类型；\n"
+        "3. 竖版构图（宽高比约2:3），上部留位给书名，中部/下部为主视觉画面；\n"
+        "4. 色彩氛围与故事基调一致（" + (tone or "根据题材匹配相应情绪") + "）；\n"
+        "5. 画面干净、光影有层次、有商业封面质感，适合网络小说平台展示。\n\n"
+        "【故事设定】\n" + scene_text + "\n"
+        + ("【必须保留的设定】\n" + must_keep_text + "\n" if must_keep_text else "")
+        + "【章节概要参考】\n" + json.dumps(outline_compact, ensure_ascii=False) + "\n\n"
+        + (user_instruction if user_instruction else "【风格倾向】写实厚涂或半厚涂风格，人物刻画精致，背景有氛围感，整体有畅销小说封面气质。")
+    )
 
 
 def _build_import_guidance_context(story: Story, db: Session) -> dict[str, Any]:
@@ -4122,23 +4185,109 @@ async def upload_story_cover(story_id: int, request: Request, db: Session = Depe
     story = _require_story_for_user(story_id, user, db)
     body = await request.json()
     b64 = body.get("image", "")
-    import uuid
     img_bytes = _decode_png_upload(b64)
-    covers_dir = manga_dir / "covers"
-    covers_dir.mkdir(parents=True, exist_ok=True)
-    filename = f"cover_{story_id}_{uuid.uuid4().hex[:8]}.png"
-    _write_bytes_or_conflict(covers_dir / filename, img_bytes, "story cover")
-    # Delete old cover file if exists
-    if story.cover_image:
-        old = Path(__file__).resolve().parent / story.cover_image
-        try:
-            _unlink_file(old, "old story cover")
-        except HTTPException:
-            logger.warning("Old story cover remained after replacement: %s", old)
-    story.cover_image = f"manga_outputs/covers/{filename}"
+    output_path = _story_cover_output_path(story_id)
+    _write_bytes_or_conflict(output_path, img_bytes, "story cover")
+    _replace_story_cover_from_path(story, output_path)
     db.commit()
     db.refresh(story)
     return {"cover_image": story.cover_image}
+
+
+@app.post("/api/stories/{story_id}/generate-cover")
+async def generate_story_cover(story_id: int, request: Request, db: Session = Depends(get_db)):
+    user = _require_user(request, db)
+    story = _require_story_for_user(story_id, user, db)
+    body = await request.json()
+    instruction = str(body.get("instruction") or "").strip()
+    prompt = _build_story_cover_prompt(story, instruction)
+    logger.info("[cover:%s] 封面 Prompt 长度: %s 字", story_id, len(prompt))
+    output_path = _story_cover_output_path(story_id)
+
+    _check_and_consume_feature_quota(
+        request,
+        user.id,
+        "manga.image.monthly_limit",
+        1,
+        db,
+        deduct=False,
+        provider_kind="image",
+    )
+    try:
+        await generate_cover_image(
+            prompt,
+            output_path,
+            api_key=_user_image_api_key(request),
+        )
+    except MangaImageGenerationError as exc:
+        raise HTTPException(502, exc.to_payload()) from exc
+
+    _replace_story_cover_from_path(story, output_path)
+    _check_and_consume_feature_quota(
+        request,
+        user.id,
+        "manga.image.monthly_limit",
+        1,
+        db,
+        deduct=True,
+        provider_kind="image",
+    )
+    db.commit()
+    db.refresh(story)
+    return {"cover_image": story.cover_image, "prompt": prompt}
+
+
+@app.post("/api/stories/{story_id}/adjust-cover")
+async def adjust_story_cover(story_id: int, request: Request, db: Session = Depends(get_db)):
+    user = _require_user(request, db)
+    story = _require_story_for_user(story_id, user, db)
+    if not story.cover_image:
+        raise HTTPException(400, "Story has no cover to adjust")
+
+    body = await request.json()
+    instruction = str(body.get("instruction") or "").strip()
+    if not instruction:
+        raise HTTPException(400, "instruction is required")
+
+    source_path = Path(__file__).resolve().parent / story.cover_image
+    if not source_path.exists():
+        raise HTTPException(404, "Existing cover file not found")
+
+    prompt = _build_story_cover_prompt(story, f"在现有封面基础上调整：{instruction}")
+    output_path = _story_cover_output_path(story_id)
+    _check_and_consume_feature_quota(
+        request,
+        user.id,
+        "manga.image.monthly_limit",
+        1,
+        db,
+        deduct=False,
+        provider_kind="image",
+    )
+    try:
+        await edit_existing_image(
+            prompt,
+            source_path,
+            output_path,
+            api_key=_user_image_api_key(request),
+            size="1024x1536",
+        )
+    except MangaImageGenerationError as exc:
+        raise HTTPException(502, exc.to_payload()) from exc
+
+    _replace_story_cover_from_path(story, output_path)
+    _check_and_consume_feature_quota(
+        request,
+        user.id,
+        "manga.image.monthly_limit",
+        1,
+        db,
+        deduct=True,
+        provider_kind="image",
+    )
+    db.commit()
+    db.refresh(story)
+    return {"cover_image": story.cover_image, "prompt": prompt}
 
 
 # ─── Chapter CRUD ───────────────────────────────────────────
@@ -5171,8 +5320,8 @@ async def generate_manga_stream(chapter_id: int, request: Request, db: Session =
                     prompt=scene_prompt,
                 )
                 db.add(manga)
-                db.commit()
                 _check_and_consume_feature_quota(request, user.id, "manga.image.monthly_limit", 1, db, deduct=True, provider_kind="image")
+                db.commit()
                 db.refresh(manga)
                 yield {
                     "event": "image",
@@ -5288,8 +5437,8 @@ async def regenerate_single_image(chapter_id: int, image_number: int, body: dict
             prompt=prompt,
         )
         db.add(manga)
-    db.commit()
     _check_and_consume_feature_quota(request, user.id, "manga.regenerate.monthly_limit", 1, db, deduct=True, provider_kind="image")
+    db.commit()
     db.refresh(manga)
 
     if old_path and old_path.exists() and old_path != Path(__file__).resolve().parent / image_result.image_path:

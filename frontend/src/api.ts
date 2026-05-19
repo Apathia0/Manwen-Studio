@@ -1101,6 +1101,26 @@ export async function uploadStoryCover(storyId: number, base64: string): Promise
   return data.cover_image;
 }
 
+export async function generateStoryCover(storyId: number, instruction: string = ''): Promise<{ cover_image: string; prompt: string }> {
+  const res = await fetch(`${BASE}/api/stories/${storyId}/generate-cover`, {
+    method: 'POST',
+    headers: apiHeaders(true),
+    body: JSON.stringify({ instruction }),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '生成封面失败'));
+  return res.json();
+}
+
+export async function adjustStoryCover(storyId: number, instruction: string): Promise<{ cover_image: string; prompt: string }> {
+  const res = await fetch(`${BASE}/api/stories/${storyId}/adjust-cover`, {
+    method: 'POST',
+    headers: apiHeaders(true),
+    body: JSON.stringify({ instruction }),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '调整封面失败'));
+  return res.json();
+}
+
 export function coverImageUrl(coverPath: string | null | undefined): string | null {
   if (!coverPath) return null;
   return `${BASE}/static/manga/${coverPath.replace('manga_outputs/', '')}`;
