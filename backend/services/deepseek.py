@@ -1429,7 +1429,8 @@ async def summarize_chapter_memory(
     "character_changes": ["角色状态变化1"],
     "new_facts": ["新确认事实1"],
     "open_loops": ["尚未回收的悬念1"],
-    "resolved_loops": ["本章回收的悬念1"]
+    "resolved_loops": ["本章回收的悬念1"],
+    "ending_scene": "本章结尾场景描写（100-200字，如无可省略）"
   }},
   "story_memory_update": {{
     "story_state": "当前故事推进到什么局面",
@@ -1453,7 +1454,12 @@ async def summarize_chapter_memory(
         "messages": [
             {
                 "role": "system",
-                "content": "你是长篇小说连续性编辑。请把章节正文压缩成后续创作可复用的结构化记忆，只输出 JSON。",
+                "content": (
+                    "你是长篇小说连续性编辑。请把章节正文压缩成后续创作可复用的结构化记忆，只输出 JSON。\n\n"
+                    "特别注意：请从章节正文中提取本章结尾场景的详细描写（约 100-200 字），"
+                    "在输出的 JSON 中放入 ending_scene 字段。"
+                    "例如：'主角站在城门前，望着夕阳下的王都，手中的剑鞘还残留着战斗的余温。远处传来钟声，新的旅程即将开始。'"
+                ),
             },
             {"role": "user", "content": user_prompt},
         ],
