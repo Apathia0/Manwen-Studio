@@ -2690,6 +2690,12 @@ def _merge_story_memory(existing: dict | None, update: dict | None, chapter: Cha
             "title": chapter.title or f"第{chapter.chapter_number}话",
             "summary": summary_text,
         }
+        ending_scene = str(chapter_summary.get("ending_scene") or "").strip()
+        if ending_scene:
+            entry["ending_scene"] = ending_scene
+        chapter_handoff = _extract_chapter_handoff(chapter.memory_summary if isinstance(chapter.memory_summary, dict) else {})
+        if chapter_handoff:
+            entry["handoff"] = chapter_handoff
         recent_entries = [item for item in recent_entries if item.get("chapter_number") != chapter.chapter_number]
         recent_entries.append(entry)
         recent_entries = sorted(recent_entries, key=lambda item: int(item.get("chapter_number") or 0))[-12:]
@@ -2719,8 +2725,14 @@ async def _refresh_chapter_memory(chapter: Chapter, request: Request, db: Sessio
         return
 
     chapter_summary = memory_payload.get("chapter_summary") if isinstance(memory_payload.get("chapter_summary"), dict) else {}
+    chapter_handoff = memory_payload.get("chapter_handoff") if isinstance(memory_payload.get("chapter_handoff"), dict) else {}
     story_memory_update = memory_payload.get("story_memory_update") if isinstance(memory_payload.get("story_memory_update"), dict) else {}
-    chapter.memory_summary = chapter_summary or None
+    chapter.memory_summary = {
+        "chapter_summary": chapter_summary,
+        "chapter_handoff": chapter_handoff,
+        "summary": chapter_summary.get("summary"),
+        "ending_scene": chapter_summary.get("ending_scene"),
+    } if (chapter_summary or chapter_handoff) else None
     chapter.story.story_memory = _merge_story_memory(chapter.story.story_memory, story_memory_update, chapter, chapter_summary)
 
 
@@ -2816,6 +2828,174 @@ def _merge_characters_payload(existing, incoming):
 
 def _story_framework_context(story: Story) -> dict:
     return _build_framework_ai_context(story)
+
+
+def _extract_chapter_handoff(memory_summary: dict | None) -> dict[str, Any]:
+    if not isinstance(memory_summary, dict):
+        return {}
+    handoff = memory_summary.get("chapter_handoff")
+    return dict(handoff) if isinstance(handoff, dict) else {}
+
+
+def _compact_chapter_memory(chapter: Chapter) -> dict[str, Any]:
+    memory_summary = chapter.memory_summary if isinstance(chapter.memory_summary, dict) else {}
+    chapter_summary = memory_summary.get("chapter_summary") if isinstance(memory_summary.get("chapter_summary"), dict) else {}
+    handoff = _extract_chapter_handoff(memory_summary)
+    summary_text = str(
+        chapter_summary.get("summary")
+        or memory_summary.get("summary")
+        or ""
+    ).strip()
+    compact: dict[str, Any] = {
+        "chapter_number": chapter.chapter_number,
+        "title": chapter.title or f"第{chapter.chapter_number}章",
+    }
+    if summary_text:
+        compact["summary"] = summary_text
+    ending_scene = str(chapter_summary.get("ending_scene") or memory_summary.get("ending_scene") or "").strip()
+    if ending_scene:
+        compact["ending_scene"] = ending_scene
+    if handoff:
+        compact["handoff"] = handoff
+    return compact
+
+
+def _build_previous_chapter_bridge(
+    story_id: int,
+    target_chapter_number: int | None,
+    db: Session,
+) -> dict[str, Any]:
+    if not isinstance(target_chapter_number, int) or target_chapter_number <= 1:
+        return {"summary_text": "", "handoff": {}, "previous_chapter": None}
+
+    prev_chapter = (
+        db.query(Chapter)
+        .filter(
+            Chapter.story_id == story_id,
+            Chapter.chapter_number < target_chapter_number,
+            Chapter.novel_content.isnot(None),
+            Chapter.status.in_(["completed", "draft", "reviewed"]),
+        )
+        .order_by(Chapter.chapter_number.desc())
+        .first()
+    )
+    if not prev_chapter:
+        return {"summary_text": "", "handoff": {}, "previous_chapter": None}
+
+    memory_summary = prev_chapter.memory_summary if isinstance(prev_chapter.memory_summary, dict) else {}
+    chapter_summary = memory_summary.get("chapter_summary") if isinstance(memory_summary.get("chapter_summary"), dict) else {}
+    handoff = _extract_chapter_handoff(memory_summary)
+    ending_scene = str(chapter_summary.get("ending_scene") or memory_summary.get("ending_scene") or "").strip()
+    summary_text = str(chapter_summary.get("summary") or memory_summary.get("summary") or "").strip()
+    fallback_tail = (prev_chapter.novel_content or "")[-800:].strip()
+
+    parts = [f"上一章《第{prev_chapter.chapter_number}章：{prev_chapter.title or ''}》"]
+    if summary_text:
+        parts.append(f"章节摘要：{summary_text}")
+    if ending_scene:
+        parts.append(f"结尾场景：{ending_scene}")
+    if fallback_tail and not ending_scene:
+        parts.append(f"正文结尾片段：\n{fallback_tail}")
+    if handoff.get("opening_must_continue"):
+        parts.append(f"下一章必须承接：{handoff['opening_must_continue']}")
+    if handoff.get("active_conflict"):
+        parts.append(f"即时冲突：{handoff['active_conflict']}")
+    return {
+        "summary_text": "\n".join(parts)[:2400],
+        "handoff": handoff,
+        "previous_chapter": prev_chapter,
+    }
+
+
+def _build_chapter_runtime_context(
+    story: Story,
+    db: Session,
+    chapter_info: dict[str, Any],
+    *,
+    user_instruction: str = "",
+) -> dict[str, Any]:
+    context = _build_framework_ai_context(story, mode="chapter_runtime", user_instruction=user_instruction)
+    target_chapter_number = chapter_info.get("chapter_number")
+    previous_bridge = _build_previous_chapter_bridge(story.id, target_chapter_number if isinstance(target_chapter_number, int) else None, db)
+    recent_candidates = (
+        db.query(Chapter)
+        .filter(
+            Chapter.story_id == story.id,
+            Chapter.chapter_number < (target_chapter_number if isinstance(target_chapter_number, int) else 10**9),
+        )
+        .order_by(Chapter.chapter_number.desc())
+        .limit(3)
+        .all()
+    )
+    recent_memories = [_compact_chapter_memory(item) for item in reversed(recent_candidates) if _compact_chapter_memory(item)]
+    current_card = {
+        "chapter_number": chapter_info.get("chapter_number"),
+        "title": chapter_info.get("title"),
+        "act": chapter_info.get("act"),
+        "summary": chapter_info.get("summary"),
+        "goal": chapter_info.get("goal"),
+        "conflict": chapter_info.get("conflict"),
+        "hook": chapter_info.get("hook"),
+        "payoff": chapter_info.get("payoff"),
+        "highlight": chapter_info.get("highlight"),
+        "key_events": chapter_info.get("key_events"),
+    }
+    context["current_chapter"] = {key: value for key, value in current_card.items() if value not in (None, "", [], {})}
+    context["previous_chapter_handoff"] = previous_bridge.get("handoff") or {}
+    context["recent_chapter_memories"] = recent_memories
+    return context
+
+
+def _build_chapter_continuity_context_text(story_context: dict[str, Any]) -> str:
+    parts: list[str] = []
+    current_chapter = story_context.get("current_chapter")
+    if isinstance(current_chapter, dict) and current_chapter:
+        parts.append("当前章节任务卡: " + json.dumps(current_chapter, ensure_ascii=False))
+    previous_handoff = story_context.get("previous_chapter_handoff")
+    if isinstance(previous_handoff, dict) and previous_handoff:
+        parts.append("上一章交接包: " + json.dumps(previous_handoff, ensure_ascii=False))
+    recent_memories = story_context.get("recent_chapter_memories")
+    if isinstance(recent_memories, list) and recent_memories:
+        parts.append("近期章节记忆: " + json.dumps(recent_memories[-3:], ensure_ascii=False))
+    return "\n".join(parts)
+
+
+async def _ensure_generated_chapter_continuity(
+    story_context: dict[str, Any],
+    chapter_info: dict[str, Any],
+    content: str,
+    request: Request,
+) -> str:
+    previous_handoff = story_context.get("previous_chapter_handoff")
+    if not isinstance(previous_handoff, dict) or not previous_handoff:
+        return content
+
+    opening_sample = (content or "")[:900]
+    expected_signals: list[str] = []
+    for key in ("ending_location", "active_conflict", "opening_must_continue"):
+        value = str(previous_handoff.get(key) or "").strip()
+        if value:
+            expected_signals.append(value[:24])
+    active_characters = previous_handoff.get("active_characters")
+    if isinstance(active_characters, list):
+        expected_signals.extend(str(item).strip() for item in active_characters[:2] if str(item).strip())
+    matched = sum(1 for item in expected_signals if item and item in opening_sample)
+    if matched >= 1 or not expected_signals:
+        return content
+
+    instruction = (
+        "请只修正本章开头的连续性问题，重点是让开头自然承接上一章结尾，"
+        "不要重写整章主线，不要改变已成立事件。"
+    )
+    instruction += "\n上一章交接包：" + json.dumps(previous_handoff, ensure_ascii=False)
+    instruction += "\n当前问题：本章开头没有充分体现上一章结尾的地点、在场角色或即时冲突。"
+    return await adjust_chapter_content(
+        story_context,
+        chapter_info,
+        content,
+        instruction,
+        api_key=_user_deepseek_api_key(request),
+    )
 
 
 def _unlink_file(path: Path, label: str) -> None:
@@ -4435,13 +4615,32 @@ async def generate_novel_endpoint(chapter_id: int, request: Request, db: Session
     if not history:
         raise HTTPException(400, "No chat history to generate novel from")
 
-    # Build framework context from story outline, characters, tags and chapter metadata
+    chapter_info = {
+        "chapter_number": chapter.chapter_number,
+        "title": chapter.title or f"第{chapter.chapter_number}章",
+        "act": chapter.act or "",
+        "key_events": chapter.key_events or [],
+    }
+    chapter_runtime_context = _build_chapter_runtime_context(
+        chapter.story,
+        db,
+        chapter_info,
+        user_instruction="根据当前聊天记录生成完整正文",
+    )
     framework_context = _build_framework_context(chapter.story, chapter)
-
+    continuity_context = _build_chapter_continuity_context_text(chapter_runtime_context)
+    if continuity_context:
+        framework_context = framework_context + "\n" + continuity_context if framework_context else continuity_context
     novel_content = await generate_novel(
         history,
         api_key=_user_deepseek_api_key(request),
         framework_context=framework_context,
+    )
+    novel_content = await _ensure_generated_chapter_continuity(
+        chapter_runtime_context,
+        chapter_info,
+        novel_content,
+        request,
     )
     _apply_chapter_content(chapter, novel_content, status="completed")
     chapter.content_source = "chat"
@@ -4495,12 +4694,13 @@ async def import_novel_endpoint(chapter_id: int, request: Request, db: Session =
 
 
 @app.put("/api/chapters/{chapter_id}/content", response_model=ChapterOut)
-def update_chapter_content(chapter_id: int, body: ChapterContentUpdate, db: Session = Depends(get_db)):
+async def update_chapter_content(chapter_id: int, body: ChapterContentUpdate, request: Request, db: Session = Depends(get_db)):
     chapter = _require_chapter(chapter_id, db)
     text = body.content.strip()
     if not text:
         raise HTTPException(400, "content is empty")
     _apply_chapter_content(chapter, text, status="draft")
+    await _refresh_chapter_memory(chapter, request, db)
     db.commit()
     db.refresh(chapter)
     return chapter
@@ -6398,7 +6598,6 @@ async def expand_chapter_endpoint(story_id: int, request: Request, db: Session =
     if not chapter_title or not isinstance(chapter_title, str) or not chapter_title.strip():
         raise HTTPException(400, "chapter_title is required")
 
-    story_context = _story_framework_context(story)
     chapter_info = {
         "title": chapter_title.strip(),
         "act": act if isinstance(act, str) else "",
@@ -6454,11 +6653,28 @@ async def expand_chapter_endpoint(story_id: int, request: Request, db: Session =
             if len(previous_chapter_summary) > 2000:
                 previous_chapter_summary = previous_chapter_summary[:2000]
 
+    chapter_info["chapter_number"] = chapter_num_for_query
+    chapter_runtime_context = _build_chapter_runtime_context(
+        story,
+        db,
+        chapter_info,
+        user_instruction="根据章节任务卡扩写正文",
+    )
+    previous_bridge = _build_previous_chapter_bridge(story_id, chapter_num_for_query, db)
+    if previous_bridge.get("summary_text"):
+        previous_chapter_summary = str(previous_bridge["summary_text"])
+
     novel_content = await expand_chapter_to_content(
-        story_context,
+        chapter_runtime_context,
         chapter_info,
         api_key=_user_deepseek_api_key(request),
         previous_chapter_summary=previous_chapter_summary,
+    )
+    novel_content = await _ensure_generated_chapter_continuity(
+        chapter_runtime_context,
+        chapter_info,
+        novel_content,
+        request,
     )
 
     # Determine chapter number
@@ -6509,11 +6725,22 @@ async def rewrite_selection_endpoint(chapter_id: int, request: Request, db: Sess
     if not isinstance(chapter_context, str):
         chapter_context = ""
 
+    chapter_runtime_context = _build_chapter_runtime_context(
+        chapter.story,
+        db,
+        {
+            "chapter_number": chapter.chapter_number,
+            "title": chapter.title or f"第{chapter.chapter_number}章",
+            "act": chapter.act or "",
+            "key_events": chapter.key_events or [],
+        },
+        user_instruction="局部改写正文片段",
+    )
     _check_and_consume_advanced_text_quota(request, user.id, db, deduct=False)
     rewritten = await rewrite_selection(
         selected_text.strip(),
         chapter_context.strip() or (chapter.novel_content or "")[:4000],
-        story_context=_story_framework_context(chapter.story),
+        story_context=chapter_runtime_context,
         api_key=_user_deepseek_api_key(request),
     )
     _check_and_consume_advanced_text_quota(request, user.id, db, deduct=True)
@@ -6538,9 +6765,15 @@ async def adjust_chapter_content_endpoint(chapter_id: int, request: Request, db:
         "chapter_number": chapter.chapter_number,
         "key_events": chapter.key_events or [],
     }
+    chapter_runtime_context = _build_chapter_runtime_context(
+        chapter.story,
+        db,
+        chapter_info,
+        user_instruction=instruction.strip(),
+    )
     _check_and_consume_advanced_text_quota(request, user.id, db, deduct=False)
     updated_content = await adjust_chapter_content(
-        _story_framework_context(chapter.story),
+        chapter_runtime_context,
         chapter_info,
         chapter.novel_content,
         instruction.strip(),
@@ -6552,6 +6785,65 @@ async def adjust_chapter_content_endpoint(chapter_id: int, request: Request, db:
     _check_and_consume_advanced_text_quota(request, user.id, db, deduct=True)
     db.refresh(chapter)
     return chapter
+
+
+@app.patch("/api/chapters/{chapter_id}/continuity-memory", response_model=ChapterOut)
+async def update_continuity_memory(chapter_id: int, request: Request, db: Session = Depends(get_db)):
+    user = _require_user(request, db)
+    chapter = _require_chapter_for_user(chapter_id, user, db)
+    body = await request.json()
+
+    current = chapter.memory_summary if isinstance(chapter.memory_summary, dict) else {}
+    if not isinstance(current, dict):
+        current = {}
+
+    summary = body.get("chapter_summary")
+    handoff = body.get("chapter_handoff")
+
+    update: dict[str, Any] = {}
+    if isinstance(summary, dict):
+        update["chapter_summary"] = summary
+    if isinstance(handoff, dict):
+        update["chapter_handoff"] = handoff
+
+    if isinstance(current.get("chapter_summary"), dict):
+        current["chapter_summary"].update(summary) if isinstance(summary, dict) else None
+    elif summary:
+        current["chapter_summary"] = summary
+
+    if isinstance(current.get("chapter_handoff"), dict):
+        current["chapter_handoff"].update(handoff) if isinstance(handoff, dict) else None
+    elif handoff:
+        current["chapter_handoff"] = handoff
+
+    chapter.memory_summary = current
+    db.commit()
+    db.refresh(chapter)
+    return chapter
+
+
+@app.post("/api/stories/{story_id}/refresh-all-memories")
+async def refresh_all_memories(story_id: int, request: Request, db: Session = Depends(get_db)):
+    user = _require_user(request, db)
+    story = _require_story_for_user(story_id, user, db)
+    chapters = (
+        db.query(Chapter)
+        .filter(Chapter.story_id == story.id, Chapter.novel_content.isnot(None), Chapter.novel_content != "")
+        .order_by(Chapter.chapter_number)
+        .all()
+    )
+    refreshed = 0
+    for chapter in chapters:
+        memory = chapter.memory_summary if isinstance(chapter.memory_summary, dict) else {}
+        handoff = memory.get("chapter_handoff") if isinstance(memory.get("chapter_handoff"), dict) else {}
+        if handoff.get("ending_location") and handoff.get("active_characters"):
+            continue
+        await _refresh_chapter_memory(chapter, request, db)
+        refreshed += 1
+    db.commit()
+    for chapter in chapters:
+        db.refresh(chapter)
+    return {"refreshed": refreshed, "total": len(chapters)}
 
 
 @app.post("/api/chapters/{chapter_id}/quality-assess")

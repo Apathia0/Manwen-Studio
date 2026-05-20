@@ -460,7 +460,7 @@ async def generate_cover_image(
     output_path: Path,
     *,
     api_key: str | None = None,
-    size: str = "1024x1536",
+    size: str = "600x800",
 ) -> str:
     progress_label = f"cover:{output_path.stem}"
     current_prompt = prompt.strip()

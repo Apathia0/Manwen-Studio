@@ -333,6 +333,7 @@ export interface Story {
   outline?: Outline;
   characters?: Character[];
   story_bible?: StoryBible;
+  story_memory?: Record<string, any> | null;
   onboarding_completed?: boolean;
   source_type?: 'manual' | 'import' | string;
   import_context_completed?: boolean;
@@ -396,6 +397,7 @@ export interface Chapter {
   act?: string;
   key_events?: any[];
   quality_score?: QualityScore;
+  memory_summary?: Record<string, any> | null;
   status?: string;
   word_count?: number;
   created_at: string;
@@ -1262,6 +1264,19 @@ export async function adjustChapterContent(chapterId: number, instruction: strin
     method: 'POST',
     headers: apiHeaders(true),
     body: JSON.stringify({ instruction }),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function saveContinuityMemory(
+  chapterId: number,
+  data: { chapter_summary?: Record<string, any>; chapter_handoff?: Record<string, any> },
+): Promise<Chapter> {
+  const res = await fetch(`${BASE}/api/chapters/${chapterId}/continuity-memory`, {
+    method: 'PATCH',
+    headers: apiHeaders(true),
+    body: JSON.stringify(data),
   });
   if (!res.ok) throw new Error(await res.text());
   return res.json();

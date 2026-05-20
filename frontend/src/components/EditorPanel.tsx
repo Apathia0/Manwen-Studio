@@ -5,6 +5,7 @@ import ChapterTabBar from './editor/ChapterTabBar';
 import FrameworkContextBar from './editor/FrameworkContextBar';
 import TextEditor from './editor/TextEditor';
 import EditorToolbar from './editor/EditorToolbar';
+import ContinuitySummaryCard from './ContinuitySummaryCard';
 import type { TextSelection } from './editor/TextEditor';
 
 interface Props {
@@ -149,6 +150,18 @@ export default function EditorPanel({
       {currentChapter && <FrameworkContextBar chapter={currentChapter} story={story} />}
 
       {currentChapter && (
+        <div className="px-4 py-2 border-b border-[#d7e3f4] bg-[#f8fbff]">
+          <ContinuitySummaryCard
+            key={currentChapter.id}
+            story={story}
+            chapter={currentChapter}
+            previousChapter={chapters.find((item) => item.chapter_number === currentChapter.chapter_number - 1) ?? null}
+            onSaved={onContentUpdated}
+          />
+        </div>
+      )}
+
+      {currentChapter && (
         <div className="flex items-center justify-between gap-3 px-4 py-2 border-b border-[#d9dfd7] bg-[#f7f8f5]">
           <div className="min-w-0">
             <p className="text-xs font-medium text-slate-700 truncate">
@@ -266,5 +279,8 @@ function buildChapterContext(story: Story, chapter: Chapter): object {
     characters: story.characters?.filter((c) => c.name).map((c) => c.name) ?? [],
     chapter_number: chapter.chapter_number,
     chapter_id: chapter.id,
+    chapter_memory: chapter.memory_summary ?? null,
+    story_memory: story.story_memory ?? null,
+    previous_chapter_number: chapter.chapter_number > 1 ? chapter.chapter_number - 1 : null,
   };
 }

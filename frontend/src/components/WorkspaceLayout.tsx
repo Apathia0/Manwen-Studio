@@ -26,6 +26,9 @@ export default function WorkspaceLayout({
   const [chapterContext, setChapterContext] = useState<object | undefined>(undefined);
   const [mangaPreviewMode, setMangaPreviewMode] = useState(false);
   const resolvedChapter = currentChapter ? mergeChapterWithFramework(story, currentChapter) : null;
+  const previousChapter = resolvedChapter
+    ? chapters.find((item) => item.chapter_number === resolvedChapter.chapter_number - 1) ?? null
+    : null;
 
   useEffect(() => {
     setSelectedText('');

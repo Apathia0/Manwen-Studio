@@ -26,22 +26,22 @@ NOVEL_SYSTEM_PROMPT = """你是一位才华横溢、文笔细腻的网络小说�
 当用户要求你创作小说时，请遵循以下要求：
 
 ## ★★★ 字数要求（最高优先级）★★★
-- 每一话必须 4000-6000 中文字。这是硬性要求，不可商量。
-- 绝对禁止低于 3500 字。如果你感觉写完了但字数不够，必须回去扩写场景、增加对话、深化心理描写，直到达到 4000 字以上。
-- 宁可 5000-6000 字，也不要只写 2000 字就结束。
+- 每一话控制在 2000 字左右（1700-2500 字范围）。这是硬性要求，不可商量。
+- 低于 1500 字则内容过于单薄，必须回去补充描写；超过 3000 字则过于冗长，需要精简。
+- 2000 字左右要写出完整且有感染力的章节，不能因为字数少就敷衍了事。
 
-## 结构指导（确保内容充实）
-一话内容应包含 3-5 个完整场景，每个场景至少 800-1500 字，包含：
-- 场景转换时的环境描写（视觉、听觉、嗅觉、触觉），至少 150 字
-- 人物之间的对话（自然生动，有潜台词，每段对话至少 5-8 个来回）
-- 角色的心理活动和内心独白（每个场景至少一段）
-- 微表情、小动作、肢体语言的细节描写
+## 结构指导
+一话内容通常包含 2-3 个场景，每个场景 600-1000 字。场景分配建议：
+- 开篇场景（400-600 字）：快速切入情境，可以是一段精彩对话、一个悬念画面或一个动作场景，让读者立即沉浸。
+- 推进场景（600-1000 字）：情节发展的核心。展开人物互动、冲突升级或关键信息揭示。此处需要细致描写——人物的微表情、语气变化、肢体动作、环境氛围的渲染。
+- 收束场景（400-600 字）：本章的落点，可以是情绪沉淀、悬念埋设或小幅高潮。不要强行断章，要给读者一个自然的停顿点。
 
 ## 写作风格
-- 描写要细腻丰富，注重氛围营造
-- 节奏有张有弛，关键情感节点放慢节奏
-- 人物描写立体鲜活，注重微表情、小动作、心理独白
-- 避免流水账，避免大段无意义的抽象拒述
+- 描写要细腻有穿透力。不追求字多，追求精准——一个恰到好处的比喻胜过三行平淡的叙述。
+- 关键情感节点和重要情节转折处放慢节奏，深化描写和心理刻画；过渡性内容则一笔带过即可。
+- 人物对话要自然生动，有潜台词，2-4 个来回即可，重在说出人物的性格和当下情绪。
+- 避免流水账，避免空洞的形容词堆砌。每一个细节都应该服务于"塑造人物"或"推进剧情"这两个核心目标。
+- 句式和段落长度要有变化，短句制造紧张感，长句用于氛围渲染和情绪铺陈。
 
 ## 核心约束：章节间连续性（最高优先级）
 - 本章开头必须自然衔接上一章结尾处的情境，不能出现剧情跳跃或角色状态无故重置
@@ -243,7 +243,7 @@ async def chat_stream(messages: list[dict], api_key: str | None = None, framewor
         "model": DEEPSEEK_MODEL,
         "messages": [{"role": "system", "content": system_content}] + messages,
         "stream": True,
-        "max_tokens": 16384,
+        "max_tokens": 6144,
     }
 
     async with httpx.AsyncClient(timeout=600) as client:
@@ -278,14 +278,14 @@ async def generate_novel(messages: list[dict], api_key: str | None = None, frame
     full_messages = [{"role": "system", "content": system_content}] + messages
     full_messages.append({
         "role": "user",
-        "content": "请根据我们的讨论，创作这一话的完整小说内容。请直接输出小说正文。",
+        "content": "请根据我们的讨论，创作这一话的完整小说内容。注意字数严格控制在2000字左右，请直接输出小说正文。",
     })
 
     payload = {
         "model": DEEPSEEK_MODEL,
         "messages": full_messages,
         "stream": False,
-        "max_tokens": 16384,
+        "max_tokens": 6144,
     }
 
     async with httpx.AsyncClient(timeout=600) as client:
@@ -1421,7 +1421,7 @@ async def summarize_chapter_memory(
 ## 章节正文
 {content_sample}
 
-只输出 JSON，对象结构如下：
+ 只输出 JSON，对象结构如下：
 {{
   "chapter_summary": {{
     "summary": "120字内本章摘要",
@@ -1431,6 +1431,14 @@ async def summarize_chapter_memory(
     "open_loops": ["尚未回收的悬念1"],
     "resolved_loops": ["本章回收的悬念1"],
     "ending_scene": "本章结尾场景描写（100-200字，如无可省略）"
+  }},
+  "chapter_handoff": {{
+    "ending_location": "本章结尾时角色所在的地点和场景（概括性描述，用于下一章承接）",
+    "active_conflict": "当前最紧迫的冲突或矛盾",
+    "active_characters": ["本章结尾时在场的角色名称列表"],
+    "character_states": ["关键角色的当前状态或情绪"],
+    "immediate_open_loops": ["下一章应立即推进的悬念或剧情线"],
+    "opening_must_continue": "下一章开头必须承接的具体情境或事件（一句话概括，便于新章节检查是否承接上了）"
   }},
   "story_memory_update": {{
     "story_state": "当前故事推进到什么局面",
@@ -1456,9 +1464,12 @@ async def summarize_chapter_memory(
                 "role": "system",
                 "content": (
                     "你是长篇小说连续性编辑。请把章节正文压缩成后续创作可复用的结构化记忆，只输出 JSON。\n\n"
-                    "特别注意：请从章节正文中提取本章结尾场景的详细描写（约 100-200 字），"
-                    "在输出的 JSON 中放入 ending_scene 字段。"
-                    "例如：'主角站在城门前，望着夕阳下的王都，手中的剑鞘还残留着战斗的余温。远处传来钟声，新的旅程即将开始。'"
+                    "特别注意：\n"
+                    "1. 请从章节正文中提取本章结尾场景的详细描写（约 100-200 字），"
+                    "在输出的 JSON 的 chapter_summary 中放入 ending_scene 字段。\n"
+                    "2. 必须生成 chapter_handoff（章节交接包），它记录了本章结尾时的位置、冲突、"
+                    "在场角色和他们的状态，以及下一章应立即推进的剧情线——这些是下一章创作时"
+                    "需要准确承接的连续性信息。"
                 ),
             },
             {"role": "user", "content": user_prompt},
@@ -1502,14 +1513,16 @@ async def expand_chapter_to_content(story_context: dict, chapter_info: dict, api
 {chapter_details}
 {previous_block}
 ## ★★★ 字数要求（最高优先级）★★★
-- 必须 4000-6000 中文字。这是硬性要求，不可商量。
-- 绝对禁止低于 3500 字。
+- 每一话控制在 2000 字左右（1700-2500 字范围）。这是硬性要求，不可商量。
+- 低于 1500 字则内容过于单薄，必须回去补充描写；超过 3000 字则过于冗长，需要精简。
+- 2000 字左右要写出完整且有感染力的章节，不能因为字数少就敷衍了事。
 
 ## 写作指导
+- 本章通常包含 2-3 个场景：开篇快速切入（400-600 字）→ 核心推进（600-1000 字，细致描写人物互动、冲突）→ 收束落点（400-600 字，情绪沉淀或悬念）
 - 请根据本章在故事大纲中的位置（所属幕、关键事件），合理推进剧情
 - 角色行为需符合角色设定和角色弧线
-- 如果上下文中包含“导入作品作者约束”或“作品圣经紧凑摘要”，优先遵守其中的必须保留项、后续目标和调整范围
-- 描写要细腻丰富，注重氛围营造
+- 如果上下文中包含"导入作品作者约束"或"作品圣经紧凑摘要"，优先遵守其中的必须保留项、后续目标和调整范围
+- 描写要细腻有穿透力，关键处深化，过渡处从简。每一个细节服务于"塑造人物"或"推进剧情"
 - 请直接输出小说正文，不要加额外说明或字数统计。"""
 
     payload = {
@@ -1528,7 +1541,7 @@ async def expand_chapter_to_content(story_context: dict, chapter_info: dict, api
             {"role": "user", "content": user_prompt},
         ],
         "stream": False,
-        "max_tokens": 16384,
+        "max_tokens": 6144,
     }
 
     async with httpx.AsyncClient(timeout=600) as client:
@@ -1575,7 +1588,7 @@ async def rewrite_selection(
             {"role": "user", "content": user_prompt},
         ],
         "stream": False,
-        "max_tokens": 16384,
+        "max_tokens": 8192,
     }
 
     async with httpx.AsyncClient(timeout=300) as client:
@@ -1623,11 +1636,11 @@ async def adjust_chapter_content(
     payload = {
         "model": DEEPSEEK_MODEL,
         "messages": [
-            {"role": "system", "content": "你是一位资深网文编辑，擅长根据编辑意见直接修改整章正文，并保持剧情与设定统一。"},
+            {"role": "system", "content": "你是一位资深网文编辑，擅长根据编辑意见直接修改整章正文，并保持剧情与设定统一。字数控制在2000字左右。"},
             {"role": "user", "content": user_prompt},
         ],
         "stream": False,
-        "max_tokens": 16384,
+        "max_tokens": 6144,
     }
 
     async with httpx.AsyncClient(timeout=600) as client:
