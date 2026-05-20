@@ -4,6 +4,7 @@ import shutil
 from pathlib import Path
 
 from dotenv import load_dotenv
+from fastapi import Request
 from sqlalchemy import create_engine
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
 
@@ -13,6 +14,13 @@ DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:postgres@localho
 BASE_DIR = Path(__file__).resolve().parent
 
 logger = logging.getLogger("database")
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 engine = create_engine(
     DATABASE_URL,
@@ -29,14 +37,19 @@ engine = create_engine(
         "connect_timeout": 10,
     },
 )
-SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
+SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False)
 
 
 class Base(DeclarativeBase):
     pass
 
 
-def get_db():
+def get_db(request: Request):
+    request_db = getattr(getattr(request, "state", None), "db", None)
+    if request_db is not None:
+        yield request_db
+        return
+
     db = SessionLocal()
     try:
         yield db
@@ -44,12 +57,27 @@ def get_db():
         db.close()
 
 
-def init_db():
+def init_db(*, run_migrations: bool | None = None):
+    if run_migrations is None:
+        run_migrations = _env_flag("RUN_STARTUP_MIGRATIONS", False)
     try:
         Base.metadata.create_all(bind=engine)
-        _migrate()
+        if run_migrations:
+            _migrate()
+        else:
+            logger.info("Skipping startup database migrations; set RUN_STARTUP_MIGRATIONS=true to enable.")
     except Exception as exc:
         logger.warning("数据库初始化失败（将在下次启动时重试）: %s", exc)
+
+
+def _prepare_migration_conn(conn) -> None:
+    from sqlalchemy import text
+
+    try:
+        conn.execute(text("SET lock_timeout = '5s'"))
+        conn.execute(text("SET statement_timeout = '120s'"))
+    except Exception as exc:
+        logger.warning("Failed to configure migration timeouts: %s", exc)
 
 
 def _migrate():
@@ -59,6 +87,7 @@ def _migrate():
     if "stories" in insp.get_table_names():
         cols = {c["name"] for c in insp.get_columns("stories")}
         with engine.begin() as conn:
+            _prepare_migration_conn(conn)
             if "owner_user_id" not in cols:
                 conn.execute(text("ALTER TABLE stories ADD COLUMN owner_user_id INTEGER"))
             if "description" not in cols:
@@ -89,6 +118,7 @@ def _migrate():
     if "chapters" in insp.get_table_names():
         cols = {c["name"] for c in insp.get_columns("chapters")}
         with engine.begin() as conn:
+            _prepare_migration_conn(conn)
             if "title" not in cols:
                 conn.execute(text("ALTER TABLE chapters ADD COLUMN title VARCHAR(255)"))
             if "content_source" not in cols:
@@ -106,6 +136,7 @@ def _migrate():
             if "word_count" not in cols:
                 conn.execute(text("ALTER TABLE chapters ADD COLUMN word_count INTEGER"))
         with engine.begin() as conn:
+            _prepare_migration_conn(conn)
             conn.execute(text("""
                 UPDATE chapters
                 SET content_source = CASE
@@ -133,6 +164,7 @@ def _migrate():
     if "billing_orders" in insp.get_table_names():
         cols = {c["name"] for c in insp.get_columns("billing_orders")}
         with engine.begin() as conn:
+            _prepare_migration_conn(conn)
             if "source" not in cols:
                 conn.execute(text("ALTER TABLE billing_orders ADD COLUMN source VARCHAR(32) DEFAULT 'system'"))
             if "billing_cycle" not in cols:
@@ -154,6 +186,7 @@ def _migrate():
     if "users" in insp.get_table_names():
         cols = {c["name"] for c in insp.get_columns("users")}
         with engine.begin() as conn:
+            _prepare_migration_conn(conn)
             if "email_verified" not in cols:
                 conn.execute(text("ALTER TABLE users ADD COLUMN email_verified BOOLEAN DEFAULT TRUE"))
                 conn.execute(text("UPDATE users SET email_verified = TRUE WHERE email_verified IS NULL"))
@@ -176,6 +209,7 @@ def _migrate_money_columns():
         return
 
     with engine.begin() as conn:
+        _prepare_migration_conn(conn)
         conn.execute(text("""
             ALTER TABLE plans
             ALTER COLUMN monthly_price TYPE NUMERIC(10,2)

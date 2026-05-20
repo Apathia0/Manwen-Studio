@@ -236,6 +236,8 @@ async def bind_request_db(request: Request, call_next):
     try:
         return await call_next(request)
     finally:
+        with contextlib.suppress(Exception):
+            db.rollback()
         db.close()
 
 
@@ -503,6 +505,13 @@ def _user_image_api_key(request: Request) -> str | None:
     if capabilities["can_override_api_key"] and override:
         return override
     return _get_platform_setting("api.image.api_key", db, "") or None
+
+
+def _release_db_transaction(db: Session) -> None:
+    try:
+        db.rollback()
+    except Exception:
+        logger.debug("Failed to rollback request transaction before external API call", exc_info=True)
 
 
 def _password_hash(raw: str) -> str:
@@ -1075,6 +1084,7 @@ async def _build_import_provisional_story_bible(
 ) -> dict[str, Any] | None:
     import_context = _build_import_guidance_context(story, db)
     raw_input = _compose_import_raw_input(import_context, {}, [])
+    _release_db_transaction(db)
     creative_brief = await build_import_creative_brief(
         import_context,
         {},
@@ -2707,23 +2717,31 @@ def _merge_story_memory(existing: dict | None, update: dict | None, chapter: Cha
 async def _refresh_chapter_memory(chapter: Chapter, request: Request, db: Session) -> None:
     if not chapter.novel_content or not chapter.novel_content.strip():
         return
+    chapter_id = chapter.id
     chapter_info = {
         "chapter_number": chapter.chapter_number,
         "title": chapter.title or f"第{chapter.chapter_number}话",
         "act": chapter.act or "",
         "key_events": chapter.key_events or [],
     }
+    story_context = _story_framework_context(chapter.story)
+    novel_content = chapter.novel_content
+    deepseek_api_key = _user_deepseek_api_key(request)
+    _release_db_transaction(db)
     try:
         memory_payload = await summarize_chapter_memory(
-            _story_framework_context(chapter.story),
+            story_context,
             chapter_info,
-            chapter.novel_content,
-            api_key=_user_deepseek_api_key(request),
+            novel_content,
+            api_key=deepseek_api_key,
         )
     except Exception as exc:
         logger.warning("Failed to refresh chapter memory for chapter %s: %s", chapter.id, exc)
         return
 
+    chapter = db.get(Chapter, chapter_id)
+    if not chapter:
+        return
     chapter_summary = memory_payload.get("chapter_summary") if isinstance(memory_payload.get("chapter_summary"), dict) else {}
     chapter_handoff = memory_payload.get("chapter_handoff") if isinstance(memory_payload.get("chapter_handoff"), dict) else {}
     story_memory_update = memory_payload.get("story_memory_update") if isinstance(memory_payload.get("story_memory_update"), dict) else {}
@@ -3162,7 +3180,7 @@ def _decode_edit_mask_upload(b64: str, target_size: tuple[int, int]) -> bytes:
 
 @app.on_event("startup")
 def on_startup():
-    init_db()
+    init_db(run_migrations=False)
     # One-time: rename default stories
     from database import SessionLocal
     db = SessionLocal()
@@ -4383,6 +4401,7 @@ async def generate_story_cover(story_id: int, request: Request, db: Session = De
     prompt = _build_story_cover_prompt(story, instruction)
     logger.info("[cover:%s] 封面 Prompt 长度: %s 字", story_id, len(prompt))
     output_path = _story_cover_output_path(story_id)
+    image_api_key = _user_image_api_key(request)
 
     _check_and_consume_feature_quota(
         request,
@@ -4393,15 +4412,17 @@ async def generate_story_cover(story_id: int, request: Request, db: Session = De
         deduct=False,
         provider_kind="image",
     )
+    _release_db_transaction(db)
     try:
         await generate_cover_image(
             prompt,
             output_path,
-            api_key=_user_image_api_key(request),
+            api_key=image_api_key,
         )
     except MangaImageGenerationError as exc:
         raise HTTPException(502, exc.to_payload()) from exc
 
+    story = _require_story_for_user(story_id, user, db)
     _replace_story_cover_from_path(story, output_path)
     _check_and_consume_feature_quota(
         request,
@@ -4435,6 +4456,7 @@ async def adjust_story_cover(story_id: int, request: Request, db: Session = Depe
 
     prompt = _build_story_cover_prompt(story, f"在现有封面基础上调整：{instruction}")
     output_path = _story_cover_output_path(story_id)
+    image_api_key = _user_image_api_key(request)
     _check_and_consume_feature_quota(
         request,
         user.id,
@@ -4444,17 +4466,19 @@ async def adjust_story_cover(story_id: int, request: Request, db: Session = Depe
         deduct=False,
         provider_kind="image",
     )
+    _release_db_transaction(db)
     try:
         await edit_existing_image(
             prompt,
             source_path,
             output_path,
-            api_key=_user_image_api_key(request),
+            api_key=image_api_key,
             size="1024x1536",
         )
     except MangaImageGenerationError as exc:
         raise HTTPException(502, exc.to_payload()) from exc
 
+    story = _require_story_for_user(story_id, user, db)
     _replace_story_cover_from_path(story, output_path)
     _check_and_consume_feature_quota(
         request,
@@ -4560,6 +4584,8 @@ async def chat(chapter_id: int, body: ChatMessageIn, request: Request, db: Sessi
             history.append({"role": m.role, "content": m.content})
 
     framework_context = _build_framework_context(chapter.story, chapter)
+    deepseek_api_key = _user_deepseek_api_key(request)
+    _release_db_transaction(db)
 
     collected: list[str] = []
 
@@ -4567,35 +4593,45 @@ async def chat(chapter_id: int, body: ChatMessageIn, request: Request, db: Sessi
         full_content = "".join(collected).strip()
         if not full_content:
             return
-        assistant_msg = ChatMessage(
-            chapter_id=chapter_id,
-            role="assistant",
-            content=f"{full_content}\n\n[已中止]",
-        )
-        db.add(assistant_msg)
-        db.commit()
+        write_db = SessionLocal()
+        try:
+            assistant_msg = ChatMessage(
+                chapter_id=chapter_id,
+                role="assistant",
+                content=f"{full_content}\n\n[已中止]",
+            )
+            write_db.add(assistant_msg)
+            write_db.commit()
+        finally:
+            write_db.close()
 
     async def event_generator():
         try:
-            async for token in chat_stream(history, api_key=_user_deepseek_api_key(request), framework_context=framework_context):
+            async for token in chat_stream(history, api_key=deepseek_api_key, framework_context=framework_context):
                 collected.append(token)
                 yield {"event": "token", "data": json.dumps({"content": token}, ensure_ascii=False)}
             # Save assistant message
             full_content = "".join(collected)
-            assistant_msg = ChatMessage(chapter_id=chapter_id, role="assistant", content=full_content)
-            db.add(assistant_msg)
-            db.commit()
+            write_db = SessionLocal()
+            try:
+                assistant_msg = ChatMessage(chapter_id=chapter_id, role="assistant", content=full_content)
+                write_db.add(assistant_msg)
+                write_db.commit()
+            finally:
+                write_db.close()
             yield {"event": "done", "data": json.dumps({"content": full_content}, ensure_ascii=False)}
         except asyncio.CancelledError:
-            db.rollback()
             save_interrupted_assistant()
             raise
         except Exception as e:
-            db.rollback()
-            persisted_user_msg = db.get(ChatMessage, user_msg.id)
-            if persisted_user_msg:
-                db.delete(persisted_user_msg)
-                db.commit()
+            write_db = SessionLocal()
+            try:
+                persisted_user_msg = write_db.get(ChatMessage, user_msg.id)
+                if persisted_user_msg:
+                    write_db.delete(persisted_user_msg)
+                    write_db.commit()
+            finally:
+                write_db.close()
             yield {"event": "error", "data": json.dumps({"error": str(e)}, ensure_ascii=False)}
 
     return EventSourceResponse(event_generator())
@@ -4631,9 +4667,11 @@ async def generate_novel_endpoint(chapter_id: int, request: Request, db: Session
     continuity_context = _build_chapter_continuity_context_text(chapter_runtime_context)
     if continuity_context:
         framework_context = framework_context + "\n" + continuity_context if framework_context else continuity_context
+    deepseek_api_key = _user_deepseek_api_key(request)
+    _release_db_transaction(db)
     novel_content = await generate_novel(
         history,
-        api_key=_user_deepseek_api_key(request),
+        api_key=deepseek_api_key,
         framework_context=framework_context,
     )
     novel_content = await _ensure_generated_chapter_continuity(
@@ -4642,6 +4680,7 @@ async def generate_novel_endpoint(chapter_id: int, request: Request, db: Session
         novel_content,
         request,
     )
+    chapter = _require_chapter(chapter_id, db)
     _apply_chapter_content(chapter, novel_content, status="completed")
     chapter.content_source = "chat"
     await _refresh_chapter_memory(chapter, request, db)
@@ -4650,8 +4689,9 @@ async def generate_novel_endpoint(chapter_id: int, request: Request, db: Session
     msg = ChatMessage(chapter_id=chapter_id, role="assistant", content=novel_content)
     db.add(msg)
     db.commit()
-    db.refresh(chapter)
-    return chapter
+    response_payload = ChapterOut.model_validate(chapter)
+    _release_db_transaction(db)
+    return response_payload
 
 
 MAX_IMPORTED_NOVEL_CHARS = int(os.getenv("MAX_IMPORTED_NOVEL_CHARS", "50000"))
@@ -4757,11 +4797,15 @@ async def generate_story_characters_from_framework(story_id: int, request: Reque
     if not isinstance(story.characters, list) or len(story.characters) == 0:
         raise HTTPException(400, "Story has no framework characters to convert")
 
+    story_context = _story_framework_context(story)
+    deepseek_api_key = _user_deepseek_api_key(request)
     _check_and_consume_advanced_text_quota(request, user.id, db, deduct=False)
+    _release_db_transaction(db)
     generated = await generate_character_profiles_from_framework(
-        _story_framework_context(story),
-        api_key=_user_deepseek_api_key(request),
+        story_context,
+        api_key=deepseek_api_key,
     )
+    story = _require_story_for_user(story_id, user, db)
     story.character_profiles = _character_profile_text({"characters": generated})
     db.commit()
     _check_and_consume_advanced_text_quota(request, user.id, db, deduct=True)
@@ -5008,6 +5052,8 @@ async def generate_story_character_ref_images(story_id: int, request: Request, d
     generated: list[str] = []
     skipped: list[str] = []
     pending_targets: list[dict] = []
+    image_api_key = _user_image_api_key(request)
+    prompt_map: dict[str, str] = {}
 
     for card in targets:
         existing = [
@@ -5021,6 +5067,7 @@ async def generate_story_character_ref_images(story_id: int, request: Request, d
             skipped.append(card["name"])
             continue
         pending_targets.append(card)
+        prompt_map[card["name"]] = _build_character_ref_prompt(story, card)
 
     if pending_targets:
         _check_and_consume_feature_quota(
@@ -5032,6 +5079,7 @@ async def generate_story_character_ref_images(story_id: int, request: Request, d
             deduct=False,
             provider_kind="image",
         )
+        _release_db_transaction(db)
 
     for card in pending_targets:
         existing = [
@@ -5052,9 +5100,9 @@ async def generate_story_character_ref_images(story_id: int, request: Request, d
 
         filename = f"char_{_slugify_ref_label(card['name'])}_{uuid.uuid4().hex[:8]}.png"
         await generate_reference_image(
-            _build_character_ref_prompt(story, card),
+            prompt_map.get(card["name"]) or _build_character_ref_prompt(story, card),
             ref_dir / filename,
-            api_key=_user_image_api_key(request),
+            api_key=image_api_key,
         )
         meta[filename] = {"label": card["name"], "kind": "character_generated"}
         generated.append(card["name"])
@@ -5117,7 +5165,9 @@ async def redraw_story_ref_image(story_id: int, filename: str, request: Request,
         if mode == "partial":
             with Image.open(path) as img:
                 mask_bytes = _decode_edit_mask_upload(str(body.get("mask") or ""), img.size)
-        await edit_existing_image(prompt, path, path, mask_bytes=mask_bytes, api_key=_user_image_api_key(request))
+        image_api_key = _user_image_api_key(request)
+        _release_db_transaction(db)
+        await edit_existing_image(prompt, path, path, mask_bytes=mask_bytes, api_key=image_api_key)
     except MangaImageGenerationError as exc:
         raise HTTPException(502, exc.to_payload()) from exc
     _check_and_consume_feature_quota(request, user.id, "manga.regenerate.monthly_limit", 1, db, deduct=True, provider_kind="image")
@@ -5188,7 +5238,9 @@ async def redraw_chapter_ref_image(chapter_id: int, filename: str, request: Requ
         if mode == "partial":
             with Image.open(path) as img:
                 mask_bytes = _decode_edit_mask_upload(str(body.get("mask") or ""), img.size)
-        await edit_existing_image(prompt, path, path, mask_bytes=mask_bytes, api_key=_user_image_api_key(request))
+        image_api_key = _user_image_api_key(request)
+        _release_db_transaction(db)
+        await edit_existing_image(prompt, path, path, mask_bytes=mask_bytes, api_key=image_api_key)
     except MangaImageGenerationError as exc:
         raise HTTPException(502, exc.to_payload()) from exc
     _check_and_consume_feature_quota(request, user.id, "manga.regenerate.monthly_limit", 1, db, deduct=True, provider_kind="image")
@@ -5350,13 +5402,16 @@ async def generate_scenes_endpoint(chapter_id: int, request: Request, db: Sessio
 
     image_count = _effective_image_count(chapter_id, user.id, db)
     chat_history = [{"role": m.role, "content": m.content} for m in chapter.messages]
+    character_profiles = _load_characters(chapter_id, db)
+    deepseek_api_key = _user_deepseek_api_key(request)
     _check_and_consume_feature_quota(request, user.id, "scene.generate.monthly_limit", 1, db, deduct=False, provider_kind="text")
+    _release_db_transaction(db)
     split_task = asyncio.create_task(
         split_scenes(
             chat_history,
-            character_profiles=_load_characters(chapter_id, db),
+            character_profiles=character_profiles,
             page_count=image_count,
-            api_key=_user_deepseek_api_key(request),
+            api_key=deepseek_api_key,
         )
     )
     try:
@@ -5452,11 +5507,25 @@ async def generate_manga_stream(chapter_id: int, request: Request, db: Session =
         raise HTTPException(400, f"Expected {image_count} scenes, found {len(scenes)}")
     if chapter_id in ACTIVE_MANGA_GENERATIONS:
         raise HTTPException(409, "Manga generation is already running for this chapter")
+    character_profiles = _load_characters(chapter_id, db)
+    ref_entries = _effective_ref_entries(chapter_id, db)
+    color_mode = _effective_color_mode(chapter_id, user.id, db)
+    image_api_key = _user_image_api_key(request)
+    custom_image_provider = _custom_image_provider_active(request)
     _check_and_consume_feature_quota(request, user.id, "manga.image.monthly_limit", len(scenes), db, deduct=False, provider_kind="image")
     ACTIVE_MANGA_GENERATIONS.add(chapter_id)
+    _release_db_transaction(db)
 
     # Check which images already exist
-    existing_images = {img.image_number: img for img in chapter.images}
+    existing_images = {
+        img.image_number: {
+            "id": img.id,
+            "image_number": img.image_number,
+            "image_path": img.image_path,
+            "prompt": img.prompt,
+        }
+        for img in chapter.images
+    }
 
     async def event_generator():
         try:
@@ -5469,10 +5538,10 @@ async def generate_manga_stream(chapter_id: int, request: Request, db: Session =
                     yield {
                         "event": "image",
                         "data": json.dumps({
-                            "id": img.id,
+                            "id": img["id"],
                             "image_number": i,
-                            "image_path": img.image_path,
-                            "prompt": img.prompt or scene_prompt,
+                            "image_path": img["image_path"],
+                            "prompt": img["prompt"] or scene_prompt,
                         }, ensure_ascii=False),
                     }
                     continue
@@ -5482,17 +5551,16 @@ async def generate_manga_stream(chapter_id: int, request: Request, db: Session =
                     "data": json.dumps({"current": i, "total": image_count, "prompt": scene_prompt}, ensure_ascii=False),
                 }
                 try:
-                    ref_entries = _effective_ref_entries(chapter_id, db)
                     ref_imgs = _select_ref_image_paths_for_scene(scene_prompt, ref_entries)
                     image_result = await generate_manga_image(
                         scene_prompt,
                         chapter_id,
                         i,
                         all_scenes=scenes,
-                        character_profiles=_load_characters(chapter_id, db),
+                        character_profiles=character_profiles,
                         ref_image_paths=[str(p) for p in ref_imgs] if ref_imgs else None,
-                        color_mode=_effective_color_mode(chapter_id, user.id, db),
-                        api_key=_user_image_api_key(request),
+                        color_mode=color_mode,
+                        api_key=image_api_key,
                     )
                     if image_result.prompt_sanitized and image_result.final_prompt != scene_prompt:
                         scenes[i - 1] = image_result.final_prompt
@@ -5513,16 +5581,22 @@ async def generate_manga_stream(chapter_id: int, request: Request, db: Session =
                     }
                     return
 
-                manga = MangaImage(
-                    chapter_id=chapter_id,
-                    image_number=i,
-                    image_path=image_result.image_path,
-                    prompt=scene_prompt,
-                )
-                db.add(manga)
-                _check_and_consume_feature_quota(request, user.id, "manga.image.monthly_limit", 1, db, deduct=True, provider_kind="image")
-                db.commit()
-                db.refresh(manga)
+                write_db = SessionLocal()
+                try:
+                    manga = MangaImage(
+                        chapter_id=chapter_id,
+                        image_number=i,
+                        image_path=image_result.image_path,
+                        prompt=scene_prompt,
+                    )
+                    write_db.add(manga)
+                    if custom_image_provider:
+                        write_db.commit()
+                    else:
+                        _check_and_consume_quota(user.id, "manga.image.monthly_limit", 1, write_db, deduct=True)
+                    write_db.refresh(manga)
+                finally:
+                    write_db.close()
                 yield {
                     "event": "image",
                     "data": json.dumps({
@@ -5576,12 +5650,17 @@ async def regenerate_single_image(chapter_id: int, image_number: int, body: dict
         MangaImage.image_number == image_number,
     ).first()
     old_path = Path(__file__).resolve().parent / old_img.image_path if old_img else None
+    character_profiles = _load_characters(chapter_id, db)
+    color_mode = _effective_color_mode(chapter_id, user.id, db)
+    image_api_key = _user_image_api_key(request)
+    custom_image_provider = _custom_image_provider_active(request)
 
     # Generate new image
     ref_entries = _effective_ref_entries(chapter_id, db)
     ref_imgs = _select_ref_image_paths_for_scene(prompt, ref_entries)
     try:
         _check_and_consume_feature_quota(request, user.id, "manga.regenerate.monthly_limit", 1, db, deduct=False, provider_kind="image")
+        _release_db_transaction(db)
         if mode in {"full", "partial"}:
             if not old_path or not old_path.exists():
                 raise HTTPException(404, "source image not found")
@@ -5598,7 +5677,7 @@ async def regenerate_single_image(chapter_id: int, image_number: int, body: dict
                 old_path,
                 output_path,
                 mask_bytes=mask_bytes,
-                api_key=_user_image_api_key(request),
+                api_key=image_api_key,
             )
             image_result = image_service.ImageGenerationResult(
                 image_path=f"manga_outputs/chapter_{chapter_id}/{filename}",
@@ -5611,10 +5690,10 @@ async def regenerate_single_image(chapter_id: int, image_number: int, body: dict
                 chapter_id,
                 image_number,
                 all_scenes=all_scenes,
-                character_profiles=_load_characters(chapter_id, db),
+                character_profiles=character_profiles,
                 ref_image_paths=[str(p) for p in ref_imgs] if ref_imgs else None,
-                color_mode=_effective_color_mode(chapter_id, user.id, db),
-                api_key=_user_image_api_key(request),
+                color_mode=color_mode,
+                api_key=image_api_key,
             )
     except MangaImageGenerationError as exc:
         raise HTTPException(502, exc.to_payload()) from exc
@@ -5625,8 +5704,17 @@ async def regenerate_single_image(chapter_id: int, image_number: int, body: dict
         _write_scenes_file(chapter_id, all_scenes, sanitized_indices)
         prompt = image_result.final_prompt
 
-    if old_img:
-        manga = old_img
+    old_image_path = old_img.image_path if old_img else None
+    old_image_id = old_img.id if old_img else None
+    chapter = _require_chapter_for_user(chapter_id, user, db)
+    if old_image_id:
+        manga = (
+            db.query(MangaImage)
+            .filter(MangaImage.id == old_image_id, MangaImage.chapter_id == chapter_id)
+            .first()
+        )
+        if not manga:
+            raise HTTPException(404, "source image not found")
         manga.image_path = image_result.image_path
         manga.prompt = prompt
     else:
@@ -5637,11 +5725,14 @@ async def regenerate_single_image(chapter_id: int, image_number: int, body: dict
             prompt=prompt,
         )
         db.add(manga)
-    _check_and_consume_feature_quota(request, user.id, "manga.regenerate.monthly_limit", 1, db, deduct=True, provider_kind="image")
+    if custom_image_provider:
+        db.commit()
+    else:
+        _check_and_consume_feature_quota(request, user.id, "manga.regenerate.monthly_limit", 1, db, deduct=True, provider_kind="image")
     db.commit()
     db.refresh(manga)
 
-    if old_path and old_path.exists() and old_path != Path(__file__).resolve().parent / image_result.image_path:
+    if old_image_path and old_path and old_path.exists() and old_path != Path(__file__).resolve().parent / image_result.image_path:
         try:
             old_path.unlink()
         except OSError as exc:
@@ -5686,18 +5777,20 @@ async def onboarding_send_message(story_id: int, request: Request, db: Session =
         raise HTTPException(400, "No valid messages")
 
     creative_brief = None
+    deepseek_api_key = _user_deepseek_api_key(request)
+    _release_db_transaction(db)
     try:
         result = await generate_onboarding_response(
             safe_messages,
             previous_collected_info=previous_collected_info,
             current_step=current_step,
-            api_key=_user_deepseek_api_key(request),
+            api_key=deepseek_api_key,
         )
         if bool(result.get("is_complete")):
             try:
                 creative_brief = await build_creative_brief(
                     result.get("collected_info", {}),
-                    api_key=_user_deepseek_api_key(request),
+                    api_key=deepseek_api_key,
                 )
             except Exception as exc:
                 logger.warning("Failed to preview creative brief during onboarding: %s", exc)
@@ -5739,19 +5832,22 @@ async def onboarding_confirm(story_id: int, request: Request, db: Session = Depe
     )
     raw_input["raw_notes"] = all_raw
 
+    deepseek_api_key = _user_deepseek_api_key(request)
+    _release_db_transaction(db)
     try:
         creative_brief = await build_creative_brief(
             collected_info,
-            api_key=_user_deepseek_api_key(request),
+            api_key=deepseek_api_key,
         )
         story_bible = await build_story_bible(
             creative_brief,
             raw_input,
-            api_key=_user_deepseek_api_key(request),
+            api_key=deepseek_api_key,
         )
     except Exception as e:
         raise HTTPException(502, f"Story Bible 生成失败: {e}")
 
+    story = _require_story_for_user(story_id, user, db)
     story.story_bible = story_bible
     story.description = story_bible.get("creative_brief", {}).get("one_line_premise", story.description or "")
     story.onboarding_completed = True
@@ -5796,20 +5892,22 @@ async def import_context_send_message(story_id: int, request: Request, db: Sessi
 
     import_context = _build_import_guidance_context(story, db)
     creative_brief = None
+    deepseek_api_key = _user_deepseek_api_key(request)
+    _release_db_transaction(db)
     try:
         result = await generate_import_guidance_response(
             safe_messages,
             import_context,
             previous_collected_info=previous_collected_info,
             current_step=current_step,
-            api_key=_user_deepseek_api_key(request),
+            api_key=deepseek_api_key,
         )
         if bool(result.get("is_complete")):
             try:
                 creative_brief = await build_import_creative_brief(
                     import_context,
                     result.get("collected_info", {}),
-                    api_key=_user_deepseek_api_key(request),
+                    api_key=deepseek_api_key,
                 )
             except Exception as exc:
                 logger.warning("Failed to preview creative brief during import guidance: %s", exc)
@@ -5843,21 +5941,24 @@ async def import_context_confirm(story_id: int, request: Request, db: Session = 
 
     import_context = _build_import_guidance_context(story, db)
     raw_input = _compose_import_raw_input(import_context, collected_info, messages_raw)
+    deepseek_api_key = _user_deepseek_api_key(request)
+    _release_db_transaction(db)
     try:
         creative_brief = await build_import_creative_brief(
             import_context,
             collected_info,
-            api_key=_user_deepseek_api_key(request),
+            api_key=deepseek_api_key,
         )
         story_bible = await build_story_bible(
             creative_brief,
             raw_input,
-            api_key=_user_deepseek_api_key(request),
+            api_key=deepseek_api_key,
         )
         story_bible["import_guidance"] = _build_import_guidance_payload(collected_info, import_context)
     except Exception as exc:
         raise HTTPException(502, f"导入作品上下文补充失败: {exc}")
 
+    story = _require_story_for_user(story_id, user, db)
     story.story_bible = story_bible
     story.description = story_bible.get("creative_brief", {}).get("one_line_premise", story.description or "")
     story.import_context_completed = True
@@ -5961,11 +6062,13 @@ async def _background_quality_check(
 
             logger.info("Background quality check found %d issues for story %d, fixing...", len(quality_issues), story_id)
             runtime_context = _build_framework_ai_context(story, mode="repair", user_instruction="后台开书质量修复")
+            story_bible = story.story_bible
+            _release_db_transaction(db)
             fixed_framework = await generate_framework(
                 story_description,
                 api_key=api_key,
                 required_min_chapters=20,
-                story_bible=story.story_bible,
+                story_bible=story_bible,
                 story_context=runtime_context,
                 launch_ready_required=True,
                 quality_feedback=quality_issues,
@@ -5974,7 +6077,7 @@ async def _background_quality_check(
                 fixed_framework,
                 story_description,
                 api_key=api_key,
-                story_bible=story.story_bible,
+                story_bible=story_bible,
                 require_launch_ready=True,
             )
             remaining = _framework_launch_quality_issues(fixed_framework)
@@ -5982,7 +6085,9 @@ async def _background_quality_check(
                 logger.warning("Background quality fix for story %d still has %d issues", story_id, len(remaining))
                 return
 
-            db.refresh(story)
+            story = db.query(Story).filter(Story.id == story_id).first()
+            if not story:
+                return
             recheck_tags = (story.tags or {}) if isinstance(story.tags, dict) else {}
             recheck_chars = (story.characters or []) if isinstance(story.characters, list) else []
             recheck_outline = (story.outline or {}) if isinstance(story.outline, dict) else {}
@@ -6015,22 +6120,25 @@ async def generate_framework_endpoint(story_id: int, request: Request, db: Sessi
     story_context = _build_framework_ai_context(story, mode="initial_generate", user_instruction=raw_description or description)
 
     requested_min_chapters = _extract_requested_min_chapters([{"role": "user", "content": raw_description or description.strip()}])
+    story_bible = story.story_bible
+    deepseek_api_key = _user_deepseek_api_key(request)
 
     _check_and_consume_feature_quota(request, user.id, "framework.generate.monthly_limit", 1, db, deduct=False, provider_kind="text")
+    _release_db_transaction(db)
     try:
         framework = await generate_framework(
             description.strip(),
-            api_key=_user_deepseek_api_key(request),
+            api_key=deepseek_api_key,
             required_min_chapters=requested_min_chapters,
-            story_bible=story.story_bible,
+            story_bible=story_bible,
             story_context=story_context,
             launch_ready_required=True,
         )
         framework = await _complete_framework_payload(
             framework,
             description.strip(),
-            api_key=_user_deepseek_api_key(request),
-            story_bible=story.story_bible,
+            api_key=deepseek_api_key,
+            story_bible=story_bible,
             require_launch_ready=True,
         )
     except ValueError as exc:
@@ -6040,9 +6148,9 @@ async def generate_framework_endpoint(story_id: int, request: Request, db: Sessi
         try:
             framework = await generate_framework(
                 description.strip(),
-                api_key=_user_deepseek_api_key(request),
+                api_key=deepseek_api_key,
                 required_min_chapters=max(requested_min_chapters or 0, 20),
-                story_bible=story.story_bible,
+                story_bible=story_bible,
                 story_context=story_context,
                 launch_ready_required=True,
                 quality_feedback=quality_issues,
@@ -6050,8 +6158,8 @@ async def generate_framework_endpoint(story_id: int, request: Request, db: Sessi
             framework = await _complete_framework_payload(
                 framework,
                 description.strip(),
-                api_key=_user_deepseek_api_key(request),
-                story_bible=story.story_bible,
+                api_key=deepseek_api_key,
+                story_bible=story_bible,
                 require_launch_ready=True,
             )
             quality_issues = _framework_launch_quality_issues(framework)
@@ -6062,6 +6170,7 @@ async def generate_framework_endpoint(story_id: int, request: Request, db: Sessi
     if requested_min_chapters and _count_framework_chapters(framework) < requested_min_chapters:
         raise HTTPException(502, f"AI 未能满足至少 {requested_min_chapters} 章的初始框架要求，请换一种更明确的故事描述后重试。")
 
+    story = _require_story_for_user(story_id, user, db)
     if raw_description and not _is_generic_framework_instruction(raw_description):
         story.description = raw_description
     elif not str(story.description or "").strip():
@@ -6074,13 +6183,13 @@ async def generate_framework_endpoint(story_id: int, request: Request, db: Sessi
     story.outline = _merge_framework_outline(saved_outline, framework.get("outline"), framework.get("chapters"))
     db.commit()
     _check_and_consume_feature_quota(request, user.id, "framework.generate.monthly_limit", 1, db, deduct=True, provider_kind="text")
-    db.refresh(story)
+    _release_db_transaction(db)
 
     # Fire async background quality check
     captured_tags = dict(story.tags or {})
     captured_chars = list(story.characters or [])
     captured_outline = dict(story.outline or {})
-    _api_key = _user_deepseek_api_key(request)
+    _api_key = deepseek_api_key
     asyncio.create_task(_background_quality_check(
         story.id,
         str(story.description or "").strip(),
@@ -6104,10 +6213,13 @@ async def regenerate_tags_endpoint(story_id: int, request: Request, db: Session 
     story = _require_story_for_user(story_id, user, db)
 
     story_context = _story_framework_context(story)
+    deepseek_api_key = _user_deepseek_api_key(request)
     _check_and_consume_advanced_text_quota(request, user.id, db, deduct=False)
-    result = await regenerate_tags(story_context, api_key=_user_deepseek_api_key(request))
+    _release_db_transaction(db)
+    result = await regenerate_tags(story_context, api_key=deepseek_api_key)
 
     tags = result if isinstance(result, dict) and "type" in result else result
+    story = _require_story_for_user(story_id, user, db)
     story.tags = tags
     db.commit()
     _check_and_consume_advanced_text_quota(request, user.id, db, deduct=True)
@@ -6121,10 +6233,13 @@ async def regenerate_characters_endpoint(story_id: int, request: Request, db: Se
     story = _require_story_for_user(story_id, user, db)
 
     story_context = _story_framework_context(story)
+    deepseek_api_key = _user_deepseek_api_key(request)
     _check_and_consume_advanced_text_quota(request, user.id, db, deduct=False)
-    result = await regenerate_characters_with_variance(story_context, api_key=_user_deepseek_api_key(request))
+    _release_db_transaction(db)
+    result = await regenerate_characters_with_variance(story_context, api_key=deepseek_api_key)
 
     characters = _normalize_characters_payload(result if isinstance(result, list) else result)
+    story = _require_story_for_user(story_id, user, db)
     story.characters = characters
     db.commit()
     _check_and_consume_advanced_text_quota(request, user.id, db, deduct=True)
@@ -6138,10 +6253,13 @@ async def regenerate_outline_endpoint(story_id: int, request: Request, db: Sessi
     story = _require_story_for_user(story_id, user, db)
 
     story_context = _story_framework_context(story)
+    deepseek_api_key = _user_deepseek_api_key(request)
     _check_and_consume_advanced_text_quota(request, user.id, db, deduct=False)
-    result = await regenerate_outline(story_context, api_key=_user_deepseek_api_key(request))
+    _release_db_transaction(db)
+    result = await regenerate_outline(story_context, api_key=deepseek_api_key)
 
     outline = result if isinstance(result, dict) and "three_acts" in result else result
+    story = _require_story_for_user(story_id, user, db)
     story.outline = _merge_framework_outline(story.outline, outline, _extract_outline_chapters(outline))
     db.commit()
     _check_and_consume_advanced_text_quota(request, user.id, db, deduct=True)
@@ -6452,13 +6570,15 @@ async def adjust_framework_endpoint(story_id: int, request: Request, db: Session
         mode="adjust",
         user_instruction=str(messages[-1].get("content") or "") if messages else "",
     )
+    deepseek_api_key = _user_deepseek_api_key(request)
 
     _check_and_consume_advanced_text_quota(request, user.id, db, deduct=False)
+    _release_db_transaction(db)
     try:
         result = await adjust_framework_with_chat(
             context_story,
             messages,
-            api_key=_user_deepseek_api_key(request),
+            api_key=deepseek_api_key,
             required_min_chapters=requested_min_chapters,
             existing_framework=existing_framework,
         )
@@ -6484,7 +6604,7 @@ async def adjust_framework_endpoint(story_id: int, request: Request, db: Session
             result = await adjust_framework_with_chat(
                 context_story,
                 retry_messages,
-                api_key=_user_deepseek_api_key(request),
+                api_key=deepseek_api_key,
                 required_min_chapters=requested_min_chapters,
                 existing_framework=existing_framework,
             )
@@ -6497,6 +6617,7 @@ async def adjust_framework_endpoint(story_id: int, request: Request, db: Session
                 f"AI 未能满足至少 {requested_min_chapters} 章的硬性要求，请重试或换一种更明确的扩写指令。",
             )
 
+    story = _require_story_for_user(story_id, user, db)
     description = str(framework.get("description") or story.description or "").strip()
     story.description = description
     story.tags = framework.get("tags") if isinstance(framework.get("tags"), dict) else {}
@@ -6532,6 +6653,7 @@ async def continue_framework_endpoint(story_id: int, request: Request, db: Sessi
         "outline": story.outline or {},
     }
     before_chapter_count = len(_extract_outline_chapters(story.outline))
+    deepseek_api_key = _user_deepseek_api_key(request)
     continue_instruction = (
         "一键续写：请基于当前框架继续向后扩展后续阶段和真实章节规划。"
         "必须返回 upsert_act 和 upsert_chapter 操作；至少新增 10 个后续章节任务卡。"
@@ -6548,11 +6670,12 @@ async def continue_framework_endpoint(story_id: int, request: Request, db: Sessi
         }
     ]
 
+    _release_db_transaction(db)
     try:
         result = await adjust_framework_with_chat(
             context_story,
             messages,
-            api_key=_user_deepseek_api_key(request),
+            api_key=deepseek_api_key,
             existing_framework=existing_framework,
         )
     except ValueError as exc:
@@ -6566,6 +6689,7 @@ async def continue_framework_endpoint(story_id: int, request: Request, db: Sessi
             "AI 续写没有写入任何新增章节。请重试，或直接输入“新增第X到第Y章，并列出每章任务卡”。",
         )
 
+    story = _require_story_for_user(story_id, user, db)
     story.description = str(framework.get("description") or story.description or "").strip()
     story.tags = framework.get("tags") if isinstance(framework.get("tags"), dict) else {}
     story.characters = _normalize_characters_payload(framework.get("characters"))
@@ -6663,11 +6787,13 @@ async def expand_chapter_endpoint(story_id: int, request: Request, db: Session =
     previous_bridge = _build_previous_chapter_bridge(story_id, chapter_num_for_query, db)
     if previous_bridge.get("summary_text"):
         previous_chapter_summary = str(previous_bridge["summary_text"])
+    deepseek_api_key = _user_deepseek_api_key(request)
 
+    _release_db_transaction(db)
     novel_content = await expand_chapter_to_content(
         chapter_runtime_context,
         chapter_info,
-        api_key=_user_deepseek_api_key(request),
+        api_key=deepseek_api_key,
         previous_chapter_summary=previous_chapter_summary,
     )
     novel_content = await _ensure_generated_chapter_continuity(
@@ -6736,12 +6862,14 @@ async def rewrite_selection_endpoint(chapter_id: int, request: Request, db: Sess
         },
         user_instruction="局部改写正文片段",
     )
+    deepseek_api_key = _user_deepseek_api_key(request)
     _check_and_consume_advanced_text_quota(request, user.id, db, deduct=False)
+    _release_db_transaction(db)
     rewritten = await rewrite_selection(
         selected_text.strip(),
         chapter_context.strip() or (chapter.novel_content or "")[:4000],
         story_context=chapter_runtime_context,
-        api_key=_user_deepseek_api_key(request),
+        api_key=deepseek_api_key,
     )
     _check_and_consume_advanced_text_quota(request, user.id, db, deduct=True)
     return {"rewritten_text": rewritten}
@@ -6771,14 +6899,17 @@ async def adjust_chapter_content_endpoint(chapter_id: int, request: Request, db:
         chapter_info,
         user_instruction=instruction.strip(),
     )
+    deepseek_api_key = _user_deepseek_api_key(request)
     _check_and_consume_advanced_text_quota(request, user.id, db, deduct=False)
+    _release_db_transaction(db)
     updated_content = await adjust_chapter_content(
         chapter_runtime_context,
         chapter_info,
         chapter.novel_content,
         instruction.strip(),
-        api_key=_user_deepseek_api_key(request),
+        api_key=deepseek_api_key,
     )
+    chapter = _require_chapter_for_user(chapter_id, user, db)
     _apply_chapter_content(chapter, updated_content, status="completed")
     await _refresh_chapter_memory(chapter, request, db)
     db.commit()
@@ -6854,9 +6985,12 @@ async def quality_assess_endpoint(chapter_id: int, request: Request, db: Session
     if not content.strip():
         raise HTTPException(400, "Chapter has no novel content to assess")
 
+    deepseek_api_key = _user_deepseek_api_key(request)
     _check_and_consume_advanced_text_quota(request, user.id, db, deduct=False)
-    assessment = await quality_assess(content, api_key=_user_deepseek_api_key(request))
+    _release_db_transaction(db)
+    assessment = await quality_assess(content, api_key=deepseek_api_key)
 
+    chapter = _require_chapter_for_user(chapter_id, user, db)
     chapter.quality_score = assessment.get("scores", assessment)
     if chapter.novel_content and chapter.novel_content.strip():
         chapter.status = "reviewed"
@@ -6884,12 +7018,14 @@ async def scenes_from_selection_endpoint(chapter_id: int, request: Request, db: 
     if page_count > 20:
         page_count = 20
 
+    deepseek_api_key = _user_deepseek_api_key(request)
     _check_and_consume_feature_quota(request, user.id, "scene.generate.monthly_limit", 1, db, deduct=False, provider_kind="text")
+    _release_db_transaction(db)
     scenes = await scenes_from_selection(
         selected_text.strip(),
         character_profiles=character_profiles,
         page_count=page_count,
-        api_key=_user_deepseek_api_key(request),
+        api_key=deepseek_api_key,
     )
     _check_and_consume_feature_quota(request, user.id, "scene.generate.monthly_limit", 1, db, deduct=True, provider_kind="text")
     sanitized_scenes, sanitized_indices = sanitize_scene_list(scenes)
@@ -7087,6 +7223,7 @@ async def import_create(body: ImportCreateRequest, request: Request, db: Session
 
     _check_and_consume_advanced_text_quota(request, user.id, db, deduct=False)
     api_key = _user_deepseek_api_key(request)
+    _release_db_transaction(db)
     try:
         framework = await analyze_import_material(combined, api_key=api_key)
     except Exception as exc:
@@ -7151,6 +7288,11 @@ async def import_create(body: ImportCreateRequest, request: Request, db: Session
             db.flush()
             _initialize_empty_chapter_workspace(chapter.id)
 
+    db.commit()
+    _check_and_consume_advanced_text_quota(request, user.id, db, deduct=True)
+    story_id = story.id
+    db.refresh(story)
+
     try:
         provisional_story_bible = await _build_import_provisional_story_bible(
             story,
@@ -7158,17 +7300,16 @@ async def import_create(body: ImportCreateRequest, request: Request, db: Session
             api_key=api_key,
         )
         if provisional_story_bible:
+            story = _require_story_for_user(story_id, user, db)
             story.story_bible = provisional_story_bible
             creative_brief = provisional_story_bible.get("creative_brief") if isinstance(provisional_story_bible.get("creative_brief"), dict) else {}
             next_description = str(creative_brief.get("one_line_premise") or creative_brief.get("project_positioning") or "").strip()
             if next_description:
                 story.description = next_description
+            db.commit()
+            db.refresh(story)
     except Exception as exc:
         logger.warning("Import provisional story bible generation failed for story %s: %s", story.id, exc)
-
-    db.commit()
-    _check_and_consume_advanced_text_quota(request, user.id, db, deduct=True)
-    db.refresh(story)
     return story
 
 
@@ -7197,8 +7338,10 @@ async def framework_analyze_endpoint(story_id: int, request: Request, db: Sessio
     _check_and_consume_advanced_text_quota(request, user.id, db, deduct=False)
     try:
         api_key = _user_deepseek_api_key(request)
+        _release_db_transaction(db)
         framework = await analyze_content_framework(combined, api_key=api_key)
 
+        story = _require_story_for_user(story_id, user, db)
         tags = framework.get("tags") if isinstance(framework.get("tags"), dict) else {}
         characters = framework.get("characters") if isinstance(framework.get("characters"), list) else []
         outline = framework.get("outline") if isinstance(framework.get("outline"), dict) else {}
