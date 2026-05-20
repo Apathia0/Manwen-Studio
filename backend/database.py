@@ -14,7 +14,21 @@ BASE_DIR = Path(__file__).resolve().parent
 
 logger = logging.getLogger("database")
 
-engine = create_engine(DATABASE_URL, echo=False)
+engine = create_engine(
+    DATABASE_URL,
+    echo=False,
+    pool_pre_ping=True,
+    pool_recycle=300,
+    pool_size=10,
+    max_overflow=20,
+    connect_args={
+        "keepalives": 1,
+        "keepalives_idle": 60,
+        "keepalives_interval": 10,
+        "keepalives_count": 6,
+        "connect_timeout": 10,
+    },
+)
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
 
 
@@ -31,8 +45,11 @@ def get_db():
 
 
 def init_db():
-    Base.metadata.create_all(bind=engine)
-    _migrate()
+    try:
+        Base.metadata.create_all(bind=engine)
+        _migrate()
+    except Exception as exc:
+        logger.warning("数据库初始化失败（将在下次启动时重试）: %s", exc)
 
 
 def _migrate():
