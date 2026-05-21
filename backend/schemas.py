@@ -116,6 +116,50 @@ class ChatMessageOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class AgentConversationCreateIn(BaseModel):
+    title: Optional[str] = None
+    chapter_id: Optional[int] = None
+
+
+class AgentConversationMessageCreateIn(BaseModel):
+    conversation_id: int
+    content: str
+    chapter_id: Optional[int] = None
+
+
+class AgentConversationMessageOut(BaseModel):
+    id: int
+    conversation_id: int
+    role: str
+    content: str
+    created_at: datetime.datetime
+
+    model_config = {"from_attributes": True}
+
+
+class AgentConversationSummaryOut(BaseModel):
+    id: int
+    story_id: int
+    chapter_id: Optional[int] = None
+    title: str
+    last_message_preview: str = ""
+    message_count: int = 0
+    created_at: datetime.datetime
+    updated_at: datetime.datetime
+
+
+class AgentConversationOut(BaseModel):
+    id: int
+    story_id: int
+    chapter_id: Optional[int] = None
+    title: str
+    created_at: datetime.datetime
+    updated_at: datetime.datetime
+    messages: list[AgentConversationMessageOut] = []
+
+    model_config = {"from_attributes": True}
+
+
 # --- Manga ---
 class MangaImageOut(BaseModel):
     id: int

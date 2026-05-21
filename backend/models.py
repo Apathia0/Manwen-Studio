@@ -28,6 +28,12 @@ class Story(Base):
     created_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now())
 
     chapters: Mapped[list["Chapter"]] = relationship("Chapter", back_populates="story", order_by="Chapter.chapter_number", cascade="all, delete-orphan")
+    agent_conversations: Mapped[list["AgentConversation"]] = relationship(
+        "AgentConversation",
+        back_populates="story",
+        order_by="AgentConversation.updated_at.desc()",
+        cascade="all, delete-orphan",
+    )
 
     @property
     def has_character_profiles(self) -> bool:
@@ -69,6 +75,39 @@ class ChatMessage(Base):
     chapter: Mapped["Chapter"] = relationship("Chapter", back_populates="messages")
 
 
+class AgentConversation(Base):
+    __tablename__ = "agent_conversations"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    story_id: Mapped[int] = mapped_column(Integer, ForeignKey("stories.id"), nullable=False, index=True)
+    owner_user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    chapter_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("chapters.id"), nullable=True, index=True)
+    title: Mapped[str] = mapped_column(String(255), nullable=False, default="新对话")
+    created_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+    story: Mapped["Story"] = relationship("Story", back_populates="agent_conversations")
+    owner: Mapped["User"] = relationship("User", back_populates="agent_conversations")
+    messages: Mapped[list["AgentConversationMessage"]] = relationship(
+        "AgentConversationMessage",
+        back_populates="conversation",
+        order_by="AgentConversationMessage.created_at",
+        cascade="all, delete-orphan",
+    )
+
+
+class AgentConversationMessage(Base):
+    __tablename__ = "agent_conversation_messages"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    conversation_id: Mapped[int] = mapped_column(Integer, ForeignKey("agent_conversations.id"), nullable=False, index=True)
+    role: Mapped[str] = mapped_column(String(20), nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    created_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now())
+
+    conversation: Mapped["AgentConversation"] = relationship("AgentConversation", back_populates="messages")
+
+
 class MangaImage(Base):
     __tablename__ = "manga_images"
     __table_args__ = (UniqueConstraint("chapter_id", "image_number", name="uq_manga_images_chapter_number"),)
@@ -98,6 +137,11 @@ class User(Base):
     created_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now())
 
     sessions: Mapped[list["UserSession"]] = relationship("UserSession", back_populates="user", cascade="all, delete-orphan")
+    agent_conversations: Mapped[list["AgentConversation"]] = relationship(
+        "AgentConversation",
+        back_populates="owner",
+        cascade="all, delete-orphan",
+    )
 
 
 class UserSession(Base):
