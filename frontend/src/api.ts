@@ -88,7 +88,7 @@ export function clearApiKeySettings(): void {
   });
 }
 
-function apiHeaders(json = false): HeadersInit {
+export function apiHeaders(json = false): HeadersInit {
   const keys = getApiKeySettings();
   const token = getAuthToken();
   return {
@@ -376,6 +376,35 @@ export interface ChatMessage {
   role: string;
   content: string;
   created_at: string;
+}
+
+export interface AgentConversationMessage {
+  id: number;
+  conversation_id: number;
+  role: 'user' | 'assistant';
+  content: string;
+  created_at: string;
+}
+
+export interface AgentConversationSummary {
+  id: number;
+  story_id: number;
+  chapter_id?: number | null;
+  title: string;
+  last_message_preview: string;
+  message_count: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AgentConversation {
+  id: number;
+  story_id: number;
+  chapter_id?: number | null;
+  title: string;
+  created_at: string;
+  updated_at: string;
+  messages: AgentConversationMessage[];
 }
 
 export interface MangaImage {
@@ -1882,4 +1911,178 @@ export function mangaImageUrl(imagePath: string, cacheBust?: number): string {
   // Served at /static/manga/chapter_1/panel_01_abc12345.png
   const url = `${BASE}/static/manga/${imagePath.replace('manga_outputs/', '')}`;
   return cacheBust ? `${url}?t=${cacheBust}` : url;
+}
+
+export function agentChatStream(
+  storyId: number,
+  conversationId: number,
+  content: string,
+  chapterId?: number,
+  callbacks?: {
+    onToken?: (token: string) => void;
+    onToolCall?: (toolCall: { id: string; name: string; args: any; status: 'running' }) => void;
+    onToolResult?: (toolCall: { id: string; name: string; args: any; status: 'success' | 'error'; summary?: string }) => void;
+    onDone?: (content: string, pendingChanges?: any[]) => void;
+    onError?: (err: string) => void;
+  },
+): AbortController {
+  const controller = new AbortController();
+  const toolCalls = new Map<string, { id: string; name: string; args: any; status: 'running' | 'success' | 'error'; summary?: string }>();
+
+  fetch(`${BASE}/api/stories/${storyId}/agent/chat`, {
+    method: 'POST',
+    headers: apiHeaders(true),
+    body: JSON.stringify({ conversation_id: conversationId, content, chapter_id: chapterId }),
+    signal: controller.signal,
+  })
+    .then(async (res) => {
+      if (!res.ok) {
+        callbacks?.onError?.(await res.text());
+        return;
+      }
+      const reader = res.body?.getReader();
+      if (!reader) return;
+      const decoder = new TextDecoder();
+      let buffer = '';
+      let currentEvent = 'message';
+      const handleLine = (line: string) => {
+        const trimmed = line.trim();
+        if (!trimmed || trimmed.startsWith(':')) return;
+        if (trimmed.startsWith('event:')) {
+          currentEvent = trimmed.slice(6).trim();
+        } else if (trimmed.startsWith('data:')) {
+          const dataStr = trimmed.slice(5).trim();
+          try {
+            const data = JSON.parse(dataStr);
+            if (currentEvent === 'token' && data.content !== undefined) {
+              callbacks?.onToken?.(data.content);
+            } else if (currentEvent === 'tool_call') {
+              const key = `${String(data.name || 'tool')}:${toolCalls.size}`;
+              const toolCall = {
+                id: key,
+                name: String(data.name || 'tool'),
+                args: data.arguments ?? data.args ?? {},
+                status: 'running' as const,
+              };
+              toolCalls.set(key, toolCall);
+              callbacks?.onToolCall?.(toolCall);
+            } else if (currentEvent === 'tool_result') {
+              const existingEntry = Array.from(toolCalls.values()).reverse().find(
+                (item) => item.name === String(data.name || 'tool') && item.status === 'running',
+              );
+              const key = existingEntry?.id ?? `${String(data.name || 'tool')}:${toolCalls.size}`;
+              const rawResult = data.result;
+              let status: 'success' | 'error' = 'success';
+              let summary = '';
+              if (typeof rawResult === 'string') {
+                summary = rawResult;
+                try {
+                  const parsed = JSON.parse(rawResult);
+                  if (parsed && typeof parsed === 'object' && 'error' in parsed) {
+                    status = 'error';
+                    summary = String((parsed as { error?: unknown }).error || '执行失败');
+                  }
+                } catch {
+                  // keep plain string summary
+                }
+              } else if (rawResult && typeof rawResult === 'object' && 'error' in rawResult) {
+                status = 'error';
+                summary = String((rawResult as { error?: unknown }).error || '执行失败');
+              } else if (rawResult !== undefined) {
+                summary = typeof rawResult === 'string' ? rawResult : JSON.stringify(rawResult);
+              }
+              const toolCall = {
+                id: key,
+                name: String(data.name || existingEntry?.name || 'tool'),
+                args: existingEntry?.args ?? {},
+                status,
+                summary,
+              };
+              toolCalls.set(key, toolCall);
+              callbacks?.onToolResult?.(toolCall);
+            } else if (currentEvent === 'done') {
+              callbacks?.onDone?.(data.content ?? '', data.pending_changes);
+            } else if (currentEvent === 'error' || data.error) {
+              callbacks?.onError?.(data.error);
+            }
+          } catch {
+            // ignore
+          }
+          currentEvent = 'message';
+        }
+      };
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+
+        for (const line of lines) {
+          handleLine(line);
+        }
+      }
+      if (buffer.trim()) handleLine(buffer);
+    })
+    .catch((err) => {
+      if (err.name !== 'AbortError') {
+        callbacks?.onError?.(err.message);
+      }
+    });
+
+  return controller;
+}
+
+export async function listAgentConversations(storyId: number): Promise<AgentConversationSummary[]> {
+  const res = await fetch(`${BASE}/api/stories/${storyId}/agent/conversations`, {
+    headers: apiHeaders(),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '获取助手历史失败'));
+  return res.json();
+}
+
+export async function createAgentConversation(
+  storyId: number,
+  data?: { title?: string; chapter_id?: number },
+): Promise<AgentConversation> {
+  const res = await fetch(`${BASE}/api/stories/${storyId}/agent/conversations`, {
+    method: 'POST',
+    headers: apiHeaders(true),
+    body: JSON.stringify(data ?? {}),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '创建助手对话失败'));
+  return res.json();
+}
+
+export async function getAgentConversation(storyId: number, conversationId: number): Promise<AgentConversation> {
+  const res = await fetch(`${BASE}/api/stories/${storyId}/agent/conversations/${conversationId}`, {
+    headers: apiHeaders(),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '获取助手对话失败'));
+  return res.json();
+}
+
+export async function deleteAgentConversation(storyId: number, conversationId: number): Promise<void> {
+  const res = await fetch(`${BASE}/api/stories/${storyId}/agent/conversations/${conversationId}`, {
+    method: 'DELETE',
+    headers: apiHeaders(),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '删除助手对话失败'));
+}
+
+export async function agentConfirmChanges(storyId: number): Promise<void> {
+  const res = await fetch(`${BASE}/api/stories/${storyId}/agent/confirm`, {
+    method: 'POST',
+    headers: apiHeaders(true),
+  });
+  if (!res.ok) throw new Error(await res.text());
+}
+
+export async function agentRollbackChanges(storyId: number): Promise<void> {
+  const res = await fetch(`${BASE}/api/stories/${storyId}/agent/rollback`, {
+    method: 'POST',
+    headers: apiHeaders(true),
+  });
+  if (!res.ok) throw new Error(await res.text());
 }
