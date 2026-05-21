@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useState } from 'react';
+import { Image, Bot } from 'lucide-react';
 import { type Story, type Chapter, type EntitlementResponse } from '../api';
 import FrameworkPanel from './FrameworkPanel';
 import EditorPanel from './EditorPanel';
 import MangaPanel from './MangaPanel';
+import AgentPanel from './AgentPanel/AgentPanel';
 import StoryBibleSummaryCard from './StoryBibleSummaryCard';
 
 interface Props {
@@ -25,6 +27,10 @@ export default function WorkspaceLayout({
   const [selectedText, setSelectedText] = useState('');
   const [chapterContext, setChapterContext] = useState<object | undefined>(undefined);
   const [mangaPreviewMode, setMangaPreviewMode] = useState(false);
+  const [rightPanelTab, setRightPanelTab] = useState<'manga' | 'agent'>(() => {
+    const saved = localStorage.getItem('rightPanelTab');
+    return (saved === 'manga' || saved === 'agent') ? saved : 'agent';
+  });
   const resolvedChapter = currentChapter ? mergeChapterWithFramework(story, currentChapter) : null;
 
   useEffect(() => {
@@ -80,20 +86,63 @@ export default function WorkspaceLayout({
         </div>
         )}
 
-        <div className={`${mangaPreviewMode ? 'flex-1' : 'w-[400px] shrink-0'} min-w-0 overflow-y-auto rounded-[24px] border border-[#d7e3f4] bg-[rgba(255,255,255,0.92)] shadow-[0_18px_42px_rgba(59,130,246,0.12)] backdrop-blur-xl`}>
-          <MangaPanel
-            chapter={resolvedChapter}
-            entitlements={entitlements}
-            onChapterRefresh={onContentUpdated}
-            selectedText={selectedText}
-            chapterContext={chapterContext as { characters?: any[] } | undefined}
-            isWorkspacePreviewMode={mangaPreviewMode}
-            onWorkspacePreviewModeChange={setMangaPreviewMode}
-            onClearSelection={() => {
-              setSelectedText('');
-              setChapterContext(undefined);
-            }}
-          />
+        <div className={`${mangaPreviewMode ? 'flex-1' : 'w-[400px] shrink-0'} min-w-0 overflow-hidden rounded-[24px] border border-[#d7e3f4] bg-[rgba(255,255,255,0.92)] shadow-[0_18px_42px_rgba(59,130,246,0.12)] backdrop-blur-xl`}>
+          <div className="flex flex-col h-full">
+            <div className="shrink-0 flex border-b border-[#d7e3f4] px-3">
+              <button
+                onClick={() => { setRightPanelTab('manga'); localStorage.setItem('rightPanelTab', 'manga'); }}
+                className={`flex items-center gap-1.5 px-4 py-2.5 text-sm font-medium transition-colors relative ${
+                  rightPanelTab === 'manga'
+                    ? 'text-blue-600'
+                    : 'text-gray-500 hover:text-gray-700'
+                }`}
+              >
+                <Image size={16} /> 漫画操作区
+                {rightPanelTab === 'manga' && (
+                  <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-blue-600 rounded-full" />
+                )}
+              </button>
+              <button
+                onClick={() => { setRightPanelTab('agent'); localStorage.setItem('rightPanelTab', 'agent'); }}
+                className={`flex items-center gap-1.5 px-4 py-2.5 text-sm font-medium transition-colors relative ${
+                  rightPanelTab === 'agent'
+                    ? 'text-blue-600'
+                    : 'text-gray-500 hover:text-gray-700'
+                }`}
+              >
+                <Bot size={16} /> AI 助手
+                {rightPanelTab === 'agent' && (
+                  <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-blue-600 rounded-full" />
+                )}
+              </button>
+            </div>
+            <div className="flex-1 min-h-0 overflow-hidden">
+              {rightPanelTab === 'manga' ? (
+                <MangaPanel
+                  chapter={resolvedChapter}
+                  entitlements={entitlements}
+                  onChapterRefresh={onContentUpdated}
+                  selectedText={selectedText}
+                  chapterContext={chapterContext as { characters?: any[] } | undefined}
+                  isWorkspacePreviewMode={mangaPreviewMode}
+                  onWorkspacePreviewModeChange={setMangaPreviewMode}
+                  onClearSelection={() => {
+                    setSelectedText('');
+                    setChapterContext(undefined);
+                  }}
+                />
+              ) : (
+                <AgentPanel
+                  storyId={story.id}
+                  chapterId={resolvedChapter?.id}
+                  chapterNumber={resolvedChapter?.chapter_number}
+                  storyTitle={story.title}
+                  chapterTitle={resolvedChapter?.title || undefined}
+                  onContentUpdated={onContentUpdated}
+                />
+              )}
+            </div>
+          </div>
         </div>
       </div>
     </div>

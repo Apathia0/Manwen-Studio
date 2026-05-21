@@ -1,6 +1,6 @@
-import { useState, useCallback, useEffect, useRef } from 'react';
-import { Loader2, Save, Send, Sparkles, SquarePen, X } from 'lucide-react';
-import { adjustChapterContent, saveChapterContent, type Chapter, type Story } from '../api';
+import { useState, useCallback, useEffect } from 'react';
+import { Save, SquarePen, X } from 'lucide-react';
+import { saveChapterContent, type Chapter, type Story } from '../api';
 import ChapterTabBar from './editor/ChapterTabBar';
 import FrameworkContextBar from './editor/FrameworkContextBar';
 import TextEditor from './editor/TextEditor';
@@ -30,20 +30,12 @@ export default function EditorPanel({
   const [isEditing, setIsEditing] = useState(false);
   const [draftContent, setDraftContent] = useState('');
   const [savingDraft, setSavingDraft] = useState(false);
-  const [assistantInput, setAssistantInput] = useState('');
-  const [assistantLoading, setAssistantLoading] = useState(false);
-  const [assistantStatus, setAssistantStatus] = useState('');
-  const [assistantError, setAssistantError] = useState('');
-  const assistantInputRef = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
     setIsEditing(false);
     setDraftContent(currentChapter?.novel_content ?? '');
     setSelectedText('');
     setSelectedRange(null);
-    setAssistantInput('');
-    setAssistantStatus('');
-    setAssistantError('');
   }, [currentChapter?.id, currentChapter?.novel_content]);
 
   const handleTextSelect = useCallback((selection: TextSelection | null) => {
@@ -101,45 +93,8 @@ export default function EditorPanel({
     }
   }, [currentChapter, draftContent, onContentUpdated, savingDraft]);
 
-  const autoResize = (el: HTMLTextAreaElement) => {
-    el.style.height = 'auto';
-    el.style.height = `${el.scrollHeight}px`;
-  };
-
-  const handleAssistantSubmit = useCallback(async () => {
-    if (!currentChapter || !assistantInput.trim() || assistantLoading || isEditing) return;
-    if (!currentChapter.novel_content?.trim()) {
-      setAssistantError('当前章节还没有正文，请先点击“AI 生成本章”或手动输入内容。');
-      return;
-    }
-    setAssistantLoading(true);
-    setAssistantError('');
-    setAssistantStatus('');
-    try {
-      await adjustChapterContent(currentChapter.id, assistantInput.trim());
-      setAssistantInput('');
-      if (assistantInputRef.current) assistantInputRef.current.style.height = 'auto';
-      setAssistantStatus('AI 已根据你的建议更新本章正文。');
-      await onContentUpdated();
-    } catch (err: any) {
-      setAssistantError(err.message || 'AI 调整失败。');
-    } finally {
-      setAssistantLoading(false);
-    }
-  }, [assistantInput, assistantLoading, currentChapter, isEditing, onContentUpdated]);
-
-  const handleAssistantKeyDown = useCallback(
-    (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-      if (e.key === 'Enter' && !e.shiftKey) {
-        e.preventDefault();
-        void handleAssistantSubmit();
-      }
-    },
-    [handleAssistantSubmit],
-  );
-
   return (
-    <div className="flex flex-col h-full bg-[#fcfcfa] min-w-0">
+    <div className="flex h-full min-w-0 flex-col bg-[#fcfcfa]">
       <ChapterTabBar
         chapters={chapters}
         currentChapter={currentChapter}
@@ -147,10 +102,10 @@ export default function EditorPanel({
         onNewChapter={handleNewChapter}
       />
 
-      {currentChapter && <FrameworkContextBar chapter={currentChapter} story={story} />}
+      {currentChapter ? <FrameworkContextBar chapter={currentChapter} story={story} /> : null}
 
-      {currentChapter && (
-        <div className="px-4 py-2 border-b border-[#d7e3f4] bg-[#f8fbff]">
+      {currentChapter ? (
+        <div className="border-b border-[#d7e3f4] bg-[#f8fbff] px-4 py-2">
           <ContinuitySummaryCard
             key={currentChapter.id}
             story={story}
@@ -159,27 +114,25 @@ export default function EditorPanel({
             onSaved={onContentUpdated}
           />
         </div>
-      )}
+      ) : null}
 
-      {currentChapter && (
-        <div className="flex items-center justify-between gap-3 px-4 py-2 border-b border-[#d9dfd7] bg-[#f7f8f5]">
+      {currentChapter ? (
+        <div className="flex items-center justify-between gap-3 border-b border-[#d9dfd7] bg-[#f7f8f5] px-4 py-2">
           <div className="min-w-0">
-            <p className="text-xs font-medium text-slate-700 truncate">
+            <p className="truncate text-xs font-medium text-slate-700">
               {currentChapter.title || `第 ${currentChapter.chapter_number} 话`}
             </p>
             <p className="text-[11px] text-slate-500">
-              {isEditing ? '手动编辑模式已开启' : '上方阅读正文，下方给 AI 下指令直接改稿'}
+              {isEditing ? '当前为手动编辑模式。' : '章节正文编辑区，AI 对话入口已统一迁移到右侧 AI 助手。'}
             </p>
           </div>
-          <div className="flex items-center gap-2 shrink-0">
+          <div className="flex shrink-0 items-center gap-2">
             {isEditing ? (
               <>
                 <button
                   onClick={handleCancelEditing}
                   disabled={savingDraft}
-                  className="inline-flex items-center gap-1 rounded-md px-2.5 py-1.5 text-xs font-medium
-                             bg-[#f3f5f0] text-slate-700 border border-[#d9dfd7] hover:bg-[#e8ece6]
-                             disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                  className="inline-flex items-center gap-1 rounded-md border border-[#d9dfd7] bg-[#f3f5f0] px-2.5 py-1.5 text-xs font-medium text-slate-700 transition-colors hover:bg-[#e8ece6] disabled:cursor-not-allowed disabled:opacity-40"
                 >
                   <X size={13} />
                   取消
@@ -187,9 +140,7 @@ export default function EditorPanel({
                 <button
                   onClick={() => void handleSaveDraft()}
                   disabled={savingDraft || !draftContent.trim()}
-                  className="inline-flex items-center gap-1 rounded-md px-2.5 py-1.5 text-xs font-medium
-                             bg-blue-600 text-white hover:bg-blue-500
-                             disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                  className="inline-flex items-center gap-1 rounded-md bg-blue-600 px-2.5 py-1.5 text-xs font-medium text-white transition-colors hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-40"
                 >
                   <Save size={13} />
                   保存正文
@@ -198,8 +149,7 @@ export default function EditorPanel({
             ) : (
               <button
                 onClick={handleStartEditing}
-                className="inline-flex items-center gap-1 rounded-md px-2.5 py-1.5 text-xs font-medium
-                           bg-blue-50 text-blue-700 border border-blue-200 hover:bg-blue-100 transition-colors"
+                className="inline-flex items-center gap-1 rounded-md border border-blue-200 bg-blue-50 px-2.5 py-1.5 text-xs font-medium text-blue-700 transition-colors hover:bg-blue-100"
               >
                 <SquarePen size={13} />
                 手动编辑
@@ -207,7 +157,7 @@ export default function EditorPanel({
             )}
           </div>
         </div>
-      )}
+      ) : null}
 
       <TextEditor
         content={currentChapter?.novel_content ?? null}
@@ -218,56 +168,16 @@ export default function EditorPanel({
         onTextSelect={handleEditorTextSelect}
       />
 
-      {currentChapter && (
-        <>
-          <div className="border-t border-[#d9dfd7] bg-[#f7f8f5] px-4 py-3">
-            <div className="flex items-end gap-2 rounded-xl border border-[#d9dfd7] bg-[#fcfcfa] px-3 py-2 focus-within:border-[#3b82f6] transition-colors">
-              <textarea
-                ref={assistantInputRef}
-                value={assistantInput}
-                onChange={(e) => {
-                  setAssistantInput(e.target.value);
-                  autoResize(e.target);
-                  if (assistantError) setAssistantError('');
-                  if (assistantStatus) setAssistantStatus('');
-                }}
-                onKeyDown={handleAssistantKeyDown}
-                placeholder="告诉 AI 怎么调整本章，比如：把这一段压缩得更紧张、补一段两人的正面对话..."
-                disabled={assistantLoading || isEditing}
-                rows={1}
-                className="flex-1 bg-transparent text-sm text-slate-800 placeholder-gray-600 resize-none outline-none disabled:opacity-50"
-                style={{ maxHeight: '120px', overflow: 'auto' }}
-              />
-              <button
-                onClick={() => void handleAssistantSubmit()}
-                disabled={!assistantInput.trim() || assistantLoading || isEditing}
-                className="inline-flex h-9 w-9 items-center justify-center rounded-lg bg-[#2563eb] hover:bg-[#1d4ed8]
-                           text-white disabled:opacity-30 disabled:cursor-not-allowed transition-colors shrink-0"
-                title="发送修改建议"
-              >
-                {assistantLoading ? <Loader2 size={15} className="animate-spin" /> : <Send size={15} />}
-              </button>
-            </div>
-            <div className="mt-2 flex items-center justify-between gap-3">
-              <span className="text-[11px] text-slate-500 inline-flex items-center gap-1.5">
-                <Sparkles size={11} className="text-[#2563eb]" />
-                AI 会直接改写整章正文，不展示中间对话记录。
-              </span>
-              {assistantStatus && <span className="text-[11px] text-blue-600">{assistantStatus}</span>}
-            </div>
-            {assistantError && <p className="mt-2 text-xs text-red-400">{assistantError}</p>}
-          </div>
-
-          <EditorToolbar
-            chapter={currentChapter}
-            story={story}
-            selectedText={selectedText}
-            selectedRange={selectedRange}
-            onContentUpdated={onContentUpdated}
-            onScenesRequest={handleScenesRequest}
-          />
-        </>
-      )}
+      {currentChapter ? (
+        <EditorToolbar
+          chapter={currentChapter}
+          story={story}
+          selectedText={selectedText}
+          selectedRange={selectedRange}
+          onContentUpdated={onContentUpdated}
+          onScenesRequest={handleScenesRequest}
+        />
+      ) : null}
     </div>
   );
 }
