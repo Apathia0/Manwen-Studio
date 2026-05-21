@@ -208,6 +208,7 @@ async def agent_chat(
     db.add(user_message)
     db.commit()
 
+    db.refresh(conversation, ["messages"])
     history = [{"role": item.role, "content": item.content} for item in conversation.messages]
     deepseek_api_key = _user_deepseek_api_key(request)
     _release_db_transaction(db)
@@ -250,6 +251,7 @@ async def agent_chat(
                 messages=history,
                 story_context=story_context,
                 api_key=deepseek_api_key,
+                story_id=story_id,
             ):
                 event_type = str(event.get("event") or "")
                 if event_type == "token":
