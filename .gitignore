@@ -58,6 +58,7 @@ test_*.png
 test_*.txt
 generate_image.py
 微信图片_*
+agent-ui-prototype.html
 
 # ─── MD files (except README) ───
 *.md
