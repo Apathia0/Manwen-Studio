@@ -7368,6 +7368,14 @@ async def framework_analyze_endpoint(story_id: int, request: Request, db: Sessio
         raise HTTPException(502, f"AI分析失败: {exc}")
 
 
+# ── Agent 路由器 ─────────────────────────────────────
+# 注意：import 放在文件末尾，确保辅助函数已全部定义，
+# 这样 agent_router.py 可以通过 sys.modules 访问 _require_user 等函数
+from routers.agent_router import router as agent_router
+
+app.include_router(agent_router)
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(
