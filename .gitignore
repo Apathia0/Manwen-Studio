@@ -23,6 +23,23 @@ backend/manga_outputs/
 test_novel_output.md
 test_ref_C.png
 
+# ─── Sisyphus agent working files ───
+.sisyphus/
+
+# ─── Runtime logs ───
+*.log
+*.err
+
+# ─── Archives ───
+*.tar.gz
+*.zip
+
+# ─── Random generated images ───
+docs/*.jpg
+
+# ─── Generated renders ───
+promo-video/renders/
+
 # ─── IDE & OS ───
 .vscode/
 .idea/

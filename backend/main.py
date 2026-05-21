@@ -6830,6 +6830,7 @@ async def expand_chapter_endpoint(story_id: int, request: Request, db: Session =
         db.add(chapter)
         db.flush()
         _initialize_empty_chapter_workspace(chapter.id)
+    db.commit()
     await _refresh_chapter_memory(chapter, request, db)
     db.add(ChatMessage(chapter_id=chapter.id, role="assistant", content=novel_content))
     db.commit()
