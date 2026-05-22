@@ -18,6 +18,7 @@ import StoryLibraryPage from './components/StoryLibraryPage';
 import ImportGuidancePage from './components/ImportGuidancePage';
 import OnboardingPage from './components/OnboardingPage';
 import WorkspaceLayout from './components/WorkspaceLayout';
+import VideoWorkspaceLayout from './components/VideoWorkspaceLayout';
 import {
   AdminAnnouncementPage,
   AdminAuditLogsPage,
@@ -138,6 +139,7 @@ function App() {
   const [importGuidanceStory, setImportGuidanceStory] = useState<Story | null>(null);
   const [chapters, setChapters] = useState<Chapter[]>([]);
   const [activeChapterId, setActiveChapterId] = useState<number | null>(null);
+  const [workspaceMode, setWorkspaceMode] = useState<'manga' | 'video'>('manga');
   const [loadingStories, setLoadingStories] = useState(false);
   const [loadingWorkspace, setLoadingWorkspace] = useState(false);
   const [plans, setPlans] = useState<PublicPlan[]>([]);
@@ -809,14 +811,39 @@ function App() {
             />
           )}
           {route === 'workspace' && (
-            <WorkspacePage
-              story={activeStory}
-              chapters={chapters}
-              currentChapter={activeChapter}
-              entitlements={myEntitlements}
-              onChapterChange={(chapter) => setActiveChapterId(chapter.id)}
-              onContentUpdated={refreshWorkspaceData}
-            />
+            <div>
+              <div className="mb-3 flex items-center gap-2">
+                <button
+                  onClick={() => setWorkspaceMode('manga')}
+                  className={`rounded-xl px-4 py-1.5 text-sm font-medium transition ${
+                    workspaceMode === 'manga'
+                      ? 'bg-[#2563eb] text-white'
+                      : 'border border-[#d7e3f4] bg-white text-slate-600'
+                  }`}
+                >
+                  漫画模式
+                </button>
+                <button
+                  onClick={() => setWorkspaceMode('video')}
+                  className={`rounded-xl px-4 py-1.5 text-sm font-medium transition ${
+                    workspaceMode === 'video'
+                      ? 'bg-[#2563eb] text-white'
+                      : 'border border-[#d7e3f4] bg-white text-slate-600'
+                  }`}
+                >
+                  视频模式
+                </button>
+              </div>
+              <WorkspacePage
+                story={activeStory}
+                chapters={chapters}
+                currentChapter={activeChapter}
+                entitlements={myEntitlements}
+                workspaceMode={workspaceMode}
+                onChapterChange={(chapter) => setActiveChapterId(chapter.id)}
+                onContentUpdated={refreshWorkspaceData}
+              />
+            </div>
           )}
           {route === 'account' && (
             <UserAccountUsagePage
@@ -1578,6 +1605,7 @@ function WorkspacePage({
   chapters,
   currentChapter,
   entitlements,
+  workspaceMode,
   onChapterChange,
   onContentUpdated,
 }: {
@@ -1585,6 +1613,7 @@ function WorkspacePage({
   chapters: Chapter[];
   currentChapter: Chapter | null;
   entitlements: EntitlementResponse | null;
+  workspaceMode: 'manga' | 'video';
   onChapterChange: (chapter: Chapter) => void;
   onContentUpdated: () => Promise<void>;
 }) {
@@ -1597,14 +1626,24 @@ function WorkspacePage({
   }
   return (
     <div className="h-[calc(100vh-120px)] overflow-hidden rounded-md border border-[#d9dfd7] bg-white">
-      <WorkspaceLayout
-        story={story}
-        chapters={chapters}
-        currentChapter={currentChapter}
-        entitlements={entitlements}
-        onChapterChange={onChapterChange}
-        onContentUpdated={onContentUpdated}
-      />
+      {workspaceMode === 'manga' ? (
+        <WorkspaceLayout
+          story={story}
+          chapters={chapters}
+          currentChapter={currentChapter}
+          entitlements={entitlements}
+          onChapterChange={onChapterChange}
+          onContentUpdated={onContentUpdated}
+        />
+      ) : (
+        <VideoWorkspaceLayout
+          story={story}
+          chapters={chapters}
+          currentChapter={currentChapter}
+          onChapterChange={onChapterChange}
+          onContentUpdated={onContentUpdated}
+        />
+      )}
     </div>
   );
 }
@@ -2078,6 +2117,37 @@ function UserAccountUsagePage({
                 />
               </div>
             </div>
+            <div className="rounded-2xl border border-[#e5edf8] bg-[#f8fbff] p-4">
+              <div className="mb-3 text-sm font-semibold text-slate-900">视频模型</div>
+              <div className="mb-3 rounded-2xl border border-[#d7e3f4] bg-white px-3 py-3 text-xs text-slate-600">
+                <div>平台地址：{platform.api?.video_base_url || '-'}</div>
+                <div className="mt-1">平台模型：{platform.api?.video_model || '-'}</div>
+              </div>
+              <div className="space-y-3">
+                <input
+                  value={apiSettings.videoBaseUrl}
+                  onChange={(e) => setApiSettings((prev) => ({ ...prev, videoBaseUrl: e.target.value }))}
+                  disabled={!canOverrideApiUrl}
+                  placeholder={platform.api?.video_base_url || '自定义视频服务 Base URL'}
+                  className="w-full rounded-2xl border border-[#d7e3f4] px-3 py-2 text-sm outline-none transition focus:border-[#60a5fa] focus:ring-2 focus:ring-[#bfdbfe] disabled:cursor-not-allowed disabled:bg-slate-100"
+                />
+                <input
+                  value={apiSettings.videoModel}
+                  onChange={(e) => setApiSettings((prev) => ({ ...prev, videoModel: e.target.value }))}
+                  disabled={!canOverrideApiUrl}
+                  placeholder={platform.api?.video_model || '自定义视频模型名'}
+                  className="w-full rounded-2xl border border-[#d7e3f4] px-3 py-2 text-sm outline-none transition focus:border-[#60a5fa] focus:ring-2 focus:ring-[#bfdbfe] disabled:cursor-not-allowed disabled:bg-slate-100"
+                />
+                <input
+                  value={apiSettings.videoApiKey}
+                  onChange={(e) => setApiSettings((prev) => ({ ...prev, videoApiKey: e.target.value }))}
+                  disabled={!canOverrideApiKey}
+                  type="password"
+                  placeholder="自定义视频 API Key"
+                  className="w-full rounded-2xl border border-[#d7e3f4] px-3 py-2 text-sm outline-none transition focus:border-[#60a5fa] focus:ring-2 focus:ring-[#bfdbfe] disabled:cursor-not-allowed disabled:bg-slate-100"
+                />
+              </div>
+            </div>
           </div>
           <div className="mt-4 flex flex-wrap gap-3">
             <button
@@ -2484,6 +2554,21 @@ const USER_FEATURE_META: Record<string, { label: string; description: string; un
     label: '高级文本 AI',
     description: '用于框架调整、继续扩展、文本改写、正文调整、质量评估与单项重生成。',
     unit: '次/月',
+  },
+  'screenplay.generate.monthly_limit': {
+    label: '影视剧本生成',
+    description: '用于将章节正文生成影视剧本与场次结构。',
+    unit: '次/月',
+  },
+  'shot.generate.monthly_limit': {
+    label: '视频镜头拆解',
+    description: '用于将场次拆解为视频镜头列表。',
+    unit: '次/月',
+  },
+  'video.generate.seconds.monthly_limit': {
+    label: '视频生成时长',
+    description: '每月可生成的视频总时长。',
+    unit: '秒/月',
   },
   'manga.max_image_count_per_chapter': {
     label: '单章节最大出图',

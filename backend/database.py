@@ -121,6 +121,8 @@ def _migrate():
             _prepare_migration_conn(conn)
             if "title" not in cols:
                 conn.execute(text("ALTER TABLE chapters ADD COLUMN title VARCHAR(255)"))
+            if "screenplay_text" not in cols:
+                conn.execute(text("ALTER TABLE chapters ADD COLUMN screenplay_text TEXT"))
             if "content_source" not in cols:
                 conn.execute(text("ALTER TABLE chapters ADD COLUMN content_source VARCHAR(20)"))
             if "act" not in cols:
