@@ -511,6 +511,10 @@ export interface EntitlementResponse {
 
 export interface SubscriptionSummary {
   status: string;
+  billing_cycle?: 'monthly' | 'yearly' | string;
+  current_period_start?: string | null;
+  current_period_end?: string | null;
+  expires_at?: string | null;
   plan: {
     id: number;
     code: string;
@@ -891,7 +895,13 @@ export async function saveAdminQuotaRules(planId: number, items: AdminQuotaRule[
 
 export async function getAdminUserEntitlements(userId: number): Promise<{
   user: AuthUser;
-  subscription: { status: string };
+  subscription: {
+    status: string;
+    billing_cycle?: string;
+    current_period_start?: string | null;
+    current_period_end?: string | null;
+    expires_at?: string | null;
+  };
   plan: { id: number; code: string; name: string };
   entitlements: Record<string, any>;
   usage: UsageItem[];

@@ -1,4 +1,5 @@
 import asyncio
+import calendar
 import contextlib
 import datetime
 import hashlib
@@ -522,8 +523,34 @@ def _new_session_token() -> str:
     return f"lv_{secrets.token_urlsafe(32)}"
 
 
-def _current_period_key(now: datetime.datetime | None = None) -> str:
-    now = now or datetime.datetime.utcnow()
+def _utcnow() -> datetime.datetime:
+    return datetime.datetime.utcnow()
+
+
+def _add_months(base: datetime.datetime, months: int) -> datetime.datetime:
+    month_index = (base.month - 1) + months
+    year = base.year + (month_index // 12)
+    month = (month_index % 12) + 1
+    day = min(base.day, calendar.monthrange(year, month)[1])
+    return base.replace(year=year, month=month, day=day)
+
+
+def _add_billing_cycle(base: datetime.datetime, billing_cycle: str) -> datetime.datetime:
+    cycle = (billing_cycle or "monthly").strip().lower()
+    if cycle == "yearly":
+        return _add_months(base, 12)
+    return _add_months(base, 1)
+
+
+def _current_period_key(
+    now: datetime.datetime | None = None,
+    *,
+    period_start: datetime.datetime | None = None,
+    period_end: datetime.datetime | None = None,
+) -> str:
+    if period_start and period_end:
+        return f"{period_start.strftime('%Y%m%d')}{period_end.strftime('%Y%m%d')}"
+    now = now or _utcnow()
     return now.strftime("%Y%m")
 
 
@@ -891,9 +918,76 @@ def _require_admin(request: Request, db: Session) -> User:
     return user
 
 
-def _active_plan_for_user(user_id: int, db: Session) -> Plan:
+def _subscription_is_expired(sub: UserSubscription | None, *, now: datetime.datetime | None = None) -> bool:
+    if not sub or not sub.expires_at:
+        return False
+    now = now or _utcnow()
+    return sub.expires_at <= now
+
+
+def _hydrate_subscription_period(
+    sub: UserSubscription,
+    db: Session,
+    *,
+    now: datetime.datetime | None = None,
+) -> UserSubscription:
+    now = now or _utcnow()
+    changed = False
+    cycle = str(sub.billing_cycle or "monthly").strip().lower() or "monthly"
+    if sub.billing_cycle != cycle:
+        sub.billing_cycle = cycle
+        changed = True
+    if not sub.current_period_start:
+        sub.current_period_start = sub.created_at or now
+        changed = True
+    plan = db.get(Plan, sub.plan_id)
+    if plan and plan.code == "free":
+        if sub.current_period_end is not None:
+            sub.current_period_end = None
+            changed = True
+        if sub.expires_at is not None:
+            sub.expires_at = None
+            changed = True
+    else:
+        if not sub.current_period_end:
+            sub.current_period_end = _add_billing_cycle(sub.current_period_start, cycle)
+            changed = True
+        if not sub.expires_at:
+            sub.expires_at = sub.current_period_end
+            changed = True
+        while sub.current_period_end and sub.expires_at and now >= sub.current_period_end and sub.current_period_end < sub.expires_at:
+            sub.current_period_start = sub.current_period_end
+            next_period_end = _add_billing_cycle(sub.current_period_start, cycle)
+            sub.current_period_end = min(next_period_end, sub.expires_at)
+            changed = True
+    if _subscription_is_expired(sub, now=now) and sub.status != "expired":
+        sub.status = "expired"
+        changed = True
+    elif not _subscription_is_expired(sub, now=now) and sub.status != "active":
+        sub.status = "active"
+        changed = True
+    if changed:
+        db.flush()
+    return sub
+
+
+def _subscription_for_user(user_id: int, db: Session) -> UserSubscription | None:
     sub = db.query(UserSubscription).filter(UserSubscription.user_id == user_id).first()
-    if sub:
+    if not sub:
+        return None
+    return _hydrate_subscription_period(sub, db)
+
+
+def _subscription_period_key(user_id: int, db: Session) -> str:
+    sub = _subscription_for_user(user_id, db)
+    if sub and sub.status == "active":
+        return _current_period_key(period_start=sub.current_period_start, period_end=sub.current_period_end)
+    return _current_period_key()
+
+
+def _active_plan_for_user(user_id: int, db: Session) -> Plan:
+    sub = _subscription_for_user(user_id, db)
+    if sub and sub.status == "active":
         plan = db.get(Plan, sub.plan_id)
         if plan:
             return plan
@@ -1191,7 +1285,7 @@ def _check_and_consume_quota(
         amount = 1
     plan = _active_plan_for_user(user_id, db)
     limits = _plan_feature_map(plan.id, db)
-    period_key = _current_period_key()
+    period_key = _subscription_period_key(user_id, db)
     base_limit = _coerce_int(limits.get(feature_key), default=0)
     granted = _extra_grant_amount(user_id, feature_key, period_key, db)
     limit = base_limit + granted
@@ -1265,6 +1359,24 @@ def _serialize_order_with_db(order: BillingOrder, db: Session) -> dict:
         setattr(_serialize_order, "_db", None)
 
 
+def _serialize_subscription_summary(sub: UserSubscription | None, plan: Plan) -> dict:
+    return {
+        "status": sub.status if sub else "active",
+        "billing_cycle": (sub.billing_cycle if sub and sub.billing_cycle else "monthly"),
+        "current_period_start": sub.current_period_start if sub else None,
+        "current_period_end": sub.current_period_end if sub else None,
+        "expires_at": sub.expires_at if sub else None,
+        "plan": {
+            "id": plan.id,
+            "code": plan.code,
+            "name": plan.name,
+            "monthly_price": _money_to_number(plan.monthly_price),
+            "yearly_price": _money_to_number(plan.yearly_price) if plan.yearly_price is not None else None,
+            "currency": plan.currency,
+        },
+    }
+
+
 def _write_audit_log(
     actor: User | None,
     action: str,
@@ -1299,7 +1411,7 @@ def _extra_grant_amount(user_id: int, feature_key: str, period_key: str, db: Ses
 def _usage_entries_for_user(user_id: int, db: Session) -> list[dict]:
     plan = _active_plan_for_user(user_id, db)
     limits = _plan_feature_map(plan.id, db)
-    period = _current_period_key()
+    period = _subscription_period_key(user_id, db)
     usage_items = db.query(UserUsageMonthly).filter(
         UserUsageMonthly.user_id == user_id,
         UserUsageMonthly.period_key == period,
@@ -1347,13 +1459,48 @@ def _check_and_consume_advanced_text_quota(request: Request, user_id: int, db: S
     )
 
 
-def _upsert_user_subscription(user_id: int, plan_id: int, db: Session) -> UserSubscription:
+def _upsert_user_subscription(
+    user_id: int,
+    plan_id: int,
+    db: Session,
+    *,
+    billing_cycle: str = "monthly",
+    effective_at: datetime.datetime | None = None,
+    extend_if_same_plan: bool = True,
+) -> UserSubscription:
+    effective_at = effective_at or _utcnow()
+    cycle = (billing_cycle or "monthly").strip().lower() or "monthly"
+    plan = db.get(Plan, plan_id)
+    if not plan:
+        raise HTTPException(404, "Plan not found")
     sub = db.query(UserSubscription).filter(UserSubscription.user_id == user_id).first()
     if sub:
+        sub = _hydrate_subscription_period(sub, db, now=effective_at)
+        previous_plan_id = sub.plan_id
         sub.plan_id = plan_id
         sub.status = "active"
+        sub.billing_cycle = cycle
+        if plan.code == "free":
+            sub.current_period_start = effective_at
+            sub.current_period_end = None
+            sub.expires_at = None
+            return sub
+        if extend_if_same_plan and previous_plan_id == plan_id and sub.expires_at and sub.expires_at > effective_at:
+            sub.expires_at = _add_billing_cycle(sub.expires_at, cycle)
+            return sub
+        sub.current_period_start = effective_at
+        sub.current_period_end = _add_billing_cycle(effective_at, cycle)
+        sub.expires_at = sub.current_period_end
         return sub
-    sub = UserSubscription(user_id=user_id, plan_id=plan_id, status="active")
+    sub = UserSubscription(
+        user_id=user_id,
+        plan_id=plan_id,
+        status="active",
+        billing_cycle=cycle,
+        current_period_start=effective_at,
+        current_period_end=None if plan.code == "free" else _add_billing_cycle(effective_at, cycle),
+        expires_at=None if plan.code == "free" else _add_billing_cycle(effective_at, cycle),
+    )
     db.add(sub)
     db.flush()
     return sub
@@ -1362,12 +1509,19 @@ def _upsert_user_subscription(user_id: int, plan_id: int, db: Session) -> UserSu
 def _mark_order_paid(order: BillingOrder, db: Session, *, operator_user_id: int | None = None, note: str = "") -> BillingOrder:
     if order.status != "paid":
         order.status = "paid"
-        order.paid_at = datetime.datetime.utcnow()
+        order.paid_at = _utcnow()
     if operator_user_id is not None:
         order.operator_user_id = operator_user_id
     if note:
         order.note = note
-    _upsert_user_subscription(order.user_id, order.plan_id, db)
+    _upsert_user_subscription(
+        order.user_id,
+        order.plan_id,
+        db,
+        billing_cycle=order.billing_cycle or "monthly",
+        effective_at=order.paid_at or _utcnow(),
+        extend_if_same_plan=True,
+    )
     db.flush()
     return order
 
@@ -1393,7 +1547,7 @@ def _mark_order_expired(order: BillingOrder, db: Session, *, note: str = "") -> 
 
 
 def _sync_order_status(order: BillingOrder, db: Session) -> BillingOrder:
-    if order.status == "pending" and order.expired_at and order.expired_at <= datetime.datetime.utcnow():
+    if order.status == "pending" and order.expired_at and order.expired_at <= _utcnow():
         _mark_order_expired(order, db, note=order.note or "Order expired before payment confirmation")
         db.commit()
         db.refresh(order)
@@ -1403,7 +1557,7 @@ def _sync_order_status(order: BillingOrder, db: Session) -> BillingOrder:
 def _order_checkout_payload(order: BillingOrder, plan: Plan, db: Session) -> dict:
     payment = _payment_settings_snapshot(db)
     expire_minutes = int(payment.get("order_expire_minutes") or 30)
-    expires_at = order.expired_at or (datetime.datetime.utcnow() + datetime.timedelta(minutes=expire_minutes))
+    expires_at = order.expired_at or (_utcnow() + datetime.timedelta(minutes=expire_minutes))
     method = order.payment_method or str(payment.get("default_method") or "mock_qr")
     provider = order.payment_provider or "mock"
     extra = order.extra_json or {}
@@ -3217,7 +3371,7 @@ def register(body: dict, db: Session = Depends(get_db)):
     db.flush()
     free_plan = db.query(Plan).filter(Plan.code == "free").first()
     if free_plan:
-        db.add(UserSubscription(user_id=user.id, plan_id=free_plan.id, status="active"))
+        _upsert_user_subscription(user.id, free_plan.id, db, billing_cycle="monthly", effective_at=_utcnow(), extend_if_same_plan=False)
     token = _new_session_token()
     db.add(UserSession(user_id=user.id, token=token))
     db.commit()
@@ -3317,7 +3471,7 @@ def my_subscription(request: Request, db: Session = Depends(get_db)):
     _ensure_platform_seed(db)
     user = _require_user(request, db)
     plan = _active_plan_for_user(user.id, db)
-    sub = db.query(UserSubscription).filter(UserSubscription.user_id == user.id).first()
+    sub = _subscription_for_user(user.id, db)
     latest_order = (
         db.query(BillingOrder)
         .filter(BillingOrder.user_id == user.id)
@@ -3328,17 +3482,7 @@ def my_subscription(request: Request, db: Session = Depends(get_db)):
         latest_order = _sync_order_status(latest_order, db)
     return {
         "user": {"id": user.id, "name": user.name, "email": user.email, "role": user.role},
-        "subscription": {
-            "status": sub.status if sub else "active",
-            "plan": {
-                "id": plan.id,
-                "code": plan.code,
-                "name": plan.name,
-                "monthly_price": _money_to_number(plan.monthly_price),
-                "yearly_price": _money_to_number(plan.yearly_price) if plan.yearly_price is not None else None,
-                "currency": plan.currency,
-            },
-        },
+        "subscription": _serialize_subscription_summary(sub, plan),
         "latest_order": _serialize_order_with_db(latest_order, db) if latest_order else None,
     }
 
@@ -3368,21 +3512,12 @@ def my_order_sync(order_no: str, request: Request, db: Session = Depends(get_db)
         order = _sync_alipay_order_status(order, db)
     plan = db.get(Plan, order.plan_id)
     current_plan = _active_plan_for_user(user.id, db)
+    sub = _subscription_for_user(user.id, db)
     return {
         "ok": True,
         "status": order.status,
         "order": _serialize_order_with_db(order, db),
-        "subscription": {
-            "status": "active",
-            "plan": {
-                "id": current_plan.id,
-                "code": current_plan.code,
-                "name": current_plan.name,
-                "monthly_price": _money_to_number(current_plan.monthly_price),
-                "yearly_price": _money_to_number(current_plan.yearly_price) if current_plan.yearly_price is not None else None,
-                "currency": current_plan.currency,
-            },
-        },
+        "subscription": _serialize_subscription_summary(sub, current_plan),
         "checkout": _order_checkout_payload(order, plan, db) if plan else None,
     }
 
@@ -3456,21 +3591,12 @@ def subscribe_plan(body: dict, request: Request, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(order)
     current_plan = _active_plan_for_user(user.id, db)
+    sub = _subscription_for_user(user.id, db)
     return {
         "ok": True,
         "message": "subscription updated" if order.status == "paid" else "checkout created",
         "status": order.status,
-        "subscription": {
-            "status": "active",
-            "plan": {
-                "id": current_plan.id,
-                "code": current_plan.code,
-                "name": current_plan.name,
-                "monthly_price": _money_to_number(current_plan.monthly_price),
-                "yearly_price": _money_to_number(current_plan.yearly_price) if current_plan.yearly_price is not None else None,
-                "currency": current_plan.currency,
-            },
-        },
+        "subscription": _serialize_subscription_summary(sub, current_plan),
         "order": _serialize_order_with_db(order, db),
         "checkout": checkout_override or _order_checkout_payload(order, plan, db),
     }
@@ -3495,21 +3621,13 @@ def my_order_mock_confirm(order_no: str, request: Request, db: Session = Depends
     })
     db.commit()
     db.refresh(order)
+    current_plan = _active_plan_for_user(user.id, db)
+    sub = _subscription_for_user(user.id, db)
     return {
         "ok": True,
         "status": order.status,
         "order": _serialize_order_with_db(order, db),
-        "subscription": {
-            "status": "active",
-            "plan": {
-                "id": plan.id,
-                "code": plan.code,
-                "name": plan.name,
-                "monthly_price": _money_to_number(plan.monthly_price),
-                "yearly_price": _money_to_number(plan.yearly_price) if plan.yearly_price is not None else None,
-                "currency": plan.currency,
-            },
-        },
+        "subscription": _serialize_subscription_summary(sub, current_plan),
     }
 
 
@@ -3589,7 +3707,7 @@ def my_usage(request: Request, db: Session = Depends(get_db)):
     _ensure_platform_seed(db)
     user = _require_user(request, db)
     plan = _active_plan_for_user(user.id, db)
-    return {"period_key": _current_period_key(), "plan_code": plan.code, "items": _usage_entries_for_user(user.id, db)}
+    return {"period_key": _subscription_period_key(user.id, db), "plan_code": plan.code, "items": _usage_entries_for_user(user.id, db)}
 
 
 @app.get("/api/admin/plans")
@@ -3771,11 +3889,9 @@ def admin_save_quota_rules(plan_id: int, body: dict, request: Request, db: Sessi
 def admin_users(request: Request, db: Session = Depends(get_db)):
     _require_admin(request, db)
     users = db.query(User).order_by(User.created_at.desc()).all()
-    subscription_map = {item.user_id: item.plan_id for item in db.query(UserSubscription).all()}
-    plan_map = {plan.id: plan for plan in db.query(Plan).all()}
     result = []
     for user in users:
-        plan = plan_map.get(subscription_map.get(user.id))
+        plan = _active_plan_for_user(user.id, db)
         result.append({
             "id": user.id,
             "name": user.name,
@@ -3886,10 +4002,16 @@ def admin_user_entitlements(user_id: int, request: Request, db: Session = Depend
     if not user:
         raise HTTPException(404, "User not found")
     plan = _active_plan_for_user(user.id, db)
-    sub = db.query(UserSubscription).filter(UserSubscription.user_id == user.id).first()
+    sub = _subscription_for_user(user.id, db)
     return {
         "user": {"id": user.id, "name": user.name, "email": user.email, "role": user.role},
-        "subscription": {"status": sub.status if sub else "active"},
+        "subscription": {
+            "status": sub.status if sub else "active",
+            "billing_cycle": (sub.billing_cycle if sub and sub.billing_cycle else "monthly"),
+            "current_period_start": sub.current_period_start if sub else None,
+            "current_period_end": sub.current_period_end if sub else None,
+            "expires_at": sub.expires_at if sub else None,
+        },
         "plan": {"id": plan.id, "code": plan.code, "name": plan.name},
         "entitlements": _plan_feature_map(plan.id, db),
         "usage": _usage_entries_for_user(user.id, db),
@@ -3975,7 +4097,7 @@ def admin_update_user_subscription(user_id: int, body: dict, request: Request, d
     plan = db.get(Plan, plan_id)
     if not plan:
         raise HTTPException(404, "Plan not found")
-    _upsert_user_subscription(user.id, plan.id, db)
+    _upsert_user_subscription(user.id, plan.id, db, billing_cycle="monthly", effective_at=_utcnow(), extend_if_same_plan=False)
     order = BillingOrder(
         order_no=f"LVADM{datetime.datetime.utcnow().strftime('%Y%m%d%H%M%S')}{secrets.randbelow(10000):04d}",
         user_id=user.id,
@@ -4016,7 +4138,7 @@ def admin_grant_user_quota(user_id: int, body: dict, request: Request, db: Sessi
         raise HTTPException(400, "feature_key is required")
     if amount <= 0:
         raise HTTPException(400, "amount must be greater than 0")
-    period_key = _current_period_key()
+    period_key = _subscription_period_key(user.id, db)
     grant = db.query(UserQuotaGrantMonthly).filter(
         UserQuotaGrantMonthly.user_id == user.id,
         UserQuotaGrantMonthly.feature_key == feature_key,

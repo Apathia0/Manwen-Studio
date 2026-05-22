@@ -1942,6 +1942,12 @@ function UserAccountUsagePage({
           <div className="text-xs font-medium text-slate-500">当前套餐</div>
           <div className="mt-2 text-2xl font-semibold text-slate-900">{subscription?.subscription.plan.name || '-'}</div>
           <div className="mt-2 text-sm text-slate-600">状态：{statusLabel(subscription?.subscription.status)}</div>
+          <div className="mt-2 text-sm text-slate-600">
+            到期时间：{subscription?.subscription.expires_at ? formatDateTime(subscription.subscription.expires_at) : '长期有效'}
+          </div>
+          <div className="mt-1 text-sm text-slate-600">
+            当前账期：{formatSubscriptionPeriod(subscription?.subscription.current_period_start, subscription?.subscription.current_period_end)}
+          </div>
         </div>
         <div className="rounded-3xl border border-[#d7e3f4] bg-white/95 p-5 shadow-[0_14px_34px_rgba(59,130,246,0.08)]">
           <div className="text-xs font-medium text-slate-500">当前月费</div>
@@ -2525,6 +2531,16 @@ function formatDateTime(value: string | null | undefined): string {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return value;
   return date.toLocaleString('zh-CN');
+}
+
+function formatSubscriptionPeriod(start: string | null | undefined, end: string | null | undefined): string {
+  if (!start || !end) return '-';
+  const startDate = new Date(start);
+  const endDate = new Date(end);
+  if (Number.isNaN(startDate.getTime()) || Number.isNaN(endDate.getTime())) {
+    return `${start || '-'} ~ ${end || '-'}`;
+  }
+  return `${startDate.toLocaleDateString('zh-CN')} ~ ${endDate.toLocaleDateString('zh-CN')}`;
 }
 
 function formatMoney(value: number | string | null | undefined): string {

@@ -222,6 +222,10 @@ class UserSubscription(Base):
     user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False)
     plan_id: Mapped[int] = mapped_column(Integer, ForeignKey("plans.id"), nullable=False)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="active")
+    billing_cycle: Mapped[str | None] = mapped_column(String(20), nullable=True, default="monthly")
+    current_period_start: Mapped[datetime.datetime | None] = mapped_column(DateTime, nullable=True)
+    current_period_end: Mapped[datetime.datetime | None] = mapped_column(DateTime, nullable=True)
+    expires_at: Mapped[datetime.datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now())
 
 

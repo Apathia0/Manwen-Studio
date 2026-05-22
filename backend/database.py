@@ -183,6 +183,19 @@ def _migrate():
                 conn.execute(text("ALTER TABLE billing_orders ADD COLUMN paid_at TIMESTAMP"))
             if "expired_at" not in cols:
                 conn.execute(text("ALTER TABLE billing_orders ADD COLUMN expired_at TIMESTAMP"))
+    if "user_subscriptions" in insp.get_table_names():
+        cols = {c["name"] for c in insp.get_columns("user_subscriptions")}
+        with engine.begin() as conn:
+            _prepare_migration_conn(conn)
+            if "billing_cycle" not in cols:
+                conn.execute(text("ALTER TABLE user_subscriptions ADD COLUMN billing_cycle VARCHAR(20) DEFAULT 'monthly'"))
+                conn.execute(text("UPDATE user_subscriptions SET billing_cycle = 'monthly' WHERE billing_cycle IS NULL"))
+            if "current_period_start" not in cols:
+                conn.execute(text("ALTER TABLE user_subscriptions ADD COLUMN current_period_start TIMESTAMP"))
+            if "current_period_end" not in cols:
+                conn.execute(text("ALTER TABLE user_subscriptions ADD COLUMN current_period_end TIMESTAMP"))
+            if "expires_at" not in cols:
+                conn.execute(text("ALTER TABLE user_subscriptions ADD COLUMN expires_at TIMESTAMP"))
     if "users" in insp.get_table_names():
         cols = {c["name"] for c in insp.get_columns("users")}
         with engine.begin() as conn:
