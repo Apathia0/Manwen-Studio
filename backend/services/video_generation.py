@@ -3,22 +3,47 @@ import logging
 from typing import Any
 
 from . import video_api
+from . import video_comfyui
 
 logger = logging.getLogger(__name__)
 
+
+def _parse_progress(raw: Any) -> int:
+    """安全解析 progress 字段，兼容 '0%' 字符串格式和数字格式。"""
+    if raw is None:
+        return 0
+    if isinstance(raw, (int, float)):
+        return int(raw)
+    if isinstance(raw, str):
+        cleaned = raw.strip().rstrip("%").strip()
+        try:
+            return int(cleaned) if cleaned else 0
+        except ValueError:
+            return 0
+    return 0
+
 _STATUS_MAP = {
+    "pending": "queued",
     "queued": "running",
+    "submitted": "running",
+    "processing": "running",
     "in_progress": "running",
     "running": "running",
+    "done": "succeeded",
+    "success": "succeeded",
     "completed": "succeeded",
     "succeeded": "succeeded",
     "failed": "failed",
+    "error": "failed",
+    "cancelled": "cancelled",
+    "canceled": "cancelled",
     "not_found": "failed",
 }
 
 
 def _map_status(provider_status: str) -> str:
-    return _STATUS_MAP.get(provider_status, "queued")
+    normalized = str(provider_status or "").strip().lower()
+    return _STATUS_MAP.get(normalized, "queued")
 
 
 async def submit_video_job(
@@ -33,27 +58,47 @@ async def submit_video_job(
     seed: int | None = None,
     api_key: str | None = None,
     base_url: str | None = None,
+    input_mode: str = "text_to_video",
 ) -> dict[str, Any]:
-    """提交视频生成任务到 New API，返回 provider_job_id。"""
+    """提交视频生成任务，根据 provider 分发到不同后端。
+
+    支持:
+      - comfyui → 本地 ComfyUI
+      - 其他 (sora/mock 等) → New API (api.xbyjs.top)
+    """
     try:
-        result = await video_api.create_video_job(
-            model=model or video_api.DEFAULT_MODEL,
-            prompt=prompt,
-            aspect_ratio=aspect_ratio or "16:9",
-            duration_seconds=duration_seconds,
-            api_key=api_key,
-        )
-        # New API 创建响应: {task_id, status}
-        provider_job_id = result.get("task_id", "")
+        if provider == "comfyui":
+            result = await video_comfyui.submit_job(
+                input_mode=input_mode,
+                prompt=prompt,
+                model=model,
+                reference_images=reference_images,
+                duration_seconds=duration_seconds,
+                base_url=base_url,
+            )
+        else:
+            result = await video_api.create_video_job(
+                model=model or video_api._resolved_model(),
+                prompt=prompt,
+                aspect_ratio=aspect_ratio or "16:9",
+                duration_seconds=duration_seconds,
+                images=reference_images,
+                api_key=api_key,
+                base_url=base_url,
+            )
+            result["provider_job_id"] = result.get("task_id", "")
+
+        provider_job_id = result.get("provider_job_id", "")
         status = _map_status(result.get("status", "queued"))
+        progress = _parse_progress(result.get("progress"))
         logger.info(
-            "Video job submitted: shot=%s provider=%s job_id=%s status=%s",
-            shot_id, provider, provider_job_id, status,
+            "Video job submitted: shot=%s provider=%s model=%s job_id=%s status=%s",
+            shot_id, provider, model, provider_job_id, status,
         )
         return {
             "provider_job_id": provider_job_id,
             "status": status,
-            "progress": 0,
+            "progress": progress,
             "provider_status": result.get("status", ""),
             "enhanced_prompt": result.get("enhanced_prompt", ""),
         }
@@ -73,22 +118,30 @@ async def query_job_status(
     api_key: str | None = None,
     base_url: str | None = None,
 ) -> dict[str, Any]:
-    """查询视频任务在 New API 的实时状态。"""
+    """查询视频任务状态，根据 provider 分发到不同后端。"""
     if not provider_job_id:
         return {"status": "failed", "progress": 0}
 
     try:
-        result = await video_api.query_video_job(
-            job_id=provider_job_id,
-            api_key=api_key,
-        )
+        if provider == "comfyui":
+            result = await video_comfyui.query_job(
+                provider_job_id=provider_job_id,
+                base_url=base_url,
+            )
+        else:
+            result = await video_api.query_video_job(
+                job_id=provider_job_id,
+                api_key=api_key,
+                base_url=base_url,
+            )
+            result["video_url"] = video_api.extract_video_url(result)
+
         provider_status = result.get("status", "unknown")
         status = _map_status(provider_status)
-        # New API 完成响应: {task_id, status, url, format, metadata, error?}
-        video_url = video_api._extract_video_url(result)
+        video_url = result.get("video_url", "")
 
-        progress = 0
-        if status in ("running",):
+        progress = _parse_progress(result.get("progress"))
+        if progress == 0 and status == "running":
             progress = 50
         elif status == "succeeded":
             progress = 100
@@ -118,13 +171,21 @@ async def fetch_job_result(
     api_key: str | None = None,
     base_url: str | None = None,
 ) -> dict[str, Any]:
-    """获取已完成视频任务的结果，下载视频到本地。"""
+    """获取已完成视频任务的结果，根据 provider 分发下载。"""
     try:
-        result = await video_api.query_video_job(
-            job_id=provider_job_id,
-            api_key=api_key,
-        )
-        video_url = video_api._extract_video_url(result)
+        if provider == "comfyui":
+            result = await video_comfyui.query_job(
+                provider_job_id=provider_job_id,
+                base_url=base_url,
+            )
+            video_url = result.get("video_url", "")
+        else:
+            result = await video_api.query_video_job(
+                job_id=provider_job_id,
+                api_key=api_key,
+                base_url=base_url,
+            )
+            video_url = video_api.extract_video_url(result)
 
         if not video_url:
             logger.warning("No video URL for job %s", provider_job_id)
@@ -135,12 +196,19 @@ async def fetch_job_result(
                 "resolution": "1280x720",
             }
 
-        local_path = await video_api.download_video(
-            video_url=video_url,
-            shot_id=shot_id,
-            job_id=provider_job_id,
-            api_key=api_key,
-        )
+        if provider == "comfyui":
+            local_path = await video_comfyui.download_video(
+                video_url=video_url,
+                shot_id=shot_id,
+                job_id=provider_job_id,
+            )
+        else:
+            local_path = await video_api.download_video(
+                video_url=video_url,
+                shot_id=shot_id,
+                job_id=provider_job_id,
+                api_key=api_key,
+            )
 
         logger.info(
             "Video result fetched: shot=%s job=%s local=%s",

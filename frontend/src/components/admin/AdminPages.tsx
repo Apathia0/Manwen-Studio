@@ -8,6 +8,7 @@ import {
   createAdminUser,
   deleteAdminPlan,
   deleteAdminUser,
+  getAdminAnnouncement,
   getAdminAuditLogs,
   getAdminFeatureCatalog,
   getAdminOrders,
@@ -20,6 +21,7 @@ import {
   getAdminUsers,
   saveAdminPlanFeatures,
   saveAdminQuotaRules,
+  updateAdminAnnouncement,
   updateAdminOrderStatus,
   updateAdminPlan,
   updateAdminPlatformSettings,
@@ -33,6 +35,7 @@ import {
   type AdminReviewChapter,
   type AdminReviewStory,
   type AdminUserItem,
+  type PlatformAnnouncement,
   type PlatformSettings,
 } from '../../api';
 
@@ -992,7 +995,16 @@ export function AdminPlatformSettingsPage({
 }) {
   const [settings, setSettings] = useState<PlatformSettings | null>(null);
   const [iconBusy, setIconBusy] = useState(false);
+  const [tab, setTab] = useState<string>('basic');
   const { busy, run } = useBusyAction(onError);
+
+  const TABS = [
+    { key: 'basic', label: '基础信息' },
+    { key: 'api', label: 'AI API' },
+    { key: 'auth', label: '登录注册' },
+    { key: 'email', label: '邮箱配置' },
+    { key: 'payment', label: '支付配置' },
+  ];
 
   useEffect(() => {
     void run(async () => {
@@ -1011,227 +1023,265 @@ export function AdminPlatformSettingsPage({
 
   return (
     <div className="space-y-5">
-      <SectionCard title="平台基础信息" description="统一管理品牌展示、客服联系方式与运营公告。">
-        <div className="grid gap-3 md:grid-cols-2">
-          <TextInput value={settings.basic.site_name} onChange={(e) => setSettings((prev) => prev ? { ...prev, basic: { ...prev.basic, site_name: e.target.value } } : prev)} placeholder="平台名称" />
-          <TextInput value={settings.basic.site_slogan} onChange={(e) => setSettings((prev) => prev ? { ...prev, basic: { ...prev.basic, site_slogan: e.target.value } } : prev)} placeholder="平台副标题" />
-          <TextInput value={settings.basic.support_email} onChange={(e) => setSettings((prev) => prev ? { ...prev, basic: { ...prev.basic, support_email: e.target.value } } : prev)} placeholder="客服邮箱" />
-          <TextInput value={settings.basic.icp} onChange={(e) => setSettings((prev) => prev ? { ...prev, basic: { ...prev.basic, icp: e.target.value } } : prev)} placeholder="ICP备案号" />
+      <div className="flex flex-wrap gap-1 rounded-3xl border border-[#d7e3f4] bg-white/90 p-1.5 shadow-[0_14px_34px_rgba(59,130,246,0.08)]">
+        {TABS.map((item) => (
+          <button
+            key={item.key}
+            onClick={() => setTab(item.key)}
+            className={`rounded-2xl px-4 py-2 text-sm font-medium transition ${
+              tab === item.key
+                ? 'bg-[#2563eb] text-white shadow-sm'
+                : 'text-slate-600 hover:bg-[#f0f4ff] hover:text-slate-900'
+            }`}
+          >
+            {item.label}
+          </button>
+        ))}
+        <div className="ml-auto flex items-center pr-1">
+          <button
+            disabled={busy}
+            onClick={() =>
+              void run(async () => {
+                const next = await updateAdminPlatformSettings(settings);
+                setSettings(next);
+                onSaved?.(next);
+              })
+            }
+            className="rounded-2xl bg-[#1d4ed8] px-5 py-2 text-sm font-medium text-white transition hover:bg-[#1e40af] disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {busy ? '保存中…' : '保存平台配置'}
+          </button>
         </div>
-        <div className="mt-3 rounded-2xl border border-[#d7e3f4] bg-[#f8fbff] p-4">
-          <div className="text-sm font-semibold text-slate-900">站点 Icon</div>
-          <div className="mt-1 text-xs text-slate-500">支持上传 png / jpg / svg，保存后会自动更新浏览器标签页图标。</div>
-          <div className="mt-4 flex flex-col gap-4 sm:flex-row sm:items-center">
-            <div className="flex h-16 w-16 items-center justify-center overflow-hidden rounded-2xl border border-[#d7e3f4] bg-white shadow-[0_8px_20px_rgba(59,130,246,0.08)]">
-              <img src={settings.basic.icon_url || '/brand-mark.svg'} alt="site icon" className="h-10 w-10 object-contain" />
-            </div>
-            <div className="flex flex-wrap gap-2">
-              <label className="inline-flex cursor-pointer items-center rounded-2xl bg-[#2563eb] px-4 py-2 text-sm font-medium text-white transition hover:bg-[#1d4ed8]">
-                {iconBusy ? '处理中...' : '上传图标'}
-                <input
-                  type="file"
-                  accept="image/png,image/jpeg,image/jpg,image/svg+xml,image/webp,image/x-icon"
-                  className="hidden"
-                  onChange={(e) => {
-                    const file = e.target.files?.[0];
-                    if (!file) return;
-                    setIconBusy(true);
-                    const reader = new FileReader();
-                    reader.onload = () => {
-                      const result = String(reader.result || '');
-                      const [, base64 = ''] = result.split(',');
-                      setSettings((prev) => prev ? {
-                        ...prev,
-                        basic: {
-                          ...prev.basic,
-                          icon_url: result,
-                          icon_data: base64,
-                          icon_mime: file.type || 'image/png',
-                          clear_icon: false,
-                        },
-                      } : prev);
-                      setIconBusy(false);
-                    };
-                    reader.onerror = () => {
-                      setIconBusy(false);
-                      onError('读取图标文件失败');
-                    };
-                    reader.readAsDataURL(file);
-                    e.target.value = '';
-                  }}
-                />
-              </label>
-              <SecondaryButton
-                disabled={iconBusy}
-                onClick={() =>
-                  setSettings((prev) => prev ? {
-                    ...prev,
-                    basic: {
-                      ...prev.basic,
-                      icon_url: '/brand-mark.svg',
-                      icon_data: '',
-                      icon_mime: '',
-                      clear_icon: true,
-                    },
-                  } : prev)
-                }
-              >
-                恢复默认
-              </SecondaryButton>
-            </div>
-          </div>
-        </div>
-        <div className="mt-3 grid gap-3">
-          <TextInput value={settings.basic.copyright} onChange={(e) => setSettings((prev) => prev ? { ...prev, basic: { ...prev.basic, copyright: e.target.value } } : prev)} placeholder="版权信息" />
-          <TextArea rows={4} value={settings.basic.notice} onChange={(e) => setSettings((prev) => prev ? { ...prev, basic: { ...prev.basic, notice: e.target.value } } : prev)} placeholder="运营公告 / 首页提示" />
-        </div>
-      </SectionCard>
+      </div>
 
-      <SectionCard title="AI API 配置" description="平台保存的配置会在用户实际生成内容时自动生效。">
-        <div className="grid gap-4 xl:grid-cols-2">
-          <div className="rounded-2xl border border-[#e5edf8] bg-[#f8fbff] p-4">
-            <div className="mb-3 text-sm font-semibold text-slate-900">文本模型服务</div>
-            <div className="space-y-3">
-              <TextInput value={settings.api.deepseek_base_url} onChange={(e) => setSettings((prev) => prev ? { ...prev, api: { ...prev.api, deepseek_base_url: e.target.value } } : prev)} placeholder="DeepSeek Base URL" />
-              <TextInput value={settings.api.deepseek_model} onChange={(e) => setSettings((prev) => prev ? { ...prev, api: { ...prev.api, deepseek_model: e.target.value } } : prev)} placeholder="DeepSeek 模型名称" />
-              <TextInput type="password" value={settings.api.deepseek_api_key} onChange={(e) => setSettings((prev) => prev ? { ...prev, api: { ...prev.api, deepseek_api_key: e.target.value } } : prev)} placeholder="DeepSeek API Key" />
+      {tab === 'basic' && (
+        <SectionCard title="基础信息" description="统一管理品牌展示、客服联系方式与运营公告。">
+          <div className="grid gap-3 md:grid-cols-2">
+            <TextInput value={settings.basic.site_name} onChange={(e) => setSettings((prev) => prev ? { ...prev, basic: { ...prev.basic, site_name: e.target.value } } : prev)} placeholder="平台名称" />
+            <TextInput value={settings.basic.site_slogan} onChange={(e) => setSettings((prev) => prev ? { ...prev, basic: { ...prev.basic, site_slogan: e.target.value } } : prev)} placeholder="平台副标题" />
+            <TextInput value={settings.basic.support_email} onChange={(e) => setSettings((prev) => prev ? { ...prev, basic: { ...prev.basic, support_email: e.target.value } } : prev)} placeholder="客服邮箱" />
+            <TextInput value={settings.basic.icp} onChange={(e) => setSettings((prev) => prev ? { ...prev, basic: { ...prev.basic, icp: e.target.value } } : prev)} placeholder="ICP备案号" />
+          </div>
+          <div className="mt-3 rounded-2xl border border-[#d7e3f4] bg-[#f8fbff] p-4">
+            <div className="text-sm font-semibold text-slate-900">站点 Icon</div>
+            <div className="mt-1 text-xs text-slate-500">支持上传 png / jpg / svg，保存后会自动更新浏览器标签页图标。</div>
+            <div className="mt-4 flex flex-col gap-4 sm:flex-row sm:items-center">
+              <div className="flex h-16 w-16 items-center justify-center overflow-hidden rounded-2xl border border-[#d7e3f4] bg-white shadow-[0_8px_20px_rgba(59,130,246,0.08)]">
+                <img src={settings.basic.icon_url || '/brand-mark.svg'} alt="site icon" className="h-10 w-10 object-contain" />
+              </div>
+              <div className="flex flex-wrap gap-2">
+                <label className="inline-flex cursor-pointer items-center rounded-2xl bg-[#2563eb] px-4 py-2 text-sm font-medium text-white transition hover:bg-[#1d4ed8]">
+                  {iconBusy ? '处理中...' : '上传图标'}
+                  <input
+                    type="file"
+                    accept="image/png,image/jpeg,image/jpg,image/svg+xml,image/webp,image/x-icon"
+                    className="hidden"
+                    onChange={(e) => {
+                      const file = e.target.files?.[0];
+                      if (!file) return;
+                      setIconBusy(true);
+                      const reader = new FileReader();
+                      reader.onload = () => {
+                        const result = String(reader.result || '');
+                        const [, base64 = ''] = result.split(',');
+                        setSettings((prev) => prev ? {
+                          ...prev,
+                          basic: {
+                            ...prev.basic,
+                            icon_url: result,
+                            icon_data: base64,
+                            icon_mime: file.type || 'image/png',
+                            clear_icon: false,
+                          },
+                        } : prev);
+                        setIconBusy(false);
+                      };
+                      reader.onerror = () => {
+                        setIconBusy(false);
+                        onError('读取图标文件失败');
+                      };
+                      reader.readAsDataURL(file);
+                      e.target.value = '';
+                    }}
+                  />
+                </label>
+                <SecondaryButton
+                  disabled={iconBusy}
+                  onClick={() =>
+                    setSettings((prev) => prev ? {
+                      ...prev,
+                      basic: {
+                        ...prev.basic,
+                        icon_url: '/brand-mark.svg',
+                        icon_data: '',
+                        icon_mime: '',
+                        clear_icon: true,
+                      },
+                    } : prev)
+                  }
+                >
+                  恢复默认
+                </SecondaryButton>
+              </div>
             </div>
           </div>
-          <div className="rounded-2xl border border-[#e5edf8] bg-[#f8fbff] p-4">
-            <div className="mb-3 text-sm font-semibold text-slate-900">图片模型服务</div>
-            <div className="space-y-3">
-              <TextInput value={settings.api.image_base_url} onChange={(e) => setSettings((prev) => prev ? { ...prev, api: { ...prev.api, image_base_url: e.target.value } } : prev)} placeholder="图片服务 Base URL" />
-              <TextInput value={settings.api.image_model} onChange={(e) => setSettings((prev) => prev ? { ...prev, api: { ...prev.api, image_model: e.target.value } } : prev)} placeholder="图片模型名称" />
-              <TextInput type="password" value={settings.api.image_api_key} onChange={(e) => setSettings((prev) => prev ? { ...prev, api: { ...prev.api, image_api_key: e.target.value } } : prev)} placeholder="图片 API Key" />
-            </div>
+          <div className="mt-3 grid gap-3">
+            <TextInput value={settings.basic.copyright} onChange={(e) => setSettings((prev) => prev ? { ...prev, basic: { ...prev.basic, copyright: e.target.value } } : prev)} placeholder="版权信息" />
+            <TextArea rows={4} value={settings.basic.notice} onChange={(e) => setSettings((prev) => prev ? { ...prev, basic: { ...prev.basic, notice: e.target.value } } : prev)} placeholder="运营公告 / 首页提示" />
           </div>
-          <div className="rounded-2xl border border-[#e5edf8] bg-[#f8fbff] p-4">
-            <div className="mb-3 text-sm font-semibold text-slate-900">视频模型服务</div>
-            <div className="space-y-3">
-              <TextInput value={settings.api.video_base_url} onChange={(e) => setSettings((prev) => prev ? { ...prev, api: { ...prev.api, video_base_url: e.target.value } } : prev)} placeholder="视频服务 Base URL" />
-              <TextInput value={settings.api.video_model} onChange={(e) => setSettings((prev) => prev ? { ...prev, api: { ...prev.api, video_model: e.target.value } } : prev)} placeholder="视频模型名称" />
-              <TextInput type="password" value={settings.api.video_api_key} onChange={(e) => setSettings((prev) => prev ? { ...prev, api: { ...prev.api, video_api_key: e.target.value } } : prev)} placeholder="视频 API Key" />
-            </div>
-          </div>
-        </div>
+        </SectionCard>
+      )}
 
-        <div className="mt-4 flex flex-wrap items-center gap-3 rounded-2xl border border-[#d7e3f4] bg-white px-4 py-3 text-sm text-slate-700">
-          <label className="flex items-center gap-2">
+      {tab === 'api' && (
+        <SectionCard title="AI API 配置" description="平台保存的配置会在用户实际生成内容时自动生效。">
+          <div className="grid gap-4 xl:grid-cols-3">
+            <div className="rounded-2xl border border-[#e5edf8] bg-[#f8fbff] p-4">
+              <div className="mb-3 text-sm font-semibold text-slate-900">文本模型服务</div>
+              <div className="space-y-3">
+                <TextInput value={settings.api.deepseek_base_url} onChange={(e) => setSettings((prev) => prev ? { ...prev, api: { ...prev.api, deepseek_base_url: e.target.value } } : prev)} placeholder="DeepSeek Base URL" />
+                <TextInput value={settings.api.deepseek_model} onChange={(e) => setSettings((prev) => prev ? { ...prev, api: { ...prev.api, deepseek_model: e.target.value } } : prev)} placeholder="DeepSeek 模型名称" />
+                <TextInput type="password" value={settings.api.deepseek_api_key} onChange={(e) => setSettings((prev) => prev ? { ...prev, api: { ...prev.api, deepseek_api_key: e.target.value } } : prev)} placeholder="DeepSeek API Key" />
+              </div>
+            </div>
+            <div className="rounded-2xl border border-[#e5edf8] bg-[#f8fbff] p-4">
+              <div className="mb-3 text-sm font-semibold text-slate-900">图片模型服务</div>
+              <div className="space-y-3">
+                <TextInput value={settings.api.image_base_url} onChange={(e) => setSettings((prev) => prev ? { ...prev, api: { ...prev.api, image_base_url: e.target.value } } : prev)} placeholder="图片服务 Base URL" />
+                <TextInput value={settings.api.image_model} onChange={(e) => setSettings((prev) => prev ? { ...prev, api: { ...prev.api, image_model: e.target.value } } : prev)} placeholder="图片模型名称" />
+                <TextInput type="password" value={settings.api.image_api_key} onChange={(e) => setSettings((prev) => prev ? { ...prev, api: { ...prev.api, image_api_key: e.target.value } } : prev)} placeholder="图片 API Key" />
+              </div>
+            </div>
+            <div className="rounded-2xl border border-[#e5edf8] bg-[#f8fbff] p-4">
+              <div className="mb-3 text-sm font-semibold text-slate-900">视频模型服务</div>
+              <div className="space-y-3">
+                <div className="flex items-center gap-2">
+                  <span className="text-xs text-slate-500 w-16 shrink-0">供应商</span>
+                  <select
+                    value={settings.api.video_provider || ''}
+                    onChange={(e) => setSettings((prev) => prev ? { ...prev, api: { ...prev.api, video_provider: e.target.value } } : prev)}
+                    className="flex-1 rounded-2xl border border-[#d7e3f4] px-3 py-2 text-sm outline-none transition focus:border-[#60a5fa] focus:ring-2 focus:ring-[#bfdbfe]"
+                  >
+                    <option value="">云端 API（默认）</option>
+                    <option value="comfyui">ComfyUI（本地部署）</option>
+                  </select>
+                </div>
+                <TextInput value={settings.api.video_base_url} onChange={(e) => setSettings((prev) => prev ? { ...prev, api: { ...prev.api, video_base_url: e.target.value } } : prev)} placeholder="视频服务 Base URL" />
+                <TextInput value={settings.api.video_model} onChange={(e) => setSettings((prev) => prev ? { ...prev, api: { ...prev.api, video_model: e.target.value } } : prev)} placeholder="视频模型名称" />
+                <TextInput type="password" value={settings.api.video_api_key} onChange={(e) => setSettings((prev) => prev ? { ...prev, api: { ...prev.api, video_api_key: e.target.value } } : prev)} placeholder="视频 API Key" />
+              </div>
+            </div>
+          </div>
+          <div className="mt-4 flex flex-wrap gap-3 rounded-2xl border border-[#d7e3f4] bg-white px-4 py-3 text-sm text-slate-700">
+            <label className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                checked={settings.api.enable_user_override}
+                onChange={(e) => setSettings((prev) => prev ? { ...prev, api: { ...prev.api, enable_user_override: e.target.checked } } : prev)}
+              />
+              允许用户临时覆盖自己的 API Key
+            </label>
+            <label className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                checked={settings.api.enable_user_url_override ?? false}
+                onChange={(e) => setSettings((prev) => prev ? { ...prev, api: { ...prev.api, enable_user_url_override: e.target.checked } } : prev)}
+              />
+              允许用户覆盖自己的 URL/模型
+            </label>
+          </div>
+        </SectionCard>
+      )}
+
+      {tab === 'auth' && (
+        <SectionCard title="登录注册验证" description="控制注册和登录是否必须通过邮箱验证码校验。">
+          <div className="space-y-3">
+            <label className="flex items-center gap-2 rounded-2xl border border-[#e5edf8] bg-white px-4 py-3 text-sm text-slate-700">
+              <input
+                type="checkbox"
+                checked={settings.auth.require_email_code_for_register}
+                onChange={(e) => setSettings((prev) => prev ? { ...prev, auth: { ...prev.auth, require_email_code_for_register: e.target.checked } } : prev)}
+              />
+              注册必须验证邮箱验证码
+            </label>
+            <label className="flex items-center gap-2 rounded-2xl border border-[#e5edf8] bg-white px-4 py-3 text-sm text-slate-700">
+              <input
+                type="checkbox"
+                checked={settings.auth.require_email_code_for_login}
+                onChange={(e) => setSettings((prev) => prev ? { ...prev, auth: { ...prev.auth, require_email_code_for_login: e.target.checked } } : prev)}
+              />
+              登录必须验证邮箱验证码
+            </label>
+            <div className="grid gap-3 md:grid-cols-2">
+              <TextInput
+                value={String(settings.auth.email_code_expire_minutes ?? 10)}
+                onChange={(e) => setSettings((prev) => prev ? { ...prev, auth: { ...prev.auth, email_code_expire_minutes: Number(e.target.value || 10) } } : prev)}
+                placeholder="验证码有效期（分钟）"
+              />
+              <TextInput
+                value={String(settings.auth.email_code_length ?? 6)}
+                onChange={(e) => setSettings((prev) => prev ? { ...prev, auth: { ...prev.auth, email_code_length: Number(e.target.value || 6) } } : prev)}
+                placeholder="验证码位数"
+              />
+            </div>
+          </div>
+        </SectionCard>
+      )}
+
+      {tab === 'email' && (
+        <SectionCard title="邮箱发信配置" description="用于注册、登录验证码发送。建议先完成配置，再开启验证码开关。">
+          <label className="flex items-center gap-2 rounded-2xl border border-[#e5edf8] bg-white px-4 py-3 text-sm text-slate-700">
             <input
               type="checkbox"
-              checked={settings.api.enable_user_override}
-              onChange={(e) => setSettings((prev) => prev ? { ...prev, api: { ...prev.api, enable_user_override: e.target.checked } } : prev)}
+              checked={settings.email.smtp_enabled}
+              onChange={(e) => setSettings((prev) => prev ? { ...prev, email: { ...prev.email, smtp_enabled: e.target.checked } } : prev)}
             />
-            允许用户临时覆盖自己的 API Key
+            启用 SMTP 发信
           </label>
-        </div>
-
-        <div className="mt-3 rounded-2xl border border-[#d7e3f4] bg-white px-4 py-3 text-sm text-slate-700">
-          <label className="flex items-center gap-2">
-            <input
-              type="checkbox"
-              checked={settings.api.enable_user_url_override ?? false}
-              onChange={(e) => setSettings((prev) => prev ? { ...prev, api: { ...prev.api, enable_user_url_override: e.target.checked } } : prev)}
-            />
-            允许用户覆盖自己的 URL/模型
-          </label>
-        </div>
-
-        <div className="mt-4 grid gap-4 xl:grid-cols-2">
-          <div className="rounded-3xl border border-[#d7e3f4] bg-white p-4">
-            <div className="text-sm font-semibold text-slate-900">登录注册验证</div>
-            <div className="mt-1 text-xs text-slate-500">可分别控制注册和登录是否必须通过邮箱验证码校验。</div>
-            <div className="mt-4 space-y-3">
-              <label className="flex items-center gap-2 rounded-2xl border border-[#e5edf8] px-3 py-3 text-sm text-slate-700">
-                <input
-                  type="checkbox"
-                  checked={settings.auth.require_email_code_for_register}
-                  onChange={(e) => setSettings((prev) => prev ? { ...prev, auth: { ...prev.auth, require_email_code_for_register: e.target.checked } } : prev)}
-                />
-                注册必须验证邮箱验证码
-              </label>
-              <label className="flex items-center gap-2 rounded-2xl border border-[#e5edf8] px-3 py-3 text-sm text-slate-700">
-                <input
-                  type="checkbox"
-                  checked={settings.auth.require_email_code_for_login}
-                  onChange={(e) => setSettings((prev) => prev ? { ...prev, auth: { ...prev.auth, require_email_code_for_login: e.target.checked } } : prev)}
-                />
-                登录必须验证邮箱验证码
-              </label>
-              <div className="grid gap-3 md:grid-cols-2">
-                <TextInput
-                  value={String(settings.auth.email_code_expire_minutes ?? 10)}
-                  onChange={(e) => setSettings((prev) => prev ? { ...prev, auth: { ...prev.auth, email_code_expire_minutes: Number(e.target.value || 10) } } : prev)}
-                  placeholder="验证码有效期（分钟）"
-                />
-                <TextInput
-                  value={String(settings.auth.email_code_length ?? 6)}
-                  onChange={(e) => setSettings((prev) => prev ? { ...prev, auth: { ...prev.auth, email_code_length: Number(e.target.value || 6) } } : prev)}
-                  placeholder="验证码位数"
-                />
-              </div>
-            </div>
+          <div className="mt-3 grid gap-3 md:grid-cols-2">
+            <TextInput value={settings.email.smtp_host} onChange={(e) => setSettings((prev) => prev ? { ...prev, email: { ...prev.email, smtp_host: e.target.value } } : prev)} placeholder="SMTP Host" />
+            <TextInput value={String(settings.email.smtp_port ?? 587)} onChange={(e) => setSettings((prev) => prev ? { ...prev, email: { ...prev.email, smtp_port: Number(e.target.value || 587) } } : prev)} placeholder="SMTP Port" />
+            <TextInput value={settings.email.smtp_username} onChange={(e) => setSettings((prev) => prev ? { ...prev, email: { ...prev.email, smtp_username: e.target.value } } : prev)} placeholder="SMTP 用户名" />
+            <TextInput type="password" value={settings.email.smtp_password} onChange={(e) => setSettings((prev) => prev ? { ...prev, email: { ...prev.email, smtp_password: e.target.value } } : prev)} placeholder="SMTP 密码 / 授权码" />
+            <TextInput value={settings.email.smtp_from_email} onChange={(e) => setSettings((prev) => prev ? { ...prev, email: { ...prev.email, smtp_from_email: e.target.value } } : prev)} placeholder="发件邮箱" />
+            <TextInput value={settings.email.smtp_from_name} onChange={(e) => setSettings((prev) => prev ? { ...prev, email: { ...prev.email, smtp_from_name: e.target.value } } : prev)} placeholder="发件人名称" />
           </div>
-
-          <div className="rounded-3xl border border-[#d7e3f4] bg-white p-4">
-            <div className="text-sm font-semibold text-slate-900">邮箱发信配置</div>
-            <div className="mt-1 text-xs text-slate-500">用于注册、登录验证码发送。建议先完成配置，再开启上面的验证码开关。</div>
-            <div className="mt-4 space-y-3">
-              <label className="flex items-center gap-2 rounded-2xl border border-[#e5edf8] px-3 py-3 text-sm text-slate-700">
-                <input
-                  type="checkbox"
-                  checked={settings.email.smtp_enabled}
-                  onChange={(e) => setSettings((prev) => prev ? { ...prev, email: { ...prev.email, smtp_enabled: e.target.checked } } : prev)}
-                />
-                启用 SMTP 发信
-              </label>
-              <div className="grid gap-3 md:grid-cols-2">
-                <TextInput value={settings.email.smtp_host} onChange={(e) => setSettings((prev) => prev ? { ...prev, email: { ...prev.email, smtp_host: e.target.value } } : prev)} placeholder="SMTP Host" />
-                <TextInput value={String(settings.email.smtp_port ?? 587)} onChange={(e) => setSettings((prev) => prev ? { ...prev, email: { ...prev.email, smtp_port: Number(e.target.value || 587) } } : prev)} placeholder="SMTP Port" />
-                <TextInput value={settings.email.smtp_username} onChange={(e) => setSettings((prev) => prev ? { ...prev, email: { ...prev.email, smtp_username: e.target.value } } : prev)} placeholder="SMTP 用户名" />
-                <TextInput type="password" value={settings.email.smtp_password} onChange={(e) => setSettings((prev) => prev ? { ...prev, email: { ...prev.email, smtp_password: e.target.value } } : prev)} placeholder="SMTP 密码 / 授权码" />
-                <TextInput value={settings.email.smtp_from_email} onChange={(e) => setSettings((prev) => prev ? { ...prev, email: { ...prev.email, smtp_from_email: e.target.value } } : prev)} placeholder="发件邮箱" />
-                <TextInput value={settings.email.smtp_from_name} onChange={(e) => setSettings((prev) => prev ? { ...prev, email: { ...prev.email, smtp_from_name: e.target.value } } : prev)} placeholder="发件人名称" />
-              </div>
-              <div className="grid gap-3 md:grid-cols-2">
-                <label className="flex items-center gap-2 rounded-2xl border border-[#e5edf8] px-3 py-3 text-sm text-slate-700">
-                  <input
-                    type="checkbox"
-                    checked={settings.email.smtp_use_tls}
-                    onChange={(e) => setSettings((prev) => prev ? { ...prev, email: { ...prev.email, smtp_use_tls: e.target.checked } } : prev)}
-                  />
-                  使用 STARTTLS
-                </label>
-                <label className="flex items-center gap-2 rounded-2xl border border-[#e5edf8] px-3 py-3 text-sm text-slate-700">
-                  <input
-                    type="checkbox"
-                    checked={settings.email.smtp_use_ssl}
-                    onChange={(e) => setSettings((prev) => prev ? { ...prev, email: { ...prev.email, smtp_use_ssl: e.target.checked } } : prev)}
-                  />
-                  使用 SSL 直连
-                </label>
-              </div>
-            </div>
+          <div className="mt-3 grid gap-3 md:grid-cols-2">
+            <label className="flex items-center gap-2 rounded-2xl border border-[#e5edf8] bg-white px-4 py-3 text-sm text-slate-700">
+              <input
+                type="checkbox"
+                checked={settings.email.smtp_use_tls}
+                onChange={(e) => setSettings((prev) => prev ? { ...prev, email: { ...prev.email, smtp_use_tls: e.target.checked } } : prev)}
+              />
+              使用 STARTTLS
+            </label>
+            <label className="flex items-center gap-2 rounded-2xl border border-[#e5edf8] bg-white px-4 py-3 text-sm text-slate-700">
+              <input
+                type="checkbox"
+                checked={settings.email.smtp_use_ssl}
+                onChange={(e) => setSettings((prev) => prev ? { ...prev, email: { ...prev.email, smtp_use_ssl: e.target.checked } } : prev)}
+              />
+              使用 SSL 直连
+            </label>
           </div>
-        </div>
+        </SectionCard>
+      )}
 
-        <div className="mt-4 rounded-3xl border border-[#d7e3f4] bg-white p-4">
-          <div className="text-sm font-semibold text-slate-900">支付配置</div>
-          <div className="mt-1 text-xs text-slate-500">当前先支持模拟支付闭环，也预留了微信和支付宝的参数入口，便于后续接真实网关。</div>
-          <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-            <label className="flex items-center gap-2 rounded-2xl border border-[#e5edf8] px-3 py-2 text-sm text-slate-700">
+      {tab === 'payment' && (
+        <SectionCard title="支付配置" description="当前先支持模拟支付闭环，也预留了微信和支付宝的参数入口。">
+          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+            <label className="flex items-center gap-2 rounded-2xl border border-[#e5edf8] bg-white px-4 py-3 text-sm text-slate-700">
               <input type="checkbox" checked={settings.payment.enabled} onChange={(e) => setSettings((prev) => prev ? { ...prev, payment: { ...prev.payment, enabled: e.target.checked } } : prev)} />
               启用支付
             </label>
-            <label className="flex items-center gap-2 rounded-2xl border border-[#e5edf8] px-3 py-2 text-sm text-slate-700">
+            <label className="flex items-center gap-2 rounded-2xl border border-[#e5edf8] bg-white px-4 py-3 text-sm text-slate-700">
               <input type="checkbox" checked={settings.payment.mock_enabled ?? true} onChange={(e) => setSettings((prev) => prev ? { ...prev, payment: { ...prev.payment, mock_enabled: e.target.checked } } : prev)} />
               模拟支付
             </label>
-            <label className="flex items-center gap-2 rounded-2xl border border-[#e5edf8] px-3 py-2 text-sm text-slate-700">
+            <label className="flex items-center gap-2 rounded-2xl border border-[#e5edf8] bg-white px-4 py-3 text-sm text-slate-700">
               <input type="checkbox" checked={settings.payment.wechat_enabled ?? false} onChange={(e) => setSettings((prev) => prev ? { ...prev, payment: { ...prev.payment, wechat_enabled: e.target.checked } } : prev)} />
               微信支付
             </label>
-            <label className="flex items-center gap-2 rounded-2xl border border-[#e5edf8] px-3 py-2 text-sm text-slate-700">
+            <label className="flex items-center gap-2 rounded-2xl border border-[#e5edf8] bg-white px-4 py-3 text-sm text-slate-700">
               <input type="checkbox" checked={settings.payment.alipay_enabled ?? false} onChange={(e) => setSettings((prev) => prev ? { ...prev, payment: { ...prev.payment, alipay_enabled: e.target.checked } } : prev)} />
               支付宝
             </label>
@@ -1254,7 +1304,7 @@ export function AdminPlatformSettingsPage({
             />
           </div>
           <div className="mt-3">
-            <label className="flex items-center gap-2 text-sm text-slate-700">
+            <label className="flex items-center gap-2 rounded-2xl border border-[#e5edf8] bg-white px-4 py-3 text-sm text-slate-700">
               <input
                 type="checkbox"
                 checked={settings.payment.auto_activate_free_plan ?? true}
@@ -1293,23 +1343,8 @@ export function AdminPlatformSettingsPage({
               </div>
             </div>
           </div>
-        </div>
-
-        <div className="mt-4">
-          <PrimaryButton
-            disabled={busy}
-            onClick={() =>
-              void run(async () => {
-                const next = await updateAdminPlatformSettings(settings);
-                setSettings(next);
-                onSaved?.(next);
-              })
-            }
-          >
-            保存平台配置
-          </PrimaryButton>
-        </div>
-      </SectionCard>
+        </SectionCard>
+      )}
     </div>
   );
 }
@@ -1417,6 +1452,78 @@ export function AdminOrdersPage({ onError }: { onError: (message: string) => voi
         </table>
       </div>
     </SectionCard>
+  );
+}
+
+export function AdminAnnouncementPage({ onError }: { onError: (message: string) => void }) {
+  const [announcement, setAnnouncement] = useState<PlatformAnnouncement>({ enabled: false, title: '', content: '' });
+  const [loaded, setLoaded] = useState(false);
+  const [successMsg, setSuccessMsg] = useState('');
+  const { busy, run } = useBusyAction(onError);
+
+  useEffect(() => {
+    void run(async () => {
+      const data = await getAdminAnnouncement();
+      setAnnouncement(data);
+      setLoaded(true);
+    });
+  }, []);
+
+  return (
+    <div className="space-y-5">
+      <SectionCard title="公告管理" description="管理全局公告弹窗的内容与显示状态。">
+        {!loaded ? (
+          <div className="text-sm text-slate-500">加载中…</div>
+        ) : (
+          <div className="space-y-4">
+            <div>
+              <label className="flex items-center gap-2 rounded-2xl border border-[#d7e3f4] bg-white px-4 py-3 text-sm text-slate-700">
+                <input
+                  type="checkbox"
+                  checked={announcement.enabled}
+                  onChange={(e) => setAnnouncement((prev) => ({ ...prev, enabled: e.target.checked }))}
+                />
+                启用公告弹窗
+              </label>
+              <p className="mt-1 text-xs text-slate-500">开启后，用户登录或注册后将看到公告弹窗。关闭后已发布的公告将不再展示。</p>
+            </div>
+            <div>
+              <TextInput
+                placeholder="公告标题（可选）"
+                value={announcement.title}
+                onChange={(e) => setAnnouncement((prev) => ({ ...prev, title: e.target.value }))}
+              />
+            </div>
+            <div>
+              <TextArea
+                rows={10}
+                placeholder="公告内容（支持 HTML）"
+                value={announcement.content}
+                onChange={(e) => setAnnouncement((prev) => ({ ...prev, content: e.target.value }))}
+              />
+              <p className="mt-1 text-xs text-slate-500">支持 HTML 格式，例如 &lt;ul&gt;、&lt;strong&gt;、&lt;a&gt; 等标签。</p>
+            </div>
+            <div className="flex gap-2 items-center">
+              <PrimaryButton
+                disabled={busy}
+                onClick={() =>
+                  void run(async () => {
+                    await updateAdminAnnouncement(announcement);
+                    setSuccessMsg('公告已保存');
+                    setTimeout(() => setSuccessMsg(''), 3000);
+                  })
+                }
+              >
+                保存公告
+              </PrimaryButton>
+              {successMsg && (
+                <span className="text-sm text-green-600 font-medium">{successMsg}</span>
+              )}
+            </div>
+          </div>
+        )}
+      </SectionCard>
+    </div>
   );
 }
 

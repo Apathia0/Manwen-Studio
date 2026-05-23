@@ -2122,6 +2122,7 @@ function UserAccountUsagePage({
               <div className="mb-3 rounded-2xl border border-[#d7e3f4] bg-white px-3 py-3 text-xs text-slate-600">
                 <div>平台地址：{platform.api?.video_base_url || '-'}</div>
                 <div className="mt-1">平台模型：{platform.api?.video_model || '-'}</div>
+                <div className="mt-1">供应商：{platform.api?.video_provider ? (platform.api.video_provider === 'comfyui' ? 'ComfyUI（本地）' : platform.api.video_provider) : '云端 API（默认）'}</div>
               </div>
               <div className="space-y-3">
                 <input

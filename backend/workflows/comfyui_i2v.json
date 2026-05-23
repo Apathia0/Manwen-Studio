@@ -1,0 +1,76 @@
+{
+  "3": {
+    "inputs": {
+      "ckpt_name": "realisticVisionV60B1_v51VAE.safetensors"
+    },
+    "class_type": "CheckpointLoaderSimple",
+    "_meta": {
+      "title": "模型"
+    }
+  },
+  "5": {
+    "inputs": {
+      "image": "reference.png",
+      "upload": "image"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "参考图片"
+    }
+  },
+  "6": {
+    "inputs": {
+      "text": "prompt text here",
+      "clip": ["3", 1]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "正面提示词"
+    }
+  },
+  "8": {
+    "inputs": {
+      "samples": ["10", 0],
+      "vae": ["3", 2]
+    },
+    "class_type": "VAEDecode",
+    "_meta": {
+      "title": "VAE 解码"
+    }
+  },
+  "10": {
+    "inputs": {
+      "model": ["3", 0],
+      "positive": ["6", 0],
+      "latent_image": ["12", 0]
+    },
+    "class_type": "SamplerCustom",
+    "_meta": {
+      "title": "视频采样"
+    }
+  },
+  "12": {
+    "inputs": {
+      "width": 512,
+      "height": 512,
+      "batch_size": 1
+    },
+    "class_type": "EmptyLatentImage",
+    "_meta": {
+      "title": "空白潜空间"
+    }
+  },
+  "15": {
+    "inputs": {
+      "frame_rate": 8,
+      "loop_count": 0,
+      "filename_prefix": "lorevista_i2v",
+      "format": "video/h264-mp4",
+      "images": ["8", 0]
+    },
+    "class_type": "VHS_VideoCombine",
+    "_meta": {
+      "title": "视频合成"
+    }
+  }
+}

@@ -151,7 +151,19 @@ async def _generate_screenplay_with_llm(
     scene_count_hint: int,
     target_duration_seconds: int,
     api_key: str,
+    story_memory: dict | None = None,
+    chapter_memory_summary: dict | None = None,
+    story_outline: dict | None = None,
 ) -> dict[str, Any]:
+    # 注入上下文信息
+    context_sections = ""
+    if story_memory is not None:
+        context_sections += f"故事级连续性记忆：{json.dumps(story_memory, ensure_ascii=False)}\n\n"
+    if chapter_memory_summary is not None:
+        context_sections += f"本章节记忆摘要：{json.dumps(chapter_memory_summary, ensure_ascii=False)}\n\n"
+    if story_outline is not None:
+        context_sections += f"故事大纲定位：{json.dumps(story_outline, ensure_ascii=False)}\n\n"
+
     prompt = f"""请把下面的小说章节内容转换成适合短剧视频生产的影视剧本，并拆成结构化场次。
 
 要求：
@@ -178,10 +190,10 @@ async def _generate_screenplay_with_llm(
 4. 总时长目标约 {target_duration_seconds} 秒。
 5. 风格要求：{style}。
 6. screenplay 字段必须是真正可读的影视剧本文本，不要只重复 summary。
-7. scene.summary 必须具体，不允许出现“根据章节内容自动生成”这类占位描述。
+7. scene.summary 必须具体，不允许出现"根据章节内容自动生成"这类占位描述。
 8. 如果原文有角色冲突、目标、转折，请体现在场次中。
 
-章节正文：
+{context_sections}章节正文：
 {chapter_content}
 """
 
@@ -238,6 +250,9 @@ async def generate_screenplay(
     scene_count_hint: int = 5,
     target_duration_seconds: int = 90,
     api_key: str | None = None,
+    story_memory: dict | None = None,
+    chapter_memory_summary: dict | None = None,
+    story_outline: dict | None = None,
 ) -> dict[str, Any]:
     """Generate screenplay and scenes from chapter content."""
     cleaned_content = str(chapter_content or "").strip()
@@ -252,6 +267,9 @@ async def generate_screenplay(
                 scene_count_hint=scene_count_hint,
                 target_duration_seconds=target_duration_seconds,
                 api_key=api_key,
+                story_memory=story_memory,
+                chapter_memory_summary=chapter_memory_summary,
+                story_outline=story_outline,
             )
         raise MissingApiKeyError("DeepSeek")
     except MissingApiKeyError:

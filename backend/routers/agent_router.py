@@ -17,16 +17,37 @@ logger = logging.getLogger("agent_router")
 
 router = APIRouter(prefix="/api/stories/{story_id}/agent")
 
-_main = sys.modules.get("main") or sys.modules.get("__main__")
-if _main is None:
-    raise RuntimeError("Unable to locate main module; ensure the app starts from main.py")
+def _resolve_main_attr(name: str):
+    # 延迟解析 main 模块属性，避免 uvicorn reload (Windows spawn)
+    # 模式下子进程 import 时序导致模块未完全初始化的问题。
+    main = sys.modules.get("main") or sys.modules.get("__main__")
+    if main is None:
+        raise RuntimeError("Unable to locate main module; ensure the app starts from main.py")
+    return getattr(main, name)
 
-_require_user = _main._require_user
-_require_story_for_user = _main._require_story_for_user
-_user_deepseek_api_key = _main._user_deepseek_api_key
-_release_db_transaction = _main._release_db_transaction
-_check_and_consume_advanced_text_quota = _main._check_and_consume_advanced_text_quota
-_build_framework_context = _main._build_framework_context
+
+def _require_user(request: Request, db: Session):
+    return _resolve_main_attr("_require_user")(request, db)
+
+
+def _require_story_for_user(story_id: int, user, db: Session):
+    return _resolve_main_attr("_require_story_for_user")(story_id, user, db)
+
+
+def _user_deepseek_api_key(request: Request):
+    return _resolve_main_attr("_user_deepseek_api_key")(request)
+
+
+def _release_db_transaction(db: Session) -> None:
+    _resolve_main_attr("_release_db_transaction")(db)
+
+
+def _check_and_consume_advanced_text_quota(request: Request, user_id: int, db: Session, *, deduct: bool) -> None:
+    _resolve_main_attr("_check_and_consume_advanced_text_quota")(request, user_id, db, deduct=deduct)
+
+
+def _build_framework_context(story, chapter=None) -> str:
+    return _resolve_main_attr("_build_framework_context")(story, chapter)
 
 
 def _conversation_preview(content: str, limit: int = 72) -> str:

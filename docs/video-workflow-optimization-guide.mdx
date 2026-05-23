@@ -1,0 +1,930 @@
+﻿# 视频工作流优化开发指导文档
+
+## 1. 文档目的
+
+本文档用于规范 `LoreVista` 后续视频工作流开发，目标不是再补一条“能出视频”的链路，而是把现有流程升级为一条 **可控、可复用、可审阅、可追溯** 的生产线。
+
+本文档重点解决以下问题：
+
+1. 纯文生视频质量不稳定，人物和场景漂移严重。
+2. 缺少统一的风格选择体系，无法稳定生成真人、动漫、3D 等不同视觉风格。
+3. 镜头与镜头之间缺少连续性锚点，导致前后内容不一致。
+4. 当前“分镜提示词 -> 直接生成视频”的结构过薄，无法保证结果忠于小说正文和镜头脚本。
+5. 关键中间产物没有充分资产化，分镜图、角色卡、场景卡无法稳定复用。
+
+本文档适用对象：
+
+- 产品设计
+- 后端开发
+- 前端开发
+- Prompt 设计
+- 测试与验收
+
+---
+
+## 2. 当前基线
+
+截至 `2026-05-22`，仓库中已存在第一版视频工作流基础设施，核心落点如下：
+
+- 数据模型已具备：
+  - [`backend/models.py`](/C:/Users/Administrator/Desktop/Desktop/-LoreVista/backend/models.py)
+  - `ScriptScene`
+  - `VideoShot`
+  - `VideoAsset`
+  - `VideoGenerationJob`
+  - `RenderedClip`
+  - `VideoProject`
+- 路由入口已存在：
+  - [`backend/routers/video.py`](/C:/Users/Administrator/Desktop/Desktop/-LoreVista/backend/routers/video.py)
+- 服务层已存在：
+  - [`backend/services/screenplay.py`](/C:/Users/Administrator/Desktop/Desktop/-LoreVista/backend/services/screenplay.py)
+  - [`backend/services/storyboard.py`](/C:/Users/Administrator/Desktop/Desktop/-LoreVista/backend/services/storyboard.py)
+  - [`backend/services/video_generation.py`](/C:/Users/Administrator/Desktop/Desktop/-LoreVista/backend/services/video_generation.py)
+  - [`backend/services/video_api.py`](/C:/Users/Administrator/Desktop/Desktop/-LoreVista/backend/services/video_api.py)
+- 前端工作台已存在：
+  - [`frontend/src/components/VideoWorkspaceLayout.tsx`](/C:/Users/Administrator/Desktop/Desktop/-LoreVista/frontend/src/components/VideoWorkspaceLayout.tsx)
+  - [`frontend/src/components/ScreenplayPanel.tsx`](/C:/Users/Administrator/Desktop/Desktop/-LoreVista/frontend/src/components/ScreenplayPanel.tsx)
+  - [`frontend/src/components/StoryboardPanel.tsx`](/C:/Users/Administrator/Desktop/Desktop/-LoreVista/frontend/src/components/StoryboardPanel.tsx)
+  - [`frontend/src/components/VideoPanel.tsx`](/C:/Users/Administrator/Desktop/Desktop/-LoreVista/frontend/src/components/VideoPanel.tsx)
+
+当前链路已经可以跑通：
+
+`小说正文 -> 场次 -> 镜头 -> 提示词 -> 视频任务 -> 轮询 -> 下载片段`
+
+但这条链路只能算“通路验证完成”，还不能视为“生产可用”。
+
+---
+
+## 3. 核心判断
+
+后续优化的核心不是“换一个更强的视频模型”，而是 **把视频生成从 prompt 驱动改为资产驱动**。
+
+必须明确：
+
+1. 只靠文字 prompt 直接生成视频，无法稳定保证角色、服装、场景、光线和动作一致。
+2. 要求镜头忠于脚本，就必须在视频生成前补出更厚的中间层。
+3. 这层中间层的核心资产不是 `video_prompt`，而是：
+   - 角色卡
+   - 场景卡
+   - 风格卡
+   - 主分镜图
+4. 视频应当默认从“已确认的分镜图”出发走图生视频，而不是默认走纯文生视频。
+
+---
+
+## 4. 目标工作流
+
+后续正式工作流统一定义为：
+
+1. 小说正文解析
+2. 场次剧本生成
+3. 镜头脚本拆解
+4. 角色资产生成
+5. 场景资产生成
+6. 风格资产选择
+7. 镜头主分镜图生成
+8. 分镜图审核与锁定
+9. 图生视频生成
+10. 连续性检查
+11. 片段落库与复用
+12. 成片编排
+
+请注意，这里的“镜头主分镜图生成”是必经步骤，不再是可选增强项。
+
+---
+
+## 5. 设计原则
+
+### 5.1 资产优先
+
+视频生成必须优先消费结构化资产，而不是优先消费自由文本。
+
+优先级顺序固定为：
+
+1. 锁定分镜图
+2. 角色卡
+3. 场景卡
+4. 风格卡
+5. continuity 结构化约束
+6. video prompt
+
+### 5.2 分层清晰
+
+必须把“文本理解”和“视觉执行”分开。
+
+- 文本理解层负责把小说拆成可拍内容。
+- 视觉执行层负责把内容稳定转成一致画面。
+
+不要继续让单个 prompt 同时承担：
+
+- 理解剧情
+- 推断角色长相
+- 推断场景布置
+- 决定镜头语言
+- 生成连续视频
+
+### 5.3 默认可复用
+
+所有中间产物默认都要可保存、可引用、可替换、可版本化。
+
+至少包括：
+
+- 角色卡
+- 场景卡
+- 风格卡
+- 主分镜图
+- 分镜变体图
+- 视频片段
+
+### 5.4 审核节点前置
+
+“生成视频”之前必须允许用户审核主分镜图。
+
+这是最低成本的人机协作节点，因为：
+
+- 图比视频便宜
+- 图比视频快
+- 图更容易看出人物和场景是否跑偏
+
+### 5.5 连续性要前置约束，不做事后安慰剂
+
+连续性不能只靠“生成完后检查”，必须作为下一镜头输入的一部分前置注入。
+
+---
+
+## 6. 当前实现的主要问题
+
+### 6.1 文本拆解层过薄
+
+当前 [`backend/services/screenplay.py`](/C:/Users/Administrator/Desktop/Desktop/-LoreVista/backend/services/screenplay.py) 与 [`backend/services/storyboard.py`](/C:/Users/Administrator/Desktop/Desktop/-LoreVista/backend/services/storyboard.py) 能生成场次和镜头，但中间结构主要仍停留在摘要、提示词和基础镜头字段层。
+
+缺失的关键字段包括：
+
+- 场景锚点
+- 角色状态
+- 道具状态
+- 视觉禁变项
+- 镜头目标
+- 人物站位
+- 前后镜头继承关系
+
+### 6.2 分镜图只是附属品，不是主资产
+
+当前 [`backend/routers/video.py`](/C:/Users/Administrator/Desktop/Desktop/-LoreVista/backend/routers/video.py) 中虽然有 `/api/shots/{shot_id}/storyboard/render`，但它还没有成为“视频生成前置条件”，更像一个附加功能。
+
+### 6.3 风格选择没有贯穿全链路
+
+现在风格更多是 prompt 文案的一部分，而不是一个稳定的制作 preset。结果就是：
+
+- 角色卡风格和视频风格可能不一致
+- 场景图风格和镜头风格可能不一致
+- 同章节镜头之间也可能出现画风跳变
+
+### 6.4 参考资产关系太弱
+
+当前 `VideoAsset` 还不足以表达：
+
+- 某张分镜图引用了哪些角色卡
+- 某个视频片段来自哪张主分镜图
+- 哪些镜头受到角色卡更新影响
+
+---
+
+## 7. 新的目标架构
+
+### 7.1 领域分层
+
+后续视频工作流统一分为五层：
+
+1. 内容理解层
+2. 制作规划层
+3. 视觉资产层
+4. 媒体生成层
+5. 成片编排层
+
+### 7.2 各层职责
+
+#### 内容理解层
+
+负责：
+
+- 从小说正文抽取场次
+- 识别角色、场景、动作、冲突、情绪
+- 生成结构化场次剧本
+
+#### 制作规划层
+
+负责：
+
+- 从场次剧本生成镜头脚本
+- 为每个镜头定义目标、主体、构图、时长、动作、连续性约束
+
+#### 视觉资产层
+
+负责：
+
+- 角色卡生成与版本管理
+- 场景卡生成与版本管理
+- 风格卡选择与参数绑定
+- 主分镜图与变体图生成和审核
+
+#### 媒体生成层
+
+负责：
+
+- 图生视频提交
+- 任务轮询
+- 结果下载
+- 片段入库
+
+#### 成片编排层
+
+负责：
+
+- 片段选择
+- 片段排序
+- 字幕/BGM/封面
+- 最终导出
+
+---
+
+## 8. 新的数据模型规范
+
+### 8.1 原则
+
+允许复用现有表，但必须避免“字段名没问题，语义已经变了”的隐性腐化。
+
+后续新增字段时必须满足：
+
+1. 字段语义单一
+2. 能表示可追溯引用关系
+3. 能支撑版本化
+4. 能表达锁定状态
+
+### 8.2 `ScriptScene` 必须补强的字段
+
+建议在现有 `ScriptScene` 基础上新增：
+
+- `dramatic_purpose`
+- `conflict_type`
+- `location_asset_id`
+- `time_weather`
+- `character_states_json`
+- `must_have_props_json`
+- `continuity_anchor_json`
+- `scene_constraints_json`
+
+字段说明：
+
+- `dramatic_purpose`
+  - 本场戏存在的叙事目的
+- `conflict_type`
+  - 对抗、揭示、转折、追逐、铺垫等
+- `location_asset_id`
+  - 绑定的主场景卡
+- `character_states_json`
+  - 记录角色在本场的服装、伤势、情绪、持物、姿态
+- `continuity_anchor_json`
+  - 记录本场继承上一场的视觉锚点
+
+### 8.3 `VideoShot` 必须补强的字段
+
+建议在现有 `VideoShot` 基础上新增：
+
+- `shot_goal`
+- `subject_focus`
+- `foreground_desc`
+- `midground_desc`
+- `background_desc`
+- `character_blocking_json`
+- `style_preset`
+- `reference_asset_ids_json`
+- `storyboard_asset_id`
+- `storyboard_locked`
+- `video_seed_image_asset_id`
+- `visual_lock_json`
+- `continuity_source_shot_id`
+
+字段说明：
+
+- `shot_goal`
+  - 该镜头要交代什么，不允许只写“展示人物”
+- `subject_focus`
+  - 主体是谁或是什么
+- `character_blocking_json`
+  - 人物站位、视线方向、左右关系、前后深度关系
+- `storyboard_asset_id`
+  - 当前镜头主分镜图
+- `storyboard_locked`
+  - 主分镜图是否已审核锁定
+- `video_seed_image_asset_id`
+  - 图生视频的主参考图
+- `visual_lock_json`
+  - 禁止变化项，如发色、服装层数、武器位置、受伤部位
+
+### 8.4 `VideoAsset` 必须升级的字段
+
+建议在现有 `VideoAsset` 基础上新增：
+
+- `asset_subtype`
+- `source_asset_ids_json`
+- `style_preset`
+- `locked`
+- `revision`
+- `is_master`
+- `status`
+- `hash_key`
+
+建议统一资产类型：
+
+- `character_reference`
+- `scene_reference`
+- `style_reference`
+- `storyboard_master`
+- `storyboard_variant`
+- `storyboard_contact_sheet`
+- `video_seed_frame`
+- `cover_frame`
+
+字段说明：
+
+- `source_asset_ids_json`
+  - 本资产引用了哪些上游资产
+- `locked`
+  - 是否已确认不可被默认覆盖
+- `revision`
+  - 版本号
+- `is_master`
+  - 是否为该镜头当前主资产
+
+### 8.5 `VideoGenerationJob` 必须补强的字段
+
+建议新增：
+
+- `input_mode`
+- `source_storyboard_asset_id`
+- `reference_asset_ids_json`
+- `provider_payload_json`
+- `provider_result_json`
+- `retry_of_job_id`
+
+其中：
+
+- `input_mode`
+  - `text_to_video` 或 `image_to_video`
+- `source_storyboard_asset_id`
+  - 本任务实际使用的主分镜图
+
+### 8.6 `RenderedClip` 必须补强的字段
+
+建议新增：
+
+- `source_storyboard_asset_id`
+- `style_preset`
+- `continuity_score`
+- `quality_score`
+- `review_status`
+
+用于后续做质量筛选和片段替换。
+
+---
+
+## 9. 风格体系规范
+
+### 9.1 风格不再是自由字符串
+
+风格必须收敛为 preset，而不是任意输入的 prompt 文案。
+
+建议新增统一枚举：
+
+- `realistic_cinematic`
+- `realistic_tv_drama`
+- `anime_tv`
+- `anime_film`
+- `anime_ink`
+- `three_d_film`
+- `three_d_game_cinematic`
+- `fantasy_oil_paint`
+
+### 9.2 每个 preset 必须绑定的内容
+
+每个 preset 至少绑定：
+
+- 面部质感描述
+- 光影策略
+- 镜头语言偏好
+- 场景材质偏好
+- 角色卡提示词模板
+- 场景卡提示词模板
+- 分镜图提示词模板
+- 视频提示词模板
+- 默认负面词
+- 默认模型
+- 默认宽高比
+- 默认时长建议
+
+### 9.3 风格选择作用范围
+
+风格 preset 必须贯穿：
+
+1. screenplay 语言风格
+2. shot 设计倾向
+3. 角色卡出图
+4. 场景卡出图
+5. 分镜图出图
+6. 视频生成
+
+不能只在最后一步视频调用时才知道风格。
+
+---
+
+## 10. 角色卡、场景卡、分镜图规范
+
+### 10.1 角色卡规范
+
+角色卡需要至少包含：
+
+- 角色名
+- 年龄段
+- 性别表现
+- 脸型
+- 发型
+- 发色
+- 服装主套装
+- 常用配饰
+- 体型
+- 神态关键词
+- 禁止变化项
+- 参考图路径
+
+角色卡必须支持：
+
+- 同角色多版本
+- 同角色多风格衍生
+- 用户手工锁定
+
+### 10.2 场景卡规范
+
+场景卡需要至少包含：
+
+- 场景名
+- 场景类别
+- 室内/室外
+- 时间段
+- 天气
+- 布局摘要
+- 主体物件
+- 光线来源
+- 色温
+- 材质关键词
+- 禁止变化项
+
+### 10.3 主分镜图规范
+
+主分镜图是每个镜头的视频生成主参考。
+
+一张主分镜图至少必须表达：
+
+- 主体角色
+- 服装状态
+- 场景背景
+- 镜头景别
+- 构图关系
+- 行为瞬间
+- 光线方向
+- 情绪状态
+
+主分镜图审核通过后：
+
+- 必须可锁定
+- 默认不可被重新生成接口直接覆盖
+- 后续视频必须优先引用它
+
+### 10.4 联系图与变体图
+
+建议支持：
+
+- `storyboard_master`
+  - 当前主分镜图
+- `storyboard_variant`
+  - 同镜头候选方案
+- `storyboard_contact_sheet`
+  - 单镜头多候选拼图或整场镜头缩略总览
+
+---
+
+## 11. 新的生成流程规范
+
+### 11.1 镜头生成不再直接输出“最终视频 prompt”
+
+镜头生成阶段必须至少输出：
+
+- shot goal
+- subject focus
+- composition
+- action beat
+- continuity locks
+- storyboard brief
+
+### 11.2 分镜图生成是独立阶段
+
+镜头脚本生成完成后，必须进入分镜图阶段。
+
+镜头分镜图生成的输入来源：
+
+1. 当前镜头结构化信息
+2. 角色卡
+3. 场景卡
+4. 风格卡
+5. 上一镜头主分镜图
+6. 连续性结构化约束
+
+### 11.3 视频生成必须默认走图生视频
+
+统一规则：
+
+1. 如果镜头存在 `storyboard_locked = true` 的主分镜图，默认走 `image_to_video`
+2. 如果镜头没有主分镜图，才允许降级为 `text_to_video`
+3. `text_to_video` 只作为临时兜底方案，不得作为正式推荐路径
+
+### 11.4 视频生成前置校验
+
+提交视频任务前必须校验：
+
+1. shot 是否存在
+2. shot 是否具备 `style_preset`
+3. shot 是否绑定主分镜图
+4. 主分镜图是否已锁定
+5. 引用的角色卡/场景卡是否存在
+6. duration 是否在套餐限制内
+
+如果未通过，接口应返回明确错误，而不是隐式降级。
+
+---
+
+## 12. 连续性规范
+
+### 12.1 连续性分三层
+
+#### 故事连续性
+
+- 角色关系
+- 伤势变化
+- 道具归属
+- 服装阶段
+
+#### 场景连续性
+
+- 方位
+- 光线
+- 时间
+- 天气
+- 场景布局
+
+#### 镜头连续性
+
+- 人物站位
+- 视线方向
+- 手部持物
+- 动作阶段
+- 景别衔接
+
+### 12.2 连续性必须结构化传递
+
+不要只保留一段 `continuity_notes` 文本。
+
+建议新增：
+
+- `carry_over_characters_json`
+- `carry_over_props_json`
+- `carry_over_scene_state_json`
+- `visual_lock_json`
+
+### 12.3 连续性注入规则
+
+生成镜头 `N+1` 时，默认注入：
+
+- 镜头 `N` 的主分镜图
+- 镜头 `N` 的角色状态
+- 镜头 `N` 的道具状态
+- 镜头 `N` 的场景状态
+- 当前场次的主场景卡
+
+---
+
+## 13. 后端接口改造规范
+
+### 13.1 保留现有接口，但逐步升级语义
+
+现有接口可以继续使用，但要分阶段升级为资产驱动语义。
+
+### 13.2 建议新增接口
+
+#### 章节资产准备
+
+- `POST /api/chapters/{chapter_id}/video-prep/extract-assets`
+  - 从正文和场次中提取角色/场景需求
+
+#### 角色卡
+
+- `POST /api/chapters/{chapter_id}/video-assets/character-cards/generate`
+- `GET /api/chapters/{chapter_id}/video-assets/character-cards`
+- `POST /api/video-assets/{asset_id}/lock`
+
+#### 场景卡
+
+- `POST /api/chapters/{chapter_id}/video-assets/scene-cards/generate`
+- `GET /api/chapters/{chapter_id}/video-assets/scene-cards`
+
+#### 风格
+
+- `GET /api/video-style-presets`
+- `POST /api/chapters/{chapter_id}/style-preset`
+
+#### 分镜图
+
+- `POST /api/shots/{shot_id}/storyboard/render`
+  - 升级为真实出图，不再只是占位记录
+- `POST /api/shots/{shot_id}/storyboard/approve`
+- `POST /api/shots/{shot_id}/storyboard/reject`
+- `POST /api/shots/{shot_id}/storyboard/set-master`
+- `GET /api/shots/{shot_id}/storyboards`
+
+#### 视频生成
+
+- `POST /api/shots/{shot_id}/video/render-from-storyboard`
+  - 明确表达图生视频语义
+- `POST /api/shots/{shot_id}/video/render-text-fallback`
+  - 明确表达降级路径
+
+### 13.3 现有接口禁止继续扩散的做法
+
+以下做法禁止继续新增：
+
+1. 接口内部静默决定是否用参考图
+2. 直接从 `video_prompt` 推断一切
+3. 不记录本次视频任务究竟用了哪张参考图
+4. 不记录任务的实际输入模式
+
+---
+
+## 14. 前端工作台改造规范
+
+### 14.1 标签页重构建议
+
+当前 [`frontend/src/components/VideoWorkspaceLayout.tsx`](/C:/Users/Administrator/Desktop/Desktop/-LoreVista/frontend/src/components/VideoWorkspaceLayout.tsx) 的标签页建议调整为：
+
+1. `正文`
+2. `场次剧本`
+3. `镜头脚本`
+4. `角色 / 场景资产`
+5. `分镜图`
+6. `视频生成`
+7. `片段管理`
+8. `成片项目`
+
+### 14.2 镜头卡必须展示的信息
+
+每个镜头卡至少展示：
+
+- 镜头标题
+- 时长
+- style preset
+- 绑定角色卡数量
+- 绑定场景卡
+- 主分镜图缩略图
+- 锁定状态
+- 当前活动片段
+- 最近任务状态
+
+### 14.3 关键交互规范
+
+必须遵守：
+
+1. 没有主分镜图时，默认不高亮“生成视频”
+2. 主分镜图未锁定时，点击生成视频需要提醒风险
+3. 替换角色卡或场景卡时，应提示哪些镜头可能受影响
+4. 视频任务完成后，前端应自动刷新 clips，不要求用户手动刷新页面
+
+### 14.4 风格选择 UI 规范
+
+风格不使用普通自由文本输入框。
+
+必须以 preset 形式出现，至少展示：
+
+- 风格名称
+- 缩略预览
+- 简短说明
+- 推荐模型
+
+---
+
+## 15. Prompt 规范
+
+### 15.1 Prompt 分层
+
+后续 prompt 禁止继续混写，必须拆层：
+
+1. `video-screenplay`
+2. `video-shot-planning`
+3. `video-character-card`
+4. `video-scene-card`
+5. `video-storyboard`
+6. `video-continuity`
+7. `video-render`
+
+### 15.2 Prompt 设计原则
+
+1. 结构优先于辞藻
+2. JSON 输出优先于自由文本
+3. 明确“禁止模型脑补”的范围
+4. 每层 prompt 只做单一任务
+
+### 15.3 典型禁忌
+
+以下做法禁止：
+
+1. 让一个 prompt 同时做剧情理解、镜头拆解、角色设定和视频生成
+2. 用一段长英文 prompt 代替结构化字段
+3. 不写负面约束
+4. 不传前一镜头连续性信息
+
+---
+
+## 16. 开发阶段规划
+
+### 阶段 1：分镜图优先改造
+
+目标：
+
+- 把主分镜图变成视频生成默认前置条件
+
+本阶段必须完成：
+
+1. `VideoShot` 增加 `style_preset`、`storyboard_asset_id`、`storyboard_locked`
+2. `VideoAsset` 增加 master/variant/locked/revision 等字段
+3. `/storyboard/render` 改为真实生成分镜图
+4. `/video/render` 默认优先读取主分镜图走图生视频
+5. 前端在镜头区展示主分镜图和锁定状态
+
+本阶段验收标准：
+
+1. 任意镜头能先生成主分镜图
+2. 主分镜图可以锁定
+3. 视频任务能明确记录来源分镜图
+4. 成功生成的视频片段能追溯到源分镜图
+
+### 阶段 2：角色卡与场景卡资产化
+
+目标：
+
+- 把人物一致性和场景一致性从 prompt 猜测变成资产约束
+
+本阶段必须完成：
+
+1. 角色卡生成与列表接口
+2. 场景卡生成与列表接口
+3. shot 自动绑定角色卡/场景卡
+4. 分镜图生成时引用这些资产
+5. 前端新增资产管理标签页
+
+本阶段验收标准：
+
+1. 同一章节角色卡可复用
+2. 同一场景卡可被多个镜头复用
+3. 更新资产后能识别受影响镜头
+
+### 阶段 3：连续性增强与批量生产
+
+目标：
+
+- 支持整场或整章的稳定批量生产
+
+本阶段必须完成：
+
+1. continuity 结构化字段落库
+2. 上一镜头主分镜图参与下一镜头生成
+3. 批量生成分镜图
+4. 批量图生视频
+5. 自动连续性诊断
+
+本阶段验收标准：
+
+1. 同场镜头间角色与场景一致性明显提升
+2. 局部重生成不影响整章资产引用关系
+
+---
+
+## 17. 研发禁忌清单
+
+以下事项为明确禁止：
+
+1. 不要继续把“视频质量问题”简单归因于模型不够强。
+2. 不要继续扩散“只有 video_prompt，没有中间资产”的接口设计。
+3. 不要让 storyboard 继续停留在占位文件路径层。
+4. 不要默认覆盖用户锁定的角色卡、场景卡、主分镜图。
+5. 不要把 `meta_json` 当成无限垃圾桶，关键字段必须显式建模。
+6. 不要在前端用隐藏逻辑静默回退到文生视频。
+7. 不要生成完视频后才去想连续性。
+
+---
+
+## 18. 测试与验收规范
+
+### 18.1 单元测试重点
+
+必须覆盖：
+
+1. 新字段序列化与反序列化
+2. 资产引用关系解析
+3. 风格 preset 合法性校验
+4. `image_to_video` 与 `text_to_video` 路径选择逻辑
+5. 锁定资产不可被覆盖
+
+### 18.2 集成测试重点
+
+必须覆盖：
+
+1. 正文 -> 场次 -> 镜头 -> 分镜图 -> 视频 的完整链路
+2. 有主分镜图时走图生视频
+3. 无主分镜图时的降级行为
+4. 视频任务完成后片段落库正确
+5. 更换主分镜图后重新生成视频能形成新版本
+
+### 18.3 人工验收重点
+
+每个测试章节至少检查：
+
+1. 角色是否前后一致
+2. 背景是否稳定
+3. 服装是否乱变
+4. 动作是否符合镜头脚本
+5. 风格是否符合 preset
+6. 视频是否能追溯到正确分镜图
+
+---
+
+## 19. 推荐实施顺序
+
+建议严格按以下顺序推进：
+
+1. 先修数据结构
+2. 再修接口语义
+3. 再补前端资产工作台
+4. 再把主分镜图变成默认入口
+5. 再接角色卡/场景卡
+6. 最后再做批量和高级一致性
+
+不建议的顺序：
+
+1. 先接更多视频模型
+2. 先做复杂成片
+3. 先做大规模 UI 美化
+
+原因很简单：
+
+如果角色卡、场景卡、主分镜图这三层没稳定下来，后面所有视频质量优化都会反复返工。
+
+---
+
+## 20. 近期可直接落地的任务清单
+
+以下任务可以直接进入开发排期：
+
+### 后端
+
+1. 扩展 `VideoShot` 和 `VideoAsset` 数据模型字段。
+2. 为主分镜图建立锁定、设主图、查询历史版本接口。
+3. 改造 `/api/shots/{shot_id}/video/render`，明确输入模式和源分镜图来源。
+4. 为 `VideoGenerationJob` 增加 `input_mode` 和 `source_storyboard_asset_id`。
+5. 为 `RenderedClip` 增加源分镜图追溯字段。
+
+### 前端
+
+1. 增加“角色 / 场景资产”标签页。
+2. 在镜头卡中展示主分镜图、锁定状态、风格 preset。
+3. 将“生成视频”按钮改为依赖主分镜图状态。
+4. 增加分镜图审核和设主图交互。
+
+### Prompt
+
+1. 重写 shot planning prompt。
+2. 拆出角色卡生成 prompt。
+3. 拆出场景卡生成 prompt。
+4. 拆出 storyboard 专用 prompt。
+5. 拆出 continuity 注入 prompt。
+
+---
+
+## 21. 结论
+
+视频工作流后续开发的唯一正确方向，不是继续强化“文本直接驱动视频”，而是建立一条 **以角色卡、场景卡、风格卡、主分镜图为中心的资产驱动生产流**。
+
+后续所有开发判断都应以这条原则为准：
+
+1. 能否提升镜头一致性
+2. 能否提升资产复用率
+3. 能否降低重生成成本
+4. 能否让结果更忠于镜头脚本
+
+如果一个设计不能同时帮助以上至少两点，就不应该优先进入开发。

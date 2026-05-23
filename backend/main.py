@@ -115,7 +115,7 @@ def _default_reload_enabled() -> bool:
     env_value = os.getenv("RELOAD")
     if env_value is not None:
         return env_value.lower() == "true"
-    return os.name != "nt"
+    return False
 
 FEATURE_CATALOG: list[dict] = [
     {
@@ -241,6 +241,11 @@ manga_dir = Path(__file__).resolve().parent / "manga_outputs"
 manga_dir.mkdir(parents=True, exist_ok=True)
 app.mount("/static/manga", StaticFiles(directory=str(manga_dir)), name="manga")
 
+# Serve downloaded videos as static files
+video_dir = Path(__file__).resolve().parent / "video_outputs"
+video_dir.mkdir(parents=True, exist_ok=True)
+app.mount("/static/video", StaticFiles(directory=str(video_dir)), name="video")
+
 
 @app.middleware("http")
 async def require_api_token(request: Request, call_next):
@@ -313,6 +318,7 @@ def _platform_settings_snapshot(db: Session) -> dict:
             "video_base_url": _get_platform_setting("api.video.base_url", db, "https://api.xbyjs.top/v1"),
             "video_model": _get_platform_setting("api.video.model", db, "veo3.1-fast"),
             "video_api_key": _get_platform_setting("api.video.api_key", db, ""),
+            "video_provider": _get_platform_setting("api.video.provider", db, ""),
             "enable_user_override": bool(_get_platform_setting("api.enable_user_override", db, True)),
             "enable_user_url_override": bool(_get_platform_setting("api.enable_user_url_override", db, False)),
         },
@@ -402,6 +408,7 @@ def _public_platform_settings_snapshot(db: Session) -> dict:
             "image_model": api.get("image_model") or "",
             "video_base_url": api.get("video_base_url") or "https://api.xbyjs.top/v1",
             "video_model": api.get("video_model") or "veo3.1-fast",
+            "video_provider": api.get("video_provider") or "",
         },
         "auth": {
             "require_email_code_for_register": bool(auth.get("require_email_code_for_register")),
@@ -533,8 +540,7 @@ def _user_image_api_key(request: Request) -> str | None:
     admin_model = str(_get_platform_setting("api.image.model", db, image_service.IMAGE_MODEL)).strip()
     resolved_base_url = override_base_url.strip() if capabilities["can_override_api_url"] and override_base_url and override_base_url.strip() else admin_base_url
     resolved_model = override_model.strip() if capabilities["can_override_api_url"] and override_model and override_model.strip() else admin_model
-    image_service.IMAGE_API_BASE_URL = resolved_base_url.rstrip("/") or image_service.IMAGE_API_BASE_URL
-    image_service.IMAGE_MODEL = resolved_model or image_service.IMAGE_MODEL
+    image_service.configure_runtime(base_url=resolved_base_url.rstrip("/"), model=resolved_model)
     if capabilities["can_override_api_key"] and override:
         return override
     return _get_platform_setting("api.image.api_key", db, "") or None
@@ -927,6 +933,7 @@ def _seed_platform_settings(db: Session) -> None:
         "api.video.base_url": "https://api.xbyjs.top/v1",
         "api.video.model": "veo3.1-fast",
         "api.video.api_key": "",
+        "api.video.provider": "",
         "api.enable_user_override": True,
         "api.enable_user_url_override": False,
         "auth.require_email_code_for_register": False,
@@ -3411,17 +3418,19 @@ def _decode_edit_mask_upload(b64: str, target_size: tuple[int, int]) -> bytes:
 
 @app.on_event("startup")
 def on_startup():
-    init_db(run_migrations=False)
+    init_db(run_migrations=True)
     # One-time: rename default stories
     from database import SessionLocal
     db = SessionLocal()
     try:
         for s in db.query(Story).filter(Story.title.in_(["我的第一个故事", "未命名故事"])).all():
             if s.chapters and any(ch.messages for ch in s.chapters):
-                s.title = "转生成为暗恋公主的女仆故事"
-                s.description = "百合女仆与公主的奇幻冒险"
+                s.title = "转生为异世界公主与女王的冒险"
+                s.description = "百合女王与公主的异世界冒险"
             # else: leave as-is for empty stories
         db.commit()
+    except Exception as exc:
+        logger.warning("One-time story rename skipped (likely missing column): %s", exc)
     finally:
         db.close()
 
@@ -4330,6 +4339,7 @@ def admin_save_platform_settings(body: dict, request: Request, db: Session = Dep
         "api.video.base_url": api.get("video_base_url", "https://api.xbyjs.top/v1"),
         "api.video.model": api.get("video_model", "veo3.1-fast"),
         "api.video.api_key": api.get("video_api_key", ""),
+        "api.video.provider": api.get("video_provider", ""),
         "api.enable_user_override": bool(api.get("enable_user_override", True)),
         "api.enable_user_url_override": bool(api.get("enable_user_url_override", False)),
         "auth.require_email_code_for_register": bool(auth.get("require_email_code_for_register", False)),
@@ -7596,4 +7606,6 @@ if __name__ == "__main__":
             "backend.log",
             "backend.err",
         ],
+        access_log=True,
+        log_level="info",
     )

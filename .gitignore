@@ -20,6 +20,8 @@ frontend/node_modules/
 
 # ─── Generated outputs (large images/data) ───
 backend/manga_outputs/
+backend/video_outputs/
+backend/regen_assets/
 test_novel_output.md
 test_ref_C.png
 

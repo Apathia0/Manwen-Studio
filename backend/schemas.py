@@ -348,6 +348,36 @@ class SubtitleItem(BaseModel):
     text: str
 
 
+class VideoStylePresetOut(BaseModel):
+    id: int
+    name: str
+    category: str
+    prompt_template: Optional[str] = None
+    image_style_params: Optional[dict[str, Any]] = None
+    video_style_params: Optional[dict[str, Any]] = None
+    sort_order: int = 0
+
+    model_config = {"from_attributes": True}
+
+
+class VideoStylePresetCreate(BaseModel):
+    name: str
+    category: str = "realistic"
+    prompt_template: Optional[str] = None
+    image_style_params: Optional[dict[str, Any]] = None
+    video_style_params: Optional[dict[str, Any]] = None
+    sort_order: int = 0
+
+
+class VideoStylePresetUpdate(BaseModel):
+    name: Optional[str] = None
+    category: Optional[str] = None
+    prompt_template: Optional[str] = None
+    image_style_params: Optional[dict[str, Any]] = None
+    video_style_params: Optional[dict[str, Any]] = None
+    sort_order: Optional[int] = None
+
+
 class ScriptSceneOut(BaseModel):
     id: int
     chapter_id: int
@@ -360,6 +390,7 @@ class ScriptSceneOut(BaseModel):
     dialogue: list[DialogueLine] = []
     voiceover: Optional[str] = None
     mood: Optional[str] = None
+    concept_art_asset_id: Optional[int] = None
     estimated_duration_seconds: Optional[int] = None
     source_type: str = "chapter"
     status: str = "draft"
@@ -425,8 +456,13 @@ class VideoShotOut(BaseModel):
     negative_prompt: Optional[str] = None
     continuity_notes: Optional[str] = None
     status: str = "draft"
+    style_preset: Optional[str] = None
+    storyboard_asset_id: Optional[int] = None
+    storyboard_locked: bool = False
     created_at: datetime.datetime
     updated_at: datetime.datetime
+    character_involvement: Optional[str] = None
+    scene_mood: Optional[str] = None
 
     model_config = {"from_attributes": True}
 
@@ -447,6 +483,7 @@ class VideoShotUpdate(BaseModel):
     negative_prompt: Optional[str] = None
     continuity_notes: Optional[str] = None
     status: Optional[str] = None
+    style_preset: Optional[str] = None
 
 
 class GenerateShotsRequest(BaseModel):
@@ -469,6 +506,9 @@ class StoryboardRenderRequest(BaseModel):
     aspect_ratio: Optional[str] = "16:9"
     overwrite: bool = False
     output_path: Optional[str] = None
+    style_preset: Optional[str] = None
+    prompt: Optional[str] = None
+    reference_asset_ids: list[int] = []
 
 
 class VideoRenderRequest(BaseModel):
@@ -484,6 +524,13 @@ class VideoRenderRequest(BaseModel):
     prompt: Optional[str] = None
     negative_prompt: Optional[str] = None
     style: Optional[str] = None
+    input_mode: Optional[str] = None
+    source_storyboard_asset_id: Optional[int] = None
+
+
+class StoryboardActionRequest(BaseModel):
+    action: str
+    asset_id: Optional[int] = None
 
 
 class VideoGenerationJobOut(BaseModel):
@@ -498,6 +545,8 @@ class VideoGenerationJobOut(BaseModel):
     duration_seconds: Optional[int] = None
     aspect_ratio: Optional[str] = None
     error_message: Optional[str] = None
+    input_mode: Optional[str] = None
+    source_storyboard_asset_id: Optional[int] = None
     submitted_at: datetime.datetime
     completed_at: Optional[datetime.datetime] = None
 
@@ -524,6 +573,11 @@ class RenderedClipOut(BaseModel):
     version: int = 1
     is_active: bool = True
     meta_json: Optional[dict[str, Any]] = None
+    source_storyboard_asset_id: Optional[int] = None
+    style_preset: Optional[str] = None
+    continuity_score: Optional[int] = None
+    quality_score: Optional[int] = None
+    review_status: str = "pending"
     created_at: datetime.datetime
 
     model_config = {"from_attributes": True}
@@ -541,6 +595,14 @@ class VideoAssetOut(BaseModel):
     provider: Optional[str] = None
     prompt: Optional[str] = None
     meta_json: Optional[dict[str, Any]] = None
+    asset_subtype: Optional[str] = None
+    source_asset_ids_json: Optional[list[int]] = None
+    style_preset: Optional[str] = None
+    locked: bool = False
+    revision: int = 1
+    is_master: bool = False
+    status: str = "active"
+    hash_key: Optional[str] = None
     created_at: datetime.datetime
 
     model_config = {"from_attributes": True}
@@ -585,6 +647,26 @@ class VideoProjectOut(BaseModel):
         return data
 
 
+class GenerateShotFramesRequest(BaseModel):
+    frame_type: str = "both"  # "first_frame" | "last_frame" | "both"
+    prompt: str | None = None
+    overwrite: bool = False
+    style_preset: Optional[str] = None
+    reference_asset_ids: list[int] = []
+    inherit_character_assets: bool = True
+    inherit_scene_assets: bool = True
+    inherit_storyboard_asset: bool = True
+
+
+class RegenerateShotFrameRequest(BaseModel):
+    asset_id: int
+    prompt: str
+    mode: str = "full"  # "full" | "partial"
+    mask: str | None = None
+    style_preset: Optional[str] = None
+    reference_asset_ids: list[int] = []
+
+
 class CreateVideoProjectRequest(BaseModel):
     name: str
     timeline: list[TimelineItem]
@@ -612,6 +694,62 @@ class CompileProjectRequest(BaseModel):
 class UsageInfo(BaseModel):
     feature_key: str
     consumed: int
+
+
+class ChapterStylePresetOut(BaseModel):
+    chapter_id: int
+    style_preset_id: Optional[int] = None
+    style_preset: Optional[VideoStylePresetOut] = None
+
+
+class ChapterStylePresetUpdate(BaseModel):
+    style_preset_id: int
+
+
+class StoryStylePresetOut(BaseModel):
+    story_id: int
+    style_preset_id: Optional[int] = None
+    style_preset: Optional[VideoStylePresetOut] = None
+
+
+class StoryStylePresetUpdate(BaseModel):
+    style_preset_id: int
+
+
+class ShotStylePresetUpdate(BaseModel):
+    style_preset: Optional[str] = None
+
+
+class UpdateAssetScopeRequest(BaseModel):
+    usage_scope: str = "shot_only"
+    inherit_to_next_shot: bool = False
+
+
+class PromoteAssetRequest(BaseModel):
+    level: str = "chapter_global"
+    inherit_to_next_shot: bool = False
+
+
+class ShotAssetBundleOut(BaseModel):
+    shot_id: int
+    shot_number: Optional[int] = None
+    scene_id: Optional[int] = None
+    style_preset: Optional[str] = None
+    storyboard_asset: Optional[VideoAssetOut] = None
+    storyboard_locked: bool = False
+    first_frame: Optional[VideoAssetOut] = None
+    last_frame: Optional[VideoAssetOut] = None
+    character_references: list[VideoAssetOut] = []
+    scene_references: list[VideoAssetOut] = []
+    available_character_assets: list[VideoAssetOut] = []
+    available_scene_assets: list[VideoAssetOut] = []
+
+
+class AssetUploadResponse(BaseModel):
+    id: int
+    asset_type: str
+    name: str
+    file_path: str
 
 
 # Resolve forward references

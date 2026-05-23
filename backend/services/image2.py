@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import contextvars
 import io
 import json
 import logging
@@ -29,6 +30,27 @@ IMAGE_API_BASE_URL = os.getenv("IMAGE_API_BASE_URL", "https://api.xbyjs.top/v1")
 IMAGE_API_KEY = os.getenv("IMAGE_API_KEY", "")
 IMAGE_MODEL = "gpt-image-2"
 IMAGE_SIZE = "1024x1536"
+
+# 每个请求的上下文变量（防止并发请求间全局变量覆盖）
+_current_base_url: contextvars.ContextVar[str | None] = contextvars.ContextVar('image2_base_url', default=None)
+_current_model: contextvars.ContextVar[str | None] = contextvars.ContextVar('image2_model', default=None)
+
+
+def configure_runtime(base_url: str | None = None, model: str | None = None) -> None:
+    if isinstance(base_url, str) and base_url.strip():
+        _current_base_url.set(base_url.strip().rstrip("/"))
+    if isinstance(model, str) and model.strip():
+        _current_model.set(model.strip())
+
+
+def _get_base_url() -> str:
+    cv = _current_base_url.get()
+    return cv if cv is not None else IMAGE_API_BASE_URL
+
+
+def _get_model() -> str:
+    cv = _current_model.get()
+    return cv if cv is not None else IMAGE_MODEL
 OUTPUT_DIR = Path(__file__).resolve().parent.parent / "manga_outputs"
 
 MAX_RETRIES = 3
@@ -388,20 +410,39 @@ async def generate_reference_image(
     *,
     api_key: str | None = None,
     size: str = "1024x1024",
+    ref_image_paths: list[str] | None = None,
 ) -> str:
     progress_label = f"ref:{output_path.stem}"
     current_prompt = prompt.strip()
     last_err: MangaImageGenerationError | None = None
 
+    # 加载参考图片
+    valid_refs = [Path(p) for p in (ref_image_paths or []) if p and Path(p).exists()]
+    ref_blobs = _prepare_ref_blobs(valid_refs, progress_label) if valid_refs else []
+
     for attempt in range(1, MAX_RETRIES + 1):
         try:
-            logger.info("[%s] 开始生成角色参考图（尝试 %s/%s）", progress_label, attempt, MAX_RETRIES)
-            async with httpx.AsyncClient(timeout=httpx.Timeout(connect=30, read=600, write=120, pool=30)) as client:
-                resp = await client.post(
-                    f"{IMAGE_API_BASE_URL}/images/generations",
-                    json={"model": IMAGE_MODEL, "prompt": current_prompt, "size": size},
-                    headers=_image_auth_headers(api_key, json_content=True),
-                )
+            mode = f"edits({len(ref_blobs)} refs)" if ref_blobs else "generations"
+            logger.info("[%s] 开始生成角色参考图 [%s]（尝试 %s/%s）", progress_label, mode, attempt, MAX_RETRIES)
+            timeout = httpx.Timeout(connect=30, read=600, write=120, pool=30)
+            limits = httpx.Limits(max_connections=1, max_keepalive_connections=0)
+            async with httpx.AsyncClient(timeout=timeout, limits=limits) as client:
+                if ref_blobs:
+                    files = [("image", (ref_blobs[0][0], io.BytesIO(ref_blobs[0][1]), "image/png"))] if len(ref_blobs) == 1 else [
+                        ("image[]", (name, io.BytesIO(blob), "image/png")) for name, blob in ref_blobs
+                    ]
+                    resp = await client.post(
+                        f"{_get_base_url()}/images/edits",
+                        files=files,
+                        data={"model": _get_model(), "prompt": current_prompt, "size": size},
+                        headers=_image_auth_headers(api_key),
+                    )
+                else:
+                    resp = await client.post(
+                        f"{_get_base_url()}/images/generations",
+                        json={"model": _get_model(), "prompt": current_prompt, "size": size},
+                        headers=_image_auth_headers(api_key, json_content=True),
+                    )
 
             if not resp.is_success:
                 raise _classify_response_error(resp, progress_label, current_prompt, False)
@@ -471,8 +512,8 @@ async def generate_cover_image(
             logger.info("[%s] 开始生成小说封面（尝试 %s/%s）", progress_label, attempt, MAX_RETRIES)
             async with httpx.AsyncClient(timeout=httpx.Timeout(connect=30, read=600, write=120, pool=30)) as client:
                 resp = await client.post(
-                    f"{IMAGE_API_BASE_URL}/images/generations",
-                    json={"model": IMAGE_MODEL, "prompt": current_prompt, "size": size},
+                    f"{_get_base_url()}/images/generations",
+                    json={"model": _get_model(), "prompt": current_prompt, "size": size},
                     headers=_image_auth_headers(api_key, json_content=True),
                 )
 
@@ -574,9 +615,9 @@ async def edit_existing_image(
 
             async with httpx.AsyncClient(timeout=httpx.Timeout(connect=30, read=600, write=120, pool=30)) as client:
                 resp = await client.post(
-                    f"{IMAGE_API_BASE_URL}/images/edits",
+                    f"{_get_base_url()}/images/edits",
                     files=files,
-                    data={"model": IMAGE_MODEL, "prompt": current_prompt, "size": size},
+                    data={"model": _get_model(), "prompt": current_prompt, "size": size},
                     headers=_image_auth_headers(api_key),
                 )
 
@@ -687,15 +728,15 @@ async def generate_manga_image(
                         ("image[]", (name, io.BytesIO(blob), "image/png")) for name, blob in ref_blobs
                     ]
                     resp = await client.post(
-                        f"{IMAGE_API_BASE_URL}/images/edits",
+                        f"{_get_base_url()}/images/edits",
                         files=files,
-                        data={"model": IMAGE_MODEL, "prompt": full_prompt, "size": IMAGE_SIZE},
+                        data={"model": _get_model(), "prompt": full_prompt, "size": IMAGE_SIZE},
                         headers=_image_auth_headers(api_key),
                     )
                 else:
                     resp = await client.post(
-                        f"{IMAGE_API_BASE_URL}/images/generations",
-                        json={"model": IMAGE_MODEL, "prompt": full_prompt, "size": IMAGE_SIZE},
+                        f"{_get_base_url()}/images/generations",
+                        json={"model": _get_model(), "prompt": full_prompt, "size": IMAGE_SIZE},
                         headers=_image_auth_headers(api_key, json_content=True),
                     )
 

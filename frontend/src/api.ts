@@ -657,6 +657,7 @@ export interface PlatformSettings {
     video_base_url: string;
     video_model: string;
     video_api_key: string;
+    video_provider: string;
     enable_user_override: boolean;
     enable_user_url_override?: boolean;
   };
@@ -695,6 +696,7 @@ export interface PublicPlatformSettings {
     image_model?: string;
     video_base_url?: string;
     video_model?: string;
+    video_provider?: string;
   };
   auth?: {
     require_email_code_for_register?: boolean;
@@ -2163,8 +2165,14 @@ export interface VideoShot {
   storyboard_prompt?: string | null;
   video_prompt?: string | null;
   negative_prompt?: string | null;
+  first_frame_prompt?: string | null;
+  last_frame_prompt?: string | null;
+  character_prompts_json?: Array<{ name: string; prompt: string }> | null;
   continuity_notes?: string | null;
   status: string;
+  style_preset?: string | null;
+  storyboard_asset_id?: number | null;
+  storyboard_locked?: boolean;
   created_at: string;
   updated_at: string;
 }
@@ -2181,6 +2189,15 @@ export interface VideoAsset {
   provider?: string | null;
   prompt?: string | null;
   meta?: Record<string, any> | null;
+  asset_subtype?: string | null;
+  source_asset_ids?: number[] | null;
+  source_asset_ids_json?: number[] | null;
+  style_preset?: string | null;
+  locked?: boolean;
+  revision?: number;
+  is_master?: boolean;
+  status?: string;
+  hash_key?: string | null;
   created_at: string;
 }
 
@@ -2196,6 +2213,8 @@ export interface VideoGenerationJob {
   aspect_ratio?: string | null;
   request_payload?: Record<string, any> | null;
   error_message?: string | null;
+  input_mode?: string | null;
+  source_storyboard_asset_id?: number | null;
   submitted_at: string;
   completed_at?: string | null;
   clip?: RenderedClip | null;
@@ -2212,6 +2231,11 @@ export interface RenderedClip {
   version: number;
   is_active: boolean;
   meta?: Record<string, any> | null;
+  source_storyboard_asset_id?: number | null;
+  style_preset?: string | null;
+  continuity_score?: number | null;
+  quality_score?: number | null;
+  review_status?: string;
   created_at: string;
 }
 
@@ -2283,9 +2307,57 @@ export async function generateShotPrompts(shotId: number, payload: { style?: str
   return res.json();
 }
 
-export async function renderStoryboardFrame(shotId: number, payload: { provider?: string; aspect_ratio?: string; overwrite?: boolean }): Promise<{ shot_id: number; asset: VideoAsset; shot_status: string }> {
+export interface ShotAssetPromptDraft {
+  shot_id: number;
+  style_preset: string;
+  character_prompts: Array<{ name: string; prompt: string }>;
+  storyboard_prompt: string;
+  first_frame_prompt: string;
+  last_frame_prompt: string;
+  video_prompt: string;
+}
+
+export async function parseShotAssetPrompts(shotId: number, payload?: {
+  style_preset?: string;
+}): Promise<ShotAssetPromptDraft> {
+  const res = await fetch(`${BASE}/api/shots/${shotId}/asset-prompts/parse`, {
+    method: 'POST', headers: apiHeaders(true), body: JSON.stringify(payload ?? {}),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '解析资产提示词失败'));
+  return res.json();
+}
+
+export async function generateShotCharacterAsset(shotId: number, payload: {
+  character_name: string;
+  prompt: string;
+  style_preset?: string;
+  source_asset_ids?: number[];
+}): Promise<{ shot_id: number; asset: VideoAsset }> {
+  const res = await fetch(`${BASE}/api/shots/${shotId}/character-assets/generate`, {
+    method: 'POST', headers: apiHeaders(true), body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '生成角色参考图失败'));
+  return res.json();
+}
+
+export async function renderStoryboardFrame(shotId: number, payload: {
+  provider?: string; aspect_ratio?: string; overwrite?: boolean;
+  style_preset?: string; prompt?: string; reference_asset_ids?: number[];
+}): Promise<{ shot_id: number; asset: VideoAsset; shot_status: string; storyboard_locked?: boolean }> {
   const res = await fetch(`${BASE}/api/shots/${shotId}/storyboard/render`, { method: 'POST', headers: apiHeaders(true), body: JSON.stringify(payload) });
   if (!res.ok) throw new Error(await readErrorMessage(res, '生成关键帧失败'));
+  return res.json();
+}
+
+export interface VideoModel {
+  key: string;
+  name: string;
+  supports_image: boolean;
+}
+
+export async function getVideoModels(): Promise<{ models: VideoModel[] }> {
+  const res = await fetch(`${BASE}/api/video/models`, { headers: apiHeaders() });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '获取视频模型列表失败'));
   return res.json();
 }
 
@@ -2293,9 +2365,55 @@ export async function renderShotVideo(shotId: number, payload: {
   provider: string; model?: string; duration_seconds: number; aspect_ratio?: string;
   fps?: number; use_reference_assets?: boolean; reference_asset_ids?: number[];
   seed?: number; overwrite_active_clip?: boolean;
+  input_mode?: string; source_storyboard_asset_id?: number;
 }): Promise<{ job: VideoGenerationJob; shot_status: string; usage?: { feature_key: string; consumed: number } }> {
   const res = await fetch(`${BASE}/api/shots/${shotId}/video/render`, { method: 'POST', headers: apiHeaders(true), body: JSON.stringify(payload) });
   if (!res.ok) throw new Error(await readErrorMessage(res, '提交视频任务失败'));
+  return res.json();
+}
+
+// ─── Storyboard Management ──────────────────────────────
+export async function approveShotStoryboard(shotId: number): Promise<{ shot_id: number; storyboard_locked: boolean; storyboard_asset_id?: number }> {
+  const res = await fetch(`${BASE}/api/shots/${shotId}/storyboard/approve`, { method: 'POST', headers: apiHeaders(true) });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '锁定分镜图失败'));
+  return res.json();
+}
+
+export async function rejectShotStoryboard(shotId: number): Promise<{ shot_id: number; storyboard_locked: boolean }> {
+  const res = await fetch(`${BASE}/api/shots/${shotId}/storyboard/reject`, { method: 'POST', headers: apiHeaders(true) });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '拒绝分镜图失败'));
+  return res.json();
+}
+
+export async function setMasterStoryboard(shotId: number, assetId: number): Promise<{ shot_id: number; storyboard_asset_id: number; is_master: boolean }> {
+  const res = await fetch(`${BASE}/api/shots/${shotId}/storyboard/set-master`, { method: 'POST', headers: apiHeaders(true), body: JSON.stringify({ action: 'set_master', asset_id: assetId }) });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '设置主分镜图失败'));
+  return res.json();
+}
+
+export async function getShotStoryboards(shotId: number): Promise<{
+  shot_id: number; assets: VideoAsset[]; active_storyboard_asset_id?: number | null; storyboard_locked: boolean;
+}> {
+  const res = await fetch(`${BASE}/api/shots/${shotId}/storyboards`, { headers: apiHeaders() });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '获取分镜图列表失败'));
+  return res.json();
+}
+
+export async function deleteShot(shotId: number): Promise<{ ok: boolean; shot_id: number }> {
+  const res = await fetch(`${BASE}/api/shots/${shotId}`, { method: 'DELETE', headers: apiHeaders() });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '删除镜头失败'));
+  return res.json();
+}
+
+export async function createSceneShot(sceneId: number, payload?: Partial<VideoShot>): Promise<VideoShot> {
+  const res = await fetch(`${BASE}/api/scenes/${sceneId}/shots`, { method: 'POST', headers: apiHeaders(true), body: JSON.stringify(payload ?? {}) });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '添加镜头失败'));
+  return res.json();
+}
+
+export async function reorderSceneShots(sceneId: number, payload: { shot_ids: number[] }): Promise<{ scene_id: number; shots: VideoShot[] }> {
+  const res = await fetch(`${BASE}/api/scenes/${sceneId}/shots/reorder`, { method: 'POST', headers: apiHeaders(true), body: JSON.stringify(payload) });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '重新排序镜头失败'));
   return res.json();
 }
 
@@ -2348,6 +2466,18 @@ export async function deleteVideoAsset(assetId: number): Promise<{ ok: boolean; 
   return res.json();
 }
 
+export async function regenerateVideoAsset(assetId: number, payload: {
+  prompt: string;
+  mode?: 'full' | 'partial';
+  mask?: string;
+}): Promise<{ asset: VideoAsset }> {
+  const res = await fetch(`${BASE}/api/video-assets/${assetId}/regen`, {
+    method: 'POST', headers: apiHeaders(true), body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '重绘资产失败'));
+  return res.json();
+}
+
 // ─── Video Projects ────────────────────────────────────────
 export async function createVideoProject(chapterId: number, payload: {
   name: string; timeline: Array<{ shot_id: number; clip_id: number; order: number; enabled: boolean }>;
@@ -2376,3 +2506,193 @@ export async function compileVideoProject(projectId: number, payload: {
   if (!res.ok) throw new Error(await readErrorMessage(res, '编译视频失败'));
   return res.json();
 }
+
+// ── Shot Frame API ──────────────────────────────────────────────
+
+export interface ShotFrameAsset {
+  id: number;
+  name: string;
+  file_path: string;
+  asset_type: string;
+  asset_subtype: string;
+  is_master?: boolean;
+  revision?: number;
+  prompt?: string | null;
+  style_preset?: string | null;
+  source_asset_ids_json?: number[] | null;
+  created_at?: string | null;
+}
+
+export interface ShotFramesResponse {
+  shot_id: number;
+  first_frames: ShotFrameAsset[];
+  last_frames: ShotFrameAsset[];
+}
+
+export interface ChapterShotFramesResponse {
+  shots: Array<{
+    shot_id: number;
+    shot_number: number | null;
+    scene_id: number | null;
+    frames: {
+      first_frames: ShotFrameAsset[];
+      last_frames: ShotFrameAsset[];
+    };
+  }>;
+}
+
+export async function generateShotFrames(shotId: number, payload: {
+  frame_type?: string; prompt?: string; overwrite?: boolean;
+  style_preset?: string;
+  reference_asset_ids?: number[];
+  inherit_character_assets?: boolean;
+  inherit_scene_assets?: boolean;
+  inherit_storyboard_asset?: boolean;
+}): Promise<{ shot_id: number; assets: ShotFrameAsset[] }> {
+  const res = await fetch(`${BASE}/api/shots/${shotId}/frames/generate`, {
+    method: 'POST', headers: apiHeaders(true), body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '生成镜头首尾帧失败'));
+  return res.json();
+}
+
+export async function regenerateShotFrame(shotId: number, payload: {
+  asset_id: number; prompt: string; mode?: string; mask?: string;
+  style_preset?: string;
+  reference_asset_ids?: number[];
+}): Promise<{ asset: ShotFrameAsset }> {
+  const res = await fetch(`${BASE}/api/shots/${shotId}/frames/regen`, {
+    method: 'POST', headers: apiHeaders(true), body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '重绘镜头帧失败'));
+  return res.json();
+}
+
+export async function getShotFrames(shotId: number): Promise<ShotFramesResponse> {
+  const res = await fetch(`${BASE}/api/shots/${shotId}/frames`, { headers: apiHeaders() });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '获取镜头帧失败'));
+  return res.json();
+}
+
+export async function listChapterShotFrames(chapterId: number): Promise<ChapterShotFramesResponse> {
+  const res = await fetch(`${BASE}/api/chapters/${chapterId}/shot-frames`, { headers: apiHeaders() });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '获取章节镜头帧列表失败'));
+  return res.json();
+}
+
+// ─── Style Preset (Story & Shot level) ──────────────────────
+
+export interface StoryStylePresetResponse {
+  story_id: number;
+  style_preset_id: number | null;
+  style_preset: VideoStylePreset | null;
+}
+
+export interface VideoStylePreset {
+  id: number;
+  name: string;
+  category: string;
+  prompt_template?: string | null;
+  image_style_params?: Record<string, any> | null;
+  video_style_params?: Record<string, any> | null;
+  sort_order: number;
+}
+
+export async function getStoryVideoStylePreset(storyId: number): Promise<StoryStylePresetResponse> {
+  const res = await fetch(`${BASE}/api/stories/${storyId}/video-style-preset`, { headers: apiHeaders() });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '获取故事风格预设失败'));
+  return res.json();
+}
+
+export async function setStoryVideoStylePreset(storyId: number, stylePresetId: number): Promise<StoryStylePresetResponse> {
+  const res = await fetch(`${BASE}/api/stories/${storyId}/video-style-preset`, {
+    method: 'PUT', headers: apiHeaders(true), body: JSON.stringify({ style_preset_id: stylePresetId }),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '设置故事风格预设失败'));
+  return res.json();
+}
+
+export async function setShotVideoStylePreset(shotId: number, stylePreset: string | null): Promise<{ shot_id: number; style_preset: string | null }> {
+  const res = await fetch(`${BASE}/api/shots/${shotId}/video-style-preset`, {
+    method: 'PUT', headers: apiHeaders(true), body: JSON.stringify({ style_preset: stylePreset }),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '设置镜头风格预设失败'));
+  return res.json();
+}
+
+export async function deleteShotVideoStylePreset(shotId: number): Promise<{ shot_id: number; style_preset: null }> {
+  const res = await fetch(`${BASE}/api/shots/${shotId}/video-style-preset`, { method: 'DELETE', headers: apiHeaders() });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '清除镜头风格预设失败'));
+  return res.json();
+}
+
+// ─── Shot Asset Bundle ──────────────────────────────────────
+
+export interface ShotAssetBundle {
+  shot_id: number;
+  shot_number: number | null;
+  scene_id: number | null;
+  style_preset: string | null;
+  storyboard_asset: VideoAsset | null;
+  storyboard_locked: boolean;
+  first_frame: ShotFrameAsset | null;
+  last_frame: ShotFrameAsset | null;
+  character_references: VideoAsset[];
+  scene_references: VideoAsset[];
+  available_character_assets: VideoAsset[];
+  available_scene_assets: VideoAsset[];
+}
+
+export async function getShotAssetBundle(shotId: number): Promise<ShotAssetBundle> {
+  const res = await fetch(`${BASE}/api/shots/${shotId}/asset-bundle`, { headers: apiHeaders() });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '获取镜头资产包失败'));
+  return res.json();
+}
+
+// ─── Asset Scope & Promote ──────────────────────────────────
+
+export async function updateAssetScope(assetId: number, payload: { usage_scope: string; inherit_to_next_shot: boolean }): Promise<{ id: number; usage_scope: string; inherit_to_next_shot: boolean }> {
+  const res = await fetch(`${BASE}/api/video-assets/${assetId}/scope`, {
+    method: 'PUT', headers: apiHeaders(true), body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '更新资源作用域失败'));
+  return res.json();
+}
+
+export async function promoteAsset(assetId: number, payload: { level: string; inherit_to_next_shot?: boolean }): Promise<{ id: number; usage_scope: string; inherit_to_next_shot: boolean }> {
+  const res = await fetch(`${BASE}/api/video-assets/${assetId}/promote`, {
+    method: 'POST', headers: apiHeaders(true), body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '提升资源级别失败'));
+  return res.json();
+}
+
+// ─── Style Presets (Chapter level - was missing) ────────────
+
+export async function listStylePresets(): Promise<{ presets: VideoStylePreset[] }> {
+  const res = await fetch(`${BASE}/api/video-style-presets`, { headers: apiHeaders() });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '获取风格预设失败'));
+  return res.json();
+}
+
+export async function getChapterStylePreset(chapterId: number): Promise<ChapterStylePresetResponse> {
+  const res = await fetch(`${BASE}/api/chapters/${chapterId}/video-style-preset`, { headers: apiHeaders() });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '获取章节风格预设失败'));
+  return res.json();
+}
+
+export interface ChapterStylePresetResponse {
+  chapter_id: number;
+  style_preset_id: number | null;
+  style_preset: VideoStylePreset | null;
+}
+
+export async function setChapterStylePreset(chapterId: number, stylePresetId: number): Promise<ChapterStylePresetResponse> {
+  const res = await fetch(`${BASE}/api/chapters/${chapterId}/video-style-preset`, {
+    method: 'PUT', headers: apiHeaders(true), body: JSON.stringify({ style_preset_id: stylePresetId }),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '设置章节风格预设失败'));
+  return res.json();
+}
+
+

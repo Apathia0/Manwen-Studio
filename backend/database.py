@@ -66,6 +66,8 @@ def init_db(*, run_migrations: bool | None = None):
             _migrate()
         else:
             logger.info("Skipping startup database migrations; set RUN_STARTUP_MIGRATIONS=true to enable.")
+            # Keep lightweight data normalization even when migrations are disabled.
+            _normalize_video_style_names()
     except Exception as exc:
         logger.warning("数据库初始化失败（将在下次启动时重试）: %s", exc)
 
@@ -209,6 +211,9 @@ def _migrate():
                 conn.execute(text("ALTER TABLE users ADD COLUMN allow_api_key_override BOOLEAN DEFAULT FALSE"))
             if "allow_api_url_override" not in cols:
                 conn.execute(text("ALTER TABLE users ADD COLUMN allow_api_url_override BOOLEAN DEFAULT FALSE"))
+    _migrate_video_tables()
+    _seed_video_style_presets()
+    _normalize_video_style_names()
     _migrate_money_columns()
     _cleanup_duplicate_chapters()
     _cleanup_duplicate_manga_images()
@@ -243,6 +248,258 @@ def _migrate_money_columns():
             ALTER COLUMN amount TYPE NUMERIC(10,2)
             USING ROUND(COALESCE(amount, 0)::numeric, 2)
         """))
+
+
+def _migrate_video_tables():
+    """Add missing columns to video-related tables (Phase 1 assets-driven workflow)."""
+    from sqlalchemy import inspect, text
+
+    insp = inspect(engine)
+    video_shots_cols = {c["name"] for c in insp.get_columns("video_shots")} if "video_shots" in insp.get_table_names() else set()
+    if video_shots_cols:
+        with engine.begin() as conn:
+            _prepare_migration_conn(conn)
+            if "style_preset" not in video_shots_cols:
+                conn.execute(text("ALTER TABLE video_shots ADD COLUMN style_preset VARCHAR(50)"))
+            if "storyboard_asset_id" not in video_shots_cols:
+                conn.execute(text("ALTER TABLE video_shots ADD COLUMN storyboard_asset_id INTEGER REFERENCES video_assets(id)"))
+            if "storyboard_locked" not in video_shots_cols:
+                conn.execute(text("ALTER TABLE video_shots ADD COLUMN storyboard_locked BOOLEAN DEFAULT FALSE"))
+            if "first_frame_prompt" not in video_shots_cols:
+                conn.execute(text("ALTER TABLE video_shots ADD COLUMN first_frame_prompt TEXT"))
+            if "last_frame_prompt" not in video_shots_cols:
+                conn.execute(text("ALTER TABLE video_shots ADD COLUMN last_frame_prompt TEXT"))
+            if "character_prompts_json" not in video_shots_cols:
+                conn.execute(text("ALTER TABLE video_shots ADD COLUMN character_prompts_json JSON"))
+
+    video_assets_cols = {c["name"] for c in insp.get_columns("video_assets")} if "video_assets" in insp.get_table_names() else set()
+    if video_assets_cols:
+        with engine.begin() as conn:
+            _prepare_migration_conn(conn)
+            if "asset_subtype" not in video_assets_cols:
+                conn.execute(text("ALTER TABLE video_assets ADD COLUMN asset_subtype VARCHAR(50)"))
+            if "source_asset_ids_json" not in video_assets_cols:
+                conn.execute(text("ALTER TABLE video_assets ADD COLUMN source_asset_ids_json JSON"))
+            if "style_preset" not in video_assets_cols:
+                conn.execute(text("ALTER TABLE video_assets ADD COLUMN style_preset VARCHAR(50)"))
+            if "locked" not in video_assets_cols:
+                conn.execute(text("ALTER TABLE video_assets ADD COLUMN locked BOOLEAN DEFAULT FALSE"))
+            if "revision" not in video_assets_cols:
+                conn.execute(text("ALTER TABLE video_assets ADD COLUMN revision INTEGER DEFAULT 1"))
+                conn.execute(text("UPDATE video_assets SET revision = 1 WHERE revision IS NULL"))
+            if "is_master" not in video_assets_cols:
+                conn.execute(text("ALTER TABLE video_assets ADD COLUMN is_master BOOLEAN DEFAULT FALSE"))
+            if "status" not in video_assets_cols:
+                conn.execute(text("ALTER TABLE video_assets ADD COLUMN status VARCHAR(20) DEFAULT 'active'"))
+                conn.execute(text("UPDATE video_assets SET status = 'active' WHERE status IS NULL"))
+            if "hash_key" not in video_assets_cols:
+                conn.execute(text("ALTER TABLE video_assets ADD COLUMN hash_key VARCHAR(64)"))
+
+    # Usage scope fields for video_assets
+    if video_assets_cols:
+        with engine.begin() as conn:
+            _prepare_migration_conn(conn)
+            if "usage_scope" not in video_assets_cols:
+                conn.execute(text("ALTER TABLE video_assets ADD COLUMN usage_scope VARCHAR(20) DEFAULT 'shot_only'"))
+                conn.execute(text("UPDATE video_assets SET usage_scope = 'shot_only' WHERE usage_scope IS NULL"))
+            if "inherit_to_next_shot" not in video_assets_cols:
+                conn.execute(text("ALTER TABLE video_assets ADD COLUMN inherit_to_next_shot BOOLEAN DEFAULT FALSE"))
+            if "source_type" not in video_assets_cols:
+                conn.execute(text("ALTER TABLE video_assets ADD COLUMN source_type VARCHAR(20) DEFAULT 'ai_generated'"))
+                conn.execute(text("UPDATE video_assets SET source_type = 'ai_generated' WHERE source_type IS NULL"))
+            if "story_level_default" not in video_assets_cols:
+                conn.execute(text("ALTER TABLE video_assets ADD COLUMN story_level_default BOOLEAN DEFAULT FALSE"))
+            if "chapter_level_default" not in video_assets_cols:
+                conn.execute(text("ALTER TABLE video_assets ADD COLUMN chapter_level_default BOOLEAN DEFAULT FALSE"))
+
+    video_jobs_cols = {c["name"] for c in insp.get_columns("video_generation_jobs")} if "video_generation_jobs" in insp.get_table_names() else set()
+    if video_jobs_cols:
+        with engine.begin() as conn:
+            _prepare_migration_conn(conn)
+            if "input_mode" not in video_jobs_cols:
+                conn.execute(text("ALTER TABLE video_generation_jobs ADD COLUMN input_mode VARCHAR(20)"))
+            if "source_storyboard_asset_id" not in video_jobs_cols:
+                conn.execute(text("ALTER TABLE video_generation_jobs ADD COLUMN source_storyboard_asset_id INTEGER REFERENCES video_assets(id)"))
+            if "reference_asset_ids_json" not in video_jobs_cols:
+                conn.execute(text("ALTER TABLE video_generation_jobs ADD COLUMN reference_asset_ids_json JSON"))
+            if "provider_payload_json" not in video_jobs_cols:
+                conn.execute(text("ALTER TABLE video_generation_jobs ADD COLUMN provider_payload_json JSON"))
+            if "provider_result_json" not in video_jobs_cols:
+                conn.execute(text("ALTER TABLE video_generation_jobs ADD COLUMN provider_result_json JSON"))
+            if "retry_of_job_id" not in video_jobs_cols:
+                conn.execute(text("ALTER TABLE video_generation_jobs ADD COLUMN retry_of_job_id INTEGER REFERENCES video_generation_jobs(id)"))
+
+    rendered_clips_cols = {c["name"] for c in insp.get_columns("rendered_clips")} if "rendered_clips" in insp.get_table_names() else set()
+    if rendered_clips_cols:
+        with engine.begin() as conn:
+            _prepare_migration_conn(conn)
+            if "source_storyboard_asset_id" not in rendered_clips_cols:
+                conn.execute(text("ALTER TABLE rendered_clips ADD COLUMN source_storyboard_asset_id INTEGER REFERENCES video_assets(id)"))
+            if "style_preset" not in rendered_clips_cols:
+                conn.execute(text("ALTER TABLE rendered_clips ADD COLUMN style_preset VARCHAR(50)"))
+            if "continuity_score" not in rendered_clips_cols:
+                conn.execute(text("ALTER TABLE rendered_clips ADD COLUMN continuity_score INTEGER"))
+            if "quality_score" not in rendered_clips_cols:
+                conn.execute(text("ALTER TABLE rendered_clips ADD COLUMN quality_score INTEGER"))
+            if "review_status" not in rendered_clips_cols:
+                conn.execute(text("ALTER TABLE rendered_clips ADD COLUMN review_status VARCHAR(20) DEFAULT 'pending'"))
+                conn.execute(text("UPDATE rendered_clips SET review_status = 'pending' WHERE review_status IS NULL"))
+
+    if "video_style_presets" not in insp.get_table_names():
+        with engine.begin() as conn:
+            _prepare_migration_conn(conn)
+            conn.execute(text("""
+                CREATE TABLE video_style_presets (
+                    id SERIAL PRIMARY KEY,
+                    name VARCHAR(100) NOT NULL,
+                    category VARCHAR(50) NOT NULL,
+                    prompt_template TEXT,
+                    image_style_params JSONB,
+                    video_style_params JSONB,
+                    sort_order INTEGER DEFAULT 0
+                )
+            """))
+
+    chapters_cols = {c["name"] for c in insp.get_columns("chapters")} if "chapters" in insp.get_table_names() else set()
+    if "video_style_preset_id" not in chapters_cols:
+        with engine.begin() as conn:
+            _prepare_migration_conn(conn)
+            conn.execute(text("ALTER TABLE chapters ADD COLUMN video_style_preset_id INTEGER REFERENCES video_style_presets(id)"))
+
+    stories_cols = {c["name"] for c in insp.get_columns("stories")} if "stories" in insp.get_table_names() else set()
+    if "video_style_preset_id" not in stories_cols:
+        with engine.begin() as conn:
+            _prepare_migration_conn(conn)
+            conn.execute(text("ALTER TABLE stories ADD COLUMN video_style_preset_id INTEGER REFERENCES video_style_presets(id)"))
+
+    script_scenes_cols = {c["name"] for c in insp.get_columns("script_scenes")} if "script_scenes" in insp.get_table_names() else set()
+    if "concept_art_asset_id" not in script_scenes_cols:
+        with engine.begin() as conn:
+            _prepare_migration_conn(conn)
+            conn.execute(text("ALTER TABLE script_scenes ADD COLUMN concept_art_asset_id INTEGER REFERENCES video_assets(id)"))
+
+    if "shot_asset_bindings" not in insp.get_table_names():
+        with engine.begin() as conn:
+            _prepare_migration_conn(conn)
+            conn.execute(text("""
+                CREATE TABLE shot_asset_bindings (
+                    id SERIAL PRIMARY KEY,
+                    shot_id INTEGER NOT NULL REFERENCES video_shots(id),
+                    asset_id INTEGER NOT NULL REFERENCES video_assets(id),
+                    role VARCHAR(30) NOT NULL,
+                    is_selected BOOLEAN DEFAULT FALSE,
+                    selection_source VARCHAR(30) DEFAULT 'auto_recommended',
+                    inherit_source_asset_id INTEGER REFERENCES video_assets(id),
+                    created_at TIMESTAMP DEFAULT NOW()
+                )
+            """))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS idx_shot_asset_bindings_shot_id ON shot_asset_bindings(shot_id)"))
+
+    if "character_involvement" not in video_shots_cols:
+        with engine.begin() as conn:
+            _prepare_migration_conn(conn)
+            conn.execute(text("ALTER TABLE video_shots ADD COLUMN character_involvement TEXT"))
+    if "scene_mood" not in video_shots_cols:
+        with engine.begin() as conn:
+            _prepare_migration_conn(conn)
+            conn.execute(text("ALTER TABLE video_shots ADD COLUMN scene_mood VARCHAR(50)"))
+
+
+def _seed_video_style_presets():
+    from sqlalchemy import inspect, text
+
+    try:
+        insp = inspect(engine)
+        if "video_style_presets" not in insp.get_table_names():
+            return
+
+        with engine.begin() as conn:
+            count = conn.execute(text("SELECT COUNT(*) FROM video_style_presets")).scalar()
+            if count and count > 0:
+                return
+
+            presets = [
+                {"name": "写实电影感", "category": "realistic", "prompt_template": "Realistic cinematic style, movie-grade lighting, natural colors, high detail, film grain", "image_style_params": {"model": "sd3.5", "size": "1920x1080", "style": "cinematic"}, "video_style_params": {"aspect_ratio": "16:9"}, "sort_order": 1},
+                {"name": "日式动漫风", "category": "anime", "prompt_template": "Japanese anime style, cel-shaded, vibrant colors, expressive eyes, clean line art, Studio Ghibli inspired", "image_style_params": {"model": "sd3.5", "size": "1920x1080", "style": "anime"}, "video_style_params": {"aspect_ratio": "16:9"}, "sort_order": 2},
+                {"name": "3A游戏渲染", "category": "game", "prompt_template": "AAA game cinematic render, Unreal Engine 5 quality, photorealistic textures, ray traced lighting, high polygon count", "image_style_params": {"model": "sd3.5", "size": "1920x1080", "style": "photorealistic"}, "video_style_params": {"aspect_ratio": "16:9"}, "sort_order": 3},
+                {"name": "水墨国风", "category": "artistic", "prompt_template": "Chinese ink wash painting style, brush stroke textures, minimalist composition, monochrome with subtle color accents, poetic atmosphere", "image_style_params": {"model": "sd3.5", "size": "1920x1080", "style": "ink-wash"}, "video_style_params": {"aspect_ratio": "16:9"}, "sort_order": 4},
+                {"name": "水彩手绘风", "category": "artistic", "prompt_template": "Watercolor illustration style, soft edges, paper texture visible, light and airy, hand-painted feel, gentle color palette", "image_style_params": {"model": "sd3.5", "size": "1920x1080", "style": "watercolor"}, "video_style_params": {"aspect_ratio": "16:9"}, "sort_order": 5},
+                {"name": "暗黑哥特风", "category": "artistic", "prompt_template": "Dark gothic style, dramatic shadows, muted color palette, high contrast, mysterious atmosphere, ornate details", "image_style_params": {"model": "sd3.5", "size": "1920x1080", "style": "dark"}, "video_style_params": {"aspect_ratio": "16:9"}, "sort_order": 6},
+                {"name": "复古胶片感", "category": "realistic", "prompt_template": "Vintage film look, 1970s cinema aesthetic, warm color grading, film grain, soft focus, retro lens flares", "image_style_params": {"model": "sd3.5", "size": "1920x1080", "style": "vintage"}, "video_style_params": {"aspect_ratio": "16:9"}, "sort_order": 7},
+                {"name": "科技赛博风", "category": "game", "prompt_template": "Cyberpunk sci-fi style, neon lights, dark urban environment, holographic displays, rain-slicked streets, futuristic technology", "image_style_params": {"model": "sd3.5", "size": "1920x1080", "style": "cyberpunk"}, "video_style_params": {"aspect_ratio": "16:9"}, "sort_order": 8},
+            ]
+
+            for preset in presets:
+                conn.execute(
+                    text("""INSERT INTO video_style_presets (name, category, prompt_template, image_style_params, video_style_params, sort_order)
+                            VALUES (:name, :category, :prompt_template, :image_style_params::jsonb, :video_style_params::jsonb, :sort_order)"""),
+                    preset,
+                )
+
+            logger.info("Seeded %d default video style presets", len(presets))
+    except Exception as exc:
+        logger.warning("Failed to seed video style presets: %s", exc)
+
+
+def _normalize_video_style_names():
+    """Normalize known legacy/typo style names across video workflow tables."""
+    from sqlalchemy import inspect, text
+
+    aliases = {
+        "3A游戏渲析": "3A游戏渲染",
+        "3A游戏滚析": "3A游戏渲染",
+        "3D游戏渲染": "3A游戏渲染",
+        "日式动漏风": "日式动漫风",
+        "水壁国风": "水墨国风",
+        "水彩手画风": "水彩手绘风",
+        "科技赛模风": "科技赛博风",
+    }
+    canonical_by_sort_order = {
+        1: "写实电影感",
+        2: "日式动漫风",
+        3: "3A游戏渲染",
+        4: "水墨国风",
+        5: "水彩手绘风",
+        6: "暗黑哥特风",
+        7: "复古胶片感",
+        8: "科技赛博风",
+    }
+
+    try:
+        insp = inspect(engine)
+        tables = set(insp.get_table_names())
+        with engine.begin() as conn:
+            _prepare_migration_conn(conn)
+            if "video_style_presets" in tables:
+                for sort_order, canonical_name in canonical_by_sort_order.items():
+                    conn.execute(
+                        text("UPDATE video_style_presets SET name = :name WHERE sort_order = :sort_order"),
+                        {"sort_order": sort_order, "name": canonical_name},
+                    )
+            for old_name, new_name in aliases.items():
+                if "video_style_presets" in tables:
+                    conn.execute(
+                        text("UPDATE video_style_presets SET name = :new_name WHERE name = :old_name"),
+                        {"old_name": old_name, "new_name": new_name},
+                    )
+                if "video_shots" in tables:
+                    conn.execute(
+                        text("UPDATE video_shots SET style_preset = :new_name WHERE style_preset = :old_name"),
+                        {"old_name": old_name, "new_name": new_name},
+                    )
+                if "video_assets" in tables:
+                    conn.execute(
+                        text("UPDATE video_assets SET style_preset = :new_name WHERE style_preset = :old_name"),
+                        {"old_name": old_name, "new_name": new_name},
+                    )
+                if "rendered_clips" in tables:
+                    conn.execute(
+                        text("UPDATE rendered_clips SET style_preset = :new_name WHERE style_preset = :old_name"),
+                        {"old_name": old_name, "new_name": new_name},
+                    )
+        logger.info("Normalized legacy video style names")
+    except Exception as exc:
+        logger.warning("Failed to normalize video style names: %s", exc)
 
 
 def _safe_unlink(path: Path):
