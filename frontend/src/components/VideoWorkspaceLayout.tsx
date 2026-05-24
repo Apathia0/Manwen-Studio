@@ -16,6 +16,7 @@ import ScreenplayPanel from './ScreenplayPanel';
 import StoryboardPanel from './StoryboardPanel';
 import ShotAssetWorkflowPanel from './ShotAssetWorkflowPanel';
 import ClipTimelinePanel from './ClipTimelinePanel';
+import VideoCharacterLibrary from './VideoCharacterLibrary';
 
 interface Props {
   story: Story;
@@ -26,6 +27,7 @@ interface Props {
 }
 
 type VideoTab = 'content' | 'screenplay' | 'storyboard' | 'clips' | 'project';
+type RightPanelTab = 'assets' | 'characters';
 
 const LS_VIDEO_ACTIVE_TAB = 'lorevista.videoActiveTab';
 const LS_VIDEO_SELECTED_SCENE_ID = 'lorevista.videoSelectedSceneId';
@@ -56,6 +58,7 @@ export default function VideoWorkspaceLayout({
   const [chapterStylePreset, setChapterStylePreset] = useState<any>(null);
   const [storyStylePreset, setStoryStylePreset] = useState<any>(null);
   const [assetsLoading, setAssetsLoading] = useState(false);
+  const [rightTab, setRightTab] = useState<RightPanelTab>('assets');
 
   const resolvedChapter = currentChapter;
 
@@ -338,21 +341,43 @@ export default function VideoWorkspaceLayout({
         </div>
       </div>
 
-      <ShotAssetWorkflowPanel
-        shot={selectedShot}
-        jobs={jobs}
-        clips={clips}
-        onJobsChange={setJobs}
-        onClipsChange={setClips}
-        chapter={resolvedChapter}
-        stylePresets={stylePresets}
-        chapterStylePreset={chapterStylePreset}
-        storyStylePreset={storyStylePreset}
-        onShotStylePresetChange={(preset) => {
-          if (selectedShot) handleShotStylePresetChange(selectedShot.id, preset);
-        }}
-        loading={assetsLoading}
-      />
+      <div className="w-[360px] shrink-0 overflow-hidden rounded-[20px] border border-[#d7e3f4] bg-white xl:w-[380px]">
+        <div className="flex gap-1 p-1 bg-slate-100 mx-3 mt-3 mb-0 rounded-xl">
+          <button
+            className={`flex-1 py-1.5 text-xs font-medium rounded-lg transition ${rightTab === 'assets' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
+            onClick={() => setRightTab('assets')}
+          >
+            资产管理
+          </button>
+          <button
+            className={`flex-1 py-1.5 text-xs font-medium rounded-lg transition ${rightTab === 'characters' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
+            onClick={() => setRightTab('characters')}
+          >
+            角色库
+          </button>
+        </div>
+        {rightTab === 'assets' ? (
+          <ShotAssetWorkflowPanel
+            shot={selectedShot}
+            jobs={jobs}
+            clips={clips}
+            onJobsChange={setJobs}
+            onClipsChange={setClips}
+            chapter={resolvedChapter}
+            stylePresets={stylePresets}
+            chapterStylePreset={chapterStylePreset}
+            storyStylePreset={storyStylePreset}
+            onShotStylePresetChange={(preset) => {
+              if (selectedShot) handleShotStylePresetChange(selectedShot.id, preset);
+            }}
+            loading={assetsLoading}
+          />
+        ) : (
+          <div className="p-4">
+            <VideoCharacterLibrary storyId={story.id} />
+          </div>
+        )}
+      </div>
     </div>
   );
 }

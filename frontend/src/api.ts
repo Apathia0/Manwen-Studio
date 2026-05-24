@@ -2365,7 +2365,7 @@ export async function renderShotVideo(shotId: number, payload: {
   provider: string; model?: string; duration_seconds: number; aspect_ratio?: string;
   fps?: number; use_reference_assets?: boolean; reference_asset_ids?: number[];
   seed?: number; overwrite_active_clip?: boolean;
-  input_mode?: string; source_storyboard_asset_id?: number;
+  input_mode?: string; source_storyboard_asset_id?: number; prompt?: string;
 }): Promise<{ job: VideoGenerationJob; shot_status: string; usage?: { feature_key: string; consumed: number } }> {
   const res = await fetch(`${BASE}/api/shots/${shotId}/video/render`, { method: 'POST', headers: apiHeaders(true), body: JSON.stringify(payload) });
   if (!res.ok) throw new Error(await readErrorMessage(res, '提交视频任务失败'));
@@ -2696,3 +2696,85 @@ export async function setChapterStylePreset(chapterId: number, stylePresetId: nu
 }
 
 
+// ─── Story Character Library (Phase 2) ─────────────────────────────
+
+export interface CharacterVersion {
+  id: number;
+  label: string;
+  is_default: boolean;
+  ref_asset_id: number | null;
+  ref_asset_url: string;
+  appearance_card: string;
+  sort_order: number;
+}
+
+export interface VideoCharacter {
+  name: string;
+  versions: CharacterVersion[];
+}
+
+export interface VideoCharactersResponse {
+  characters: VideoCharacter[];
+  video_character_profiles: string;
+}
+
+export async function listVideoCharacters(storyId: number): Promise<VideoCharactersResponse> {
+  const res = await fetch(`${BASE}/api/stories/${storyId}/video-characters`, { headers: apiHeaders() });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '获取角色库失败'));
+  return res.json();
+}
+
+export async function generateVideoCharacters(storyId: number): Promise<VideoCharactersResponse> {
+  const res = await fetch(`${BASE}/api/stories/${storyId}/video-characters/generate`, { method: 'POST', headers: apiHeaders(true) });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '生成角色卡失败'));
+  return res.json();
+}
+
+export async function createCharacterVersion(
+  storyId: number, characterName: string, payload: { version_label: string; appearance_card: string; set_default?: boolean }
+): Promise<{ version: CharacterVersion }> {
+  const res = await fetch(`${BASE}/api/stories/${storyId}/video-characters/${encodeURIComponent(characterName)}/versions`, {
+    method: 'POST', headers: apiHeaders(true), body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '创建角色版本失败'));
+  return res.json();
+}
+
+export async function deleteCharacterVersion(
+  storyId: number, characterName: string, versionId: number
+): Promise<void> {
+  const res = await fetch(`${BASE}/api/stories/${storyId}/video-characters/${encodeURIComponent(characterName)}/versions/${versionId}`, {
+    method: 'DELETE', headers: apiHeaders(true),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '删除角色版本失败'));
+}
+
+export async function generateCharacterRefImage(
+  storyId: number, characterName: string, versionId: number, stylePreset?: string
+): Promise<{ ref_asset_id: number; file_path: string }> {
+  const res = await fetch(`${BASE}/api/stories/${storyId}/video-characters/${encodeURIComponent(characterName)}/versions/${versionId}/generate-ref`, {
+    method: 'POST', headers: apiHeaders(true), body: JSON.stringify({ style_preset: stylePreset || '' }),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '生成角色参考图失败'));
+  return res.json();
+}
+
+export async function deleteCharacterRefImage(
+  storyId: number, characterName: string, versionId: number
+): Promise<void> {
+  const res = await fetch(`${BASE}/api/stories/${storyId}/video-characters/${encodeURIComponent(characterName)}/versions/${versionId}/ref`, {
+    method: 'DELETE', headers: apiHeaders(true),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '删除参考图失败'));
+}
+
+export async function redrawCharacterRefImage(
+  storyId: number, characterName: string, versionId: number,
+  payload: { prompt: string; mode: ImageRedrawMode; mask?: string },
+): Promise<{ ref_asset_id: number; file_path: string }> {
+  const res = await fetch(`${BASE}/api/stories/${storyId}/video-characters/${encodeURIComponent(characterName)}/versions/${versionId}/ref/redraw`, {
+    method: 'POST', headers: apiHeaders(true), body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '重绘参考图失败'));
+  return res.json();
+}

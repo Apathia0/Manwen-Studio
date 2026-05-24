@@ -17,6 +17,7 @@ class Story(Base):
     description: Mapped[str | None] = mapped_column(Text, nullable=True, default="")
     cover_image: Mapped[str | None] = mapped_column(String(500), nullable=True)
     character_profiles: Mapped[str | None] = mapped_column(Text, nullable=True, default="")
+    video_character_profiles: Mapped[str | None] = mapped_column(Text, nullable=True, default="")
     tags: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     outline: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     characters: Mapped[list[dict[str, Any]] | None] = mapped_column(JSON, nullable=True)
@@ -487,3 +488,25 @@ class VideoProject(Base):
     output_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
     created_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
+class StoryCharacterVersion(Base):
+    """Story-level character version library for video workflow."""
+    __tablename__ = "story_character_versions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    story_id: Mapped[int] = mapped_column(Integer, ForeignKey("stories.id", ondelete="CASCADE"), nullable=False, index=True)
+    character_name: Mapped[str] = mapped_column(String(100), nullable=False)
+    version_label: Mapped[str] = mapped_column(String(50), nullable=False, default="v1-默认")
+    appearance_card: Mapped[str | None] = mapped_column(Text, nullable=True, default="")
+    ref_asset_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("video_assets.id"), nullable=True)
+    is_default: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+    __table_args__ = (
+        UniqueConstraint("story_id", "character_name", "version_label"),
+    )
+
+    story: Mapped["Story"] = relationship("Story")

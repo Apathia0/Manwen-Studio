@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import VideoPanel from './VideoPanel';
 import AssetManagementPanel from './AssetManagementPanel';
+import VideoCharacterLibrary from './VideoCharacterLibrary';
 import type { VideoShot, VideoGenerationJob, RenderedClip } from '../api';
 
 interface VideoRightPanelProps {
@@ -22,9 +23,9 @@ interface VideoRightPanelProps {
 const STORAGE_KEY = 'lorevista.videoRightTab';
 
 export default function VideoRightPanel(props: VideoRightPanelProps) {
-  const [activeTab, setActiveTab] = useState<'video' | 'assets'>(() => {
+  const [activeTab, setActiveTab] = useState<'video' | 'assets' | 'characters'>(() => {
     const saved = localStorage.getItem(STORAGE_KEY);
-    if (saved === 'video' || saved === 'assets') return saved;
+    if (saved === 'video' || saved === 'assets' || saved === 'characters') return saved;
     return 'video';
   });
 
@@ -55,6 +56,16 @@ export default function VideoRightPanel(props: VideoRightPanelProps) {
         >
           资产管理
         </button>
+        <button
+          className={`px-4 py-2 text-sm font-medium rounded-lg transition ${
+            activeTab === 'characters'
+              ? 'bg-white text-slate-900 shadow-sm'
+              : 'text-slate-500 hover:text-slate-700'
+          }`}
+          onClick={() => setActiveTab('characters')}
+        >
+          角色库
+        </button>
       </div>
 
       <div className="p-4">
@@ -65,6 +76,10 @@ export default function VideoRightPanel(props: VideoRightPanelProps) {
             clips={props.clips}
             onJobsChange={props.onJobsChange}
             onClipsChange={props.onClipsChange}
+          />
+        ) : activeTab === 'characters' ? (
+          <VideoCharacterLibrary
+            storyId={props.chapter?.story_id}
           />
         ) : (
           <AssetManagementPanel

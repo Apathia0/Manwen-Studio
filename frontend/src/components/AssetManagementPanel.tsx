@@ -60,7 +60,7 @@ const AssetManagementPanel: React.FC<AssetPanelProps> = ({
       const res = await fetch(`/api/chapters/${chapter.id}/video-assets`, { headers: apiHeaders() });
       const data = await res.json();
       const assets = data.assets || [];
-      setCharacterAssets(assets.filter((a: any) => a.asset_type === 'character_reference'));
+      setCharacterAssets(assets.filter((a: any) => a.asset_type === 'character_reference' || a.asset_type === 'story_character_reference'));
       setSceneAssets(assets.filter((a: any) => a.asset_type === 'scene_reference'));
     } catch (e) {
       console.error('Failed to load assets:', e);

@@ -212,6 +212,7 @@ def _migrate():
             if "allow_api_url_override" not in cols:
                 conn.execute(text("ALTER TABLE users ADD COLUMN allow_api_url_override BOOLEAN DEFAULT FALSE"))
     _migrate_video_tables()
+    _migrate_video_character_tables()
     _seed_video_style_presets()
     _normalize_video_style_names()
     _migrate_money_columns()
@@ -500,6 +501,40 @@ def _normalize_video_style_names():
         logger.info("Normalized legacy video style names")
     except Exception as exc:
         logger.warning("Failed to normalize video style names: %s", exc)
+
+
+def _migrate_video_character_tables():
+    """Story-level character library for video workflow (Phase 2)."""
+    from sqlalchemy import inspect, text
+
+    insp = inspect(engine)
+
+    # stories.video_character_profiles
+    stories_cols = {c["name"] for c in insp.get_columns("stories")} if "stories" in insp.get_table_names() else set()
+    if stories_cols and "video_character_profiles" not in stories_cols:
+        with engine.begin() as conn:
+            _prepare_migration_conn(conn)
+            conn.execute(text("ALTER TABLE stories ADD COLUMN video_character_profiles TEXT"))
+
+    # story_character_versions table
+    if "story_character_versions" not in insp.get_table_names():
+        with engine.begin() as conn:
+            _prepare_migration_conn(conn)
+            conn.execute(text("""
+                CREATE TABLE story_character_versions (
+                    id SERIAL PRIMARY KEY,
+                    story_id INTEGER NOT NULL REFERENCES stories(id) ON DELETE CASCADE,
+                    character_name VARCHAR(100) NOT NULL,
+                    version_label VARCHAR(50) NOT NULL DEFAULT 'v1-默认',
+                    appearance_card TEXT DEFAULT '',
+                    ref_asset_id INTEGER REFERENCES video_assets(id),
+                    is_default BOOLEAN DEFAULT FALSE,
+                    sort_order INTEGER DEFAULT 0,
+                    created_at TIMESTAMP DEFAULT NOW(),
+                    updated_at TIMESTAMP DEFAULT NOW(),
+                    UNIQUE(story_id, character_name, version_label)
+                )
+            """))
 
 
 def _safe_unlink(path: Path):

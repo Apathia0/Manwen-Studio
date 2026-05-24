@@ -24,12 +24,22 @@ from database import SessionLocal, get_db
 _VIDEO_OUTPUTS_DIR = Path(__file__).resolve().parent.parent / "video_outputs"
 
 def _to_video_url(local_path: str) -> str:
+    if not local_path:
+        return ""
+    if local_path.startswith("/static/video/"):
+        return local_path
+    if local_path.startswith("http://") or local_path.startswith("https://"):
+        return local_path
     p = Path(local_path)
+    if not p.is_absolute():
+        # 相对路径直接拼接
+        return f"/static/video/{p.as_posix()}"
+    # 绝对路径：尝试相对于 _VIDEO_OUTPUTS_DIR
     try:
-        rel = p.relative_to(_VIDEO_OUTPUTS_DIR)
+        rel = p.resolve().relative_to(_VIDEO_OUTPUTS_DIR.resolve())
         return f"/static/video/{rel.as_posix()}"
     except ValueError:
-        return local_path
+        return f"/static/video/{p.name}"
 
 
 def _from_video_url(video_url: str) -> str | None:
@@ -49,6 +59,7 @@ from models import (
     PlatformSetting,
     ScriptScene,
     Story,
+    StoryCharacterVersion,
     User,
     UserSession,
     VideoAsset,
@@ -388,13 +399,13 @@ def _build_character_sheet_prompt(
         "Use orthographic-like character-sheet composition with clean labels and consistent proportions. "
         "Clean light background, no scene background, no story event text overlays. "
         f"Character name: {character_name}. "
-        f"Role: {role}. "
-        f"Personality/arc cues: {arc}. "
-        f"Trait cues: {traits}. "
-        f"Appearance notes: {note_from_profiles}. "
-        f"Reference anchor: {inherited_prompt}. "
-        "Must keep stable identity markers (face shape, hairstyle, eye shape, signature colors, silhouette). "
-        "High-detail character sheet for reusable animation/video consistency."
+        f"Role: {role}. Character arc: {arc}. "
+        f"Personality profile (Big Five): {traits}. "
+        f"Appearance details: {note_from_profiles or 'detailed facial features, hairstyle, eye shape, body type, signature colors required'}. "
+        f"Reference anchor: {inherited_prompt or 'consistent identity markers across all frames'}. "
+        f"Style requirement: apply selected anime/illustration style, cel-shaded rendering, clean line art, vibrant color palette. "
+        "Mandatory consistency: lock face shape, eye distance, nose bridge contour, lip shape, jawline angle, hair parting, and 3 signature color swatches across ALL generated frames. "
+        "This is a master reference sheet for video animation consistency. Every subsequent frame MUST match these identity markers exactly."
     )
     return _merge_style_prompt(card, style_ctx.get("prompt_template"), style_ctx.get("name"))
 
@@ -415,10 +426,10 @@ def _get_active_frame_assets_for_shot(shot_id: int, db: Session) -> list[VideoAs
 def _collect_shot_reference_asset_ids(
     shot: VideoShot,
     db: Session,
-    include_characters: bool = True,
-    include_scene: bool = True,
-    include_storyboard: bool = True,
-    include_frames: bool = True,
+    include_characters: bool = False,
+    include_scene: bool = False,
+    include_storyboard: bool = False,
+    include_frames: bool = False,
     explicit_asset_ids: list[int] | None = None,
 ) -> list[int]:
     ids: list[int] = []
@@ -435,10 +446,77 @@ def _collect_shot_reference_asset_ids(
     return list(dict.fromkeys(ids))
 
 
+def _split_frame_assets(ref_assets: list[VideoAsset]) -> tuple[VideoAsset | None, VideoAsset | None, list[VideoAsset]]:
+    """从参考资产中分离首帧、尾帧和其他参考图。"""
+    first_frame: VideoAsset | None = None
+    last_frame: VideoAsset | None = None
+    other: list[VideoAsset] = []
+    for a in ref_assets:
+        sub = a.asset_subtype or ""
+        if sub == "first_frame":
+            first_frame = a
+        elif sub == "last_frame":
+            last_frame = a
+        else:
+            other.append(a)
+    return first_frame, last_frame, other
+
+
+def _get_previous_shot_last_frame(shot: VideoShot, db: Session) -> VideoAsset | None:
+    """获取同一场景中前一个镜头的尾帧资产，用于视频连贯继承。"""
+    if not shot.scene_id or not shot.shot_number:
+        return None
+    prev_shot = (
+        db.query(VideoShot)
+        .filter(
+            VideoShot.scene_id == shot.scene_id,
+            VideoShot.shot_number < shot.shot_number,
+        )
+        .order_by(VideoShot.shot_number.desc())
+        .first()
+    )
+    if not prev_shot:
+        return None
+    return (
+        db.query(VideoAsset)
+        .filter(
+            VideoAsset.shot_id == prev_shot.id,
+            VideoAsset.asset_type == "frame",
+            VideoAsset.asset_subtype == "last_frame",
+            VideoAsset.status == "active",
+        )
+        .order_by(VideoAsset.created_at.desc())
+        .first()
+    )
+
+
 def _select_character_reference_assets_for_scene(scene: ScriptScene, db: Session, limit: int = 6) -> list[VideoAsset]:
     chapter_id = scene.chapter_id
     scene_characters = [str(c).strip() for c in (scene.characters_json or []) if str(c).strip()]
-    all_assets = (
+    matched: list[VideoAsset] = []
+    used_ids: set[int] = set()
+    chapter = db.get(Chapter, chapter_id) if chapter_id else None
+    story_id = chapter.story_id if chapter else None
+
+    # 第一级：Story 级角色库默认版本参考图
+    if story_id and scene_characters:
+        for ch in scene_characters:
+            version = db.query(StoryCharacterVersion).filter(
+                StoryCharacterVersion.story_id == story_id,
+                StoryCharacterVersion.character_name == ch,
+                StoryCharacterVersion.is_default == True,
+                StoryCharacterVersion.ref_asset_id.isnot(None),
+            ).first()
+            if version and version.ref_asset_id and version.ref_asset_id not in used_ids:
+                asset = db.get(VideoAsset, version.ref_asset_id)
+                if asset and asset.status == "active":
+                    matched.append(asset)
+                    used_ids.add(version.ref_asset_id)
+                    if len(matched) >= limit:
+                        return matched[:limit]
+
+    # 第二级：Chapter 级 character_reference 资产（兜底）
+    all_chapter_assets = (
         db.query(VideoAsset)
         .filter(
             VideoAsset.chapter_id == chapter_id,
@@ -449,23 +527,23 @@ def _select_character_reference_assets_for_scene(scene: ScriptScene, db: Session
         .all()
     )
     if not scene_characters:
-        return all_assets[:limit]
+        for a in all_chapter_assets:
+            if a.id not in used_ids:
+                matched.append(a)
+                used_ids.add(a.id)
+        return matched[:limit]
 
-    matched: list[VideoAsset] = []
-    used_ids: set[int] = set()
     for ch in scene_characters:
-        for a in all_assets:
+        for a in all_chapter_assets:
             if a.id in used_ids:
                 continue
-            name = (a.name or "")
-            prompt = (a.prompt or "")
-            if ch in name or ch in prompt:
+            if ch in (a.name or "") or ch in (a.prompt or ""):
                 matched.append(a)
                 used_ids.add(a.id)
                 break
 
     if len(matched) < limit:
-        for a in all_assets:
+        for a in all_chapter_assets:
             if a.id in used_ids:
                 continue
             matched.append(a)
@@ -475,28 +553,36 @@ def _select_character_reference_assets_for_scene(scene: ScriptScene, db: Session
 
 
 def _build_reference_constraints_block(character_assets: list[VideoAsset]) -> str:
-    """Build hard character identity constraints from existing reference assets."""
+    """构建参考资产使用说明，按资产类型给出明确角色标注。"""
     if not character_assets:
         return ""
-    parts = ["<<<CHARACTER_LOCK_PROTOCOL>>>"]
+
+    type_roles = {
+        "character_reference": "角色身份参考图",
+        "story_character_reference": "角色身份参考图",
+        "scene_reference": "场景氛围参考图",
+        "storyboard_frame": "分镜构图参考图",
+        "frame": "首尾帧参考图",
+    }
+
+    groups: dict[str, list[VideoAsset]] = {}
     for a in character_assets:
-        asset_id = a.id
-        name = a.name or "character"
-        prompt_snippet = (a.prompt or "")[:200]
-        locked_markers = ""
-        if a.locked:
-            locked_markers = " [LOCKED-涓嶅彲淇敼]"
-        if a.is_master:
-            locked_markers += " [MASTER-涓荤増鏈弬鑰僝"
-        parts.append(
-            f"[CHARACTER_ID:{asset_id}] {name}{locked_markers}: "
-            f"{prompt_snippet}"
-        )
+        at = a.asset_type or "reference"
+        groups.setdefault(at, []).append(a)
+
+    parts = ["<<<REFERENCE_ASSET_GUIDE>>>"]
+    parts.append("以下图片已作为视觉参考传入。各图片用途如下：")
+
+    for at, assets in groups.items():
+        role = type_roles.get(at, f"{at}参考图")
+        names = ", ".join(a.name or "unnamed" for a in assets[:5])
+        parts.append(f"- {role} ({len(assets)}张): {names}")
+
     parts.append(
-        "<<<END_LOCK>>> "
-        "MANDATORY: face structure, hairstyle, body proportions, costume silhouette, "
-        "and identity colors of the above CHARACTER_ID entries MUST remain exactly as described. "
-        "These identity anchors override any conflicting description elsewhere."
+        "<<<END_GUIDE>>> "
+        "MANDATORY: 使用上述参考图时，人物参考图用于锁定面部特征、发型、服装；"
+        "场景参考图用于锁定氛围和色调；分镜参考图用于锁定构图和镜头。"
+        "所有身份标记（脸型、眼距、鼻梁、唇形、标志色）必须与参考图严格一致。"
     )
     return " ".join(parts)
 
@@ -617,6 +703,8 @@ def _build_story_grounding_block(
         parts.append(f"Character roster: {_compact_json(story.characters[:8], 700)}")
     if story.character_profiles:
         parts.append(f"Character appearance profiles: {(story.character_profiles or '')[:900]}")
+    if story.video_character_profiles:
+        parts.append(f"Video character design cards: {(story.video_character_profiles or '')[:1200]}")
     if chapter and chapter.novel_content:
         parts.append(f"Chapter source text excerpt: {(chapter.novel_content or '')[:900]}")
     if scene:
@@ -1351,7 +1439,11 @@ async def update_shot(
         reference_image_urls = []
     input_mode = body.input_mode
     if not input_mode:
-        if source_storyboard_asset_id and shot.storyboard_locked:
+        has_ref_images = bool(reference_image_urls)
+        has_storyboard = source_storyboard_asset_id and shot.storyboard_locked
+        if has_storyboard:
+            input_mode = "image_to_video"
+        elif has_ref_images:
             input_mode = "image_to_video"
         else:
             input_mode = "text_to_video"
@@ -1363,6 +1455,33 @@ async def update_shot(
             "Consider approving the storyboard first.", shot_id
         )
 
+    ref_assets = db.query(VideoAsset).filter(VideoAsset.id.in_(auto_reference_asset_ids)).all() if auto_reference_asset_ids else []
+    first_frame_asset, last_frame_asset, other_refs = _split_frame_assets(ref_assets)
+    ref_block = _build_reference_constraints_block(ref_assets)
+
+    ordered_images: list[str] = []
+    # 用户未选首帧时，自动继承前一个镜头的尾帧作为连贯参考
+    prev_last_frame = _get_previous_shot_last_frame(shot, db) if not first_frame_asset else None
+    if prev_last_frame:
+        p = _resolve_asset_file_paths([prev_last_frame])
+        b = _encode_file_to_base64_data_uri(p[0]) if p else None
+        if b:
+            ordered_images.append(b)
+            if not first_frame_asset:
+                first_frame_url_text = b[:80] + "..."
+                logger.info("Shot %s: 继承前镜头尾帧作为首帧连贯参考", shot_id)
+    if first_frame_asset:
+        path = _resolve_asset_file_paths([first_frame_asset])
+        b64 = _encode_file_to_base64_data_uri(path[0]) if path else None
+        if b64:
+            ordered_images.append(b64)
+    ordered_images.extend(_resolve_asset_reference_urls([a.id for a in other_refs], db, request) if other_refs else [])
+    if last_frame_asset:
+        path = _resolve_asset_file_paths([last_frame_asset])
+        b64 = _encode_file_to_base64_data_uri(path[0]) if path else None
+        if b64:
+            ordered_images.append(b64)
+
     style_ctx = _resolve_effective_style_for_shot(shot, db, requested_style_name=body.style)
     style_name = style_ctx["name"]
     video_style_params = style_ctx["video_style_params"]
@@ -1372,7 +1491,7 @@ async def update_shot(
     resolved_model = body.model or resolved_model
     aspect_ratio = body.aspect_ratio or video_style_params.get("aspect_ratio") or "16:9"
     grounding = _build_story_grounding_block(shot.scene.chapter.story if shot.scene and shot.scene.chapter else None, shot.scene.chapter if shot.scene else None, shot.scene)
-    full_prompt = _merge_style_prompt(f"{body.prompt or shot.video_prompt or ''} Grounding: {grounding}".strip(), style_template, style_name)
+    full_prompt = _merge_style_prompt(f"{body.prompt or shot.video_prompt or ''} {ref_block} Grounding: {grounding}".strip(), style_template, style_name)
 
     job_result = await video_gen_service.submit_video_job(
         shot_id=shot_id,
@@ -1382,7 +1501,7 @@ async def update_shot(
         negative_prompt=body.negative_prompt or shot.negative_prompt or "",
         duration_seconds=duration,
         aspect_ratio=aspect_ratio,
-        reference_images=reference_image_urls if reference_image_urls else None,
+        reference_images=ordered_images if ordered_images else None,
         api_key=api_key,
         base_url=base_url,
     )
@@ -1507,10 +1626,41 @@ async def render_shot_video_stream(
         reference_image_urls = []
     input_mode = body.input_mode
     if not input_mode:
-        if source_storyboard_asset_id and shot.storyboard_locked:
+        has_ref_images = bool(reference_image_urls)
+        has_storyboard = source_storyboard_asset_id and shot.storyboard_locked
+        if has_storyboard:
+            input_mode = "image_to_video"
+        elif has_ref_images:
             input_mode = "image_to_video"
         else:
             input_mode = "text_to_video"
+
+    ref_assets = db.query(VideoAsset).filter(VideoAsset.id.in_(auto_reference_asset_ids)).all() if auto_reference_asset_ids else []
+    first_frame_asset, last_frame_asset, other_refs = _split_frame_assets(ref_assets)
+    ref_block = _build_reference_constraints_block(ref_assets)
+
+    ordered_images: list[str] = []
+    # 用户未选首帧时，自动继承前一个镜头的尾帧作为连贯参考
+    prev_last_frame = _get_previous_shot_last_frame(shot, db) if not first_frame_asset else None
+    if prev_last_frame:
+        p = _resolve_asset_file_paths([prev_last_frame])
+        b = _encode_file_to_base64_data_uri(p[0]) if p else None
+        if b:
+            ordered_images.append(b)
+            if not first_frame_asset:
+                first_frame_url_text = b[:80] + "..."
+                logger.info("Shot %s: 继承前镜头尾帧作为首帧连贯参考", shot_id)
+    if first_frame_asset:
+        path = _resolve_asset_file_paths([first_frame_asset])
+        b64 = _encode_file_to_base64_data_uri(path[0]) if path else None
+        if b64:
+            ordered_images.append(b64)
+    ordered_images.extend(_resolve_asset_reference_urls([a.id for a in other_refs], db, request) if other_refs else [])
+    if last_frame_asset:
+        path = _resolve_asset_file_paths([last_frame_asset])
+        b64 = _encode_file_to_base64_data_uri(path[0]) if path else None
+        if b64:
+            ordered_images.append(b64)
 
     style_ctx = _resolve_effective_style_for_shot(shot, db, requested_style_name=body.style)
     style_name = style_ctx["name"]
@@ -1521,7 +1671,7 @@ async def render_shot_video_stream(
     resolved_model = body.model or resolved_model
     aspect_ratio = body.aspect_ratio or video_style_params.get("aspect_ratio") or "16:9"
     grounding = _build_story_grounding_block(shot.scene.chapter.story if shot.scene and shot.scene.chapter else None, shot.scene.chapter if shot.scene else None, shot.scene)
-    full_prompt = _merge_style_prompt(f"{body.prompt or shot.video_prompt or ''} Grounding: {grounding}".strip(), style_template, style_name)
+    full_prompt = _merge_style_prompt(f"{body.prompt or shot.video_prompt or ''} {ref_block} Grounding: {grounding}".strip(), style_template, style_name)
 
     async def event_generator():
         nonlocal db, base_url
@@ -1538,7 +1688,7 @@ async def render_shot_video_stream(
                 negative_prompt=body.negative_prompt or shot.negative_prompt or "",
                 duration_seconds=duration,
                 aspect_ratio=aspect_ratio,
-                reference_images=reference_image_urls if reference_image_urls else None,
+                reference_images=ordered_images if ordered_images else None,
                 api_key=api_key,
                 base_url=base_url,
             )
@@ -1904,6 +2054,7 @@ async def get_video_job(
                 db.add(clip)
                 db.commit()
                 db.refresh(clip)
+                logger.info("Video job %s created clip id=%s path=%s version=%s", job_id, clip.id, clip.video_path, clip.version)
                 shot.status = "ready"
                 shot.updated_at = datetime.datetime.utcnow()
                 db.commit()
@@ -1939,6 +2090,7 @@ async def get_video_job(
             "resolution": clip.resolution or "",
             "version": clip.version,
         }
+        logger.info("Video job %s returning clip: id=%s path=%s", job_id, clip.id, clip.video_path)
 
     return result
 
@@ -2005,13 +2157,30 @@ async def list_chapter_video_assets(
     db: Session = Depends(get_db),
 ):
     user = _require_user(request, db)
-    _require_chapter_for_user(chapter_id, user, db)
+    chapter = _require_chapter_for_user(chapter_id, user, db)
 
     query = db.query(VideoAsset).filter(VideoAsset.chapter_id == chapter_id)
     if asset_type:
         query = query.filter(VideoAsset.asset_type == asset_type)
 
-    assets = query.order_by(VideoAsset.created_at.desc()).all()
+    assets = list(query.order_by(VideoAsset.created_at.desc()).all())
+
+    # 查询角色资产时，补充 Story 级角色库中的参考图
+    if asset_type == "character_reference" and chapter.story_id:
+        story_char_assets = (
+            db.query(VideoAsset)
+            .join(StoryCharacterVersion, StoryCharacterVersion.ref_asset_id == VideoAsset.id)
+            .filter(
+                StoryCharacterVersion.story_id == chapter.story_id,
+                StoryCharacterVersion.is_default == True,
+                VideoAsset.status == "active",
+            )
+            .all()
+        )
+        existing_ids = {a.id for a in assets}
+        for a in story_char_assets:
+            if a.id not in existing_ids:
+                assets.append(a)
 
     return {
         "chapter_id": chapter_id,
@@ -2024,7 +2193,7 @@ async def list_chapter_video_assets(
                 "shot_id": a.shot_id,
                 "asset_type": a.asset_type,
                 "name": a.name,
-                "file_path": a.file_path,
+                "file_path": _to_video_url(a.file_path),
                 "provider": a.provider,
                 "prompt": a.prompt or "",
                 "meta": a.meta_json or {},
@@ -2248,7 +2417,7 @@ async def regenerate_video_asset(
         "asset": {
             "id": new_asset.id,
             "name": new_asset.name,
-            "file_path": new_asset.file_path,
+            "file_path": _to_video_url(new_asset.file_path),
             "asset_type": new_asset.asset_type,
             "asset_subtype": new_asset.asset_subtype,
             "prompt": new_asset.prompt,
@@ -2482,7 +2651,533 @@ async def set_story_video_style_preset(
     }
 
 
-# 鈹€鈹€鈹€ Shot Style Preset Override 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+# ─── Story Character Library (Phase 2) ──────────────────────────────
+
+def _get_story_character_reference_asset_ids(story_id: int, db: Session) -> list[int]:
+    """获取 Story 级所有角色默认版本的参考图 asset_id。"""
+    versions = db.query(StoryCharacterVersion).filter(
+        StoryCharacterVersion.story_id == story_id,
+        StoryCharacterVersion.is_default == True,
+        StoryCharacterVersion.ref_asset_id.isnot(None),
+    ).all()
+    return [v.ref_asset_id for v in versions if v.ref_asset_id]
+
+
+def _serialize_character_versions(db: Session, story_id: int, character_name: str) -> list[dict]:
+    versions = db.query(StoryCharacterVersion).filter(
+        StoryCharacterVersion.story_id == story_id,
+        StoryCharacterVersion.character_name == character_name,
+    ).order_by(StoryCharacterVersion.sort_order.asc()).all()
+    result: list[dict] = []
+    for v in versions:
+        ref_url = ""
+        if v.ref_asset_id:
+            asset = db.get(VideoAsset, v.ref_asset_id)
+            if asset:
+                ref_url = _to_video_url(asset.file_path)
+        result.append({
+            "id": v.id,
+            "label": v.version_label,
+            "is_default": v.is_default,
+            "ref_asset_id": v.ref_asset_id,
+            "ref_asset_url": ref_url,
+            "appearance_card": v.appearance_card or "",
+            "sort_order": v.sort_order,
+        })
+    return result
+
+
+@router.get("/api/stories/{story_id}/video-characters")
+async def list_video_characters(
+    story_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    user = _require_user(request, db)
+    story = _require_story_for_user(story_id, user, db)
+
+    versions = db.query(StoryCharacterVersion).filter(
+        StoryCharacterVersion.story_id == story_id,
+    ).order_by(StoryCharacterVersion.sort_order.asc()).all()
+
+    char_map: dict[str, list[dict]] = {}
+    for v in versions:
+        ref_url = ""
+        if v.ref_asset_id:
+            asset = db.get(VideoAsset, v.ref_asset_id)
+            if asset:
+                ref_url = _to_video_url(asset.file_path)
+        char_map.setdefault(v.character_name, []).append({
+            "id": v.id,
+            "label": v.version_label,
+            "is_default": v.is_default,
+            "ref_asset_id": v.ref_asset_id,
+            "ref_asset_url": ref_url,
+            "appearance_card": v.appearance_card or "",
+            "sort_order": v.sort_order,
+        })
+
+    characters = [{"name": name, "versions": vers} for name, vers in char_map.items()]
+    return {"characters": characters, "video_character_profiles": story.video_character_profiles or ""}
+
+
+@router.post("/api/stories/{story_id}/video-characters/generate")
+async def generate_video_characters(
+    story_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """从 story.characters 调用 DeepSeek 生成角色外貌卡，存入 story.video_character_profiles 并创建默认版本。"""
+    user = _require_user(request, db)
+    story = _require_story_for_user(story_id, user, db)
+
+    characters_data = story.characters or []
+    if not characters_data:
+        raise HTTPException(400, "故事尚无角色数据，请先在故事框架中生成角色")
+
+    character_names: list[str] = []
+    char_descriptions: list[str] = []
+    for c in characters_data:
+        if isinstance(c, dict):
+            name = str(c.get("name") or "").strip()
+            if not name:
+                continue
+            character_names.append(name)
+            parts = [name]
+            for k in ("role", "personality", "arc", "appearance"):
+                v = str(c.get(k) or "").strip()
+                if v:
+                    parts.append(f"{k}: {v[:300]}")
+            bf = c.get("big_five")
+            if isinstance(bf, dict):
+                parts.append(f"big_five: {json.dumps(bf, ensure_ascii=False)}")
+            char_descriptions.append("\n".join(parts))
+        elif isinstance(c, str) and c.strip():
+            character_names.append(c.strip())
+            char_descriptions.append(c.strip())
+
+    if not character_names:
+        raise HTTPException(400, "无法从角色数据中提取角色名")
+
+    api_key = _user_deepseek_api_key(request, db)
+    if api_key:
+        import httpx
+        prompt_text = f"""你是一名专业的影视动画角色设计主管。请为以下每个角色生成一份详细的角色设计表（Character Design Sheet）文本描述。
+
+角色数据：
+{chr(10).join(f"--- {d}" for d in char_descriptions)}
+
+输出格式（每个角色必须包含以下字段，按顺序输出）：
+
+角色名：xxx
+身份定位：xxx（角色在故事中的职业/身份/阵营，1-2句）
+外貌描述：xxx（必须详细描述：发色、发型、眼型、瞳色、脸型、肤色、体型、身高特征、标志性面部特征如伤疤/痣等。至少100字，足够画师直接落笔）
+服装要点：xxx（上身、下身、鞋履、配饰、材质说明、主色调、辅助色。包含服装层次和剪裁特点）
+气质与表情：xxx（招牌表情、眼神特征、整体气场、标志性动作/姿态、情绪基调）
+大五人格：O:xx C:xx E:xx A:xx N:xx（基于角色数据中的 big_five 推断，数值范围0-100）
+绘制注意：xxx（必须包含可验证的面部几何特征——脸型基准、眼距比例、鼻梁轮廓、唇形、下颌线角度、发缝位置、标志色号。不可使用模糊描述）
+
+输出规则：
+1. 纯文本输出，不要 markdown 代码块
+2. 每个角色之间用空行分隔
+3. 「外貌描述」至少 100 字，要足够详细让画师能直接落笔
+4. 「绘制注意」必须包含具体的面部几何测量或比例描述（如"眼距约为眼宽的1.2倍"）
+5. 「大五人格」用数值标注，格式固定为 O:xx C:xx E:xx A:xx N:xx
+6. 角色设计表用于视频动画的一致性参考，所有帧必须严格匹配这些标记"""
+
+        try:
+            async with httpx.AsyncClient(timeout=120) as client:
+                response = await client.post(
+                    f"{deepseek_service.DEEPSEEK_BASE_URL}/chat/completions",
+                    json={
+                        "model": deepseek_service.DEEPSEEK_MODEL,
+                        "messages": [
+                            {"role": "system", "content": "你是专业的影视角色设计师。直接输出纯文本角色卡。"},
+                            {"role": "user", "content": prompt_text},
+                        ],
+                        "stream": False,
+                        "max_tokens": 4096,
+                    },
+                    headers=deepseek_service._deepseek_auth_headers(api_key),
+                )
+                response.raise_for_status()
+                data = response.json()
+                content = str(data["choices"][0]["message"]["content"] or "").strip()
+        except Exception as e:
+            logger.warning("AI generate character profiles failed: %s", e)
+            content = ""
+    else:
+        content = ""
+
+    if not content:
+        cards: list[str] = []
+        for c in characters_data:
+            if not isinstance(c, dict):
+                continue
+            name = str(c.get("name") or "").strip()
+            if not name:
+                continue
+            role = str(c.get("role") or "").strip()
+            arc = str(c.get("arc") or "").strip()
+            appearance = str(c.get("appearance") or "").strip()
+            personality = str(c.get("personality") or "").strip()
+            bf = c.get("big_five")
+            bf_str = ""
+            if isinstance(bf, dict):
+                bf_str = f"O:{bf.get('O',50)} C:{bf.get('C',50)} E:{bf.get('E',50)} A:{bf.get('A',50)} N:{bf.get('N',50)}"
+            cards.append(
+                f"角色名：{name}\n"
+                f"身份定位：{role}\n"
+                f"外貌描述：{appearance or '发色、发型、眼型、瞳色、脸型、肤色、体型需补充'}\n"
+                f"服装要点：{arc[:60] if arc else '需补充上衣、下装、鞋履、配饰'}\n"
+                f"气质与表情：{personality or '需补充招牌表情、眼神特征、整体气场'}\n"
+                + (f"大五人格：{bf_str}\n" if bf_str else "") +
+                f"绘制注意：保持面部特征一致——脸型、眼距、鼻型、唇形、标志色固定不变\n"
+            )
+        content = "\n\n".join(cards)
+
+    story.video_character_profiles = content
+    db.flush()
+
+    # 解析外貌卡创建版本
+    import re
+    created: list[dict] = []
+    blocks = re.split(r'\n(?=角色名[：:])', content)
+    for block in blocks:
+        block = block.strip()
+        if not block:
+            continue
+        name_match = re.search(r'角色名[：:]\s*(.+)', block)
+        if not name_match:
+            continue
+        name = name_match.group(1).strip()
+        existing = db.query(StoryCharacterVersion).filter(
+            StoryCharacterVersion.story_id == story_id,
+            StoryCharacterVersion.character_name == name,
+        ).first()
+        if existing:
+            existing.appearance_card = block
+            db.flush()
+            created.append({"name": name, "versions": _serialize_character_versions(db, story_id, name)})
+        else:
+            version = StoryCharacterVersion(
+                story_id=story_id,
+                character_name=name,
+                version_label="v1-默认",
+                appearance_card=block,
+                is_default=True,
+                sort_order=0,
+            )
+            db.add(version)
+            db.flush()
+            created.append({"name": name, "versions": _serialize_character_versions(db, story_id, name)})
+
+    db.commit()
+    return {"characters": created, "video_character_profiles": content}
+
+
+@router.post("/api/stories/{story_id}/video-characters/{character_name}/versions")
+async def create_character_version(
+    story_id: int,
+    character_name: str,
+    body: dict,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    user = _require_user(request, db)
+    story = _require_story_for_user(story_id, user, db)
+
+    version_label = str(body.get("version_label") or "v1-默认").strip()
+    appearance_card = str(body.get("appearance_card") or "").strip()
+    set_default = bool(body.get("set_default", False))
+
+    existing = db.query(StoryCharacterVersion).filter(
+        StoryCharacterVersion.story_id == story_id,
+        StoryCharacterVersion.character_name == character_name,
+        StoryCharacterVersion.version_label == version_label,
+    ).first()
+    if existing:
+        existing.appearance_card = appearance_card
+        if set_default:
+            db.query(StoryCharacterVersion).filter(
+                StoryCharacterVersion.story_id == story_id,
+                StoryCharacterVersion.character_name == character_name,
+            ).update({"is_default": False})
+            existing.is_default = True
+        db.commit()
+        return {"version": {"id": existing.id, "label": existing.version_label, "is_default": existing.is_default, "ref_asset_id": existing.ref_asset_id, "appearance_card": existing.appearance_card}}
+
+    if set_default:
+        db.query(StoryCharacterVersion).filter(
+            StoryCharacterVersion.story_id == story_id,
+            StoryCharacterVersion.character_name == character_name,
+        ).update({"is_default": False})
+
+    next_order = (
+        db.query(sa_func.max(StoryCharacterVersion.sort_order))
+        .filter(StoryCharacterVersion.story_id == story_id, StoryCharacterVersion.character_name == character_name)
+        .scalar() or 0
+    ) + 1
+
+    version = StoryCharacterVersion(
+        story_id=story_id,
+        character_name=character_name,
+        version_label=version_label,
+        appearance_card=appearance_card,
+        is_default=set_default or not db.query(StoryCharacterVersion).filter(
+            StoryCharacterVersion.story_id == story_id,
+            StoryCharacterVersion.character_name == character_name,
+        ).count(),
+        sort_order=next_order,
+    )
+    db.add(version)
+    db.commit()
+    db.refresh(version)
+    return {"version": {"id": version.id, "label": version.version_label, "is_default": version.is_default, "ref_asset_id": version.ref_asset_id, "appearance_card": version.appearance_card}}
+
+
+@router.delete("/api/stories/{story_id}/video-characters/{character_name}/versions/{version_id}")
+async def delete_character_version(
+    story_id: int,
+    character_name: str,
+    version_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    user = _require_user(request, db)
+    story = _require_story_for_user(story_id, user, db)
+
+    version = db.get(StoryCharacterVersion, version_id)
+    if not version or version.story_id != story_id or version.character_name != character_name:
+        raise HTTPException(404, "Version not found")
+
+    remaining = db.query(StoryCharacterVersion).filter(
+        StoryCharacterVersion.story_id == story_id,
+        StoryCharacterVersion.character_name == character_name,
+    ).count()
+    if remaining <= 1:
+        raise HTTPException(400, "每个角色至少保留一个版本")
+
+    db.delete(version)
+    if version.is_default:
+        fallback = db.query(StoryCharacterVersion).filter(
+            StoryCharacterVersion.story_id == story_id,
+            StoryCharacterVersion.character_name == character_name,
+        ).first()
+        if fallback:
+            fallback.is_default = True
+    db.commit()
+    return {"ok": True}
+
+
+@router.post("/api/stories/{story_id}/video-characters/{character_name}/versions/{version_id}/generate-ref")
+async def generate_character_ref_image(
+    story_id: int,
+    character_name: str,
+    version_id: int,
+    body: dict,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    user = _require_user(request, db)
+    story = _require_story_for_user(story_id, user, db)
+
+    version = db.get(StoryCharacterVersion, version_id)
+    if not version or version.story_id != story_id or version.character_name != character_name:
+        raise HTTPException(404, "Version not found")
+    if not (version.appearance_card or "").strip():
+        raise HTTPException(400, "该版本尚无外貌卡，请先生成或编辑")
+
+    style_name = str(body.get("style_preset") or "").strip()
+    style_ctx: dict = {}
+    if style_name:
+        preset = db.query(VideoStylePreset).filter(VideoStylePreset.name == style_name).first()
+        if not preset:
+            preset = db.get(VideoStylePreset, int(style_name)) if style_name.isdigit() else None
+        if preset:
+            style_ctx = {
+                "name": preset.name,
+                "prompt_template": str(preset.image_style_params.get("prompt_template", "") if isinstance(preset.image_style_params, dict) else ""),
+                "image_style_params": preset.image_style_params if isinstance(preset.image_style_params, dict) else {},
+            }
+    if not style_ctx:
+        style_ctx = {"name": "", "prompt_template": "", "image_style_params": {}}
+
+    final_prompt = _merge_style_prompt(
+        str(version.appearance_card or ""),
+        style_ctx.get("prompt_template"),
+        style_ctx.get("name", ""),
+    )
+    # 追加角色设计表布局和一致性锁定指令
+    final_prompt = (
+        f"Character design sheet, one-page turnaround board. {final_prompt}. "
+        "Required layout: front view portrait, side view portrait, back view portrait, full-body standing pose, "
+        "4 facial expressions (neutral, surprised, smiling, focused), "
+        "outfit detail callouts with accessories and material notes, costume breakdown panel, color palette chips. "
+        "Orthographic character-sheet composition, clean labels, consistent proportions, clean light background. "
+        "Mandatory consistency: lock face shape, eye distance, nose bridge contour, lip shape, jawline angle, "
+        "hair parting, and 3 signature color swatches across ALL frames. "
+        "Master reference sheet for video animation consistency."
+    )
+    img_size = style_ctx.get("image_style_params", {}).get("size", "1024x1024")
+
+    char_dir = _VIDEO_OUTPUTS_DIR / f"story_{story_id}" / "characters"
+    char_dir.mkdir(parents=True, exist_ok=True)
+    filename = f"{uuid.uuid4().hex}_{version.id}.png"
+    full_path = char_dir / filename
+
+    api_key, _base_url, _model = _user_video_api_key(request)
+    try:
+        await image2_service.generate_reference_image(
+            prompt=final_prompt,
+            output_path=full_path,
+            api_key=api_key or None,
+            size=img_size,
+        )
+    except Exception as e:
+        logger.warning("Character ref generation failed for %s/%s: %s", character_name, version.version_label, e)
+        raise HTTPException(502, f"角色参考图生成失败: {e}")
+
+    file_path = str(full_path)
+    ref_asset = VideoAsset(
+        story_id=story_id,
+        asset_type="story_character_reference",
+        name=f"Character - {character_name} ({version.version_label})",
+        file_path=file_path,
+        provider="image2",
+        prompt=version.appearance_card,
+        style_preset=style_name or None,
+        status="active",
+    )
+    db.add(ref_asset)
+    db.flush()
+    version.ref_asset_id = ref_asset.id
+    db.commit()
+    db.refresh(ref_asset)
+
+    return {
+        "ref_asset_id": ref_asset.id,
+        "file_path": _to_video_url(ref_asset.file_path),
+    }
+
+
+@router.delete("/api/stories/{story_id}/video-characters/{character_name}/versions/{version_id}/ref")
+async def delete_character_ref_image(
+    story_id: int,
+    character_name: str,
+    version_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    user = _require_user(request, db)
+    story = _require_story_for_user(story_id, user, db)
+
+    version = db.get(StoryCharacterVersion, version_id)
+    if not version or version.story_id != story_id or version.character_name != character_name:
+        raise HTTPException(404, "Version not found")
+    if not version.ref_asset_id:
+        raise HTTPException(404, "该版本尚无参考图")
+
+    asset = db.get(VideoAsset, version.ref_asset_id)
+    if asset:
+        # 删除物理文件
+        local = _from_video_url(asset.file_path) or str(_VIDEO_OUTPUTS_DIR / (asset.file_path or ""))
+        try:
+            os.remove(local)
+        except OSError:
+            pass
+        db.delete(asset)
+
+    version.ref_asset_id = None
+    db.commit()
+    return {"ok": True}
+
+
+@router.post("/api/stories/{story_id}/video-characters/{character_name}/versions/{version_id}/ref/redraw")
+async def redraw_character_ref_image(
+    story_id: int,
+    character_name: str,
+    version_id: int,
+    body: dict,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    user = _require_user(request, db)
+    story = _require_story_for_user(story_id, user, db)
+
+    version = db.get(StoryCharacterVersion, version_id)
+    if not version or version.story_id != story_id or version.character_name != character_name:
+        raise HTTPException(404, "Version not found")
+    if not version.ref_asset_id:
+        raise HTTPException(400, "该版本尚无参考图")
+
+    redraw_prompt = str(body.get("prompt") or "").strip()
+    if not redraw_prompt:
+        raise HTTPException(400, "重绘提示词不能为空")
+
+    mode = str(body.get("mode") or "full")
+    mask_base64 = str(body.get("mask") or "")
+
+    old_asset = db.get(VideoAsset, version.ref_asset_id)
+    if not old_asset:
+        raise HTTPException(404, "参考图资源不存在")
+
+    source_path = _from_video_url(old_asset.file_path) or str(_VIDEO_OUTPUTS_DIR / (old_asset.file_path or ""))
+    source_path_obj = Path(source_path)
+    if not source_path_obj.exists():
+        raise HTTPException(404, "参考图文件不存在，请重新生成")
+
+    char_dir = _VIDEO_OUTPUTS_DIR / f"story_{story_id}" / "characters"
+    char_dir.mkdir(parents=True, exist_ok=True)
+    filename = f"{uuid.uuid4().hex}_{version.id}.png"
+    full_path = char_dir / filename
+
+    api_key, _base_url, _model = _user_video_api_key(request)
+
+    try:
+        if mode == "partial" and mask_base64:
+            import base64
+            mask_bytes = base64.b64decode(mask_base64.split(",")[-1] if "," in mask_base64 else mask_base64)
+            await image2_service.edit_existing_image(
+                prompt=redraw_prompt,
+                source_image_path=source_path_obj,
+                output_path=full_path,
+                mask_bytes=mask_bytes,
+                api_key=api_key or None,
+            )
+        else:
+            await image2_service.generate_reference_image(
+                prompt=redraw_prompt,
+                output_path=full_path,
+                api_key=api_key or None,
+            )
+    except Exception as e:
+        logger.warning("Character ref redraw failed for %s/%s: %s", character_name, version.version_label, e)
+        raise HTTPException(502, f"角色参考图重绘失败: {e}")
+
+    new_asset = VideoAsset(
+        story_id=story_id,
+        asset_type="story_character_reference",
+        name=f"Character - {character_name} ({version.version_label})",
+        file_path=str(full_path),
+        provider="image2",
+        prompt=redraw_prompt,
+        style_preset=old_asset.style_preset,
+        status="active",
+    )
+    db.add(new_asset)
+    db.flush()
+    version.ref_asset_id = new_asset.id
+    db.commit()
+    db.refresh(new_asset)
+
+    return {
+        "ref_asset_id": new_asset.id,
+        "file_path": _to_video_url(new_asset.file_path),
+    }
+
+
+# ─── Shot Style Preset Override ─────────────────────────────────────
 
 @router.put("/api/shots/{shot_id}/video-style-preset")
 async def set_shot_video_style_preset(
@@ -2938,7 +3633,7 @@ async def render_shot_storyboard(
         explicit_asset_ids=body.reference_asset_ids or [],
     )
     ref_assets = db.query(VideoAsset).filter(VideoAsset.id.in_(ref_asset_ids)).all() if ref_asset_ids else []
-    ref_block = _build_reference_constraints_block([a for a in ref_assets if a.asset_type == "character_reference"])
+    ref_block = _build_reference_constraints_block(ref_assets)
     ref_paths = _resolve_asset_file_paths(ref_assets)
 
     storyboards_dir = _VIDEO_OUTPUTS_DIR / "storyboards" / f"chapter_{shot.scene.chapter_id}" / f"shot_{shot_id}"
@@ -3167,7 +3862,7 @@ async def generate_shot_frames(
         explicit_asset_ids=body.reference_asset_ids or [],
     )
     ref_assets = db.query(VideoAsset).filter(VideoAsset.id.in_(ref_asset_ids)).all() if ref_asset_ids else []
-    ref_block = _build_reference_constraints_block([a for a in ref_assets if a.asset_type == "character_reference"])
+    ref_block = _build_reference_constraints_block(ref_assets)
     ref_paths = _resolve_asset_file_paths(ref_assets)
 
     api_key, _base_url, _model = _user_video_api_key(request)
@@ -3294,7 +3989,8 @@ async def regenerate_shot_frame(
         explicit_asset_ids=body.reference_asset_ids or [],
     )
     ref_assets = db.query(VideoAsset).filter(VideoAsset.id.in_(ref_asset_ids)).all() if ref_asset_ids else []
-    ref_block = _build_reference_constraints_block([a for a in ref_assets if a.asset_type == "character_reference"])
+    ref_block = _build_reference_constraints_block(ref_assets)
+    ref_paths = _resolve_asset_file_paths(ref_assets)
     prompt = _merge_style_prompt(f"{prompt} {ref_block}".strip(), style_ctx.get("prompt_template"), style_ctx.get("name"))
     try:
         await image2_service.generate_reference_image(
@@ -3302,6 +3998,7 @@ async def regenerate_shot_frame(
             output_path=full_path,
             api_key=api_key or None,
             size=(style_ctx.get("image_style_params") or {}).get("size", "1536x1024"),
+            ref_image_paths=ref_paths if ref_paths else None,
         )
     except Exception as e:
         logger.warning("Frame regen failed for shot %s asset %s: %s", shot_id, body.asset_id, e)
@@ -3375,7 +4072,7 @@ async def get_shot_frames(
         return {
             "id": a.id,
             "name": a.name,
-            "file_path": a.file_path,
+            "file_path": _to_video_url(a.file_path),
             "asset_type": a.asset_type,
             "asset_subtype": a.asset_subtype or "",
             "is_master": a.is_master,
@@ -3500,17 +4197,38 @@ async def parse_shot_asset_prompts(
     inherited_constraints = _build_reference_constraints_block(inherited_char_assets)
     shot_grounding = _build_shot_asset_grounding_block(story, chapter, scene, shot)
 
+    # 优先从 Story 级角色库读取角色 prompt，无角色库时才实时构建
+    story_char_versions = (
+        db.query(StoryCharacterVersion)
+        .filter(
+            StoryCharacterVersion.story_id == story.id,
+            StoryCharacterVersion.is_default == True,
+        )
+        .all()
+        if story else []
+    )
+    version_map = {v.character_name: v for v in story_char_versions}
+    logger.info("Shot %s parse_prompts: scene_chars=%s story_has_library=%s",
+                shot_id, character_names, bool(story_char_versions))
+
     default_character_prompts: list[dict] = []
     for name in character_names:
-        note = character_notes.get(name, "")
-        inherited_prompt = ""
-        for asset in inherited_char_assets:
-            if name in (asset.name or "") or name in (asset.prompt or ""):
-                inherited_prompt = (asset.prompt or "")[:260]
-                break
-        design_grounding = _build_character_design_grounding_block(story, name, note)
-        default_character_prompts.append(
-            {
+        v = version_map.get(name)
+        if v and (v.appearance_card or "").strip():
+            default_character_prompts.append({
+                "name": name,
+                "prompt": str(v.appearance_card or "").strip(),
+                "grounding": "",
+            })
+        else:
+            note = character_notes.get(name, "")
+            inherited_prompt = ""
+            for asset in inherited_char_assets:
+                if name in (asset.name or "") or name in (asset.prompt or ""):
+                    inherited_prompt = (asset.prompt or "")[:260]
+                    break
+            design_grounding = _build_character_design_grounding_block(story, name, note)
+            default_character_prompts.append({
                 "name": name,
                 "prompt": _build_character_sheet_prompt(
                     character_name=name,
@@ -3520,8 +4238,7 @@ async def parse_shot_asset_prompts(
                     inherited_prompt=inherited_prompt,
                 ),
                 "grounding": design_grounding,
-            }
-        )
+            })
 
     base_storyboard = _merge_style_prompt(
         (
@@ -3559,15 +4276,46 @@ async def parse_shot_asset_prompts(
         style_ctx.get("prompt_template"),
         style_name,
     )
+    # 获取前镜头尾帧用于连贯上下文
+    prev_last = _get_previous_shot_last_frame(shot, db) if shot else None
+    prev_context = ""
+    if prev_last:
+        prev_context = (
+            f" SEAMLESS TRANSITION FROM PREVIOUS SHOT: "
+            f"video must begin from the state shown in the preceding shot's last frame, "
+            f"creating continuous visual flow."
+        )
+
+    # 首尾帧插值指令
+    frame_guidance = ""
+    if shot.first_frame_prompt or shot.last_frame_prompt:
+        frame_guidance = (
+            " FRAME-GUIDED VIDEO: The first reference image is the START frame and "
+            "the last reference image is the END frame. Generate smooth animated "
+            "transition between these two states, showing the described action unfold. "
+            "Do NOT output a static image - animate the scene with realistic motion."
+        )
+
+    # 运镜改写：static → subtle motion，让视频有生命力
+    camera_desc = shot.camera_movement or "static"
+    if camera_desc == "static":
+        camera_desc = "subtle handheld micro-movements with breathing camera feel"
+
     base_video = _merge_style_prompt(
         (
-            f"Shot video generation prompt. Duration {shot.duration_seconds or 5}s. "
-            f"Camera movement: {shot.camera_movement or 'static'}. "
-            f"Framing: {shot.shot_type or 'medium'} with {shot.camera_angle or 'eye_level'} angle. "
-            f"Action progression: {shot.action_description or ''}. "
-            f"Dialogue: {shot.dialogue or 'none'}. Sound cues: {shot.sound_design or 'ambient'}. "
-            f"Continuity constraints: {shot.continuity_notes or 'strict continuity with storyboard and frame references'}. "
-            "Motion should be coherent, physically plausible, and strictly aligned with storyboard and first/last frame."
+            f"Shot {shot.shot_number} - {shot.title or ''}. "
+            f"Scene context: {scene_summary}. Location: {scene_location}. Mood: {scene_mood}. "
+            f"Characters: {', '.join(character_names) if character_names else 'none'}. "
+            f"Action: {shot.action_description or 'no action specified'}. "
+            f"Dialogue: {shot.dialogue or 'none'}. "
+            f"Camera: {shot.shot_type or 'medium'} shot, {shot.camera_angle or 'eye_level'} angle, {camera_desc}. "
+            f"Duration: {shot.duration_seconds or 5}s. "
+            f"Sound: {shot.sound_design or 'ambient'}. "
+            f"Continuity: {shot.continuity_notes or 'strict visual continuity'}.{prev_context}{frame_guidance} "
+            "Video must accurately depict the described action with realistic motion, "
+            "proper camera work matching the specified movement/framing, "
+            "character behavior consistent with personality and scene mood, "
+            "and seamless visual flow from first frame to last frame."
         ),
         style_ctx.get("prompt_template"),
         style_name,
@@ -3671,6 +4419,9 @@ Base video prompt:
             shot.character_prompts_json = cleaned_char_prompts  # pyright: ignore[reportAttributeAccessIssue]
             db.commit()
 
+            logger.info("Shot %s parse_prompts AI OK: char_count=%d storyboard_len=%d",
+                        shot_id, len(cleaned_char_prompts), len(final_storyboard))
+
             return {
                 "shot_id": shot_id,
                 "style_preset": style_name,
@@ -3703,6 +4454,9 @@ Base video prompt:
     shot.character_prompts_json = fallback_char  # pyright: ignore[reportAttributeAccessIssue]
     db.commit()
 
+    logger.info("Shot %s parse_prompts DONE: char_count=%d storyboard_len=%d video_len=%d",
+                shot_id, len(fallback_char), len(fallback_storyboard), len(fallback_video))
+
     return {
         "shot_id": shot_id,
         "style_preset": style_name,
@@ -3717,6 +4471,7 @@ Base video prompt:
             "character_count": len(default_character_prompts),
         },
     }
+
 
 @router.post("/api/shots/{shot_id}/character-assets/generate")
 async def generate_shot_character_asset(
@@ -3843,10 +4598,42 @@ async def render_shot_video(
         reference_image_urls = []
     input_mode = body.input_mode
     if not input_mode:
-        if source_storyboard_asset_id and shot.storyboard_locked:
+        has_ref_images = bool(reference_image_urls)
+        has_storyboard = source_storyboard_asset_id and shot.storyboard_locked
+        if has_storyboard:
+            input_mode = "image_to_video"
+        elif has_ref_images:
             input_mode = "image_to_video"
         else:
             input_mode = "text_to_video"
+
+    ref_assets = db.query(VideoAsset).filter(VideoAsset.id.in_(auto_reference_asset_ids)).all() if auto_reference_asset_ids else []
+    first_frame_asset, last_frame_asset, other_refs = _split_frame_assets(ref_assets)
+    ref_block = _build_reference_constraints_block(ref_assets)
+
+    # 构建图片列表：首帧→主图(image[0])，其他→中间，尾帧→最后
+    ordered_images: list[str] = []
+    # 用户未选首帧时，自动继承前一个镜头的尾帧作为连贯参考
+    prev_last_frame = _get_previous_shot_last_frame(shot, db) if not first_frame_asset else None
+    if prev_last_frame:
+        p = _resolve_asset_file_paths([prev_last_frame])
+        b = _encode_file_to_base64_data_uri(p[0]) if p else None
+        if b:
+            ordered_images.append(b)
+            if not first_frame_asset:
+                first_frame_url_text = b[:80] + "..."
+                logger.info("Shot %s: 继承前镜头尾帧作为首帧连贯参考", shot_id)
+    if first_frame_asset:
+        path = _resolve_asset_file_paths([first_frame_asset])
+        b64 = _encode_file_to_base64_data_uri(path[0]) if path else None
+        if b64:
+            ordered_images.append(b64)
+    ordered_images.extend(_resolve_asset_reference_urls([a.id for a in other_refs], db, request) if other_refs else [])
+    if last_frame_asset:
+        path = _resolve_asset_file_paths([last_frame_asset])
+        b64 = _encode_file_to_base64_data_uri(path[0]) if path else None
+        if b64:
+            ordered_images.append(b64)
 
     style_ctx = _resolve_effective_style_for_shot(shot, db, requested_style_name=body.style)
     style_name = style_ctx["name"]
@@ -3857,7 +4644,7 @@ async def render_shot_video(
     resolved_model = body.model or resolved_model
     aspect_ratio = body.aspect_ratio or video_style_params.get("aspect_ratio") or "16:9"
     grounding = _build_story_grounding_block(shot.scene.chapter.story if shot.scene and shot.scene.chapter else None, shot.scene.chapter if shot.scene else None, shot.scene)
-    full_prompt = _merge_style_prompt(f"{body.prompt or shot.video_prompt or ''} Grounding: {grounding}".strip(), style_template, style_name)
+    full_prompt = _merge_style_prompt(f"{body.prompt or shot.video_prompt or ''} {ref_block} Grounding: {grounding}".strip(), style_template, style_name)
 
     job_result = await video_gen_service.submit_video_job(
         shot_id=shot_id,
@@ -3867,7 +4654,7 @@ async def render_shot_video(
         negative_prompt=body.negative_prompt or shot.negative_prompt or "",
         duration_seconds=duration,
         aspect_ratio=aspect_ratio,
-        reference_images=reference_image_urls if reference_image_urls else None,
+        reference_images=ordered_images if ordered_images else None,
         api_key=api_key,
         base_url=base_url,
     )

@@ -131,16 +131,13 @@ export default function ShotAssetWorkflowPanel({
   const [storyboardPromptDraft, setStoryboardPromptDraft] = useState('');
   const [firstFramePromptDraft, setFirstFramePromptDraft] = useState('');
   const [lastFramePromptDraft, setLastFramePromptDraft] = useState('');
+  const [videoPromptDraft, setVideoPromptDraft] = useState('');
 
   const [previewAsset, setPreviewAsset] = useState<VideoAsset | null>(null);
   const [previewTitle, setPreviewTitle] = useState('');
   const [previewBusy, setPreviewBusy] = useState(false);
   const [deletingAssetId, setDeletingAssetId] = useState<number | null>(null);
 
-  const [useReferenceAssetsForVideo, setUseReferenceAssetsForVideo] = useState(true);
-  const [inheritCharacterAssets, setInheritCharacterAssets] = useState(true);
-  const [inheritSceneAssets, setInheritSceneAssets] = useState(true);
-  const [inheritStoryboardAsset, setInheritStoryboardAsset] = useState(true);
   const [selectedReferenceAssetIds, setSelectedReferenceAssetIds] = useState<number[]>([]);
 
   const currentStyleName =
@@ -210,6 +207,7 @@ export default function ShotAssetWorkflowPanel({
       setStoryboardPromptDraft(draft.storyboard_prompt || '');
       setFirstFramePromptDraft(draft.first_frame_prompt || '');
       setLastFramePromptDraft(draft.last_frame_prompt || '');
+      setVideoPromptDraft(draft.video_prompt || '');
       const first = charPrompts[0];
       setSelectedCharacterName(first?.name || '');
       setSelectedCharacterPrompt(first?.prompt || '');
@@ -222,6 +220,7 @@ export default function ShotAssetWorkflowPanel({
     setStoryboardPromptDraft('');
     setFirstFramePromptDraft('');
     setLastFramePromptDraft('');
+    setVideoPromptDraft('');
     setSelectedCharacterName('');
     setSelectedCharacterPrompt('');
     if (!shot || !chapter) return;
@@ -272,6 +271,7 @@ export default function ShotAssetWorkflowPanel({
       setStoryboardPromptDraft(draft.storyboard_prompt || '');
       setFirstFramePromptDraft(draft.first_frame_prompt || '');
       setLastFramePromptDraft(draft.last_frame_prompt || '');
+      setVideoPromptDraft(draft.video_prompt || '');
       const first = draft.character_prompts?.[0];
       setSelectedCharacterName(first?.name || '');
       setSelectedCharacterPrompt(first?.prompt || '');
@@ -370,9 +370,6 @@ export default function ShotAssetWorkflowPanel({
           overwrite: false,
           style_preset: currentStyleName || undefined,
           reference_asset_ids: selectedReferenceAssetIds,
-          inherit_character_assets: inheritCharacterAssets,
-          inherit_scene_assets: inheritSceneAssets,
-          inherit_storyboard_asset: inheritStoryboardAsset,
         });
       };
       if (frameType === 'both') {
@@ -448,10 +445,9 @@ export default function ShotAssetWorkflowPanel({
         duration_seconds: shot.duration_seconds || 5,
         aspect_ratio: '16:9',
         fps: 24,
-        use_reference_assets: useReferenceAssetsForVideo,
         reference_asset_ids: selectedReferenceAssetIds,
-        input_mode: storyboardData?.storyboard_locked ? 'image_to_video' : 'text_to_video',
-        source_storyboard_asset_id: storyboardData?.active_storyboard_asset_id ?? undefined,
+        input_mode: selectedReferenceAssetIds.length > 0 ? 'image_to_video' : 'text_to_video',
+        prompt: videoPromptDraft || undefined,
       });
       onJobsChange((prev) => [result.job, ...prev]);
       pollJob(result.job.id);
@@ -509,7 +505,12 @@ export default function ShotAssetWorkflowPanel({
         {activeSection === 'characters' ? (
           <div className="space-y-3">
             <button onClick={generateCharacterAssets} disabled={generatingCharacters || !selectedCharacterPrompt.trim()} className="rounded-lg bg-[#2563eb] px-3 py-2 text-xs text-white hover:bg-[#1d4ed8]">{generatingCharacters ? '生成中...' : '生成角色图'}</button>
-            <div className="grid grid-cols-2 gap-2">
+            <select value={selectedCharacterName} onChange={(e)=>{ const n=e.target.value; setSelectedCharacterName(n); const hit=promptDrafts?.character_prompts?.find((p)=>p.name===n); setSelectedCharacterPrompt(hit?.prompt||''); }} className="w-full rounded-lg border border-[#d7e3f4] px-2 py-2 text-xs">
+              <option value="">选择角色</option>
+              {(promptDrafts?.character_prompts || []).map((item) => <option key={item.name} value={item.name}>{item.name}</option>)}
+            </select>
+            <textarea value={selectedCharacterPrompt} onChange={(e)=>setSelectedCharacterPrompt(e.target.value)} className="h-24 w-full rounded-lg border border-[#d7e3f4] p-2 text-xs" placeholder="角色设定板提示词" />
+            <div className="grid grid-cols-2 gap-2 max-h-52 overflow-y-auto">
               {characterAssets.map((a) => (
                 <div key={a.id} className="rounded-lg border border-[#d7e3f4] p-1.5">
                   <img src={toAssetUrl(a.file_path)} alt={a.name} className="aspect-[3/4] w-full cursor-zoom-in rounded object-cover" onClick={() => openAssetWorkbench(a, `${a.name}（角色参考）`)} />
@@ -517,11 +518,6 @@ export default function ShotAssetWorkflowPanel({
                 </div>
               ))}
             </div>
-            <select value={selectedCharacterName} onChange={(e)=>{ const n=e.target.value; setSelectedCharacterName(n); const hit=promptDrafts?.character_prompts?.find((p)=>p.name===n); setSelectedCharacterPrompt(hit?.prompt||''); }} className="w-full rounded-lg border border-[#d7e3f4] px-2 py-2 text-xs">
-              <option value="">选择角色</option>
-              {(promptDrafts?.character_prompts || []).map((item) => <option key={item.name} value={item.name}>{item.name}</option>)}
-            </select>
-            <textarea value={selectedCharacterPrompt} onChange={(e)=>setSelectedCharacterPrompt(e.target.value)} className="h-28 w-full rounded-lg border border-[#d7e3f4] p-2 text-xs" placeholder="角色设定板提示词" />
           </div>
         ) : null}
 
@@ -592,15 +588,6 @@ export default function ShotAssetWorkflowPanel({
         {activeSection === 'bundle' ? (
           <div className="space-y-3">
             <div className="rounded-lg border border-[#d7e3f4] p-3">
-              <div className="mb-2 text-xs font-semibold">继承策略</div>
-              <div className="grid grid-cols-2 gap-2 text-xs">
-                <label className="flex items-center gap-2"><input type="checkbox" checked={inheritCharacterAssets} onChange={(e) => setInheritCharacterAssets(e.target.checked)} />角色卡继承</label>
-                <label className="flex items-center gap-2"><input type="checkbox" checked={inheritSceneAssets} onChange={(e) => setInheritSceneAssets(e.target.checked)} />场景图继承</label>
-                <label className="flex items-center gap-2"><input type="checkbox" checked={inheritStoryboardAsset} onChange={(e) => setInheritStoryboardAsset(e.target.checked)} />分镜图继承</label>
-                <label className="flex items-center gap-2"><input type="checkbox" checked={useReferenceAssetsForVideo} onChange={(e) => setUseReferenceAssetsForVideo(e.target.checked)} />视频启用引用</label>
-              </div>
-            </div>
-            <div className="rounded-lg border border-[#d7e3f4] p-3">
               <div className="mb-2 text-xs font-semibold">本次引用资产</div>
               <div className="max-h-40 overflow-y-auto space-y-1 text-xs">
                 {candidateReferenceAssets.map((asset) => (
@@ -621,6 +608,7 @@ export default function ShotAssetWorkflowPanel({
                 ))}
               </div>
             </div>
+            <textarea value={videoPromptDraft} onChange={e => setVideoPromptDraft(e.target.value)} className="h-28 w-full rounded-lg border border-[#d7e3f4] p-2 text-xs resize-y" placeholder="视频生成提示词（AI 解析或手动编辑）" />
             <button onClick={submitVideo} disabled={submittingVideo} className="w-full rounded-lg bg-gradient-to-r from-[#1d4ed8] to-[#1e40af] px-4 py-2 text-xs font-semibold text-white">
               {submittingVideo ? '提交中...' : '生成视频'}
             </button>
