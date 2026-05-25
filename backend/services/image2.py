@@ -144,6 +144,34 @@ def _contains_any(text: str, keywords: tuple[str, ...]) -> bool:
     return any(keyword.lower() in lowered for keyword in keywords)
 
 
+def _extract_data_image_entry(data: dict, progress_label: str) -> dict:
+    """从 API 响应的 data 数组中安全提取第一张图片条目。
+
+    防御性处理以防止上游 API 返回 HTTP 200 但 data 为空的情况。
+    """
+    image_list = data.get("data")
+    if not isinstance(image_list, list):
+        logger.error("[%s] API 返回的 data 字段类型异常: type=%s body=%s",
+                     progress_label, type(image_list).__name__,
+                     json.dumps(data, ensure_ascii=False)[:1000])
+        raise MangaImageGenerationError(
+            code="invalid_response",
+            user_message="绘图服务返回了意外的数据格式，请稍后重试。",
+            retryable=True,
+            provider_message=f"data field type is {type(image_list).__name__}, expected list",
+        )
+    if len(image_list) == 0:
+        logger.error("[%s] API 返回了空图片列表: %s",
+                     progress_label, json.dumps(data, ensure_ascii=False)[:1000])
+        raise MangaImageGenerationError(
+            code="empty_response",
+            user_message="绘图服务返回了空的图片列表，请稍后重试或检查 API 配置。",
+            retryable=True,
+            provider_message="API returned HTTP 200 with empty data array",
+        )
+    return image_list[0]
+
+
 def _extract_provider_message(resp: httpx.Response) -> str:
     try:
         payload = resp.json()
@@ -281,11 +309,19 @@ def _build_full_prompt(
 
     style_block = _build_manga_style(color_mode)
     if all_scenes:
-        script_context = "\n".join(f"第{i + 1}页：{scene}" for i, scene in enumerate(all_scenes))
+        # 只取当前页附近的分镜作为上下文，避免 prompt 过长导致 API 处理失败
+        idx = image_number - 1
+        window_start = max(0, idx - 1)
+        window_end = min(len(all_scenes), idx + 2)
+        script_context = "\n".join(
+            f"第{i + 1}页：{scene}"
+            for i, scene in enumerate(all_scenes)
+            if window_start <= i < window_end
+        )
         return (
             f"{ref_block}{char_block}"
             f"你正在绘制第 {image_number}/{total_pages} 页漫画。\n"
-            f"完整分镜如下，请保持人物、服装和镜头风格一致：\n{script_context}\n\n"
+            f"附近分镜如下，请保持人物、服装和镜头风格一致：\n{script_context}\n\n"
             f"当前只绘制第 {image_number} 页。\n"
             f"{style_block}\n"
             f"{scene_prompt}"
@@ -407,7 +443,7 @@ async def generate_reference_image(
                 raise _classify_response_error(resp, progress_label, current_prompt, False)
 
             data = resp.json()
-            image_entry = data["data"][0]
+            image_entry = _extract_data_image_entry(data, progress_label)
             image_bytes = normalize_image_bytes(await _download_generated_image(image_entry, progress_label))
             output_path.parent.mkdir(parents=True, exist_ok=True)
             output_path.write_bytes(image_bytes)
@@ -480,7 +516,7 @@ async def generate_cover_image(
                 raise _classify_response_error(resp, progress_label, current_prompt, False)
 
             data = resp.json()
-            image_entry = data["data"][0]
+            image_entry = _extract_data_image_entry(data, progress_label)
             image_bytes = normalize_image_bytes(await _download_generated_image(image_entry, progress_label))
             output_path.parent.mkdir(parents=True, exist_ok=True)
             output_path.write_bytes(image_bytes)
@@ -584,7 +620,7 @@ async def edit_existing_image(
                 raise _classify_response_error(resp, progress_label, current_prompt, False)
 
             data = resp.json()
-            image_entry = data["data"][0]
+            image_entry = _extract_data_image_entry(data, progress_label)
             image_bytes = normalize_image_bytes(await _download_generated_image(image_entry, progress_label))
             output_path.parent.mkdir(parents=True, exist_ok=True)
             output_path.write_bytes(image_bytes)
@@ -715,7 +751,7 @@ async def generate_manga_image(
                 ) from exc
 
             logger.info("[%s] API 返回成功，耗时 %.1fs", progress_label, time.time() - t0)
-            image_entry = data["data"][0]
+            image_entry = _extract_data_image_entry(data, progress_label)
             image_bytes = normalize_image_bytes(await _download_generated_image(image_entry, progress_label))
 
             chapter_dir = OUTPUT_DIR / f"chapter_{chapter_id}"
@@ -767,7 +803,7 @@ async def generate_manga_image(
         )
 
         if last_err.should_sanitize and not prompt_sanitized:
-            optimized_prompt = last_err.optimized_prompt or _sanitize_scene_prompt(current_prompt)
+            optimized_prompt = last_err.optimized_prompt or sanitize_scene_text(current_prompt)[0]
             if optimized_prompt != current_prompt:
                 logger.warning("[%s] 检测到内容风控，自动将当前分镜降敏后重试", progress_label)
                 current_prompt = optimized_prompt

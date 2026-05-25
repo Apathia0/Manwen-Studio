@@ -5557,6 +5557,10 @@ async def generate_scenes_endpoint(chapter_id: int, request: Request, db: Sessio
                 await split_task
     sanitized_scenes, sanitized_indices = sanitize_scene_list(scenes)
     _write_scenes_file(chapter_id, sanitized_scenes, sanitized_indices)
+    # 以 AI 实际返回的分镜数量为准，同步更新 image_count
+    count_path = _image_count_path(chapter_id)
+    count_path.parent.mkdir(parents=True, exist_ok=True)
+    count_path.write_text(str(len(sanitized_scenes)), encoding="utf-8")
     _check_and_consume_feature_quota(request, user.id, "scene.generate.monthly_limit", 1, db, deduct=True, provider_kind="text")
     return {"scenes": sanitized_scenes, "sanitized_indices": sanitized_indices}
 
@@ -5589,12 +5593,18 @@ async def update_scenes_endpoint(chapter_id: int, body: dict, request: Request, 
     user = _require_user(request, db)
     _require_chapter_for_user(chapter_id, user, db)
     scenes = body.get("scenes", [])
-    image_count = _effective_image_count(chapter_id, user.id, db)
-    if not isinstance(scenes, list) or len(scenes) != image_count or not all(isinstance(s, str) and s.strip() for s in scenes):
-        raise HTTPException(400, f"Must provide exactly {image_count} scenes")
+    if not isinstance(scenes, list) or not all(isinstance(s, str) and s.strip() for s in scenes):
+        raise HTTPException(400, "Invalid scenes format")
+    if len(scenes) < 1:
+        raise HTTPException(400, "At least one scene is required")
+
+    # 自动对齐 image_count 和分镜数量
+    count_path = _image_count_path(chapter_id)
+    count_path.parent.mkdir(parents=True, exist_ok=True)
+    count_path.write_text(str(len(scenes)), encoding="utf-8")
 
     _write_scenes_file(chapter_id, scenes, [])
-    return {"ok": True}
+    return {"ok": True, "image_count": len(scenes)}
 
 
 # ─── SSE for manga image generation ─────────────────────
@@ -5636,6 +5646,8 @@ async def generate_manga_stream(chapter_id: int, request: Request, db: Session =
     custom_image_provider = _custom_image_provider_active(request)
     _check_and_consume_feature_quota(request, user.id, "manga.image.monthly_limit", len(scenes), db, deduct=False, provider_kind="image")
     ACTIVE_MANGA_GENERATIONS.add(chapter_id)
+    # 在释放事务前提取 user_id，避免异步 generator 中 user 对象 session 已关闭
+    user_id = user.id
     _release_db_transaction(db)
 
     # Check which images already exist
@@ -5715,7 +5727,7 @@ async def generate_manga_stream(chapter_id: int, request: Request, db: Session =
                     if custom_image_provider:
                         write_db.commit()
                     else:
-                        _check_and_consume_quota(user.id, "manga.image.monthly_limit", 1, write_db, deduct=True)
+                        _check_and_consume_quota(user_id, "manga.image.monthly_limit", 1, write_db, deduct=True)
                     write_db.refresh(manga)
                 finally:
                     write_db.close()

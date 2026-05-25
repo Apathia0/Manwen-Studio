@@ -364,7 +364,6 @@ export default function MangaPanel({
       ? mergeImages(persistedImages, images)
       : persistedImages;
   const imageByNumber = new Map(displayImages.map((img) => [img.image_number, img]));
-  const imageIndexByNumber = new Map(displayImages.map((img, idx) => [img.image_number, idx]));
   const gallerySlots = scenes.length > 0
     ? scenes.map((scene, idx) => ({
       image_number: idx + 1,
@@ -1200,7 +1199,7 @@ export default function MangaPanel({
         </div>
       </div>
 
-      <div className={showWorkspacePreview ? 'hidden' : ''}>
+      <div className={`${showWorkspacePreview ? 'hidden' : 'flex flex-col flex-1 min-h-0'}`}>
       {/* Progress bar */}
       {generating && (
         <div className="px-5 py-4 border-b border-[#d9dfd7] bg-white">
@@ -1763,14 +1762,7 @@ export default function MangaPanel({
                 <div
                   className="relative rounded-xl overflow-hidden border border-[#d9dfd7] bg-white cursor-pointer
                              hover:border-[#d9dfd7] transition-colors"
-                  onClick={() => {
-                    const idx = imageIndexByNumber.get(image_number);
-                    if (idx !== undefined) {
-                      setLightboxZoom(1.35);
-                      onWorkspacePreviewModeChange?.(true);
-                      setLightboxIdx(idx);
-                    }
-                  }}
+                  onClick={() => openMangaRedraw(image_number)}
                 >
                   <img
                     src={resolvedImgSrc}
