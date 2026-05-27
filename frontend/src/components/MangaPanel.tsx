@@ -34,7 +34,6 @@ import {
   type EntitlementResponse,
   type RefSource,
   type RefImage,
-  type CharRefEvent,
 } from '../api';
 import { genStore } from '../genStore';
 
