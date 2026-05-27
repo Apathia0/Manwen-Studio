@@ -295,6 +295,7 @@ def _build_full_prompt(
     character_profiles: str,
     use_ref: bool,
     color_mode: str,
+    ref_layout_desc: str = "",
 ) -> str:
     char_block = ""
     if character_profiles and not use_ref:
@@ -302,10 +303,13 @@ def _build_full_prompt(
 
     ref_block = ""
     if use_ref:
-        ref_block = (
-            "【人物一致性要求】\n"
-            "请严格保持参考图中角色的发型、脸型、服装和整体气质，不要凭空创造新外貌。\n\n"
-        )
+        if ref_layout_desc:
+            ref_block = f"{ref_layout_desc}\n\n"
+        else:
+            ref_block = (
+                "【角色参考图说明】\n"
+                "请严格保持参考图中角色的外貌特征（发型、脸型、服装、体型），不要凭空创造新外貌。\n\n"
+            )
 
     style_block = _build_manga_style(color_mode)
     if all_scenes:
@@ -334,18 +338,93 @@ def _prepare_ref_blobs(valid_refs: list[Path], progress_label: str) -> list[tupl
     for idx, ref_path in enumerate(valid_refs, start=1):
         try:
             img = Image.open(ref_path)
-            max_side = 1024
+            # gpt-image-2 以高保真处理每张垫图，512×512 在 token 和视觉参考间取得平衡
+            max_side = 512
             ratio = min(max_side / img.width, max_side / img.height)
-            if ratio < 1:
-                img = img.resize((int(img.width * ratio), int(img.height * ratio)), Image.LANCZOS)
+            if ratio < 1 or ratio > 1.0:
+                new_w = max(1, int(img.width * ratio))
+                new_h = max(1, int(img.height * ratio))
+                img = img.resize((new_w, new_h), Image.LANCZOS)
             buf = io.BytesIO()
-            img.convert("RGBA").save(buf, format="PNG", optimize=True)
+            # 使用 RGB 而非 RGBA，避免透明度通道增加 token 消耗
+            img.convert("RGB").save(buf, format="PNG", optimize=True)
             blob = buf.getvalue()
             ref_blobs.append((f"ref{idx}.png", blob))
             logger.info("[%s] 参考图 %s 已加载: %s -> %.0f KB", progress_label, idx, ref_path.name, len(blob) / 1024)
         except Exception as exc:
             logger.warning("[%s] 参考图加载失败 %s: %s", progress_label, ref_path, exc)
     return ref_blobs
+
+
+def _compose_ref_sheet(ref_paths: list[Path], ref_labels: list[str]) -> tuple[bytes, str]:
+    """多角色参考图合拼为紧凑网格图供 /images/edits 单图使用。
+
+    不在图上绘制文字标签——角色对应关系通过 prompt 编号策略描述。
+    返回 (PNG bytes, 布局描述)。
+    """
+    if len(ref_paths) == 1:
+        buf = io.BytesIO()
+        with Image.open(ref_paths[0]) as img:
+            img.convert("RGB").save(buf, format="PNG", optimize=True)
+        label = ref_labels[0] if ref_labels and ref_labels[0] else ""
+        desc = f"【角色参考图说明】\n角色：{label}。请严格保持该角色外貌特征，将其融入以下漫画场景中。\n" if label else ""
+        return buf.getvalue(), desc
+
+    cell_size = 384
+    padding = 8
+    max_cols = 3
+
+    images: list[Image.Image] = []
+    for p in ref_paths:
+        try:
+            img = Image.open(p).convert("RGB")
+            ratio = cell_size / max(img.width, img.height)
+            if ratio < 1:
+                new_w = max(1, int(img.width * ratio))
+                new_h = max(1, int(img.height * ratio))
+                img = img.resize((new_w, new_h), Image.LANCZOS)
+            canvas = Image.new("RGB", (cell_size, cell_size), (255, 255, 255))
+            x = (cell_size - img.width) // 2
+            y = (cell_size - img.height) // 2
+            canvas.paste(img, (x, y))
+            images.append(canvas)
+        except Exception as exc:
+            logger.warning("合拼参考图加载失败 %s: %s", p, exc)
+
+    if not images:
+        raise MangaImageGenerationError(
+            code="ref_compose_failed",
+            user_message="无法加载任何角色参考图进行合拼。",
+            retryable=False,
+        )
+
+    count = len(images)
+    cols = min(count, max_cols)
+    rows = (count + cols - 1) // cols
+    total_w = cols * cell_size + (cols - 1) * padding
+    total_h = rows * cell_size + (rows - 1) * padding
+    composite = Image.new("RGB", (total_w, total_h), (255, 255, 255))
+
+    for i, img in enumerate(images):
+        col = i % cols
+        row = i // cols
+        composite.paste(img, (col * (cell_size + padding), row * (cell_size + padding)))
+
+    buf = io.BytesIO()
+    composite.save(buf, format="PNG", optimize=True)
+
+    labels = []
+    for i in range(count):
+        label = ref_labels[i] if i < len(ref_labels) and ref_labels[i] else f"角色{i + 1}"
+        labels.append(f"角色「{label}」")
+
+    desc = (
+        "【角色参考图说明】\n"
+        f"参考图是一张合拼网格图，包含以下角色：{'、'.join(labels)}。\n"
+        "请根据参考图中各角色的外貌特征，将其融入以下漫画场景中。\n"
+        "严格保持每个角色的发型、脸型、服装和整体气质，不要混淆或错乱角色特征。\n"
+    )
+    return buf.getvalue(), desc
 
 
 async def _download_generated_image(image_entry: dict, progress_label: str) -> bytes:
@@ -675,148 +754,201 @@ async def generate_manga_image(
     all_scenes: list[str] | None = None,
     character_profiles: str = "",
     ref_image_paths: list[str] | None = None,
+    ref_labels: list[str] | None = None,
     color_mode: str = "bw",
     api_key: str | None = None,
 ) -> ImageGenerationResult:
     total_pages = len(all_scenes) if all_scenes else 1
     progress_label = f"{image_number}/{total_pages}"
     valid_refs = [Path(p) for p in (ref_image_paths or []) if p and Path(p).exists()]
-    use_ref = bool(valid_refs)
-    ref_blobs = _prepare_ref_blobs(valid_refs, progress_label)
+    valid_labels = [l for l in (ref_labels or [])[:len(valid_refs)] if l]
+
+    # 构建策略列表——每个策略都保证角色参考图被使用，绝不降级到无图模式
+    strategies: list[tuple[str, bool, list[tuple[str, bytes]], str]] = []
+    if valid_refs:
+        ref_blobs = _prepare_ref_blobs(valid_refs, progress_label)
+        if len(ref_blobs) > 1:
+            # 策略1：多图 image[] + 官方编号 prompt——模型知道每张图对应哪个角色
+            numbered = "\n".join(
+                f"参考图{i}：角色「{valid_labels[i - 1] if i <= len(valid_labels) else f'角色{i}'}」"
+                for i in range(1, len(ref_blobs) + 1)
+            )
+            multi_desc = (
+                "【角色参考图说明】\n"
+                f"{numbered}\n\n"
+                "将以上各角色按以下分镜描述融合到同一漫画画面中。\n"
+                "每张参考图对应一个角色——严格保持该角色在参考图中的发型、脸型、服装和整体气质，\n"
+                "各角色外貌特征不得混淆、交换或错乱。\n"
+            )
+            strategies.append(("multi_edits", True, ref_blobs, multi_desc))
+
+            # 策略2：合拼单图编辑——image[] 返回空时的后备，同样用视觉参考保证角色一致
+            try:
+                comp_blob, comp_desc = _compose_ref_sheet(valid_refs, valid_labels)
+                strategies.append(("composite_edits", True, [("ref_composite.png", comp_blob)], comp_desc))
+            except Exception as exc:
+                logger.warning("[%s] 合拼参考图生成失败，将仅使用多图策略: %s", progress_label, exc)
+        elif len(ref_blobs) == 1:
+            label = valid_labels[0] if valid_labels else ""
+            desc = ""
+            if label:
+                desc = (
+                    "【角色参考图说明】\n"
+                    f"角色：{label}。请严格保持该角色外貌特征，将其融入以下漫画场景中。\n"
+                )
+            strategies.append(("single_edits", True, ref_blobs, desc))
+    else:
+        # 无参考图可用的兜底：纯文本 generations
+        strategies.append(("generations", False, [], ""))
 
     current_prompt = prompt.strip()
     current_scenes = list(all_scenes) if all_scenes else None
     prompt_sanitized = False
     last_err: MangaImageGenerationError | None = None
 
-    for attempt in range(1, MAX_RETRIES + 1):
-        full_prompt = _build_full_prompt(
-            current_prompt,
-            image_number=image_number,
-            total_pages=total_pages,
-            all_scenes=current_scenes,
-            character_profiles=character_profiles,
-            use_ref=use_ref,
-            color_mode=color_mode,
-        )
-        heartbeat_task: asyncio.Task | None = None
-        try:
-            mode = f"edits({len(ref_blobs)} refs)" if ref_blobs else "generations"
-            logger.info("[%s] 开始调用 Image2 API [%s]（尝试 %s/%s）", progress_label, mode, attempt, MAX_RETRIES)
-            t0 = time.time()
-
-            async def _heartbeat() -> None:
-                try:
-                    while True:
-                        await asyncio.sleep(30)
-                        waited = int(time.time() - t0)
-                        logger.info("[%s] 等待中... 已等待 %ss", progress_label, waited)
-                except asyncio.CancelledError:
-                    return
-
-            heartbeat_task = asyncio.create_task(_heartbeat())
-            timeout = httpx.Timeout(connect=30, read=600, write=120, pool=30)
-            limits = httpx.Limits(max_connections=1, max_keepalive_connections=0)
-            async with httpx.AsyncClient(timeout=timeout, limits=limits) as client:
-                if ref_blobs:
-                    files = [("image", (ref_blobs[0][0], io.BytesIO(ref_blobs[0][1]), "image/png"))] if len(ref_blobs) == 1 else [
-                        ("image[]", (name, io.BytesIO(blob), "image/png")) for name, blob in ref_blobs
-                    ]
-                    resp = await client.post(
-                        f"{IMAGE_API_BASE_URL}/images/edits",
-                        files=files,
-                        data={"model": IMAGE_MODEL, "prompt": full_prompt, "size": IMAGE_SIZE},
-                        headers=_image_auth_headers(api_key),
-                    )
-                else:
-                    resp = await client.post(
-                        f"{IMAGE_API_BASE_URL}/images/generations",
-                        json={"model": IMAGE_MODEL, "prompt": full_prompt, "size": IMAGE_SIZE},
-                        headers=_image_auth_headers(api_key, json_content=True),
-                    )
-
-            if heartbeat_task:
-                heartbeat_task.cancel()
-            if not resp.is_success:
-                raise _classify_response_error(resp, progress_label, current_prompt, prompt_sanitized)
-
+    for strategy_name, strategy_use_ref, strategy_blobs, strategy_layout in strategies:
+        max_attempts = MAX_RETRIES
+        for attempt in range(1, max_attempts + 1):
+            full_prompt = _build_full_prompt(
+                current_prompt,
+                image_number=image_number,
+                total_pages=total_pages,
+                all_scenes=current_scenes,
+                character_profiles=character_profiles,
+                use_ref=strategy_use_ref,
+                color_mode=color_mode,
+                ref_layout_desc=strategy_layout,
+            )
+            heartbeat_task: asyncio.Task | None = None
             try:
-                data = resp.json()
-            except Exception as exc:
-                raise MangaImageGenerationError(
-                    code="invalid_json",
-                    user_message="绘图服务返回了无法解析的数据，请重试。",
+                mode = f"{strategy_name}({len(strategy_blobs)} refs)" if strategy_blobs else "generations"
+                logger.info("[%s] 开始调用 Image2 API [%s]（尝试 %s/%s）", progress_label, mode, attempt, max_attempts)
+                t0 = time.time()
+
+                async def _heartbeat() -> None:
+                    try:
+                        while True:
+                            await asyncio.sleep(30)
+                            waited = int(time.time() - t0)
+                            logger.info("[%s] 等待中... 已等待 %ss", progress_label, waited)
+                    except asyncio.CancelledError:
+                        return
+
+                heartbeat_task = asyncio.create_task(_heartbeat())
+                timeout = httpx.Timeout(connect=30, read=600, write=120, pool=30)
+                limits = httpx.Limits(max_connections=1, max_keepalive_connections=0)
+                async with httpx.AsyncClient(timeout=timeout, limits=limits) as client:
+                    if strategy_blobs:
+                        if len(strategy_blobs) == 1:
+                            name, blob = strategy_blobs[0]
+                            files = [("image", (name, io.BytesIO(blob), "image/png"))]
+                        else:
+                            files = [
+                                ("image[]", (name, io.BytesIO(blob), "image/png"))
+                                for name, blob in strategy_blobs
+                            ]
+                        resp = await client.post(
+                            f"{IMAGE_API_BASE_URL}/images/edits",
+                            files=files,
+                            data={"model": IMAGE_MODEL, "prompt": full_prompt, "size": IMAGE_SIZE},
+                            headers=_image_auth_headers(api_key),
+                        )
+                    else:
+                        resp = await client.post(
+                            f"{IMAGE_API_BASE_URL}/images/generations",
+                            json={"model": IMAGE_MODEL, "prompt": full_prompt, "size": IMAGE_SIZE},
+                            headers=_image_auth_headers(api_key, json_content=True),
+                        )
+
+                if heartbeat_task:
+                    heartbeat_task.cancel()
+                if not resp.is_success:
+                    raise _classify_response_error(resp, progress_label, current_prompt, prompt_sanitized)
+
+                try:
+                    data = resp.json()
+                except Exception as exc:
+                    raise MangaImageGenerationError(
+                        code="invalid_json",
+                        user_message="绘图服务返回了无法解析的数据，请重试。",
+                        retryable=True,
+                        provider_message=str(exc),
+                    ) from exc
+
+                logger.info("[%s] API 返回成功，耗时 %.1fs", progress_label, time.time() - t0)
+                image_entry = _extract_data_image_entry(data, progress_label)
+                image_bytes = normalize_image_bytes(await _download_generated_image(image_entry, progress_label))
+
+                chapter_dir = OUTPUT_DIR / f"chapter_{chapter_id}"
+                chapter_dir.mkdir(parents=True, exist_ok=True)
+                filename = f"panel_{image_number:02d}_{uuid.uuid4().hex[:8]}.png"
+                filepath = chapter_dir / filename
+                filepath.write_bytes(image_bytes)
+                logger.info("[%s] 已保存到 %s", progress_label, filepath)
+                return ImageGenerationResult(
+                    image_path=f"manga_outputs/chapter_{chapter_id}/{filename}",
+                    final_prompt=current_prompt,
+                    prompt_sanitized=prompt_sanitized,
+                )
+
+            except httpx.TimeoutException as exc:
+                last_err = MangaImageGenerationError(
+                    code="timeout",
+                    user_message="绘图服务响应超时，请继续生成或稍后再试。",
                     retryable=True,
-                    provider_message=str(exc),
-                ) from exc
+                    provider_message=repr(exc),
+                )
+            except httpx.TransportError as exc:
+                last_err = MangaImageGenerationError(
+                    code="network_error",
+                    user_message="绘图服务网络异常，请检查网络后继续生成。",
+                    retryable=True,
+                    provider_message=repr(exc),
+                )
+            except MangaImageGenerationError as exc:
+                last_err = exc
+                # image[] 多图返回空数据时立即切换到合拼单图策略，不浪费重试次数
+                if exc.code == "empty_response" and strategy_name == "multi_edits":
+                    logger.warning(
+                        "[%s] 多图 image[] 返回空数据，切换到合拼单图策略（仍保证角色一致性）",
+                        progress_label,
+                    )
+                    break
+            except Exception as exc:
+                last_err = MangaImageGenerationError(
+                    code="unknown_error",
+                    user_message="绘图服务发生未知错误，请稍后继续生成。",
+                    retryable=True,
+                    provider_message=repr(exc),
+                )
+            finally:
+                if heartbeat_task:
+                    heartbeat_task.cancel()
 
-            logger.info("[%s] API 返回成功，耗时 %.1fs", progress_label, time.time() - t0)
-            image_entry = _extract_data_image_entry(data, progress_label)
-            image_bytes = normalize_image_bytes(await _download_generated_image(image_entry, progress_label))
-
-            chapter_dir = OUTPUT_DIR / f"chapter_{chapter_id}"
-            chapter_dir.mkdir(parents=True, exist_ok=True)
-            filename = f"panel_{image_number:02d}_{uuid.uuid4().hex[:8]}.png"
-            filepath = chapter_dir / filename
-            filepath.write_bytes(image_bytes)
-            logger.info("[%s] 已保存到 %s", progress_label, filepath)
-            return ImageGenerationResult(
-                image_path=f"manga_outputs/chapter_{chapter_id}/{filename}",
-                final_prompt=current_prompt,
-                prompt_sanitized=prompt_sanitized,
+            logger.error(
+                "[%s] 尝试 %s 失败: code=%s retryable=%s provider=%s",
+                progress_label, attempt, last_err.code, last_err.retryable, last_err.provider_message,
             )
 
-        except httpx.TimeoutException as exc:
-            last_err = MangaImageGenerationError(
-                code="timeout",
-                user_message="绘图服务响应超时，请继续生成或稍后再试。",
-                retryable=True,
-                provider_message=repr(exc),
-            )
-        except httpx.TransportError as exc:
-            last_err = MangaImageGenerationError(
-                code="network_error",
-                user_message="绘图服务网络异常，请检查网络后继续生成。",
-                retryable=True,
-                provider_message=repr(exc),
-            )
-        except MangaImageGenerationError as exc:
-            last_err = exc
-        except Exception as exc:
-            last_err = MangaImageGenerationError(
-                code="unknown_error",
-                user_message="绘图服务发生未知错误，请稍后继续生成。",
-                retryable=True,
-                provider_message=repr(exc),
-            )
-        finally:
-            if heartbeat_task:
-                heartbeat_task.cancel()
+            if last_err.should_sanitize and not prompt_sanitized:
+                optimized_prompt = last_err.optimized_prompt or sanitize_scene_text(current_prompt)[0]
+                if optimized_prompt != current_prompt:
+                    logger.warning("[%s] 检测到内容风控，自动将当前分镜降敏后重试", progress_label)
+                    current_prompt = optimized_prompt
+                    prompt_sanitized = True
+                    if current_scenes and 0 <= image_number - 1 < len(current_scenes):
+                        current_scenes[image_number - 1] = optimized_prompt
+                    continue
 
-        logger.error(
-            "[%s] 尝试 %s 失败: code=%s retryable=%s provider=%s",
-            progress_label,
-            attempt,
-            last_err.code,
-            last_err.retryable,
-            last_err.provider_message,
-        )
-
-        if last_err.should_sanitize and not prompt_sanitized:
-            optimized_prompt = last_err.optimized_prompt or sanitize_scene_text(current_prompt)[0]
-            if optimized_prompt != current_prompt:
-                logger.warning("[%s] 检测到内容风控，自动将当前分镜降敏后重试", progress_label)
-                current_prompt = optimized_prompt
-                prompt_sanitized = True
-                if current_scenes and 0 <= image_number - 1 < len(current_scenes):
-                    current_scenes[image_number - 1] = optimized_prompt
+            if attempt < max_attempts and last_err.retryable:
+                logger.info("[%s] %s秒后重试...", progress_label, RETRY_DELAY)
+                await asyncio.sleep(RETRY_DELAY)
                 continue
+            break
 
-        if attempt < MAX_RETRIES and last_err.retryable:
-            logger.info("[%s] %s秒后重试...", progress_label, RETRY_DELAY)
-            await asyncio.sleep(RETRY_DELAY)
-            continue
-        break
+        # 仅在 multi_edits 空数据时继续下一策略，其他任何失败立刻中断
+        if last_err and last_err.code != "empty_response":
+            break
 
     assert last_err is not None
     if prompt_sanitized and not last_err.optimized_prompt:

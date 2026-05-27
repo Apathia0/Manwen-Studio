@@ -12,7 +12,7 @@ import {
   resetMangaImages,
   getCharacters,
   generateStoryCharactersFromFramework,
-  generateStoryCharacterRefImages,
+  generateStoryCharRefStream,
   saveCharacters,
   resetChapterCharacters,
   getChapterRefImages,
@@ -34,6 +34,7 @@ import {
   type EntitlementResponse,
   type RefSource,
   type RefImage,
+  type CharRefEvent,
 } from '../api';
 import { genStore } from '../genStore';
 
@@ -221,6 +222,7 @@ export default function MangaPanel({
   const sceneDetailRefs = useRef<Record<number, HTMLDivElement | null>>({});
   const chapterLoadRequestRef = useRef(0);
   const sceneAbortRef = useRef<AbortController | null>(null);
+  const charRefStreamRef = useRef<AbortController | null>(null);
   const [selectionLoading, setSelectionLoading] = useState(false);
   const [scenesFromSelectionFlag, setScenesFromSelectionFlag] = useState(false);
   const [ignorePersistedImages, setIgnorePersistedImages] = useState(false);
@@ -280,6 +282,8 @@ export default function MangaPanel({
     // Abort any in-flight scene generation when switching chapters
     sceneAbortRef.current?.abort();
     sceneAbortRef.current = null;
+    charRefStreamRef.current?.abort();
+    charRefStreamRef.current = null;
     const requestId = ++chapterLoadRequestRef.current;
     setImages([]);
     // Don't downgrade phase if there's an ongoing generation for this new chapter;
@@ -471,8 +475,8 @@ export default function MangaPanel({
   // 鈹€鈹€ Scene generation 鈹€鈹€
   const handleGenerateScenes = async () => {
     if (!chapter) return;
-    if (!chapter.messages || chapter.messages.length === 0) {
-      alert('请先在左侧进行对话');
+    if ((!chapter.messages || chapter.messages.length === 0) && !chapter.novel_content) {
+      alert('请先在左侧进行对话或手动编写正文');
       return;
     }
     setScenesFromSelectionFlag(false);
@@ -611,21 +615,32 @@ export default function MangaPanel({
 
   const handleGenerateCharacterRefImage = async (characterName: string, overwrite = false) => {
     if (!chapter) return;
+    if (charRefStreamRef.current) {
+      charRefStreamRef.current.abort();
+    }
     setCharRefGeneratingKey(characterName);
     setErrorMsg('');
-    try {
-      const result = await generateStoryCharacterRefImages(chapter.story_id, {
-        character_name: characterName,
-        overwrite,
-      });
-      setRefImages(result.images);
-      setRefSource('story');
-      setRefMax(result.max);
-    } catch (err: any) {
-      setErrorMsg(`角色参考图生成失败：${err.message}`);
-    } finally {
-      setCharRefGeneratingKey('');
-    }
+    charRefStreamRef.current = generateStoryCharRefStream(
+      chapter.story_id,
+      { character_name: characterName, overwrite },
+      (event) => {
+        if (event.type === 'snapshot' || event.type === 'image') {
+          setRefImages(event.data.images);
+          setRefSource('story');
+          setRefMax(event.data.max);
+        } else if (event.type === 'done') {
+          setRefImages(event.data.images);
+          setRefSource('story');
+          setRefMax(event.data.max);
+          setCharRefGeneratingKey('');
+          charRefStreamRef.current = null;
+        } else if (event.type === 'error') {
+          setErrorMsg(`角色参考图生成失败：${event.data.error}`);
+          setCharRefGeneratingKey('');
+          charRefStreamRef.current = null;
+        }
+      },
+    );
   };
 
   const openMangaRedraw = useCallback((imageNumber: number) => {
@@ -1104,7 +1119,7 @@ export default function MangaPanel({
           {!generating && (phase === 'idle' || phase === 'editing-scenes') && (
             <button
               onClick={handleGenerateScenes}
-              disabled={!chapter || !chapter?.messages?.length}
+              disabled={!chapter || (!chapter?.messages?.length && !chapter?.novel_content)}
               className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md
                          bg-[#1f5f58] hover:bg-[#184c46] text-white disabled:opacity-40
                          disabled:cursor-not-allowed transition-colors"
@@ -1500,22 +1515,37 @@ export default function MangaPanel({
                           className="flex items-center gap-1 text-xs text-amber-400 hover:text-amber-300 disabled:opacity-40 transition-colors"
                         ><Sparkles size={11} /> {charGenerating ? '生成中...' : '根据角色设定重生成'}</button>
                       )}
-                      {chapter && parsedCharacterCards.length > 0 && (
-                        <button
-                          onClick={async () => {
-                            setCharRefGeneratingKey('__all__');
-                            try {
-                              const result = await generateStoryCharacterRefImages(chapter.story_id, { overwrite: false });
-                              setRefImages(result.images);
-                              setRefSource('story');
-                              setRefMax(result.max);
-                            } catch (err: any) {
-                              setErrorMsg(`生成角色参考图失败：${err.message}`);
-                            } finally {
-                              setCharRefGeneratingKey('');
-                            }
-                          }}
-                          disabled={!!charRefGeneratingKey}
+                          {chapter && parsedCharacterCards.length > 0 && (
+                            <button
+                              onClick={async () => {
+                                if (charRefStreamRef.current) {
+                                  charRefStreamRef.current.abort();
+                                }
+                                setCharRefGeneratingKey('__all__');
+                                setErrorMsg('');
+                                charRefStreamRef.current = generateStoryCharRefStream(
+                                  chapter.story_id,
+                                  { overwrite: false },
+                                  (event) => {
+                                    if (event.type === 'snapshot' || event.type === 'image') {
+                                      setRefImages(event.data.images);
+                                      setRefSource('story');
+                                      setRefMax(event.data.max);
+                                    } else if (event.type === 'done') {
+                                      setRefImages(event.data.images);
+                                      setRefSource('story');
+                                      setRefMax(event.data.max);
+                                      setCharRefGeneratingKey('');
+                                      charRefStreamRef.current = null;
+                                    } else if (event.type === 'error') {
+                                      setErrorMsg(`生成角色参考图失败：${event.data.error}`);
+                                      setCharRefGeneratingKey('');
+                                      charRefStreamRef.current = null;
+                                    }
+                                  },
+                                );
+                              }}
+                              disabled={!!charRefGeneratingKey}
                           className="flex items-center gap-1 text-xs text-emerald-400 hover:text-emerald-300 disabled:opacity-40 transition-colors"
                         >
                           {charRefGeneratingKey === '__all__' ? <Loader2 size={11} className="animate-spin" /> : <ImagePlus size={11} />}

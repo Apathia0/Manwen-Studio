@@ -13,6 +13,7 @@ import {
 import {
   confirmOnboarding,
   sendOnboardingMessage,
+  skipOnboarding,
   type CreativeBrief,
   type OnboardingChatMessage,
   type Story,
@@ -114,6 +115,19 @@ export default function OnboardingPage({ story, onComplete, onBack }: Props) {
     setShowConfirm(false);
     setInput('');
     inputRef.current?.focus();
+  };
+
+  const handleSkipOnboarding = async () => {
+    setLoading(true);
+    setError('');
+    try {
+      await skipOnboarding(story.id);
+      onComplete(story.id);
+    } catch (err: any) {
+      setError(err.message || '跳过引导失败，请重试');
+    } finally {
+      setLoading(false);
+    }
   };
 
   return (
@@ -249,6 +263,18 @@ export default function OnboardingPage({ story, onComplete, onBack }: Props) {
             {error && (
               <div className="mt-2 text-xs text-rose-600">{error}</div>
             )}
+            <div className="mt-3 flex items-center justify-between">
+              <button
+                onClick={() => void handleSkipOnboarding()}
+                disabled={loading}
+                className="rounded-2xl border border-[#d7e3f4] bg-white px-4 py-2 text-sm text-slate-500 transition hover:bg-[#f8fbff] disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                跳过引导，直接开始
+              </button>
+              <div className="text-xs text-slate-400">
+                已有故事内容可跳过引导
+              </div>
+            </div>
           </div>
         </div>
 

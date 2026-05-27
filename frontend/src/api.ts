@@ -1642,6 +1642,75 @@ export function generateMangaStream(
   return controller;
 }
 
+/** SSE 流式生成角色参考图，每生成一张即时回调 */
+export type CharRefEvent =
+  | { type: 'snapshot'; data: { images: RefImage[]; max: number; generated: string[]; skipped: string[] } }
+  | { type: 'image'; data: { images: RefImage[]; max: number; generated: string[] } }
+  | { type: 'done'; data: { images: RefImage[]; max: number; generated: string[]; skipped: string[] } }
+  | { type: 'error'; data: { error: string } };
+
+export function generateStoryCharRefStream(
+  storyId: number,
+  data: { character_name?: string; overwrite?: boolean },
+  onEvent: (event: CharRefEvent) => void,
+): AbortController {
+  const controller = new AbortController();
+
+  fetch(`${BASE}/api/stories/${storyId}/character-ref-images/generate`, {
+    method: 'POST',
+    headers: apiHeaders(true),
+    body: JSON.stringify(data ?? {}),
+    signal: controller.signal,
+  })
+    .then(async (res) => {
+      if (!res.ok) {
+        onEvent({ type: 'error', data: { error: await res.text() } });
+        return;
+      }
+      const reader = res.body?.getReader();
+      if (!reader) return;
+      const decoder = new TextDecoder();
+      let buffer = '';
+      let currentEvent = 'message';
+      const handleLine = (line: string) => {
+        const trimmed = line.trim();
+        if (!trimmed || trimmed.startsWith(':')) return;
+        if (trimmed.startsWith('event:')) {
+          currentEvent = trimmed.slice(6).trim();
+        } else if (trimmed.startsWith('data:')) {
+          const dataStr = trimmed.slice(5).trim();
+          try {
+            const parsed = JSON.parse(dataStr);
+            const eventType = currentEvent as CharRefEvent['type'];
+            onEvent({ type: eventType, data: parsed });
+          } catch {
+            // ignore unparseable data
+          }
+          currentEvent = 'message';
+        }
+      };
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+        for (const line of lines) {
+          handleLine(line);
+        }
+      }
+      if (buffer.trim()) handleLine(buffer);
+    })
+    .catch((err) => {
+      if (err.name !== 'AbortError') {
+        onEvent({ type: 'error', data: { error: err.message } });
+      }
+    });
+
+  return controller;
+}
+
 // ─── Onboarding / Story Bible ────────────────────────────────
 
 export async function sendOnboardingMessage(
@@ -1670,6 +1739,15 @@ export async function confirmOnboarding(
     body: JSON.stringify({ collected_info: collectedInfo, messages }),
   });
   if (!res.ok) throw new Error(await readErrorMessage(res, '确认引导失败'));
+  return res.json();
+}
+
+export async function skipOnboarding(storyId: number): Promise<{ story_id: number; onboarding_completed: boolean }> {
+  const res = await fetch(`${BASE}/api/stories/${storyId}/onboarding/skip`, {
+    method: 'POST',
+    headers: apiHeaders(true),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '跳过引导失败'));
   return res.json();
 }
 

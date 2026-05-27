@@ -1,6 +1,6 @@
 import { useState, useCallback, useEffect } from 'react';
 import { Save, SquarePen, X } from 'lucide-react';
-import { saveChapterContent, type Chapter, type Story } from '../api';
+import { saveChapterContent, createNextChapter, type Chapter, type Story } from '../api';
 import ChapterTabBar from './editor/ChapterTabBar';
 import FrameworkContextBar from './editor/FrameworkContextBar';
 import TextEditor from './editor/TextEditor';
@@ -30,24 +30,29 @@ export default function EditorPanel({
   const [isEditing, setIsEditing] = useState(false);
   const [draftContent, setDraftContent] = useState('');
   const [savingDraft, setSavingDraft] = useState(false);
+  const [saveSuccess, setSaveSuccess] = useState(false);
 
   useEffect(() => {
     setIsEditing(false);
     setDraftContent(currentChapter?.novel_content ?? '');
     setSelectedText('');
     setSelectedRange(null);
-  }, [currentChapter?.id, currentChapter?.novel_content]);
+  }, [currentChapter?.id]);
 
   const handleTextSelect = useCallback((selection: TextSelection | null) => {
     setSelectedText(selection?.text.trim() ?? '');
     setSelectedRange(selection ? { start: selection.start, end: selection.end } : null);
   }, []);
 
-  const handleNewChapter = useCallback(() => {
-    if (chapters.length > 0) {
-      onChapterChange(chapters[chapters.length - 1]);
+  const handleNewChapter = useCallback(async () => {
+    try {
+      const newChapter = await createNextChapter(story.id);
+      await onContentUpdated();
+      onChapterChange(newChapter);
+    } catch (error) {
+      console.error('创建章节失败:', error);
     }
-  }, [chapters, onChapterChange]);
+  }, [story.id, onContentUpdated, onChapterChange]);
 
   const handleEditorTextSelect = useCallback(
     (selection: TextSelection | null) => {
@@ -87,6 +92,8 @@ export default function EditorPanel({
     try {
       await saveChapterContent(currentChapter.id, draftContent);
       setIsEditing(false);
+      setSaveSuccess(true);
+      setTimeout(() => setSaveSuccess(false), 2000);
       await onContentUpdated();
     } finally {
       setSavingDraft(false);
@@ -158,6 +165,12 @@ export default function EditorPanel({
           </div>
         </div>
       ) : null}
+
+      {saveSuccess && (
+        <div className="border-b border-[#bbf7d0] bg-[#f0fdf4] px-4 py-2 text-xs text-[#15803d]">
+          ✓ 正文已保存
+        </div>
+      )}
 
       <TextEditor
         content={currentChapter?.novel_content ?? null}

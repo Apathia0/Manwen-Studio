@@ -352,13 +352,23 @@ export default function ChapterListSection({
 
             <div className="mt-2 flex flex-wrap items-center gap-2">
               <button
-                onClick={() => (canOpen ? onChapterSelect(chapter.chapter_number) : void handleExpand(chapter))}
-                disabled={busyId !== null}
-                className="inline-flex items-center gap-1 rounded-md border border-blue-200 bg-blue-50 px-2.5 py-1 text-[11px] font-medium text-blue-700 hover:bg-blue-100 disabled:opacity-40"
+                onClick={() => onChapterSelect(chapter.chapter_number)}
+                className="inline-flex items-center gap-1 rounded-md border border-blue-200 bg-blue-50 px-2.5 py-1 text-[11px] font-medium text-blue-700 hover:bg-blue-100"
               >
-                {isBusy && busyAction === 'expand' ? <Loader2 size={12} className="animate-spin" /> : <FileText size={12} />}
-                {canOpen ? '打开正文' : '生成正文'}
+                <FileText size={12} />
+                打开正文
               </button>
+
+              {!canOpen && (
+                <button
+                  onClick={() => void handleExpand(chapter)}
+                  disabled={busyId !== null}
+                  className="inline-flex items-center gap-1 rounded-md border border-emerald-200 bg-emerald-50 px-2.5 py-1 text-[11px] font-medium text-emerald-700 hover:bg-emerald-100 disabled:opacity-40"
+                >
+                  {isBusy && busyAction === 'expand' ? <Loader2 size={12} className="animate-spin" /> : <FileText size={12} />}
+                  生成正文
+                </button>
+              )}
 
               {chapter.id && (
                 <button onClick={() => void handleAssess(chapter)} disabled={busyId !== null} className="inline-flex items-center gap-1 rounded-md border border-slate-200 bg-slate-900 px-2.5 py-1 text-[11px] font-medium text-white hover:bg-slate-800 disabled:opacity-40">
@@ -395,16 +405,6 @@ export default function ChapterListSection({
           </div>
         );
       })}
-
-      <div className="rounded-lg border border-dashed border-blue-200 bg-blue-50/50 p-3">
-        <button onClick={() => openEditor('append')} disabled={savingPlan} className="inline-flex items-center gap-1 rounded-md border border-blue-200 bg-white px-2.5 py-1.5 text-[11px] font-medium text-blue-700 hover:bg-blue-50 disabled:opacity-40">
-          <FilePlus2 size={12} />
-          末尾新增章节
-        </button>
-        {editorState?.mode === 'append' && (
-          <PlanEditorCard title="在章节列表尾部新增章节" draft={editorState.draft} saving={savingPlan} onChange={(draft) => setEditorState({ ...editorState, draft })} onCancel={() => setEditorState(null)} onSave={() => void handleSavePlan()} />
-        )}
-      </div>
 
       {error && <p className="px-1 pt-1 text-xs text-red-500">{error}</p>}
     </div>

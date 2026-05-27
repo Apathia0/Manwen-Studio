@@ -80,6 +80,7 @@ from services.deepseek import (
     continue_framework,
     expand_chapter_to_content,
     generate_character_profiles_from_framework,
+    generate_character_profiles_from_content,
     generate_framework,
     generate_import_guidance_response,
     generate_onboarding_response,
@@ -4862,6 +4863,10 @@ async def update_chapter_content(chapter_id: int, body: ChapterContentUpdate, re
     if not text:
         raise HTTPException(400, "content is empty")
     _apply_chapter_content(chapter, text, status="draft")
+    if not chapter.messages:
+        db.add(ChatMessage(chapter_id=chapter_id, role="user", content=text))
+    db.commit()
+    db.refresh(chapter)
     await _refresh_chapter_memory(chapter, request, db)
     db.commit()
     db.refresh(chapter)
@@ -4886,6 +4891,37 @@ def _load_characters(chapter_id: int, db: Session | None = None) -> str:
         chapter = db.get(Chapter, chapter_id)
         if chapter and chapter.story and chapter.story.character_profiles:
             return chapter.story.character_profiles.strip()
+    return ""
+
+
+async def _load_characters_async(chapter_id: int, request: Request, db: Session) -> str:
+    """加载角色数据，当为空时自动从章节内容提取。"""
+    # 先尝试从文件和数据库加载
+    result = _load_characters(chapter_id, db)
+    if result:
+        return result
+
+    # 如果为空，尝试从章节内容提取
+    chapter = db.get(Chapter, chapter_id)
+    if not chapter or not chapter.novel_content or not chapter.novel_content.strip():
+        return ""
+
+    # 从章节内容提取角色信息
+    deepseek_api_key = _user_deepseek_api_key(request)
+    try:
+        generated = await generate_character_profiles_from_content(
+            chapter.novel_content,
+            api_key=deepseek_api_key,
+        )
+        if generated:
+            # 保存到章节文件
+            p = _characters_path(chapter_id)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(generated, encoding="utf-8")
+            return generated
+    except Exception as exc:
+        logger.warning("Failed to generate character profiles from content for chapter %s: %s", chapter_id, exc)
+
     return ""
 
 
@@ -4916,17 +4952,34 @@ async def save_story_characters(story_id: int, body: dict, request: Request, db:
 async def generate_story_characters_from_framework(story_id: int, request: Request, db: Session = Depends(get_db)):
     user = _require_user(request, db)
     story = _require_story_for_user(story_id, user, db)
-    if not isinstance(story.characters, list) or len(story.characters) == 0:
-        raise HTTPException(400, "Story has no framework characters to convert")
-
-    story_context = _story_framework_context(story)
     deepseek_api_key = _user_deepseek_api_key(request)
-    _check_and_consume_advanced_text_quota(request, user.id, db, deduct=False)
-    _release_db_transaction(db)
-    generated = await generate_character_profiles_from_framework(
-        story_context,
-        api_key=deepseek_api_key,
-    )
+
+    if isinstance(story.characters, list) and len(story.characters) > 0:
+        story_context = _story_framework_context(story)
+        _check_and_consume_advanced_text_quota(request, user.id, db, deduct=False)
+        _release_db_transaction(db)
+        generated = await generate_character_profiles_from_framework(
+            story_context,
+            api_key=deepseek_api_key,
+        )
+    else:
+        all_chapters = db.query(Chapter).filter(
+            Chapter.story_id == story_id,
+            Chapter.novel_content.isnot(None),
+            Chapter.novel_content != "",
+        ).order_by(Chapter.chapter_number).all()
+        if not all_chapters:
+            raise HTTPException(400, "Story has no framework characters or novel content to generate from")
+        combined_content = "\n\n".join(
+            f"第 {c.chapter_number} 话：{c.novel_content}" for c in all_chapters
+        )
+        _check_and_consume_advanced_text_quota(request, user.id, db, deduct=False)
+        _release_db_transaction(db)
+        generated = await generate_character_profiles_from_content(
+            combined_content,
+            api_key=deepseek_api_key,
+        )
+
     story = _require_story_for_user(story_id, user, db)
     story.character_profiles = _character_profile_text({"characters": generated})
     db.commit()
@@ -5097,28 +5150,48 @@ def _effective_ref_image_paths(chapter_id: int, db: Session) -> list[Path]:
     return [entry["path"] for entry in _effective_ref_entries(chapter_id, db)]
 
 
-def _select_ref_image_paths_for_scene(scene_prompt: str, ref_entries: list[dict]) -> list[Path]:
+def _label_matches_scene(label: str, scene_text: str) -> bool:
+    """模糊匹配角色标签和分镜文本，支持全名/简称/分段匹配。
+
+    例如 label="狂风之刃·狂刃" scene_text="狂刃站在雨中" → True。
+    """
+    if not label or not scene_text:
+        return False
+    if label in scene_text:
+        return True
+    segments = re.split(r"[·•・,、/／\s]+", label)
+    for seg in segments:
+        seg = seg.strip()
+        if len(seg) >= 2 and seg in scene_text:
+            return True
+    return False
+
+
+def _select_ref_image_paths_for_scene(scene_prompt: str, ref_entries: list[dict]) -> list[tuple[Path, str]]:
+    """返回 (图片路径, 角色标签) 列表。无标签的垫图标签为空字符串。"""
     if not ref_entries:
         return []
 
     scene_text = (scene_prompt or "").strip()
-    unlabeled = [entry["path"] for entry in ref_entries if not entry.get("label")]
+    unlabeled = [(entry["path"], entry.get("label", "") or "")
+                 for entry in ref_entries if not entry.get("label")]
     labeled_matches = [
-        entry["path"]
+        (entry["path"], entry.get("label", "") or "")
         for entry in ref_entries
-        if entry.get("label") and entry["label"] in scene_text
+        if entry.get("label") and _label_matches_scene(entry["label"], scene_text)
     ]
     if labeled_matches:
         seen: set[str] = set()
-        selected: list[Path] = []
-        for path in [*unlabeled, *labeled_matches]:
+        selected: list[tuple[Path, str]] = []
+        for path, label in [*unlabeled, *labeled_matches]:
             key = str(path)
             if key in seen:
                 continue
             seen.add(key)
-            selected.append(path)
+            selected.append((path, label))
         return selected
-    return unlabeled or [entry["path"] for entry in ref_entries]
+    # 无匹配时只返回无标签垫图，不返回其他角色的参考图（防止角色形象混用）
+    return unlabeled
 
 
 def _save_uploaded_ref(ref_dir: Path, img_bytes: bytes, label: str) -> str:
@@ -5139,12 +5212,23 @@ def _slugify_ref_label(label: str) -> str:
 def _build_character_ref_prompt(story: Story, card: dict) -> str:
     tags = json.dumps(story.tags, ensure_ascii=False) if story.tags else "漫画角色设定"
     return (
-        "请生成一张单人漫画角色参考图，用于后续固定角色形象。\n"
+        "请生成一张完整的漫画角色设定参考图（Character Design Sheet），用于后续漫画分镜中固定该角色的外貌形象。\n"
         f"题材标签：{tags}\n"
         f"角色名：{card['name']}\n"
-        f"角色外貌卡：\n{card['raw']}\n\n"
-        "要求：只出现该角色一人；突出稳定五官、发型、服装和体型特征；"
-        "采用角色设定图或干净半身立绘构图；背景简洁；不要对话框、不要文字、不要分镜、不要多人物。"
+        f"以下为该角色的详细外貌设定：\n{card['raw']}\n\n"
+        "设定图必须包含以下内容：\n"
+        "1. 三视图——正面全身站立图（居中偏大，作为主图）、侧面全身图（左侧）、"
+        "背面全身图（右侧）。三个视角比例一致，姿态自然中性站立，双臂自然下垂。\n"
+        "2. 表情集——在画面下方或右下角，用3-4个独立的小头像特写展示关键表情："
+        "常态（自然表情）、高兴/微笑、愤怒/严肃、悲伤/惊讶。每个表情须有明显差异。\n"
+        "3. 服装和配饰——所有服装款式、材质、色彩必须清晰展示。"
+        "所有配饰（首饰、武器、道具、装饰品）必须在角色身上明确可见，不可省略或模糊。\n\n"
+        "风格与构图要求：\n"
+        "- 漫画/动画风格，线条干净利落，上色均匀平整\n"
+        "- 背景为纯白或浅灰，无场景、无背景元素\n"
+        "- 只绘制这一个角色，画面中绝对不出现其他人物\n"
+        "- 不要对话框、不要分镜线、不要叙事性文字或标题\n"
+        "- 整体呈现为专业动画/漫画角色设定稿的标准排版"
     )
 
 
@@ -5171,10 +5255,9 @@ async def generate_story_character_ref_images(story_id: int, request: Request, d
     _migrate_legacy_ref(_legacy_story_ref_image(story_id), ref_dir)
     ref_dir.mkdir(parents=True, exist_ok=True)
     meta = _load_ref_meta(ref_dir)
-    generated: list[str] = []
+    image_api_key = _user_image_api_key(request)
     skipped: list[str] = []
     pending_targets: list[dict] = []
-    image_api_key = _user_image_api_key(request)
     prompt_map: dict[str, str] = {}
 
     for card in targets:
@@ -5201,51 +5284,89 @@ async def generate_story_character_ref_images(story_id: int, request: Request, d
             deduct=False,
             provider_kind="image",
         )
-        _release_db_transaction(db)
+    user_id = user.id
+    _release_db_transaction(db)
+    # 清空 request.state 中的 db/user，避免后面异步 generator 中
+    # _check_and_consume_feature_quota → _custom_image_provider_active
+    # 访问到已 detached 的 User 实例触发 DetachedInstanceError
+    request.state.db = None
+    request.state.current_user = None
 
-    for card in pending_targets:
-        existing = [
-            filename
-            for filename, item in meta.items()
-            if isinstance(item, dict)
-            and item.get("kind") == "character_generated"
-            and item.get("label") == card["name"]
-        ]
-        for filename in existing:
-            path = ref_dir / filename
-            if path.exists():
-                _unlink_file(path, "story character ref image")
-            meta.pop(filename, None)
+    async def event_generator():
+        nonlocal meta
+        generated: list[str] = []
+        _save_ref_meta(ref_dir, meta)
+        current_images = _serialize_refs(ref_dir, "story", story_id)
+        yield {"event": "snapshot", "data": json.dumps({
+            "images": current_images,
+            "max": MAX_REF_IMAGES_PER_LEVEL,
+            "generated": [],
+            "skipped": skipped,
+        }, ensure_ascii=False)}
 
-        if len(_list_ref_files(ref_dir)) >= MAX_REF_IMAGES_PER_LEVEL:
-            raise HTTPException(409, f"Maximum {MAX_REF_IMAGES_PER_LEVEL} reference images allowed")
+        for card in pending_targets:
+            if await request.is_disconnected():
+                break
 
-        filename = f"char_{_slugify_ref_label(card['name'])}_{uuid.uuid4().hex[:8]}.png"
-        await generate_reference_image(
-            prompt_map.get(card["name"]) or _build_character_ref_prompt(story, card),
-            ref_dir / filename,
-            api_key=image_api_key,
-        )
-        meta[filename] = {"label": card["name"], "kind": "character_generated"}
-        generated.append(card["name"])
+            existing = [
+                filename
+                for filename, item in meta.items()
+                if isinstance(item, dict)
+                and item.get("kind") == "character_generated"
+                and item.get("label") == card["name"]
+            ]
+            for filename in existing:
+                path = ref_dir / filename
+                if path.exists():
+                    _unlink_file(path, "story character ref image")
+                meta.pop(filename, None)
 
-    _save_ref_meta(ref_dir, meta)
-    if generated:
-        _check_and_consume_feature_quota(
-            request,
-            user.id,
-            "manga.image.monthly_limit",
-            len(generated),
-            db,
-            deduct=True,
-            provider_kind="image",
-        )
-    return {
-        "images": _serialize_refs(ref_dir, "story", story_id),
-        "max": MAX_REF_IMAGES_PER_LEVEL,
-        "generated": generated,
-        "skipped": skipped,
-    }
+            if len(_list_ref_files(ref_dir)) >= MAX_REF_IMAGES_PER_LEVEL:
+                continue
+
+            filename = f"char_{_slugify_ref_label(card['name'])}_{uuid.uuid4().hex[:8]}.png"
+            try:
+                await generate_reference_image(
+                    prompt_map.get(card["name"]) or _build_character_ref_prompt(story, card),
+                    ref_dir / filename,
+                    api_key=image_api_key,
+                )
+            except Exception:
+                continue
+
+            meta[filename] = {"label": card["name"], "kind": "character_generated"}
+            generated.append(card["name"])
+            _save_ref_meta(ref_dir, meta)
+
+            yield {"event": "image", "data": json.dumps({
+                "images": _serialize_refs(ref_dir, "story", story_id),
+                "max": MAX_REF_IMAGES_PER_LEVEL,
+                "generated": [card["name"]],
+            }, ensure_ascii=False)}
+
+        if generated:
+            quota_db = SessionLocal()
+            try:
+                _check_and_consume_feature_quota(
+                    request,
+                    user_id,
+                    "manga.image.monthly_limit",
+                    len(generated),
+                    quota_db,
+                    deduct=True,
+                    provider_kind="image",
+                )
+            finally:
+                quota_db.close()
+
+        yield {"event": "done", "data": json.dumps({
+            "images": _serialize_refs(ref_dir, "story", story_id),
+            "max": MAX_REF_IMAGES_PER_LEVEL,
+            "generated": generated,
+            "skipped": skipped,
+        }, ensure_ascii=False)}
+
+    return EventSourceResponse(event_generator())
 
 
 @app.get("/api/stories/{story_id}/ref-images")
@@ -5519,12 +5640,15 @@ async def generate_scenes_endpoint(chapter_id: int, request: Request, db: Sessio
     """Generate scene prompts from chat history. Returns them for user review."""
     user = _require_user(request, db)
     chapter = _require_chapter_for_user(chapter_id, user, db)
-    if not chapter.messages:
+    if not chapter.messages and not chapter.novel_content:
         raise HTTPException(400, "No chat messages yet")
 
     image_count = _effective_image_count(chapter_id, user.id, db)
-    chat_history = [{"role": m.role, "content": m.content} for m in chapter.messages]
-    character_profiles = _load_characters(chapter_id, db)
+    if chapter.messages:
+        chat_history = [{"role": m.role, "content": m.content} for m in chapter.messages]
+    else:
+        chat_history = [{"role": "user", "content": chapter.novel_content}]
+    character_profiles = await _load_characters_async(chapter_id, request, db)
     deepseek_api_key = _user_deepseek_api_key(request)
     _check_and_consume_feature_quota(request, user.id, "scene.generate.monthly_limit", 1, db, deduct=False, provider_kind="text")
     _release_db_transaction(db)
@@ -5639,7 +5763,7 @@ async def generate_manga_stream(chapter_id: int, request: Request, db: Session =
         raise HTTPException(400, f"Expected {image_count} scenes, found {len(scenes)}")
     if chapter_id in ACTIVE_MANGA_GENERATIONS:
         raise HTTPException(409, "Manga generation is already running for this chapter")
-    character_profiles = _load_characters(chapter_id, db)
+    character_profiles = await _load_characters_async(chapter_id, request, db)
     ref_entries = _effective_ref_entries(chapter_id, db)
     color_mode = _effective_color_mode(chapter_id, user.id, db)
     image_api_key = _user_image_api_key(request)
@@ -5686,13 +5810,16 @@ async def generate_manga_stream(chapter_id: int, request: Request, db: Session =
                 }
                 try:
                     ref_imgs = _select_ref_image_paths_for_scene(scene_prompt, ref_entries)
+                    ref_paths = [str(p) for p, _ in ref_imgs]
+                    ref_labels = [label for _, label in ref_imgs]
                     image_result = await generate_manga_image(
                         scene_prompt,
                         chapter_id,
                         i,
                         all_scenes=scenes,
                         character_profiles=character_profiles,
-                        ref_image_paths=[str(p) for p in ref_imgs] if ref_imgs else None,
+                        ref_image_paths=ref_paths if ref_paths else None,
+                        ref_labels=ref_labels if any(ref_labels) else None,
                         color_mode=color_mode,
                         api_key=image_api_key,
                     )
@@ -5784,7 +5911,7 @@ async def regenerate_single_image(chapter_id: int, image_number: int, body: dict
         MangaImage.image_number == image_number,
     ).first()
     old_path = Path(__file__).resolve().parent / old_img.image_path if old_img else None
-    character_profiles = _load_characters(chapter_id, db)
+    character_profiles = await _load_characters_async(chapter_id, request, db)
     color_mode = _effective_color_mode(chapter_id, user.id, db)
     image_api_key = _user_image_api_key(request)
     custom_image_provider = _custom_image_provider_active(request)
@@ -5792,6 +5919,8 @@ async def regenerate_single_image(chapter_id: int, image_number: int, body: dict
     # Generate new image
     ref_entries = _effective_ref_entries(chapter_id, db)
     ref_imgs = _select_ref_image_paths_for_scene(prompt, ref_entries)
+    ref_paths = [str(p) for p, _ in ref_imgs]
+    ref_labels = [label for _, label in ref_imgs]
     try:
         _check_and_consume_feature_quota(request, user.id, "manga.regenerate.monthly_limit", 1, db, deduct=False, provider_kind="image")
         _release_db_transaction(db)
@@ -5825,7 +5954,8 @@ async def regenerate_single_image(chapter_id: int, image_number: int, body: dict
                 image_number,
                 all_scenes=all_scenes,
                 character_profiles=character_profiles,
-                ref_image_paths=[str(p) for p in ref_imgs] if ref_imgs else None,
+                ref_image_paths=ref_paths if ref_paths else None,
+                ref_labels=ref_labels if any(ref_labels) else None,
                 color_mode=color_mode,
                 api_key=image_api_key,
             )
@@ -5993,6 +6123,17 @@ async def onboarding_confirm(story_id: int, request: Request, db: Session = Depe
         "story_bible": story_bible,
         "creative_brief": creative_brief,
     }
+
+
+@app.post("/api/stories/{story_id}/onboarding/skip")
+async def onboarding_skip(story_id: int, request: Request, db: Session = Depends(get_db)):
+    """跳过引导，直接标记为已完成"""
+    user = _require_user(request, db)
+    story = _require_story_for_user(story_id, user, db)
+    story.onboarding_completed = True
+    db.commit()
+    db.refresh(story)
+    return {"story_id": story.id, "onboarding_completed": True}
 
 
 @app.post("/api/stories/{story_id}/import-context/message", response_model=OnboardingMessageOut)
