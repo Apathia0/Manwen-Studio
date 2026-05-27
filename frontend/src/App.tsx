@@ -55,6 +55,9 @@ import {
   me,
   register,
   sendEmailVerificationCode,
+  changePassword as changePasswordApi,
+  sendResetEmailCode,
+  resetPassword as resetPasswordApi,
   saveApiKeySettings,
   saveAdminPlanFeatures,
   saveAdminQuotaRules,
@@ -89,6 +92,7 @@ type RouteKey =
   | 'import-guidance'
   | 'workspace'
   | 'account'
+  | 'forgot-password'
   | 'plan-config'
   | 'quota-rules'
   | 'entitlements'
@@ -436,6 +440,19 @@ function App() {
     }
   }
 
+  async function doSendResetEmailCode(email: string) {
+    const result = await sendResetEmailCode(email);
+    const minutes = Math.max(1, Math.round((result.expires_in_seconds || 600) / 60));
+    setGlobalSuccess(`验证码已发送至 ${email}，请在 ${minutes} 分钟内完成重置。`);
+    return result;
+  }
+
+  async function doResetPassword(email: string, verificationCode: string) {
+    const result = await resetPasswordApi(email, verificationCode);
+    setGlobalSuccess(result.message || `新密码已发送至 ${email}，请查收邮件。`);
+    setRoute('login');
+  }
+
   async function refreshPlans() {
     try {
       const data = await getPublicPlans();
@@ -643,8 +660,21 @@ function App() {
           requireEmailCode={Boolean(platform.auth?.require_email_code_for_login)}
           codeExpireMinutes={platform.auth?.email_code_expire_minutes || 10}
           toRegister={() => setRoute('register')}
+          toForgotPassword={() => setRoute('forgot-password')}
           error={globalError}
         />
+    );
+  }
+  if (!session && route === 'forgot-password') {
+    return (
+      <ForgotPasswordPage
+        title={platform.site_name}
+        subtitle={platform.site_slogan}
+        onBack={() => setRoute('login')}
+        onSendCode={doSendResetEmailCode}
+        onResetPassword={doResetPassword}
+        error={globalError}
+      />
     );
   }
   if (!session && route === 'register') {
@@ -977,6 +1007,7 @@ function LoginPage({
   requireEmailCode,
   codeExpireMinutes,
   toRegister,
+  toForgotPassword,
   error,
 }: {
   title: string;
@@ -987,6 +1018,7 @@ function LoginPage({
   requireEmailCode: boolean;
   codeExpireMinutes: number;
   toRegister: () => void;
+  toForgotPassword: () => void;
   error: string | null;
 }) {
   const [email, setEmail] = useState('');
@@ -1060,7 +1092,101 @@ function LoginPage({
         </button>
         {error && <div className="text-xs text-rose-600">{error}</div>}
       </div>
-      <button onClick={toRegister} className="mt-5 text-xs font-medium text-slate-600 transition hover:text-[#2563eb]">没有账号？去注册</button>
+      <div className="mt-5 flex items-center justify-between">
+        <button onClick={toForgotPassword} className="text-xs font-medium text-slate-500 transition hover:text-[#2563eb]">忘记密码？</button>
+        <button onClick={toRegister} className="text-xs font-medium text-slate-600 transition hover:text-[#2563eb]">没有账号？去注册</button>
+      </div>
+    </AuthLayout>
+  );
+}
+
+function ForgotPasswordPage({
+  title,
+  subtitle,
+  onBack,
+  onSendCode,
+  onResetPassword,
+  error,
+}: {
+  title: string;
+  subtitle: string;
+  onBack: () => void;
+  onSendCode: (email: string) => Promise<{ ok: boolean; expires_in_seconds: number }>;
+  onResetPassword: (email: string, verificationCode: string) => Promise<void>;
+  error: string | null;
+}) {
+  const [email, setEmail] = useState('');
+  const [verificationCode, setVerificationCode] = useState('');
+  const [sendingCode, setSendingCode] = useState(false);
+  const [codeCooldown, setCodeCooldown] = useState(0);
+  const [resetting, setResetting] = useState(false);
+  const brandName = title || DEFAULT_SITE_NAME;
+  const brandSlogan = subtitle || DEFAULT_SITE_SLOGAN;
+
+  useEffect(() => {
+    if (codeCooldown <= 0) return;
+    const timer = window.setTimeout(() => setCodeCooldown((prev) => Math.max(0, prev - 1)), 1000);
+    return () => window.clearTimeout(timer);
+  }, [codeCooldown]);
+
+  return (
+    <AuthLayout
+      brandName={brandName}
+      brandSlogan={brandSlogan}
+      title="找回密码"
+      subtitle={`验证邮箱后，新密码将发送到您的邮箱。`}
+      onBack={onBack}
+    >
+      <div className="space-y-3">
+        <input
+          value={email}
+          onChange={(e) => setEmail(e.target.value)}
+          className="w-full rounded-2xl border border-[#d7e3f4] bg-[#fafdff] px-4 py-3 text-sm text-slate-900 outline-none transition placeholder:text-slate-400 focus:border-[#93c5fd] focus:bg-white focus:ring-4 focus:ring-[#dbeafe]"
+          placeholder="邮箱"
+        />
+        <div className="flex gap-2">
+          <input
+            value={verificationCode}
+            onChange={(e) => setVerificationCode(e.target.value)}
+            className="min-w-0 flex-1 rounded-2xl border border-[#d7e3f4] bg-[#fafdff] px-4 py-3 text-sm text-slate-900 outline-none transition placeholder:text-slate-400 focus:border-[#93c5fd] focus:bg-white focus:ring-4 focus:ring-[#dbeafe]"
+            placeholder="邮箱验证码"
+          />
+          <button
+            onClick={() =>
+              void (async () => {
+                setSendingCode(true);
+                try {
+                  await onSendCode(email);
+                  setCodeCooldown(60);
+                } finally {
+                  setSendingCode(false);
+                }
+              })()
+            }
+            className="shrink-0 rounded-2xl border border-[#bfdbfe] bg-white px-4 py-3 text-sm font-medium text-[#2563eb] transition hover:bg-[#eff6ff] disabled:cursor-not-allowed disabled:opacity-60"
+            disabled={sendingCode || codeCooldown > 0 || !email}
+          >
+            {sendingCode ? '发送中...' : codeCooldown > 0 ? `${codeCooldown}s 后重发` : '发送验证码'}
+          </button>
+        </div>
+        <button
+          onClick={() =>
+            void (async () => {
+              setResetting(true);
+              try {
+                await onResetPassword(email, verificationCode);
+              } finally {
+                setResetting(false);
+              }
+            })()
+          }
+          disabled={resetting || !email || !verificationCode}
+          className="w-full rounded-2xl bg-[#2563eb] py-3 text-sm font-medium text-white shadow-[0_16px_34px_rgba(59,130,246,0.24)] transition hover:bg-[#1d4ed8] disabled:cursor-not-allowed disabled:opacity-60"
+        >
+          {resetting ? '处理中...' : '重置密码'}
+        </button>
+        {error && <div className="text-xs text-rose-600">{error}</div>}
+      </div>
     </AuthLayout>
   );
 }
@@ -2099,6 +2225,11 @@ function UserAccountUsagePage({
         </div>
       ) : null}
 
+      <div className="mt-4 rounded-3xl border border-[#d7e3f4] bg-white/95 p-5 shadow-[0_14px_34px_rgba(59,130,246,0.08)]">
+        <div className="text-sm font-semibold text-slate-900">密码修改</div>
+        <PasswordChangeForm onChangePassword={changePasswordApi} />
+      </div>
+
       <div className="mt-4 overflow-hidden rounded-3xl border border-[#d7e3f4] bg-white/95 shadow-[0_14px_34px_rgba(59,130,246,0.08)]">
         <div className="border-b border-[#e5edf8] px-4 py-3">
           <div className="text-sm font-semibold text-slate-900">本月核心额度</div>
@@ -2210,6 +2341,87 @@ function UserAccountUsagePage({
           </div>
         </div>
       </div>
+    </div>
+  );
+}
+
+function PasswordChangeForm({
+  onChangePassword,
+}: {
+  onChangePassword: (oldPassword: string, newPassword: string) => Promise<void>;
+}) {
+  const [oldPassword, setOldPassword] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [localError, setLocalError] = useState<string | null>(null);
+  const [localSuccess, setLocalSuccess] = useState<string | null>(null);
+
+  async function handleSubmit() {
+    setLocalError(null);
+    setLocalSuccess(null);
+    if (!oldPassword || !newPassword || !confirmPassword) {
+      setLocalError('请填写所有密码字段');
+      return;
+    }
+    if (newPassword.length < 6) {
+      setLocalError('新密码长度不能少于 6 位');
+      return;
+    }
+    if (newPassword !== confirmPassword) {
+      setLocalError('两次输入的新密码不一致');
+      return;
+    }
+    if (newPassword === oldPassword) {
+      setLocalError('新密码不能与旧密码相同');
+      return;
+    }
+    setSaving(true);
+    try {
+      await onChangePassword(oldPassword, newPassword);
+      setLocalSuccess('密码修改成功');
+      setOldPassword('');
+      setNewPassword('');
+      setConfirmPassword('');
+    } catch (err: any) {
+      setLocalError(err.message || '密码修改失败');
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="mt-3 space-y-3">
+      <input
+        value={oldPassword}
+        onChange={(e) => setOldPassword(e.target.value)}
+        type="password"
+        placeholder="当前密码"
+        className="w-full rounded-2xl border border-[#d7e3f4] bg-[#fafdff] px-3 py-2 text-sm outline-none transition focus:border-[#60a5fa] focus:ring-2 focus:ring-[#bfdbfe]"
+      />
+      <input
+        value={newPassword}
+        onChange={(e) => setNewPassword(e.target.value)}
+        type="password"
+        placeholder="新密码（不少于 6 位）"
+        className="w-full rounded-2xl border border-[#d7e3f4] bg-[#fafdff] px-3 py-2 text-sm outline-none transition focus:border-[#60a5fa] focus:ring-2 focus:ring-[#bfdbfe]"
+      />
+      <input
+        value={confirmPassword}
+        onChange={(e) => setConfirmPassword(e.target.value)}
+        type="password"
+        placeholder="确认新密码"
+        className="w-full rounded-2xl border border-[#d7e3f4] bg-[#fafdff] px-3 py-2 text-sm outline-none transition focus:border-[#60a5fa] focus:ring-2 focus:ring-[#bfdbfe]"
+      />
+      <button
+        onClick={() => void handleSubmit()}
+        disabled={saving}
+        className="rounded-2xl bg-[#1d4ed8] px-4 py-2 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-60"
+      >
+        {saving ? '修改中...' : '修改密码'}
+      </button>
+      {localError && <div className="text-xs text-rose-600">{localError}</div>}
+      {localSuccess && <div className="text-xs text-emerald-600">{localSuccess}</div>}
     </div>
   );
 }

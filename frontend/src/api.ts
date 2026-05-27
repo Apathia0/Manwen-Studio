@@ -727,6 +727,35 @@ export async function me(): Promise<AuthUser> {
   return res.json();
 }
 
+export async function changePassword(old_password: string, new_password: string): Promise<void> {
+  const res = await fetch(`${BASE}/api/user/password`, {
+    method: 'PUT',
+    headers: apiHeaders(),
+    body: JSON.stringify({ old_password, new_password }),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '密码修改失败'));
+}
+
+export async function sendResetEmailCode(email: string): Promise<{ ok: boolean; expires_in_seconds: number }> {
+  const res = await fetch(`${BASE}/api/auth/forgot-password`, {
+    method: 'POST',
+    headers: apiHeaders(true),
+    body: JSON.stringify({ email }),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '验证码发送失败，请稍后重试。'));
+  return res.json();
+}
+
+export async function resetPassword(email: string, verification_code: string): Promise<{ ok: boolean; message: string }> {
+  const res = await fetch(`${BASE}/api/auth/reset-password`, {
+    method: 'POST',
+    headers: apiHeaders(true),
+    body: JSON.stringify({ email, verification_code }),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '密码重置失败'));
+  return res.json();
+}
+
 export async function getPublicPlans(): Promise<PublicPlan[]> {
   const res = await fetch(`${BASE}/api/plans/public`, { headers: apiHeaders() });
   if (!res.ok) throw new Error(await res.text());

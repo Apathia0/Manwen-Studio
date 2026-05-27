@@ -657,7 +657,7 @@ def _issue_email_verification_code(email: str, purpose: str, db: Session) -> dic
             expires_at=expires_at,
         )
     )
-    subject_action = "注册" if purpose == "register" else "登录"
+    subject_action = {"register": "注册", "login": "登录", "reset": "重置密码"}.get(purpose, purpose)
     subject = f"{_get_platform_setting('platform.site_name', db, 'StoryCanvas')} {subject_action}验证码"
     body = (
         f"您好，\n\n"
@@ -3434,6 +3434,66 @@ def logout(request: Request, db: Session = Depends(get_db)):
             sess.revoked_at = datetime.datetime.utcnow()
             db.commit()
     return {"ok": True}
+
+
+@app.put("/api/user/password")
+def change_password(request: Request, body: dict, db: Session = Depends(get_db)):
+    _ensure_platform_seed(db)
+    user = _require_user(request, db)
+    old_password = str(body.get("old_password") or "").strip()
+    new_password = str(body.get("new_password") or "").strip()
+    if not old_password or not new_password:
+        raise HTTPException(400, "请输入旧密码和新密码")
+    if user.password_hash != _password_hash(old_password):
+        raise HTTPException(403, "旧密码不正确")
+    if len(new_password) < 6:
+        raise HTTPException(400, "新密码长度不能少于 6 位")
+    if new_password == old_password:
+        raise HTTPException(400, "新密码不能与旧密码相同")
+    user.password_hash = _password_hash(new_password)
+    _write_audit_log(user, "user.change_password", "user", user.id, f"用户 {user.name}({user.email}) 修改了密码", db)
+    db.commit()
+    return {"ok": True}
+
+
+@app.post("/api/auth/forgot-password")
+def forgot_password(body: dict, db: Session = Depends(get_db)):
+    _ensure_platform_seed(db)
+    email = _normalize_email(body.get("email"))
+    user = db.query(User).filter(User.email == email).first()
+    if not user:
+        raise HTTPException(404, "该邮箱尚未注册")
+    if user.status != "active":
+        raise HTTPException(403, "账号已被停用")
+    return _issue_email_verification_code(email, "reset", db)
+
+
+@app.post("/api/auth/reset-password")
+def reset_password(body: dict, db: Session = Depends(get_db)):
+    _ensure_platform_seed(db)
+    email = _normalize_email(body.get("email"))
+    verification_code = str(body.get("verification_code") or "").strip()
+    user = db.query(User).filter(User.email == email).first()
+    if not user:
+        raise HTTPException(404, "该邮箱尚未注册")
+    if user.status != "active":
+        raise HTTPException(403, "账号已被停用")
+    _consume_email_verification_code(email, "reset", verification_code, db)
+    new_password = secrets.token_urlsafe(12)
+    user.password_hash = _password_hash(new_password)
+    _write_audit_log(None, "system.reset_password", "user", user.id, f"系统重置了 {user.name}({user.email}) 的密码并发送至邮箱", db)
+    db.commit()
+    site_name = _get_platform_setting("platform.site_name", db, "StoryCanvas")
+    subject = f"{site_name} 密码已重置"
+    body_text = (
+        f"您好，\n\n"
+        f"您的 {site_name} 账号密码已被重置。\n\n"
+        f"新密码：{new_password}\n\n"
+        f"请使用新密码登录，登录后建议及时修改密码。\n"
+        f"如果这不是您的操作，请联系客服。\n"
+    )
+    _send_platform_email(email, subject, body_text, db)
+    return {"ok": True, "message": f"新密码已发送至 {email}，请查收邮件"}
 
 
 @app.get("/api/plans/public")
