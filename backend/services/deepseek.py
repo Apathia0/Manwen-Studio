@@ -1439,7 +1439,9 @@ async def adjust_framework_with_chat(
    - 用户未提及删除/修改章节 → 保留所有已有章节（chapter_number、title、summary 等完整保留），自动划分到新幕归属中。
    - 用户明确要求删除某些章节 → 按用户要求删除，其余保留。
    - 用户明确要求修改某些章节 → 按用户要求修改，其余保留。
-   绝对不能在用户未要求的情况下丢失任何已有章节。
+    绝对不能在用户未要求的情况下丢失任何已有章节。
+    重要：用户明确要求的幕数必须严格遵守。如用户要求压缩/扩展到特定幕数（如 5 幕、7 幕），
+    即使某些幕暂时没有章节，也必须创建该数量的幕（空幕设 chapters: []），不能擅自减少或增加幕数。
 7. 每个 add_chapter 的 changes 尽量包含 title、summary、goal、conflict、hook、payoff、highlight、key_events。"""
 
     user_prompt = f"""请根据下面的对话，对现有小说框架输出结构化编辑计划。
@@ -1554,7 +1556,9 @@ async def continue_framework_with_chat(
    - 用户未提及删除/修改章节 → 保留所有已有章节（chapter_number、title、summary 等完整保留），自动划分到新幕归属中。
    - 用户明确要求删除某些章节 → 按用户要求删除，其余保留。
    - 用户明确要求修改某些章节 → 按用户要求修改，其余保留。
-   绝对不能在用户未要求的情况下丢失任何已有章节。
+    绝对不能在用户未要求的情况下丢失任何已有章节。
+    重要：用户明确要求的幕数必须严格遵守。如用户要求压缩/扩展到特定幕数（如 5 幕、7 幕），
+    即使某些幕暂时没有章节，也必须创建该数量的幕（空幕设 chapters: []），不能擅自减少或增加幕数。
 3. 每个 add_chapter 的 changes 尽量包含 title、summary、goal、conflict、hook、payoff、highlight、key_events。
 4. 章节编号严格延续现有主线，不要跳跃或重复。
 5. 不要把长篇故事压缩成短篇结局，保持后续升级、扩盘、反转空间。
