@@ -46,9 +46,6 @@ export default function ToolCallStatus({ toolCalls }: 工具状态属性) {
               <>
                 <span className="text-emerald-500 shrink-0">✓</span>
                 <span className="text-gray-500">{call.summary || 中文标签.replace('正在', '已').replace('…', '')}</span>
-                {call.name === 'adjust_framework' && (
-                  <span className="text-gray-400 ml-1">（已自动备份，可在左侧「历史版本」中回滚）</span>
-                )}
               </>
             )}
             {call.status === 'error' && (
