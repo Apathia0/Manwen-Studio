@@ -20,6 +20,7 @@ from services.deepseek import (
 )
 from services.framework_utils import (
     _build_current_snapshot_data,
+    _build_outline_compact,
     _enforce_framework_snapshot_limit,
     _extract_outline_chapters,
     _merge_framework_outline,
@@ -787,7 +788,7 @@ async def adjust_framework(story_id: int, instruction: str) -> dict:
             "outline": story.outline or {},
         }
 
-        story_context = _build_story_context_dict(story)
+        story_context = _build_story_context_dict(story, user_instruction=instruction)
 
         messages = [{"role": "user", "content": instruction}]
 
@@ -812,17 +813,6 @@ async def adjust_framework(story_id: int, instruction: str) -> dict:
 
         framework = apply_result["framework"]
 
-        # ★ 自动快照：保存调整前的框架状态
-        db.flush()
-        _save_framework_snapshot(
-            story_id=story.id,
-            snapshot_data=_build_current_snapshot_data(story),
-            source="agent_adjust",
-            reply_summary=(plan.get("reply") or "")[:255] if plan.get("reply") else None,
-            db=db,
-        )
-        _enforce_framework_snapshot_limit(story.id, max_count=20, db=db)
-
         story.description = str(framework.get("description") or existing_framework["description"] or "").strip()
         story.tags = framework.get("tags") if isinstance(framework.get("tags"), dict) else existing_framework["tags"]
         story.characters = _normalize_characters_payload(framework.get("characters"))
@@ -831,6 +821,16 @@ async def adjust_framework(story_id: int, instruction: str) -> dict:
         if tool_registry.pending_changes:
             for f in ("description", "tags", "characters", "outline"):
                 tool_registry.pending_changes.update_new_value("story", story.id, f, getattr(story, f))
+
+        # ★ 自动快照：保存调整后的框架状态
+        _save_framework_snapshot(
+            story_id=story.id,
+            snapshot_data=_build_current_snapshot_data(story),
+            source="agent_adjust",
+            reply_summary=(plan.get("reply") or "")[:255] if plan.get("reply") else None,
+            db=db,
+        )
+        _enforce_framework_snapshot_limit(story.id, max_count=20, db=db)
         db.commit()
 
         warnings = [*plan.get("warnings", []), *apply_result.get("warnings", [])]
@@ -1191,9 +1191,11 @@ async def update_scenes(chapter_id: int, scenes: list[str]) -> dict:
 # ── 内部辅助 ──────────────────────────────────────────────
 
 
-def _build_story_context_dict(story: Story) -> dict:
+def _build_story_context_dict(story: Story, user_instruction: str = "") -> dict:
     """构建 story_context 字典，与 main._build_framework_ai_context 对齐。"""
     outline = story.outline if isinstance(story.outline, dict) else {}
+    chapters = _extract_outline_chapters(outline)
+    chapter_numbers = [item["chapter_number"] for item in chapters if isinstance(item.get("chapter_number"), int)]
     return {
         "description": story.description or "",
         "tags": story.tags,
@@ -1203,12 +1205,14 @@ def _build_story_context_dict(story: Story) -> dict:
         "story_bible_compact": _build_bible_compact(story.story_bible),
         "story_memory": story.story_memory,
         "story_memory_compact": _build_memory_compact(story.story_memory),
-        "outline_compact": {"three_acts_count": len(outline.get("three_acts") or []) if isinstance(outline.get("three_acts"), list) else 0},
+        "outline_compact": _build_outline_compact(outline),
         "framework_stats": {
             "mode": "agent",
-            "chapter_count": len(_extract_outline_chapters(outline)),
+            "stage_count": len(outline.get("three_acts") or []) if isinstance(outline.get("three_acts"), list) else 0,
+            "chapter_count": len(chapters),
+            "last_chapter_number": max(chapter_numbers) if chapter_numbers else 0,
         },
-        "user_instruction": "",
+        "user_instruction": user_instruction.strip(),
     }
 
 

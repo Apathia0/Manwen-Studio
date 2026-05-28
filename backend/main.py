@@ -18,6 +18,7 @@ from typing import Any
 
 from services.framework_utils import (
     _build_current_snapshot_data,
+    _build_outline_compact,
     _coerce_chapter_number,
     _count_framework_chapters,
     _enforce_framework_snapshot_limit,
@@ -2302,62 +2303,6 @@ def _build_story_memory_compact(story_memory: dict | None) -> dict[str, Any]:
             item for item in recent_chapter_summaries[-8:]
             if isinstance(item, dict)
         ]
-    return compact
-
-
-def _build_outline_compact(outline: dict | None, recent_chapter_limit: int = 12) -> dict[str, Any]:
-    if not isinstance(outline, dict):
-        return {}
-
-    acts = outline.get("three_acts") if isinstance(outline.get("three_acts"), list) else []
-    compact_acts: list[dict[str, Any]] = []
-    for index, act in enumerate(acts, start=1):
-        if not isinstance(act, dict):
-            continue
-        compact_acts.append(
-            {
-                "act": act.get("act", index),
-                "title": str(act.get("title") or act.get("name") or "").strip(),
-                "summary": str(act.get("summary") or "").strip(),
-                "chapter_count": len([item for item in (act.get("chapters") or []) if isinstance(item, dict)]),
-            }
-        )
-
-    all_chapters = _extract_outline_chapters(outline)
-    recent_chapters = sorted(all_chapters, key=lambda item: item["chapter_number"])[-recent_chapter_limit:]
-    recent_cards: list[dict[str, Any]] = []
-    for chapter in recent_chapters:
-        card = {
-            "chapter_number": chapter.get("chapter_number"),
-            "title": chapter.get("title"),
-            "act": chapter.get("act"),
-        }
-        for key in ("summary", "goal", "conflict", "hook", "payoff", "highlight"):
-            value = str(chapter.get(key) or "").strip()
-            if value:
-                card[key] = value
-        key_events = chapter.get("key_events")
-        if isinstance(key_events, list):
-            cleaned = [str(item).strip() for item in key_events if str(item).strip()]
-            if cleaned:
-                card["key_events"] = cleaned[:6]
-        recent_cards.append(card)
-
-    compact: dict[str, Any] = {
-        "stage_count": len(compact_acts),
-        "chapter_count": len(all_chapters),
-        "acts": compact_acts,
-        "recent_chapter_cards": recent_cards,
-    }
-    serial_strategy = outline.get("serial_strategy")
-    if isinstance(serial_strategy, dict) and serial_strategy:
-        compact["serial_strategy"] = serial_strategy
-    themes = outline.get("themes")
-    if isinstance(themes, list) and themes:
-        compact["themes"] = [str(item).strip() for item in themes if str(item).strip()][:8]
-    foreshadowing = outline.get("foreshadowing")
-    if isinstance(foreshadowing, list) and foreshadowing:
-        compact["foreshadowing"] = [str(item).strip() for item in foreshadowing if str(item).strip()][:8]
     return compact
 
 
@@ -6192,6 +6137,18 @@ async def generate_framework_endpoint(story_id: int, request: Request, db: Sessi
     story.characters = _normalize_characters_payload(framework.get("characters"))
     story.outline = _merge_framework_outline(saved_outline, framework.get("outline"), framework.get("chapters"))
     db.commit()
+
+    # ★ 初始快照：保存首次生成框架后的状态
+    _save_framework_snapshot(
+        story_id=story.id,
+        snapshot_data=_build_current_snapshot_data(story),
+        source="initial_generate",
+        reply_summary="初始框架",
+        db=db,
+    )
+    _enforce_framework_snapshot_limit(story.id, max_count=20, db=db)
+    db.commit()
+
     _check_and_consume_feature_quota(request, user.id, "framework.generate.monthly_limit", 1, db, deduct=True, provider_kind="text")
     _release_db_transaction(db)
 
@@ -6672,7 +6629,13 @@ async def adjust_framework_endpoint(story_id: int, request: Request, db: Session
 
     story = _require_story_for_user(story_id, user, db)
 
-    # ★ 自动快照：保存调整前的框架状态
+    description = str(framework.get("description") or story.description or "").strip()
+    story.description = description
+    story.tags = framework.get("tags") if isinstance(framework.get("tags"), dict) else existing_framework["tags"]
+    story.characters = _normalize_characters_payload(framework.get("characters"))
+    story.outline = framework.get("outline") if isinstance(framework.get("outline"), dict) else existing_framework["outline"]
+
+    # ★ 自动快照：保存调整后的框架状态
     _save_framework_snapshot(
         story_id=story.id,
         snapshot_data=_build_current_snapshot_data(story),
@@ -6681,12 +6644,6 @@ async def adjust_framework_endpoint(story_id: int, request: Request, db: Session
         db=db,
     )
     _enforce_framework_snapshot_limit(story.id, max_count=20, db=db)
-
-    description = str(framework.get("description") or story.description or "").strip()
-    story.description = description
-    story.tags = framework.get("tags") if isinstance(framework.get("tags"), dict) else existing_framework["tags"]
-    story.characters = _normalize_characters_payload(framework.get("characters"))
-    story.outline = framework.get("outline") if isinstance(framework.get("outline"), dict) else existing_framework["outline"]
     db.commit()
     _check_and_consume_advanced_text_quota(request, user.id, db, deduct=True)
     db.refresh(story)
@@ -6770,7 +6727,12 @@ async def continue_framework_endpoint(story_id: int, request: Request, db: Sessi
 
     story = _require_story_for_user(story_id, user, db)
 
-    # ★ 自动快照：保存调整前的框架状态
+    story.description = str(framework.get("description") or story.description or "").strip()
+    story.tags = framework.get("tags") if isinstance(framework.get("tags"), dict) else existing_framework["tags"]
+    story.characters = _normalize_characters_payload(framework.get("characters"))
+    story.outline = framework.get("outline") if isinstance(framework.get("outline"), dict) else existing_framework["outline"]
+
+    # ★ 自动快照：保存调整后的框架状态
     _save_framework_snapshot(
         story_id=story.id,
         snapshot_data=_build_current_snapshot_data(story),
@@ -6779,11 +6741,6 @@ async def continue_framework_endpoint(story_id: int, request: Request, db: Sessi
         db=db,
     )
     _enforce_framework_snapshot_limit(story.id, max_count=20, db=db)
-
-    story.description = str(framework.get("description") or story.description or "").strip()
-    story.tags = framework.get("tags") if isinstance(framework.get("tags"), dict) else existing_framework["tags"]
-    story.characters = _normalize_characters_payload(framework.get("characters"))
-    story.outline = framework.get("outline") if isinstance(framework.get("outline"), dict) else existing_framework["outline"]
     db.commit()
     _check_and_consume_advanced_text_quota(request, user.id, db, deduct=True)
     db.refresh(story)

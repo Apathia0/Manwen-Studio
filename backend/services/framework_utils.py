@@ -982,3 +982,58 @@ def restore_framework_snapshot(story, snapshot_id: int, db: Session) -> dict:
     _enforce_framework_snapshot_limit(story.id, max_count=20, db=db)
 
     return _build_current_snapshot_data(story)
+
+
+def _build_outline_compact(outline: dict | None, recent_chapter_limit: int = 12) -> dict:
+    """生成大纲精简版（含每幕摘要、最近章节卡片），供 AI 上下文使用。"""
+    if not isinstance(outline, dict):
+        return {}
+
+    acts = outline.get("three_acts") if isinstance(outline.get("three_acts"), list) else []
+    compact_acts: list[dict] = []
+    for index, act in enumerate(acts, start=1):
+        if not isinstance(act, dict):
+            continue
+        compact_acts.append({
+            "act": act.get("act", index),
+            "title": str(act.get("title") or act.get("name") or "").strip(),
+            "summary": str(act.get("summary") or "").strip(),
+            "chapter_count": len([item for item in (act.get("chapters") or []) if isinstance(item, dict)]),
+        })
+
+    all_chapters = _extract_outline_chapters(outline)
+    recent_chapters = sorted(all_chapters, key=lambda item: item["chapter_number"])[-recent_chapter_limit:]
+    recent_cards: list[dict] = []
+    for chapter in recent_chapters:
+        card = {
+            "chapter_number": chapter.get("chapter_number"),
+            "title": chapter.get("title"),
+            "act": chapter.get("act"),
+        }
+        for key in ("summary", "goal", "conflict", "hook", "payoff", "highlight"):
+            value = str(chapter.get(key) or "").strip()
+            if value:
+                card[key] = value
+        key_events = chapter.get("key_events")
+        if isinstance(key_events, list):
+            cleaned = [str(item).strip() for item in key_events if str(item).strip()]
+            if cleaned:
+                card["key_events"] = cleaned[:6]
+        recent_cards.append(card)
+
+    compact: dict = {
+        "stage_count": len(compact_acts),
+        "chapter_count": len(all_chapters),
+        "acts": compact_acts,
+        "recent_chapter_cards": recent_cards,
+    }
+    serial_strategy = outline.get("serial_strategy")
+    if isinstance(serial_strategy, dict) and serial_strategy:
+        compact["serial_strategy"] = serial_strategy
+    themes = outline.get("themes")
+    if isinstance(themes, list) and themes:
+        compact["themes"] = [str(item).strip() for item in themes if str(item).strip()][:8]
+    foreshadowing = outline.get("foreshadowing")
+    if isinstance(foreshadowing, list) and foreshadowing:
+        compact["foreshadowing"] = [str(item).strip() for item in foreshadowing if str(item).strip()][:8]
+    return compact
