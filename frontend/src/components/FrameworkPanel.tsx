@@ -1,14 +1,17 @@
-import { useEffect, useMemo, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
 import { ChevronDown, Loader2, MessageSquare, Pencil, Save, Sparkles, Wand2 } from 'lucide-react';
 import {
   adjustFramework,
   continueFramework,
   generateFramework,
+  listFrameworkSnapshots,
   regenerateOutline,
+  restoreFrameworkSnapshot,
   saveOutlineChapterPlan,
   updateStory,
   type Chapter,
   type FrameworkChatMessage,
+  type FrameworkSnapshotItem,
   type OutlineChapterPlanInput,
   type Story,
 } from '../api';
@@ -50,6 +53,9 @@ export default function FrameworkPanel({ story, chapters, onChapterSelect, onFra
     outline: true,
     chapters: true,
   });
+  const [showSnapshotList, setShowSnapshotList] = useState(false);
+  const [snapshots, setSnapshots] = useState<FrameworkSnapshotItem[]>([]);
+  const [snapshotLoading, setSnapshotLoading] = useState(false);
 
   useEffect(() => {
     setChatMessages([]);
@@ -77,6 +83,30 @@ export default function FrameworkPanel({ story, chapters, onChapterSelect, onFra
     const next = !allExpanded;
     setExpanded({ tags: next, characters: next, outline: next, chapters: next });
   };
+
+  const loadSnapshots = useCallback(async () => {
+    if (!story.id) return;
+    setSnapshotLoading(true);
+    try {
+      const res = await listFrameworkSnapshots(story.id);
+      setSnapshots(res.snapshots);
+    } catch {
+      setSnapshots([]);
+    } finally {
+      setSnapshotLoading(false);
+    }
+  }, [story.id]);
+
+  const handleRestoreSnapshot = useCallback(async (snapshotId: number) => {
+    if (!story.id) return;
+    if (!window.confirm('回滚将先保存当前状态再恢复所选版本，确认继续？')) return;
+    try {
+      await restoreFrameworkSnapshot(story.id, snapshotId);
+      window.location.reload();
+    } catch (e) {
+      alert(`回滚失败: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }, [story.id]);
 
   const handleFrameworkChat = async () => {
     const instruction = chatInput.trim();
@@ -203,6 +233,12 @@ export default function FrameworkPanel({ story, chapters, onChapterSelect, onFra
                   </button>
                 )}
                 <button
+                  onClick={() => { setShowSnapshotList(v => !v); if (!showSnapshotList) loadSnapshots(); }}
+                  className="text-[11px] text-slate-500 hover:text-slate-700 transition-colors"
+                >
+                  历史版本
+                </button>
+                <button
                   onClick={() => setChatMessages([])}
                   disabled={chatLoading || continueLoading || chatMessages.length === 0}
                   className="text-[11px] text-slate-500 hover:text-slate-700 disabled:opacity-40 transition-colors"
@@ -211,6 +247,55 @@ export default function FrameworkPanel({ story, chapters, onChapterSelect, onFra
                 </button>
               </div>
             </div>
+
+            {showSnapshotList && (
+              <div className="border-b border-[#d9dfd7] bg-gray-50 max-h-60 overflow-y-auto">
+                <div className="px-3 py-2 text-xs text-gray-500 font-medium flex items-center justify-between">
+                  <span>历史版本（保留最近 20 条）</span>
+                  <button onClick={loadSnapshots} className="text-blue-500 hover:text-blue-700">刷新</button>
+                </div>
+                {snapshotLoading ? (
+                  <div className="px-3 py-4 text-center text-sm text-gray-400">加载中...</div>
+                ) : snapshots.length === 0 ? (
+                  <div className="px-3 py-4 text-center text-sm text-gray-400">暂无历史版本</div>
+                ) : (
+                  <ul>
+                    {snapshots.map((snap, idx) => {
+                      const time = (() => {
+                        try {
+                          const d = new Date(snap.created_at);
+                          const m = String(d.getMonth() + 1).padStart(2, '0');
+                          const day = String(d.getDate()).padStart(2, '0');
+                          const h = String(d.getHours()).padStart(2, '0');
+                          const min = String(d.getMinutes()).padStart(2, '0');
+                          return `${m}/${day} ${h}:${min}`;
+                        } catch { return snap.created_at; }
+                      })();
+                      return (
+                        <li key={snap.id} className="px-3 py-2 border-t border-[#d9dfd7] flex items-center justify-between text-xs">
+                          <div className="flex-1 min-w-0">
+                            <span className={idx === 0 ? 'text-blue-600 font-medium' : ''}>
+                              {idx === 0 ? '● 当前版本' : time}
+                            </span>
+                            {snap.reply_summary && <span className="text-gray-500 ml-1">- {snap.reply_summary}</span>}
+                            <div className="text-gray-400">{snap.source}</div>
+                          </div>
+                          {idx > 0 && (
+                            <button
+                              onClick={() => handleRestoreSnapshot(snap.id)}
+                              className="ml-2 px-2 py-0.5 text-xs rounded bg-blue-500 text-white hover:bg-blue-600 flex-shrink-0"
+                            >
+                              回滚到此
+                            </button>
+                          )}
+                        </li>
+                      );
+                    })}
+                  </ul>
+                )}
+              </div>
+            )}
+
             <div className="max-h-64 overflow-y-auto px-3 py-3 space-y-2">
               {chatMessages.length === 0 ? (
                 <p className="text-xs text-slate-500 leading-relaxed">
