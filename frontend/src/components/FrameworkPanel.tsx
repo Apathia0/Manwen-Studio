@@ -271,14 +271,20 @@ export default function FrameworkPanel({ story, chapters, onChapterSelect, onFra
                           return `${m}/${day} ${h}:${min}`;
                         } catch { return snap.created_at; }
                       })();
+                      const sourceLabel: Record<string, string> = {
+                        panel_adjust: '框架对话',
+                        agent_adjust: 'AI 助手',
+                        auto_before_restore: '回滚前自动保存',
+                      };
                       return (
                         <li key={snap.id} className="px-3 py-2 border-t border-[#d9dfd7] flex items-center justify-between text-xs">
                           <div className="flex-1 min-w-0">
+                            <span className="text-gray-400 mr-1">#{snapshots.length - idx}</span>
                             <span className={idx === 0 ? 'text-blue-600 font-medium' : ''}>
                               {idx === 0 ? '● 当前版本' : time}
                             </span>
                             {snap.reply_summary && <span className="text-gray-500 ml-1">- {snap.reply_summary}</span>}
-                            <div className="text-gray-400">{snap.source}</div>
+                            <div className="text-gray-400">{sourceLabel[snap.source] || snap.source}</div>
                           </div>
                           {idx > 0 && (
                             <button
