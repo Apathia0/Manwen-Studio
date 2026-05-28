@@ -17,8 +17,10 @@ from pathlib import Path
 from typing import Any
 
 from services.framework_utils import (
+    _build_current_snapshot_data,
     _coerce_chapter_number,
     _count_framework_chapters,
+    _enforce_framework_snapshot_limit,
     _extract_outline_chapters,
     _merge_chapter_plans,
     _merge_framework_outline,
@@ -28,7 +30,9 @@ from services.framework_utils import (
     _normalize_characters_payload,
     _normalize_framework_outline,
     _normalize_key_events,
+    _save_framework_snapshot,
     apply_framework_operations,
+    restore_framework_snapshot,
     validate_applied_framework_consistency,
     validate_framework_json,
 )
@@ -52,6 +56,7 @@ from models import (
     Chapter,
     EmailVerificationCode,
     ChatMessage,
+    FrameworkSnapshot,
     MangaImage,
     Plan,
     PlanFeature,
@@ -6553,6 +6558,60 @@ def _apply_framework_edit_operations(existing: dict, operations: list) -> tuple[
     return framework, applied
 
 
+# ── 框架快照 API ──────────────────────────────────────
+
+
+@app.get("/api/stories/{story_id}/framework/snapshots")
+def list_framework_snapshots(story_id: int, request: Request, db: Session = Depends(get_db)):
+    """获取指定故事的框架快照列表（不含 snapshot_data，仅元信息）。"""
+    user = _require_user(request, db)
+    story = _require_story_for_user(story_id, user, db)
+
+    snapshots = (
+        db.query(FrameworkSnapshot)
+        .filter(FrameworkSnapshot.story_id == story.id)
+        .order_by(FrameworkSnapshot.created_at.desc())
+        .limit(50)
+        .all()
+    )
+    return {
+        "snapshots": [
+            {
+                "id": s.id,
+                "source": s.source,
+                "reply_summary": s.reply_summary or "",
+                "created_at": s.created_at.isoformat() if s.created_at else "",
+            }
+            for s in snapshots
+        ],
+    }
+
+
+@app.post("/api/stories/{story_id}/framework/snapshots/{snapshot_id}/restore")
+def restore_framework_snapshot_endpoint(story_id: int, snapshot_id: int, request: Request, db: Session = Depends(get_db)):
+    """将故事框架恢复到指定快照版本。回滚前自动保存当前状态。"""
+    user = _require_user(request, db)
+    story = _require_story_for_user(story_id, user, db)
+
+    try:
+        new_data = restore_framework_snapshot(story, snapshot_id, db)
+    except ValueError as exc:
+        raise HTTPException(404, str(exc))
+
+    db.commit()
+    db.refresh(story)
+    return {
+        "story": {
+            "description": story.description,
+            "tags": story.tags,
+            "characters": story.characters,
+            "outline": story.outline,
+        },
+        "snapshot_data": new_data,
+        "message": "已恢复到所选版本",
+    }
+
+
 @app.post("/api/stories/{story_id}/framework/adjust")
 async def adjust_framework_endpoint(story_id: int, request: Request, db: Session = Depends(get_db)):
     user = _require_user(request, db)
@@ -6612,6 +6671,17 @@ async def adjust_framework_endpoint(story_id: int, request: Request, db: Session
         )
 
     story = _require_story_for_user(story_id, user, db)
+
+    # ★ 自动快照：保存调整前的框架状态
+    _save_framework_snapshot(
+        story_id=story.id,
+        snapshot_data=_build_current_snapshot_data(story),
+        source="panel_adjust",
+        reply_summary=(plan.get("reply") or "")[:255] if plan.get("reply") else None,
+        db=db,
+    )
+    _enforce_framework_snapshot_limit(story.id, max_count=20, db=db)
+
     description = str(framework.get("description") or story.description or "").strip()
     story.description = description
     story.tags = framework.get("tags") if isinstance(framework.get("tags"), dict) else existing_framework["tags"]
