@@ -1435,6 +1435,10 @@ async def adjust_framework_with_chat(
 4. 找不到目标或指令有歧义时，把问题写进 warnings。
 5. 移动章节到不同幕：用 move_chapter_to_act（target.chapter_number + target.act）。
 6. 压缩/合并/重组幕结构：用 patch path="outline.three_acts"，value 为完整的新 three_acts 数组（包含 act/title/summary/chapters），会整体替换现有幕结构。
+   【关键规则】你必须先读取当前框架 JSON 中 outline.three_acts 的所有章节信息，然后在新的 three_acts 数组中完整保留这些章节。
+   每个章节对象必须包含完整的 chapter_number、title、summary 等字段，不能省略。
+   例如：如果原大纲有第1-100章，新大纲中也必须包含第1-100章的完整信息，只是重新分配到新的幕归属中。
+   绝对不能丢失任何已有章节。
 7. 每个 add_chapter 的 changes 尽量包含 title、summary、goal、conflict、hook、payoff、highlight、key_events。"""
 
     user_prompt = f"""请根据下面的对话，对现有小说框架输出结构化编辑计划。
@@ -1543,7 +1547,12 @@ async def continue_framework_with_chat(
 
 要求：
 1. 续写操作：只使用 add_chapter、add_character、update_act_summary、move_chapter_to_act、delete_chapter 操作，不要删除或修改已有内容。
-2. 大纲重构：如果用户明确要求压缩/合并/重构幕结构，使用 patch 操作，path 为 "outline.three_acts"，value 为新的完整三幕结构数组。每个幕对象格式：{"act": "幕标识", "title": "...", "summary": "...", "chapters": [...]}。保留原有章节信息（chapter_number、title、summary 等），重新分配到新幕结构中。
+2. 大纲重构（重要）：如果用户明确要求压缩/合并/重构幕结构，使用 patch 操作，path 为 "outline.three_acts"，value 为新的完整三幕结构数组。
+   【关键规则】你必须先读取当前框架 JSON 中 outline.three_acts 的所有章节信息，然后在新的 three_acts 数组中完整保留这些章节。
+   每个幕对象格式：{"act": "幕标识", "title": "...", "summary": "...", "chapters": [...]}。
+   每个章节对象必须包含完整的 chapter_number、title、summary 等字段，不能省略。
+   例如：如果原大纲有第1-100章，新大纲中也必须包含第1-100章的完整信息，只是重新分配到新的幕归属中。
+   绝对不能丢失任何已有章节。
 3. 每个 add_chapter 的 changes 尽量包含 title、summary、goal、conflict、hook、payoff、highlight、key_events。
 4. 章节编号严格延续现有主线，不要跳跃或重复。
 5. 不要把长篇故事压缩成短篇结局，保持后续升级、扩盘、反转空间。
