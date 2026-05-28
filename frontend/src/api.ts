@@ -1974,7 +1974,7 @@ export async function listFrameworkSnapshots(
   storyId: number
 ): Promise<FrameworkSnapshotListResponse> {
   const res = await fetch(`${BASE}/api/stories/${storyId}/framework/snapshots`, {
-    credentials: 'include',
+    headers: apiHeaders(),
   });
   if (!res.ok) throw new Error(`获取快照列表失败: ${res.status}`);
   return res.json();
@@ -1988,7 +1988,7 @@ export async function restoreFrameworkSnapshot(
     `${BASE}/api/stories/${storyId}/framework/snapshots/${snapshotId}/restore`,
     {
       method: 'POST',
-      credentials: 'include',
+      headers: apiHeaders(),
     }
   );
   if (!res.ok) {
