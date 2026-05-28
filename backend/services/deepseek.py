@@ -1468,15 +1468,20 @@ async def adjust_framework_with_chat(
             "response_format": {"type": "json_object"},
         }
 
-        async with httpx.AsyncClient(timeout=600) as client:
-            resp = await client.post(
-                f"{DEEPSEEK_BASE_URL}/chat/completions",
-                json=payload,
-                headers=_deepseek_auth_headers(api_key),
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            content = data["choices"][0]["message"]["content"]
+        try:
+            async with httpx.AsyncClient(timeout=600) as client:
+                resp = await client.post(
+                    f"{DEEPSEEK_BASE_URL}/chat/completions",
+                    json=payload,
+                    headers=_deepseek_auth_headers(api_key),
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                content = data["choices"][0]["message"]["content"]
+        except httpx.HTTPStatusError as e:
+            if attempt < MAX_RETRIES:
+                continue
+            raise ValueError(f"DeepSeek API 返回错误：{e.response.status_code}") from e
 
         try:
             result = _extract_json_object(content)
@@ -1582,15 +1587,20 @@ async def continue_framework_with_chat(
             "response_format": {"type": "json_object"},
         }
 
-        async with httpx.AsyncClient(timeout=600) as client:
-            resp = await client.post(
-                f"{DEEPSEEK_BASE_URL}/chat/completions",
-                json=payload,
-                headers=_deepseek_auth_headers(api_key),
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            content = data["choices"][0]["message"]["content"]
+        try:
+            async with httpx.AsyncClient(timeout=600) as client:
+                resp = await client.post(
+                    f"{DEEPSEEK_BASE_URL}/chat/completions",
+                    json=payload,
+                    headers=_deepseek_auth_headers(api_key),
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                content = data["choices"][0]["message"]["content"]
+        except httpx.HTTPStatusError as e:
+            if attempt < MAX_RETRIES:
+                continue
+            raise ValueError(f"DeepSeek API 返回错误：{e.response.status_code}") from e
 
         try:
             result = _extract_json_object(content)
