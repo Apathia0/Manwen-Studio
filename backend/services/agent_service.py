@@ -840,6 +840,97 @@ async def adjust_framework(story_id: int, instruction: str) -> dict:
             "reply": plan.get("reply", ""),
             "applied_operations": apply_result.get("applied_operations", []),
             "warnings": warnings,
+            "_generated_operations": plan.get("operations", []),
+        }
+    finally:
+        db.close()
+
+
+@tool_registry.register(
+    name="apply_framework_ops",
+    description="直接执行框架编辑操作。接收结构化的 operations 数组，立即应用到故事数据库。不调用 AI，适合你已经明确知道要做什么修改的场景（如'把主角改名为李明'、'添加一个反派角色'、'修改第三幕概要'）。复杂创作需求（如'帮我重新设计第二幕'）请用 adjust_framework。",
+    is_write=True,
+    parameters={
+        "type": "object",
+        "properties": {
+            "story_id": {"type": "integer", "description": "故事 ID"},
+            "operations": {
+                "type": "array",
+                "description": "编辑操作列表，每项格式: {\"op\": \"操作名\", \"target\": {...}, \"changes\": {...}}",
+                "items": {"type": "object"},
+            },
+            "patches": {
+                "type": "array",
+                "description": "JSON Patch 列表（可选）",
+                "items": {"type": "object"},
+            },
+            "dry_run": {
+                "type": "boolean",
+                "description": "为 true 时只校验不执行，返回预览结果而不写入数据库（默认 false）",
+            },
+        },
+        "required": ["story_id", "operations"],
+    },
+)
+async def apply_framework_ops(story_id: int, operations: list, patches: list | None = None, dry_run: bool = False) -> dict:
+    """直接应用框架编辑操作，不调用 AI。"""
+    db = SessionLocal()
+    try:
+        story = _validate_story_ownership(db, story_id, tool_registry.current_story_id)
+        if not story:
+            return {"error": "故事不存在或无权访问"}
+
+        existing_framework = {
+            "description": story.description or "",
+            "tags": story.tags or {},
+            "characters": story.characters or [],
+            "outline": story.outline or {},
+        }
+
+        apply_result = apply_framework_operations(
+            existing_framework=existing_framework,
+            operations=operations,
+            patches=patches or [],
+        )
+
+        if apply_result["errors"]:
+            return {"error": "；".join(apply_result["errors"])}
+
+        if dry_run:
+            return {
+                "ok": True,
+                "dry_run": True,
+                "preview_framework": apply_result["framework"],
+                "applied_operations": apply_result["applied_operations"],
+                "warnings": apply_result.get("warnings", []),
+            }
+
+        if tool_registry.pending_changes:
+            tool_registry.pending_changes.record_story_field(story, "description")
+            tool_registry.pending_changes.record_story_field(story, "tags")
+            tool_registry.pending_changes.record_story_field(story, "characters")
+            tool_registry.pending_changes.record_story_field(story, "outline")
+
+        framework = apply_result["framework"]
+        story.description = str(framework.get("description") or "").strip()
+        story.tags = framework.get("tags") if isinstance(framework.get("tags"), dict) else existing_framework["tags"]
+        story.characters = _normalize_characters_payload(framework.get("characters"))
+        story.outline = framework.get("outline") if isinstance(framework.get("outline"), dict) else existing_framework["outline"]
+
+        _save_framework_snapshot(
+            story_id=story.id,
+            snapshot_data=_build_current_snapshot_data(story),
+            source="agent_direct_ops",
+            reply_summary=None,
+            db=db,
+        )
+        _enforce_framework_snapshot_limit(story.id, max_count=20, db=db)
+        db.commit()
+
+        return {
+            "ok": True,
+            "applied_operations": apply_result["applied_operations"],
+            "warnings": apply_result.get("warnings", []),
         }
     finally:
         db.close()
@@ -1279,149 +1370,6 @@ def _build_memory_compact(story_memory: dict | None) -> dict[str, Any]:
     return compact
 
 
-def _apply_framework_operations(existing: dict, operations: list[dict]) -> dict:
-    """应用框架编辑操作，返回修改后的 framework dict。"""
-    framework = {
-        "description": str(existing.get("description") or ""),
-        "tags": dict(existing.get("tags") or {}),
-        "characters": [dict(item) for item in (existing.get("characters") or []) if isinstance(item, dict)],
-        "outline": dict(existing.get("outline") or {}),
-    }
-
-    def _merge_tags(existing_tags, incoming):
-        """合并标签。"""
-        existing_tags = existing_tags if isinstance(existing_tags, dict) else {}
-        incoming = incoming if isinstance(incoming, dict) else {}
-        merged = dict(existing_tags)
-        for key, value in incoming.items():
-            if value not in (None, "", [], {}):
-                merged[key] = value
-        return merged or existing_tags or incoming
-
-    for raw_op in operations:
-        if not isinstance(raw_op, dict):
-            continue
-        op_name = str(raw_op.get("op") or "").strip()
-        value = raw_op.get("value")
-
-        if op_name == "set_description" and isinstance(value, str):
-            framework["description"] = value.strip()
-
-        elif op_name == "set_tags" and isinstance(value, dict):
-            framework["tags"] = _merge_tags(framework["tags"], value)
-
-        elif op_name == "upsert_character" and isinstance(value, dict):
-            name = str(raw_op.get("name") or value.get("name") or "").strip()
-            if name:
-                found = False
-                for i, ch in enumerate(framework["characters"]):
-                    if str(ch.get("name") or "").strip().casefold() == name.casefold():
-                        merged = dict(ch)
-                        merged.update({k: v for k, v in value.items() if v not in (None, "", [], {})})
-                        framework["characters"][i] = merged
-                        found = True
-                        break
-                if not found:
-                    framework["characters"].append(value)
-
-        elif op_name == "delete_character":
-            name = str(raw_op.get("name") or "").strip()
-            if name:
-                framework["characters"] = [
-                    ch for ch in framework["characters"]
-                    if str(ch.get("name") or "").strip().casefold() != name.casefold()
-                ]
-
-        elif op_name == "upsert_act" and isinstance(value, dict):
-            act_label = str(raw_op.get("act") or value.get("act") or "").strip()
-            if act_label:
-                three_acts = framework["outline"].get("three_acts")
-                if not isinstance(three_acts, list):
-                    three_acts = []
-                    framework["outline"]["three_acts"] = three_acts
-                found = False
-                for i, act in enumerate(three_acts):
-                    if isinstance(act, dict) and str(act.get("act") or "").strip() == act_label:
-                        merged = dict(act)
-                        merged.update({k: v for k, v in value.items() if v not in (None, "", [], {})})
-                        three_acts[i] = merged
-                        found = True
-                        break
-                if not found:
-                    three_acts.append(value)
-
-        elif op_name == "delete_act":
-            act_label = str(raw_op.get("act") or "").strip()
-            if act_label:
-                three_acts = framework["outline"].get("three_acts")
-                if isinstance(three_acts, list):
-                    framework["outline"]["three_acts"] = [
-                        act for act in three_acts
-                        if not (isinstance(act, dict) and str(act.get("act") or "").strip() == act_label)
-                    ]
-
-        elif op_name == "upsert_chapter":
-            chapter_number = raw_op.get("chapter_number")
-            if chapter_number is None and isinstance(value, dict):
-                chapter_number = value.get("chapter_number")
-            if chapter_number is not None and isinstance(value, dict):
-                three_acts = framework["outline"].get("three_acts")
-                if not isinstance(three_acts, list):
-                    three_acts = []
-                    framework["outline"]["three_acts"] = three_acts
-                act_label = str(raw_op.get("act") or value.get("act") or "").strip()
-                # 找到对应的 act
-                target_act = None
-                for act in three_acts:
-                    if isinstance(act, dict) and (not act_label or str(act.get("act") or "").strip() == act_label):
-                        target_act = act
-                        break
-                if not target_act and act_label:
-                    target_act = {"act": act_label, "title": act_label, "chapters": []}
-                    three_acts.append(target_act)
-                if target_act:
-                    ch_list = target_act.get("chapters")
-                    if not isinstance(ch_list, list):
-                        ch_list = []
-                        target_act["chapters"] = ch_list
-                    found = False
-                    for i, ch in enumerate(ch_list):
-                        if isinstance(ch, dict) and ch.get("chapter_number") == chapter_number:
-                            merged = dict(ch)
-                            merged.update({k: v for k, v in value.items() if v not in (None, "", [], {})})
-                            merged["chapter_number"] = chapter_number
-                            ch_list[i] = merged
-                            found = True
-                            break
-                    if not found:
-                        entry = dict(value)
-                        entry["chapter_number"] = chapter_number
-                        ch_list.append(entry)
-                    ch_list.sort(key=lambda x: x.get("chapter_number", 0) if isinstance(x, dict) else 0)
-
-        elif op_name == "delete_chapter":
-            chapter_number = raw_op.get("chapter_number")
-            if chapter_number is not None:
-                three_acts = framework["outline"].get("three_acts")
-                if isinstance(three_acts, list):
-                    for act in three_acts:
-                        if isinstance(act, dict):
-                            ch_list = act.get("chapters")
-                            if isinstance(ch_list, list):
-                                act["chapters"] = [
-                                    ch for ch in ch_list
-                                    if not (isinstance(ch, dict) and ch.get("chapter_number") == chapter_number)
-                                ]
-
-        elif op_name == "replace_outline_meta" and isinstance(value, dict):
-            outline = framework["outline"]
-            for k, v in value.items():
-                if v not in (None, "", [], {}):
-                    outline[k] = v
-
-    return framework
-
-
 # ── Agent 服务 ─────────────────────────────────────────────
 
 
@@ -1478,8 +1426,10 @@ class AgentService:
 - `adjust_chapter_by_instruction` — 根据用户指令让 AI 重写整章（消耗高级配额）
 - `update_story_info` — 修改标题/描述/标签
 - `update_characters` — 替换角色设定列表
-- `adjust_framework` — 根据指令调整故事框架/大纲（消耗高级配额）
+- `apply_framework_ops` — **直接执行框架编辑操作**，不调用 AI，适合明确的增删改（如"把主角改名"、"加个反派"、"改章节标题"）
+- `adjust_framework` — 根据指令调整故事框架/大纲，**适合需要 AI 创作的场景**（如"帮我重新设计第二幕"、"让故事更悬疑"）。消耗高级配额。如果改动明确请优先用 apply_framework_ops
 - `add_chapter_plan` — 在大纲中添加新的章节计划
+- `bulk_add_chapter_plans` — **批量添加多个章节规划**（用户给出明确章节列表时用，比多次调 add_chapter_plan 更高效）
 - `update_scenes` — 更新分镜列表
 
 ---
@@ -1495,7 +1445,7 @@ class AgentService:
 | "把这段改成……"（附具体文本） | 调 `rewrite_text_segment` 或 `update_chapter_content` 直接执行 |
 | "帮我重写这一章，改成……风格"（无具体文本） | 先调 `get_chapter_full` 读取本章 → 给出重写方案/方向让用户确认 → 再调 `adjust_chapter_by_instruction` |
 | "帮我修改角色设定" | 调 `get_framework_detail` 查看当前角色 → 给出修改方案 → 待确认后调 `update_characters` |
-| "帮我调整大纲/结构" | 调 `get_framework_detail` 查看当前大纲 → 给出调整方案 → 待确认后调 `adjust_framework` |
+| "帮我调整大纲/结构" | 调 `get_framework_detail` 查看当前大纲 → 给出调整方案 → 待确认后调 `apply_framework_ops`（明确改动）或 `adjust_framework`（需要 AI 创作） |
 | "添加一个新章节" | 调 `get_framework_detail` 查看现有章节 → 给出新章节建议位置 → 待确认后调 `add_chapter_plan` |
 | "看看这一章写了什么" | 调 `get_chapter_full` → 总结/展示内容 |
 | "有哪些章节，进展如何" | 调 `get_all_chapters_summary` → 呈现概览 |
@@ -1521,7 +1471,6 @@ class AgentService:
         - 如果是因为缺少参数（如 `story_id`），当前作品 ID 已在上方注明
         - **不要默默忽略错误去用其他数据回答问题**。如果工具没法用，就想办法用已有的上下文知识给用户提供帮助，但要明确说明你目前能做什么、不能做什么
     13. **批处理原则**：当用户提出多项修改要求时，将同类修改合并到一次工具调用中。
-        - 框架调整：将所有改动汇总到**一次** `adjust_framework` 调用。用一条 instruction 包含所有要求，不要分多次调用。
         - 多章调整：如果对多个章节做相同类型调整（如统一优化风格），使用 `batch_adjust_chapters` 一次完成。
         - 多章正文保存：如果用户给出了多个章节的完整改写内容，使用 `batch_update_chapters` 一次保存多章。
         - 角色管理：使用 `update_characters` 传入完整列表，不要逐个增删。
@@ -1529,6 +1478,54 @@ class AgentService:
         - 章节规划：如果用户给出明确的章节列表，使用 `bulk_add_chapter_plans` 批量添加。
           如果需要 AI 自主生成章节内容（如"帮我规划后续 5 章"），用 `adjust_framework` 更合适。
         - 设计原因：每次工具调用触发一次完整 AI 推理循环，批量操作可显著减少轮次、降低消耗。
+
+### 框架修改工具选择决策树
+
+框架修改时，按以下优先级选择工具：
+
+| 场景 | 推荐工具 | 原因 |
+|------|---------|------|
+| 用户给出明确修改（"把 X 改成 Y"、"删除角色 Z"、"加 5 章"） | `apply_framework_ops` / `bulk_add_chapter_plans` | 一次 LLM 调用，零额外 AI 成本 |
+| 用户需要 AI 创作/生成内容（"让故事更悬疑"、"重新设计第二幕"） | `adjust_framework` | 需要 AI 创作能力生成具体方案 |
+
+原则：**能用 `apply_framework_ops` 解决的，不要用 `adjust_framework`**。
+
+### 框架直接编辑（apply_framework_ops 操作格式参考）
+
+`apply_framework_ops` 的 `operations` 参数结构：
+
+```json
+[
+  {{"op": "操作名", "target": {{...}}, "changes": {{...}}}},
+  {{"op": "操作名", "target": {{...}}, "changes": {{...}}}}
+]
+```
+
+| op | target | changes | 说明 |
+|----|--------|---------|------|
+| `update_story_description` | — | `{{"description": "..."}}` | 更新故事描述 |
+| `update_tags` | — | `{{...}}` | 更新标签（tags.type/theme/style/audience） |
+| `add_character` | — | `{{"name": "...", "role": "...", ...}}` | 添加角色 |
+| `update_character` | `{{"name": "角色名"}}` | `{{...}}` | 更新指定角色 |
+| `remove_character` | `{{"name": "角色名"}}` | — | 删除角色 |
+| `update_act_summary` | `{{"act": "幕标识"}}` | `{{"summary": "..."}}` | 更新幕概要 |
+| `add_chapter` | `{{"act": "幕标识"}}` | `{{"chapter_number": N, "title": "...", ...}}` | 添加章节规划 |
+| `update_chapter` | `{{"chapter_number": N}}` | `{{"title": "...", "summary": "...", ...}}` | 更新章节规划 |
+| `insert_chapter_after` | `{{"chapter_number": N}}` | `{{"chapter_number": N+1, "title": "...", ...}}` | 在指定章节后插入 |
+| `move_chapter_to_act` | `{{"chapter_number": N, "act": "目标幕"}}` | — | 移动章节到另一幕 |
+| `delete_chapter` | `{{"chapter_number": N}}` | — | 删除章节 |
+
+> 💡 `apply_framework_ops` 支持 `dry_run=true` 参数：设为 true 时只校验不写入数据库，返回预览结果。适合需要先看一眼改动效果再确认的场景。
+
+示例：用户说"把主角改名为李明，添加一个反派叫张三，把第 5 章标题改为'真相'"
+→ 调用 apply_framework_ops，operations:
+```json
+[
+  {{"op": "update_character", "target": {{"name": "原主角名"}}, "changes": {{"name": "李明"}}}},
+  {{"op": "add_character", "changes": {{"name": "张三", "role": "反派"}}}},
+  {{"op": "update_chapter", "target": {{"chapter_number": 5}}, "changes": {{"title": "真相"}}}}
+]
+```
 
 ---
 
@@ -1562,7 +1559,7 @@ class AgentService:
                 "messages": all_messages,
                 "stream": True,
                 "tools": tool_registry.get_tool_specs(),
-                "max_tokens": 16384,
+                "max_tokens": 32768,
             }
 
             collected_content = ""
