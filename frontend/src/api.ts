@@ -258,6 +258,35 @@ export interface FrameworkAdjustResponse {
 
 export interface FrameworkContinueResponse extends FrameworkAdjustResponse {}
 
+// ─── 框架快照 ─────────────────────────────────────────
+
+export interface FrameworkSnapshotItem {
+  id: number;
+  source: string;
+  reply_summary: string;
+  created_at: string;
+}
+
+export interface FrameworkSnapshotListResponse {
+  snapshots: FrameworkSnapshotItem[];
+}
+
+export interface FrameworkRestoreResponse {
+  story: {
+    description?: string;
+    tags?: Tags;
+    characters?: Character[];
+    outline?: Outline;
+  };
+  snapshot_data: {
+    description: string;
+    tags: Tags;
+    characters: Character[];
+    outline: Outline;
+  };
+  message: string;
+}
+
 // ─── Onboarding / Story Bible ─────────────────────────────
 
 export interface OnboardingChatMessage {
@@ -1938,6 +1967,34 @@ export async function adjustFramework(
     body: JSON.stringify({ messages }),
   });
   if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function listFrameworkSnapshots(
+  storyId: number
+): Promise<FrameworkSnapshotListResponse> {
+  const res = await fetch(`${BASE}/api/stories/${storyId}/framework/snapshots`, {
+    credentials: 'include',
+  });
+  if (!res.ok) throw new Error(`获取快照列表失败: ${res.status}`);
+  return res.json();
+}
+
+export async function restoreFrameworkSnapshot(
+  storyId: number,
+  snapshotId: number
+): Promise<FrameworkRestoreResponse> {
+  const res = await fetch(
+    `${BASE}/api/stories/${storyId}/framework/snapshots/${snapshotId}/restore`,
+    {
+      method: 'POST',
+      credentials: 'include',
+    }
+  );
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(text || `回滚失败: ${res.status}`);
+  }
   return res.json();
 }
 
