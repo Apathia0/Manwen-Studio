@@ -19,10 +19,13 @@ from services.deepseek import (
     adjust_chapter_content,
 )
 from services.framework_utils import (
+    _build_current_snapshot_data,
+    _enforce_framework_snapshot_limit,
     _extract_outline_chapters,
     _merge_framework_outline,
     _normalize_characters_payload,
     _normalize_framework_outline,
+    _save_framework_snapshot,
     apply_framework_operations,
 )
 
@@ -808,6 +811,17 @@ async def adjust_framework(story_id: int, instruction: str) -> dict:
             return {"error": "；".join(apply_result["errors"])}
 
         framework = apply_result["framework"]
+
+        # ★ 自动快照：保存调整前的框架状态
+        db.flush()
+        _save_framework_snapshot(
+            story_id=story.id,
+            snapshot_data=_build_current_snapshot_data(story),
+            source="agent_adjust",
+            reply_summary=(plan.get("reply") or "")[:255] if plan.get("reply") else None,
+            db=db,
+        )
+        _enforce_framework_snapshot_limit(story.id, max_count=20, db=db)
 
         story.description = str(framework.get("description") or existing_framework["description"] or "").strip()
         story.tags = framework.get("tags") if isinstance(framework.get("tags"), dict) else existing_framework["tags"]
