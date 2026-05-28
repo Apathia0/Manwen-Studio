@@ -1419,18 +1419,23 @@ async def adjust_framework_with_chat(
 - update_act_summary: target.act 指定幕标识，changes.summary 更新幕概述
 - add_chapter: target.act 指定目标幕标识，changes 包含新章节字段
 - insert_chapter_after: target.chapter_number 指定插入位置，changes 包含新章节字段
+- move_chapter_to_act: target.chapter_number + target.act，将章节移动到目标幕
 - update_chapter: target.chapter_number 指定章节号，changes 包含要更新的字段
 - delete_chapter: target.chapter_number 指定要删除的章节号
 
 支持的 patch 路径：
 - description, tags.type, tags.theme, tags.style, tags.audience
 - outline.serial_strategy, outline.themes, outline.foreshadowing
+- outline.three_acts（用于整体压缩/重组幕结构，value 为新 three_acts 数组）
 
 要求：
 1. operations 优先，只有 description/tags.* / outline.serial_strategy / outline.themes / outline.foreshadowing 允许走 patches。
 2. 禁止返回完整 framework。
 3. 用户未要求修改的内容不要生成无关操作。
-4. 找不到目标或指令有歧义时，把问题写进 warnings。"""
+4. 找不到目标或指令有歧义时，把问题写进 warnings。
+5. 移动章节到不同幕：用 move_chapter_to_act（target.chapter_number + target.act）。
+6. 压缩/合并/重组幕结构：用 patch path="outline.three_acts"，value 为完整的新 three_acts 数组（包含 act/title/summary/chapters），会整体替换现有幕结构。
+7. 每个 add_chapter 的 changes 尽量包含 title、summary、goal、conflict、hook、payoff、highlight、key_events。"""
 
     user_prompt = f"""请根据下面的对话，对现有小说框架输出结构化编辑计划。
 
@@ -1526,18 +1531,23 @@ async def continue_framework_with_chat(
   "operations": [
     {"op": "add_chapter", "target": {"act": "幕标识"}, "changes": {"chapter_number": N, "title": "...", "summary": "...", ...}},
     {"op": "add_character", "changes": {"name": "...", "role": "...", ...}},
-    {"op": "update_act_summary", "target": {"act": "幕标识"}, "changes": {"summary": "..."}}
+    {"op": "update_act_summary", "target": {"act": "幕标识"}, "changes": {"summary": "..."}},
+    {"op": "move_chapter_to_act", "target": {"chapter_number": N, "act": "幕标识"}, "changes": {}},
+    {"op": "delete_chapter", "target": {"chapter_number": N}, "changes": {}}
   ],
-  "patches": [],
+  "patches": [
+    {"path": "outline.three_acts", "value": [...]}
+  ],
   "warnings": []
 }
 
 要求：
-1. 只使用 add_chapter、add_character、update_act_summary 操作，不要删除或修改已有内容。
-2. 每个 add_chapter 的 changes 尽量包含 title、summary、goal、conflict、hook、payoff、highlight、key_events。
-3. 章节编号严格延续现有主线，不要跳跃或重复。
-4. 不要把长篇故事压缩成短篇结局，保持后续升级、扩盘、反转空间。
-5. reply 只说明实际续写的章节范围，不要说"我会"。"""
+1. 续写操作：只使用 add_chapter、add_character、update_act_summary、move_chapter_to_act、delete_chapter 操作，不要删除或修改已有内容。
+2. 大纲重构：如果用户明确要求压缩/合并/重构幕结构，使用 patch 操作，path 为 "outline.three_acts"，value 为新的完整三幕结构数组。每个幕对象格式：{"act": "幕标识", "title": "...", "summary": "...", "chapters": [...]}。保留原有章节信息（chapter_number、title、summary 等），重新分配到新幕结构中。
+3. 每个 add_chapter 的 changes 尽量包含 title、summary、goal、conflict、hook、payoff、highlight、key_events。
+4. 章节编号严格延续现有主线，不要跳跃或重复。
+5. 不要把长篇故事压缩成短篇结局，保持后续升级、扩盘、反转空间。
+6. reply 只说明实际续写的章节范围，不要说"我会"。"""
 
     user_prompt = f"""请在以下现有故事框架的基础上继续续写后续发展。
 

@@ -402,6 +402,7 @@ SUPPORTED_FRAMEWORK_OPERATIONS = {
     "update_act_summary",
     "add_chapter",
     "insert_chapter_after",
+    "move_chapter_to_act",
     "update_chapter",
     "delete_chapter",
 }
@@ -415,6 +416,7 @@ SUPPORTED_FRAMEWORK_PATCH_PATHS = {
     "outline.serial_strategy",
     "outline.themes",
     "outline.foreshadowing",
+    "outline.three_acts",
 }
 
 
@@ -448,6 +450,35 @@ def _apply_framework_patch(framework: dict, path: str, value):
         return
     if path == "outline.serial_strategy":
         framework.setdefault("outline", {})["serial_strategy"] = value if isinstance(value, dict) else {}
+        return
+    if path == "outline.three_acts":
+        if not isinstance(value, list):
+            return
+        new_acts = []
+        for act_idx, act in enumerate(value, start=1):
+            if not isinstance(act, dict):
+                continue
+            act_entry = {
+                "act": act.get("act", act_idx),
+                "title": str(act.get("title") or "").strip(),
+                "summary": str(act.get("summary") or "").strip(),
+            }
+            if "name" in act:
+                act_entry["name"] = str(act.get("name") or "").strip()
+            chapters = []
+            for ch in act.get("chapters", []):
+                if not isinstance(ch, dict):
+                    continue
+                cn = _coerce_chapter_number(ch.get("chapter_number"))
+                title = str(ch.get("title") or "").strip()
+                if cn is None or not title:
+                    continue
+                chapter_entry = {"chapter_number": cn, "title": title, "act": str(act_entry["act"])}
+                chapter_entry.update(_normalize_chapter_plan_meta(ch))
+                chapters.append(chapter_entry)
+            act_entry["chapters"] = sorted(chapters, key=lambda x: x["chapter_number"])
+            new_acts.append(act_entry)
+        framework.setdefault("outline", {})["three_acts"] = new_acts
         return
 
 
@@ -538,6 +569,7 @@ def apply_framework_operations(existing_framework: dict, operations: list | None
 
             if target_act is not None:
                 new_chapter = {k: v for k, v in changes.items() if v not in (None, "")}
+                new_chapter["act"] = str(target_act.get("act") or act_id or "").strip()
                 cn = _coerce_chapter_number(new_chapter.get("chapter_number"))
                 if cn is None:
                     cn = max(
@@ -586,6 +618,28 @@ def apply_framework_operations(existing_framework: dict, operations: list | None
                     break
             else:
                 warnings.append(f"未找到角色: {target_name}")
+
+        # ── move_chapter_to_act ──────────────────────────────
+        if op == "move_chapter_to_act":
+            target_number = _coerce_chapter_number((item.get("target") or {}).get("chapter_number"))
+            new_act = str(((item.get("target") or {}).get("act") or "")).strip()
+            if not new_act:
+                warnings.append("move_chapter_to_act 缺少 target.act")
+            elif target_number is None:
+                warnings.append("move_chapter_to_act 缺少 target.chapter_number")
+            else:
+                chapters = _extract_outline_chapters(framework["outline"])
+                moved = False
+                for ch in chapters:
+                    if ch.get("chapter_number") == target_number:
+                        ch["act"] = new_act
+                        moved = True
+                        break
+                if moved:
+                    framework["outline"] = _normalize_framework_outline(framework["outline"], chapters)
+                    applied_operations.append(f"move_chapter_to_act:{target_number}")
+                else:
+                    warnings.append(f"未找到章节: {target_number}")
 
         # ── update_chapter ───────────────────────────────────
         if op == "update_chapter":
