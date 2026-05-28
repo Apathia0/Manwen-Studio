@@ -6531,6 +6531,25 @@ def list_framework_snapshots(story_id: int, request: Request, db: Session = Depe
         .limit(50)
         .all()
     )
+
+    # 旧作品首次查看快照时，自动生成一个当前状态的初始快照作为种子
+    if not snapshots:
+        _save_framework_snapshot(
+            story_id=story.id,
+            snapshot_data=_build_current_snapshot_data(story),
+            source="initial_generate",
+            reply_summary="初始框架（自动生成）",
+            db=db,
+        )
+        db.commit()
+        snapshots = (
+            db.query(FrameworkSnapshot)
+            .filter(FrameworkSnapshot.story_id == story.id)
+            .order_by(FrameworkSnapshot.created_at.desc())
+            .limit(50)
+            .all()
+        )
+
     return {
         "snapshots": [
             {
@@ -6629,13 +6648,7 @@ async def adjust_framework_endpoint(story_id: int, request: Request, db: Session
 
     story = _require_story_for_user(story_id, user, db)
 
-    description = str(framework.get("description") or story.description or "").strip()
-    story.description = description
-    story.tags = framework.get("tags") if isinstance(framework.get("tags"), dict) else existing_framework["tags"]
-    story.characters = _normalize_characters_payload(framework.get("characters"))
-    story.outline = framework.get("outline") if isinstance(framework.get("outline"), dict) else existing_framework["outline"]
-
-    # ★ 自动快照：保存调整后的框架状态
+    # ★ 自动快照：保存调整前的当前状态（用于回退）
     _save_framework_snapshot(
         story_id=story.id,
         snapshot_data=_build_current_snapshot_data(story),
@@ -6644,6 +6657,13 @@ async def adjust_framework_endpoint(story_id: int, request: Request, db: Session
         db=db,
     )
     _enforce_framework_snapshot_limit(story.id, max_count=20, db=db)
+
+    description = str(framework.get("description") or story.description or "").strip()
+    story.description = description
+    story.tags = framework.get("tags") if isinstance(framework.get("tags"), dict) else existing_framework["tags"]
+    story.characters = _normalize_characters_payload(framework.get("characters"))
+    story.outline = framework.get("outline") if isinstance(framework.get("outline"), dict) else existing_framework["outline"]
+
     db.commit()
     _check_and_consume_advanced_text_quota(request, user.id, db, deduct=True)
     db.refresh(story)
@@ -6666,6 +6686,15 @@ async def adjust_framework_endpoint(story_id: int, request: Request, db: Session
 async def continue_framework_endpoint(story_id: int, request: Request, db: Session = Depends(get_db)):
     user = _require_user(request, db)
     story = _require_story_for_user(story_id, user, db)
+
+    # ★ 自动快照：保存续写前的当前状态（用于回退）
+    _save_framework_snapshot(
+        story_id=story.id,
+        snapshot_data=_build_current_snapshot_data(story),
+        source="panel_continue",
+        reply_summary="一键续写",
+        db=db,
+    )
 
     _check_and_consume_advanced_text_quota(request, user.id, db, deduct=False)
 
@@ -6732,14 +6761,6 @@ async def continue_framework_endpoint(story_id: int, request: Request, db: Sessi
     story.characters = _normalize_characters_payload(framework.get("characters"))
     story.outline = framework.get("outline") if isinstance(framework.get("outline"), dict) else existing_framework["outline"]
 
-    # ★ 自动快照：保存调整后的框架状态
-    _save_framework_snapshot(
-        story_id=story.id,
-        snapshot_data=_build_current_snapshot_data(story),
-        source="panel_adjust",
-        reply_summary="一键续写"[:255],
-        db=db,
-    )
     _enforce_framework_snapshot_limit(story.id, max_count=20, db=db)
     db.commit()
     _check_and_consume_advanced_text_quota(request, user.id, db, deduct=True)

@@ -813,6 +813,16 @@ async def adjust_framework(story_id: int, instruction: str) -> dict:
 
         framework = apply_result["framework"]
 
+        # ★ 自动快照：保存调整前的当前状态（用于回退）
+        _save_framework_snapshot(
+            story_id=story.id,
+            snapshot_data=_build_current_snapshot_data(story),
+            source="agent_adjust",
+            reply_summary=(plan.get("reply") or "")[:255] if plan.get("reply") else None,
+            db=db,
+        )
+        _enforce_framework_snapshot_limit(story.id, max_count=20, db=db)
+
         story.description = str(framework.get("description") or existing_framework["description"] or "").strip()
         story.tags = framework.get("tags") if isinstance(framework.get("tags"), dict) else existing_framework["tags"]
         story.characters = _normalize_characters_payload(framework.get("characters"))
@@ -822,15 +832,6 @@ async def adjust_framework(story_id: int, instruction: str) -> dict:
             for f in ("description", "tags", "characters", "outline"):
                 tool_registry.pending_changes.update_new_value("story", story.id, f, getattr(story, f))
 
-        # ★ 自动快照：保存调整后的框架状态
-        _save_framework_snapshot(
-            story_id=story.id,
-            snapshot_data=_build_current_snapshot_data(story),
-            source="agent_adjust",
-            reply_summary=(plan.get("reply") or "")[:255] if plan.get("reply") else None,
-            db=db,
-        )
-        _enforce_framework_snapshot_limit(story.id, max_count=20, db=db)
         db.commit()
 
         warnings = [*plan.get("warnings", []), *apply_result.get("warnings", [])]
