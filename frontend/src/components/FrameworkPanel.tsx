@@ -251,9 +251,12 @@ export default function FrameworkPanel({ story, chapters, onChapterSelect, onFra
             {showSnapshotList && (
               <div className="border-b border-[#d9dfd7] bg-gray-50 max-h-60 overflow-y-auto">
                 <div className="px-3 py-2 text-xs text-gray-500 font-medium flex items-center justify-between">
-                  <span>历史版本（保留最近 20 条）</span>
+                  <span>版本历史</span>
                   <button onClick={loadSnapshots} className="text-blue-500 hover:text-blue-700">刷新</button>
                 </div>
+                <p className="px-3 pb-2 text-[11px] text-gray-400 leading-relaxed">
+                  每次调整框架时自动生成新版本，点击回滚可恢复到任意历史版本。
+                </p>
                 {snapshotLoading ? (
                   <div className="px-3 py-4 text-center text-sm text-gray-400">加载中...</div>
                 ) : snapshots.length === 0 ? (
@@ -272,6 +275,7 @@ export default function FrameworkPanel({ story, chapters, onChapterSelect, onFra
                         } catch { return snap.created_at; }
                       })();
                       const sourceLabel: Record<string, string> = {
+                        initial_generate: '初始版本',
                         panel_adjust: '框架对话',
                         agent_adjust: 'AI 助手',
                         auto_before_restore: '回滚前自动保存',
@@ -279,21 +283,17 @@ export default function FrameworkPanel({ story, chapters, onChapterSelect, onFra
                       return (
                         <li key={snap.id} className="px-3 py-2 border-t border-[#d9dfd7] flex items-center justify-between text-xs">
                           <div className="flex-1 min-w-0">
-                            <span className="text-gray-400 mr-1">#{snapshots.length - idx}</span>
-                            <span className={idx === 0 ? 'text-blue-600 font-medium' : ''}>
-                              {idx === 0 ? '● 当前版本' : time}
-                            </span>
+                            <span className="text-gray-400 mr-1">#{idx + 1}</span>
+                            <span>{time}</span>
                             {snap.reply_summary && <span className="text-gray-500 ml-1">- {snap.reply_summary}</span>}
                             <div className="text-gray-400">{sourceLabel[snap.source] || snap.source}</div>
                           </div>
-                          {idx > 0 && (
-                            <button
-                              onClick={() => handleRestoreSnapshot(snap.id)}
-                              className="ml-2 px-2 py-0.5 text-xs rounded bg-blue-500 text-white hover:bg-blue-600 flex-shrink-0"
-                            >
-                              回滚到此
-                            </button>
-                          )}
+                          <button
+                            onClick={() => handleRestoreSnapshot(snap.id)}
+                            className="ml-2 px-2 py-0.5 text-xs rounded bg-blue-500 text-white hover:bg-blue-600 flex-shrink-0"
+                          >
+                            回滚到此
+                          </button>
                         </li>
                       );
                     })}
