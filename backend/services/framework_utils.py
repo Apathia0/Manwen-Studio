@@ -602,6 +602,12 @@ def apply_framework_operations(existing_framework: dict, operations: list | None
                 if target_act_key:
                     new_chapter["act"] = target_act_key
                 chapters = _extract_outline_chapters(framework["outline"])
+                # ★ 避免 chapter_number 重复：仅当 new_cn 已被占用时才后移后续章节
+                existing_numbers = {ch.get("chapter_number") for ch in chapters if isinstance(ch.get("chapter_number"), int)}
+                if new_cn in existing_numbers:
+                    for ch in chapters:
+                        if isinstance(ch.get("chapter_number"), int) and ch["chapter_number"] >= new_cn:
+                            ch["chapter_number"] += 1
                 chapters.append(new_chapter)
                 framework["outline"] = _normalize_framework_outline(framework["outline"], chapters)
                 applied_operations.append(f"insert_chapter_after:{new_cn}")
