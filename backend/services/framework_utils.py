@@ -420,6 +420,16 @@ SUPPORTED_FRAMEWORK_PATCH_PATHS = {
 }
 
 
+def _is_valid_patch_path(path: str) -> bool:
+    """检查 patch path 是否在白名单或允许的子路径中。"""
+    if path in SUPPORTED_FRAMEWORK_PATCH_PATHS:
+        return True
+    # outline.three_acts 允许子路径，如 outline.three_acts[0].chapters
+    if path.startswith("outline.three_acts["):
+        return True
+    return False
+
+
 def validate_framework_operations(operations: list | None, patches: list | None) -> list[str]:
     """校验 operation/patch 白名单，返回错误列表。"""
     errors: list[str] = []
@@ -429,7 +439,7 @@ def validate_framework_operations(operations: list | None, patches: list | None)
             errors.append(f"operations[{index}].op 不支持: {op or '<empty>'}")
     for index, item in enumerate(patches or []):
         path = str((item or {}).get("path") or "").strip()
-        if path not in SUPPORTED_FRAMEWORK_PATCH_PATHS:
+        if not _is_valid_patch_path(path):
             errors.append(f"patches[{index}].path 不支持: {path or '<empty>'}")
     return errors
 
@@ -479,6 +489,33 @@ def _apply_framework_patch(framework: dict, path: str, value):
             act_entry["chapters"] = sorted(chapters, key=lambda x: x["chapter_number"])
             new_acts.append(act_entry)
         framework.setdefault("outline", {})["three_acts"] = new_acts
+        return
+
+    # 支持 outline.three_acts[i].chapters / chapter_count 子路径（分配章节到指定幕）
+    import re as _re
+    m = _re.match(r'^outline\.three_acts\[(\d+)\]\.(.+)$', path)
+    if m:
+        act_idx = int(m.group(1))
+        field = m.group(2)
+        acts = framework.setdefault("outline", {}).setdefault("three_acts", [])
+        while len(acts) <= act_idx:
+            acts.append({"act": str(len(acts) + 1), "title": "", "summary": "", "chapters": []})
+        if field == "chapters":
+            if not isinstance(value, list):
+                return
+            chapters = []
+            for ch in value:
+                if not isinstance(ch, dict):
+                    continue
+                cn = _coerce_chapter_number(ch.get("chapter_number"))
+                title = str(ch.get("title") or "").strip()
+                if cn is None or not title:
+                    continue
+                chapter_entry = {"chapter_number": cn, "title": title, "act": str(act_idx + 1)}
+                chapter_entry.update(_normalize_chapter_plan_meta(ch))
+                chapters.append(chapter_entry)
+            acts[act_idx]["chapters"] = sorted(chapters, key=lambda x: x["chapter_number"])
+        # chapter_count 信息性字段，不改变实际数据
         return
 
 
