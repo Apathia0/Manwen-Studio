@@ -251,7 +251,9 @@ export interface FrameworkAdjustResponse {
     outline?: Outline;
   };
   chapters?: FrameworkChapterPlan[];
-  applied_operations?: { op: string; target: string }[];
+  applied_operations?: string[];
+  warnings?: string[];
+  validation_errors?: string[];
 }
 
 export interface FrameworkContinueResponse extends FrameworkAdjustResponse {}

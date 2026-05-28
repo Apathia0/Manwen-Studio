@@ -34,6 +34,12 @@ class Story(Base):
         order_by="AgentConversation.updated_at.desc()",
         cascade="all, delete-orphan",
     )
+    framework_snapshots: Mapped[list["FrameworkSnapshot"]] = relationship(
+        "FrameworkSnapshot",
+        back_populates="story",
+        order_by="FrameworkSnapshot.created_at.desc()",
+        cascade="all, delete-orphan",
+    )
 
     @property
     def has_character_profiles(self) -> bool:
@@ -296,3 +302,19 @@ class AuditLog(Base):
     summary: Mapped[str | None] = mapped_column(String(255), nullable=True)
     detail_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+# ── 框架调整快照 ──────────────────────────────────────
+
+
+class FrameworkSnapshot(Base):
+    __tablename__ = "framework_snapshots"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    story_id: Mapped[int] = mapped_column(Integer, ForeignKey("stories.id"), nullable=False, index=True)
+    snapshot_data: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    source: Mapped[str] = mapped_column(String(32), nullable=False, default="adjust")
+    reply_summary: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    created_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now())
+
+    story: Mapped["Story"] = relationship("Story", back_populates="framework_snapshots")

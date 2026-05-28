@@ -7,6 +7,8 @@ from typing import Any, AsyncGenerator
 import httpx
 from dotenv import load_dotenv
 
+from services.framework_utils import _extract_outline_chapters, validate_framework_json
+
 load_dotenv()
 
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
@@ -804,8 +806,30 @@ def _build_framework_runtime_brief(story_context: dict, include_outline_json: bo
                     focus_outline[key] = value
             acts = outline.get("three_acts") if isinstance(outline.get("three_acts"), list) else []
             if acts:
-                focus_outline["three_acts"] = acts[-4:]
-            parts.append(f"当前大纲JSON(聚焦版): {json.dumps(focus_outline, ensure_ascii=False)}")
+                condensed_acts = []
+                for act in acts:
+                    if not isinstance(act, dict):
+                        continue
+                    condensed = {
+                        k: v for k, v in act.items() if k != "chapters"
+                    }
+                    ch_list = act.get("chapters")
+                    if isinstance(ch_list, list) and ch_list:
+                        condensed["chapters"] = [
+                            {
+                                "chapter_number": ch.get("chapter_number"),
+                                "title": ch.get("title", ""),
+                                "act": ch.get("act", ""),
+                                "summary": str(ch.get("summary") or "")[:80],
+                            }
+                            for ch in ch_list
+                            if isinstance(ch, dict)
+                        ]
+                    else:
+                        condensed["chapters"] = []
+                    condensed_acts.append(condensed)
+                focus_outline["three_acts"] = condensed_acts
+            parts.append(f"当前大纲JSON(精简版): {json.dumps(focus_outline, ensure_ascii=False)}")
 
     description = str(story_context.get("description") or "").strip()
     if description:
@@ -1335,6 +1359,20 @@ async def regenerate_outline(story_context: dict, api_key: str | None = None) ->
         raise ValueError(f"Outline regeneration failed: {e}")
 
 
+def _extract_framework_adjustment_plan(result: dict) -> dict:
+    """从 AI JSON 输出中提取结构化编辑计划（operations/patches/warnings）。"""
+    reply = str(result.get("reply") or "").strip() or "已根据你的建议调整框架。"
+    operations = result.get("operations") if isinstance(result.get("operations"), list) else []
+    patches = result.get("patches") if isinstance(result.get("patches"), list) else []
+    warnings = result.get("warnings") if isinstance(result.get("warnings"), list) else []
+    return {
+        "reply": reply,
+        "operations": operations,
+        "patches": patches,
+        "warnings": [str(item).strip() for item in warnings if str(item).strip()],
+    }
+
+
 async def adjust_framework_with_chat(
     story_context: dict,
     messages: list[dict],
@@ -1342,7 +1380,7 @@ async def adjust_framework_with_chat(
     required_min_chapters: int | None = None,
     existing_framework: dict | None = None,
 ) -> dict:
-    """Return minimal, deterministic edit operations for the framework JSON."""
+    """根据自然语言指令输出结构化编辑计划（operations/patches），不再返回完整框架。"""
     snapshot = _build_story_snapshot_tiered(story_context, "framework_runtime")
     description = str(story_context.get("description") or "").strip()
     safe_messages = [
@@ -1354,86 +1392,104 @@ async def adjust_framework_with_chat(
         if isinstance(item, dict) and str(item.get("content") or "").strip()
     ]
     if not safe_messages:
-        raise ValueError("At least one chat message is required")
+        raise ValueError("至少需要一条对话消息")
 
     min_chapter_requirement = (
-        f"\n- 如果用户要求至少 {required_min_chapters} 章，你必须用多条 upsert_chapter 操作真实创建或更新到该数量，不能只在 reply 里承诺。"
+        f"\n- 如果用户要求至少 {required_min_chapters} 章，你必须在 operations 中用 add_chapter 或 insert_chapter_after 补到该数量，不能只在 reply 里承诺。"
         if required_min_chapters and required_min_chapters >= 20
         else ""
     )
 
-    system_prompt = """你是职业作者发布平台的“故事框架 JSON 编辑器”，不是泛泛聊天助手。
-你的任务是读取现有框架 JSON，严格按作者最后的明确指令输出最小可执行补丁。
+    system_prompt = """你是故事框架编辑规划器。你的任务不是输出完整 framework JSON，而是输出结构化编辑计划。
 
-只允许输出 JSON 对象，格式：
+输出 JSON 格式：
 {
-  "reply": "一句话说明你实际准备改什么",
-  "operations": [
-    {"op": "set_description", "value": "新的作品描述"},
-    {"op": "set_tags", "value": {"type": "...", "theme": "...", "style": "...", "audience": "..."}},
-    {"op": "upsert_character", "name": "角色名", "value": {"name": "角色名", "role": "...", "arc": {}, "relationships": []}},
-    {"op": "delete_character", "name": "角色名"},
-    {"op": "upsert_act", "act": "阶段标识", "value": {"act": "阶段标识", "title": "...", "summary": "...", "key_events": []}},
-    {"op": "delete_act", "act": "阶段标识"},
-    {"op": "upsert_chapter", "chapter_number": 12, "act": "阶段标识", "value": {"title": "...", "summary": "...", "goal": "...", "conflict": "...", "hook": "...", "payoff": "...", "highlight": "...", "key_events": []}},
-    {"op": "delete_chapter", "chapter_number": 12},
-    {"op": "replace_outline_meta", "value": {"themes": [], "foreshadowing": [], "serial_strategy": {}}}
-  ]
+  "reply": "只描述实际可执行改动",
+  "operations": [{"op": "update_character", "target": {"name": "林霁"}, "changes": {}}],
+  "patches": [{"path": "outline.themes", "value": []}],
+  "warnings": ["无法定位目标时写在这里"]
 }
 
-硬规则：
-1. 只输出 operations，不要输出 changes/framework/完整故事框架。
-2. 用户只要求局部修改时，只返回相关操作，不要重写无关角色、阶段或章节。
-3. 不要为了“显得完整”扩写一大堆无关内容。精准执行比丰富更重要。
-4. upsert_chapter 必须包含 chapter_number；章节号必须是数字。
-5. 如果用户要求“第 N 章改成...”就只对第 N 章使用 upsert_chapter。
-6. 如果用户要求新增后续章节，才追加新的 upsert_chapter。
-7. 如果用户要求删除，使用 delete_* 操作，不要用空值覆盖。
-8. 保留作者原设定，不主动改题材、主角、核心悬念，除非用户明确要求。
-9. 禁止 Markdown、代码块、解释性前后缀。"""
+支持的操作 operations：
+- update_story_description: 用 target 不填，changes.description 更新故事描述
+- update_tags: 用 target 不填，changes 中传 tags.type/theme/style/audience
+- add_character: target 不填，changes 包含新角色字段
+- update_character: target.name 指定角色名，changes 包含要更新的字段
+- remove_character: target.name 指定要删除的角色名
+- update_act_summary: target.act 指定幕标识，changes.summary 更新幕概述
+- add_chapter: target.act 指定目标幕标识，changes 包含新章节字段
+- insert_chapter_after: target.chapter_number 指定插入位置，changes 包含新章节字段
+- update_chapter: target.chapter_number 指定章节号，changes 包含要更新的字段
+- delete_chapter: target.chapter_number 指定要删除的章节号
 
-    user_prompt = f"""请根据下面的对话，对现有小说框架 JSON 做精准补丁修改。
+支持的 patch 路径：
+- description, tags.type, tags.theme, tags.style, tags.audience
+- outline.serial_strategy, outline.themes, outline.foreshadowing
+
+要求：
+1. operations 优先，只有 description/tags.* / outline.serial_strategy / outline.themes / outline.foreshadowing 允许走 patches。
+2. 禁止返回完整 framework。
+3. 用户未要求修改的内容不要生成无关操作。
+4. 找不到目标或指令有歧义时，把问题写进 warnings。"""
+
+    user_prompt = f"""请根据下面的对话，对现有小说框架输出结构化编辑计划。
 
 故事创意：{description}
 
 当前框架 JSON：
 {snapshot}
 
-补丁要求：
-- 按用户最后一条明确指令生成最小 operations。
-- 所有 value 必须是可以直接写入当前框架 JSON 的干净结构。
-- reply 只说明实际执行范围，不要说“我会”。
+修改要求：
+- 输出 reply + operations + patches + warnings。
+- reply 只说明实际执行范围，不要说"我会"。
+- 禁止输出完整 framework JSON。
 {min_chapter_requirement}"""
 
-    payload = {
-        "model": DEEPSEEK_MODEL,
-        "messages": _framework_messages_with_long_form(system_prompt, user_prompt) + safe_messages,
-        "stream": False,
-        "max_tokens": 16384,
-        "response_format": {"type": "json_object"},
-    }
+    MAX_RETRIES = 2
 
-    async with httpx.AsyncClient(timeout=600) as client:
-        resp = await client.post(
-            f"{DEEPSEEK_BASE_URL}/chat/completions",
-            json=payload,
-            headers=_deepseek_auth_headers(api_key),
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        content = data["choices"][0]["message"]["content"]
+    for attempt in range(MAX_RETRIES + 1):
+        payload = {
+            "model": DEEPSEEK_MODEL,
+            "messages": _framework_messages_with_long_form(system_prompt, user_prompt) + safe_messages,
+            "stream": False,
+            "max_tokens": 65536,
+            "response_format": {"type": "json_object"},
+        }
 
-    try:
-        result = _extract_json_object(content)
-    except ValueError as e:
-        raise ValueError(f"Framework adjustment failed: {e}")
+        async with httpx.AsyncClient(timeout=600) as client:
+            resp = await client.post(
+                f"{DEEPSEEK_BASE_URL}/chat/completions",
+                json=payload,
+                headers=_deepseek_auth_headers(api_key),
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            content = data["choices"][0]["message"]["content"]
 
-    operations = result.get("operations") if isinstance(result.get("operations"), list) else []
-    if not operations:
-        raise ValueError("Framework adjustment failed: missing operations array")
+        try:
+            result = _extract_json_object(content)
+        except ValueError as e:
+            if attempt < MAX_RETRIES:
+                safe_messages.append({"role": "assistant", "content": content})
+                safe_messages.append({
+                    "role": "user",
+                    "content": f"你输出的 JSON 解析失败：{e}。请修复后重新输出有效的结构化编辑计划。",
+                })
+                continue
+            raise ValueError(f"Framework adjustment failed: {e}")
 
-    reply = str(result.get("reply") or "").strip() or "已根据你的建议调整框架。"
-    return {"reply": reply, "operations": operations}
+        plan = _extract_framework_adjustment_plan(result)
+
+        if not plan["operations"] and not plan["patches"]:
+            if attempt < MAX_RETRIES:
+                safe_messages.append({"role": "assistant", "content": content})
+                safe_messages.append({
+                    "role": "user",
+                    "content": "输出缺少 operations 或 patches（至少一项），请重新输出结构化编辑计划。",
+                })
+                continue
+
+        return plan
 
 
 async def continue_framework(story_context: dict, api_key: str | None = None) -> dict:
@@ -1442,58 +1498,99 @@ async def continue_framework(story_context: dict, api_key: str | None = None) ->
     Returns {"reply": ..., "changes": {"outline": ..., "chapters": [...]}}
     where changes only contains the extended outline and chapters.
     """
+    return await continue_framework_with_chat(story_context, [], api_key=api_key)
+
+
+async def continue_framework_with_chat(
+    story_context: dict,
+    messages: list[dict],
+    api_key: str | None = None,
+) -> dict:
+    """根据对话上下文续写框架，返回结构化编辑计划。"""
     snapshot = _build_story_snapshot_tiered(story_context, "auto")
-    payload = {
-        "model": DEEPSEEK_MODEL,
-        "messages": _framework_messages_with_long_form(
-            (
-                "你是一位资深小说策划编辑。请基于现有故事框架继续向后扩展剧情，"
-                "补充后续大纲和后续章节规划。"
-                "请始终输出一个 JSON 对象，格式为 "
-                '{"reply":"...","changes":{"outline":{},"chapters":[]}}。'
-                "changes 中只包含 outline 和 chapters。"
-                "changes.outline 中每个 act（阶段）必须包含 title、summary 和 chapters 三个字段。"
-                "章节编号必须严格延续现有主线，不要把故事过早收束。"
-                "必须保留或补齐 outline.serial_strategy，并让新增章节尽量包含 goal、conflict、hook、payoff、highlight。"
-            ),
-            (
-                "请在以下现有故事框架的基础上继续续写后续发展。\n\n"
-                f"{snapshot}\n\n"
-                "要求：\n"
-                "1. 继续补完后续阶段、后续剧情推进和章节列表；\n"
-                "2. 如有需要可以新增人物与势力，但不要删除原有主线；\n"
-                "3. 不要把长篇故事压缩成短篇结局；\n"
-                "4. 保持后续仍有升级、扩盘、反转和终局回收空间；\n"
-                "5. 阶段结构不固定，不必强制写成三幕；\n"
-                "6. 新增章节要更像作者可执行的任务卡，而不是只有标题。"
-            ),
-        ),
-        "stream": False,
-        "max_tokens": 16384,
-        "response_format": {"type": "json_object"},
-    }
 
-    async with httpx.AsyncClient(timeout=600) as client:
-        resp = await client.post(
-            f"{DEEPSEEK_BASE_URL}/chat/completions",
-            json=payload,
-            headers=_deepseek_auth_headers(api_key),
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        content = data["choices"][0]["message"]["content"]
+    safe_messages = [
+        {
+            "role": "assistant" if str(item.get("role")) == "assistant" else "user",
+            "content": str(item.get("content") or "").strip(),
+        }
+        for item in messages
+        if isinstance(item, dict) and str(item.get("content") or "").strip()
+    ]
 
-    try:
-        result = _extract_json_object(content)
-    except ValueError as e:
-        raise ValueError(f"Framework continuation failed: {e}")
+    system_prompt = """你是故事框架续写规划器。你的任务是基于现有框架，向后扩展后续阶段和章节规划。
 
-    changes = result.get("changes") if isinstance(result.get("changes"), dict) else {}
-    if not changes:
-        raise ValueError("Framework continuation failed: missing changes object")
+输出 JSON 格式：
+{
+  "reply": "描述续写的内容",
+  "operations": [
+    {"op": "add_chapter", "target": {"act": "幕标识"}, "changes": {"chapter_number": N, "title": "...", "summary": "...", ...}},
+    {"op": "add_character", "changes": {"name": "...", "role": "...", ...}},
+    {"op": "update_act_summary", "target": {"act": "幕标识"}, "changes": {"summary": "..."}}
+  ],
+  "patches": [],
+  "warnings": []
+}
 
-    reply = str(result.get("reply") or "").strip() or "已继续扩展后续大纲与章节规划。"
-    return {"reply": reply, "changes": changes}
+要求：
+1. 只使用 add_chapter、add_character、update_act_summary 操作，不要删除或修改已有内容。
+2. 每个 add_chapter 的 changes 尽量包含 title、summary、goal、conflict、hook、payoff、highlight、key_events。
+3. 章节编号严格延续现有主线，不要跳跃或重复。
+4. 不要把长篇故事压缩成短篇结局，保持后续升级、扩盘、反转空间。
+5. reply 只说明实际续写的章节范围，不要说"我会"。"""
+
+    user_prompt = f"""请在以下现有故事框架的基础上继续续写后续发展。
+
+当前框架 JSON：
+{snapshot}
+
+请输出结构化编辑计划（reply + operations + patches + warnings）。"""
+
+    MAX_RETRIES = 2
+
+    for attempt in range(MAX_RETRIES + 1):
+        payload = {
+            "model": DEEPSEEK_MODEL,
+            "messages": _framework_messages_with_long_form(system_prompt, user_prompt) + safe_messages,
+            "stream": False,
+            "max_tokens": 65536,
+            "response_format": {"type": "json_object"},
+        }
+
+        async with httpx.AsyncClient(timeout=600) as client:
+            resp = await client.post(
+                f"{DEEPSEEK_BASE_URL}/chat/completions",
+                json=payload,
+                headers=_deepseek_auth_headers(api_key),
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            content = data["choices"][0]["message"]["content"]
+
+        try:
+            result = _extract_json_object(content)
+        except ValueError as e:
+            if attempt < MAX_RETRIES:
+                safe_messages.append({"role": "assistant", "content": content})
+                safe_messages.append({
+                    "role": "user",
+                    "content": f"你输出的 JSON 解析失败：{e}。请修复后重新输出有效的结构化编辑计划。",
+                })
+                continue
+            raise ValueError(f"Framework continuation failed: {e}")
+
+        plan = _extract_framework_adjustment_plan(result)
+
+        if not plan["operations"] and not plan["patches"]:
+            if attempt < MAX_RETRIES:
+                safe_messages.append({"role": "assistant", "content": content})
+                safe_messages.append({
+                    "role": "user",
+                    "content": "输出缺少 operations 或 patches（至少一项），请重新输出结构化编辑计划。",
+                })
+                continue
+
+        return plan
 
 
 async def summarize_chapter_memory(

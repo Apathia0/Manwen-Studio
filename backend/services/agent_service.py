@@ -18,6 +18,13 @@ from services.deepseek import (
     adjust_framework_with_chat,
     adjust_chapter_content,
 )
+from services.framework_utils import (
+    _extract_outline_chapters,
+    _merge_framework_outline,
+    _normalize_characters_payload,
+    _normalize_framework_outline,
+    apply_framework_operations,
+)
 
 
 # ── 待确认修改追踪 ──────────────────────────────────────
@@ -496,6 +503,63 @@ async def update_chapter_content(chapter_id: int, content: str) -> dict:
 
 
 @tool_registry.register(
+    name="batch_update_chapters",
+    description="批量更新多个章节的正文内容。适用于用户给出多个章节的具体改写内容时，一次保存多章。比分别调用 update_chapter_content 更高效。",
+    is_write=True,
+    parameters={
+        "type": "object",
+        "properties": {
+            "chapters": {
+                "type": "array",
+                "description": "要更新的章节列表",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "chapter_id": {"type": "integer", "description": "章节 ID"},
+                        "content": {"type": "string", "description": "新的章节正文内容"},
+                    },
+                    "required": ["chapter_id", "content"],
+                },
+            },
+        },
+        "required": ["chapters"],
+    },
+)
+async def batch_update_chapters(chapters: list[dict]) -> dict:
+    """批量更新多个章节正文。"""
+    MAX_BATCH_SIZE = 10
+    if not isinstance(chapters, list):
+        return {"error": "chapters 必须是一个数组"}
+    if len(chapters) > MAX_BATCH_SIZE:
+        return {"error": f"一次最多更新 {MAX_BATCH_SIZE} 个章节"}
+
+    async def _update_one(item: dict) -> dict:
+        chapter_id = item.get("chapter_id")
+        content = item.get("content")
+        if not chapter_id or content is None:
+            return {"chapter_id": chapter_id, "error": "缺少 chapter_id 或 content"}
+        db = SessionLocal()
+        try:
+            chapter = _validate_chapter_ownership(db, chapter_id, tool_registry.current_story_id)
+            if not chapter:
+                return {"chapter_id": chapter_id, "error": "章节不存在或无权访问"}
+            if tool_registry.pending_changes:
+                tool_registry.pending_changes.record_chapter_field(chapter, "novel_content")
+            chapter.novel_content = content
+            if tool_registry.pending_changes:
+                tool_registry.pending_changes.update_new_value("chapter", chapter.id, "novel_content", content)
+            db.commit()
+            return {"chapter_id": chapter_id, "ok": True}
+        except Exception as e:
+            return {"chapter_id": chapter_id, "error": str(e)}
+        finally:
+            db.close()
+
+    results = await asyncio.gather(*[_update_one(item) for item in chapters])
+    return {"ok": True, "results": results}
+
+
+@tool_registry.register(
     name="adjust_chapter_by_instruction",
     description="根据用户指令让 AI 重写整章正文。适用于用户要求调整风格、补充内容等场景。消耗文本配额。如果用户已给出具体改写文本，用 update_chapter_content 更直接。",
     is_write=True,
@@ -684,7 +748,7 @@ async def update_characters(story_id: int, characters: list[dict]) -> dict:
 
 @tool_registry.register(
     name="adjust_framework",
-    description="通过自然语言指令调整故事框架（标签、角色、大纲）。调用 AI 理解指令并生成精准的框架编辑操作。此操作会消耗高级文本配额。",
+    description="通过自然语言指令调整故事框架（标签、角色、大纲、章节规划）。调用 AI 理解指令并生成精准的框架编辑操作。此操作会消耗高级文本配额。\n\n⚠️ 批量使用：请将所有要修改的内容汇总到一条 instruction 中（例如：'把主角改成更勇敢，新增一个反派角色，把大纲基调改为悬疑风格，把第 3 章标题改成XXX'），全部放进一条 instruction，不要分多次调用。",
     is_write=True,
     parameters={
         "type": "object",
@@ -725,7 +789,7 @@ async def adjust_framework(story_id: int, instruction: str) -> dict:
         messages = [{"role": "user", "content": instruction}]
 
         try:
-            result = await adjust_framework_with_chat(
+            plan = await adjust_framework_with_chat(
                 story_context=story_context,
                 messages=messages,
                 api_key=api_key,
@@ -734,30 +798,119 @@ async def adjust_framework(story_id: int, instruction: str) -> dict:
         except ValueError as exc:
             return {"error": f"AI 返回格式无效: {exc}"}
 
-        operations = result.get("operations", [])
-        if not operations:
-            return {"error": "AI 没有返回可执行的框架修改操作"}
+        apply_result = apply_framework_operations(
+            existing_framework=existing_framework,
+            operations=plan.get("operations"),
+            patches=plan.get("patches"),
+        )
 
-        # 应用操作
-        framework = _apply_framework_operations(existing_framework, operations)
+        if apply_result.get("errors"):
+            return {"error": "；".join(apply_result["errors"])}
 
-        story.description = str(framework.get("description") or story.description or "").strip()
-        story.tags = framework.get("tags") if isinstance(framework.get("tags"), dict) else {}
-        story.characters = framework.get("characters") if isinstance(framework.get("characters"), list) else []
-        story.outline = framework.get("outline") if isinstance(framework.get("outline"), dict) else {}
+        framework = apply_result["framework"]
+
+        story.description = str(framework.get("description") or existing_framework["description"] or "").strip()
+        story.tags = framework.get("tags") if isinstance(framework.get("tags"), dict) else existing_framework["tags"]
+        story.characters = _normalize_characters_payload(framework.get("characters"))
+        story.outline = framework.get("outline") if isinstance(framework.get("outline"), dict) else existing_framework["outline"]
 
         if tool_registry.pending_changes:
             for f in ("description", "tags", "characters", "outline"):
                 tool_registry.pending_changes.update_new_value("story", story.id, f, getattr(story, f))
         db.commit()
 
+        warnings = [*plan.get("warnings", []), *apply_result.get("warnings", [])]
         return {
             "ok": True,
-            "reply": result.get("reply", ""),
-            "applied_operations": len(operations),
+            "reply": plan.get("reply", ""),
+            "applied_operations": apply_result.get("applied_operations", []),
+            "warnings": warnings,
         }
     finally:
         db.close()
+
+
+@tool_registry.register(
+    name="batch_adjust_chapters",
+    description="批量调整多个章节的正文内容。适用于用户要求统一调整多章风格、同时优化多个章节等场景。每次调用可调整多章，比分别调用 adjust_chapter_by_instruction 更高效。消耗高级文本配额。",
+    is_write=True,
+    parameters={
+        "type": "object",
+        "properties": {
+            "chapters": {
+                "type": "array",
+                "description": "要调整的章节列表，每项包含 chapter_id 和 instruction",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "chapter_id": {"type": "integer", "description": "章节 ID"},
+                        "instruction": {"type": "string", "description": "该章节的调整指令"},
+                    },
+                    "required": ["chapter_id", "instruction"],
+                },
+            },
+        },
+        "required": ["chapters"],
+    },
+)
+async def batch_adjust_chapters(chapters: list[dict]) -> dict:
+    """批量调整多个章节正文。"""
+    MAX_BATCH_SIZE = 10
+    if not isinstance(chapters, list):
+        return {"error": "chapters 必须是一个数组"}
+    if len(chapters) > MAX_BATCH_SIZE:
+        return {"error": f"一次最多调整 {MAX_BATCH_SIZE} 个章节"}
+    api_key = tool_registry.api_key
+    if not api_key:
+        return {"error": "DeepSeek API Key 未配置"}
+
+    semaphore = asyncio.Semaphore(3)
+
+    async def _adjust_one(item: dict) -> dict:
+        chapter_id = item.get("chapter_id")
+        instruction = str(item.get("instruction") or "").strip()
+        if not chapter_id or not instruction:
+            return {"chapter_id": chapter_id, "error": "缺少 chapter_id 或 instruction"}
+        db = SessionLocal()
+        try:
+            chapter = _validate_chapter_ownership(db, chapter_id, tool_registry.current_story_id)
+            if not chapter:
+                return {"chapter_id": chapter_id, "error": "章节不存在或无权访问"}
+            story_obj = db.get(Story, chapter.story_id)
+            if not story_obj:
+                return {"chapter_id": chapter_id, "error": "所属故事不存在"}
+            if tool_registry.pending_changes:
+                tool_registry.pending_changes.record_chapter_field(chapter, "novel_content")
+            story_context = _build_story_context_dict(story_obj)
+            chapter_info = {
+                "chapter_number": chapter.chapter_number,
+                "title": chapter.title or f"第{chapter.chapter_number}章",
+                "act": chapter.act or "",
+                "key_events": chapter.key_events or [],
+            }
+            chapter_content = chapter.novel_content or ""
+            async with semaphore:
+                new_content = await adjust_chapter_content(
+                    story_context=story_context,
+                    chapter_info=chapter_info,
+                    chapter_content=chapter_content,
+                    instruction=instruction,
+                    api_key=api_key,
+                )
+            if not new_content or not new_content.strip():
+                return {"chapter_id": chapter_id, "error": "AI 返回内容为空"}
+            chapter.novel_content = new_content
+            if tool_registry.pending_changes:
+                tool_registry.pending_changes.update_new_value("chapter", chapter.id, "novel_content", new_content)
+            db.commit()
+            return {"chapter_id": chapter_id, "ok": True}
+        except Exception as e:
+            return {"chapter_id": chapter_id, "error": str(e)}
+        finally:
+            db.close()
+
+    results = await asyncio.gather(*[_adjust_one(item) for item in chapters])
+    return {"ok": True, "results": results}
 
 
 @tool_registry.register(
@@ -867,6 +1020,102 @@ async def add_chapter_plan(story_id: int, chapter: dict) -> dict:
             tool_registry.pending_changes.update_new_value("story", story.id, "outline", outline)
         db.commit()
         return {"ok": True, "action": "added", "chapter_number": chapter_number}
+    finally:
+        db.close()
+
+
+@tool_registry.register(
+    name="bulk_add_chapter_plans",
+    description="批量添加多个章节计划到故事大纲中。如果用户给出了明确的章节列表，用此工具一次添加多章。如果用户只说帮我规划后续章节，用 adjust_framework 更合适。比分别调用 add_chapter_plan 更高效。",
+    is_write=True,
+    parameters={
+        "type": "object",
+        "properties": {
+            "story_id": {"type": "integer", "description": "故事 ID"},
+            "chapters": {
+                "type": "array",
+                "description": "章节计划列表",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "chapter_number": {"type": "integer", "description": "章节号"},
+                        "title": {"type": "string", "description": "章节标题"},
+                        "summary": {"type": "string", "description": "章节概要"},
+                        "act": {"type": "string", "description": "所属幕（如 1, 2, 3）"},
+                    },
+                    "required": ["chapter_number", "title"],
+                },
+            },
+        },
+        "required": ["story_id", "chapters"],
+    },
+)
+async def bulk_add_chapter_plans(story_id: int, chapters: list[dict]) -> dict:
+    """批量添加章节计划到故事大纲。"""
+    db = SessionLocal()
+    try:
+        story = _validate_story_ownership(db, story_id, tool_registry.current_story_id)
+        if not story:
+            return {"error": "故事不存在或无权访问"}
+        if tool_registry.pending_changes:
+            tool_registry.pending_changes.record_story_field(story, "outline")
+        outline = story.outline if isinstance(story.outline, dict) else {}
+        three_acts = outline.get("three_acts")
+        if not isinstance(three_acts, list):
+            three_acts = []
+            outline["three_acts"] = three_acts
+
+        results = []
+        for chapter in chapters:
+            if not isinstance(chapter, dict):
+                results.append({"chapter_number": None, "ok": False, "error": "无效的章节数据"})
+                continue
+            chapter_number = chapter.get("chapter_number")
+            act_label = str(chapter.get("act") or "").strip() or "1"
+            target_act = None
+            for act in three_acts:
+                if isinstance(act, dict) and act.get("act") == act_label:
+                    target_act = act
+                    break
+            if not target_act:
+                target_act = {
+                    "act": act_label,
+                    "title": f"阶段 {act_label}",
+                    "summary": "",
+                    "chapters": [],
+                }
+                three_acts.append(target_act)
+            act_chapters = target_act.get("chapters")
+            if not isinstance(act_chapters, list):
+                act_chapters = []
+                target_act["chapters"] = act_chapters
+            existing = None
+            for item in act_chapters:
+                if isinstance(item, dict) and item.get("chapter_number") == chapter_number:
+                    existing = item
+                    break
+            entry = {
+                "chapter_number": chapter_number,
+                "title": chapter.get("title", ""),
+                "summary": chapter.get("summary", ""),
+                "act": act_label,
+            }
+            entry = {k: v for k, v in entry.items() if v not in (None, "", [], {})}
+            if chapter_number is not None:
+                entry["chapter_number"] = chapter_number
+                entry["title"] = chapter.get("title", "")
+            if existing is not None:
+                existing.update(entry)
+                results.append({"chapter_number": chapter_number, "ok": True, "action": "updated"})
+            else:
+                act_chapters.append(entry)
+                results.append({"chapter_number": chapter_number, "ok": True, "action": "added"})
+            act_chapters.sort(key=lambda x: x.get("chapter_number", 0) if isinstance(x, dict) else 0)
+        story.outline = outline
+        if tool_registry.pending_changes:
+            tool_registry.pending_changes.update_new_value("story", story.id, "outline", outline)
+        db.commit()
+        return {"ok": True, "results": results}
     finally:
         db.close()
 
@@ -1009,26 +1258,6 @@ def _build_memory_compact(story_memory: dict | None) -> dict[str, Any]:
             if cleaned:
                 compact[key] = cleaned[:8]
     return compact
-
-
-def _extract_outline_chapters(outline: dict | None) -> list[dict]:
-    """从大纲中提取所有章节。"""
-    if not isinstance(outline, dict):
-        return []
-    acts = outline.get("three_acts")
-    if not isinstance(acts, list):
-        return []
-    extracted: list[dict] = []
-    for act in acts:
-        if not isinstance(act, dict):
-            continue
-        chapters = act.get("chapters")
-        if not isinstance(chapters, list):
-            continue
-        for item in chapters:
-            if isinstance(item, dict):
-                extracted.append(item)
-    return extracted
 
 
 def _apply_framework_operations(existing: dict, operations: list[dict]) -> dict:
@@ -1267,11 +1496,20 @@ class AgentService:
 9. **不要暴露工具名和参数等内部细节**，用自然的创作语言说明你做了什么。
 10. **可以并行调用多个读取工具**（如同时获取框架和章节列表），以提高效率。
 11. **工具调用后我会把结果返回给你**，根据返回的数据决定下一步行动。
-12. **⚠️ 工具调用失败时**：如果返回结果中包含 `"error"` 字段，说明工具执行出错。此时你应当：
-    - 告知用户工具执行遇到了什么问题（用自然语言，不要暴露细节）
-    - 询问用户能否提供正确的参数信息
-    - 如果是因为缺少参数（如 `story_id`），当前作品 ID 已在上方注明
-    - **不要默默忽略错误去用其他数据回答问题**。如果工具没法用，就想办法用已有的上下文知识给用户提供帮助，但要明确说明你目前能做什么、不能做什么
+    12. **⚠️ 工具调用失败时**：如果返回结果中包含 `"error"` 字段，说明工具执行出错。此时你应当：
+        - 告知用户工具执行遇到了什么问题（用自然语言，不要暴露细节）
+        - 询问用户能否提供正确的参数信息
+        - 如果是因为缺少参数（如 `story_id`），当前作品 ID 已在上方注明
+        - **不要默默忽略错误去用其他数据回答问题**。如果工具没法用，就想办法用已有的上下文知识给用户提供帮助，但要明确说明你目前能做什么、不能做什么
+    13. **批处理原则**：当用户提出多项修改要求时，将同类修改合并到一次工具调用中。
+        - 框架调整：将所有改动汇总到**一次** `adjust_framework` 调用。用一条 instruction 包含所有要求，不要分多次调用。
+        - 多章调整：如果对多个章节做相同类型调整（如统一优化风格），使用 `batch_adjust_chapters` 一次完成。
+        - 多章正文保存：如果用户给出了多个章节的完整改写内容，使用 `batch_update_chapters` 一次保存多章。
+        - 角色管理：使用 `update_characters` 传入完整列表，不要逐个增删。
+        - 分镜调整：使用 `update_scenes` 一次替换完整列表。
+        - 章节规划：如果用户给出明确的章节列表，使用 `bulk_add_chapter_plans` 批量添加。
+          如果需要 AI 自主生成章节内容（如"帮我规划后续 5 章"），用 `adjust_framework` 更合适。
+        - 设计原因：每次工具调用触发一次完整 AI 推理循环，批量操作可显著减少轮次、降低消耗。
 
 ---
 
@@ -1294,9 +1532,10 @@ class AgentService:
 
         collected_content = ""
         iteration_count = 0
-        max_iterations = 10  # 防止无限循环
+        SAFETY_MAX_ITERATIONS = 50  # 熔断：防止无限循环
+        write_executed = False
 
-        while iteration_count < max_iterations:
+        while iteration_count < SAFETY_MAX_ITERATIONS:
             iteration_count += 1
 
             payload = {
@@ -1406,14 +1645,39 @@ class AgentService:
                         "tool_call_id": tc["id"],
                         "content": result_str,
                     })
+
+                # 检查是否有写工具成功执行（不含 error）
+                any_write_succeeded = False
+                for i in sorted_indices:
+                    tc = tool_calls_acc[i]
+                    tool_name = tc["function"]["name"]
+                    if tool_name in tool_registry._write_tool_names:
+                        tool_call_id = tc["id"]
+                        for msg in all_messages:
+                            if msg.get("role") == "tool" and msg.get("tool_call_id") == tool_call_id:
+                                content_str = str(msg.get("content", ""))
+                                if '"error"' not in content_str:
+                                    any_write_succeeded = True
+                                break
+
+                if any_write_succeeded:
+                    write_executed = True
+                    all_messages.append({
+                        "role": "system",
+                        "content": "写入操作已执行完毕。如需进一步调整，请发送新消息继续。",
+                    })
+                    break
+
                 # 继续循环（把工具结果送回 LLM）
                 continue
 
             # 这里说明没有工具调用了，正常结束
             break
 
-        if iteration_count >= max_iterations:
-            logger.warning("Agent 达到最大迭代次数 %s", max_iterations)
+        if write_executed:
+            logger.info("Agent 写入操作完成，共 %s 次迭代", iteration_count)
+        elif iteration_count >= SAFETY_MAX_ITERATIONS:
+            logger.warning("Agent 达到安全熔断上限 %s", SAFETY_MAX_ITERATIONS)
 
         yield {"event": "done", "data": json.dumps({
             "content": collected_content,

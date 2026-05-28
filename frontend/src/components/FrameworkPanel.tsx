@@ -99,7 +99,16 @@ export default function FrameworkPanel({ story, chapters, onChapterSelect, onFra
       } else {
         const result = await adjustFramework(story.id, nextMessages);
         const operationHint = formatAppliedOperations(result.applied_operations);
-        setChatMessages((prev) => [...prev, { role: 'assistant', content: `${result.reply}${operationHint}` }]);
+        const appliedHint = result.applied_operations?.length
+          ? `\n\n实际已应用改动：\n- ${result.applied_operations.join('\n- ')}`
+          : '';
+        const warningHint = result.warnings?.length
+          ? `\n\n未执行或需注意：\n- ${result.warnings.join('\n- ')}`
+          : '';
+        const validationHint = result.validation_errors?.length
+          ? `\n\n校验提示：\n- ${result.validation_errors.join('\n- ')}`
+          : '';
+        setChatMessages((prev) => [...prev, { role: 'assistant', content: `${result.reply}${operationHint}${appliedHint}${warningHint}${validationHint}` }]);
       }
       await onFrameworkUpdate();
     } catch (err: any) {
@@ -139,9 +148,18 @@ export default function FrameworkPanel({ story, chapters, onChapterSelect, onFra
         ? `\n\n已从 ${beforeCount} 章扩展到 ${afterCount} 章，新增 ${delta} 章。请在下方“故事大纲/章节列表”里查看新增规划。`
         : '\n\n已完成续写请求，但章节数量没有增加；建议查看“故事大纲”是否更新了阶段内容，或输入更明确的扩展章数再试。';
       const operationHint = formatAppliedOperations(result.applied_operations);
+      const appliedHint = result.applied_operations?.length
+        ? `\n\n实际已应用改动：\n- ${result.applied_operations.join('\n- ')}`
+        : '';
+      const warningHint = result.warnings?.length
+        ? `\n\n未执行或需注意：\n- ${result.warnings.join('\n- ')}`
+        : '';
+      const validationHint = result.validation_errors?.length
+        ? `\n\n校验提示：\n- ${result.validation_errors.join('\n- ')}`
+        : '';
       setChatMessages((prev) => [
         ...prev,
-        { role: 'assistant', content: `${result.reply || '已续写后续大纲、章节与可能出现的新角色。'}${visibilityHint}${operationHint}` },
+        { role: 'assistant', content: `${result.reply || '已续写后续大纲、章节与可能出现的新角色。'}${visibilityHint}${operationHint}${appliedHint}${warningHint}${validationHint}` },
       ]);
       await onFrameworkUpdate();
     } catch (err: any) {
@@ -505,11 +523,42 @@ function countOutlineChapters(outline: Story['outline'] | undefined): number {
   return numbers.size;
 }
 
-function formatAppliedOperations(operations: { op: string; target: string }[] | undefined): string {
-  if (!operations?.length) return '';
-  const preview = operations.slice(0, 5).map((item) => `${item.op}:${item.target}`).join('、');
-  const suffix = operations.length > 5 ? ` 等 ${operations.length} 项` : '';
-  return `\n\n已精准写入 ${operations.length} 项框架修改：${preview}${suffix}。`;
+function formatAppliedOperations(ops: string[] | undefined): string {
+  if (!ops?.length) return '';
+  const opLabels: Record<string, string> = {
+    update_character: '更新角色',
+    add_character: '新增角色',
+    remove_character: '删除角色',
+    update_chapter: '更新章节',
+    add_chapter: '新增章节',
+    insert_chapter_after: '新增章节',
+    delete_chapter: '删除章节',
+    update_story_description: '更新故事描述',
+    update_tags: '更新标签',
+    update_act_summary: '更新阶段概述',
+  };
+  const fieldLabels: Record<string, string> = {
+    'patch:description': '故事描述',
+    'patch:tags.type': '类型标签',
+    'patch:tags.theme': '主题标签',
+    'patch:tags.style': '风格标签',
+    'patch:tags.audience': '受众标签',
+    'patch:outline.themes': '主题列表',
+    'patch:outline.foreshadowing': '伏笔列表',
+    'patch:outline.serial_strategy': '连载策略',
+  };
+  const seen = new Set<string>();
+  const labels: string[] = [];
+  for (const op of ops) {
+    const [prefix] = op.split(':');
+    const label = fieldLabels[op] || opLabels[prefix];
+    if (label && !seen.has(label)) {
+      seen.add(label);
+      labels.push(label);
+    }
+    if (labels.length >= 4) break;
+  }
+  return labels.length ? `\n\n已修改：${labels.join('、')}。` : '';
 }
 
 function SectionShell({

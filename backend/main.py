@@ -15,6 +15,23 @@ from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from email.message import EmailMessage
 from pathlib import Path
 from typing import Any
+
+from services.framework_utils import (
+    _coerce_chapter_number,
+    _count_framework_chapters,
+    _extract_outline_chapters,
+    _merge_chapter_plans,
+    _merge_framework_outline,
+    _normalize_act_token,
+    _normalize_big_five_scores,
+    _normalize_chapter_plan_meta,
+    _normalize_characters_payload,
+    _normalize_framework_outline,
+    _normalize_key_events,
+    apply_framework_operations,
+    validate_applied_framework_consistency,
+    validate_framework_json,
+)
 from urllib.parse import parse_qsl
 
 import httpx
@@ -78,6 +95,7 @@ from services.deepseek import (
     build_story_bible,
     chat_stream,
     continue_framework,
+    continue_framework_with_chat,
     expand_chapter_to_content,
     generate_character_profiles_from_framework,
     generate_character_profiles_from_content,
@@ -1833,300 +1851,6 @@ def _count_words(text: str | None) -> int | None:
     return len("".join(stripped.split()))
 
 
-def _normalize_key_events(raw) -> list[str] | None:
-    if not raw:
-        return None
-    if isinstance(raw, list):
-        items = [str(item).strip() for item in raw if str(item).strip()]
-        return items or None
-    if isinstance(raw, str):
-        text = raw.strip()
-        return [text] if text else None
-    return [str(raw).strip()] if str(raw).strip() else None
-
-
-def _coerce_chapter_number(raw) -> int | None:
-    if isinstance(raw, bool):
-        return None
-    if isinstance(raw, int):
-        return raw if raw > 0 else None
-    if isinstance(raw, float):
-        return int(raw) if raw.is_integer() and raw > 0 else None
-    if isinstance(raw, str):
-        text = raw.strip()
-        if not text:
-            return None
-        if text.isdigit():
-            value = int(text)
-            return value if value > 0 else None
-        match = re.search(r"\d+", text)
-        if match:
-            value = int(match.group(0))
-            return value if value > 0 else None
-    return None
-
-
-def _normalize_chapter_plan_meta(raw: dict | None) -> dict[str, Any]:
-    raw = raw if isinstance(raw, dict) else {}
-    payload: dict[str, Any] = {}
-
-    summary = str(raw.get("summary") or "").strip()
-    if summary:
-        payload["summary"] = summary
-
-    key_events = _normalize_key_events(raw.get("key_events"))
-    if key_events:
-        payload["key_events"] = key_events
-
-    for field in ("goal", "conflict", "hook", "payoff", "highlight"):
-        value = str(raw.get(field) or "").strip()
-        if value:
-            payload[field] = value
-    return payload
-
-
-def _normalize_act_token(value) -> str:
-    text = str(value or "").strip().lower()
-    if not text:
-        return ""
-    text = re.sub(r"[\s_\-:：,.，。、()（）\[\]【】]+", "", text)
-    replacements = {
-        "第一幕": "1",
-        "第二幕": "2",
-        "第三幕": "3",
-        "第一章": "1",
-        "第二章": "2",
-        "第三章": "3",
-        "第一部分": "1",
-        "第二部分": "2",
-        "第三部分": "3",
-        "第一卷": "1",
-        "第二卷": "2",
-        "第三卷": "3",
-        "actone": "1",
-        "acttwo": "2",
-        "actthree": "3",
-        "act1": "1",
-        "act2": "2",
-        "act3": "3",
-    }
-    if text in replacements:
-        return replacements[text]
-    match = re.search(r"act(\d+)", text)
-    if match:
-        return match.group(1)
-    match = re.search(r"第([123])幕", text)
-    if match:
-        return match.group(1)
-    match = re.search(r"([123])幕", text)
-    if match:
-        return match.group(1)
-    if text in {"1", "2", "3"}:
-        return text
-    return text
-
-
-def _build_act_alias_map(acts: list) -> dict[str, str]:
-    alias_map: dict[str, str] = {}
-    for index, raw_act in enumerate(acts, start=1):
-        if isinstance(raw_act, dict):
-            act_entry = raw_act
-        else:
-            act_entry = {"title": str(raw_act)}
-        canonical = str(act_entry.get("act", index))
-        aliases = {
-            canonical,
-            str(index),
-            act_entry.get("title", ""),
-            act_entry.get("name", ""),
-            f"第{index}幕",
-            f"{index}幕",
-            f"act {index}",
-            f"act{index}",
-        }
-        for alias in aliases:
-            normalized = _normalize_act_token(alias)
-            if normalized:
-                alias_map[normalized] = canonical
-    return alias_map
-
-
-def _normalize_framework_outline(outline: dict | None, chapters: list | None) -> dict:
-    normalized = dict(outline or {})
-    acts = normalized.get("three_acts")
-    if not isinstance(acts, list):
-        acts = []
-    act_alias_map = _build_act_alias_map(acts)
-
-    chapter_groups: dict[str, list[dict]] = {}
-    if isinstance(chapters, list):
-        for item in chapters:
-            if not isinstance(item, dict):
-                continue
-            raw_act_key = str(item.get("act") or "").strip()
-            act_key = act_alias_map.get(_normalize_act_token(raw_act_key), raw_act_key)
-            chapter_number = _coerce_chapter_number(item.get("chapter_number"))
-            title = str(item.get("title") or "").strip()
-            if chapter_number is None or not title:
-                continue
-            chapter_entry = {
-                "chapter_number": chapter_number,
-                "title": title,
-                "act": act_key or raw_act_key,
-            }
-            chapter_entry.update(_normalize_chapter_plan_meta(item))
-            chapter_groups.setdefault(act_key, []).append(chapter_entry)
-
-    next_unassigned: list[dict] = chapter_groups.pop("", [])
-    merged_acts: list[dict] = []
-    for index, act in enumerate(acts, start=1):
-        if isinstance(act, dict):
-            act_entry = dict(act)
-        else:
-            act_entry = {"title": str(act)}
-        act_label = act_entry.get("act", index)
-        act_entry["act"] = act_label
-        candidates = None
-        for candidate_key in {
-            str(act_label),
-            str(index),
-            _normalize_act_token(act_label),
-            _normalize_act_token(index),
-            _normalize_act_token(act_entry.get("title")),
-            _normalize_act_token(act_entry.get("name")),
-        }:
-            if candidate_key in chapter_groups:
-                candidates = chapter_groups.pop(candidate_key)
-                break
-        if not candidates and next_unassigned:
-            candidates = next_unassigned
-            next_unassigned = []
-        act_entry["chapters"] = sorted(candidates or [], key=lambda item: item["chapter_number"])
-        merged_acts.append(act_entry)
-
-    leftover = []
-    for items in chapter_groups.values():
-        leftover.extend(items)
-    leftover.extend(next_unassigned)
-    if leftover:
-        merged_acts.append({
-            "act": len(merged_acts) + 1,
-            "title": "章节规划",
-            "summary": "",
-            "chapters": sorted(leftover, key=lambda item: item["chapter_number"]),
-        })
-
-    normalized["three_acts"] = merged_acts
-    return normalized
-
-
-def _extract_outline_chapters(outline: dict | None) -> list[dict]:
-    if not isinstance(outline, dict):
-        return []
-    acts = outline.get("three_acts")
-    if not isinstance(acts, list):
-        return []
-    extracted: list[dict] = []
-    for index, act in enumerate(acts, start=1):
-        if not isinstance(act, dict):
-            continue
-        act_label = act.get("act", index)
-        chapters = act.get("chapters")
-        if not isinstance(chapters, list):
-            continue
-        for item in chapters:
-            if not isinstance(item, dict):
-                continue
-            chapter_number = _coerce_chapter_number(item.get("chapter_number"))
-            title = str(item.get("title") or "").strip()
-            if chapter_number is None or not title:
-                continue
-            chapter_entry = dict(item)
-            chapter_entry["chapter_number"] = chapter_number
-            chapter_entry["title"] = title
-            chapter_entry["act"] = item.get("act", act_label)
-            extracted.append(chapter_entry)
-    return extracted
-
-
-def _merge_chapter_plans(existing: list[dict] | None, incoming: list[dict] | None) -> list[dict]:
-    merged: dict[int, dict] = {}
-
-    def _ingest(items: list[dict] | None, *, prefer_existing: bool) -> None:
-        if not isinstance(items, list):
-            return
-        for item in items:
-            if not isinstance(item, dict):
-                continue
-            chapter_number = _coerce_chapter_number(item.get("chapter_number"))
-            title = str(item.get("title") or "").strip()
-            if chapter_number is None or not title:
-                continue
-            normalized = dict(item)
-            normalized["chapter_number"] = chapter_number
-            normalized["title"] = title
-            if prefer_existing and chapter_number in merged:
-                current = dict(merged[chapter_number])
-                current.update({k: v for k, v in normalized.items() if v not in (None, "", [], {})})
-                merged[chapter_number] = current
-            else:
-                current = dict(merged.get(chapter_number, {}))
-                current.update(normalized)
-                merged[chapter_number] = current
-
-    _ingest(existing, prefer_existing=False)
-    _ingest(incoming, prefer_existing=True)
-    return [merged[key] for key in sorted(merged)]
-
-
-def _merge_framework_outline(existing_outline: dict | None, incoming_outline: dict | None, incoming_chapters: list | None) -> dict:
-    existing_outline = existing_outline if isinstance(existing_outline, dict) else {}
-    incoming_outline = incoming_outline if isinstance(incoming_outline, dict) else {}
-
-    existing_chapters = _extract_outline_chapters(existing_outline)
-    incoming_outline_chapters = _extract_outline_chapters(incoming_outline)
-    combined_incoming = _merge_chapter_plans(incoming_outline_chapters, incoming_chapters)
-    merged_chapters = _merge_chapter_plans(existing_chapters, combined_incoming)
-
-    existing_acts = existing_outline.get("three_acts") if isinstance(existing_outline.get("three_acts"), list) else []
-    incoming_acts = incoming_outline.get("three_acts") if isinstance(incoming_outline.get("three_acts"), list) else []
-
-    merged_acts: list[dict] = []
-    act_index: dict[str, int] = {}
-
-    def _push_act(raw_act, fallback_index: int, *, prefer_incoming: bool) -> None:
-        if isinstance(raw_act, dict):
-            act_entry = dict(raw_act)
-        else:
-            act_entry = {"title": str(raw_act)}
-        act_label = str(act_entry.get("act", fallback_index))
-        act_entry["act"] = act_entry.get("act", fallback_index)
-        act_entry.pop("chapters", None)
-        if act_label in act_index:
-            idx = act_index[act_label]
-            current = dict(merged_acts[idx])
-            update_data = {k: v for k, v in act_entry.items() if v not in (None, "", [], {})}
-            if prefer_incoming:
-                current.update(update_data)
-            else:
-                for key, value in update_data.items():
-                    current.setdefault(key, value)
-            merged_acts[idx] = current
-            return
-        act_index[act_label] = len(merged_acts)
-        merged_acts.append(act_entry)
-
-    for idx, act in enumerate(existing_acts, start=1):
-        _push_act(act, idx, prefer_incoming=False)
-    for idx, act in enumerate(incoming_acts, start=1):
-        _push_act(act, idx, prefer_incoming=True)
-
-    base_outline = dict(existing_outline)
-    base_outline.update({k: v for k, v in incoming_outline.items() if k != "three_acts"})
-    base_outline["three_acts"] = merged_acts
-    return _normalize_framework_outline(base_outline, merged_chapters)
-
-
 def _has_complete_tags(tags: dict | None) -> bool:
     if not isinstance(tags, dict):
         return False
@@ -2275,15 +1999,6 @@ def _has_opening_ready_outline(outline: dict | None) -> bool:
     if _count_detailed_opening_chapters(chapters, upto=10) < 6:
         return False
     return True
-
-
-def _count_framework_chapters(framework: dict | None) -> int:
-    if not isinstance(framework, dict):
-        return 0
-    chapters = framework.get("chapters")
-    if isinstance(chapters, list) and chapters:
-        return len([item for item in chapters if isinstance(item, dict)])
-    return len(_extract_outline_chapters(framework.get("outline")))
 
 
 def _read_serial_strategy(outline: dict | None) -> dict[str, Any]:
@@ -2907,51 +2622,6 @@ async def _refresh_chapter_memory(chapter: Chapter, request: Request, db: Sessio
         "ending_scene": chapter_summary.get("ending_scene"),
     } if (chapter_summary or chapter_handoff) else None
     chapter.story.story_memory = _merge_story_memory(chapter.story.story_memory, story_memory_update, chapter, chapter_summary)
-
-
-def _normalize_big_five_scores(raw):
-    if not isinstance(raw, dict):
-        return raw
-    key_map = {
-        "O": "O",
-        "C": "C",
-        "E": "E",
-        "A": "A",
-        "N": "N",
-        "openness": "O",
-        "conscientiousness": "C",
-        "extraversion": "E",
-        "agreeableness": "A",
-        "neuroticism": "N",
-    }
-    normalized = {}
-    for key, value in raw.items():
-        target = key_map.get(str(key))
-        if not target:
-            continue
-        try:
-            numeric = float(value)
-        except (TypeError, ValueError):
-            continue
-        if numeric <= 10:
-            numeric *= 10
-        normalized[target] = max(0, min(100, int(round(numeric))))
-    return normalized or raw
-
-
-def _normalize_characters_payload(raw):
-    if not isinstance(raw, list):
-        return raw
-    normalized = []
-    for item in raw:
-        if not isinstance(item, dict):
-            normalized.append(item)
-            continue
-        character = dict(item)
-        if "big_five" in character:
-            character["big_five"] = _normalize_big_five_scores(character.get("big_five"))
-        normalized.append(character)
-    return normalized
 
 
 def _merge_tags(existing, incoming):
@@ -6910,7 +6580,7 @@ async def adjust_framework_endpoint(story_id: int, request: Request, db: Session
     _check_and_consume_advanced_text_quota(request, user.id, db, deduct=False)
     _release_db_transaction(db)
     try:
-        result = await adjust_framework_with_chat(
+        plan = await adjust_framework_with_chat(
             context_story,
             messages,
             api_key=deepseek_api_key,
@@ -6920,57 +6590,48 @@ async def adjust_framework_endpoint(story_id: int, request: Request, db: Session
     except ValueError as exc:
         raise HTTPException(502, f"AI 框架调整返回格式无效：{exc}") from exc
 
-    framework, applied_operations = _apply_framework_edit_operations(existing_framework, result.get("operations", []))
-    if not applied_operations:
-        raise HTTPException(502, "AI 没有返回可执行的框架修改操作，请换一种更明确的指令。")
+    apply_result = apply_framework_operations(
+        existing_framework=existing_framework,
+        operations=plan.get("operations"),
+        patches=plan.get("patches"),
+    )
+
+    if apply_result["errors"]:
+        raise HTTPException(502, "；".join(apply_result["errors"]))
+
+    framework = apply_result["framework"]
+    validation_errors = validate_applied_framework_consistency(framework)
+
+    if validation_errors:
+        raise HTTPException(502, "；".join(validation_errors))
 
     if requested_min_chapters and _count_framework_chapters(framework) < requested_min_chapters:
-        retry_messages = list(messages) + [
-            {
-                "role": "user",
-                "content": (
-                    f'硬性修正：你上一版没有满足我"至少 {requested_min_chapters} 章"的要求。'
-                    f"请重新输出 operations，用足够多的 upsert_chapter 操作确保章节规划不少于 {requested_min_chapters} 章。"
-                    "不要只在 reply 里说已经扩展，必须返回真实可执行操作。"
-                ),
-            }
-        ]
-        try:
-            result = await adjust_framework_with_chat(
-                context_story,
-                retry_messages,
-                api_key=deepseek_api_key,
-                required_min_chapters=requested_min_chapters,
-                existing_framework=existing_framework,
-            )
-        except ValueError as exc:
-            raise HTTPException(502, f"AI 二次修正返回格式无效：{exc}") from exc
-        framework, applied_operations = _apply_framework_edit_operations(existing_framework, result.get("operations", []))
-        if _count_framework_chapters(framework) < requested_min_chapters:
-            raise HTTPException(
-                502,
-                f"AI 未能满足至少 {requested_min_chapters} 章的硬性要求，请重试或换一种更明确的扩写指令。",
-            )
+        raise HTTPException(
+            502,
+            f"AI 未能满足至少 {requested_min_chapters} 章的硬性要求，请重试或换一种更明确的扩写指令。",
+        )
 
     story = _require_story_for_user(story_id, user, db)
     description = str(framework.get("description") or story.description or "").strip()
     story.description = description
-    story.tags = framework.get("tags") if isinstance(framework.get("tags"), dict) else {}
+    story.tags = framework.get("tags") if isinstance(framework.get("tags"), dict) else existing_framework["tags"]
     story.characters = _normalize_characters_payload(framework.get("characters"))
-    story.outline = framework.get("outline") if isinstance(framework.get("outline"), dict) else {}
+    story.outline = framework.get("outline") if isinstance(framework.get("outline"), dict) else existing_framework["outline"]
     db.commit()
     _check_and_consume_advanced_text_quota(request, user.id, db, deduct=True)
     db.refresh(story)
     return {
-        "reply": result.get("reply", ""),
+        "reply": plan.get("reply", ""),
         "story": {
             "description": story.description,
             "tags": story.tags,
             "characters": story.characters,
             "outline": story.outline,
         },
-        "chapters": framework.get("chapters"),
-        "applied_operations": applied_operations,
+        "chapters": _extract_outline_chapters(framework.get("outline", {})),
+        "applied_operations": apply_result["applied_operations"],
+        "warnings": [*plan.get("warnings", []), *apply_result["warnings"]],
+        "validation_errors": validation_errors,
     }
 
 
@@ -6991,8 +6652,8 @@ async def continue_framework_endpoint(story_id: int, request: Request, db: Sessi
     deepseek_api_key = _user_deepseek_api_key(request)
     continue_instruction = (
         "一键续写：请基于当前框架继续向后扩展后续阶段和真实章节规划。"
-        "必须返回 upsert_act 和 upsert_chapter 操作；至少新增 10 个后续章节任务卡。"
-        "不要只在 reply 里描述扩展到了多少章，必须用 operations 写入大纲 JSON。"
+        "在 framework.outline.three_acts 中至少新增 10 个后续章节任务卡。"
+        "不要只在 reply 里描述扩展到了多少章，必须体现在 framework.outline.three_acts 中。"
         "每个新增章节尽量包含 title、summary、goal、conflict、hook、payoff、highlight、key_events。"
         "保留原有主线、角色成长与代价平衡，不要删除现有内容。"
     )
@@ -7007,18 +6668,31 @@ async def continue_framework_endpoint(story_id: int, request: Request, db: Sessi
 
     _release_db_transaction(db)
     try:
-        result = await adjust_framework_with_chat(
+        plan = await continue_framework_with_chat(
             context_story,
             messages,
             api_key=deepseek_api_key,
-            existing_framework=existing_framework,
         )
     except ValueError as exc:
         raise HTTPException(502, f"AI 续写返回格式无效：{exc}") from exc
 
-    framework, applied_operations = _apply_framework_edit_operations(existing_framework, result.get("operations", []))
+    apply_result = apply_framework_operations(
+        existing_framework=existing_framework,
+        operations=plan.get("operations"),
+        patches=plan.get("patches"),
+    )
+
+    if apply_result["errors"]:
+        raise HTTPException(502, "；".join(apply_result["errors"]))
+
+    framework = apply_result["framework"]
     after_chapter_count = _count_framework_chapters(framework)
-    if after_chapter_count <= before_chapter_count:
+
+    has_new_chapter = any(
+        op.startswith("add_chapter") or op.startswith("insert_chapter_after")
+        for op in apply_result["applied_operations"]
+    )
+    if not has_new_chapter or after_chapter_count <= before_chapter_count:
         raise HTTPException(
             502,
             "AI 续写没有写入任何新增章节。请重试，或直接输入“新增第X到第Y章，并列出每章任务卡”。",
@@ -7026,22 +6700,23 @@ async def continue_framework_endpoint(story_id: int, request: Request, db: Sessi
 
     story = _require_story_for_user(story_id, user, db)
     story.description = str(framework.get("description") or story.description or "").strip()
-    story.tags = framework.get("tags") if isinstance(framework.get("tags"), dict) else {}
+    story.tags = framework.get("tags") if isinstance(framework.get("tags"), dict) else existing_framework["tags"]
     story.characters = _normalize_characters_payload(framework.get("characters"))
-    story.outline = framework.get("outline") if isinstance(framework.get("outline"), dict) else {}
+    story.outline = framework.get("outline") if isinstance(framework.get("outline"), dict) else existing_framework["outline"]
     db.commit()
     _check_and_consume_advanced_text_quota(request, user.id, db, deduct=True)
     db.refresh(story)
     return {
-        "reply": result.get("reply", ""),
+        "reply": plan.get("reply", ""),
         "story": {
             "description": story.description,
             "tags": story.tags,
             "characters": story.characters,
             "outline": story.outline,
         },
-        "chapters": framework.get("chapters"),
-        "applied_operations": applied_operations,
+        "chapters": _extract_outline_chapters(framework.get("outline", {})),
+        "applied_operations": apply_result["applied_operations"],
+        "warnings": [*plan.get("warnings", []), *apply_result["warnings"]],
     }
 
 
