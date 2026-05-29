@@ -1,0 +1,69 @@
+// styles/variables.scss
+// LoreVista 移动端设计令牌
+
+// ===== 主色 =====
+$lv-primary: #2563eb;         // 主蓝色 (按钮/激活态/链接)
+$lv-primary-dark: #1d4ed8;    // 深蓝 (按下态)
+$lv-primary-light: #dbeafe;   // 浅蓝 (背景/徽标)
+$lv-primary-lighter: #eff6ff; // 极浅蓝 (页面背景)
+$lv-primary-bg: #e8f1ff;      // 图标背景
+
+// ===== 背景 =====
+$lv-bg-start: #f4f8ff;                    // 页面渐变起点
+$lv-bg-mid: #eef4ff;                      // 页面渐变中点
+$lv-bg-end: #f8fbff;                      // 页面渐变终点
+$lv-surface: rgba(255, 255, 255, 0.92);   // 卡片/面板背景
+$lv-surface-solid: #ffffff;               // 不支持毛玻璃时的回退
+
+// ===== 边框 =====
+$lv-border: #d7e3f4;          // 主边框色
+$lv-border-focus: #93c5fd;    // 输入框聚焦
+$lv-border-light: #e5edf8;    // 浅边框
+
+// ===== 文字 =====
+$lv-text-primary: #0f172a;    // 主文字 (slate-900)
+$lv-text-secondary: #475569;  // 次要文字 (slate-600)
+$lv-text-muted: #94a3b8;      // 辅助文字 (slate-400)
+$lv-text-on-primary: #ffffff; // 主色上的文字
+
+// ===== 语义色 =====
+$lv-success: #15803d;         // 成功 (green-700)
+$lv-success-bg: #f0fdf4;      // 成功背景
+$lv-error: #be123c;           // 错误 (rose-700)
+$lv-error-bg: #fff1f2;        // 错误背景
+$lv-warning: #d97706;         // 警告 (amber-600)
+$lv-warning-bg: #fffbeb;      // 警告背景
+
+// ===== 阴影 =====
+$lv-shadow-sm: 0 6rpx 18rpx rgba(59, 130, 246, 0.08);
+$lv-shadow-md: 0 10rpx 24rpx rgba(59, 130, 246, 0.14);
+$lv-shadow-lg: 0 18rpx 42rpx rgba(59, 130, 246, 0.12);
+$lv-shadow-xl: 0 24rpx 60rpx rgba(15, 23, 42, 0.2);
+
+// ===== 圆角 =====
+$lv-radius-xs: 8rpx;          // 小圆角 (标签)
+$lv-radius-sm: 16rpx;         // 中小圆角 (输入框)
+$lv-radius-md: 24rpx;         // 中圆角 (卡片)
+$lv-radius-lg: 36rpx;         // 大圆角 (面板)
+$lv-radius-xl: 48rpx;         // 特大圆角 (药丸按钮)
+$lv-radius-full: 9999rpx;     // 全圆
+
+// ===== 间距 =====
+$lv-page-padding: 32rpx;      // 页面内边距
+$lv-card-padding: 28rpx;      // 卡片内边距
+$lv-section-gap: 24rpx;       // 区块间距
+$lv-item-gap: 16rpx;          // 列表项间距
+
+// ===== 字号 =====
+$lv-font-xs: 22rpx;           // 11px
+$lv-font-sm: 24rpx;           // 12px
+$lv-font-base: 28rpx;         // 14px
+$lv-font-md: 30rpx;           // 15px
+$lv-font-lg: 32rpx;           // 16px
+$lv-font-xl: 36rpx;           // 18px
+$lv-font-2xl: 40rpx;          // 20px
+$lv-font-3xl: 48rpx;          // 24px
+
+// ===== 触控 =====
+$lv-touch-min: 88rpx;         // 最小触控目标 (44px)
+$lv-touch-comfortable: 96rpx; // 舒适触控高度 (48px)

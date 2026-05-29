@@ -1,0 +1,252 @@
+{
+  "pages": [
+    {
+      "path": "pages/index/index",
+      "style": {
+        "navigationStyle": "custom"
+      }
+    },
+    {
+      "path": "pages/workspace/index",
+      "style": {
+        "navigationStyle": "custom"
+      }
+    },
+    {
+      "path": "pages/discover/index",
+      "style": {
+        "navigationStyle": "custom"
+      }
+    },
+    {
+      "path": "pages/profile/index",
+      "style": {
+        "navigationStyle": "custom"
+      }
+    },
+    {
+      "path": "pages/auth/login",
+      "style": {
+        "navigationBarTitleText": "登录"
+      }
+    },
+    {
+      "path": "pages/auth/register",
+      "style": {
+        "navigationBarTitleText": "注册"
+      }
+    },
+    {
+      "path": "pages/auth/forgot-password",
+      "style": {
+        "navigationBarTitleText": "重置密码"
+      }
+    },
+    {
+      "path": "pages/story/create",
+      "style": {
+        "navigationBarTitleText": "新建故事"
+      }
+    },
+    {
+      "path": "pages/story/detail",
+      "style": {
+        "navigationStyle": "custom"
+      }
+    },
+    {
+      "path": "pages/story/cover-edit",
+      "style": {
+        "navigationBarTitleText": "封面编辑"
+      }
+    }
+  ],
+  "subPackages": [
+    {
+      "root": "pages/story",
+      "pages": [
+        {
+          "path": "onboarding",
+          "style": {
+            "navigationStyle": "custom"
+          }
+        },
+        {
+          "path": "import-guidance",
+          "style": {
+            "navigationStyle": "custom"
+          }
+        },
+        {
+          "path": "import",
+          "style": {
+            "navigationBarTitleText": "导入小说"
+          }
+        }
+      ]
+    },
+    {
+      "root": "pages/workspace",
+      "pages": [
+        {
+          "path": "chapter-view",
+          "style": {
+            "navigationStyle": "custom"
+          }
+        },
+        {
+          "path": "editor",
+          "style": {
+            "navigationStyle": "custom"
+          }
+        },
+        {
+          "path": "chat",
+          "style": {
+            "navigationBarTitleText": "AI 对话"
+          }
+        },
+        {
+          "path": "framework-chat",
+          "style": {
+            "navigationBarTitleText": "调整框架"
+          }
+        },
+        {
+          "path": "manga",
+          "style": {
+            "navigationStyle": "custom"
+          }
+        },
+        {
+          "path": "manga-gallery",
+          "style": {
+            "navigationStyle": "custom"
+          }
+        },
+        {
+          "path": "agent",
+          "style": {
+            "navigationBarTitleText": "AI 助手"
+          }
+        },
+        {
+          "path": "agent-history",
+          "style": {
+            "navigationBarTitleText": "历史会话"
+          }
+        },
+        {
+          "path": "character-profiles",
+          "style": {
+            "navigationBarTitleText": "角色外观"
+          }
+        },
+        {
+          "path": "ref-images",
+          "style": {
+            "navigationBarTitleText": "参考图"
+          }
+        },
+        {
+          "path": "continuity",
+          "style": {
+            "navigationBarTitleText": "连贯性记忆"
+          }
+        },
+        {
+          "path": "quality",
+          "style": {
+            "navigationBarTitleText": "质量评估"
+          }
+        }
+      ]
+    },
+    {
+      "root": "pages/billing",
+      "pages": [
+        {
+          "path": "checkout",
+          "style": {
+            "navigationBarTitleText": "支付"
+          }
+        },
+        {
+          "path": "orders",
+          "style": {
+            "navigationBarTitleText": "订单记录"
+          }
+        },
+        {
+          "path": "order-detail",
+          "style": {
+            "navigationBarTitleText": "订单详情"
+          }
+        }
+      ]
+    },
+    {
+      "root": "pages/settings",
+      "pages": [
+        {
+          "path": "api-keys",
+          "style": {
+            "navigationBarTitleText": "API 配置"
+          }
+        },
+        {
+          "path": "password",
+          "style": {
+            "navigationBarTitleText": "修改密码"
+          }
+        },
+        {
+          "path": "about",
+          "style": {
+            "navigationBarTitleText": "关于"
+          }
+        }
+      ]
+    }
+  ],
+  "tabBar": {
+    "color": "#94a3b8",
+    "selectedColor": "#2563eb",
+    "backgroundColor": "#f8fbff",
+    "borderStyle": "white",
+    "list": [
+      {
+        "pagePath": "pages/index/index",
+        "text": "作品",
+        "iconPath": "static/tab/home.png",
+        "selectedIconPath": "static/tab/home-active.png"
+      },
+      {
+        "pagePath": "pages/workspace/index",
+        "text": "创作",
+        "iconPath": "static/tab/compose.png",
+        "selectedIconPath": "static/tab/compose-active.png"
+      },
+      {
+        "pagePath": "pages/discover/index",
+        "text": "发现",
+        "iconPath": "static/tab/star.png",
+        "selectedIconPath": "static/tab/star-active.png"
+      },
+      {
+        "pagePath": "pages/profile/index",
+        "text": "我的",
+        "iconPath": "static/tab/person.png",
+        "selectedIconPath": "static/tab/person-active.png"
+      }
+    ]
+  },
+  "globalStyle": {
+    "navigationBarTextStyle": "black",
+    "navigationBarBackgroundColor": "#f8fbff",
+    "backgroundColor": "#f4f8ff",
+    "app-plus": {
+      "titleNView": false
+    }
+  }
+}

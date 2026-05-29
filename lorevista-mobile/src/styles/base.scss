@@ -1,0 +1,135 @@
+// styles/base.scss
+// LoreVista 移动端基础/重置样式
+
+// 主字体栈: 拉丁字符使用 IBM Plex Sans, CJK 回退系统字体
+$lv-font-family: "IBM Plex Sans", "PingFang SC", "Source Han Sans SC",
+                 "Noto Sans CJK SC", "Helvetica Neue", sans-serif;
+
+// 阅读字体: 小说正文使用衬线体
+$lv-font-serif: "Lora", "Songti SC", "SimSun", Georgia, serif;
+
+// 全局盒模型
+page {
+  font-family: $lv-font-family;
+  font-size: $lv-font-base;
+  color: $lv-text-primary;
+  background: $lv-bg-start;
+  box-sizing: border-box;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+// 通用盒模型
+view, text, scroll-view, swiper, input, textarea, button {
+  box-sizing: border-box;
+}
+
+// 移除按钮默认样式
+button {
+  margin: 0;
+  padding: 0;
+  background: none;
+  border: none;
+  border-radius: 0;
+  font-size: inherit;
+  line-height: inherit;
+  color: inherit;
+
+  &::after {
+    display: none;
+  }
+}
+
+// 移除输入框默认样式
+input, textarea {
+  margin: 0;
+  padding: 0;
+  font-family: inherit;
+}
+
+// 图片默认样式
+image {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+// 链接样式
+a {
+  color: $lv-primary;
+  text-decoration: none;
+}
+
+// 通用间距类
+.page-padding {
+  padding: $lv-page-padding;
+}
+
+.section-gap {
+  margin-bottom: $lv-section-gap;
+}
+
+.item-gap {
+  margin-bottom: $lv-item-gap;
+}
+
+// 通用文本样式
+.text-primary {
+  color: $lv-text-primary;
+}
+
+.text-secondary {
+  color: $lv-text-secondary;
+}
+
+.text-muted {
+  color: $lv-text-muted;
+}
+
+.text-center {
+  text-align: center;
+}
+
+// 通用布局
+.flex-row {
+  display: flex;
+  flex-direction: row;
+}
+
+.flex-col {
+  display: flex;
+  flex-direction: column;
+}
+
+.flex-1 {
+  flex: 1;
+}
+
+// 页面容器
+.page-container {
+  min-height: 100vh;
+  background: linear-gradient(180deg, $lv-bg-start 0%, $lv-bg-end 100%);
+}
+
+// 卡片基础样式
+.card {
+  @include lv-glass-card;
+  padding: $lv-card-padding;
+}
+
+// 分割线
+.divider {
+  height: 1rpx;
+  background: $lv-border-light;
+  margin: $lv-section-gap 0;
+}
+
+// 状态栏占位
+.status-bar {
+  height: var(--status-bar-height);
+}
+
+// 安全区域底部
+.safe-area-bottom {
+  @include safe-area-bottom;
+}

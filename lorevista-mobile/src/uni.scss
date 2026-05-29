@@ -1,0 +1,33 @@
+/* uni.scss - UniApp 全局 SCSS 变量 */
+
+/* 主色 */
+$uni-primary: #2563eb;
+$uni-primary-dark: #1d4ed8;
+$uni-primary-light: #dbeafe;
+
+/* 文字颜色 */
+$uni-text-color: #0f172a;
+$uni-text-color-inverse: #ffffff;
+$uni-text-color-grey: #94a3b8;
+
+/* 背景色 */
+$uni-bg-color: #f4f8ff;
+$uni-bg-color-hover: #f0f4ff;
+
+/* 边框颜色 */
+$uni-border-color: #d7e3f4;
+
+/* 错误色 */
+$uni-error: #be123c;
+
+/* 字体大小 */
+$uni-font-size-sm: 24rpx;
+$uni-font-size-base: 28rpx;
+$uni-font-size-lg: 32rpx;
+$uni-font-size-xl: 36rpx;
+
+/* 圆角 */
+$uni-border-radius-sm: 8rpx;
+$uni-border-radius-base: 16rpx;
+$uni-border-radius-lg: 24rpx;
+$uni-border-radius-circle: 9999rpx;

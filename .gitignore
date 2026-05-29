@@ -60,8 +60,9 @@ generate_image.py
 微信图片_*
 agent-ui-prototype.html
 
-# ─── Mobile app (WIP, not for pro branch) ───
-lorevista-mobile/
+# ─── Mobile app (H5 build output only) ───
+lorevista-mobile/node_modules/
+lorevista-mobile/dist/
 
 # ─── MD files (except README) ───
 *.md
