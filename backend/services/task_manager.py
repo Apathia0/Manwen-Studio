@@ -1,7 +1,7 @@
 import asyncio
 import logging
 from functools import wraps
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Callable, Any, Optional
 from database import SessionLocal
 from models import BackgroundTask
@@ -33,7 +33,13 @@ class TaskManager:
                 for attempt in range(max_retries + 1):
                     try:
                         return await func(*args, **kwargs)
+                    except asyncio.CancelledError:
+                        # 任务取消直接重抛，不重试
+                        raise
                     except Exception as e:
+                        # 超时异常直接抛出不重试
+                        if isinstance(e, asyncio.TimeoutError):
+                            raise
                         last_exception = e
                         if attempt < max_retries:
                             delay = min(
@@ -85,7 +91,7 @@ class TaskManager:
             if task:
                 task.status = "failed"
                 task.error_message = error
-                task.completed_at = datetime.utcnow()
+                task.completed_at = datetime.now(timezone.utc).replace(tzinfo=None)
                 db.commit()
         finally:
             db.close()
@@ -100,7 +106,7 @@ class TaskManager:
             if task:
                 task.status = "succeeded"
                 task.result_json = result if isinstance(result, dict) else {"result": result}
-                task.completed_at = datetime.utcnow()
+                task.completed_at = datetime.now(timezone.utc).replace(tzinfo=None)
                 db.commit()
         finally:
             db.close()
@@ -184,7 +190,7 @@ class TaskManager:
             ).first()
             if db_task:
                 db_task.status = "running"
-                db_task.started_at = datetime.utcnow()
+                db_task.started_at = datetime.now(timezone.utc).replace(tzinfo=None)
                 db.commit()
         finally:
             db.close()
@@ -195,7 +201,7 @@ class TaskManager:
         """清理超时的僵尸任务"""
         db = SessionLocal()
         try:
-            cutoff = datetime.utcnow() - timedelta(hours=max_age_hours)
+            cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=max_age_hours)
             stale_tasks = db.query(BackgroundTask).filter(
                 BackgroundTask.status.in_(["pending", "running", "retrying"]),
                 BackgroundTask.created_at < cutoff
@@ -204,7 +210,7 @@ class TaskManager:
             for task in stale_tasks:
                 task.status = "failed"
                 task.error_message = "Task timed out and was cleaned up"
-                task.completed_at = datetime.utcnow()
+                task.completed_at = datetime.now(timezone.utc).replace(tzinfo=None)
 
                 if task.task_id in self._running_tasks:
                     self._running_tasks[task.task_id].cancel()
