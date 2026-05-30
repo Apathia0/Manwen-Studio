@@ -87,16 +87,16 @@ export const videoGenStore = {
     emit();
   },
 
-  updateProgress(shotId: number, status: string, progress: number, statusMsg: string) {
-    this.patch(shotId, { status, progress, statusMsg });
+  updateProgress: (shotId: number, status: string, progress: number, statusMsg: string) => {
+    videoGenStore.patch(shotId, { status, progress, statusMsg });
   },
 
-  markSucceeded(shotId: number) {
-    this.patch(shotId, { active: false, status: 'succeeded', progress: 100, statusMsg: '视频生成完成' });
+  markSucceeded: (shotId: number) => {
+    videoGenStore.patch(shotId, { active: false, status: 'succeeded', progress: 100, statusMsg: '视频生成完成' });
   },
 
-  markFailed(shotId: number, errorMsg: string) {
-    this.patch(shotId, { active: false, status: 'failed', progress: 0, errorMsg, statusMsg: '视频生成失败' });
+  markFailed: (shotId: number, errorMsg: string) => {
+    videoGenStore.patch(shotId, { active: false, status: 'failed', progress: 0, errorMsg, statusMsg: '视频生成失败' });
   },
 
   clear(shotId: number) {
