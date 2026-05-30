@@ -542,19 +542,19 @@ class BackgroundTask(Base):
     status: Mapped[str] = mapped_column(String(20), default="pending")
     retry_count: Mapped[int] = mapped_column(Integer, default=0)
     max_retries: Mapped[int] = mapped_column(Integer, default=3)
-    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
-    result_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    result_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
 
-    # 关联实体
-    story_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    chapter_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    shot_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # 关联实体（带索引）
+    story_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    chapter_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    shot_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
 
     # 时间戳
     created_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
     started_at: Mapped[datetime.datetime | None] = mapped_column(DateTime, nullable=True)
     completed_at: Mapped[datetime.datetime | None] = mapped_column(DateTime, nullable=True)
 
     # 元数据
-    metadata_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    metadata_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
