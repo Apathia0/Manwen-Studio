@@ -559,7 +559,13 @@ async def batch_update_chapters(chapters: list[dict]) -> dict:
         finally:
             db.close()
 
-    results = await asyncio.gather(*[_update_one(item) for item in chapters])
+    semaphore = asyncio.Semaphore(3)
+
+    async def _update_one_with_limit(item: dict) -> dict:
+        async with semaphore:
+            return await _update_one(item)
+
+    results = await asyncio.gather(*[_update_one_with_limit(item) for item in chapters])
     return {"ok": True, "results": results}
 
 
