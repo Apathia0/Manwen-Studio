@@ -6260,7 +6260,7 @@ async def generate_framework_endpoint(story_id: int, request: Request, db: Sessi
     captured_chars = list(story.characters or [])
     captured_outline = dict(story.outline or {})
     _api_key = deepseek_api_key
-    task_manager.submit_task(
+    await task_manager.submit_task(
         task_id=f"quality_check_{story.id}_{int(datetime.datetime.now(datetime.timezone.utc).timestamp())}",
         task_type="quality_check",
         coro_func=_background_quality_check,

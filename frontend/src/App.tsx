@@ -18,6 +18,7 @@ import StoryLibraryPage from './components/StoryLibraryPage';
 import ImportGuidancePage from './components/ImportGuidancePage';
 import OnboardingPage from './components/OnboardingPage';
 import WorkspaceLayout from './components/WorkspaceLayout';
+import VideoWorkspaceLayout from './components/VideoWorkspaceLayout';
 import {
   AdminAnnouncementPage,
   AdminAuditLogsPage,
@@ -179,6 +180,7 @@ function App() {
   const [globalSuccess, setGlobalSuccess] = useState<string | null>(null);
   const [announcement, setAnnouncement] = useState<PlatformAnnouncement | null>(null);
   const [announcementDismissed, setAnnouncementDismissed] = useState(false);
+  const [workspaceMode, setWorkspaceMode] = useState<'manga' | 'video'>('manga');
   void adminPlans;
   void adminOrders;
   void entitlementPreview;
@@ -839,14 +841,39 @@ function App() {
             />
           )}
           {route === 'workspace' && (
-            <WorkspacePage
-              story={activeStory}
-              chapters={chapters}
-              currentChapter={activeChapter}
-              entitlements={myEntitlements}
-              onChapterChange={(chapter) => setActiveChapterId(chapter.id)}
-              onContentUpdated={refreshWorkspaceData}
-            />
+            <div>
+              <div className="flex items-center gap-2 px-4 py-2">
+                <button
+                  onClick={() => setWorkspaceMode('manga')}
+                  className={`rounded-xl px-4 py-1.5 text-sm font-medium transition ${
+                    workspaceMode === 'manga'
+                      ? 'bg-[#2563eb] text-white'
+                      : 'border border-[#d7e3f4] bg-white text-slate-600'
+                  }`}
+                >
+                  漫画模式
+                </button>
+                <button
+                  onClick={() => setWorkspaceMode('video')}
+                  className={`rounded-xl px-4 py-1.5 text-sm font-medium transition ${
+                    workspaceMode === 'video'
+                      ? 'bg-[#2563eb] text-white'
+                      : 'border border-[#d7e3f4] bg-white text-slate-600'
+                  }`}
+                >
+                  视频模式
+                </button>
+              </div>
+              <WorkspacePage
+                story={activeStory}
+                chapters={chapters}
+                currentChapter={activeChapter}
+                entitlements={myEntitlements}
+                workspaceMode={workspaceMode}
+                onChapterChange={(chapter) => setActiveChapterId(chapter.id)}
+                onContentUpdated={refreshWorkspaceData}
+              />
+            </div>
           )}
           {route === 'account' && (
             <UserAccountUsagePage
@@ -1704,6 +1731,7 @@ function WorkspacePage({
   chapters,
   currentChapter,
   entitlements,
+  workspaceMode,
   onChapterChange,
   onContentUpdated,
 }: {
@@ -1711,6 +1739,7 @@ function WorkspacePage({
   chapters: Chapter[];
   currentChapter: Chapter | null;
   entitlements: EntitlementResponse | null;
+  workspaceMode: 'manga' | 'video';
   onChapterChange: (chapter: Chapter) => void;
   onContentUpdated: () => Promise<void>;
 }) {
@@ -1723,14 +1752,24 @@ function WorkspacePage({
   }
   return (
     <div className="h-[calc(100vh-120px)] overflow-hidden rounded-md border border-[#d9dfd7] bg-white">
-      <WorkspaceLayout
-        story={story}
-        chapters={chapters}
-        currentChapter={currentChapter}
-        entitlements={entitlements}
-        onChapterChange={onChapterChange}
-        onContentUpdated={onContentUpdated}
-      />
+      {workspaceMode === 'manga' ? (
+        <WorkspaceLayout
+          story={story}
+          chapters={chapters}
+          currentChapter={currentChapter}
+          entitlements={entitlements}
+          onChapterChange={onChapterChange}
+          onContentUpdated={onContentUpdated}
+        />
+      ) : (
+        <VideoWorkspaceLayout
+          story={story}
+          chapters={chapters}
+          currentChapter={currentChapter}
+          onChapterChange={onChapterChange}
+          onContentUpdated={onContentUpdated}
+        />
+      )}
     </div>
   );
 }

@@ -2262,3 +2262,839 @@ export async function agentRollbackChanges(storyId: number): Promise<void> {
   });
   if (!res.ok) throw new Error(await res.text());
 }
+
+// ── Video Workflow ──────────────────────────────────────────
+
+export interface ScriptScene {
+  id: number;
+  chapter_id: number;
+  scene_number: number;
+  title: string;
+  location?: string | null;
+  time_of_day?: string | null;
+  characters: string[];
+  summary: string;
+  dialogue: { speaker: string; text: string }[];
+  voiceover?: string | null;
+  mood?: string | null;
+  estimated_duration_seconds?: number | null;
+  source_type: string;
+  status: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface VideoShot {
+  id: number;
+  scene_id: number;
+  shot_number: number;
+  title: string;
+  shot_type?: string | null;
+  camera_angle?: string | null;
+  camera_movement?: string | null;
+  composition?: string | null;
+  action_description?: string | null;
+  dialogue?: string | null;
+  sound_design?: string | null;
+  duration_seconds?: number | null;
+  storyboard_prompt?: string | null;
+  video_prompt?: string | null;
+  negative_prompt?: string | null;
+  first_frame_prompt?: string | null;
+  last_frame_prompt?: string | null;
+  character_prompts_json?: Array<{ name: string; prompt: string }> | null;
+  continuity_notes?: string | null;
+  status: string;
+  style_preset?: string | null;
+  storyboard_asset_id?: number | null;
+  storyboard_locked: boolean;
+  created_at: string;
+  updated_at: string;
+  character_involvement?: string | null;
+  scene_mood?: string | null;
+}
+
+export interface VideoAsset {
+  id: number;
+  story_id?: number | null;
+  chapter_id?: number | null;
+  scene_id?: number | null;
+  shot_id?: number | null;
+  asset_type: string;
+  name: string;
+  file_path: string;
+  provider?: string | null;
+  prompt?: string | null;
+  meta_json?: Record<string, unknown> | null;
+  asset_subtype?: string | null;
+  source_asset_ids_json?: number[] | null;
+  style_preset?: string | null;
+  locked: boolean;
+  revision: number;
+  is_master: boolean;
+  status: string;
+  hash_key?: string | null;
+  created_at: string;
+}
+
+export interface VideoGenerationJob {
+  id: number;
+  shot_id: number;
+  provider: string;
+  provider_job_id?: string | null;
+  model?: string | null;
+  status: string;
+  progress: number;
+  duration_seconds?: number | null;
+  aspect_ratio?: string | null;
+  request_payload?: Record<string, any> | null;
+  error_message?: string | null;
+  input_mode?: string | null;
+  source_storyboard_asset_id?: number | null;
+  submitted_at: string;
+  completed_at?: string | null;
+  clip?: RenderedClip | null;
+  job?: {
+    id?: number | null;
+    status?: string | null;
+    progress?: number;
+  };
+}
+
+export interface RenderedClip {
+  id: number;
+  shot_id: number;
+  job_id?: number | null;
+  video_path: string;
+  thumbnail_path?: string | null;
+  duration_seconds?: number | null;
+  resolution?: string | null;
+  version: number;
+  is_active: boolean;
+  meta?: Record<string, any> | null;
+  source_storyboard_asset_id?: number | null;
+  style_preset?: string | null;
+  continuity_score?: number | null;
+  quality_score?: number | null;
+  review_status?: string;
+  created_at: string;
+}
+
+export interface VideoProject {
+  id: number;
+  story_id: number;
+  chapter_id: number;
+  name: string;
+  timeline: Array<{ shot_id: number; clip_id: number; order: number; enabled: boolean }>;
+  subtitle: Array<{ start_ms: number; end_ms: number; text: string }>;
+  bgm_path?: string | null;
+  cover_path?: string | null;
+  status: string;
+  output_path?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export async function generateScreenplay(chapterId: number, payload: {
+  mode?: string;
+  style?: string;
+  target_duration_seconds?: number;
+  scene_count_hint?: number;
+  regenerate?: boolean;
+}): Promise<{ screenplay: string; scenes: ScriptScene[] }> {
+  const res = await fetch(`${BASE}/api/video/chapters/${chapterId}/screenplay/generate`, {
+    method: 'POST',
+    headers: apiHeaders(true),
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  const data = await res.json();
+  return {
+    screenplay: data.screenplay || '',
+    scenes: (data.scenes || []) as ScriptScene[],
+  };
+}
+
+export async function listScreenplayScenes(chapterId: number): Promise<{ scenes: ScriptScene[]; screenplay: string }> {
+  const res = await fetch(`${BASE}/api/video/chapters/${chapterId}/screenplay/scenes`, {
+    headers: apiHeaders(),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  const data = await res.json();
+  return {
+    scenes: (data.scenes || []) as ScriptScene[],
+    screenplay: data.screenplay || '',
+  };
+}
+
+export async function generateSceneShots(sceneId: number, payload: { style?: string; shot_count_hint?: number; regenerate?: boolean; duration_budget_seconds?: number }): Promise<{ scene_id: number; shots: VideoShot[] }> {
+  const res = await fetch(`${BASE}/api/video/scenes/${sceneId}/shots/generate`, {
+    method: 'POST',
+    headers: apiHeaders(true),
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function listSceneShots(sceneId: number): Promise<{ scene_id: number; shots: VideoShot[] }> {
+  const res = await fetch(`${BASE}/api/video/scenes/${sceneId}/shots`, {
+    headers: apiHeaders(),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function updateVideoShot(shotId: number, payload: Partial<VideoShot>): Promise<VideoShot> {
+  const res = await fetch(`${BASE}/api/video/shots/${shotId}`, {
+    method: 'PATCH',
+    headers: apiHeaders(true),
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function generateShotPrompts(shotId: number, payload: { style?: string; provider?: string; include_references?: boolean; instruction?: string; continuity_notes?: string }): Promise<{ shot: VideoShot }> {
+  const res = await fetch(`${BASE}/api/video/shots/${shotId}/prompts/generate`, {
+    method: 'POST',
+    headers: apiHeaders(true),
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  const data = await res.json();
+  return { shot: data };
+}
+
+export interface ShotAssetPromptDraft {
+  shot_id: number;
+  style_preset: string;
+  character_prompts: Array<{ name: string; prompt: string }>;
+  storyboard_prompt: string;
+  first_frame_prompt: string;
+  last_frame_prompt: string;
+  video_prompt: string;
+}
+
+export async function parseShotAssetPrompts(shotId: number, payload?: {
+  style?: string;
+  style_preset?: string;
+  provider?: string;
+  instruction?: string;
+}): Promise<ShotAssetPromptDraft> {
+  const res = await fetch(`${BASE}/api/video/shots/${shotId}/prompts/parse`, {
+    method: 'POST',
+    headers: apiHeaders(true),
+    body: JSON.stringify(payload || {}),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function generateShotCharacterAsset(shotId: number, payload: {
+  character_name: string;
+  prompt: string;
+  style_preset?: string;
+  reference_asset_ids?: number[];
+  source_asset_ids?: number[];
+}): Promise<VideoAsset> {
+  const res = await fetch(`${BASE}/api/video/shots/${shotId}/assets/character/generate`, {
+    method: 'POST',
+    headers: apiHeaders(true),
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function renderStoryboardFrame(shotId: number, payload: {
+  provider?: string;
+  aspect_ratio?: string;
+  overwrite?: boolean;
+  style_preset?: string;
+  prompt?: string;
+  reference_asset_ids?: number[];
+}): Promise<{ shot_status: string; asset: VideoAsset; storyboard_locked: boolean }> {
+  const res = await fetch(`${BASE}/api/video/shots/${shotId}/storyboard/render`, {
+    method: 'POST',
+    headers: apiHeaders(true),
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  const data = await res.json();
+  return {
+    shot_status: 'storyboard_ready',
+    asset: data,
+    storyboard_locked: false,
+  };
+}
+
+export interface VideoModel {
+  id: string;
+  name: string;
+  provider: string;
+}
+
+export async function getVideoModels(): Promise<{ models: VideoModel[] }> {
+  const res = await fetch(`${BASE}/api/video/models`, {
+    headers: apiHeaders(),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function renderShotVideo(shotId: number, payload: {
+  provider?: string;
+  model?: string;
+  duration_seconds?: number;
+  aspect_ratio?: string;
+  fps?: number;
+  use_reference_assets?: boolean;
+  reference_asset_ids?: number[];
+  seed?: number;
+  overwrite_active_clip?: boolean;
+  prompt?: string;
+  negative_prompt?: string;
+  style?: string;
+  input_mode?: string;
+  source_storyboard_asset_id?: number;
+}): Promise<{ job: VideoGenerationJob }> {
+  const res = await fetch(`${BASE}/api/video/shots/${shotId}/render`, {
+    method: 'POST',
+    headers: apiHeaders(true),
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  const data = await res.json();
+  return { job: data };
+}
+
+export async function approveShotStoryboard(shotId: number): Promise<{ storyboard_locked: boolean; storyboard_asset_id: number }> {
+  const res = await fetch(`${BASE}/api/video/shots/${shotId}/storyboard/approve`, {
+    method: 'POST',
+    headers: apiHeaders(true),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  const data = await res.json();
+  return {
+    storyboard_locked: true,
+    storyboard_asset_id: data.storyboard_asset_id ?? 0,
+  };
+}
+
+export async function rejectShotStoryboard(shotId: number): Promise<{ storyboard_locked: boolean; storyboard_asset_id: number }> {
+  const res = await fetch(`${BASE}/api/video/shots/${shotId}/storyboard/reject`, {
+    method: 'POST',
+    headers: apiHeaders(true),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  const data = await res.json();
+  return {
+    storyboard_locked: false,
+    storyboard_asset_id: data.storyboard_asset_id ?? 0,
+  };
+}
+
+export async function setMasterStoryboard(shotId: number, assetId: number): Promise<{ shot_id: number; asset_id: number }> {
+  const res = await fetch(`${BASE}/api/video/shots/${shotId}/storyboard/${assetId}/master`, {
+    method: 'POST',
+    headers: apiHeaders(true),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function getShotStoryboards(shotId: number): Promise<{
+  assets: VideoAsset[];
+  active_storyboard_asset_id?: number | null;
+  storyboard_locked: boolean;
+}> {
+  const res = await fetch(`${BASE}/api/video/shots/${shotId}/storyboards`, {
+    headers: apiHeaders(),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  const data = await res.json();
+  return {
+    assets: data.storyboards || [],
+    active_storyboard_asset_id: data.active_storyboard_id,
+    storyboard_locked: data.storyboard_locked ?? false,
+  };
+}
+
+export async function deleteShot(shotId: number): Promise<{ ok: boolean; shot_id: number }> {
+  const res = await fetch(`${BASE}/api/video/shots/${shotId}`, {
+    method: 'DELETE',
+    headers: apiHeaders(true),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function createSceneShot(sceneId: number, payload?: Partial<VideoShot>): Promise<VideoShot> {
+  const res = await fetch(`${BASE}/api/video/scenes/${sceneId}/shots`, {
+    method: 'POST',
+    headers: apiHeaders(true),
+    body: JSON.stringify(payload || {}),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function reorderSceneShots(sceneId: number, payload: { shot_ids: number[] }): Promise<{ scene_id: number; shots: VideoShot[] }> {
+  const res = await fetch(`${BASE}/api/video/scenes/${sceneId}/shots/reorder`, {
+    method: 'POST',
+    headers: apiHeaders(true),
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  const data = await res.json();
+  return {
+    scene_id: data.scene_id ?? sceneId,
+    shots: data.shots || data.shot_ids?.map((id: number) => ({ id, shot_number: id })) || [],
+  };
+}
+
+export async function getVideoJob(jobId: number): Promise<VideoGenerationJob> {
+  const res = await fetch(`${BASE}/api/video/jobs/${jobId}`, {
+    headers: apiHeaders(),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function retryVideoJob(jobId: number, payload?: { provider?: string; model?: string; duration_seconds?: number; aspect_ratio?: string; seed?: number; request_payload?: Record<string, unknown> }): Promise<VideoGenerationJob> {
+  const res = await fetch(`${BASE}/api/video/jobs/${jobId}/retry`, {
+    method: 'POST',
+    headers: apiHeaders(true),
+    body: JSON.stringify(payload || {}),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function listShotClips(shotId: number): Promise<{ shot_id: number; clips: RenderedClip[]; active_clip_id?: number }> {
+  const res = await fetch(`${BASE}/api/video/shots/${shotId}/clips`, {
+    headers: apiHeaders(),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function activateShotClip(shotId: number, clipId: number): Promise<{ active_clip_id: number }> {
+  const res = await fetch(`${BASE}/api/video/shots/${shotId}/clips/${clipId}/activate`, {
+    method: 'POST',
+    headers: apiHeaders(true),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return { active_clip_id: clipId };
+}
+
+export async function listVideoAssets(chapterId: number, assetType?: string): Promise<{ chapter_id: number; assets: VideoAsset[] }> {
+  const params = assetType ? `?asset_type=${encodeURIComponent(assetType)}` : '';
+  const res = await fetch(`${BASE}/api/video/chapters/${chapterId}/assets${params}`, {
+    headers: apiHeaders(),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function createVideoAsset(chapterId: number, payload: {
+  story_id?: number;
+  scene_id?: number;
+  shot_id?: number;
+  asset_type: string;
+  name: string;
+  file_path: string;
+  provider?: string;
+  prompt?: string;
+  meta?: Record<string, unknown>;
+}): Promise<VideoAsset> {
+  const res = await fetch(`${BASE}/api/video/chapters/${chapterId}/assets`, {
+    method: 'POST',
+    headers: apiHeaders(true),
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function deleteVideoAsset(assetId: number): Promise<{ ok: boolean; asset_id: number }> {
+  const res = await fetch(`${BASE}/api/video/assets/${assetId}`, {
+    method: 'DELETE',
+    headers: apiHeaders(true),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function regenerateVideoAsset(assetId: number, payload: {
+  prompt?: string;
+  style?: string;
+  provider?: string;
+  model?: string;
+  reference_asset_ids?: number[];
+  instruction?: string;
+  overwrite?: boolean;
+}): Promise<VideoAsset> {
+  const res = await fetch(`${BASE}/api/video/assets/${assetId}/regenerate`, {
+    method: 'POST',
+    headers: apiHeaders(true),
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function createVideoProject(chapterId: number, payload: {
+  name: string;
+  timeline: Array<{ shot_id: number; clip_id: number; order: number; enabled: boolean }>;
+  subtitle?: Array<{ start_ms: number; end_ms: number; text: string }>;
+  bgm_path?: string;
+  cover_path?: string;
+}): Promise<VideoProject> {
+  const res = await fetch(`${BASE}/api/video/chapters/${chapterId}/projects`, {
+    method: 'POST',
+    headers: apiHeaders(true),
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function getVideoProject(projectId: number): Promise<VideoProject> {
+  const res = await fetch(`${BASE}/api/video/projects/${projectId}`, {
+    headers: apiHeaders(),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function updateVideoProject(projectId: number, payload: Partial<VideoProject>): Promise<VideoProject> {
+  const res = await fetch(`${BASE}/api/video/projects/${projectId}`, {
+    method: 'PATCH',
+    headers: apiHeaders(true),
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function compileVideoProject(projectId: number, payload: {
+  resolution?: string;
+  fps?: number;
+  burn_subtitle?: boolean;
+  include_bgm?: boolean;
+}): Promise<{ project_id: number; output_path: string; status: string }> {
+  const res = await fetch(`${BASE}/api/video/projects/${projectId}/compile`, {
+    method: 'POST',
+    headers: apiHeaders(true),
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export interface ShotFrameAsset {
+  id: number;
+  asset_type: string;
+  name: string;
+  file_path: string;
+  prompt?: string | null;
+  meta_json?: Record<string, unknown> | null;
+  style_preset?: string | null;
+  revision: number;
+  is_master: boolean;
+  status: string;
+  created_at: string;
+}
+
+export interface ShotFramesResponse {
+  shot_id: number;
+  first_frames: ShotFrameAsset[];
+  last_frames: ShotFrameAsset[];
+}
+
+export interface ChapterShotFramesResponse {
+  chapter_id: number;
+  shots: Array<{
+    shot_id: number;
+    shot_number: number | null;
+    scene_id: number | null;
+    frames: {
+      first_frames: ShotFrameAsset[];
+      last_frames: ShotFrameAsset[];
+    };
+  }>;
+}
+
+export async function generateShotFrames(shotId: number, payload: {
+  frame_type?: string;
+  prompt?: string | null;
+  overwrite?: boolean;
+  style_preset?: string;
+  reference_asset_ids?: number[];
+  inherit_character_assets?: boolean;
+  inherit_scene_assets?: boolean;
+  inherit_storyboard_asset?: boolean;
+}): Promise<ShotFramesResponse> {
+  const res = await fetch(`${BASE}/api/video/shots/${shotId}/frames/generate`, {
+    method: 'POST',
+    headers: apiHeaders(true),
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function regenerateShotFrame(shotId: number, payload: {
+  asset_id: number;
+  prompt: string;
+  mode?: string;
+  mask?: string | null;
+  style_preset?: string;
+  reference_asset_ids?: number[];
+}): Promise<ShotFrameAsset> {
+  const res = await fetch(`${BASE}/api/video/shots/${shotId}/frames/regenerate`, {
+    method: 'POST',
+    headers: apiHeaders(true),
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function getShotFrames(shotId: number): Promise<ShotFramesResponse> {
+  const res = await fetch(`${BASE}/api/video/shots/${shotId}/frames`, {
+    headers: apiHeaders(),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function listChapterShotFrames(chapterId: number): Promise<ChapterShotFramesResponse> {
+  const res = await fetch(`${BASE}/api/video/chapters/${chapterId}/frames`, {
+    headers: apiHeaders(),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export interface VideoStylePreset {
+  id: number;
+  name: string;
+  category: string;
+  prompt_template?: string | null;
+  image_style_params?: Record<string, unknown> | null;
+  video_style_params?: Record<string, unknown> | null;
+  sort_order: number;
+}
+
+export async function getStoryVideoStylePreset(storyId: number): Promise<{ story_id: number; style_preset_id: number | null; style_preset: VideoStylePreset | null }> {
+  const res = await fetch(`${BASE}/api/video/stories/${storyId}/style-preset`, {
+    headers: apiHeaders(),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function setStoryVideoStylePreset(storyId: number, stylePresetId: number): Promise<{ story_id: number; style_preset_id: number }> {
+  const res = await fetch(`${BASE}/api/video/stories/${storyId}/style-preset`, {
+    method: 'PUT',
+    headers: apiHeaders(true),
+    body: JSON.stringify({ style_preset_id: stylePresetId }),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function setShotVideoStylePreset(shotId: number, stylePreset: string): Promise<{ shot_id: number; style_preset: string }> {
+  const res = await fetch(`${BASE}/api/video/shots/${shotId}/style-preset`, {
+    method: 'PUT',
+    headers: apiHeaders(true),
+    body: JSON.stringify({ style_preset: stylePreset }),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function deleteShotVideoStylePreset(shotId: number): Promise<{ shot_id: number; style_preset: null }> {
+  const res = await fetch(`${BASE}/api/video/shots/${shotId}/style-preset`, {
+    method: 'DELETE',
+    headers: apiHeaders(true),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export interface ShotAssetBundle {
+  shot_id: number;
+  shot_number?: number | null;
+  scene_id?: number | null;
+  style_preset?: string | null;
+  storyboard_asset: VideoAsset | null;
+  storyboard_locked: boolean;
+  first_frame: VideoAsset | null;
+  last_frame: VideoAsset | null;
+  character_references: VideoAsset[];
+  scene_references: VideoAsset[];
+  available_character_assets: VideoAsset[];
+  available_scene_assets: VideoAsset[];
+}
+
+export async function getShotAssetBundle(shotId: number): Promise<ShotAssetBundle> {
+  const res = await fetch(`${BASE}/api/video/shots/${shotId}/assets/bundle`, {
+    headers: apiHeaders(),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function updateAssetScope(assetId: number, payload: { usage_scope: string; inherit_to_next_shot?: boolean }): Promise<{ asset_id: number; usage_scope: string; inherit_to_next_shot: boolean }> {
+  const res = await fetch(`${BASE}/api/video/assets/${assetId}/scope`, {
+    method: 'PUT',
+    headers: apiHeaders(true),
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function promoteAsset(assetId: number, payload: { level: string; inherit_to_next_shot?: boolean }): Promise<{ asset_id: number; level: string }> {
+  const res = await fetch(`${BASE}/api/video/assets/${assetId}/promote`, {
+    method: 'POST',
+    headers: apiHeaders(true),
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function listStylePresets(): Promise<{ presets: VideoStylePreset[] }> {
+  const res = await fetch(`${BASE}/api/video/style-presets`, {
+    headers: apiHeaders(),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export interface CharacterVersion {
+  id: number;
+  version: string;
+  label: string;
+  appearance_card: string;
+  ref_asset?: VideoAsset | null;
+  ref_asset_id?: number | null;
+  ref_asset_url?: string | undefined;
+  is_default: boolean;
+  sort_order: number;
+}
+
+export interface VideoCharacter {
+  name: string;
+  versions: CharacterVersion[];
+}
+
+export interface VideoCharactersResponse {
+  characters: VideoCharacter[];
+  video_character_profiles: string;
+}
+
+export async function listVideoCharacters(storyId: number): Promise<VideoCharactersResponse> {
+  const res = await fetch(`${BASE}/api/video/stories/${storyId}/characters`, {
+    headers: apiHeaders(),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function generateVideoCharacters(storyId: number): Promise<VideoCharactersResponse> {
+  const res = await fetch(`${BASE}/api/video/stories/${storyId}/characters/generate`, {
+    method: 'POST',
+    headers: apiHeaders(true),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function createCharacterVersion(
+  storyId: number,
+  characterName: string,
+  payload: { version_label: string; appearance_card?: string; set_default?: boolean },
+): Promise<{ version: CharacterVersion }> {
+  const res = await fetch(`${BASE}/api/video/stories/${storyId}/characters/${characterName}/versions`, {
+    method: 'POST',
+    headers: apiHeaders(true),
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  const data = await res.json();
+  const version: CharacterVersion = {
+    id: data.id ?? Date.now(),
+    version: data.version_label ?? payload.version_label,
+    label: data.version_label ?? payload.version_label,
+    appearance_card: data.appearance_card ?? payload.appearance_card ?? '',
+    ref_asset: data.ref_asset ?? null,
+    ref_asset_url: data.ref_asset?.file_path ?? null,
+    is_default: data.is_default ?? false,
+    sort_order: data.sort_order ?? 0,
+  };
+  return { version };
+}
+
+export async function deleteCharacterVersion(
+  storyId: number,
+  characterName: string,
+  versionLabel: string | number,
+): Promise<{ ok: boolean }> {
+  const label = String(versionLabel);
+  const res = await fetch(`${BASE}/api/video/stories/${storyId}/characters/${characterName}/versions/${label}`, {
+    method: 'DELETE',
+    headers: apiHeaders(true),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function generateCharacterRefImage(
+  storyId: number,
+  characterName: string,
+  versionId: number,
+  stylePreset?: string,
+): Promise<VideoAsset> {
+  const res = await fetch(`${BASE}/api/video/stories/${storyId}/characters/${characterName}/ref-image/generate`, {
+    method: 'POST',
+    headers: apiHeaders(true),
+    body: JSON.stringify({ version_id: versionId, style_preset: stylePreset }),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function deleteCharacterRefImage(
+  storyId: number,
+  characterName: string,
+  versionId: number,
+): Promise<{ ok: boolean }> {
+  const res = await fetch(`${BASE}/api/video/stories/${storyId}/characters/${characterName}/ref-image`, {
+    method: 'DELETE',
+    headers: apiHeaders(true),
+    body: JSON.stringify({ version_id: versionId }),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function redrawCharacterRefImage(
+  storyId: number,
+  characterName: string,
+  versionId: number,
+  payload: { prompt: string; mode: ImageRedrawMode; mask?: string },
+): Promise<VideoAsset> {
+  const res = await fetch(`${BASE}/api/video/stories/${storyId}/characters/${characterName}/ref-image/redraw`, {
+    method: 'POST',
+    headers: apiHeaders(true),
+    body: JSON.stringify({ version_id: versionId, ...payload }),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}

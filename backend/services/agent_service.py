@@ -172,6 +172,9 @@ logger = logging.getLogger("agent_service")
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 
+# 批量操作的并发限制
+BATCH_CONCURRENCY_LIMIT = 3
+
 
 def _chapter_dir(chapter_id: int) -> Path:
     return BACKEND_DIR / "manga_outputs" / f"chapter_{chapter_id}"
@@ -559,7 +562,7 @@ async def batch_update_chapters(chapters: list[dict]) -> dict:
         finally:
             db.close()
 
-    semaphore = asyncio.Semaphore(3)
+    semaphore = asyncio.Semaphore(BATCH_CONCURRENCY_LIMIT)
 
     async def _update_one_with_limit(item: dict) -> dict:
         async with semaphore:
@@ -976,8 +979,6 @@ async def batch_adjust_chapters(chapters: list[dict]) -> dict:
     if not api_key:
         return {"error": "DeepSeek API Key 未配置"}
 
-    semaphore = asyncio.Semaphore(3)
-
     async def _adjust_one(item: dict) -> dict:
         chapter_id = item.get("chapter_id")
         instruction = str(item.get("instruction") or "").strip()
@@ -1001,14 +1002,13 @@ async def batch_adjust_chapters(chapters: list[dict]) -> dict:
                 "key_events": chapter.key_events or [],
             }
             chapter_content = chapter.novel_content or ""
-            async with semaphore:
-                new_content = await adjust_chapter_content(
-                    story_context=story_context,
-                    chapter_info=chapter_info,
-                    chapter_content=chapter_content,
-                    instruction=instruction,
-                    api_key=api_key,
-                )
+            new_content = await adjust_chapter_content(
+                story_context=story_context,
+                chapter_info=chapter_info,
+                chapter_content=chapter_content,
+                instruction=instruction,
+                api_key=api_key,
+            )
             if not new_content or not new_content.strip():
                 return {"chapter_id": chapter_id, "error": "AI 返回内容为空"}
             chapter.novel_content = new_content
@@ -1021,7 +1021,13 @@ async def batch_adjust_chapters(chapters: list[dict]) -> dict:
         finally:
             db.close()
 
-    results = await asyncio.gather(*[_adjust_one(item) for item in chapters])
+    semaphore = asyncio.Semaphore(BATCH_CONCURRENCY_LIMIT)
+
+    async def _adjust_one_with_limit(item: dict) -> dict:
+        async with semaphore:
+            return await _adjust_one(item)
+
+    results = await asyncio.gather(*[_adjust_one_with_limit(item) for item in chapters])
     return {"ok": True, "results": results}
 
 

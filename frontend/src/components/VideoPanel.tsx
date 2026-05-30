@@ -1,4 +1,4 @@
-import { useState, type Dispatch, type SetStateAction } from 'react';
+import { useState, useRef, useEffect, type Dispatch, type SetStateAction } from 'react';
 import { apiHeaders, renderShotVideo, getVideoJob, type VideoShot, type VideoGenerationJob, type RenderedClip } from '../api';
 
 interface Props {
@@ -21,6 +21,23 @@ export default function VideoPanel({
   const [showUnlockWarning, setShowUnlockWarning] = useState(false);
   const [sseConnected, setSseConnected] = useState(false);
   const [sseProgress, setSseProgress] = useState<{progress: number; stage: string; message: string} | null>(null);
+
+  // 用于组件卸载时清理轮询定时器
+  const pollingRef = useRef<{ timeoutId: ReturnType<typeof setTimeout> | null; mounted: boolean }>({
+    timeoutId: null,
+    mounted: true,
+  });
+
+  useEffect(() => {
+    pollingRef.current.mounted = true;
+    return () => {
+      pollingRef.current.mounted = false;
+      if (pollingRef.current.timeoutId) {
+        clearTimeout(pollingRef.current.timeoutId);
+        pollingRef.current.timeoutId = null;
+      }
+    };
+  }, []);
 
   async function handleRenderVideo(forceTextToVideo = false) {
     if (!shot?.id) return;
@@ -155,12 +172,24 @@ export default function VideoPanel({
   };
 
   function pollJobStatus(jobId: number) {
-    let delay = 3000;  // 初始3秒
-    const maxDelay = 30000;  // 最大30秒
+    let delay = 3000;
+    const maxDelay = 30000;
+    const maxRetries = 60;
+    let attemptCount = 0;
 
     const poll = async () => {
+      if (!pollingRef.current.mounted) return;
+
+      attemptCount++;
+      if (attemptCount > maxRetries) {
+        console.error(`视频任务 ${jobId} 轮询已达最大次数 ${maxRetries}，停止轮询`);
+        return;
+      }
+
       try {
         const job = await getVideoJob(jobId);
+
+        if (!pollingRef.current.mounted) return;
 
         onJobsChange((prev) => prev.map((item) => (item.id === jobId ? job : item)));
 
@@ -171,21 +200,20 @@ export default function VideoPanel({
           });
         }
 
-        // 指数退避
         if (job.status === 'running' || job.status === 'queued') {
           delay = Math.min(delay * 1.5, maxDelay);
-          setTimeout(poll, delay);
+          pollingRef.current.timeoutId = setTimeout(poll, delay);
         } else {
-          // 完成或失败，重置延迟
           delay = 3000;
         }
-      } catch {
-        // 错误时使用当前延迟重试
-        setTimeout(poll, delay);
+      } catch (err) {
+        console.error(`视频任务 ${jobId} 轮询出错:`, err);
+        if (attemptCount >= maxRetries) return;
+        pollingRef.current.timeoutId = setTimeout(poll, delay);
       }
     };
 
-    setTimeout(poll, delay);
+    pollingRef.current.timeoutId = setTimeout(poll, delay);
   }
 
   const activeClip = clips.find((clip) => clip.is_active);

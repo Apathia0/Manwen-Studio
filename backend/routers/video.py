@@ -1778,7 +1778,17 @@ async def render_shot_video_stream(
                     finally:
                         write_db.close()
                     return
+                elif task_status["status"] == "pending":
+                    current_status = "queued"
+                    progress = 0
+                elif task_status["status"] == "retrying":
+                    current_status = "retrying"
+                    progress = 30
+                elif task_status["status"] == "running":
+                    current_status = "running"
+                    progress = 50
                 else:
+                    # 处理其他未知状态，默认作为 running
                     current_status = "running"
                     progress = 50
                 
@@ -1842,11 +1852,21 @@ async def render_shot_video_stream(
                     return
                 
                 progress_val = max(15, min(75, int(progress) or (poll_count * 5 + 15)))
+                # 根据 current_status 动态映射 stage 和 message
+                if current_status == "queued":
+                    stage = "queued"
+                    message = "等待执行..."
+                elif current_status == "retrying":
+                    stage = "retrying"
+                    message = "生成失败，正在重试..."
+                else:
+                    stage = "generating"
+                    message = f"瑙嗛鐢熸垚涓?.. ({progress_val}%)"
                 yield {"event": "progress", "data": json.dumps({
                     "job_id": job_id,
                     "progress": progress_val,
-                    "stage": "generating",
-                    "message": f"瑙嗛鐢熸垚涓?.. ({progress_val}%)"
+                    "stage": stage,
+                    "message": message,
                 })}
                 
                 await asyncio.sleep(3)
