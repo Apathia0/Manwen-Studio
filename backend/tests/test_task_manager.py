@@ -1,3 +1,5 @@
+import asyncio
+
 import pytest
 from datetime import datetime, timezone
 from sqlalchemy import create_engine
@@ -269,3 +271,42 @@ class TestBackgroundTaskMaxRetries:
         assert saved.status == "pending"
         assert saved.retry_count == 0
         assert saved.error_message is None
+
+
+class TestTaskManager:
+    """测试 TaskManager 服务"""
+
+    @pytest.fixture
+    def task_manager(self):
+        from services.task_manager import TaskManager
+        return TaskManager(max_concurrent=2)
+
+    def test_task_manager_init(self, task_manager):
+        """测试 TaskManager 初始化"""
+        assert task_manager._semaphore._value == 2
+        assert len(task_manager._running_tasks) == 0
+
+    def test_with_retry_decorator(self, task_manager):
+        """测试重试装饰器"""
+        call_count = 0
+
+        @task_manager.with_retry(max_retries=2, base_delay=0.01)
+        async def failing_task():
+            nonlocal call_count
+            call_count += 1
+            if call_count < 3:
+                raise ValueError("Temporary error")
+            return "success"
+
+        result = asyncio.get_event_loop().run_until_complete(failing_task())
+        assert result == "success"
+        assert call_count == 3
+
+    def test_with_retry_exhausted(self, task_manager):
+        """测试重试耗尽"""
+        @task_manager.with_retry(max_retries=1, base_delay=0.01)
+        async def always_failing():
+            raise ValueError("Permanent error")
+
+        with pytest.raises(ValueError, match="Permanent error"):
+            asyncio.get_event_loop().run_until_complete(always_failing())
