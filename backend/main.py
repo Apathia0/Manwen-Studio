@@ -53,6 +53,7 @@ from sse_starlette.sse import EventSourceResponse
 from database import SessionLocal, get_db, init_db
 from models import (
     AuditLog,
+    BackgroundTask,
     BillingOrder,
     Chapter,
     EmailVerificationCode,
@@ -69,6 +70,7 @@ from models import (
     UserSession,
     UserSubscription,
     UserUsageMonthly,
+    VideoGenerationJob,
 )
 from schemas import (
     ChapterContentUpdate,
@@ -91,6 +93,8 @@ from schemas import (
     StoryOut,
     StoryUpdate,
 )
+from services.task_manager import task_manager
+
 from services.deepseek import (
     adjust_chapter_content,
     adjust_framework_with_chat,
@@ -124,6 +128,7 @@ from services.scene_safety import sanitize_scene_list
 from services import deepseek as deepseek_service
 from services import image2 as image_service
 from services import alipay_f2f
+from routers.video import router as video_router
 
 load_dotenv()
 
@@ -205,6 +210,14 @@ FEATURE_CATALOG: list[dict] = [
         "value_type": "boolean",
         "default_rule": {"reset_period": "monthly", "deduct_mode": "on_success"},
     },
+    {
+        "key": "video.generate.seconds.monthly_limit",
+        "name": "视频生成总时长",
+        "description": "用户每月可生成的视频总秒数。",
+        "category": "视频创作",
+        "value_type": "number",
+        "default_rule": {"reset_period": "monthly", "deduct_mode": "on_success"},
+    },
 ]
 
 FEATURE_CATALOG_MAP = {item["key"]: item for item in FEATURE_CATALOG}
@@ -238,6 +251,11 @@ async def _missing_api_key_handler(request: Request, exc: MissingApiKeyError):
 manga_dir = Path(__file__).resolve().parent / "manga_outputs"
 manga_dir.mkdir(parents=True, exist_ok=True)
 app.mount("/static/manga", StaticFiles(directory=str(manga_dir)), name="manga")
+
+# Serve downloaded videos as static files
+video_dir = Path(__file__).resolve().parent / "video_outputs"
+video_dir.mkdir(parents=True, exist_ok=True)
+app.mount("/static/video", StaticFiles(directory=str(video_dir)), name="video")
 
 
 @app.middleware("http")
@@ -308,6 +326,10 @@ def _platform_settings_snapshot(db: Session) -> dict:
             "image_base_url": _get_platform_setting("api.image.base_url", db, "https://api.xbyjs.top/v1"),
             "image_model": _get_platform_setting("api.image.model", db, "default"),
             "image_api_key": _get_platform_setting("api.image.api_key", db, ""),
+            "video_base_url": _get_platform_setting("api.video.base_url", db, "https://api.xbyjs.top/v1"),
+            "video_model": _get_platform_setting("api.video.model", db, "veo3.1-fast"),
+            "video_api_key": _get_platform_setting("api.video.api_key", db, ""),
+            "video_provider": _get_platform_setting("api.video.provider", db, ""),
             "enable_user_override": bool(_get_platform_setting("api.enable_user_override", db, True)),
             "enable_user_url_override": bool(_get_platform_setting("api.enable_user_url_override", db, False)),
         },
@@ -395,6 +417,9 @@ def _public_platform_settings_snapshot(db: Session) -> dict:
             "deepseek_model": api.get("deepseek_model") or "",
             "image_base_url": api.get("image_base_url") or "",
             "image_model": api.get("image_model") or "",
+            "video_base_url": api.get("video_base_url") or "https://api.xbyjs.top/v1",
+            "video_model": api.get("video_model") or "veo3.1-fast",
+            "video_provider": api.get("video_provider") or "",
         },
         "auth": {
             "require_email_code_for_register": bool(auth.get("require_email_code_for_register")),
@@ -780,6 +805,7 @@ def _ensure_platform_seed(db: Session) -> None:
             "ai.text.advanced_calls.monthly_limit": 20,
             "manga.max_image_count_per_chapter": 6,
             "manga.allow_color_mode": False,
+            "video.generate.seconds.monthly_limit": 60,
         },
         "pro": {
             "framework.generate.monthly_limit": 50,
@@ -790,6 +816,7 @@ def _ensure_platform_seed(db: Session) -> None:
             "ai.text.advanced_calls.monthly_limit": 180,
             "manga.max_image_count_per_chapter": 12,
             "manga.allow_color_mode": True,
+            "video.generate.seconds.monthly_limit": 900,
         },
         "premium": {
             "framework.generate.monthly_limit": 200,
@@ -800,6 +827,7 @@ def _ensure_platform_seed(db: Session) -> None:
             "ai.text.advanced_calls.monthly_limit": 600,
             "manga.max_image_count_per_chapter": 20,
             "manga.allow_color_mode": True,
+            "video.generate.seconds.monthly_limit": 3600,
         },
     }
     for plan in [free, pro, premium]:
@@ -878,6 +906,10 @@ def _seed_platform_settings(db: Session) -> None:
         "api.image.base_url": "https://api.xbyjs.top/v1",
         "api.image.model": "default",
         "api.image.api_key": "",
+        "api.video.base_url": "https://api.xbyjs.top/v1",
+        "api.video.model": "veo3.1-fast",
+        "api.video.api_key": "",
+        "api.video.provider": "",
         "api.enable_user_override": True,
         "api.enable_user_url_override": False,
         "auth.require_email_code_for_register": False,
@@ -1454,6 +1486,7 @@ def _usage_entries_for_user(user_id: int, db: Session) -> list[dict]:
         "manga.image.monthly_limit",
         "manga.regenerate.monthly_limit",
         "ai.text.advanced_calls.monthly_limit",
+        "video.generate.seconds.monthly_limit",
     ]
     entries = []
     for key in tracked:
@@ -2970,6 +3003,22 @@ def on_startup():
         db.close()
 
 
+@app.on_event("startup")
+async def startup_task_cleanup():
+    """应用启动时启动定时清理后台任务的循环"""
+    async def cleanup_loop():
+        while True:
+            try:
+                cleaned = await task_manager.cleanup_stale_tasks(max_age_hours=24)
+                if cleaned > 0:
+                    logger.info("Cleaned up %d stale tasks", cleaned)
+            except Exception as e:
+                logger.error("Task cleanup failed: %s", e)
+            await asyncio.sleep(3600)  # 每小时执行一次
+
+    asyncio.create_task(cleanup_loop())
+
+
 # ─── Story CRUD ─────────────────────────────────────────────
 
 @app.post("/api/auth/register")
@@ -3931,6 +3980,10 @@ def admin_save_platform_settings(body: dict, request: Request, db: Session = Dep
         "api.image.base_url": api.get("image_base_url", "https://api.xbyjs.top/v1"),
         "api.image.model": api.get("image_model", "default"),
         "api.image.api_key": api.get("image_api_key", ""),
+        "api.video.base_url": api.get("video_base_url", "https://api.xbyjs.top/v1"),
+        "api.video.model": api.get("video_model", "veo3.1-fast"),
+        "api.video.api_key": api.get("video_api_key", ""),
+        "api.video.provider": api.get("video_provider", ""),
         "api.enable_user_override": bool(api.get("enable_user_override", True)),
         "api.enable_user_url_override": bool(api.get("enable_user_url_override", False)),
         "auth.require_email_code_for_register": bool(auth.get("require_email_code_for_register", False)),
@@ -5975,6 +6028,7 @@ async def _background_quality_check(
     captured_tags: dict,
     captured_characters: list,
     captured_outline: dict,
+    task_id: str | None = None,
 ):
     """Async background quality gate for framework generate.
 
@@ -6056,6 +6110,55 @@ async def _background_quality_check(
             db.close()
     except Exception as exc:
         logger.warning("Background quality check failed for story %d: %s", story_id, exc)
+
+
+# ─── 后台任务状态查询 ──────────────────────────────────
+
+
+@app.get("/api/tasks/{task_id}")
+async def get_task_status(task_id: str, request: Request, db: Session = Depends(get_db)):
+    """查询后台任务状态"""
+    user = _require_user(request, db)
+    status = task_manager.get_task_status(task_id)
+    if not status:
+        raise HTTPException(404, "Task not found")
+    return status
+
+
+@app.get("/api/tasks")
+async def list_tasks(
+    request: Request,
+    db: Session = Depends(get_db),
+    status: str | None = None,
+    task_type: str | None = None,
+    limit: int = 50,
+    offset: int = 0,
+):
+    """列出后台任务"""
+    user = _require_user(request, db)
+    query = db.query(BackgroundTask)
+    if status:
+        query = query.filter(BackgroundTask.status == status)
+    if task_type:
+        query = query.filter(BackgroundTask.task_type == task_type)
+
+    total = query.count()
+    tasks = query.order_by(BackgroundTask.created_at.desc()).offset(offset).limit(limit).all()
+
+    return {
+        "tasks": [
+            {
+                "task_id": t.task_id,
+                "task_type": t.task_type,
+                "status": t.status,
+                "created_at": t.created_at.isoformat() if t.created_at else None,
+            }
+            for t in tasks
+        ],
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+    }
 
 
 @app.post("/api/stories/{story_id}/framework/generate")
@@ -6152,19 +6255,25 @@ async def generate_framework_endpoint(story_id: int, request: Request, db: Sessi
     _check_and_consume_feature_quota(request, user.id, "framework.generate.monthly_limit", 1, db, deduct=True, provider_kind="text")
     _release_db_transaction(db)
 
-    # Fire async background quality check
+    # Fire async background quality check via task manager
     captured_tags = dict(story.tags or {})
     captured_chars = list(story.characters or [])
     captured_outline = dict(story.outline or {})
     _api_key = deepseek_api_key
-    asyncio.create_task(_background_quality_check(
+    task_manager.submit_task(
+        task_id=f"quality_check_{story.id}_{int(datetime.datetime.now(datetime.timezone.utc).timestamp())}",
+        task_type="quality_check",
+        coro_func=_background_quality_check,
         story.id,
         str(story.description or "").strip(),
         _api_key,
         captured_tags,
         captured_chars,
         captured_outline,
-    ))
+        story_id=story.id,
+        timeout=600,  # 10分钟超时
+        max_retries=2,
+    )
 
     return {
         "tags": story.tags,
@@ -7442,6 +7551,7 @@ async def framework_analyze_endpoint(story_id: int, request: Request, db: Sessio
 # 这样 agent_router.py 可以通过 sys.modules 访问 _require_user 等函数
 from routers.agent_router import router as agent_router
 
+app.include_router(video_router)
 app.include_router(agent_router)
 
 
