@@ -551,6 +551,7 @@ def _migrate_video_tables():
 
 
 def _seed_video_style_presets():
+    import json
     from sqlalchemy import inspect, text
 
     try:
@@ -578,7 +579,7 @@ def _seed_video_style_presets():
                 conn.execute(
                     text("""INSERT INTO video_style_presets (name, category, prompt_template, image_style_params, video_style_params, sort_order)
                             VALUES (:name, :category, :prompt_template, CAST(:image_style_params AS JSONB), CAST(:video_style_params AS JSONB), :sort_order)"""),
-                    preset,
+                    {k: json.dumps(v) if isinstance(v, dict) else v for k, v in preset.items()},
                 )
 
             logger.info("Seeded %d default video style presets", len(presets))
