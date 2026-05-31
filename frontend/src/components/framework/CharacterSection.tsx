@@ -198,7 +198,7 @@ export default function CharacterSection({ characters, storyId, onUpdate }: Prop
 
       <div className="space-y-1.5">
         {characters?.map((char, i) => (
-          <CharacterCard key={char.name || i} character={char} defaultOpen={expandedAll} />
+          <CharacterCard key={i} character={char} defaultOpen={expandedAll} />
         ))}
       </div>
 
