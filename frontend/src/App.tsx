@@ -5,6 +5,7 @@ import {
   CreditCard,
   Gauge,
   Home,
+  Library,
   LogOut,
   MessageSquareQuote,
   ScrollText,
@@ -19,6 +20,9 @@ import ImportGuidancePage from './components/ImportGuidancePage';
 import OnboardingPage from './components/OnboardingPage';
 import WorkspaceLayout from './components/WorkspaceLayout';
 import VideoWorkspaceLayout from './components/VideoWorkspaceLayout';
+import TemplateManagePage from './components/TemplateManagePage';
+import TemplateBindingPanel from './components/TemplateBindingPanel';
+import AdminTemplateReview from './components/AdminTemplateReview';
 import {
   AdminAnnouncementPage,
   AdminAuditLogsPage,
@@ -93,6 +97,8 @@ type RouteKey =
   | 'import-guidance'
   | 'workspace'
   | 'account'
+  | 'templates'
+  | 'template-review'
   | 'forgot-password'
   | 'plan-config'
   | 'quota-rules'
@@ -115,6 +121,7 @@ const USER_NAV: NavItem[] = [
   { key: 'stories', label: '作品', icon: Home },
   { key: 'workspace', label: '创作工作台', icon: Brush },
   { key: 'account', label: '账户与用量', icon: UserCircle2 },
+  { key: 'templates', label: '提示词模板', icon: Library },
   { key: 'pricing', label: '套餐订阅', icon: CreditCard },
 ];
 
@@ -125,6 +132,7 @@ const ADMIN_NAV: NavItem[] = [
   { key: 'orders', label: '订单订阅', icon: ScrollText },
   { key: 'audit-logs', label: '操作审计', icon: MessageSquareQuote },
   { key: 'announcement', label: '公告管理', icon: MessageSquareQuote },
+  { key: 'template-review', label: '模板审核', icon: Library },
 ];
 
 ADMIN_NAV[0].label = '套餐管理';
@@ -133,6 +141,7 @@ ADMIN_NAV[2].label = '用户管理';
 ADMIN_NAV[3].label = '订单中心';
 ADMIN_NAV[4].label = '操作审计';
 ADMIN_NAV[5].label = '公告管理';
+ADMIN_NAV[6].label = '模板审核';
 
 function App() {
   const [session, setSession] = useState<AuthUser | null>(null);
@@ -850,6 +859,12 @@ function App() {
               onChapterChange={(chapter) => setActiveChapterId(chapter.id)}
               onContentUpdated={refreshWorkspaceData}
             />
+          )}
+          {route === 'template-review' && (
+            <AdminTemplateReview />
+          )}
+          {route === 'templates' && (
+            <TemplateManagePage />
           )}
           {route === 'account' && (
             <UserAccountUsagePage
@@ -1728,6 +1743,9 @@ function WorkspacePage({
   }
   return (
     <div className="h-[calc(100vh-120px)] overflow-hidden rounded-md border border-[#d9dfd7] bg-white">
+      <div className="flex items-center justify-end border-b border-[#e8edf2] px-4 py-2">
+        <TemplateBindingPanel storyId={story.id} />
+      </div>
       {workspaceMode === 'manga' ? (
         <WorkspaceLayout
           story={story}

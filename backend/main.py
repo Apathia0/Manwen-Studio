@@ -64,7 +64,10 @@ from models import (
     PlanFeature,
     PlanQuotaRule,
     PlatformSetting,
+    PromptTemplate,
     Story,
+    StoryTemplateBinding,
+    TemplateLike,
     User,
     UserQuotaGrantMonthly,
     UserSession,
@@ -123,6 +126,7 @@ from services.deepseek import (
     summarize_chapter_memory,
 )
 from services.errors import MangaImageGenerationError, MissingApiKeyError
+from services.prompt_template import get_effective_prompt
 from services.image2 import edit_existing_image, generate_cover_image, generate_manga_image, generate_reference_image
 from services.scene_safety import sanitize_scene_list
 from services import deepseek as deepseek_service
@@ -964,6 +968,21 @@ def _require_user(request: Request, db: Session) -> User:
     user = db.get(User, session.user_id)
     if not user or user.status != "active":
         raise HTTPException(403, "User unavailable")
+    request.state.current_user = user
+    return user
+
+
+def _get_current_user(request: Request, db: Session) -> User | None:
+    """获取当前用户（不抛出异常），未登录时返回 None。"""
+    token = _parse_auth_token(request)
+    if not token:
+        return None
+    session = db.query(UserSession).filter(UserSession.token == token, UserSession.revoked_at.is_(None)).first()
+    if not session:
+        return None
+    user = db.get(User, session.user_id)
+    if not user or user.status != "active":
+        return None
     request.state.current_user = user
     return user
 
@@ -4689,11 +4708,13 @@ async def generate_story_characters_from_framework(story_id: int, request: Reque
 
     if isinstance(story.characters, list) and len(story.characters) > 0:
         story_context = _story_framework_context(story)
+        template_char_prompt = get_effective_prompt(story_id, "character", db)
         _check_and_consume_advanced_text_quota(request, user.id, db, deduct=False)
         _release_db_transaction(db)
         generated = await generate_character_profiles_from_framework(
             story_context,
             api_key=deepseek_api_key,
+            system_prompt=template_char_prompt or None,
         )
     else:
         all_chapters = db.query(Chapter).filter(
@@ -6351,6 +6372,7 @@ async def generate_framework_endpoint(story_id: int, request: Request, db: Sessi
     story_bible = story.story_bible
     deepseek_api_key = _user_deepseek_api_key(request)
 
+    template_fw_prompt = get_effective_prompt(story_id, "framework", db)
     _check_and_consume_feature_quota(request, user.id, "framework.generate.monthly_limit", 1, db, deduct=False, provider_kind="text")
     _release_db_transaction(db)
     try:
@@ -6361,6 +6383,7 @@ async def generate_framework_endpoint(story_id: int, request: Request, db: Sessi
             story_bible=story_bible,
             story_context=story_context,
             launch_ready_required=True,
+            system_prompt=template_fw_prompt or None,
         )
         framework = await _complete_framework_payload(
             framework,
@@ -6891,6 +6914,7 @@ async def adjust_framework_endpoint(story_id: int, request: Request, db: Session
     )
     deepseek_api_key = _user_deepseek_api_key(request)
 
+    template_fw_prompt = get_effective_prompt(story_id, "framework", db)
     _check_and_consume_advanced_text_quota(request, user.id, db, deduct=False)
     _release_db_transaction(db)
     try:
@@ -6900,6 +6924,7 @@ async def adjust_framework_endpoint(story_id: int, request: Request, db: Session
             api_key=deepseek_api_key,
             required_min_chapters=requested_min_chapters,
             existing_framework=existing_framework,
+            system_prompt=template_fw_prompt or None,
         )
     except ValueError as exc:
         raise HTTPException(502, f"AI 框架调整返回格式无效：{exc}") from exc
@@ -7138,11 +7163,13 @@ async def expand_chapter_endpoint(story_id: int, request: Request, db: Session =
     deepseek_api_key = _user_deepseek_api_key(request)
 
     _release_db_transaction(db)
+    template_ch_prompt = get_effective_prompt(story_id, "chapter", db)
     novel_content = await expand_chapter_to_content(
         chapter_runtime_context,
         chapter_info,
         api_key=deepseek_api_key,
         previous_chapter_summary=previous_chapter_summary,
+        system_prompt=template_ch_prompt or None,
     )
     novel_content = await _ensure_generated_chapter_continuity(
         chapter_runtime_context,
@@ -7714,6 +7741,480 @@ async def framework_analyze_endpoint(story_id: int, request: Request, db: Sessio
         db.rollback()
         logger.error("Framework analysis failed for story %s: %s", story_id, exc)
         raise HTTPException(502, f"AI分析失败: {exc}")
+
+
+# ─── 提示词模板系统 API ──────────────────────────────────
+
+def _serialize_template(template, current_user_id, db_session) -> dict:
+    """将 PromptTemplate 序列化为字典"""
+    author = None
+    if template.author_user_id:
+        u = db_session.query(User).filter(User.id == template.author_user_id).first()
+        author = {"id": u.id, "username": u.name} if u else None
+
+    is_liked = False
+    if current_user_id:
+        like = db_session.query(TemplateLike).filter(
+            TemplateLike.template_id == template.id,
+            TemplateLike.user_id == current_user_id,
+        ).first()
+        is_liked = like is not None
+
+    def _json_or_none(val):
+        return val if isinstance(val, (dict, list, type(None))) else None
+
+    return {
+        "id": template.id,
+        "name": template.name,
+        "description": template.description or "",
+        "author": author,
+        "category": template.category,
+        "tags": template.tags or [],
+        "status": template.status,
+        "visibility": template.visibility,
+        "is_public": template.is_public,
+        "usage_count": template.usage_count,
+        "like_count": template.like_count,
+        "is_liked": is_liked,
+        "framework_prompt": template.framework_prompt,
+        "chapter_prompt": template.chapter_prompt,
+        "character_prompt": template.character_prompt,
+        "manga_style_prompt": template.manga_style_prompt,
+        "framework_params": _json_or_none(template.framework_params),
+        "chapter_params": _json_or_none(template.chapter_params),
+        "character_params": _json_or_none(template.character_params),
+        "manga_style_params": _json_or_none(template.manga_style_params),
+        "forked_from": template.forked_from,
+        "submitted_at": template.submitted_at.isoformat() if template.submitted_at else None,
+        "reviewed_at": template.reviewed_at.isoformat() if template.reviewed_at else None,
+        "review_note": template.review_note,
+        "created_at": template.created_at.isoformat() if template.created_at else None,
+        "updated_at": template.updated_at.isoformat() if template.updated_at else None,
+    }
+
+
+# ── 系统默认 Prompt 参考 ──────────────────────────────
+
+@app.get("/api/prompt-templates/defaults")
+def get_system_default_prompts(request: Request, db: Session = Depends(get_db)):
+    """返回系统内置的四类提示词，供用户创建模板时参考。"""
+    from services.deepseek import FRAMEWORK_SYSTEM_PROMPT, _long_form_framework_rules
+
+    return {
+        "framework": FRAMEWORK_SYSTEM_PROMPT + "\n\n" + _long_form_framework_rules(),
+        "chapter": (
+            "你是出版级网文作家。你写的章节节奏紧凑、人物鲜活，能直接发表到起点/番茄等平台。\n\n"
+            "## 核心写作准则\n"
+            "1. 场景即故事：每个场景必须有明确的戏剧功能。\n"
+            "2. 角色驱动：情节由角色的欲望、恐惧、缺陷推动，不是作者在背后操纵。\n"
+            "3. 对话有区分度：不同角色的说话方式必须不同。\n"
+            "4. 克制抒情：用动作、对话、细节来传达情绪，而非直接告诉读者「他很愤怒」。\n"
+            "5. 节奏变化：紧张处用短句、快切；日常处用舒缓的长句。\n\n"
+            "## 严禁的 AI 写作习惯\n"
+            "- 禁止「突然」「忽然」「就在这时」频繁出现\n"
+            "- 禁止「深深地」「无比地」「极其」等程度副词堆砌\n"
+            "- 禁止「他不知道的是……」「而这一切，才刚刚开始……」等模板化悬念\n"
+            "- 禁止所有角色说话风格雷同\n"
+            "- 禁止「心中涌起一股暖流」等空洞套话\n"
+            "- 禁止凑字数的环境描写和无意义细节"
+        ),
+        "character": (
+            "你是专业漫画角色设定师，擅长把角色设定转化为具体可视化的外貌卡。\n\n"
+            "要求：\n"
+            "1. 每个角色必须有2-3个标志性特征（特定发型、疤痕、配饰等）\n"
+            "2. 性格映射为外貌——冷静的人克制端正、张扬的人有攻击性视觉符号\n"
+            "3. 禁止千篇一律的「俊美」「帅气」——具体到可画的特征\n"
+            "4. 每个角色需包含：角色名、身份、外貌、发型发色、眼型、体型、服装、配饰、"
+            "标志性表情（常态/高兴/愤怒）、动作习惯、神态气质"
+        ),
+        "manga_style": (
+            "黑白模式(bw)：黑白漫画风格，高对比度，清晰线条，网点/排线阴影，电影级分镜构图。\n"
+            "彩色模式(color)：日式动漫风格，cel-shaded，鲜艳色彩，电影级分镜构图。\n\n"
+            "用户可在增量修改中添加自己的风格偏好，如：\n"
+            "- 禁止Q版/简笔画风格\n"
+            "- 场景必须使用电影级构图\n"
+            "- 角色服装必须符合故事时代背景\n"
+            "- 画面整体偏暗色调/暖色调"
+        ),
+    }
+
+
+# ── 模板 CRUD ──────────────────────────────────────────
+
+@app.post("/api/prompt-templates")
+def create_prompt_template(body: dict, request: Request, db: Session = Depends(get_db)):
+    user = _require_user(request, db)
+
+    template = PromptTemplate(
+        name=str(body.get("name", "")).strip()[:100],
+        description=str(body.get("description", "")).strip(),
+        author_user_id=user.id,
+        category=str(body.get("category", "")).strip() or None,
+        tags=body.get("tags") if isinstance(body.get("tags"), list) else None,
+        framework_prompt=str(body.get("framework_prompt", "")).strip() or None,
+        chapter_prompt=str(body.get("chapter_prompt", "")).strip() or None,
+        character_prompt=str(body.get("character_prompt", "")).strip() or None,
+        manga_style_prompt=str(body.get("manga_style_prompt", "")).strip() or None,
+        framework_params=body.get("framework_params"),
+        chapter_params=body.get("chapter_params"),
+        character_params=body.get("character_params"),
+        manga_style_params=body.get("manga_style_params"),
+    )
+    db.add(template)
+    db.commit()
+    db.refresh(template)
+    return _serialize_template(template, user.id, db)
+
+
+@app.get("/api/prompt-templates/my")
+def list_my_templates(request: Request, page: int = 1, page_size: int = 20, status: str = "", db: Session = Depends(get_db)):
+    user = _require_user(request, db)
+
+    query = db.query(PromptTemplate).filter(PromptTemplate.author_user_id == user.id)
+    if status:
+        query = query.filter(PromptTemplate.status == status)
+    query = query.order_by(PromptTemplate.updated_at.desc())
+
+    total = query.count()
+    templates = query.offset((page - 1) * page_size).limit(page_size).all()
+    return {
+        "templates": [_serialize_template(t, user.id, db) for t in templates],
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+    }
+
+
+@app.get("/api/prompt-templates/public")
+def list_public_templates(
+    request: Request,
+    sort: str = "popular",
+    category: str = "",
+    page: int = 1,
+    page_size: int = 20,
+    db: Session = Depends(get_db),
+):
+    query = db.query(PromptTemplate).filter(
+        PromptTemplate.status == "approved",
+        PromptTemplate.visibility.in_(["public", "official"]),
+    )
+    if category:
+        query = query.filter(PromptTemplate.category == category)
+    if sort == "official":
+        query = query.filter(PromptTemplate.visibility == "official")
+        query = query.order_by(PromptTemplate.usage_count.desc())
+    elif sort == "latest":
+        query = query.order_by(PromptTemplate.reviewed_at.desc().nullslast())
+    else:
+        query = query.order_by(PromptTemplate.usage_count.desc())
+
+    total = query.count()
+    templates = query.offset((page - 1) * page_size).limit(page_size).all()
+
+    user = _get_current_user(request, db)
+    return {
+        "templates": [_serialize_template(t, user.id if user else None, db) for t in templates],
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+    }
+
+
+@app.get("/api/prompt-templates/{template_id}")
+def get_prompt_template(template_id: int, request: Request, db: Session = Depends(get_db)):
+    template = db.query(PromptTemplate).filter(PromptTemplate.id == template_id).first()
+    if not template:
+        raise HTTPException(404, "模板不存在")
+
+    user = _get_current_user(request, db)
+    if template.visibility == "private":
+        if not user or user.id != template.author_user_id:
+            raise HTTPException(403, "无权访问此模板")
+
+    return _serialize_template(template, user.id if user else None, db)
+
+
+@app.put("/api/prompt-templates/{template_id}")
+def update_prompt_template(template_id: int, body: dict, request: Request, db: Session = Depends(get_db)):
+    user = _require_user(request, db)
+
+    template = db.query(PromptTemplate).filter(PromptTemplate.id == template_id).first()
+    if not template:
+        raise HTTPException(404, "模板不存在")
+    if template.author_user_id != user.id:
+        raise HTTPException(403, "只能编辑自己的模板")
+
+    str_fields = ["name", "description", "category", "framework_prompt", "chapter_prompt",
+                  "character_prompt", "manga_style_prompt"]
+    for key in str_fields:
+        if key in body:
+            val = body[key]
+            setattr(template, key, str(val).strip() if val else None)
+
+    list_fields = ["tags"]
+    for key in list_fields:
+        if key in body:
+            val = body[key]
+            setattr(template, key, val if isinstance(val, list) else None)
+
+    param_fields = ["framework_params", "chapter_params", "character_params", "manga_style_params"]
+    for key in param_fields:
+        if key in body:
+            val = body[key]
+            setattr(template, key, val if isinstance(val, dict) else None)
+
+    template.updated_at = datetime.datetime.now(datetime.timezone.utc)
+    db.commit()
+    db.refresh(template)
+    return _serialize_template(template, user.id, db)
+
+
+@app.delete("/api/prompt-templates/{template_id}")
+def delete_prompt_template(template_id: int, request: Request, db: Session = Depends(get_db)):
+    user = _require_user(request, db)
+
+    template = db.query(PromptTemplate).filter(PromptTemplate.id == template_id).first()
+    if not template:
+        raise HTTPException(404, "模板不存在")
+    if template.author_user_id != user.id:
+        raise HTTPException(403, "只能删除自己的模板")
+
+    db.query(StoryTemplateBinding).filter(StoryTemplateBinding.template_id == template_id).delete()
+    db.query(TemplateLike).filter(TemplateLike.template_id == template_id).delete()
+    db.delete(template)
+    db.commit()
+    return {"ok": True}
+
+
+@app.post("/api/prompt-templates/{template_id}/submit-for-review")
+def submit_template_for_review(template_id: int, request: Request, db: Session = Depends(get_db)):
+    user = _require_user(request, db)
+
+    template = db.query(PromptTemplate).filter(PromptTemplate.id == template_id).first()
+    if not template:
+        raise HTTPException(404, "模板不存在")
+    if template.author_user_id != user.id:
+        raise HTTPException(403, "只能提交自己的模板")
+    if template.status not in ("draft", "rejected"):
+        raise HTTPException(400, "当前状态不允许提交审核")
+
+    template.status = "pending"
+    template.submitted_at = datetime.datetime.now(datetime.timezone.utc)
+    db.commit()
+    return _serialize_template(template, user.id, db)
+
+
+@app.post("/api/prompt-templates/{template_id}/fork")
+def fork_prompt_template(template_id: int, request: Request, db: Session = Depends(get_db)):
+    user = _require_user(request, db)
+
+    source = db.query(PromptTemplate).filter(PromptTemplate.id == template_id).first()
+    if not source:
+        raise HTTPException(404, "模板不存在")
+    if source.visibility == "private" and source.author_user_id != user.id:
+        raise HTTPException(403, "无权复制此模板")
+
+    new_template = PromptTemplate(
+        name=f"{source.name}（副本）",
+        description=source.description,
+        author_user_id=user.id,
+        category=source.category,
+        tags=source.tags,
+        framework_prompt=source.framework_prompt,
+        chapter_prompt=source.chapter_prompt,
+        character_prompt=source.character_prompt,
+        manga_style_prompt=source.manga_style_prompt,
+        framework_params=source.framework_params,
+        chapter_params=source.chapter_params,
+        character_params=source.character_params,
+        manga_style_params=source.manga_style_params,
+        forked_from=source.id,
+    )
+    db.add(new_template)
+    db.commit()
+    db.refresh(new_template)
+    return _serialize_template(new_template, user.id, db)
+
+
+# ── 作品模板绑定 ──────────────────────────────────────
+
+@app.post("/api/stories/{story_id}/bind-template")
+def bind_story_template(story_id: int, body: dict, request: Request, db: Session = Depends(get_db)):
+    user = _require_user(request, db)
+
+    story = db.query(Story).filter(Story.id == story_id).first()
+    if not story:
+        raise HTTPException(404, "作品不存在")
+    if story.owner_user_id != user.id:
+        raise HTTPException(403, "只能修改自己的作品")
+
+    template_id = body.get("template_id")
+    if not template_id:
+        raise HTTPException(400, "请提供 template_id")
+
+    template = db.query(PromptTemplate).filter(PromptTemplate.id == template_id).first()
+    if not template:
+        raise HTTPException(404, "模板不存在")
+
+    db.query(StoryTemplateBinding).filter(StoryTemplateBinding.story_id == story_id).delete()
+    binding = StoryTemplateBinding(story_id=story_id, template_id=template_id)
+    db.add(binding)
+    template.usage_count = (template.usage_count or 0) + 1
+    db.commit()
+    db.refresh(binding)
+    return {
+        "story_id": story_id,
+        "template_id": template_id,
+        "bound_at": binding.bound_at.isoformat() if binding.bound_at else "",
+    }
+
+
+@app.get("/api/stories/{story_id}/template")
+def get_story_template(story_id: int, request: Request, db: Session = Depends(get_db)):
+    user = _require_user(request, db)
+
+    story = db.query(Story).filter(Story.id == story_id).first()
+    if not story:
+        raise HTTPException(404, "作品不存在")
+    if story.owner_user_id != user.id:
+        raise HTTPException(403, "权限不足")
+
+    binding = db.query(StoryTemplateBinding).filter(StoryTemplateBinding.story_id == story_id).first()
+    if not binding or not binding.template:
+        return {"template": None}
+
+    return {"template": _serialize_template(binding.template, user.id, db)}
+
+
+@app.delete("/api/stories/{story_id}/template")
+def unbind_story_template(story_id: int, request: Request, db: Session = Depends(get_db)):
+    user = _require_user(request, db)
+
+    story = db.query(Story).filter(Story.id == story_id).first()
+    if not story:
+        raise HTTPException(404, "作品不存在")
+    if story.owner_user_id != user.id:
+        raise HTTPException(403, "只能修改自己的作品")
+
+    db.query(StoryTemplateBinding).filter(StoryTemplateBinding.story_id == story_id).delete()
+    db.commit()
+    return {"ok": True}
+
+
+@app.post("/api/prompt-templates/{template_id}/like")
+def like_template(template_id: int, request: Request, db: Session = Depends(get_db)):
+    user = _require_user(request, db)
+
+    template = db.query(PromptTemplate).filter(PromptTemplate.id == template_id).first()
+    if not template:
+        raise HTTPException(404, "模板不存在")
+
+    existing = db.query(TemplateLike).filter(
+        TemplateLike.template_id == template_id,
+        TemplateLike.user_id == user.id,
+    ).first()
+
+    if not existing:
+        db.add(TemplateLike(template_id=template_id, user_id=user.id))
+        template.like_count = (template.like_count or 0) + 1
+        db.commit()
+
+    return {"like_count": template.like_count, "is_liked": True}
+
+
+@app.delete("/api/prompt-templates/{template_id}/like")
+def unlike_template(template_id: int, request: Request, db: Session = Depends(get_db)):
+    user = _require_user(request, db)
+
+    template = db.query(PromptTemplate).filter(PromptTemplate.id == template_id).first()
+    if not template:
+        raise HTTPException(404, "模板不存在")
+
+    existing = db.query(TemplateLike).filter(
+        TemplateLike.template_id == template_id,
+        TemplateLike.user_id == user.id,
+    ).first()
+    if existing:
+        db.delete(existing)
+        template.like_count = max(0, (template.like_count or 0) - 1)
+        db.commit()
+
+    return {"like_count": template.like_count, "is_liked": False}
+
+
+# ── 管理员审核 ─────────────────────────────────────────
+
+@app.get("/api/admin/prompt-templates/pending")
+def admin_list_pending_templates(request: Request, page: int = 1, page_size: int = 20, db: Session = Depends(get_db)):
+    _require_admin(request, db)
+
+    query = db.query(PromptTemplate).filter(PromptTemplate.status == "pending")
+    query = query.order_by(PromptTemplate.submitted_at.asc().nullslast())
+    total = query.count()
+    templates = query.offset((page - 1) * page_size).limit(page_size).all()
+
+    user = _get_current_user(request, db)
+    return {
+        "templates": [_serialize_template(t, user.id if user else None, db) for t in templates],
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+    }
+
+
+@app.post("/api/admin/prompt-templates/{template_id}/approve")
+def admin_approve_template(template_id: int, body: dict, request: Request, db: Session = Depends(get_db)):
+    _require_admin(request, db)
+
+    template = db.query(PromptTemplate).filter(PromptTemplate.id == template_id).first()
+    if not template:
+        raise HTTPException(404, "模板不存在")
+    if template.status != "pending":
+        raise HTTPException(400, "只能审核待审核状态的模板")
+
+    user = _get_current_user(request, db)
+    template.status = "approved"
+    template.visibility = body.get("visibility", "public")
+    template.is_public = True
+    template.reviewed_at = datetime.datetime.now(datetime.timezone.utc)
+    template.reviewed_by = user.id if user else None
+    template.review_note = body.get("note", "")
+    db.commit()
+    return _serialize_template(template, user.id if user else None, db)
+
+
+@app.post("/api/admin/prompt-templates/{template_id}/reject")
+def admin_reject_template(template_id: int, body: dict, request: Request, db: Session = Depends(get_db)):
+    _require_admin(request, db)
+
+    template = db.query(PromptTemplate).filter(PromptTemplate.id == template_id).first()
+    if not template:
+        raise HTTPException(404, "模板不存在")
+
+    user = _get_current_user(request, db)
+    template.status = "rejected"
+    template.is_public = False
+    template.visibility = "private"
+    template.reviewed_at = datetime.datetime.now(datetime.timezone.utc)
+    template.reviewed_by = user.id if user else None
+    template.review_note = body.get("note", "")
+    db.commit()
+    return _serialize_template(template, user.id if user else None, db)
+
+
+@app.post("/api/admin/prompt-templates/{template_id}/archive")
+def admin_archive_template(template_id: int, body: dict, request: Request, db: Session = Depends(get_db)):
+    _require_admin(request, db)
+
+    template = db.query(PromptTemplate).filter(PromptTemplate.id == template_id).first()
+    if not template:
+        raise HTTPException(404, "模板不存在")
+
+    template.visibility = "archived"
+    template.is_public = False
+    template.review_note = body.get("reason", "管理员下架")
+    db.commit()
+    return {"ok": True, "id": template_id, "visibility": "archived"}
 
 
 # ── Agent 路由器 ─────────────────────────────────────

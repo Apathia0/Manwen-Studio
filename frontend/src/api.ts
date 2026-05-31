@@ -1633,6 +1633,26 @@ export interface MangaProgress {
   data: any;
 }
 
+export interface MangaGenStatusResponse {
+  task_id: string | null;
+  status: 'none' | 'pending' | 'running' | 'succeeded' | 'failed' | 'retrying';
+  progress: number;
+  total: number;
+  error_message: string | null;
+  created_at: string | null;
+  completed_at: string | null;
+}
+
+export async function getMangaGenerationStatus(chapterId: number): Promise<MangaGenStatusResponse> {
+  const response = await fetch(`${BASE}/api/chapters/${chapterId}/manga-generation-status`, {
+    headers: apiHeaders(),
+  });
+  if (!response.ok) {
+    throw new Error(`获取漫画生成状态失败: ${response.statusText}`);
+  }
+  return response.json();
+}
+
 export async function resetMangaImages(chapterId: number): Promise<void> {
   const res = await fetch(`${BASE}/api/chapters/${chapterId}/manga-images`, {
     method: 'DELETE',
@@ -3096,5 +3116,201 @@ export async function redrawCharacterRefImage(
     body: JSON.stringify({ version_id: versionId, ...payload }),
   });
   if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+// ─── Prompt Template API ─────────────────────────────────
+
+export interface PromptTemplateItem {
+  id: number;
+  name: string;
+  description: string;
+  author: { id: number; username: string } | null;
+  category: string | null;
+  tags: string[];
+  status: string;
+  visibility: string;
+  is_public: boolean;
+  usage_count: number;
+  like_count: number;
+  is_liked?: boolean;
+  framework_prompt?: string | null;
+  chapter_prompt?: string | null;
+  character_prompt?: string | null;
+  manga_style_prompt?: string | null;
+  framework_params?: Record<string, string> | null;
+  chapter_params?: Record<string, string> | null;
+  character_params?: Record<string, string> | null;
+  manga_style_params?: Record<string, string> | null;
+  forked_from?: number | null;
+  submitted_at?: string | null;
+  reviewed_at?: string | null;
+  review_note?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface TemplateListResponse {
+  templates: PromptTemplateItem[];
+  total: number;
+  page: number;
+  page_size: number;
+}
+
+export async function createPromptTemplate(data: {
+  name: string;
+  description?: string;
+  category?: string;
+  tags?: string[];
+  framework_prompt?: string | null;
+  chapter_prompt?: string | null;
+  character_prompt?: string | null;
+  manga_style_prompt?: string | null;
+  framework_params?: Record<string, string> | null;
+  chapter_params?: Record<string, string> | null;
+  character_params?: Record<string, string> | null;
+  manga_style_params?: Record<string, string> | null;
+}): Promise<PromptTemplateItem> {
+  const res = await fetch(`${BASE}/api/prompt-templates`, {
+    method: 'POST',
+    headers: apiHeaders(true),
+    body: JSON.stringify(data),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '创建模板失败'));
+  return res.json();
+}
+
+export async function listMyTemplates(params?: {
+  page?: number; page_size?: number; status?: string;
+}): Promise<TemplateListResponse> {
+  const query = new URLSearchParams();
+  if (params?.page) query.set('page', String(params.page));
+  if (params?.page_size) query.set('page_size', String(params.page_size));
+  if (params?.status) query.set('status', params.status);
+  const res = await fetch(`${BASE}/api/prompt-templates/my?${query}`, { headers: apiHeaders() });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '获取模板列表失败'));
+  return res.json();
+}
+
+export async function getPromptTemplate(id: number): Promise<PromptTemplateItem> {
+  const res = await fetch(`${BASE}/api/prompt-templates/${id}`, { headers: apiHeaders() });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '获取模板详情失败'));
+  return res.json();
+}
+
+export async function updatePromptTemplate(id: number, data: Record<string, unknown>): Promise<PromptTemplateItem> {
+  const res = await fetch(`${BASE}/api/prompt-templates/${id}`, {
+    method: 'PUT', headers: apiHeaders(true), body: JSON.stringify(data),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '更新模板失败'));
+  return res.json();
+}
+
+export async function deletePromptTemplate(id: number): Promise<void> {
+  const res = await fetch(`${BASE}/api/prompt-templates/${id}`, { method: 'DELETE', headers: apiHeaders() });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '删除模板失败'));
+}
+
+export async function submitTemplateForReview(id: number): Promise<PromptTemplateItem> {
+  const res = await fetch(`${BASE}/api/prompt-templates/${id}/submit-for-review`, {
+    method: 'POST', headers: apiHeaders(true),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '提交审核失败'));
+  return res.json();
+}
+
+export async function forkPromptTemplate(id: number): Promise<PromptTemplateItem> {
+  const res = await fetch(`${BASE}/api/prompt-templates/${id}/fork`, {
+    method: 'POST', headers: apiHeaders(true),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '复制模板失败'));
+  return res.json();
+}
+
+export async function listPublicTemplates(params?: {
+  sort?: string; category?: string; page?: number; page_size?: number;
+}): Promise<TemplateListResponse> {
+  const query = new URLSearchParams();
+  if (params?.sort) query.set('sort', params.sort);
+  if (params?.category) query.set('category', params.category);
+  if (params?.page) query.set('page', String(params.page || 1));
+  if (params?.page_size) query.set('page_size', String(params.page_size || 20));
+  const res = await fetch(`${BASE}/api/prompt-templates/public?${query}`, { headers: apiHeaders() });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '获取公开模板失败'));
+  return res.json();
+}
+
+export async function likeTemplate(id: number): Promise<{ like_count: number; is_liked: boolean }> {
+  const res = await fetch(`${BASE}/api/prompt-templates/${id}/like`, {
+    method: 'POST', headers: apiHeaders(true),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '点赞失败'));
+  return res.json();
+}
+
+export async function unlikeTemplate(id: number): Promise<{ like_count: number; is_liked: boolean }> {
+  const res = await fetch(`${BASE}/api/prompt-templates/${id}/like`, {
+    method: 'DELETE', headers: apiHeaders(),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '取消点赞失败'));
+  return res.json();
+}
+
+export async function bindStoryTemplate(storyId: number, templateId: number): Promise<void> {
+  const res = await fetch(`${BASE}/api/stories/${storyId}/bind-template`, {
+    method: 'POST', headers: apiHeaders(true),
+    body: JSON.stringify({ template_id: templateId }),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '绑定模板失败'));
+}
+
+export async function getStoryTemplate(storyId: number): Promise<{ template: PromptTemplateItem | null }> {
+  const res = await fetch(`${BASE}/api/stories/${storyId}/template`, { headers: apiHeaders() });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '获取作品模板失败'));
+  return res.json();
+}
+
+export async function unbindStoryTemplate(storyId: number): Promise<void> {
+  const res = await fetch(`${BASE}/api/stories/${storyId}/template`, {
+    method: 'DELETE', headers: apiHeaders(),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '解绑模板失败'));
+}
+
+export interface SystemDefaultPrompts {
+  framework: string;
+  chapter: string;
+  character: string;
+  manga_style: string;
+}
+
+export async function getSystemDefaultPrompts(): Promise<SystemDefaultPrompts> {
+  const res = await fetch(`${BASE}/api/prompt-templates/defaults`, { headers: apiHeaders() });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '获取系统默认提示词失败'));
+  return res.json();
+}
+
+// Admin: template review
+export async function listPendingTemplates(page = 1, pageSize = 50): Promise<TemplateListResponse> {
+  const res = await fetch(`${BASE}/api/admin/prompt-templates/pending?page=${page}&page_size=${pageSize}`, { headers: apiHeaders() });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '获取待审核列表失败'));
+  return res.json();
+}
+
+export async function approveTemplate(id: number, visibility: string, note?: string): Promise<PromptTemplateItem> {
+  const res = await fetch(`${BASE}/api/admin/prompt-templates/${id}/approve`, {
+    method: 'POST', headers: apiHeaders(true),
+    body: JSON.stringify({ visibility, note: note || '' }),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '审核操作失败'));
+  return res.json();
+}
+
+export async function rejectTemplate(id: number, note: string): Promise<PromptTemplateItem> {
+  const res = await fetch(`${BASE}/api/admin/prompt-templates/${id}/reject`, {
+    method: 'POST', headers: apiHeaders(true),
+    body: JSON.stringify({ note }),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '拒绝操作失败'));
   return res.json();
 }

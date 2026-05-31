@@ -558,3 +558,83 @@ class BackgroundTask(Base):
 
     # 元数据
     metadata_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+
+
+# ── 提示词模板系统 ──────────────────────────────────────
+
+
+class PromptTemplate(Base):
+    """提示词模板主表"""
+    __tablename__ = "prompt_templates"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    author_user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False)
+
+    # 提示词内容
+    framework_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
+    chapter_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
+    character_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
+    manga_style_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # 提示词参数
+    framework_params: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    chapter_params: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    character_params: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    manga_style_params: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+
+    # 状态与可见性
+    is_public: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="draft")
+    visibility: Mapped[str] = mapped_column(String(20), nullable=False, default="private")
+
+    # 统计
+    usage_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    like_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+    # 分类
+    category: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    tags: Mapped[list | None] = mapped_column(JSON, nullable=True)
+
+    # 审核
+    submitted_at: Mapped[datetime.datetime | None] = mapped_column(DateTime, nullable=True)
+    reviewed_at: Mapped[datetime.datetime | None] = mapped_column(DateTime, nullable=True)
+    reviewed_by: Mapped[int | None] = mapped_column(Integer, ForeignKey("users.id"), nullable=True)
+    review_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # Fork 来源（自引用外键）
+    forked_from: Mapped[int | None] = mapped_column(Integer, ForeignKey("prompt_templates.id"), nullable=True)
+
+    # 时间戳
+    created_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+    # 关系
+    author: Mapped["User"] = relationship("User", foreign_keys=[author_user_id])
+
+
+class StoryTemplateBinding(Base):
+    """作品-模板关联表"""
+    __tablename__ = "story_template_bindings"
+    __table_args__ = (UniqueConstraint("story_id"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    story_id: Mapped[int] = mapped_column(Integer, ForeignKey("stories.id"), nullable=False)
+    template_id: Mapped[int] = mapped_column(Integer, ForeignKey("prompt_templates.id"), nullable=False)
+    bound_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now())
+
+    # 关系
+    story: Mapped["Story"] = relationship("Story")
+    template: Mapped["PromptTemplate"] = relationship("PromptTemplate")
+
+
+class TemplateLike(Base):
+    """模板点赞记录表"""
+    __tablename__ = "template_likes"
+    __table_args__ = (UniqueConstraint("template_id", "user_id"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    template_id: Mapped[int] = mapped_column(Integer, ForeignKey("prompt_templates.id"), nullable=False)
+    user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False)
+    created_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now())

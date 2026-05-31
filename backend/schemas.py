@@ -751,5 +751,126 @@ class AssetUploadResponse(BaseModel):
     file_path: str
 
 
+# ─── Prompt Template Schemas ─────────────────────────────
+
+class TemplateFrameworkParams(BaseModel):
+    story_length: str = "long"
+    pacing: str = "steady"
+    structure: str = "flexible"
+    chapter_detail_level: str = "high"
+    character_depth: str = "deep"
+    world_building: str = "rich"
+    tone: str = "serious"
+    custom_rules: str = ""
+
+
+class TemplateChapterParams(BaseModel):
+    writing_style: str = "descriptive"
+    dialogue_ratio: str = "medium"
+    scene_detail: str = "rich"
+    inner_monologue: str = "moderate"
+    pacing_preference: str = "varied"
+    vocabulary_level: str = "advanced"
+    custom_style_notes: str = ""
+
+
+class TemplateCharacterParams(BaseModel):
+    detail_level: str = "high"
+    appearance_focus: str = "balanced"
+    personality_depth: str = "deep"
+    relationship_emphasis: str = "high"
+    arc_planning: str = "complete"
+    custom_requirements: str = ""
+
+
+class TemplateMangaStyleParams(BaseModel):
+    art_style: str = "anime"
+    color_scheme: str = "vibrant"
+    detail_level: str = "high"
+    composition: str = "dynamic"
+    lighting: str = "dramatic"
+    mood: str = "epic"
+    custom_style_prompt: str = ""
+
+
+class PromptTemplateCreate(BaseModel):
+    name: str
+    description: str = ""
+    category: str = ""
+    tags: list[str] = []
+    framework_prompt: Optional[str] = None
+    chapter_prompt: Optional[str] = None
+    character_prompt: Optional[str] = None
+    manga_style_prompt: Optional[str] = None
+    framework_params: Optional[TemplateFrameworkParams] = None
+    chapter_params: Optional[TemplateChapterParams] = None
+    character_params: Optional[TemplateCharacterParams] = None
+    manga_style_params: Optional[TemplateMangaStyleParams] = None
+
+
+class PromptTemplateUpdate(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    category: Optional[str] = None
+    tags: Optional[list[str]] = None
+    framework_prompt: Optional[str] = None
+    chapter_prompt: Optional[str] = None
+    character_prompt: Optional[str] = None
+    manga_style_prompt: Optional[str] = None
+    framework_params: Optional[TemplateFrameworkParams] = None
+    chapter_params: Optional[TemplateChapterParams] = None
+    character_params: Optional[TemplateCharacterParams] = None
+    manga_style_params: Optional[TemplateMangaStyleParams] = None
+
+
+class TemplateAuthorOut(BaseModel):
+    id: int
+    username: str
+
+
+class PromptTemplateOut(BaseModel):
+    id: int
+    name: str
+    description: Optional[str] = ""
+    author: Optional[TemplateAuthorOut] = None
+    category: Optional[str] = None
+    tags: Optional[list] = None
+    status: str
+    visibility: str
+    is_public: bool
+    usage_count: int
+    like_count: int
+    framework_prompt: Optional[str] = None
+    chapter_prompt: Optional[str] = None
+    character_prompt: Optional[str] = None
+    manga_style_prompt: Optional[str] = None
+    framework_params: Optional[dict] = None
+    chapter_params: Optional[dict] = None
+    character_params: Optional[dict] = None
+    manga_style_params: Optional[dict] = None
+    forked_from: Optional[int] = None
+    submitted_at: Optional[str] = None
+    reviewed_at: Optional[str] = None
+    review_note: Optional[str] = None
+    created_at: str
+    updated_at: str
+
+
+class TemplateListOut(BaseModel):
+    templates: list[PromptTemplateOut]
+    total: int
+    page: int
+    page_size: int
+
+
+class BindTemplateRequest(BaseModel):
+    template_id: int
+
+
+class AdminReviewRequest(BaseModel):
+    visibility: str = "public"
+    note: str = ""
+
+
 # Resolve forward references
 ChapterOut.model_rebuild()

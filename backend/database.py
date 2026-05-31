@@ -217,6 +217,7 @@ def _migrate():
     _cleanup_duplicate_chapters()
     _cleanup_duplicate_manga_images()
     _add_unique_constraints()
+    _migrate_prompt_templates()
 
 
 def _migrate_money_columns():
@@ -678,3 +679,81 @@ def _migrate_video_character_tables():
                     UNIQUE(story_id, character_name, version_label)
                 )
             """))
+
+
+def _migrate_prompt_templates():
+    """创建提示词模板系统相关表（prompt_templates / story_template_bindings / template_likes）。"""
+    from sqlalchemy import inspect, text
+
+    insp = inspect(engine)
+
+    # 1. 提示词模板主表
+    if "prompt_templates" not in insp.get_table_names():
+        with engine.begin() as conn:
+            _prepare_migration_conn(conn)
+            conn.execute(text("""
+                CREATE TABLE prompt_templates (
+                    id SERIAL PRIMARY KEY,
+                    name VARCHAR(100) NOT NULL,
+                    description TEXT,
+                    author_user_id INTEGER NOT NULL REFERENCES users(id),
+                    framework_prompt TEXT,
+                    chapter_prompt TEXT,
+                    character_prompt TEXT,
+                    manga_style_prompt TEXT,
+                    framework_params JSONB,
+                    chapter_params JSONB,
+                    character_params JSONB,
+                    manga_style_params JSONB,
+                    is_public BOOLEAN NOT NULL DEFAULT FALSE,
+                    status VARCHAR(20) NOT NULL DEFAULT 'draft',
+                    visibility VARCHAR(20) NOT NULL DEFAULT 'private',
+                    usage_count INTEGER NOT NULL DEFAULT 0,
+                    like_count INTEGER NOT NULL DEFAULT 0,
+                    category VARCHAR(50),
+                    tags JSONB,
+                    submitted_at TIMESTAMP,
+                    reviewed_at TIMESTAMP,
+                    reviewed_by INTEGER REFERENCES users(id),
+                    review_note TEXT,
+                    forked_from INTEGER REFERENCES prompt_templates(id),
+                    created_at TIMESTAMP DEFAULT NOW(),
+                    updated_at TIMESTAMP DEFAULT NOW()
+                )
+            """))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS idx_prompt_templates_author ON prompt_templates(author_user_id)"))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS idx_prompt_templates_status ON prompt_templates(status)"))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS idx_prompt_templates_category ON prompt_templates(category)"))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS idx_prompt_templates_is_public ON prompt_templates(is_public)"))
+
+    # 2. 作品-模板关联表
+    if "story_template_bindings" not in insp.get_table_names():
+        with engine.begin() as conn:
+            _prepare_migration_conn(conn)
+            conn.execute(text("""
+                CREATE TABLE story_template_bindings (
+                    id SERIAL PRIMARY KEY,
+                    story_id INTEGER NOT NULL REFERENCES stories(id),
+                    template_id INTEGER NOT NULL REFERENCES prompt_templates(id),
+                    bound_at TIMESTAMP DEFAULT NOW(),
+                    UNIQUE(story_id)
+                )
+            """))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS idx_story_template_bindings_story ON story_template_bindings(story_id)"))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS idx_story_template_bindings_template ON story_template_bindings(template_id)"))
+
+    # 3. 模板点赞记录表
+    if "template_likes" not in insp.get_table_names():
+        with engine.begin() as conn:
+            _prepare_migration_conn(conn)
+            conn.execute(text("""
+                CREATE TABLE template_likes (
+                    id SERIAL PRIMARY KEY,
+                    template_id INTEGER NOT NULL REFERENCES prompt_templates(id),
+                    user_id INTEGER NOT NULL REFERENCES users(id),
+                    created_at TIMESTAMP DEFAULT NOW(),
+                    UNIQUE(template_id, user_id)
+                )
+            """))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS idx_template_likes_template_id ON template_likes(template_id)"))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS idx_template_likes_user_id ON template_likes(user_id)"))
