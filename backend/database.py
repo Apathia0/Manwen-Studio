@@ -135,6 +135,8 @@ def _migrate():
                 conn.execute(text("ALTER TABLE chapters ADD COLUMN status VARCHAR(20) DEFAULT 'pending'"))
             if "word_count" not in cols:
                 conn.execute(text("ALTER TABLE chapters ADD COLUMN word_count INTEGER"))
+            if "screenplay_text" not in cols:
+                conn.execute(text("ALTER TABLE chapters ADD COLUMN screenplay_text TEXT"))
         with engine.begin() as conn:
             _prepare_migration_conn(conn)
             conn.execute(text("""

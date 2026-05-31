@@ -180,7 +180,7 @@ function App() {
   const [globalSuccess, setGlobalSuccess] = useState<string | null>(null);
   const [announcement, setAnnouncement] = useState<PlatformAnnouncement | null>(null);
   const [announcementDismissed, setAnnouncementDismissed] = useState(false);
-  const [workspaceMode, setWorkspaceMode] = useState<'manga' | 'video'>('manga');
+  // const [workspaceMode, setWorkspaceMode] = useState<'manga' | 'video'>('manga'); // 视频工作流暂时屏蔽
   void adminPlans;
   void adminOrders;
   void entitlementPreview;
@@ -841,39 +841,15 @@ function App() {
             />
           )}
           {route === 'workspace' && (
-            <div>
-              <div className="flex items-center gap-2 px-4 py-2">
-                <button
-                  onClick={() => setWorkspaceMode('manga')}
-                  className={`rounded-xl px-4 py-1.5 text-sm font-medium transition ${
-                    workspaceMode === 'manga'
-                      ? 'bg-[#2563eb] text-white'
-                      : 'border border-[#d7e3f4] bg-white text-slate-600'
-                  }`}
-                >
-                  漫画模式
-                </button>
-                <button
-                  onClick={() => setWorkspaceMode('video')}
-                  className={`rounded-xl px-4 py-1.5 text-sm font-medium transition ${
-                    workspaceMode === 'video'
-                      ? 'bg-[#2563eb] text-white'
-                      : 'border border-[#d7e3f4] bg-white text-slate-600'
-                  }`}
-                >
-                  视频模式
-                </button>
-              </div>
-              <WorkspacePage
-                story={activeStory}
-                chapters={chapters}
-                currentChapter={activeChapter}
-                entitlements={myEntitlements}
-                workspaceMode={workspaceMode}
-                onChapterChange={(chapter) => setActiveChapterId(chapter.id)}
-                onContentUpdated={refreshWorkspaceData}
-              />
-            </div>
+            <WorkspacePage
+              story={activeStory}
+              chapters={chapters}
+              currentChapter={activeChapter}
+              entitlements={myEntitlements}
+              workspaceMode="manga"
+              onChapterChange={(chapter) => setActiveChapterId(chapter.id)}
+              onContentUpdated={refreshWorkspaceData}
+            />
           )}
           {route === 'account' && (
             <UserAccountUsagePage

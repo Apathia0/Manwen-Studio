@@ -27,6 +27,7 @@ import {
   setImageCount,
   ALLOWED_IMAGE_COUNTS,
   mangaImageUrl,
+  getMangaGenerationStatus,
   type ImageRedrawMode,
   type Chapter,
   type MangaProgress,
@@ -237,6 +238,8 @@ export default function MangaPanel({
   const mangaAbortRef = useRef<Map<number, AbortController>>(new Map());
   const imagePreloadAttemptsRef = useRef<Record<string, number>>({});
   const refPreloadAttemptsRef = useRef<Record<string, number>>({});
+  const backendTaskPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const checkBackendMangaStatusRef = useRef<((chapterId: number) => Promise<void>) | null>(null);
   const parsedCharacterCards = useMemoValue(() => parseCharacterAppearanceCards(charText), [charText]);
   const maxImagesPerChapter = useMemoValue(() => {
     const configured = entitlementNumber(entitlements, 'manga.max_image_count_per_chapter', DEFAULT_IMAGE_COUNT);
@@ -283,7 +286,7 @@ export default function MangaPanel({
     sceneAbortRef.current = null;
     charRefStreamRef.current?.abort();
     charRefStreamRef.current = null;
-    const requestId = ++chapterLoadRequestRef.current;
+    chapterLoadRequestRef.current++;
     setImages([]);
     // Don't downgrade phase if there's an ongoing generation for this new chapter;
     // the derived `generating` flag below will reflect it via genStore.
@@ -321,7 +324,89 @@ export default function MangaPanel({
     setRefLoadSrcs({});
     imagePreloadAttemptsRef.current = {};
     refPreloadAttemptsRef.current = {};
-    // Load existing scenes and characters if available
+  }, [chapter?.id, onWorkspacePreviewModeChange]);
+
+  const syncChapterImagesFromServer = useCallback(async (chapterId: number) => {
+    const latest = await getChapter(chapterId);
+    const latestImages: ImageItem[] = latest.images.map((img) => ({
+      image_number: img.image_number,
+      image_path: img.image_path,
+      prompt: img.prompt || '',
+    }));
+    setImages(latestImages);
+    setIgnorePersistedImages(false);
+    return latestImages;
+  }, []);
+
+  // ── 后台任务轮询 ──
+
+  const startBackendTaskPolling = useCallback((chapterId: number) => {
+    // 清除已有的轮询定时器
+    if (backendTaskPollRef.current) {
+      clearInterval(backendTaskPollRef.current);
+      backendTaskPollRef.current = null;
+    }
+    backendTaskPollRef.current = setInterval(async () => {
+      try {
+        const status = await getMangaGenerationStatus(chapterId);
+        if (status.status === 'succeeded') {
+          // 后台任务完成，停止轮询并刷新数据
+          if (backendTaskPollRef.current) {
+            clearInterval(backendTaskPollRef.current);
+            backendTaskPollRef.current = null;
+          }
+          genStore.finish(chapterId);
+          await syncChapterImagesFromServer(chapterId);
+          onChapterRefresh?.(chapterId);
+          setTimeout(() => genStore.clear(chapterId), 800);
+        } else if (status.status === 'failed') {
+          // 后台任务失败
+          if (backendTaskPollRef.current) {
+            clearInterval(backendTaskPollRef.current);
+            backendTaskPollRef.current = null;
+          }
+          setErrorMsg(`后台漫画生成失败：${status.error_message || '未知错误'}`);
+          genStore.finish(chapterId, status.error_message || '未知错误');
+        } else if (status.status === 'running' || status.status === 'pending' || status.status === 'retrying') {
+          // 后台任务仍在进行，更新进度
+          setProgress({ current: status.progress, total: status.total });
+          genStore.patch(chapterId, { current: status.progress, total: status.total });
+        }
+      } catch (err) {
+        console.error('Backend task polling error:', err);
+      }
+    }, 3000);
+  }, [syncChapterImagesFromServer, onChapterRefresh]);
+
+  // ── 检查后台漫画生成状态 ──
+
+  const checkBackendMangaStatus = useCallback(async (chapterId: number) => {
+    try {
+      const status = await getMangaGenerationStatus(chapterId);
+      if (status.status === 'running' || status.status === 'pending' || status.status === 'retrying') {
+        // 后台有正在运行的任务，恢复进度显示并开始轮询
+        setProgress({ current: status.progress, total: status.total });
+        setStatusMsg(`检测到后台正在生成漫画 (${status.progress}/${status.total})`);
+        genStore.start(chapterId, status.total, []);
+        genStore.patch(chapterId, { current: status.progress, total: status.total, statusMsg: `后台正在生成漫画 (${status.progress}/${status.total})` });
+        startBackendTaskPolling(chapterId);
+      } else if (status.status === 'succeeded') {
+        // 后台任务已经完成，同步最新图片
+        await syncChapterImagesFromServer(chapterId);
+        onChapterRefresh?.(chapterId);
+      } else if (status.status === 'failed') {
+        // 后台任务失败，显示错误信息
+        setErrorMsg(`后台漫画生成任务失败：${status.error_message || '未知错误'}`);
+      }
+    } catch (err) {
+      console.error('Failed to check backend manga status:', err);
+    }
+  }, [syncChapterImagesFromServer, onChapterRefresh, startBackendTaskPolling]);
+  checkBackendMangaStatusRef.current = checkBackendMangaStatus;
+
+  // Load existing scenes and characters if available
+  useEffect(() => {
+    const requestId = ++chapterLoadRequestRef.current;
     if (chapter) {
       getChapterRefImages(chapter.id).then((r) => {
         if (chapterLoadRequestRef.current !== requestId) return;
@@ -348,8 +433,20 @@ export default function MangaPanel({
         setCharText(r.characters || '');
         setCharSource(r.source);
       }).catch(() => {});
+      // 检查是否有正在运行的后台漫画生成任务
+      checkBackendMangaStatusRef.current?.(chapter.id);
     }
   }, [chapter?.id]);
+
+  // 组件卸载时清理后台任务轮询
+  useEffect(() => {
+    return () => {
+      if (backendTaskPollRef.current) {
+        clearInterval(backendTaskPollRef.current);
+        backendTaskPollRef.current = null;
+      }
+    };
+  }, []);
 
   // Load existing images from chapter
   const existingImages: ImageItem[] =
@@ -767,18 +864,6 @@ export default function MangaPanel({
     }
   }, [allowColorMode, colorMode]);
 
-  const syncChapterImagesFromServer = useCallback(async (chapterId: number) => {
-    const latest = await getChapter(chapterId);
-    const latestImages: ImageItem[] = latest.images.map((img) => ({
-      image_number: img.image_number,
-      image_path: img.image_path,
-      prompt: img.prompt || '',
-    }));
-    setImages(latestImages);
-    setIgnorePersistedImages(false);
-    return latestImages;
-  }, []);
-
   const reconcileGenerationAfterStreamIssue = useCallback(
     async (chapterId: number, targetTotal: number, fallbackImages: ImageItem[], fallbackError: string) => {
       try {
@@ -806,7 +891,7 @@ export default function MangaPanel({
     [onChapterRefresh, syncChapterImagesFromServer],
   );
 
-  // 鈹€鈹€ Image generation 鈹€鈹€
+  // ── Image generation ──
 
   const startMangaGeneration = async (mode: 'continue' | 'restart' = 'continue') => {
     if (!chapter) return;

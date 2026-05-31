@@ -2988,7 +2988,7 @@ def _decode_edit_mask_upload(b64: str, target_size: tuple[int, int]) -> bytes:
 
 @app.on_event("startup")
 def on_startup():
-    init_db(run_migrations=False)
+    init_db()  # 尊重环境变量 RUN_STARTUP_MIGRATIONS
     # One-time: rename default stories
     from database import SessionLocal
     db = SessionLocal()
@@ -5466,6 +5466,113 @@ async def update_scenes_endpoint(chapter_id: int, body: dict, request: Request, 
 
 # ─── SSE for manga image generation ─────────────────────
 
+
+async def _background_manga_generation(
+    chapter_id: int,
+    scenes: list,
+    image_count: int,
+    character_profiles: str,
+    ref_entries: list,
+    color_mode: str,
+    image_api_key: str,
+    custom_image_provider: bool,
+    user_id: int,
+    task_id: str | None = None,
+    **kwargs,
+) -> dict:
+    """后台漫画生成任务，由 TaskManager 调度
+    
+    Args:
+        task_id: 由 TaskManager 传入的任务ID
+        其他参数与 generate_manga_stream 一致
+    
+    Returns:
+        dict: {
+            "completed_images": int,
+            "total_images": int,
+        }
+    """
+    logger.info(f"Background manga generation started: chapter={chapter_id}, images={image_count}")
+    completed = 0
+    total = len(scenes)
+
+    # 提前设置 result_json，使 get_manga_generation_status 能获取 total
+    init_db = SessionLocal()
+    try:
+        bg_task = init_db.query(BackgroundTask).filter(BackgroundTask.task_id == task_id).first()
+        if bg_task:
+            bg_task.result_json = {"completed_images": 0, "total_images": total}
+            init_db.commit()
+    finally:
+        init_db.close()
+
+    for i, scene_prompt in enumerate(scenes, start=1):
+        # 检查是否已存在（幂等性：断点续传）
+        check_db = SessionLocal()
+        try:
+            existing = check_db.query(MangaImage).filter(
+                MangaImage.chapter_id == chapter_id,
+                MangaImage.image_number == i,
+            ).first()
+            if existing:
+                completed += 1
+                continue
+        finally:
+            check_db.close()
+        
+        # 生成参考图路径
+        ref_imgs = _select_ref_image_paths_for_scene(scene_prompt, ref_entries)
+        ref_paths = [str(p) for p, _ in ref_imgs]
+        ref_labels = [label for _, label in ref_imgs]
+        
+        try:
+            image_result = await generate_manga_image(
+                scene_prompt,
+                chapter_id,
+                i,
+                all_scenes=scenes,
+                character_profiles=character_profiles,
+                ref_image_paths=ref_paths if ref_paths else None,
+                ref_labels=ref_labels if any(ref_labels) else None,
+                color_mode=color_mode,
+                api_key=image_api_key,
+            )
+            
+            # 如果有 sanitized prompt，更新 scenes 文件
+            if image_result.prompt_sanitized and image_result.final_prompt != scene_prompt:
+                scenes[i - 1] = image_result.final_prompt
+                meta = _load_scene_meta(chapter_id)
+                sanitized_indices = sorted(set((meta.get("sanitized_indices", []) or []) + [i - 1]))
+                _write_scenes_file(chapter_id, scenes, sanitized_indices)
+                scene_prompt = image_result.final_prompt
+        except (MangaImageGenerationError, Exception) as e:
+            logger.error(f"Background manga image {i} failed: {e}")
+            raise  # 让 TaskManager 处理重试/失败
+        
+        # 保存到数据库
+        write_db = SessionLocal()
+        try:
+            manga = MangaImage(
+                chapter_id=chapter_id,
+                image_number=i,
+                image_path=image_result.image_path,
+                prompt=scene_prompt,
+            )
+            write_db.add(manga)
+            if custom_image_provider:
+                write_db.commit()
+            else:
+                _check_and_consume_quota(user_id, "manga.image.monthly_limit", 1, write_db, deduct=True)
+            write_db.refresh(manga)
+        finally:
+            write_db.close()
+        
+        completed += 1
+    
+    logger.info(f"Background manga generation completed: chapter={chapter_id}, completed={completed}/{total}")
+    return {"completed_images": completed, "total_images": total}
+
+
 @app.delete("/api/chapters/{chapter_id}/manga-images")
 async def reset_manga_images(chapter_id: int, request: Request, db: Session = Depends(get_db)):
     user = _require_user(request, db)
@@ -5496,6 +5603,14 @@ async def generate_manga_stream(chapter_id: int, request: Request, db: Session =
         raise HTTPException(400, f"Expected {image_count} scenes, found {len(scenes)}")
     if chapter_id in ACTIVE_MANGA_GENERATIONS:
         raise HTTPException(409, "Manga generation is already running for this chapter")
+    # 数据库级别检查：防止服务器重启或 SSE 断开后仍允许重复提交
+    existing_task = db.query(BackgroundTask).filter(
+        BackgroundTask.task_type == "manga_generation",
+        BackgroundTask.chapter_id == chapter_id,
+        BackgroundTask.status.in_(["pending", "running", "retrying"]),
+    ).first()
+    if existing_task:
+        raise HTTPException(409, "Manga generation is already running for this chapter")
     character_profiles = await _load_characters_async(chapter_id, request, db)
     ref_entries = _effective_ref_entries(chapter_id, db)
     color_mode = _effective_color_mode(chapter_id, user.id, db)
@@ -5507,107 +5622,162 @@ async def generate_manga_stream(chapter_id: int, request: Request, db: Session =
     user_id = user.id
     _release_db_transaction(db)
 
-    # Check which images already exist
-    existing_images = {
-        img.image_number: {
-            "id": img.id,
-            "image_number": img.image_number,
-            "image_path": img.image_path,
-            "prompt": img.prompt,
-        }
-        for img in chapter.images
-    }
+    # 漫画生成超时常量，与 submit_task 的 timeout 参数同步
+    _manga_gen_timeout = 1800  # 30 minutes
+
+    # 提交后台任务到 TaskManager
+    task_id = f"manga_gen_{chapter_id}_{int(datetime.datetime.utcnow().timestamp())}"
+    await task_manager.submit_task(
+        task_id=task_id,
+        task_type="manga_generation",
+        coro_func=_background_manga_generation,
+        chapter_id=chapter_id,
+        scenes=scenes,
+        image_count=image_count,
+        character_profiles=character_profiles,
+        ref_entries=ref_entries,
+        color_mode=color_mode,
+        image_api_key=image_api_key,
+        custom_image_provider=custom_image_provider,
+        user_id=user_id,
+        timeout=_manga_gen_timeout,
+        max_retries=0,
+    )
+
+    # 已发送过的图片编号集合，防止重复推送
+    _yielded_image_numbers: set[int] = set()
 
     async def event_generator():
+        nonlocal _yielded_image_numbers
         try:
             yield {"event": "scenes", "data": json.dumps({"scenes": scenes}, ensure_ascii=False)}
 
-            for i, scene_prompt in enumerate(scenes, start=1):
-                # Skip already generated images
-                if i in existing_images:
-                    img = existing_images[i]
-                    yield {
-                        "event": "image",
-                        "data": json.dumps({
-                            "id": img["id"],
-                            "image_number": i,
-                            "image_path": img["image_path"],
-                            "prompt": img["prompt"] or scene_prompt,
-                        }, ensure_ascii=False),
-                    }
+            poll_count = 0
+            max_polls = _manga_gen_timeout // 2  # 与 TaskManager 超时同步（默认 1800/2=900）
+
+            while poll_count < max_polls:
+                poll_count += 1
+                task_status = task_manager.get_task_status(task_id)
+
+                if task_status is None:
+                    yield {"event": "progress", "data": json.dumps({"current": 0, "total": image_count, "prompt": "正在排队..."}, ensure_ascii=False)}
+                    await asyncio.sleep(2)
                     continue
 
-                yield {
-                    "event": "progress",
-                    "data": json.dumps({"current": i, "total": image_count, "prompt": scene_prompt}, ensure_ascii=False),
-                }
-                try:
-                    ref_imgs = _select_ref_image_paths_for_scene(scene_prompt, ref_entries)
-                    ref_paths = [str(p) for p, _ in ref_imgs]
-                    ref_labels = [label for _, label in ref_imgs]
-                    image_result = await generate_manga_image(
-                        scene_prompt,
-                        chapter_id,
-                        i,
-                        all_scenes=scenes,
-                        character_profiles=character_profiles,
-                        ref_image_paths=ref_paths if ref_paths else None,
-                        ref_labels=ref_labels if any(ref_labels) else None,
-                        color_mode=color_mode,
-                        api_key=image_api_key,
-                    )
-                    if image_result.prompt_sanitized and image_result.final_prompt != scene_prompt:
-                        scenes[i - 1] = image_result.final_prompt
-                        meta = _load_scene_meta(chapter_id)
-                        sanitized_indices = sorted(set((meta.get("sanitized_indices", []) or []) + [i - 1]))
-                        _write_scenes_file(chapter_id, scenes, sanitized_indices)
-                        scene_prompt = image_result.final_prompt
-                except MangaImageGenerationError as img_err:
-                    payload = img_err.to_payload()
-                    payload["error"] = f"第{i}张生成失败: {payload['error']}"
-                    payload["image_number"] = i
-                    yield {"event": "error", "data": json.dumps(payload, ensure_ascii=False)}
-                    return
-                except Exception as img_err:
-                    yield {
-                        "event": "error",
-                        "data": json.dumps({"error": f"第{i}张生成失败: {str(img_err) or repr(img_err)}", "code": "unknown_error", "image_number": i}, ensure_ascii=False),
-                    }
+                status = task_status["status"]
+
+                if status == "succeeded":
+                    # 查询数据库中所有已生成的图片并返回
+                    result_db = SessionLocal()
+                    try:
+                        chapter_refresh = result_db.query(Chapter).filter(Chapter.id == chapter_id).first()
+                        all_images = sorted(chapter_refresh.images, key=lambda img: img.image_number) if chapter_refresh else []
+                        for img in all_images:
+                            yield {
+                                "event": "image",
+                                "data": json.dumps({
+                                    "id": img.id,
+                                    "image_number": img.image_number,
+                                    "image_path": img.image_path,
+                                    "prompt": img.prompt or "",
+                                }, ensure_ascii=False),
+                            }
+                    finally:
+                        result_db.close()
+                    yield {"event": "done", "data": json.dumps({"message": "漫画生成完成！"}, ensure_ascii=False)}
                     return
 
-                write_db = SessionLocal()
-                try:
-                    manga = MangaImage(
-                        chapter_id=chapter_id,
-                        image_number=i,
-                        image_path=image_result.image_path,
-                        prompt=scene_prompt,
-                    )
-                    write_db.add(manga)
-                    if custom_image_provider:
-                        write_db.commit()
-                    else:
-                        _check_and_consume_quota(user_id, "manga.image.monthly_limit", 1, write_db, deduct=True)
-                    write_db.refresh(manga)
-                finally:
-                    write_db.close()
-                yield {
-                    "event": "image",
-                    "data": json.dumps({
-                        "id": manga.id,
-                        "image_number": i,
-                        "image_path": image_result.image_path,
-                        "prompt": scene_prompt,
-                    }, ensure_ascii=False),
-                }
+                elif status == "failed":
+                    error_msg = task_status.get("error_message", "Generation failed")
+                    yield {"event": "error", "data": json.dumps({"error": error_msg}, ensure_ascii=False)}
+                    return
 
-            yield {"event": "done", "data": json.dumps({"message": "漫画生成完成！"}, ensure_ascii=False)}
+                elif status == "running":
+                    # 从数据库中查询已完成的数量和图片
+                    check_db2 = SessionLocal()
+                    try:
+                        existing_imgs = check_db2.query(MangaImage).filter(
+                            MangaImage.chapter_id == chapter_id,
+                        ).order_by(MangaImage.image_number).all()
+                    finally:
+                        check_db2.close()
+
+                    completed_count = len(existing_imgs)
+                    yield {"event": "progress", "data": json.dumps({
+                        "current": completed_count,
+                        "total": image_count,
+                        "prompt": f"正在生成第 {completed_count + 1}/{image_count} 张漫画",
+                    }, ensure_ascii=False)}
+
+                    # 仅发送增量图片（防止重复推送）
+                    for img_obj in existing_imgs:
+                        if img_obj.image_number not in _yielded_image_numbers:
+                            _yielded_image_numbers.add(img_obj.image_number)
+                            yield {
+                                "event": "image",
+                                "data": json.dumps({
+                                    "id": img_obj.id,
+                                    "image_number": img_obj.image_number,
+                                    "image_path": img_obj.image_path,
+                                    "prompt": img_obj.prompt or "",
+                                }, ensure_ascii=False),
+                            }
+
+                elif status == "pending":
+                    yield {"event": "progress", "data": json.dumps({"current": 0, "total": image_count, "prompt": "正在排队..."}, ensure_ascii=False)}
+
+                elif status == "retrying":
+                    yield {"event": "progress", "data": json.dumps({"current": 0, "total": image_count, "prompt": "正在重试..."}, ensure_ascii=False)}
+
+                await asyncio.sleep(2)
+
+            # Timeout
+            yield {"event": "error", "data": json.dumps({"error": "漫画生成超时"}, ensure_ascii=False)}
+
+        except asyncio.CancelledError:
+            # SSE 连接断开，但后台任务继续运行
+            logger.info(f"Manga generation SSE cancelled for chapter {chapter_id}, background task continues")
         except Exception as e:
+            logger.exception(f"Manga generation SSE error: {e}")
             yield {"event": "error", "data": json.dumps({"error": str(e)}, ensure_ascii=False)}
         finally:
             ACTIVE_MANGA_GENERATIONS.discard(chapter_id)
 
     return EventSourceResponse(event_generator(), ping=10)
+
+
+@app.get("/api/chapters/{chapter_id}/manga-generation-status")
+async def get_manga_generation_status(chapter_id: int, request: Request, db: Session = Depends(get_db)):
+    """查询漫画生成后台任务状态"""
+    user = _require_user(request, db)
+    chapter = _require_chapter_for_user(chapter_id, user, db)
+
+    # 查询最新的漫画生成 BackgroundTask
+    task = db.query(BackgroundTask).filter(
+        BackgroundTask.task_type == "manga_generation",
+        BackgroundTask.chapter_id == chapter_id,
+    ).order_by(BackgroundTask.created_at.desc()).first()
+
+    if not task:
+        return {
+            "status": "none",
+            "message": "没有进行中的漫画生成任务",
+        }
+
+    # 查询当前已生成的图片数量
+    image_count = db.query(MangaImage).filter(
+        MangaImage.chapter_id == chapter_id,
+    ).count()
+
+    return {
+        "task_id": task.task_id,
+        "status": task.status,
+        "progress": image_count,
+        "total": task.result_json.get("total_images", image_count) if task.result_json else image_count,
+        "error_message": task.error_message,
+        "created_at": task.created_at.isoformat() if task.created_at else None,
+        "completed_at": task.completed_at.isoformat() if task.completed_at else None,
+    }
 
 
 # ─── Regenerate single image ─────────────────────────────
@@ -6261,18 +6431,18 @@ async def generate_framework_endpoint(story_id: int, request: Request, db: Sessi
     captured_outline = dict(story.outline or {})
     _api_key = deepseek_api_key
     await task_manager.submit_task(
-        task_id=f"quality_check_{story.id}_{int(datetime.datetime.now(datetime.timezone.utc).timestamp())}",
-        task_type="quality_check",
-        coro_func=_background_quality_check,
+        f"quality_check_{story.id}_{int(datetime.datetime.now(datetime.timezone.utc).timestamp())}",
+        "quality_check",
+        _background_quality_check,
         story.id,
         str(story.description or "").strip(),
         _api_key,
         captured_tags,
         captured_chars,
         captured_outline,
-        story_id=story.id,
         timeout=600,  # 10分钟超时
         max_retries=2,
+        story_id=story.id,
     )
 
     return {
