@@ -577,7 +577,7 @@ def _seed_video_style_presets():
             for preset in presets:
                 conn.execute(
                     text("""INSERT INTO video_style_presets (name, category, prompt_template, image_style_params, video_style_params, sort_order)
-                            VALUES (:name, :category, :prompt_template, :image_style_params::jsonb, :video_style_params::jsonb, :sort_order)"""),
+                            VALUES (:name, :category, :prompt_template, CAST(:image_style_params AS JSONB), CAST(:video_style_params AS JSONB), :sort_order)"""),
                     preset,
                 )
 
