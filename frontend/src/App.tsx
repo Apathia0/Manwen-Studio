@@ -1742,7 +1742,7 @@ function WorkspacePage({
     );
   }
   return (
-    <div className="h-[calc(100vh-120px)] overflow-hidden rounded-md border border-[#d9dfd7] bg-white">
+    <div className="h-[calc(100vh-120px)] overflow-y-auto rounded-md border border-[#d9dfd7] bg-white">
       <div className="flex items-center justify-end border-b border-[#e8edf2] px-4 py-2">
         <TemplateBindingPanel storyId={story.id} />
       </div>
@@ -2740,6 +2740,21 @@ const USER_FEATURE_META: Record<string, { label: string; description: string; un
     description: '是否支持彩色漫画生成。',
     unit: '',
     kind: 'boolean',
+  },
+  'video.generate.seconds.monthly_limit': {
+    label: '视频生成时长',
+    description: '每月可生成的视频总时长。',
+    unit: '秒/月',
+  },
+  'screenplay.generate.monthly_limit': {
+    label: '剧本生成',
+    description: '每月可生成影视剧本的次数。',
+    unit: '次/月',
+  },
+  'shot.generate.monthly_limit': {
+    label: '分镜任务生成',
+    description: '每月可生成分镜任务卡的次数。',
+    unit: '次/月',
   },
 };
 
