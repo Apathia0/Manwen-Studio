@@ -2078,7 +2078,9 @@ def _has_opening_ready_outline(outline: dict | None) -> bool:
         return False
     if not str(first_chapter.get("hook") or "").strip():
         return False
-    if _count_detailed_opening_chapters(chapters, upto=10) < 6:
+    max_check = min(len(chapters), 10)
+    need_detailed = max(3, max_check - 4)
+    if _count_detailed_opening_chapters(chapters, upto=max_check) < need_detailed:
         return False
     return True
 
