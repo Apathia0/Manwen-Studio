@@ -1351,7 +1351,7 @@ async def regenerate_outline(story_context: dict, api_key: str | None = None) ->
 2. 阶段结构必须完整，但阶段数量不固定；请根据题材自由决定分成几个主要阶段更合适。
 3. 中段要保留足够的升级空间、悬念递进和关系变化空间。
 4. 真正的终局高潮应放在整体规划后段，不要过早揭秘、过早满级、过早完结。
-5. 开书段要明确：在 `outline.serial_strategy` 中给出 `opening_hook`、`first_3_chapter_hook`、`chapter_10_climax`、`chapter_20_payoff`。
+        5. 开书段要明确：在 `outline.serial_strategy` 中给出 `positioning`、`opening_hook`、`first_3_chapter_hook`、`chapter_10_climax`、`chapter_20_payoff`。
 6. 可以把前中期写得更细，把后期写成更高层级的阶段目标与冲突推进，但整体方向必须完整。
 7. 只输出 `{{"outline": ...}}` JSON 对象。"""
 

@@ -222,6 +222,22 @@ FEATURE_CATALOG: list[dict] = [
         "value_type": "number",
         "default_rule": {"reset_period": "monthly", "deduct_mode": "on_success"},
     },
+    {
+        "key": "screenplay.generate.monthly_limit",
+        "name": "剧本生成次数",
+        "description": "用户每月可生成影视剧本的次数。",
+        "category": "视频制作",
+        "value_type": "number",
+        "default_rule": {"reset_period": "monthly", "deduct_mode": "on_success"},
+    },
+    {
+        "key": "shot.generate.monthly_limit",
+        "name": "分镜生成次数",
+        "description": "用户每月可生成分镜任务卡的次数。",
+        "category": "视频制作",
+        "value_type": "number",
+        "default_rule": {"reset_period": "monthly", "deduct_mode": "on_success"},
+    },
 ]
 
 FEATURE_CATALOG_MAP = {item["key"]: item for item in FEATURE_CATALOG}
@@ -810,6 +826,8 @@ def _ensure_platform_seed(db: Session) -> None:
             "manga.max_image_count_per_chapter": 6,
             "manga.allow_color_mode": False,
             "video.generate.seconds.monthly_limit": 60,
+            "screenplay.generate.monthly_limit": 3,
+            "shot.generate.monthly_limit": 10,
         },
         "pro": {
             "framework.generate.monthly_limit": 50,
@@ -821,6 +839,8 @@ def _ensure_platform_seed(db: Session) -> None:
             "manga.max_image_count_per_chapter": 12,
             "manga.allow_color_mode": True,
             "video.generate.seconds.monthly_limit": 900,
+            "screenplay.generate.monthly_limit": 30,
+            "shot.generate.monthly_limit": 100,
         },
         "premium": {
             "framework.generate.monthly_limit": 200,
@@ -832,6 +852,8 @@ def _ensure_platform_seed(db: Session) -> None:
             "manga.max_image_count_per_chapter": 20,
             "manga.allow_color_mode": True,
             "video.generate.seconds.monthly_limit": 3600,
+            "screenplay.generate.monthly_limit": 100,
+            "shot.generate.monthly_limit": 500,
         },
     }
     for plan in [free, pro, premium]:
@@ -1506,6 +1528,8 @@ def _usage_entries_for_user(user_id: int, db: Session) -> list[dict]:
         "manga.regenerate.monthly_limit",
         "ai.text.advanced_calls.monthly_limit",
         "video.generate.seconds.monthly_limit",
+        "screenplay.generate.monthly_limit",
+        "shot.generate.monthly_limit",
     ]
     entries = []
     for key in tracked:
@@ -4440,6 +4464,11 @@ async def chat(chapter_id: int, body: ChatMessageIn, request: Request, db: Sessi
     if chapter.content_source == "import":
         raise HTTPException(409, "This chapter was imported from existing novel text and cannot use AI chat")
 
+    # 配额预检
+    user = _require_user(request, db)
+    user_id = user.id
+    _check_and_consume_advanced_text_quota(request, user_id, db, deduct=False)
+
     # Save user message
     chapter.content_source = "chat"
     user_msg = ChatMessage(chapter_id=chapter_id, role="user", content=body.content)
@@ -4492,6 +4521,8 @@ async def chat(chapter_id: int, body: ChatMessageIn, request: Request, db: Sessi
                 assistant_msg = ChatMessage(chapter_id=chapter_id, role="assistant", content=full_content)
                 write_db.add(assistant_msg)
                 write_db.commit()
+                # 配额扣减
+                _check_and_consume_advanced_text_quota(request, user_id, write_db, deduct=True)
             finally:
                 write_db.close()
             yield {"event": "done", "data": json.dumps({"content": full_content}, ensure_ascii=False)}
