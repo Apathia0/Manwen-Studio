@@ -1060,6 +1060,9 @@ async def regenerate_chapter_scenes(
 
     _clear_chapter_scenes(chapter_id, db)
 
+    # 配额预检
+    _check_and_consume_quota_wrapper(user.id, "screenplay.generate.monthly_limit", 1, db, deduct=False)
+
     # Generate new scenes
     scenes_data = await regenerate_scenes(
         existing_screenplay=chapter.screenplay_text or chapter.novel_content or "",
@@ -1089,6 +1092,8 @@ async def regenerate_chapter_scenes(
         scenes.append(scene)
 
     db.commit()
+    # 配额扣减
+    _check_and_consume_quota_wrapper(user.id, "screenplay.generate.monthly_limit", 1, db, deduct=True)
 
     for scene in scenes:
         db.refresh(scene)
@@ -1294,6 +1299,10 @@ async def generate_scene_concept_art(
     full_path = scene_dir / filename
 
     api_key, _base_url, _model = _user_video_api_key(request)
+
+    # 配额预检
+    _check_and_consume_quota_wrapper(user.id, "manga.image.monthly_limit", 1, db, deduct=False)
+
     try:
         await image2_service.generate_reference_image(
             prompt=prompt,
@@ -1340,6 +1349,8 @@ async def generate_scene_concept_art(
     scene.concept_art_asset_id = asset.id
 
     db.commit()
+    # 配额扣减
+    _check_and_consume_quota_wrapper(user.id, "manga.image.monthly_limit", 1, db, deduct=True)
     db.refresh(asset)
 
     return {
@@ -2139,6 +2150,12 @@ async def retry_video_job(
         raise HTTPException(404, "Associated shot not found")
     _require_chapter_for_user(shot.scene.chapter_id, user, db)
 
+    # 配额预检
+    _check_and_consume_quota_wrapper(
+        user.id, "video.generate.seconds.monthly_limit",
+        old_job.duration_seconds or 5, db, deduct=False,
+    )
+
     # Create new job with same shot_id
     new_job = VideoGenerationJob(
         shot_id=old_job.shot_id,
@@ -2153,6 +2170,11 @@ async def retry_video_job(
     )
     db.add(new_job)
     db.commit()
+    # 配额扣减
+    _check_and_consume_quota_wrapper(
+        user.id, "video.generate.seconds.monthly_limit",
+        old_job.duration_seconds or 5, db, deduct=True,
+    )
     db.refresh(new_job)
 
     return {
@@ -2387,6 +2409,9 @@ async def regenerate_video_asset(
     output_filename = f"asset_{asset.id}_regen_{uuid.uuid4().hex[:8]}.png"
     output_path = regen_dir / output_filename
 
+    # 配额预检
+    _check_and_consume_quota_wrapper(user.id, "manga.image.monthly_limit", 1, db, deduct=False)
+
     try:
         if mode == "partial" and mask:
             import base64
@@ -2438,6 +2463,8 @@ async def regenerate_video_asset(
             shot.updated_at = datetime.datetime.utcnow()
 
     db.commit()
+    # 配额扣减
+    _check_and_consume_quota_wrapper(user.id, "manga.image.monthly_limit", 1, db, deduct=True)
     db.refresh(new_asset)
 
     return {
@@ -2812,6 +2839,9 @@ async def generate_video_characters(
 5. 「大五人格」用数值标注，格式固定为 O:xx C:xx E:xx A:xx N:xx
 6. 角色设计表用于视频动画的一致性参考，所有帧必须严格匹配这些标记"""
 
+        # 配额预检
+        _check_and_consume_quota_wrapper(user.id, "ai.text.advanced_calls.monthly_limit", 1, db, deduct=False)
+
         try:
             async with httpx.AsyncClient(timeout=120) as client:
                 response = await client.post(
@@ -2900,6 +2930,8 @@ async def generate_video_characters(
             created.append({"name": name, "versions": _serialize_character_versions(db, story_id, name)})
 
     db.commit()
+    # 配额扣减
+    _check_and_consume_quota_wrapper(user.id, "ai.text.advanced_calls.monthly_limit", 1, db, deduct=True)
     return {"characters": created, "video_character_profiles": content}
 
 
@@ -3054,6 +3086,10 @@ async def generate_character_ref_image(
     full_path = char_dir / filename
 
     api_key, _base_url, _model = _user_video_api_key(request)
+
+    # 配额预检
+    _check_and_consume_quota_wrapper(user.id, "manga.image.monthly_limit", 1, db, deduct=False)
+
     try:
         await image2_service.generate_reference_image(
             prompt=final_prompt,
@@ -3080,6 +3116,8 @@ async def generate_character_ref_image(
     db.flush()
     version.ref_asset_id = ref_asset.id
     db.commit()
+    # 配额扣减
+    _check_and_consume_quota_wrapper(user.id, "manga.image.monthly_limit", 1, db, deduct=True)
     db.refresh(ref_asset)
 
     return {
@@ -3592,6 +3630,9 @@ async def generate_shot_prompts(
         "action_description": shot.action_description,
     }
 
+    # 配额预检
+    _check_and_consume_quota_wrapper(user.id, "ai.text.advanced_calls.monthly_limit", 1, db, deduct=False)
+
     prompts = await generate_shot_prompts_service(
         shot_info=shot_info,
         style=body.style or "cinematic",
@@ -3605,6 +3646,8 @@ async def generate_shot_prompts(
     shot.continuity_notes = prompts.get("continuity_notes", shot.continuity_notes or "")
     shot.updated_at = datetime.datetime.utcnow()
     db.commit()
+    # 配额扣减
+    _check_and_consume_quota_wrapper(user.id, "ai.text.advanced_calls.monthly_limit", 1, db, deduct=True)
     db.refresh(shot)
 
     reference_assets = []
@@ -3674,6 +3717,10 @@ async def render_shot_storyboard(
         style_name,
     )
     api_key, _base_url, _model = _user_video_api_key(request)
+
+    # 配额预检
+    _check_and_consume_quota_wrapper(user.id, "manga.image.monthly_limit", 1, db, deduct=False)
+
     try:
         await image2_service.generate_reference_image(
             prompt=prompt,
@@ -3705,6 +3752,8 @@ async def render_shot_storyboard(
     shot.status = "storyboard_ready"
     shot.updated_at = datetime.datetime.utcnow()
     db.commit()
+    # 配额扣减
+    _check_and_consume_quota_wrapper(user.id, "manga.image.monthly_limit", 1, db, deduct=True)
     db.refresh(shot)
     db.refresh(asset)
 
@@ -3896,6 +3945,10 @@ async def generate_shot_frames(
     frames_dir = _VIDEO_OUTPUTS_DIR / "frames"
     frames_dir.mkdir(parents=True, exist_ok=True)
 
+    # 配额预检（按实际生成帧数）
+    frame_count = 2 if frame_type == "both" else 1
+    _check_and_consume_quota_wrapper(user.id, "manga.image.monthly_limit", frame_count, db, deduct=False)
+
     assets = []
 
     for subtype in (["first_frame", "last_frame"] if frame_type == "both" else [frame_type]):
@@ -3952,6 +4005,8 @@ async def generate_shot_frames(
         assets.append(asset)
 
     db.commit()
+    # 配额扣减
+    _check_and_consume_quota_wrapper(user.id, "manga.image.monthly_limit", frame_count, db, deduct=True)
     for a in assets:
         db.refresh(a)
 
@@ -4534,6 +4589,10 @@ async def generate_shot_character_asset(
 
     final_prompt = _merge_style_prompt(prompt, style_ctx.get("prompt_template"), style_name)
     api_key, _base_url, _model = _user_video_api_key(request)
+
+    # 配额预检
+    _check_and_consume_quota_wrapper(user.id, "manga.image.monthly_limit", 1, db, deduct=False)
+
     try:
         await image2_service.generate_reference_image(
             prompt=final_prompt,
@@ -4565,6 +4624,8 @@ async def generate_shot_character_asset(
     )
     db.add(asset)
     db.commit()
+    # 配额扣减
+    _check_and_consume_quota_wrapper(user.id, "manga.image.monthly_limit", 1, db, deduct=True)
     db.refresh(asset)
 
     return {

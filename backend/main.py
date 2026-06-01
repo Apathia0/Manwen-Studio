@@ -2060,7 +2060,7 @@ def _has_opening_ready_outline(outline: dict | None) -> bool:
     if not isinstance(acts, list) or len(acts) < 2:
         return False
     chapters = _extract_outline_chapters(outline)
-    if len(chapters) < 10:
+    if len(chapters) < 3:
         return False
     strategy = _read_serial_strategy(outline)
     required_strategy_fields = [
@@ -4557,6 +4557,11 @@ async def generate_novel_endpoint(chapter_id: int, request: Request, db: Session
     if not history:
         raise HTTPException(400, "No chat history to generate novel from")
 
+    # 配额预检
+    user = _require_user(request, db)
+    user_id = user.id
+    _check_and_consume_advanced_text_quota(request, user_id, db, deduct=False)
+
     chapter_info = {
         "chapter_number": chapter.chapter_number,
         "title": chapter.title or f"第{chapter.chapter_number}章",
@@ -4595,6 +4600,8 @@ async def generate_novel_endpoint(chapter_id: int, request: Request, db: Session
     msg = ChatMessage(chapter_id=chapter_id, role="assistant", content=novel_content)
     db.add(msg)
     db.commit()
+    # 配额扣减
+    _check_and_consume_advanced_text_quota(request, user_id, db, deduct=True)
     response_payload = ChapterOut.model_validate(chapter)
     _release_db_transaction(db)
     return response_payload
@@ -5995,6 +6002,9 @@ async def onboarding_send_message(story_id: int, request: Request, db: Session =
     if not safe_messages:
         raise HTTPException(400, "No valid messages")
 
+    # 配额预检
+    _check_and_consume_advanced_text_quota(request, user.id, db, deduct=False)
+
     creative_brief = None
     deepseek_api_key = _user_deepseek_api_key(request)
     _release_db_transaction(db)
@@ -6015,6 +6025,9 @@ async def onboarding_send_message(story_id: int, request: Request, db: Session =
                 logger.warning("Failed to preview creative brief during onboarding: %s", exc)
     except Exception as e:
         raise HTTPException(502, f"AI 服务调用失败: {e}")
+
+    # 配额扣减
+    _check_and_consume_advanced_text_quota(request, user.id, db, deduct=True)
 
     return OnboardingMessageOut(
         reply=result.get("reply", ""),
@@ -6052,6 +6065,10 @@ async def onboarding_confirm(story_id: int, request: Request, db: Session = Depe
     raw_input["raw_notes"] = all_raw
 
     deepseek_api_key = _user_deepseek_api_key(request)
+
+    # 配额预检
+    _check_and_consume_advanced_text_quota(request, user.id, db, deduct=False)
+
     _release_db_transaction(db)
     try:
         creative_brief = await build_creative_brief(
@@ -6071,6 +6088,8 @@ async def onboarding_confirm(story_id: int, request: Request, db: Session = Depe
     story.description = story_bible.get("creative_brief", {}).get("one_line_premise", story.description or "")
     story.onboarding_completed = True
     db.commit()
+    # 配额扣减
+    _check_and_consume_advanced_text_quota(request, user.id, db, deduct=True)
     db.refresh(story)
 
     return {
@@ -6120,6 +6139,9 @@ async def import_context_send_message(story_id: int, request: Request, db: Sessi
     if not safe_messages:
         raise HTTPException(400, "No valid messages")
 
+    # 配额预检
+    _check_and_consume_advanced_text_quota(request, user.id, db, deduct=False)
+
     import_context = _build_import_guidance_context(story, db)
     creative_brief = None
     deepseek_api_key = _user_deepseek_api_key(request)
@@ -6143,6 +6165,9 @@ async def import_context_send_message(story_id: int, request: Request, db: Sessi
                 logger.warning("Failed to preview creative brief during import guidance: %s", exc)
     except Exception as exc:
         raise HTTPException(502, f"AI 导入补充调用失败: {exc}")
+
+    # 配额扣减
+    _check_and_consume_advanced_text_quota(request, user.id, db, deduct=True)
 
     return OnboardingMessageOut(
         reply=result.get("reply", ""),
@@ -6172,6 +6197,10 @@ async def import_context_confirm(story_id: int, request: Request, db: Session = 
     import_context = _build_import_guidance_context(story, db)
     raw_input = _compose_import_raw_input(import_context, collected_info, messages_raw)
     deepseek_api_key = _user_deepseek_api_key(request)
+
+    # 配额预检
+    _check_and_consume_advanced_text_quota(request, user.id, db, deduct=False)
+
     _release_db_transaction(db)
     try:
         creative_brief = await build_import_creative_brief(
@@ -6193,6 +6222,8 @@ async def import_context_confirm(story_id: int, request: Request, db: Session = 
     story.description = story_bible.get("creative_brief", {}).get("one_line_premise", story.description or "")
     story.import_context_completed = True
     db.commit()
+    # 配额扣减
+    _check_and_consume_advanced_text_quota(request, user.id, db, deduct=True)
     db.refresh(story)
     return {
         "story_id": story.id,
@@ -7370,6 +7401,19 @@ async def refresh_all_memories(story_id: int, request: Request, db: Session = De
         .order_by(Chapter.chapter_number)
         .all()
     )
+    # 统计需要刷新的章节数并预检配额
+    needs_refresh = 0
+    for chapter in chapters:
+        memory = chapter.memory_summary if isinstance(chapter.memory_summary, dict) else {}
+        handoff = memory.get("chapter_handoff") if isinstance(memory.get("chapter_handoff"), dict) else {}
+        if not (handoff.get("ending_location") and handoff.get("active_characters")):
+            needs_refresh += 1
+    if needs_refresh > 0:
+        _check_and_consume_feature_quota(
+            request, user.id, "ai.text.advanced_calls.monthly_limit",
+            needs_refresh, db, deduct=False, provider_kind="text",
+        )
+
     refreshed = 0
     for chapter in chapters:
         memory = chapter.memory_summary if isinstance(chapter.memory_summary, dict) else {}
@@ -7379,6 +7423,12 @@ async def refresh_all_memories(story_id: int, request: Request, db: Session = De
         await _refresh_chapter_memory(chapter, request, db)
         refreshed += 1
     db.commit()
+    # 配额扣减（按实际刷新数量）
+    if refreshed > 0:
+        _check_and_consume_feature_quota(
+            request, user.id, "ai.text.advanced_calls.monthly_limit",
+            refreshed, db, deduct=True, provider_kind="text",
+        )
     for chapter in chapters:
         db.refresh(chapter)
     return {"refreshed": refreshed, "total": len(chapters)}
