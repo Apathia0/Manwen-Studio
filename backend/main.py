@@ -2108,7 +2108,7 @@ def _count_detailed_opening_chapters(chapters: list[dict], upto: int = 10) -> in
     return count
 
 
-def _framework_launch_quality_issues(framework: dict | None) -> list[str]:
+def _framework_launch_quality_issues(framework: dict | None, expected_min_chapters: int = 10) -> list[str]:
     issues: list[str] = []
     if not isinstance(framework, dict):
         return ["返回结果不是有效框架对象"]
@@ -2123,12 +2123,14 @@ def _framework_launch_quality_issues(framework: dict | None) -> list[str]:
         issues.append("主要阶段不足，至少需要 2 个以上阶段来支撑开书和后续扩写")
 
     chapters = _extract_outline_chapters(outline)
-    if len(chapters) < 10:
-        issues.append("开书规划不足，至少需要覆盖前 10 章的章节规划")
+    min_ch = expected_min_chapters
+    if len(chapters) < min_ch:
+        issues.append(f"开书规划不足，至少需要覆盖前 {min_ch} 章的章节规划")
 
-    detailed_first_10 = _count_detailed_opening_chapters(chapters, upto=10)
-    if detailed_first_10 < 6:
-        issues.append("前 10 章不够细，至少应有 6 章具备摘要和目标/冲突/钩子等执行信息")
+    detailed_count = _count_detailed_opening_chapters(chapters, upto=min_ch)
+    min_detailed = max(3, min_ch - 4)
+    if detailed_count < min_detailed:
+        issues.append(f"前 {min_ch} 章不够细，至少应有 {min_detailed} 章具备摘要和目标/冲突/钩子等执行信息")
 
     strategy = _read_serial_strategy(outline)
     required_strategy_fields = [
@@ -6456,13 +6458,14 @@ async def generate_framework_endpoint(story_id: int, request: Request, db: Sessi
         )
     except ValueError as exc:
         raise HTTPException(502, f"AI 初始框架生成不完整：{exc}") from exc
-    quality_issues = _framework_launch_quality_issues(framework)
+    expected_min = max(requested_min_chapters or 0, 10)
+    quality_issues = _framework_launch_quality_issues(framework, expected_min_chapters=expected_min)
     if quality_issues:
         try:
             framework = await generate_framework(
                 description.strip(),
                 api_key=deepseek_api_key,
-                required_min_chapters=max(requested_min_chapters or 0, 20),
+                required_min_chapters=expected_min,
                 story_bible=story_bible,
                 story_context=story_context,
                 launch_ready_required=True,
@@ -6475,7 +6478,7 @@ async def generate_framework_endpoint(story_id: int, request: Request, db: Sessi
                 story_bible=story_bible,
                 require_launch_ready=True,
             )
-            quality_issues = _framework_launch_quality_issues(framework)
+            quality_issues = _framework_launch_quality_issues(framework, expected_min_chapters=expected_min)
         except ValueError as exc:
             raise HTTPException(502, f"AI 开书框架二次修正失败：{exc}") from exc
     if quality_issues:
