@@ -28,7 +28,7 @@ os.environ["no_proxy"] = "*"
 IMAGE_API_BASE_URL = os.getenv("IMAGE_API_BASE_URL", "https://api.xbyjs.top/v1").rstrip("/")
 IMAGE_API_KEY = os.getenv("IMAGE_API_KEY", "")
 IMAGE_MODEL = "gpt-image-2"
-IMAGE_SIZE = "1024x1536"
+IMAGE_SIZE = "1024x1024"
 OUTPUT_DIR = Path(__file__).resolve().parent.parent / "manga_outputs"
 
 MAX_RETRIES = 3
@@ -575,7 +575,7 @@ async def generate_cover_image(
     output_path: Path,
     *,
     api_key: str | None = None,
-    size: str = "600x800",
+    size: str = "1024x1536",
 ) -> str:
     progress_label = f"cover:{output_path.stem}"
     current_prompt = prompt.strip()

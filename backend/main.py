@@ -126,7 +126,7 @@ from services.deepseek import (
     summarize_chapter_memory,
 )
 from services.errors import MangaImageGenerationError, MissingApiKeyError
-from services.prompt_template import get_effective_prompt
+from services.prompt_template import get_effective_prompt, get_template_story_length
 from services.image2 import edit_existing_image, generate_cover_image, generate_manga_image, generate_reference_image
 from services.scene_safety import sanitize_scene_list
 from services import deepseek as deepseek_service
@@ -571,6 +571,9 @@ def _user_image_api_key(request: Request) -> str | None:
     admin_model = str(_get_platform_setting("api.image.model", db, image_service.IMAGE_MODEL)).strip()
     resolved_base_url = override_base_url.strip() if capabilities["can_override_api_url"] and override_base_url and override_base_url.strip() else admin_base_url
     resolved_model = override_model.strip() if capabilities["can_override_api_url"] and override_model and override_model.strip() else admin_model
+    # 过滤掉数据库中的占位值，确保回退到 image2.py 的硬编码默认值
+    if not resolved_model or resolved_model.strip().lower() in ("default", "none", "null"):
+        resolved_model = ""
     image_service.IMAGE_API_BASE_URL = resolved_base_url.rstrip("/") or image_service.IMAGE_API_BASE_URL
     image_service.IMAGE_MODEL = resolved_model or image_service.IMAGE_MODEL
     if capabilities["can_override_api_key"] and override:
@@ -930,7 +933,7 @@ def _seed_platform_settings(db: Session) -> None:
         "api.deepseek.model": deepseek_service.DEEPSEEK_MODEL,
         "api.deepseek.api_key": "",
         "api.image.base_url": "https://api.xbyjs.top/v1",
-        "api.image.model": "default",
+        "api.image.model": "",
         "api.image.api_key": "",
         "api.video.base_url": "https://api.xbyjs.top/v1",
         "api.video.model": "veo3.1-fast",
@@ -2247,6 +2250,31 @@ def _infer_story_bible_min_chapters(story_bible: dict | None) -> int | None:
     return requested
 
 
+def _infer_story_length_from_story(story: Story, description: str = "", messages: list | None = None) -> str | None:
+    """从 Story 对象中推断篇幅类型 short/medium/long，返回 None 表示无法推断。
+
+    Args:
+        story: Story 数据库对象
+        description: 用户输入的故事描述文本，作为篇幅推断的补充来源。
+        messages: 对话消息列表，用于从用户聊天中提取篇幅信息。
+    """
+    from services.deepseek import _infer_story_length
+    context = {"story_bible": story.story_bible}
+    length = _infer_story_length(context, description=description, messages=messages)
+    # 如果推断结果仍为 long（默认值），且没有任何有效数据，返回 None 让调用方使用默认行为
+    if length == "long":
+        story_bible = story.story_bible if isinstance(story.story_bible, dict) else {}
+        creative_brief = story_bible.get("creative_brief") if isinstance(story_bible, dict) else None
+        raw_input = story_bible.get("raw_input") if isinstance(story_bible, dict) else None
+        has_target = (isinstance(creative_brief, dict) and str(creative_brief.get("serial_length_target") or "").strip()) or \
+                     (isinstance(raw_input, dict) and str(raw_input.get("raw_length_goal") or "").strip())
+        has_desc_hint = bool(description.strip()) and _infer_story_length({}, description=description) != "long"
+        has_msg_hint = bool(messages) and _infer_story_length({}, messages=messages) != "long"
+        if not has_target and not has_desc_hint and not has_msg_hint:
+            return None
+    return length
+
+
 def _is_generic_framework_instruction(text: str | None) -> bool:
     normalized = re.sub(r"\s+", "", str(text or "").strip().lower())
     if not normalized:
@@ -2418,6 +2446,7 @@ async def _complete_framework_payload(
     require_launch_ready: bool = False,
     allow_partial_outline: bool = False,
     fields_to_check: list[str] | None = None,
+    story_length: str | None = None,
 ) -> dict:
     """Normalize and optionally complete framework fields.
 
@@ -2473,7 +2502,7 @@ async def _complete_framework_payload(
         outline_ready = _has_opening_ready_outline if require_launch_ready else _has_complete_outline
         if not outline_ready(payload["outline"]):
             try:
-                incoming_outline = await regenerate_outline(story_context, api_key=api_key)
+                incoming_outline = await regenerate_outline(story_context, api_key=api_key, story_length=story_length)
                 payload["outline"] = _merge_framework_outline(
                     payload["outline"],
                     incoming_outline,
@@ -4025,7 +4054,7 @@ def admin_save_platform_settings(body: dict, request: Request, db: Session = Dep
         "api.deepseek.model": api.get("deepseek_model", deepseek_service.DEEPSEEK_MODEL),
         "api.deepseek.api_key": api.get("deepseek_api_key", ""),
         "api.image.base_url": api.get("image_base_url", "https://api.xbyjs.top/v1"),
-        "api.image.model": api.get("image_model", "default"),
+        "api.image.model": api.get("image_model", ""),
         "api.image.api_key": api.get("image_api_key", ""),
         "api.video.base_url": api.get("video_base_url", "https://api.xbyjs.top/v1"),
         "api.video.model": api.get("video_model", "veo3.1-fast"),
@@ -6329,6 +6358,7 @@ async def _background_quality_check(
             logger.info("Background quality check found %d issues for story %d, fixing...", len(quality_issues), story_id)
             runtime_context = _build_framework_ai_context(story, mode="repair", user_instruction="后台开书质量修复")
             story_bible = story.story_bible
+            story_length = _infer_story_length_from_story(story, description=story_description)
             _release_db_transaction(db)
             fixed_framework = await generate_framework(
                 story_description,
@@ -6338,6 +6368,7 @@ async def _background_quality_check(
                 story_context=runtime_context,
                 launch_ready_required=True,
                 quality_feedback=quality_issues,
+                story_length=story_length,
             )
             fixed_framework = await _complete_framework_payload(
                 fixed_framework,
@@ -6345,6 +6376,7 @@ async def _background_quality_check(
                 api_key=api_key,
                 story_bible=story_bible,
                 require_launch_ready=True,
+                story_length=story_length,
             )
             remaining = _framework_launch_quality_issues(fixed_framework)
             if remaining:
@@ -6437,6 +6469,9 @@ async def generate_framework_endpoint(story_id: int, request: Request, db: Sessi
     requested_min_chapters = _extract_requested_min_chapters([{"role": "user", "content": raw_description or description.strip()}])
     story_bible = story.story_bible
     deepseek_api_key = _user_deepseek_api_key(request)
+    # 篇幅推断优先级：模板参数 > story_bible > 用户描述 > 默认 long
+    template_story_length = get_template_story_length(story_id, db)
+    story_length = template_story_length or _infer_story_length_from_story(story, description=description)
 
     template_fw_prompt = get_effective_prompt(story_id, "framework", db)
     _check_and_consume_feature_quota(request, user.id, "framework.generate.monthly_limit", 1, db, deduct=False, provider_kind="text")
@@ -6450,6 +6485,7 @@ async def generate_framework_endpoint(story_id: int, request: Request, db: Sessi
             story_context=story_context,
             launch_ready_required=True,
             system_prompt=template_fw_prompt or None,
+            story_length=story_length,
         )
         framework = await _complete_framework_payload(
             framework,
@@ -6457,6 +6493,7 @@ async def generate_framework_endpoint(story_id: int, request: Request, db: Sessi
             api_key=deepseek_api_key,
             story_bible=story_bible,
             require_launch_ready=True,
+            story_length=story_length,
         )
     except ValueError as exc:
         raise HTTPException(502, f"AI 初始框架生成不完整：{exc}") from exc
@@ -6472,6 +6509,7 @@ async def generate_framework_endpoint(story_id: int, request: Request, db: Sessi
                 story_context=story_context,
                 launch_ready_required=True,
                 quality_feedback=quality_issues,
+                story_length=story_length,
             )
             framework = await _complete_framework_payload(
                 framework,
@@ -6479,6 +6517,7 @@ async def generate_framework_endpoint(story_id: int, request: Request, db: Sessi
                 api_key=deepseek_api_key,
                 story_bible=story_bible,
                 require_launch_ready=True,
+                story_length=story_length,
             )
             quality_issues = _framework_launch_quality_issues(framework, expected_min_chapters=expected_min)
         except ValueError as exc:
@@ -6590,9 +6629,11 @@ async def regenerate_outline_endpoint(story_id: int, request: Request, db: Sessi
 
     story_context = _story_framework_context(story)
     deepseek_api_key = _user_deepseek_api_key(request)
+    template_story_length = get_template_story_length(story_id, db)
+    story_length = template_story_length or _infer_story_length_from_story(story)
     _check_and_consume_advanced_text_quota(request, user.id, db, deduct=False)
     _release_db_transaction(db)
-    result = await regenerate_outline(story_context, api_key=deepseek_api_key)
+    result = await regenerate_outline(story_context, api_key=deepseek_api_key, story_length=story_length)
 
     outline = result if isinstance(result, dict) and "three_acts" in result else result
     story = _require_story_for_user(story_id, user, db)
@@ -6980,6 +7021,8 @@ async def adjust_framework_endpoint(story_id: int, request: Request, db: Session
         user_instruction=str(messages[-1].get("content") or "") if messages else "",
     )
     deepseek_api_key = _user_deepseek_api_key(request)
+    template_story_length = get_template_story_length(story_id, db)
+    story_length = template_story_length or _infer_story_length_from_story(story, messages=messages)
 
     template_fw_prompt = get_effective_prompt(story_id, "framework", db)
     _check_and_consume_advanced_text_quota(request, user.id, db, deduct=False)
@@ -6992,6 +7035,7 @@ async def adjust_framework_endpoint(story_id: int, request: Request, db: Session
             required_min_chapters=requested_min_chapters,
             existing_framework=existing_framework,
             system_prompt=template_fw_prompt or None,
+            story_length=story_length,
         )
     except ValueError as exc:
         raise HTTPException(502, f"AI 框架调整返回格式无效：{exc}") from exc
@@ -7077,13 +7121,25 @@ async def continue_framework_endpoint(story_id: int, request: Request, db: Sessi
     }
     before_chapter_count = len(_extract_outline_chapters(story.outline))
     deepseek_api_key = _user_deepseek_api_key(request)
-    continue_instruction = (
-        "一键续写：请基于当前框架继续向后扩展后续阶段和真实章节规划。"
-        "在 framework.outline.three_acts 中至少新增 10 个后续章节任务卡。"
-        "不要只在 reply 里描述扩展到了多少章，必须体现在 framework.outline.three_acts 中。"
-        "每个新增章节尽量包含 title、summary、goal、conflict、hook、payoff、highlight、key_events。"
-        "保留原有主线、角色成长与代价平衡，不要删除现有内容。"
-    )
+    template_story_length = get_template_story_length(story_id, db)
+    story_length = template_story_length or _infer_story_length_from_story(story, description=str(story.description or ""))
+    # 短篇续写目标章节数更少
+    if story_length == "short":
+        continue_instruction = (
+            "一键续写：请基于当前框架继续向后扩展后续阶段和章节规划。"
+            "在 framework.outline.three_acts 中至少新增 5 个后续章节任务卡。"
+            "不要只在 reply 里描述扩展到了多少章，必须体现在 framework.outline.three_acts 中。"
+            "每个新增章节尽量包含 title、summary、goal、conflict、hook、payoff、highlight、key_events。"
+            "保留原有主线、角色成长与代价平衡，不要删除现有内容。"
+        )
+    else:
+        continue_instruction = (
+            "一键续写：请基于当前框架继续向后扩展后续阶段和真实章节规划。"
+            "在 framework.outline.three_acts 中至少新增 10 个后续章节任务卡。"
+            "不要只在 reply 里描述扩展到了多少章，必须体现在 framework.outline.three_acts 中。"
+            "每个新增章节尽量包含 title、summary、goal、conflict、hook、payoff、highlight、key_events。"
+            "保留原有主线、角色成长与代价平衡，不要删除现有内容。"
+        )
     context_story = _build_framework_ai_context(story, mode="continue", user_instruction=continue_instruction)
 
     messages = [
@@ -7099,6 +7155,7 @@ async def continue_framework_endpoint(story_id: int, request: Request, db: Sessi
             context_story,
             messages,
             api_key=deepseek_api_key,
+            story_length=story_length,
         )
     except ValueError as exc:
         raise HTTPException(502, f"AI 续写返回格式无效：{exc}") from exc
@@ -7884,10 +7941,16 @@ def _serialize_template(template, current_user_id, db_session) -> dict:
 @app.get("/api/prompt-templates/defaults")
 def get_system_default_prompts(request: Request, db: Session = Depends(get_db)):
     """返回系统内置的四类提示词，供用户创建模板时参考。"""
-    from services.deepseek import FRAMEWORK_SYSTEM_PROMPT, _long_form_framework_rules
+    from services.deepseek import FRAMEWORK_SYSTEM_PROMPT, _long_form_framework_rules, _medium_form_framework_rules, _short_form_framework_rules
+
+    framework_rules = "\n\n".join([
+        "## 长篇创作硬性要求\n" + _long_form_framework_rules(),
+        "## 中篇创作硬性要求\n" + _medium_form_framework_rules(),
+        "## 短篇创作硬性要求\n" + _short_form_framework_rules(),
+    ])
 
     return {
-        "framework": FRAMEWORK_SYSTEM_PROMPT + "\n\n" + _long_form_framework_rules(),
+        "framework": FRAMEWORK_SYSTEM_PROMPT + "\n\n" + framework_rules,
         "chapter": (
             "你是出版级网文作家。你写的章节节奏紧凑、人物鲜活，能直接发表到起点/番茄等平台。\n\n"
             "## 核心写作准则\n"
@@ -8065,10 +8128,18 @@ def delete_prompt_template(template_id: int, request: Request, db: Session = Dep
     if template.author_user_id != user.id:
         raise HTTPException(403, "只能删除自己的模板")
 
-    db.query(StoryTemplateBinding).filter(StoryTemplateBinding.template_id == template_id).delete()
-    db.query(TemplateLike).filter(TemplateLike.template_id == template_id).delete()
-    db.delete(template)
-    db.commit()
+    try:
+        db.query(PromptTemplate).filter(PromptTemplate.forked_from == template_id).update(
+            {"forked_from": None}
+        )
+        db.query(StoryTemplateBinding).filter(StoryTemplateBinding.template_id == template_id).delete()
+        db.query(TemplateLike).filter(TemplateLike.template_id == template_id).delete()
+        db.delete(template)
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        logger.error("[delete_template:%s] 删除模板失败: %s", template_id, repr(exc))
+        raise HTTPException(500, "删除模板失败，请稍后重试") from exc
     return {"ok": True}
 
 

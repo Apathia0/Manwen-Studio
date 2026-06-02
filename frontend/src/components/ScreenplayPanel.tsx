@@ -1,11 +1,22 @@
 import { useEffect, useMemo, useState } from 'react';
-import { generateScreenplay, listScreenplayScenes, type ScriptScene } from '../api';
+import { generateScreenplay, listScreenplayScenes, type ScriptScene, type EntitlementResponse } from '../api';
+
+function entitlementNumber(entitlements: EntitlementResponse | null | undefined, key: string, fallback: number): number {
+  const raw = entitlements?.entitlements?.[key];
+  if (typeof raw === 'number' && Number.isFinite(raw)) return raw;
+  if (typeof raw === 'string') {
+    const parsed = Number(raw);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return fallback;
+}
 
 interface Props {
   chapterId?: number | null;
   chapterContent?: string | null;
   scenes: ScriptScene[];
   screenplay: string;
+  entitlements?: EntitlementResponse | null;
   onScenesChange: (scenes: ScriptScene[]) => void;
   onScreenplayChange: (text: string) => void;
   onSceneSelect: (scene: ScriptScene) => void;
@@ -16,6 +27,7 @@ export default function ScreenplayPanel({
   chapterContent,
   scenes,
   screenplay,
+  entitlements,
   onScenesChange,
   onScreenplayChange,
   onSceneSelect,
@@ -24,6 +36,8 @@ export default function ScreenplayPanel({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+
+  const screenplayLimit = entitlementNumber(entitlements, 'screenplay.generate.monthly_limit', 0);
 
   const contentReady = !!chapterContent?.trim();
   const contentPreview = useMemo(() => {
@@ -118,7 +132,10 @@ export default function ScreenplayPanel({
           <h3 className="text-lg font-semibold text-slate-900">影视剧本</h3>
           <p className="mt-1 text-sm text-slate-500">先读取本章正文，再生成剧本与场次，最后进入镜头拆解。</p>
         </div>
-        <div className="flex shrink-0 gap-2">
+        <div className="flex shrink-0 items-center gap-3">
+          {screenplayLimit > 0 && (
+            <span className="text-xs text-slate-400">本月配额 {screenplayLimit} 次</span>
+          )}
           <button
             onClick={handleLoad}
             disabled={loading || generating || !chapterId}

@@ -23,7 +23,7 @@ def configure_runtime(base_url: str | None = None, model: str | None = None) -> 
     if isinstance(model, str) and model.strip():
         DEEPSEEK_MODEL = model.strip()
 
-NOVEL_SYSTEM_PROMPT = """你是一位才华横溢、文笔细腻的网络小说家。用户会和你讨论小说的主题、风格、角色等。
+NOVEL_SYSTEM_PROMPT = """你是一位白金级网络小说家，作品长期位居各平台畅销榜首。你的小说以逻辑严密、节奏精准、人物鲜活著称。
 
 当用户要求你创作小说时，请遵循以下要求：
 
@@ -35,15 +35,22 @@ NOVEL_SYSTEM_PROMPT = """你是一位才华横溢、文笔细腻的网络小说�
 ## 结构指导
 一话内容通常包含 2-3 个场景，每个场景 600-1000 字。场景分配建议：
 - 开篇场景（400-600 字）：快速切入情境，可以是一段精彩对话、一个悬念画面或一个动作场景，让读者立即沉浸。
-- 推进场景（600-1000 字）：情节发展的核心。展开人物互动、冲突升级或关键信息揭示。此处需要细致描写——人物的微表情、语气变化、肢体动作、环境氛围的渲染。
+- 推进场景（600-1000 字）：情节发展的核心。展开人物互动、冲突升级或关键信息揭示。此处需要细致描写，包括人物的微表情、语气变化、肢体动作、环境氛围的渲染。
 - 收束场景（400-600 字）：本章的落点，可以是情绪沉淀、悬念埋设或小幅高潮。不要强行断章，要给读者一个自然的停顿点。
 
 ## 写作风格
-- 描写要细腻有穿透力。不追求字多，追求精准——一个恰到好处的比喻胜过三行平淡的叙述。
+- 描写要细腻有穿透力。不追求字多，追求精准。一个恰到好处的比喻胜过三行平淡的叙述。
 - 关键情感节点和重要情节转折处放慢节奏，深化描写和心理刻画；过渡性内容则一笔带过即可。
 - 人物对话要自然生动，有潜台词，2-4 个来回即可，重在说出人物的性格和当下情绪。
 - 避免流水账，避免空洞的形容词堆砌。每一个细节都应该服务于"塑造人物"或"推进剧情"这两个核心目标。
 - 句式和段落长度要有变化，短句制造紧张感，长句用于氛围渲染和情绪铺陈。
+
+## 核心约束：逻辑自洽（最高优先级）
+- 每一个情节转折都必须有因有果，不能跳跃式推进
+- 角色做出的每个决定，都必须有足够的情感动机和信息支撑
+- 禁止用「几天后」「过了一段时间」等时间跳跃来跳过关键剧情发展
+- 禁止用「突然」「忽然」廉价地制造转折——所有转折都必须有铺垫
+- 如果角色做出看似不合理的决定，必须在文中给出足够的情感铺垫或信息揭示
 
 ## 核心约束：章节间连续性（最高优先级）
 - 本章开头必须自然衔接上一章结尾处的情境，不能出现剧情跳跃或角色状态无故重置
@@ -52,6 +59,15 @@ NOVEL_SYSTEM_PROMPT = """你是一位才华横溢、文笔细腻的网络小说�
 - 角色状态（性格、关系、能力、情感）必须与连续性记忆保持一致
 - 不可在无铺垫的情况下让角色忘记前文发生的关键事件
 - 只能参考已实际发生的剧情事实，不得编造或虚构未发生的前情事件
+
+## 禁止的写作手法
+- 禁止使用破折号（——），用逗号、句号或省略号代替
+- 禁止使用「突然」「忽然」「就在这时」超过 2 次
+- 禁止使用「深深地」「无比地」「极其」等副词堆砌
+- 禁止结尾写「他不知道的是……」「这一切才刚刚开始……」等模板化悬念
+- 禁止所有角色说话风格雷同
+- 禁止用「心中涌起一股暖流」等空洞套话描写情感
+- 禁止写无关的环境描写凑字数
 
 请直接输出小说正文，不要加额外说明或字数统计。"""
 
@@ -72,6 +88,42 @@ def _loads_json_lenient(text: str):
     # strings. strict=False accepts those without treating the whole response as
     # invalid JSON.
     return json.loads(text, strict=False)
+
+
+def _sanitize_novel_content(text: str) -> str:
+    """清理 AI 生成的小说正文中的常见问题。
+
+    处理项：
+    1. 移除所有破折号（——），替换为逗号或省略号（根据上下文）
+    2. 移除多余的「突然」「忽然」等廉价转折词（保留首次出现，移除后续）
+    """
+    import re
+    if not text:
+        return text
+
+    # 处理破折号：—— 前后有标点则直接移除，否则替换为逗号
+    # 情况1：句号/问号/感叹号 + —— → 保留前面的标点，移除破折号
+    text = re.sub(r'([。！？])——\s*', r'\1', text)
+    # 情况2：逗号/顿号 + —— → 保留逗号，移除破折号
+    text = re.sub(r'([，、])——\s*', r'\1', text)
+    # 情况3：—— 后跟标点 → 保留后面的标点，移除破折号
+    text = re.sub(r'\s*——([。！？，、])', r'\1', text)
+    # 情况4：独立的破折号（前后无标点）→ 替换为逗号
+    text = text.replace('——', '，')
+
+    # 处理廉价转折词：保留第1次，移除后续出现
+    cheap_transition_words = ['突然', '忽然', '就在这时', '就在此时']
+    for word in cheap_transition_words:
+        count = text.count(word)
+        if count > 1:
+            # 保留第1次，后续替换为逗号分隔
+            first_idx = text.index(word)
+            result = text[:first_idx + len(word)]
+            rest = text[first_idx + len(word):]
+            result += rest.replace(word, '，', count - 1)
+            text = result
+
+    return text
 
 
 def _extract_json_array(raw: str) -> list:
@@ -1217,6 +1269,11 @@ FRAMEWORK_SYSTEM_PROMPT = """你是资深小说策划编辑，擅长设计能被
 - outline.three_acts 是分阶段大纲数组，不限制必须三幕
 - 阶段数量根据题材自由决定，通常 2 个及以上
 - 每个阶段包含 act, title, summary, key_events，尽量附带 chapters
+
+## 篇幅适配（请根据 story_length 指令选择对应要求）
+- short（短篇）：全书 10-30 章，聚焦单一核心冲突，阶段 2-3 个，每章必须有明确叙事功能，第二章前进入核心冲突。
+- medium（中篇）：全书 50-100 章，核心冲突升级 2-3 次，阶段 3-5 个，每阶段至少 10 章，中段保留升级空间和悬念递进。
+- long（长篇，默认）：全书 100+ 章，核心冲突升级 3 次以上，阶段结构灵活，世界观揭秘分层递进，终局高潮放在规划后段。
 """
 
 
@@ -1237,10 +1294,125 @@ def _long_form_framework_rules() -> str:
 """.strip()
 
 
-def _framework_messages_with_long_form(system_text: str, user_text: str) -> list[dict]:
+def _medium_form_framework_rules() -> str:
+    return """
+## 中篇创作硬性要求
+1. 大纲覆盖完整主线，规划 50-100 章，不要在前 30 章内收束主线。
+2. 核心冲突升级 2-3 次，每次升级改变角色处境和故事格局。
+3. 阶段结构 3-5 个，每个阶段至少包含 10 个以上章节。
+4. 阶段间要有明确的转折点，不能平铺直叙地过渡。
+5. 角色成长渐进，每个阶段角色至少有一个关键变化。
+6. 世界观分 2-3 层揭秘，不要一次性交代完毕。
+7. 中段要保留升级空间和悬念递进，不能让故事在中段塌陷。
+8. 感情线、友情线、敌对线都要有独立的发展曲线。
+9. 每个章节必须有钩子——让读者想继续读下去的悬念、疑问或期待。
+10. 前10章的每章必须标注 goal, conflict, hook，确保开篇有足够抓力。
+""".strip()
+
+
+def _short_form_framework_rules() -> str:
+    return """
+## 短篇创作硬性要求
+1. 全书控制在 10-30 章以内，节奏紧凑，不要拖沓。
+2. 聚焦单一核心冲突，不要引入过多支线和副线。
+3. 阶段结构 2-3 个即可：建立冲突 → 升级/反转 → 高潮/解决。
+4. 高密度情节推进——每一章都必须有明确的叙事功能（推进剧情/揭示真相/制造转折），不能有纯过渡章。
+5. 世界观简洁明了，只保留服务核心冲突的必要设定，不要过度展开。
+6. 角色精简（3-5 个核心角色），每个角色都要有明确的叙事功能。
+7. 第二章前必须进入核心冲突，不要用太多篇幅铺垫。
+8. 中段要有一个关键反转或真相揭示，推动故事走向高潮。
+9. 结局要紧凑有力，回收所有主要伏笔，不要拖尾。
+10. 每章必须标注 goal, conflict, hook，确保全书节奏紧凑。
+""".strip()
+
+
+def _infer_story_length(story_context: dict, description: str = "", messages: list | None = None) -> str:
+    """从故事上下文、用户描述、对话消息中推断篇幅类型：short / medium / long。
+
+    优先级：story_bible > description 文本 > messages 文本 > story_context 字段 > 默认 long。
+    story_bible 优先是因为它代表用户经过引导建书确认的明确选择。
+    """
+    if not isinstance(story_context, dict):
+        story_context = {}
+
+    def _classify_length_text(text: str) -> str | None:
+        """从文本中推断篇幅类型，返回 None 表示无法判断。"""
+        t = text.strip().lower()
+        if not t:
+            return None
+        # 明确关键词匹配
+        if any(k in t for k in ("短篇", "短", "short")):
+            return "short"
+        if any(k in t for k in ("中篇", "中", "medium")):
+            return "medium"
+        if any(k in t for k in ("长篇", "超长", "long")):
+            return "long"
+        # 数字匹配：提取第一个数字进行范围判断
+        import re
+        nums = re.findall(r"\d+", t)
+        if nums:
+            n = int(nums[0])
+            if n <= 30:
+                return "short"
+            if n <= 100:
+                return "medium"
+            return "long"
+        return None
+
+    # 优先级 1：从 story_bible 中提取（代表用户确认过的目标篇幅）
+    story_bible = story_context.get("story_bible")
+    if isinstance(story_bible, dict):
+        creative_brief = story_bible.get("creative_brief")
+        if isinstance(creative_brief, dict):
+            target = str(creative_brief.get("serial_length_target") or "").strip()
+            result = _classify_length_text(target)
+            if result:
+                return result
+        raw_input = story_bible.get("raw_input")
+        if isinstance(raw_input, dict):
+            raw_goal = str(raw_input.get("raw_length_goal") or "").strip()
+            result = _classify_length_text(raw_goal)
+            if result:
+                return result
+
+    # 优先级 2：从用户描述文本中提取（用户直接在描述中写明篇幅）
+    result = _classify_length_text(description)
+    if result:
+        return result
+
+    # 优先级 3：从对话消息中提取（用户在聊天中提到篇幅要求）
+    if isinstance(messages, list):
+        # 从后往前搜索，用户最新消息的篇幅要求优先
+        for msg in reversed(messages):
+            if isinstance(msg, dict):
+                content = str(msg.get("content") or "").strip()
+                result = _classify_length_text(content)
+                if result:
+                    return result
+
+    # 优先级 4：从 story_context 直接字段提取
+    for key in ("target_length", "story_length"):
+        val = str(story_context.get(key) or "").strip()
+        result = _classify_length_text(val)
+        if result:
+            return result
+
+    return "long"
+
+
+def _framework_rules_for_length(story_length: str) -> str:
+    """根据篇幅类型返回对应的创作规则。"""
+    if story_length == "short":
+        return _short_form_framework_rules()
+    if story_length == "medium":
+        return _medium_form_framework_rules()
+    return _long_form_framework_rules()
+
+
+def _framework_messages_with_long_form(system_text: str, user_text: str, story_length: str = "long") -> list[dict]:
     return [
         {"role": "system", "content": system_text},
-        {"role": "system", "content": _long_form_framework_rules()},
+        {"role": "system", "content": _framework_rules_for_length(story_length)},
         {"role": "user", "content": user_text},
     ]
 
@@ -1254,11 +1426,16 @@ async def generate_framework(
     launch_ready_required: bool = False,
     quality_feedback: list[str] | None = None,
     system_prompt: str | None = None,
+    story_length: str | None = None,
 ) -> dict:
     """Generate a complete story framework with flexible stage structure.
 
     Args:
-        system_prompt: Custom system prompt, None uses built-in default."""
+        system_prompt: Custom system prompt, None uses built-in default.
+        story_length: 篇幅类型 short/medium/long，None 自动推断。"""
+    # 推断篇幅类型
+    effective_length = story_length or _infer_story_length(story_context or {"story_bible": story_bible})
+
     min_chapter_requirement = (
         f"\n7. `chapters` 的实际返回数量必须不少于 {required_min_chapters} 章，不能只口头说明会扩展。"
         if required_min_chapters and required_min_chapters >= 20
@@ -1287,7 +1464,17 @@ async def generate_framework(
             )
     launch_ready_hint = ""
     if launch_ready_required:
-        launch_ready_hint = """
+        if effective_length == "short":
+            launch_ready_hint = """
+9. 这次是"平台可发布级开书框架"生成，必须达到开书可用标准，而不是只给概念草稿。
+10. 短篇必须一次性给出完整的章节规划（10-30 章），不能留待后续扩展。
+11. 每章必须尽量细到能直接写，补齐 `summary`，并给出 `goal`、`conflict`、`hook`、`payoff`、`highlight`。
+12. `outline` 至少要有 2 个主要阶段，明确开篇阶段和高潮/结局阶段。
+13. `outline.serial_strategy` 至少给出 `positioning`、`opening_hook`、`first_3_chapter_hook`。
+14. 第 1 章必须有强钩子，快速进入核心冲突。
+""".strip()
+        else:
+            launch_ready_hint = """
 9. 这次是"平台可发布级开书框架"生成，必须达到开书可用标准，而不是只给概念草稿。
 10. 不要求一次性列完未来全部 200-500 章，但必须至少给出前 10 章的完整开书规划；如果能做到，前 20 章更好。
 11. 前 10 章必须尽量细到能直接写，至少 6 章要补齐 `summary`，并尽量给出 `goal`、`conflict`、`hook`、`payoff`、`highlight`。
@@ -1299,7 +1486,40 @@ async def generate_framework(
     quality_feedback_hint = ""
     if quality_feedback:
         quality_feedback_hint = "\n上一版未达标的问题如下，请逐项修正后再输出：\n- " + "\n- ".join(quality_feedback)
-    user_prompt = f"""请根据以下故事描述，生成一版适合长篇创作的完整小说框架：
+
+    # 根据篇幅类型生成不同的 user_prompt
+    if effective_length == "short":
+        user_prompt = f"""请根据以下故事描述，生成一版适合短篇创作的完整小说框架：
+
+{description}
+{story_bible_hint}
+
+额外要求：
+1. `outline` 覆盖完整主线，阶段结构 2-3 个：建立冲突 → 升级/反转 → 高潮/解决。
+2. `chapters` 总数控制在 10-30 章，每章都要有明确的叙事功能，不要有纯过渡章。
+3. 节奏紧凑——第二章前进入核心冲突，中段有关键反转，结尾回收所有主要伏笔。
+4. 每个 `chapters` 条目除 `chapter_number`、`title`、`act` 外，还应包含 `summary`、`goal`、`conflict`、`hook`、`payoff`、`highlight`、`key_events`。{min_chapter_requirement}
+5. `outline` 中必须额外包含 `serial_strategy` 对象，至少给出 `positioning`、`opening_hook`、`first_3_chapter_hook`。
+6. 只输出 JSON，包含 `tags`、`characters`、`outline`、`chapters` 四个字段。
+{launch_ready_hint}
+{quality_feedback_hint}"""
+    elif effective_length == "medium":
+        user_prompt = f"""请根据以下故事描述，生成一版适合中篇创作的完整小说框架：
+
+{description}
+{story_bible_hint}
+
+额外要求：
+1. `outline` 覆盖完整主线，阶段结构 3-5 个，每个阶段至少 10 章。
+2. `chapters` 总数规划 50-100 章，核心冲突升级 2-3 次。
+3. 前 1-20 章尽量细化到"能直接写"的粒度；21-50 章保持较细规划；50 章后可逐步转为阶段性推进。
+4. 每个 `chapters` 条目除 `chapter_number`、`title`、`act` 外，还应尽量包含 `summary`、`goal`、`conflict`、`hook`、`payoff`、`highlight`、`key_events`。{min_chapter_requirement}
+5. `outline` 中必须额外包含 `serial_strategy` 对象，至少给出 `positioning`、`opening_hook`、`first_3_chapter_hook`、`chapter_10_climax`、`chapter_20_payoff`。
+6. 只输出 JSON，包含 `tags`、`characters`、`outline`、`chapters` 四个字段。
+{launch_ready_hint}
+{quality_feedback_hint}"""
+    else:
+        user_prompt = f"""请根据以下故事描述，生成一版适合长篇创作的完整小说框架：
 
 {description}
 {story_bible_hint}
@@ -1318,7 +1538,7 @@ async def generate_framework(
 
     payload = {
         "model": DEEPSEEK_MODEL,
-        "messages": _framework_messages_with_long_form(system_prompt or FRAMEWORK_SYSTEM_PROMPT, user_prompt),
+        "messages": _framework_messages_with_long_form(system_prompt or FRAMEWORK_SYSTEM_PROMPT, user_prompt, effective_length),
         "stream": False,
         "max_tokens": 16384,
         "response_format": {"type": "json_object"},
@@ -1340,10 +1560,34 @@ async def generate_framework(
         raise ValueError(f"Framework generation failed: {e}")
 
 
-async def regenerate_outline(story_context: dict, api_key: str | None = None) -> dict:
-    """Regenerate outline with long-form pacing and flexible stage count."""
+async def regenerate_outline(story_context: dict, api_key: str | None = None, story_length: str | None = None) -> dict:
+    """Regenerate outline with length-appropriate pacing and flexible stage count."""
+    effective_length = story_length or _infer_story_length(story_context)
     snapshot = _build_story_snapshot_tiered(story_context, "framework_runtime")
-    user_prompt = f"""以下是故事当前的全部框架信息。请基于这些信息，重新生成一版更适合长篇创作的 `outline`。
+
+    if effective_length == "short":
+        user_prompt = f"""以下是故事当前的全部框架信息。请基于这些信息，重新生成一版更适合短篇创作的 `outline`。
+{snapshot}
+
+额外要求：
+1. 大纲要服务于短篇节奏（10-30 章），紧凑有力，不要拖沓。
+2. 阶段结构 2-3 个：建立冲突 → 升级/反转 → 高潮/解决。
+3. 每一章都要有明确的叙事功能，不要有纯过渡章。
+4. 真正的高潮应放在中后段，但不要太远——短篇需要快速进入核心。
+5. 开书段要明确：在 `outline.serial_strategy` 中给出 `positioning`、`opening_hook`、`first_3_chapter_hook`。
+6. 只输出 `{{"outline": ...}}` JSON 对象。"""
+    elif effective_length == "medium":
+        user_prompt = f"""以下是故事当前的全部框架信息。请基于这些信息，重新生成一版更适合中篇创作的 `outline`。
+{snapshot}
+
+额外要求：
+1. 大纲要服务于中篇小说节奏（50-100 章），不要让主线在几十章内快速收束。
+2. 阶段结构 3-5 个，每个阶段至少 10 章。
+3. 中段要保留升级空间、悬念递进和关系变化空间。
+4. 开书段要明确：在 `outline.serial_strategy` 中给出 `positioning`、`opening_hook`、`first_3_chapter_hook`、`chapter_10_climax`、`chapter_20_payoff`。
+5. 只输出 `{{"outline": ...}}` JSON 对象。"""
+    else:
+        user_prompt = f"""以下是故事当前的全部框架信息。请基于这些信息，重新生成一版更适合长篇创作的 `outline`。
 {snapshot}
 
 额外要求：
@@ -1360,6 +1604,7 @@ async def regenerate_outline(story_context: dict, api_key: str | None = None) ->
         "messages": _framework_messages_with_long_form(
             "你是小说策划编辑。基于已有故事框架，只输出包含 outline 的 JSON 对象。",
             user_prompt,
+            effective_length,
         ),
         "stream": False,
         "max_tokens": 16384,
@@ -1404,11 +1649,14 @@ async def adjust_framework_with_chat(
     required_min_chapters: int | None = None,
     existing_framework: dict | None = None,
     system_prompt: str | None = None,
+    story_length: str | None = None,
 ) -> dict:
     """根据自然语言指令输出结构化编辑计划（operations/patches），不再返回完整框架。
 
     Args:
-        system_prompt: Custom system prompt, None uses built-in default."""
+        system_prompt: Custom system prompt, None uses built-in default.
+        story_length: 篇幅类型 short/medium/long，None 自动推断。"""
+    effective_length = story_length or _infer_story_length(story_context)
     snapshot = _build_story_snapshot_tiered(story_context, "framework_runtime")
     description = str(story_context.get("description") or "").strip()
     safe_messages = [
@@ -1490,7 +1738,7 @@ async def adjust_framework_with_chat(
     for attempt in range(MAX_RETRIES + 1):
         payload = {
             "model": DEEPSEEK_MODEL,
-            "messages": _framework_messages_with_long_form(system_prompt or default_system_prompt, user_prompt) + safe_messages,
+            "messages": _framework_messages_with_long_form(system_prompt or default_system_prompt, user_prompt, effective_length) + safe_messages,
             "stream": False,
             "max_tokens": 65536,
             "response_format": {"type": "json_object"},
@@ -1537,21 +1785,23 @@ async def adjust_framework_with_chat(
         return plan
 
 
-async def continue_framework(story_context: dict, api_key: str | None = None) -> dict:
+async def continue_framework(story_context: dict, api_key: str | None = None, story_length: str | None = None) -> dict:
     """Continue the framework without rushing to an ending.
 
     Returns {"reply": ..., "changes": {"outline": ..., "chapters": [...]}}
     where changes only contains the extended outline and chapters.
     """
-    return await continue_framework_with_chat(story_context, [], api_key=api_key)
+    return await continue_framework_with_chat(story_context, [], api_key=api_key, story_length=story_length)
 
 
 async def continue_framework_with_chat(
     story_context: dict,
     messages: list[dict],
     api_key: str | None = None,
+    story_length: str | None = None,
 ) -> dict:
     """根据对话上下文续写框架，返回结构化编辑计划。"""
+    effective_length = story_length or _infer_story_length(story_context)
     snapshot = _build_story_snapshot_tiered(story_context, "auto")
 
     safe_messages = [
@@ -1609,7 +1859,7 @@ async def continue_framework_with_chat(
     for attempt in range(MAX_RETRIES + 1):
         payload = {
             "model": DEEPSEEK_MODEL,
-            "messages": _framework_messages_with_long_form(system_prompt or default_system_prompt, user_prompt) + safe_messages,
+            "messages": _framework_messages_with_long_form(system_prompt or default_system_prompt, user_prompt, effective_length) + safe_messages,
             "stream": False,
             "max_tokens": 65536,
             "response_format": {"type": "json_object"},
@@ -1790,6 +2040,9 @@ async def expand_chapter_to_content(story_context: dict, chapter_info: dict, api
 2. 【执行钩子】如果本章任务卡给出了 hook/goal/conflict/payoff，必须切实执行，不能忽略。
 3. 【因果推进】本章的结果必须为下一章制造新的问题或悬念——不能写成独立单元剧。
 4. 【场景组织】每个场景要有明确的叙事功能，过渡处从简，关键处深化。
+5. 【逻辑自洽】每一个情节转折都必须有因有果。角色行为要符合其性格和处境，不能强行推进剧情。
+6. 【禁止破折号】全文禁止使用破折号（——），用逗号、句号或省略号代替。
+7. 【避免强行推进】禁止用「几天后」「过了一段时间」「不知不觉」这类时间跳跃来跳过关键剧情发展。
 
 ## 严禁的 AI 写作习惯
 - 禁止使用「突然」「忽然」「就在这时」超过 2 次
@@ -1798,42 +2051,53 @@ async def expand_chapter_to_content(story_context: dict, chapter_info: dict, api
 - 禁止所有角色说话风格雷同
 - 禁止用「心中涌起一股暖流」等空洞套话描写情感
 - 禁止写无关的环境描写凑字数
+- 禁止使用破折号（——）
 
 请直接输出小说正文，不要加额外说明或字数统计。"""
 
     chapter_system_prompt = (
-        "你是出版级网文作家。你写的章节能直接发表到起点/番茄等平台。\
-"
+        "你是白金级网文作家，作品长期位居各平台畅销榜首。你的小说以逻辑严密、节奏精准、人物鲜活著称。\n"
         "\n"
-        "## 创作准则\
-"
-        "1. 场景即故事：每个场景必须有明确的戏剧功能——推进剧情、揭示角色、制造冲突、埋下伏笔。\
-"
-        "2. 角色驱动情节：角色的欲望、恐惧、缺陷推动行为，每个决定都要有角色内在逻辑。\
-"
-        "3. 对话有区分度：不同身份的角色用词习惯、句子长短、语气态度必须不同。\
-"
-        "4. 克制抒情：用动作、对话、细节传达情绪，禁止大段内心独白和情感总结。\
-"
-        "5. 节奏变化：紧张处短句快切，日常处舒缓长句，一章内要有呼吸感。\
-"
+        "## 核心创作铁律\n"
+        "1. **逻辑自洽优先**：每一个情节点都必须有因有果。角色做出的每个决定，都必须有足够的情感动机和信息支撑。\n"
+        "   - 不能出现「没有理由就突然改变主意」「明明知道危险还往上冲」这类不合逻辑的行为。\n"
+        "   - 如果角色做出了看似不合理的决定，必须在文中给出足够的情感铺垫或信息揭示。\n"
         "\n"
-        "## 连续性要求\
-"
-        "本章开头必须基于「前情提要」中的故事状态和近期章节摘要自然衔接。\
-"
-        "如果前情提要包含 opening_must_continue（必须承接的开场）或 active_conflict（即时冲突），\
-"
-        "必须以此为起点展开本章，不能凭空开始新场景。\
-"
-        "只能参考已实际发生的剧情事实，不得编造未发生的前情事件。\
-"
+        "2. **剧情推进要有因果链**：每个事件都必须是前一个事件的合理结果，不能「跳跃式」推进。\n"
+        "   - 禁止出现「几天后」「过了段时间」「不知不觉中」这类时间跳跃直接推进剧情。\n"
+        "   - 禁止用「突然出现」「突然发生」来制造转折——所有转折都必须有铺垫。\n"
+        "   - 如果需要时间过渡，必须用具体场景或细节来展示这段时间发生了什么。\n"
         "\n"
-        "## 章节任务卡执行要求\
-"
-        "任务卡中的 goal（目标）、conflict（冲突）、hook（钩子）、payoff（回收）、highlight（亮点）\
-"
-        "不是参考建议而是必须执行的硬性指令。每一条都必须在本章正文中有效兑现。"
+        "3. **人物行为要符合其性格和处境**：角色不能做出与其一贯性格相悖的行为，除非有足够的心理铺垫。\n"
+        "   - 内向的角色不能突然变得健谈，除非有特定的情境触发。\n"
+        "   - 聪明的角色不能突然做出愚蠢的决定，除非有情绪干扰或信息不对称。\n"
+        "\n"
+        "## 对话写作要求\n"
+        "1. 对话必须符合角色的性格、身份、处境和情绪。\n"
+        "2. 禁止所有角色说话风格雷同——必须有明显的语言差异。\n"
+        "3. 对话要有潜台词，不能直白地表达所有情感。\n"
+        "4. 禁止用对话直接解释剧情——要通过行动和细节来展现。\n"
+        "\n"
+        "## 禁止的写作手法\n"
+        "1. **禁止使用破折号（——）**：用逗号、句号或省略号代替。破折号会让句子显得生硬和不专业。\n"
+        "2. **禁止使用「突然」「忽然」「就在这时」「就在此时」**：这些词会让转折显得廉价和突兀。\n"
+        "3. **禁止使用「深深地」「无比地」「极其」「非常」「十分」等程度副词堆砌**：用具体的动作和细节来传达强度。\n"
+        "4. **禁止使用「心中涌起一股暖流」「感到一阵心酸」等空洞的情感描写**：用具体的生理反应、动作、对话来传达情感。\n"
+        "5. **禁止使用「他不知道的是」「而这一切，才刚刚开始」等上帝视角的旁白**：保持叙事视角的一致性。\n"
+        "6. **禁止用无关的环境描写来凑字数**：每个环境描写都必须服务于情绪、氛围或剧情。\n"
+        "\n"
+        "## 节奏控制\n"
+        "1. 紧张场景：短句、快节奏、具体动作。\n"
+        "2. 日常场景：舒缓长句、细节描写、人物互动。\n"
+        "3. 情感场景：克制描写、潜台词、留白。\n"
+        "4. 每个场景都要有明确的叙事功能——推进剧情、揭示角色、制造冲突、埋下伏笔。\n"
+        "\n"
+        "## 逻辑自检清单（在写完每个场景后检查）\n"
+        "- 这个角色为什么会做出这个决定？有足够的情感铺垫吗？\n"
+        "- 这个事件的发生合理吗？有前因后果吗？\n"
+        "- 这段对话符合角色的性格和处境吗？\n"
+        "- 这个情节能让读者信服吗？有没有逻辑漏洞？\n"
+        "- 如果我是读者，我会觉得这个发展牵强吗？\n"
     )
     payload = {
         "model": DEEPSEEK_MODEL,
@@ -1853,7 +2117,8 @@ async def expand_chapter_to_content(story_context: dict, chapter_info: dict, api
         )
         resp.raise_for_status()
         data = resp.json()
-        return data["choices"][0]["message"]["content"]
+        content = data["choices"][0]["message"]["content"]
+        return _sanitize_novel_content(content)
 
 
 async def rewrite_selection(
@@ -1880,12 +2145,21 @@ async def rewrite_selection(
 - 提升描写的细腻度和画面感
 - 增强人物微表情、小动作、心理活动的描写
 - 优化句式节奏，避免单调
+- 逻辑自洽：确保改写后的情节转折有因有果，角色行为符合其性格和处境
+- 禁止使用破折号（——），用逗号、句号或省略号代替
+- 禁止使用「突然」「忽然」等廉价转折词
 - 直接输出改写后的文本，不要加额外说明"""
 
     payload = {
         "model": DEEPSEEK_MODEL,
         "messages": [
-            {"role": "system", "content": "你是一位资深小说编辑，擅长在不改变情节的前提下提升文笔质量。"},
+            {"role": "system", "content": (
+                "你是白金级小说编辑，擅长在不改变情节的前提下提升文笔质量。\n"
+                "## 核心约束\n"
+                "1. 逻辑自洽优先：改写后的内容必须有清晰的因果链。\n"
+                "2. 禁止使用破折号（——），用逗号、句号或省略号代替。\n"
+                "3. 禁止使用「突然」「忽然」等廉价转折词。"
+            )},
             {"role": "user", "content": user_prompt},
         ],
         "stream": False,
@@ -1900,7 +2174,7 @@ async def rewrite_selection(
         )
         resp.raise_for_status()
         data = resp.json()
-        return data["choices"][0]["message"]["content"]
+        return _sanitize_novel_content(data["choices"][0]["message"]["content"])
 
 
 async def adjust_chapter_content(
@@ -1932,12 +2206,23 @@ async def adjust_chapter_content(
 - 保留当前章节已经成立的主要剧情信息，除非用户明确要求重做
 - 优先根据用户要求调整节奏、情绪、冲突、人物互动、伏笔、描写重点
 - 保持人物设定、世界观和大纲约束一致
+- 逻辑自洽：每一个情节转折都必须有因有果，角色行为要符合其性格和处境
+- 禁止使用破折号（——），用逗号、句号或省略号代替
+- 禁止用「几天后」「过了一段时间」等时间跳跃来跳过关键剧情发展
 - 直接输出修改后的完整正文，不要解释，不要摘要，不要额外说明"""
 
     payload = {
         "model": DEEPSEEK_MODEL,
         "messages": [
-            {"role": "system", "content": "你是一位资深网文编辑，擅长根据编辑意见直接修改整章正文，并保持剧情与设定统一。字数控制在2000字左右。"},
+            {"role": "system", "content": (
+                "你是白金级网文编辑，擅长根据编辑意见直接修改整章正文，并保持剧情与设定统一。\n"
+                "字数控制在2000字左右。\n"
+                "## 核心约束\n"
+                "1. 逻辑自洽优先：每个情节转折都必须有因有果。\n"
+                "2. 禁止使用破折号（——），用逗号、句号或省略号代替。\n"
+                "3. 禁止用「突然」「忽然」等词廉价地制造转折。\n"
+                "4. 角色行为必须符合其性格和处境，不能为了推进剧情而强行改变角色。"
+            )},
             {"role": "user", "content": user_prompt},
         ],
         "stream": False,
@@ -1952,7 +2237,7 @@ async def adjust_chapter_content(
         )
         resp.raise_for_status()
         data = resp.json()
-        return data["choices"][0]["message"]["content"]
+        return _sanitize_novel_content(data["choices"][0]["message"]["content"])
 
 
 async def quality_assess(chapter_content: str, api_key: str | None = None) -> dict:

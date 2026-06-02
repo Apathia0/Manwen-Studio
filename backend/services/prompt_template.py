@@ -178,6 +178,38 @@ def _build_manga_style_rules(parts: list, params: dict):
 
 # ── 模板应用逻辑 ────────────────────────────────────────
 
+def get_template_story_length(story_id: int, db) -> str | None:
+    """获取模板绑定中的 story_length 参数。
+
+    Returns:
+        story_length 值（如 "short"/"medium"/"long"），无模板或无该参数时返回 None。
+    """
+    from models import StoryTemplateBinding
+
+    binding = db.query(StoryTemplateBinding).filter_by(story_id=story_id).first()
+    if not binding or not binding.template:
+        return None
+
+    template = binding.template
+    # 优先从 framework_params 中提取
+    params = getattr(template, "framework_params", None)
+    if isinstance(params, dict):
+        val = str(params.get("story_length") or "").strip().lower()
+        if val in ("short", "medium", "long"):
+            return val
+    # 从 framework_prompt 全文中推断（作为 fallback）
+    full_prompt = getattr(template, "framework_prompt", None)
+    if full_prompt and isinstance(full_prompt, str):
+        t = full_prompt.lower()
+        if "短篇" in t or "short" in t:
+            return "short"
+        if "中篇" in t or "medium" in t:
+            return "medium"
+        if "长篇" in t or "long" in t:
+            return "long"
+    return None
+
+
 def get_effective_prompt(story_id: int, prompt_type: str, db) -> str:
     """获取作品实际使用的 prompt。
 

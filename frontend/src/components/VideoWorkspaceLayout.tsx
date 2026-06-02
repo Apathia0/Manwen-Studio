@@ -6,6 +6,7 @@ import {
   type VideoShot,
   type VideoGenerationJob,
   type RenderedClip,
+  type EntitlementResponse,
   apiHeaders,
   listScreenplayScenes,
   listSceneShots,
@@ -22,6 +23,7 @@ interface Props {
   story: Story;
   chapters: Chapter[];
   currentChapter: Chapter | null;
+  entitlements?: EntitlementResponse | null;
   onChapterChange: (chapter: Chapter) => void;
   onContentUpdated: () => void | Promise<void>;
 }
@@ -37,6 +39,7 @@ export default function VideoWorkspaceLayout({
   story,
   chapters,
   currentChapter,
+  entitlements,
   onChapterChange,
   onContentUpdated,
 }: Props) {
@@ -287,6 +290,7 @@ export default function VideoWorkspaceLayout({
               chapterContent={resolvedChapter?.novel_content}
               scenes={scenes}
               screenplay={screenplay}
+              entitlements={entitlements}
               onScenesChange={setScenes}
               onScreenplayChange={setScreenplay}
               onSceneSelect={(scene) => {
@@ -303,6 +307,7 @@ export default function VideoWorkspaceLayout({
               shots={shots}
               shotsLoading={shotsLoading}
               scenesLoading={scenesLoading}
+              entitlements={entitlements}
               onShotsChange={(nextShots) => {
                 setShots(nextShots);
 
@@ -367,6 +372,7 @@ export default function VideoWorkspaceLayout({
             stylePresets={stylePresets}
             chapterStylePreset={chapterStylePreset}
             storyStylePreset={storyStylePreset}
+            entitlements={entitlements}
             onShotStylePresetChange={(preset) => {
               if (selectedShot) handleShotStylePresetChange(selectedShot.id, preset);
             }}

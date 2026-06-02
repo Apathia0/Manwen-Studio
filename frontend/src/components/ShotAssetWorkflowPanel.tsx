@@ -20,8 +20,19 @@ import {
   type VideoAsset,
   type VideoGenerationJob,
   type VideoShot,
+  type EntitlementResponse,
 } from '../api';
 import ShotFrameRegenerationModal from './ShotFrameRegenerationModal';
+
+function entitlementNumber(entitlements: EntitlementResponse | null | undefined, key: string, fallback: number): number {
+  const raw = entitlements?.entitlements?.[key];
+  if (typeof raw === 'number' && Number.isFinite(raw)) return raw;
+  if (typeof raw === 'string') {
+    const parsed = Number(raw);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return fallback;
+}
 
 export interface ShotAssetWorkflowPanelProps {
   shot: VideoShot | null;
@@ -33,6 +44,7 @@ export interface ShotAssetWorkflowPanelProps {
   stylePresets: any[];
   chapterStylePreset: any;
   storyStylePreset: any;
+  entitlements?: EntitlementResponse | null;
   onShotStylePresetChange?: (preset: string | null) => void;
   loading: boolean;
 }
@@ -103,10 +115,13 @@ export default function ShotAssetWorkflowPanel({
   stylePresets,
   chapterStylePreset,
   storyStylePreset,
+  entitlements,
   onShotStylePresetChange,
 }: ShotAssetWorkflowPanelProps) {
   const [activeSection, setActiveSection] = useState<SectionKey>('style');
   const [error, setError] = useState<string | null>(null);
+
+  const videoSecondsLimit = entitlementNumber(entitlements, 'video.generate.seconds.monthly_limit', 0);
 
   const [characterAssets, setCharacterAssets] = useState<VideoAsset[]>([]);
   const [sceneAssets, setSceneAssets] = useState<VideoAsset[]>([]);
@@ -609,9 +624,14 @@ export default function ShotAssetWorkflowPanel({
               </div>
             </div>
             <textarea value={videoPromptDraft} onChange={e => setVideoPromptDraft(e.target.value)} className="h-28 w-full rounded-lg border border-[#d7e3f4] p-2 text-xs resize-y" placeholder="视频生成提示词（AI 解析或手动编辑）" />
-            <button onClick={submitVideo} disabled={submittingVideo} className="w-full rounded-lg bg-gradient-to-r from-[#1d4ed8] to-[#1e40af] px-4 py-2 text-xs font-semibold text-white">
-              {submittingVideo ? '提交中...' : '生成视频'}
-            </button>
+            <div className="flex items-center justify-between gap-3">
+              {videoSecondsLimit > 0 && (
+                <span className="text-xs text-slate-400">本月视频时长配额 {videoSecondsLimit}s</span>
+              )}
+              <button onClick={submitVideo} disabled={submittingVideo} className="flex-1 rounded-lg bg-gradient-to-r from-[#1d4ed8] to-[#1e40af] px-4 py-2 text-xs font-semibold text-white">
+                {submittingVideo ? '提交中...' : '生成视频'}
+              </button>
+            </div>
           </div>
         ) : null}
 

@@ -801,12 +801,17 @@ async def adjust_framework(story_id: int, instruction: str) -> dict:
 
         messages = [{"role": "user", "content": instruction}]
 
+        # 推断篇幅类型，让框架调整遵循正确的篇幅规则
+        from .deepseek import _infer_story_length
+        story_length = _infer_story_length(story_context, description=instruction, messages=messages)
+
         try:
             plan = await adjust_framework_with_chat(
                 story_context=story_context,
                 messages=messages,
                 api_key=api_key,
                 existing_framework=existing_framework,
+                story_length=story_length,
             )
         except ValueError as exc:
             return {"error": f"AI 返回格式无效: {exc}"}

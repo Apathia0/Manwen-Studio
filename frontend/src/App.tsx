@@ -1760,6 +1760,7 @@ function WorkspacePage({
           story={story}
           chapters={chapters}
           currentChapter={currentChapter}
+          entitlements={entitlements}
           onChapterChange={onChapterChange}
           onContentUpdated={onContentUpdated}
         />

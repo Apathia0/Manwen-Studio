@@ -14,14 +14,26 @@ import {
   type ScriptScene,
   type VideoShot,
   type VideoAsset,
+  type EntitlementResponse,
 } from '../api';
 import ShotFrameRegenerationModal from './ShotFrameRegenerationModal';
+
+function entitlementNumber(entitlements: EntitlementResponse | null | undefined, key: string, fallback: number): number {
+  const raw = entitlements?.entitlements?.[key];
+  if (typeof raw === 'number' && Number.isFinite(raw)) return raw;
+  if (typeof raw === 'string') {
+    const parsed = Number(raw);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return fallback;
+}
 
 interface Props {
   scene: ScriptScene | null;
   shots: VideoShot[];
   shotsLoading?: boolean;
   scenesLoading?: boolean;
+  entitlements?: EntitlementResponse | null;
   onShotsChange: (shots: VideoShot[]) => void;
   onShotSelect: (shot: VideoShot) => void;
 }
@@ -31,9 +43,11 @@ export default function StoryboardPanel({
   shots,
   shotsLoading,
   scenesLoading,
+  entitlements,
   onShotsChange,
   onShotSelect,
 }: Props) {
+  const shotLimit = entitlementNumber(entitlements, 'shot.generate.monthly_limit', 0);
   const [generating, setGenerating] = useState(false);
   const [generatingPrompts, setGeneratingPrompts] = useState<number | null>(null);
   const [renderingSb, setRenderingSb] = useState<number | null>(null);
@@ -447,13 +461,18 @@ export default function StoryboardPanel({
           </h3>
           <p className="mt-1 text-sm leading-6 text-slate-500">{scene.summary}</p>
         </div>
-        <button
-          onClick={handleGenerateShots}
-          disabled={generating}
-          className="shrink-0 rounded-xl bg-[#2563eb] px-4 py-2 text-sm text-white disabled:opacity-60"
-        >
-          {generating ? '生成中...' : shots.length > 0 ? '重新生成镜头' : '生成镜头'}
-        </button>
+        <div className="flex shrink-0 flex-col items-end gap-1">
+          {shotLimit > 0 && (
+            <span className="text-xs text-slate-400">本月配额 {shotLimit} 次</span>
+          )}
+          <button
+            onClick={handleGenerateShots}
+            disabled={generating}
+            className="shrink-0 rounded-xl bg-[#2563eb] px-4 py-2 text-sm text-white disabled:opacity-60"
+          >
+            {generating ? '生成中...' : shots.length > 0 ? '重新生成镜头' : '生成镜头'}
+          </button>
+        </div>
       </div>
 
       {/* ─── Scene info bar ─────────────────────────────────── */}
