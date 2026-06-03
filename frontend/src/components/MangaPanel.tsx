@@ -28,6 +28,7 @@ import {
   ALLOWED_IMAGE_COUNTS,
   mangaImageUrl,
   getMangaGenerationStatus,
+  cancelMangaGeneration,
   type ImageRedrawMode,
   type Chapter,
   type MangaProgress,
@@ -1001,12 +1002,21 @@ export default memo(function MangaPanel({
 
   const handleRestartManga = () => startMangaGeneration('restart');
 
-  const handleAbortManga = () => {
+  const handleAbortManga = async () => {
     if (!chapter) return;
     const targetId = chapter.id;
     const state = genStore.get(targetId);
+
+    // 1) 通知后端取消后台任务（先触发，不等完成即可中止 SSE）
+    cancelMangaGeneration(targetId).catch(() => {
+      // 即使后端取消 API 调用失败（如任务已结束），仍继续本地清理
+    });
+
+    // 2) 中止本地 SSE 流连接
     mangaAbortRef.current.get(targetId)?.abort();
     mangaAbortRef.current.delete(targetId);
+
+    // 3) 清理本地状态
     if (state?.images.length) {
       setImages(mergeImages(existingImages, state.images));
       setIgnorePersistedImages(false);

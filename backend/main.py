@@ -5607,6 +5607,11 @@ async def _background_manga_generation(
         init_db.close()
 
     for i, scene_prompt in enumerate(scenes, start=1):
+        # 检查用户是否请求取消（优雅取消：当前 await 完成后才生效）
+        if task_manager.is_cancellation_requested(task_id):
+            logger.info(f"Background manga generation cancelled by user at image {i}/{total}")
+            break
+
         # 检查是否已存在（幂等性：断点续传）
         check_db = SessionLocal()
         try:
@@ -5668,6 +5673,20 @@ async def _background_manga_generation(
             write_db.close()
         
         completed += 1
+    
+    # 如果因用户取消而退出循环，在 DB 标记失败（_on_task_complete 不会覆盖已存在的 failed）
+    if task_manager.is_cancellation_requested(task_id):
+        task_manager.clear_cancellation_flag(task_id)
+        cancel_db = SessionLocal()
+        try:
+            bg_task = cancel_db.query(BackgroundTask).filter(BackgroundTask.task_id == task_id).first()
+            if bg_task and bg_task.status != "failed":
+                bg_task.status = "failed"
+                bg_task.error_message = f"用户手动取消了任务，已完成 {completed}/{total} 张"
+                bg_task.completed_at = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
+                cancel_db.commit()
+        finally:
+            cancel_db.close()
     
     logger.info(f"Background manga generation completed: chapter={chapter_id}, completed={completed}/{total}")
     return {"completed_images": completed, "total_images": total}
@@ -5844,6 +5863,39 @@ async def generate_manga_stream(chapter_id: int, request: Request, db: Session =
             ACTIVE_MANGA_GENERATIONS.discard(chapter_id)
 
     return EventSourceResponse(event_generator(), ping=10)
+
+
+@app.post("/api/chapters/{chapter_id}/cancel-manga-generation")
+async def cancel_manga_generation(chapter_id: int, request: Request, db: Session = Depends(get_db)):
+    """取消正在进行的漫画生成任务"""
+    user = _require_user(request, db)
+    chapter = _require_chapter_for_user(chapter_id, user, db)
+
+    # 查找该章节正在运行的 BackgroundTask
+    task = db.query(BackgroundTask).filter(
+        BackgroundTask.task_type == "manga_generation",
+        BackgroundTask.chapter_id == chapter_id,
+        BackgroundTask.status.in_(["pending", "running", "retrying"]),
+    ).first()
+
+    if not task:
+        raise HTTPException(404, "No active manga generation task found for this chapter")
+
+    # 1) 设置取消标志，不抛 CancelledError——让当前正在 await 的图片正常完成
+    task_manager.request_cancellation(task.task_id)
+
+    # 2) 先设置数据库状态为失败（后续 _background_manga_generation 的取消检测
+    #    及 _on_task_complete 都不会覆盖已存在的 failed 状态）
+    task.status = "failed"
+    task.error_message = "用户手动取消了任务"
+    task.completed_at = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
+    db.commit()
+
+    # 3) 清理活跃集合
+    ACTIVE_MANGA_GENERATIONS.discard(chapter_id)
+
+    logger.info(f"Manga generation cancelled by user: chapter={chapter_id}, task={task.task_id}")
+    return {"ok": True, "message": "漫画生成任务已取消"}
 
 
 @app.get("/api/chapters/{chapter_id}/manga-generation-status")

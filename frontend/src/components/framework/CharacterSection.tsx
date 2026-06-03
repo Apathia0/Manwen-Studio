@@ -117,7 +117,7 @@ function CharacterCard({ character, defaultOpen }: { character: Character; defau
             </div>
           )}
 
-          {character.relationships && character.relationships.length > 0 && (
+          {Array.isArray(character.relationships) && character.relationships.length > 0 && (
             <div>
               <span className="text-[10px] font-medium text-slate-500">关系</span>
               <div className="flex flex-wrap gap-1.5 mt-0.5">

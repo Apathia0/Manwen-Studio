@@ -1653,6 +1653,15 @@ export async function getMangaGenerationStatus(chapterId: number): Promise<Manga
   return response.json();
 }
 
+export async function cancelMangaGeneration(chapterId: number): Promise<{ ok: boolean; message: string }> {
+  const res = await fetch(`${BASE}/api/chapters/${chapterId}/cancel-manga-generation`, {
+    method: 'POST',
+    headers: apiHeaders(),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '取消漫画生成失败'));
+  return res.json();
+}
+
 export async function resetMangaImages(chapterId: number): Promise<void> {
   const res = await fetch(`${BASE}/api/chapters/${chapterId}/manga-images`, {
     method: 'DELETE',

@@ -15,6 +15,7 @@ class TaskManager:
     def __init__(self, max_concurrent: int = 5):
         self._semaphore = asyncio.Semaphore(max_concurrent)
         self._running_tasks: dict[str, asyncio.Task] = {}
+        self._cancellation_flags: dict[str, bool] = {}
 
     def with_retry(
         self,
@@ -89,6 +90,9 @@ class TaskManager:
                 BackgroundTask.task_id == task_id
             ).first()
             if task:
+                # 如果已经是 failed 状态，保留已有的错误消息（例如取消任务已设置的信息）
+                if task.status == "failed":
+                    return
                 task.status = "failed"
                 task.error_message = error
                 task.completed_at = datetime.now(timezone.utc).replace(tzinfo=None)
@@ -104,6 +108,9 @@ class TaskManager:
                 BackgroundTask.task_id == task_id
             ).first()
             if task:
+                # 如果已经是 failed（如已被用户取消），不再覆盖
+                if task.status == "failed":
+                    return
                 task.status = "succeeded"
                 task.result_json = result if isinstance(result, dict) else {"result": result}
                 task.completed_at = datetime.now(timezone.utc).replace(tzinfo=None)
@@ -197,7 +204,38 @@ class TaskManager:
 
         return task_id
 
-    async def cleanup_stale_tasks(self, max_age_hours: int = 24) -> int:
+    def request_cancellation(self, task_id: str) -> bool:
+        """请求优雅取消正在运行的任务。
+
+        设置取消标志，由业务协程在合适的时机（如每轮循环开始前）检查。
+        不会粗暴地抛 CancelledError 中断正在进行的 await 操作，
+        因此当前正在生成中的图片可以正常完成。
+        """
+        task = self._running_tasks.get(task_id)
+        if task is None:
+            return False
+        self._cancellation_flags[task_id] = True
+        return True
+
+    def is_cancellation_requested(self, task_id: str | None) -> bool:
+        """检查任务是否被请求取消"""
+        if task_id is None:
+            return False
+        return self._cancellation_flags.get(task_id, False)
+
+    def clear_cancellation_flag(self, task_id: str) -> None:
+        """清除取消标志"""
+        self._cancellation_flags.pop(task_id, None)
+
+    def cancel_task(self, task_id: str) -> bool:
+        """硬取消 — 直接抛 CancelledError 中断 await（备用方案）"""
+        task = self._running_tasks.get(task_id)
+        if task is None:
+            return False
+        task.cancel()
+        return True
+
+    def cleanup_stale_tasks(self, max_age_hours: int = 24) -> int:
         """清理超时的僵尸任务"""
         db = SessionLocal()
         try:
