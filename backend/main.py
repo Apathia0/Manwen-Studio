@@ -3093,7 +3093,7 @@ async def startup_task_cleanup():
     async def cleanup_loop():
         while True:
             try:
-                cleaned = await task_manager.cleanup_stale_tasks(max_age_hours=24)
+                cleaned = task_manager.cleanup_stale_tasks(max_age_hours=24)
                 if cleaned > 0:
                     logger.info("Cleaned up %d stale tasks", cleaned)
             except Exception as e:
@@ -6632,7 +6632,7 @@ async def generate_framework_endpoint(story_id: int, request: Request, db: Sessi
         captured_outline,
         timeout=600,  # 10分钟超时
         max_retries=2,
-        story_id=story.id,
+        # 注意：story_id 已作为第一个 positional arg 传入，不要再传 story_id= 关键字参数
     )
 
     return {
