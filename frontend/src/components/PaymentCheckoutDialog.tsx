@@ -1,0 +1,149 @@
+import { useEffect, useState } from 'react';
+import QRCode from 'qrcode';
+import { X } from 'lucide-react';
+import { syncMyOrder, type BillingCheckout } from '../api';
+import { formatMoney, formatDateTime, paymentMethodLabel } from '../lib/format';
+
+/** 支付结账弹窗 */
+export function PaymentCheckoutDialog({
+  checkout,
+  onClose,
+  onSuccess,
+}: {
+  checkout: (BillingCheckout & { orderNo: string }) | null;
+  onClose: () => void;
+  onSuccess: (message: string) => void;
+}) {
+  const [qrDataUrl, setQrDataUrl] = useState<string>('');
+  const [checkingPayment, setCheckingPayment] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function renderQr() {
+      if (!checkout?.qr_code_text) {
+        setQrDataUrl('');
+        return;
+      }
+      try {
+        const url = await QRCode.toDataURL(checkout.qr_code_text, {
+          width: 280,
+          margin: 1,
+          color: {
+            dark: '#0f172a',
+            light: '#ffffff',
+          },
+        });
+        if (!cancelled) setQrDataUrl(url);
+      } catch {
+        if (!cancelled) setQrDataUrl('');
+      }
+    }
+    void renderQr();
+    return () => {
+      cancelled = true;
+    };
+  }, [checkout]);
+
+  async function confirmAlipayPaid() {
+    if (!checkout?.orderNo || checkingPayment) return;
+    setCheckingPayment(true);
+    try {
+      const result = await syncMyOrder(checkout.orderNo);
+      if (result.status === 'paid') {
+        onSuccess(`支付成功，${result.subscription.plan.name} 已生效。`);
+      }
+    } finally {
+      setCheckingPayment(false);
+    }
+  }
+
+  if (!checkout) return null;
+
+  return (
+    <div className="fixed inset-0 z-40 flex items-center justify-center bg-[rgba(15,23,42,0.48)] px-4">
+      <div className="w-full max-w-4xl rounded-[28px] border border-[#d7e3f4] bg-white p-6 shadow-[0_24px_60px_rgba(15,23,42,0.2)]">
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <div className="text-lg font-semibold text-slate-900">支付订单</div>
+            <div className="mt-1 text-sm text-slate-500">
+              订单号 {checkout.orderNo}，请使用{paymentMethodLabel(checkout.method)}完成支付。
+            </div>
+          </div>
+          <button
+            onClick={onClose}
+            className="rounded-full border border-[#d7e3f4] bg-white p-2 text-slate-500 transition hover:bg-[#f8fbff] hover:text-slate-900"
+          >
+            <X size={16} />
+          </button>
+        </div>
+
+        <div className="mt-6 grid gap-6 lg:grid-cols-[320px_minmax(0,1fr)]">
+          <div className="rounded-3xl border border-[#d7e3f4] bg-[#f8fbff] p-5">
+            <div className="rounded-3xl bg-white p-4 shadow-[0_10px_24px_rgba(59,130,246,0.08)]">
+              {qrDataUrl ? (
+                <img src={qrDataUrl} alt="支付二维码" className="mx-auto h-[280px] w-[280px] rounded-2xl" />
+              ) : (
+                <div className="flex h-[280px] items-center justify-center rounded-2xl bg-[#f8fbff] text-sm text-slate-500">
+                  正在生成二维码...
+                </div>
+              )}
+            </div>
+            <div className="mt-4 text-center text-sm text-slate-600">
+              {checkout.provider === 'alipay' ? '打开支付宝扫一扫完成付款' : '请使用对应支付 App 扫码完成付款'}
+            </div>
+          </div>
+
+          <div className="space-y-4">
+            <div className="rounded-3xl border border-[#d7e3f4] bg-white p-5">
+              <div className="text-sm font-semibold text-slate-900">订单信息</div>
+              <div className="mt-4 grid gap-3 sm:grid-cols-2">
+                <div className="rounded-2xl bg-[#f8fbff] px-4 py-3">
+                  <div className="text-xs text-slate-500">套餐</div>
+                  <div className="mt-1 text-sm font-medium text-slate-900">{checkout.plan_name}</div>
+                </div>
+                <div className="rounded-2xl bg-[#f8fbff] px-4 py-3">
+                  <div className="text-xs text-slate-500">金额</div>
+                  <div className="mt-1 text-sm font-medium text-slate-900">{checkout.currency} {formatMoney(checkout.amount)}</div>
+                </div>
+                <div className="rounded-2xl bg-[#f8fbff] px-4 py-3">
+                  <div className="text-xs text-slate-500">计费周期</div>
+                  <div className="mt-1 text-sm font-medium text-slate-900">{checkout.billing_cycle === 'yearly' ? '年付' : '月付'}</div>
+                </div>
+                <div className="rounded-2xl bg-[#f8fbff] px-4 py-3">
+                  <div className="text-xs text-slate-500">失效时间</div>
+                  <div className="mt-1 text-sm font-medium text-slate-900">{formatDateTime(checkout.expires_at)}</div>
+                </div>
+              </div>
+            </div>
+
+            <div className="rounded-3xl border border-[#d7e3f4] bg-white p-5">
+              <div className="text-sm font-semibold text-slate-900">支付说明</div>
+              <div className="mt-3 whitespace-pre-wrap text-sm leading-7 text-slate-600">
+                {checkout.instructions || '请在二维码失效前完成支付，支付成功后系统会通过官方回调自动更新订单状态。'}
+              </div>
+              {checkout.payment_url ? (
+                <a
+                  href={checkout.payment_url}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="mt-4 inline-flex rounded-2xl bg-[#1d4ed8] px-4 py-2 text-sm font-medium text-white transition hover:bg-[#1e40af]"
+                >
+                  在新窗口打开支付链接
+                </a>
+              ) : null}
+              {checkout.method === 'alipay_qr' ? (
+                <button
+                  onClick={() => void confirmAlipayPaid()}
+                  disabled={checkingPayment}
+                  className="mt-4 ml-3 inline-flex rounded-2xl border border-[#bfdbfe] bg-white px-4 py-2 text-sm font-medium text-[#1d4ed8] transition hover:bg-[#eff6ff] disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  {checkingPayment ? '正在确认支付...' : '我已完成支付'}
+                </button>
+              ) : null}
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}

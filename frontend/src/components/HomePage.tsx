@@ -31,6 +31,8 @@ import {
   type RefImage,
 } from '../api';
 import { exportStoryAsZip } from '../lib/exportStory';
+import { toast } from '../lib/toast';
+import { confirm } from '../lib/confirm';
 import ImportDialog from './ImportDialog';
 
 interface Props {
@@ -100,7 +102,7 @@ export default function HomePage({ onSelectStory }: Props) {
       setStoryCharFlags((prev) => ({ ...prev, [charModalStoryId]: !!charModalText.trim() }));
       setCharModalStoryId(null);
     } catch (err: any) {
-      alert(`保存失败: ${err.message}`);
+      toast.error(`保存失败: ${err.message}`);
     } finally {
       setCharModalSaving(false);
     }
@@ -140,7 +142,7 @@ export default function HomePage({ onSelectStory }: Props) {
       setRefModalMax(r.max);
       setStoryRefFlags((prev) => ({ ...prev, [refModalStoryId]: r.images.length > 0 }));
     } catch (err: any) {
-      alert(`上传垫图失败: ${err.message}`);
+      toast.error(`上传垫图失败: ${err.message}`);
     } finally {
       setRefModalUploading(false);
     }
@@ -153,7 +155,7 @@ export default function HomePage({ onSelectStory }: Props) {
       setRefModalImages(r.images);
       setStoryRefFlags((prev) => ({ ...prev, [refModalStoryId]: r.images.length > 0 }));
     } catch (err: any) {
-      alert(`删除垫图失败: ${err.message}`);
+      toast.error(`删除垫图失败: ${err.message}`);
     }
   };
 
@@ -192,7 +194,7 @@ export default function HomePage({ onSelectStory }: Props) {
   };
 
   const handleDelete = async (id: number) => {
-    if (!confirm('确定要删除这本小说吗？所有章节、对话、漫画都将被永久删除！')) return;
+    if (!(await confirm({ message: '确定要删除这本小说吗？所有章节、对话、漫画都将被永久删除！' }))) return;
     await deleteStory(id);
     setStories((prev) => prev.filter((s) => s.id !== id));
   };
@@ -203,7 +205,7 @@ export default function HomePage({ onSelectStory }: Props) {
       const chapters = await listChapters(story.id);
       await exportStoryAsZip({ story, chapters });
     } catch (err: any) {
-      alert(`导出失败: ${err.message}`);
+      toast.error(`导出失败: ${err.message}`);
     } finally {
       setExportingStoryId(null);
     }
@@ -216,7 +218,7 @@ export default function HomePage({ onSelectStory }: Props) {
       setShowImportDialog(false);
       if (imported) onSelectStory(imported);
     } catch (err: any) {
-      alert(`导入完成后刷新失败: ${err.message}`);
+      toast.error(`导入完成后刷新失败: ${err.message}`);
     }
   };
 
@@ -254,13 +256,13 @@ export default function HomePage({ onSelectStory }: Props) {
           prev.map((s) => (s.id === storyId ? { ...s, cover_image: coverPath } : s))
         );
       } catch (err: any) {
-        alert(`上传封面失败: ${err.message}`);
+        toast.error(`上传封面失败: ${err.message}`);
       } finally {
         setUploadingCover(null);
       }
     };
     reader.onerror = () => {
-      alert('读取封面文件失败');
+      toast.error('读取封面文件失败');
       setUploadingCover(null);
     };
     reader.readAsDataURL(file);
@@ -400,6 +402,8 @@ export default function HomePage({ onSelectStory }: Props) {
                       src={coverImageUrl(s.cover_image)!}
                       alt={s.title}
                       className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
+                      loading="lazy"
+                      decoding="async"
                     />
                   ) : (
                     <div className="flex flex-col items-center justify-center h-full text-gray-600 group-hover:text-gray-500 transition-colors">
@@ -652,6 +656,8 @@ export default function HomePage({ onSelectStory }: Props) {
                         src={`${refImageUrl(img.image_path)}?t=${Date.now()}`}
                         alt={img.filename}
                         className="w-full h-full object-cover"
+                        loading="lazy"
+                        decoding="async"
                       />
                       <div className="absolute inset-0 bg-black/0 group-hover:bg-black/40 transition-colors flex items-end p-2 pointer-events-none">
                         <span className="text-[10px] text-white/80 bg-black/60 px-1.5 py-0.5 rounded">

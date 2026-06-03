@@ -1,6 +1,7 @@
 import { BookOpen, ChevronDown, ChevronUp, Loader2, Pencil, Save, X } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import { updateStoryBible, type StoryBible } from '../api';
+import { toast } from '../lib/toast';
 
 interface Props {
   storyId: number;
@@ -61,6 +62,7 @@ export default function StoryBibleSummaryCard({ storyId, storyBible, onUpdated }
       await updateStoryBible(storyId, buildStoryBiblePayload(form, storyBible));
       setEditOpen(false);
       await onUpdated?.();
+      toast.success('保存成功');
     } catch (err: any) {
       setError(err?.message || '更新作品圣经失败');
     } finally {

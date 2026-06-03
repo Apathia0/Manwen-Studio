@@ -6,6 +6,7 @@ import {
   type PromptTemplateItem,
   type SystemDefaultPrompts,
 } from '../api';
+import { toast } from '../lib/toast';
 
 type PromptType = 'framework' | 'chapter' | 'character' | 'manga_style';
 
@@ -129,6 +130,7 @@ export default function TemplateEditor({ template, onSave, onCancel }: Props) {
       } else {
         await updatePromptTemplate(template!.id, payload);
       }
+      toast.success('模板已保存');
       onSave();
     } catch (e: any) {
       setError(e.message || '保存失败');

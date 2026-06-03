@@ -1,11 +1,13 @@
-import { useCallback, useEffect, useState } from 'react';
+import { Suspense, lazy, useCallback, useEffect, useState } from 'react';
 import { Image, Bot } from 'lucide-react';
 import { type Story, type Chapter, type EntitlementResponse } from '../api';
-import FrameworkPanel from './FrameworkPanel';
-import EditorPanel from './EditorPanel';
-import MangaPanel from './MangaPanel';
-import AgentPanel from './AgentPanel/AgentPanel';
+import { RouteLoadingFallback } from './ui/RouteLoadingFallback';
 import StoryBibleSummaryCard from './StoryBibleSummaryCard';
+
+const FrameworkPanel = lazy(() => import('./FrameworkPanel'));
+const EditorPanel = lazy(() => import('./EditorPanel'));
+const MangaPanel = lazy(() => import('./MangaPanel'));
+const AgentPanel = lazy(() => import('./AgentPanel/AgentPanel'));
 
 interface Props {
   story: Story;
@@ -61,28 +63,32 @@ export default function WorkspaceLayout({
       <div className="flex min-h-0 flex-1 gap-4">
         {!mangaPreviewMode && (
         <div className="w-[320px] shrink-0 overflow-y-auto rounded-[24px] border border-[#d7e3f4] bg-[rgba(255,255,255,0.92)] shadow-[0_18px_42px_rgba(59,130,246,0.12)] backdrop-blur-xl">
-          <FrameworkPanel
-            story={story}
-            chapters={chapters}
-            onChapterSelect={handleChapterSelect}
-            onFrameworkUpdate={onContentUpdated}
-          />
+          <Suspense fallback={<RouteLoadingFallback />}>
+            <FrameworkPanel
+              story={story}
+              chapters={chapters}
+              onChapterSelect={handleChapterSelect}
+              onFrameworkUpdate={onContentUpdated}
+            />
+          </Suspense>
         </div>
         )}
 
         {!mangaPreviewMode && (
         <div className="flex-1 min-w-0 overflow-hidden rounded-[24px] border border-[#d7e3f4] bg-[rgba(255,255,255,0.92)] shadow-[0_18px_42px_rgba(59,130,246,0.12)] backdrop-blur-xl">
-          <EditorPanel
-            story={story}
-            chapters={chapters}
-            currentChapter={resolvedChapter}
-            onChapterChange={onChapterChange}
-            onContentUpdated={onContentUpdated}
-            onTextSelected={(text, context) => {
-              setSelectedText(text);
-              setChapterContext(context);
-            }}
-          />
+          <Suspense fallback={<RouteLoadingFallback />}>
+            <EditorPanel
+              story={story}
+              chapters={chapters}
+              currentChapter={resolvedChapter}
+              onChapterChange={onChapterChange}
+              onContentUpdated={onContentUpdated}
+              onTextSelected={(text, context) => {
+                setSelectedText(text);
+                setChapterContext(context);
+              }}
+            />
+          </Suspense>
         </div>
         )}
 
@@ -117,6 +123,7 @@ export default function WorkspaceLayout({
               </button>
             </div>
             <div className="flex-1 min-h-0 overflow-hidden">
+              <Suspense fallback={<RouteLoadingFallback />}>
               {rightPanelTab === 'manga' ? (
                 <MangaPanel
                   chapter={resolvedChapter}
@@ -141,6 +148,7 @@ export default function WorkspaceLayout({
                   onContentUpdated={onContentUpdated}
                 />
               )}
+              </Suspense>
             </div>
           </div>
         </div>

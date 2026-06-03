@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
+import { memo, useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
 import { ChevronDown, Loader2, MessageSquare, Pencil, Save, Sparkles, Wand2 } from 'lucide-react';
 import {
   adjustFramework,
@@ -16,6 +16,8 @@ import {
   type Story,
 } from '../api';
 import type { FrameworkChapter } from './framework/types';
+import { toast } from '../lib/toast';
+import { confirm } from '../lib/confirm';
 import ChapterListSection from './framework/ChapterListSection';
 import CharacterSection from './framework/CharacterSection';
 import OutlineSection from './framework/OutlineSection';
@@ -37,7 +39,7 @@ const SECTION_LABELS: Record<SectionKey, string> = {
   chapters: '章节列表',
 };
 
-export default function FrameworkPanel({ story, chapters, onChapterSelect, onFrameworkUpdate }: Props) {
+export default memo(function FrameworkPanel({ story, chapters, onChapterSelect, onFrameworkUpdate }: Props) {
   const [chatInput, setChatInput] = useState('');
   const [chatLoading, setChatLoading] = useState(false);
   const [continueLoading, setContinueLoading] = useState(false);
@@ -99,12 +101,12 @@ export default function FrameworkPanel({ story, chapters, onChapterSelect, onFra
 
   const handleRestoreSnapshot = useCallback(async (snapshotId: number) => {
     if (!story.id) return;
-    if (!window.confirm('回滚将先保存当前状态再恢复所选版本，确认继续？')) return;
+    if (!await confirm({ message: '回滚将先保存当前状态再恢复所选版本，确认继续？' })) return;
     try {
       await restoreFrameworkSnapshot(story.id, snapshotId);
       window.location.reload();
     } catch (e) {
-      alert(`回滚失败: ${e instanceof Error ? e.message : String(e)}`);
+      toast.error(`回滚失败: ${e instanceof Error ? e.message : String(e)}`);
     }
   }, [story.id]);
 
@@ -519,7 +521,7 @@ export default function FrameworkPanel({ story, chapters, onChapterSelect, onFra
       </div>
     </div>
   );
-}
+})
 
 function buildFrameworkDraft(story: Story): string {
   return JSON.stringify(

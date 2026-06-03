@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { Check, ImageIcon, Pencil, Plus, ScrollText, Trash2, X } from 'lucide-react';
 import { coverImageUrl, listChapters, type Story } from '../api';
 import { exportStoryAsZip } from '../lib/exportStory';
+import { confirm } from '../lib/confirm';
 import NovelCoverEditModal from './NovelCoverEditModal';
 
 interface Props {
@@ -83,7 +84,10 @@ export default function StoryLibraryPage({
   };
 
   const handleDelete = async (story: Story) => {
-    const confirmed = window.confirm(`确定删除《${story.title}》吗？作品下的章节、对话和漫画资源也会一起删除。`);
+    const confirmed = await confirm({
+      title: '删除作品',
+      message: `确定删除《${story.title}》吗？作品下的章节、对话和漫画资源也会一起删除。`,
+    });
     if (!confirmed) return;
     setDeletingId(story.id);
     try {
@@ -236,6 +240,8 @@ export default function StoryLibraryPage({
                           src={coverImageUrl(story.cover_image) || ''}
                           alt={`${story.title} 封面`}
                           className="h-36 w-full object-cover"
+                          loading="lazy"
+                          decoding="async"
                         />
                       </div>
                     ) : null}

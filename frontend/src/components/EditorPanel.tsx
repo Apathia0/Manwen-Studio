@@ -7,6 +7,7 @@ import TextEditor from './editor/TextEditor';
 import EditorToolbar from './editor/EditorToolbar';
 import ContinuitySummaryCard from './ContinuitySummaryCard';
 import type { TextSelection } from './editor/TextEditor';
+import { toast } from '../lib/toast';
 
 interface Props {
   story: Story;
@@ -30,7 +31,6 @@ export default function EditorPanel({
   const [isEditing, setIsEditing] = useState(false);
   const [draftContent, setDraftContent] = useState('');
   const [savingDraft, setSavingDraft] = useState(false);
-  const [saveSuccess, setSaveSuccess] = useState(false);
 
   useEffect(() => {
     setIsEditing(false);
@@ -92,8 +92,7 @@ export default function EditorPanel({
     try {
       await saveChapterContent(currentChapter.id, draftContent);
       setIsEditing(false);
-      setSaveSuccess(true);
-      setTimeout(() => setSaveSuccess(false), 2000);
+      toast.success('正文已保存');
       await onContentUpdated();
     } finally {
       setSavingDraft(false);
@@ -165,12 +164,6 @@ export default function EditorPanel({
           </div>
         </div>
       ) : null}
-
-      {saveSuccess && (
-        <div className="border-b border-[#bbf7d0] bg-[#f0fdf4] px-4 py-2 text-xs text-[#15803d]">
-          ✓ 正文已保存
-        </div>
-      )}
 
       <TextEditor
         content={currentChapter?.novel_content ?? null}

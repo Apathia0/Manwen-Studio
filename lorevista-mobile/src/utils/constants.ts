@@ -121,6 +121,21 @@ export const FEATURE_LABELS: Record<string, FeatureMeta> = {
     unit: '',
     kind: 'boolean',
   },
+  'video.generate.seconds.monthly_limit': {
+    label: '视频生成时长',
+    description: '每月可生成的视频总时长。',
+    unit: '秒/月',
+  },
+  'screenplay.generate.monthly_limit': {
+    label: '剧本生成',
+    description: '每月可生成影视剧本的次数。',
+    unit: '次/月',
+  },
+  'shot.generate.monthly_limit': {
+    label: '分镜任务生成',
+    description: '每月可生成分镜任务卡的次数。',
+    unit: '次/月',
+  },
 }
 
 // 计费周期

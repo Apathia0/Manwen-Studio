@@ -55,6 +55,7 @@
 import { ref, onMounted } from 'vue'
 import { useStoriesStore } from '@/stores/stories'
 import type { Story } from '@/api/types'
+import { exportStory } from '@/utils/exportStory'
 import LvNavbar from '@/components/lv-navbar/lv-navbar.vue'
 import LvBadge from '@/components/lv-badge/lv-badge.vue'
 import LvPullRefresh from '@/components/lv-pull-refresh/lv-pull-refresh.vue'
@@ -137,11 +138,23 @@ function handleStoryActionSelect(index: number) {
       uni.navigateTo({ url: `/pages/story/cover-edit?id=${selectedStory.value.id}` })
       break
     case 2:
-      uni.showToast({ title: '导出功能开发中', icon: 'none' })
+      handleExport()
       break
     case 3:
       confirmDelete()
       break
+  }
+}
+
+async function handleExport() {
+  if (!selectedStory.value) return
+  uni.showLoading({ title: '导出中...' })
+  try {
+    await exportStory(selectedStory.value.id)
+  } catch (e: any) {
+    uni.showToast({ title: e.message || '导出失败', icon: 'none' })
+  } finally {
+    uni.hideLoading()
   }
 }
 

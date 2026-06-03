@@ -10,6 +10,8 @@ import {
   type PromptTemplateItem,
 } from '../api';
 import TemplateEditor from './TemplateEditor';
+import { toast } from '../lib/toast';
+import { confirm } from '../lib/confirm';
 
 type TabKey = 'my' | 'market';
 
@@ -54,12 +56,12 @@ export default function TemplateManagePage() {
   }, [activeTab]);
 
   async function handleDelete(templateId: number) {
-    if (!confirm('确定删除此模板？')) return;
+    if (!(await confirm({ message: '确定删除此模板？' }))) return;
     try {
       await deletePromptTemplate(templateId);
       setMyTemplates(prev => prev.filter(t => t.id !== templateId));
     } catch (e: any) {
-      alert(e.message || '删除失败');
+      toast.error(e.message || '删除失败');
     }
   }
 
@@ -68,7 +70,7 @@ export default function TemplateManagePage() {
       await submitTemplateForReview(templateId);
       loadMyTemplates();
     } catch (e: any) {
-      alert(e.message || '提交失败');
+      toast.error(e.message || '提交失败');
     }
   }
 
@@ -81,7 +83,7 @@ export default function TemplateManagePage() {
       }
       loadMarketTemplates();
     } catch (e: any) {
-      alert(e.message || '操作失败');
+      toast.error(e.message || '操作失败');
     }
   }
 
@@ -91,7 +93,7 @@ export default function TemplateManagePage() {
       loadMyTemplates();
       setActiveTab('my');
     } catch (e: any) {
-      alert(e.message || '复制失败');
+      toast.error(e.message || '复制失败');
     }
   }
 

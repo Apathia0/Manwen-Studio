@@ -63,6 +63,24 @@
             <ChevronRight :size="14" color="#94a3b8" />
           </view>
         </view>
+        <view class="profile-page__menu-item" @tap="goTemplates">
+          <view class="profile-page__menu-icon">
+            <Library :size="18" color="#2563eb" />
+          </view>
+          <text class="profile-page__menu-text">提示词模板</text>
+          <view class="profile-page__menu-arrow">
+            <ChevronRight :size="14" color="#94a3b8" />
+          </view>
+        </view>
+        <view class="profile-page__menu-item" @tap="goModelConfig">
+          <view class="profile-page__menu-icon">
+            <Settings :size="18" color="#2563eb" />
+          </view>
+          <text class="profile-page__menu-text">自定义模型</text>
+          <view class="profile-page__menu-arrow">
+            <ChevronRight :size="14" color="#94a3b8" />
+          </view>
+        </view>
         <view class="profile-page__menu-item" @tap="goPassword">
           <view class="profile-page__menu-icon">
             <Lock :size="18" color="#2563eb" />
@@ -77,6 +95,19 @@
             <Info :size="18" color="#2563eb" />
           </view>
           <text class="profile-page__menu-text">关于应用</text>
+          <view class="profile-page__menu-arrow">
+            <ChevronRight :size="14" color="#94a3b8" />
+          </view>
+        </view>
+      </view>
+
+      <!-- 管理员入口 -->
+      <view v-if="authStore.user?.role === 'admin'" class="profile-page__menu">
+        <view class="profile-page__menu-item" @tap="goAdmin">
+          <view class="profile-page__menu-icon">
+            <Shield :size="18" color="#2563eb" />
+          </view>
+          <text class="profile-page__menu-text">管理中心</text>
           <view class="profile-page__menu-arrow">
             <ChevronRight :size="14" color="#94a3b8" />
           </view>
@@ -102,7 +133,7 @@ import LvTag from '@/components/lv-tag/lv-tag.vue'
 import LvButton from '@/components/lv-button/lv-button.vue'
 import LvEmpty from '@/components/lv-empty/lv-empty.vue'
 import UsageMeter from '@/components/usage-meter/usage-meter.vue'
-import { User, CreditCard, FileText, Key, Lock, Info, ChevronRight } from '@lucide/vue'
+import { User, CreditCard, FileText, Key, Lock, Info, ChevronRight, Library, Settings, Shield } from '@lucide/vue'
 
 const authStore = useAuthStore()
 const billingStore = useBillingStore()
@@ -142,12 +173,24 @@ function goApiKeys() {
   uni.navigateTo({ url: '/pages/settings/api-keys' })
 }
 
+function goTemplates() {
+  uni.navigateTo({ url: '/pages/templates/index' })
+}
+
+function goModelConfig() {
+  uni.navigateTo({ url: '/pages/settings/model-config' })
+}
+
 function goPassword() {
   uni.navigateTo({ url: '/pages/settings/password' })
 }
 
 function goAbout() {
   uni.navigateTo({ url: '/pages/settings/about' })
+}
+
+function goAdmin() {
+  uni.navigateTo({ url: '/pages/admin/index' })
 }
 </script>
 

@@ -23,6 +23,7 @@ import {
   type EntitlementResponse,
 } from '../api';
 import ShotFrameRegenerationModal from './ShotFrameRegenerationModal';
+import { confirm } from '../lib/confirm';
 
 function entitlementNumber(entitlements: EntitlementResponse | null | undefined, key: string, fallback: number): number {
   const raw = entitlements?.entitlements?.[key];
@@ -403,7 +404,7 @@ export default function ShotAssetWorkflowPanel({
 
   const handleDeleteAsset = async (asset: VideoAsset) => {
     if (!asset?.id) return;
-    if (!window.confirm(`确认删除资产「${asset.name}」吗？`)) return;
+    if (!(await confirm({ message: `确认删除资产「${asset.name}」吗？` }))) return;
     setDeletingAssetId(asset.id);
     try {
       await deleteVideoAsset(asset.id);
@@ -528,7 +529,7 @@ export default function ShotAssetWorkflowPanel({
             <div className="grid grid-cols-2 gap-2 max-h-52 overflow-y-auto">
               {characterAssets.map((a) => (
                 <div key={a.id} className="rounded-lg border border-[#d7e3f4] p-1.5">
-                  <img src={toAssetUrl(a.file_path)} alt={a.name} className="aspect-[3/4] w-full cursor-zoom-in rounded object-cover" onClick={() => openAssetWorkbench(a, `${a.name}（角色参考）`)} />
+                  <img src={toAssetUrl(a.file_path)} alt={a.name} className="aspect-[3/4] w-full cursor-zoom-in rounded object-cover" loading="lazy" decoding="async" onClick={() => openAssetWorkbench(a, `${a.name}（角色参考）`)} />
                   <div className="mt-1 flex items-center justify-between text-[11px]"><span className="truncate">{a.name}</span><button onClick={() => handleDeleteAsset(a)} disabled={deletingAssetId===a.id} className="text-rose-500">删除</button></div>
                 </div>
               ))}
@@ -542,7 +543,7 @@ export default function ShotAssetWorkflowPanel({
             <div className="space-y-2">
               {sceneAssets.map((a) => (
                 <div key={a.id} className="flex gap-2 rounded-lg border border-[#d7e3f4] p-2">
-                  <img src={toAssetUrl(a.file_path)} alt={a.name} className="h-16 w-24 cursor-zoom-in rounded object-cover" onClick={() => openAssetWorkbench(a, `${a.name}（场景参考）`)} />
+                  <img src={toAssetUrl(a.file_path)} alt={a.name} className="h-16 w-24 cursor-zoom-in rounded object-cover" loading="lazy" decoding="async" onClick={() => openAssetWorkbench(a, `${a.name}（场景参考）`)} />
                   <div className="min-w-0 flex-1">
                     <div className="flex items-center justify-between gap-2">
                       <div className="truncate text-xs">{a.name}</div>
@@ -566,7 +567,7 @@ export default function ShotAssetWorkflowPanel({
               ) : null}
             </div>
             <textarea value={storyboardPromptDraft} onChange={(e)=>setStoryboardPromptDraft(e.target.value)} className="h-24 w-full rounded-lg border border-[#d7e3f4] p-2 text-xs" placeholder="分镜提示词" />
-            {storyboardLoading ? <div className="text-xs text-slate-500">加载中...</div> : activeStoryboard ? <img src={toAssetUrl(activeStoryboard.file_path)} alt="storyboard" className="w-full cursor-zoom-in rounded-lg border border-[#d7e3f4]" onClick={() => openAssetWorkbench(activeStoryboard, '主分镜图重绘')} /> : <div className="text-xs text-slate-500">暂无分镜图</div>}
+            {storyboardLoading ? <div className="text-xs text-slate-500">加载中...</div> : activeStoryboard ? <img src={toAssetUrl(activeStoryboard.file_path)} alt="storyboard" className="w-full cursor-zoom-in rounded-lg border border-[#d7e3f4]" loading="lazy" decoding="async" onClick={() => openAssetWorkbench(activeStoryboard, '主分镜图重绘')} /> : <div className="text-xs text-slate-500">暂无分镜图</div>}
           </div>
         ) : null}
 
@@ -583,7 +584,7 @@ export default function ShotAssetWorkflowPanel({
               <div>
                 {framesLoading ? <div className="text-xs">加载中...</div> : firstFrame ? (
                   <div className="space-y-1">
-                    <img src={toAssetUrl(firstFrame.file_path)} alt="first" className="cursor-zoom-in rounded-lg border border-[#d7e3f4]" onClick={() => openAssetWorkbench(firstFrame as unknown as VideoAsset, '首帧重绘')} />
+                    <img src={toAssetUrl(firstFrame.file_path)} alt="first" className="cursor-zoom-in rounded-lg border border-[#d7e3f4]" loading="lazy" decoding="async" onClick={() => openAssetWorkbench(firstFrame as unknown as VideoAsset, '首帧重绘')} />
                     <button onClick={() => handleDeleteAsset(firstFrame as unknown as VideoAsset)} disabled={deletingAssetId === (firstFrame as any).id} className="text-[11px] text-rose-500 hover:text-rose-600 disabled:opacity-50">删除</button>
                   </div>
                 ) : <div className="text-xs text-slate-500">暂无首帧</div>}
@@ -591,7 +592,7 @@ export default function ShotAssetWorkflowPanel({
               <div>
                 {framesLoading ? <div className="text-xs">加载中...</div> : lastFrame ? (
                   <div className="space-y-1">
-                    <img src={toAssetUrl(lastFrame.file_path)} alt="last" className="cursor-zoom-in rounded-lg border border-[#d7e3f4]" onClick={() => openAssetWorkbench(lastFrame as unknown as VideoAsset, '尾帧重绘')} />
+                    <img src={toAssetUrl(lastFrame.file_path)} alt="last" className="cursor-zoom-in rounded-lg border border-[#d7e3f4]" loading="lazy" decoding="async" onClick={() => openAssetWorkbench(lastFrame as unknown as VideoAsset, '尾帧重绘')} />
                     <button onClick={() => handleDeleteAsset(lastFrame as unknown as VideoAsset)} disabled={deletingAssetId === (lastFrame as any).id} className="text-[11px] text-rose-500 hover:text-rose-600 disabled:opacity-50">删除</button>
                   </div>
                 ) : <div className="text-xs text-slate-500">暂无尾帧</div>}

@@ -1,6 +1,7 @@
 import { Check, ChevronDown, ChevronUp, Link2, Pencil, X } from 'lucide-react';
 import { useCallback, useMemo, useState } from 'react';
 import { saveContinuityMemory, type Chapter, type Story } from '../api';
+import { toast } from '../lib/toast';
 
 interface Props {
   story: Story;
@@ -53,6 +54,7 @@ export default function ContinuitySummaryCard({ story, chapter, previousChapter,
       });
       setEditing(false);
       onSaved?.();
+      toast.success('已保存');
     } catch {
       // 错误由调用方处理
     } finally {

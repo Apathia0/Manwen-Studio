@@ -1,4 +1,4 @@
-﻿import { useCallback, useEffect, useRef, useState } from 'react';
+﻿import { memo, useCallback, useEffect, useRef, useState } from 'react';
 import { ChevronUp, ChevronDown, Download, ImageIcon, Loader2, Sparkles, Pencil, RefreshCw, Check, X, ImagePlus, Trash2, Square } from 'lucide-react';
 import { useMemo as useMemoValue } from 'react';
 import { createPortal } from 'react-dom';
@@ -37,6 +37,7 @@ import {
   type RefImage,
 } from '../api';
 import { genStore } from '../genStore';
+import { toast } from '../lib/toast';
 
 interface Props {
   chapter: Chapter | null;
@@ -176,7 +177,7 @@ function entitlementBool(entitlements: EntitlementResponse | null | undefined, k
   return fallback;
 }
 
-export default function MangaPanel({
+export default memo(function MangaPanel({
   chapter,
   entitlements,
   onChapterRefresh,
@@ -572,7 +573,7 @@ export default function MangaPanel({
   const handleGenerateScenes = async () => {
     if (!chapter) return;
     if ((!chapter.messages || chapter.messages.length === 0) && !chapter.novel_content) {
-      alert('请先在左侧进行对话或手动编写正文');
+      toast.error('请先在左侧进行对话或手动编写正文');
       return;
     }
     setScenesFromSelectionFlag(false);
@@ -671,6 +672,7 @@ export default function MangaPanel({
     try {
       await updateScenes(chapter.id, scenes);
       setFailedSceneIdx(-1);
+      toast.success('保存成功');
     } catch (err: any) {
       setErrorMsg(err.message);
     } finally {
@@ -1461,6 +1463,7 @@ export default function MangaPanel({
                             setCharText(charDraft);
                             setCharSource('chapter');
                             setCharEditing(false);
+                            toast.success('保存成功');
                           } catch (err: any) {
                             setErrorMsg(err.message);
                           } finally {
@@ -1516,6 +1519,8 @@ export default function MangaPanel({
                                               src={refLoadSrcs[refImage.image_path] || refImageSrc(refImage.image_path)}
                                               alt={`${card.name} 角色参考图`}
                                               className="h-[240px] w-full object-contain bg-[#08111d] transition-transform group-hover:scale-[1.01]"
+                                              loading="lazy"
+                                              decoding="async"
                                             />
                                           ) : (
                                             <div className="flex h-[240px] w-full items-center justify-center bg-[linear-gradient(180deg,_#08111d_0%,_#111827_100%)] text-emerald-200/80">
@@ -1882,7 +1887,8 @@ export default function MangaPanel({
                     src={resolvedImgSrc}
                     alt={`Panel ${image_number}`}
                     className={`w-full object-contain ${isRegenerating ? 'opacity-30' : ''}`}
-                    loading="eager"
+                    loading="lazy"
+                    decoding="async"
                   />
                   <div className="absolute top-3 left-3 px-2 py-0.5 bg-black/70 rounded text-[10px] text-slate-700 font-mono">
                     {image_number}/{imageCount}
@@ -2067,6 +2073,8 @@ export default function MangaPanel({
                 src={imageLoadSrcs[lightboxImg!.image_path] || mangaImageUrl(lightboxImg!.image_path)}
                 alt={`Panel ${lightboxImg!.image_number}`}
                 className={`mx-auto h-auto object-contain rounded-xl shadow-2xl ${lightboxImageClass}`}
+                loading="lazy"
+                decoding="async"
               />
             </div>
 
@@ -2146,6 +2154,8 @@ export default function MangaPanel({
                             src={refLoadSrcs[img.image_path] || refImageSrc(img.image_path)}
                             alt={img.filename}
                             className="w-full h-full object-cover transition-transform group-hover:scale-[1.03]"
+                            loading="lazy"
+                            decoding="async"
                           />
                         ) : (
                           <div className="flex h-full w-full items-center justify-center bg-[linear-gradient(180deg,_#0f172a_0%,_#111827_100%)] text-white/70">
@@ -2265,7 +2275,7 @@ export default function MangaPanel({
       )}
     </div>
   );
-}
+})
 
 function ImageRedrawModal({
   target,
@@ -2474,6 +2484,8 @@ function ImageRedrawModal({
                     syncCanvasSize();
                   }}
                   draggable={false}
+                  loading="lazy"
+                  decoding="async"
                   className={`block max-h-[72vh] max-w-full rounded-2xl object-contain shadow-2xl ${imageLoaded ? 'opacity-100' : 'opacity-0'}`}
                 />
                 {!imageLoaded && (
@@ -2562,7 +2574,7 @@ function ImageRedrawModal({
                     if (mode === 'partial') {
                       const mask = exportMask();
                       if (!mask) {
-                        alert('请先在左侧图片上涂抹需要修改的区域。');
+                        toast.error('请先在左侧图片上涂抹需要修改的区域。');
                         return;
                       }
                       payload.mask = mask;
@@ -2658,6 +2670,8 @@ function RefPreviewModal({
                     src={imageSrc}
                     alt={target.image.filename}
                     className={`mx-auto h-auto object-contain rounded-xl shadow-2xl ${previewImageClass}`}
+                    loading="lazy"
+                    decoding="async"
                   />
                 ) : (
                   <div className="flex min-h-[420px] min-w-[320px] items-center justify-center rounded-xl bg-[linear-gradient(180deg,_#08111d_0%,_#111827_100%)] text-white/70">
@@ -2709,5 +2723,3 @@ function RefPreviewModal({
 
   return createPortal(modal, document.body);
 }
-
-

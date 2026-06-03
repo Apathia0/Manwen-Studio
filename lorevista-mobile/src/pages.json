@@ -159,6 +159,12 @@
           "style": {
             "navigationBarTitleText": "质量评估"
           }
+        },
+        {
+          "path": "template-editor",
+          "style": {
+            "navigationBarTitleText": "模板编辑"
+          }
         }
       ]
     },
@@ -204,6 +210,76 @@
           "path": "about",
           "style": {
             "navigationBarTitleText": "关于"
+          }
+        },
+        {
+          "path": "model-config",
+          "style": {
+            "navigationBarTitleText": "自定义模型"
+          }
+        }
+      ]
+    },
+    {
+      "root": "pages/templates",
+      "pages": [
+        {
+          "path": "index",
+          "style": {
+            "navigationStyle": "custom"
+          }
+        }
+      ]
+    },
+    {
+      "root": "pages/admin",
+      "pages": [
+        {
+          "path": "index",
+          "style": {
+            "navigationStyle": "custom"
+          }
+        },
+        {
+          "path": "plans",
+          "style": {
+            "navigationBarTitleText": "套餐管理"
+          }
+        },
+        {
+          "path": "users",
+          "style": {
+            "navigationBarTitleText": "用户管理"
+          }
+        },
+        {
+          "path": "platform",
+          "style": {
+            "navigationBarTitleText": "平台配置"
+          }
+        },
+        {
+          "path": "orders",
+          "style": {
+            "navigationBarTitleText": "订单中心"
+          }
+        },
+        {
+          "path": "audit-logs",
+          "style": {
+            "navigationBarTitleText": "操作审计"
+          }
+        },
+        {
+          "path": "announcement",
+          "style": {
+            "navigationBarTitleText": "公告管理"
+          }
+        },
+        {
+          "path": "template-review",
+          "style": {
+            "navigationBarTitleText": "模板审核"
           }
         }
       ]

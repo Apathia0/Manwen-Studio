@@ -169,6 +169,8 @@ export default function NovelCoverEditModal({ story, onClose, onUpdated }: Props
                     src={coverUrl}
                     alt={`${story.title} 封面`}
                     onLoad={() => setImageLoaded(true)}
+                    loading="lazy"
+                    decoding="async"
                     className={`mx-auto h-auto max-h-[72vh] object-contain rounded-xl shadow-2xl transition-opacity ${previewImageClass} ${imageLoaded ? 'opacity-100' : 'opacity-0'}`}
                   />
                   {!imageLoaded && (

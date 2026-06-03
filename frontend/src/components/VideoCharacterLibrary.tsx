@@ -13,6 +13,8 @@ import {
   type ImageRedrawMode,
 } from '../api';
 import { ChevronLeft, ChevronRight, X, Loader2 } from 'lucide-react';
+import { confirm } from '../lib/confirm';
+import { toast } from '../lib/toast';
 
 interface Props {
   storyId: number;
@@ -119,7 +121,7 @@ export default function VideoCharacterLibrary({ storyId }: Props) {
   };
 
   const handleDeleteVersion = async (versionId: number) => {
-    if (!window.confirm('确认删除此版本？')) return;
+    if (!(await confirm({ message: '确认删除此版本？' }))) return;
     try {
       await deleteCharacterVersion(storyId, selectedName, versionId);
       await loadCharacters();
@@ -156,7 +158,7 @@ export default function VideoCharacterLibrary({ storyId }: Props) {
 
   const handleDeleteRef = async () => {
     if (!selectedVersion || !selectedName) return;
-    if (!window.confirm('确认删除当前版本的参考图？')) return;
+    if (!(await confirm({ message: '确认删除当前版本的参考图？' }))) return;
     try {
       await deleteCharacterRefImage(storyId, selectedName, selectedVersion.id);
       await loadCharacters();
@@ -299,6 +301,8 @@ export default function VideoCharacterLibrary({ storyId }: Props) {
                     src={selectedVersion.ref_asset_url}
                     alt={selectedName}
                     className="w-32 h-32 rounded-lg border border-[#d7e3f4] object-cover cursor-pointer"
+                    loading="lazy"
+                    decoding="async"
                     onClick={() => setPreviewOpen(true)}
                   />
                   {/* hover 遮罩 */}
@@ -370,6 +374,8 @@ export default function VideoCharacterLibrary({ storyId }: Props) {
               <img
                 src={selectedVersion.ref_asset_url}
                 alt={selectedName}
+                loading="lazy"
+                decoding="async"
                 className={`mx-auto h-auto object-contain rounded-xl shadow-2xl ${
                   lightboxZoom === 1
                     ? 'max-w-[92%] max-h-none'
@@ -629,6 +635,8 @@ function ImageRedrawModal({
                     syncCanvasSize();
                   }}
                   draggable={false}
+                  loading="lazy"
+                  decoding="async"
                   className={`block max-h-[72vh] max-w-full rounded-2xl object-contain shadow-2xl ${imageLoaded ? 'opacity-100' : 'opacity-0'}`}
                 />
                 {!imageLoaded && (
@@ -718,7 +726,7 @@ function ImageRedrawModal({
                     if (mode === 'partial') {
                       const mask = exportMask();
                       if (!mask) {
-                        alert('请先在左侧图片上涂抹需要修改的区域。');
+                        toast.error('请先在左侧图片上涂抹需要修改的区域。');
                         return;
                       }
                       payload.mask = mask;

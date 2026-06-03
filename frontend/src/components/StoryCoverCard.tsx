@@ -1,5 +1,5 @@
 import { ImagePlus, Loader2, Sparkles, Upload } from 'lucide-react';
-import { useRef, useState } from 'react';
+import { memo, useRef, useState } from 'react';
 import {
   adjustStoryCover,
   coverImageUrl,
@@ -13,7 +13,7 @@ interface Props {
   onUpdated?: () => void | Promise<void>;
 }
 
-export default function StoryCoverCard({ story, onUpdated }: Props) {
+export default memo(function StoryCoverCard({ story, onUpdated }: Props) {
   const fileRef = useRef<HTMLInputElement>(null);
   const [instruction, setInstruction] = useState('');
   const [loading, setLoading] = useState<'generate' | 'adjust' | 'upload' | null>(null);
@@ -149,4 +149,4 @@ export default function StoryCoverCard({ story, onUpdated }: Props) {
       </div>
     </div>
   );
-}
+})

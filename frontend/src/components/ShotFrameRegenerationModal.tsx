@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { X, Loader2 } from 'lucide-react';
 import { createPortal } from 'react-dom';
+import { toast } from '../lib/toast';
 
 interface ShotFrameRegenerationModalProps {
   imageSrc: string;
@@ -303,7 +304,7 @@ function ShotFrameRegenerationModal({
                     if (mode === 'partial') {
                       const mask = exportMask();
                       if (!mask) {
-                        alert('请先在左侧图片上涂抹需要修改的区域。');
+                        toast.error('请先在左侧图片上涂抹需要修改的区域。');
                         return;
                       }
                       payload.mask = mask;

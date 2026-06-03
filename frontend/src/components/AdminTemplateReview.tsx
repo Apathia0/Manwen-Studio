@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { listPendingTemplates, approveTemplate, rejectTemplate, type PromptTemplateItem } from '../api';
+import { toast } from '../lib/toast';
 
 export default function AdminTemplateReview() {
   const [templates, setTemplates] = useState<PromptTemplateItem[]>([]);
@@ -32,19 +33,19 @@ export default function AdminTemplateReview() {
       setNotes(prev => ({ ...prev, [templateId]: '' }));
       loadPending();
     } catch (e: any) {
-      alert(e.message || '操作失败');
+      toast.error(e.message || '操作失败');
     }
   }
 
   async function handleReject(templateId: number) {
     const note = notes[templateId] || '';
-    if (!note.trim()) { alert('请填写拒绝原因'); return; }
+    if (!note.trim()) { toast.error('请填写拒绝原因'); return; }
     try {
       await rejectTemplate(templateId, note);
       setNotes(prev => ({ ...prev, [templateId]: '' }));
       loadPending();
     } catch (e: any) {
-      alert(e.message || '操作失败');
+      toast.error(e.message || '操作失败');
     }
   }
 

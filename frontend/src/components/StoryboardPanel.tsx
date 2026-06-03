@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { memo, useMemo, useState } from 'react';
 import {
   generateSceneShots,
   generateShotPrompts,
@@ -16,6 +16,7 @@ import {
   type VideoAsset,
   type EntitlementResponse,
 } from '../api';
+import { toast } from '../lib/toast';
 import ShotFrameRegenerationModal from './ShotFrameRegenerationModal';
 
 function entitlementNumber(entitlements: EntitlementResponse | null | undefined, key: string, fallback: number): number {
@@ -38,7 +39,7 @@ interface Props {
   onShotSelect: (shot: VideoShot) => void;
 }
 
-export default function StoryboardPanel({
+export default memo(function StoryboardPanel({
   scene,
   shots,
   shotsLoading,
@@ -248,6 +249,7 @@ export default function StoryboardPanel({
       setEditingShotId(null);
       setEditFormData({});
       setNotice(`镜头 ${shot.shot_number} 已更新。`);
+      toast.success('已保存');
     } catch (err: any) {
       setError(err.message || '更新镜头失败');
     } finally {
@@ -860,7 +862,7 @@ export default function StoryboardPanel({
       )}
     </div>
   );
-}
+})
 
 function shotStatusLabel(status: string): string {
   const labels: Record<string, string> = {

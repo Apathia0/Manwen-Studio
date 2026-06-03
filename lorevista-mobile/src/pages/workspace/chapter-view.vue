@@ -24,6 +24,21 @@
       <template #tab-0>
         <scroll-view scroll-y class="chapter-view__tab-scroll">
           <view class="chapter-view__tab">
+            <!-- 模板绑定 -->
+            <template-binding
+              v-if="storiesStore.activeStoryId"
+              :story-id="storiesStore.activeStoryId"
+              @bound="onTemplateBound"
+            />
+
+            <!-- 创意简报 -->
+            <bible-summary
+              v-if="storyBible && Object.keys(storyBible).length > 0"
+              :bible="storyBible"
+              :editable="true"
+              @edit="handleEditBible"
+            />
+
             <!-- 故事描述 -->
             <view class="fp__section fp__card">
               <view class="fp__section-header" @tap="toggleDescEdit">
@@ -429,6 +444,8 @@ import MangaImageCard from '@/components/manga-image-card/manga-image-card.vue'
 import ChatMessage from '@/components/chat-message/chat-message.vue'
 import ChatInput from '@/components/chat-input/chat-input.vue'
 import ChangesBanner from '@/components/changes-banner/changes-banner.vue'
+import TemplateBinding from '@/components/template-binding/template-binding.vue'
+import BibleSummary from '@/components/bible-summary/bible-summary.vue'
 
 const workspaceStore = useWorkspaceStore()
 const editorStore = useEditorStore()
@@ -476,6 +493,20 @@ const descEditing = ref(false)
 const descDraft = ref('')
 const savingDesc = ref(false)
 const storyDesc = computed(() => frameworkStory.value?.description || '')
+
+// --- Story Bible ---
+const storyBible = computed(() => frameworkStory.value?.story_bible || {})
+
+function onTemplateBound() {
+  // 模板绑定后可刷新框架相关数据
+}
+
+function handleEditBible() {
+  // 跳转到引导页面编辑创意简报
+  if (storiesStore.activeStoryId) {
+    uni.navigateTo({ url: `/pages/story/onboarding?storyId=${storiesStore.activeStoryId}` })
+  }
+}
 
 function toggleDescEdit() {
   if (descEditing.value) return

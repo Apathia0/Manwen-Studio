@@ -7,6 +7,7 @@ import {
   listPublicTemplates,
   type PromptTemplateItem,
 } from '../api';
+import { toast } from '../lib/toast';
 
 interface Props {
   storyId: number;
@@ -52,7 +53,7 @@ export default function TemplateBindingPanel({ storyId }: Props) {
       setCurrentTemplate(tpl);
       setShowPicker(false);
     } catch (e: any) {
-      alert(e.message || '绑定失败');
+      toast.error(e.message || '绑定失败');
     }
   }
 
@@ -61,7 +62,7 @@ export default function TemplateBindingPanel({ storyId }: Props) {
       await unbindStoryTemplate(storyId);
       setCurrentTemplate(null);
     } catch (e: any) {
-      alert(e.message || '解绑失败');
+      toast.error(e.message || '解绑失败');
     }
   }
 

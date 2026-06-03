@@ -38,6 +38,7 @@ import {
   type PlatformAnnouncement,
   type PlatformSettings,
 } from '../../api';
+import { toast } from '../../lib/toast';
 
 type AsyncAction = () => Promise<void>;
 
@@ -342,6 +343,7 @@ export function AdminPlanManagementPage({ onError }: { onError: (message: string
                       });
                       setDraftPlan({ code: '', name: '', description: '', monthly_price: '0', yearly_price: '0' });
                       await loadPlans();
+                      toast.success('套餐创建成功');
                     })
                   }
                 >
@@ -383,6 +385,7 @@ export function AdminPlanManagementPage({ onError }: { onError: (message: string
                       is_recommended: planMeta.is_recommended,
                     });
                     await loadPlans(selectedPlanId);
+                    toast.success('套餐信息已保存');
                   })
                 }
               >
@@ -395,6 +398,7 @@ export function AdminPlanManagementPage({ onError }: { onError: (message: string
                     if (!selectedPlanId) return;
                     await deleteAdminPlan(selectedPlanId);
                     await loadPlans();
+                    toast.success('套餐已删除');
                   })
                 }
               >
@@ -493,6 +497,7 @@ export function AdminPlanManagementPage({ onError }: { onError: (message: string
                     await saveAdminPlanFeatures(selectedPlanId, features);
                     await saveAdminQuotaRules(selectedPlanId, rules);
                     await loadPlans(selectedPlanId);
+                    toast.success('套餐能力已保存');
                   })
                 }
               >
@@ -695,6 +700,7 @@ export function AdminUserManagementPage({ onError }: { onError: (message: string
                         allow_api_url_override: false,
                       });
                       await loadData();
+                      toast.success('用户创建成功');
                     })
                   }
                 >
@@ -753,6 +759,7 @@ export function AdminUserManagementPage({ onError }: { onError: (message: string
                           });
                           await loadData();
                           await loadEntitlements(selectedUser.id);
+                          toast.success('账号信息已保存');
                         })
                       }
                     >
@@ -767,6 +774,7 @@ export function AdminUserManagementPage({ onError }: { onError: (message: string
                           setSelectedUserId(null);
                           setGrantFeedback(null);
                           await loadData();
+                          toast.success('账号已停用');
                         })
                       }
                     >
@@ -800,6 +808,7 @@ export function AdminUserManagementPage({ onError }: { onError: (message: string
                             await adminUpdateUserSubscription(selectedUser.id, selectedPlanId);
                             await loadData();
                             await loadEntitlements(selectedUser.id);
+                            toast.success('套餐已切换');
                           })
                         }
                       >
@@ -826,6 +835,7 @@ export function AdminUserManagementPage({ onError }: { onError: (message: string
                             setGrantFeedback(result);
                             setEntitlementPreview((prev: any) => prev ? { ...prev, usage: result.usage } : prev);
                             await loadEntitlements(selectedUser.id);
+                            toast.success('额度已补发');
                           })
                         }
                       >
@@ -1005,6 +1015,7 @@ export function AdminAnnouncementPage({ onError }: { onError: (message: string) 
     try {
       const result = await updateAdminAnnouncement(announcement);
       setAnnouncement(result.announcement);
+      toast.success('公告已保存');
     } catch (error: any) {
       onError(error?.message || '保存公告失败');
     } finally {
@@ -1411,6 +1422,7 @@ export function AdminPlatformSettingsPage({
               const next = await updateAdminPlatformSettings(settings);
               setSettings(next);
               onSaved?.(next);
+              toast.success('平台配置已保存');
             })
           }
         >
@@ -1441,6 +1453,7 @@ export function AdminOrdersPage({ onError }: { onError: (message: string) => voi
     try {
       await updateAdminOrderStatus(orderNo, status);
       await loadOrders();
+      toast.success('订单状态已更新');
     } catch (error: any) {
       onError(error?.message || '订单状态更新失败');
     } finally {

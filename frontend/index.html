@@ -5,7 +5,13 @@
     <link rel="icon" type="image/svg+xml" href="/brand-mark.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>StoryCanvas - AI 小说与漫画创作平台</title>
-    <link href="https://fonts.googleapis.com/css2?family=Lora:ital,wght@0,400..700;1,400..700&display=swap" rel="stylesheet">
+    <!-- 字体预连接，加速 DNS/TLS 握手 -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <!-- 异步加载字体，不阻塞渲染 -->
+    <link rel="preload" as="style" href="https://fonts.googleapis.com/css2?family=Lora:ital,wght@0,400..700;1,400..700&display=swap" />
+    <link href="https://fonts.googleapis.com/css2?family=Lora:ital,wght@0,400..700;1,400..700&display=swap" rel="stylesheet" media="print" onload="this.media='all'" />
+    <noscript><link href="https://fonts.googleapis.com/css2?family=Lora:ital,wght@0,400..700;1,400..700&display=swap" rel="stylesheet" /></noscript>
   </head>
   <body>
     <div id="root"></div>

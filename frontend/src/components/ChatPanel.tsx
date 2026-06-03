@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { memo, useEffect, useRef, useState } from 'react';
 import { Send, Image, Square, MessageSquare, FileText, Save } from 'lucide-react';
 import { chatStream, importNovel, type Chapter } from '../api';
 
@@ -12,7 +12,7 @@ interface Props {
   onGoToManga?: () => void;
 }
 
-export default function ChatPanel({ chapter, onMessageSent, onChapterRefresh, onGoToManga }: Props) {
+export default memo(function ChatPanel({ chapter, onMessageSent, onChapterRefresh, onGoToManga }: Props) {
   const [messages, setMessages] = useState<{ role: string; content: string }[]>([]);
   const [input, setInput] = useState('');
   const [streaming, setStreaming] = useState(false);
@@ -349,4 +349,4 @@ export default function ChatPanel({ chapter, onMessageSent, onChapterRefresh, on
       )}
     </div>
   );
-}
+})
