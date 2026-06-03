@@ -2056,7 +2056,7 @@ def _characters_big_five_feel_generic(characters) -> bool:
     return max(spread_by_dimension.values()) < 15
 
 
-def _has_opening_ready_outline(outline: dict | None) -> bool:
+def _has_opening_ready_outline(outline: dict | None, story_length: str | None = None) -> bool:
     if not isinstance(outline, dict):
         return False
     acts = outline.get("three_acts")
@@ -2065,15 +2065,23 @@ def _has_opening_ready_outline(outline: dict | None) -> bool:
     chapters = _extract_outline_chapters(outline)
     if len(chapters) < 3:
         return False
+
+    # 根据故事篇幅决定验证范围
+    length_to_max_check = {"short": 5, "medium": 8}
+    max_check = min(len(chapters), length_to_max_check.get(story_length or "", 10))
+
     strategy = _read_serial_strategy(outline)
+    # 短/中篇不要求 chapter_10_climax（没有第10章）
     required_strategy_fields = [
         "positioning",
         "opening_hook",
         "first_3_chapter_hook",
-        "chapter_10_climax",
     ]
+    if max_check >= 10:
+        required_strategy_fields.append("chapter_10_climax")
     if any(not str(strategy.get(field) or "").strip() for field in required_strategy_fields):
         return False
+
     first_chapter = next((item for item in chapters if item.get("chapter_number") == 1), None)
     if not first_chapter:
         return False
@@ -2081,7 +2089,7 @@ def _has_opening_ready_outline(outline: dict | None) -> bool:
         return False
     if not str(first_chapter.get("hook") or "").strip():
         return False
-    max_check = min(len(chapters), 10)
+
     need_detailed = max(3, max_check - 4)
     if _count_detailed_opening_chapters(chapters, upto=max_check) < need_detailed:
         return False
@@ -2499,7 +2507,7 @@ async def _complete_framework_payload(
                 logger.warning("Failed to backfill framework characters: %s", exc)
 
     if check_all or "outline" in fields_to_check:
-        outline_ready = _has_opening_ready_outline if require_launch_ready else _has_complete_outline
+        outline_ready = (lambda o: _has_opening_ready_outline(o, story_length=story_length)) if require_launch_ready else _has_complete_outline
         if not outline_ready(payload["outline"]):
             try:
                 incoming_outline = await regenerate_outline(story_context, api_key=api_key, story_length=story_length)
@@ -6497,7 +6505,8 @@ async def generate_framework_endpoint(story_id: int, request: Request, db: Sessi
         )
     except ValueError as exc:
         raise HTTPException(502, f"AI 初始框架生成不完整：{exc}") from exc
-    expected_min = max(requested_min_chapters or 0, 10)
+    length_defaults = {"short": 5, "medium": 8}
+    expected_min = max(requested_min_chapters or 0, length_defaults.get(story_length or "", 10))
     quality_issues = _framework_launch_quality_issues(framework, expected_min_chapters=expected_min)
     if quality_issues:
         try:
