@@ -104,8 +104,10 @@ from services.install import (
     database_has_install_markers,
     detect_install_status,
     redact_url,
+    request_backend_restart,
     test_database_url,
     test_redis_url,
+    validate_install_admin_config,
     write_env_updates,
 )
 
@@ -1002,12 +1004,10 @@ def _ensure_platform_seed(db: Session, *, create_default_admin: bool = False) ->
 
 
 def _create_install_admin_user(admin_config: dict[str, Any], db: Session) -> User:
-    email = _normalize_email(admin_config.get("email"))
-    name = str(admin_config.get("name") or "").strip() or "系统管理员"
-    password = str(admin_config.get("password") or "")
-    _validate_email_format(email)
-    if len(password) < 8:
-        raise HTTPException(400, "管理员密码至少 8 位")
+    normalized = validate_install_admin_config(admin_config)
+    email = normalized["email"]
+    name = normalized["name"]
+    password = normalized["password"]
     existing = db.query(User).filter(User.email == email).first()
     if existing:
         raise HTTPException(409, "管理员邮箱已存在")
@@ -3667,15 +3667,11 @@ def install_complete(body: dict):
     admin_config = body.get("admin") if isinstance(body.get("admin"), dict) else {}
 
     try:
+        admin_config = validate_install_admin_config(admin_config)
         database_url = build_database_url(database_config)
         redis_url = build_redis_url(redis_config)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
-
-    password = str(admin_config.get("password") or "")
-    confirm_password = str(admin_config.get("confirmPassword") or admin_config.get("confirm_password") or "")
-    if password != confirm_password:
-        raise HTTPException(400, "管理员两次输入的密码不一致")
 
     try:
         test_database_url(database_url)
@@ -3735,6 +3731,18 @@ def install_complete(body: dict):
         raise HTTPException(500, f"安装失败: {exc}") from exc
     finally:
         install_engine.dispose()
+
+
+@app.post("/api/install/restart")
+def install_restart():
+    status = _refresh_install_status()
+    if not status.get("requires_restart"):
+        raise HTTPException(409, "系统当前不处于安装后待重启状态")
+    try:
+        restart_result = request_backend_restart()
+        return {"ok": True, **restart_result}
+    except Exception as exc:
+        raise HTTPException(500, f"自动重启失败: {exc}") from exc
 
 
 @app.post("/api/auth/register")

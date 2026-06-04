@@ -1,9 +1,13 @@
 import contextlib
 import os
+import re
 import shutil
 import socket
 import ssl
+import subprocess
+import sys
 import tempfile
+import threading
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -15,10 +19,26 @@ from sqlalchemy import create_engine, inspect, text
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 ENV_PATH = BACKEND_DIR / ".env"
 ALLOWED_SSLMODES = {"disable", "allow", "prefer", "require", "verify-ca", "verify-full"}
+EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
 def is_truthy(value: str | None) -> bool:
     return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def validate_install_admin_config(config: dict[str, Any]) -> dict[str, str]:
+    email = str(config.get("email") or "").strip().lower()
+    name = str(config.get("name") or "").strip() or "系统管理员"
+    password = str(config.get("password") or "")
+    confirm_password = str(config.get("confirmPassword") or config.get("confirm_password") or "")
+
+    if not EMAIL_RE.match(email):
+        raise ValueError("管理员邮箱格式不正确")
+    if len(password) < 8:
+        raise ValueError("管理员密码至少 8 位")
+    if password != confirm_password:
+        raise ValueError("管理员两次输入的密码不一致")
+    return {"email": email, "name": name, "password": password}
 
 
 def build_database_url(config: dict[str, Any]) -> str:
@@ -268,4 +288,91 @@ def write_env_updates(updates: dict[str, str], env_path: Path = ENV_PATH) -> dic
     return {
         "env_path": str(env_path),
         "backup_path": str(backup_path) if backup_path else None,
+    }
+
+
+def _detached_popen(command: str | list[str], *, shell: bool = False, env: dict[str, str] | None = None):
+    kwargs: dict[str, Any] = {
+        "cwd": str(BACKEND_DIR),
+        "env": env or os.environ.copy(),
+        "stdin": subprocess.DEVNULL,
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+        "shell": shell,
+    }
+    if os.name == "nt":
+        kwargs["creationflags"] = (
+            getattr(subprocess, "DETACHED_PROCESS", 0)
+            | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        )
+    else:
+        kwargs["start_new_session"] = True
+    return subprocess.Popen(command, **kwargs)
+
+
+def _pm2_restart_command() -> list[str] | None:
+    configured_name = os.getenv("INSTALL_PM2_PROCESS_NAME", "").strip()
+    pm2_managed = any(os.getenv(key) for key in ("PM2_HOME", "pm_id", "NODE_APP_INSTANCE"))
+    process_name = configured_name or (os.getenv("name", "").strip() if pm2_managed else "")
+    if pm2_managed and not process_name:
+        process_name = "canvas-backend"
+    if not process_name:
+        return None
+
+    pm2_bin = shutil.which("pm2") or shutil.which("pm2.cmd")
+    if not pm2_bin:
+        raise RuntimeError("检测到 PM2 重启配置，但当前 PATH 找不到 pm2；请设置 INSTALL_RESTART_COMMAND")
+    return [pm2_bin, "reload", process_name, "--update-env"]
+
+
+def _spawn_development_restart() -> None:
+    env = os.environ.copy()
+    env["RELOAD"] = "false"
+    env["INSTALL_RESTART_CWD"] = str(BACKEND_DIR)
+    env["INSTALL_RESTART_DELAY"] = env.get("INSTALL_RESTART_DELAY", "1.2")
+    backend_args = [sys.executable, str(BACKEND_DIR / "main.py")]
+    launcher_code = (
+        "import os, subprocess, sys, time; "
+        "time.sleep(float(os.environ.get('INSTALL_RESTART_DELAY', '1.2'))); "
+        "kwargs={'cwd': os.environ.get('INSTALL_RESTART_CWD') or None, "
+        "'env': os.environ.copy(), 'stdin': subprocess.DEVNULL, "
+        "'stdout': subprocess.DEVNULL, 'stderr': subprocess.DEVNULL}; "
+        "kwargs.update({'creationflags': getattr(subprocess, 'DETACHED_PROCESS', 0) | "
+        "getattr(subprocess, 'CREATE_NEW_PROCESS_GROUP', 0)} if os.name == 'nt' "
+        "else {'start_new_session': True}); "
+        "subprocess.Popen(sys.argv[1:], **kwargs)"
+    )
+    _detached_popen([sys.executable, "-c", launcher_code, *backend_args], env=env)
+    timer = threading.Timer(0.8, lambda: os._exit(0))
+    timer.daemon = True
+    timer.start()
+
+
+def request_backend_restart() -> dict[str, str]:
+    command = os.getenv("INSTALL_RESTART_COMMAND", "").strip()
+    if command:
+        _detached_popen(command, shell=True)
+        return {
+            "mode": "command",
+            "message": "已提交 INSTALL_RESTART_COMMAND，等待后端进程重启。",
+        }
+
+    pm2_command = _pm2_restart_command()
+    if pm2_command:
+        _detached_popen(pm2_command)
+        return {
+            "mode": "pm2",
+            "message": "已提交 PM2 reload --update-env，等待后端进程重启。",
+        }
+
+    if os.name != "nt" and not is_truthy(os.getenv("INSTALL_ALLOW_DEV_RESTART")):
+        raise RuntimeError(
+            "Linux 部署请配置 INSTALL_RESTART_COMMAND 或 INSTALL_PM2_PROCESS_NAME；"
+            "如确认为本机开发环境，可设置 INSTALL_ALLOW_DEV_RESTART=true"
+        )
+
+    _spawn_development_restart()
+    return {
+        "mode": "development",
+        "message": "已启动本地开发模式自动重启，等待后端重新监听端口。",
     }

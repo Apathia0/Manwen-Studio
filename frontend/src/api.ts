@@ -100,6 +100,12 @@ export interface InstallCompleteResponse {
   };
 }
 
+export interface InstallRestartResponse {
+  ok: boolean;
+  mode: string;
+  message: string;
+}
+
 export function getApiKeySettings(): ApiKeySettings {
   return {
     deepseekApiKey: localStorage.getItem(LS_DEEPSEEK_API_KEY) || '',
@@ -860,6 +866,15 @@ export async function completeInstall(payload: InstallCompleteRequest): Promise<
     body: JSON.stringify(payload),
   });
   if (!res.ok) throw new Error(await readErrorMessage(res, '系统安装失败'));
+  return res.json();
+}
+
+export async function restartInstallBackend(): Promise<InstallRestartResponse> {
+  const res = await fetch(`${BASE}/api/install/restart`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '自动重启失败'));
   return res.json();
 }
 
