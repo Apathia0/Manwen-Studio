@@ -64,6 +64,7 @@ agent-ui-prototype.html
 lorevista-mobile/node_modules/
 lorevista-mobile/dist/
 
-# ─── MD files (except README) ───
+# ─── MD files (except README & AGENTS) ───
 *.md
 !README.md
+!AGENTS.md
