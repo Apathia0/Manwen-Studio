@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   getAdminRevenueSummary,
   getAdminRevenueMonthly,
@@ -99,7 +99,10 @@ function MetricCard({
   );
 }
 
-function LineChart({ data }: { data: { label: string; value: number; color?: string }[] }) {
+function LineChart({ data }: { data: { label: string; value: number }[] }) {
+  const [hovered, setHovered] = useState<number | null>(null);
+  const svgRef = useRef<SVGSVGElement>(null);
+
   const w = 600;
   const h = 160;
   const padL = 40;
@@ -124,43 +127,79 @@ function LineChart({ data }: { data: { label: string; value: number; color?: str
   }));
 
   return (
-    <svg viewBox={`0 0 ${w} ${h}`} className="w-full" style={{ maxHeight: 200 }}>
-      {/* 网格线 */}
-      {yTicks.map((t, i) => (
-        <line key={i} x1={padL} y1={t.y} x2={w - padR} y2={t.y} stroke="#e5edf8" strokeWidth={1} />
-      ))}
-      {/* Y 轴标签 */}
-      {yTicks.map((t, i) => (
-        <text key={i} x={padL - 6} y={t.y + 3} textAnchor="end" className="fill-slate-400" fontSize={10}>
-          {t.label}
-        </text>
-      ))}
-      {/* 折线 */}
-      <path d={linePath} fill="none" stroke="#3b82f6" strokeWidth={2.5} strokeLinejoin="round" strokeLinecap="round" />
-      {/* 面积填充 */}
-      <path
-        d={`${linePath} L${points[points.length - 1]?.x ?? padL},${padT + chartH} L${points[0]?.x ?? padL},${padT + chartH} Z`}
-        fill="url(#lineGrad)"
-        opacity={0.15}
-      />
-      {/* 渐变定义 */}
-      <defs>
-        <linearGradient id="lineGrad" x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0%" stopColor="#3b82f6" />
-          <stop offset="100%" stopColor="#3b82f6" stopOpacity={0} />
-        </linearGradient>
-      </defs>
-      {/* 数据点 */}
-      {points.map((p, i) => (
-        <circle key={i} cx={p.x} cy={p.y} r={3} fill="#fff" stroke="#3b82f6" strokeWidth={2} />
-      ))}
-      {/* X 轴标签 */}
-      {points.filter((_, i) => data.length > 12 ? i % 2 === 0 || i === data.length - 1 : true).map((p, i) => (
-        <text key={i} x={p.x} y={h - 4} textAnchor="middle" className="fill-slate-500" fontSize={10}>
-          {p.label}
-        </text>
-      ))}
-    </svg>
+    <div className="relative">
+      <svg ref={svgRef} viewBox={`0 0 ${w} ${h}`} className="w-full" style={{ maxHeight: 200 }}>
+        {/* 网格线 */}
+        {yTicks.map((t, i) => (
+          <line key={i} x1={padL} y1={t.y} x2={w - padR} y2={t.y} stroke="#e5edf8" strokeWidth={1} />
+        ))}
+        {/* Y 轴标签 */}
+        {yTicks.map((t, i) => (
+          <text key={i} x={padL - 6} y={t.y + 3} textAnchor="end" className="fill-slate-400" fontSize={10}>
+            {t.label}
+          </text>
+        ))}
+        {/* 折线 */}
+        <path d={linePath} fill="none" stroke="#3b82f6" strokeWidth={2.5} strokeLinejoin="round" strokeLinecap="round" />
+        {/* 面积填充 */}
+        <path
+          d={`${linePath} L${points[points.length - 1]?.x ?? padL},${padT + chartH} L${points[0]?.x ?? padL},${padT + chartH} Z`}
+          fill="url(#lineGrad)"
+          opacity={0.15}
+        />
+        {/* 渐变定义 */}
+        <defs>
+          <linearGradient id="lineGrad" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor="#3b82f6" />
+            <stop offset="100%" stopColor="#3b82f6" stopOpacity={0} />
+          </linearGradient>
+        </defs>
+        {/* 悬浮指示线 */}
+        {hovered !== null && points[hovered] ? (
+          <line
+            x1={points[hovered].x} y1={padT}
+            x2={points[hovered].x} y2={padT + chartH}
+            stroke="#3b82f6" strokeWidth={1} strokeDasharray="3,3"
+          />
+        ) : null}
+        {/* 数据点（可悬停区域 + 可见圆点） */}
+        {points.map((p, i) => (
+          <g key={i}>
+            <circle cx={p.x} cy={p.y} r={14} fill="transparent"
+              style={{ cursor: 'pointer' }}
+              onMouseEnter={() => setHovered(i)}
+              onMouseLeave={() => setHovered(null)}
+            />
+            <circle cx={p.x} cy={p.y} r={hovered === i ? 5 : 3}
+              fill="#fff" stroke="#3b82f6" strokeWidth={2.5}
+              className="transition-all duration-200"
+            />
+          </g>
+        ))}
+        {/* X 轴标签 */}
+        {points.filter((_, i) => data.length > 12 ? i % 2 === 0 || i === data.length - 1 : true).map((p, i) => (
+          <text key={i} x={p.x} y={h - 4} textAnchor="middle" className="fill-slate-500" fontSize={10}>
+            {p.label}
+          </text>
+        ))}
+      </svg>
+      {/* 悬浮提示框 */}
+      {hovered !== null && points[hovered] ? (
+        <div
+          className="pointer-events-none absolute z-10 -translate-x-1/2"
+          style={{
+            left: `${(points[hovered].x / w) * 100}%`,
+            top: `${(points[hovered].y / h) * 100 - 4}%`,
+          }}
+        >
+          <div className="rounded-lg bg-slate-800 px-3 py-2 text-center text-xs text-white shadow-lg">
+            <div className="font-medium">{data[hovered].label}</div>
+            <div className="mt-0.5 font-semibold text-blue-300">¥{formatMoney(data[hovered].value)}</div>
+          </div>
+          <div className="mx-auto h-2 w-2 -translate-y-0.5 rotate-45 bg-slate-800" />
+        </div>
+      ) : null}
+    </div>
   );
 }
 
