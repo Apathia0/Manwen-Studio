@@ -46,7 +46,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from PIL import Image
-from sqlalchemy import func
+from sqlalchemy import case, func, and_
 from sqlalchemy.orm import Session
 from sse_starlette.sse import EventSourceResponse
 
@@ -4572,6 +4572,87 @@ def admin_update_order_status(order_no: str, body: dict, request: Request, db: S
     db.commit()
     db.refresh(order)
     return {"ok": True, "order": _serialize_order_with_db(order, db)}
+
+
+@app.get("/api/admin/revenue/summary")
+def admin_revenue_summary(request: Request, db: Session = Depends(get_db)):
+    _require_admin(request, db)
+    now = _utcnow()
+    month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
+    total = db.query(
+        func.count(BillingOrder.id).label("total_orders"),
+        func.coalesce(func.sum(case((BillingOrder.status == "paid", BillingOrder.amount), else_=0)), 0).label("total_revenue"),
+        func.count(case((BillingOrder.status == "paid", 1))).label("paid_orders"),
+        func.count(case((BillingOrder.status == "cancelled", 1))).label("cancelled_orders"),
+        func.count(case((BillingOrder.status == "expired", 1))).label("expired_orders"),
+    ).first()
+
+    monthly = db.query(
+        func.count(BillingOrder.id).label("monthly_orders"),
+        func.count(case((BillingOrder.status == "paid", 1))).label("monthly_paid_orders"),
+        func.coalesce(func.sum(case(
+            (and_(BillingOrder.status == "paid", BillingOrder.paid_at >= month_start), BillingOrder.amount),
+            else_=0
+        )), 0).label("monthly_revenue"),
+        func.count(func.distinct(case(
+            (and_(BillingOrder.status == "paid", BillingOrder.paid_at >= month_start), BillingOrder.user_id),
+        ))).label("monthly_new_users"),
+    ).filter(
+        BillingOrder.created_at >= month_start
+    ).first()
+
+    active_subs = db.query(func.count(UserSubscription.id)).filter(
+        UserSubscription.status == "active"
+    ).scalar() or 0
+
+    monthly_orders = monthly.monthly_orders or 0
+    monthly_paid = monthly.monthly_paid_orders or 0
+    conversion_rate = round(monthly_paid / monthly_orders * 100, 1) if monthly_orders > 0 else 0.0
+
+    return {
+        "total_revenue": float(total.total_revenue or 0),
+        "total_orders": total.total_orders or 0,
+        "paid_orders": total.paid_orders or 0,
+        "cancelled_orders": total.cancelled_orders or 0,
+        "expired_orders": total.expired_orders or 0,
+        "monthly_revenue": float(monthly.monthly_revenue or 0),
+        "monthly_orders": monthly_orders,
+        "monthly_paid_orders": monthly_paid,
+        "conversion_rate": conversion_rate,
+        "active_subscriptions": active_subs,
+        "monthly_new_users": monthly.monthly_new_users or 0,
+    }
+
+
+@app.get("/api/admin/revenue/monthly")
+def admin_revenue_monthly(months: int = 12, request: Request = None, db: Session = Depends(get_db)):
+    _require_admin(request, db)
+    now = _utcnow()
+    start_date = now - datetime.timedelta(days=months * 31)
+
+    rows = db.query(
+        func.date_trunc("month", BillingOrder.created_at).label("month"),
+        func.coalesce(func.sum(case((BillingOrder.status == "paid", BillingOrder.amount), else_=0)), 0).label("revenue"),
+        func.count(BillingOrder.id).label("orders"),
+        func.count(case((BillingOrder.status == "paid", 1))).label("paid"),
+        func.count(case((BillingOrder.status == "cancelled", 1))).label("cancelled"),
+        func.count(case((BillingOrder.status == "expired", 1))).label("expired"),
+    ).filter(
+        BillingOrder.created_at >= start_date
+    ).group_by("month").order_by("month").all()
+
+    return [
+        {
+            "period": row.month.strftime("%Y-%m"),
+            "revenue": float(row.revenue),
+            "orders": row.orders,
+            "paid": row.paid,
+            "cancelled": row.cancelled,
+            "expired": row.expired,
+        }
+        for row in rows
+    ]
 
 
 @app.post("/api/stories", response_model=StoryOut)
