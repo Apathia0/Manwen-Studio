@@ -13,15 +13,15 @@ export interface ApiKeySettings {
 }
 
 // Stored in localStorage so multiple tabs share the same API key settings.
-const LS_DEEPSEEK_API_KEY = 'lorevista.deepseekApiKey';
-const LS_DEEPSEEK_BASE_URL = 'lorevista.deepseekBaseUrl';
-const LS_DEEPSEEK_MODEL = 'lorevista.deepseekModel';
-const LS_IMAGE_API_KEY = 'lorevista.imageApiKey';
-const LS_IMAGE_BASE_URL = 'lorevista.imageBaseUrl';
-const LS_IMAGE_MODEL = 'lorevista.imageModel';
-const LS_AUTH_TOKEN = 'lorevista.authToken';
-export const API_KEY_CHANGE_EVENT = 'lorevista:api-key-change';
-export const AUTH_CHANGE_EVENT = 'lorevista:auth-change';
+const LS_DEEPSEEK_API_KEY = 'storycanvas.deepseekApiKey';
+const LS_DEEPSEEK_BASE_URL = 'storycanvas.deepseekBaseUrl';
+const LS_DEEPSEEK_MODEL = 'storycanvas.deepseekModel';
+const LS_IMAGE_API_KEY = 'storycanvas.imageApiKey';
+const LS_IMAGE_BASE_URL = 'storycanvas.imageBaseUrl';
+const LS_IMAGE_MODEL = 'storycanvas.imageModel';
+const LS_AUTH_TOKEN = 'storycanvas.authToken';
+export const API_KEY_CHANGE_EVENT = 'storycanvas:api-key-change';
+export const AUTH_CHANGE_EVENT = 'storycanvas:auth-change';
 
 export type UserRole = 'user' | 'admin';
 

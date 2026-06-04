@@ -1,7 +1,7 @@
 {
-  "name": "lorevista-mobile",
+  "name": "storycanvas-mobile",
   "version": "1.0.0",
-  "description": "LoreVista 移动端 - AI 小说创作与漫画生成平台",
+  "description": "StoryCanvas 移动端 - AI 小说创作与漫画生成平台",
   "scripts": {
     "dev:mp-weixin": "uni -p mp-weixin",
     "dev:app": "uni -p app",

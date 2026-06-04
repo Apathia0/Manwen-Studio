@@ -1,12 +1,12 @@
-# LoreVista — AI 小说创作 + 漫画/视频生成平台
+# StoryCanvas — AI 小说创作 + 漫画/视频生成平台
 
 ## 项目概览
 
-LoreVista 是一个 AI 驱动的创作平台，支持小说创作、自动分镜、漫画图片生成和视频制作。
+StoryCanvas 是一个 AI 驱动的创作平台，支持小说创作、自动分镜、漫画图片生成和视频制作。基于 LoreVista 深度二次开发，融入更多创作工具和优化体验。
 
 - **后端**：Python 3.10+ / FastAPI / SQLAlchemy 2.0 / PostgreSQL
 - **前端**：React 19 / TypeScript 6 / Vite 8 / Tailwind CSS v4
-- **移动端**：Vue 3 / uni-app（`lorevista-mobile/`）
+- **移动端**：Vue 3 / uni-app（`storycanvas-mobile/`）
 - **AI 服务**：DeepSeek API（文本）+ Image2 API（图片）+ ComfyUI（视频）
 - **部署**：PM2 + Nginx（CentOS Stream 9）
 
@@ -15,7 +15,7 @@ LoreVista 是一个 AI 驱动的创作平台，支持小说创作、自动分镜
 ## 目录结构
 
 ```
-LoreVista/
+StoryCanvas/
 ├── backend/                          # FastAPI 后端
 │   ├── main.py                       # 主入口（8828 行）— 所有 API 路由 + 种子函数 + cron
 │   ├── database.py                   # 引擎/Session + init_db + 增量迁移
@@ -71,7 +71,7 @@ LoreVista/
 │       │   └── *Page.tsx / *Panel.tsx # 页面级组件（~30 个）
 │       └── assets/                   # 静态资源
 │
-├── lorevista-mobile/                 # Vue 3 + uni-app 移动端
+├── storycanvas-mobile/               # Vue 3 + uni-app 移动端
 │   └── src/                          # 相同 API 层，vue 组件
 │
 ├── .sisyphus/                        # Sisyphus AI Agent 工作文件
@@ -251,7 +251,7 @@ type RouteKey = 'landing' | 'login' | 'stories' | 'workspace' | 'templates' | ..
 
 ---
 
-## 移动端（`lorevista-mobile/`）
+## 移动端（`storycanvas-mobile/`）
 
 - Vue 3 + uni-app
 - 独立构建，共享后端 API
@@ -283,7 +283,7 @@ type RouteKey = 'landing' | 'login' | 'stories' | 'workspace' | 'templates' | ..
 - **服务器**：103.149.26.199（CentOS Stream 9）
 - **项目路径**：`/www/wwwroot/canvas.aifusion6.cn/`
 - **Python 虚拟环境**：`/www/wwwroot/canvas.aifusion6.cn/venv/`
-- **PM2 进程**：`canvas-backend`（cwd = `.../backend/`）
+- **PM2 进程**：`storycanvas-backend`（cwd = `.../backend/`）
 - **前端**：`frontend/dist/` → Nginx 静态服务
 
 ### ⚠️ 部署红线：用户生成资源绝对保护
@@ -323,7 +323,7 @@ cd frontend
 npm install && npm run build
 
 # 4. 重启后端
-pm2 reload canvas-backend --update-env
+pm2 reload storycanvas-backend --update-env
 
 # 5. 执行数据库迁移（如有）
 export RUN_STARTUP_MIGRATIONS=true; cd backend && python -c "
@@ -337,10 +337,10 @@ init_db(run_migrations=True)
 
 ```bash
 pm2 list                           # 查看进程
-pm2 logs canvas-backend            # 查看日志
-pm2 reload canvas-backend --update-env  # 重启（更新环境变量）
-pm2 delete canvas-backend          # 删除进程
-pm2 start /www/wwwroot/.../backend/main.py --interpreter python3 --name canvas-backend
+pm2 logs storycanvas-backend       # 查看日志
+pm2 reload storycanvas-backend --update-env  # 重启（更新环境变量）
+pm2 delete storycanvas-backend     # 删除进程
+pm2 start /www/wwwroot/.../backend/main.py --interpreter python3 --name storycanvas-backend
 ```
 
 ### 数据库迁移
@@ -404,7 +404,7 @@ async def my_func(*args, task_id=None, story_id=None, chapter_id=None, shot_id=N
 `_migrate()` 中的 ALTER TABLE 都检查列是否存在后再执行。迁移函数应始终幂等。
 
 ### 6. Vue vs React 在 mobile
-`lorevista-mobile/` 使用 Vue 3 + uni-app 而非 React。修改 mobile 时要切换到对应工具链（npm install + manifest.json）。
+`storycanvas-mobile/` 使用 Vue 3 + uni-app 而非 React。修改 mobile 时要切换到对应工具链（npm install + manifest.json）。
 
 ### 7. 前端 SSO（无 react-router）
 添加新页面时需要三步：① 在 `api.ts` 定义 API 函数和类型 ② 创建组件文件 ③ 在 `App.tsx` 添加 `RouteKey` + import + 条件渲染

@@ -15,16 +15,16 @@ export const BASE_URL = 'http://localhost:8000'
 let KEYS: Record<string, string>
 // #ifdef H5
 KEYS = {
-  AUTH_TOKEN: 'lorevista.authToken',
-  ACTIVE_STORY: 'lorevista.activeStory',
-  WORKSPACE_TAB: 'lorevista.workspaceTab',
-  USER_INFO: 'lorevista.userInfo',
-  DEEPSEEK_API_KEY: 'lorevista.deepseekApiKey',
-  DEEPSEEK_BASE_URL: 'lorevista.deepseekBaseUrl',
-  DEEPSEEK_MODEL: 'lorevista.deepseekModel',
-  IMAGE_API_KEY: 'lorevista.imageApiKey',
-  IMAGE_BASE_URL: 'lorevista.imageBaseUrl',
-  IMAGE_MODEL: 'lorevista.imageModel'
+  AUTH_TOKEN: 'storycanvas.authToken',
+  ACTIVE_STORY: 'storycanvas.activeStory',
+  WORKSPACE_TAB: 'storycanvas.workspaceTab',
+  USER_INFO: 'storycanvas.userInfo',
+  DEEPSEEK_API_KEY: 'storycanvas.deepseekApiKey',
+  DEEPSEEK_BASE_URL: 'storycanvas.deepseekBaseUrl',
+  DEEPSEEK_MODEL: 'storycanvas.deepseekModel',
+  IMAGE_API_KEY: 'storycanvas.imageApiKey',
+  IMAGE_BASE_URL: 'storycanvas.imageBaseUrl',
+  IMAGE_MODEL: 'storycanvas.imageModel'
 }
 // #endif
 // #ifndef H5

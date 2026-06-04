@@ -303,7 +303,7 @@ _UNAUTHORIZED_HTML = """\
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>域名未授权 - LoreVista</title>
+<title>域名未授权 - StoryCanvas</title>
 <style>
 *{{margin:0;padding:0;box-sizing:border-box}}
 body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px}}
@@ -329,7 +329,7 @@ p{{color:#666;line-height:1.6;margin-bottom:8px;font-size:14px}}
 <div style="margin-top:20px">
 {{button_html}}
 </div>
-<div class="footer">LoreVista — AI 小说创作平台</div>
+<div class="footer">StoryCanvas — AI 小说创作平台</div>
 </div>
 </body>
 </html>"""
@@ -889,10 +889,10 @@ def _consume_email_verification_code(email: str, purpose: str, code: str, db: Se
 def _ensure_platform_seed(db: Session, *, create_default_admin: bool = False) -> None:
     # Keep the legacy admin seed disabled by default. First-run install creates
     # the administrator from user-supplied credentials instead.
-    admin = db.query(User).filter(User.email == "admin@lorevista.ai").first()
+    admin = db.query(User).filter(User.email == "admin@storycanvas.app").first()
     if create_default_admin and not admin:
         db.add(User(
-            email="admin@lorevista.ai",
+            email="admin@storycanvas.app",
             password_hash=_password_hash("admin123"),
             name="运营管理员",
             role="admin",
@@ -2157,7 +2157,7 @@ def _order_checkout_payload(order: BillingOrder, plan: Plan, db: Session) -> dic
     method = order.payment_method or str(payment.get("default_method") or "mock_qr")
     provider = order.payment_provider or "mock"
     extra = order.extra_json or {}
-    qr_code_text = f"LOREVISTA:{method}:{order.order_no}:{order.amount}"
+    qr_code_text = f"STORYCANVAS:{method}:{order.order_no}:{order.amount}"
     payment_url = f"/mock-pay/{order.order_no}" if method == "mock_qr" else ""
     can_mock_confirm = method == "mock_qr"
     if method == "alipay_qr":

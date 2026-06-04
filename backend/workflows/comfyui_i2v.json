@@ -64,7 +64,7 @@
     "inputs": {
       "frame_rate": 8,
       "loop_count": 0,
-      "filename_prefix": "lorevista_i2v",
+      "filename_prefix": "storycanvas_i2v",
       "format": "video/h264-mp4",
       "images": ["8", 0]
     },

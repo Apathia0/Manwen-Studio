@@ -31,9 +31,9 @@ interface Props {
 type VideoTab = 'content' | 'screenplay' | 'storyboard' | 'clips' | 'project';
 type RightPanelTab = 'assets' | 'characters';
 
-const LS_VIDEO_ACTIVE_TAB = 'lorevista.videoActiveTab';
-const LS_VIDEO_SELECTED_SCENE_ID = 'lorevista.videoSelectedSceneId';
-const LS_VIDEO_SELECTED_SHOT_ID = 'lorevista.videoSelectedShotId';
+const LS_VIDEO_ACTIVE_TAB = 'storycanvas.videoActiveTab';
+const LS_VIDEO_SELECTED_SCENE_ID = 'storycanvas.videoSelectedSceneId';
+const LS_VIDEO_SELECTED_SHOT_ID = 'storycanvas.videoSelectedShotId';
 
 export default function VideoWorkspaceLayout({
   story,

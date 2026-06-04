@@ -20,7 +20,7 @@ interface VideoRightPanelProps {
   onShotFrameSelect?: (asset: any, shotId: number) => void;
 }
 
-const STORAGE_KEY = 'lorevista.videoRightTab';
+const STORAGE_KEY = 'storycanvas.videoRightTab';
 
 export default function VideoRightPanel(props: VideoRightPanelProps) {
   const [activeTab, setActiveTab] = useState<'video' | 'assets' | 'characters'>(() => {

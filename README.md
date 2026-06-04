@@ -1,8 +1,8 @@
-# LoreVista
+# StoryCanvas
 
-AI 小说创作 + 漫画插画生成工具。通过对话引导 AI 创作小说，自动拆分分镜脚本，并生成漫画图片。
+AI 驱动的创作平台，支持小说创作、自动分镜、漫画图片生成和视频制作。通过对话引导 AI 创作小说，自动拆分分镜脚本，生成漫画图片并支持视频创作工作流。
 
-> 小白用户建议使用 SQLite 版，不需要安装 PostgreSQL：  
+> 小白用户建议使用 SQLite 版，不需要安装 PostgreSQL：
 > https://github.com/libohan-ha/-LoreVista/tree/sqlite
 
 ## 功能
@@ -10,15 +10,19 @@ AI 小说创作 + 漫画插画生成工具。通过对话引导 AI 创作小说�
 - **AI 小说创作**：基于 DeepSeek API，通过对话交互引导创作。
 - **自动分镜**：AI 将小说内容拆分为漫画分镜脚本，支持手动编辑。
 - **漫画生成**：基于 Image2 API 生成漫画图片，支持逐张重新生成。
+- **视频制作**：剧本生成、分镜任务、ComfyUI 视频工作流。
 - **角色卡系统**：固定角色外貌描述，帮助保持人物形象一致。
 - **多张垫图**：支持上传多张参考图，让生成结果更稳定。
-- **实时进度**：对话、分镜、漫画生成都有进度反馈。
+- **实时进度**：对话、分镜、漫画生成、视频制作都有进度反馈。
+- **AI Agent 助手**：智能对话辅助创作全流程。
 
 ## 技术栈
 
 - **后端**：Python / FastAPI / SQLAlchemy / PostgreSQL
 - **前端**：React / TypeScript / Vite / TailwindCSS
-- **AI**：DeepSeek API + Image2 API
+- **移动端**：Vue 3 / uni-app
+- **AI**：DeepSeek API + Image2 API + ComfyUI
+- **部署**：PM2 + Nginx（CentOS Stream 9）
 
 ## 使用教程（PostgreSQL 版）
 
@@ -84,8 +88,8 @@ install.bat
 
 脚本会自动检查 Python / Node.js，并依次安装后端 (`pip install`) 和前端 (`npm install`) 依赖。看到 `Install completed successfully!` 即成功。
 
-> 前置条件：已安装 Python 3.10+ 和 Node.js 18+。如果脚本提示找不到 Python 或 Node，请先去官网安装：  
-> Python: https://www.python.org/downloads/（安装时勾选 *Add Python to PATH*）  
+> 前置条件：已安装 Python 3.10+ 和 Node.js 18+。如果脚本提示找不到 Python 或 Node，请先去官网安装：
+> Python: https://www.python.org/downloads/（安装时勾选 *Add Python to PATH*）
 > Node.js: https://nodejs.org/
 
 #### 方式二：手动安装
@@ -180,7 +184,7 @@ https://api.xbyjs.top/console/token
 
 配置完成后，就可以开始测试：
 
-1. 点击“新建小说”
+1. 点击"新建小说"
 2. 进入小说
 3. 和 AI 对话，生成小说内容
 4. 生成分镜

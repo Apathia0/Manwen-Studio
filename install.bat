@@ -1,10 +1,10 @@
 @echo off
 chcp 65001 >nul
-title LoreVista Installer
+title StoryCanvas Installer
 cd /d "%~dp0"
 
 echo ==========================================
-echo    LoreVista - One-Click Installer
+echo    StoryCanvas - One-Click Installer
 echo ==========================================
 echo.
 
