@@ -3,11 +3,16 @@ import {
   getAdminRevenueSummary,
   getAdminRevenueMonthly,
   getAdminOrders,
+  searchAdminOrders,
+  updateAdminOrderStatus,
   type AdminRevenueSummary,
   type AdminRevenueMonthlyItem,
   type AdminOrderItem,
+  type AdminOrderSearchParams,
+  type AdminOrderSearchResult,
 } from '../../api';
 import { formatMoney } from './AdminPages';
+import { toast } from '../../lib/toast';
 
 function cn(...parts: Array<string | false | null | undefined>) {
   return parts.filter(Boolean).join(' ');
@@ -18,6 +23,24 @@ function formatDateTime(value: string | null | undefined) {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return value;
   return date.toLocaleString('zh-CN');
+}
+
+function orderStatusLabel(status: string) {
+  if (status === 'pending') return '待支付';
+  if (status === 'paid') return '已支付';
+  if (status === 'cancelled') return '已取消';
+  if (status === 'expired') return '已过期';
+  return status;
+}
+
+function orderStatusColor(status: string): string {
+  switch (status) {
+    case 'paid': return 'bg-emerald-100 text-emerald-700';
+    case 'pending': return 'bg-amber-100 text-amber-700';
+    case 'cancelled': return 'bg-red-100 text-red-700';
+    case 'expired': return 'bg-orange-100 text-orange-700';
+    default: return 'bg-slate-100 text-slate-600';
+  }
 }
 
 function SectionCard({ title, children }: { title: string; children: React.ReactNode }) {
@@ -138,6 +161,72 @@ export function AdminRevenueDashboardPage({ onError }: { onError: (message: stri
   const [recentOrders, setRecentOrders] = useState<AdminOrderItem[]>([]);
   const { busy, run } = useBusyAction(onError);
 
+  const [searchResult, setSearchResult] = useState<AdminOrderSearchResult | null>(null);
+  const [searchFilters, setSearchFilters] = useState<AdminOrderSearchParams>({ page: 1, page_size: 20, status: '' });
+  const [datePreset, setDatePreset] = useState('all');
+  const [actingOrderNo, setActingOrderNo] = useState<string | null>(null);
+  const [loadingOrders, setLoadingOrders] = useState(false);
+
+  function getDateRange(preset: string): { start?: string; end?: string } {
+    const now = new Date();
+    switch (preset) {
+      case '7d': {
+        const d = new Date(now); d.setDate(d.getDate() - 7);
+        return { start: d.toISOString().slice(0, 10), end: now.toISOString().slice(0, 10) };
+      }
+      case '30d': {
+        const d = new Date(now); d.setDate(d.getDate() - 30);
+        return { start: d.toISOString().slice(0, 10), end: now.toISOString().slice(0, 10) };
+      }
+      case '90d': {
+        const d = new Date(now); d.setDate(d.getDate() - 90);
+        return { start: d.toISOString().slice(0, 10), end: now.toISOString().slice(0, 10) };
+      }
+      case '1y': {
+        const d = new Date(now); d.setFullYear(d.getFullYear() - 1);
+        return { start: d.toISOString().slice(0, 10), end: now.toISOString().slice(0, 10) };
+      }
+      default: return {};
+    }
+  }
+
+  function applyFilters(overrides: Partial<AdminOrderSearchParams & { _datePreset?: string }>) {
+    const newStatus = overrides.status !== undefined ? overrides.status : searchFilters.status;
+    const newDatePreset = overrides._datePreset !== undefined ? overrides._datePreset : datePreset;
+    if (overrides._datePreset !== undefined) setDatePreset(overrides._datePreset);
+    const newPage = (overrides.status !== undefined || overrides._datePreset !== undefined) ? 1 : (overrides.page ?? searchFilters.page);
+    setSearchFilters(prev => ({ ...prev, status: newStatus, page: newPage }));
+  }
+
+  async function loadSearchOrders(filters: AdminOrderSearchParams, dp: string) {
+    setLoadingOrders(true);
+    try {
+      const params: AdminOrderSearchParams = { ...filters };
+      const dr = getDateRange(dp);
+      if (dr.start) params.start_date = dr.start;
+      if (dr.end) params.end_date = dr.end;
+      const result = await searchAdminOrders(params);
+      setSearchResult(result);
+    } catch (error: any) {
+      onError(error?.message || '加载订单失败');
+    } finally {
+      setLoadingOrders(false);
+    }
+  }
+
+  async function handleOrderStatus(orderNo: string, status: 'paid' | 'cancelled' | 'expired') {
+    setActingOrderNo(orderNo);
+    try {
+      await updateAdminOrderStatus(orderNo, status);
+      toast.success('订单状态已更新');
+      await loadSearchOrders(searchFilters, datePreset);
+    } catch (error: any) {
+      onError(error?.message || '订单状态更新失败');
+    } finally {
+      setActingOrderNo(null);
+    }
+  }
+
   async function loadAll() {
     const [s, m, o] = await Promise.all([
       getAdminRevenueSummary(),
@@ -147,11 +236,19 @@ export function AdminRevenueDashboardPage({ onError }: { onError: (message: stri
     setSummary(s);
     setMonthly(m);
     setRecentOrders(o.filter((ord) => ord.status === 'paid').slice(0, 20));
+
+    await loadSearchOrders({ page: 1, page_size: 20, status: '' }, 'all');
   }
 
   useEffect(() => {
     void run(loadAll);
   }, []);
+
+  useEffect(() => {
+    if (summary) {
+      void loadSearchOrders(searchFilters, datePreset);
+    }
+  }, [searchFilters.page, searchFilters.status, searchFilters.page_size, datePreset]);
 
   if (!summary) {
     return (
@@ -241,40 +338,144 @@ export function AdminRevenueDashboardPage({ onError }: { onError: (message: stri
         </SectionCard>
       </div>
 
-      <SectionCard title="最近收入订单">
-        {recentOrders.length > 0 ? (
-          <div className="overflow-hidden rounded-2xl border border-[#e5edf8]">
-            <table className="w-full text-left text-sm">
-              <thead className="bg-[#f8fbff] text-slate-500">
-                <tr>
-                  <th className="px-3 py-3 font-medium">订单号</th>
-                  <th className="px-3 py-3 font-medium">用户</th>
-                  <th className="px-3 py-3 font-medium">金额</th>
-                  <th className="px-3 py-3 font-medium">周期</th>
-                  <th className="px-3 py-3 font-medium">支付方式</th>
-                  <th className="px-3 py-3 font-medium">支付时间</th>
+      <SectionCard title="订单管理">
+        {/* 筛选栏 */}
+        <div className="mb-4 flex flex-wrap items-center gap-3">
+          <select
+            value={searchFilters.status || ''}
+            onChange={(e) => applyFilters({ status: e.target.value })}
+            className="rounded-2xl border border-[#d7e3f4] bg-white px-3 py-2 text-sm outline-none focus:border-[#60a5fa]"
+          >
+            <option value="">全部状态</option>
+            <option value="pending">待支付</option>
+            <option value="paid">已支付</option>
+            <option value="cancelled">已取消</option>
+            <option value="expired">已过期</option>
+          </select>
+
+          {[
+            { value: 'all', label: '全部时间' },
+            { value: '7d', label: '近7天' },
+            { value: '30d', label: '近30天' },
+            { value: '90d', label: '近90天' },
+            { value: '1y', label: '近1年' },
+          ].map((opt) => (
+            <button
+              key={opt.value}
+              onClick={() => applyFilters({ _datePreset: opt.value })}
+              className={`rounded-2xl px-3 py-2 text-sm font-medium transition ${
+                datePreset === opt.value
+                  ? 'bg-[#3b82f6] text-white'
+                  : 'border border-[#d7e3f4] bg-white text-slate-600 hover:bg-[#eff6ff]'
+              }`}
+            >
+              {opt.label}
+            </button>
+          ))}
+
+          <button
+            disabled={loadingOrders}
+            onClick={() => void loadSearchOrders(searchFilters, datePreset)}
+            className="ml-auto rounded-2xl border border-[#d7e3f4] bg-white px-4 py-2 text-sm font-medium text-slate-700 transition hover:bg-[#eff6ff] disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {loadingOrders ? '加载中…' : '刷新'}
+          </button>
+        </div>
+
+        {/* 订单表格 */}
+        <div className="overflow-hidden rounded-2xl border border-[#e5edf8]">
+          <table className="w-full text-left text-sm">
+            <thead className="bg-[#f8fbff] text-slate-500">
+              <tr>
+                <th className="px-3 py-3 font-medium">订单号</th>
+                <th className="px-3 py-3 font-medium">用户</th>
+                <th className="px-3 py-3 font-medium">金额</th>
+                <th className="px-3 py-3 font-medium">状态</th>
+                <th className="px-3 py-3 font-medium">来源</th>
+                <th className="px-3 py-3 font-medium">创建时间</th>
+                <th className="px-3 py-3 font-medium">操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              {(searchResult?.items ?? []).map((order) => (
+                <tr key={order.order_no} className="border-t border-[#e5edf8]">
+                  <td className="px-3 py-3 font-medium text-slate-900">{order.order_no}</td>
+                  <td className="px-3 py-3">
+                    <div>#{order.user_id}</div>
+                    <div className="text-xs text-slate-500">{order.user_name || '-'}</div>
+                  </td>
+                  <td className="px-3 py-3">{order.currency} {formatMoney(order.amount)}</td>
+                  <td className="px-3 py-3">
+                    <span className={`inline-block rounded-full px-2.5 py-0.5 text-xs font-medium ${orderStatusColor(order.status)}`}>
+                      {orderStatusLabel(order.status)}
+                    </span>
+                  </td>
+                  <td className="px-3 py-3">{order.source || '-'}</td>
+                  <td className="px-3 py-3">
+                    <div>{formatDateTime(order.created_at)}</div>
+                    <div className="text-xs text-slate-500">失效：{formatDateTime(order.expired_at)}</div>
+                  </td>
+                  <td className="px-3 py-3">
+                    <div className="flex flex-wrap gap-2">
+                      <button
+                        disabled={actingOrderNo === order.order_no || order.status === 'paid'}
+                        onClick={() => void handleOrderStatus(order.order_no, 'paid')}
+                        className="rounded-xl border border-[#d7e3f4] bg-white px-3 py-1.5 text-xs font-medium text-slate-700 transition hover:bg-[#eff6ff] disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        标记已支付
+                      </button>
+                      <button
+                        disabled={actingOrderNo === order.order_no || order.status === 'cancelled'}
+                        onClick={() => void handleOrderStatus(order.order_no, 'cancelled')}
+                        className="rounded-xl border border-[#d7e3f4] bg-white px-3 py-1.5 text-xs font-medium text-slate-700 transition hover:bg-[#eff6ff] disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        取消
+                      </button>
+                      <button
+                        disabled={actingOrderNo === order.order_no || order.status === 'expired'}
+                        onClick={() => void handleOrderStatus(order.order_no, 'expired')}
+                        className="rounded-xl border border-[#d7e3f4] bg-white px-3 py-1.5 text-xs font-medium text-slate-700 transition hover:bg-[#eff6ff] disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        过期
+                      </button>
+                    </div>
+                  </td>
                 </tr>
-              </thead>
-              <tbody>
-                {recentOrders.map((order) => (
-                  <tr key={order.order_no} className="border-t border-[#e5edf8]">
-                    <td className="px-3 py-3 font-medium text-slate-900">{order.order_no}</td>
-                    <td className="px-3 py-3">
-                      <div>#{order.user_id}</div>
-                      <div className="text-xs text-slate-500">{order.user_name || '-'}</div>
-                    </td>
-                    <td className="px-3 py-3">{order.currency} {formatMoney(order.amount)}</td>
-                    <td className="px-3 py-3">{order.billing_cycle === 'yearly' ? '年付' : '月付'}</td>
-                    <td className="px-3 py-3">{order.payment_method || '-'}</td>
-                    <td className="px-3 py-3">{formatDateTime(order.paid_at)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+              ))}
+              {(!searchResult || searchResult.items.length === 0) ? (
+                <tr>
+                  <td colSpan={7} className="px-3 py-8 text-center text-sm text-slate-500">
+                    暂无匹配订单
+                  </td>
+                </tr>
+              ) : null}
+            </tbody>
+          </table>
+        </div>
+
+        {/* 分页 */}
+        {searchResult && searchResult.total_pages > 1 ? (
+          <div className="mt-4 flex items-center justify-between text-sm text-slate-600">
+            <span>共 {searchResult.total} 条</span>
+            <div className="flex items-center gap-2">
+              <button
+                disabled={searchResult.page <= 1 || loadingOrders}
+                onClick={() => setSearchFilters(prev => ({ ...prev, page: prev.page! - 1 }))}
+                className="rounded-2xl border border-[#d7e3f4] bg-white px-3 py-1.5 text-sm transition hover:bg-[#eff6ff] disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                上一页
+              </button>
+              <span className="px-2">第 {searchResult.page} / {searchResult.total_pages} 页</span>
+              <button
+                disabled={searchResult.page >= searchResult.total_pages || loadingOrders}
+                onClick={() => setSearchFilters(prev => ({ ...prev, page: prev.page! + 1 }))}
+                className="rounded-2xl border border-[#d7e3f4] bg-white px-3 py-1.5 text-sm transition hover:bg-[#eff6ff] disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                下一页
+              </button>
+            </div>
           </div>
-        ) : (
-          <div className="py-6 text-center text-sm text-slate-500">暂无已支付订单</div>
-        )}
+        ) : null}
       </SectionCard>
     </div>
   );
