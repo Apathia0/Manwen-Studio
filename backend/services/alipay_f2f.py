@@ -106,7 +106,18 @@ def call_api(
 
     response = httpx.post(gateway.strip(), data=params, timeout=timeout_seconds)
     response.raise_for_status()
-    payload = response.json()
+    try:
+        payload = response.json()
+    except UnicodeDecodeError:
+        content = response.content
+        for enc in ("gbk", "gb2312", "utf-8"):
+            try:
+                payload = json.loads(content.decode(enc))
+                break
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                continue
+        else:
+            raise AlipayApiError(f"Failed to decode Alipay response: {content[:200]}")
     response_key = f"{method.replace('.', '_')}_response"
     if response_key not in payload:
         raise AlipayApiError(json.dumps(payload, ensure_ascii=False)[:1000])
