@@ -617,6 +617,29 @@ export interface AdminOrderItem {
   created_at: string;
 }
 
+export interface AdminRevenueSummary {
+  total_revenue: number;
+  total_orders: number;
+  paid_orders: number;
+  cancelled_orders: number;
+  expired_orders: number;
+  monthly_revenue: number;
+  monthly_orders: number;
+  monthly_paid_orders: number;
+  conversion_rate: number;
+  active_subscriptions: number;
+  monthly_new_users: number;
+}
+
+export interface AdminRevenueMonthlyItem {
+  period: string;
+  revenue: number;
+  orders: number;
+  paid: number;
+  cancelled: number;
+  expired: number;
+}
+
 export interface AdminAuditLogItem {
   id: number;
   actor_user_id: number | null;
@@ -1025,6 +1048,18 @@ export async function updateAdminOrderStatus(
     headers: apiHeaders(true),
     body: JSON.stringify({ status, note }),
   });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function getAdminRevenueSummary(): Promise<AdminRevenueSummary> {
+  const res = await fetch(`${BASE}/api/admin/revenue/summary`, { headers: apiHeaders() });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function getAdminRevenueMonthly(months = 12): Promise<AdminRevenueMonthlyItem[]> {
+  const res = await fetch(`${BASE}/api/admin/revenue/monthly?months=${months}`, { headers: apiHeaders() });
   if (!res.ok) throw new Error(await res.text());
   return res.json();
 }
