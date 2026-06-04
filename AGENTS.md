@@ -42,8 +42,8 @@ LoreVista/
 │   ├── tests/                        # pytest 测试
 │   ├── workflows/                    # ComfyUI JSON 工作流模板
 │   ├── manual_migrate.py             # 手动数据库迁移脚本
-│   ├── manga_outputs/                # 生成的漫画图片（静态文件）
-│   └── video_outputs/                # 生成的视频文件（静态文件）
+│   ├── manga_outputs/                # ⚠️ 用户生成的漫画图片（部署时绝对不可删除）
+│   └── video_outputs/                # ⚠️ 用户生成的视频文件（部署时绝对不可删除）
 │
 ├── frontend/                         # React + Vite 前端
 │   ├── vite.config.ts                # Vite 配置（代理 /api→:8000，代码分割）
@@ -286,10 +286,33 @@ type RouteKey = 'landing' | 'login' | 'stories' | 'workspace' | 'templates' | ..
 - **PM2 进程**：`canvas-backend`（cwd = `.../backend/`）
 - **前端**：`frontend/dist/` → Nginx 静态服务
 
+### ⚠️ 部署红线：用户生成资源绝对保护
+
+部署时**最容易犯的致命错误**是删除或覆盖用户已生成的漫画/视频资源。
+
+| 资源目录 | 对应路由 | 说明 |
+|---------|---------|------|
+| `backend/manga_outputs/` | `/static/manga` | 所有已生成的漫画图片 |
+| `backend/video_outputs/` | `/static/video` | 所有已生成的视频文件 |
+
+**硬性规则（任何部署工具/脚本都必须遵守）：**
+
+1. **禁止 `rsync --delete`** — 绝对不能在部署时使用 `--delete` 标志，它会删掉目标机已有的用户图片和视频，但 `manga_outputs/` 不在本地仓库中，部署脚本本地没有这些文件，一旦 `--delete` 会被全部清空。
+2. **禁止 `git clean -fdx`** — 会删除 `manga_outputs/` 和 `video_outputs/` 中所有未跟踪的用户资源。
+3. **禁止整个目录替换** — 不要 `rm -rf backend && cp -r`；只能增量覆盖代码文件。
+4. **这些目录已在 `.gitignore` 中**，本地仓库不含用户资源，无需担心误提交。
+
+**安全做法：**
+- 使用 `git pull` 或 `git fetch + checkout` 更新代码
+- 手动替换单个文件（如 `backend/main.py`、`backend/services/*.py`）
+- 构建前端时只操作 `frontend/` 目录，不影响用户资源
+
 ### 部署步骤
 
 ```bash
-# 1. 上传代码
+# 1. 拉取最新代码（不会影响 manga_outputs/ 和 video_outputs/）
+git pull
+
 # 2. 安装后端依赖（venv 中）
 cd /www/wwwroot/canvas.aifusion6.cn/
 source venv/bin/activate
@@ -390,6 +413,9 @@ async def my_func(*args, task_id=None, story_id=None, chapter_id=None, shot_id=N
 - 无 `tailwind.config.js`，样式定制直接在 `index.css` 中
 - 使用 `@import "tailwindcss"` 而非旧式 `@tailwind` 指令
 - 生产构建中 Tailwind 会 tree-shake 未使用的类
+
+### 9. ⚠️ 部署时误删用户图片/视频（致命）
+`manga_outputs/` 和 `video_outputs/` 在 `.gitignore` 中，本地仓库没有这些文件。如果部署时使用 `rsync --delete`、`git clean -fdx`、或用 `rm -rf backend` 再替换，会永久删除所有用户的漫画图片和视频。**永远只做增量更新，不做全量替换。**
 
 ---
 
