@@ -172,6 +172,7 @@ export function AdminRevenueDashboardPage({ onError }: { onError: (message: stri
   const [datePreset, setDatePreset] = useState('all');
   const [actingOrderNo, setActingOrderNo] = useState<string | null>(null);
   const [loadingOrders, setLoadingOrders] = useState(false);
+  const [monthRange, setMonthRange] = useState(12);
 
   function getDateRange(preset: string): { start?: string; end?: string } {
     const now = new Date();
@@ -232,10 +233,11 @@ export function AdminRevenueDashboardPage({ onError }: { onError: (message: stri
     }
   }
 
-  async function loadAll() {
+  async function loadAll(range?: number) {
+    const months = range ?? monthRange;
     const [s, m, o] = await Promise.all([
       getAdminRevenueSummary(),
-      getAdminRevenueMonthly(12),
+      getAdminRevenueMonthly(months),
       getAdminOrders(),
     ]);
     setSummary(s);
@@ -243,6 +245,11 @@ export function AdminRevenueDashboardPage({ onError }: { onError: (message: stri
     setRecentOrders(o.filter((ord) => ord.status === 'paid').slice(0, 20));
 
     await loadSearchOrders({ page: 1, page_size: 20, status: '' }, 'all');
+  }
+
+  function handleMonthRangeChange(range: number) {
+    setMonthRange(range);
+    void run(() => loadAll(range));
   }
 
   useEffect(() => {
@@ -263,10 +270,19 @@ export function AdminRevenueDashboardPage({ onError }: { onError: (message: stri
     );
   }
 
-  const barData = monthly.map((m) => ({
-    label: m.period.slice(5),
-    value: m.revenue,
-  }));
+  function fillMissingMonths(data: AdminRevenueMonthlyItem[], count: number) {
+    const map = new Map(data.map((m) => [m.period, m.revenue]));
+    const result: { label: string; value: number }[] = [];
+    const now = new Date();
+    for (let i = count - 1; i >= 0; i--) {
+      const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+      const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+      result.push({ label: key.slice(5), value: map.get(key) ?? 0 });
+    }
+    return result;
+  }
+
+  const barData = fillMissingMonths(monthly, monthRange);
 
   const byPlan: { label: string; value: number; color: string }[] = [];
   const planMap = new Map<string, number>();
@@ -326,11 +342,22 @@ export function AdminRevenueDashboardPage({ onError }: { onError: (message: stri
       </div>
 
       <SectionCard title="月度收入趋势">
-        {monthly.length > 0 ? (
-          <BarChart data={barData} />
-        ) : (
-          <div className="py-6 text-center text-sm text-slate-500">暂无月度数据</div>
-        )}
+        <div className="mb-4 flex items-center gap-2">
+          {[6, 12].map((n) => (
+            <button
+              key={n}
+              onClick={() => handleMonthRangeChange(n)}
+              className={`rounded-2xl px-3 py-1.5 text-sm font-medium transition ${
+                monthRange === n
+                  ? 'bg-[#3b82f6] text-white'
+                  : 'border border-[#d7e3f4] bg-white text-slate-600 hover:bg-[#eff6ff]'
+              }`}
+            >
+              近{n}个月
+            </button>
+          ))}
+        </div>
+        <BarChart data={barData} />
       </SectionCard>
 
       <div className="grid gap-5 md:grid-cols-2">
