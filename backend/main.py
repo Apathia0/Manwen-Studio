@@ -43,7 +43,7 @@ import httpx
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, File, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from PIL import Image
 from sqlalchemy import case, func, and_
@@ -132,6 +132,7 @@ from services.scene_safety import sanitize_scene_list
 from services import deepseek as deepseek_service
 from services import image2 as image_service
 from services import alipay_f2f
+from services import license_checker
 from routers.video import router as video_router
 
 load_dotenv()
@@ -254,6 +255,44 @@ MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_BYTES", str(10 * 1024 * 1024)))
 MAX_CHARACTER_PROFILE_CHARS = int(os.getenv("MAX_CHARACTER_PROFILE_CHARS", "20000"))
 API_TOKEN = os.getenv("API_TOKEN", "").strip()
 
+# 未授权域名时显示的 HTML 页面模板
+_UNAUTHORIZED_HTML = """\
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>域名未授权 - LoreVista</title>
+<style>
+*{{margin:0;padding:0;box-sizing:border-box}}
+body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px}}
+.card{{background:#fff;border-radius:20px;padding:40px;max-width:520px;width:100%;box-shadow:0 20px 60px rgba(0,0,0,.3);text-align:center}}
+.icon{{font-size:64px;margin-bottom:20px}}
+h1{{font-size:24px;color:#333;margin-bottom:12px}}
+p{{color:#666;line-height:1.6;margin-bottom:8px;font-size:14px}}
+.domain{{background:#f8f9fa;padding:10px 16px;border-radius:8px;font-family:monospace;font-size:16px;color:#667eea;margin:16px 0;word-break:break-all}}
+.btn{{display:inline-block;padding:12px 32px;border-radius:25px;text-decoration:none;font-weight:600;font-size:15px;margin:8px 4px;transition:transform .2s}}
+.btn-primary{{background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);color:#fff}}
+.btn-primary:hover{{transform:translateY(-2px);box-shadow:0 5px 15px rgba(102,126,234,.4)}}
+.footer{{margin-top:24px;padding-top:16px;border-top:1px solid #eee;font-size:12px;color:#999}}
+</style>
+</head>
+<body>
+<div class="card">
+<div class="icon">🔒</div>
+<h1>域名未授权</h1>
+<p>当前域名 <strong>{hostname}</strong> 尚未获得授权。</p>
+<div class="domain">{hostname}</div>
+<p>请联系管理员获取授权码，或前往授权页面完成授权。</p>
+<p style="font-size:12px;color:#999;margin-top:12px">授权完成后，系统将自动解除限制。</p>
+<div style="margin-top:20px">
+{{button_html}}
+</div>
+<div class="footer">LoreVista — AI 小说创作平台</div>
+</div>
+</body>
+</html>"""
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=CORS_ORIGINS,
@@ -261,6 +300,38 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def license_check_middleware(request: Request, call_next):
+    path = request.url.path
+    if path.startswith(("/static/",)) or request.method == "OPTIONS":
+        return await call_next(request)
+
+    hostname = request.url.hostname or ""
+    if not hostname or license_checker.is_dev_domain(hostname):
+        return await call_next(request)
+
+    if not license_checker.check_domain(hostname):
+        auth_url = license_checker.get_auth_page_url()
+        if path.startswith("/api/"):
+            return JSONResponse(
+                status_code=403,
+                content={
+                    "detail": "域名未授权，请联系管理员",
+                    "message": f"当前域名 {hostname} 未获得授权，无法提供服务",
+                    "authorized": False,
+                    "auth_url": auth_url,
+                },
+            )
+        return HTMLResponse(
+            status_code=403,
+            content=_UNAUTHORIZED_HTML.format(hostname=hostname, button_html=(
+                f'<a class="btn btn-primary" href="{auth_url}" target="_blank">前往授权页面</a>'
+            )),
+        )
+
+    return await call_next(request)
 
 
 @app.exception_handler(MissingApiKeyError)
