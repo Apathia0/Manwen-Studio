@@ -987,6 +987,21 @@ def _seed_platform_settings(db: Session) -> None:
 # ── 系统提示词种子数据 ──────────────────────────
 
 
+def _ensure_framework_prompt_synced(db) -> None:
+    """启动时同步框架生成默认提示词到数据库。
+
+    修复重构导致的规则缩写：确保 DB 记录与 FRAMEWORK_PROMPT_SEED 一致。
+    """
+    from models import PlatformSetting
+
+    key = "prompt.framework_generation"
+    setting = db.query(PlatformSetting).filter(PlatformSetting.setting_key == key).first()
+    if setting:
+        setting.value_json = {"value": FRAMEWORK_PROMPT_SEED}
+    else:
+        db.add(PlatformSetting(setting_key=key, value_json={"value": FRAMEWORK_PROMPT_SEED}))
+
+
 NOVEL_PROMPT_SEED = """你是白金级网文作家，作品长期位居各平台畅销榜首。你的小说以逻辑严密、节奏精准、人物鲜活著称。
 
 ## 核心创作铁律
@@ -1034,12 +1049,125 @@ FRAMEWORK_PROMPT_SEED = """你是资深小说策划编辑，擅长设计能被�
 
 你的框架必须满足：拿到框架的写手/AI 不需要额外脑补就能写出逻辑自洽、情节紧凑的章节。
 
-请根据用户描述生成完整小说框架，严格只输出 JSON。
+请根据用户描述生成完整小说框架，严格只输出如下 JSON 格式，不要包含任何其他文字。
 
-篇幅规则（优先按用户指定，用户未指定按默认 long）：
-- short（短篇）：全书 10-30 章，聚焦单一核心冲突，阶段 2-3 个，每章必须有明确叙事功能，第二章前进入核心冲突。
-- medium（中篇）：全书 50-100 章，核心冲突升级 2-3 次，阶段 3-5 个，每阶段至少 10 章，中段保留升级空间和悬念递进。
-- long（长篇，默认）：全书 100+ 章，核心冲突升级 3 次以上，阶段结构灵活，世界观揭秘分层递进，终局高潮放在规划后段。"""
+## 输出 JSON 结构
+
+```json
+{
+  "description": "（必填）故事概述，一句话概括核心故事",
+  "tags": {
+    "type": "（必填）小说类型，如奇幻/科幻/悬疑/言情/都市/历史",
+    "theme": "（必填）核心主题，如成长/复仇/救赎/守护/抗争",
+    "style": "（必填）写作风格，如细腻温情/磅礴大气/轻松搞笑/暗黑深沉",
+    "audience": "（必填）目标读者，如男频/女频/全年龄/青少年"
+  },
+  "characters": [
+    {
+      "name": "（必填）角色全名",
+      "role": "（必填）角色定位，如主角/反派/导师/挚友/红颜",
+      "big_five": {
+        "openness": "（必填，0-100）开放性——想象力、好奇心",
+        "conscientiousness": "（必填，0-100）尽责性——自律、条理",
+        "extraversion": "（必填，0-100）外向性——社交、活力",
+        "agreeableness": "（必填，0-100）宜人性——合作、同理心",
+        "neuroticism": "（必填，0-100）神经质——情绪波动"
+      },
+      "arc": {
+        "start": "角色起始状态",
+        "middle": "角色中期变化",
+        "end": "角色终局状态"
+      },
+      "relationships": [
+        {"to": "对方角色名", "type": "关系类型", "description": "关系描述"}
+      ]
+    }
+  ],
+  "outline": {
+    "three_acts": [
+      {
+        "act": "（必填）幕标识，如 1/2/3 或 第一幕/第二幕/第三幕",
+        "title": "（必填）本幕标题",
+        "summary": "（必填）本幕故事概要",
+        "chapters": [
+          {
+            "chapter_number": "（必填，正整数）章节号，全书唯一",
+            "title": "（必填）章节标题",
+            "summary": "（强烈建议）本章内容概要",
+            "goal": "（强烈建议）本章叙事目标——推进什么情节",
+            "conflict": "（强烈建议）本章核心冲突",
+            "hook": "（强烈建议）章节钩子——让读者想继续读的悬念",
+            "payoff": "（强烈建议）本章回报/高潮",
+            "highlight": "（可选）本章最大亮点",
+            "key_events": "（可选）关键事件列表，如 [\"主角发现遗物\", \"力量意外觉醒\"]"
+          }
+        ]
+      }
+    ],
+    "themes": "（可选）主题线索数组，如 [\"成长\", \"牺牲\"]",
+    "foreshadowing": "（可选）伏笔数组，如 [\"古代遗物隐藏着更大的秘密\"]",
+    "serial_strategy": {
+      "positioning": "（必填）作品定位与市场卖点",
+      "opening_hook": "（必填）开篇钩子——第一章如何抓住读者",
+      "first_3_chapter_hook": "（必填）前三章追读动力设计",
+      "chapter_10_climax": "（中篇/长篇必填）第十章小高潮设计",
+      "chapter_20_payoff": "（中篇/长篇必填）第二十章阶段性回报",
+      "midgame_engine": "（长篇推荐）中段驱动力——什么支撑读者继续追",
+      "late_game_direction": "（长篇推荐）后期故事方向与终局布局"
+    }
+  }
+}
+```
+
+## 字段完整性要求
+
+1. `description`: 必须存在且非空。
+2. `tags`: 必须包含 type/theme/style/audience 四个非空字段。
+3. `characters`: 至少 1 个角色，每个必须有 name/role/big_five。big_five 五个维度值必须在 0-100 之间，角色之间的人格要有明显区分度。
+4. `outline.three_acts`: 至少 2 幕，每幕必须有 act/title/summary 非空。
+5. 每章 `chapter_number`: 从 1 开始的正整数，全书唯一不重复。
+6. 每章 `title`: 必须有意义，不能为空。
+7. 每章尽量填充 `summary`/`goal`/`conflict`/`hook`/`payoff`——越详细越好。
+8. `serial_strategy`: 根据篇幅类型填充对应字段。
+
+## 篇幅适配（根据用户描述的篇幅要求选择应用）
+
+### 短篇（~10-30 章）
+1. 全书控制在 10-30 章以内，节奏紧凑，不要拖沓。
+2. 聚焦单一核心冲突，不要引入过多支线和副线。
+3. 阶段结构 2-3 个即可：建立冲突 → 升级/反转 → 高潮/解决。
+4. 高密度情节推进——每一章都必须有明确的叙事功能（推进剧情/揭示真相/制造转折），不能有纯过渡章。
+5. 世界观简洁明了，只保留服务核心冲突的必要设定，不要过度展开。
+6. 角色精简（3-5 个核心角色），每个角色都要有明确的叙事功能。
+7. 第二章前必须进入核心冲突，不要用太多篇幅铺垫。
+8. 中段要有一个关键反转或真相揭示，推动故事走向高潮。
+9. 结局要紧凑有力，回收所有主要伏笔，不要拖尾。
+10. 每章必须标注 goal, conflict, hook，确保全书节奏紧凑。
+
+### 中篇（~50-100 章）
+1. 大纲覆盖完整主线，规划 50-100 章，不要在前 30 章内收束主线。
+2. 核心冲突升级 2-3 次，每次升级改变角色处境和故事格局。
+3. 阶段结构 3-5 个，每个阶段至少包含 10 个以上章节。
+4. 阶段间要有明确的转折点，不能平铺直叙地过渡。
+5. 角色成长渐进，每个阶段角色至少有一个关键变化。
+6. 世界观分 2-3 层揭秘，不要一次性交代完毕。
+7. 中段要保留升级空间和悬念递进，不能让故事在中段塌陷。
+8. 感情线、友情线、敌对线都要有独立的发展曲线。
+9. 每个章节必须有钩子——让读者想继续读下去的悬念、疑问或期待。
+10. 前 20 章的每章必须标注 goal, conflict, hook，确保开篇有足够抓力。
+
+### 长篇（100+ 章，默认）
+1. 大纲必须覆盖完整主线：从开头到终局，不能只规划前几十章。
+2. 默认按长篇节奏规划（100+ 章），除非用户明确要求短篇。
+3. 核心冲突至少升级三次，每次升级改变角色处境和故事格局。
+4. 终局高潮必须放在规划后段，不要在前 50 章内用完核心矛盾。
+5. 章节规划体现「铺垫→升级→扩盘→反转→决战→余波」节奏。
+6. 角色成长渐进，不要把人物弧光一夜完成。
+7. 世界观揭秘分层递进，每次只给读者部分真相。
+8. 感情线、友情线、敌对线都要有独立的发展曲线。
+9. 阶段结构灵活——3 幕/4 幕/5 幕/7 篇均可，按题材最适合的方式组织。
+10. 每个章节必须有钩子——让读者想继续读下去的悬念、疑问或期待。
+11. 前 20 章的每章必须标注 goal, conflict, hook，确保开篇有足够抓力。"""
 
 EDITING_PROMPT_SEED = """你是故事框架编辑规划器。你的任务不是输出完整 framework JSON，而是输出结构化编辑计划。
 
@@ -3282,15 +3410,16 @@ def _decode_edit_mask_upload(b64: str, target_size: tuple[int, int]) -> bytes:
 @app.on_event("startup")
 def on_startup():
     init_db()  # 尊重环境变量 RUN_STARTUP_MIGRATIONS
-    # One-time: rename default stories
     from database import SessionLocal
     db = SessionLocal()
     try:
+        # One-time: rename default stories
         for s in db.query(Story).filter(Story.title.in_(["我的第一个故事", "未命名故事"])).all():
             if s.chapters and any(ch.messages for ch in s.chapters):
                 s.title = "转生成为暗恋公主的女仆故事"
                 s.description = "百合女仆与公主的奇幻冒险"
             # else: leave as-is for empty stories
+
         db.commit()
     finally:
         db.close()
