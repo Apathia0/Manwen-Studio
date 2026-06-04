@@ -99,26 +99,68 @@ function MetricCard({
   );
 }
 
-function BarChart({ data }: { data: { label: string; value: number; color?: string }[] }) {
+function LineChart({ data }: { data: { label: string; value: number; color?: string }[] }) {
+  const w = 600;
+  const h = 160;
+  const padL = 40;
+  const padR = 8;
+  const padT = 8;
+  const padB = 24;
+  const chartW = w - padL - padR;
+  const chartH = h - padT - padB;
   const max = Math.max(...data.map((d) => d.value), 1);
+
+  const points = data.map((d, i) => {
+    const x = padL + (i / Math.max(data.length - 1, 1)) * chartW;
+    const y = padT + chartH - (d.value / max) * chartH;
+    return { x, y, ...d };
+  });
+
+  const linePath = points.map((p, i) => `${i === 0 ? 'M' : 'L'}${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(' ');
+
+  const yTicks = [0, 0.25, 0.5, 0.75, 1].map((r) => ({
+    y: padT + chartH - r * chartH,
+    label: Math.round(max * r),
+  }));
+
   return (
-    <div className="flex items-end gap-2" style={{ height: 160 }}>
-      {data.map((item) => {
-        const h = max > 0 ? (item.value / max) * 140 : 0;
-        return (
-          <div key={item.label} className="flex flex-1 flex-col items-center gap-1">
-            <div
-              className="w-full rounded-t-md transition-all duration-500"
-              style={{
-                height: Math.max(h, 2),
-                backgroundColor: item.color || '#3b82f6',
-              }}
-            />
-            <span className="text-[10px] text-slate-500">{item.label}</span>
-          </div>
-        );
-      })}
-    </div>
+    <svg viewBox={`0 0 ${w} ${h}`} className="w-full" style={{ maxHeight: 200 }}>
+      {/* 网格线 */}
+      {yTicks.map((t, i) => (
+        <line key={i} x1={padL} y1={t.y} x2={w - padR} y2={t.y} stroke="#e5edf8" strokeWidth={1} />
+      ))}
+      {/* Y 轴标签 */}
+      {yTicks.map((t, i) => (
+        <text key={i} x={padL - 6} y={t.y + 3} textAnchor="end" className="fill-slate-400" fontSize={10}>
+          {t.label}
+        </text>
+      ))}
+      {/* 折线 */}
+      <path d={linePath} fill="none" stroke="#3b82f6" strokeWidth={2.5} strokeLinejoin="round" strokeLinecap="round" />
+      {/* 面积填充 */}
+      <path
+        d={`${linePath} L${points[points.length - 1]?.x ?? padL},${padT + chartH} L${points[0]?.x ?? padL},${padT + chartH} Z`}
+        fill="url(#lineGrad)"
+        opacity={0.15}
+      />
+      {/* 渐变定义 */}
+      <defs>
+        <linearGradient id="lineGrad" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stopColor="#3b82f6" />
+          <stop offset="100%" stopColor="#3b82f6" stopOpacity={0} />
+        </linearGradient>
+      </defs>
+      {/* 数据点 */}
+      {points.map((p, i) => (
+        <circle key={i} cx={p.x} cy={p.y} r={3} fill="#fff" stroke="#3b82f6" strokeWidth={2} />
+      ))}
+      {/* X 轴标签 */}
+      {points.filter((_, i) => data.length > 12 ? i % 2 === 0 || i === data.length - 1 : true).map((p, i) => (
+        <text key={i} x={p.x} y={h - 4} textAnchor="middle" className="fill-slate-500" fontSize={10}>
+          {p.label}
+        </text>
+      ))}
+    </svg>
   );
 }
 
@@ -257,10 +299,9 @@ export function AdminRevenueDashboardPage({ onError }: { onError: (message: stri
     );
   }
 
-  const barData = monthly.map((m) => ({
+  const lineData = monthly.map((m) => ({
     label: m.period.slice(5),
     value: m.revenue,
-    color: m.revenue > 0 ? '#3b82f6' : '#e5edf8',
   }));
 
   const byPlan: { label: string; value: number; color: string }[] = [];
@@ -322,7 +363,7 @@ export function AdminRevenueDashboardPage({ onError }: { onError: (message: stri
 
       <SectionCard title="月度收入趋势">
         {monthly.length > 0 ? (
-          <BarChart data={barData} />
+          <LineChart data={lineData} />
         ) : (
           <div className="py-6 text-center text-sm text-slate-500">暂无月度数据</div>
         )}
