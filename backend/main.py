@@ -47,10 +47,10 @@ from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from PIL import Image
 from sqlalchemy import case, func, and_
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, sessionmaker
 from sse_starlette.sse import EventSourceResponse
 
-from database import SessionLocal, get_db, init_db
+from database import SessionLocal, get_db, init_db, engine as database_engine
 from models import (
     AuditLog,
     BackgroundTask,
@@ -97,6 +97,17 @@ from schemas import (
     StoryUpdate,
 )
 from services.task_manager import task_manager
+from services.install import (
+    build_database_url,
+    build_redis_url,
+    create_install_engine,
+    database_has_install_markers,
+    detect_install_status,
+    redact_url,
+    test_database_url,
+    test_redis_url,
+    write_env_updates,
+)
 
 from services.deepseek import (
     adjust_chapter_content,
@@ -254,6 +265,36 @@ CORS_ORIGINS = [
 MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_BYTES", str(10 * 1024 * 1024)))
 MAX_CHARACTER_PROFILE_CHARS = int(os.getenv("MAX_CHARACTER_PROFILE_CHARS", "20000"))
 API_TOKEN = os.getenv("API_TOKEN", "").strip()
+INSTALL_API_PREFIX = "/api/install"
+INSTALL_STATUS: dict[str, Any] = {
+    "installed": False,
+    "source": "unknown",
+    "database_reachable": None,
+}
+INSTALL_REQUIRES_RESTART = False
+SYSTEM_READY = False
+
+
+def _is_install_api_path(path: str) -> bool:
+    return path == INSTALL_API_PREFIX or path.startswith(f"{INSTALL_API_PREFIX}/")
+
+
+def _refresh_install_status() -> dict[str, Any]:
+    global INSTALL_STATUS
+    if INSTALL_REQUIRES_RESTART:
+        INSTALL_STATUS = {
+            "installed": True,
+            "source": "installer",
+            "database_reachable": True,
+            "requires_restart": True,
+        }
+        return INSTALL_STATUS
+    INSTALL_STATUS = detect_install_status(database_engine)
+    return INSTALL_STATUS
+
+
+def _system_installed() -> bool:
+    return bool(INSTALL_STATUS.get("installed")) and not bool(INSTALL_STATUS.get("requires_restart")) and SYSTEM_READY
 
 # 未授权域名时显示的 HTML 页面模板
 _UNAUTHORIZED_HTML = """\
@@ -305,7 +346,7 @@ app.add_middleware(
 @app.middleware("http")
 async def license_check_middleware(request: Request, call_next):
     path = request.url.path
-    if path.startswith(("/static/",)) or request.method == "OPTIONS":
+    if path.startswith(("/static/",)) or _is_install_api_path(path) or request.method == "OPTIONS":
         return await call_next(request)
 
     host_header = request.headers.get("host", "")
@@ -352,7 +393,7 @@ app.mount("/static/video", StaticFiles(directory=str(video_dir)), name="video")
 
 @app.middleware("http")
 async def require_api_token(request: Request, call_next):
-    if API_TOKEN and request.url.path.startswith("/api") and request.method != "OPTIONS":
+    if API_TOKEN and request.url.path.startswith("/api") and not _is_install_api_path(request.url.path) and request.method != "OPTIONS":
         supplied = request.headers.get("x-api-token", "").strip()
         if not supplied:
             auth = request.headers.get("authorization", "")
@@ -367,6 +408,10 @@ async def require_api_token(request: Request, call_next):
 
 @app.middleware("http")
 async def bind_request_db(request: Request, call_next):
+    if _is_install_api_path(request.url.path):
+        return await call_next(request)
+    if request.url.path.startswith("/api") and not _system_installed():
+        return JSONResponse({"detail": "System is not installed", "installed": False}, status_code=503)
     db = SessionLocal()
     request.state.db = db
     try:
@@ -841,9 +886,11 @@ def _consume_email_verification_code(email: str, purpose: str, code: str, db: Se
     db.commit()
 
 
-def _ensure_platform_seed(db: Session) -> None:
+def _ensure_platform_seed(db: Session, *, create_default_admin: bool = False) -> None:
+    # Keep the legacy admin seed disabled by default. First-run install creates
+    # the administrator from user-supplied credentials instead.
     admin = db.query(User).filter(User.email == "admin@lorevista.ai").first()
-    if not admin:
+    if create_default_admin and not admin:
         db.add(User(
             email="admin@lorevista.ai",
             password_hash=_password_hash("admin123"),
@@ -952,6 +999,42 @@ def _ensure_platform_seed(db: Session) -> None:
     db.commit()
     _seed_platform_settings(db)
     db.commit()
+
+
+def _create_install_admin_user(admin_config: dict[str, Any], db: Session) -> User:
+    email = _normalize_email(admin_config.get("email"))
+    name = str(admin_config.get("name") or "").strip() or "系统管理员"
+    password = str(admin_config.get("password") or "")
+    _validate_email_format(email)
+    if len(password) < 8:
+        raise HTTPException(400, "管理员密码至少 8 位")
+    existing = db.query(User).filter(User.email == email).first()
+    if existing:
+        raise HTTPException(409, "管理员邮箱已存在")
+
+    user = User(
+        email=email,
+        password_hash=_password_hash(password),
+        name=name,
+        role="admin",
+        status="active",
+        email_verified=True,
+        allow_api_key_override=True,
+        allow_api_url_override=True,
+    )
+    db.add(user)
+    db.flush()
+    free_plan = db.query(Plan).filter(Plan.code == "free").first()
+    if free_plan:
+        _upsert_user_subscription(
+            user.id,
+            free_plan.id,
+            db,
+            billing_cycle="monthly",
+            effective_at=_utcnow(),
+            extend_if_same_plan=False,
+        )
+    return user
 
 
 def _ensure_plan_feature_seed(db: Session) -> None:
@@ -3481,8 +3564,17 @@ def _decode_edit_mask_upload(b64: str, target_size: tuple[int, int]) -> bytes:
 
 @app.on_event("startup")
 def on_startup():
-    init_db()  # 尊重环境变量 RUN_STARTUP_MIGRATIONS
-    from database import SessionLocal
+    global SYSTEM_READY
+    status = _refresh_install_status()
+    if not status.get("installed"):
+        logger.info("System is not installed; startup database initialization is skipped.")
+        return
+    try:
+        init_db(raise_errors=True)  # 尊重环境变量 RUN_STARTUP_MIGRATIONS
+    except Exception as exc:
+        SYSTEM_READY = False
+        logger.warning("Startup database initialization skipped: %s", exc)
+        return
     db = SessionLocal()
     try:
         # One-time: rename default stories
@@ -3493,6 +3585,10 @@ def on_startup():
             # else: leave as-is for empty stories
 
         db.commit()
+        SYSTEM_READY = True
+    except Exception as exc:
+        SYSTEM_READY = False
+        logger.warning("Startup database maintenance skipped: %s", exc)
     finally:
         db.close()
 
@@ -3500,6 +3596,10 @@ def on_startup():
 @app.on_event("startup")
 async def startup_task_cleanup():
     """应用启动时启动定时清理后台任务的循环"""
+    if not _system_installed():
+        logger.info("System is not ready; task cleanup loop is skipped.")
+        return
+
     async def cleanup_loop():
         while True:
             try:
@@ -3514,6 +3614,128 @@ async def startup_task_cleanup():
 
 
 # ─── Story CRUD ─────────────────────────────────────────────
+
+@app.get("/api/install/status")
+def install_status():
+    status = _refresh_install_status()
+    return {
+        "installed": bool(status.get("installed")),
+        "source": status.get("source") or "unknown",
+        "database_reachable": status.get("database_reachable"),
+        "database_error": status.get("database_error"),
+        "requires_restart": bool(status.get("requires_restart")),
+    }
+
+
+def _ensure_not_installed_for_install_api() -> None:
+    status = _refresh_install_status()
+    if status.get("installed"):
+        raise HTTPException(409, "系统已安装，不能重复执行安装程序")
+
+
+@app.post("/api/install/test-database")
+def install_test_database(body: dict):
+    _ensure_not_installed_for_install_api()
+    try:
+        database_url = build_database_url(body or {})
+        return test_database_url(database_url)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(400, f"数据库连接失败: {exc}") from exc
+
+
+@app.post("/api/install/test-redis")
+def install_test_redis(body: dict):
+    _ensure_not_installed_for_install_api()
+    try:
+        redis_url = build_redis_url(body or {})
+        return test_redis_url(redis_url)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(400, f"Redis 连接失败: {exc}") from exc
+
+
+@app.post("/api/install/complete")
+def install_complete(body: dict):
+    global INSTALL_REQUIRES_RESTART, INSTALL_STATUS, SYSTEM_READY
+    _ensure_not_installed_for_install_api()
+
+    database_config = body.get("database") if isinstance(body.get("database"), dict) else {}
+    redis_config = body.get("redis") if isinstance(body.get("redis"), dict) else {}
+    admin_config = body.get("admin") if isinstance(body.get("admin"), dict) else {}
+
+    try:
+        database_url = build_database_url(database_config)
+        redis_url = build_redis_url(redis_config)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+    password = str(admin_config.get("password") or "")
+    confirm_password = str(admin_config.get("confirmPassword") or admin_config.get("confirm_password") or "")
+    if password != confirm_password:
+        raise HTTPException(400, "管理员两次输入的密码不一致")
+
+    try:
+        test_database_url(database_url)
+        test_redis_url(redis_url)
+    except Exception as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+    install_engine = create_install_engine(database_url)
+    InstallSession = sessionmaker(bind=install_engine, autoflush=False, autocommit=False, expire_on_commit=False)
+    admin_user_payload: dict[str, Any] = {}
+    try:
+        if database_has_install_markers(install_engine):
+            raise HTTPException(409, "目标数据库已有用户或平台配置，不能重复执行安装程序")
+        init_db(bind_engine=install_engine, run_migrations=True, raise_errors=True)
+        db = InstallSession()
+        try:
+            _ensure_platform_seed(db)
+            admin_user = _create_install_admin_user(admin_config, db)
+            admin_user_payload = {"id": admin_user.id, "email": admin_user.email, "name": admin_user.name}
+            db.commit()
+        except HTTPException:
+            db.rollback()
+            raise
+        except Exception as exc:
+            db.rollback()
+            raise HTTPException(500, f"初始化管理员失败: {exc}") from exc
+        finally:
+            db.close()
+
+        env_result = write_env_updates({
+            "DATABASE_URL": database_url,
+            "REDIS_URL": redis_url,
+            "REDIS_ENABLED": "true",
+            "SYSTEM_INSTALLED": "true",
+        })
+        SYSTEM_READY = False
+        INSTALL_REQUIRES_RESTART = True
+        INSTALL_STATUS = {
+            "installed": True,
+            "source": "installer",
+            "database_reachable": True,
+            "requires_restart": True,
+        }
+        return {
+            "ok": True,
+            "installed": True,
+            "requires_restart": True,
+            "message": "安装完成，请重启后端或 PM2 后刷新页面。",
+            "database_url": redact_url(database_url),
+            "redis_url": redact_url(redis_url),
+            "admin": admin_user_payload,
+            **env_result,
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(500, f"安装失败: {exc}") from exc
+    finally:
+        install_engine.dispose()
+
 
 @app.post("/api/auth/register")
 def register(body: dict, db: Session = Depends(get_db)):

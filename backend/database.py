@@ -57,17 +57,20 @@ def get_db(request: Request):
         db.close()
 
 
-def init_db(*, run_migrations: bool | None = None):
+def init_db(*, run_migrations: bool | None = None, bind_engine=None, raise_errors: bool = False):
+    target_engine = bind_engine or engine
     if run_migrations is None:
         run_migrations = _env_flag("RUN_STARTUP_MIGRATIONS", False)
     try:
-        Base.metadata.create_all(bind=engine)
+        Base.metadata.create_all(bind=target_engine)
         if run_migrations:
-            _migrate()
+            _migrate(target_engine)
         else:
             logger.info("Skipping startup database migrations; set RUN_STARTUP_MIGRATIONS=true to enable.")
     except Exception as exc:
         logger.warning("数据库初始化失败（将在下次启动时重试）: %s", exc)
+        if raise_errors:
+            raise
 
 
 def _prepare_migration_conn(conn) -> None:
@@ -80,13 +83,14 @@ def _prepare_migration_conn(conn) -> None:
         logger.warning("Failed to configure migration timeouts: %s", exc)
 
 
-def _migrate():
+def _migrate(target_engine=None):
     """Add missing columns to existing tables (poor-man's migration)."""
     from sqlalchemy import inspect, text
-    insp = inspect(engine)
+    db_engine = target_engine or engine
+    insp = inspect(db_engine)
     if "stories" in insp.get_table_names():
         cols = {c["name"] for c in insp.get_columns("stories")}
-        with engine.begin() as conn:
+        with db_engine.begin() as conn:
             _prepare_migration_conn(conn)
             if "owner_user_id" not in cols:
                 conn.execute(text("ALTER TABLE stories ADD COLUMN owner_user_id INTEGER"))
@@ -117,7 +121,7 @@ def _migrate():
                 conn.execute(text("UPDATE stories SET import_context_completed = TRUE WHERE import_context_completed IS NULL"))
     if "chapters" in insp.get_table_names():
         cols = {c["name"] for c in insp.get_columns("chapters")}
-        with engine.begin() as conn:
+        with db_engine.begin() as conn:
             _prepare_migration_conn(conn)
             if "title" not in cols:
                 conn.execute(text("ALTER TABLE chapters ADD COLUMN title VARCHAR(255)"))
@@ -137,7 +141,7 @@ def _migrate():
                 conn.execute(text("ALTER TABLE chapters ADD COLUMN word_count INTEGER"))
             if "screenplay_text" not in cols:
                 conn.execute(text("ALTER TABLE chapters ADD COLUMN screenplay_text TEXT"))
-        with engine.begin() as conn:
+        with db_engine.begin() as conn:
             _prepare_migration_conn(conn)
             conn.execute(text("""
                 UPDATE chapters
@@ -165,7 +169,7 @@ def _migrate():
             """))
     if "billing_orders" in insp.get_table_names():
         cols = {c["name"] for c in insp.get_columns("billing_orders")}
-        with engine.begin() as conn:
+        with db_engine.begin() as conn:
             _prepare_migration_conn(conn)
             if "source" not in cols:
                 conn.execute(text("ALTER TABLE billing_orders ADD COLUMN source VARCHAR(32) DEFAULT 'system'"))
@@ -187,7 +191,7 @@ def _migrate():
                 conn.execute(text("ALTER TABLE billing_orders ADD COLUMN expired_at TIMESTAMP"))
     if "user_subscriptions" in insp.get_table_names():
         cols = {c["name"] for c in insp.get_columns("user_subscriptions")}
-        with engine.begin() as conn:
+        with db_engine.begin() as conn:
             _prepare_migration_conn(conn)
             if "billing_cycle" not in cols:
                 conn.execute(text("ALTER TABLE user_subscriptions ADD COLUMN billing_cycle VARCHAR(20) DEFAULT 'monthly'"))
@@ -200,7 +204,7 @@ def _migrate():
                 conn.execute(text("ALTER TABLE user_subscriptions ADD COLUMN expires_at TIMESTAMP"))
     if "users" in insp.get_table_names():
         cols = {c["name"] for c in insp.get_columns("users")}
-        with engine.begin() as conn:
+        with db_engine.begin() as conn:
             _prepare_migration_conn(conn)
             if "email_verified" not in cols:
                 conn.execute(text("ALTER TABLE users ADD COLUMN email_verified BOOLEAN DEFAULT TRUE"))
@@ -209,26 +213,27 @@ def _migrate():
                 conn.execute(text("ALTER TABLE users ADD COLUMN allow_api_key_override BOOLEAN DEFAULT FALSE"))
             if "allow_api_url_override" not in cols:
                 conn.execute(text("ALTER TABLE users ADD COLUMN allow_api_url_override BOOLEAN DEFAULT FALSE"))
-    _migrate_video_tables()
-    _migrate_video_character_tables()
-    _seed_video_style_presets()
-    _normalize_video_style_names()
-    _migrate_money_columns()
-    _cleanup_duplicate_chapters()
-    _cleanup_duplicate_manga_images()
-    _add_unique_constraints()
-    _migrate_prompt_templates()
+    _migrate_video_tables(db_engine)
+    _migrate_video_character_tables(db_engine)
+    _seed_video_style_presets(db_engine)
+    _normalize_video_style_names(db_engine)
+    _migrate_money_columns(db_engine)
+    _cleanup_duplicate_chapters(db_engine)
+    _cleanup_duplicate_manga_images(db_engine)
+    _add_unique_constraints(db_engine)
+    _migrate_prompt_templates(db_engine)
 
 
-def _migrate_money_columns():
+def _migrate_money_columns(target_engine=None):
     """Migrate price/amount columns to fixed-point decimals for billing accuracy."""
     from sqlalchemy import text
 
-    if engine.dialect.name != "postgresql":
-        logger.warning("Skipping money column migration for non-PostgreSQL database: %s", engine.dialect.name)
+    db_engine = target_engine or engine
+    if db_engine.dialect.name != "postgresql":
+        logger.warning("Skipping money column migration for non-PostgreSQL database: %s", db_engine.dialect.name)
         return
 
-    with engine.begin() as conn:
+    with db_engine.begin() as conn:
         _prepare_migration_conn(conn)
         conn.execute(text("""
             ALTER TABLE plans
@@ -265,11 +270,12 @@ def _safe_rmtree(path: Path):
         logger.warning("Failed to delete duplicate chapter directory %s: %s", path, exc)
 
 
-def _cleanup_duplicate_manga_images():
+def _cleanup_duplicate_manga_images(target_engine=None):
     """Keep the newest image record per chapter/image number and remove older duplicates."""
     from sqlalchemy import text
 
-    with engine.begin() as conn:
+    db_engine = target_engine or engine
+    with db_engine.begin() as conn:
         groups = conn.execute(text("""
             SELECT chapter_id, image_number
             FROM manga_images
@@ -305,11 +311,12 @@ def _chapter_score(chapter: dict, has_dir: bool) -> tuple[int, int, int, int]:
     )
 
 
-def _cleanup_duplicate_chapters():
+def _cleanup_duplicate_chapters(target_engine=None):
     """Keep the most content-rich chapter per story/chapter number and remove duplicates."""
     from sqlalchemy import text
 
-    with engine.begin() as conn:
+    db_engine = target_engine or engine
+    with db_engine.begin() as conn:
         groups = conn.execute(text("""
             SELECT story_id, chapter_number
             FROM chapters
@@ -361,15 +368,16 @@ def _cleanup_duplicate_chapters():
                 )
 
 
-def _add_unique_constraints():
+def _add_unique_constraints(target_engine=None):
     """Apply model unique constraints to existing PostgreSQL tables."""
     from sqlalchemy import inspect, text
 
-    if engine.dialect.name != "postgresql":
-        logger.warning("Skipping unique constraint migration for non-PostgreSQL database: %s", engine.dialect.name)
+    db_engine = target_engine or engine
+    if db_engine.dialect.name != "postgresql":
+        logger.warning("Skipping unique constraint migration for non-PostgreSQL database: %s", db_engine.dialect.name)
         return
 
-    insp = inspect(engine)
+    insp = inspect(db_engine)
     table_names = set(insp.get_table_names())
     if not {"chapters", "manga_images"}.issubset(table_names):
         return
@@ -380,7 +388,7 @@ def _add_unique_constraints():
         for constraint in insp.get_unique_constraints(table)
     }
 
-    with engine.begin() as conn:
+    with db_engine.begin() as conn:
         if "uq_chapters_story_number" not in existing:
             conn.execute(text("""
                 ALTER TABLE chapters
@@ -395,14 +403,15 @@ def _add_unique_constraints():
             """))
 
 
-def _migrate_video_tables():
+def _migrate_video_tables(target_engine=None):
     """Add missing columns to video-related tables (Phase 1 assets-driven workflow)."""
     from sqlalchemy import inspect, text
 
-    insp = inspect(engine)
+    db_engine = target_engine or engine
+    insp = inspect(db_engine)
     video_shots_cols = {c["name"] for c in insp.get_columns("video_shots")} if "video_shots" in insp.get_table_names() else set()
     if video_shots_cols:
-        with engine.begin() as conn:
+        with db_engine.begin() as conn:
             _prepare_migration_conn(conn)
             if "style_preset" not in video_shots_cols:
                 conn.execute(text("ALTER TABLE video_shots ADD COLUMN style_preset VARCHAR(50)"))
@@ -419,7 +428,7 @@ def _migrate_video_tables():
 
     video_assets_cols = {c["name"] for c in insp.get_columns("video_assets")} if "video_assets" in insp.get_table_names() else set()
     if video_assets_cols:
-        with engine.begin() as conn:
+        with db_engine.begin() as conn:
             _prepare_migration_conn(conn)
             if "asset_subtype" not in video_assets_cols:
                 conn.execute(text("ALTER TABLE video_assets ADD COLUMN asset_subtype VARCHAR(50)"))
@@ -442,7 +451,7 @@ def _migrate_video_tables():
 
     # Usage scope fields for video_assets
     if video_assets_cols:
-        with engine.begin() as conn:
+        with db_engine.begin() as conn:
             _prepare_migration_conn(conn)
             if "usage_scope" not in video_assets_cols:
                 conn.execute(text("ALTER TABLE video_assets ADD COLUMN usage_scope VARCHAR(20) DEFAULT 'shot_only'"))
@@ -459,7 +468,7 @@ def _migrate_video_tables():
 
     video_jobs_cols = {c["name"] for c in insp.get_columns("video_generation_jobs")} if "video_generation_jobs" in insp.get_table_names() else set()
     if video_jobs_cols:
-        with engine.begin() as conn:
+        with db_engine.begin() as conn:
             _prepare_migration_conn(conn)
             if "input_mode" not in video_jobs_cols:
                 conn.execute(text("ALTER TABLE video_generation_jobs ADD COLUMN input_mode VARCHAR(20)"))
@@ -476,7 +485,7 @@ def _migrate_video_tables():
 
     rendered_clips_cols = {c["name"] for c in insp.get_columns("rendered_clips")} if "rendered_clips" in insp.get_table_names() else set()
     if rendered_clips_cols:
-        with engine.begin() as conn:
+        with db_engine.begin() as conn:
             _prepare_migration_conn(conn)
             if "source_storyboard_asset_id" not in rendered_clips_cols:
                 conn.execute(text("ALTER TABLE rendered_clips ADD COLUMN source_storyboard_asset_id INTEGER REFERENCES video_assets(id)"))
@@ -491,7 +500,7 @@ def _migrate_video_tables():
                 conn.execute(text("UPDATE rendered_clips SET review_status = 'pending' WHERE review_status IS NULL"))
 
     if "video_style_presets" not in insp.get_table_names():
-        with engine.begin() as conn:
+        with db_engine.begin() as conn:
             _prepare_migration_conn(conn)
             conn.execute(text("""
                 CREATE TABLE video_style_presets (
@@ -507,24 +516,24 @@ def _migrate_video_tables():
 
     chapters_cols = {c["name"] for c in insp.get_columns("chapters")} if "chapters" in insp.get_table_names() else set()
     if "video_style_preset_id" not in chapters_cols:
-        with engine.begin() as conn:
+        with db_engine.begin() as conn:
             _prepare_migration_conn(conn)
             conn.execute(text("ALTER TABLE chapters ADD COLUMN video_style_preset_id INTEGER REFERENCES video_style_presets(id)"))
 
     stories_cols = {c["name"] for c in insp.get_columns("stories")} if "stories" in insp.get_table_names() else set()
     if "video_style_preset_id" not in stories_cols:
-        with engine.begin() as conn:
+        with db_engine.begin() as conn:
             _prepare_migration_conn(conn)
             conn.execute(text("ALTER TABLE stories ADD COLUMN video_style_preset_id INTEGER REFERENCES video_style_presets(id)"))
 
     script_scenes_cols = {c["name"] for c in insp.get_columns("script_scenes")} if "script_scenes" in insp.get_table_names() else set()
     if "concept_art_asset_id" not in script_scenes_cols:
-        with engine.begin() as conn:
+        with db_engine.begin() as conn:
             _prepare_migration_conn(conn)
             conn.execute(text("ALTER TABLE script_scenes ADD COLUMN concept_art_asset_id INTEGER REFERENCES video_assets(id)"))
 
     if "shot_asset_bindings" not in insp.get_table_names():
-        with engine.begin() as conn:
+        with db_engine.begin() as conn:
             _prepare_migration_conn(conn)
             conn.execute(text("""
                 CREATE TABLE shot_asset_bindings (
@@ -541,25 +550,26 @@ def _migrate_video_tables():
             conn.execute(text("CREATE INDEX IF NOT EXISTS idx_shot_asset_bindings_shot_id ON shot_asset_bindings(shot_id)"))
 
     if "character_involvement" not in video_shots_cols:
-        with engine.begin() as conn:
+        with db_engine.begin() as conn:
             _prepare_migration_conn(conn)
             conn.execute(text("ALTER TABLE video_shots ADD COLUMN character_involvement TEXT"))
     if "scene_mood" not in video_shots_cols:
-        with engine.begin() as conn:
+        with db_engine.begin() as conn:
             _prepare_migration_conn(conn)
             conn.execute(text("ALTER TABLE video_shots ADD COLUMN scene_mood VARCHAR(50)"))
 
 
-def _seed_video_style_presets():
+def _seed_video_style_presets(target_engine=None):
     import json
     from sqlalchemy import inspect, text
 
+    db_engine = target_engine or engine
     try:
-        insp = inspect(engine)
+        insp = inspect(db_engine)
         if "video_style_presets" not in insp.get_table_names():
             return
 
-        with engine.begin() as conn:
+        with db_engine.begin() as conn:
             count = conn.execute(text("SELECT COUNT(*) FROM video_style_presets")).scalar()
             if count and count > 0:
                 return
@@ -587,7 +597,7 @@ def _seed_video_style_presets():
         logger.warning("Failed to seed video style presets: %s", exc)
 
 
-def _normalize_video_style_names():
+def _normalize_video_style_names(target_engine=None):
     """Normalize known legacy/typo style names across video workflow tables."""
     from sqlalchemy import inspect, text
 
@@ -611,10 +621,11 @@ def _normalize_video_style_names():
         8: "科技赛博风",
     }
 
+    db_engine = target_engine or engine
     try:
-        insp = inspect(engine)
+        insp = inspect(db_engine)
         tables = set(insp.get_table_names())
-        with engine.begin() as conn:
+        with db_engine.begin() as conn:
             _prepare_migration_conn(conn)
             if "video_style_presets" in tables:
                 for sort_order, canonical_name in canonical_by_sort_order.items():
@@ -648,22 +659,23 @@ def _normalize_video_style_names():
         logger.warning("Failed to normalize video style names: %s", exc)
 
 
-def _migrate_video_character_tables():
+def _migrate_video_character_tables(target_engine=None):
     """Story-level character library for video workflow (Phase 2)."""
     from sqlalchemy import inspect, text
 
-    insp = inspect(engine)
+    db_engine = target_engine or engine
+    insp = inspect(db_engine)
 
     # stories.video_character_profiles
     stories_cols = {c["name"] for c in insp.get_columns("stories")} if "stories" in insp.get_table_names() else set()
     if stories_cols and "video_character_profiles" not in stories_cols:
-        with engine.begin() as conn:
+        with db_engine.begin() as conn:
             _prepare_migration_conn(conn)
             conn.execute(text("ALTER TABLE stories ADD COLUMN video_character_profiles TEXT"))
 
     # story_character_versions table
     if "story_character_versions" not in insp.get_table_names():
-        with engine.begin() as conn:
+        with db_engine.begin() as conn:
             _prepare_migration_conn(conn)
             conn.execute(text("""
                 CREATE TABLE story_character_versions (
@@ -682,15 +694,16 @@ def _migrate_video_character_tables():
             """))
 
 
-def _migrate_prompt_templates():
+def _migrate_prompt_templates(target_engine=None):
     """创建提示词模板系统相关表（prompt_templates / story_template_bindings / template_likes）。"""
     from sqlalchemy import inspect, text
 
-    insp = inspect(engine)
+    db_engine = target_engine or engine
+    insp = inspect(db_engine)
 
     # 1. 提示词模板主表
     if "prompt_templates" not in insp.get_table_names():
-        with engine.begin() as conn:
+        with db_engine.begin() as conn:
             _prepare_migration_conn(conn)
             conn.execute(text("""
                 CREATE TABLE prompt_templates (
@@ -729,7 +742,7 @@ def _migrate_prompt_templates():
 
     # 2. 作品-模板关联表
     if "story_template_bindings" not in insp.get_table_names():
-        with engine.begin() as conn:
+        with db_engine.begin() as conn:
             _prepare_migration_conn(conn)
             conn.execute(text("""
                 CREATE TABLE story_template_bindings (
@@ -745,7 +758,7 @@ def _migrate_prompt_templates():
 
     # 3. 模板点赞记录表
     if "template_likes" not in insp.get_table_names():
-        with engine.begin() as conn:
+        with db_engine.begin() as conn:
             _prepare_migration_conn(conn)
             conn.execute(text("""
                 CREATE TABLE template_likes (

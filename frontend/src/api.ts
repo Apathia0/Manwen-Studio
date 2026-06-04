@@ -39,6 +39,67 @@ export interface AuthSession {
   user: AuthUser;
 }
 
+export interface InstallStatus {
+  installed: boolean;
+  source: string;
+  database_reachable?: boolean | null;
+  database_error?: string | null;
+  requires_restart?: boolean;
+}
+
+export interface InstallDatabaseConfig {
+  host: string;
+  port: number;
+  database: string;
+  username: string;
+  password: string;
+  sslmode: string;
+}
+
+export interface InstallRedisConfig {
+  host: string;
+  port: number;
+  db: number;
+  username: string;
+  password: string;
+  tls: boolean;
+}
+
+export interface InstallAdminConfig {
+  name: string;
+  email: string;
+  password: string;
+  confirmPassword: string;
+}
+
+export interface InstallCompleteRequest {
+  database: InstallDatabaseConfig;
+  redis: InstallRedisConfig;
+  admin: InstallAdminConfig;
+}
+
+export interface InstallTestResponse {
+  ok: boolean;
+  database_url?: string;
+  redis_url?: string;
+}
+
+export interface InstallCompleteResponse {
+  ok: boolean;
+  installed: boolean;
+  requires_restart: boolean;
+  message: string;
+  database_url: string;
+  redis_url: string;
+  env_path: string;
+  backup_path?: string | null;
+  admin: {
+    id: number;
+    email: string;
+    name: string;
+  };
+}
+
 export function getApiKeySettings(): ApiKeySettings {
   return {
     deepseekApiKey: localStorage.getItem(LS_DEEPSEEK_API_KEY) || '',
@@ -763,6 +824,42 @@ export async function sendEmailVerificationCode(payload: { email: string; purpos
     body: JSON.stringify(payload),
   });
   if (!res.ok) throw new Error(await readErrorMessage(res, '验证码发送失败，请稍后重试。'));
+  return res.json();
+}
+
+export async function getInstallStatus(): Promise<InstallStatus> {
+  const res = await fetch(`${BASE}/api/install/status`);
+  if (!res.ok) throw new Error(await readErrorMessage(res, '安装状态检查失败'));
+  return res.json();
+}
+
+export async function testInstallDatabase(payload: InstallDatabaseConfig): Promise<InstallTestResponse> {
+  const res = await fetch(`${BASE}/api/install/test-database`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '数据库连接测试失败'));
+  return res.json();
+}
+
+export async function testInstallRedis(payload: InstallRedisConfig): Promise<InstallTestResponse> {
+  const res = await fetch(`${BASE}/api/install/test-redis`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, 'Redis 连接测试失败'));
+  return res.json();
+}
+
+export async function completeInstall(payload: InstallCompleteRequest): Promise<InstallCompleteResponse> {
+  const res = await fetch(`${BASE}/api/install/complete`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '系统安装失败'));
   return res.json();
 }
 

@@ -34,6 +34,7 @@ import {
 import { LoginPage } from './components/LoginPage';
 import { ForgotPasswordPage } from './components/ForgotPasswordPage';
 import { RegisterPage } from './components/RegisterPage';
+import { InstallWizardPage } from './components/InstallWizardPage';
 import { PricingPublicPage } from './components/PricingPublicPage';
 import { WorkspacePage } from './components/WorkspacePage';
 import { PaymentCheckoutDialog } from './components/PaymentCheckoutDialog';
@@ -66,6 +67,7 @@ import {
   syncMyOrder,
   updateStory,
   deleteStory,
+  getInstallStatus,
   type AdminOrderItem,
   type AuthUser,
   type BillingCheckout,
@@ -80,6 +82,7 @@ import {
 } from './api';
 
 type RouteKey =
+  | 'install'
   | 'landing'
   | 'login'
   | 'register'
@@ -175,6 +178,7 @@ function App() {
   const [activeCheckout, setActiveCheckout] = useState<(BillingCheckout & { orderNo: string }) | null>(null);
   const [announcement, setAnnouncement] = useState<PlatformAnnouncement | null>(null);
   const [announcementDismissed, setAnnouncementDismissed] = useState(false);
+  const [installRequired, setInstallRequired] = useState(false);
 
   const activeChapter = useMemo(
     () => chapters.find((chapter) => chapter.id === activeChapterId) ?? null,
@@ -183,9 +187,7 @@ function App() {
   const isWorkspaceRoute = route === 'workspace';
 
   useEffect(() => {
-    void bootstrapSession();
-    void refreshPlans();
-    void refreshPlatformSettings();
+    void bootstrapApp();
   }, []);
 
   useEffect(() => {
@@ -255,6 +257,29 @@ function App() {
     };
   }, [session, activeCheckout?.orderNo]);
 
+  async function bootstrapApp() {
+    try {
+      const status = await getInstallStatus();
+      if (!status.installed || status.requires_restart) {
+        clearAuthToken();
+        setSession(null);
+        setInstallRequired(true);
+        setRoute('install');
+        return;
+      }
+      setInstallRequired(false);
+      void refreshPlans();
+      void refreshPlatformSettings();
+      await bootstrapSession();
+    } catch {
+      clearAuthToken();
+      setSession(null);
+      setRoute('landing');
+    } finally {
+      setBootstrapping(false);
+    }
+  }
+
   async function bootstrapSession() {
     try {
       const user = await me();
@@ -265,8 +290,6 @@ function App() {
       clearAuthToken();
       setSession(null);
       setRoute('landing');
-    } finally {
-      setBootstrapping(false);
     }
   }
 
@@ -542,6 +565,20 @@ function App() {
     } finally {
       setActioningOrderNo(null);
     }
+  }
+
+  if (installRequired || route === 'install') {
+    return (
+      <>
+        <LoadingOverlay visible={bootstrapping} message="正在检查安装状态..." />
+        <InstallWizardPage
+          onInstalled={() => {
+            setBootstrapping(true);
+            void bootstrapApp();
+          }}
+        />
+      </>
+    );
   }
 
   if (!session && route === 'login') {
