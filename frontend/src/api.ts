@@ -631,6 +631,22 @@ export interface AdminRevenueSummary {
   monthly_new_users: number;
 }
 
+export interface AdminOrderSearchParams {
+  page?: number;
+  page_size?: number;
+  status?: string;
+  start_date?: string;
+  end_date?: string;
+}
+
+export interface AdminOrderSearchResult {
+  items: AdminOrderItem[];
+  total: number;
+  page: number;
+  page_size: number;
+  total_pages: number;
+}
+
 export interface AdminRevenueMonthlyItem {
   period: string;
   revenue: number;
@@ -1034,6 +1050,23 @@ export async function adminGrantUserQuota(userId: number, featureKey: string, am
 
 export async function getAdminOrders(): Promise<AdminOrderItem[]> {
   const res = await fetch(`${BASE}/api/admin/orders`, { headers: apiHeaders() });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function searchAdminOrders(
+  params: AdminOrderSearchParams
+): Promise<AdminOrderSearchResult> {
+  const search = new URLSearchParams();
+  if (params.page) search.set('page', String(params.page));
+  if (params.page_size) search.set('page_size', String(params.page_size));
+  if (params.status) search.set('status', params.status);
+  if (params.start_date) search.set('start_date', params.start_date);
+  if (params.end_date) search.set('end_date', params.end_date);
+  const qs = search.toString();
+  const res = await fetch(`${BASE}/api/admin/orders/search${qs ? '?' + qs : ''}`, {
+    headers: apiHeaders(),
+  });
   if (!res.ok) throw new Error(await res.text());
   return res.json();
 }

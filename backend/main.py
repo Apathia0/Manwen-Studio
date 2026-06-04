@@ -4544,6 +4544,52 @@ def admin_orders(request: Request, db: Session = Depends(get_db)):
     return [_serialize_order_with_db(order, db) for order in orders]
 
 
+@app.get("/api/admin/orders/search")
+def admin_orders_search(
+    request: Request,
+    page: int = 1,
+    page_size: int = 20,
+    status: str = "",
+    start_date: str = "",
+    end_date: str = "",
+    db: Session = Depends(get_db),
+):
+    _require_admin(request, db)
+    page = max(1, page)
+    page_size = max(1, min(100, page_size))
+
+    query = db.query(BillingOrder)
+    if status and status.strip():
+        query = query.filter(BillingOrder.status == status.strip())
+    if start_date:
+        try:
+            sd = datetime.datetime.strptime(start_date, "%Y-%m-%d")
+            query = query.filter(BillingOrder.created_at >= sd)
+        except ValueError:
+            pass
+    if end_date:
+        try:
+            ed = datetime.datetime.strptime(end_date, "%Y-%m-%d") + datetime.timedelta(days=1)
+            query = query.filter(BillingOrder.created_at < ed)
+        except ValueError:
+            pass
+
+    total = query.count()
+    total_pages = max(1, (total + page_size - 1) // page_size)
+    orders = query.order_by(BillingOrder.created_at.desc()).offset((page - 1) * page_size).limit(page_size).all()
+
+    for order in orders:
+        _sync_order_status(order, db)
+
+    return {
+        "items": [_serialize_order_with_db(order, db) for order in orders],
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "total_pages": total_pages,
+    }
+
+
 @app.post("/api/admin/orders/{order_no}/status")
 def admin_update_order_status(order_no: str, body: dict, request: Request, db: Session = Depends(get_db)):
     _ensure_platform_seed(db)
