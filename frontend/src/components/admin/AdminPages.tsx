@@ -56,7 +56,7 @@ function formatDateTime(value: string | null | undefined) {
   return date.toLocaleString('zh-CN');
 }
 
-function formatMoney(value: number | string | null | undefined): string {
+export function formatMoney(value: number | string | null | undefined): string {
   const amount = Number(value ?? 0);
   if (!Number.isFinite(amount)) return '-';
   return amount.toFixed(2).replace(/\.00$/, '').replace(/(\.\d)0$/, '$1');
@@ -1716,3 +1716,5 @@ export function AdminSystemPromptsPage({ onError }: { onError: (message: string)
     </div>
   );
 }
+
+export { AdminRevenueDashboardPage } from './RevenueDashboard';
