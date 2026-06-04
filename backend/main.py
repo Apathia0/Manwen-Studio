@@ -308,7 +308,8 @@ async def license_check_middleware(request: Request, call_next):
     if path.startswith(("/static/",)) or request.method == "OPTIONS":
         return await call_next(request)
 
-    hostname = request.url.hostname or ""
+    host_header = request.headers.get("host", "")
+    hostname = host_header.split(":")[0].strip().lower()
     if not hostname or license_checker.is_dev_domain(hostname):
         return await call_next(request)
 
