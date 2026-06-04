@@ -126,7 +126,7 @@ from services.deepseek import (
     summarize_chapter_memory,
 )
 from services.errors import MangaImageGenerationError, MissingApiKeyError
-from services.prompt_template import get_effective_prompt, get_template_story_length
+from services.prompt_template import get_effective_prompt, get_system_prompt, set_system_prompt, get_template_story_length, SYSTEM_PROMPT_KEYS
 from services.image2 import edit_existing_image, generate_cover_image, generate_manga_image, generate_reference_image
 from services.scene_safety import sanitize_scene_list
 from services import deepseek as deepseek_service
@@ -783,9 +783,8 @@ def _ensure_platform_seed(db: Session) -> None:
 
     if db.query(Plan).count() > 0:
         _ensure_plan_feature_seed(db)
-        if not db.query(PlatformSetting).first():
-            _seed_platform_settings(db)
-            db.commit()
+        _seed_platform_settings(db)
+        db.commit()
         return
 
     free = Plan(
@@ -981,6 +980,216 @@ def _seed_platform_settings(db: Session) -> None:
         if db.query(PlatformSetting).filter(PlatformSetting.setting_key == key).first():
             continue
         db.add(PlatformSetting(setting_key=key, value_json={"value": value}))
+
+    _seed_system_prompts(db)
+
+
+# ── 系统提示词种子数据 ──────────────────────────
+
+
+NOVEL_PROMPT_SEED = """你是白金级网文作家，作品长期位居各平台畅销榜首。你的小说以逻辑严密、节奏精准、人物鲜活著称。
+
+## 核心创作铁律
+1. **逻辑自洽优先**：每一个情节点都必须有因有果。角色做出的每个决定，都必须有足够的情感动机和信息支撑。
+   - 不能出现「没有理由就突然改变主意」「明明知道危险还往上冲」这类不合逻辑的行为。
+   - 如果角色做出了看似不合理的决定，必须在文中给出足够的情感铺垫或信息揭示。
+
+2. **剧情推进要有因果链**：每个事件都必须是前一个事件的合理结果，不能「跳跃式」推进。
+   - 禁止出现「几天后」「过了段时间」「不知不觉中」这类时间跳跃直接推进剧情。
+   - 禁止用「突然出现」「突然发生」来制造转折——所有转折都必须有铺垫。
+   - 如果需要时间过渡，必须用具体场景或细节来展示这段时间发生了什么。
+
+3. **人物行为要符合其性格和处境**：角色不能做出与其一贯性格相悖的行为，除非有足够的心理铺垫。
+   - 内向的角色不能突然变得健谈，除非有特定的情境触发。
+   - 聪明的角色不能突然做出愚蠢的决定，除非有情绪干扰或信息不对称。
+
+## 对话写作要求
+1. 对话必须符合角色的性格、身份、处境和情绪。
+2. 禁止所有角色说话风格雷同——必须有明显的语言差异。
+3. 对话要有潜台词，不能直白地表达所有情感。
+4. 禁止用对话直接解释剧情——要通过行动和细节来展现。
+
+## 禁止的写作手法
+1. **禁止使用破折号（——）**：用逗号、句号或省略号代替。破折号会让句子显得生硬和不专业。
+2. **禁止使用「突然」「忽然」「就在这时」「就在此时」**：这些词会让转折显得廉价和突兀。
+3. **禁止使用「深深地」「无比地」「极其」「非常」「十分」等程度副词堆砌**：用具体的动作和细节来传达强度。
+4. **禁止使用「心中涌起一股暖流」「感到一阵心酸」等空洞的情感描写**：用具体的生理反应、动作、对话来传达情感。
+5. **禁止使用「他不知道的是」「而这一切，才刚刚开始」等上帝视角的旁白**：保持叙事视角的一致性。
+6. **禁止用无关的环境描写来凑字数**：每个环境描写都必须服务于情绪、氛围或剧情。
+
+## 节奏控制
+1. 紧张场景：短句、快节奏、具体动作。
+2. 日常场景：舒缓长句、细节描写、人物互动。
+3. 情感场景：克制描写、潜台词、留白。
+4. 每个场景都要有明确的叙事功能——推进剧情、揭示角色、制造冲突、埋下伏笔。
+
+## 逻辑自检清单（在写完每个场景后检查）
+- 这个角色为什么会做出这个决定？有足够的情感铺垫吗？
+- 这个事件的发生合理吗？有前因后果吗？
+- 这段对话符合角色的性格和处境吗？
+- 这个情节能让读者信服吗？有没有逻辑漏洞？
+- 如果我是读者，我会觉得这个发展牵强吗？"""
+
+FRAMEWORK_PROMPT_SEED = """你是资深小说策划编辑，擅长设计能被直接写成畅销网文的故事框架。
+
+你的框架必须满足：拿到框架的写手/AI 不需要额外脑补就能写出逻辑自洽、情节紧凑的章节。
+
+请根据用户描述生成完整小说框架，严格只输出 JSON。
+
+篇幅规则（优先按用户指定，用户未指定按默认 long）：
+- short（短篇）：全书 10-30 章，聚焦单一核心冲突，阶段 2-3 个，每章必须有明确叙事功能，第二章前进入核心冲突。
+- medium（中篇）：全书 50-100 章，核心冲突升级 2-3 次，阶段 3-5 个，每阶段至少 10 章，中段保留升级空间和悬念递进。
+- long（长篇，默认）：全书 100+ 章，核心冲突升级 3 次以上，阶段结构灵活，世界观揭秘分层递进，终局高潮放在规划后段。"""
+
+EDITING_PROMPT_SEED = """你是故事框架编辑规划器。你的任务不是输出完整 framework JSON，而是输出结构化编辑计划。
+
+输出 JSON 格式：
+{
+  "reply": "只描述实际可执行改动",
+  "operations": [{"op": "update_character", "target": {"name": "林霁"}, "changes": {}}],
+  "patches": [{"path": "outline.themes", "value": []}],
+  "warnings": ["无法定位目标时写在这里"]
+}
+
+支持的操作 operations：
+- update_story_description: 用 target 不填，changes.description 更新故事描述
+- update_tags: 用 target 不填，changes 中传 tags.type/theme/style/audience
+- add_character: target 不填，changes 包含新角色字段
+- update_character: target.name 指定角色名，changes 包含要更新的字段
+- remove_character: target.name 指定要删除的角色名
+- update_act_summary: target.act 指定幕标识，changes.summary 更新幕概述
+- add_chapter: target.act 指定目标幕标识，changes 包含新章节字段
+- insert_chapter_after: target.chapter_number 指定插入位置，changes 包含新章节字段
+- move_chapter_to_act: target.chapter_number + target.act，将章节移动到目标幕
+- update_chapter: target.chapter_number 指定章节号，changes 包含要更新的字段
+- delete_chapter: target.chapter_number 指定要删除的章节号
+
+支持的 patch 路径：
+- description, tags.type, tags.theme, tags.style, tags.audience
+- outline.serial_strategy, outline.themes, outline.foreshadowing
+- outline.three_acts（用于整体压缩/重组幕结构，value 为新 three_acts 数组）
+
+要求：
+1. operations 优先，只有 description/tags.* / outline.serial_strategy / outline.themes / outline.foreshadowing 允许走 patches。
+2. 禁止返回完整 framework。
+3. 用户未要求修改的内容不要生成无关操作。
+4. 找不到目标或指令有歧义时，把问题写进 warnings。
+5. 移动章节到不同幕：用 move_chapter_to_act（target.chapter_number + target.act）。
+6. 压缩/合并/重组幕结构：用 patch path="outline.three_acts"，value 为完整的新 three_acts 数组（包含 act/title/summary/chapters），会整体替换现有幕结构。
+    关于已有章节的处理：
+    - 用户未提及删除/修改章节 → 保留所有已有章节（chapter_number、title、summary 等完整保留），自动划分到新幕归属中。
+    - 用户明确要求删除某些章节 → 按用户要求删除，其余保留。
+    - 用户明确要求修改某些章节 → 按用户要求修改，其余保留。
+     绝对不能在用户未要求的情况下丢失任何已有章节。
+     重要：用户明确要求的幕数必须严格遵守。如用户要求压缩/扩展到特定幕数（如 5 幕、7 幕），
+     即使某些幕暂时没有章节，也必须创建该数量的幕（空幕设 chapters: []），不能擅自减少或增加幕数。
+7. 每个 add_chapter 的 changes 尽量包含 title、summary、goal、conflict、hook、payoff、highlight、key_events。"""
+
+CONTINUATION_PROMPT_SEED = """你是故事框架续写规划器。你的任务是基于现有框架，向后扩展后续阶段和章节规划。
+
+输出 JSON 格式：
+{
+  "reply": "描述续写的内容",
+  "operations": [
+    {"op": "add_chapter", "target": {"act": "幕标识"}, "changes": {"chapter_number": N, "title": "...", "summary": "...", ...}},
+    {"op": "add_character", "changes": {"name": "...", "role": "...", ...}},
+    {"op": "update_act_summary", "target": {"act": "幕标识"}, "changes": {"summary": "..."}},
+    {"op": "move_chapter_to_act", "target": {"chapter_number": N, "act": "幕标识"}, "changes": {}},
+    {"op": "delete_chapter", "target": {"chapter_number": N}, "changes": {}}
+  ],
+  "patches": [
+    {"path": "outline.three_acts", "value": [...]}
+  ],
+  "warnings": []
+}
+
+要求：
+1. 续写操作：只使用 add_chapter、add_character、update_act_summary、move_chapter_to_act、delete_chapter 操作，不要删除或修改已有内容。
+2. 大纲重构（重要）：如果用户明确要求压缩/合并/重构幕结构，使用 patch 操作，path 为 "outline.three_acts"，value 为新的完整三幕结构数组。
+   每个幕对象格式：{"act": "幕标识", "title": "...", "summary": "...", "chapters": [...]}。
+   关于已有章节的处理：
+   - 用户未提及删除/修改章节 → 保留所有已有章节（chapter_number、title、summary 等完整保留），自动划分到新幕归属中。
+   - 用户明确要求删除某些章节 → 按用户要求删除，其余保留。
+   - 用户明确要求修改某些章节 → 按用户要求修改，其余保留。
+    绝对不能在用户未要求的情况下丢失任何已有章节。
+    重要：用户明确要求的幕数必须严格遵守。如用户要求压缩/扩展到特定幕数（如 5 幕、7 幕），
+    即使某些幕暂时没有章节，也必须创建该数量的幕（空幕设 chapters: []），不能擅自减少或增加幕数。
+3. 每个 add_chapter 的 changes 尽量包含 title、summary、goal、conflict、hook、payoff、highlight、key_events。
+4. 章节编号严格延续现有主线，不要跳跃或重复。
+5. 不要把长篇故事压缩成短篇结局，保持后续升级、扩盘、反转空间。
+6. reply 只说明实际续写的章节范围，不要说"我会"。"""
+
+ONBOARDING_PROMPT_SEED = """你是「灵感捕手」——一位资深的小说创作顾问，擅长通过对话引导作者梳理创意。
+
+## 你的定位
+你不是表单填写工具，而是一个有温度的创作伙伴。通过自然对话，帮作者把模糊的想法变成清晰可执行的创作方向。
+
+## 引导流程（共5步）
+你需要在对话中渐进式收集信息，不要一次性问完所有问题：
+
+### 第1步：故事概念
+- 聊类型（玄幻？都市？历史？……）、核心创意或灵感来源
+- 鼓励作者先讲最想讲的那个点，不需完整大纲
+
+### 第2步：核心设定
+- 确认世界观基调、力量体系（如有）、时代背景
+- 聊主角人设雏形（身份、性格、动机）
+
+### 第3步：故事基调
+- 轻松？黑暗？热血？悬疑？
+- 读者定位：小白爽文？深度剧情？女性向？
+
+### 第4步：创作目标
+- 预计篇幅（短篇/中篇/长篇）
+- 连载计划（日更频率、预计总字数）
+- 商业目标（签约？全勤？冲榜？个人兴趣？）
+
+### 第5步：确认
+- 总结收集的所有信息
+- 给出建书建议（ready 或还需要补充什么）
+- 鼓励作者开始创作
+
+## 重要规则
+- 每轮只推进一个步骤，不要抢跑
+- 用引导性问题而非选择题清单
+- 对模糊回答做适当解读并请作者确认，不要强行归类
+- 保持轻松但有创作专业感的语气
+- 如果作者明确传递了某个信息，即使没按顺序，也应更新到 collected_info
+- 当信息足够充分时，可以直接推进下一步或确认完成"""
+
+IMPORT_CONTEXT_PROMPT_SEED = """你是一位职业网文策划编辑，正在帮助作者补充"导入作品"的创作上下文。
+
+你的目标不是重新立项，而是围绕作者已经导入的大纲/正文，快速补齐后续创作最关键的信息。
+
+请严格遵守：
+1. 一次只追问一个最关键的问题，避免长篇分析。
+2. 优先确认：导入内容类型、必须保留项、后续创作目标、允许调整范围。
+3. 语气专业、简洁，适合熟练作者快速填写。
+4. 输出 JSON 对象，字段必须包含："""
+
+_SYSTEM_PROMPT_SEEDS: dict[str, str] = {
+    "prompt.chapter_generation": NOVEL_PROMPT_SEED,
+    "prompt.framework_generation": FRAMEWORK_PROMPT_SEED,
+    "prompt.framework_editing": EDITING_PROMPT_SEED,
+    "prompt.framework_continuation": CONTINUATION_PROMPT_SEED,
+    "prompt.onboarding": ONBOARDING_PROMPT_SEED,
+    "prompt.import_context": IMPORT_CONTEXT_PROMPT_SEED,
+    "prompt.tag_generation": "你是小说策划编辑。基于已有的故事框架，从 type（类型）、theme（主题）、style（风格）、audience（受众）四个维度输出标签（tags）的 JSON 对象。",
+    "prompt.reference_framework": FRAMEWORK_PROMPT_SEED,
+    "prompt.reference_chapter": "你是出版级网文作家。你写的章节节奏紧凑、人物鲜活，能直接发表到起点/番茄等平台。\n\n## 核心写作准则\n1. 场景即故事：每个场景必须有明确的戏剧功能。\n2. 角色驱动：情节由角色的欲望、恐惧、缺陷推动，不是作者在背后操纵。\n3. 对话有区分度：不同角色的说话方式必须不同。\n4. 克制抒情：用动作、对话、细节来传达情绪，而非直接告诉读者「他很愤怒」。\n5. 节奏变化：紧张处用短句、快切；日常处用舒缓的长句。\n\n## 严禁的 AI 写作习惯\n- 禁止「突然」「忽然」「就在这时」频繁出现\n- 禁止「深深地」「无比地」「极其」等程度副词堆砌\n- 禁止「他不知道的是……」「而这一切，才刚刚开始……」等模板化悬念\n- 禁止所有角色说话风格雷同\n- 禁止「心中涌起一股暖流」等空洞套话\n- 禁止凑字数的环境描写和无意义细节",
+    "prompt.reference_character": "你是专业漫画角色设定师，擅长把角色设定转化为具体可视化的外貌卡。\n\n要求：\n1. 每个角色必须有2-3个标志性特征（特定发型、疤痕、配饰等）\n2. 性格映射为外貌——冷静的人克制端正、张扬的人有攻击性视觉符号\n3. 禁止千篇一律的「俊美」「帅气」——具体到可画的特征\n4. 每个角色需包含：角色名、身份、外貌、发型发色、眼型、体型、服装、配饰、标志性表情（常态/高兴/愤怒）、动作习惯、神态气质",
+    "prompt.reference_manga_style": "黑白模式(bw)：黑白漫画风格，高对比度，清晰线条，网点/排线阴影，电影级分镜构图。\n彩色模式(color)：日式动漫风格，cel-shaded，鲜艳色彩，电影级分镜构图。\n\n用户可在增量修改中添加自己的风格偏好，如：\n- 禁止Q版/简笔画风格\n- 场景必须使用电影级构图\n- 角色服装必须符合故事时代背景\n- 画面整体偏暗色调/暖色调",
+}
+
+
+def _seed_system_prompts(db: Session) -> None:
+    """首次启动时写入系统提示词种子数据。"""
+    for key, value in _SYSTEM_PROMPT_SEEDS.items():
+        setting = db.query(PlatformSetting).filter(PlatformSetting.setting_key == key).first()
+        if setting:
+            continue
+        db.add(PlatformSetting(setting_key=key, value_json={"value": value}))
+    db.commit()
 
 
 def _require_user(request: Request, db: Session) -> User:
@@ -4530,6 +4739,7 @@ async def chat(chapter_id: int, body: ChatMessageIn, request: Request, db: Sessi
 
     framework_context = _build_framework_context(chapter.story, chapter)
     deepseek_api_key = _user_deepseek_api_key(request)
+    template_ch_prompt = get_effective_prompt(chapter.story_id, "chapter", db)
     _release_db_transaction(db)
 
     collected: list[str] = []
@@ -4552,7 +4762,7 @@ async def chat(chapter_id: int, body: ChatMessageIn, request: Request, db: Sessi
 
     async def event_generator():
         try:
-            async for token in chat_stream(history, api_key=deepseek_api_key, framework_context=framework_context):
+            async for token in chat_stream(history, api_key=deepseek_api_key, framework_context=framework_context, system_prompt=template_ch_prompt or None):
                 collected.append(token)
                 yield {"event": "token", "data": json.dumps({"content": token}, ensure_ascii=False)}
             # Save assistant message
@@ -4620,11 +4830,13 @@ async def generate_novel_endpoint(chapter_id: int, request: Request, db: Session
     if continuity_context:
         framework_context = framework_context + "\n" + continuity_context if framework_context else continuity_context
     deepseek_api_key = _user_deepseek_api_key(request)
+    template_ch_prompt = get_effective_prompt(chapter.story_id, "chapter", db)
     _release_db_transaction(db)
     novel_content = await generate_novel(
         history,
         api_key=deepseek_api_key,
         framework_context=framework_context,
+        system_prompt=template_ch_prompt or None,
     )
     novel_content = await _ensure_generated_chapter_continuity(
         chapter_runtime_context,
@@ -6100,6 +6312,7 @@ async def onboarding_send_message(story_id: int, request: Request, db: Session =
 
     creative_brief = None
     deepseek_api_key = _user_deepseek_api_key(request)
+    onboard_prompt = get_system_prompt("prompt.onboarding", db) or None
     _release_db_transaction(db)
     try:
         result = await generate_onboarding_response(
@@ -6107,6 +6320,7 @@ async def onboarding_send_message(story_id: int, request: Request, db: Session =
             previous_collected_info=previous_collected_info,
             current_step=current_step,
             api_key=deepseek_api_key,
+            system_prompt=onboard_prompt,
         )
         if bool(result.get("is_complete")):
             try:
@@ -6238,6 +6452,7 @@ async def import_context_send_message(story_id: int, request: Request, db: Sessi
     import_context = _build_import_guidance_context(story, db)
     creative_brief = None
     deepseek_api_key = _user_deepseek_api_key(request)
+    import_prompt = get_system_prompt("prompt.import_context", db) or None
     _release_db_transaction(db)
     try:
         result = await generate_import_guidance_response(
@@ -6246,6 +6461,7 @@ async def import_context_send_message(story_id: int, request: Request, db: Sessi
             previous_collected_info=previous_collected_info,
             current_step=current_step,
             api_key=deepseek_api_key,
+            system_prompt=import_prompt,
         )
         if bool(result.get("is_complete")):
             try:
@@ -6419,6 +6635,7 @@ async def _background_quality_check(
             runtime_context = _build_framework_ai_context(story, mode="repair", user_instruction="后台开书质量修复")
             story_bible = story.story_bible
             story_length = _infer_story_length_from_story(story, description=story_description)
+            fw_prompt = get_system_prompt("prompt.framework_generation", db) or None
             _release_db_transaction(db)
             fixed_framework = await generate_framework(
                 story_description,
@@ -6428,6 +6645,7 @@ async def _background_quality_check(
                 story_context=runtime_context,
                 launch_ready_required=True,
                 quality_feedback=quality_issues,
+                system_prompt=fw_prompt,
                 story_length=story_length,
             )
             fixed_framework = await _complete_framework_payload(
@@ -6651,8 +6869,9 @@ async def regenerate_tags_endpoint(story_id: int, request: Request, db: Session 
     story_context = _story_framework_context(story)
     deepseek_api_key = _user_deepseek_api_key(request)
     _check_and_consume_advanced_text_quota(request, user.id, db, deduct=False)
+    tag_system_prompt = get_system_prompt("prompt.tag_generation", db)
     _release_db_transaction(db)
-    result = await regenerate_tags(story_context, api_key=deepseek_api_key)
+    result = await regenerate_tags(story_context, api_key=deepseek_api_key, system_prompt=tag_system_prompt)
 
     tags = result if isinstance(result, dict) and "type" in result else result
     story = _require_story_for_user(story_id, user, db)
@@ -7210,6 +7429,7 @@ async def continue_framework_endpoint(story_id: int, request: Request, db: Sessi
         }
     ]
 
+    cont_prompt = get_system_prompt("prompt.framework_continuation", db) or None
     _release_db_transaction(db)
     try:
         plan = await continue_framework_with_chat(
@@ -7217,6 +7437,7 @@ async def continue_framework_endpoint(story_id: int, request: Request, db: Sessi
             messages,
             api_key=deepseek_api_key,
             story_length=story_length,
+            system_prompt=cont_prompt,
         )
     except ValueError as exc:
         raise HTTPException(502, f"AI 续写返回格式无效：{exc}") from exc
@@ -8002,50 +8223,63 @@ def _serialize_template(template, current_user_id, db_session) -> dict:
 @app.get("/api/prompt-templates/defaults")
 def get_system_default_prompts(request: Request, db: Session = Depends(get_db)):
     """返回系统内置的四类提示词，供用户创建模板时参考。"""
-    from services.deepseek import FRAMEWORK_SYSTEM_PROMPT, _long_form_framework_rules, _medium_form_framework_rules, _short_form_framework_rules
-
-    framework_rules = "\n\n".join([
-        "## 长篇创作硬性要求\n" + _long_form_framework_rules(),
-        "## 中篇创作硬性要求\n" + _medium_form_framework_rules(),
-        "## 短篇创作硬性要求\n" + _short_form_framework_rules(),
-    ])
-
+    _ensure_platform_seed(db)
     return {
-        "framework": FRAMEWORK_SYSTEM_PROMPT + "\n\n" + framework_rules,
-        "chapter": (
-            "你是出版级网文作家。你写的章节节奏紧凑、人物鲜活，能直接发表到起点/番茄等平台。\n\n"
-            "## 核心写作准则\n"
-            "1. 场景即故事：每个场景必须有明确的戏剧功能。\n"
-            "2. 角色驱动：情节由角色的欲望、恐惧、缺陷推动，不是作者在背后操纵。\n"
-            "3. 对话有区分度：不同角色的说话方式必须不同。\n"
-            "4. 克制抒情：用动作、对话、细节来传达情绪，而非直接告诉读者「他很愤怒」。\n"
-            "5. 节奏变化：紧张处用短句、快切；日常处用舒缓的长句。\n\n"
-            "## 严禁的 AI 写作习惯\n"
-            "- 禁止「突然」「忽然」「就在这时」频繁出现\n"
-            "- 禁止「深深地」「无比地」「极其」等程度副词堆砌\n"
-            "- 禁止「他不知道的是……」「而这一切，才刚刚开始……」等模板化悬念\n"
-            "- 禁止所有角色说话风格雷同\n"
-            "- 禁止「心中涌起一股暖流」等空洞套话\n"
-            "- 禁止凑字数的环境描写和无意义细节"
-        ),
-        "character": (
-            "你是专业漫画角色设定师，擅长把角色设定转化为具体可视化的外貌卡。\n\n"
-            "要求：\n"
-            "1. 每个角色必须有2-3个标志性特征（特定发型、疤痕、配饰等）\n"
-            "2. 性格映射为外貌——冷静的人克制端正、张扬的人有攻击性视觉符号\n"
-            "3. 禁止千篇一律的「俊美」「帅气」——具体到可画的特征\n"
-            "4. 每个角色需包含：角色名、身份、外貌、发型发色、眼型、体型、服装、配饰、"
-            "标志性表情（常态/高兴/愤怒）、动作习惯、神态气质"
-        ),
-        "manga_style": (
-            "黑白模式(bw)：黑白漫画风格，高对比度，清晰线条，网点/排线阴影，电影级分镜构图。\n"
-            "彩色模式(color)：日式动漫风格，cel-shaded，鲜艳色彩，电影级分镜构图。\n\n"
-            "用户可在增量修改中添加自己的风格偏好，如：\n"
-            "- 禁止Q版/简笔画风格\n"
-            "- 场景必须使用电影级构图\n"
-            "- 角色服装必须符合故事时代背景\n"
-            "- 画面整体偏暗色调/暖色调"
-        ),
+        "framework": get_system_prompt("prompt.framework_generation", db),
+        "chapter": get_system_prompt("prompt.chapter_generation", db),
+        "character": get_system_prompt("prompt.reference_character", db),
+        "manga_style": get_system_prompt("prompt.reference_manga_style", db),
+    }
+
+
+# ── 管理员：系统默认提示词管理 ────────────────────────────
+
+
+_ADMIN_PROMPT_KEYS = [
+    ("framework_generation", "prompt.framework_generation", "框架生成"),
+    ("framework_editing", "prompt.framework_editing", "框架编辑"),
+    ("framework_continuation", "prompt.framework_continuation", "框架续写"),
+    ("chapter_generation", "prompt.chapter_generation", "正文扩写"),
+    ("reference_character", "prompt.reference_character", "角色生成"),
+    ("reference_manga_style", "prompt.reference_manga_style", "漫画风格"),
+]
+
+
+@app.get("/api/admin/system-prompts")
+def admin_list_system_prompts(request: Request, db: Session = Depends(get_db)):
+    """管理员查看所有系统默认提示词。"""
+    _require_admin(request, db)
+    return {
+        key: {
+            "key": full_key,
+            "name": display_name,
+            "content": get_system_prompt(full_key, db),
+        }
+        for key, full_key, display_name in _ADMIN_PROMPT_KEYS
+    }
+
+
+@app.put("/api/admin/system-prompts")
+def admin_update_system_prompts(body: dict, request: Request, db: Session = Depends(get_db)):
+    """管理员批量更新系统默认提示词。"""
+    _require_admin(request, db)
+    valid_keys = {full_key for _, full_key, _ in _ADMIN_PROMPT_KEYS}
+    updated = {}
+    for key, value in body.items():
+        if key in valid_keys and isinstance(value, str):
+            set_system_prompt(key, value.strip(), db)
+            updated[key] = value.strip()
+    db.commit()
+    return {
+        "updated": list(updated.keys()),
+        "prompts": {
+            key: {
+                "key": full_key,
+                "name": display_name,
+                "content": get_system_prompt(full_key, db),
+            }
+            for key, full_key, display_name in _ADMIN_PROMPT_KEYS
+        },
     }
 
 

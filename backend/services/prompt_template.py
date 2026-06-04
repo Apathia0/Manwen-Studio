@@ -1,4 +1,4 @@
-"""提示词模板服务：参数→prompt 转换、模板应用逻辑"""
+"""提示词模板服务：参数→prompt 转换、模板应用逻辑、系统默认提示词"""
 
 from typing import Any
 
@@ -210,10 +210,19 @@ def get_template_story_length(story_id: int, db) -> str | None:
     return None
 
 
+# prompt_type → system prompt key 映射
+_PROMPT_TYPE_TO_SYSTEM_KEY = {
+    "framework": "prompt.framework_generation",
+    "chapter": "prompt.chapter_generation",
+    "character": "prompt.reference_character",
+    "manga_style": "prompt.reference_manga_style",
+}
+
+
 def get_effective_prompt(story_id: int, prompt_type: str, db) -> str:
     """获取作品实际使用的 prompt。
 
-    优先级：模板完整 prompt > 模板参数生成 > 系统默认
+    优先级：模板完整 prompt > 模板参数生成 > 系统默认（数据库）
 
     Args:
         story_id: 作品 ID
@@ -230,20 +239,88 @@ def get_effective_prompt(story_id: int, prompt_type: str, db) -> str:
     if binding and binding.template:
         template = binding.template
 
-        # 优先使用完整 prompt
+        # 优先使用模板完整 prompt
         full_prompt = getattr(template, f"{prompt_type}_prompt", None)
         if full_prompt and full_prompt.strip():
             return full_prompt
 
-        # 从参数生成
+        # 从参数生成，以系统默认 prompt 为基底
+        system_default = _get_db_default(prompt_type, db)
         params = getattr(template, f"{prompt_type}_params", None)
         if params and isinstance(params, dict):
-            return build_prompt_from_params(_get_default_prompt(prompt_type), params, prompt_type)
+            return build_prompt_from_params(system_default, params, prompt_type)
 
-    # 回退到系统默认
-    return _get_default_prompt(prompt_type)
+    # 回退到系统默认（数据库）
+    return _get_db_default(prompt_type, db)
 
 
-def _get_default_prompt(prompt_type: str) -> str:
-    """返回空字符串，由调用方使用各自硬编码的默认 prompt 作为 fallback。"""
+def _get_db_default(prompt_type: str, db) -> str:
+    """根据 prompt_type 从数据库读取系统默认提示词。"""
+    setting_key = _PROMPT_TYPE_TO_SYSTEM_KEY.get(prompt_type, f"prompt.{prompt_type}")
+    return get_system_prompt(setting_key, db)
+
+
+# ── 系统默认提示词（数据库存储） ──────────────────────────
+
+# PlatformSetting key 前缀
+_SYSTEM_PROMPT_KEY_PREFIX = "prompt."
+
+# 运行时系统提示词的 key 列表
+SYSTEM_PROMPT_KEYS = {
+    "chapter_generation": "prompt.chapter_generation",
+    "framework_generation": "prompt.framework_generation",
+    "framework_editing": "prompt.framework_editing",
+    "framework_continuation": "prompt.framework_continuation",
+    "onboarding": "prompt.onboarding",
+    "import_context": "prompt.import_context",
+    "build_import_brief": "prompt.build_import_brief",
+    "build_brief": "prompt.build_brief",
+    "build_story_bible": "prompt.build_story_bible",
+    "tag_generation": "prompt.tag_generation",
+    # 参考提示词（用户创建模板时看到的内置参考）
+    "reference_framework": "prompt.reference_framework",
+    "reference_chapter": "prompt.reference_chapter",
+    "reference_character": "prompt.reference_character",
+    "reference_manga_style": "prompt.reference_manga_style",
+}
+
+
+def get_system_prompt(key: str, db) -> str:
+    """从数据库读取系统默认提示词。
+
+    Args:
+        key: SYSTEM_PROMPT_KEYS 中的键或完整 setting_key。
+        db: SQLAlchemy 数据库会话。
+
+    Returns:
+        提示词文本，不存在时返回空字符串。
+    """
+    from models import PlatformSetting
+
+    setting_key = SYSTEM_PROMPT_KEYS.get(key, key)
+    setting = db.query(PlatformSetting).filter(
+        PlatformSetting.setting_key == setting_key
+    ).first()
+    if setting and setting.value_json:
+        return str(setting.value_json.get("value") or "")
     return ""
+
+
+def set_system_prompt(key: str, value: str, db) -> None:
+    """写入系统默认提示词到数据库。
+
+    Args:
+        key: SYSTEM_PROMPT_KEYS 中的键或完整 setting_key。
+        value: 提示词正文。
+        db: SQLAlchemy 数据库会话。
+    """
+    from models import PlatformSetting
+
+    setting_key = SYSTEM_PROMPT_KEYS.get(key, key)
+    setting = db.query(PlatformSetting).filter(
+        PlatformSetting.setting_key == setting_key
+    ).first()
+    if setting:
+        setting.value_json = {"value": value}
+    else:
+        db.add(PlatformSetting(setting_key=setting_key, value_json={"value": value}))

@@ -1,6 +1,6 @@
 <template>
   <view :class="avatarClasses">
-    <image v-if="src" :src="src" class="lv-avatar__image" mode="aspectFill" />
+    <image v-if="src" :src="src" class="lv-avatar__image" mode="aspectFill" lazy-load />
     <text v-else class="lv-avatar__text">{{ initials }}</text>
   </view>
 </template>

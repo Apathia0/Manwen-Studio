@@ -16,6 +16,7 @@ import {
   getAdminPlans,
   getAdminPlatformSettings,
   getAdminQuotaRules,
+  getAdminSystemPrompts,
   getAdminUserEntitlements,
   getAdminUserStories,
   getAdminUsers,
@@ -25,6 +26,7 @@ import {
   updateAdminOrderStatus,
   updateAdminPlan,
   updateAdminPlatformSettings,
+  updateAdminSystemPrompts,
   updateAdminUser,
   type AdminAuditLogItem,
   type AdminFeatureCatalogItem,
@@ -34,6 +36,7 @@ import {
   type AdminQuotaRule,
   type AdminReviewChapter,
   type AdminReviewStory,
+  type AdminSystemPrompt,
   type AdminUserItem,
   type PlatformAnnouncement,
   type PlatformSettings,
@@ -1647,6 +1650,67 @@ export function AdminAuditLogsPage({ onError }: { onError: (message: string) => 
               ) : null}
             </tbody>
           </table>
+        </div>
+      </SectionCard>
+    </div>
+  );
+}
+
+export function AdminSystemPromptsPage({ onError }: { onError: (message: string) => void }) {
+  const [prompts, setPrompts] = useState<AdminSystemPrompt[]>([]);
+  const [editMap, setEditMap] = useState<Record<string, string>>({});
+  const [saving, setSaving] = useState<Record<string, boolean>>({});
+  const { busy, run } = useBusyAction(onError);
+
+  useEffect(() => {
+    void run(async () => {
+      const data = await getAdminSystemPrompts();
+      setPrompts(Object.values(data));
+    });
+  }, []);
+
+  async function handleSave(fullKey: string) {
+    setSaving((prev) => ({ ...prev, [fullKey]: true }));
+    try {
+      await updateAdminSystemPrompts({ [fullKey]: editMap[fullKey] ?? '' });
+      setPrompts((prev) => prev.map((p) => (p.key === fullKey ? { ...p, content: editMap[fullKey] ?? '' } : p)));
+    } catch (err: any) {
+      onError(err?.message || '保存失败');
+    } finally {
+      setSaving((prev) => ({ ...prev, [fullKey]: false }));
+    }
+  }
+
+  return (
+    <div className="space-y-5">
+      <SectionCard title="系统默认提示词" description="管理全局生效的系统提示词模板。所有用户未自定义时的默认值，修改后即时生效。">
+        <div className="space-y-6">
+          {prompts.map((prompt) => {
+            const fullKey = prompt.key;
+            const value = editMap[fullKey] ?? prompt.content ?? '';
+            return (
+              <div key={fullKey}>
+                <div className="mb-2 flex items-center justify-between">
+                  <label className="text-sm font-medium text-slate-800">{prompt.name}</label>
+                  <span className="text-xs text-slate-400">{fullKey}</span>
+                </div>
+                <TextArea
+                  rows={6}
+                  value={value}
+                  onChange={(e) => setEditMap((prev) => ({ ...prev, [fullKey]: e.target.value }))}
+                  placeholder="暂无提示词内容..."
+                />
+                <div className="mt-2 flex justify-end">
+                  <PrimaryButton
+                    disabled={busy || saving[fullKey] || value === (prompts.find((p) => p.key === fullKey)?.content ?? '')}
+                    onClick={() => void handleSave(fullKey)}
+                  >
+                    {saving[fullKey] ? '保存中…' : '保存'}
+                  </PrimaryButton>
+                </div>
+              </div>
+            );
+          })}
         </div>
       </SectionCard>
     </div>

@@ -6,6 +6,7 @@
         :src="coverUrl"
         class="story-card__cover-image"
         mode="aspectFill"
+        lazy-load
       />
       <view v-else class="story-card__cover-placeholder">
         <BookOpen :size="32" />

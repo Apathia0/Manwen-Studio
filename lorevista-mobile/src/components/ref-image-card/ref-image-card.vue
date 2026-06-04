@@ -4,6 +4,7 @@
       :src="imageUrl"
       class="ref-image-card__image"
       mode="aspectFill"
+      lazy-load
     />
     <view class="ref-image-card__actions">
       <view class="ref-image-card__btn" @tap.stop="handleRedraw">

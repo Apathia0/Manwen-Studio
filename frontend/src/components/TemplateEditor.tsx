@@ -103,26 +103,28 @@ export default function TemplateEditor({ template, onSave, onCancel }: Props) {
       };
 
       if (expertMode) {
-        // 专家模式：直接保存完整 prompt
+        // 专家模式：直接保存完整 prompt（替换系统默认）
         payload.framework_prompt = fwPrompt.trim() || null;
         payload.chapter_prompt = chPrompt.trim() || null;
         payload.character_prompt = charPrompt.trim() || null;
         payload.manga_style_prompt = msPrompt.trim() || null;
+        // 清空 params（防止增量模式下遗留的数据干扰）
+        payload.framework_params = null;
+        payload.chapter_params = null;
+        payload.character_params = null;
+        payload.manga_style_params = null;
       } else {
-        // 简单模式：保存增量规则
-        // 如果有增量规则，拼接「系统 prompt + 规则」作为实际使用的完整 prompt
-        if (fwRules.trim()) {
-          payload.framework_prompt = currentSysDefault + '\n\n## 用户自定义要求\n' + fwRules.trim();
-        }
-        if (chRules.trim()) {
-          payload.chapter_prompt = (sysDefaults?.chapter || '') + '\n\n## 用户自定义要求\n' + chRules.trim();
-        }
-        if (charRules.trim()) {
-          payload.character_prompt = (sysDefaults?.character || '') + '\n\n## 用户自定义要求\n' + charRules.trim();
-        }
-        if (msRules.trim()) {
-          payload.manga_style_prompt = (sysDefaults?.manga_style || '') + '\n\n## 用户自定义要求\n' + msRules.trim();
-        }
+        // 简单/增量模式：保存自定义规则为 params
+        // 运行时后端自动从数据库读取最新的系统默认 prompt，再拼接用户规则
+        payload.framework_params = fwRules.trim() ? { custom_rules: fwRules.trim() } : null;
+        payload.chapter_params = chRules.trim() ? { custom_style_notes: chRules.trim() } : null;
+        payload.character_params = charRules.trim() ? { custom_requirements: charRules.trim() } : null;
+        payload.manga_style_params = msRules.trim() ? { custom_style_prompt: msRules.trim() } : null;
+        // 清除框架 prompt（确保走 params 路径）
+        payload.framework_prompt = null;
+        payload.chapter_prompt = null;
+        payload.character_prompt = null;
+        payload.manga_style_prompt = null;
       }
 
       if (isNew) {

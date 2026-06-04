@@ -3323,3 +3323,36 @@ export async function rejectTemplate(id: number, note: string): Promise<PromptTe
   if (!res.ok) throw new Error(await readErrorMessage(res, '拒绝操作失败'));
   return res.json();
 }
+
+// ── Admin: 系统默认提示词管理 ─────────────────────────────
+
+export interface AdminSystemPrompt {
+  key: string;
+  name: string;
+  content: string;
+}
+
+export interface AdminSystemPromptsResponse {
+  [shortKey: string]: AdminSystemPrompt;
+}
+
+export interface AdminUpdateSystemPromptsResponse {
+  updated: string[];
+  prompts: AdminSystemPromptsResponse;
+}
+
+export async function getAdminSystemPrompts(): Promise<AdminSystemPromptsResponse> {
+  const res = await fetch(`${BASE}/api/admin/system-prompts`, { headers: apiHeaders() });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '获取系统提示词失败'));
+  return res.json();
+}
+
+export async function updateAdminSystemPrompts(payload: Record<string, string>): Promise<AdminUpdateSystemPromptsResponse> {
+  const res = await fetch(`${BASE}/api/admin/system-prompts`, {
+    method: 'PUT',
+    headers: apiHeaders(true),
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '保存系统提示词失败'));
+  return res.json();
+}

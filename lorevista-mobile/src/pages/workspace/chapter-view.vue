@@ -26,8 +26,8 @@
           <view class="chapter-view__tab">
             <!-- 模板绑定 -->
             <template-binding
-              v-if="storiesStore.activeStoryId"
-              :story-id="storiesStore.activeStoryId"
+              v-if="storyStore.activeStoryId"
+              :story-id="storyStore.activeStoryId"
               @bound="onTemplateBound"
             />
 
@@ -503,8 +503,8 @@ function onTemplateBound() {
 
 function handleEditBible() {
   // 跳转到引导页面编辑创意简报
-  if (storiesStore.activeStoryId) {
-    uni.navigateTo({ url: `/pages/story/onboarding?storyId=${storiesStore.activeStoryId}` })
+  if (storyStore.activeStoryId) {
+    uni.navigateTo({ url: `/pages/story/onboarding?storyId=${storyStore.activeStoryId}` })
   }
 }
 

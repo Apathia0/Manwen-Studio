@@ -163,7 +163,7 @@ function handleClear() {
   background: linear-gradient(180deg, $lv-bg-start 0%, $lv-bg-end 100%);
 
   &__content {
-    padding: calc(var(--status-bar-height) + 88rpx) $lv-page-padding $lv-page-padding;
+    padding: $lv-page-padding;
   }
 
   &__info {

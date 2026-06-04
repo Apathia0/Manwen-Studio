@@ -20,6 +20,7 @@
                 :src="coverUrl"
                 class="workspace-page__cover-image"
                 mode="aspectFill"
+                lazy-load
               />
               <view v-else class="workspace-page__cover-placeholder">
                 <BookOpen :size="32" color="#94a3b8" />

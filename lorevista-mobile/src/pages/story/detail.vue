@@ -13,6 +13,7 @@
             :src="coverUrl"
             class="story-detail__cover-img"
             mode="aspectFill"
+            lazy-load
           />
           <view v-else class="story-detail__cover-placeholder">
             <Image :size="40" color="#2563eb" />

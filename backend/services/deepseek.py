@@ -23,53 +23,7 @@ def configure_runtime(base_url: str | None = None, model: str | None = None) -> 
     if isinstance(model, str) and model.strip():
         DEEPSEEK_MODEL = model.strip()
 
-NOVEL_SYSTEM_PROMPT = """你是一位白金级网络小说家，作品长期位居各平台畅销榜首。你的小说以逻辑严密、节奏精准、人物鲜活著称。
-
-当用户要求你创作小说时，请遵循以下要求：
-
-## ★★★ 字数要求（最高优先级）★★★
-- 每一话控制在 2000 字左右（1700-2500 字范围）。这是硬性要求，不可商量。
-- 低于 1500 字则内容过于单薄，必须回去补充描写；超过 3000 字则过于冗长，需要精简。
-- 2000 字左右要写出完整且有感染力的章节，不能因为字数少就敷衍了事。
-
-## 结构指导
-一话内容通常包含 2-3 个场景，每个场景 600-1000 字。场景分配建议：
-- 开篇场景（400-600 字）：快速切入情境，可以是一段精彩对话、一个悬念画面或一个动作场景，让读者立即沉浸。
-- 推进场景（600-1000 字）：情节发展的核心。展开人物互动、冲突升级或关键信息揭示。此处需要细致描写，包括人物的微表情、语气变化、肢体动作、环境氛围的渲染。
-- 收束场景（400-600 字）：本章的落点，可以是情绪沉淀、悬念埋设或小幅高潮。不要强行断章，要给读者一个自然的停顿点。
-
-## 写作风格
-- 描写要细腻有穿透力。不追求字多，追求精准。一个恰到好处的比喻胜过三行平淡的叙述。
-- 关键情感节点和重要情节转折处放慢节奏，深化描写和心理刻画；过渡性内容则一笔带过即可。
-- 人物对话要自然生动，有潜台词，2-4 个来回即可，重在说出人物的性格和当下情绪。
-- 避免流水账，避免空洞的形容词堆砌。每一个细节都应该服务于"塑造人物"或"推进剧情"这两个核心目标。
-- 句式和段落长度要有变化，短句制造紧张感，长句用于氛围渲染和情绪铺陈。
-
-## 核心约束：逻辑自洽（最高优先级）
-- 每一个情节转折都必须有因有果，不能跳跃式推进
-- 角色做出的每个决定，都必须有足够的情感动机和信息支撑
-- 禁止用「几天后」「过了一段时间」等时间跳跃来跳过关键剧情发展
-- 禁止用「突然」「忽然」廉价地制造转折——所有转折都必须有铺垫
-- 如果角色做出看似不合理的决定，必须在文中给出足够的情感铺垫或信息揭示
-
-## 核心约束：章节间连续性（最高优先级）
-- 本章开头必须自然衔接上一章结尾处的情境，不能出现剧情跳跃或角色状态无故重置
-- 必须严格参考"故事框架约束"中的"作品连续性记忆"，尤其是 recent_chapter_summaries 中的事件进展
-- 已解决的事件仅做必要引用，不可重复描述；未回收的伏笔应在本章适当推进
-- 角色状态（性格、关系、能力、情感）必须与连续性记忆保持一致
-- 不可在无铺垫的情况下让角色忘记前文发生的关键事件
-- 只能参考已实际发生的剧情事实，不得编造或虚构未发生的前情事件
-
-## 禁止的写作手法
-- 禁止使用破折号（——），用逗号、句号或省略号代替
-- 禁止使用「突然」「忽然」「就在这时」超过 2 次
-- 禁止使用「深深地」「无比地」「极其」等副词堆砌
-- 禁止结尾写「他不知道的是……」「这一切才刚刚开始……」等模板化悬念
-- 禁止所有角色说话风格雷同
-- 禁止用「心中涌起一股暖流」等空洞套话描写情感
-- 禁止写无关的环境描写凑字数
-
-请直接输出小说正文，不要加额外说明或字数统计。"""
+# NOVEL_SYSTEM_PROMPT 已移至 main.py _seed_system_prompts
 
 
 def _deepseek_auth_headers(api_key: str | None = None) -> dict[str, str]:
@@ -263,34 +217,69 @@ def _extract_scenes_payload(raw: str) -> list[str]:
 def _scene_split_prompt(page_count: int = 10) -> str:
     return f"""你是一位专业漫画分镜师。请将小说内容拆分为恰好{page_count}页漫画。
 
-## ★★★ 最重要的规则 ★★★
-- 输出JSON数组，恰好{page_count}个元素，每个元素代表一"页"（不是一"格"）
-- 每一页必须包含 **4-6 个分镜格**（最少4格，推荐5格），用【第1格】【第2格】【第3格】【第4格】…标记
-- 绝对禁止一页只有3个或更少的画面！信息量不足！
+## ★★★ 最高原则：叙事完整性优先 ★★★
+你的首要任务是**完整覆盖原文所有关键事件**，不能遗漏任何重要情节。
+分镜的目的是让读者通过漫画获得与原文等价的故事体验，而非展示画技。
 
-## 每页必须包含的内容
-- 至少4个【第N格（宽格/窄格/大宽格）】，每格描述：构图+人物+动作+表情
-- 多条对话气泡：「角色的台词」（推荐2-4条/页）
-- 音效字：唰—、铿！、嗡——、咔嚓、轰隆、噗通（动作或情绪转折场景必须有）
-- 节奏变化：远景→中景→特写交替，避免每格景别相同
+## 两阶段工作流程（必须严格执行）
 
-## 格式示例（必须严格遵守此格式，至少4格。注意：示例中的角色名仅作格式参考，你必须使用小说中实际出现的角色名和剧情）
-"第1页：【第1格（大宽格）】远景，某场景的环境全貌，光影氛围。音效：环境音。【第2格（窄格）】特写，角色A的表情和动作细节。对话气泡：「角色A的台词。」【第3格（窄格）】特写，角色B的反应。对话气泡：「角色B的台词。」【第4格（中景）】两人互动的中景画面，肢体语言和情绪表达。音效：动作音效。【第5格（大宽格）】场景转换或高潮画面，动态构图。对话气泡：「关键台词。」音效：氛围音效。"
+### 第一步：提取关键事件（内心完成，不输出）
+在脑中列出原文的每一个关键事件，包括：
+- 推动剧情的动作和决定
+- 重要对话和信息揭示
+- 冲突升级和转折点
+- 角色的关键反应和情绪变化
+按时间顺序排列，标注每个事件的重要程度（核心/重要/辅助）。
+
+### 第二步：分配到 {page_count} 页
+- 将第一步的事件**均匀分配**到 {page_count} 页中
+- **核心事件**必须占据更多格数（2-3格），**辅助事件**可以压缩（1格）
+- 每页的主题应明确，不能把不相关的事件混在一页
+- 宁可每页信息密度高，也不能用氛围格凑数导致事件遗漏
+
+## 分镜格类型与优先级
+
+每页 4-5 格，按以下优先级分配格数：
+
+| 格类型 | 作用 | 优先级 | 每页上限 |
+|--------|------|--------|----------|
+| 对话格 | 推进剧情、揭示信息 | ★★★ 最高 | 2-3格 |
+| 动作格 | 关键动作、事件、冲突 | ★★★ 最高 | 2-3格 |
+| 反应格 | 角色情绪反应、心理变化 | ★★ 中等 | 1格 |
+| 氛围格 | 环境、气氛、过渡 | ★ 最低 | 每页最多1格 |
+
+**严禁用多个格子展示同一瞬间的不同角度**——这是最常见的叙事浪费。
+
+## 每页格式要求
+- 4-5 个分镜格，用【第1格】【第2格】…标记
+- 每格描述：构图类型（大宽格/中景/窄格/特写）+ 画面内容
+- 对话气泡：用「」标记，每页 2-4 条
+- 音效字：仅在动作/情绪转折场景使用，不要每格都加
+- 景别交替：远景→中景→特写，避免连续 3 格相同景别
+
+## 格式示例
+"第1页：【第1格（大宽格）】场景环境全貌。【第2格（中景）】角色A和B面对面对话。对话气泡：「A的台词。」【第3格（窄格）】角色B的反应和动作。对话气泡：「B的回应。」【第4格（大宽格）】关键事件发生的动态画面。音效：动作音效。"
 
 风格：日式黑白漫画，高对比度，戏剧性光影，精细线条和网点。
 
+## 禁止事项
+1. 禁止用氛围格/特写格凑数——每格都必须有叙事功能
+2. 禁止用多个格子展示同一瞬间的不同角度
+3. 禁止遗漏原文中的核心事件和关键对话
+4. 禁止在每格都加音效字——只在关键动作/转折处使用
+
 请输出JSON数组，不要输出其他任何内容：
 [
-  "第1页：【第1格...】...【第2格...】...【第3格...】...【第4格...】...（可选第5格）",
+  "第1页：【第1格...】...【第2格...】...【第3格...】...【第4格...】...",
   "第2页：【第1格...】...【第2格...】...【第3格...】...【第4格...】...",
   ...
   "第{page_count}页：【第1格...】...【第2格...】...【第3格...】...【第4格...】..."
 ]"""
 
 
-async def chat_stream(messages: list[dict], api_key: str | None = None, framework_context: str = "") -> AsyncGenerator[str, None]:
+async def chat_stream(messages: list[dict], api_key: str | None = None, framework_context: str = "", system_prompt: str | None = None) -> AsyncGenerator[str, None]:
     """Stream chat response from DeepSeek."""
-    system_content = NOVEL_SYSTEM_PROMPT
+    system_content = system_prompt or ""
     if framework_context:
         system_content += "\n\n## 故事框架约束\n" + framework_context
     payload = {
@@ -324,9 +313,9 @@ async def chat_stream(messages: list[dict], api_key: str | None = None, framewor
                     continue
 
 
-async def generate_novel(messages: list[dict], api_key: str | None = None, framework_context: str = "") -> str:
+async def generate_novel(messages: list[dict], api_key: str | None = None, framework_context: str = "", system_prompt: str | None = None) -> str:
     """Generate a full novel chapter (non-streaming)."""
-    system_content = NOVEL_SYSTEM_PROMPT
+    system_content = system_prompt or ""
     if framework_context:
         system_content += "\n\n## 故事框架约束\n" + framework_context
     full_messages = [{"role": "system", "content": system_content}] + messages
@@ -358,6 +347,17 @@ async def split_scenes(chat_messages: list[dict], character_profiles: str = "", 
     scene_prompt = _scene_split_prompt(page_count)
     if character_profiles:
         scene_prompt += f"\n\n以下是角色外貌设定，分镜描述中必须严格匹配这些外貌特征：\n{character_profiles}"
+
+    # 计算上下文总长度，如果过长则在提示词前加入聚焦指令
+    total_content_len = sum(len(str(m.get("content") or "")) for m in chat_messages)
+    if total_content_len > 3000:
+        scene_prompt = (
+            "【重要提示】原文内容较长，你必须先通读全文，提取所有关键事件（剧情转折、重要对话、冲突、揭示），"
+            f"然后将这些事件均匀分配到 {page_count} 页中。"
+            "宁可每页信息密度高，也绝不能遗漏任何核心事件。\n\n"
+            + scene_prompt
+        )
+
     async def _request_scene_split(extra_instruction: str = "") -> str:
         prompt = scene_prompt
         if extra_instruction:
@@ -371,10 +371,12 @@ async def split_scenes(chat_messages: list[dict], character_profiles: str = "", 
                 {
                     "role": "system",
                     "content": (
-                        f"你是漫画分镜专家。只输出一个有效JSON对象，格式必须是 "
-                        f'{{"scenes": ["...", "..."]}}。scenes 必须恰好有 {page_count} 个字符串元素。'
-                        "每个元素代表一整页漫画，且每页包含4-6个分镜格。"
-                        "不要输出 Markdown、解释、前后缀或任何非 JSON 文本。"
+                        f"你是漫画分镜专家，首要任务是确保叙事完整性——覆盖原文所有关键事件。"
+                        f'只输出一个有效JSON对象，格式必须是 {{"scenes": ["...", "..."]}}。'
+                        f"scenes 必须恰好有 {page_count} 个字符串元素。"
+                        f"每个元素代表一整页漫画，每页包含4-5个分镜格。"
+                        f"严禁遗漏核心事件，严禁用氛围格凑数。"
+                        f"不要输出 Markdown、解释、前后缀或任何非 JSON 文本。"
                     ),
                 },
             ] + messages,
@@ -396,7 +398,8 @@ async def split_scenes(chat_messages: list[dict], character_profiles: str = "", 
     last_error: Exception | None = None
     retry_instructions = (
         "",
-        f"重试：严格返回 {{\"scenes\": [...]}}，其中 scenes 必须恰好包含 {page_count} 页，且不要包含任何额外文字。",
+        f"重试：严格返回 {{\"scenes\": [...]}}，其中 scenes 必须恰好包含 {page_count} 页。"
+        f"再次强调：必须覆盖原文所有关键事件，不能遗漏任何核心情节。每个格子必须有叙事功能，不能用氛围格凑数。",
     )
 
     for idx, extra_instruction in enumerate(retry_instructions):
@@ -996,8 +999,12 @@ def _build_story_snapshot_tiered(story_context: dict, tier: str = "auto") -> str
     return "\n\n".join(parts)
 
 
-async def regenerate_tags(story_context: dict, api_key: str | None = None) -> dict:
-    """Regenerate only the tags based on existing story context."""
+async def regenerate_tags(story_context: dict, api_key: str | None = None, system_prompt: str | None = None) -> dict:
+    """Regenerate only the tags based on existing story context.
+
+    Args:
+        system_prompt: Custom system prompt (from DB). Empty string falls back to basic instruction.
+    """
     snapshot = _build_story_snapshot(story_context)
     user_prompt = f"""以下是故事当前的全部框架信息。请基于这些信息，重新生成标签（tags）。
 
@@ -1005,10 +1012,12 @@ async def regenerate_tags(story_context: dict, api_key: str | None = None) -> di
 
 请严格输出只包含 tags 的JSON对象，格式：{{"tags": {{"type": "...", "theme": "...", "style": "...", "audience": "..."}}}}"""
 
+    system_content = system_prompt or "你是小说策划编辑。基于已有的故事框架，输出仅包含 tags 的JSON对象。"
+
     payload = {
         "model": DEEPSEEK_MODEL,
         "messages": [
-            {"role": "system", "content": "你是小说策划编辑。基于已有的故事框架，输出仅包含 tags 的JSON对象。"},
+            {"role": "system", "content": system_content},
             {"role": "user", "content": user_prompt},
         ],
         "stream": False,
@@ -1128,10 +1137,7 @@ async def generate_character_profiles_from_framework(story_context: dict, api_ke
 漫画绘制注意点：面部务必保持杏仁眼和锋锐眉形，短靴不可省略，深蓝色外套为标志性服装
 """
 
-    char_system_prompt = system_prompt or (
-        "你是专业漫画角色设定师，擅长把小说角色设定转成稳定、具体、可复用的角色外貌卡。"
-        "你输出的内容会直接作为分镜和生图提示词的一部分，所以必须高度具体、统一、可视化。"
-    )
+    char_system_prompt = system_prompt or ""
     payload = {
         "model": DEEPSEEK_MODEL,
         "messages": [
@@ -1235,51 +1241,11 @@ async def generate_character_profiles_from_content(chapter_content: str, api_key
         return str(data["choices"][0]["message"]["content"] or "").strip()
 
 
-FRAMEWORK_SYSTEM_PROMPT = """你是资深小说策划编辑，擅长设计能被直接写成畅销网文的故事框架。
-
-你的框架必须满足：拿到框架的写手/AI 不需要额外脑补就能写出逻辑自洽、情节紧凑的章节。
-
-请根据用户描述生成完整小说框架，严格只输出 JSON。
-
-## 输出结构
-1. tags: {type, theme, style, audience} -- 明确故事定位
-2. characters: 3-6 个核心角色，每个含 name, role, big_five, arc, relationships
-3. outline: {three_acts, themes, foreshadowing} -- 故事蓝图
-4. chapters: 章节规划数组，每章含 chapter_number, title, act, key_events, goal, conflict, hook, payoff, highlight
-
-## 角色创作要求
-- 每个角色必须有内在矛盾（想要的 vs 需要的）
-- 反派必须有合理的动机和世界观，不能是纯粹的恶
-- 角色关系必须是动态的，不能全程不变
-
-## 剧情规划要求
-- 主线必须有贯穿始终的核心冲突
-- 每阶段必须有独立的阶段目标和阶段冲突
-- 章节规划必须体现因果链：前一章的结果导致下一章的困境
-- 伏笔必须具体（在哪章埋下、在哪章回收）
-
-## 章节钩子结构（每章尽量包含以下字段，支撑后续扩写）
-- goal: 本章要达成的叙事目标
-- conflict: 本章核心冲突（至少一个）
-- hook: 开篇钩子——本章前500字内必须有吸引读者的悬念
-- payoff: 本章回收的伏笔或前情（没有则为空）
-- highlight: 本章最精彩的场景/对话/反转
-
-其中：
-- outline.three_acts 是分阶段大纲数组，不限制必须三幕
-- 阶段数量根据题材自由决定，通常 2 个及以上
-- 每个阶段包含 act, title, summary, key_events，尽量附带 chapters
-
-## 篇幅适配（请根据 story_length 指令选择对应要求）
-- short（短篇）：全书 10-30 章，聚焦单一核心冲突，阶段 2-3 个，每章必须有明确叙事功能，第二章前进入核心冲突。
-- medium（中篇）：全书 50-100 章，核心冲突升级 2-3 次，阶段 3-5 个，每阶段至少 10 章，中段保留升级空间和悬念递进。
-- long（长篇，默认）：全书 100+ 章，核心冲突升级 3 次以上，阶段结构灵活，世界观揭秘分层递进，终局高潮放在规划后段。
-"""
+# FRAMEWORK_SYSTEM_PROMPT 种子数据已移至 main.py _seed_system_prompts
 
 
 def _long_form_framework_rules() -> str:
     return """
-## 长篇创作硬性要求
 1. 大纲必须覆盖完整主线：从开头到终局，不能只规划前几十章。
 2. 默认按长篇节奏规划（100章+），除非用户明确要求短篇。
 3. 核心冲突至少升级三次，每次升级改变角色处境和故事格局。
@@ -1296,7 +1262,6 @@ def _long_form_framework_rules() -> str:
 
 def _medium_form_framework_rules() -> str:
     return """
-## 中篇创作硬性要求
 1. 大纲覆盖完整主线，规划 50-100 章，不要在前 30 章内收束主线。
 2. 核心冲突升级 2-3 次，每次升级改变角色处境和故事格局。
 3. 阶段结构 3-5 个，每个阶段至少包含 10 个以上章节。
@@ -1312,7 +1277,6 @@ def _medium_form_framework_rules() -> str:
 
 def _short_form_framework_rules() -> str:
     return """
-## 短篇创作硬性要求
 1. 全书控制在 10-30 章以内，节奏紧凑，不要拖沓。
 2. 聚焦单一核心冲突，不要引入过多支线和副线。
 3. 阶段结构 2-3 个即可：建立冲突 → 升级/反转 → 高潮/解决。
@@ -1538,7 +1502,7 @@ async def generate_framework(
 
     payload = {
         "model": DEEPSEEK_MODEL,
-        "messages": _framework_messages_with_long_form(system_prompt or FRAMEWORK_SYSTEM_PROMPT, user_prompt, effective_length),
+        "messages": _framework_messages_with_long_form(system_prompt or "", user_prompt, effective_length),
         "stream": False,
         "max_tokens": 16384,
         "response_format": {"type": "json_object"},
@@ -1676,50 +1640,6 @@ async def adjust_framework_with_chat(
         else ""
     )
 
-    default_system_prompt = """你是故事框架编辑规划器。你的任务不是输出完整 framework JSON，而是输出结构化编辑计划。
-
-输出 JSON 格式：
-{
-  "reply": "只描述实际可执行改动",
-  "operations": [{"op": "update_character", "target": {"name": "林霁"}, "changes": {}}],
-  "patches": [{"path": "outline.themes", "value": []}],
-  "warnings": ["无法定位目标时写在这里"]
-}
-
-支持的操作 operations：
-- update_story_description: 用 target 不填，changes.description 更新故事描述
-- update_tags: 用 target 不填，changes 中传 tags.type/theme/style/audience
-- add_character: target 不填，changes 包含新角色字段
-- update_character: target.name 指定角色名，changes 包含要更新的字段
-- remove_character: target.name 指定要删除的角色名
-- update_act_summary: target.act 指定幕标识，changes.summary 更新幕概述
-- add_chapter: target.act 指定目标幕标识，changes 包含新章节字段
-- insert_chapter_after: target.chapter_number 指定插入位置，changes 包含新章节字段
-- move_chapter_to_act: target.chapter_number + target.act，将章节移动到目标幕
-- update_chapter: target.chapter_number 指定章节号，changes 包含要更新的字段
-- delete_chapter: target.chapter_number 指定要删除的章节号
-
-支持的 patch 路径：
-- description, tags.type, tags.theme, tags.style, tags.audience
-- outline.serial_strategy, outline.themes, outline.foreshadowing
-- outline.three_acts（用于整体压缩/重组幕结构，value 为新 three_acts 数组）
-
-要求：
-1. operations 优先，只有 description/tags.* / outline.serial_strategy / outline.themes / outline.foreshadowing 允许走 patches。
-2. 禁止返回完整 framework。
-3. 用户未要求修改的内容不要生成无关操作。
-4. 找不到目标或指令有歧义时，把问题写进 warnings。
-5. 移动章节到不同幕：用 move_chapter_to_act（target.chapter_number + target.act）。
-6. 压缩/合并/重组幕结构：用 patch path="outline.three_acts"，value 为完整的新 three_acts 数组（包含 act/title/summary/chapters），会整体替换现有幕结构。
-   关于已有章节的处理：
-   - 用户未提及删除/修改章节 → 保留所有已有章节（chapter_number、title、summary 等完整保留），自动划分到新幕归属中。
-   - 用户明确要求删除某些章节 → 按用户要求删除，其余保留。
-   - 用户明确要求修改某些章节 → 按用户要求修改，其余保留。
-    绝对不能在用户未要求的情况下丢失任何已有章节。
-    重要：用户明确要求的幕数必须严格遵守。如用户要求压缩/扩展到特定幕数（如 5 幕、7 幕），
-    即使某些幕暂时没有章节，也必须创建该数量的幕（空幕设 chapters: []），不能擅自减少或增加幕数。
-7. 每个 add_chapter 的 changes 尽量包含 title、summary、goal、conflict、hook、payoff、highlight、key_events。"""
-
     user_prompt = f"""请根据下面的对话，对现有小说框架输出结构化编辑计划。
 
 故事创意：{description}
@@ -1738,7 +1658,7 @@ async def adjust_framework_with_chat(
     for attempt in range(MAX_RETRIES + 1):
         payload = {
             "model": DEEPSEEK_MODEL,
-            "messages": _framework_messages_with_long_form(system_prompt or default_system_prompt, user_prompt, effective_length) + safe_messages,
+            "messages": _framework_messages_with_long_form(system_prompt or "", user_prompt, effective_length) + safe_messages,
             "stream": False,
             "max_tokens": 65536,
             "response_format": {"type": "json_object"},
@@ -1799,6 +1719,7 @@ async def continue_framework_with_chat(
     messages: list[dict],
     api_key: str | None = None,
     story_length: str | None = None,
+    system_prompt: str | None = None,
 ) -> dict:
     """根据对话上下文续写框架，返回结构化编辑计划。"""
     effective_length = story_length or _infer_story_length(story_context)
@@ -1813,39 +1734,7 @@ async def continue_framework_with_chat(
         if isinstance(item, dict) and str(item.get("content") or "").strip()
     ]
 
-    system_prompt = """你是故事框架续写规划器。你的任务是基于现有框架，向后扩展后续阶段和章节规划。
-
-输出 JSON 格式：
-{
-  "reply": "描述续写的内容",
-  "operations": [
-    {"op": "add_chapter", "target": {"act": "幕标识"}, "changes": {"chapter_number": N, "title": "...", "summary": "...", ...}},
-    {"op": "add_character", "changes": {"name": "...", "role": "...", ...}},
-    {"op": "update_act_summary", "target": {"act": "幕标识"}, "changes": {"summary": "..."}},
-    {"op": "move_chapter_to_act", "target": {"chapter_number": N, "act": "幕标识"}, "changes": {}},
-    {"op": "delete_chapter", "target": {"chapter_number": N}, "changes": {}}
-  ],
-  "patches": [
-    {"path": "outline.three_acts", "value": [...]}
-  ],
-  "warnings": []
-}
-
-要求：
-1. 续写操作：只使用 add_chapter、add_character、update_act_summary、move_chapter_to_act、delete_chapter 操作，不要删除或修改已有内容。
-2. 大纲重构（重要）：如果用户明确要求压缩/合并/重构幕结构，使用 patch 操作，path 为 "outline.three_acts"，value 为新的完整三幕结构数组。
-   每个幕对象格式：{"act": "幕标识", "title": "...", "summary": "...", "chapters": [...]}。
-   关于已有章节的处理：
-   - 用户未提及删除/修改章节 → 保留所有已有章节（chapter_number、title、summary 等完整保留），自动划分到新幕归属中。
-   - 用户明确要求删除某些章节 → 按用户要求删除，其余保留。
-   - 用户明确要求修改某些章节 → 按用户要求修改，其余保留。
-    绝对不能在用户未要求的情况下丢失任何已有章节。
-    重要：用户明确要求的幕数必须严格遵守。如用户要求压缩/扩展到特定幕数（如 5 幕、7 幕），
-    即使某些幕暂时没有章节，也必须创建该数量的幕（空幕设 chapters: []），不能擅自减少或增加幕数。
-3. 每个 add_chapter 的 changes 尽量包含 title、summary、goal、conflict、hook、payoff、highlight、key_events。
-4. 章节编号严格延续现有主线，不要跳跃或重复。
-5. 不要把长篇故事压缩成短篇结局，保持后续升级、扩盘、反转空间。
-6. reply 只说明实际续写的章节范围，不要说"我会"。"""
+    system_prompt = system_prompt or ""
 
     user_prompt = f"""请在以下现有故事框架的基础上继续续写后续发展。
 
@@ -1859,7 +1748,7 @@ async def continue_framework_with_chat(
     for attempt in range(MAX_RETRIES + 1):
         payload = {
             "model": DEEPSEEK_MODEL,
-            "messages": _framework_messages_with_long_form(system_prompt or default_system_prompt, user_prompt, effective_length) + safe_messages,
+            "messages": _framework_messages_with_long_form(system_prompt or "", user_prompt, effective_length) + safe_messages,
             "stream": False,
             "max_tokens": 65536,
             "response_format": {"type": "json_object"},
@@ -2099,10 +1988,11 @@ async def expand_chapter_to_content(story_context: dict, chapter_info: dict, api
         "- 这个情节能让读者信服吗？有没有逻辑漏洞？\n"
         "- 如果我是读者，我会觉得这个发展牵强吗？\n"
     )
+    effective_system = system_prompt if system_prompt else chapter_system_prompt
     payload = {
         "model": DEEPSEEK_MODEL,
         "messages": [
-            {"role": "system", "content": chapter_system_prompt},
+            {"role": "system", "content": effective_system},
             {"role": "user", "content": user_prompt},
         ],
         "stream": False,
@@ -2496,71 +2386,7 @@ async def scenes_from_selection(selected_text: str, character_profiles: str = ""
 
 # ─── Onboarding / Story Bible ───────────────────────────────
 
-ONBOARDING_SYSTEM_PROMPT = """你是「灵感捕手」——一位资深的小说创作顾问，擅长通过对话引导作者梳理创意。
-
-## 你的定位
-你不是表单填写工具，而是一个有温度的创作伙伴。通过自然对话，帮作者把模糊的想法变成清晰可执行的创作方向。
-
-## 引导流程（共5步）
-你需要在对话中渐进式收集信息，不要一次性问完所有问题：
-
-### 第1步：故事概念
-用温暖、开放的方式邀请作者描述ta想写的故事。比如：
-- "说说你想写一个怎样的故事？"
-- "主角是什么样的人？"
-- "大概会发生什么？"
-
-### 第2步：题材与读者方向
-在作者描述后，判断适合的题材方向并让作者确认：
-- 判断方向：男频 / 女频 / 轻小说 / 悬疑 / 群像 / 其他
-- 语气应是："听起来你的故事更偏向XXX风格，是这样吗？"
-
-### 第3步：核心卖点
-帮作者提炼最吸引人的亮点：
-- 是主角设定特别？
-- 世界观机制有趣？
-- 爽点机制独特？
-- 还是谜题设计精妙？
-
-### 第4步：目标体量
-了解作者想写多长：
-- 短篇（10-30章）
-- 中篇（50-100章）
-- 长篇（200-300章）
-- 超长篇（500章起）
-
-### 第5步：必须保留的设定
-了解哪些设定是作者绝不希望被改掉的：
-- 后期真相
-- 关键角色关系
-- 特殊世界规则
-- 结局方向
-
-## 对话原则
-1. 每次只推进1个步骤，不要跳步
-2. 用自然语言提问，不要列出结构化表单
-3. 在用户回答后，先肯定/理解，再自然过渡到下一个问题
-4. 当用户给出足够信息时，可以简要总结ta说的内容再问下一个
-5. 保持亲切、鼓励的语气，尊重作者的每一个创意
-6. 在每步结束时，把收集到的信息更新到 collected_info 中
-
-## 输出格式
-你必须始终输出JSON格式的回复：
-{
-  "reply": "你给用户的自然语言回复",
-  "collected_info": {
-    "story_concept": "已收集的故事概念",
-    "genre_audience": "已确定的题材方向",
-    "core_hook": "已提炼的核心卖点",
-    "target_length": "已确定的目标体量",
-    "must_keep": "已记录的必保留设定"
-  },
-  "step": 当前步骤编号(1-5),
-  "total_steps": 5,
-  "is_complete": false
-}
-
-当5步全部完成时，设置 is_complete: true，并在 reply 中总结所有收集到的信息，邀请用户进入确认环节。"""
+# ONBOARDING_SYSTEM_PROMPT 种子数据已移至 main.py _seed_system_prompts
 
 
 async def generate_onboarding_response(
@@ -2569,6 +2395,7 @@ async def generate_onboarding_response(
     current_step: int | None = None,
     api_key: str | None = None,
     max_retries: int = 2,
+    system_prompt: str | None = None,
 ) -> dict:
     """生成引导建书对话中 AI 的下一轮回复，含自动重试韧性"""
     last_error: Exception | None = None
@@ -2587,7 +2414,7 @@ async def generate_onboarding_response(
             payload = {
                 "model": DEEPSEEK_MODEL,
                 "messages": [
-                    {"role": "system", "content": ONBOARDING_SYSTEM_PROMPT + onboarding_state_hint},
+                    {"role": "system", "content": (system_prompt or "") + onboarding_state_hint},
                     *messages,
                 ],
                 "stream": False,
@@ -2654,36 +2481,7 @@ def _infer_import_context_next_step(collected_info: dict[str, Any]) -> int:
     return 4
 
 
-IMPORT_CONTEXT_SYSTEM_PROMPT = """你是一位职业网文策划编辑，正在帮助作者补充"导入作品"的创作上下文。
-
-你的目标不是重新立项，而是围绕作者已经导入的大纲/正文，快速补齐后续创作最关键的信息。
-
-请严格遵守：
-1. 一次只追问一个最关键的问题，避免长篇分析。
-2. 优先确认：导入内容类型、必须保留项、后续创作目标、允许调整范围。
-3. 语气专业、简洁，适合熟练作者快速填写。
-4. 输出 JSON 对象，字段必须包含：
-{
-  "reply": "给作者的简短回复",
-  "collected_info": {
-    "import_material_type": "",
-    "must_keep": "",
-    "author_goal": "",
-    "adjustment_scope": "",
-    "longline_plan": "",
-    "tone_guardrails": ""
-  },
-  "step": 1,
-  "total_steps": 4,
-  "is_complete": false
-}
-5. 如果作者只是在确认、补充或修正，保留已经收集到的有效信息，不要被"是/对/可以"覆盖掉。
-6. 当以下四项都已经明确时，可视为完成：
-   - import_material_type
-   - must_keep
-   - author_goal
-   - adjustment_scope
-7. longline_plan 和 tone_guardrails 有则记录，没有也可以完成。"""
+# IMPORT_CONTEXT_SYSTEM_PROMPT 种子数据已移至 main.py _seed_system_prompts
 
 
 async def generate_import_guidance_response(
@@ -2693,6 +2491,7 @@ async def generate_import_guidance_response(
     current_step: int | None = None,
     api_key: str | None = None,
     max_retries: int = 2,
+    system_prompt: str | None = None,
 ) -> dict[str, Any]:
     last_error: Exception | None = None
     current_snapshot = json.dumps(previous_collected_info or {}, ensure_ascii=False)
@@ -2712,7 +2511,7 @@ async def generate_import_guidance_response(
             payload = {
                 "model": DEEPSEEK_MODEL,
                 "messages": [
-                    {"role": "system", "content": IMPORT_CONTEXT_SYSTEM_PROMPT + runtime_hint},
+                    {"role": "system", "content": (system_prompt or "") + runtime_hint},
                     *messages,
                 ],
                 "stream": False,
