@@ -11,7 +11,6 @@ import {
   getAdminAnnouncement,
   getAdminAuditLogs,
   getAdminFeatureCatalog,
-  getAdminOrders,
   getAdminPlanFeatures,
   getAdminPlans,
   getAdminPlatformSettings,
@@ -23,7 +22,6 @@ import {
   saveAdminPlanFeatures,
   saveAdminQuotaRules,
   updateAdminAnnouncement,
-  updateAdminOrderStatus,
   updateAdminPlan,
   updateAdminPlatformSettings,
   updateAdminSystemPrompts,
@@ -31,7 +29,6 @@ import {
   type AdminAuditLogItem,
   type AdminFeatureCatalogItem,
   type AdminFeatureItem,
-  type AdminOrderItem,
   type AdminPlan,
   type AdminQuotaRule,
   type AdminReviewChapter,
@@ -62,7 +59,7 @@ export function formatMoney(value: number | string | null | undefined): string {
   return amount.toFixed(2).replace(/\.00$/, '').replace(/(\.\d)0$/, '$1');
 }
 
-function orderStatusLabel(status: string) {
+export function orderStatusLabel(status: string) {
   if (status === 'pending') return '待支付';
   if (status === 'paid') return '已支付';
   if (status === 'cancelled') return '已取消';
@@ -1433,113 +1430,6 @@ export function AdminPlatformSettingsPage({
         </PrimaryButton>
       </div>
     </div>
-  );
-}
-
-export function AdminOrdersPage({ onError }: { onError: (message: string) => void }) {
-  const [orders, setOrders] = useState<AdminOrderItem[]>([]);
-  const [actingOrderNo, setActingOrderNo] = useState<string | null>(null);
-  const { busy, run } = useBusyAction(onError);
-
-  async function loadOrders() {
-    setOrders(await getAdminOrders());
-  }
-
-  useEffect(() => {
-    void run(async () => {
-      await loadOrders();
-    });
-  }, []);
-
-  async function handleOrderStatus(orderNo: string, status: 'paid' | 'cancelled' | 'expired') {
-    setActingOrderNo(orderNo);
-    try {
-      await updateAdminOrderStatus(orderNo, status);
-      await loadOrders();
-      toast.success('订单状态已更新');
-    } catch (error: any) {
-      onError(error?.message || '订单状态更新失败');
-    } finally {
-      setActingOrderNo(null);
-    }
-  }
-
-  return (
-    <SectionCard title="订单中心" description="查看最近订单、套餐订阅变化与人工调整记录。">
-      <div className="mb-3 flex justify-end">
-        <SecondaryButton disabled={busy} onClick={() => void run(loadOrders)}>
-          刷新订单
-        </SecondaryButton>
-      </div>
-      <div className="overflow-hidden rounded-2xl border border-[#e5edf8]">
-        <table className="w-full text-left text-sm">
-          <thead className="bg-[#f8fbff] text-slate-500">
-            <tr>
-              <th className="px-3 py-3 font-medium">订单号</th>
-              <th className="px-3 py-3 font-medium">用户</th>
-              <th className="px-3 py-3 font-medium">金额</th>
-              <th className="px-3 py-3 font-medium">状态</th>
-              <th className="px-3 py-3 font-medium">来源</th>
-              <th className="px-3 py-3 font-medium">创建时间</th>
-              <th className="px-3 py-3 font-medium">操作</th>
-            </tr>
-          </thead>
-          <tbody>
-            {orders.map((order) => (
-              <tr key={order.order_no} className="border-t border-[#e5edf8]">
-                <td className="px-3 py-3 font-medium text-slate-900">{order.order_no}</td>
-                <td className="px-3 py-3">
-                  <div>#{order.user_id}</div>
-                  <div className="text-xs text-slate-500">{order.user_name || '-'}</div>
-                </td>
-                <td className="px-3 py-3">{order.currency} {formatMoney(order.amount)}</td>
-                <td className="px-3 py-3">
-                  <div>{orderStatusLabel(order.status)}</div>
-                  <div className="text-xs text-slate-500">{order.payment_method || '-'}</div>
-                </td>
-                <td className="px-3 py-3">{order.source || '-'}</td>
-                <td className="px-3 py-3">
-                  <div>{formatDateTime(order.created_at)}</div>
-                  <div className="text-xs text-slate-500">失效：{formatDateTime(order.expired_at)}</div>
-                </td>
-                <td className="px-3 py-3">
-                  <div className="flex flex-wrap gap-2">
-                    <SecondaryButton
-                      disabled={actingOrderNo === order.order_no || order.status === 'paid'}
-                      className="px-3 py-1.5 text-xs"
-                      onClick={() => void handleOrderStatus(order.order_no, 'paid')}
-                    >
-                      标记已支付
-                    </SecondaryButton>
-                    <SecondaryButton
-                      disabled={actingOrderNo === order.order_no || order.status === 'cancelled'}
-                      className="px-3 py-1.5 text-xs"
-                      onClick={() => void handleOrderStatus(order.order_no, 'cancelled')}
-                    >
-                      取消
-                    </SecondaryButton>
-                    <SecondaryButton
-                      disabled={actingOrderNo === order.order_no || order.status === 'expired'}
-                      className="px-3 py-1.5 text-xs"
-                      onClick={() => void handleOrderStatus(order.order_no, 'expired')}
-                    >
-                      过期
-                    </SecondaryButton>
-                  </div>
-                </td>
-              </tr>
-            ))}
-            {orders.length === 0 ? (
-              <tr>
-                <td colSpan={7} className="px-3 py-8 text-center text-sm text-slate-500">
-                  暂无订单数据
-                </td>
-              </tr>
-            ) : null}
-          </tbody>
-        </table>
-      </div>
-    </SectionCard>
   );
 }
 

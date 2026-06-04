@@ -192,7 +192,6 @@ export function AdminRevenueDashboardPage({ onError }: { onError: (message: stri
 
   function applyFilters(overrides: Partial<AdminOrderSearchParams & { _datePreset?: string }>) {
     const newStatus = overrides.status !== undefined ? overrides.status : searchFilters.status;
-    const newDatePreset = overrides._datePreset !== undefined ? overrides._datePreset : datePreset;
     if (overrides._datePreset !== undefined) setDatePreset(overrides._datePreset);
     const newPage = (overrides.status !== undefined || overrides._datePreset !== undefined) ? 1 : (overrides.page ?? searchFilters.page);
     setSearchFilters(prev => ({ ...prev, status: newStatus, page: newPage }));

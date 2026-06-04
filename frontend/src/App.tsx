@@ -8,7 +8,6 @@ import {
   Library,
   LogOut,
   MessageSquareQuote,
-  ScrollText,
   Settings2,
   ShieldCheck,
   UserCircle2,
@@ -26,7 +25,6 @@ import AdminTemplateReview from './components/AdminTemplateReview';
 import {
   AdminAnnouncementPage,
   AdminAuditLogsPage,
-  AdminOrdersPage,
   AdminPlanManagementPage,
   AdminPlatformSettingsPage,
   AdminRevenueDashboardPage,
@@ -126,7 +124,6 @@ const ADMIN_NAV: NavItem[] = [
   { key: 'quota-rules', label: '配额规则', icon: Gauge },
   { key: 'entitlements', label: '用户权益', icon: ShieldCheck },
   { key: 'revenue', label: '收入看板', icon: BarChart3 },
-  { key: 'orders', label: '订单订阅', icon: ScrollText },
   { key: 'audit-logs', label: '操作审计', icon: MessageSquareQuote },
   { key: 'announcement', label: '公告管理', icon: MessageSquareQuote },
   { key: 'template-review', label: '模板审核', icon: Library },
@@ -136,12 +133,11 @@ const ADMIN_NAV: NavItem[] = [
 ADMIN_NAV[0].label = '套餐管理';
 ADMIN_NAV[1].label = '平台配置';
 ADMIN_NAV[2].label = '用户管理';
-ADMIN_NAV[3].label = '收入看板';
-ADMIN_NAV[4].label = '订单中心';
-ADMIN_NAV[5].label = '操作审计';
-ADMIN_NAV[6].label = '公告管理';
-ADMIN_NAV[7].label = '模板审核';
-ADMIN_NAV[8].label = '系统提示词';
+ADMIN_NAV[3].label = '收入与订单';
+ADMIN_NAV[4].label = '操作审计';
+ADMIN_NAV[5].label = '公告管理';
+ADMIN_NAV[6].label = '模板审核';
+ADMIN_NAV[7].label = '系统提示词';
 
 function App() {
   const [session, setSession] = useState<AuthUser | null>(null);
@@ -780,7 +776,6 @@ function App() {
             <AdminUserManagementPage onError={(message) => toast.error(message)} />
           )}
           {route === 'revenue' && session.role === 'admin' && <AdminRevenueDashboardPage onError={(message) => toast.error(message)} />}
-          {route === 'orders' && session.role === 'admin' && <AdminOrdersPage onError={(message) => toast.error(message)} />}
           {route === 'audit-logs' && session.role === 'admin' && (
             <AdminAuditLogsPage onError={(message: string) => toast.error(message)} />
           )}
