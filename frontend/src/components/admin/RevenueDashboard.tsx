@@ -100,24 +100,35 @@ function MetricCard({
 }
 
 function BarChart({ data }: { data: { label: string; value: number }[] }) {
+  const [hovered, setHovered] = useState<number | null>(null);
   const n = data.length;
-  const gap = 4;
-  const barMaxW = 32;
-  const totalBarW = Math.min(barMaxW, (100 - gap * (n - 1)) / n);
-  const barW = totalBarW;
+  const gap = n > 8 ? 3 : 6;
+  const barPct = n > 1 ? Math.min(80, (100 - gap * (n - 1)) / n) : 100;
   const max = Math.max(...data.map((d) => d.value), 1);
 
   return (
-    <div className="flex items-end justify-center gap-[4px]" style={{ height: 160 }}>
-      {data.map((item) => {
+    <div className="flex items-end justify-center" style={{ height: 160, gap: `${gap}px` }}>
+      {data.map((item, i) => {
         const h = max > 0 ? (item.value / max) * 140 : 0;
         return (
-          <div key={item.label} className="flex flex-col items-center gap-1" style={{ width: `${barW}%`, minWidth: 8, maxWidth: barMaxW }}>
+          <div
+            key={item.label}
+            className="relative flex flex-col items-center gap-1"
+            style={{ width: `${barPct}%`, minWidth: 6, maxWidth: n > 8 ? 40 : 64 }}
+            onMouseEnter={() => setHovered(i)}
+            onMouseLeave={() => setHovered(null)}
+          >
+            {hovered === i ? (
+              <div className="absolute bottom-full z-10 mb-1.5 whitespace-nowrap rounded-lg bg-slate-800 px-2.5 py-1.5 text-center text-xs text-white shadow-lg">
+                <div className="font-semibold text-blue-300">¥{formatMoney(item.value)}</div>
+                <div className="text-white/70">{item.label}</div>
+              </div>
+            ) : null}
             <div
-              className="w-full rounded-t-md transition-all duration-500"
+              className="w-full rounded-t-md transition-all duration-300"
               style={{
                 height: Math.max(h, 2),
-                backgroundColor: '#3b82f6',
+                backgroundColor: hovered === i ? '#2563eb' : '#3b82f6',
               }}
             />
             <span className="text-[10px] text-slate-500">{item.label}</span>
