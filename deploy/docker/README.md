@@ -14,6 +14,7 @@ fallback for emergency manual operations.
 - `deploy/docker/update-lorevista.sh`: host-level manual updater with locking,
   migrations, health checks, and rollback.
 - `deploy/docker/RELEASE_AND_UPDATE.md`: Docker 发布、首次安装与用户侧更新操作说明。
+- `deploy/docker/FAQ.md`: Docker 首次安装和更新常见故障处理。
 - `deploy/docker/systemd/*`: optional service/timer for unattended update checks.
 
 ## Server Setup

@@ -8,6 +8,8 @@
 
 核心原则：生产服务器不保存源码、Git 凭据、CI token 或构建缓存。生产服务器只运行 Docker Compose、私有镜像、运行时配置和内部 updater 服务。
 
+安装或更新过程中遇到异常时，先查看同目录的 `FAQ.md`，其中包含安装后仍显示未安装、PostgreSQL 密码不一致、容器内 `.env` 与宿主机 `.env` 不一致、Shell 换行错误等处理步骤。
+
 ## 私有仓库定义
 
 本文档中的“私有仓库”指私有 Docker 镜像仓库，也就是 Docker Registry，不是 Git 源码仓库。
