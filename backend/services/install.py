@@ -325,6 +325,22 @@ def _pm2_restart_command() -> list[str] | None:
     return [pm2_bin, "reload", process_name, "--update-env"]
 
 
+def _running_in_docker() -> bool:
+    if Path("/.dockerenv").exists():
+        return True
+    with contextlib.suppress(Exception):
+        cgroup_text = Path("/proc/1/cgroup").read_text(encoding="utf-8", errors="ignore")
+        return "docker" in cgroup_text or "kubepods" in cgroup_text or "containerd" in cgroup_text
+    return False
+
+
+def _exit_for_container_restart() -> None:
+    delay = float(os.getenv("INSTALL_RESTART_DELAY", "1.2"))
+    timer = threading.Timer(delay, lambda: os._exit(0))
+    timer.daemon = True
+    timer.start()
+
+
 def _spawn_development_restart() -> None:
     env = os.environ.copy()
     env["RELOAD"] = "false"
@@ -365,9 +381,17 @@ def request_backend_restart() -> dict[str, str]:
             "message": "已提交 PM2 reload --update-env，等待后端进程重启。",
         }
 
+    if _running_in_docker():
+        _exit_for_container_restart()
+        return {
+            "mode": "docker",
+            "message": "已提交 Docker 容器重启，等待 Compose restart policy 自动拉起后端。",
+        }
+
     if os.name != "nt" and not is_truthy(os.getenv("INSTALL_ALLOW_DEV_RESTART")):
         raise RuntimeError(
             "Linux 部署请配置 INSTALL_RESTART_COMMAND 或 INSTALL_PM2_PROCESS_NAME；"
+            "Docker 部署请确保 backend 使用 restart policy；"
             "如确认为本机开发环境，可设置 INSTALL_ALLOW_DEV_RESTART=true"
         )
 

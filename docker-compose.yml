@@ -20,6 +20,10 @@ services:
       UPDATER_URL: ${UPDATER_URL:-http://updater:8090}
       UPDATER_TOKEN: ${UPDATER_TOKEN:-}
       UPDATE_MANIFEST_URL: ${UPDATE_MANIFEST_URL:-}
+      INSTALL_RESTART_COMMAND: ${INSTALL_RESTART_COMMAND:-}
+      INSTALL_PM2_PROCESS_NAME: ${INSTALL_PM2_PROCESS_NAME:-}
+      INSTALL_ALLOW_DEV_RESTART: ${INSTALL_ALLOW_DEV_RESTART:-false}
+      INSTALL_RESTART_DELAY: ${INSTALL_RESTART_DELAY:-1.2}
     volumes:
       - ${LOREVISTA_DATA_DIR:-./deploy/docker/data}/manga_outputs:/app/backend/manga_outputs
       - ${LOREVISTA_DATA_DIR:-./deploy/docker/data}/video_outputs:/app/backend/video_outputs

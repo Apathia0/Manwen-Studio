@@ -93,6 +93,7 @@ def test_request_backend_restart_uses_explicit_command(monkeypatch):
     calls = []
     monkeypatch.setenv("INSTALL_RESTART_COMMAND", "pm2 reload canvas-backend --update-env")
     monkeypatch.setattr("services.install._detached_popen", lambda *args, **kwargs: calls.append((args, kwargs)))
+    monkeypatch.setattr("services.install._running_in_docker", lambda: True)
 
     result = request_backend_restart()
 
@@ -101,12 +102,27 @@ def test_request_backend_restart_uses_explicit_command(monkeypatch):
     assert calls[0][1]["shell"] is True
 
 
+def test_request_backend_restart_uses_docker_container_exit(monkeypatch):
+    calls = []
+    monkeypatch.delenv("INSTALL_RESTART_COMMAND", raising=False)
+    monkeypatch.delenv("INSTALL_PM2_PROCESS_NAME", raising=False)
+    monkeypatch.setattr("services.install._pm2_restart_command", lambda: None)
+    monkeypatch.setattr("services.install._running_in_docker", lambda: True)
+    monkeypatch.setattr("services.install._exit_for_container_restart", lambda: calls.append("exit"))
+
+    result = request_backend_restart()
+
+    assert result["mode"] == "docker"
+    assert calls == ["exit"]
+
+
 def test_request_backend_restart_rejects_unmanaged_linux(monkeypatch):
     monkeypatch.delenv("INSTALL_RESTART_COMMAND", raising=False)
     monkeypatch.delenv("INSTALL_PM2_PROCESS_NAME", raising=False)
     monkeypatch.delenv("INSTALL_ALLOW_DEV_RESTART", raising=False)
     monkeypatch.setattr("services.install.os.name", "posix")
     monkeypatch.setattr("services.install._pm2_restart_command", lambda: None)
+    monkeypatch.setattr("services.install._running_in_docker", lambda: False)
 
     try:
         request_backend_restart()

@@ -369,7 +369,9 @@ Redis tls: false
 
 ### 9. 安装完成后重启后端
 
-安装完成后，当前后端进程不会热切换数据库连接。重启后端容器：
+安装完成后，当前后端进程不会热切换数据库连接。Docker 部署下可直接点击页面上的“自动重启后端”按钮：后端会退出当前容器，Docker Compose 通过 `restart: unless-stopped` 自动拉起新进程。
+
+如果按钮失败，或部署文件没有启用 restart policy，则在宿主机手动重启后端容器：
 
 ```bash
 cd /opt/lorevista
@@ -377,8 +379,6 @@ docker compose --env-file .env restart backend
 ```
 
 刷新页面，用安装向导创建的管理员账号登录。
-
-如果页面上的“自动重启后端”按钮可用，也可以点击按钮。如果按钮失败，以宿主机命令为准。
 
 ### 10. 首次安装验收
 
