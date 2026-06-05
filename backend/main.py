@@ -254,7 +254,60 @@ FEATURE_CATALOG: list[dict] = [
 
 FEATURE_CATALOG_MAP = {item["key"]: item for item in FEATURE_CATALOG}
 
-app = FastAPI(title="Novel & Manga Generator")
+@contextlib.asynccontextmanager
+async def lifespan(app: FastAPI):
+    """应用生命周期管理 — 替代废弃的 @app.on_event('startup') 语法"""
+    global SYSTEM_READY
+
+    # ── 启动：数据库初始化 ──
+    status = _refresh_install_status()
+    if not status.get("installed"):
+        logger.info("System is not installed; startup database initialization is skipped.")
+        yield
+        return
+
+    try:
+        init_db(raise_errors=True)
+    except Exception as exc:
+        SYSTEM_READY = False
+        logger.warning("Startup database initialization skipped: %s", exc)
+        yield
+        return
+
+    db = SessionLocal()
+    try:
+        for s in db.query(Story).filter(Story.title.in_(["我的第一个故事", "未命名故事"])).all():
+            if s.chapters and any(ch.messages for ch in s.chapters):
+                s.title = "转生成为暗恋公主的女仆故事"
+                s.description = "百合女仆与公主的奇幻冒险"
+        db.commit()
+        SYSTEM_READY = True
+    except Exception as exc:
+        SYSTEM_READY = False
+        logger.warning("Startup database maintenance skipped: %s", exc)
+    finally:
+        db.close()
+
+    # ── 启动：定时清理后台任务 ──
+    async def cleanup_loop():
+        while True:
+            try:
+                cleaned = task_manager.cleanup_stale_tasks(max_age_hours=24)
+                if cleaned > 0:
+                    logger.info("Cleaned up %d stale tasks", cleaned)
+            except Exception as e:
+                logger.error("Task cleanup failed: %s", e)
+            await asyncio.sleep(3600)
+
+    cleanup_task = asyncio.create_task(cleanup_loop())
+
+    yield  # 应用在此运行
+
+    # ── 关闭：取消后台清理任务 ──
+    cleanup_task.cancel()
+
+
+app = FastAPI(title="Novel & Manga Generator", lifespan=lifespan)
 
 DEFAULT_CORS_ORIGINS = "http://localhost:5173,http://127.0.0.1:5173,http://localhost:5174,http://127.0.0.1:5174"
 CORS_ORIGINS = [
@@ -3562,55 +3615,7 @@ def _decode_edit_mask_upload(b64: str, target_size: tuple[int, int]) -> bytes:
         raise HTTPException(400, "Uploaded mask is not a valid image")
 
 
-@app.on_event("startup")
-def on_startup():
-    global SYSTEM_READY
-    status = _refresh_install_status()
-    if not status.get("installed"):
-        logger.info("System is not installed; startup database initialization is skipped.")
-        return
-    try:
-        init_db(raise_errors=True)  # 尊重环境变量 RUN_STARTUP_MIGRATIONS
-    except Exception as exc:
-        SYSTEM_READY = False
-        logger.warning("Startup database initialization skipped: %s", exc)
-        return
-    db = SessionLocal()
-    try:
-        # One-time: rename default stories
-        for s in db.query(Story).filter(Story.title.in_(["我的第一个故事", "未命名故事"])).all():
-            if s.chapters and any(ch.messages for ch in s.chapters):
-                s.title = "转生成为暗恋公主的女仆故事"
-                s.description = "百合女仆与公主的奇幻冒险"
-            # else: leave as-is for empty stories
-
-        db.commit()
-        SYSTEM_READY = True
-    except Exception as exc:
-        SYSTEM_READY = False
-        logger.warning("Startup database maintenance skipped: %s", exc)
-    finally:
-        db.close()
-
-
-@app.on_event("startup")
-async def startup_task_cleanup():
-    """应用启动时启动定时清理后台任务的循环"""
-    if not _system_installed():
-        logger.info("System is not ready; task cleanup loop is skipped.")
-        return
-
-    async def cleanup_loop():
-        while True:
-            try:
-                cleaned = task_manager.cleanup_stale_tasks(max_age_hours=24)
-                if cleaned > 0:
-                    logger.info("Cleaned up %d stale tasks", cleaned)
-            except Exception as e:
-                logger.error("Task cleanup failed: %s", e)
-            await asyncio.sleep(3600)  # 每小时执行一次
-
-    asyncio.create_task(cleanup_loop())
+# ── 启动事件已迁移到 lifespan 函数（见文件顶部 app=FastAPI(...) 附近） ──
 
 
 # ─── Story CRUD ─────────────────────────────────────────────

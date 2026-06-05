@@ -2,8 +2,7 @@
 
 AI 驱动的创作平台，支持小说创作、自动分镜、漫画图片生成和视频制作。通过对话引导 AI 创作小说，自动拆分分镜脚本，生成漫画图片并支持视频创作工作流。
 
-> 小白用户建议使用 SQLite 版，不需要安装 PostgreSQL：
-> https://github.com/libohan-ha/-LoreVista/tree/sqlite
+
 
 ## 功能
 
@@ -29,7 +28,7 @@ AI 驱动的创作平台，支持小说创作、自动分镜、漫画图片生�
 ### 1. 拉取项目代码
 
 ```bash
-git clone https://github.com/libohan-ha/-LoreVista.git
+git clone https://github.com/dream619/Manwen-Studio.git
 cd -LoreVista
 ```
 
