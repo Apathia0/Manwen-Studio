@@ -37,6 +37,10 @@ class UpdateRequest(BaseModel):
     target_version: str | None = None
 
 
+class EnvUpdateRequest(BaseModel):
+    updates: dict[str, str]
+
+
 def _now() -> str:
     return datetime.now(UTC).isoformat()
 
@@ -197,6 +201,57 @@ def _update_env_version(version: str) -> None:
     os.replace(tmp_path, ENV_FILE)
 
 
+def _write_env_updates(updates: dict[str, str]) -> dict[str, str | None]:
+    allowed_keys = {
+        "DATABASE_URL",
+        "REDIS_URL",
+        "REDIS_ENABLED",
+        "SYSTEM_INSTALLED",
+        "RUN_STARTUP_MIGRATIONS",
+    }
+    unknown = sorted(set(updates) - allowed_keys)
+    if unknown:
+        raise HTTPException(400, f"Unsupported env keys: {', '.join(unknown)}")
+
+    ENV_FILE.parent.mkdir(parents=True, exist_ok=True)
+    existing = ENV_FILE.read_text(encoding="utf-8") if ENV_FILE.exists() else ""
+    lines = existing.splitlines()
+    seen: set[str] = set()
+    output: list[str] = []
+
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in line:
+            output.append(line)
+            continue
+        key = line.split("=", 1)[0].strip()
+        if key in updates:
+            output.append(f"{key}={updates[key]}")
+            seen.add(key)
+        else:
+            output.append(line)
+
+    missing = [key for key in updates if key not in seen]
+    if missing:
+        if output and output[-1].strip():
+            output.append("")
+        output.append("# System installation")
+        output.extend(f"{key}={updates[key]}" for key in missing)
+
+    backup: Path | None = None
+    if ENV_FILE.exists():
+        backup = ENV_FILE.with_suffix(f".env.bak.{datetime.now(UTC).strftime('%Y%m%d%H%M%S')}")
+        backup.write_text(existing, encoding="utf-8")
+
+    tmp_path = ENV_FILE.with_suffix(".tmp")
+    tmp_path.write_text("\n".join(output).rstrip() + "\n", encoding="utf-8")
+    os.replace(tmp_path, ENV_FILE)
+    return {
+        "env_path": str(ENV_FILE),
+        "backup_path": str(backup) if backup else None,
+    }
+
+
 def _restore_env(previous_content: str | None, existed: bool) -> None:
     if not existed:
         if ENV_FILE.exists():
@@ -271,6 +326,12 @@ def _run_update(target_version: str | None) -> None:
 @app.get("/health")
 def health():
     return {"ok": True}
+
+
+@app.post("/internal/env")
+def write_env(body: EnvUpdateRequest, _: None = Depends(_auth)):
+    result = _write_env_updates({str(key): str(value) for key, value in body.updates.items()})
+    return {"ok": True, **result}
 
 
 @app.get("/status")

@@ -149,6 +149,28 @@ def test_write_env_updates_preserves_existing_values_and_creates_backup(tmp_path
     assert os.path.exists(result["backup_path"])
 
 
+def test_write_env_updates_uses_updater_writer_in_docker(monkeypatch):
+    calls = []
+    monkeypatch.delenv("INSTALL_ENV_PATH", raising=False)
+    monkeypatch.setattr("services.install._running_in_docker", lambda: True)
+    monkeypatch.setenv("UPDATER_URL", "http://updater:8090")
+    monkeypatch.setattr(
+        "services.install._write_env_updates_via_updater",
+        lambda updates: calls.append(updates) or {
+            "env_path": "/opt/lorevista/.env",
+            "backup_path": None,
+            "env_writer": "updater",
+        },
+    )
+
+    result = write_env_updates({"SYSTEM_INSTALLED": "true"})
+
+    assert result["env_writer"] == "updater"
+    assert result["env_path"] == "/opt/lorevista/.env"
+    assert calls == [{"SYSTEM_INSTALLED": "true"}]
+    assert os.environ["SYSTEM_INSTALLED"] == "true"
+
+
 def test_database_has_install_markers_for_existing_users():
     engine = create_engine("sqlite:///:memory:")
     metadata = MetaData()

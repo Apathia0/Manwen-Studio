@@ -265,6 +265,8 @@ Compose 中的 `DOCKER_CONFIG_DIR=/root/.docker` 会把该目录只读挂载给 
 
 如果用户使用外部 PostgreSQL 或 Redis，需要在启动容器前把 `/opt/lorevista/.env` 中的 `DATABASE_URL` 和 `REDIS_URL` 改为外部服务地址。安装向导填写的值必须指向同一套服务，否则安装程序可能初始化一个数据库，而重启后的后端连接另一个数据库。
 
+安装向导完成后，Docker 版本会通过内部 `updater` 服务把 `DATABASE_URL`、`REDIS_URL`、`REDIS_ENABLED`、`SYSTEM_INSTALLED` 写入宿主机 `/opt/lorevista/.env`。不要只依赖 backend 容器内的 `/app/backend/.env`，容器重建后该文件不会作为 Compose 配置来源。
+
 ### 4. 配置后端运行时密钥
 
 编辑 `/opt/lorevista/deploy/docker/runtime/backend.env`：
@@ -379,6 +381,17 @@ docker compose --env-file .env restart backend
 ```
 
 刷新页面，用安装向导创建的管理员账号登录。
+
+如果安装已完成但 `/api/install/status` 仍返回 `installed:false`，优先检查宿主机 `.env` 和当前后端环境是否一致：
+
+```bash
+cd /opt/lorevista
+grep -E '^(SYSTEM_INSTALLED|DATABASE_URL|REDIS_URL)=' .env
+docker compose --env-file .env exec backend sh -lc 'env | grep -E "^(SYSTEM_INSTALLED|DATABASE_URL|REDIS_URL)="'
+docker compose --env-file .env exec postgres sh -lc 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "select count(*) as users from users;"'
+```
+
+如果 `.env` 仍是 `SYSTEM_INSTALLED=false` 或数据库地址不是安装时填写的地址，先修正 `/opt/lorevista/.env`，再执行 `docker compose --env-file .env up -d backend web updater`。
 
 ### 10. 首次安装验收
 

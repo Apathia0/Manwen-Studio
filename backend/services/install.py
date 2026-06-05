@@ -1,4 +1,5 @@
 import contextlib
+import json
 import os
 import re
 import shutil
@@ -8,6 +9,8 @@ import subprocess
 import sys
 import tempfile
 import threading
+import urllib.error
+import urllib.request
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -241,7 +244,61 @@ def detect_install_status(db_engine=None) -> dict[str, Any]:
         }
 
 
-def write_env_updates(updates: dict[str, str], env_path: Path = ENV_PATH) -> dict[str, str | None]:
+def _default_env_path() -> Path:
+    configured = os.getenv("INSTALL_ENV_PATH", "").strip()
+    return Path(configured) if configured else ENV_PATH
+
+
+def _install_env_writer_url() -> str:
+    explicit = os.getenv("INSTALL_ENV_WRITER_URL", "").strip().rstrip("/")
+    if explicit:
+        return explicit
+    if not _running_in_docker():
+        return ""
+    updater_url = os.getenv("UPDATER_URL", "").strip().rstrip("/")
+    if not updater_url:
+        return ""
+    return f"{updater_url}/internal/env"
+
+
+def _write_env_updates_via_updater(updates: dict[str, str]) -> dict[str, str | None] | None:
+    writer_url = _install_env_writer_url()
+    if not writer_url:
+        return None
+    payload = json.dumps({"updates": updates}).encode("utf-8")
+    headers = {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+    }
+    updater_token = os.getenv("UPDATER_TOKEN", "").strip()
+    if updater_token:
+        headers["X-Updater-Token"] = updater_token
+    request = urllib.request.Request(writer_url, data=payload, headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            body = response.read(1024 * 64)
+            result = json.loads(body.decode(response.headers.get_content_charset() or "utf-8"))
+    except urllib.error.HTTPError as exc:
+        detail = exc.read(4096).decode("utf-8", errors="replace")
+        raise RuntimeError(f"updater env writer failed with HTTP {exc.code}: {detail}") from exc
+    except Exception as exc:
+        raise RuntimeError(f"updater env writer unavailable: {exc}") from exc
+    return {
+        "env_path": str(result.get("env_path") or "updater"),
+        "backup_path": str(result["backup_path"]) if result.get("backup_path") else None,
+        "env_writer": "updater",
+    }
+
+
+def write_env_updates(updates: dict[str, str], env_path: Path | None = None) -> dict[str, str | None]:
+    if env_path is None and not os.getenv("INSTALL_ENV_PATH", "").strip():
+        updater_result = _write_env_updates_via_updater(updates)
+        if updater_result:
+            for key, value in updates.items():
+                os.environ[key] = value
+            return updater_result
+
+    env_path = Path(env_path) if env_path is not None else _default_env_path()
     env_path.parent.mkdir(parents=True, exist_ok=True)
     existing = env_path.read_text(encoding="utf-8") if env_path.exists() else ""
     lines = existing.splitlines()
