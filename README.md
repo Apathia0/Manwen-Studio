@@ -21,7 +21,171 @@ AI 驱动的创作平台，支持小说创作、自动分镜、漫画图片生�
 - **前端**：React / TypeScript / Vite / TailwindCSS
 - **移动端**：Vue 3 / uni-app
 - **AI**：DeepSeek API + Image2 API + ComfyUI
-- **部署**：PM2 + Nginx（CentOS Stream 9）
+- **部署**：Docker Compose（ghcr.io 镜像 + CI/CD 自动构建 + BT-Panel Nginx TLS 终止）
+
+---
+## Docker 部署（生产环境）
+
+本项目使用 Docker Compose 部署生产环境，所有镜像由 GitHub Actions CI/CD 自动构建并推送到 GitHub Container Registry（ghcr.io）。
+
+### 镜像来源
+
+```text
+ghcr.io/dream619/manwen-studio/backend:<tag>   # FastAPI 后端
+ghcr.io/dream619/manwen-studio/web:<tag>       # Nginx 静态服务
+ghcr.io/dream619/manwen-studio/updater:<tag>   # 热更新 sidecar
+```
+
+推送 `main` 分支或 `v*` 标签即可触发 CI 自动构建。
+
+### 全新服务器部署流程
+
+#### 1. 前置条件
+
+- 服务器已安装 Docker 和 Docker Compose
+- 拥有 GitHub Personal Access Token（**只需 `read:packages` 权限**，无需 repo 权限）
+
+#### 2. 创建 GitHub PAT（仅首次）
+
+GitHub → Settings → Developer settings → Personal access tokens → Tokens (classic)
+
+创建 Token：
+- 权限只勾 `read:packages`
+- 复制 Token 值备用
+
+> 若你** fork 了仓库**，镜像地址会变成 `ghcr.io/<你的用户名>/Manwen-Studio/*`，需要先在 fork 仓库手动触发一次 Actions 构建，镜像就绪后才能拉取。
+
+#### 3. 登录 ghcr.io 并部署
+
+```bash
+# 设置变量（按需修改）
+SERVER_IP="你的服务器IP"
+PAT="你的GitHubPAT"
+
+# SSH 登录服务器
+ssh root@$SERVER_IP
+
+# 创建项目目录
+mkdir -p /opt/lorevista/deploy/docker/runtime /opt/lorevista/data
+
+# 登录 ghcr.io（只需一次，凭证会保存在 ~/.docker/config.json）
+echo "$PAT" | docker login ghcr.io -u dream619 --password-stdin
+
+# 从仓库获取部署文件（二选一）
+# 方式 A：git clone
+git clone https://github.com/dream619/Manwen-Studio.git /tmp/lorevista
+cp /tmp/lorevista/docker-compose.yml /opt/lorevista/
+cp -r /tmp/lorevista/deploy/docker /opt/lorevista/deploy/
+rm -rf /tmp/lorevista
+
+# 方式 B：本地打包上传（本地执行）
+tar czf lorevista-deploy.tar.gz docker-compose.yml deploy/docker/
+scp lorevista-deploy.tar.gz root@$SERVER_IP:/opt/lorevista/
+# 服务器上解压
+cd /opt/lorevista && tar xzf lorevista-deploy.tar.gz
+```
+
+#### 4. 配置环境变量
+
+```bash
+cd /opt/lorevista
+
+# 复制环境变量模板
+cp deploy/docker/.env.example .env
+cp deploy/docker/runtime/backend.env.example deploy/docker/runtime/backend.env
+
+# 编辑 .env，修改以下关键项：
+#   REGISTRY_IMAGE_PREFIX=ghcr.io/dream619/manwen-studio
+#   APP_VERSION=v1.0.4（或你想要的版本）
+#   POSTGRES_PASSWORD=设置一个强密码
+#   DATABASE_URL=postgresql://postgres:密码@postgres:5432/manga_novel
+#   SYSTEM_INSTALLED=false（新服务器首次部署为 false）
+#   UPDATER_TOKEN=$(openssl rand -hex 32)（生成随机 Token）
+```
+
+#### 5. 启动服务
+
+```bash
+cd /opt/lorevista
+docker compose --env-file .env up -d
+```
+
+Docker 会自动从 ghcr.io 拉取 3 个业务镜像 + 从 Docker Hub 拉取 PostgreSQL 和 Redis。
+
+#### 6. 验证
+
+```bash
+docker compose ps
+# 应看到 5 个容器全部 healthy
+
+curl http://localhost:8080/api/health
+# 应返回 {"status":"ok"}
+```
+
+#### 7. 配置宿主 Nginx（TLS 终止）
+
+宿主机 Nginx 反向代理到 Docker web 容器的端口（默认 `127.0.0.1:8080`）：
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name your-domain.com;
+
+    ssl_certificate /path/to/cert.pem;
+    ssl_certificate_key /path/to/key.pem;
+
+    location / {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+```
+
+#### 8. 首次访问
+
+浏览器打开 `https://your-domain.com` → 自动进入安装向导，创建管理员账号后即可使用。
+
+### 更新线上服务
+
+推送代码后，GitHub Actions 会自动构建镜像，然后在服务器上执行更新：
+
+```bash
+# 方式一：管理后台在线更新（推荐）
+# 管理员登录 → 管理导航「系统更新」→ 输入版本号 → 确认
+
+# 方式二：SSH 命令行更新
+sudo APP_DIR=/opt/lorevista /usr/bin/env bash /opt/lorevista/deploy/docker/update-lorevista.sh
+```
+
+> 只需 `git push` 打 tag，不需要手动执行构建。构建由 GitHub Actions 自动完成。
+
+### 架构示意
+
+```
+宿主 Nginx (TLS 443)
+    ↓ proxy_pass :8080
+Docker Compose (5 容器)
+├── web (Nginx :80)          ← 静态文件 + 反向代理 /api/ → backend
+├── backend (FastAPI :8000)  ← 业务 API
+├── updater (FastAPI :8090)  ← 热更新 sidecar（挂载 docker.sock）
+├── postgres (PostgreSQL 16) ← 数据库（持久化 volume）
+└── redis (Redis 7)          ← 缓存（AOF 持久化 volume）
+```
+
+### ⚠️ 部署红线
+
+| 规则 | 说明 |
+|------|------|
+| 禁止 `docker compose down -v` | 会删除 PostgreSQL 和 Redis 数据卷 |
+| 禁止 `rsync --delete` | 会删除用户已生成的漫画/视频文件 |
+| 禁止 `git clean -fdx` | 会删除 manga_outputs/ 和 video_outputs/ |
+| 禁止整个目录替换 | 只做增量覆盖代码文件 |
+| `manga_outputs/` 和 `video_outputs/` | 在 `.gitignore` 中，本地仓库不含用户资源 |
+
+---
 
 ## 使用教程（PostgreSQL 版）
 
@@ -66,7 +230,7 @@ copy .env.example .env
 
 ```env
 DATABASE_URL=postgresql://postgres:postgres@localhost:5432/manga_novel
-    IMAGE_API_BASE_URL=https://api.xbyjs.top/v1
+    IMAGE_API_BASE_URL=https://newapi.aifusion6.cn/v1
 HOST=127.0.0.1
 PORT=8000
 ```

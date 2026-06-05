@@ -25,7 +25,7 @@ load_dotenv()
 os.environ["NO_PROXY"] = "*"
 os.environ["no_proxy"] = "*"
 
-IMAGE_API_BASE_URL = os.getenv("IMAGE_API_BASE_URL", "https://api.xbyjs.top/v1").rstrip("/")
+IMAGE_API_BASE_URL = os.getenv("IMAGE_API_BASE_URL", "https://newapi.aifusion6.cn/v1").rstrip("/")
 IMAGE_API_KEY = os.getenv("IMAGE_API_KEY", "")
 IMAGE_MODEL = "gpt-image-2"
 IMAGE_SIZE = "1024x1024"

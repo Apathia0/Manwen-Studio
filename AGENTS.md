@@ -8,7 +8,9 @@ StoryCanvas 是一个 AI 驱动的创作平台，支持小说创作、自动分�
 - **前端**：React 19 / TypeScript 6 / Vite 8 / Tailwind CSS v4
 - **移动端**：Vue 3 / uni-app（`storycanvas-mobile/`）
 - **AI 服务**：DeepSeek API（文本）+ Image2 API（图片）+ ComfyUI（视频）
-- **部署**：PM2 + Nginx（CentOS Stream 9）
+- **部署**：Docker Compose（ghcr.io 镜像 + sidecar 热更新），宿主机 Nginx（TLS 终止 + BT-Panel）
+- **生产服务器**：103.149.26.199（CentOS Stream 9），已从 PM2 直接部署迁移至 Docker
+- **Docker 部署目录**：`/opt/lorevista/`
 
 ---
 
@@ -17,7 +19,7 @@ StoryCanvas 是一个 AI 驱动的创作平台，支持小说创作、自动分�
 ```
 StoryCanvas/
 ├── backend/                          # FastAPI 后端
-│   ├── main.py                       # 主入口（8828 行）— 所有 API 路由 + 种子函数 + cron
+│   ├── main.py                       # 主入口（9407 行）— 所有 API 路由 + 种子函数 + cron + updater 代理
 │   ├── database.py                   # 引擎/Session + init_db + 增量迁移
 │   ├── models.py                     # SQLAlchemy ORM 模型（~640 行）
 │   ├── schemas.py                    # Pydantic 请求/响应模型（~876 行）
@@ -36,6 +38,7 @@ StoryCanvas/
 │   │   ├── scene_safety.py           # 场景文本安全审查（替换敏感词）
 │   │   ├── storyboard.py             # 分镜服务
 │   │   ├── screenplay.py             # 剧本服务
+│   │   ├── install.py                # 首次安装向导（数据库/Redis 测试、.env 写入、PM2 重启）
 │   │   ├── video_*.py                # 视频相关服务（qa/compiler/generation/api/comfyui）
 │   │   ├── alipay_f2f.py             # 支付宝当面付
 │   │   └── errors.py                 # 错误类型定义
@@ -44,6 +47,32 @@ StoryCanvas/
 │   ├── manual_migrate.py             # 手动数据库迁移脚本
 │   ├── manga_outputs/                # ⚠️ 用户生成的漫画图片（部署时绝对不可删除）
 │   └── video_outputs/                # ⚠️ 用户生成的视频文件（部署时绝对不可删除）
+│
+├── .github/                          # GitHub CI/CD
+│   └── workflows/
+│       └── docker-images.yml         # Docker 镜像构建与推送（main/master/v* 标签触发）
+│
+├── *.Dockerfile                      # Docker 镜像定义
+│   ├── Dockerfile.backend            # FastAPI 后端镜像（python:3.11-slim）
+│   ├── Dockerfile.web                # 前端 Nginx 镜像（node:22-alpine 构建 → nginx:1.27-alpine）
+│   └── Dockerfile.updater            # 热更新 sidecar 镜像（python:3.11-alpine + docker-cli）
+│
+├── docker-compose.yml                # Docker Compose 编排（backend/web/updater/postgres/redis）
+│
+├── deploy/
+│   └── docker/                       # Docker 部署资源
+│       ├── README.md                 # Docker 部署完整文档
+│       ├── .env.example              # Docker Compose 环境变量模板
+│       ├── update-lorevista.sh       # 热更新 shell 脚本（flock 锁 + 镜像拉取 + 迁移 + 健康检查 + 回滚）
+│       ├── nginx/
+│       │   └── default.conf          # Nginx 配置（反向代理 /api/ → backend:8000）
+│       ├── runtime/
+│       │   └── backend.env.example   # backend 容器环境变量模板
+│       ├── systemd/
+│       │   ├── lorevista-update.service  # systemd 热更新服务（可选无人值守）
+│       │   └── lorevista-update.timer    # systemd 定时器（默认每 5 分钟检测）
+│       └── updater/
+│           └── app.py               # 热更新 sidecar HTTP 服务（FastAPI, 240 行）
 │
 ├── frontend/                         # React + Vite 前端
 │   ├── vite.config.ts                # Vite 配置（代理 /api→:8000，代码分割）
@@ -92,6 +121,25 @@ uvicorn main:app --host 0.0.0.0 --port 8000 --reload  # 需要 RELOAD=true 环�
 
 环境变量由 `dotenv` 从 `backend/.env` 加载。
 
+### 生命周期管理
+
+FastAPI 已从废弃的 `@app.on_event("startup")` 迁移为 **`lifespan` 异步上下文管理器**：
+
+```python
+@contextlib.asynccontextmanager
+async def lifespan(app: FastAPI):
+    # 启动：DB 初始化 + 默认故事重命名 + 后台清理循环
+    yield
+    # 关闭：取消清理任务
+```
+
+启动时序：
+1. 检查系统安装状态（`INSTALL_STATUS`）
+2. 如已安装 → `init_db()` 初始化数据库 + 执行增量迁移
+3. 默认故事重命名（"我的第一个故事" → "转生成为暗恋公主的女仆故事"）
+4. 启动后台任务清理循环（每小时清理 24 小时前的过期任务）
+5. 标记 `SYSTEM_READY = True`
+
 ### 数据库
 
 - **ORM**：SQLAlchemy 2.0（声明式映射 `Mapped` + `mapped_column`）
@@ -112,7 +160,7 @@ uvicorn main:app --host 0.0.0.0 --port 8000 --reload  # 需要 RELOAD=true 环�
 
 ### 单文件路由架构
 
-所有 API 路由集中在 `main.py`（8828 行），按功能分区：
+所有 API 路由集中在 `main.py`（9407 行），按功能分区：
 - `/api/stories/*`, `/api/chapters/*` — 作品、章节 CRUD
 - `/api/framework/*` — 小说框架生成、调整
 - `/api/manga/*` — 漫画生成、重绘
@@ -122,6 +170,8 @@ uvicorn main:app --host 0.0.0.0 --port 8000 --reload  # 需要 RELOAD=true 环�
 - `/api/prompt-templates/*` — 提示词模板
 - `/api/billing/*` — 计费
 - `/api/video/*` — 视频生成（路由在 `routers/video.py`）
+- `/api/install/*` — 首次安装向导（数据库/Redis 测试、管理员创建、环境变量写入）
+- `/api/admin/system/update*` — 系统热更新代理（管理员触发 → 转发到 updater sidecar）
 
 ### 认证系统
 
@@ -281,10 +331,32 @@ type RouteKey = 'landing' | 'login' | 'stories' | 'workspace' | 'templates' | ..
 ### 生产环境
 
 - **服务器**：103.149.26.199（CentOS Stream 9）
-- **项目路径**：`/www/wwwroot/canvas.aifusion6.cn/`
-- **Python 虚拟环境**：`/www/wwwroot/canvas.aifusion6.cn/venv/`
-- **PM2 进程**：`storycanvas-backend`（cwd = `.../backend/`）
-- **前端**：`frontend/dist/` → Nginx 静态服务
+- **部署方式**：Docker Compose（5 容器），已从 PM2 迁移
+- **Docker 项目目录**：`/opt/lorevista/`
+- **Compose 配置**：`/opt/lorevista/docker-compose.yml`
+- **Docker 环境变量**：`/opt/lorevista/.env`
+- **后端密钥配置**：`/opt/lorevista/deploy/docker/runtime/backend.env`
+- **数据持久化**：`/opt/lorevista/data/manga_outputs/` + `data/video_outputs/` + Docker volumes
+- **宿主机 Nginx**：BT-Panel 管理，位于 `/www/server/panel/vhost/nginx/canvas.aifusion6.cn.conf`
+- **旧 PM2 项目路径**（已停用）：`/www/wwwroot/canvas.aifusion6.cn/`
+
+### Docker 服务一览
+
+```bash
+# 生产服务器当前运行的 5 个容器
+lorevista-backend-1    ghcr.io/dream619/manwen-studio/backend:v1.0.4   healthy
+lorevista-web-1        ghcr.io/dream619/manwen-studio/web:v1.0.4       healthy
+lorevista-updater-1    ghcr.io/dream619/manwen-studio/updater:v1.0.4   healthy
+lorevista-postgres-1   postgres:16-alpine                              healthy
+lorevista-redis-1      redis:7-alpine                                  healthy
+```
+
+### 镜像来源
+
+镜像由 GitHub Actions CI/CD 自动构建并推送到 `ghcr.io/dream619/manwen-studio/`：
+- `ghcr.io/dream619/manwen-studio/backend:<tag>`
+- `ghcr.io/dream619/manwen-studio/web:<tag>`
+- `ghcr.io/dream619/manwen-studio/updater:<tag>`
 
 ### ⚠️ 部署红线：用户生成资源绝对保护
 
@@ -303,57 +375,367 @@ type RouteKey = 'landing' | 'login' | 'stories' | 'workspace' | 'templates' | ..
 4. **这些目录已在 `.gitignore` 中**，本地仓库不含用户资源，无需担心误提交。
 
 **安全做法：**
-- 使用 `git pull` 或 `git fetch + checkout` 更新代码
-- 手动替换单个文件（如 `backend/main.py`、`backend/services/*.py`）
-- 构建前端时只操作 `frontend/` 目录，不影响用户资源
+- Docker 部署下用户数据通过卷挂载保护，`manga_outputs/` 和 `video_outputs/` 映射到 `/opt/lorevista/data/`
+- 禁止 `docker compose down -v`（会删除 PostgreSQL 和 Redis 数据卷）
+- 更新镜像使用管理后台在线更新，或 CLI 回退方案
 
-### 部署步骤
+### Docker 更新方式
 
+详见 [deploy/docker/DOCKER-DEPLOY-FROM-ZERO.md](deploy/docker/DOCKER-DEPLOY-FROM-ZERO.md) 第 8 章。
+
+#### 方式一：管理后台在线更新（推荐）
+1. 管理员登录 → 管理导航「系统更新」
+2. 输入目标版本（如 `v1.2.3`）或留空（使用 `.env` 中的 `APP_VERSION`）
+3. 确认 → 系统自动拉取镜像 → 执行迁移 → 滚动更新 backend + web
+
+#### 方式二：SSH 命令行更新
 ```bash
-# 1. 拉取最新代码（不会影响 manga_outputs/ 和 video_outputs/）
-git pull
-
-# 2. 安装后端依赖（venv 中）
-cd /www/wwwroot/canvas.aifusion6.cn/
-source venv/bin/activate
-pip install -r backend/requirements.txt
-
-# 3. 构建前端
-cd frontend
-npm install && npm run build
-
-# 4. 重启后端
-pm2 reload storycanvas-backend --update-env
-
-# 5. 执行数据库迁移（如有）
-export RUN_STARTUP_MIGRATIONS=true; cd backend && python -c "
-from main import app
-from database import init_db
-init_db(run_migrations=True)
-"
+sudo APP_DIR=/opt/lorevista /usr/bin/env bash /opt/lorevista/deploy/docker/update-lorevista.sh
 ```
 
-### PM2 服务管理
-
+#### 方式三：无人值守自动更新（可选）
 ```bash
-pm2 list                           # 查看进程
-pm2 logs storycanvas-backend       # 查看日志
-pm2 reload storycanvas-backend --update-env  # 重启（更新环境变量）
-pm2 delete storycanvas-backend     # 删除进程
-pm2 start /www/wwwroot/.../backend/main.py --interpreter python3 --name storycanvas-backend
+sudo cp /opt/lorevista/deploy/docker/systemd/lorevista-update.* /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now lorevista-update.timer
 ```
 
 ### 数据库迁移
 
 ```bash
+# 通过 docker compose exec 执行数据库操作
+cd /opt/lorevista
+docker compose exec -T postgres psql -U postgres -d manga_novel -c "SQL 语句"
+
 # 手动执行 _ensure_framework_prompt_synced
-cd /www/wwwroot/canvas.aifusion6.cn/backend
-python -c "
+docker compose run --rm backend python -c "
 from database import SessionLocal
 from main import _ensure_framework_prompt_synced
 _ensure_framework_prompt_synced(next(SessionLocal()))
 "
 ```
+
+### 全新服务器部署
+
+在全新的服务器上从零部署 StoryCanvas。
+
+#### 前置条件
+
+- 服务器已安装 Docker 和 Docker Compose
+- 拥有 GitHub Personal Access Token（只需 `read:packages` 权限）
+
+#### 1. 创建 GitHub PAT
+
+GitHub → Settings → Developer settings → Personal access tokens → Tokens (classic)
+
+- 权限只勾 `read:packages`
+- 不需要任何 repo 权限
+
+> 若你 **fork 了仓库**，镜像地址会变更为 `ghcr.io/<你的用户名>/Manwen-Studio/*`。
+> 首次部署前需要在 fork 仓库手动触发一次 Actions 构建（`Actions` → `Docker Images` → `Run workflow`），
+> 等镜像就绪后才能拉取。`.env` 中的 `REGISTRY_IMAGE_PREFIX` 也要对应更改。
+
+#### 2. 部署步骤
+
+```bash
+# SSH 登录新服务器
+ssh root@新服务器IP
+
+# 创建目录
+mkdir -p /opt/lorevista/deploy/docker/runtime /opt/lorevista/data
+
+# 登录 ghcr.io（凭证保存在 ~/.docker/config.json，updater 容器也会读取）
+echo "$你的PAT" | docker login ghcr.io -u dream619 --password-stdin
+
+# 复制部署文件（二选一）
+# 方式 A：git clone
+git clone https://github.com/dream619/Manwen-Studio.git /tmp/lv
+cp /tmp/lv/docker-compose.yml /opt/lorevista/
+cp -r /tmp/lv/deploy/docker /opt/lorevista/deploy/
+rm -rf /tmp/lv
+
+# 方式 B：本地打包上传
+# 本地执行：tar czf deploy.tar.gz docker-compose.yml deploy/docker/
+# scp deploy.tar.gz root@新服务器IP:/opt/lorevista/
+# 服务器执行：cd /opt/lorevista && tar xzf deploy.tar.gz
+```
+
+#### 3. 配置环境变量
+
+```bash
+cd /opt/lorevista
+cp deploy/docker/.env.example .env
+cp deploy/docker/runtime/backend.env.example deploy/docker/runtime/backend.env
+```
+
+修改 `.env` 关键项：
+
+```ini
+REGISTRY_IMAGE_PREFIX=ghcr.io/dream619/manwen-studio
+APP_VERSION=v1.0.4
+POSTGRES_PASSWORD=设置强密码
+DATABASE_URL=postgresql://postgres:密码@postgres:5432/manga_novel
+SYSTEM_INSTALLED=false           # 新服务器首次 = false
+UPDATER_TOKEN=openssl rand -hex 32 的值
+```
+
+#### 4. 启动
+
+```bash
+cd /opt/lorevista
+docker compose --env-file .env up -d
+```
+
+Docker 自动拉取 5 个镜像（3 个 ghcr.io + postgres + redis from Docker Hub）。
+
+#### 5. 验证
+
+```bash
+docker compose ps               # 5 个容器全部 healthy
+curl http://localhost:8080/api/health  # {"status":"ok"}
+```
+
+#### 6. 配置宿主 Nginx（TLS 终止）
+
+参考 `deploy/docker/nginx/default.conf`，反向代理到 `127.0.0.1:8080`。
+
+#### 7. 首次访问
+
+浏览器打开域名 → 安装向导 → 创建管理员账号即可使用。
+
+#### ghcr.io 凭证过期处理
+
+ghcr.io 的 token 可能过期，导致 `docker compose pull` 失败：
+
+```bash
+# 重新登录
+echo "$新PAT" | docker login ghcr.io -u dream619 --password-stdin
+
+# 验证
+docker compose pull
+```
+
+建议在 CI/CD 中定期刷新凭证，或使用机器人账户的只读 token。
+
+---
+
+## Docker 部署
+
+### 架构概览
+
+```
+┌──────────────────────────────┐
+│       Host Nginx (TLS)       │
+│  proxy_pass :8080            │
+└──────────┬───────────────────┘
+           │
+┌──────────▼───────────────────┐
+│    docker-compose.yml        │
+│  ┌────────┐ ┌──────┐ ┌────┐ │
+│  │  web   │ │be-  │ │up- │ │
+│  │(Nginx  │ │ckend│ │datr│ │
+│  │ :80)   │ │:8000│ │:809│ │
+│  └───┬────┘ └──┬───┘ └─┬──┘ │
+│      │/api/*───┘       │    │
+│      │/static/*────────┘     │
+│      │       ┌──────┐       │
+│  ┌───▼───┐ ┌─▼────┐ │       │
+│  │postgres│ │redis │ │       │
+│  └───────┘ └──────┘ │       │
+│  updater mounts:     │       │
+│  /var/run/docker.sock │       │
+│  /opt/lorevista      │       │
+└──────────────────────────────┘
+```
+
+### Dockerfile 定义
+
+| 文件 | 基础镜像 | 作用 |
+|------|---------|------|
+| `Dockerfile.backend` | `python:3.11-slim` | FastAPI 后端，暴露 8000，HEALTHCHECK `/api/health` |
+| `Dockerfile.web` | 两阶段：`node:22-alpine` 构建 → `nginx:1.27-alpine` 运行 | React 静态文件，Nginx 反向代理 `/api/` |
+| `Dockerfile.updater` | `python:3.11-alpine` | 热更新 sidecar，暴露 8090，挂载 Docker socket |
+
+### 服务器初始设置
+
+```bash
+# 创建运行目录
+sudo mkdir -p /opt/lorevista/deploy/docker/runtime /opt/lorevista/data
+sudo cp docker-compose.yml /opt/lorevista/
+sudo cp -r deploy/docker /opt/lorevista/deploy/
+sudo cp deploy/docker/.env.example /opt/lorevista/.env
+sudo cp deploy/docker/runtime/backend.env.example /opt/lorevista/deploy/docker/runtime/backend.env
+
+# 登录 ghcr.io（只读 token）
+echo "$READ_ONLY_REGISTRY_TOKEN" | docker login ghcr.io -u "$REGISTRY_USER" --password-stdin
+
+# 启动
+cd /opt/lorevista
+docker compose --env-file .env up -d
+```
+
+### 服务网络
+
+- **web**: 暴露端口到宿主机（默认 `127.0.0.1:8080`），由宿主 Nginx 做 TLS 终止
+- **backend**: 仅 Docker 内部网络可达，web 通过 `http://backend:8000` 访问
+- **updater**: 仅 Docker 内部网络可达，backend 通过 `http://updater:8090` 调用
+- **postgres/redis**: 不对外暴露端口
+
+### Docker Compose 编排（5 个服务）
+
+| 服务 | 镜像来源 | 说明 |
+|------|---------|------|
+| `backend` | `ghcr.io/dream619/manwen-studio/backend:<tag>` | 后端应用，挂载 manga_outputs/video_outputs volume |
+| `web` | `ghcr.io/dream619/manwen-studio/web:<tag>` | Nginx 静态服务 |
+| `updater` | `ghcr.io/dream619/manwen-studio/updater:<tag>` | 热更新 sidecar，挂载 docker.sock |
+| `postgres` | `postgres:16-alpine` | 数据库，持久化 volume |
+| `redis` | `redis:7-alpine` | 缓存，AOF 持久化 volume |
+
+---
+
+## 热更新流程
+
+### 设计原则
+
+**"业务后端不接触 Docker socket"** — 用一个专门的 `updater` sidecar 容器执行所有 Docker/Compose 操作。
+
+### 触发链路
+
+```
+管理员登录 → 管理后台 "系统更新" 页面
+         ↓
+POST /api/admin/system/update { target_version? }
+         ↓
+backend 验证管理员身份（_require_admin）
+         ↓
+POST http://updater:8090/update { target_version }
+    Headers: X-Updater-Token = UPDATER_TOKEN
+```
+
+### Updater Sidecar（`deploy/docker/updater/app.py`）
+
+| 端点 | 方法 | 作用 |
+|------|------|------|
+| `/health` | GET | 健康检查 |
+| `/status` | GET | 查询当前更新状态（含日志尾部） |
+| `/update` | POST | 触发更新（指定版本或按 .env 中的 APP_VERSION） |
+
+状态管理：`update-state.json` 持久化，支持防抖（stale 检测）、并发锁。
+
+### 热更新执行流程
+
+```
+┌─ 1. 更新 APP_VERSION（如指定目标版本）
+│   → 修改 /opt/lorevista/.env 中的 APP_VERSION=
+│   → 创建 .env.bak.<timestamp> 备份
+│
+├─ 2. 异步启动 update-lorevista.sh
+│   → flock 文件锁（/var/lock/lorevista-update.lock）
+│   → 防止并发更新
+│
+├─ 3. 记录当前运行镜像 ID（backend / web）
+│
+├─ 4. docker compose pull（拉取最新镜像）
+│
+├─ 5. 检查镜像 ID 是否变化
+│   └─ 无变化 → 退出（跳过不必要的更新）
+│
+├─ 6. 运行数据库迁移
+│   → docker compose run --rm -e RUN_STARTUP_MIGRATIONS=true backend \
+│       python -c "from database import init_db; init_db()"
+│   → timeout 180 秒
+│
+├─ 7. 启动 backend 新容器
+│   → docker compose up -d --no-deps backend
+│   → 等待 /api/health 响应（timeout 90 秒，每 3 秒轮询）
+│   └─ 失败 → 回滚
+│
+├─ 8. 启动 web 新容器
+│   → docker compose up -d --no-deps web
+│   → 再次等待健康检查
+│   └─ 失败 → 回滚
+│
+├─ 9. docker image prune -f（清理 7 天前的旧镜像）
+│
+└─ ✅ 完成
+```
+
+### 回滚机制
+
+任何健康检查失败或脚本执行错误时：
+
+```bash
+# 将之前记录的镜像 ID 重新 tag 回原来的引用
+docker tag $BACKEND_PREVIOUS_IMAGE_ID $BACKEND_IMAGE_REF
+docker tag $WEB_PREVIOUS_IMAGE_ID $WEB_IMAGE_REF
+# 重新启动旧版本
+docker compose up -d backend web
+```
+
+### 管理后台实时日志
+
+```
+前端每隔 3 秒轮询 GET /api/admin/system/update/status
+  → backend 代理到 GET http://updater:8090/status
+  → 返回 sanitized 更新状态 + 最近 120 行日志
+  → 日志在传输过程中做脱敏（密码/TOKEN/KEY → ***）
+  → 前端渲染在黑色 <pre> 终端风格区域
+```
+
+### CLI 回退方案
+
+```bash
+sudo APP_DIR=/opt/lorevista /usr/bin/env bash /opt/lorevista/deploy/docker/update-lorevista.sh
+```
+
+### 无人值守自动更新（可选）
+
+```bash
+sudo cp /opt/lorevista/deploy/docker/systemd/lorevista-update.* /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now lorevista-update.timer
+```
+
+- `lorevista-update.timer`：开机 2 分钟后启动，之后每 5 分钟检测一次
+- `lorevista-update.service`：oneshot 类型，调用 `update-lorevista.sh`
+
+---
+
+## CI/CD 流水线
+
+定义在 `.github/workflows/docker-images.yml`，在 push 到 `main`/`master` 分支或 `v*` 标签时触发。
+
+| 阶段 | 操作 |
+|------|------|
+| **代码检查** | `py_compile` 语法检查 + `pytest` 运行测试 |
+| **前端构建** | `npm ci` + `npm run build` |
+| **Docker 构建** | Buildx 构建 3 个镜像（backend/web/updater） |
+| **镜像推送** | 推送到 `ghcr.io/<repo>/` |
+
+镜像标签策略：
+- 普通分支推送：`sha-<commit12位>` + `stable`
+- 标签推送（`v*`）：`sha-<commit12位>` + `<标签名>`
+
+---
+
+## 首次安装向导
+
+`backend/services/install.py` 提供了完整的首次部署安装流程：
+
+| API 端点 | 作用 |
+|---------|------|
+| `GET /api/install/status` | 检测系统是否已安装 |
+| `POST /api/install/test-database` | 测试 PostgreSQL 连接（支持 SSL 模式配置） |
+| `POST /api/install/test-redis` | 测试 Redis 连接（支持 TLS/密码认证） |
+| `POST /api/install/complete` | 写入 .env（数据库/Redis URL + 管理员账号），初始化数据库种子 |
+| `POST /api/install/restart` | 重启后端进程（PM2 / 自定义命令 / 开发模式自重启） |
+
+重启策略优先级：
+1. `INSTALL_RESTART_COMMAND` 环境变量 → 执行自定义命令
+2. `INSTALL_PM2_PROCESS_NAME` 或 PM2 检测 → `pm2 reload --update-env`
+3. 开发模式（Windows 或 `INSTALL_ALLOW_DEV_RESTART=true`）→ 分离进程自重启
+
+前端页面：`frontend/src/components/InstallWizardPage.tsx`，三步引导配置。
 
 ---
 
@@ -416,6 +798,21 @@ async def my_func(*args, task_id=None, story_id=None, chapter_id=None, shot_id=N
 
 ### 9. ⚠️ 部署时误删用户图片/视频（致命）
 `manga_outputs/` 和 `video_outputs/` 在 `.gitignore` 中，本地仓库没有这些文件。如果部署时使用 `rsync --delete`、`git clean -fdx`、或用 `rm -rf backend` 再替换，会永久删除所有用户的漫画图片和视频。**永远只做增量更新，不做全量替换。**
+
+### 10. Docker 卷挂载路径一致性
+`docker-compose.yml` 中用 `${LOREVISTA_DATA_DIR:-./deploy/docker/data}` 作为默认数据目录。确保宿主机上该路径存在，否则 Docker 会自动创建目录但权限可能不正确。生产部署建议使用绝对路径。
+
+### 11. Updater 端口冲突
+updater 监听 8090 端口，仅在 Docker 内部网络可达。如果宿主机有服务占用 8090，不会冲突（Docker 网络隔离），但如果宿主机有 iptables 规则拦截内部网络通信，updater 会无法被 backend 访问。
+
+### 12. ghcr.io 镜像拉取凭证
+updater 容器挂载了 `/root/.docker:ro` 用于拉取私有镜像。如果镜像仓库凭证过期，更新操作会在 `docker compose pull` 阶段静默失败。建议在 CI/CD 中定期刷新凭证，或使用机器人账户的只读 token。
+
+### 13. PM2 → Docker 迁移时数据库密码不一致
+Docker PostgreSQL 容器首次启动时通过环境变量 `POSTGRES_PASSWORD` 设置密码。后期修改 `.env` 中的密码**不会自动同步到运行中的 PostgreSQL**。迁移时需通过 `docker compose exec -T postgres psql -U postgres -c "ALTER USER postgres WITH PASSWORD '新密码';"` 手动修改，或删除 Docker volume 重建。
+
+### 14. 宿主机与 Docker 的 PostgreSQL 端口冲突
+宿主机本身可能运行 PostgreSQL（监听 `127.0.0.1:5432`）。Docker compose 的 postgres 容器默认不暴露端口到宿主机，但通过 `docker compose exec` 访问时不受影响。从宿主机执行 `psql -h 127.0.0.1` 时连接的是**宿主机数据库**而非 Docker 数据库，注意区分。
 
 ---
 

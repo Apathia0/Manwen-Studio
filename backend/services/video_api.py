@@ -36,7 +36,7 @@ def configure(*, base_url: str | None = None, api_key: str | None = None, model:
 
 
 def _resolved_base_url() -> str:
-    return (_runtime_base_url or os.getenv("VIDEO_API_BASE_URL") or "https://api.xbyjs.top/v1").rstrip("/")
+    return (_runtime_base_url or os.getenv("VIDEO_API_BASE_URL") or "https://newapi.aifusion6.cn/v1").rstrip("/")
 
 
 def _resolved_api_key() -> str:
@@ -94,8 +94,8 @@ def _output_dir() -> Path:
 def _build_api_url(path: str, base_url: str | None = None) -> str:
     """拼接完整 API URL，自动处理 /v1 前缀去重。
 
-    例: base=https://api.xbyjs.top/v1, path=/v1/video/generations
-    → https://api.xbyjs.top/v1/video/generations
+    例: base=https://newapi.aifusion6.cn/v1, path=/v1/video/generations
+    → https://newapi.aifusion6.cn/v1/video/generations
     """
     base = (base_url or _resolved_base_url()).rstrip("/")
     normalized = "/" + path.lstrip("/")
