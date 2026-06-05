@@ -1010,7 +1010,12 @@ def _consume_email_verification_code(email: str, purpose: str, code: str, db: Se
     db.commit()
 
 
-def _ensure_platform_seed(db: Session, *, create_default_admin: bool = False) -> None:
+def _ensure_platform_seed(
+    db: Session,
+    *,
+    create_default_admin: bool = False,
+    commit: bool = True,
+) -> None:
     # Keep the legacy admin seed disabled by default. First-run install creates
     # the administrator from user-supplied credentials instead.
     admin = db.query(User).filter(User.email == "admin@storycanvas.app").first()
@@ -1022,12 +1027,14 @@ def _ensure_platform_seed(db: Session, *, create_default_admin: bool = False) ->
             role="admin",
             status="active",
         ))
-        db.commit()
+        if commit:
+            db.commit()
 
     if db.query(Plan).count() > 0:
-        _ensure_plan_feature_seed(db)
-        _seed_platform_settings(db)
-        db.commit()
+        _ensure_plan_feature_seed(db, commit=commit)
+        _seed_platform_settings(db, commit=commit)
+        if commit:
+            db.commit()
         return
 
     free = Plan(
@@ -1120,16 +1127,17 @@ def _ensure_platform_seed(db: Session, *, create_default_admin: bool = False) ->
                 )
             )
 
-    db.commit()
-    _seed_platform_settings(db)
-    db.commit()
+    if commit:
+        db.commit()
+    _seed_platform_settings(db, commit=commit)
+    if commit:
+        db.commit()
 
 
-def _create_install_admin_user(admin_config: dict[str, Any], db: Session) -> User:
-    normalized = validate_install_admin_config(admin_config)
-    email = normalized["email"]
-    name = normalized["name"]
-    password = normalized["password"]
+def _create_install_admin_user(normalized_admin: dict[str, str], db: Session) -> User:
+    email = normalized_admin["email"]
+    name = normalized_admin["name"]
+    password = normalized_admin["password"]
     existing = db.query(User).filter(User.email == email).first()
     if existing:
         raise HTTPException(409, "管理员邮箱已存在")
@@ -1159,7 +1167,7 @@ def _create_install_admin_user(admin_config: dict[str, Any], db: Session) -> Use
     return user
 
 
-def _ensure_plan_feature_seed(db: Session) -> None:
+def _ensure_plan_feature_seed(db: Session, *, commit: bool = True) -> None:
     default_limits = {
         "free": {
             "ai.text.advanced_calls.monthly_limit": 20,
@@ -1193,11 +1201,11 @@ def _ensure_plan_feature_seed(db: Session) -> None:
                     extra_config={"carry_over_enabled": False},
                 ))
                 changed = True
-    if changed:
+    if changed and commit:
         db.commit()
 
 
-def _seed_platform_settings(db: Session) -> None:
+def _seed_platform_settings(db: Session, *, commit: bool = True) -> None:
     defaults = {
         "platform.site_name": "StoryCanvas",
         "platform.site_slogan": "AI 小说漫画创作平台",
@@ -1258,7 +1266,7 @@ def _seed_platform_settings(db: Session) -> None:
             continue
         db.add(PlatformSetting(setting_key=key, value_json={"value": value}))
 
-    _seed_system_prompts(db)
+    _seed_system_prompts(db, commit=commit)
 
 
 # ── 系统提示词种子数据 ──────────────────────────
@@ -1587,14 +1595,15 @@ _SYSTEM_PROMPT_SEEDS: dict[str, str] = {
 }
 
 
-def _seed_system_prompts(db: Session) -> None:
+def _seed_system_prompts(db: Session, *, commit: bool = True) -> None:
     """首次启动时写入系统提示词种子数据。"""
     for key, value in _SYSTEM_PROMPT_SEEDS.items():
         setting = db.query(PlatformSetting).filter(PlatformSetting.setting_key == key).first()
         if setting:
             continue
         db.add(PlatformSetting(setting_key=key, value_json={"value": value}))
-    db.commit()
+    if commit:
+        db.commit()
 
 
 def _require_user(request: Request, db: Session) -> User:
@@ -3830,7 +3839,7 @@ def install_complete(body: dict):
         init_db(bind_engine=install_engine, run_migrations=True, raise_errors=True)
         db = InstallSession()
         try:
-            _ensure_platform_seed(db)
+            _ensure_platform_seed(db, commit=False)
             admin_user = _create_install_admin_user(admin_config, db)
             admin_user_payload = {"id": admin_user.id, "email": admin_user.email, "name": admin_user.name}
             db.commit()
