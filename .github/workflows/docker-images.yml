@@ -34,9 +34,10 @@ jobs:
           pip install -r backend/requirements.txt pytest
 
       - name: Backend syntax and tests
+        working-directory: backend
         run: |
-          python -m py_compile backend/database.py backend/main.py backend/services/install.py
-          pytest backend/tests -q
+          python -m py_compile database.py main.py services/install.py
+          pytest tests -q
 
       - name: Set up Node
         uses: actions/setup-node@v4
