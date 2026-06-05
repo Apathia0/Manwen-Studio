@@ -144,8 +144,8 @@ from services.image2 import edit_existing_image, generate_cover_image, generate_
 from services.scene_safety import sanitize_scene_list
 from services import deepseek as deepseek_service
 from services import image2 as image_service
-from services import alipay_f2f
 from services import license_checker
+from services.payment import init_gateways, get_gateway, get_gateway_by_provider, get_method_options
 from routers.video import router as video_router
 
 load_dotenv()
@@ -284,6 +284,10 @@ async def lifespan(app: FastAPI):
                 s.description = "百合女仆与公主的奇幻冒险"
         db.commit()
         SYSTEM_READY = True
+        try:
+            init_gateways()
+        except Exception as exc:
+            logger.warning("Payment gateway initialization failed: %s", exc)
     except Exception as exc:
         SYSTEM_READY = False
         logger.warning("Startup database maintenance skipped: %s", exc)
@@ -584,10 +588,10 @@ def _platform_settings_snapshot(db: Session) -> dict:
             "deepseek_base_url": _get_platform_setting("api.deepseek.base_url", db, deepseek_service.DEEPSEEK_BASE_URL),
             "deepseek_model": _get_platform_setting("api.deepseek.model", db, deepseek_service.DEEPSEEK_MODEL),
             "deepseek_api_key": _get_platform_setting("api.deepseek.api_key", db, ""),
-            "image_base_url": _get_platform_setting("api.image.base_url", db, "https://api.xbyjs.top/v1"),
+            "image_base_url": _get_platform_setting("api.image.base_url", db, "https://newapi.aifusion6.cn/v1"),
             "image_model": _get_platform_setting("api.image.model", db, "default"),
             "image_api_key": _get_platform_setting("api.image.api_key", db, ""),
-            "video_base_url": _get_platform_setting("api.video.base_url", db, "https://api.xbyjs.top/v1"),
+            "video_base_url": _get_platform_setting("api.video.base_url", db, "https://newapi.aifusion6.cn/v1"),
             "video_model": _get_platform_setting("api.video.model", db, "veo3.1-fast"),
             "video_api_key": _get_platform_setting("api.video.api_key", db, ""),
             "video_provider": _get_platform_setting("api.video.provider", db, ""),
@@ -618,12 +622,10 @@ def _platform_settings_snapshot(db: Session) -> dict:
         },
         "payment": {
             "enabled": bool(_get_platform_setting("payment.enabled", db, True)),
-            "mode": str(_get_platform_setting("payment.mode", db, "mock")),
             "default_method": str(_get_platform_setting("payment.default_method", db, "mock_qr")),
             "order_expire_minutes": int(_get_platform_setting("payment.order_expire_minutes", db, 30) or 30),
             "auto_activate_free_plan": bool(_get_platform_setting("payment.auto_activate_free_plan", db, True)),
-            "instructions": str(_get_platform_setting("payment.instructions", db, "测试环境可使用模拟支付；正式上线时请切换到真实支付网关。") or ""),
-            "mock_enabled": bool(_get_platform_setting("payment.mock_enabled", db, True)),
+            "instructions": str(_get_platform_setting("payment.instructions", db, "") or ""),
             "wechat_enabled": bool(_get_platform_setting("payment.wechat_enabled", db, False)),
             "wechat_app_id": str(_get_platform_setting("payment.wechat_app_id", db, "") or ""),
             "wechat_mch_id": str(_get_platform_setting("payment.wechat_mch_id", db, "") or ""),
@@ -636,6 +638,13 @@ def _platform_settings_snapshot(db: Session) -> dict:
             "alipay_app_private_key": str(_get_platform_setting("payment.alipay_app_private_key", db, "") or ""),
             "alipay_public_key": str(_get_platform_setting("payment.alipay_public_key", db, "") or ""),
             "alipay_notify_url": str(_get_platform_setting("payment.alipay_notify_url", db, "") or ""),
+            "epay_enabled": bool(_get_platform_setting("payment.epay_enabled", db, False)),
+            "epay_gateway": str(_get_platform_setting("payment.epay_gateway", db, "") or ""),
+            "epay_pid": str(_get_platform_setting("payment.epay_pid", db, "") or ""),
+            "epay_key": str(_get_platform_setting("payment.epay_key", db, "") or ""),
+            "epay_type": str(_get_platform_setting("payment.epay_type", db, "alipay") or "alipay"),
+            "epay_notify_url": str(_get_platform_setting("payment.epay_notify_url", db, "") or ""),
+            "epay_return_url": str(_get_platform_setting("payment.epay_return_url", db, "") or ""),
         },
     }
 
@@ -678,7 +687,7 @@ def _public_platform_settings_snapshot(db: Session) -> dict:
             "deepseek_model": api.get("deepseek_model") or "",
             "image_base_url": api.get("image_base_url") or "",
             "image_model": api.get("image_model") or "",
-            "video_base_url": api.get("video_base_url") or "https://api.xbyjs.top/v1",
+            "video_base_url": api.get("video_base_url") or "https://newapi.aifusion6.cn/v1",
             "video_model": api.get("video_model") or "veo3.1-fast",
             "video_provider": api.get("video_provider") or "",
         },
@@ -697,19 +706,13 @@ def _public_platform_settings_snapshot(db: Session) -> dict:
 
 def _payment_method_options(db: Session) -> list[dict]:
     payment = _payment_settings_snapshot(db)
-    methods = [
-        {"key": "mock_qr", "label": "模拟支付", "enabled": bool(payment.get("mock_enabled")), "provider": "mock"},
-        {"key": "wechat_qr", "label": "微信扫码", "enabled": bool(payment.get("wechat_enabled")), "provider": "wechat"},
-        {"key": "alipay_qr", "label": "支付宝扫码", "enabled": bool(payment.get("alipay_enabled")), "provider": "alipay"},
-    ]
-    return [item for item in methods if item["enabled"]]
+    return get_method_options(payment)
 
 
 def _public_payment_config(db: Session) -> dict:
     payment = _payment_settings_snapshot(db)
     return {
         "enabled": bool(payment.get("enabled")),
-        "mode": str(payment.get("mode") or "mock"),
         "default_method": str(payment.get("default_method") or "mock_qr"),
         "order_expire_minutes": int(payment.get("order_expire_minutes") or 30),
         "instructions": str(payment.get("instructions") or ""),
@@ -1216,10 +1219,10 @@ def _seed_platform_settings(db: Session, *, commit: bool = True) -> None:
         "api.deepseek.base_url": deepseek_service.DEEPSEEK_BASE_URL,
         "api.deepseek.model": deepseek_service.DEEPSEEK_MODEL,
         "api.deepseek.api_key": "",
-        "api.image.base_url": "https://api.xbyjs.top/v1",
+        "api.image.base_url": "https://newapi.aifusion6.cn/v1",
         "api.image.model": "",
         "api.image.api_key": "",
-        "api.video.base_url": "https://api.xbyjs.top/v1",
+        "api.video.base_url": "https://newapi.aifusion6.cn/v1",
         "api.video.model": "veo3.1-fast",
         "api.video.api_key": "",
         "api.video.provider": "",
@@ -1242,12 +1245,10 @@ def _seed_platform_settings(db: Session, *, commit: bool = True) -> None:
         "email.smtp_use_tls": True,
         "email.smtp_use_ssl": False,
         "payment.enabled": True,
-        "payment.mode": "mock",
         "payment.default_method": "mock_qr",
         "payment.order_expire_minutes": 30,
         "payment.auto_activate_free_plan": True,
-        "payment.instructions": "测试环境可使用模拟支付；正式上线时请切换到真实支付网关。",
-        "payment.mock_enabled": True,
+        "payment.instructions": "",
         "payment.wechat_enabled": False,
         "payment.wechat_app_id": "",
         "payment.wechat_mch_id": "",
@@ -1260,6 +1261,13 @@ def _seed_platform_settings(db: Session, *, commit: bool = True) -> None:
         "payment.alipay_app_private_key": "",
         "payment.alipay_public_key": "",
         "payment.alipay_notify_url": "",
+        "payment.epay_enabled": False,
+        "payment.epay_gateway": "",
+        "payment.epay_pid": "",
+        "payment.epay_key": "",
+        "payment.epay_type": "alipay",
+        "payment.epay_notify_url": "",
+        "payment.epay_return_url": "",
     }
     for key, value in defaults.items():
         if db.query(PlatformSetting).filter(PlatformSetting.setting_key == key).first():
@@ -2349,22 +2357,27 @@ def _sync_order_status(order: BillingOrder, db: Session) -> BillingOrder:
     return order
 
 
-def _order_checkout_payload(order: BillingOrder, plan: Plan, db: Session) -> dict:
-    payment = _payment_settings_snapshot(db)
-    expire_minutes = int(payment.get("order_expire_minutes") or 30)
-    expires_at = order.expired_at or (_utcnow() + datetime.timedelta(minutes=expire_minutes))
+def _order_checkout_payload(order: BillingOrder, plan: Plan, db: Session, payment_override: dict | None = None) -> dict:
+    payment = payment_override if payment_override is not None else _payment_settings_snapshot(db)
     method = order.payment_method or str(payment.get("default_method") or "mock_qr")
     provider = order.payment_provider or "mock"
-    extra = order.extra_json or {}
-    qr_code_text = f"STORYCANVAS:{method}:{order.order_no}:{order.amount}"
-    payment_url = f"/mock-pay/{order.order_no}" if method == "mock_qr" else ""
-    can_mock_confirm = method == "mock_qr"
-    if method == "alipay_qr":
-        qr_code_text = str(extra.get("alipay_qr_code") or "")
-        payment_url = str(extra.get("alipay_payment_url") or qr_code_text or "")
-        can_mock_confirm = False
+
+    gateway = get_gateway(method)
+    if gateway is not None:
+        try:
+            checkout = gateway.create_checkout(order, plan, payment)
+            if checkout.extra:
+                merged = dict(order.extra_json or {})
+                merged.update(checkout.extra)
+                order.extra_json = merged
+            return gateway.build_checkout_response(order, plan, payment, checkout)
+        except RuntimeError:
+            # create_checkout 可能失败（如订单已在网关侧存在），降级为静默返回
+            pass
+
+    expire_minutes = int(payment.get("order_expire_minutes") or 30)
+    expires_at = order.expired_at or (_utcnow() + datetime.timedelta(minutes=expire_minutes))
     return {
-        "mode": str(payment.get("mode") or "mock"),
         "method": method,
         "provider": provider,
         "instructions": str(payment.get("instructions") or ""),
@@ -2373,130 +2386,10 @@ def _order_checkout_payload(order: BillingOrder, plan: Plan, db: Session) -> dic
         "plan_name": plan.name,
         "billing_cycle": order.billing_cycle or "monthly",
         "expires_at": expires_at,
-        "qr_code_text": qr_code_text,
-        "payment_url": payment_url,
-        "can_mock_confirm": can_mock_confirm,
-    }
-
-
-def _alipay_config(payment: dict) -> dict:
-    config = {
-        "app_id": str(payment.get("alipay_app_id") or "").strip(),
-        "seller_id": str(payment.get("alipay_pid") or "").strip(),
-        "gateway": str(payment.get("alipay_gateway") or "https://openapi.alipay.com/gateway.do").strip(),
-        "sign_type": str(payment.get("alipay_sign_type") or "RSA2").strip() or "RSA2",
-        "app_private_key": str(payment.get("alipay_app_private_key") or "").strip(),
-        "alipay_public_key": str(payment.get("alipay_public_key") or "").strip(),
-        "notify_url": str(payment.get("alipay_notify_url") or "").strip(),
-    }
-    return config
-
-
-def _validate_alipay_config(payment: dict) -> dict:
-    config = _alipay_config(payment)
-    required = {
-        "app_id": "payment.alipay_app_id",
-        "gateway": "payment.alipay_gateway",
-        "app_private_key": "payment.alipay_app_private_key",
-        "alipay_public_key": "payment.alipay_public_key",
-        "notify_url": "payment.alipay_notify_url",
-    }
-    missing = [setting_key for field, setting_key in required.items() if not config.get(field)]
-    if missing:
-        raise HTTPException(400, f"Alipay configuration incomplete: {', '.join(missing)}")
-    if config["sign_type"].upper() != "RSA2":
-        raise HTTPException(400, "Only RSA2 is supported for Alipay face-to-face payment")
-    return config
-
-
-def _alipay_precreate(order: BillingOrder, plan: Plan, payment: dict) -> dict:
-    config = _validate_alipay_config(payment)
-    expire_minutes = max(1, int(payment.get("order_expire_minutes") or 30))
-    timeout_express = f"{expire_minutes}m"
-    expires_at = order.expired_at or (datetime.datetime.utcnow() + datetime.timedelta(minutes=expire_minutes))
-    subject = f"{plan.name} {('年付' if (order.billing_cycle or 'monthly') == 'yearly' else '月付')}"
-    body = plan.description or f"StoryCanvas subscription for {plan.name}"
-    total_amount = f"{float(order.amount or 0):.2f}"
-    result = alipay_f2f.precreate(
-        gateway=config["gateway"],
-        app_id=config["app_id"],
-        private_key=config["app_private_key"],
-        notify_url=config["notify_url"],
-        out_trade_no=order.order_no,
-        total_amount=total_amount,
-        subject=subject[:256],
-        seller_id=config["seller_id"] or None,
-        timeout_express=timeout_express,
-        body=body[:128],
-        store_id="StoryCanvas",
-    )
-    qr_code = result["result"].get("qr_code") or ""
-    payment_url = qr_code
-    extra = dict(order.extra_json or {})
-    extra.update({
-        "payment_method": order.payment_method,
-        "billing_cycle": order.billing_cycle,
-        "alipay_qr_code": qr_code,
-        "alipay_payment_url": payment_url,
-        "alipay_precreate_response": result["result"],
-    })
-    order.extra_json = extra
-    return {
-        "mode": str(payment.get("mode") or "mock"),
-        "provider": "alipay",
-        "method": "alipay_qr",
-        "instructions": str(payment.get("instructions") or ""),
-        "amount": _money_to_number(order.amount),
-        "currency": order.currency,
-        "plan_name": plan.name,
-        "billing_cycle": order.billing_cycle or "monthly",
-        "expires_at": expires_at,
-        "qr_code_text": qr_code,
-        "payment_url": payment_url,
+        "qr_code_text": "",
+        "payment_url": "",
         "can_mock_confirm": False,
-        "provider_response": result["result"],
     }
-
-
-def _sync_alipay_order_status(order: BillingOrder, db: Session) -> BillingOrder:
-    if order.payment_method != "alipay_qr" or order.status != "pending":
-        return order
-
-    payment = _payment_settings_snapshot(db)
-    config = _validate_alipay_config(payment)
-    try:
-        result = alipay_f2f.trade_query(
-            gateway=config["gateway"],
-            app_id=config["app_id"],
-            private_key=config["app_private_key"],
-            out_trade_no=order.order_no,
-            seller_id=config["seller_id"] or None,
-        )
-    except (alipay_f2f.AlipayApiError, alipay_f2f.AlipayConfigError, httpx.HTTPError):
-        return order
-
-    query_result = result.get("result", {})
-    trade_status = str(query_result.get("trade_status") or "").strip()
-    total_amount = str(query_result.get("total_amount") or "").strip()
-    trade_no = str(query_result.get("trade_no") or "").strip()
-
-    extra = dict(order.extra_json or {})
-    extra.update({
-        "alipay_trade_query_result": query_result,
-        "alipay_trade_no": trade_no or str(extra.get("alipay_trade_no") or ""),
-    })
-    order.extra_json = extra
-
-    if trade_status in {"TRADE_SUCCESS", "TRADE_FINISHED"}:
-        expected_amount = f"{float(order.amount or 0):.2f}"
-        if total_amount and total_amount == expected_amount:
-            _mark_order_paid(order, db, note=f"Alipay trade query confirmed trade {trade_no or order.order_no}")
-    elif trade_status == "TRADE_CLOSED":
-        _mark_order_cancelled(order, db, note=f"Alipay trade query closed trade {trade_no or order.order_no}")
-
-    db.commit()
-    db.refresh(order)
-    return order
 
 
 def _order_for_user(order_no: str, user_id: int, db: Session) -> BillingOrder:
@@ -4113,18 +4006,42 @@ def my_order_sync(order_no: str, request: Request, db: Session = Depends(get_db)
     _ensure_platform_seed(db)
     user = _require_user(request, db)
     order = _order_for_user(order_no, user.id, db)
-    if order.payment_method == "alipay_qr" and order.status == "pending":
-        order = _sync_alipay_order_status(order, db)
+    if order.status == "pending":
+        gateway = get_gateway(order.payment_method or "")
+        if gateway is not None:
+            payment = _payment_settings_snapshot(db)
+            sync_result = gateway.sync_status(order, payment)
+            if sync_result and sync_result.status_changed:
+                if sync_result.new_status == "paid":
+                    _mark_order_paid(order, db, note=f"{gateway.provider} sync confirmed trade {sync_result.trade_no}")
+                elif sync_result.new_status == "cancelled":
+                    _mark_order_cancelled(order, db, note=f"{gateway.provider} sync closed trade {sync_result.trade_no}")
+                db.commit()
+                db.refresh(order)
     plan = db.get(Plan, order.plan_id)
     current_plan = _active_plan_for_user(user.id, db)
     sub = _subscription_for_user(user.id, db)
+
+    checkout_payload = None
+    if plan:
+        payment_with_ip = dict(payment)
+        payment_with_ip["client_ip"] = request.client.host if request.client else ""
+        checkout_payload = _order_checkout_payload(order, plan, db, payment_override=payment_with_ip)
+
     return {
         "ok": True,
         "status": order.status,
         "order": _serialize_order_with_db(order, db),
         "subscription": _serialize_subscription_summary(sub, current_plan),
-        "checkout": _order_checkout_payload(order, plan, db) if plan else None,
+        "checkout": checkout_payload,
     }
+
+
+@app.get("/api/billing/payment-config")
+def billing_payment_config(db: Session = Depends(get_db)):
+    """返回公开支付配置，含可用支付方式选项"""
+    _ensure_platform_seed(db)
+    return _public_payment_config(db)
 
 
 @app.post("/api/billing/subscribe")
@@ -4144,6 +4061,9 @@ def subscribe_plan(body: dict, request: Request, db: Session = Depends(get_db)):
         raise HTTPException(404, "Plan not found")
     method_options = _payment_method_options(db)
     selected_method = next((item for item in method_options if item["key"] == payment_method), None)
+    if not selected_method:
+        if payment_method == "epay_qr":
+            selected_method = next((item for item in method_options if item["key"].startswith("epay_")), None)
     if not selected_method:
         raise HTTPException(400, "Payment method unavailable")
 
@@ -4177,15 +4097,20 @@ def subscribe_plan(body: dict, request: Request, db: Session = Depends(get_db)):
     checkout_override = None
     if _coerce_money(amount) <= Decimal("0.00") and bool(payment.get("auto_activate_free_plan", True)):
         _mark_order_paid(order, db, operator_user_id=user.id, note=f"Auto-activated free plan {plan.name}")
-    elif payment_method == "alipay_qr":
-        try:
-            checkout_override = _alipay_precreate(order, plan, payment)
-        except alipay_f2f.AlipayApiError as exc:
-            raise HTTPException(502, f"Alipay precreate failed: {exc}") from exc
-        except alipay_f2f.AlipayConfigError as exc:
-            raise HTTPException(400, f"Alipay config invalid: {exc}") from exc
-        except httpx.HTTPError as exc:
-            raise HTTPException(502, f"Alipay gateway request failed: {exc}") from exc
+    else:
+        gateway = get_gateway(payment_method)
+        if gateway is not None:
+            try:
+                payment_with_ip = dict(payment)
+                payment_with_ip["client_ip"] = request.client.host if request.client else ""
+                checkout_data = gateway.create_checkout(order, plan, payment_with_ip)
+                if checkout_data.extra:
+                    merged = dict(order.extra_json or {})
+                    merged.update(checkout_data.extra)
+                    order.extra_json = merged
+                checkout_override = gateway.build_checkout_response(order, plan, payment, checkout_data)
+            except RuntimeError as exc:
+                raise HTTPException(502, f"{gateway.label} checkout failed: {exc}") from exc
     _write_audit_log(user, "subscribe_plan", "billing_order", order.order_no, f"Created checkout for {plan.name}", db, {
         "plan_id": plan.id,
         "plan_name": plan.name,
@@ -4261,20 +4186,14 @@ async def alipay_notify(request: Request, db: Session = Depends(get_db)):
     _ensure_platform_seed(db)
     raw_body = (await request.body()).decode("utf-8", errors="ignore")
     payload = {key: value for key, value in parse_qsl(raw_body, keep_blank_values=True)}
-    signature = payload.get("sign", "")
-    if not signature:
-        return Response("failure", media_type="text/plain", status_code=400)
-    params = {key: value for key, value in payload.items() if key not in {"sign", "sign_type"}}
-    sign_content = "&".join(
-        f"{key}={params[key]}"
-        for key in sorted(params.keys())
-        if params[key] is not None and params[key] != ""
-    )
+
+    gateway = get_gateway("alipay_qr")
+    if gateway is None:
+        return Response("failure", media_type="text/plain", status_code=500)
+
     payment = _payment_settings_snapshot(db)
-    config = _validate_alipay_config(payment)
-    try:
-        alipay_f2f.rsa2_verify(sign_content, signature, config["alipay_public_key"])
-    except Exception:
+    result = gateway.verify_notify(payload, payment)
+    if not result.verified:
         return Response("failure", media_type="text/plain", status_code=400)
 
     order_no = payload.get("out_trade_no", "").strip()
@@ -4852,10 +4771,10 @@ def admin_save_platform_settings(body: dict, request: Request, db: Session = Dep
         "api.deepseek.base_url": api.get("deepseek_base_url", deepseek_service.DEEPSEEK_BASE_URL),
         "api.deepseek.model": api.get("deepseek_model", deepseek_service.DEEPSEEK_MODEL),
         "api.deepseek.api_key": api.get("deepseek_api_key", ""),
-        "api.image.base_url": api.get("image_base_url", "https://api.xbyjs.top/v1"),
+        "api.image.base_url": api.get("image_base_url", "https://newapi.aifusion6.cn/v1"),
         "api.image.model": api.get("image_model", ""),
         "api.image.api_key": api.get("image_api_key", ""),
-        "api.video.base_url": api.get("video_base_url", "https://api.xbyjs.top/v1"),
+        "api.video.base_url": api.get("video_base_url", "https://newapi.aifusion6.cn/v1"),
         "api.video.model": api.get("video_model", "veo3.1-fast"),
         "api.video.api_key": api.get("video_api_key", ""),
         "api.video.provider": api.get("video_provider", ""),
@@ -4875,12 +4794,10 @@ def admin_save_platform_settings(body: dict, request: Request, db: Session = Dep
         "email.smtp_use_tls": bool(email.get("smtp_use_tls", True)),
         "email.smtp_use_ssl": bool(email.get("smtp_use_ssl", False)),
         "payment.enabled": bool(payment.get("enabled", True)),
-        "payment.mode": str(payment.get("mode", "mock") or "mock"),
         "payment.default_method": str(payment.get("default_method", "mock_qr") or "mock_qr"),
         "payment.order_expire_minutes": int(payment.get("order_expire_minutes", 30) or 30),
         "payment.auto_activate_free_plan": bool(payment.get("auto_activate_free_plan", True)),
         "payment.instructions": str(payment.get("instructions", "") or ""),
-        "payment.mock_enabled": bool(payment.get("mock_enabled", True)),
         "payment.wechat_enabled": bool(payment.get("wechat_enabled", False)),
         "payment.wechat_app_id": str(payment.get("wechat_app_id", "") or ""),
         "payment.wechat_mch_id": str(payment.get("wechat_mch_id", "") or ""),
@@ -4893,6 +4810,13 @@ def admin_save_platform_settings(body: dict, request: Request, db: Session = Dep
         "payment.alipay_app_private_key": str(payment.get("alipay_app_private_key", "") or ""),
         "payment.alipay_public_key": str(payment.get("alipay_public_key", "") or ""),
         "payment.alipay_notify_url": str(payment.get("alipay_notify_url", "") or ""),
+        "payment.epay_enabled": bool(payment.get("epay_enabled", False)),
+        "payment.epay_gateway": str(payment.get("epay_gateway", "") or ""),
+        "payment.epay_pid": str(payment.get("epay_pid", "") or ""),
+        "payment.epay_key": str(payment.get("epay_key", "") or ""),
+        "payment.epay_type": str(payment.get("epay_type", "alipay") or "alipay"),
+        "payment.epay_notify_url": str(payment.get("epay_notify_url", "") or ""),
+        "payment.epay_return_url": str(payment.get("epay_return_url", "") or ""),
         "platform.announcement.enabled": bool(announcement.get("enabled", False)),
         "platform.announcement.title": announcement.get("title", ""),
         "platform.announcement.content": announcement.get("content", ""),
