@@ -747,6 +747,19 @@ export interface AdminSystemUpdateStatus {
   log_tail: string[];
 }
 
+export interface AdminSystemUpdateCheck {
+  configured: boolean;
+  current_version: string;
+  latest_version?: string | null;
+  update_available: boolean;
+  release_notes: string;
+  published_at?: string | null;
+  min_supported_version?: string | null;
+  channel?: string | null;
+  manifest_url?: string;
+  message: string;
+}
+
 export interface AdminUserItem {
   id: number;
   name: string;
@@ -1243,6 +1256,12 @@ export async function getAdminAuditLogs(params?: {
 export async function getAdminSystemUpdateStatus(): Promise<AdminSystemUpdateStatus> {
   const res = await fetch(`${BASE}/api/admin/system/update/status`, { headers: apiHeaders() });
   if (!res.ok) throw new Error(await readErrorMessage(res, '获取更新状态失败'));
+  return res.json();
+}
+
+export async function checkAdminSystemUpdate(): Promise<AdminSystemUpdateCheck> {
+  const res = await fetch(`${BASE}/api/admin/system/update/check`, { headers: apiHeaders() });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '检测系统更新失败'));
   return res.json();
 }
 

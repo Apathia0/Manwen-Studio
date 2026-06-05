@@ -13,8 +13,7 @@ fallback for emergency manual operations.
 - `docker-compose.yml`: app, web, PostgreSQL, Redis, and persistent volumes.
 - `deploy/docker/update-lorevista.sh`: host-level manual updater with locking,
   migrations, health checks, and rollback.
-- `deploy/docker/RELEASE_AND_UPDATE.md`: Chinese release and user-side update
-  operating guide.
+- `deploy/docker/RELEASE_AND_UPDATE.md`: Docker 发布、首次安装与用户侧更新操作说明。
 - `deploy/docker/systemd/*`: optional service/timer for unattended update checks.
 
 ## Server Setup
@@ -35,6 +34,21 @@ Do not commit real secrets.
 Set a long random `UPDATER_TOKEN` in `/opt/lorevista/.env`. Compose passes the
 same token to both `backend` and `updater`. The backend uses it only to call the
 internal updater API after admin authentication.
+
+Set `UPDATE_MANIFEST_URL` to the vendor-published update manifest. The admin
+`Check for updates` button reads this manifest and does not require operators to
+type a Docker tag. If the manifest endpoint is private, also set a read-only
+`UPDATE_MANIFEST_TOKEN`.
+
+Token locations:
+
+- Registry pull token: do not put it in `.env`; run `docker login` on the host.
+  Docker stores it in `DOCKER_CONFIG_DIR`, usually `/root/.docker/config.json`,
+  and the updater mounts that directory read-only.
+- `UPDATER_TOKEN`: put it in `/opt/lorevista/.env`; backend and updater both
+  receive it from Compose.
+- `UPDATE_MANIFEST_TOKEN`: put it in `/opt/lorevista/.env` only if the update
+  manifest endpoint is private.
 
 Login with a read-only registry token:
 
@@ -64,16 +78,31 @@ socket into the business `backend` service.
 User-side updates are manual by default and are triggered from the application:
 
 1. Login as an administrator.
-2. Open the admin navigation item `系统更新`.
-3. Leave the version empty to use `/opt/lorevista/.env` `APP_VERSION`, or enter
-   a Docker tag such as `v1.2.3` or `sha-abcdef123456`.
-4. Confirm the update.
+2. Open the admin navigation item `System Update`.
+3. Click `Check for updates`.
+4. If a newer version is available, click `Update to latest`.
 
 The backend verifies admin permission and forwards the request to the updater
-sidecar. The updater then updates `APP_VERSION` when a target tag is supplied,
-pulls images, runs migrations, restarts backend first, checks `/api/health`, then
-updates the web container. Logs are visible in the admin page with basic secret
-redaction.
+sidecar. The updater reads `UPDATE_MANIFEST_URL` to find the latest stable tag,
+updates `APP_VERSION` when that tag is selected, pulls images, runs migrations,
+restarts backend first, checks `/api/health`, then updates the web container.
+Logs are visible in the admin page with basic secret redaction.
+
+Manual version input remains available only as an advanced fallback for rollback,
+gray release, or support-directed updates.
+
+For each official release, publish images first, verify them on a test server,
+then update the manifest, for example:
+
+```json
+{
+  "channel": "stable",
+  "latest_version": "v1.2.3",
+  "min_supported_version": "v1.0.0",
+  "release_notes": "Bug fixes and migration improvements.",
+  "published_at": "2026-06-05T12:00:00Z"
+}
+```
 
 ## CLI Fallback
 
@@ -91,6 +120,7 @@ For controlled releases, set a fixed version in `/opt/lorevista/.env`:
 
 ```env
 APP_VERSION=v1.0.0
+UPDATE_MANIFEST_URL=https://example.com/lorevista/update-manifest.json
 ```
 
 Then trigger the update in the admin panel or run the fallback script. Avoid

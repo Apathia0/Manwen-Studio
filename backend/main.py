@@ -2136,6 +2136,24 @@ def _sanitize_update_status(payload: dict[str, Any] | None) -> dict[str, Any]:
     }
 
 
+def _sanitize_update_check(payload: dict[str, Any] | None) -> dict[str, Any]:
+    payload = payload if isinstance(payload, dict) else {}
+    latest_version = str(payload.get("latest_version") or "").strip() or None
+    current_version = str(payload.get("current_version") or os.getenv("APP_VERSION", "dev")).strip()
+    return {
+        "configured": bool(payload.get("configured", False)),
+        "current_version": current_version or "dev",
+        "latest_version": latest_version,
+        "update_available": bool(payload.get("update_available", False) and latest_version),
+        "release_notes": str(payload.get("release_notes") or ""),
+        "published_at": payload.get("published_at") or None,
+        "min_supported_version": payload.get("min_supported_version") or None,
+        "channel": payload.get("channel") or None,
+        "manifest_url": _redact_update_line(payload.get("manifest_url") or ""),
+        "message": str(payload.get("message") or ""),
+    }
+
+
 async def _call_updater(method: str, path: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
     if not UPDATER_URL:
         raise HTTPException(503, "Updater service is not configured")
@@ -4931,6 +4949,12 @@ def public_announcement(db: Session = Depends(get_db)):
 async def admin_system_update_status(request: Request, db: Session = Depends(get_db)):
     _require_admin(request, db)
     return _sanitize_update_status(await _call_updater("GET", "/status"))
+
+
+@app.get("/api/admin/system/update/check")
+async def admin_system_update_check(request: Request, db: Session = Depends(get_db)):
+    _require_admin(request, db)
+    return _sanitize_update_check(await _call_updater("GET", "/check"))
 
 
 @app.post("/api/admin/system/update")

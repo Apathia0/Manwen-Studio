@@ -4,6 +4,7 @@ import {
   adminGrantUserQuota,
   getAdminStoryChapters,
   adminUpdateUserSubscription,
+  checkAdminSystemUpdate,
   createAdminPlan,
   createAdminUser,
   deleteAdminPlan,
@@ -36,6 +37,7 @@ import {
   type AdminReviewChapter,
   type AdminReviewStory,
   type AdminSystemPrompt,
+  type AdminSystemUpdateCheck,
   type AdminSystemUpdateStatus,
   type AdminUserItem,
   type PlatformAnnouncement,
@@ -1568,6 +1570,7 @@ function updateStatusClass(status: string) {
 
 export function AdminSystemUpdatePage({ onError }: { onError: (message: string) => void }) {
   const [status, setStatus] = useState<AdminSystemUpdateStatus | null>(null);
+  const [updateCheck, setUpdateCheck] = useState<AdminSystemUpdateCheck | null>(null);
   const [targetVersion, setTargetVersion] = useState('');
   const { busy, run } = useBusyAction(onError);
   const running = status?.running || status?.status === 'queued' || status?.status === 'running';
@@ -1589,8 +1592,22 @@ export function AdminSystemUpdatePage({ onError }: { onError: (message: string) 
     return () => window.clearInterval(timer);
   }, [running]);
 
-  async function handleStart() {
-    const version = targetVersion.trim();
+  async function handleCheckUpdate() {
+    void run(async () => {
+      const data = await checkAdminSystemUpdate();
+      setUpdateCheck(data);
+      if (!data.configured) {
+        toast.error(data.message || '服务器尚未配置更新检测地址');
+      } else if (data.update_available) {
+        toast.success(`检测到新版本 ${data.latest_version}`);
+      } else {
+        toast.success('当前已是最新版本');
+      }
+    });
+  }
+
+  async function handleStart(target?: string) {
+    const version = (target ?? targetVersion).trim();
     const confirmed = await confirm({
       title: '确认执行系统更新',
       message: version
@@ -1609,6 +1626,7 @@ export function AdminSystemUpdatePage({ onError }: { onError: (message: string) 
   }
 
   const logTail = status?.log_tail || [];
+  const latestVersion = updateCheck?.latest_version?.trim() || '';
 
   return (
     <div className="space-y-5">
@@ -1650,21 +1668,72 @@ export function AdminSystemUpdatePage({ onError }: { onError: (message: string) 
             {status?.message ? <p className="mt-4 rounded-2xl bg-white p-3 text-sm text-slate-600">{status.message}</p> : null}
           </div>
 
-          <div className="rounded-2xl border border-[#e5edf8] bg-white p-4">
-            <label className="text-sm font-semibold text-slate-900">指定镜像版本</label>
-            <TextInput
-              className="mt-2"
-              value={targetVersion}
-              onChange={(event) => setTargetVersion(event.target.value)}
-              placeholder="可选：v1.2.3 或 sha-abcdef123456"
-              disabled={running}
-            />
-            <p className="mt-2 text-xs leading-relaxed text-slate-500">
-              留空表示使用服务器部署配置中的 APP_VERSION。填写版本时，updater 会先更新服务器 .env 中的 APP_VERSION，再执行拉取、迁移、重启和健康检查。
-            </p>
-            <PrimaryButton className="mt-4 w-full" disabled={busy || running} onClick={() => void handleStart()}>
-              {running ? '更新执行中' : '开始更新'}
-            </PrimaryButton>
+          <div className="space-y-4">
+            <div className="rounded-2xl border border-[#dbeafe] bg-white p-4">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <h3 className="text-sm font-semibold text-slate-900">检测更新</h3>
+                  <p className="mt-1 text-xs leading-relaxed text-slate-500">
+                    默认从发布清单读取最新稳定版本，管理员无需手动输入版本号。
+                  </p>
+                </div>
+                <SecondaryButton disabled={busy || running} onClick={handleCheckUpdate}>
+                  检测更新
+                </SecondaryButton>
+              </div>
+
+              {updateCheck ? (
+                <div className="mt-4 rounded-2xl bg-[#f8fbff] p-3 text-sm text-slate-700">
+                  <div className="grid gap-2">
+                    <div className="flex justify-between gap-3">
+                      <span className="text-slate-500">当前版本</span>
+                      <span className="font-medium">{updateCheck.current_version || '-'}</span>
+                    </div>
+                    <div className="flex justify-between gap-3">
+                      <span className="text-slate-500">最新版本</span>
+                      <span className="font-medium">{latestVersion || '-'}</span>
+                    </div>
+                    <div className="flex justify-between gap-3">
+                      <span className="text-slate-500">发布渠道</span>
+                      <span className="font-medium">{updateCheck.channel || 'stable'}</span>
+                    </div>
+                    {updateCheck.published_at ? (
+                      <div className="flex justify-between gap-3">
+                        <span className="text-slate-500">发布时间</span>
+                        <span className="font-medium">{formatDateTime(updateCheck.published_at)}</span>
+                      </div>
+                    ) : null}
+                  </div>
+                  {updateCheck.message ? <p className="mt-3 text-xs text-slate-500">{updateCheck.message}</p> : null}
+                  {updateCheck.release_notes ? (
+                    <p className="mt-3 rounded-xl bg-white p-3 text-xs leading-relaxed text-slate-600">{updateCheck.release_notes}</p>
+                  ) : null}
+                  {updateCheck.manifest_url ? <p className="mt-2 break-all text-[11px] text-slate-400">清单：{updateCheck.manifest_url}</p> : null}
+                  {updateCheck.update_available && latestVersion ? (
+                    <PrimaryButton className="mt-4 w-full" disabled={busy || running} onClick={() => void handleStart(latestVersion)}>
+                      更新到最新版 {latestVersion}
+                    </PrimaryButton>
+                  ) : null}
+                </div>
+              ) : null}
+            </div>
+
+            <div className="rounded-2xl border border-[#e5edf8] bg-white p-4">
+              <label className="text-sm font-semibold text-slate-900">高级：指定镜像版本</label>
+              <TextInput
+                className="mt-2"
+                value={targetVersion}
+                onChange={(event) => setTargetVersion(event.target.value)}
+                placeholder="可选：v1.2.3 或 sha-abcdef123456"
+                disabled={running}
+              />
+              <p className="mt-2 text-xs leading-relaxed text-slate-500">
+                通常不需要填写版本号。仅在回滚、灰度或技术支持要求时使用。填写版本时，updater 会先更新服务器 .env 中的 APP_VERSION，再执行拉取、迁移、重启和健康检查。
+              </p>
+              <PrimaryButton className="mt-4 w-full" disabled={busy || running} onClick={() => void handleStart()}>
+                {running ? '更新执行中' : '按指定版本更新'}
+              </PrimaryButton>
+            </div>
           </div>
         </div>
       </SectionCard>

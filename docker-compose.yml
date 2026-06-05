@@ -19,6 +19,7 @@ services:
       APP_VERSION: ${APP_VERSION:-v1.0.0}
       UPDATER_URL: ${UPDATER_URL:-http://updater:8090}
       UPDATER_TOKEN: ${UPDATER_TOKEN:-}
+      UPDATE_MANIFEST_URL: ${UPDATE_MANIFEST_URL:-}
     volumes:
       - ${LOREVISTA_DATA_DIR:-./deploy/docker/data}/manga_outputs:/app/backend/manga_outputs
       - ${LOREVISTA_DATA_DIR:-./deploy/docker/data}/video_outputs:/app/backend/video_outputs
@@ -51,6 +52,8 @@ services:
       ENV_FILE: /opt/lorevista/.env
       COMPOSE_FILE: /opt/lorevista/docker-compose.yml
       UPDATER_TOKEN: ${UPDATER_TOKEN:-}
+      UPDATE_MANIFEST_URL: ${UPDATE_MANIFEST_URL:-}
+      UPDATE_MANIFEST_TOKEN: ${UPDATE_MANIFEST_TOKEN:-}
       UPDATER_STATE_FILE: /opt/lorevista/deploy/docker/update-state.json
       LOG_FILE: /opt/lorevista/deploy/docker/update.log
       LOCK_FILE: /opt/lorevista/deploy/docker/update.lock
