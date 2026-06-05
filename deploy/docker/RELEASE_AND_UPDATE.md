@@ -1,4 +1,4 @@
-# LoreVista Docker 发布、首次安装与更新说明
+﻿# LoreVista Docker 发布、首次安装与更新说明
 
 本文档说明 Docker 发行模式下的三个流程：
 
@@ -16,22 +16,24 @@
 
 ```text
 Registry: ghcr.io
-Image prefix: ghcr.io/<github-owner>/<github-repo>
+Image prefix: ghcr.io/dream619/manwen-studio
 ```
 
-如果 GitHub 仓库是 `your-org/lorevista`，镜像名称为：
+当前项目的镜像名称为：
 
 ```text
-ghcr.io/your-org/lorevista/backend:v1.2.3
-ghcr.io/your-org/lorevista/web:v1.2.3
-ghcr.io/your-org/lorevista/updater:v1.2.3
+ghcr.io/dream619/manwen-studio/backend:v1.0.0
+ghcr.io/dream619/manwen-studio/web:v1.0.0
+ghcr.io/dream619/manwen-studio/updater:v1.0.0
 ```
+
+不要使用 `ghcr.io/dream619/lorevista/...`。GHCR 路径来自 GitHub 仓库名 `dream619/Manwen-Studio`，会被转成小写 `dream619/manwen-studio`。
 
 服务器 `.env` 示例：
 
 ```env
-REGISTRY_IMAGE_PREFIX=ghcr.io/your-org/lorevista
-APP_VERSION=v1.2.3
+REGISTRY_IMAGE_PREFIX=ghcr.io/dream619/manwen-studio
+APP_VERSION=v1.0.0
 ```
 
 权限边界：
@@ -73,17 +75,17 @@ tag 推送后，`.github/workflows/docker-images.yml` 会执行测试、构建�
 发布 `v1.2.3` 时会生成：
 
 ```text
-ghcr.io/<github-owner>/<github-repo>/backend:v1.2.3
-ghcr.io/<github-owner>/<github-repo>/web:v1.2.3
-ghcr.io/<github-owner>/<github-repo>/updater:v1.2.3
+ghcr.io/dream619/manwen-studio/backend:v1.2.3
+ghcr.io/dream619/manwen-studio/web:v1.2.3
+ghcr.io/dream619/manwen-studio/updater:v1.2.3
 ```
 
 同时生成提交追踪标签：
 
 ```text
-ghcr.io/<github-owner>/<github-repo>/backend:sha-<commit>
-ghcr.io/<github-owner>/<github-repo>/web:sha-<commit>
-ghcr.io/<github-owner>/<github-repo>/updater:sha-<commit>
+ghcr.io/dream619/manwen-studio/backend:sha-<commit>
+ghcr.io/dream619/manwen-studio/web:sha-<commit>
+ghcr.io/dream619/manwen-studio/updater:sha-<commit>
 ```
 
 推送到 `main` 或 `master` 也可以触发预发布镜像构建。分支构建会发布 `sha-<commit>` 并更新浮动标签 `stable`。
@@ -188,7 +190,7 @@ deploy/docker/RELEASE_AND_UPDATE.md
 
 ```bash
 sudo mkdir -p /opt/lorevista
-sudo tar -xzf lorevista-docker-deploy-v1.2.3.tar.gz -C /opt/lorevista
+sudo tar -xzf lorevista-docker-deploy-v1.0.0.tar.gz -C /opt/lorevista
 cd /opt/lorevista
 
 sudo mkdir -p deploy/docker/runtime data
@@ -204,8 +206,8 @@ sudo chmod 600 .env deploy/docker/runtime/backend.env
 编辑 `/opt/lorevista/.env`：
 
 ```env
-REGISTRY_IMAGE_PREFIX=ghcr.io/your-org/lorevista
-APP_VERSION=v1.2.3
+REGISTRY_IMAGE_PREFIX=ghcr.io/dream619/manwen-studio
+APP_VERSION=v1.0.0
 
 WEB_BIND_ADDR=127.0.0.1
 WEB_PORT=8080
@@ -297,9 +299,9 @@ echo "$READ_ONLY_REGISTRY_TOKEN" | docker login ghcr.io -u "$REGISTRY_USER" --pa
 验证镜像可拉取：
 
 ```bash
-docker pull ghcr.io/your-org/lorevista/backend:v1.2.3
-docker pull ghcr.io/your-org/lorevista/web:v1.2.3
-docker pull ghcr.io/your-org/lorevista/updater:v1.2.3
+docker pull ghcr.io/dream619/manwen-studio/backend:v1.0.0
+docker pull ghcr.io/dream619/manwen-studio/web:v1.0.0
+docker pull ghcr.io/dream619/manwen-studio/updater:v1.0.0
 ```
 
 ### 6. 启动容器
@@ -504,8 +506,8 @@ sudo APP_DIR=/opt/lorevista /usr/bin/env bash /opt/lorevista/deploy/docker/updat
 可控版本更新推荐：
 
 ```env
-REGISTRY_IMAGE_PREFIX=ghcr.io/your-org/lorevista
-APP_VERSION=v1.2.3
+REGISTRY_IMAGE_PREFIX=ghcr.io/dream619/manwen-studio
+APP_VERSION=v1.0.0
 UPDATER_URL=http://updater:8090
 UPDATER_TOKEN=<long-random-token>
 UPDATE_MANIFEST_URL=https://example.com/lorevista/update-manifest.json

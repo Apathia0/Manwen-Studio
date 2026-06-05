@@ -2,7 +2,7 @@ name: lorevista
 
 services:
   backend:
-    image: ${REGISTRY_IMAGE_PREFIX:-ghcr.io/your-org/lorevista}/backend:${APP_VERSION:-v1.0.0}
+    image: ${REGISTRY_IMAGE_PREFIX:-ghcr.io/dream619/manwen-studio}/backend:${APP_VERSION:-v1.0.0}
     build:
       context: .
       dockerfile: Dockerfile.backend
@@ -31,7 +31,7 @@ services:
     restart: unless-stopped
 
   web:
-    image: ${REGISTRY_IMAGE_PREFIX:-ghcr.io/your-org/lorevista}/web:${APP_VERSION:-v1.0.0}
+    image: ${REGISTRY_IMAGE_PREFIX:-ghcr.io/dream619/manwen-studio}/web:${APP_VERSION:-v1.0.0}
     build:
       context: .
       dockerfile: Dockerfile.web
@@ -43,7 +43,7 @@ services:
     restart: unless-stopped
 
   updater:
-    image: ${REGISTRY_IMAGE_PREFIX:-ghcr.io/your-org/lorevista}/updater:${APP_VERSION:-v1.0.0}
+    image: ${REGISTRY_IMAGE_PREFIX:-ghcr.io/dream619/manwen-studio}/updater:${APP_VERSION:-v1.0.0}
     build:
       context: .
       dockerfile: Dockerfile.updater

@@ -40,6 +40,17 @@ Set `UPDATE_MANIFEST_URL` to the vendor-published update manifest. The admin
 type a Docker tag. If the manifest endpoint is private, also set a read-only
 `UPDATE_MANIFEST_TOKEN`.
 
+For this repository, use:
+
+```env
+REGISTRY_IMAGE_PREFIX=ghcr.io/dream619/manwen-studio
+APP_VERSION=v1.0.0
+```
+
+Do not use `ghcr.io/dream619/lorevista`; the GHCR path is derived from the
+GitHub repository `dream619/Manwen-Studio` and is lowercased to
+`dream619/manwen-studio`.
+
 Token locations:
 
 - Registry pull token: do not put it in `.env`; run `docker login` on the host.
@@ -54,6 +65,14 @@ Login with a read-only registry token:
 
 ```bash
 echo "$READ_ONLY_REGISTRY_TOKEN" | docker login ghcr.io -u "$REGISTRY_USER" --password-stdin
+```
+
+Verify image access:
+
+```bash
+docker pull ghcr.io/dream619/manwen-studio/backend:v1.0.0
+docker pull ghcr.io/dream619/manwen-studio/web:v1.0.0
+docker pull ghcr.io/dream619/manwen-studio/updater:v1.0.0
 ```
 
 If the server cannot reach Docker Hub, configure a Docker registry mirror or
