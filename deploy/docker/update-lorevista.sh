@@ -7,6 +7,8 @@ ENV_FILE="${ENV_FILE:-${APP_DIR}/.env}"
 LOCK_FILE="${LOCK_FILE:-/var/lock/lorevista-update.lock}"
 LOG_FILE="${LOG_FILE:-/var/log/lorevista-update.log}"
 HEALTH_URL="${HEALTH_URL:-http://127.0.0.1:${WEB_PORT:-8080}/api/health}"
+BACKEND_HEALTH_URL="${BACKEND_HEALTH_URL:-$HEALTH_URL}"
+WEB_HEALTH_URL="${WEB_HEALTH_URL:-$HEALTH_URL}"
 BACKEND_SERVICE="${BACKEND_SERVICE:-backend}"
 WEB_SERVICE="${WEB_SERVICE:-web}"
 MIGRATION_TIMEOUT_SECONDS="${MIGRATION_TIMEOUT_SECONDS:-180}"
@@ -50,9 +52,10 @@ running_image_id_for() {
 }
 
 wait_for_health() {
+  local url="$1"
   local deadline=$((SECONDS + HEALTH_TIMEOUT_SECONDS))
   while (( SECONDS < deadline )); do
-    if curl -fsS "$HEALTH_URL" >/dev/null; then
+    if curl -fsS "$url" >/dev/null; then
       return 0
     fi
     sleep 3
@@ -101,7 +104,7 @@ main() {
 
   log "starting backend with new image"
   compose up -d --no-deps "$BACKEND_SERVICE"
-  if ! wait_for_health; then
+  if ! wait_for_health "$BACKEND_HEALTH_URL"; then
     log "backend health check failed"
     rollback
     exit 1
@@ -109,7 +112,7 @@ main() {
 
   log "starting web with new image"
   compose up -d --no-deps "$WEB_SERVICE"
-  if ! wait_for_health; then
+  if ! wait_for_health "$WEB_HEALTH_URL"; then
     log "web health check failed"
     rollback
     exit 1

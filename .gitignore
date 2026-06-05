@@ -3,6 +3,9 @@
 backend/.env
 deploy/docker/runtime/backend.env
 deploy/docker/data/
+deploy/docker/update-state.json
+deploy/docker/update.log
+deploy/docker/update.lock
 
 # ─── Python ───
 __pycache__/

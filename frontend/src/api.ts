@@ -735,6 +735,18 @@ export interface AdminAuditLogItem {
   created_at: string;
 }
 
+export interface AdminSystemUpdateStatus {
+  status: 'idle' | 'queued' | 'running' | 'succeeded' | 'failed' | 'unknown' | string;
+  message: string;
+  running: boolean;
+  target_version?: string | null;
+  current_version?: string;
+  started_at?: string | null;
+  finished_at?: string | null;
+  exit_code?: number | null;
+  log_tail: string[];
+}
+
 export interface AdminUserItem {
   id: number;
   name: string;
@@ -1225,6 +1237,23 @@ export async function getAdminAuditLogs(params?: {
   const suffix = query.toString() ? `?${query.toString()}` : '';
   const res = await fetch(`${BASE}/api/admin/audit-logs${suffix}`, { headers: apiHeaders() });
   if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function getAdminSystemUpdateStatus(): Promise<AdminSystemUpdateStatus> {
+  const res = await fetch(`${BASE}/api/admin/system/update/status`, { headers: apiHeaders() });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '获取更新状态失败'));
+  return res.json();
+}
+
+export async function startAdminSystemUpdate(targetVersion?: string): Promise<AdminSystemUpdateStatus> {
+  const body = targetVersion?.trim() ? { target_version: targetVersion.trim() } : {};
+  const res = await fetch(`${BASE}/api/admin/system/update`, {
+    method: 'POST',
+    headers: apiHeaders(true),
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '启动系统更新失败'));
   return res.json();
 }
 

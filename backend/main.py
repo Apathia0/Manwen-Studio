@@ -267,6 +267,12 @@ CORS_ORIGINS = [
 MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_BYTES", str(10 * 1024 * 1024)))
 MAX_CHARACTER_PROFILE_CHARS = int(os.getenv("MAX_CHARACTER_PROFILE_CHARS", "20000"))
 API_TOKEN = os.getenv("API_TOKEN", "").strip()
+UPDATER_URL = os.getenv("UPDATER_URL", "http://updater:8090").strip().rstrip("/")
+UPDATER_TOKEN = os.getenv("UPDATER_TOKEN", "").strip()
+UPDATER_TIMEOUT_SECONDS = float(os.getenv("UPDATER_TIMEOUT_SECONDS", "10"))
+UPDATER_VERSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
+SECRET_ASSIGNMENT_RE = re.compile(r"(?i)\b([A-Z0-9_]*(?:TOKEN|PASSWORD|SECRET|KEY)[A-Z0-9_]*)=([^\s]+)")
+URL_WITH_PASSWORD_RE = re.compile(r"(?i)\b((?:postgresql|postgres|redis|rediss)://[^:\s/@]+:)([^@\s]+)(@[^ \t\r\n]+)")
 INSTALL_API_PREFIX = "/api/install"
 HEALTH_API_PATH = "/api/health"
 INSTALL_STATUS: dict[str, Any] = {
@@ -2053,6 +2059,56 @@ def _write_audit_log(
             detail_json=detail or {},
         )
     )
+
+
+def _redact_update_line(line: Any) -> str:
+    text_value = str(line)
+    text_value = URL_WITH_PASSWORD_RE.sub(r"\1***\3", text_value)
+    return SECRET_ASSIGNMENT_RE.sub(lambda match: f"{match.group(1)}=***", text_value)
+
+
+def _sanitize_update_status(payload: dict[str, Any] | None) -> dict[str, Any]:
+    payload = payload if isinstance(payload, dict) else {}
+    log_tail = payload.get("log_tail") if isinstance(payload.get("log_tail"), list) else []
+    return {
+        "status": str(payload.get("status") or "unknown"),
+        "message": str(payload.get("message") or ""),
+        "running": bool(payload.get("running", False)),
+        "target_version": payload.get("target_version") or None,
+        "current_version": os.getenv("APP_VERSION", "dev"),
+        "started_at": payload.get("started_at") or None,
+        "finished_at": payload.get("finished_at") or None,
+        "exit_code": payload.get("exit_code") if payload.get("exit_code") is not None else None,
+        "log_tail": [_redact_update_line(item) for item in log_tail[-120:]],
+    }
+
+
+async def _call_updater(method: str, path: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    if not UPDATER_URL:
+        raise HTTPException(503, "Updater service is not configured")
+    headers = {"X-Updater-Token": UPDATER_TOKEN} if UPDATER_TOKEN else {}
+    url = f"{UPDATER_URL}{path}"
+    try:
+        async with httpx.AsyncClient(timeout=UPDATER_TIMEOUT_SECONDS) as client:
+            response = await client.request(method, url, headers=headers, json=payload)
+    except httpx.TimeoutException:
+        raise HTTPException(503, "Updater service timed out")
+    except httpx.RequestError as exc:
+        raise HTTPException(503, f"Updater service is unavailable: {exc}")
+    if response.status_code >= 400:
+        detail = response.text
+        with contextlib.suppress(Exception):
+            data = response.json()
+            detail = data.get("detail") or data.get("message") or detail
+        status_code = 503 if response.status_code == 401 else response.status_code
+        raise HTTPException(status_code, f"Updater rejected request: {detail}")
+    try:
+        data = response.json()
+    except ValueError:
+        raise HTTPException(503, "Updater service returned invalid JSON")
+    if not isinstance(data, dict):
+        raise HTTPException(503, "Updater service returned an invalid payload")
+    return data
 
 
 def _extra_grant_amount(user_id: int, feature_key: str, period_key: str, db: Session) -> int:
@@ -4864,6 +4920,32 @@ def public_announcement(db: Session = Depends(get_db)):
         "title": str(_get_platform_setting("platform.announcement.title", db, "") or ""),
         "content": str(_get_platform_setting("platform.announcement.content", db, "") or ""),
     }
+
+
+@app.get("/api/admin/system/update/status")
+async def admin_system_update_status(request: Request, db: Session = Depends(get_db)):
+    _require_admin(request, db)
+    return _sanitize_update_status(await _call_updater("GET", "/status"))
+
+
+@app.post("/api/admin/system/update")
+async def admin_start_system_update(body: dict, request: Request, db: Session = Depends(get_db)):
+    admin = _require_admin(request, db)
+    target_version = str(body.get("target_version") or "").strip() or None
+    if target_version and not UPDATER_VERSION_RE.match(target_version):
+        raise HTTPException(400, "Invalid target version. Use a Docker tag such as v1.2.3 or sha-abcdef123456.")
+    status = _sanitize_update_status(await _call_updater("POST", "/update", {"target_version": target_version}))
+    _write_audit_log(
+        admin,
+        "system_update_start",
+        "system",
+        "docker",
+        f"Started system update to {target_version or 'configured APP_VERSION'}",
+        db,
+        {"target_version": target_version},
+    )
+    db.commit()
+    return status
 
 
 @app.get("/api/admin/audit-logs")

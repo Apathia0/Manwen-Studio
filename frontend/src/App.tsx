@@ -28,6 +28,7 @@ import {
   AdminPlanManagementPage,
   AdminPlatformSettingsPage,
   AdminRevenueDashboardPage,
+  AdminSystemUpdatePage,
   AdminSystemPromptsPage,
   AdminUserManagementPage,
 } from './components/admin/AdminPages';
@@ -102,6 +103,7 @@ type RouteKey =
   | 'revenue'
   | 'audit-logs'
   | 'announcement'
+  | 'system-update'
   | 'system-prompts';
 
 type NavItem = {
@@ -131,6 +133,7 @@ const ADMIN_NAV: NavItem[] = [
   { key: 'announcement', label: '公告管理', icon: MessageSquareQuote },
   { key: 'template-review', label: '模板审核', icon: Library },
   { key: 'system-prompts', label: '系统提示词', icon: MessageSquareQuote },
+  { key: 'system-update', label: '系统更新', icon: Settings2 },
 ];
 
 ADMIN_NAV[0].label = '套餐管理';
@@ -141,6 +144,7 @@ ADMIN_NAV[4].label = '操作审计';
 ADMIN_NAV[5].label = '公告管理';
 ADMIN_NAV[6].label = '模板审核';
 ADMIN_NAV[7].label = '系统提示词';
+ADMIN_NAV[8].label = '系统更新';
 
 function App() {
   const [session, setSession] = useState<AuthUser | null>(null);
@@ -821,6 +825,9 @@ function App() {
           )}
           {route === 'system-prompts' && session.role === 'admin' && (
             <AdminSystemPromptsPage onError={(message: string) => toast.error(message)} />
+          )}
+          {route === 'system-update' && session.role === 'admin' && (
+            <AdminSystemUpdatePage onError={(message: string) => toast.error(message)} />
           )}
           </Suspense>
         </main>

@@ -1,0 +1,23 @@
+FROM python:3.11-alpine
+
+ENV PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    APP_DIR=/opt/lorevista \
+    ENV_FILE=/opt/lorevista/.env \
+    UPDATER_COMMAND="/usr/bin/env bash /updater/update-lorevista.sh"
+
+RUN apk add --no-cache bash curl docker-cli docker-cli-compose util-linux
+
+WORKDIR /updater
+RUN pip install --no-cache-dir fastapi==0.115.0 uvicorn[standard]==0.30.6 pydantic==2.9.2
+
+COPY deploy/docker/update-lorevista.sh /updater/update-lorevista.sh
+COPY deploy/docker/updater/app.py /updater/app.py
+RUN chmod +x /updater/update-lorevista.sh
+
+EXPOSE 8090
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD curl -fsS http://127.0.0.1:8090/health || exit 1
+
+CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8090"]

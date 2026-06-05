@@ -1,5 +1,5 @@
 [Unit]
-Description=Run LoreVista Docker image updater every 5 minutes
+Description=Optional unattended LoreVista Docker image update check
 
 [Timer]
 OnBootSec=2min
