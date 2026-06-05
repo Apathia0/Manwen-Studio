@@ -107,6 +107,8 @@ jobs:
       - name: Build and push updater
         uses: docker/build-push-action@v6
         with:
+          provenance: false
+          sbom: false
           context: .
           file: Dockerfile.updater
           push: true
