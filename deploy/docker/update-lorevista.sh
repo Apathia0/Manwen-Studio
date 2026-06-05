@@ -12,15 +12,25 @@ WEB_HEALTH_URL="${WEB_HEALTH_URL:-$HEALTH_URL}"
 BACKEND_SERVICE="${BACKEND_SERVICE:-backend}"
 WEB_SERVICE="${WEB_SERVICE:-web}"
 MIGRATION_TIMEOUT_SECONDS="${MIGRATION_TIMEOUT_SECONDS:-180}"
+MIGRATION_COMMAND="${MIGRATION_COMMAND:-python -c \"from database import init_db; init_db(run_migrations=True, raise_errors=True)\"}"
 HEALTH_TIMEOUT_SECONDS="${HEALTH_TIMEOUT_SECONDS:-90}"
 BACKEND_IMAGE_REF="${BACKEND_IMAGE_REF:-}"
 WEB_IMAGE_REF="${WEB_IMAGE_REF:-}"
 
 mkdir -p "$(dirname "$LOG_FILE")"
-exec 9>"$LOCK_FILE"
-if ! flock -n 9; then
-  echo "$(date -Is) update already running" >>"$LOG_FILE"
-  exit 0
+LOCK_DIR="${LOCK_FILE}.d"
+if command -v flock >/dev/null 2>&1; then
+  exec 9>"$LOCK_FILE"
+  if ! flock -n 9; then
+    echo "$(date -Is) update already running" >>"$LOG_FILE"
+    exit 0
+  fi
+else
+  if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+    echo "$(date -Is) update already running" >>"$LOG_FILE"
+    exit 0
+  fi
+  trap 'rmdir "$LOCK_DIR" 2>/dev/null || true' EXIT
 fi
 
 log() {
@@ -29,6 +39,10 @@ log() {
 
 compose() {
   docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" "$@"
+}
+
+compose_with_timeout() {
+  timeout "$1" docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" "${@:2}"
 }
 
 image_id_for() {
@@ -97,10 +111,10 @@ main() {
   fi
 
   log "new image detected; running migrations before service replacement"
-  timeout "$MIGRATION_TIMEOUT_SECONDS" compose run --rm \
+  compose_with_timeout "$MIGRATION_TIMEOUT_SECONDS" run --rm \
     -e RUN_STARTUP_MIGRATIONS=true \
     "$BACKEND_SERVICE" \
-    python -c "from database import init_db; init_db(run_migrations=True, raise_errors=True)"
+    sh -lc "$MIGRATION_COMMAND"
 
   log "starting backend with new image"
   compose up -d --no-deps "$BACKEND_SERVICE"
@@ -118,7 +132,11 @@ main() {
     exit 1
   fi
 
-  docker image prune -f --filter "until=168h" >/dev/null || true
+  if [[ "${SKIP_IMAGE_PRUNE:-false}" == "true" ]]; then
+    log "skipping image prune"
+  else
+    docker image prune -f --filter "until=168h" >/dev/null || true
+  fi
   log "update completed"
 }
 

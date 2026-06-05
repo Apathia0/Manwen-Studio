@@ -13,6 +13,8 @@ fallback for emergency manual operations.
 - `docker-compose.yml`: app, web, PostgreSQL, Redis, and persistent volumes.
 - `deploy/docker/update-lorevista.sh`: host-level manual updater with locking,
   migrations, health checks, and rollback.
+- `deploy/docker/RELEASE_AND_UPDATE.md`: Chinese release and user-side update
+  operating guide.
 - `deploy/docker/systemd/*`: optional service/timer for unattended update checks.
 
 ## Server Setup

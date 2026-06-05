@@ -75,3 +75,4 @@ lorevista-mobile/dist/
 *.md
 !README.md
 !AGENTS.md
+!deploy/docker/RELEASE_AND_UPDATE.md

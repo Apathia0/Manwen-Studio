@@ -15,7 +15,6 @@ permissions:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_PREFIX: ${{ github.repository }}
 
 jobs:
   test-and-build:
@@ -62,16 +61,25 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Compute image tags
+      - name: Compute image metadata
         id: meta
+        shell: bash
         run: |
-          version="sha-${GITHUB_SHA::12}"
-          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          image_prefix="$(echo "${GITHUB_REPOSITORY}" | tr '[:upper:]' '[:lower:]')"
+          sha_tag="sha-${GITHUB_SHA::12}"
+
           if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
-            echo "extra_tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+            release_tag="${GITHUB_REF_NAME}"
+            app_version="${GITHUB_REF_NAME}"
           else
-            echo "extra_tag=stable" >> "$GITHUB_OUTPUT"
+            release_tag="stable"
+            app_version="${sha_tag}"
           fi
+
+          echo "image_prefix=${image_prefix}" >> "$GITHUB_OUTPUT"
+          echo "sha_tag=${sha_tag}" >> "$GITHUB_OUTPUT"
+          echo "release_tag=${release_tag}" >> "$GITHUB_OUTPUT"
+          echo "app_version=${app_version}" >> "$GITHUB_OUTPUT"
 
       - name: Build and push backend
         uses: docker/build-push-action@v6
@@ -80,10 +88,10 @@ jobs:
           file: Dockerfile.backend
           push: true
           build-args: |
-            APP_VERSION=${{ steps.meta.outputs.version }}
+            APP_VERSION=${{ steps.meta.outputs.app_version }}
           tags: |
-            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/backend:${{ steps.meta.outputs.version }}
-            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/backend:${{ steps.meta.outputs.extra_tag }}
+            ${{ env.REGISTRY }}/${{ steps.meta.outputs.image_prefix }}/backend:${{ steps.meta.outputs.sha_tag }}
+            ${{ env.REGISTRY }}/${{ steps.meta.outputs.image_prefix }}/backend:${{ steps.meta.outputs.release_tag }}
 
       - name: Build and push web
         uses: docker/build-push-action@v6
@@ -92,8 +100,8 @@ jobs:
           file: Dockerfile.web
           push: true
           tags: |
-            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/web:${{ steps.meta.outputs.version }}
-            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/web:${{ steps.meta.outputs.extra_tag }}
+            ${{ env.REGISTRY }}/${{ steps.meta.outputs.image_prefix }}/web:${{ steps.meta.outputs.sha_tag }}
+            ${{ env.REGISTRY }}/${{ steps.meta.outputs.image_prefix }}/web:${{ steps.meta.outputs.release_tag }}
 
       - name: Build and push updater
         uses: docker/build-push-action@v6
@@ -102,5 +110,5 @@ jobs:
           file: Dockerfile.updater
           push: true
           tags: |
-            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/updater:${{ steps.meta.outputs.version }}
-            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/updater:${{ steps.meta.outputs.extra_tag }}
+            ${{ env.REGISTRY }}/${{ steps.meta.outputs.image_prefix }}/updater:${{ steps.meta.outputs.sha_tag }}
+            ${{ env.REGISTRY }}/${{ steps.meta.outputs.image_prefix }}/updater:${{ steps.meta.outputs.release_tag }}
