@@ -15,12 +15,14 @@ import {
   getAdminPlans,
   getAdminPlatformSettings,
   getAdminQuotaRules,
+  getAdminSystemUpdateStatus,
   getAdminSystemPrompts,
   getAdminUserEntitlements,
   getAdminUserStories,
   getAdminUsers,
   saveAdminPlanFeatures,
   saveAdminQuotaRules,
+  startAdminSystemUpdate,
   updateAdminAnnouncement,
   updateAdminPlan,
   updateAdminPlatformSettings,
@@ -34,10 +36,12 @@ import {
   type AdminReviewChapter,
   type AdminReviewStory,
   type AdminSystemPrompt,
+  type AdminSystemUpdateStatus,
   type AdminUserItem,
   type PlatformAnnouncement,
   type PlatformSettings,
 } from '../../api';
+import { confirm } from '../../lib/confirm';
 import { toast } from '../../lib/toast';
 
 type AsyncAction = () => Promise<void>;
@@ -1541,6 +1545,134 @@ export function AdminAuditLogsPage({ onError }: { onError: (message: string) => 
             </tbody>
           </table>
         </div>
+      </SectionCard>
+    </div>
+  );
+}
+
+function updateStatusLabel(status: string) {
+  if (status === 'idle') return '空闲';
+  if (status === 'queued') return '排队中';
+  if (status === 'running') return '更新中';
+  if (status === 'succeeded') return '已完成';
+  if (status === 'failed') return '失败';
+  return status || '未知';
+}
+
+function updateStatusClass(status: string) {
+  if (status === 'running' || status === 'queued') return 'bg-amber-50 text-amber-700 ring-amber-200';
+  if (status === 'succeeded') return 'bg-emerald-50 text-emerald-700 ring-emerald-200';
+  if (status === 'failed') return 'bg-rose-50 text-rose-700 ring-rose-200';
+  return 'bg-slate-50 text-slate-700 ring-slate-200';
+}
+
+export function AdminSystemUpdatePage({ onError }: { onError: (message: string) => void }) {
+  const [status, setStatus] = useState<AdminSystemUpdateStatus | null>(null);
+  const [targetVersion, setTargetVersion] = useState('');
+  const { busy, run } = useBusyAction(onError);
+  const running = status?.running || status?.status === 'queued' || status?.status === 'running';
+
+  async function loadStatus() {
+    const data = await getAdminSystemUpdateStatus();
+    setStatus(data);
+  }
+
+  useEffect(() => {
+    void run(loadStatus);
+  }, []);
+
+  useEffect(() => {
+    if (!running) return;
+    const timer = window.setInterval(() => {
+      void loadStatus().catch((error: any) => onError(error?.message || '刷新更新状态失败'));
+    }, 3000);
+    return () => window.clearInterval(timer);
+  }, [running]);
+
+  async function handleStart() {
+    const version = targetVersion.trim();
+    const confirmed = await confirm({
+      title: '确认执行系统更新',
+      message: version
+        ? `将更新到镜像版本 ${version}。更新过程中后端和前端容器会重启，确认继续？`
+        : '将按服务器当前 APP_VERSION 配置拉取镜像并执行更新。更新过程中后端和前端容器会重启，确认继续？',
+      confirmText: '开始更新',
+      cancelText: '取消',
+      danger: true,
+    });
+    if (!confirmed) return;
+    void run(async () => {
+      const next = await startAdminSystemUpdate(version || undefined);
+      setStatus(next);
+      toast.success('系统更新已启动');
+    });
+  }
+
+  const logTail = status?.log_tail || [];
+
+  return (
+    <div className="space-y-5">
+      <SectionCard title="系统更新" description="管理员可在系统内手动触发 Docker 镜像更新。实际拉取镜像、迁移和重启由 updater 容器执行，业务后端不接触 Docker socket。">
+        <div className="grid gap-4 lg:grid-cols-[1.2fr_0.8fr]">
+          <div className="rounded-2xl border border-[#e5edf8] bg-[#f8fbff] p-4">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <div className="text-sm text-slate-500">当前状态</div>
+                <div className="mt-2 flex items-center gap-2">
+                  <span className={cn('rounded-full px-3 py-1 text-xs font-semibold ring-1', updateStatusClass(status?.status || 'unknown'))}>
+                    {updateStatusLabel(status?.status || 'unknown')}
+                  </span>
+                  <span className="text-sm text-slate-500">当前版本：{status?.current_version || '-'}</span>
+                </div>
+              </div>
+              <SecondaryButton disabled={busy} onClick={() => void run(loadStatus)}>
+                刷新状态
+              </SecondaryButton>
+            </div>
+            <div className="mt-4 grid gap-3 text-sm md:grid-cols-2">
+              <div className="rounded-xl bg-white px-3 py-2">
+                <div className="text-xs text-slate-400">目标版本</div>
+                <div className="mt-1 font-medium text-slate-800">{status?.target_version || '按服务器 APP_VERSION'}</div>
+              </div>
+              <div className="rounded-xl bg-white px-3 py-2">
+                <div className="text-xs text-slate-400">退出码</div>
+                <div className="mt-1 font-medium text-slate-800">{status?.exit_code ?? '-'}</div>
+              </div>
+              <div className="rounded-xl bg-white px-3 py-2">
+                <div className="text-xs text-slate-400">开始时间</div>
+                <div className="mt-1 font-medium text-slate-800">{formatDateTime(status?.started_at)}</div>
+              </div>
+              <div className="rounded-xl bg-white px-3 py-2">
+                <div className="text-xs text-slate-400">结束时间</div>
+                <div className="mt-1 font-medium text-slate-800">{formatDateTime(status?.finished_at)}</div>
+              </div>
+            </div>
+            {status?.message ? <p className="mt-4 rounded-2xl bg-white p-3 text-sm text-slate-600">{status.message}</p> : null}
+          </div>
+
+          <div className="rounded-2xl border border-[#e5edf8] bg-white p-4">
+            <label className="text-sm font-semibold text-slate-900">指定镜像版本</label>
+            <TextInput
+              className="mt-2"
+              value={targetVersion}
+              onChange={(event) => setTargetVersion(event.target.value)}
+              placeholder="可选：v1.2.3 或 sha-abcdef123456"
+              disabled={running}
+            />
+            <p className="mt-2 text-xs leading-relaxed text-slate-500">
+              留空表示使用服务器部署配置中的 APP_VERSION。填写版本时，updater 会先更新服务器 .env 中的 APP_VERSION，再执行拉取、迁移、重启和健康检查。
+            </p>
+            <PrimaryButton className="mt-4 w-full" disabled={busy || running} onClick={() => void handleStart()}>
+              {running ? '更新执行中' : '开始更新'}
+            </PrimaryButton>
+          </div>
+        </div>
+      </SectionCard>
+
+      <SectionCard title="更新日志" description="仅展示最近日志尾部，并在服务端做基础脱敏。">
+        <pre className="max-h-[420px] overflow-auto rounded-2xl bg-slate-950 p-4 text-xs leading-relaxed text-slate-100">
+          {logTail.length ? logTail.join('\n') : '暂无更新日志'}
+        </pre>
       </SectionCard>
     </div>
   );

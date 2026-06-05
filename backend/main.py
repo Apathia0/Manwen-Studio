@@ -46,7 +46,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from PIL import Image
-from sqlalchemy import case, func, and_
+from sqlalchemy import case, func, and_, text
 from sqlalchemy.orm import Session, sessionmaker
 from sse_starlette.sse import EventSourceResponse
 
@@ -104,8 +104,10 @@ from services.install import (
     database_has_install_markers,
     detect_install_status,
     redact_url,
+    request_backend_restart,
     test_database_url,
     test_redis_url,
+    validate_install_admin_config,
     write_env_updates,
 )
 
@@ -318,7 +320,14 @@ CORS_ORIGINS = [
 MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_BYTES", str(10 * 1024 * 1024)))
 MAX_CHARACTER_PROFILE_CHARS = int(os.getenv("MAX_CHARACTER_PROFILE_CHARS", "20000"))
 API_TOKEN = os.getenv("API_TOKEN", "").strip()
+UPDATER_URL = os.getenv("UPDATER_URL", "http://updater:8090").strip().rstrip("/")
+UPDATER_TOKEN = os.getenv("UPDATER_TOKEN", "").strip()
+UPDATER_TIMEOUT_SECONDS = float(os.getenv("UPDATER_TIMEOUT_SECONDS", "10"))
+UPDATER_VERSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
+SECRET_ASSIGNMENT_RE = re.compile(r"(?i)\b([A-Z0-9_]*(?:TOKEN|PASSWORD|SECRET|KEY)[A-Z0-9_]*)=([^\s]+)")
+URL_WITH_PASSWORD_RE = re.compile(r"(?i)\b((?:postgresql|postgres|redis|rediss)://[^:\s/@]+:)([^@\s]+)(@[^ \t\r\n]+)")
 INSTALL_API_PREFIX = "/api/install"
+HEALTH_API_PATH = "/api/health"
 INSTALL_STATUS: dict[str, Any] = {
     "installed": False,
     "source": "unknown",
@@ -330,6 +339,10 @@ SYSTEM_READY = False
 
 def _is_install_api_path(path: str) -> bool:
     return path == INSTALL_API_PREFIX or path.startswith(f"{INSTALL_API_PREFIX}/")
+
+
+def _is_public_runtime_api_path(path: str) -> bool:
+    return _is_install_api_path(path) or path == HEALTH_API_PATH
 
 
 def _refresh_install_status() -> dict[str, Any]:
@@ -348,6 +361,64 @@ def _refresh_install_status() -> dict[str, Any]:
 
 def _system_installed() -> bool:
     return bool(INSTALL_STATUS.get("installed")) and not bool(INSTALL_STATUS.get("requires_restart")) and SYSTEM_READY
+
+
+@app.get("/api/health")
+def health_check():
+    status = _refresh_install_status()
+    installed = bool(status.get("installed"))
+    requires_restart = bool(status.get("requires_restart"))
+    database_reachable = status.get("database_reachable")
+    base_payload = {
+        "version": os.getenv("APP_VERSION", "dev"),
+        "installed": installed,
+        "requires_restart": requires_restart,
+    }
+    if not installed:
+        return {
+            "ok": True,
+            "ready": False,
+            "database_reachable": database_reachable,
+            **base_payload,
+        }
+    if requires_restart:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "ok": False,
+                "ready": False,
+                "database_reachable": database_reachable,
+                **base_payload,
+            },
+        )
+    if database_reachable is None:
+        try:
+            with database_engine.connect() as conn:
+                conn.execute(text("SELECT 1"))
+            database_reachable = True
+        except Exception as exc:
+            return JSONResponse(
+                status_code=503,
+                content={
+                "ok": False,
+                    "ready": False,
+                "database_reachable": database_reachable,
+                "database_error": str(exc),
+                    **base_payload,
+                },
+            )
+    ok = database_reachable is not False
+    payload = {
+        "ok": ok,
+        "ready": ok,
+        "database_reachable": database_reachable,
+        **base_payload,
+    }
+    if not ok:
+        return JSONResponse(status_code=503, content=payload)
+    return {
+        **payload,
+    }
 
 # 未授权域名时显示的 HTML 页面模板
 _UNAUTHORIZED_HTML = """\
@@ -399,7 +470,7 @@ app.add_middleware(
 @app.middleware("http")
 async def license_check_middleware(request: Request, call_next):
     path = request.url.path
-    if path.startswith(("/static/",)) or _is_install_api_path(path) or request.method == "OPTIONS":
+    if path.startswith(("/static/",)) or _is_public_runtime_api_path(path) or request.method == "OPTIONS":
         return await call_next(request)
 
     host_header = request.headers.get("host", "")
@@ -446,7 +517,7 @@ app.mount("/static/video", StaticFiles(directory=str(video_dir)), name="video")
 
 @app.middleware("http")
 async def require_api_token(request: Request, call_next):
-    if API_TOKEN and request.url.path.startswith("/api") and not _is_install_api_path(request.url.path) and request.method != "OPTIONS":
+    if API_TOKEN and request.url.path.startswith("/api") and not _is_public_runtime_api_path(request.url.path) and request.method != "OPTIONS":
         supplied = request.headers.get("x-api-token", "").strip()
         if not supplied:
             auth = request.headers.get("authorization", "")
@@ -461,7 +532,7 @@ async def require_api_token(request: Request, call_next):
 
 @app.middleware("http")
 async def bind_request_db(request: Request, call_next):
-    if _is_install_api_path(request.url.path):
+    if _is_public_runtime_api_path(request.url.path):
         return await call_next(request)
     if request.url.path.startswith("/api") and not _system_installed():
         return JSONResponse({"detail": "System is not installed", "installed": False}, status_code=503)
@@ -1055,12 +1126,10 @@ def _ensure_platform_seed(db: Session, *, create_default_admin: bool = False) ->
 
 
 def _create_install_admin_user(admin_config: dict[str, Any], db: Session) -> User:
-    email = _normalize_email(admin_config.get("email"))
-    name = str(admin_config.get("name") or "").strip() or "系统管理员"
-    password = str(admin_config.get("password") or "")
-    _validate_email_format(email)
-    if len(password) < 8:
-        raise HTTPException(400, "管理员密码至少 8 位")
+    normalized = validate_install_admin_config(admin_config)
+    email = normalized["email"]
+    name = normalized["name"]
+    password = normalized["password"]
     existing = db.query(User).filter(User.email == email).first()
     if existing:
         raise HTTPException(409, "管理员邮箱已存在")
@@ -2043,6 +2112,56 @@ def _write_audit_log(
             detail_json=detail or {},
         )
     )
+
+
+def _redact_update_line(line: Any) -> str:
+    text_value = str(line)
+    text_value = URL_WITH_PASSWORD_RE.sub(r"\1***\3", text_value)
+    return SECRET_ASSIGNMENT_RE.sub(lambda match: f"{match.group(1)}=***", text_value)
+
+
+def _sanitize_update_status(payload: dict[str, Any] | None) -> dict[str, Any]:
+    payload = payload if isinstance(payload, dict) else {}
+    log_tail = payload.get("log_tail") if isinstance(payload.get("log_tail"), list) else []
+    return {
+        "status": str(payload.get("status") or "unknown"),
+        "message": str(payload.get("message") or ""),
+        "running": bool(payload.get("running", False)),
+        "target_version": payload.get("target_version") or None,
+        "current_version": os.getenv("APP_VERSION", "dev"),
+        "started_at": payload.get("started_at") or None,
+        "finished_at": payload.get("finished_at") or None,
+        "exit_code": payload.get("exit_code") if payload.get("exit_code") is not None else None,
+        "log_tail": [_redact_update_line(item) for item in log_tail[-120:]],
+    }
+
+
+async def _call_updater(method: str, path: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    if not UPDATER_URL:
+        raise HTTPException(503, "Updater service is not configured")
+    headers = {"X-Updater-Token": UPDATER_TOKEN} if UPDATER_TOKEN else {}
+    url = f"{UPDATER_URL}{path}"
+    try:
+        async with httpx.AsyncClient(timeout=UPDATER_TIMEOUT_SECONDS) as client:
+            response = await client.request(method, url, headers=headers, json=payload)
+    except httpx.TimeoutException:
+        raise HTTPException(503, "Updater service timed out")
+    except httpx.RequestError as exc:
+        raise HTTPException(503, f"Updater service is unavailable: {exc}")
+    if response.status_code >= 400:
+        detail = response.text
+        with contextlib.suppress(Exception):
+            data = response.json()
+            detail = data.get("detail") or data.get("message") or detail
+        status_code = 503 if response.status_code == 401 else response.status_code
+        raise HTTPException(status_code, f"Updater rejected request: {detail}")
+    try:
+        data = response.json()
+    except ValueError:
+        raise HTTPException(503, "Updater service returned invalid JSON")
+    if not isinstance(data, dict):
+        raise HTTPException(503, "Updater service returned an invalid payload")
+    return data
 
 
 def _extra_grant_amount(user_id: int, feature_key: str, period_key: str, db: Session) -> int:
@@ -3672,15 +3791,11 @@ def install_complete(body: dict):
     admin_config = body.get("admin") if isinstance(body.get("admin"), dict) else {}
 
     try:
+        admin_config = validate_install_admin_config(admin_config)
         database_url = build_database_url(database_config)
         redis_url = build_redis_url(redis_config)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
-
-    password = str(admin_config.get("password") or "")
-    confirm_password = str(admin_config.get("confirmPassword") or admin_config.get("confirm_password") or "")
-    if password != confirm_password:
-        raise HTTPException(400, "管理员两次输入的密码不一致")
 
     try:
         test_database_url(database_url)
@@ -3740,6 +3855,18 @@ def install_complete(body: dict):
         raise HTTPException(500, f"安装失败: {exc}") from exc
     finally:
         install_engine.dispose()
+
+
+@app.post("/api/install/restart")
+def install_restart():
+    status = _refresh_install_status()
+    if not status.get("requires_restart"):
+        raise HTTPException(409, "系统当前不处于安装后待重启状态")
+    try:
+        restart_result = request_backend_restart()
+        return {"ok": True, **restart_result}
+    except Exception as exc:
+        raise HTTPException(500, f"自动重启失败: {exc}") from exc
 
 
 @app.post("/api/auth/register")
@@ -4798,6 +4925,32 @@ def public_announcement(db: Session = Depends(get_db)):
         "title": str(_get_platform_setting("platform.announcement.title", db, "") or ""),
         "content": str(_get_platform_setting("platform.announcement.content", db, "") or ""),
     }
+
+
+@app.get("/api/admin/system/update/status")
+async def admin_system_update_status(request: Request, db: Session = Depends(get_db)):
+    _require_admin(request, db)
+    return _sanitize_update_status(await _call_updater("GET", "/status"))
+
+
+@app.post("/api/admin/system/update")
+async def admin_start_system_update(body: dict, request: Request, db: Session = Depends(get_db)):
+    admin = _require_admin(request, db)
+    target_version = str(body.get("target_version") or "").strip() or None
+    if target_version and not UPDATER_VERSION_RE.match(target_version):
+        raise HTTPException(400, "Invalid target version. Use a Docker tag such as v1.2.3 or sha-abcdef123456.")
+    status = _sanitize_update_status(await _call_updater("POST", "/update", {"target_version": target_version}))
+    _write_audit_log(
+        admin,
+        "system_update_start",
+        "system",
+        "docker",
+        f"Started system update to {target_version or 'configured APP_VERSION'}",
+        db,
+        {"target_version": target_version},
+    )
+    db.commit()
+    return status
 
 
 @app.get("/api/admin/audit-logs")

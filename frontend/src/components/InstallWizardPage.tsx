@@ -3,6 +3,8 @@ import type { ReactNode } from 'react';
 import { Check, Database, KeyRound, Loader2, RefreshCw, Server, ShieldCheck } from 'lucide-react';
 import {
   completeInstall,
+  getInstallStatus,
+  restartInstallBackend,
   testInstallDatabase,
   testInstallRedis,
   type InstallAdminConfig,
@@ -50,12 +52,18 @@ export function InstallWizardPage({ onInstalled }: InstallWizardPageProps) {
   const [redisResult, setRedisResult] = useState<string>('');
   const [testing, setTesting] = useState<'database' | 'redis' | null>(null);
   const [installing, setInstalling] = useState(false);
+  const [restarting, setRestarting] = useState(false);
+  const [restartMessage, setRestartMessage] = useState('');
   const [error, setError] = useState<string>('');
   const [result, setResult] = useState<InstallCompleteResponse | null>(null);
 
+  const adminEmailValid = useMemo(() => {
+    return /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(admin.email.trim());
+  }, [admin.email]);
+
   const adminValid = useMemo(() => {
-    return admin.email.trim() && admin.password.length >= 8 && admin.password === admin.confirmPassword;
-  }, [admin]);
+    return adminEmailValid && admin.password.length >= 8 && admin.password === admin.confirmPassword;
+  }, [adminEmailValid, admin.password, admin.confirmPassword]);
 
   async function handleTestDatabase() {
     setTesting('database');
@@ -98,6 +106,39 @@ export function InstallWizardPage({ onInstalled }: InstallWizardPageProps) {
     }
   }
 
+  async function handleRestartBackend() {
+    setRestarting(true);
+    setError('');
+    setRestartMessage('正在提交重启请求...');
+    try {
+      const restartResult = await restartInstallBackend();
+      setRestartMessage(restartResult.message || '已提交重启请求，正在等待后端恢复...');
+      await waitForBackendReady();
+      onInstalled();
+    } catch (err: any) {
+      setRestartMessage('');
+      setError(err.message || '自动重启失败，请手动重启后端或 PM2 后刷新页面');
+      setRestarting(false);
+    }
+  }
+
+  async function waitForBackendReady() {
+    const deadline = Date.now() + 60_000;
+    while (Date.now() < deadline) {
+      await new Promise((resolve) => window.setTimeout(resolve, 2000));
+      try {
+        const status = await getInstallStatus();
+        if (status.installed && !status.requires_restart) {
+          setRestartMessage('后端已重启，正在刷新系统状态...');
+          return;
+        }
+      } catch {
+        setRestartMessage('后端正在重启，等待服务恢复...');
+      }
+    }
+    throw new Error('自动重启已提交，但 60 秒内未检测到后端恢复。请手动重启后刷新页面。');
+  }
+
   function canContinue(): boolean {
     if (step === 0) return Boolean(databaseResult);
     if (step === 1) return Boolean(redisResult);
@@ -123,14 +164,30 @@ export function InstallWizardPage({ onInstalled }: InstallWizardPageProps) {
             <InfoRow label="环境文件" value={result.env_path} />
             {result.backup_path ? <InfoRow label="备份文件" value={result.backup_path} /> : null}
           </div>
-          <button
-            type="button"
-            onClick={onInstalled}
-            className="mt-7 inline-flex min-h-11 items-center justify-center gap-2 rounded-2xl bg-slate-950 px-5 py-3 text-sm font-semibold text-white transition hover:bg-slate-800"
-          >
-            <RefreshCw size={16} />
-            我已重启，重新检查
-          </button>
+          {restartMessage ? (
+            <div className="mt-6 rounded-2xl border border-sky-200 bg-sky-50 px-4 py-3 text-sm text-sky-700">{restartMessage}</div>
+          ) : null}
+          {error ? <div className="mt-6 rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">{error}</div> : null}
+          <div className="mt-7 flex flex-col gap-3 sm:flex-row">
+            <button
+              type="button"
+              disabled={restarting}
+              onClick={() => void handleRestartBackend()}
+              className="inline-flex min-h-11 items-center justify-center gap-2 rounded-2xl bg-slate-950 px-5 py-3 text-sm font-semibold text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              {restarting ? <Loader2 size={16} className="animate-spin" /> : <RefreshCw size={16} />}
+              自动重启后端
+            </button>
+            <button
+              type="button"
+              disabled={restarting}
+              onClick={onInstalled}
+              className="inline-flex min-h-11 items-center justify-center gap-2 rounded-2xl border border-slate-200 bg-white px-5 py-3 text-sm font-semibold text-slate-700 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              <RefreshCw size={16} />
+              我已手动重启，重新检查
+            </button>
+          </div>
         </div>
       </InstallShell>
     );
@@ -233,6 +290,21 @@ export function InstallWizardPage({ onInstalled }: InstallWizardPageProps) {
                 <TextField label="密码" value={admin.password} type="password" onChange={(value) => setAdmin({ ...admin, password: value })} />
                 <TextField label="确认密码" value={admin.confirmPassword} type="password" onChange={(value) => setAdmin({ ...admin, confirmPassword: value })} />
               </div>
+              {admin.email.trim() && !adminEmailValid ? (
+                <p className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-xs leading-5 text-rose-700">
+                  管理员邮箱格式不正确，请填写类似 admin@example.com 的邮箱地址。
+                </p>
+              ) : null}
+              {admin.password && admin.password.length < 8 ? (
+                <p className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-xs leading-5 text-amber-700">
+                  密码至少 8 位。
+                </p>
+              ) : null}
+              {admin.confirmPassword && admin.password !== admin.confirmPassword ? (
+                <p className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-xs leading-5 text-rose-700">
+                  两次输入的密码不一致。
+                </p>
+              ) : null}
               <p className="rounded-2xl bg-slate-50 px-4 py-3 text-xs leading-5 text-slate-500">
                 密码至少 8 位。安装程序会创建该账号为管理员，并绑定默认 Free 套餐。
               </p>
@@ -248,7 +320,7 @@ export function InstallWizardPage({ onInstalled }: InstallWizardPageProps) {
               </div>
               <button
                 type="button"
-                disabled={installing}
+                disabled={installing || !adminValid}
                 onClick={() => void handleCompleteInstall()}
                 className="inline-flex min-h-11 items-center justify-center gap-2 rounded-2xl bg-slate-950 px-5 py-3 text-sm font-semibold text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-60"
               >

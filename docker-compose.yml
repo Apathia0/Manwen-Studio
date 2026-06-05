@@ -1,0 +1,94 @@
+name: lorevista
+
+services:
+  backend:
+    image: ${REGISTRY_IMAGE_PREFIX:-ghcr.io/your-org/lorevista}/backend:${APP_VERSION:-v1.0.0}
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    env_file:
+      - ${BACKEND_ENV_FILE:-./deploy/docker/runtime/backend.env.example}
+    environment:
+      HOST: 0.0.0.0
+      PORT: 8000
+      DATABASE_URL: ${DATABASE_URL:-postgresql://postgres:postgres@postgres:5432/manga_novel}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      REDIS_ENABLED: ${REDIS_ENABLED:-true}
+      SYSTEM_INSTALLED: ${SYSTEM_INSTALLED:-false}
+      RUN_STARTUP_MIGRATIONS: ${RUN_STARTUP_MIGRATIONS:-false}
+      APP_VERSION: ${APP_VERSION:-v1.0.0}
+      UPDATER_URL: ${UPDATER_URL:-http://updater:8090}
+      UPDATER_TOKEN: ${UPDATER_TOKEN:-}
+    volumes:
+      - ${LOREVISTA_DATA_DIR:-./deploy/docker/data}/manga_outputs:/app/backend/manga_outputs
+      - ${LOREVISTA_DATA_DIR:-./deploy/docker/data}/video_outputs:/app/backend/video_outputs
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  web:
+    image: ${REGISTRY_IMAGE_PREFIX:-ghcr.io/your-org/lorevista}/web:${APP_VERSION:-v1.0.0}
+    build:
+      context: .
+      dockerfile: Dockerfile.web
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "${WEB_BIND_ADDR:-127.0.0.1}:${WEB_PORT:-8080}:80"
+    restart: unless-stopped
+
+  updater:
+    image: ${REGISTRY_IMAGE_PREFIX:-ghcr.io/your-org/lorevista}/updater:${APP_VERSION:-v1.0.0}
+    build:
+      context: .
+      dockerfile: Dockerfile.updater
+    environment:
+      APP_DIR: /opt/lorevista
+      ENV_FILE: /opt/lorevista/.env
+      COMPOSE_FILE: /opt/lorevista/docker-compose.yml
+      UPDATER_TOKEN: ${UPDATER_TOKEN:-}
+      UPDATER_STATE_FILE: /opt/lorevista/deploy/docker/update-state.json
+      LOG_FILE: /opt/lorevista/deploy/docker/update.log
+      LOCK_FILE: /opt/lorevista/deploy/docker/update.lock
+      BACKEND_HEALTH_URL: http://backend:8000/api/health
+      WEB_HEALTH_URL: http://web/api/health
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${LOREVISTA_APP_DIR:-.}:/opt/lorevista
+      - ${DOCKER_CONFIG_DIR:-/root/.docker}:/root/.docker:ro
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-manga_novel}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  redis_data:
