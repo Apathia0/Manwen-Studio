@@ -1,6 +1,8 @@
 # ─── Environment & Secrets ───
 .env
 backend/.env
+deploy/docker/runtime/backend.env
+deploy/docker/data/
 
 # ─── Python ───
 __pycache__/
@@ -20,6 +22,7 @@ frontend/node_modules/
 
 # ─── Generated outputs (large images/data) ───
 backend/manga_outputs/
+backend/video_outputs/
 test_novel_output.md
 test_ref_C.png
 

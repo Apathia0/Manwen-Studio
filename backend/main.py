@@ -46,7 +46,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from PIL import Image
-from sqlalchemy import case, func, and_
+from sqlalchemy import case, func, and_, text
 from sqlalchemy.orm import Session, sessionmaker
 from sse_starlette.sse import EventSourceResponse
 
@@ -268,6 +268,7 @@ MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_BYTES", str(10 * 1024 * 1024)))
 MAX_CHARACTER_PROFILE_CHARS = int(os.getenv("MAX_CHARACTER_PROFILE_CHARS", "20000"))
 API_TOKEN = os.getenv("API_TOKEN", "").strip()
 INSTALL_API_PREFIX = "/api/install"
+HEALTH_API_PATH = "/api/health"
 INSTALL_STATUS: dict[str, Any] = {
     "installed": False,
     "source": "unknown",
@@ -279,6 +280,10 @@ SYSTEM_READY = False
 
 def _is_install_api_path(path: str) -> bool:
     return path == INSTALL_API_PREFIX or path.startswith(f"{INSTALL_API_PREFIX}/")
+
+
+def _is_public_runtime_api_path(path: str) -> bool:
+    return _is_install_api_path(path) or path == HEALTH_API_PATH
 
 
 def _refresh_install_status() -> dict[str, Any]:
@@ -297,6 +302,64 @@ def _refresh_install_status() -> dict[str, Any]:
 
 def _system_installed() -> bool:
     return bool(INSTALL_STATUS.get("installed")) and not bool(INSTALL_STATUS.get("requires_restart")) and SYSTEM_READY
+
+
+@app.get("/api/health")
+def health_check():
+    status = _refresh_install_status()
+    installed = bool(status.get("installed"))
+    requires_restart = bool(status.get("requires_restart"))
+    database_reachable = status.get("database_reachable")
+    base_payload = {
+        "version": os.getenv("APP_VERSION", "dev"),
+        "installed": installed,
+        "requires_restart": requires_restart,
+    }
+    if not installed:
+        return {
+            "ok": True,
+            "ready": False,
+            "database_reachable": database_reachable,
+            **base_payload,
+        }
+    if requires_restart:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "ok": False,
+                "ready": False,
+                "database_reachable": database_reachable,
+                **base_payload,
+            },
+        )
+    if database_reachable is None:
+        try:
+            with database_engine.connect() as conn:
+                conn.execute(text("SELECT 1"))
+            database_reachable = True
+        except Exception as exc:
+            return JSONResponse(
+                status_code=503,
+                content={
+                "ok": False,
+                    "ready": False,
+                "database_reachable": database_reachable,
+                "database_error": str(exc),
+                    **base_payload,
+                },
+            )
+    ok = database_reachable is not False
+    payload = {
+        "ok": ok,
+        "ready": ok,
+        "database_reachable": database_reachable,
+        **base_payload,
+    }
+    if not ok:
+        return JSONResponse(status_code=503, content=payload)
+    return {
+        **payload,
+    }
 
 # 未授权域名时显示的 HTML 页面模板
 _UNAUTHORIZED_HTML = """\
@@ -348,7 +411,7 @@ app.add_middleware(
 @app.middleware("http")
 async def license_check_middleware(request: Request, call_next):
     path = request.url.path
-    if path.startswith(("/static/",)) or _is_install_api_path(path) or request.method == "OPTIONS":
+    if path.startswith(("/static/",)) or _is_public_runtime_api_path(path) or request.method == "OPTIONS":
         return await call_next(request)
 
     host_header = request.headers.get("host", "")
@@ -395,7 +458,7 @@ app.mount("/static/video", StaticFiles(directory=str(video_dir)), name="video")
 
 @app.middleware("http")
 async def require_api_token(request: Request, call_next):
-    if API_TOKEN and request.url.path.startswith("/api") and not _is_install_api_path(request.url.path) and request.method != "OPTIONS":
+    if API_TOKEN and request.url.path.startswith("/api") and not _is_public_runtime_api_path(request.url.path) and request.method != "OPTIONS":
         supplied = request.headers.get("x-api-token", "").strip()
         if not supplied:
             auth = request.headers.get("authorization", "")
@@ -410,7 +473,7 @@ async def require_api_token(request: Request, call_next):
 
 @app.middleware("http")
 async def bind_request_db(request: Request, call_next):
-    if _is_install_api_path(request.url.path):
+    if _is_public_runtime_api_path(request.url.path):
         return await call_next(request)
     if request.url.path.startswith("/api") and not _system_installed():
         return JSONResponse({"detail": "System is not installed", "installed": False}, status_code=503)

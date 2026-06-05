@@ -1,0 +1,11 @@
+[Unit]
+Description=LoreVista Docker image updater
+Wants=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+Environment=APP_DIR=/opt/lorevista
+ExecStart=/usr/bin/env bash /opt/lorevista/deploy/docker/update-lorevista.sh
+User=root
+Group=root
