@@ -117,6 +117,12 @@ export function paymentMethodLabel(method: string | null | undefined): string {
   if (method === 'mock_qr') return '模拟支付';
   if (method === 'wechat_qr') return '微信扫码';
   if (method === 'alipay_qr') return '支付宝扫码';
+  if (method === 'epay_qr') return '易支付';
+  if (method.startsWith('epay_')) {
+    const labels: Record<string, string> = { alipay: '支付宝', wxpay: '微信支付', qqpay: 'QQ钱包', tenpay: '财付通' };
+    const type = method.slice(5);
+    return `易支付(${labels[type] || type})`;
+  }
   if (method === 'manual_adjustment') return '后台人工调整';
   return method;
 }

@@ -572,10 +572,16 @@ export interface PaymentSettings {
   alipay_app_private_key?: string;
   alipay_public_key?: string;
   alipay_notify_url?: string;
+  epay_enabled?: boolean;
+  epay_gateway?: string;
+  epay_pid?: string;
+  epay_key?: string;
+  epay_type?: string;
+  epay_notify_url?: string;
+  epay_return_url?: string;
 }
 
 export interface BillingCheckout {
-  mode: string;
   method: string;
   provider: string;
   instructions: string;
@@ -993,7 +999,23 @@ export async function getMyOrders(): Promise<AdminOrderItem[]> {
   return res.json();
 }
 
-export async function subscribePlan(planId: number, billingCycle: 'monthly' | 'yearly' = 'monthly'): Promise<{
+export async function getPaymentConfig(): Promise<{
+  enabled: boolean;
+  default_method: string;
+  order_expire_minutes: number;
+  instructions: string;
+  methods: PaymentMethodOption[];
+}> {
+  const res = await fetch(`${BASE}/api/billing/payment-config`);
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function subscribePlan(
+  planId: number,
+  billingCycle: 'monthly' | 'yearly' = 'monthly',
+  paymentMethod?: string,
+): Promise<{
   ok: boolean;
   message: string;
   status: string;
@@ -1001,12 +1023,19 @@ export async function subscribePlan(planId: number, billingCycle: 'monthly' | 'y
   order: AdminOrderItem;
   checkout: BillingCheckout;
 }> {
+  const body: Record<string, unknown> = { plan_id: planId, billing_cycle: billingCycle };
+  if (paymentMethod) body.payment_method = paymentMethod;
   const res = await fetch(`${BASE}/api/billing/subscribe`, {
     method: 'POST',
     headers: apiHeaders(true),
-    body: JSON.stringify({ plan_id: planId, billing_cycle: billingCycle }),
+    body: JSON.stringify(body),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) {
+    const text = await res.text();
+    let detail = text;
+    try { detail = JSON.parse(text).detail || text; } catch { /* 非 JSON 响应直接使用原文 */ }
+    throw new Error(detail);
+  }
   return res.json();
 }
 

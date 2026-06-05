@@ -1342,35 +1342,38 @@ export function AdminPlatformSettingsPage({
 
       {activeTab === 'payment' && (
         <SectionCard title="支付配置" description="管理支付开关、渠道参数与订单策略。">
-          <div className="mt-1 grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-            <label className="flex items-center gap-2 rounded-2xl border border-[#e5edf8] px-3 py-2 text-sm text-slate-700">
-              <input type="checkbox" checked={settings.payment.enabled} onChange={(e) => setSettings((prev) => prev ? { ...prev, payment: { ...prev.payment, enabled: e.target.checked } } : prev)} />
-              启用支付
-            </label>
-            <label className="flex items-center gap-2 rounded-2xl border border-[#e5edf8] px-3 py-2 text-sm text-slate-700">
-              <input type="checkbox" checked={settings.payment.mock_enabled ?? true} onChange={(e) => setSettings((prev) => prev ? { ...prev, payment: { ...prev.payment, mock_enabled: e.target.checked } } : prev)} />
-              模拟支付
-            </label>
-            <label className="flex items-center gap-2 rounded-2xl border border-[#e5edf8] px-3 py-2 text-sm text-slate-700">
-              <input type="checkbox" checked={settings.payment.wechat_enabled ?? false} onChange={(e) => setSettings((prev) => prev ? { ...prev, payment: { ...prev.payment, wechat_enabled: e.target.checked } } : prev)} />
-              微信支付
-            </label>
-            <label className="flex items-center gap-2 rounded-2xl border border-[#e5edf8] px-3 py-2 text-sm text-slate-700">
-              <input type="checkbox" checked={settings.payment.alipay_enabled ?? false} onChange={(e) => setSettings((prev) => prev ? { ...prev, payment: { ...prev.payment, alipay_enabled: e.target.checked } } : prev)} />
-              支付宝
-            </label>
-          </div>
-          <div className="mt-3 grid gap-3 md:grid-cols-3">
-            <Select value={settings.payment.mode} onChange={(e) => setSettings((prev) => prev ? { ...prev, payment: { ...prev.payment, mode: e.target.value } } : prev)}>
-              <option value="mock">mock</option>
-              <option value="hybrid">hybrid</option>
-              <option value="live">live</option>
-            </Select>
-            <Select value={settings.payment.default_method} onChange={(e) => setSettings((prev) => prev ? { ...prev, payment: { ...prev.payment, default_method: e.target.value } } : prev)}>
-              <option value="mock_qr">模拟支付</option>
-              <option value="wechat_qr">微信扫码</option>
-              <option value="alipay_qr">支付宝扫码</option>
-            </Select>
+          <div className="mt-1 grid gap-3 md:grid-cols-2">
+            {(() => {
+              const pm = settings.payment;
+              let cur = 'closed';
+              if (pm.enabled) {
+                if (pm.wechat_enabled) cur = 'wechat';
+                else if (pm.alipay_enabled) cur = 'alipay';
+                else if (pm.epay_enabled) cur = 'epay';
+              }
+              return (
+                <Select value={cur} onChange={(e) => {
+                  const v = e.target.value;
+                  setSettings((prev) => {
+                    if (!prev) return prev;
+                    const base = { ...prev.payment };
+                    base.enabled = v !== 'closed';
+                    base.wechat_enabled = v === 'wechat';
+                    base.alipay_enabled = v === 'alipay';
+                    base.epay_enabled = v === 'epay';
+                    if (v === 'wechat') base.default_method = 'wechat_qr';
+                    else if (v === 'alipay') base.default_method = 'alipay_qr';
+                    else if (v === 'epay') base.default_method = 'epay_qr';
+                    return { ...prev, payment: base };
+                  });
+                }}>
+                  <option value="closed">关闭</option>
+                  <option value="wechat">微信支付</option>
+                  <option value="alipay">支付宝</option>
+                  <option value="epay">易支付</option>
+                </Select>
+              );
+            })()}
             <TextInput
               value={String(settings.payment.order_expire_minutes ?? 30)}
               onChange={(e) => setSettings((prev) => prev ? { ...prev, payment: { ...prev.payment, order_expire_minutes: Number(e.target.value || 30) } } : prev)}
@@ -1395,28 +1398,86 @@ export function AdminPlatformSettingsPage({
               placeholder="支付说明"
             />
           </div>
-          <div className="mt-3 grid gap-3 xl:grid-cols-2">
-            <div className="rounded-2xl border border-[#e5edf8] bg-[#f8fbff] p-4">
-              <div className="mb-3 text-sm font-semibold text-slate-900">微信参数</div>
-              <div className="space-y-3">
-                <TextInput value={settings.payment.wechat_app_id || ''} onChange={(e) => setSettings((prev) => prev ? { ...prev, payment: { ...prev.payment, wechat_app_id: e.target.value } } : prev)} placeholder="App ID" />
-                <TextInput value={settings.payment.wechat_mch_id || ''} onChange={(e) => setSettings((prev) => prev ? { ...prev, payment: { ...prev.payment, wechat_mch_id: e.target.value } } : prev)} placeholder="商户号" />
-                <TextInput value={settings.payment.wechat_notify_url || ''} onChange={(e) => setSettings((prev) => prev ? { ...prev, payment: { ...prev.payment, wechat_notify_url: e.target.value } } : prev)} placeholder="回调地址" />
+          {(() => {
+            const pm = settings.payment;
+            let activeMethod = 'closed';
+            if (pm.enabled) {
+              if (pm.wechat_enabled) activeMethod = 'wechat';
+              else if (pm.alipay_enabled) activeMethod = 'alipay';
+              else if (pm.epay_enabled) activeMethod = 'epay';
+            }
+
+            const wechatSection = (
+              <div className="rounded-2xl border border-[#e5edf8] bg-[#f8fbff] p-4">
+                <div className="mb-3 text-sm font-semibold text-slate-900">微信参数</div>
+                <div className="space-y-3">
+                  <TextInput value={pm.wechat_app_id || ''} onChange={(e) => setSettings((prev) => prev ? { ...prev, payment: { ...prev.payment, wechat_app_id: e.target.value } } : prev)} placeholder="App ID" />
+                  <TextInput value={pm.wechat_mch_id || ''} onChange={(e) => setSettings((prev) => prev ? { ...prev, payment: { ...prev.payment, wechat_mch_id: e.target.value } } : prev)} placeholder="商户号" />
+                  <TextInput value={pm.wechat_notify_url || ''} onChange={(e) => setSettings((prev) => prev ? { ...prev, payment: { ...prev.payment, wechat_notify_url: e.target.value } } : prev)} placeholder="回调地址" />
+                </div>
               </div>
-            </div>
-            <div className="rounded-2xl border border-[#e5edf8] bg-[#f8fbff] p-4">
-              <div className="mb-3 text-sm font-semibold text-slate-900">支付宝参数</div>
-              <div className="space-y-3">
-                <TextInput value={settings.payment.alipay_app_id || ''} onChange={(e) => setSettings((prev) => prev ? { ...prev, payment: { ...prev.payment, alipay_app_id: e.target.value } } : prev)} placeholder="App ID" />
-                <TextInput value={settings.payment.alipay_pid || ''} onChange={(e) => setSettings((prev) => prev ? { ...prev, payment: { ...prev.payment, alipay_pid: e.target.value } } : prev)} placeholder="卖家 ID / PID（可选）" />
-                <TextInput value={settings.payment.alipay_gateway || ''} onChange={(e) => setSettings((prev) => prev ? { ...prev, payment: { ...prev.payment, alipay_gateway: e.target.value } } : prev)} placeholder="网关地址" />
-                <TextInput value={settings.payment.alipay_sign_type || 'RSA2'} onChange={(e) => setSettings((prev) => prev ? { ...prev, payment: { ...prev.payment, alipay_sign_type: e.target.value } } : prev)} placeholder="签名类型" />
-                <TextInput value={settings.payment.alipay_notify_url || ''} onChange={(e) => setSettings((prev) => prev ? { ...prev, payment: { ...prev.payment, alipay_notify_url: e.target.value } } : prev)} placeholder="异步回调地址" />
-                <TextArea rows={5} value={settings.payment.alipay_app_private_key || ''} onChange={(e) => setSettings((prev) => prev ? { ...prev, payment: { ...prev.payment, alipay_app_private_key: e.target.value } } : prev)} placeholder="应用私钥（PKCS8）" />
-                <TextArea rows={5} value={settings.payment.alipay_public_key || ''} onChange={(e) => setSettings((prev) => prev ? { ...prev, payment: { ...prev.payment, alipay_public_key: e.target.value } } : prev)} placeholder="支付宝公钥" />
+            );
+
+            const alipaySection = (
+              <div className="rounded-2xl border border-[#e5edf8] bg-[#f8fbff] p-4">
+                <div className="mb-3 text-sm font-semibold text-slate-900">支付宝参数</div>
+                <div className="space-y-3">
+                  <TextInput value={pm.alipay_app_id || ''} onChange={(e) => setSettings((prev) => prev ? { ...prev, payment: { ...prev.payment, alipay_app_id: e.target.value } } : prev)} placeholder="App ID" />
+                  <TextInput value={pm.alipay_pid || ''} onChange={(e) => setSettings((prev) => prev ? { ...prev, payment: { ...prev.payment, alipay_pid: e.target.value } } : prev)} placeholder="卖家 ID / PID（可选）" />
+                  <TextInput value={pm.alipay_gateway || ''} onChange={(e) => setSettings((prev) => prev ? { ...prev, payment: { ...prev.payment, alipay_gateway: e.target.value } } : prev)} placeholder="网关地址" />
+                  <TextInput value={pm.alipay_sign_type || 'RSA2'} onChange={(e) => setSettings((prev) => prev ? { ...prev, payment: { ...prev.payment, alipay_sign_type: e.target.value } } : prev)} placeholder="签名类型" />
+                  <TextInput value={pm.alipay_notify_url || ''} onChange={(e) => setSettings((prev) => prev ? { ...prev, payment: { ...prev.payment, alipay_notify_url: e.target.value } } : prev)} placeholder="异步回调地址" />
+                  <TextArea rows={5} value={pm.alipay_app_private_key || ''} onChange={(e) => setSettings((prev) => prev ? { ...prev, payment: { ...prev.payment, alipay_app_private_key: e.target.value } } : prev)} placeholder="应用私钥（PKCS8）" />
+                  <TextArea rows={5} value={pm.alipay_public_key || ''} onChange={(e) => setSettings((prev) => prev ? { ...prev, payment: { ...prev.payment, alipay_public_key: e.target.value } } : prev)} placeholder="支付宝公钥" />
+                </div>
               </div>
-            </div>
-          </div>
+            );
+
+            const epaySection = (
+              <div className="rounded-2xl border border-[#e5edf8] bg-[#f8fbff] p-4">
+                <div className="mb-3 text-sm font-semibold text-slate-900">易支付参数</div>
+                <div className="space-y-3">
+                  <TextInput value={pm.epay_gateway || ''} onChange={(e) => setSettings((prev) => prev ? { ...prev, payment: { ...prev.payment, epay_gateway: e.target.value } } : prev)} placeholder="网关地址 https://your-epay.com" />
+                  <TextInput value={pm.epay_pid || ''} onChange={(e) => setSettings((prev) => prev ? { ...prev, payment: { ...prev.payment, epay_pid: e.target.value } } : prev)} placeholder="商户ID" />
+                  <TextInput value={pm.epay_key || ''} onChange={(e) => setSettings((prev) => prev ? { ...prev, payment: { ...prev.payment, epay_key: e.target.value } } : prev)} placeholder="商户密钥" type="password" />
+                  <div className="text-xs font-medium text-slate-600">开放通道（可多选）</div>
+                  <div className="flex flex-wrap gap-2">
+                    {[
+                      { value: 'alipay', label: '支付宝' },
+                      { value: 'wxpay', label: '微信支付' },
+                      { value: 'qqpay', label: 'QQ钱包' },
+                      { value: 'tenpay', label: '财付通' },
+                    ].map((ch) => {
+                      const active = (pm.epay_type || 'alipay').split(',').map((s) => s.trim());
+                      const checked = active.includes(ch.value);
+                      return (
+                        <label key={ch.value} className="flex items-center gap-1.5 rounded-xl border border-[#d7e3f4] px-3 py-1.5 text-sm text-slate-700 has-[:checked]:border-[#1d4ed8] has-[:checked]:bg-[#eff6ff] has-[:checked]:text-[#1d4ed8]">
+                          <input
+                            type="checkbox"
+                            className="accent-[#1d4ed8]"
+                            checked={checked}
+                            onChange={() => {
+                              const next = checked ? active.filter((s) => s !== ch.value) : [...active, ch.value];
+                              setSettings((prev) => prev ? { ...prev, payment: { ...prev.payment, epay_type: next.join(',') || 'alipay' } } : prev);
+                            }}
+                          />
+                          {ch.label}
+                        </label>
+                      );
+                    })}
+                  </div>
+                  <TextInput value={pm.epay_notify_url || ''} onChange={(e) => setSettings((prev) => prev ? { ...prev, payment: { ...prev.payment, epay_notify_url: e.target.value } } : prev)} placeholder="异步通知地址" />
+                  <TextInput value={pm.epay_return_url || ''} onChange={(e) => setSettings((prev) => prev ? { ...prev, payment: { ...prev.payment, epay_return_url: e.target.value } } : prev)} placeholder="同步跳转地址" />
+                </div>
+              </div>
+            );
+
+            const section = activeMethod === 'wechat' ? wechatSection
+              : activeMethod === 'alipay' ? alipaySection
+              : activeMethod === 'epay' ? epaySection
+              : null;
+            return section ? <div className="mt-3">{section}</div> : null;
+          })()}
         </SectionCard>
       )}
 

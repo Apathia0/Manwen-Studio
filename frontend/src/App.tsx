@@ -49,6 +49,7 @@ import {
   getMyEntitlements,
   getMyOrders,
   getPublicAnnouncement,
+  getPaymentConfig,
   getPublicPlatformSettings,
   getMySubscription,
   getMyUsage,
@@ -75,6 +76,7 @@ import {
   type Chapter,
   type EntitlementResponse,
   type MySubscriptionResponse,
+  type PaymentMethodOption,
   type PlatformAnnouncement,
   type PublicPlatformSettings,
   type PublicPlan,
@@ -183,6 +185,9 @@ function App() {
   const [announcement, setAnnouncement] = useState<PlatformAnnouncement | null>(null);
   const [announcementDismissed, setAnnouncementDismissed] = useState(false);
   const [installRequired, setInstallRequired] = useState(false);
+  const [paymentMethods, setPaymentMethods] = useState<PaymentMethodOption[]>([]);
+  const [channelPicker, setChannelPicker] = useState<{ planId: number; billingCycle: 'monthly' | 'yearly'; options: PaymentMethodOption[] } | null>(null);
+  const [channelLoading, setChannelLoading] = useState<string | null>(null);
 
   const activeChapter = useMemo(
     () => chapters.find((chapter) => chapter.id === activeChapterId) ?? null,
@@ -237,7 +242,7 @@ function App() {
         if (!currentOrder) {
           return;
         }
-        if (currentOrder.status !== 'pending') {
+        if (currentOrder.status === 'paid') {
           await Promise.all([refreshSubscriptionData(), refreshUsage()]);
           if (!cancelled) {
             setActiveCheckout(null);
@@ -274,6 +279,7 @@ function App() {
       setInstallRequired(false);
       void refreshPlans();
       void refreshPlatformSettings();
+      void fetchPaymentConfig();
       await bootstrapSession();
     } catch {
       clearAuthToken();
@@ -505,9 +511,20 @@ function App() {
   }
 
   async function purchasePlan(planId: number, billingCycle: 'monthly' | 'yearly' = 'monthly') {
+    // 检查易支付是否有多个通道需要用户选择
+    const epayMethods = paymentMethods.filter((m) => m.provider === 'epay');
+    if (epayMethods.length > 1) {
+      setChannelPicker({ planId, billingCycle, options: epayMethods });
+      return;
+    }
+    await doSubscribe(planId, billingCycle, epayMethods.length === 1 ? epayMethods[0].key : undefined);
+  }
+
+  /** 执行订阅，返回是否成功 */
+  async function doSubscribe(planId: number, billingCycle: 'monthly' | 'yearly', paymentMethod?: string): Promise<boolean> {
     setSubscribingPlanId(planId);
     try {
-      const result = await subscribePlan(planId, billingCycle);
+      const result = await subscribePlan(planId, billingCycle, paymentMethod);
       await Promise.all([refreshSubscriptionData(), refreshUsage()]);
       if (result.status === 'pending') {
         setActiveCheckout({ ...result.checkout, orderNo: result.order.order_no });
@@ -517,8 +534,10 @@ function App() {
         setRoute('account');
         toast.success(`支付成功，${result.subscription.plan.name} 已生效。`);
       }
+      return true;
     } catch (error: any) {
       toast.error(error.message || '订阅套餐失败');
+      return false;
     } finally {
       setSubscribingPlanId(null);
     }
@@ -530,6 +549,17 @@ function App() {
       setPlatform(data);
     } catch {
       setPlatform((prev) => prev);
+    }
+  }
+
+  async function fetchPaymentConfig() {
+    try {
+      const data = await getPaymentConfig();
+      if (data.enabled && data.methods) {
+        setPaymentMethods(data.methods);
+      }
+    } catch {
+      // Non-critical; defaults will be used
     }
   }
 
@@ -861,13 +891,69 @@ function App() {
       )}
       <PaymentCheckoutDialog
         checkout={activeCheckout}
-        onClose={() => setActiveCheckout(null)}
+        onClose={async () => {
+          const orderNo = activeCheckout?.orderNo;
+          setActiveCheckout(null);
+          setSubscribingPlanId(null);
+          if (orderNo) {
+            try {
+              await syncMyOrder(orderNo);
+              const orders = await getMyOrders();
+              setMyOrders(orders);
+              const currentOrder = orders.find((o) => o.order_no === orderNo);
+              if (currentOrder && currentOrder.status === 'paid') {
+                await Promise.all([refreshSubscriptionData(), refreshUsage()]);
+                setRoute('account');
+                toast.success('支付成功，套餐已生效。');
+              }
+            } catch {
+              // 静默处理，不干扰用户操作
+            }
+          }
+        }}
         onSuccess={(message) => {
           setActiveCheckout(null);
+          setSubscribingPlanId(null);
           setRoute('account');
           toast.success(message);
         }}
       />
+
+      {/* 易支付通道选择弹窗 */}
+      {channelPicker && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-[rgba(15,23,42,0.48)] px-4">
+          <div className="w-full max-w-sm rounded-[28px] border border-[#d7e3f4] bg-white p-6 shadow-[0_24px_60px_rgba(15,23,42,0.2)]">
+            <div className="text-base font-semibold text-slate-900">选择支付方式</div>
+            <div className="mt-1 text-sm text-slate-500">请选择要使用的支付通道</div>
+            <div className="mt-4 space-y-2">
+              {channelPicker.options.map((opt) => {
+                const loading = channelLoading === opt.key;
+                return (
+                  <button
+                    key={opt.key}
+                    disabled={!!channelLoading}
+                    onClick={async () => {
+                      setChannelLoading(opt.key);
+                      const ok = await doSubscribe(channelPicker.planId, channelPicker.billingCycle, opt.key);
+                      if (ok) setChannelPicker(null);
+                      setChannelLoading(null);
+                    }}
+                    className="w-full rounded-2xl border border-[#d7e3f4] bg-[#f8fbff] px-4 py-3 text-left text-sm font-medium text-slate-900 transition hover:border-[#1d4ed8] hover:bg-[#eff6ff] disabled:cursor-not-allowed disabled:opacity-60"
+                  >
+                    {loading ? `${opt.label} ...` : opt.label}
+                  </button>
+                );
+              })}
+            </div>
+            <button
+              onClick={() => { setChannelPicker(null); setChannelLoading(null); }}
+              className="mt-4 w-full rounded-2xl border border-[#d7e3f4] px-4 py-2 text-sm text-slate-500 transition hover:bg-[#f8fbff]"
+            >
+              取消
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

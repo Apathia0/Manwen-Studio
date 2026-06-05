@@ -89,7 +89,7 @@ export function PaymentCheckoutDialog({
               )}
             </div>
             <div className="mt-4 text-center text-sm text-slate-600">
-              {checkout.provider === 'alipay' ? '打开支付宝扫一扫完成付款' : '请使用对应支付 App 扫码完成付款'}
+              {checkout.provider === 'alipay' ? '打开支付宝扫一扫完成付款' : checkout.provider === 'epay' ? `在已打开的页面中完成支付（${paymentMethodLabel(checkout.method)}）` : '请使用对应支付 App 扫码完成付款'}
             </div>
           </div>
 
@@ -131,7 +131,7 @@ export function PaymentCheckoutDialog({
                   在新窗口打开支付链接
                 </a>
               ) : null}
-              {checkout.method === 'alipay_qr' ? (
+              {checkout.method === 'alipay_qr' || checkout.method.startsWith('epay_') ? (
                 <button
                   onClick={() => void confirmAlipayPaid()}
                   disabled={checkingPayment}
