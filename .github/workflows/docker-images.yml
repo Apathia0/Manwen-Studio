@@ -3,8 +3,7 @@ name: Docker Images
 on:
   push:
     branches:
-      - main
-      - master
+      - pro
     tags:
       - "v*"
   workflow_dispatch:
@@ -124,8 +123,8 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          git fetch origin main
-          git checkout main
+          git fetch origin pro
+          git checkout pro
 
           PUBLISHED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           cat > update-manifest.json << EOF
@@ -143,5 +142,5 @@ jobs:
             echo "No manifest changes to commit"
           else
             git commit -m "chore: update version manifest to ${{ steps.meta.outputs.app_version }} [skip ci]"
-            git push origin main
+            git push origin pro
           fi
