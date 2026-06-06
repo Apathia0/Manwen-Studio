@@ -628,19 +628,19 @@ async def _repair_onboarding_response(
                 ),
             },
         ],
-                "stream": False,
-                "max_tokens": 4096,
-            }
+        "stream": False,
+        "max_tokens": 4096,
+    }
 
-            async with httpx.AsyncClient(timeout=120) as client:
-                resp = await client.post(
-                    f"{DEEPSEEK_BASE_URL}/chat/completions",
-                    json=payload,
-                    headers=_deepseek_auth_headers(api_key),
+    async with httpx.AsyncClient(timeout=120) as client:
+        resp = await client.post(
+            f"{DEEPSEEK_BASE_URL}/chat/completions",
+            json=payload,
+            headers=_deepseek_auth_headers(api_key),
         )
-        resp.raise_for_status()
-        data = resp.json()
-        content = data["choices"][0]["message"]["content"]
+    resp.raise_for_status()
+    data = resp.json()
+    content = data["choices"][0]["message"]["content"]
 
     result = _extract_json_object(content)
     collected_info = result.get("collected_info")
