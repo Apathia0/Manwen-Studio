@@ -92,6 +92,12 @@ main() {
   cd "$APP_DIR"
   log "checking for image updates"
 
+  # 清理 .env 中版本清单 URL 的占位值，让 Docker 镜像内置的默认值生效
+  if grep -qsE '^UPDATE_MANIFEST_URL=https?://example\.com/' "$ENV_FILE" 2>/dev/null; then
+    log "removing placeholder UPDATE_MANIFEST_URL from $ENV_FILE"
+    sed -i '/^UPDATE_MANIFEST_URL=/s/^/#/' "$ENV_FILE"
+  fi
+
   local backend_before web_before backend_pulled web_pulled
   backend_before="$(running_image_id_for "$BACKEND_SERVICE")"
   web_before="$(running_image_id_for "$WEB_SERVICE")"
@@ -100,7 +106,7 @@ main() {
   BACKEND_IMAGE_REF="${BACKEND_IMAGE_REF:-$(image_ref_for "$BACKEND_SERVICE")}"
   WEB_IMAGE_REF="${WEB_IMAGE_REF:-$(image_ref_for "$WEB_SERVICE")}"
 
-  compose pull "$BACKEND_SERVICE" "$WEB_SERVICE"
+  compose pull "$BACKEND_SERVICE" "$WEB_SERVICE" updater
 
   backend_pulled="$(image_id_for "$BACKEND_SERVICE")"
   web_pulled="$(image_id_for "$WEB_SERVICE")"
@@ -137,6 +143,10 @@ main() {
   else
     docker image prune -f --filter "until=168h" >/dev/null || true
   fi
+
+  log "restarting updater with new image"
+  compose up -d --no-deps updater
+
   log "update completed"
 }
 

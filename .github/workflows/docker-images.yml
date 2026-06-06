@@ -10,7 +10,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
   packages: write
 
 env:
@@ -112,6 +112,36 @@ jobs:
           context: .
           file: Dockerfile.updater
           push: true
+          build-args: |
+            GITHUB_REPOSITORY=${{ github.repository }}
           tags: |
             ${{ env.REGISTRY }}/${{ steps.meta.outputs.image_prefix }}/updater:${{ steps.meta.outputs.sha_tag }}
             ${{ env.REGISTRY }}/${{ steps.meta.outputs.image_prefix }}/updater:${{ steps.meta.outputs.release_tag }}
+
+      - name: Update version manifest (tag only)
+        if: github.ref_type == 'tag'
+        run: |
+          PUBLISHED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          cat > update-manifest.json << EOF
+          {
+            "channel": "stable",
+            "latest_version": "${{ steps.meta.outputs.app_version }}",
+            "min_supported_version": "v1.0.0",
+            "release_notes": "",
+            "published_at": "${PUBLISHED_AT}"
+          }
+          EOF
+          echo "Updated manifest: $(cat update-manifest.json)"
+
+      - name: Commit and push updated manifest
+        if: github.ref_type == 'tag'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add update-manifest.json
+          if git diff --cached --quiet; then
+            echo "No manifest changes to commit"
+          else
+            git commit -m "chore: update version manifest to ${{ steps.meta.outputs.app_version }} [skip ci]"
+            git push origin HEAD:main
+          fi

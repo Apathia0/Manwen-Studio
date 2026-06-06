@@ -1,10 +1,13 @@
 FROM python:3.11-alpine
 
+ARG GITHUB_REPOSITORY
+
 ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     APP_DIR=/opt/lorevista \
     ENV_FILE=/opt/lorevista/.env \
-    UPDATER_COMMAND="/usr/bin/env bash /updater/update-lorevista.sh"
+    UPDATER_COMMAND="/usr/bin/env bash /updater/update-lorevista.sh" \
+    DEFAULT_MANIFEST_URL=https://raw.githubusercontent.com/${GITHUB_REPOSITORY:-dream619/Manwen-Studio}/main/update-manifest.json
 
 RUN apk add --no-cache bash curl docker-cli docker-cli-compose util-linux
 
