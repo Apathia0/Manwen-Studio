@@ -71,9 +71,13 @@ agent-ui-prototype.html
 lorevista-mobile/node_modules/
 lorevista-mobile/dist/
 
-# ─── MD files (except README & AGENTS) ───
+# ─── MD files (except README & AGENTS & docs) ───
 *.md
 !README.md
 !AGENTS.md
 !deploy/docker/RELEASE_AND_UPDATE.md
 !deploy/docker/FAQ.md
+!docs/superpowers/**/*.md
+
+# ─── Superpowers brainstorming files ───
+.superpowers/
