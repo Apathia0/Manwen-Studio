@@ -193,7 +193,13 @@ def _fetch_latest_tag_from_github() -> str | None:
 
 
 def _tag_exists_in_registry(tag: str) -> bool | None:
-    """查询 ghcr.io API 检查指定 tag 是否存在。返回 True/False，API 不可用时返回 None。"""
+    """查询 ghcr.io API 检查指定 tag 是否存在。
+
+    ghcr.io 使用 token 认证流程：
+    1. 用 docker config 中的 basic auth 凭证换取 Bearer token
+    2. 用 Bearer token 查询 tag 列表
+    返回 True/False，API 不可用时返回 None。
+    """
     docker_config = Path("/root/.docker/config.json")
     auth_value: str | None = None
     if docker_config.exists():
@@ -211,14 +217,28 @@ def _tag_exists_in_registry(tag: str) -> bool | None:
             pass
     if not auth_value:
         return None
-    registry_url = "https://ghcr.io/v2/dream619/manwen-studio/backend/tags/list"
-    encoded = base64.b64encode(auth_value.encode("utf-8")).decode("ascii")
-    headers = {
-        "Accept": "application/json",
-        "Authorization": f"Basic {encoded}",
-    }
+
+    # ghcr.io 需要先用 basic auth 换取 Bearer token，不能直接用 basic auth 查询
+    repo = "dream619/manwen-studio/backend"
+    basic_encoded = base64.b64encode(auth_value.encode("utf-8")).decode("ascii")
+    token_url = f"https://ghcr.io/token?scope=repository:{repo}:pull&service=ghcr.io"
     try:
-        req = urllib.request.Request(registry_url, headers=headers)
+        token_req = urllib.request.Request(token_url)
+        token_req.add_header("Authorization", f"Basic {basic_encoded}")
+        with urllib.request.urlopen(token_req, timeout=UPDATE_MANIFEST_TIMEOUT_SECONDS) as resp:
+            token_data = json.loads(resp.read(512 * 1024).decode())
+        bearer_token = token_data.get("token", "")
+        if not bearer_token:
+            return None
+    except Exception:
+        return None
+
+    # 用 Bearer token 查询 tag 列表
+    registry_url = f"https://ghcr.io/v2/{repo}/tags/list"
+    try:
+        req = urllib.request.Request(registry_url)
+        req.add_header("Authorization", f"Bearer {bearer_token}")
+        req.add_header("Accept", "application/json")
         with urllib.request.urlopen(req, timeout=UPDATE_MANIFEST_TIMEOUT_SECONDS) as resp:
             data = json.loads(resp.read(512 * 1024).decode())
     except Exception:
