@@ -228,24 +228,14 @@ def _tag_exists_in_registry(tag: str) -> bool | None:
 
 
 def _get_image_ref(service: str, target_version: str) -> str:
-    """从 docker compose config 获取服务镜像名，替换 tag 为目标版本。"""
-    try:
-        result = subprocess.run(
-            ["docker", "compose", "--env-file", str(ENV_FILE), "-f", str(COMPOSE_FILE),
-             "config", "--images", service],
-            capture_output=True, text=True, timeout=15, cwd=str(APP_DIR),
-        )
-    except subprocess.TimeoutExpired as exc:
-        raise HTTPException(503, f"无法获取 {service} 的镜像配置：命令超时") from exc
-    except Exception as exc:
-        raise HTTPException(502, f"无法获取 {service} 的镜像配置：{exc}") from exc
-    if result.returncode != 0 or not result.stdout.strip():
-        raise HTTPException(502, f"无法获取 {service} 的镜像配置：{result.stderr.strip()}")
-    current_ref = result.stdout.strip().splitlines()[0]
-    if ":" in current_ref:
-        repo = current_ref.rsplit(":", 1)[0]
-        return f"{repo}:{target_version}"
-    return f"{current_ref}:{target_version}"
+    """根据 REGISTRY_IMAGE_PREFIX 构造服务镜像引用。
+
+    直接从 .env 读取 REGISTRY_IMAGE_PREFIX 并拼接服务名和版本号，
+    不再依赖 docker compose config --images（该命令会返回所有依赖镜像，
+    不只目标服务的，导致取到错误的镜像引用）。
+    """
+    prefix = _read_env_value("REGISTRY_IMAGE_PREFIX") or "ghcr.io/dream619/manwen-studio"
+    return f"{prefix}/{service}:{target_version}"
 
 
 def _validate_version_tags(target_version: str) -> None:
