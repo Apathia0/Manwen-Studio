@@ -17,6 +17,7 @@ from pydantic import BaseModel
 
 APP_DIR = Path(os.getenv("APP_DIR", "/opt/lorevista"))
 ENV_FILE = Path(os.getenv("ENV_FILE", str(APP_DIR / ".env")))
+COMPOSE_FILE = Path(os.getenv("COMPOSE_FILE", str(APP_DIR / "docker-compose.yml")))
 STATE_FILE = Path(os.getenv("UPDATER_STATE_FILE", str(APP_DIR / "deploy/docker/update-state.json")))
 UPDATE_COMMAND = os.getenv("UPDATER_COMMAND", "/usr/bin/env bash /updater/update-lorevista.sh")
 UPDATER_TOKEN = os.getenv("UPDATER_TOKEN", "").strip()
@@ -150,12 +151,12 @@ def _fetch_update_manifest() -> dict[str, Any]:
             if len(body) > 1024 * 1024:
                 raise HTTPException(502, "Update manifest is too large")
             charset = response.headers.get_content_charset() or "utf-8"
-    except urllib.error.HTTPError as exc:
-        raise HTTPException(502, f"Update manifest request failed with HTTP {exc.code}") from exc
-    except urllib.error.URLError as exc:
-        raise HTTPException(502, f"Update manifest is unavailable: {exc.reason}") from exc
-    except TimeoutError as exc:
-        raise HTTPException(502, "Update manifest request timed out") from exc
+    except urllib.error.HTTPError:
+        return {}
+    except urllib.error.URLError:
+        return {}
+    except TimeoutError:
+        return {}
     try:
         data = json.loads(body.decode(charset))
     except Exception as exc:
@@ -188,6 +189,49 @@ def _fetch_latest_tag_from_github() -> str | None:
         if VERSION_RE.match(tag_name) and tag_name.startswith("v"):
             return tag_name
     return None
+
+
+def _get_image_ref(service: str, target_version: str) -> str:
+    """从 docker compose config 获取服务镜像名，替换 tag 为目标版本。"""
+    try:
+        result = subprocess.run(
+            ["docker", "compose", "--env-file", str(ENV_FILE), "-f", str(COMPOSE_FILE),
+             "config", "--images", service],
+            capture_output=True, text=True, timeout=15, cwd=str(APP_DIR),
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise HTTPException(503, f"无法获取 {service} 的镜像配置：命令超时") from exc
+    except Exception as exc:
+        raise HTTPException(502, f"无法获取 {service} 的镜像配置：{exc}") from exc
+    if result.returncode != 0 or not result.stdout.strip():
+        raise HTTPException(502, f"无法获取 {service} 的镜像配置：{result.stderr.strip()}")
+    current_ref = result.stdout.strip().splitlines()[0]
+    if ":" in current_ref:
+        repo = current_ref.rsplit(":", 1)[0]
+        return f"{repo}:{target_version}"
+    return f"{current_ref}:{target_version}"
+
+
+def _validate_version_tags(target_version: str) -> None:
+    """验证目标版本的所有镜像标签在仓库中存在。"""
+    services = ["backend", "web", "updater"]
+    missing: list[str] = []
+    for service in services:
+        image = _get_image_ref(service, target_version)
+        try:
+            result = subprocess.run(
+                ["docker", "buildx", "imagetools", "inspect", image],
+                capture_output=True, text=True, timeout=30,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise HTTPException(503, f"验证镜像 {image} 超时，仓库可能不可达") from exc
+        except FileNotFoundError:
+            return
+        if result.returncode != 0:
+            missing.append(image)
+    if missing:
+        detail = "以下镜像在仓库中不存在:\n" + "\n".join(f"  - {img}" for img in missing)
+        raise HTTPException(400, detail)
 
 
 def _parse_semver(version: str) -> tuple[int, ...]:
@@ -408,10 +452,20 @@ def check_update(_: None = Depends(_auth)):
 
     manifest = _fetch_update_manifest()
     latest_version = _string_field(manifest, "latest_version") or _string_field(manifest, "version")
-    if not latest_version:
-        raise HTTPException(502, "Update manifest is missing latest_version")
-    if not VERSION_RE.match(latest_version):
-        raise HTTPException(502, "Update manifest contains an invalid latest_version")
+    if not latest_version or not VERSION_RE.match(latest_version):
+        return {
+            "configured": False,
+            "source": None,
+            "current_version": current_version,
+            "latest_version": latest_version or None,
+            "update_available": False,
+            "release_notes": "",
+            "published_at": None,
+            "min_supported_version": None,
+            "channel": None,
+            "manifest_url": _redact_manifest_url(UPDATE_MANIFEST_URL),
+            "message": "更新清单不可用。如果仓库是私有的，需要在 .env 中配置 UPDATE_MANIFEST_URL。",
+        }
 
     update_available = _is_newer_version(latest_version, current_version)
     return {
@@ -447,6 +501,8 @@ def start_update(payload: UpdateRequest, _: None = Depends(_auth)):
             }
         if payload.target_version and not VERSION_RE.match(payload.target_version):
             raise HTTPException(400, "Invalid target version")
+        if payload.target_version:
+            _validate_version_tags(payload.target_version)
         _write_state({
             **current,
             "status": "queued",
