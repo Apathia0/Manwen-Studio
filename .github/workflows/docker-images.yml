@@ -117,7 +117,7 @@ jobs:
             ${{ env.REGISTRY }}/${{ steps.meta.outputs.image_prefix }}/updater:${{ steps.meta.outputs.sha_tag }}
             ${{ env.REGISTRY }}/${{ steps.meta.outputs.image_prefix }}/updater:${{ steps.meta.outputs.release_tag }}
 
-      - name: Update version manifest on main (tag only)
+      - name: Update version manifest on pro (tag only)
         if: github.ref_type == 'tag'
         run: |
           git config user.name "github-actions[bot]"
