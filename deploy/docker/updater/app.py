@@ -28,6 +28,7 @@ GITHUB_REPOSITORY = os.getenv("GITHUB_REPOSITORY", "").strip()
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "").strip()
 GITHUB_API_TIMEOUT_SECONDS = float(os.getenv("GITHUB_API_TIMEOUT_SECONDS", "10"))
 VERSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
+SEMVER_RE = re.compile(r"^v?(\d+)(?:\.(\d+)(?:\.(\d+))?)?")
 SECRET_ASSIGNMENT_RE = re.compile(r"(?i)\b([A-Z0-9_]*(?:TOKEN|PASSWORD|SECRET|KEY)[A-Z0-9_]*)=([^\s]+)")
 URL_WITH_PASSWORD_RE = re.compile(r"(?i)\b((?:postgresql|postgres|redis|rediss)://[^:\s/@]+:)([^@\s]+)(@[^ \t\r\n]+)")
 STALE_STATE_SECONDS = int(os.getenv("UPDATER_STALE_STATE_SECONDS", "60"))
@@ -187,6 +188,17 @@ def _fetch_latest_tag_from_github() -> str | None:
         if VERSION_RE.match(tag_name) and tag_name.startswith("v"):
             return tag_name
     return None
+
+
+def _parse_semver(version: str) -> tuple[int, ...]:
+    m = SEMVER_RE.match(version.strip())
+    if not m:
+        return (0,)
+    return tuple(int(p) if p else 0 for p in m.groups())
+
+
+def _is_newer_version(latest: str, current: str) -> bool:
+    return _parse_semver(latest) > _parse_semver(current)
 
 
 def _set_state(**updates: Any) -> dict[str, Any]:
@@ -381,7 +393,7 @@ def check_update(_: None = Depends(_auth)):
 
     github_tag = _fetch_latest_tag_from_github()
     if github_tag:
-        update_available = github_tag != current_version
+        update_available = _is_newer_version(github_tag, current_version)
         return {
             "configured": True,
             "source": "github-api",
@@ -418,7 +430,7 @@ def check_update(_: None = Depends(_auth)):
     if not VERSION_RE.match(latest_version):
         raise HTTPException(502, "Update manifest contains an invalid latest_version")
 
-    update_available = latest_version != current_version
+    update_available = _is_newer_version(latest_version, current_version)
     return {
         "configured": True,
         "source": "manifest",
