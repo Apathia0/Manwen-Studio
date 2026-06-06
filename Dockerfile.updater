@@ -7,7 +7,8 @@ ENV PYTHONUNBUFFERED=1 \
     APP_DIR=/opt/lorevista \
     ENV_FILE=/opt/lorevista/.env \
     UPDATER_COMMAND="/usr/bin/env bash /updater/update-lorevista.sh" \
-    DEFAULT_MANIFEST_URL=https://raw.githubusercontent.com/${GITHUB_REPOSITORY:-dream619/Manwen-Studio}/pro/update-manifest.json
+    DEFAULT_MANIFEST_URL=https://raw.githubusercontent.com/${GITHUB_REPOSITORY:-dream619/Manwen-Studio}/pro/update-manifest.json \
+    GITHUB_REPOSITORY=${GITHUB_REPOSITORY:-dream619/Manwen-Studio}
 
 RUN apk add --no-cache bash curl docker-cli docker-cli-compose util-linux
 

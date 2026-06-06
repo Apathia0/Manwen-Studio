@@ -24,6 +24,8 @@ DEFAULT_MANIFEST_URL = os.getenv("DEFAULT_MANIFEST_URL", "").strip()
 UPDATE_MANIFEST_URL = os.getenv("UPDATE_MANIFEST_URL", "").strip() or DEFAULT_MANIFEST_URL or ""
 UPDATE_MANIFEST_TOKEN = os.getenv("UPDATE_MANIFEST_TOKEN", "").strip()
 UPDATE_MANIFEST_TIMEOUT_SECONDS = float(os.getenv("UPDATE_MANIFEST_TIMEOUT_SECONDS", "10"))
+GITHUB_REPOSITORY = os.getenv("GITHUB_REPOSITORY", "").strip()
+GITHUB_API_TIMEOUT_SECONDS = float(os.getenv("GITHUB_API_TIMEOUT_SECONDS", "10"))
 VERSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 SECRET_ASSIGNMENT_RE = re.compile(r"(?i)\b([A-Z0-9_]*(?:TOKEN|PASSWORD|SECRET|KEY)[A-Z0-9_]*)=([^\s]+)")
 URL_WITH_PASSWORD_RE = re.compile(r"(?i)\b((?:postgresql|postgres|redis|rediss)://[^:\s/@]+:)([^@\s]+)(@[^ \t\r\n]+)")
@@ -159,6 +161,29 @@ def _fetch_update_manifest() -> dict[str, Any]:
     if not isinstance(data, dict):
         raise HTTPException(502, "Update manifest must be a JSON object")
     return data
+
+
+def _fetch_latest_tag_from_github() -> str | None:
+    if not GITHUB_REPOSITORY:
+        return None
+    url = f"https://api.github.com/repos/{GITHUB_REPOSITORY}/tags?per_page=10"
+    headers = {
+        "Accept": "application/vnd.github.v3+json",
+        "User-Agent": "StoryCanvas-Updater",
+    }
+    req = urllib.request.Request(url, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=GITHUB_API_TIMEOUT_SECONDS) as resp:
+            tags = json.loads(resp.read(1024 * 128).decode())
+    except Exception:
+        return None
+    if not isinstance(tags, list):
+        return None
+    for tag in tags:
+        tag_name = tag.get("name", "")
+        if VERSION_RE.match(tag_name) and tag_name.startswith("v"):
+            return tag_name
+    return None
 
 
 def _set_state(**updates: Any) -> dict[str, Any]:
@@ -350,9 +375,28 @@ def status(_: None = Depends(_auth)):
 @app.get("/check")
 def check_update(_: None = Depends(_auth)):
     current_version = _read_env_value("APP_VERSION") or "dev"
+
+    github_tag = _fetch_latest_tag_from_github()
+    if github_tag:
+        update_available = github_tag != current_version
+        return {
+            "configured": True,
+            "source": "github-api",
+            "current_version": current_version,
+            "latest_version": github_tag,
+            "update_available": update_available,
+            "release_notes": "",
+            "published_at": None,
+            "min_supported_version": None,
+            "channel": None,
+            "manifest_url": "",
+            "message": "A new version is available." if update_available else "Already on the latest version.",
+        }
+
     if not UPDATE_MANIFEST_URL:
         return {
             "configured": False,
+            "source": None,
             "current_version": current_version,
             "latest_version": None,
             "update_available": False,
@@ -361,7 +405,7 @@ def check_update(_: None = Depends(_auth)):
             "min_supported_version": None,
             "channel": None,
             "manifest_url": "",
-            "message": "UPDATE_MANIFEST_URL is not configured.",
+            "message": "UPDATE_MANIFEST_URL is not configured and GitHub API is unavailable.",
         }
 
     manifest = _fetch_update_manifest()
@@ -374,6 +418,7 @@ def check_update(_: None = Depends(_auth)):
     update_available = latest_version != current_version
     return {
         "configured": True,
+        "source": "manifest",
         "current_version": current_version,
         "latest_version": latest_version,
         "update_available": update_available,
