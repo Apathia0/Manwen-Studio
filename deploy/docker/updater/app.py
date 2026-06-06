@@ -1,3 +1,4 @@
+import base64
 import json
 import contextlib
 import os
@@ -189,6 +190,46 @@ def _fetch_latest_tag_from_github() -> str | None:
         if VERSION_RE.match(tag_name) and tag_name.startswith("v"):
             return tag_name
     return None
+
+
+def _fetch_latest_tag_from_registry() -> str | None:
+    """从 ghcr.io 列出可用标签，找到最新版本。"""
+    docker_config = Path("/root/.docker/config.json")
+    auth_value: str | None = None
+    if docker_config.exists():
+        try:
+            cfg = json.loads(docker_config.read_text())
+            for registry_key in cfg.get("auths", {}):
+                if "ghcr.io" in registry_key:
+                    entry = cfg["auths"][registry_key]
+                    raw = entry.get("auth", "").strip()
+                    if raw:
+                        decoded = base64.b64decode(raw).decode("utf-8", errors="replace")
+                        auth_value = decoded
+                    break
+        except Exception:
+            pass
+    if not auth_value:
+        return None
+    registry_url = "https://ghcr.io/v2/dream619/manwen-studio/backend/tags/list"
+    encoded = base64.b64encode(auth_value.encode("utf-8")).decode("ascii")
+    headers = {
+        "Accept": "application/json",
+        "Authorization": f"Basic {encoded}",
+    }
+    try:
+        req = urllib.request.Request(registry_url, headers=headers)
+        with urllib.request.urlopen(req, timeout=UPDATE_MANIFEST_TIMEOUT_SECONDS) as resp:
+            data = json.loads(resp.read(512 * 1024).decode())
+    except Exception:
+        return None
+    tags = data.get("tags") or []
+    version_tags = sorted(
+        [t for t in tags if SEMVER_RE.match(t)],
+        key=lambda t: _parse_semver(t),
+        reverse=True,
+    )
+    return version_tags[0] if version_tags else None
 
 
 def _get_image_ref(service: str, target_version: str) -> str:
@@ -455,9 +496,31 @@ def status(_: None = Depends(_auth)):
 def check_update(_: None = Depends(_auth)):
     current_version = _read_env_value("APP_VERSION") or "dev"
 
-    if not UPDATE_MANIFEST_URL:
+    # 1) 尝试从 manifest URL 获取最新版本
+    manifest_latest: str | None = None
+    manifest_data: dict[str, Any] = {}
+    manifest_configured = bool(UPDATE_MANIFEST_URL)
+    if UPDATE_MANIFEST_URL:
+        manifest_data = _fetch_update_manifest()
+        ml = _string_field(manifest_data, "latest_version") or _string_field(manifest_data, "version")
+        if ml and VERSION_RE.match(ml):
+            manifest_latest = ml
+
+    # 2) 尝试从 ghcr.io 远程查询最新 tag（私有仓库使用 Docker 凭证）
+    registry_latest: str | None = _fetch_latest_tag_from_registry()
+
+    # 3) 取两个来源中较新的版本
+    latest_version = manifest_latest or registry_latest
+    source = "registry"
+    if manifest_latest and registry_latest:
+        latest_version = manifest_latest if _is_newer_version(manifest_latest, registry_latest) else registry_latest
+        source = "manifest+registry"
+    elif manifest_latest:
+        source = "manifest"
+
+    if not latest_version:
         return {
-            "configured": False,
+            "configured": manifest_configured,
             "source": None,
             "current_version": current_version,
             "latest_version": None,
@@ -466,40 +529,23 @@ def check_update(_: None = Depends(_auth)):
             "published_at": None,
             "min_supported_version": None,
             "channel": None,
-            "manifest_url": "",
-            "message": "UPDATE_MANIFEST_URL is not configured.",
-        }
-
-    manifest = _fetch_update_manifest()
-    latest_version = _string_field(manifest, "latest_version") or _string_field(manifest, "version")
-    if not latest_version or not VERSION_RE.match(latest_version):
-        return {
-            "configured": False,
-            "source": None,
-            "current_version": current_version,
-            "latest_version": latest_version or None,
-            "update_available": False,
-            "release_notes": "",
-            "published_at": None,
-            "min_supported_version": None,
-            "channel": None,
             "manifest_url": _redact_manifest_url(UPDATE_MANIFEST_URL),
-            "message": "更新清单不可用。如果仓库是私有的，需要在 .env 中配置 UPDATE_MANIFEST_URL。",
+            "message": "无法检测到最新版本（manifest 不可用且 ghcr.io 查询失败）。",
         }
 
     update_available = _is_newer_version(latest_version, current_version)
     return {
-        "configured": True,
-        "source": "manifest",
+        "configured": manifest_configured,
+        "source": source,
         "current_version": current_version,
         "latest_version": latest_version,
         "update_available": update_available,
-        "release_notes": _string_field(manifest, "release_notes"),
-        "published_at": _string_field(manifest, "published_at") or None,
-        "min_supported_version": _string_field(manifest, "min_supported_version") or None,
-        "channel": _string_field(manifest, "channel") or None,
+        "release_notes": _string_field(manifest_data, "release_notes"),
+        "published_at": _string_field(manifest_data, "published_at") or None,
+        "min_supported_version": _string_field(manifest_data, "min_supported_version") or None,
+        "channel": _string_field(manifest_data, "channel") or None,
         "manifest_url": _redact_manifest_url(UPDATE_MANIFEST_URL),
-        "message": "A new version is available." if update_available else "Already on the latest version.",
+        "message": "有新版本可用。" if update_available else "已是最新版本。",
     }
 
 
