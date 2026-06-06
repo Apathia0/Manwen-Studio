@@ -28,7 +28,7 @@ UPDATE_MANIFEST_TIMEOUT_SECONDS = float(os.getenv("UPDATE_MANIFEST_TIMEOUT_SECON
 GITHUB_REPOSITORY = os.getenv("GITHUB_REPOSITORY", "").strip()
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "").strip()
 GITHUB_API_TIMEOUT_SECONDS = float(os.getenv("GITHUB_API_TIMEOUT_SECONDS", "10"))
-VERSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
+VERSION_RE = re.compile(r"^v\d+(?:\.\d+){0,2}(?:[._-][a-zA-Z0-9]+)?$")
 SEMVER_RE = re.compile(r"^v?(\d+)(?:\.(\d+)(?:\.(\d+))?)?")
 SECRET_ASSIGNMENT_RE = re.compile(r"(?i)\b([A-Z0-9_]*(?:TOKEN|PASSWORD|SECRET|KEY)[A-Z0-9_]*)=([^\s]+)")
 URL_WITH_PASSWORD_RE = re.compile(r"(?i)\b((?:postgresql|postgres|redis|rediss)://[^:\s/@]+:)([^@\s]+)(@[^ \t\r\n]+)")
@@ -262,7 +262,7 @@ def _auth(x_updater_token: str | None = Header(default=None)) -> None:
 
 def _update_env_version(version: str) -> None:
     if not VERSION_RE.match(version):
-        raise HTTPException(400, "Invalid target version. Use a Docker tag such as v1.2.3 or sha-abcdef123456.")
+        raise HTTPException(400, "Invalid target version. Please use a valid version like v1.2.3.")
     ENV_FILE.parent.mkdir(parents=True, exist_ok=True)
     existing = ENV_FILE.read_text(encoding="utf-8") if ENV_FILE.exists() else ""
     lines = existing.splitlines()
