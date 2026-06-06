@@ -2406,9 +2406,7 @@ async def generate_onboarding_response(
         f"- current_step: {step_hint}\n"
         f"- current_collected_info: {current_snapshot}\n"
         "请在此基础上更新 collected_info。对于「是的/嗯/对」这类确认回答，不要把这些确认词直接写入字段，"
-        "而应保留上一轮你已经判断出的内容。\n"
-        "\n请以 JSON 格式回复，包含 reply（你的回复文本）、collected_info（更新后的收集信息对象）"
-        "和 step（当前步骤编号）字段。直接输出 JSON 对象，不要 Markdown 代码块或额外说明。"
+        "而应保留上一轮你已经判断出的内容。"
     )
 
     for attempt in range(max_retries + 1):
