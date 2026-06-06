@@ -25,6 +25,7 @@ UPDATE_MANIFEST_URL = os.getenv("UPDATE_MANIFEST_URL", "").strip() or DEFAULT_MA
 UPDATE_MANIFEST_TOKEN = os.getenv("UPDATE_MANIFEST_TOKEN", "").strip()
 UPDATE_MANIFEST_TIMEOUT_SECONDS = float(os.getenv("UPDATE_MANIFEST_TIMEOUT_SECONDS", "10"))
 GITHUB_REPOSITORY = os.getenv("GITHUB_REPOSITORY", "").strip()
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "").strip()
 GITHUB_API_TIMEOUT_SECONDS = float(os.getenv("GITHUB_API_TIMEOUT_SECONDS", "10"))
 VERSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 SECRET_ASSIGNMENT_RE = re.compile(r"(?i)\b([A-Z0-9_]*(?:TOKEN|PASSWORD|SECRET|KEY)[A-Z0-9_]*)=([^\s]+)")
@@ -171,6 +172,8 @@ def _fetch_latest_tag_from_github() -> str | None:
         "Accept": "application/vnd.github.v3+json",
         "User-Agent": "StoryCanvas-Updater",
     }
+    if GITHUB_TOKEN:
+        headers["Authorization"] = f"Bearer {GITHUB_TOKEN}"
     req = urllib.request.Request(url, headers=headers)
     try:
         with urllib.request.urlopen(req, timeout=GITHUB_API_TIMEOUT_SECONDS) as resp:
