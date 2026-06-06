@@ -10,6 +10,7 @@
 """
 
 import logging
+import time
 from datetime import datetime, timedelta
 from urllib.parse import quote
 
@@ -39,24 +40,30 @@ def get_auth_page_url() -> str:
 
 def _do_check(domain: str) -> bool:
     """调用授权站 API 检查域名是否已授权。"""
-    try:
-        api_url = f"{_AUTH_SERVER_URL.rstrip('/')}/api/check_license.php?domain={quote(domain, safe='')}"
-        with httpx.Client(timeout=10) as client:
-            resp = client.get(api_url)
-            resp.raise_for_status()
-            data = resp.json()
-            authorized = data.get("success", False) and data.get("authorized", False)
-            if authorized:
-                logger.info("域名 %s 授权通过", domain)
+    for attempt in range(2):
+        try:
+            api_url = f"{_AUTH_SERVER_URL.rstrip('/')}/api/check_license.php?domain={quote(domain, safe='')}"
+            with httpx.Client(timeout=20) as client:
+                resp = client.get(api_url)
+                resp.raise_for_status()
+                data = resp.json()
+                authorized = data.get("success", False) and data.get("authorized", False)
+                if authorized:
+                    logger.info("域名 %s 授权通过", domain)
+                else:
+                    logger.warning("域名 %s 未授权", domain)
+                return authorized
+        except httpx.RequestError as e:
+            if attempt == 0:
+                logger.warning("授权站不可达，1秒后重试（%s）: %s", _AUTH_SERVER_URL, e)
+                time.sleep(1)
             else:
-                logger.warning("域名 %s 未授权", domain)
-            return authorized
-    except httpx.RequestError as e:
-        logger.error("授权站不可达（%s）: %s", _AUTH_SERVER_URL, e)
-        return False
-    except (ValueError, KeyError) as e:
-        logger.error("授权站返回数据异常: %s", e)
-        return False
+                logger.error("授权站不可达（%s）: %s", _AUTH_SERVER_URL, e)
+                return False
+        except (ValueError, KeyError) as e:
+            logger.error("授权站返回数据异常: %s", e)
+            return False
+    return False
 
 
 def check_domain(domain: str) -> bool:
