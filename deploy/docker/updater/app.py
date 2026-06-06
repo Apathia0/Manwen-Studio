@@ -293,6 +293,7 @@ def _write_env_updates(updates: dict[str, str]) -> dict[str, str | None]:
         "REDIS_ENABLED",
         "SYSTEM_INSTALLED",
         "RUN_STARTUP_MIGRATIONS",
+        "UPDATE_MANIFEST_URL",
     }
     unknown = sorted(set(updates) - allowed_keys)
     if unknown:
@@ -395,6 +396,14 @@ def _run_update(target_version: str | None) -> None:
         exit_code = proc.wait()
         _process = None
         if exit_code == 0:
+            # 更新成功后，自动配置 UPDATE_MANIFEST_URL 指向本机 /manifest
+            current_url = _read_env_value("UPDATE_MANIFEST_URL") or ""
+            if not current_url or current_url == DEFAULT_MANIFEST_URL or "example.com" in current_url:
+                try:
+                    _write_env_updates({"UPDATE_MANIFEST_URL": "http://updater:8090/manifest"})
+                    _append_log(state, "UPDATE_MANIFEST_URL 已设置为 http://updater:8090/manifest")
+                except Exception as exc:
+                    _append_log(state, f"UPDATE_MANIFEST_URL 自动配置失败: {exc}")
             _set_state(status="succeeded", message="Update completed.", finished_at=_now(), exit_code=exit_code)
         else:
             if target_version:
@@ -411,6 +420,17 @@ def _run_update(target_version: str | None) -> None:
 @app.get("/health")
 def health():
     return {"ok": True}
+
+
+@app.get("/manifest")
+def get_manifest(_: None = Depends(_auth)):
+    manifest_path = APP_DIR / "update-manifest.json"
+    if not manifest_path.exists():
+        raise HTTPException(404, "Manifest file not found")
+    try:
+        return json.loads(manifest_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise HTTPException(502, f"Manifest file is corrupted: {exc}") from exc
 
 
 @app.post("/internal/env")
