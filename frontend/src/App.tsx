@@ -683,7 +683,7 @@ function App() {
             className="flex items-center gap-3 text-left transition hover:opacity-90"
           >
             <img
-              src="/brand-mark.svg"
+              src={platform.icon_url || DEFAULT_ICON_URL}
               alt={`${platform.site_name || DEFAULT_SITE_NAME} logo`}
               className="h-9 w-9 rounded-2xl shadow-[0_10px_24px_rgba(59,130,246,0.14)]"
             />
