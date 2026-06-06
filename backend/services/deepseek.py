@@ -2418,7 +2418,6 @@ async def generate_onboarding_response(
                 ],
                 "stream": False,
                 "max_tokens": 4096,
-                "response_format": {"type": "json_object"},
             }
 
             async with httpx.AsyncClient(timeout=120) as client:
