@@ -88,6 +88,34 @@ rollback() {
   compose up -d "$BACKEND_SERVICE" "$WEB_SERVICE" || true
 }
 
+check_image_exists() {
+  local image="$1"
+  if docker buildx imagetools inspect "$image" >/dev/null 2>&1; then
+    return 0
+  fi
+  return 1
+}
+
+validate_version_images() {
+  local version="$1"
+  local all_exist=true
+  for svc in backend web updater; do
+    local img
+    img="$(image_ref_for "$svc")"
+    local repo="${img%:*}"
+    local full_image="${repo}:${version}"
+    if ! check_image_exists "$full_image"; then
+      log "ERROR: 镜像 ${full_image} 在仓库中不存在"
+      all_exist=false
+    fi
+  done
+  if ! $all_exist; then
+    log "版本 ${version} 存在缺失的镜像，终止更新"
+    exit 1
+  fi
+  log "版本 ${version} 的所有镜像已验证通过"
+}
+
 main() {
   cd "$APP_DIR"
   log "checking for image updates"
@@ -96,6 +124,13 @@ main() {
   if grep -qsE '^UPDATE_MANIFEST_URL=https?://example\.com/' "$ENV_FILE" 2>/dev/null; then
     log "removing placeholder UPDATE_MANIFEST_URL from $ENV_FILE"
     sed -i '/^UPDATE_MANIFEST_URL=/s/^/#/' "$ENV_FILE"
+  fi
+
+  # 验证目标版本的镜像标签在仓库中存在
+  local current_target
+  current_target="$(grep -oP '^APP_VERSION=\K.*' "$ENV_FILE" 2>/dev/null || true)"
+  if [[ -n "$current_target" ]]; then
+    validate_version_images "$current_target"
   fi
 
   local backend_before web_before backend_pulled web_pulled
