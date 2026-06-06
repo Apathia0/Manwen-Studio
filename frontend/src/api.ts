@@ -943,7 +943,7 @@ export async function me(): Promise<AuthUser> {
 export async function changePassword(old_password: string, new_password: string): Promise<void> {
   const res = await fetch(`${BASE}/api/user/password`, {
     method: 'PUT',
-    headers: apiHeaders(),
+    headers: apiHeaders(true),
     body: JSON.stringify({ old_password, new_password }),
   });
   if (!res.ok) throw new Error(await readErrorMessage(res, '密码修改失败'));
