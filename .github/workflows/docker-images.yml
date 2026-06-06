@@ -118,9 +118,15 @@ jobs:
             ${{ env.REGISTRY }}/${{ steps.meta.outputs.image_prefix }}/updater:${{ steps.meta.outputs.sha_tag }}
             ${{ env.REGISTRY }}/${{ steps.meta.outputs.image_prefix }}/updater:${{ steps.meta.outputs.release_tag }}
 
-      - name: Update version manifest (tag only)
+      - name: Update version manifest on main (tag only)
         if: github.ref_type == 'tag'
         run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git fetch origin main
+          git checkout main
+
           PUBLISHED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           cat > update-manifest.json << EOF
           {
@@ -131,17 +137,11 @@ jobs:
             "published_at": "${PUBLISHED_AT}"
           }
           EOF
-          echo "Updated manifest: $(cat update-manifest.json)"
 
-      - name: Commit and push updated manifest
-        if: github.ref_type == 'tag'
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
           git add update-manifest.json
           if git diff --cached --quiet; then
             echo "No manifest changes to commit"
           else
             git commit -m "chore: update version manifest to ${{ steps.meta.outputs.app_version }} [skip ci]"
-            git push origin HEAD:main
+            git push origin main
           fi
