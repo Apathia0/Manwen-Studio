@@ -327,7 +327,7 @@ API_TOKEN = os.getenv("API_TOKEN", "").strip()
 UPDATER_URL = os.getenv("UPDATER_URL", "http://updater:8090").strip().rstrip("/")
 UPDATER_TOKEN = os.getenv("UPDATER_TOKEN", "").strip()
 UPDATER_TIMEOUT_SECONDS = float(os.getenv("UPDATER_TIMEOUT_SECONDS", "10"))
-UPDATER_VERSION_RE = re.compile(r"^v\d+(?:\.\d+){0,2}(?:[._-][a-zA-Z0-9]+)?$")
+UPDATER_VERSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 SECRET_ASSIGNMENT_RE = re.compile(r"(?i)\b([A-Z0-9_]*(?:TOKEN|PASSWORD|SECRET|KEY)[A-Z0-9_]*)=([^\s]+)")
 URL_WITH_PASSWORD_RE = re.compile(r"(?i)\b((?:postgresql|postgres|redis|rediss)://[^:\s/@]+:)([^@\s]+)(@[^ \t\r\n]+)")
 INSTALL_API_PREFIX = "/api/install"
@@ -4895,7 +4895,7 @@ async def admin_start_system_update(body: dict, request: Request, db: Session = 
     admin = _require_admin(request, db)
     target_version = str(body.get("target_version") or "").strip() or None
     if target_version and not UPDATER_VERSION_RE.match(target_version):
-        raise HTTPException(400, "无效的目标版本。请输入有效的版本号，例如 v1.2.3。")
+        raise HTTPException(400, "Invalid target version format.")
     status = _sanitize_update_status(await _call_updater("POST", "/update", {"target_version": target_version}))
     _write_audit_log(
         admin,

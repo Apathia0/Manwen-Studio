@@ -1,3 +1,4 @@
+import base64
 import json
 import contextlib
 import os
@@ -28,7 +29,7 @@ UPDATE_MANIFEST_TIMEOUT_SECONDS = float(os.getenv("UPDATE_MANIFEST_TIMEOUT_SECON
 GITHUB_REPOSITORY = os.getenv("GITHUB_REPOSITORY", "").strip()
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "").strip()
 GITHUB_API_TIMEOUT_SECONDS = float(os.getenv("GITHUB_API_TIMEOUT_SECONDS", "10"))
-VERSION_RE = re.compile(r"^v\d+(?:\.\d+){0,2}(?:[._-][a-zA-Z0-9]+)?$")
+VERSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 SEMVER_RE = re.compile(r"^v?(\d+)(?:\.(\d+)(?:\.(\d+))?)?")
 SECRET_ASSIGNMENT_RE = re.compile(r"(?i)\b([A-Z0-9_]*(?:TOKEN|PASSWORD|SECRET|KEY)[A-Z0-9_]*)=([^\s]+)")
 URL_WITH_PASSWORD_RE = re.compile(r"(?i)\b((?:postgresql|postgres|redis|rediss)://[^:\s/@]+:)([^@\s]+)(@[^ \t\r\n]+)")
@@ -191,6 +192,41 @@ def _fetch_latest_tag_from_github() -> str | None:
     return None
 
 
+def _tag_exists_in_registry(tag: str) -> bool | None:
+    """查询 ghcr.io API 检查指定 tag 是否存在。返回 True/False，API 不可用时返回 None。"""
+    docker_config = Path("/root/.docker/config.json")
+    auth_value: str | None = None
+    if docker_config.exists():
+        try:
+            cfg = json.loads(docker_config.read_text())
+            for registry_key in cfg.get("auths", {}):
+                if "ghcr.io" in registry_key:
+                    entry = cfg["auths"][registry_key]
+                    raw = entry.get("auth", "").strip()
+                    if raw:
+                        decoded = base64.b64decode(raw).decode("utf-8", errors="replace")
+                        auth_value = decoded
+                    break
+        except Exception:
+            pass
+    if not auth_value:
+        return None
+    registry_url = "https://ghcr.io/v2/dream619/manwen-studio/backend/tags/list"
+    encoded = base64.b64encode(auth_value.encode("utf-8")).decode("ascii")
+    headers = {
+        "Accept": "application/json",
+        "Authorization": f"Basic {encoded}",
+    }
+    try:
+        req = urllib.request.Request(registry_url, headers=headers)
+        with urllib.request.urlopen(req, timeout=UPDATE_MANIFEST_TIMEOUT_SECONDS) as resp:
+            data = json.loads(resp.read(512 * 1024).decode())
+    except Exception:
+        return None
+    tags = data.get("tags") or []
+    return tag in tags
+
+
 def _get_image_ref(service: str, target_version: str) -> str:
     """从 docker compose config 获取服务镜像名，替换 tag 为目标版本。"""
     try:
@@ -213,10 +249,16 @@ def _get_image_ref(service: str, target_version: str) -> str:
 
 
 def _validate_version_tags(target_version: str) -> None:
-    """验证目标版本的所有镜像标签在仓库中存在。"""
-    services = ["backend", "web", "updater"]
+    """验证目标版本在 ghcr.io 中存在。优先查 API tag 列表，失败时回退到 docker buildx inspect。"""
+    exists = _tag_exists_in_registry(target_version)
+    if exists is True:
+        return
+    if exists is False:
+        raise HTTPException(400, f"版本 {target_version} 在 ghcr.io 中不存在")
+
+    # API 不可用，回退到 docker buildx imagetools inspect 逐镜像验证
     missing: list[str] = []
-    for service in services:
+    for service in ["backend", "web", "updater"]:
         image = _get_image_ref(service, target_version)
         try:
             result = subprocess.run(
