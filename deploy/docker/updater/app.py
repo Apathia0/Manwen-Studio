@@ -391,23 +391,6 @@ def status(_: None = Depends(_auth)):
 def check_update(_: None = Depends(_auth)):
     current_version = _read_env_value("APP_VERSION") or "dev"
 
-    github_tag = _fetch_latest_tag_from_github()
-    if github_tag:
-        update_available = _is_newer_version(github_tag, current_version)
-        return {
-            "configured": True,
-            "source": "github-api",
-            "current_version": current_version,
-            "latest_version": github_tag,
-            "update_available": update_available,
-            "release_notes": "",
-            "published_at": None,
-            "min_supported_version": None,
-            "channel": None,
-            "manifest_url": "",
-            "message": "A new version is available." if update_available else "Already on the latest version.",
-        }
-
     if not UPDATE_MANIFEST_URL:
         return {
             "configured": False,
@@ -420,7 +403,7 @@ def check_update(_: None = Depends(_auth)):
             "min_supported_version": None,
             "channel": None,
             "manifest_url": "",
-            "message": "UPDATE_MANIFEST_URL is not configured and GitHub API is unavailable.",
+            "message": "UPDATE_MANIFEST_URL is not configured.",
         }
 
     manifest = _fetch_update_manifest()

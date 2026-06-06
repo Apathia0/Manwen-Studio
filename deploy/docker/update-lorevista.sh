@@ -92,8 +92,9 @@ main() {
   cd "$APP_DIR"
   log "checking for image updates"
 
-  if grep -qsE '^UPDATE_MANIFEST_URL=' "$ENV_FILE" 2>/dev/null; then
-    log "removing UPDATE_MANIFEST_URL from $ENV_FILE to use baked-in default"
+  # 清理 .env 中版本清单 URL 的占位值，让 Docker 镜像内置的默认值生效
+  if grep -qsE '^UPDATE_MANIFEST_URL=https?://example\.com/' "$ENV_FILE" 2>/dev/null; then
+    log "removing placeholder UPDATE_MANIFEST_URL from $ENV_FILE"
     sed -i '/^UPDATE_MANIFEST_URL=/s/^/#/' "$ENV_FILE"
   fi
 
@@ -141,6 +142,23 @@ main() {
     log "skipping image prune"
   else
     docker image prune -f --filter "until=168h" >/dev/null || true
+  fi
+
+  local updated_version
+  updated_version="$(grep -oP '^APP_VERSION=\K.*' "$ENV_FILE" 2>/dev/null || true)"
+  if [[ -n "$updated_version" ]]; then
+    local published_at
+    published_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    cat > "$APP_DIR/update-manifest.json" << EOF
+{
+  "channel": "stable",
+  "latest_version": "${updated_version}",
+  "min_supported_version": "v1.0.0",
+  "release_notes": "",
+  "published_at": "${published_at}"
+}
+EOF
+    log "updated local manifest to ${updated_version}"
   fi
 
   log "restarting updater with new image"
