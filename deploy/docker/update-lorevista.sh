@@ -92,9 +92,8 @@ main() {
   cd "$APP_DIR"
   log "checking for image updates"
 
-  # 清理 .env 中版本清单 URL 的占位值，让 Docker 镜像内置的默认值生效
-  if grep -qsE '^UPDATE_MANIFEST_URL=https?://example\.com/' "$ENV_FILE" 2>/dev/null; then
-    log "removing placeholder UPDATE_MANIFEST_URL from $ENV_FILE"
+  if grep -qsE '^UPDATE_MANIFEST_URL=' "$ENV_FILE" 2>/dev/null; then
+    log "removing UPDATE_MANIFEST_URL from $ENV_FILE to use baked-in default"
     sed -i '/^UPDATE_MANIFEST_URL=/s/^/#/' "$ENV_FILE"
   fi
 
@@ -145,7 +144,8 @@ main() {
   fi
 
   log "restarting updater with new image"
-  compose up -d --no-deps updater
+  # 使用 nohup 让重启命令在容器停止后仍能执行完毕
+  nohup bash -c "sleep 2 && compose up -d --no-deps updater" >/dev/null 2>&1 &
 
   log "update completed"
 }
