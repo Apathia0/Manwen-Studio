@@ -14,14 +14,23 @@ import os
 import uuid
 from pathlib import Path
 import re
+import httpx
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy import func as sa_func
 from sqlalchemy.orm import Session
 from sse_starlette.sse import EventSourceResponse
 
-from database import SessionLocal, get_db
+from database import SessionLocal, get_db, init_db
 _VIDEO_OUTPUTS_DIR = Path(__file__).resolve().parent.parent / "video_outputs"
+
+SHOT_TYPES = [
+    "全景 (Wide Shot)", "中景 (Medium Shot)", "近景 (Close-up)",
+    "特写 (Extreme Close-up)", "远景 (Extreme Wide Shot)",
+    "过肩镜头 (Over-the-shoulder)", "主观镜头 (POV)",
+    "俯拍 (High Angle)", "仰拍 (Low Angle)", "荷兰角 (Dutch Angle)",
+    "推拉镜头 (Zoom)", "跟拍 (Tracking Shot)", "环绕镜头 (Orbit Shot)",
+]
 
 def _to_video_url(local_path: str) -> str:
     if not local_path:
@@ -56,6 +65,8 @@ def _from_video_url(video_url: str) -> str | None:
 
 from models import (
     Chapter,
+    ChapterVideoWorkflow,
+    ChapterVideoShot,
     PlatformSetting,
     ScriptScene,
     Story,
@@ -71,6 +82,11 @@ from models import (
 )
 from schemas import (
     ChapterStylePresetUpdate,
+    ChapterVideoWorkflowCreate,
+    ChapterVideoWorkflowOut,
+    ChapterVideoWorkflowListOut,
+    ChapterVideoWorkflowStatusOut,
+    ChapterVideoShotOut,
     CreateVideoAssetRequest,
     CreateVideoProjectRequest,
     CompileProjectRequest,
@@ -80,6 +96,8 @@ from schemas import (
     GenerateShotFramesRequest,
     RegenerateScenesRequest,
     RegenerateShotFrameRequest,
+    RegenerateShotRequest,
+    ChapterWorkflowStageActionRequest,
     RetryJobRequest,
     ScriptSceneUpdate,
     StoryboardActionRequest,
@@ -104,6 +122,21 @@ from services import video_api as video_api_service
 from services import video_qa
 from services.video_compiler import compile_project
 from services.task_manager import task_manager
+from services.video_chapter_pipeline import (
+    create_workflow as create_chapter_workflow,
+    get_workflow as get_chapter_workflow,
+    get_workflows_for_chapter as get_chapter_workflows,
+    start_workflow_background,
+    update_workflow_status as update_chapter_workflow_status,
+    regenerate_shot_storyboard,
+    regenerate_shot_video,
+    concat_chapter_videos,
+    validate_character_consistency,
+    parse_chapter_shots,
+    generate_storyboards_for_shots,
+    generate_videos_for_shots,
+    run_all_stages,
+)
 
 logger = logging.getLogger("video_router")
 
@@ -146,6 +179,19 @@ def _user_video_api_key(request: Request) -> tuple[str | None, str, str]:
         effective_key = key or None
 
     return effective_key, resolved_base_url.rstrip("/"), resolved_model
+
+
+def _user_image_api_key(request: Request) -> str | None:
+    """Return image API key for current request/user context."""
+    override = request.headers.get("x-image-api-key") or None
+    db = getattr(request.state, "db", None)
+    if db is None:
+        return override
+    user = getattr(request.state, "current_user", None)
+    capabilities = _user_api_override_capabilities(user, db)
+    if capabilities["can_override_api_key"] and override:
+        return override
+    return _get_platform_setting("api.image.api_key", db, "") or None
 
 
 def _get_platform_setting(key: str, db: Session, default=None):
@@ -336,12 +382,16 @@ def _merge_style_prompt(base_prompt: str, style_template: str | None, style_name
     base = (base_prompt or "").strip()
     template = (style_template or "").strip()
     name = (style_name or "").strip()
-    style_prefix = template or (f"Style: {name}" if name else "")
-    if not style_prefix:
+    style_text = template.strip(". ") if template else (name if name else "")
+    if not style_text:
         return base
     if not base:
-        return style_prefix
-    return f"{style_prefix}. {base}"
+        return style_text
+    # 视频/故事版提示词：将风格自然融入末尾作为视觉质量要求
+    if len(base) > 300:
+        return f"{base}\n\nVisual style: {style_text}."
+    # 短提示词：前缀方式
+    return f"{style_text}. {base}"
 
 
 def _extract_character_notes(character_profiles: str | None, character_names: list[str]) -> dict[str, str]:
@@ -581,9 +631,12 @@ def _build_reference_constraints_block(character_assets: list[VideoAsset]) -> st
 
     parts.append(
         "<<<END_GUIDE>>> "
-        "MANDATORY: 使用上述参考图时，人物参考图用于锁定面部特征、发型、服装；"
-        "场景参考图用于锁定氛围和色调；分镜参考图用于锁定构图和镜头。"
-        "所有身份标记（脸型、眼距、鼻梁、唇形、标志色）必须与参考图严格一致。"
+        "MANDATORY USAGE RULES: "
+        "1. Character reference images: lock face shape, hairstyle, eye color, outfit, body type for each character. All identity markers must match exactly. "
+        "2. Storyboard reference image: use as the authoritative shot plan -- follow the panel-by-panel camera framing, character blocking, action progression, and timing shown in the storyboard. The storyboard defines the exact visual sequence to generate. "
+        "3. Scene reference images: match atmosphere, color palette, and lighting setup. "
+        "4. Frame reference images: first frame = start state, last frame = end state. Generate smooth transition between them. "
+        "CRITICAL: The storyboard image is the director's blueprint. The generated video must faithfully follow the shot breakdown, camera movements, and character actions depicted in the storyboard panels."
     )
     return " ".join(parts)
 
@@ -1106,6 +1159,216 @@ async def regenerate_chapter_scenes(
 
 # 鈹€鈹€鈹€ Scene Endpoints 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 
+# --- Chapter Storyboard (chapter-level, skip scenes) ---
+
+@router.get("/api/chapters/{chapter_id}/storyboard")
+async def list_chapter_storyboard(chapter_id: int, request: Request, db: Session = Depends(get_db)):
+    user = _require_user(request, db)
+    chapter = _require_chapter_for_user(chapter_id, user, db)
+    scenes = db.query(ScriptScene).filter(ScriptScene.chapter_id == chapter_id).order_by(ScriptScene.scene_number.asc()).all()
+    all_shots = []
+    for scene in scenes:
+        shots = db.query(VideoShot).filter(VideoShot.scene_id == scene.id).order_by(VideoShot.shot_number.asc()).all()
+        all_shots.extend([_serialize_shot(s) for s in shots])
+    return {"chapter_id": chapter_id, "shots": all_shots}
+
+
+@router.post("/api/chapters/{chapter_id}/storyboard/generate")
+async def generate_chapter_storyboard(chapter_id: int, body: dict, request: Request, db: Session = Depends(get_db)):
+    user = _require_user(request, db)
+    chapter = _require_chapter_for_user(chapter_id, user, db)
+    story = chapter.story
+    if not chapter.novel_content or not chapter.novel_content.strip():
+        raise HTTPException(400, "Chapter content is empty")
+    _check_and_consume_quota_wrapper(user.id, "shot.generate.monthly_limit", 1, db, deduct=False)
+
+    shot_count_hint = int(body.get("shot_count_hint") or 0) or 0
+    style_preset = str(body.get("style_preset") or "").strip() or "cinematic"
+
+    character_context = ""
+    if story and getattr(story, 'character_profiles', None):
+        character_context += "Character profiles: " + str(story.character_profiles)[:500] + "\n"
+    if story and isinstance(getattr(story, 'characters', None), list):
+        character_context += "Cast: " + json.dumps(story.characters[:8], ensure_ascii=False) + "\n"
+
+    hint_line = ("Target approximately " + str(shot_count_hint) + " shots.") if shot_count_hint else ""
+    ai_prompt = (
+        "You are a professional film director. Read the chapter below and design a storyboard "
+        "that tells the core story with cinematic impact.\n\n"
+        "Your task:\n"
+        "1. Understand the chapter's narrative arc, emotional beats, and key turning points.\n"
+        "2. Filter and trim: keep only scenes that drive the story forward. Remove filler "
+        "and non-essential dialogue.\n"
+        "3. Design shots that form a coherent visual narrative -- each shot should naturally "
+        "lead to the next.\n"
+        "4. Use varied shot types (wide establishing -> medium action -> close-up emotion) "
+        "to create cinematic rhythm.\n\n"
+        "Output a strict JSON: {\"shots\": [{...}]}.\n\n"
+        "Each shot MUST have ALL of these fields:\n"
+        "  shot_number, title, shot_type, camera_angle, camera_movement,\n"
+        "  composition, action_description, dialogue, sound_design, duration_seconds,\n"
+        "  storyboard_prompt, video_prompt, negative_prompt, continuity_notes,\n"
+        "  character_involvement, scene_mood, status\n\n"
+        "Guidelines:\n"
+        "- Shot count: decide based on the story's dramatic needs. " + hint_line +
+        "A typical chapter needs 8-25 well-crafted shots. Quality over quantity.\n"
+        "- Duration: default 10s per shot. All shots must be 10s or less. Quick cuts 5-6s. Model limit: 10s.\n"
+        "- character_involvement: JSON array of character names in this shot.\n"
+        "- scene_mood: describe the emotional atmosphere.\n"
+        "- shot_type from: " + json.dumps(SHOT_TYPES, ensure_ascii=False) + ".\n"
+        "- Use camera movement and framing to enhance storytelling.\n"
+        "- Ensure visual continuity across shots.\n"
+        "- End with a satisfying conclusion.\n"
+        "- Style: " + style_preset + ".\n"
+        "- status: draft for all shots.\n\n" +
+        character_context +
+        "Chapter text:\n" + (chapter.novel_content or "")[:6000]
+    )
+
+    api_key = _user_deepseek_api_key(request, db)
+    if not api_key:
+        raise HTTPException(400, "DeepSeek API key not configured")
+
+    payload = {
+        "model": deepseek_service.DEEPSEEK_MODEL,
+        "messages": [
+            {"role": "system", "content": "You are a storyboard director. Output strict JSON only."},
+            {"role": "user", "content": ai_prompt},
+        ],
+        "stream": False,
+        "max_tokens": 16384,
+        "response_format": {"type": "json_object"},
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=180) as client:
+            resp = await client.post(
+                f"{deepseek_service.DEEPSEEK_BASE_URL}/chat/completions",
+                json=payload,
+                headers=deepseek_service._deepseek_auth_headers(api_key),
+            )
+            resp.raise_for_status()
+            ai_data = resp.json()
+            ai_content = str(ai_data["choices"][0]["message"]["content"] or "").strip()
+    except Exception as e:
+        logger.exception("Chapter storyboard AI call failed")
+        raise HTTPException(502, f"AI storyboard generation failed: {e}")
+
+    raw_result = deepseek_service._extract_json_object(ai_content)
+    raw_shots = raw_result.get("shots") if isinstance(raw_result, dict) else []
+    if not isinstance(raw_shots, list) or not raw_shots:
+        raw_shots = _fallback_chapter_storyboard(chapter.novel_content, max(8, shot_count_hint or 12))
+
+    chapter_scene = db.query(ScriptScene).filter(
+        ScriptScene.chapter_id == chapter_id, ScriptScene.source_type == "chapter_storyboard"
+    ).first()
+    # 从分镜数据中提取所有出场角色
+    all_chars = set()
+    for sd in raw_shots:
+        if isinstance(sd, dict):
+            ci = sd.get("character_involvement")
+            if isinstance(ci, list):
+                all_chars.update(str(c).strip() for c in ci if str(c).strip())
+            elif isinstance(ci, str) and ci.strip():
+                try:
+                    parsed = json.loads(ci)
+                    if isinstance(parsed, list):
+                        all_chars.update(str(c).strip() for c in parsed if str(c).strip())
+                except Exception:
+                    all_chars.add(ci.strip())
+
+    if chapter_scene:
+        _clear_scene_shots(chapter_scene.id, db)
+        chapter_scene.characters_json = sorted(all_chars)
+        db.flush()
+    else:
+        chapter_scene = ScriptScene(
+            chapter_id=chapter_id, scene_number=0,
+            title=f"Chapter {chapter.chapter_number} Storyboard",
+            location="", time_of_day="", characters_json=sorted(all_chars),
+            summary=f"Chapter-level storyboard, {len(raw_shots)} shots",
+            dialogue_json=[], source_type="chapter_storyboard", status="draft",
+        )
+        db.add(chapter_scene)
+        db.flush()
+
+    shots = []
+    default_dur = min(10, max(5, 90 // max(1, len(raw_shots))))  # 1.5pro 上限 10s
+    for idx, sd in enumerate(raw_shots):
+        if not isinstance(sd, dict):
+            continue
+        n = _normalize_chapter_shot(sd, idx + 1, default_dur)
+        shot = VideoShot(
+            scene_id=chapter_scene.id, shot_number=n["shot_number"], title=n["title"],
+            shot_type=n.get("shot_type"), camera_angle=n.get("camera_angle"),
+            camera_movement=n.get("camera_movement"), composition=n.get("composition"),
+            action_description=n.get("action_description"), dialogue=n.get("dialogue"),
+            sound_design=n.get("sound_design"), duration_seconds=n.get("duration_seconds"),
+            storyboard_prompt=n.get("storyboard_prompt"), video_prompt=n.get("video_prompt"),
+            negative_prompt=n.get("negative_prompt"), continuity_notes=n.get("continuity_notes"),
+            character_involvement=n.get("character_involvement"), scene_mood=n.get("scene_mood"),
+            status="draft",
+        )
+        db.add(shot)
+        shots.append(shot)
+
+    db.commit()
+    _check_and_consume_quota_wrapper(user.id, "shot.generate.monthly_limit", 1, db, deduct=True)
+    for shot in shots:
+        db.refresh(shot)
+    quota_result = _check_and_consume_quota_wrapper(user.id, "shot.generate.monthly_limit", 0, db, deduct=False)
+    return {
+        "chapter_id": chapter_id, "shots": [_serialize_shot(s) for s in shots],
+        "total_count": len(shots),
+        "usage": _serialize_usage(quota_result["used"], quota_result["limit"]),
+    }
+
+
+def _normalize_chapter_shot(raw, index, default_duration):
+    return {
+        "shot_number": int(raw.get("shot_number") or index),
+        "title": (str(raw.get("title") or "").strip() or f"Shot {index}"),
+        "shot_type": str(raw.get("shot_type") or "medium").strip(),
+        "camera_angle": str(raw.get("camera_angle") or "eye_level").strip(),
+        "camera_movement": str(raw.get("camera_movement") or "static").strip(),
+        "composition": str(raw.get("composition") or "").strip(),
+        "action_description": str(raw.get("action_description") or "").strip(),
+        "dialogue": str(raw.get("dialogue") or "").strip() or None,
+        "sound_design": str(raw.get("sound_design") or "").strip() or None,
+        "duration_seconds": min(10, int(raw.get("duration_seconds") or default_duration)),
+        "storyboard_prompt": str(raw.get("storyboard_prompt") or "").strip() or None,
+        "video_prompt": str(raw.get("video_prompt") or "").strip() or None,
+        "negative_prompt": str(raw.get("negative_prompt") or "").strip() or None,
+        "continuity_notes": str(raw.get("continuity_notes") or "").strip() or None,
+        "character_involvement": str(raw.get("character_involvement") or "").strip() or None,
+        "scene_mood": str(raw.get("scene_mood") or "").strip() or None,
+        "status": "draft",
+    }
+
+
+def _fallback_chapter_storyboard(chapter_content, shot_count_hint):
+    paragraphs = [p.strip() for p in chapter_content.split("\n") if p.strip()]
+    if not paragraphs:
+        paragraphs = [chapter_content]
+    key_paragraphs = [p for p in paragraphs if len(p) > 20]
+    if not key_paragraphs:
+        key_paragraphs = paragraphs
+    count = min(len(key_paragraphs), 16)
+    step = max(1, len(key_paragraphs) // count)
+    candidates = key_paragraphs[::step][:count]
+    return [{
+        "shot_number": i + 1, "title": f"Shot {i + 1}",
+        "shot_type": "medium" if i % 3 != 0 else "wide",
+        "camera_angle": "eye_level", "camera_movement": "static",
+        "composition": "", "action_description": p[:200],
+        "dialogue": None, "sound_design": None, "duration_seconds": 10,
+        "storyboard_prompt": None, "video_prompt": None,
+        "negative_prompt": None, "continuity_notes": None,
+        "character_involvement": None, "scene_mood": None,
+        "status": "draft",
+    } for i, p in enumerate(candidates)]
+
+
 @router.patch("/api/scenes/{scene_id}")
 async def update_scene(
     scene_id: int,
@@ -1164,7 +1427,7 @@ async def generate_scene_shots(
         scene_dialogue=scene.dialogue_json or [],
         scene_mood=scene.mood or "",
         shot_count_hint=body.shot_count_hint or 4,
-        duration_budget_seconds=body.duration_budget_seconds or 18,
+        duration_budget_seconds=body.duration_budget_seconds or 40,
         style=body.style or "cinematic",
         api_key=_user_deepseek_api_key(request, db),
         # Context injection
@@ -1298,7 +1561,7 @@ async def generate_scene_concept_art(
     filename = f"concept_art_{timestamp}.png"
     full_path = scene_dir / filename
 
-    api_key, _base_url, _model = _user_video_api_key(request)
+    api_key = _user_image_api_key(request)
 
     # 配额预检
     _check_and_consume_quota_wrapper(user.id, "manga.image.monthly_limit", 1, db, deduct=False)
@@ -1308,7 +1571,7 @@ async def generate_scene_concept_art(
             prompt=prompt,
             output_path=full_path,
             api_key=api_key or None,
-            size=image_style_params.get("size", "1920x1080"),
+            size=image_style_params.get("size", "1792x1024"),
             ref_image_paths=ref_paths if ref_paths else None,
         )
     except Exception as e:
@@ -1428,7 +1691,7 @@ async def update_shot(
     effective_provider = _resolve_video_provider(body.provider, db)
 
     # Check quota for video generation (by seconds)
-    duration = max(1, body.duration_seconds or shot.duration_seconds or 5)
+    duration = max(1, min(10, body.duration_seconds or shot.duration_seconds or 10))
     _check_and_consume_quota_wrapper(
         user.id, "video.generate.seconds.monthly_limit", duration, db, deduct=False,
     )
@@ -1437,10 +1700,10 @@ async def update_shot(
     auto_reference_asset_ids = _collect_shot_reference_asset_ids(
         shot,
         db,
-        include_characters=True,
-        include_scene=True,
-        include_storyboard=True,
-        include_frames=True,
+        include_characters=False,
+        include_scene=False,
+        include_storyboard=False,
+        include_frames=False,
         explicit_asset_ids=body.reference_asset_ids or [],
     )
     auto_reference_asset_ids = list(dict.fromkeys(auto_reference_asset_ids))
@@ -1454,8 +1717,6 @@ async def update_shot(
         has_ref_images = bool(reference_image_urls)
         has_storyboard = source_storyboard_asset_id and shot.storyboard_locked
         if has_storyboard:
-            input_mode = "image_to_video"
-        elif has_ref_images:
             input_mode = "image_to_video"
         else:
             input_mode = "text_to_video"
@@ -1503,7 +1764,20 @@ async def update_shot(
     resolved_model = body.model or resolved_model
     aspect_ratio = body.aspect_ratio or video_style_params.get("aspect_ratio") or "16:9"
     grounding = _build_story_grounding_block(shot.scene.chapter.story if shot.scene and shot.scene.chapter else None, shot.scene.chapter if shot.scene else None, shot.scene)
-    full_prompt = _merge_style_prompt(f"{body.prompt or shot.video_prompt or ''} {ref_block} Grounding: {grounding}".strip(), style_template, style_name)
+    storyboard_guide = ""
+    if shot.storyboard_prompt:
+        storyboard_guide = (
+            f"\n\n<<<STORYBOARD_BLUEPRINT>>>\n"
+            f"This is the shot-by-shot storyboard that the video MUST follow:\n"
+            f"{shot.storyboard_prompt}\n"
+            f"<<<END_BLUEPRINT>>>\n"
+            f"CRITICAL: Generate video matching EVERY time segment, camera movement, "
+            f"character action, and dialogue in the storyboard blueprint above."
+        )
+    full_prompt = _merge_style_prompt(
+        f"{body.prompt or shot.video_prompt or ''}{storyboard_guide} {ref_block} Grounding: {grounding}".strip(),
+        style_template, style_name,
+    )
 
     task_id = f"video_render_{shot_id}_{int(datetime.datetime.utcnow().timestamp())}"
     await task_manager.submit_task(
@@ -1615,7 +1889,7 @@ async def render_shot_video_stream(
 
     effective_provider = _resolve_video_provider(body.provider, db)
 
-    duration = max(1, body.duration_seconds or shot.duration_seconds or 5)
+    duration = max(1, min(10, body.duration_seconds or shot.duration_seconds or 10))
     _check_and_consume_quota_wrapper(
         user.id, "video.generate.seconds.monthly_limit", duration, db, deduct=False,
     )
@@ -1624,10 +1898,10 @@ async def render_shot_video_stream(
     auto_reference_asset_ids = _collect_shot_reference_asset_ids(
         shot,
         db,
-        include_characters=True,
-        include_scene=True,
-        include_storyboard=True,
-        include_frames=True,
+        include_characters=False,
+        include_scene=False,
+        include_storyboard=False,
+        include_frames=False,
         explicit_asset_ids=body.reference_asset_ids or [],
     )
     auto_reference_asset_ids = list(dict.fromkeys(auto_reference_asset_ids))
@@ -1641,8 +1915,6 @@ async def render_shot_video_stream(
         has_ref_images = bool(reference_image_urls)
         has_storyboard = source_storyboard_asset_id and shot.storyboard_locked
         if has_storyboard:
-            input_mode = "image_to_video"
-        elif has_ref_images:
             input_mode = "image_to_video"
         else:
             input_mode = "text_to_video"
@@ -1683,7 +1955,20 @@ async def render_shot_video_stream(
     resolved_model = body.model or resolved_model
     aspect_ratio = body.aspect_ratio or video_style_params.get("aspect_ratio") or "16:9"
     grounding = _build_story_grounding_block(shot.scene.chapter.story if shot.scene and shot.scene.chapter else None, shot.scene.chapter if shot.scene else None, shot.scene)
-    full_prompt = _merge_style_prompt(f"{body.prompt or shot.video_prompt or ''} {ref_block} Grounding: {grounding}".strip(), style_template, style_name)
+    storyboard_guide = ""
+    if shot.storyboard_prompt:
+        storyboard_guide = (
+            f"\n\n<<<STORYBOARD_BLUEPRINT>>>\n"
+            f"This is the shot-by-shot storyboard that the video MUST follow:\n"
+            f"{shot.storyboard_prompt}\n"
+            f"<<<END_BLUEPRINT>>>\n"
+            f"CRITICAL: Generate video matching EVERY time segment, camera movement, "
+            f"character action, and dialogue in the storyboard blueprint above."
+        )
+    full_prompt = _merge_style_prompt(
+        f"{body.prompt or shot.video_prompt or ''}{storyboard_guide} {ref_block} Grounding: {grounding}".strip(),
+        style_template, style_name,
+    )
 
     async def event_generator():
         nonlocal db, base_url
@@ -1992,6 +2277,29 @@ async def get_video_job(
         raise HTTPException(404, "Associated shot not found")
     _require_chapter_for_user(shot.scene.chapter_id, user, db)
 
+    # 内部 task_id 时尝试从 task_manager 获取真实 API task_id
+    if job.provider_job_id and job.provider_job_id.startswith("video_render_"):
+        task_status = task_manager.get_task_status(job.provider_job_id)
+        if task_status and task_status.get("result_json"):
+            result = task_status.get("result_json", {})
+            real_id = result.get("provider_job_id", "")
+            if real_id and real_id != job.provider_job_id:
+                job.provider_job_id = real_id
+                db.commit()
+        # task_manager 还没完成提交，跳过本次查询，下次轮询重试
+        if job.provider_job_id and job.provider_job_id.startswith("video_render_"):
+            logger.info("Video job %s: task submission pending, skip external query", job_id)
+            return {
+                "id": job.id, "shot_id": job.shot_id, "provider": job.provider,
+                "provider_job_id": job.provider_job_id, "model": job.model,
+                "request_payload": job.request_payload_json or {}, "status": job.status,
+                "progress": job.progress, "duration_seconds": job.duration_seconds,
+                "aspect_ratio": job.aspect_ratio or "",
+                "error_message": job.error_message or "",
+                "submitted_at": _serialize_datetime(job.submitted_at),
+                "completed_at": _serialize_datetime(job.completed_at),
+            }
+
     if job.status not in {"succeeded", "failed", "cancelled"} and job.provider_job_id:
         api_key, base_url, _model = _user_video_api_key(request)
         latest = await video_gen_service.query_job_status(
@@ -2153,7 +2461,7 @@ async def retry_video_job(
     # 配额预检
     _check_and_consume_quota_wrapper(
         user.id, "video.generate.seconds.monthly_limit",
-        old_job.duration_seconds or 5, db, deduct=False,
+        min(10, old_job.duration_seconds or 10), db, deduct=False,
     )
 
     # Create new job with same shot_id
@@ -2173,7 +2481,7 @@ async def retry_video_job(
     # 配额扣减
     _check_and_consume_quota_wrapper(
         user.id, "video.generate.seconds.monthly_limit",
-        old_job.duration_seconds or 5, db, deduct=True,
+        min(10, old_job.duration_seconds or 10), db, deduct=True,
     )
     db.refresh(new_job)
 
@@ -2372,6 +2680,55 @@ async def delete_video_asset(
     return {"ok": True, "asset_id": asset_id}
 
 
+@router.post("/api/video-assets/{asset_id}/replace")
+async def replace_video_asset(asset_id: int, request: Request, db: Session = Depends(get_db)):
+    """上传本地图片替换资产文件。"""
+    user = _require_user(request, db)
+    asset = db.get(VideoAsset, asset_id)
+    if not asset:
+        raise HTTPException(404, "Video asset not found")
+    if asset.chapter_id:
+        _require_chapter_for_user(asset.chapter_id, user, db)
+    elif asset.story_id:
+        _require_story_for_user(asset.story_id, user, db)
+    else:
+        raise HTTPException(403, "Cannot determine asset ownership")
+
+    content_type = request.headers.get("content-type", "")
+    if "multipart/form-data" not in content_type:
+        raise HTTPException(400, "Expected multipart/form-data upload")
+
+    form = await request.form()
+    uploaded = form.get("file")
+    if uploaded is None or not hasattr(uploaded, "filename"):
+        raise HTTPException(400, "No file uploaded")
+
+    filename = getattr(uploaded, "filename", "") or "replaced.png"
+    data = await uploaded.read()
+
+    asset_dir = _VIDEO_OUTPUTS_DIR / f"asset_{asset_id}"
+    asset_dir.mkdir(parents=True, exist_ok=True)
+    ext = Path(filename).suffix or ".png"
+    output_path = asset_dir / f"replaced_{datetime.datetime.utcnow().strftime('%Y%m%d_%H%M%S')}{ext}"
+    output_path.write_bytes(data)
+
+    rel_path = str(output_path.relative_to(_VIDEO_OUTPUTS_DIR.resolve()))
+    asset.file_path = rel_path
+    asset.name = filename
+    asset.revision = (asset.revision or 0) + 1
+    db.commit()
+    db.refresh(asset)
+
+    return {
+        "ok": True,
+        "asset": {
+            "id": asset.id, "name": asset.name,
+            "file_path": _to_video_url(asset.file_path),
+            "revision": asset.revision,
+        },
+    }
+
+
 @router.post("/api/video-assets/{asset_id}/regen")
 async def regenerate_video_asset(
     asset_id: int,
@@ -2403,7 +2760,7 @@ async def regenerate_video_asset(
     if not source_path or not Path(source_path).exists():
         raise HTTPException(404, "Source image not found")
 
-    api_key, _base_url, _model = _user_video_api_key(request)
+    api_key = _user_image_api_key(request)
     regen_dir = _VIDEO_OUTPUTS_DIR / "regen_assets"
     regen_dir.mkdir(parents=True, exist_ok=True)
     output_filename = f"asset_{asset.id}_regen_{uuid.uuid4().hex[:8]}.png"
@@ -3085,7 +3442,7 @@ async def generate_character_ref_image(
     filename = f"{uuid.uuid4().hex}_{version.id}.png"
     full_path = char_dir / filename
 
-    api_key, _base_url, _model = _user_video_api_key(request)
+    api_key = _user_image_api_key(request)
 
     # 配额预检
     _check_and_consume_quota_wrapper(user.id, "manga.image.monthly_limit", 1, db, deduct=False)
@@ -3197,7 +3554,7 @@ async def redraw_character_ref_image(
     filename = f"{uuid.uuid4().hex}_{version.id}.png"
     full_path = char_dir / filename
 
-    api_key, _base_url, _model = _user_video_api_key(request)
+    api_key = _user_image_api_key(request)
 
     try:
         if mode == "partial" and mask_base64:
@@ -3538,7 +3895,7 @@ async def create_scene_shot(
         action_description=body.action_description or "",
         dialogue=body.dialogue or "",
         sound_design=body.sound_design or "",
-        duration_seconds=body.duration_seconds or 5,
+        duration_seconds=min(10, body.duration_seconds or 10),
         storyboard_prompt=body.storyboard_prompt or "",
         video_prompt=body.video_prompt or "",
         negative_prompt=body.negative_prompt or "",
@@ -3696,8 +4053,8 @@ async def render_shot_storyboard(
     ref_asset_ids = _collect_shot_reference_asset_ids(
         shot,
         db,
-        include_characters=True,
-        include_scene=True,
+        include_characters=False,
+        include_scene=False,
         include_storyboard=False,
         include_frames=False,
         explicit_asset_ids=body.reference_asset_ids or [],
@@ -3711,12 +4068,48 @@ async def render_shot_storyboard(
     file_name = f"storyboard_{datetime.datetime.utcnow().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}.png"
     full_path = storyboards_dir / file_name
 
+    # 构建故事版 prompt（精简，避免图片 API 超时）
+    duration = min(10, shot.duration_seconds or 10)
+    content_full = shot.storyboard_prompt or shot.action_description or f"Shot {shot.shot_number}"
+    # 专业电影导演故事板 prompt — 中文输出，9:16 纵向，角色形象由参考图决定
+    storyboard_prompt = (
+        f"你是一位拥有20年经验的好莱坞电影导演和分镜导演。请将以下剧情转换为一张完整的电影级故事板展示图。\n\n"
+        f"【剧情内容】\n{content_full}\n\n"
+        f"【镜头信息】\n"
+        f"镜头：{shot.shot_number} - {shot.title or ''}\n"
+        f"时长：{duration}s | 景别：{shot.shot_type or 'medium'} | 角度：{shot.camera_angle or 'eye level'} | 运镜：{shot.camera_movement or 'static'}\n"
+        f"动作：{shot.action_description or ''}\n"
+        f"对白：{shot.dialogue or '无'}\n\n"
+        f"【核心规则】\n"
+        f"1. 角色外观完全由上传的参考图决定。禁止输出人物长相、发型、服装、五官等外貌描述。参考图中角色长什么样就画什么样。\n"
+        f"2. 自动拆解剧情为5-8个关键镜头，形成完整故事节奏：开始→发展→冲突→高潮→结局。\n"
+        f"3. 每个镜头包含：镜头编号、时间节点、剧情摘要、人物动作、情绪状态、关键对白、运镜方式、景别。\n\n"
+        f"【画面布局】\n"
+        f"整张图必须包含以下区域：\n"
+        f"① 标题区：故事名称、类型、一句话简介\n"
+        f"② 剧情概述区：故事背景、人物关系、核心矛盾\n"
+        f"③ 时间轴区：开始→发展→冲突→高潮→结局，真实电影时间轴设计\n"
+        f"④ 分镜展示区：5-8个Frame，每个含缩略图、编号、时间、摘要、对白、运镜、情绪标签\n"
+        f"⑤ 对白展示区：关键对白摘录和情感表达\n"
+        f"⑥ 情绪曲线区：人物情绪变化、情感递进、高潮节点\n"
+        f"⑦ 导演批注区：镜头设计意图、叙事重点、节奏设计\n"
+        f"⑧ 镜头语言区：远景/全景/中景/近景/特写/推进/拉远/跟拍等说明\n\n"
+        f"【输出规则】\n"
+        f"- 所有文字必须使用简体中文，禁止英文\n"
+        f"- 图片比例：16:9横向\n"
+        f"- 文字排版：真实可读的电影提案板风格，禁止乱码和占位符\n"
+        f"- 画面占比：60%分镜画面 + 40%文字信息\n"
+        f"- 视觉风格：专业影视故事板、电影导演提案板、高端电影预制作文档\n"
+        f"- 统一留白、统一网格布局、高级质感\n"
+        f"- 只输出一张完整的中文电影故事板展示图\n"
+        f"- 角色形象严格匹配参考图"
+    )
     prompt = _merge_style_prompt(
-        f"{shot.storyboard_prompt or shot.video_prompt or f'Storyboard for shot {shot.shot_number}'} {ref_block}".strip(),
+        storyboard_prompt.strip(),
         style_ctx.get("prompt_template"),
         style_name,
     )
-    api_key, _base_url, _model = _user_video_api_key(request)
+    api_key = _user_image_api_key(request)
 
     # 配额预检
     _check_and_consume_quota_wrapper(user.id, "manga.image.monthly_limit", 1, db, deduct=False)
@@ -3725,8 +4118,8 @@ async def render_shot_storyboard(
         await image2_service.generate_reference_image(
             prompt=prompt,
             output_path=full_path,
-            api_key=api_key or None,
-            size=image_style_params.get("size", "1536x1024"),
+            api_key=api_key,
+            size=image_style_params.get("size", "1792x1024"),
             ref_image_paths=ref_paths if ref_paths else None,
         )
     except Exception as e:
@@ -3968,7 +4361,7 @@ async def generate_shot_frames(
                 prompt=prompt,
                 output_path=full_path,
                 api_key=api_key or None,
-                size=image_style_params.get("size", "1920x1080"),
+                size=image_style_params.get("size", "1792x1024"),
                 ref_image_paths=ref_paths if ref_paths else None,
             )
         except Exception as e:
@@ -4058,15 +4451,15 @@ async def regenerate_shot_frame(
     full_path = frames_dir / filename
     file_path = f"frames/{filename}"
 
-    api_key, _base_url, _model = _user_video_api_key(request)
+    api_key = _user_image_api_key(request)
     prompt = body.prompt or old_asset.prompt or ""
     style_ctx = _resolve_effective_style_for_shot(shot, db, body.style_preset)
     ref_asset_ids = _collect_shot_reference_asset_ids(
         shot,
         db,
-        include_characters=True,
-        include_scene=True,
-        include_storyboard=True,
+        include_characters=False,
+        include_scene=False,
+        include_storyboard=False,
         include_frames=False,
         explicit_asset_ids=body.reference_asset_ids or [],
     )
@@ -4079,7 +4472,7 @@ async def regenerate_shot_frame(
             prompt=prompt,
             output_path=full_path,
             api_key=api_key or None,
-            size=(style_ctx.get("image_style_params") or {}).get("size", "1536x1024"),
+            size=(style_ctx.get("image_style_params") or {}).get("size", "1792x1024"),
             ref_image_paths=ref_paths if ref_paths else None,
         )
     except Exception as e:
@@ -4322,15 +4715,21 @@ async def parse_shot_asset_prompts(
                 "grounding": design_grounding,
             })
 
+    duration = min(10, shot.duration_seconds or 10)
+    segments = max(3, min(5, duration // 2))  # 10s → 5段×2s, 8s → 4段×2s
+    seg_dur = duration // segments
     base_storyboard = _merge_style_prompt(
         (
-            f"Master storyboard keyframe for shot {shot.shot_number}. "
-            f"Scene: {scene_summary}. Location: {scene_location}. Mood: {scene_mood}. "
-            f"Shot language: {shot.shot_type or 'medium'}, {shot.camera_angle or 'eye_level'}, "
-            f"{shot.camera_movement or 'static'}, composition {shot.composition or 'clear subject hierarchy'}. "
-            f"Action: {shot.action_description or ''}. Dialogue cue: {shot.dialogue or 'none'}. "
-            f"Continuity: {shot.continuity_notes or 'preserve character identity, outfit and props across frames'}. "
-            "One production storyboard frame with clear staging, readable blocking, and consistent costume/props."
+            f"SHOT TIMELINE STORYBOARD for shot {shot.shot_number} ({duration}s total, {shot.shot_type or 'medium'}, {shot.camera_angle or 'eye_level'}, {shot.camera_movement or 'static'}). "
+            f"Characters: {', '.join(character_names) if character_names else 'N/A'}. "
+            f"Action: {shot.action_description or ''}. Dialogue: {shot.dialogue or 'none'}. "
+            f"Break this {duration}s shot into exactly {segments} time segments of {seg_dur}s each. "
+            f"For EACH segment describe: (a) timestamp range, (b) character positions and expressions at that moment, "
+            f"(c) camera framing at that moment (wide/medium/close-up), (d) what action happens in this segment, "
+            f"(e) any dialogue spoken in this segment. "
+            f"Format as:\n"
+            f"[0-{seg_dur}s] ...\n[{seg_dur}-{2*seg_dur}s] ...\n...\n"
+            f"End with camera/director notes for video generation reference."
         ),
         style_ctx.get("prompt_template"),
         style_name,
@@ -4391,7 +4790,7 @@ async def parse_shot_asset_prompts(
             f"Action: {shot.action_description or 'no action specified'}. "
             f"Dialogue: {shot.dialogue or 'none'}. "
             f"Camera: {shot.shot_type or 'medium'} shot, {shot.camera_angle or 'eye_level'} angle, {camera_desc}. "
-            f"Duration: {shot.duration_seconds or 5}s. "
+            f"Duration: {min(10, shot.duration_seconds or 10)}s. "
             f"Sound: {shot.sound_design or 'ambient'}. "
             f"Continuity: {shot.continuity_notes or 'strict visual continuity'}.{prev_context}{frame_guidance} "
             "Video must accurately depict the described action with realistic motion, "
@@ -4428,9 +4827,16 @@ Return JSON schema:
 Rules:
 1. Character prompts are CHARACTER DESIGN SHEETS ONLY. No scene events, no system UI text overlays, no chapter plot reenactment.
 2. Character prompts must request one-page turnaround sheet with: front portrait, side portrait, full-body, expression set, outfit/accessory callouts.
-3. Storyboard/first/last/video prompts must be grounded to shot + scene + story context and keep identity consistency.
-4. Keep style consistency with selected style preset.
-5. Output valid JSON object only.
+3. Storyboard prompt MUST be a time-segmented shot breakdown covering ALL content that will appear in the final video. Requirements:
+   a. Divide the shot into 3-5 equal time segments with [X-Ys] timestamps.
+   b. For EACH segment describe: exact camera framing and movement state, precise character positions (foreground/background/left/right), facial expressions, body language, lighting changes, any props or environment details visible.
+   c. Each segment description must be 2-4 sentences with vivid visual detail (not just one line).
+   d. Include all dialogue/exactly when it occurs, with speaker and tone.
+   e. End with complete camera/director notes: lens choice, focus pull, lighting setup, color temperature, depth of field.
+4. Video prompt must describe the COMPLETE continuous action of the shot from start to end, including all camera movement, character blocking, lighting progression, and sound design. It must be consistent with the storyboard segments.
+5. First/last frame prompts must capture the exact visual state at the beginning and end of the shot.
+6. Keep style consistency with selected style preset.
+7. Output valid JSON object only.
 
 Selected style: {style_name}
 Shot grounding: {shot_grounding}
@@ -4588,7 +4994,7 @@ async def generate_shot_character_asset(
     full_path = char_dir / file_name
 
     final_prompt = _merge_style_prompt(prompt, style_ctx.get("prompt_template"), style_name)
-    api_key, _base_url, _model = _user_video_api_key(request)
+    api_key = _user_image_api_key(request)
 
     # 配额预检
     _check_and_consume_quota_wrapper(user.id, "manga.image.monthly_limit", 1, db, deduct=False)
@@ -4598,7 +5004,7 @@ async def generate_shot_character_asset(
             prompt=final_prompt,
             output_path=full_path,
             api_key=api_key or None,
-            size=image_style_params.get("size", "1536x1024"),
+            size=image_style_params.get("size", "1792x1024"),
         )
     except Exception as e:
         logger.warning("Character reference generation failed (shot=%s, name=%s): %s", shot_id, character_name, e)
@@ -4663,7 +5069,7 @@ async def render_shot_video(
 
     effective_provider = _resolve_video_provider(body.provider, db)
 
-    duration = max(1, body.duration_seconds or shot.duration_seconds or 5)
+    duration = max(1, min(10, body.duration_seconds or shot.duration_seconds or 10))
     _check_and_consume_quota_wrapper(
         user.id, "video.generate.seconds.monthly_limit", duration, db, deduct=False,
     )
@@ -4672,10 +5078,10 @@ async def render_shot_video(
     auto_reference_asset_ids = _collect_shot_reference_asset_ids(
         shot,
         db,
-        include_characters=True,
-        include_scene=True,
-        include_storyboard=True,
-        include_frames=True,
+        include_characters=False,
+        include_scene=False,
+        include_storyboard=False,
+        include_frames=False,
         explicit_asset_ids=body.reference_asset_ids or [],
     )
     auto_reference_asset_ids = list(dict.fromkeys(auto_reference_asset_ids))
@@ -4689,8 +5095,6 @@ async def render_shot_video(
         has_ref_images = bool(reference_image_urls)
         has_storyboard = source_storyboard_asset_id and shot.storyboard_locked
         if has_storyboard:
-            input_mode = "image_to_video"
-        elif has_ref_images:
             input_mode = "image_to_video"
         else:
             input_mode = "text_to_video"
@@ -4732,7 +5136,20 @@ async def render_shot_video(
     resolved_model = body.model or resolved_model
     aspect_ratio = body.aspect_ratio or video_style_params.get("aspect_ratio") or "16:9"
     grounding = _build_story_grounding_block(shot.scene.chapter.story if shot.scene and shot.scene.chapter else None, shot.scene.chapter if shot.scene else None, shot.scene)
-    full_prompt = _merge_style_prompt(f"{body.prompt or shot.video_prompt or ''} {ref_block} Grounding: {grounding}".strip(), style_template, style_name)
+    storyboard_guide = ""
+    if shot.storyboard_prompt:
+        storyboard_guide = (
+            f"\n\n<<<STORYBOARD_BLUEPRINT>>>\n"
+            f"This is the shot-by-shot storyboard that the video MUST follow:\n"
+            f"{shot.storyboard_prompt}\n"
+            f"<<<END_BLUEPRINT>>>\n"
+            f"CRITICAL: Generate video matching EVERY time segment, camera movement, "
+            f"character action, and dialogue in the storyboard blueprint above."
+        )
+    full_prompt = _merge_style_prompt(
+        f"{body.prompt or shot.video_prompt or ''}{storyboard_guide} {ref_block} Grounding: {grounding}".strip(),
+        style_template, style_name,
+    )
 
     task_id = f"video_render_{shot_id}_{int(datetime.datetime.utcnow().timestamp())}"
     await task_manager.submit_task(
@@ -5121,4 +5538,368 @@ def _check_and_consume_quota_wrapper(
     }
 
 
+# ── 章节视频工作流 API ────────────────────────────────────
 
+
+@router.post("/api/video/chapter-workflows", response_model=ChapterVideoWorkflowOut)
+async def api_create_chapter_workflow(
+    body: ChapterVideoWorkflowCreate,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """创建并启动章节视频工作流。"""
+    user = _require_user(request, db)
+    chapter = _require_chapter_for_user(body.chapter_id, user, db)
+
+    init_db(run_migrations=True, raise_errors=True)
+
+    # 创建工作流
+    wf = create_chapter_workflow(
+        chapter_id=body.chapter_id,
+        story_id=chapter.story_id,
+        source_text=chapter.novel_content or "",
+        character_reference_ids=body.character_reference_ids,
+        video_style=body.video_style,
+    )
+
+    # 后台启动流水线
+    api_key = _user_deepseek_api_key(request, db)
+    await start_workflow_background(wf.id, api_key=api_key)
+
+    refreshed_workflow = get_chapter_workflow(wf.id)
+    return refreshed_workflow or wf
+
+
+@router.get("/api/video/chapter-workflows/{workflow_id}", response_model=ChapterVideoWorkflowOut)
+async def api_get_chapter_workflow(
+    workflow_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """获取章节视频工作流详情（含所有 shots）。"""
+    user = _require_user(request, db)
+    wf = get_chapter_workflow(workflow_id)
+    if not wf:
+        raise HTTPException(404, "工作流不存在")
+
+    # 验证所有权
+    story = db.get(Story, wf.story_id)
+    if not story or story.owner_user_id != user.id:
+        raise HTTPException(403, "无权访问此工作流")
+
+    return wf
+
+
+@router.get("/api/video/chapter-workflows/by-chapter/{chapter_id}", response_model=ChapterVideoWorkflowListOut)
+async def api_list_chapter_workflows(
+    chapter_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """获取章节的所有视频工作流。"""
+    user = _require_user(request, db)
+    chapter = _require_chapter_for_user(chapter_id, user, db)
+
+    workflows = get_chapter_workflows(chapter_id)
+    return ChapterVideoWorkflowListOut(
+        workflows=[ChapterVideoWorkflowOut.model_validate(w) for w in workflows],
+        total=len(workflows),
+    )
+
+
+@router.get("/api/video/chapter-workflows/{workflow_id}/status", response_model=ChapterVideoWorkflowStatusOut)
+async def api_get_chapter_workflow_status(
+    workflow_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """获取工作流轻量状态（不含 shots 详情）。"""
+    user = _require_user(request, db)
+    wf = get_chapter_workflow(workflow_id)
+    if not wf:
+        raise HTTPException(404, "工作流不存在")
+
+    story = db.get(Story, wf.story_id)
+    if not story or story.owner_user_id != user.id:
+        raise HTTPException(403, "无权访问")
+
+    return ChapterVideoWorkflowStatusOut(
+        id=wf.id,
+        chapter_id=wf.chapter_id,
+        workflow_status=wf.workflow_status,
+        total_shots=wf.total_shots,
+        completed_shots=wf.completed_shots,
+        failed_shots=wf.failed_shots,
+        error_message=wf.error_message,
+    )
+
+
+@router.post("/api/video/chapter-workflows/{workflow_id}/cancel")
+async def api_cancel_chapter_workflow(
+    workflow_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """取消运行中的章节视频工作流。"""
+    user = _require_user(request, db)
+    wf = get_chapter_workflow(workflow_id)
+    if not wf:
+        raise HTTPException(404, "工作流不存在")
+
+    story = db.get(Story, wf.story_id)
+    if not story or story.owner_user_id != user.id:
+        raise HTTPException(403, "无权访问")
+
+    task_manager.request_cancellation(f"chapter_video_{workflow_id}")
+    update_chapter_workflow_status(workflow_id, "failed", "用户取消")
+    return {"ok": True, "message": "已请求取消章节视频工作流"}
+
+
+@router.post("/api/video/chapter-workflows/shots/{shot_id}/regenerate-storyboard")
+async def api_regenerate_shot_storyboard(
+    shot_id: int,
+    body: RegenerateShotRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """重新生成单镜头的故事版图片。"""
+    user = _require_user(request, db)
+    shot = db.get(ChapterVideoShot, shot_id)
+    if not shot:
+        raise HTTPException(404, "镜头不存在")
+
+    wf = get_chapter_workflow(shot.workflow_id)
+    if not wf:
+        raise HTTPException(404, "工作流不存在")
+
+    story = db.get(Story, wf.story_id)
+    if not story or story.owner_user_id != user.id:
+        raise HTTPException(403, "无权访问")
+
+    api_key = _user_image_api_key(request)
+    updated_shot = await regenerate_shot_storyboard(shot_id, api_key, body.prompt_override)
+
+    if not updated_shot:
+        raise HTTPException(500, "重新生成故事版失败")
+
+    return ChapterVideoShotOut.model_validate(updated_shot)
+
+
+@router.post("/api/video/chapter-workflows/shots/{shot_id}/regenerate-video")
+async def api_regenerate_shot_video(
+    shot_id: int,
+    body: RegenerateShotRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """重新生成单镜头的视频。"""
+    user = _require_user(request, db)
+    shot = db.get(ChapterVideoShot, shot_id)
+    if not shot:
+        raise HTTPException(404, "镜头不存在")
+
+    wf = get_chapter_workflow(shot.workflow_id)
+    if not wf:
+        raise HTTPException(404, "工作流不存在")
+
+    story = db.get(Story, wf.story_id)
+    if not story or story.owner_user_id != user.id:
+        raise HTTPException(403, "无权访问")
+
+    api_key = _user_image_api_key(request)
+    updated_shot = await regenerate_shot_video(shot_id, api_key, body.prompt_override)
+
+    if not updated_shot:
+        raise HTTPException(500, "重新生成视频失败")
+
+    return ChapterVideoShotOut.model_validate(updated_shot)
+
+
+@router.post("/api/video/chapter-workflows/{workflow_id}/concat")
+async def api_concat_chapter_videos(
+    workflow_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """拼接工作流中所有已完成镜头的视频为完整的章节视频。"""
+    user = _require_user(request, db)
+    wf = get_chapter_workflow(workflow_id)
+    if not wf:
+        raise HTTPException(404, "工作流不存在")
+    story = db.get(Story, wf.story_id)
+    if not story or story.owner_user_id != user.id:
+        raise HTTPException(403, "无权访问")
+
+    try:
+        result = concat_chapter_videos(workflow_id)
+        return result
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except RuntimeError as e:
+        raise HTTPException(500, str(e))
+
+
+@router.get("/api/video/chapter-workflows/{workflow_id}/consistency")
+async def api_check_chapter_consistency(
+    workflow_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """检查章节工作流的角色一致性。"""
+    user = _require_user(request, db)
+    wf = get_chapter_workflow(workflow_id)
+    if not wf:
+        raise HTTPException(404, "工作流不存在")
+    story = db.get(Story, wf.story_id)
+    if not story or story.owner_user_id != user.id:
+        raise HTTPException(403, "无权访问")
+
+    return validate_character_consistency(workflow_id)
+
+
+# ── 阶段 API ────────────────────────────────────────────
+
+
+@router.post("/api/video/chapter-workflows/{workflow_id}/parse")
+async def api_parse_chapter_shots(
+    workflow_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """阶段1-拆镜：将章节正文解析为 10s 镜头列表，停在 shots_ready。"""
+    user = _require_user(request, db)
+    wf = get_chapter_workflow(workflow_id)
+    if not wf:
+        raise HTTPException(404, "工作流不存在")
+    story = db.get(Story, wf.story_id)
+    if not story or story.owner_user_id != user.id:
+        raise HTTPException(403, "无权访问")
+
+    if wf.workflow_status not in ("pending", "shots_ready", "failed"):
+        raise HTTPException(400, f"当前状态 {wf.workflow_status} 不允许拆镜操作")
+
+    deepseek_api_key = _user_deepseek_api_key(request, db)
+    if not deepseek_api_key:
+        raise HTTPException(400, "请配置 DeepSeek API Key")
+
+    task_id = f"chapter_video_{workflow_id}_stage_{uuid.uuid4().hex[:8]}"
+
+    result = await parse_chapter_shots(
+        workflow_id=workflow_id,
+        chapter_id=wf.chapter_id,
+        story_id=wf.story_id,
+        source_text=wf.source_text or "",
+        deepseek_api_key=deepseek_api_key,
+        task_id=task_id,
+    )
+
+    return result
+
+
+@router.post("/api/video/chapter-workflows/{workflow_id}/storyboards")
+async def api_generate_storyboards(
+    workflow_id: int,
+    body: ChapterWorkflowStageActionRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """阶段2-故事版：为指定镜头生成故事版图片。"""
+    user = _require_user(request, db)
+    wf = get_chapter_workflow(workflow_id)
+    if not wf:
+        raise HTTPException(404, "工作流不存在")
+    story = db.get(Story, wf.story_id)
+    if not story or story.owner_user_id != user.id:
+        raise HTTPException(403, "无权访问")
+
+    if wf.workflow_status not in ("shots_ready", "generating_storyboards", "failed"):
+        raise HTTPException(400, f"当前状态 {wf.workflow_status} 不允许故事版操作")
+
+    deepseek_api_key = _user_deepseek_api_key(request, db)
+    image_api_key = _user_image_api_key(request)
+
+    task_id = f"chapter_video_{workflow_id}_stage_{uuid.uuid4().hex[:8]}"
+
+    result = await generate_storyboards_for_shots(
+        workflow_id=workflow_id,
+        story_id=wf.story_id,
+        shot_ids=body.shot_ids or None,
+        image_api_key=image_api_key,
+        deepseek_api_key=deepseek_api_key,
+        character_reference_ids=wf.character_reference_ids,
+        task_id=task_id,
+    )
+
+    return result
+
+
+@router.post("/api/video/chapter-workflows/{workflow_id}/videos")
+async def api_generate_videos(
+    workflow_id: int,
+    body: ChapterWorkflowStageActionRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """阶段3-视频：为指定镜头生成视频。"""
+    user = _require_user(request, db)
+    wf = get_chapter_workflow(workflow_id)
+    if not wf:
+        raise HTTPException(404, "工作流不存在")
+    story = db.get(Story, wf.story_id)
+    if not story or story.owner_user_id != user.id:
+        raise HTTPException(403, "无权访问")
+
+    if wf.workflow_status not in ("storyboards_ready", "generating_videos", "failed"):
+        raise HTTPException(400, f"当前状态 {wf.workflow_status} 不允许视频操作")
+
+    deepseek_api_key = _user_deepseek_api_key(request, db)
+    image_api_key = _user_image_api_key(request)
+
+    task_id = f"chapter_video_{workflow_id}_stage_{uuid.uuid4().hex[:8]}"
+
+    result = await generate_videos_for_shots(
+        workflow_id=workflow_id,
+        shot_ids=body.shot_ids or None,
+        image_api_key=image_api_key,
+        deepseek_api_key=deepseek_api_key,
+        task_id=task_id,
+    )
+
+    return result
+
+
+@router.post("/api/video/chapter-workflows/{workflow_id}/run-all")
+async def api_run_all_stages(
+    workflow_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """一键全自动：依次执行拆镜→故事版→视频三个阶段。"""
+    user = _require_user(request, db)
+    wf = get_chapter_workflow(workflow_id)
+    if not wf:
+        raise HTTPException(404, "工作流不存在")
+    story = db.get(Story, wf.story_id)
+    if not story or story.owner_user_id != user.id:
+        raise HTTPException(403, "无权访问")
+
+    deepseek_api_key = _user_deepseek_api_key(request, db)
+    image_api_key = _user_image_api_key(request)
+
+    if not deepseek_api_key:
+        raise HTTPException(400, "请配置 DeepSeek API Key")
+
+    task_id = f"chapter_video_{workflow_id}_stage_{uuid.uuid4().hex[:8]}"
+
+    result = await run_all_stages(
+        workflow_id=workflow_id,
+        chapter_id=wf.chapter_id,
+        story_id=wf.story_id,
+        source_text=wf.source_text or "",
+        character_reference_ids=wf.character_reference_ids,
+        deepseek_api_key=deepseek_api_key,
+        image_api_key=image_api_key,
+        task_id=task_id,
+    )
+
+    return result
