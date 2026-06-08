@@ -633,3 +633,100 @@ def test_regenerate_shot_video_uses_image_api_key(monkeypatch):
 
     assert captured_key[0] == "image-key", \
         f"应使用 image-api-key，实际使用: {captured_key[0]}"
+
+
+# ── Fix 6: 路由级别 image_api_key 存在性校验 ────────────
+
+
+def test_storyboard_route_rejects_missing_image_api_key(monkeypatch):
+    """/storyboards 路由在缺少 image_api_key 时返回 400。"""
+    from routers import video as video_router
+    from schemas import ChapterWorkflowStageActionRequest
+    from fastapi import HTTPException
+
+    monkeypatch.setattr(video_router, "_require_user", lambda request, db: SimpleNamespace(id=1))
+    monkeypatch.setattr(video_router, "_user_deepseek_api_key", lambda request, db: "deepseek-key")
+    monkeypatch.setattr(video_router, "_user_image_api_key", lambda request: None)
+    monkeypatch.setattr(video_router, "get_chapter_workflow",
+                        lambda wid: SimpleNamespace(id=wid, story_id=34, workflow_status="shots_ready"))
+
+    class FakeDb:
+        def get(self, model, pk):
+            return SimpleNamespace(id=34, owner_user_id=1)
+
+        def query(self, model):
+            class Q:
+                def filter(self, *a, **kw): return self
+                def first(self): return None
+            return Q()
+
+    with pytest.raises(HTTPException) as excinfo:
+        asyncio.run(video_router.api_generate_storyboards(
+            workflow_id=99, body=ChapterWorkflowStageActionRequest(),
+            request=SimpleNamespace(), db=FakeDb(),
+        ))
+
+    assert excinfo.value.status_code == 400
+    assert "Image" in str(excinfo.value.detail)
+
+
+def test_video_route_rejects_missing_image_api_key(monkeypatch):
+    """/videos 路由在缺少 image_api_key 时返回 400。"""
+    from routers import video as video_router
+    from schemas import ChapterWorkflowStageActionRequest
+    from fastapi import HTTPException
+
+    monkeypatch.setattr(video_router, "_require_user", lambda request, db: SimpleNamespace(id=1))
+    monkeypatch.setattr(video_router, "_user_deepseek_api_key", lambda request, db: "deepseek-key")
+    monkeypatch.setattr(video_router, "_user_image_api_key", lambda request: None)
+    monkeypatch.setattr(video_router, "get_chapter_workflow",
+                        lambda wid: SimpleNamespace(id=wid, story_id=34, workflow_status="storyboards_ready"))
+
+    class FakeDb:
+        def get(self, model, pk):
+            return SimpleNamespace(id=34, owner_user_id=1)
+
+        def query(self, model):
+            class Q:
+                def filter(self, *a, **kw): return self
+                def first(self): return None
+            return Q()
+
+    with pytest.raises(HTTPException) as excinfo:
+        asyncio.run(video_router.api_generate_videos(
+            workflow_id=99, body=ChapterWorkflowStageActionRequest(),
+            request=SimpleNamespace(), db=FakeDb(),
+        ))
+
+    assert excinfo.value.status_code == 400
+    assert "Image" in str(excinfo.value.detail)
+
+
+def test_run_all_route_rejects_missing_image_api_key(monkeypatch):
+    """/run-all 路由在缺少 image_api_key 时返回 400。"""
+    from routers import video as video_router
+    from fastapi import HTTPException
+
+    monkeypatch.setattr(video_router, "_require_user", lambda request, db: SimpleNamespace(id=1))
+    monkeypatch.setattr(video_router, "_user_deepseek_api_key", lambda request, db: "deepseek-key")
+    monkeypatch.setattr(video_router, "_user_image_api_key", lambda request: None)
+    monkeypatch.setattr(video_router, "get_chapter_workflow",
+                        lambda wid: SimpleNamespace(id=wid, story_id=34, workflow_status="pending"))
+
+    class FakeDb:
+        def get(self, model, pk):
+            return SimpleNamespace(id=34, owner_user_id=1)
+
+        def query(self, model):
+            class Q:
+                def filter(self, *a, **kw): return self
+                def first(self): return None
+            return Q()
+
+    with pytest.raises(HTTPException) as excinfo:
+        asyncio.run(video_router.api_run_all_stages(
+            workflow_id=99, request=SimpleNamespace(), db=FakeDb(),
+        ))
+
+    assert excinfo.value.status_code == 400
+    assert "Image" in str(excinfo.value.detail)

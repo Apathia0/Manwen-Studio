@@ -138,6 +138,9 @@ from services.video_chapter_pipeline import (
     run_all_stages,
 )
 
+# 模块级标记：init_db 在整个进程生命周期中只调用一次
+_db_schema_verified: bool = False
+
 logger = logging.getLogger("video_router")
 
 router = APIRouter()
@@ -5548,10 +5551,15 @@ async def api_create_chapter_workflow(
     db: Session = Depends(get_db),
 ):
     """创建并启动章节视频工作流。"""
+    global _db_schema_verified
+
     user = _require_user(request, db)
     chapter = _require_chapter_for_user(body.chapter_id, user, db)
 
-    init_db(run_migrations=True, raise_errors=True)
+    # init_db 在整个进程生命周期中只执行一次
+    if not _db_schema_verified:
+        init_db(run_migrations=True, raise_errors=True)
+        _db_schema_verified = True
 
     # 创建工作流
     wf = create_chapter_workflow(
@@ -5562,9 +5570,10 @@ async def api_create_chapter_workflow(
         video_style=body.video_style,
     )
 
-    # 后台启动流水线
-    api_key = _user_deepseek_api_key(request, db)
-    await start_workflow_background(wf.id, api_key=api_key)
+    # 后台启动流水线（分别传递两个 key，避免 image 误用 deepseek key）
+    deepseek_api_key = _user_deepseek_api_key(request, db)
+    image_api_key = _user_image_api_key(request)
+    await start_workflow_background(wf.id, api_key=deepseek_api_key, image_api_key=image_api_key)
 
     refreshed_workflow = get_chapter_workflow(wf.id)
     return refreshed_workflow or wf
@@ -5818,6 +5827,9 @@ async def api_generate_storyboards(
     deepseek_api_key = _user_deepseek_api_key(request, db)
     image_api_key = _user_image_api_key(request)
 
+    if not image_api_key:
+        raise HTTPException(400, "请配置 Image API Key")
+
     task_id = f"chapter_video_{workflow_id}_stage_{uuid.uuid4().hex[:8]}"
 
     result = await generate_storyboards_for_shots(
@@ -5855,6 +5867,9 @@ async def api_generate_videos(
     deepseek_api_key = _user_deepseek_api_key(request, db)
     image_api_key = _user_image_api_key(request)
 
+    if not image_api_key:
+        raise HTTPException(400, "请配置 Image API Key")
+
     task_id = f"chapter_video_{workflow_id}_stage_{uuid.uuid4().hex[:8]}"
 
     result = await generate_videos_for_shots(
@@ -5888,6 +5903,9 @@ async def api_run_all_stages(
 
     if not deepseek_api_key:
         raise HTTPException(400, "请配置 DeepSeek API Key")
+
+    if not image_api_key:
+        raise HTTPException(400, "请配置 Image API Key")
 
     task_id = f"chapter_video_{workflow_id}_stage_{uuid.uuid4().hex[:8]}"
 
