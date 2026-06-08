@@ -1,6 +1,8 @@
 import asyncio
+import contextvars
 import json
 import logging
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, AsyncGenerator
@@ -155,6 +157,83 @@ class PendingChangesTracker:
         self._seen.clear()
 
 
+AgentMode = str
+AGENT_MODES: set[AgentMode] = {"chat", "analyze", "execute"}
+READ_ONLY_AGENT_MODES: set[AgentMode] = {"chat", "analyze"}
+
+
+@dataclass(frozen=True)
+class AgentPendingChangeKey:
+    user_id: int
+    story_id: int
+    conversation_id: int
+
+
+@dataclass
+class AgentRunContext:
+    story_id: int
+    api_key: str | None
+    mode: AgentMode
+    pending_changes: PendingChangesTracker
+    pending_change_key: AgentPendingChangeKey | None = None
+
+
+class AgentPendingChangeStore:
+    """In-memory pending change store scoped to one user/story/conversation."""
+
+    def __init__(self):
+        self._items: dict[AgentPendingChangeKey, PendingChangesTracker] = {}
+        self._lock = threading.RLock()
+
+    def set(self, key: AgentPendingChangeKey, tracker: PendingChangesTracker) -> None:
+        with self._lock:
+            if tracker.has_changes():
+                self._items[key] = tracker
+            else:
+                self._items.pop(key, None)
+
+    def get(self, key: AgentPendingChangeKey) -> PendingChangesTracker | None:
+        with self._lock:
+            return self._items.get(key)
+
+    def clear(self, key: AgentPendingChangeKey) -> None:
+        with self._lock:
+            self._items.pop(key, None)
+
+
+_AGENT_RUN_CONTEXT: contextvars.ContextVar[AgentRunContext | None] = contextvars.ContextVar(
+    "agent_run_context",
+    default=None,
+)
+agent_pending_change_store = AgentPendingChangeStore()
+
+
+def normalize_agent_mode(mode: str | None) -> AgentMode:
+    normalized = str(mode or "execute").strip().lower()
+    if normalized not in AGENT_MODES:
+        return "execute"
+    return normalized
+
+
+def _current_run_context() -> AgentRunContext | None:
+    return _AGENT_RUN_CONTEXT.get()
+
+
+def _current_story_id() -> int | None:
+    context = _current_run_context()
+    return context.story_id if context else None
+
+
+def _current_api_key() -> str | None:
+    context = _current_run_context()
+    return context.api_key if context else None
+
+
+def _current_pending_changes() -> PendingChangesTracker | None:
+    context = _current_run_context()
+    return context.pending_changes if context else None
+
+
 def _serialize_for_diff(value: Any) -> str:
     """将各种类型的值序列化为适合对比展示的字符串。"""
     if value is None:
@@ -203,12 +282,6 @@ class ToolRegistry:
     def __init__(self):
         self._tools: dict[str, dict[str, Any]] = {}
         self._write_tool_names: set[str] = set()
-        # 每次 agent 运行前设置
-        self.api_key: str | None = None
-        # 当前操作的故事 ID，用于工具执行时的所有权校验
-        self.current_story_id: int | None = None
-        # 待确认修改追踪
-        self.pending_changes: PendingChangesTracker | None = None
 
     def register(self, name: str, description: str, parameters: dict, is_write: bool = False):
         """装饰器：注册一个工具处理函数。"""
@@ -229,8 +302,17 @@ class ToolRegistry:
             return func
         return decorator
 
-    def get_tool_specs(self) -> list[dict]:
+    def is_write_tool(self, name: str) -> bool:
+        return name in self._write_tool_names
+
+    def get_tool_specs(self, mode: AgentMode = "execute") -> list[dict]:
         """返回 DeepSeek/OpenAI function calling 格式的工具清单。"""
+        if normalize_agent_mode(mode) in READ_ONLY_AGENT_MODES:
+            return [
+                info["spec"]
+                for name, info in self._tools.items()
+                if name not in self._write_tool_names
+            ]
         return [info["spec"] for info in self._tools.values()]
 
     async def execute(self, name: str, args: dict) -> str:
@@ -238,6 +320,16 @@ class ToolRegistry:
         info = self._tools.get(name)
         if not info:
             raise ValueError(f"未知工具: {name}")
+        context = _current_run_context()
+        if name in self._write_tool_names and (context is None or context.mode != "execute"):
+            return json.dumps(
+                {
+                    "error": "当前 Agent 模式不允许写入。请切换到执行模式后再保存修改。",
+                    "write_denied": True,
+                    "mode": context.mode if context else None,
+                },
+                ensure_ascii=False,
+            )
         result = await info["handler"](**args)
         if isinstance(result, str):
             return result
@@ -295,7 +387,7 @@ async def get_chapter_full(chapter_id: int) -> dict:
     """读取完整的章节信息。"""
     db = SessionLocal()
     try:
-        chapter = _validate_chapter_ownership(db, chapter_id, tool_registry.current_story_id)
+        chapter = _validate_chapter_ownership(db, chapter_id, _current_story_id())
         if not chapter:
             return {"error": "章节不存在或无权访问"}
         return {
@@ -329,7 +421,7 @@ async def get_all_chapters_summary(story_id: int) -> dict:
     """列出故事下所有章节的基本信息。"""
     db = SessionLocal()
     try:
-        if story_id != tool_registry.current_story_id:
+        if story_id != _current_story_id():
             return {"error": "故事 ID 与当前上下文不匹配"}
         chapters = (
             db.query(Chapter)
@@ -369,7 +461,7 @@ async def get_framework_detail(story_id: int) -> dict:
     """获取故事标签、角色和大纲。"""
     db = SessionLocal()
     try:
-        story = _validate_story_ownership(db, story_id, tool_registry.current_story_id)
+        story = _validate_story_ownership(db, story_id, _current_story_id())
         if not story:
             return {"error": "故事不存在或无权访问"}
         return {
@@ -396,7 +488,7 @@ async def get_story_bible(story_id: int) -> dict:
     """获取故事圣经中的 creative_brief 和 writing_guidance。"""
     db = SessionLocal()
     try:
-        story = _validate_story_ownership(db, story_id, tool_registry.current_story_id)
+        story = _validate_story_ownership(db, story_id, _current_story_id())
         if not story:
             return {"error": "故事不存在或无权访问"}
         bible = story.story_bible if isinstance(story.story_bible, dict) else {}
@@ -424,7 +516,7 @@ async def get_scenes(chapter_id: int) -> dict:
     """从文件读取章节分镜列表。"""
     db = SessionLocal()
     try:
-        chapter = _validate_chapter_ownership(db, chapter_id, tool_registry.current_story_id)
+        chapter = _validate_chapter_ownership(db, chapter_id, _current_story_id())
         if not chapter:
             return {"error": "章节不存在或无权访问"}
     finally:
@@ -456,7 +548,7 @@ async def get_character_profiles(chapter_id: int) -> dict:
     """获取角色外貌设定。"""
     db = SessionLocal()
     try:
-        chapter = _validate_chapter_ownership(db, chapter_id, tool_registry.current_story_id)
+        chapter = _validate_chapter_ownership(db, chapter_id, _current_story_id())
         if not chapter:
             return {"error": "章节不存在或无权访问"}
         cfile = _characters_file_path(chapter_id)
@@ -495,14 +587,14 @@ async def update_chapter_content(chapter_id: int, content: str) -> dict:
     """直接更新章节正文。"""
     db = SessionLocal()
     try:
-        chapter = _validate_chapter_ownership(db, chapter_id, tool_registry.current_story_id)
+        chapter = _validate_chapter_ownership(db, chapter_id, _current_story_id())
         if not chapter:
             return {"error": "章节不存在或无权访问"}
-        if tool_registry.pending_changes:
-            tool_registry.pending_changes.record_chapter_field(chapter, "novel_content")
+        if _current_pending_changes():
+            _current_pending_changes().record_chapter_field(chapter, "novel_content")
         chapter.novel_content = content
-        if tool_registry.pending_changes:
-            tool_registry.pending_changes.update_new_value("chapter", chapter.id, "novel_content", content)
+        if _current_pending_changes():
+            _current_pending_changes().update_new_value("chapter", chapter.id, "novel_content", content)
         db.commit()
         return {"ok": True, "chapter_id": chapter_id}
     finally:
@@ -547,14 +639,14 @@ async def batch_update_chapters(chapters: list[dict]) -> dict:
             return {"chapter_id": chapter_id, "error": "缺少 chapter_id 或 content"}
         db = SessionLocal()
         try:
-            chapter = _validate_chapter_ownership(db, chapter_id, tool_registry.current_story_id)
+            chapter = _validate_chapter_ownership(db, chapter_id, _current_story_id())
             if not chapter:
                 return {"chapter_id": chapter_id, "error": "章节不存在或无权访问"}
-            if tool_registry.pending_changes:
-                tool_registry.pending_changes.record_chapter_field(chapter, "novel_content")
+            if _current_pending_changes():
+                _current_pending_changes().record_chapter_field(chapter, "novel_content")
             chapter.novel_content = content
-            if tool_registry.pending_changes:
-                tool_registry.pending_changes.update_new_value("chapter", chapter.id, "novel_content", content)
+            if _current_pending_changes():
+                _current_pending_changes().update_new_value("chapter", chapter.id, "novel_content", content)
             db.commit()
             return {"chapter_id": chapter_id, "ok": True}
         except Exception as e:
@@ -589,15 +681,15 @@ async def adjust_chapter_by_instruction(chapter_id: int, instruction: str) -> di
     """调用 DeepSeek 根据指令重写整章。"""
     db = SessionLocal()
     try:
-        chapter = _validate_chapter_ownership(db, chapter_id, tool_registry.current_story_id)
+        chapter = _validate_chapter_ownership(db, chapter_id, _current_story_id())
         if not chapter:
             return {"error": "章节不存在或无权访问"}
         story_obj = db.get(Story, chapter.story_id)
         if not story_obj:
             return {"error": "所属故事不存在"}
 
-        if tool_registry.pending_changes:
-            tool_registry.pending_changes.record_chapter_field(chapter, "novel_content")
+        if _current_pending_changes():
+            _current_pending_changes().record_chapter_field(chapter, "novel_content")
 
         story_context = _build_story_context_dict(story_obj)
         chapter_info = {
@@ -608,7 +700,7 @@ async def adjust_chapter_by_instruction(chapter_id: int, instruction: str) -> di
         }
         chapter_content = chapter.novel_content or ""
 
-        api_key = tool_registry.api_key
+        api_key = _current_api_key()
         if not api_key:
             return {"error": "DeepSeek API Key 未配置"}
 
@@ -623,8 +715,8 @@ async def adjust_chapter_by_instruction(chapter_id: int, instruction: str) -> di
             return {"error": "AI 返回内容为空"}
 
         chapter.novel_content = new_content
-        if tool_registry.pending_changes:
-            tool_registry.pending_changes.update_new_value("chapter", chapter.id, "novel_content", new_content)
+        if _current_pending_changes():
+            _current_pending_changes().update_new_value("chapter", chapter.id, "novel_content", new_content)
         db.commit()
         return {"ok": True, "chapter_id": chapter_id, "content_length": len(new_content)}
     finally:
@@ -649,18 +741,18 @@ async def rewrite_text_segment(chapter_id: int, original: str, rewritten: str) -
     """在章节正文中执行精确查找替换。"""
     db = SessionLocal()
     try:
-        chapter = _validate_chapter_ownership(db, chapter_id, tool_registry.current_story_id)
+        chapter = _validate_chapter_ownership(db, chapter_id, _current_story_id())
         if not chapter:
             return {"error": "章节不存在或无权访问"}
         current = chapter.novel_content or ""
         if original not in current:
             return {"error": "未在正文中找到完全匹配的原文，请确认文本是否一致", "found": False}
-        if tool_registry.pending_changes:
-            tool_registry.pending_changes.record_chapter_field(chapter, "novel_content")
+        if _current_pending_changes():
+            _current_pending_changes().record_chapter_field(chapter, "novel_content")
         new_content = current.replace(original, rewritten, 1)
         chapter.novel_content = new_content
-        if tool_registry.pending_changes:
-            tool_registry.pending_changes.update_new_value("chapter", chapter.id, "novel_content", new_content)
+        if _current_pending_changes():
+            _current_pending_changes().update_new_value("chapter", chapter.id, "novel_content", new_content)
         db.commit()
         return {
             "ok": True,
@@ -695,16 +787,16 @@ async def update_story_info(story_id: int, title: str | None = None, description
     """更新故事基本信息。"""
     db = SessionLocal()
     try:
-        story = _validate_story_ownership(db, story_id, tool_registry.current_story_id)
+        story = _validate_story_ownership(db, story_id, _current_story_id())
         if not story:
             return {"error": "故事不存在或无权访问"}
-        if tool_registry.pending_changes:
+        if _current_pending_changes():
             if title is not None:
-                tool_registry.pending_changes.record_story_field(story, "title")
+                _current_pending_changes().record_story_field(story, "title")
             if description is not None:
-                tool_registry.pending_changes.record_story_field(story, "description")
+                _current_pending_changes().record_story_field(story, "description")
             if tags is not None:
-                tool_registry.pending_changes.record_story_field(story, "tags")
+                _current_pending_changes().record_story_field(story, "tags")
         updated_fields = []
         if title is not None:
             story.title = title
@@ -715,9 +807,9 @@ async def update_story_info(story_id: int, title: str | None = None, description
         if tags is not None:
             story.tags = tags
             updated_fields.append("tags")
-        if tool_registry.pending_changes:
+        if _current_pending_changes():
             for f in updated_fields:
-                tool_registry.pending_changes.update_new_value("story", story.id, f, getattr(story, f))
+                _current_pending_changes().update_new_value("story", story.id, f, getattr(story, f))
         db.commit()
         return {"ok": True, "updated_fields": updated_fields}
     finally:
@@ -745,14 +837,14 @@ async def update_characters(story_id: int, characters: list[dict]) -> dict:
     """替换整个角色设定列表。"""
     db = SessionLocal()
     try:
-        story = _validate_story_ownership(db, story_id, tool_registry.current_story_id)
+        story = _validate_story_ownership(db, story_id, _current_story_id())
         if not story:
             return {"error": "故事不存在或无权访问"}
-        if tool_registry.pending_changes:
-            tool_registry.pending_changes.record_story_field(story, "characters")
+        if _current_pending_changes():
+            _current_pending_changes().record_story_field(story, "characters")
         story.characters = characters
-        if tool_registry.pending_changes:
-            tool_registry.pending_changes.update_new_value("story", story.id, "characters", characters)
+        if _current_pending_changes():
+            _current_pending_changes().update_new_value("story", story.id, "characters", characters)
         db.commit()
         return {"ok": True, "count": len(characters)}
     finally:
@@ -776,17 +868,17 @@ async def adjust_framework(story_id: int, instruction: str) -> dict:
     """根据自然语言指令调整故事框架。"""
     db = SessionLocal()
     try:
-        story = _validate_story_ownership(db, story_id, tool_registry.current_story_id)
+        story = _validate_story_ownership(db, story_id, _current_story_id())
         if not story:
             return {"error": "故事不存在或无权访问"}
 
-        if tool_registry.pending_changes:
-            tool_registry.pending_changes.record_story_field(story, "description")
-            tool_registry.pending_changes.record_story_field(story, "tags")
-            tool_registry.pending_changes.record_story_field(story, "characters")
-            tool_registry.pending_changes.record_story_field(story, "outline")
+        if _current_pending_changes():
+            _current_pending_changes().record_story_field(story, "description")
+            _current_pending_changes().record_story_field(story, "tags")
+            _current_pending_changes().record_story_field(story, "characters")
+            _current_pending_changes().record_story_field(story, "outline")
 
-        api_key = tool_registry.api_key
+        api_key = _current_api_key()
         if not api_key:
             return {"error": "DeepSeek API Key 未配置"}
 
@@ -842,9 +934,9 @@ async def adjust_framework(story_id: int, instruction: str) -> dict:
         story.characters = _normalize_characters_payload(framework.get("characters"))
         story.outline = framework.get("outline") if isinstance(framework.get("outline"), dict) else existing_framework["outline"]
 
-        if tool_registry.pending_changes:
+        if _current_pending_changes():
             for f in ("description", "tags", "characters", "outline"):
-                tool_registry.pending_changes.update_new_value("story", story.id, f, getattr(story, f))
+                _current_pending_changes().update_new_value("story", story.id, f, getattr(story, f))
 
         db.commit()
 
@@ -890,7 +982,7 @@ async def apply_framework_ops(story_id: int, operations: list, patches: list | N
     """直接应用框架编辑操作，不调用 AI。"""
     db = SessionLocal()
     try:
-        story = _validate_story_ownership(db, story_id, tool_registry.current_story_id)
+        story = _validate_story_ownership(db, story_id, _current_story_id())
         if not story:
             return {"error": "故事不存在或无权访问"}
 
@@ -919,11 +1011,11 @@ async def apply_framework_ops(story_id: int, operations: list, patches: list | N
                 "warnings": apply_result.get("warnings", []),
             }
 
-        if tool_registry.pending_changes:
-            tool_registry.pending_changes.record_story_field(story, "description")
-            tool_registry.pending_changes.record_story_field(story, "tags")
-            tool_registry.pending_changes.record_story_field(story, "characters")
-            tool_registry.pending_changes.record_story_field(story, "outline")
+        if _current_pending_changes():
+            _current_pending_changes().record_story_field(story, "description")
+            _current_pending_changes().record_story_field(story, "tags")
+            _current_pending_changes().record_story_field(story, "characters")
+            _current_pending_changes().record_story_field(story, "outline")
 
         framework = apply_result["framework"]
         story.description = str(framework.get("description") or "").strip()
@@ -980,7 +1072,7 @@ async def batch_adjust_chapters(chapters: list[dict]) -> dict:
         return {"error": "chapters 必须是一个数组"}
     if len(chapters) > MAX_BATCH_SIZE:
         return {"error": f"一次最多调整 {MAX_BATCH_SIZE} 个章节"}
-    api_key = tool_registry.api_key
+    api_key = _current_api_key()
     if not api_key:
         return {"error": "DeepSeek API Key 未配置"}
 
@@ -991,14 +1083,14 @@ async def batch_adjust_chapters(chapters: list[dict]) -> dict:
             return {"chapter_id": chapter_id, "error": "缺少 chapter_id 或 instruction"}
         db = SessionLocal()
         try:
-            chapter = _validate_chapter_ownership(db, chapter_id, tool_registry.current_story_id)
+            chapter = _validate_chapter_ownership(db, chapter_id, _current_story_id())
             if not chapter:
                 return {"chapter_id": chapter_id, "error": "章节不存在或无权访问"}
             story_obj = db.get(Story, chapter.story_id)
             if not story_obj:
                 return {"chapter_id": chapter_id, "error": "所属故事不存在"}
-            if tool_registry.pending_changes:
-                tool_registry.pending_changes.record_chapter_field(chapter, "novel_content")
+            if _current_pending_changes():
+                _current_pending_changes().record_chapter_field(chapter, "novel_content")
             story_context = _build_story_context_dict(story_obj)
             chapter_info = {
                 "chapter_number": chapter.chapter_number,
@@ -1017,8 +1109,8 @@ async def batch_adjust_chapters(chapters: list[dict]) -> dict:
             if not new_content or not new_content.strip():
                 return {"chapter_id": chapter_id, "error": "AI 返回内容为空"}
             chapter.novel_content = new_content
-            if tool_registry.pending_changes:
-                tool_registry.pending_changes.update_new_value("chapter", chapter.id, "novel_content", new_content)
+            if _current_pending_changes():
+                _current_pending_changes().update_new_value("chapter", chapter.id, "novel_content", new_content)
             db.commit()
             return {"chapter_id": chapter_id, "ok": True}
         except Exception as e:
@@ -1068,12 +1160,12 @@ async def add_chapter_plan(story_id: int, chapter: dict) -> dict:
     """在故事大纲中添加章节计划。"""
     db = SessionLocal()
     try:
-        story = _validate_story_ownership(db, story_id, tool_registry.current_story_id)
+        story = _validate_story_ownership(db, story_id, _current_story_id())
         if not story:
             return {"error": "故事不存在或无权访问"}
 
-        if tool_registry.pending_changes:
-            tool_registry.pending_changes.record_story_field(story, "outline")
+        if _current_pending_changes():
+            _current_pending_changes().record_story_field(story, "outline")
 
         outline = story.outline if isinstance(story.outline, dict) else {}
         three_acts = outline.get("three_acts")
@@ -1110,8 +1202,8 @@ async def add_chapter_plan(story_id: int, chapter: dict) -> dict:
                 # 更新已有章节
                 existing.update(chapter)
                 story.outline = outline
-                if tool_registry.pending_changes:
-                    tool_registry.pending_changes.update_new_value("story", story.id, "outline", outline)
+                if _current_pending_changes():
+                    _current_pending_changes().update_new_value("story", story.id, "outline", outline)
                 db.commit()
                 return {"ok": True, "action": "updated", "chapter_number": chapter_number}
 
@@ -1139,8 +1231,8 @@ async def add_chapter_plan(story_id: int, chapter: dict) -> dict:
         act_chapters.sort(key=lambda x: x.get("chapter_number", 0) if isinstance(x, dict) else 0)
 
         story.outline = outline
-        if tool_registry.pending_changes:
-            tool_registry.pending_changes.update_new_value("story", story.id, "outline", outline)
+        if _current_pending_changes():
+            _current_pending_changes().update_new_value("story", story.id, "outline", outline)
         db.commit()
         return {"ok": True, "action": "added", "chapter_number": chapter_number}
     finally:
@@ -1177,11 +1269,11 @@ async def bulk_add_chapter_plans(story_id: int, chapters: list[dict]) -> dict:
     """批量添加章节计划到故事大纲。"""
     db = SessionLocal()
     try:
-        story = _validate_story_ownership(db, story_id, tool_registry.current_story_id)
+        story = _validate_story_ownership(db, story_id, _current_story_id())
         if not story:
             return {"error": "故事不存在或无权访问"}
-        if tool_registry.pending_changes:
-            tool_registry.pending_changes.record_story_field(story, "outline")
+        if _current_pending_changes():
+            _current_pending_changes().record_story_field(story, "outline")
         outline = story.outline if isinstance(story.outline, dict) else {}
         three_acts = outline.get("three_acts")
         if not isinstance(three_acts, list):
@@ -1235,8 +1327,8 @@ async def bulk_add_chapter_plans(story_id: int, chapters: list[dict]) -> dict:
                 results.append({"chapter_number": chapter_number, "ok": True, "action": "added"})
             act_chapters.sort(key=lambda x: x.get("chapter_number", 0) if isinstance(x, dict) else 0)
         story.outline = outline
-        if tool_registry.pending_changes:
-            tool_registry.pending_changes.update_new_value("story", story.id, "outline", outline)
+        if _current_pending_changes():
+            _current_pending_changes().update_new_value("story", story.id, "outline", outline)
         db.commit()
         return {"ok": True, "results": results}
     finally:
@@ -1264,13 +1356,13 @@ async def update_scenes(chapter_id: int, scenes: list[str]) -> dict:
     """写入章节分镜文件。"""
     db = SessionLocal()
     try:
-        chapter = _validate_chapter_ownership(db, chapter_id, tool_registry.current_story_id)
+        chapter = _validate_chapter_ownership(db, chapter_id, _current_story_id())
         if not chapter:
             return {"error": "章节不存在或无权访问"}
         # 记录旧分镜内容用于撤回
-        if tool_registry.pending_changes:
+        if _current_pending_changes():
             old_scenes_text = _scenes_path(chapter_id).read_text("utf-8") if _scenes_path(chapter_id).exists() else ""
-            tool_registry.pending_changes.record(PendingChange(
+            _current_pending_changes().record(PendingChange(
                 type="scenes_file",
                 record_id=chapter_id,
                 display_name=f"第{chapter.chapter_number}章分镜",
@@ -1289,8 +1381,8 @@ async def update_scenes(chapter_id: int, scenes: list[str]) -> dict:
             new_text += f"=== 第{idx}格 ===\n{scene.strip()}\n\n"
         with open(prompts_file, "w", encoding="utf-8") as f:
             f.write(new_text)
-        if tool_registry.pending_changes:
-            tool_registry.pending_changes.update_new_value("scenes_file", chapter_id, "scenes_file", new_text)
+        if _current_pending_changes():
+            _current_pending_changes().update_new_value("scenes_file", chapter_id, "scenes_file", new_text)
         return {"ok": True, "chapter_id": chapter_id, "scene_count": len(scenes)}
     except OSError as exc:
         logger.warning("写入分镜文件失败 chapter_id=%s: %s", chapter_id, exc)
@@ -1555,166 +1647,188 @@ class AgentService:
         story_context: str,
         api_key: str,
         story_id: int = 0,
+        mode: AgentMode = "execute",
+        pending_change_key: AgentPendingChangeKey | None = None,
     ) -> AsyncGenerator[dict[str, str], None]:
         """运行 agent 聊天循环，生成 SSE 事件。"""
-        tool_registry.api_key = api_key
-        tool_registry.pending_changes = PendingChangesTracker()
+        mode = normalize_agent_mode(mode)
+        pending_changes = PendingChangesTracker()
+        run_context = AgentRunContext(
+            story_id=story_id,
+            api_key=api_key,
+            mode=mode,
+            pending_changes=pending_changes,
+            pending_change_key=pending_change_key,
+        )
+        context_token = _AGENT_RUN_CONTEXT.set(run_context)
+        pending_changes_stored = False
 
-        system_prompt = self._build_system_prompt(story_context, story_id=story_id)
-        all_messages: list[dict] = [{"role": "system", "content": system_prompt}] + list(messages)
-
-        collected_content = ""
-        iteration_count = 0
-        SAFETY_MAX_ITERATIONS = 50  # 熔断：防止无限循环
-        write_executed = False
-
-        while iteration_count < SAFETY_MAX_ITERATIONS:
-            iteration_count += 1
-
-            payload = {
-                "model": DEEPSEEK_MODEL,
-                "messages": all_messages,
-                "stream": True,
-                "tools": tool_registry.get_tool_specs(),
-                "max_tokens": 32768,
-            }
+        try:
+            system_prompt = self._build_system_prompt(story_context, story_id=story_id)
+            all_messages: list[dict] = [{"role": "system", "content": system_prompt}] + list(messages)
 
             collected_content = ""
-            tool_calls_acc: dict[int, dict[str, Any]] = {}
-            finish_reason: str | None = None
+            iteration_count = 0
+            SAFETY_MAX_ITERATIONS = 50  # 熔断：防止无限循环
+            write_executed = False
 
-            async with httpx.AsyncClient(timeout=600) as client:
-                async with client.stream(
-                    "POST",
-                    f"{DEEPSEEK_BASE_URL}/chat/completions",
-                    json=payload,
-                    headers=_deepseek_auth_headers(api_key),
-                ) as response:
-                    response.raise_for_status()
-                    async for line in response.aiter_lines():
-                        if not line.startswith("data: "):
-                            continue
-                        data_str = line[6:]
-                        if data_str.strip() == "[DONE]":
-                            break
-                        try:
-                            data = json.loads(data_str)
-                            choices = data.get("choices", [])
-                            if not choices:
+            while iteration_count < SAFETY_MAX_ITERATIONS:
+                iteration_count += 1
+
+                payload = {
+                    "model": DEEPSEEK_MODEL,
+                    "messages": all_messages,
+                    "stream": True,
+                    "tools": self.tool_registry.get_tool_specs(mode=mode),
+                    "max_tokens": 32768,
+                }
+
+                collected_content = ""
+                tool_calls_acc: dict[int, dict[str, Any]] = {}
+                finish_reason: str | None = None
+
+                async with httpx.AsyncClient(timeout=600) as client:
+                    async with client.stream(
+                        "POST",
+                        f"{DEEPSEEK_BASE_URL}/chat/completions",
+                        json=payload,
+                        headers=_deepseek_auth_headers(api_key),
+                    ) as response:
+                        response.raise_for_status()
+                        async for line in response.aiter_lines():
+                            if not line.startswith("data: "):
                                 continue
-                            delta = choices[0].get("delta", {})
-                            finish_reason = choices[0].get("finish_reason")
-
-                            # 文本 token
-                            content = delta.get("content", "")
-                            if content:
-                                collected_content += content
-                                yield {"event": "token", "data": json.dumps({"content": content}, ensure_ascii=False)}
-
-                            # 工具调用（流式累加）
-                            tool_calls = delta.get("tool_calls", [])
-                            for tc in tool_calls:
-                                idx = tc.get("index", 0)
-                                if idx not in tool_calls_acc:
-                                    tool_calls_acc[idx] = {
-                                        "id": "",
-                                        "function": {"name": "", "arguments": ""},
-                                    }
-                                if tc.get("id"):
-                                    tool_calls_acc[idx]["id"] = tc["id"]
-                                func_data = tc.get("function", {})
-                                if func_data.get("name"):
-                                    tool_calls_acc[idx]["function"]["name"] = func_data["name"]
-                                if func_data.get("arguments"):
-                                    tool_calls_acc[idx]["function"]["arguments"] += func_data["arguments"]
-                        except (json.JSONDecodeError, KeyError, IndexError):
-                            continue
-
-            # 构建 assistant 消息
-            assistant_msg: dict[str, Any] = {"role": "assistant"}
-            if collected_content:
-                assistant_msg["content"] = collected_content
-            else:
-                assistant_msg["content"] = None
-
-            if tool_calls_acc:
-                sorted_indices = sorted(tool_calls_acc.keys())
-                assistant_msg["tool_calls"] = [
-                    {
-                        "id": tool_calls_acc[i]["id"],
-                        "type": "function",
-                        "function": {
-                            "name": tool_calls_acc[i]["function"]["name"],
-                            "arguments": tool_calls_acc[i]["function"]["arguments"],
-                        },
-                    }
-                    for i in sorted_indices
-                ]
-            all_messages.append(assistant_msg)
-
-            # 处理工具调用
-            if finish_reason == "tool_calls" and tool_calls_acc:
-                sorted_indices = sorted(tool_calls_acc.keys())
-                for i in sorted_indices:
-                    tc = tool_calls_acc[i]
-                    name = tc["function"]["name"]
-                    try:
-                        args = json.loads(tc["function"]["arguments"]) if tc["function"]["arguments"].strip() else {}
-                    except json.JSONDecodeError:
-                        args = {}
-
-                    yield {"event": "tool_call", "data": json.dumps({"name": name, "arguments": args}, ensure_ascii=False)}
-
-                    try:
-                        result_str = await tool_registry.execute(name, args)
-                        yield {"event": "tool_result", "data": json.dumps({"name": name, "result": result_str}, ensure_ascii=False)}
-                    except Exception as e:
-                        error_msg = json.dumps({"error": str(e)}, ensure_ascii=False)
-                        yield {"event": "tool_result", "data": json.dumps({"name": name, "result": error_msg}, ensure_ascii=False)}
-                        result_str = error_msg
-
-                    all_messages.append({
-                        "role": "tool",
-                        "tool_call_id": tc["id"],
-                        "content": result_str,
-                    })
-
-                # 检查是否有写工具成功执行（不含 error）
-                any_write_succeeded = False
-                for i in sorted_indices:
-                    tc = tool_calls_acc[i]
-                    tool_name = tc["function"]["name"]
-                    if tool_name in tool_registry._write_tool_names:
-                        tool_call_id = tc["id"]
-                        for msg in all_messages:
-                            if msg.get("role") == "tool" and msg.get("tool_call_id") == tool_call_id:
-                                content_str = str(msg.get("content", ""))
-                                if '"error"' not in content_str:
-                                    any_write_succeeded = True
+                            data_str = line[6:]
+                            if data_str.strip() == "[DONE]":
                                 break
+                            try:
+                                data = json.loads(data_str)
+                                choices = data.get("choices", [])
+                                if not choices:
+                                    continue
+                                delta = choices[0].get("delta", {})
+                                finish_reason = choices[0].get("finish_reason")
 
-                if any_write_succeeded:
-                    write_executed = True
-                    all_messages.append({
-                        "role": "system",
-                        "content": "写入操作已完成。请检查是否所有需要修改的章节都已处理完毕。如果还有章节未处理，请继续调用批量工具完成剩余章节。如果全部完成，请回复用户总结操作结果。",
-                    })
+                                # 文本 token
+                                content = delta.get("content", "")
+                                if content:
+                                    collected_content += content
+                                    yield {"event": "token", "data": json.dumps({"content": content}, ensure_ascii=False)}
 
-                # 继续循环（把工具结果送回 LLM，让 LLM 判断是否还有未完成的章节需要处理）
-                continue
+                                # 工具调用（流式累加）
+                                tool_calls = delta.get("tool_calls", [])
+                                for tc in tool_calls:
+                                    idx = tc.get("index", 0)
+                                    if idx not in tool_calls_acc:
+                                        tool_calls_acc[idx] = {
+                                            "id": "",
+                                            "function": {"name": "", "arguments": ""},
+                                        }
+                                    if tc.get("id"):
+                                        tool_calls_acc[idx]["id"] = tc["id"]
+                                    func_data = tc.get("function", {})
+                                    if func_data.get("name"):
+                                        tool_calls_acc[idx]["function"]["name"] = func_data["name"]
+                                    if func_data.get("arguments"):
+                                        tool_calls_acc[idx]["function"]["arguments"] += func_data["arguments"]
+                            except (json.JSONDecodeError, KeyError, IndexError):
+                                continue
 
-            # 这里说明没有工具调用了，正常结束
-            break
+                # 构建 assistant 消息
+                assistant_msg: dict[str, Any] = {"role": "assistant"}
+                if collected_content:
+                    assistant_msg["content"] = collected_content
+                else:
+                    assistant_msg["content"] = None
 
-        if write_executed:
-            logger.info("Agent 写入操作完成，共 %s 次迭代", iteration_count)
-        elif iteration_count >= SAFETY_MAX_ITERATIONS:
-            logger.warning("Agent 达到安全熔断上限 %s", SAFETY_MAX_ITERATIONS)
+                if tool_calls_acc:
+                    sorted_indices = sorted(tool_calls_acc.keys())
+                    assistant_msg["tool_calls"] = [
+                        {
+                            "id": tool_calls_acc[i]["id"],
+                            "type": "function",
+                            "function": {
+                                "name": tool_calls_acc[i]["function"]["name"],
+                                "arguments": tool_calls_acc[i]["function"]["arguments"],
+                            },
+                        }
+                        for i in sorted_indices
+                    ]
+                all_messages.append(assistant_msg)
 
-        yield {"event": "done", "data": json.dumps({
-            "content": collected_content,
-            "pending_changes": tool_registry.pending_changes.get_summary() if tool_registry.pending_changes else [],
-        }, ensure_ascii=False)}
+                # 处理工具调用
+                if finish_reason == "tool_calls" and tool_calls_acc:
+                    sorted_indices = sorted(tool_calls_acc.keys())
+                    for i in sorted_indices:
+                        tc = tool_calls_acc[i]
+                        name = tc["function"]["name"]
+                        try:
+                            args = json.loads(tc["function"]["arguments"]) if tc["function"]["arguments"].strip() else {}
+                        except json.JSONDecodeError:
+                            args = {}
+
+                        yield {"event": "tool_call", "data": json.dumps({"name": name, "arguments": args}, ensure_ascii=False)}
+
+                        try:
+                            result_str = await self.tool_registry.execute(name, args)
+                            yield {"event": "tool_result", "data": json.dumps({"name": name, "result": result_str}, ensure_ascii=False)}
+                        except Exception as e:
+                            error_msg = json.dumps({"error": str(e)}, ensure_ascii=False)
+                            yield {"event": "tool_result", "data": json.dumps({"name": name, "result": error_msg}, ensure_ascii=False)}
+                            result_str = error_msg
+
+                        all_messages.append({
+                            "role": "tool",
+                            "tool_call_id": tc["id"],
+                            "content": result_str,
+                        })
+
+                    # 检查是否有写工具成功执行（不含 error）
+                    any_write_succeeded = False
+                    for i in sorted_indices:
+                        tc = tool_calls_acc[i]
+                        tool_name = tc["function"]["name"]
+                        if self.tool_registry.is_write_tool(tool_name):
+                            tool_call_id = tc["id"]
+                            for msg in all_messages:
+                                if msg.get("role") == "tool" and msg.get("tool_call_id") == tool_call_id:
+                                    content_str = str(msg.get("content", ""))
+                                    if '"error"' not in content_str:
+                                        any_write_succeeded = True
+                                    break
+
+                    if any_write_succeeded:
+                        write_executed = True
+                        all_messages.append({
+                            "role": "system",
+                            "content": "写入操作已完成。请检查是否所有需要修改的章节都已处理完毕。如果还有章节未处理，请继续调用批量工具完成剩余章节。如果全部完成，请回复用户总结操作结果。",
+                        })
+
+                    # 继续循环（把工具结果送回 LLM，让 LLM 判断是否还有未完成的章节需要处理）
+                    continue
+
+                # 这里说明没有工具调用了，正常结束
+                break
+
+            if write_executed:
+                logger.info("Agent 写入操作完成，共 %s 次迭代", iteration_count)
+            elif iteration_count >= SAFETY_MAX_ITERATIONS:
+                logger.warning("Agent 达到安全熔断上限 %s", SAFETY_MAX_ITERATIONS)
+
+            if pending_change_key is not None:
+                agent_pending_change_store.set(pending_change_key, pending_changes)
+                pending_changes_stored = True
+
+            yield {"event": "done", "data": json.dumps({
+                "content": collected_content,
+                "pending_changes": pending_changes.get_summary(),
+                "agent_mode": mode,
+            }, ensure_ascii=False)}
+
+        finally:
+            if pending_change_key is not None and not pending_changes_stored:
+                agent_pending_change_store.set(pending_change_key, pending_changes)
+            _AGENT_RUN_CONTEXT.reset(context_token)
 
 
 # ── 模块级单例 ──────────────────────────────────────────

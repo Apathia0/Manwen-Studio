@@ -24,11 +24,11 @@
         <text class="checkout-page__instructions-text">{{ instructions }}</text>
       </view>
 
-      <!-- 二维码支付 (alipay_qr) -->
-      <view v-if="method === 'alipay_qr' && qrCodeText" class="checkout-page__qr">
+      <!-- 二维码支付 -->
+      <view v-if="qrCodeText" class="checkout-page__qr">
         <text class="checkout-page__qr-title">请扫码支付</text>
         <checkout-qr :text="qrCodeText" />
-        <text class="checkout-page__qr-hint">打开支付宝扫一扫完成付款</text>
+        <text class="checkout-page__qr-hint">{{ qrHint }}</text>
       </view>
 
       <!-- 支付状态 -->
@@ -52,13 +52,13 @@
           确认支付
         </lv-button>
 
-        <!-- 支付宝：我已完成支付 -->
-        <lv-button v-if="method === 'alipay_qr' && payStatus === 'pending'" block secondary @tap="handleCheckStatus" :loading="actionLoading">
+        <!-- 外部扫码/跳转支付：我已完成支付 -->
+        <lv-button v-if="canManualCheck && payStatus === 'pending'" block secondary @tap="handleCheckStatus" :loading="actionLoading">
           我已完成支付
         </lv-button>
 
         <!-- 刷新状态 -->
-        <lv-button v-if="payStatus === 'pending' && !canMockConfirm && method !== 'alipay_qr'" block @tap="handleCheckStatus">
+        <lv-button v-if="payStatus === 'pending' && !canMockConfirm && !canManualCheck" block @tap="handleCheckStatus">
           刷新状态
         </lv-button>
 
@@ -109,6 +109,22 @@ const statusText = computed(() => {
     case 'failed': return '支付失败'
     default: return ''
   }
+})
+
+const canManualCheck = computed(() => (
+  method.value === 'alipay_qr' ||
+  method.value === 'mapay_qr' ||
+  method.value.startsWith('epay_') ||
+  method.value.startsWith('mapay_')
+))
+
+const qrHint = computed(() => {
+  if (method.value === 'alipay_qr' || method.value === 'mapay_alipay') return '打开支付宝扫一扫完成付款'
+  if (method.value === 'mapay_wxpay') return '打开微信扫一扫完成付款'
+  if (method.value === 'mapay_qqpay') return '打开 QQ 钱包扫一扫完成付款'
+  if (method.value.startsWith('mapay_')) return '请使用码支付对应通道完成付款'
+  if (method.value.startsWith('epay_')) return '请使用对应支付 App 扫码完成付款'
+  return '请扫码完成付款'
 })
 
 onMounted(() => {

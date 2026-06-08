@@ -65,10 +65,12 @@ def init_gateways() -> None:
     from .mock_gateway import MockGateway
     from .alipay_gateway import AlipayGateway
     from .epay_gateway import EpayGateway
+    from .mapay_gateway import MaPayGateway
 
     register_gateway(MockGateway())
     register_gateway(AlipayGateway())
     register_gateway(EpayGateway())
+    register_gateway(MaPayGateway())
 
 
 __all__ = [

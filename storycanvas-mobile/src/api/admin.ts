@@ -288,6 +288,13 @@ export interface PlatformSettings {
     image_base_url: string
     image_model: string
     image_api_key: string
+    image_size: string
+    image_quality: string
+    image_background: string
+    image_moderation: string
+    image_output_format: string
+    image_output_compression: string
+    image_input_fidelity: string
     enable_user_override: boolean
     enable_user_url_override?: boolean
   }

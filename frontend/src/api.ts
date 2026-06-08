@@ -505,6 +505,8 @@ export interface AgentConversation {
   messages: AgentConversationMessage[];
 }
 
+export type AgentMode = 'chat' | 'analyze' | 'execute';
+
 export interface MangaImage {
   id: number;
   chapter_id: number;
@@ -579,6 +581,13 @@ export interface PaymentSettings {
   epay_type?: string;
   epay_notify_url?: string;
   epay_return_url?: string;
+  mapay_enabled?: boolean;
+  mapay_gateway?: string;
+  mapay_pid?: string;
+  mapay_key?: string;
+  mapay_type?: string;
+  mapay_notify_url?: string;
+  mapay_return_url?: string;
 }
 
 export interface BillingCheckout {
@@ -798,6 +807,13 @@ export interface PlatformSettings {
     image_base_url: string;
     image_model: string;
     image_api_key: string;
+    image_size: string;
+    image_quality: string;
+    image_background: string;
+    image_moderation: string;
+    image_output_format: string;
+    image_output_compression: string;
+    image_input_fidelity: string;
     enable_user_override: boolean;
     enable_user_url_override?: boolean;
   };
@@ -2380,6 +2396,7 @@ export function agentChatStream(
   conversationId: number,
   content: string,
   chapterId?: number,
+  mode: AgentMode = 'execute',
   callbacks?: {
     onToken?: (token: string) => void;
     onToolCall?: (toolCall: { id: string; name: string; args: any; status: 'running' }) => void;
@@ -2394,7 +2411,7 @@ export function agentChatStream(
   fetch(`${BASE}/api/stories/${storyId}/agent/chat`, {
     method: 'POST',
     headers: apiHeaders(true),
-    body: JSON.stringify({ conversation_id: conversationId, content, chapter_id: chapterId }),
+    body: JSON.stringify({ conversation_id: conversationId, content, chapter_id: chapterId, mode }),
     signal: controller.signal,
   })
     .then(async (res) => {
@@ -2533,18 +2550,20 @@ export async function deleteAgentConversation(storyId: number, conversationId: n
   if (!res.ok) throw new Error(await readErrorMessage(res, '删除助手对话失败'));
 }
 
-export async function agentConfirmChanges(storyId: number): Promise<void> {
+export async function agentConfirmChanges(storyId: number, conversationId?: number | null): Promise<void> {
   const res = await fetch(`${BASE}/api/stories/${storyId}/agent/confirm`, {
     method: 'POST',
     headers: apiHeaders(true),
+    body: JSON.stringify(conversationId ? { conversation_id: conversationId } : {}),
   });
   if (!res.ok) throw new Error(await res.text());
 }
 
-export async function agentRollbackChanges(storyId: number): Promise<void> {
+export async function agentRollbackChanges(storyId: number, conversationId?: number | null): Promise<void> {
   const res = await fetch(`${BASE}/api/stories/${storyId}/agent/rollback`, {
     method: 'POST',
     headers: apiHeaders(true),
+    body: JSON.stringify(conversationId ? { conversation_id: conversationId } : {}),
   });
   if (!res.ok) throw new Error(await res.text());
 }

@@ -12,6 +12,12 @@ from sse_starlette.sse import EventSourceResponse
 from database import SessionLocal, get_db
 from models import AgentConversation, AgentConversationMessage, Chapter
 from schemas import AgentConversationCreateIn, AgentConversationOut, AgentConversationSummaryOut
+from services.agent_service import (
+    AgentPendingChangeKey,
+    agent_pending_change_store,
+    agent_service,
+    normalize_agent_mode,
+)
 
 logger = logging.getLogger("agent_router")
 
@@ -54,6 +60,29 @@ def _require_conversation(
     if not conversation or conversation.story_id != story_id or conversation.owner_user_id != user_id:
         raise HTTPException(404, "Conversation not found")
     return conversation
+
+
+def _pending_change_key_from_request(
+    *,
+    request: Request,
+    db: Session,
+    story_id: int,
+    user_id: int,
+    body: dict[str, Any] | None = None,
+) -> AgentPendingChangeKey | None:
+    raw_conversation_id = None
+    if body is not None:
+        raw_conversation_id = body.get("conversation_id")
+    if raw_conversation_id in (None, ""):
+        raw_conversation_id = request.query_params.get("conversation_id")
+    try:
+        conversation_id = int(raw_conversation_id or 0)
+    except (TypeError, ValueError):
+        raise HTTPException(400, "Invalid conversation_id")
+    if not conversation_id:
+        return None
+    _require_conversation(db, conversation_id=conversation_id, story_id=story_id, user_id=user_id)
+    return AgentPendingChangeKey(user_id=user_id, story_id=story_id, conversation_id=conversation_id)
 
 
 def _build_conversation_summary(conversation: AgentConversation) -> AgentConversationSummaryOut:
@@ -160,6 +189,7 @@ async def agent_chat(
 
     conversation_id = int(body.get("conversation_id") or 0)
     content = str(body.get("content") or "").strip()
+    agent_mode = normalize_agent_mode(body.get("mode"))
     if not conversation_id:
         raise HTTPException(400, "conversation_id is required")
     if not content:
@@ -173,6 +203,11 @@ async def agent_chat(
     )
     persisted_conversation_id = conversation.id
     persisted_user_id = user.id
+    pending_change_key = AgentPendingChangeKey(
+        user_id=persisted_user_id,
+        story_id=story_id,
+        conversation_id=persisted_conversation_id,
+    )
 
     current_chapter = None
     current_chapter_id = body.get("chapter_id")
@@ -214,9 +249,6 @@ async def agent_chat(
     _release_db_transaction(db)
 
     async def event_generator():
-        from services.agent_service import agent_service, tool_registry
-
-        tool_registry.current_story_id = story_id
         collected: list[str] = []
         assistant_saved = False
 
@@ -252,6 +284,8 @@ async def agent_chat(
                 story_context=story_context,
                 api_key=deepseek_api_key,
                 story_id=story_id,
+                mode=agent_mode,
+                pending_change_key=pending_change_key,
             ):
                 event_type = str(event.get("event") or "")
                 if event_type == "token":
@@ -290,41 +324,62 @@ async def agent_chat(
             if not assistant_saved:
                 persist_assistant_message(f"错误: {exc}")
             yield {"event": "error", "data": json.dumps({"error": str(exc)}, ensure_ascii=False)}
-        finally:
-            tool_registry.current_story_id = None
 
     return EventSourceResponse(event_generator())
 
 
 @router.post("/confirm")
-def confirm_changes(
+async def confirm_changes(
     story_id: int,
     request: Request,
     db: Session = Depends(get_db),
 ):
-    from services.agent_service import tool_registry
-
-    _require_user(request, db)
-    if tool_registry.pending_changes:
-        tool_registry.pending_changes.clear()
+    user = _require_user(request, db)
+    _require_story_for_user(story_id, user, db)
+    try:
+        body = await request.json()
+    except Exception:
+        body = None
+    key = _pending_change_key_from_request(
+        request=request,
+        db=db,
+        story_id=story_id,
+        user_id=user.id,
+        body=body if isinstance(body, dict) else None,
+    )
+    if key is not None:
+        agent_pending_change_store.clear(key)
     return {"ok": True, "message": "修改已确认"}
 
 
 @router.post("/rollback")
-def rollback_changes(
+async def rollback_changes(
     story_id: int,
     request: Request,
     db: Session = Depends(get_db),
 ):
-    from services.agent_service import tool_registry
-
     user = _require_user(request, db)
     _require_story_for_user(story_id, user, db)
-
-    if not tool_registry.pending_changes or not tool_registry.pending_changes.has_changes():
+    try:
+        body = await request.json()
+    except Exception:
+        body = None
+    key = _pending_change_key_from_request(
+        request=request,
+        db=db,
+        story_id=story_id,
+        user_id=user.id,
+        body=body if isinstance(body, dict) else None,
+    )
+    if key is None:
         return {"ok": True, "message": "没有待撤回的修改"}
 
-    results = tool_registry.pending_changes.rollback(db)
+    tracker = agent_pending_change_store.get(key)
+    if not tracker or not tracker.has_changes():
+        return {"ok": True, "message": "没有待撤回的修改"}
+
+    results = tracker.rollback(db)
+    agent_pending_change_store.clear(key)
     return {"ok": True, "results": results}
 
 
@@ -334,9 +389,17 @@ def get_pending_changes(
     request: Request,
     db: Session = Depends(get_db),
 ):
-    from services.agent_service import tool_registry
-
-    _require_user(request, db)
-    if not tool_registry.pending_changes:
+    user = _require_user(request, db)
+    _require_story_for_user(story_id, user, db)
+    key = _pending_change_key_from_request(
+        request=request,
+        db=db,
+        story_id=story_id,
+        user_id=user.id,
+    )
+    if key is None:
         return {"changes": []}
-    return {"changes": tool_registry.pending_changes.get_full_data()}
+    tracker = agent_pending_change_store.get(key)
+    if not tracker:
+        return {"changes": []}
+    return {"changes": tracker.get_full_data()}

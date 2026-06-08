@@ -43,16 +43,17 @@ export function chatUrl(storyId: number): string {
 }
 
 /** 确认变更 */
-export function confirmChanges(storyId: number): Promise<{ ok: boolean; message: string }> {
-  return post(`/api/stories/${storyId}/agent/confirm`)
+export function confirmChanges(storyId: number, conversationId?: number): Promise<{ ok: boolean; message: string }> {
+  return post(`/api/stories/${storyId}/agent/confirm`, conversationId ? { conversation_id: conversationId } : {})
 }
 
 /** 回滚变更 */
-export function rollbackChanges(storyId: number): Promise<{ ok: boolean; results: any[] }> {
-  return post(`/api/stories/${storyId}/agent/rollback`)
+export function rollbackChanges(storyId: number, conversationId?: number): Promise<{ ok: boolean; results: any[] }> {
+  return post(`/api/stories/${storyId}/agent/rollback`, conversationId ? { conversation_id: conversationId } : {})
 }
 
 /** 获取待确认变更 */
-export function getPendingChanges(storyId: number): Promise<{ changes: any[] }> {
-  return get(`/api/stories/${storyId}/agent/pending-changes`)
+export function getPendingChanges(storyId: number, conversationId?: number): Promise<{ changes: any[] }> {
+  const query = conversationId ? `?conversation_id=${encodeURIComponent(String(conversationId))}` : ''
+  return get(`/api/stories/${storyId}/agent/pending-changes${query}`)
 }

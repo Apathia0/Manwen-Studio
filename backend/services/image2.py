@@ -1,9 +1,11 @@
 import asyncio
 import base64
+import contextvars
 import io
 import json
 import logging
 import os
+import re
 import time
 import uuid
 from dataclasses import dataclass
@@ -25,11 +27,24 @@ load_dotenv()
 os.environ["NO_PROXY"] = "*"
 os.environ["no_proxy"] = "*"
 
-IMAGE_API_BASE_URL = os.getenv("IMAGE_API_BASE_URL", "https://newapi.aifusion6.cn/v1").rstrip("/")
+DEFAULT_IMAGE_API_BASE_URL = os.getenv("IMAGE_API_BASE_URL", "https://newapi.aifusion6.cn/v1").rstrip("/")
+DEFAULT_IMAGE_MODEL = "gpt-image-2"
+DEFAULT_IMAGE_SIZE = "1024x1024"
+
+IMAGE_API_BASE_URL = DEFAULT_IMAGE_API_BASE_URL
 IMAGE_API_KEY = os.getenv("IMAGE_API_KEY", "")
-IMAGE_MODEL = "gpt-image-2"
-IMAGE_SIZE = "1024x1024"
+IMAGE_MODEL = DEFAULT_IMAGE_MODEL
+IMAGE_SIZE = DEFAULT_IMAGE_SIZE
+IMAGE_QUALITY = ""
+IMAGE_BACKGROUND = ""
+IMAGE_MODERATION = ""
+IMAGE_OUTPUT_FORMAT = ""
+IMAGE_OUTPUT_COMPRESSION: int | None = None
+IMAGE_INPUT_FIDELITY = ""
 OUTPUT_DIR = Path(__file__).resolve().parent.parent / "manga_outputs"
+
+OFFICIAL_IMAGE_SIZES = {"1024x1024", "1536x1024", "1024x1536", "auto"}
+IMAGE2_SIZE_PATTERN = re.compile(r"^\d{1,5}x\d{1,5}$")
 
 MAX_RETRIES = 3
 RETRY_DELAY = 5
@@ -76,6 +91,166 @@ class ImageGenerationResult:
     image_path: str
     final_prompt: str
     prompt_sanitized: bool = False
+
+
+@dataclass(frozen=True)
+class ImageRuntimeSettings:
+    base_url: str
+    model: str
+    size: str
+    quality: str = ""
+    background: str = ""
+    moderation: str = ""
+    output_format: str = ""
+    output_compression: int | None = None
+    input_fidelity: str = ""
+
+
+_IMAGE_RUNTIME: contextvars.ContextVar[ImageRuntimeSettings | None] = contextvars.ContextVar(
+    "image2_runtime",
+    default=None,
+)
+
+
+def configure_runtime(
+    *,
+    base_url: str | None = None,
+    model: str | None = None,
+    size: str | None = None,
+    quality: str | None = None,
+    background: str | None = None,
+    moderation: str | None = None,
+    output_format: str | None = None,
+    output_compression: int | str | None = None,
+    input_fidelity: str | None = None,
+) -> None:
+    global IMAGE_API_BASE_URL, IMAGE_MODEL, IMAGE_SIZE, IMAGE_QUALITY, IMAGE_BACKGROUND, IMAGE_MODERATION
+    global IMAGE_OUTPUT_FORMAT, IMAGE_OUTPUT_COMPRESSION, IMAGE_INPUT_FIDELITY
+
+    if isinstance(base_url, str) and base_url.strip():
+        IMAGE_API_BASE_URL = base_url.strip().rstrip("/")
+    if isinstance(model, str) and model.strip():
+        IMAGE_MODEL = model.strip()
+    if size is not None:
+        IMAGE_SIZE = _clean_optional_param(size) or DEFAULT_IMAGE_SIZE
+    IMAGE_QUALITY = _clean_optional_param(quality)
+    IMAGE_BACKGROUND = _clean_optional_param(background)
+    IMAGE_MODERATION = _clean_optional_param(moderation)
+    IMAGE_OUTPUT_FORMAT = _clean_optional_param(output_format)
+    IMAGE_OUTPUT_COMPRESSION = _clean_output_compression(output_compression)
+    IMAGE_INPUT_FIDELITY = _clean_optional_param(input_fidelity)
+    _IMAGE_RUNTIME.set(
+        ImageRuntimeSettings(
+            base_url=IMAGE_API_BASE_URL,
+            model=IMAGE_MODEL,
+            size=IMAGE_SIZE,
+            quality=IMAGE_QUALITY,
+            background=IMAGE_BACKGROUND,
+            moderation=IMAGE_MODERATION,
+            output_format=IMAGE_OUTPUT_FORMAT,
+            output_compression=IMAGE_OUTPUT_COMPRESSION,
+            input_fidelity=IMAGE_INPUT_FIDELITY,
+        )
+    )
+
+
+def _clean_optional_param(value: str | None) -> str:
+    if value is None:
+        return ""
+    cleaned = str(value).strip()
+    return "" if cleaned.lower() in ("", "default", "none", "null") else cleaned
+
+
+def _clean_output_compression(value: int | str | None) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        cleaned = _clean_optional_param(value)
+        if not cleaned:
+            return None
+        try:
+            value = int(cleaned)
+        except ValueError:
+            logger.warning("Ignoring invalid image output_compression value: %s", value)
+            return None
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        logger.warning("Ignoring invalid image output_compression value: %s", value)
+        return None
+    return max(0, min(100, number))
+
+
+def _runtime_settings() -> ImageRuntimeSettings:
+    runtime = _IMAGE_RUNTIME.get()
+    if runtime is not None:
+        return runtime
+    return ImageRuntimeSettings(
+        base_url=IMAGE_API_BASE_URL,
+        model=IMAGE_MODEL,
+        size=IMAGE_SIZE,
+        quality=IMAGE_QUALITY,
+        background=IMAGE_BACKGROUND,
+        moderation=IMAGE_MODERATION,
+        output_format=IMAGE_OUTPUT_FORMAT,
+        output_compression=IMAGE_OUTPUT_COMPRESSION,
+        input_fidelity=IMAGE_INPUT_FIDELITY,
+    )
+
+
+def _runtime_base_url() -> str:
+    return _runtime_settings().base_url
+
+
+def _normalize_image_size(size: str | None) -> str:
+    runtime = _runtime_settings()
+    candidate = (size or runtime.size).strip() or DEFAULT_IMAGE_SIZE
+    model = (runtime.model or "").strip().lower()
+    if model == "gpt-image-2" and IMAGE2_SIZE_PATTERN.match(candidate):
+        return candidate
+    if candidate in OFFICIAL_IMAGE_SIZES:
+        return candidate
+    fallback = runtime.size if runtime.size in OFFICIAL_IMAGE_SIZES else DEFAULT_IMAGE_SIZE
+    if IMAGE2_SIZE_PATTERN.match(candidate):
+        logger.warning(
+            "Image size %s is only enabled for gpt-image-2; using %s for model %s",
+            candidate,
+            fallback,
+            runtime.model,
+        )
+    return fallback
+
+
+def _base_image_payload(prompt: str, size: str | None) -> dict[str, str | int]:
+    runtime = _runtime_settings()
+    payload: dict[str, str | int] = {
+        "model": runtime.model,
+        "prompt": prompt,
+        "size": _normalize_image_size(size),
+    }
+    optional: dict[str, str | int | None] = {
+        "quality": runtime.quality,
+        "background": runtime.background,
+        "moderation": runtime.moderation,
+        "output_format": runtime.output_format,
+        "output_compression": runtime.output_compression,
+    }
+    for key, value in optional.items():
+        if value not in ("", None):
+            payload[key] = value
+    return payload
+
+
+def _generation_payload(prompt: str, size: str | None = None) -> dict[str, str | int]:
+    return _base_image_payload(prompt, size)
+
+
+def _edit_payload(prompt: str, size: str | None = None) -> dict[str, str | int]:
+    runtime = _runtime_settings()
+    payload = _base_image_payload(prompt, size)
+    if runtime.input_fidelity:
+        payload["input_fidelity"] = runtime.input_fidelity
+    return payload
 
 
 def _pending_download_path(output_path: Path) -> Path:
@@ -513,8 +688,8 @@ async def generate_reference_image(
             logger.info("[%s] 开始生成角色参考图（尝试 %s/%s）", progress_label, attempt, MAX_RETRIES)
             async with httpx.AsyncClient(timeout=httpx.Timeout(connect=30, read=600, write=120, pool=30)) as client:
                 resp = await client.post(
-                    f"{IMAGE_API_BASE_URL}/images/generations",
-                    json={"model": IMAGE_MODEL, "prompt": current_prompt, "size": size},
+                    f"{_runtime_base_url()}/images/generations",
+                    json=_generation_payload(current_prompt, size),
                     headers=_image_auth_headers(api_key, json_content=True),
                 )
 
@@ -586,8 +761,8 @@ async def generate_cover_image(
             logger.info("[%s] 开始生成小说封面（尝试 %s/%s）", progress_label, attempt, MAX_RETRIES)
             async with httpx.AsyncClient(timeout=httpx.Timeout(connect=30, read=600, write=120, pool=30)) as client:
                 resp = await client.post(
-                    f"{IMAGE_API_BASE_URL}/images/generations",
-                    json={"model": IMAGE_MODEL, "prompt": current_prompt, "size": size},
+                    f"{_runtime_base_url()}/images/generations",
+                    json=_generation_payload(current_prompt, size),
                     headers=_image_auth_headers(api_key, json_content=True),
                 )
 
@@ -689,9 +864,9 @@ async def edit_existing_image(
 
             async with httpx.AsyncClient(timeout=httpx.Timeout(connect=30, read=600, write=120, pool=30)) as client:
                 resp = await client.post(
-                    f"{IMAGE_API_BASE_URL}/images/edits",
+                    f"{_runtime_base_url()}/images/edits",
                     files=files,
-                    data={"model": IMAGE_MODEL, "prompt": current_prompt, "size": size},
+                    data=_edit_payload(current_prompt, size),
                     headers=_image_auth_headers(api_key),
                 )
 
@@ -848,15 +1023,15 @@ async def generate_manga_image(
                                 for name, blob in strategy_blobs
                             ]
                         resp = await client.post(
-                            f"{IMAGE_API_BASE_URL}/images/edits",
+                            f"{_runtime_base_url()}/images/edits",
                             files=files,
-                            data={"model": IMAGE_MODEL, "prompt": full_prompt, "size": IMAGE_SIZE},
+                            data=_edit_payload(full_prompt, IMAGE_SIZE),
                             headers=_image_auth_headers(api_key),
                         )
                     else:
                         resp = await client.post(
-                            f"{IMAGE_API_BASE_URL}/images/generations",
-                            json={"model": IMAGE_MODEL, "prompt": full_prompt, "size": IMAGE_SIZE},
+                            f"{_runtime_base_url()}/images/generations",
+                            json=_generation_payload(full_prompt, IMAGE_SIZE),
                             headers=_image_auth_headers(api_key, json_content=True),
                         )
 

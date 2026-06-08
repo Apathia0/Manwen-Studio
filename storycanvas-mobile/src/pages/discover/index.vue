@@ -118,8 +118,8 @@ async function handleSubscribe(plan: PublicPlan) {
       // #ifndef MP-WEIXIN
       uiStore.info('请在微信中完成支付')
       // #endif
-    } else if (checkout.method === 'alipay_qr' && checkout.qr_code_text) {
-      // 支付宝扫码 — 跳转 checkout 页展示二维码
+    } else if (checkout.qr_code_text) {
+      // 扫码支付 — 跳转 checkout 页展示二维码
       uni.navigateTo({
         url: `/pages/billing/checkout?orderNo=${order.order_no}&method=${checkout.method}&qr=${encodeURIComponent(checkout.qr_code_text)}`
       })

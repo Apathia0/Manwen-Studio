@@ -119,3 +119,42 @@ def test_framework_utils_unchanged():
     assert "existing_framework" in params
     assert "operations" in params
     assert "patches" in params
+
+
+# ─── 11. Agent 运行上下文隔离 ───────────────────────────
+def test_agent_run_context_uses_contextvars():
+    """Agent 运行态应通过 ContextVar 隔离，不挂在全局 tool_registry 上"""
+    code = open("services/agent_service.py", encoding="utf-8").read()
+    assert "contextvars.ContextVar" in code
+    assert "class AgentRunContext" in code
+    assert "class AgentPendingChangeStore" in code
+
+
+def test_tool_registry_has_no_mutable_run_state():
+    """ToolRegistry 只保留工具注册表，不保存 api_key/story_id/pending_changes 运行态"""
+    from services.agent_service import tool_registry
+
+    assert not hasattr(tool_registry, "api_key")
+    assert not hasattr(tool_registry, "current_story_id")
+    assert not hasattr(tool_registry, "pending_changes")
+
+
+def test_read_only_modes_hide_write_tools():
+    """chat/analyze 模式不向模型暴露写入工具"""
+    from services.agent_service import tool_registry
+
+    execute_names = {s["function"]["name"] for s in tool_registry.get_tool_specs(mode="execute")}
+    analyze_names = {s["function"]["name"] for s in tool_registry.get_tool_specs(mode="analyze")}
+
+    assert "update_chapter_content" in execute_names
+    assert "update_chapter_content" not in analyze_names
+    assert "apply_framework_ops" not in analyze_names
+    assert "get_chapter_full" in analyze_names
+
+
+def test_pending_changes_are_scoped_by_conversation():
+    """路由层应按 user/story/conversation 读取待确认变更"""
+    code = open("routers/agent_router.py", encoding="utf-8").read()
+    assert "AgentPendingChangeKey" in code
+    assert "agent_pending_change_store" in code
+    assert "conversation_id" in code

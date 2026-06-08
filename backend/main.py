@@ -591,6 +591,13 @@ def _platform_settings_snapshot(db: Session) -> dict:
             "image_base_url": _get_platform_setting("api.image.base_url", db, "https://newapi.aifusion6.cn/v1"),
             "image_model": _get_platform_setting("api.image.model", db, "default"),
             "image_api_key": _get_platform_setting("api.image.api_key", db, ""),
+            "image_size": _get_platform_setting("api.image.size", db, ""),
+            "image_quality": _get_platform_setting("api.image.quality", db, ""),
+            "image_background": _get_platform_setting("api.image.background", db, ""),
+            "image_moderation": _get_platform_setting("api.image.moderation", db, ""),
+            "image_output_format": _get_platform_setting("api.image.output_format", db, ""),
+            "image_output_compression": _get_platform_setting("api.image.output_compression", db, ""),
+            "image_input_fidelity": _get_platform_setting("api.image.input_fidelity", db, ""),
             "video_base_url": _get_platform_setting("api.video.base_url", db, "https://newapi.aifusion6.cn/v1"),
             "video_model": _get_platform_setting("api.video.model", db, "veo3.1-fast"),
             "video_api_key": _get_platform_setting("api.video.api_key", db, ""),
@@ -645,6 +652,13 @@ def _platform_settings_snapshot(db: Session) -> dict:
             "epay_type": str(_get_platform_setting("payment.epay_type", db, "alipay") or "alipay"),
             "epay_notify_url": str(_get_platform_setting("payment.epay_notify_url", db, "") or ""),
             "epay_return_url": str(_get_platform_setting("payment.epay_return_url", db, "") or ""),
+            "mapay_enabled": bool(_get_platform_setting("payment.mapay_enabled", db, False)),
+            "mapay_gateway": str(_get_platform_setting("payment.mapay_gateway", db, "https://pay.21lili.cn") or ""),
+            "mapay_pid": str(_get_platform_setting("payment.mapay_pid", db, "") or ""),
+            "mapay_key": str(_get_platform_setting("payment.mapay_key", db, "") or ""),
+            "mapay_type": str(_get_platform_setting("payment.mapay_type", db, "alipay") or "alipay"),
+            "mapay_notify_url": str(_get_platform_setting("payment.mapay_notify_url", db, "") or ""),
+            "mapay_return_url": str(_get_platform_setting("payment.mapay_return_url", db, "") or ""),
         },
     }
 
@@ -811,18 +825,45 @@ def _user_image_api_key(request: Request) -> str | None:
         return override
     user = getattr(request.state, "current_user", None)
     capabilities = _user_api_override_capabilities(user, db)
-    admin_base_url = str(_get_platform_setting("api.image.base_url", db, image_service.IMAGE_API_BASE_URL)).strip()
-    admin_model = str(_get_platform_setting("api.image.model", db, image_service.IMAGE_MODEL)).strip()
+    admin_base_url = str(_get_platform_setting("api.image.base_url", db, image_service.DEFAULT_IMAGE_API_BASE_URL)).strip()
+    admin_model = str(_get_platform_setting("api.image.model", db, image_service.DEFAULT_IMAGE_MODEL)).strip()
     resolved_base_url = override_base_url.strip() if capabilities["can_override_api_url"] and override_base_url and override_base_url.strip() else admin_base_url
     resolved_model = override_model.strip() if capabilities["can_override_api_url"] and override_model and override_model.strip() else admin_model
     # 过滤掉数据库中的占位值，确保回退到 image2.py 的硬编码默认值
     if not resolved_model or resolved_model.strip().lower() in ("default", "none", "null"):
         resolved_model = ""
-    image_service.IMAGE_API_BASE_URL = resolved_base_url.rstrip("/") or image_service.IMAGE_API_BASE_URL
-    image_service.IMAGE_MODEL = resolved_model or image_service.IMAGE_MODEL
+    image_service.configure_runtime(
+        base_url=resolved_base_url.rstrip("/") or image_service.DEFAULT_IMAGE_API_BASE_URL,
+        model=resolved_model or image_service.DEFAULT_IMAGE_MODEL,
+        size=str(_get_platform_setting("api.image.size", db, "") or ""),
+        quality=str(_get_platform_setting("api.image.quality", db, "") or ""),
+        background=str(_get_platform_setting("api.image.background", db, "") or ""),
+        moderation=str(_get_platform_setting("api.image.moderation", db, "") or ""),
+        output_format=str(_get_platform_setting("api.image.output_format", db, "") or ""),
+        output_compression=_get_platform_setting("api.image.output_compression", db, ""),
+        input_fidelity=str(_get_platform_setting("api.image.input_fidelity", db, "") or ""),
+    )
     if capabilities["can_override_api_key"] and override:
         return override
     return _get_platform_setting("api.image.api_key", db, "") or None
+
+
+def _image_setting_text(api: dict, key: str) -> str:
+    value = api.get(key, "")
+    if value is None:
+        return ""
+    cleaned = str(value).strip()
+    return "" if cleaned.lower() in ("default", "none", "null") else cleaned
+
+
+def _image_output_compression_setting(api: dict) -> str:
+    value = api.get("image_output_compression", "")
+    if value in (None, ""):
+        return ""
+    try:
+        return str(max(0, min(100, int(value))))
+    except (TypeError, ValueError):
+        return ""
 
 
 def _release_db_transaction(db: Session) -> None:
@@ -1222,6 +1263,13 @@ def _seed_platform_settings(db: Session, *, commit: bool = True) -> None:
         "api.image.base_url": "https://newapi.aifusion6.cn/v1",
         "api.image.model": "",
         "api.image.api_key": "",
+        "api.image.size": "",
+        "api.image.quality": "",
+        "api.image.background": "",
+        "api.image.moderation": "",
+        "api.image.output_format": "",
+        "api.image.output_compression": "",
+        "api.image.input_fidelity": "",
         "api.video.base_url": "https://newapi.aifusion6.cn/v1",
         "api.video.model": "veo3.1-fast",
         "api.video.api_key": "",
@@ -1268,6 +1316,13 @@ def _seed_platform_settings(db: Session, *, commit: bool = True) -> None:
         "payment.epay_type": "alipay",
         "payment.epay_notify_url": "",
         "payment.epay_return_url": "",
+        "payment.mapay_enabled": False,
+        "payment.mapay_gateway": "https://pay.21lili.cn",
+        "payment.mapay_pid": "",
+        "payment.mapay_key": "",
+        "payment.mapay_type": "alipay",
+        "payment.mapay_notify_url": "",
+        "payment.mapay_return_url": "",
     }
     for key, value in defaults.items():
         if db.query(PlatformSetting).filter(PlatformSetting.setting_key == key).first():
@@ -2361,6 +2416,37 @@ def _order_checkout_payload(order: BillingOrder, plan: Plan, db: Session, paymen
     payment = payment_override if payment_override is not None else _payment_settings_snapshot(db)
     method = order.payment_method or str(payment.get("default_method") or "mock_qr")
     provider = order.payment_provider or "mock"
+    extra = dict(order.extra_json or {})
+
+    if provider in {"alipay", "epay", "mapay"}:
+        qr_code_text = str(
+            extra.get(f"{provider}_qr_code")
+            or extra.get("alipay_qr_code")
+            or ""
+        )
+        payment_url = str(
+            extra.get(f"{provider}_payment_url")
+            or extra.get("alipay_payment_url")
+            or qr_code_text
+            or ""
+        )
+        if qr_code_text or payment_url:
+            expire_minutes = int(payment.get("order_expire_minutes") or 30)
+            expires_at = order.expired_at or (_utcnow() + datetime.timedelta(minutes=expire_minutes))
+            return {
+                "mode": "qrcode" if qr_code_text else "redirect",
+                "method": method,
+                "provider": provider,
+                "instructions": str(payment.get("instructions") or ""),
+                "amount": _money_to_number(order.amount),
+                "currency": order.currency,
+                "plan_name": plan.name,
+                "billing_cycle": order.billing_cycle or "monthly",
+                "expires_at": expires_at,
+                "qr_code_text": qr_code_text,
+                "payment_url": payment_url,
+                "can_mock_confirm": False,
+            }
 
     gateway = get_gateway(method)
     if gateway is not None:
@@ -4006,10 +4092,10 @@ def my_order_sync(order_no: str, request: Request, db: Session = Depends(get_db)
     _ensure_platform_seed(db)
     user = _require_user(request, db)
     order = _order_for_user(order_no, user.id, db)
+    payment = _payment_settings_snapshot(db)
     if order.status == "pending":
         gateway = get_gateway(order.payment_method or "")
         if gateway is not None:
-            payment = _payment_settings_snapshot(db)
             sync_result = gateway.sync_status(order, payment)
             if sync_result and sync_result.status_changed:
                 if sync_result.new_status == "paid":
@@ -4023,7 +4109,7 @@ def my_order_sync(order_no: str, request: Request, db: Session = Depends(get_db)
     sub = _subscription_for_user(user.id, db)
 
     checkout_payload = None
-    if plan:
+    if plan and order.status == "pending":
         payment_with_ip = dict(payment)
         payment_with_ip["client_ip"] = request.client.host if request.client else ""
         checkout_payload = _order_checkout_payload(order, plan, db, payment_override=payment_with_ip)
@@ -4064,8 +4150,11 @@ def subscribe_plan(body: dict, request: Request, db: Session = Depends(get_db)):
     if not selected_method:
         if payment_method == "epay_qr":
             selected_method = next((item for item in method_options if item["key"].startswith("epay_")), None)
+        elif payment_method == "mapay_qr":
+            selected_method = next((item for item in method_options if item["key"].startswith("mapay_")), None)
     if not selected_method:
         raise HTTPException(400, "Payment method unavailable")
+    selected_method_key = str(selected_method["key"])
 
     amount = plan.yearly_price if billing_cycle == "yearly" and plan.yearly_price is not None else plan.monthly_price
     expire_minutes = int(payment.get("order_expire_minutes") or 30)
@@ -4087,10 +4176,10 @@ def subscribe_plan(body: dict, request: Request, db: Session = Depends(get_db)):
         source="user_purchase",
         billing_cycle=billing_cycle,
         payment_provider=str(selected_method["provider"]),
-        payment_method=str(selected_method["key"]),
+        payment_method=selected_method_key,
         operator_user_id=user.id,
         note=f"Checkout created for {plan.name}",
-        extra_json={"billing_cycle": billing_cycle, "payment_method": payment_method},
+        extra_json={"billing_cycle": billing_cycle, "payment_method": selected_method_key},
         expired_at=expires_at,
     )
     db.add(order)
@@ -4098,7 +4187,7 @@ def subscribe_plan(body: dict, request: Request, db: Session = Depends(get_db)):
     if _coerce_money(amount) <= Decimal("0.00") and bool(payment.get("auto_activate_free_plan", True)):
         _mark_order_paid(order, db, operator_user_id=user.id, note=f"Auto-activated free plan {plan.name}")
     else:
-        gateway = get_gateway(payment_method)
+        gateway = get_gateway(selected_method_key)
         if gateway is not None:
             try:
                 payment_with_ip = dict(payment)
@@ -4116,7 +4205,7 @@ def subscribe_plan(body: dict, request: Request, db: Session = Depends(get_db)):
         "plan_name": plan.name,
         "billing_cycle": billing_cycle,
         "amount": _money_to_number(amount),
-        "payment_method": payment_method,
+        "payment_method": selected_method_key,
     })
     db.commit()
     db.refresh(order)
@@ -4222,6 +4311,54 @@ async def alipay_notify(request: Request, db: Session = Depends(get_db)):
         })
     elif trade_status in {"TRADE_CLOSED"}:
         _mark_order_cancelled(order, db, note=f"Alipay notify closed trade {trade_no}")
+    db.commit()
+    return Response("success", media_type="text/plain")
+
+
+@app.post("/api/payments/mapay/notify")
+@app.post("/mapay/notify")
+async def mapay_notify(request: Request, db: Session = Depends(get_db)):
+    _ensure_platform_seed(db)
+    raw_body = (await request.body()).decode("utf-8", errors="ignore")
+    payload = {key: value for key, value in parse_qsl(raw_body, keep_blank_values=True)}
+
+    gateway = get_gateway("mapay_qr")
+    if gateway is None:
+        return Response("failure", media_type="text/plain", status_code=500)
+
+    payment = _payment_settings_snapshot(db)
+    result = gateway.verify_notify(payload, payment)
+    if not result.verified:
+        return Response("failure", media_type="text/plain", status_code=400)
+
+    order_no = payload.get("out_trade_no", "").strip()
+    trade_no = payload.get("trade_no", "").strip()
+    notify_amount = payload.get("money", "").strip()
+    order = db.query(BillingOrder).filter(BillingOrder.order_no == order_no).first()
+    if not order:
+        return Response("failure", media_type="text/plain", status_code=404)
+
+    plan = db.get(Plan, order.plan_id)
+    extra = dict(order.extra_json or {})
+    extra.update({
+        "mapay_trade_no": trade_no,
+        "mapay_notify_payload": payload,
+    })
+    order.extra_json = extra
+
+    if result.trade_status == "paid":
+        expected_amount = f"{float(order.amount or 0):.2f}"
+        if notify_amount and notify_amount != expected_amount:
+            return Response("failure", media_type="text/plain", status_code=400)
+        _mark_order_paid(order, db, note=f"MaPay notify confirmed trade {trade_no}")
+        _write_audit_log(None, "mapay_notify_paid", "billing_order", order.order_no, "MaPay async notify marked order paid", db, {
+            "order_no": order.order_no,
+            "trade_no": trade_no,
+            "plan_name": plan.name if plan else "",
+        })
+    elif result.trade_status == "failed":
+        _mark_order_cancelled(order, db, note=f"MaPay notify closed trade {trade_no}")
+
     db.commit()
     return Response("success", media_type="text/plain")
 
@@ -4774,6 +4911,13 @@ def admin_save_platform_settings(body: dict, request: Request, db: Session = Dep
         "api.image.base_url": api.get("image_base_url", "https://newapi.aifusion6.cn/v1"),
         "api.image.model": api.get("image_model", ""),
         "api.image.api_key": api.get("image_api_key", ""),
+        "api.image.size": _image_setting_text(api, "image_size"),
+        "api.image.quality": _image_setting_text(api, "image_quality"),
+        "api.image.background": _image_setting_text(api, "image_background"),
+        "api.image.moderation": _image_setting_text(api, "image_moderation"),
+        "api.image.output_format": _image_setting_text(api, "image_output_format"),
+        "api.image.output_compression": _image_output_compression_setting(api),
+        "api.image.input_fidelity": _image_setting_text(api, "image_input_fidelity"),
         "api.video.base_url": api.get("video_base_url", "https://newapi.aifusion6.cn/v1"),
         "api.video.model": api.get("video_model", "veo3.1-fast"),
         "api.video.api_key": api.get("video_api_key", ""),
@@ -4817,6 +4961,13 @@ def admin_save_platform_settings(body: dict, request: Request, db: Session = Dep
         "payment.epay_type": str(payment.get("epay_type", "alipay") or "alipay"),
         "payment.epay_notify_url": str(payment.get("epay_notify_url", "") or ""),
         "payment.epay_return_url": str(payment.get("epay_return_url", "") or ""),
+        "payment.mapay_enabled": bool(payment.get("mapay_enabled", False)),
+        "payment.mapay_gateway": str(payment.get("mapay_gateway", "https://pay.21lili.cn") or "https://pay.21lili.cn"),
+        "payment.mapay_pid": str(payment.get("mapay_pid", "") or ""),
+        "payment.mapay_key": str(payment.get("mapay_key", "") or ""),
+        "payment.mapay_type": str(payment.get("mapay_type", "alipay") or "alipay"),
+        "payment.mapay_notify_url": str(payment.get("mapay_notify_url", "") or ""),
+        "payment.mapay_return_url": str(payment.get("mapay_return_url", "") or ""),
         "platform.announcement.enabled": bool(announcement.get("enabled", False)),
         "platform.announcement.title": announcement.get("title", ""),
         "platform.announcement.content": announcement.get("content", ""),

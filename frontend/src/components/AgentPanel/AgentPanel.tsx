@@ -352,7 +352,7 @@ export default function AgentPanel({
       let accumulated = '';
       const toolCallMap = new Map<string, ToolCallInfo>();
 
-      abortRef.current = agentChatStream(storyId, conversationId, content, chapterId, {
+      abortRef.current = agentChatStream(storyId, conversationId, content, chapterId, 'execute', {
         onToken: (token: string) => {
           accumulated += token;
           setStreamContent(accumulated);
@@ -638,6 +638,7 @@ export default function AgentPanel({
           <ChangesBanner
             changes={pendingChanges}
             storyId={storyId}
+            conversationId={activeConversationId}
             onConfirm={handleConfirmChanges}
             onRollback={handleRollbackChanges}
           />

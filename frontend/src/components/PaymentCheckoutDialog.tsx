@@ -44,7 +44,7 @@ export function PaymentCheckoutDialog({
     };
   }, [checkout]);
 
-  async function confirmAlipayPaid() {
+  async function confirmPaymentPaid() {
     if (!checkout?.orderNo || checkingPayment) return;
     setCheckingPayment(true);
     try {
@@ -58,6 +58,19 @@ export function PaymentCheckoutDialog({
   }
 
   if (!checkout) return null;
+
+  const canCheckManually =
+    checkout.method === 'alipay_qr' ||
+    checkout.method === 'mapay_qr' ||
+    checkout.method.startsWith('epay_') ||
+    checkout.method.startsWith('mapay_');
+  const scanHint = checkout.provider === 'alipay'
+    ? '打开支付宝扫一扫完成付款'
+    : checkout.provider === 'epay'
+      ? `在已打开的页面中完成支付（${paymentMethodLabel(checkout.method)}）`
+      : checkout.provider === 'mapay'
+        ? `使用${paymentMethodLabel(checkout.method)}完成付款`
+        : '请使用对应支付 App 扫码完成付款';
 
   return (
     <div className="fixed inset-0 z-40 flex items-center justify-center bg-[rgba(15,23,42,0.48)] px-4">
@@ -82,6 +95,10 @@ export function PaymentCheckoutDialog({
             <div className="rounded-3xl bg-white p-4 shadow-[0_10px_24px_rgba(59,130,246,0.08)]">
               {qrDataUrl ? (
                 <img src={qrDataUrl} alt="支付二维码" className="mx-auto h-[280px] w-[280px] rounded-2xl" />
+              ) : checkout.payment_url ? (
+                <div className="flex h-[280px] items-center justify-center rounded-2xl bg-[#f8fbff] px-6 text-center text-sm leading-6 text-slate-500">
+                  该通道返回支付链接，请在右侧打开后完成付款。
+                </div>
               ) : (
                 <div className="flex h-[280px] items-center justify-center rounded-2xl bg-[#f8fbff] text-sm text-slate-500">
                   正在生成二维码...
@@ -89,7 +106,7 @@ export function PaymentCheckoutDialog({
               )}
             </div>
             <div className="mt-4 text-center text-sm text-slate-600">
-              {checkout.provider === 'alipay' ? '打开支付宝扫一扫完成付款' : checkout.provider === 'epay' ? `在已打开的页面中完成支付（${paymentMethodLabel(checkout.method)}）` : '请使用对应支付 App 扫码完成付款'}
+              {scanHint}
             </div>
           </div>
 
@@ -131,9 +148,9 @@ export function PaymentCheckoutDialog({
                   在新窗口打开支付链接
                 </a>
               ) : null}
-              {checkout.method === 'alipay_qr' || checkout.method.startsWith('epay_') ? (
+              {canCheckManually ? (
                 <button
-                  onClick={() => void confirmAlipayPaid()}
+                  onClick={() => void confirmPaymentPaid()}
                   disabled={checkingPayment}
                   className="mt-4 ml-3 inline-flex rounded-2xl border border-[#bfdbfe] bg-white px-4 py-2 text-sm font-medium text-[#1d4ed8] transition hover:bg-[#eff6ff] disabled:cursor-not-allowed disabled:opacity-60"
                 >

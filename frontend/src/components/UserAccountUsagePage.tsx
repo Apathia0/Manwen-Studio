@@ -97,7 +97,7 @@ export function UserAccountUsagePage({
                   打开支付宝收银二维码
                 </a>
               ) : null}
-              <div className="mt-1 text-xs text-slate-500">当前先支持模拟支付确认，后续接真实网关时这里可以继续扩展为二维码跳转或回调状态轮询。</div>
+              <div className="mt-1 text-xs text-slate-500">真实支付会通过回调或手动刷新更新订单状态，未完成的订单可在失效前取消。</div>
             </div>
             <div className="flex flex-wrap gap-3">
               {pendingOrder.payment_method === 'mock_qr' ? (

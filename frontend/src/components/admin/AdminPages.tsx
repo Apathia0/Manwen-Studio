@@ -1230,6 +1230,15 @@ export function AdminPlatformSettingsPage({
                 <TextInput value={settings.api.image_base_url} onChange={(e) => setSettings((prev) => prev ? { ...prev, api: { ...prev.api, image_base_url: e.target.value } } : prev)} placeholder="图片服务 Base URL" />
                 <TextInput value={settings.api.image_model} onChange={(e) => setSettings((prev) => prev ? { ...prev, api: { ...prev.api, image_model: e.target.value } } : prev)} placeholder="图片模型名称" />
                 <TextInput type="password" value={settings.api.image_api_key} onChange={(e) => setSettings((prev) => prev ? { ...prev, api: { ...prev.api, image_api_key: e.target.value } } : prev)} placeholder="图片 API Key" />
+                <div className="grid gap-3 md:grid-cols-2">
+                  <TextInput value={settings.api.image_size || ''} onChange={(e) => setSettings((prev) => prev ? { ...prev, api: { ...prev.api, image_size: e.target.value } } : prev)} placeholder="默认尺寸，如 1024x1024；留空不覆盖" />
+                  <TextInput value={settings.api.image_quality || ''} onChange={(e) => setSettings((prev) => prev ? { ...prev, api: { ...prev.api, image_quality: e.target.value } } : prev)} placeholder="quality，如 auto / high / medium / low" />
+                  <TextInput value={settings.api.image_background || ''} onChange={(e) => setSettings((prev) => prev ? { ...prev, api: { ...prev.api, image_background: e.target.value } } : prev)} placeholder="background，如 auto / transparent / opaque" />
+                  <TextInput value={settings.api.image_moderation || ''} onChange={(e) => setSettings((prev) => prev ? { ...prev, api: { ...prev.api, image_moderation: e.target.value } } : prev)} placeholder="moderation，如 auto / low" />
+                  <TextInput value={settings.api.image_output_format || ''} onChange={(e) => setSettings((prev) => prev ? { ...prev, api: { ...prev.api, image_output_format: e.target.value } } : prev)} placeholder="output_format，如 png / jpeg / webp" />
+                  <TextInput value={settings.api.image_output_compression || ''} onChange={(e) => setSettings((prev) => prev ? { ...prev, api: { ...prev.api, image_output_compression: e.target.value } } : prev)} placeholder="output_compression，0-100" />
+                  <TextInput value={settings.api.image_input_fidelity || ''} onChange={(e) => setSettings((prev) => prev ? { ...prev, api: { ...prev.api, image_input_fidelity: e.target.value } } : prev)} placeholder="edits input_fidelity，如 high / low" />
+                </div>
               </div>
             </div>
           </div>
@@ -1350,6 +1359,7 @@ export function AdminPlatformSettingsPage({
                 if (pm.wechat_enabled) cur = 'wechat';
                 else if (pm.alipay_enabled) cur = 'alipay';
                 else if (pm.epay_enabled) cur = 'epay';
+                else if (pm.mapay_enabled) cur = 'mapay';
               }
               return (
                 <Select value={cur} onChange={(e) => {
@@ -1361,9 +1371,11 @@ export function AdminPlatformSettingsPage({
                     base.wechat_enabled = v === 'wechat';
                     base.alipay_enabled = v === 'alipay';
                     base.epay_enabled = v === 'epay';
+                    base.mapay_enabled = v === 'mapay';
                     if (v === 'wechat') base.default_method = 'wechat_qr';
                     else if (v === 'alipay') base.default_method = 'alipay_qr';
                     else if (v === 'epay') base.default_method = 'epay_qr';
+                    else if (v === 'mapay') base.default_method = 'mapay_qr';
                     return { ...prev, payment: base };
                   });
                 }}>
@@ -1371,6 +1383,7 @@ export function AdminPlatformSettingsPage({
                   <option value="wechat">微信支付</option>
                   <option value="alipay">支付宝</option>
                   <option value="epay">易支付</option>
+                  <option value="mapay">码支付</option>
                 </Select>
               );
             })()}
@@ -1405,6 +1418,7 @@ export function AdminPlatformSettingsPage({
               if (pm.wechat_enabled) activeMethod = 'wechat';
               else if (pm.alipay_enabled) activeMethod = 'alipay';
               else if (pm.epay_enabled) activeMethod = 'epay';
+              else if (pm.mapay_enabled) activeMethod = 'mapay';
             }
 
             const wechatSection = (
@@ -1472,9 +1486,49 @@ export function AdminPlatformSettingsPage({
               </div>
             );
 
+            const mapaySection = (
+              <div className="rounded-2xl border border-[#e5edf8] bg-[#f8fbff] p-4">
+                <div className="mb-3 text-sm font-semibold text-slate-900">码支付参数</div>
+                <div className="space-y-3">
+                  <TextInput value={pm.mapay_gateway || ''} onChange={(e) => setSettings((prev) => prev ? { ...prev, payment: { ...prev.payment, mapay_gateway: e.target.value } } : prev)} placeholder="网关地址 https://pay.21lili.cn" />
+                  <TextInput value={pm.mapay_pid || ''} onChange={(e) => setSettings((prev) => prev ? { ...prev, payment: { ...prev.payment, mapay_pid: e.target.value } } : prev)} placeholder="商户ID" />
+                  <TextInput value={pm.mapay_key || ''} onChange={(e) => setSettings((prev) => prev ? { ...prev, payment: { ...prev.payment, mapay_key: e.target.value } } : prev)} placeholder="商户密钥" type="password" />
+                  <div className="text-xs font-medium text-slate-600">开放通道（可多选）</div>
+                  <div className="flex flex-wrap gap-2">
+                    {[
+                      { value: 'alipay', label: '支付宝' },
+                      { value: 'wxpay', label: '微信支付' },
+                      { value: 'qqpay', label: 'QQ钱包' },
+                      { value: 'usdt', label: 'USDT' },
+                    ].map((ch) => {
+                      const active = (pm.mapay_type || 'alipay').split(',').map((s) => s.trim());
+                      const checked = active.includes(ch.value);
+                      return (
+                        <label key={ch.value} className="flex items-center gap-1.5 rounded-xl border border-[#d7e3f4] px-3 py-1.5 text-sm text-slate-700 has-[:checked]:border-[#1d4ed8] has-[:checked]:bg-[#eff6ff] has-[:checked]:text-[#1d4ed8]">
+                          <input
+                            type="checkbox"
+                            className="accent-[#1d4ed8]"
+                            checked={checked}
+                            onChange={() => {
+                              const next = checked ? active.filter((s) => s !== ch.value) : [...active, ch.value];
+                              setSettings((prev) => prev ? { ...prev, payment: { ...prev.payment, mapay_type: next.join(',') || 'alipay' } } : prev);
+                            }}
+                          />
+                          {ch.label}
+                        </label>
+                      );
+                    })}
+                  </div>
+                  <TextInput value={pm.mapay_notify_url || ''} onChange={(e) => setSettings((prev) => prev ? { ...prev, payment: { ...prev.payment, mapay_notify_url: e.target.value } } : prev)} placeholder="异步通知地址，例如 https://域名/api/payments/mapay/notify" />
+                  <TextInput value={pm.mapay_return_url || ''} onChange={(e) => setSettings((prev) => prev ? { ...prev, payment: { ...prev.payment, mapay_return_url: e.target.value } } : prev)} placeholder="同步跳转地址" />
+                </div>
+              </div>
+            );
+
             const section = activeMethod === 'wechat' ? wechatSection
               : activeMethod === 'alipay' ? alipaySection
               : activeMethod === 'epay' ? epaySection
+              : activeMethod === 'mapay' ? mapaySection
               : null;
             return section ? <div className="mt-3">{section}</div> : null;
           })()}
