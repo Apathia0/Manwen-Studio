@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
-import { ChevronLeft, ChevronRight, X, ZoomIn, ZoomOut, RotateCcw, Upload, Trash2, Wand2 } from 'lucide-react';
-import ImageRedrawModal from './shared/ImageRedrawModal';
+import { ChevronLeft, ChevronRight, RotateCcw, Upload, Trash2, Wand2, X } from 'lucide-react';
+import { ImageRedrawModal } from './shared/ImageRedrawModal';
 
 interface VideoCardWorkbenchProps {
   type: 'character' | 'storyboard' | 'video';
@@ -116,8 +116,9 @@ export default function VideoCardWorkbench({ type, shotId, assetId, onClose }: V
           prompt={state.editingPrompt}
           busy={false}
           onClose={() => setState(s => ({ ...s, isRedrawModalOpen: false }))}
-          onSubmit={async () => {
+          onSubmit={async (payload) => {
             setState(s => ({ ...s, isRedrawModalOpen: false }));
+            console.log('重绘提交', payload);
           }}
         />
       )}
