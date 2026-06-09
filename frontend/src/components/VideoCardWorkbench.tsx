@@ -19,7 +19,7 @@ interface WorkbenchState {
 
 export default function VideoCardWorkbench({ type, shotId, assetId, resources, onClose }: VideoCardWorkbenchProps) {
   const [state, setState] = useState<WorkbenchState>({
-    currentIndex: resources.findIndex(r => r.id === assetId),
+    currentIndex: Math.max(0, resources.findIndex(r => r.id === assetId)),
     zoomLevel: 1,
     isRedrawModalOpen: false,
     editingPrompt: '',
