@@ -141,7 +141,7 @@ export default function VideoCardWorkbench({ type, shotId, assetId, resources, o
       {state.isRedrawModalOpen && (
         <ImageRedrawModal
           title="重绘图片"
-          imageSrc=""
+          imageSrc={resources[currentIndex]?.url || ''}
           prompt={state.editingPrompt}
           busy={false}
           onClose={() => setState(s => ({ ...s, isRedrawModalOpen: false }))}
