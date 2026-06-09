@@ -6,6 +6,7 @@ interface VideoCardWorkbenchProps {
   type: 'character' | 'storyboard' | 'video';
   shotId: number;
   assetId?: number;
+  resources: Array<{ id: number; url: string; prompt?: string }>;
   onClose: () => void;
 }
 
@@ -16,13 +17,32 @@ interface WorkbenchState {
   editingPrompt: string;
 }
 
-export default function VideoCardWorkbench({ type, shotId, assetId, onClose }: VideoCardWorkbenchProps) {
+export default function VideoCardWorkbench({ type, shotId, assetId, resources, onClose }: VideoCardWorkbenchProps) {
   const [state, setState] = useState<WorkbenchState>({
-    currentIndex: 0,
+    currentIndex: resources.findIndex(r => r.id === assetId),
     zoomLevel: 1,
     isRedrawModalOpen: false,
     editingPrompt: '',
   });
+
+  const { currentIndex } = state;
+
+  // 导航函数
+  const handlePrev = useCallback(() => {
+    setState(s => ({
+      ...s,
+      currentIndex: s.currentIndex > 0 ? s.currentIndex - 1 : resources.length - 1,
+      editingPrompt: resources[s.currentIndex > 0 ? s.currentIndex - 1 : resources.length - 1]?.prompt || '',
+    }));
+  }, [resources]);
+
+  const handleNext = useCallback(() => {
+    setState(s => ({
+      ...s,
+      currentIndex: s.currentIndex < resources.length - 1 ? s.currentIndex + 1 : 0,
+      editingPrompt: resources[s.currentIndex < resources.length - 1 ? s.currentIndex + 1 : 0]?.prompt || '',
+    }));
+  }, [resources]);
 
   // 键盘快捷键处理
   const handleKeyDown = useCallback((e: KeyboardEvent) => {
@@ -31,24 +51,24 @@ export default function VideoCardWorkbench({ type, shotId, assetId, onClose }: V
         onClose();
         break;
       case 'ArrowLeft':
-        // 上一个资源
+        handlePrev();
         break;
       case 'ArrowRight':
-        // 下一个资源
+        handleNext();
         break;
       case '+':
       case '=':
-        // 放大
+        setState(s => ({ ...s, zoomLevel: s.zoomLevel < 1.7 ? (s.zoomLevel === 1 ? 1.35 : 1.7) : 1 }));
         break;
       case '-':
-        // 缩小
+        setState(s => ({ ...s, zoomLevel: s.zoomLevel > 1 ? (s.zoomLevel === 1.7 ? 1.35 : 1) : 1 }));
         break;
       case 'r':
       case 'R':
-        // 打开重绘
+        setState(s => ({ ...s, isRedrawModalOpen: true }));
         break;
     }
-  }, [onClose]);
+  }, [onClose, handlePrev, handleNext]);
 
   useEffect(() => {
     document.addEventListener('keydown', handleKeyDown);
@@ -77,15 +97,24 @@ export default function VideoCardWorkbench({ type, shotId, assetId, onClose }: V
 
       {/* 预览区域 */}
       <div className="flex flex-1 items-center justify-between gap-3 overflow-hidden px-4 py-4">
-        <button className="rounded-full bg-white/10 p-2 text-white hover:bg-white/20 disabled:opacity-50">
+        <button onClick={handlePrev} disabled={resources.length <= 1} className="rounded-full bg-white/10 p-2 text-white hover:bg-white/20 disabled:opacity-50">
           <ChevronLeft size={20} />
         </button>
         <div className="flex-1 h-full overflow-auto rounded-[24px] bg-black/20 px-4 py-5">
-          <div className="mx-auto h-full flex items-center justify-center text-white/50">
-            预览区域
-          </div>
+          {resources[currentIndex]?.url ? (
+            <img
+              src={resources[currentIndex].url}
+              alt="预览"
+              className="mx-auto h-auto max-h-full object-contain rounded-xl shadow-2xl"
+              style={{ transform: `scale(${state.zoomLevel})` }}
+            />
+          ) : (
+            <div className="mx-auto h-full flex items-center justify-center text-white/50">
+              暂无内容
+            </div>
+          )}
         </div>
-        <button className="rounded-full bg-white/10 p-2 text-white hover:bg-white/20 disabled:opacity-50">
+        <button onClick={handleNext} disabled={resources.length <= 1} className="rounded-full bg-white/10 p-2 text-white hover:bg-white/20 disabled:opacity-50">
           <ChevronRight size={20} />
         </button>
       </div>
