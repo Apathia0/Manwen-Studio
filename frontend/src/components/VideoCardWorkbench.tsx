@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { ChevronLeft, ChevronRight, RotateCcw, Upload, Trash2, Wand2, X } from 'lucide-react';
 import { ImageRedrawModal } from './shared/ImageRedrawModal';
 
@@ -7,6 +7,10 @@ interface VideoCardWorkbenchProps {
   shotId: number;
   assetId?: number;
   resources: Array<{ id: number; url: string; prompt?: string }>;
+  onRegenerate: (resourceId: number) => Promise<void>;
+  onUploadReplace: (resourceId: number, file: File) => Promise<void>;
+  onDelete: (resourceId: number) => Promise<void>;
+  onRedraw: (resourceId: number, prompt: string, mask?: Blob) => Promise<void>;
   onClose: () => void;
 }
 
@@ -17,7 +21,7 @@ interface WorkbenchState {
   editingPrompt: string;
 }
 
-export default function VideoCardWorkbench({ type, shotId, assetId, resources, onClose }: VideoCardWorkbenchProps) {
+export default function VideoCardWorkbench({ type, shotId, assetId, resources, onRegenerate, onUploadReplace, onDelete, onRedraw, onClose }: VideoCardWorkbenchProps) {
   const [state, setState] = useState<WorkbenchState>({
     currentIndex: Math.max(0, resources.findIndex(r => r.id === assetId)),
     zoomLevel: 1,
@@ -26,6 +30,41 @@ export default function VideoCardWorkbench({ type, shotId, assetId, resources, o
   });
 
   const { currentIndex } = state;
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const handleRegenerate = async () => {
+    const resource = resources[currentIndex];
+    if (!resource) return;
+    await onRegenerate(resource.id);
+  };
+
+  const handleUploadClick = () => {
+    fileInputRef.current?.click();
+  };
+
+  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    const resource = resources[currentIndex];
+    if (!file || !resource) return;
+    await onUploadReplace(resource.id, file);
+    e.target.value = '';
+  };
+
+  const handleDelete = async () => {
+    const resource = resources[currentIndex];
+    if (!resource) return;
+    if (!confirm('确定要删除这个资源吗？')) return;
+    await onDelete(resource.id);
+    if (resources.length === 1) {
+      onClose();
+    } else {
+      handleNext();
+    }
+  };
+
+  const handleRedrawClick = () => {
+    setState(s => ({ ...s, isRedrawModalOpen: true }));
+  };
 
   // 导航函数
   const handlePrev = useCallback(() => {
@@ -122,19 +161,20 @@ export default function VideoCardWorkbench({ type, shotId, assetId, resources, o
       {/* 底部操作栏 */}
       <div className="border-t border-white/10 px-5 py-4">
         <div className="flex flex-wrap gap-2">
-          <button className="flex items-center gap-2 rounded-lg bg-blue-600 px-3 py-1.5 text-xs text-white hover:bg-blue-700">
+          <button onClick={handleRegenerate} className="flex items-center gap-2 rounded-lg bg-blue-600 px-3 py-1.5 text-xs text-white hover:bg-blue-700">
             <RotateCcw size={12} /> 重新生成
           </button>
-          <button className="flex items-center gap-2 rounded-lg border border-white/20 px-3 py-1.5 text-xs text-white hover:bg-white/10">
+          <button onClick={handleUploadClick} className="flex items-center gap-2 rounded-lg border border-white/20 px-3 py-1.5 text-xs text-white hover:bg-white/10">
             <Upload size={12} /> 上传替换
           </button>
-          <button className="flex items-center gap-2 rounded-lg border border-white/20 px-3 py-1.5 text-xs text-white hover:bg-white/10">
+          <button onClick={handleDelete} className="flex items-center gap-2 rounded-lg border border-white/20 px-3 py-1.5 text-xs text-white hover:bg-white/10">
             <Trash2 size={12} /> 删除
           </button>
-          <button className="flex items-center gap-2 rounded-lg border border-white/20 px-3 py-1.5 text-xs text-white hover:bg-white/10">
+          <button onClick={handleRedrawClick} className="flex items-center gap-2 rounded-lg border border-white/20 px-3 py-1.5 text-xs text-white hover:bg-white/10">
             <Wand2 size={12} /> 重绘
           </button>
         </div>
+        <input ref={fileInputRef} type="file" accept="image/*" onChange={handleFileChange} className="hidden" />
       </div>
 
       {/* 重绘弹窗 */}
