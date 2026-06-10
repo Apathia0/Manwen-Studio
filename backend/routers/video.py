@@ -1,4 +1,4 @@
-"""Video production workflow router.
+﻿"""Video production workflow router.
 
 Handles screenplay, shot breakdown, storyboard, video generation,
 asset management, and video project compilation endpoints.
@@ -5135,6 +5135,175 @@ async def generate_shot_character_asset(
             "prompt": asset.prompt or "",
             "style_preset": asset.style_preset,
             "status": asset.status,
+            "created_at": _serialize_datetime(asset.created_at),
+        },
+    }
+
+@router.post("/api/shots/{shot_id}/prop-assets/generate")
+async def generate_shot_prop_asset(
+    shot_id: int,
+    body: dict,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """为镜头生成道具参考图。"""
+    user = _require_user(request, db)
+    shot = db.get(VideoShot, shot_id)
+    if not shot:
+        raise HTTPException(404, "Shot not found")
+    if not shot.scene:
+        raise HTTPException(404, "Scene not found")
+    _require_chapter_for_user(shot.scene.chapter_id, user, db)
+
+    prop_name = str(body.get("prop_name") or "Prop").strip() or "Prop"
+    prompt = str(body.get("prompt") or "").strip()
+    if not prompt:
+        raise HTTPException(400, "Prop prompt is required")
+
+    style_ctx = _resolve_effective_style_for_shot(shot, db, body.get("style_preset"))
+    style_name = style_ctx.get("name") or ""
+    image_style_params = style_ctx.get("image_style_params") or {}
+
+    chapter_id = shot.scene.chapter_id
+    prop_dir = _VIDEO_OUTPUTS_DIR / "prop_refs" / f"chapter_{chapter_id}" / f"shot_{shot_id}"
+    prop_dir.mkdir(parents=True, exist_ok=True)
+    safe_name = re.sub(r"[^\w\u4e00-\u9fff-]+", "_", prop_name)
+    file_name = f"{safe_name}_{uuid.uuid4().hex[:8]}.png"
+    full_path = prop_dir / file_name
+
+    final_prompt = _merge_style_prompt(prompt, style_ctx.get("prompt_template"), style_name)
+    api_key = _user_image_api_key(request)
+    _configure_image_service(request, db)
+
+    _check_and_consume_quota_wrapper(user.id, "manga.image.monthly_limit", 1, db, deduct=False)
+
+    try:
+        await image2_service.generate_reference_image(
+            prompt=final_prompt,
+            output_path=full_path,
+            api_key=api_key or None,
+            size=image_style_params.get("size", "1792x1024"),
+        )
+    except Exception as e:
+        logger.warning("Prop reference generation failed (shot=%s, name=%s): %s", shot_id, prop_name, e)
+        raise HTTPException(502, f"道具参考图生成失败: {e}")
+
+    relative_path = f"prop_refs/chapter_{chapter_id}/shot_{shot_id}/{file_name}"
+    source_asset_ids = body.get("source_asset_ids")
+    if not isinstance(source_asset_ids, list):
+        source_asset_ids = None
+
+    asset = VideoAsset(
+        story_id=shot.scene.chapter.story_id if shot.scene.chapter else None,
+        chapter_id=shot.scene.chapter_id,
+        scene_id=shot.scene_id,
+        shot_id=shot_id,
+        asset_type="prop_reference",
+        name=f"Prop - {prop_name}",
+        file_path=relative_path,
+        provider="image2",
+        prompt=final_prompt,
+        source_asset_ids_json=source_asset_ids,
+        style_preset=style_name or None,
+    )
+    db.add(asset)
+    db.commit()
+    _check_and_consume_quota_wrapper(user.id, "manga.image.monthly_limit", 1, db, deduct=True)
+    db.refresh(asset)
+
+    return {
+        "shot_id": shot_id,
+        "asset": {
+            "id": asset.id,
+            "name": asset.name,
+            "file_path": _to_video_url(asset.file_path),
+            "asset_type": asset.asset_type,
+            "prompt": asset.prompt,
+            "style_preset": asset.style_preset,
+            "created_at": _serialize_datetime(asset.created_at),
+        },
+    }
+
+
+@router.post("/api/shots/{shot_id}/scene-assets/generate")
+async def generate_shot_scene_asset(
+    shot_id: int,
+    body: dict,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """为镜头生成场景参考图（shot 级别场景，非场景级概念图）。"""
+    user = _require_user(request, db)
+    shot = db.get(VideoShot, shot_id)
+    if not shot:
+        raise HTTPException(404, "Shot not found")
+    if not shot.scene:
+        raise HTTPException(404, "Scene not found")
+    _require_chapter_for_user(shot.scene.chapter_id, user, db)
+
+    prompt = str(body.get("prompt") or "").strip()
+    if not prompt:
+        prompt = shot.scene_prompt or f"Scene at {shot.scene.location or 'unknown'}. Mood: {shot.scene.mood or 'neutral'}."
+
+    style_ctx = _resolve_effective_style_for_shot(shot, db, body.get("style_preset"))
+    style_name = style_ctx.get("name") or ""
+    image_style_params = style_ctx.get("image_style_params") or {}
+
+    chapter_id = shot.scene.chapter_id
+    scene_dir = _VIDEO_OUTPUTS_DIR / "scene_refs" / f"chapter_{chapter_id}" / f"shot_{shot_id}"
+    scene_dir.mkdir(parents=True, exist_ok=True)
+    file_name = f"scene_{uuid.uuid4().hex[:8]}.png"
+    full_path = scene_dir / file_name
+
+    final_prompt = _merge_style_prompt(prompt, style_ctx.get("prompt_template"), style_name)
+    api_key = _user_image_api_key(request)
+    _configure_image_service(request, db)
+
+    _check_and_consume_quota_wrapper(user.id, "manga.image.monthly_limit", 1, db, deduct=False)
+
+    try:
+        await image2_service.generate_reference_image(
+            prompt=final_prompt,
+            output_path=full_path,
+            api_key=api_key or None,
+            size=image_style_params.get("size", "1792x1024"),
+        )
+    except Exception as e:
+        logger.warning("Scene reference generation failed (shot=%s): %s", shot_id, e)
+        raise HTTPException(502, f"场景参考图生成失败: {e}")
+
+    relative_path = f"scene_refs/chapter_{chapter_id}/shot_{shot_id}/{file_name}"
+    source_asset_ids = body.get("source_asset_ids")
+    if not isinstance(source_asset_ids, list):
+        source_asset_ids = None
+
+    asset = VideoAsset(
+        story_id=shot.scene.chapter.story_id if shot.scene.chapter else None,
+        chapter_id=shot.scene.chapter_id,
+        scene_id=shot.scene_id,
+        shot_id=shot_id,
+        asset_type="scene_reference",
+        name=f"Scene - {shot.scene.title or f'Scene {shot.scene.scene_number}'}",
+        file_path=relative_path,
+        provider="image2",
+        prompt=final_prompt,
+        source_asset_ids_json=source_asset_ids,
+        style_preset=style_name or None,
+    )
+    db.add(asset)
+    db.commit()
+    _check_and_consume_quota_wrapper(user.id, "manga.image.monthly_limit", 1, db, deduct=True)
+    db.refresh(asset)
+
+    return {
+        "shot_id": shot_id,
+        "asset": {
+            "id": asset.id,
+            "name": asset.name,
+            "file_path": _to_video_url(asset.file_path),
+            "asset_type": asset.asset_type,
+            "prompt": asset.prompt,
+            "style_preset": asset.style_preset,
             "created_at": _serialize_datetime(asset.created_at),
         },
     }
