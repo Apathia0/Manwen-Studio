@@ -553,7 +553,7 @@ async def bind_request_db(request: Request, call_next):
 def _require_chapter(chapter_id: int, db: Session) -> Chapter:
     chapter = db.get(Chapter, chapter_id)
     if not chapter:
-        raise HTTPException(404, "Chapter not found")
+        raise HTTPException(404, "章节未找到")
     return chapter
 
 
@@ -1672,13 +1672,13 @@ def _seed_system_prompts(db: Session, *, commit: bool = True) -> None:
 def _require_user(request: Request, db: Session) -> User:
     token = _parse_auth_token(request)
     if not token:
-        raise HTTPException(401, "Unauthorized")
+        raise HTTPException(401, "未授权")
     session = db.query(UserSession).filter(UserSession.token == token, UserSession.revoked_at.is_(None)).first()
     if not session:
-        raise HTTPException(401, "Session expired or invalid token")
+        raise HTTPException(401, "会话已过期或令牌无效")
     user = db.get(User, session.user_id)
     if not user or user.status != "active":
-        raise HTTPException(403, "User unavailable")
+        raise HTTPException(403, "用户不可用")
     request.state.current_user = user
     return user
 
@@ -1701,7 +1701,7 @@ def _get_current_user(request: Request, db: Session) -> User | None:
 def _require_admin(request: Request, db: Session) -> User:
     user = _require_user(request, db)
     if user.role != "admin":
-        raise HTTPException(403, "Admin permission required")
+        raise HTTPException(403, "需要管理员权限")
     return user
 
 
@@ -1780,16 +1780,16 @@ def _active_plan_for_user(user_id: int, db: Session) -> Plan:
             return plan
     free = db.query(Plan).filter(Plan.code == "free").first()
     if not free:
-        raise HTTPException(500, "Seed plan missing")
+        raise HTTPException(500, "种子套餐缺失")
     return free
 
 
 def _require_story_for_user(story_id: int, user: User, db: Session) -> Story:
     story = db.get(Story, story_id)
     if not story:
-        raise HTTPException(404, "Story not found")
+        raise HTTPException(404, "作品未找到")
     if story.owner_user_id != user.id:
-        raise HTTPException(403, "Story access denied")
+        raise HTTPException(403, "作品访问被拒绝")
     return story
 
 
@@ -1984,9 +1984,9 @@ def _require_chapter_for_user(chapter_id: int, user: User, db: Session) -> Chapt
     chapter = _require_chapter(chapter_id, db)
     story = chapter.story
     if not story:
-        raise HTTPException(404, "Story not found")
+        raise HTTPException(404, "作品未找到")
     if story.owner_user_id != user.id:
-        raise HTTPException(403, "Chapter access denied")
+        raise HTTPException(403, "章节访问被拒绝")
     return chapter
 
 
@@ -2037,9 +2037,9 @@ def _parse_money_input(value: object, field_name: str) -> Decimal:
     try:
         amount = Decimal(str(value if value is not None else "0")).quantize(MONEY_QUANT, rounding=ROUND_HALF_UP)
     except (InvalidOperation, TypeError, ValueError) as exc:
-        raise HTTPException(400, f"{field_name} must be a valid number") from exc
+        raise HTTPException(400, f"{field_name} 必须是有效数字") from exc
     if amount < 0:
-        raise HTTPException(400, f"{field_name} must be greater than or equal to 0")
+        raise HTTPException(400, f"{field_name} 必须大于等于 0")
     return amount
 
 
@@ -2083,9 +2083,9 @@ def _check_and_consume_quota(
     ).first()
     used = _coerce_int(usage.used_amount if usage else 0, default=0)
     if limit <= 0:
-        raise HTTPException(403, f"Feature not available in your current plan: {feature_key}")
+        raise HTTPException(403, f"当前套餐不可用此功能: {feature_key}")
     if used + amount > limit:
-        raise HTTPException(429, f"Quota exceeded for {feature_key} ({used}/{limit})")
+        raise HTTPException(429, f"{feature_key} 配额已超限 ({used}/{limit})")
     if deduct:
         if usage:
             usage.used_amount = used + amount
@@ -2228,29 +2228,29 @@ def _sanitize_update_check(payload: dict[str, Any] | None) -> dict[str, Any]:
 
 async def _call_updater(method: str, path: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
     if not UPDATER_URL:
-        raise HTTPException(503, "Updater service is not configured")
+        raise HTTPException(503, "更新服务未配置")
     headers = {"X-Updater-Token": UPDATER_TOKEN} if UPDATER_TOKEN else {}
     url = f"{UPDATER_URL}{path}"
     try:
         async with httpx.AsyncClient(timeout=UPDATER_TIMEOUT_SECONDS) as client:
             response = await client.request(method, url, headers=headers, json=payload)
     except httpx.TimeoutException:
-        raise HTTPException(503, "Updater service timed out")
+        raise HTTPException(503, "更新服务超时")
     except httpx.RequestError as exc:
-        raise HTTPException(503, f"Updater service is unavailable: {exc}")
+        raise HTTPException(503, f"更新服务不可用: {exc}")
     if response.status_code >= 400:
         detail = response.text
         with contextlib.suppress(Exception):
             data = response.json()
             detail = data.get("detail") or data.get("message") or detail
         status_code = 503 if response.status_code == 401 else response.status_code
-        raise HTTPException(status_code, f"Updater rejected request: {detail}")
+        raise HTTPException(status_code, f"更新服务拒绝请求: {detail}")
     try:
         data = response.json()
     except ValueError:
-        raise HTTPException(503, "Updater service returned invalid JSON")
+        raise HTTPException(503, "更新服务返回无效 JSON")
     if not isinstance(data, dict):
-        raise HTTPException(503, "Updater service returned an invalid payload")
+        raise HTTPException(503, "更新服务返回无效负载")
     return data
 
 
@@ -2330,7 +2330,7 @@ def _upsert_user_subscription(
     cycle = (billing_cycle or "monthly").strip().lower() or "monthly"
     plan = db.get(Plan, plan_id)
     if not plan:
-        raise HTTPException(404, "Plan not found")
+        raise HTTPException(404, "套餐未找到")
     sub = db.query(UserSubscription).filter(UserSubscription.user_id == user_id).first()
     if sub:
         sub = _hydrate_subscription_period(sub, db, now=effective_at)
@@ -2481,17 +2481,17 @@ def _order_checkout_payload(order: BillingOrder, plan: Plan, db: Session, paymen
 def _order_for_user(order_no: str, user_id: int, db: Session) -> BillingOrder:
     order = db.query(BillingOrder).filter(BillingOrder.order_no == order_no, BillingOrder.user_id == user_id).first()
     if not order:
-        raise HTTPException(404, "Order not found")
+        raise HTTPException(404, "订单未找到")
     return _sync_order_status(order, db)
 
 
 def _character_profile_text(body: dict) -> str:
     raw = body.get("characters", "")
     if not isinstance(raw, str):
-        raise HTTPException(400, "characters must be a string")
+        raise HTTPException(400, "角色必须是字符串")
     text = raw.strip()
     if len(text) > MAX_CHARACTER_PROFILE_CHARS:
-        raise HTTPException(413, f"Character profile is too long. Max length is {MAX_CHARACTER_PROFILE_CHARS} characters")
+        raise HTTPException(413, f"角色简介过长，最大长度为 {MAX_CHARACTER_PROFILE_CHARS} 个字符")
     return text
 
 
@@ -3585,7 +3585,7 @@ def _unlink_file(path: Path, label: str) -> None:
         path.unlink()
     except OSError as exc:
         logger.warning("Failed to delete %s %s: %s", label, path, exc)
-        raise HTTPException(409, f"{label} file is currently in use. Try again later")
+        raise HTTPException(409, f"{label} 文件正在使用中，请稍后再试")
 
 
 def _rmtree_best_effort(path: Path, label: str) -> None:
@@ -3602,7 +3602,7 @@ def _write_bytes_or_conflict(path: Path, data: bytes, label: str) -> None:
         path.write_bytes(data)
     except OSError as exc:
         logger.warning("Failed to write %s %s: %s", label, path, exc)
-        raise HTTPException(409, f"{label} file is currently in use. Try again later")
+        raise HTTPException(409, f"{label} 文件正在使用中，请稍后再试")
 
 
 def _chapter_dir(chapter_id: int) -> Path:
@@ -3671,7 +3671,7 @@ def _clear_chapter_images_only(chapter: Chapter, db: Session) -> None:
 
 def _decode_png_upload(b64: str) -> bytes:
     if not b64:
-        raise HTTPException(400, "No image provided")
+        raise HTTPException(400, "未提供图片")
     if "," in b64 and b64.lstrip().startswith("data:"):
         b64 = b64.split(",", 1)[1]
     try:
@@ -3683,7 +3683,7 @@ def _decode_png_upload(b64: str) -> bytes:
 
         img_bytes = base64.b64decode(b64, validate=True)
         if len(img_bytes) > MAX_UPLOAD_BYTES:
-            raise HTTPException(413, f"Image is too large. Max size is {MAX_UPLOAD_BYTES // (1024 * 1024)}MB")
+            raise HTTPException(413, f"图片太大，最大尺寸为 {MAX_UPLOAD_BYTES // (1024 * 1024)}MB")
         with Image.open(io.BytesIO(img_bytes)) as img:
             img.verify()
         with Image.open(io.BytesIO(img_bytes)) as img:
@@ -3691,19 +3691,19 @@ def _decode_png_upload(b64: str) -> bytes:
             img.convert("RGBA").save(output, format="PNG", optimize=True)
             png_bytes = output.getvalue()
         if len(png_bytes) > MAX_UPLOAD_BYTES:
-            raise HTTPException(413, f"Image is too large after processing. Max size is {MAX_UPLOAD_BYTES // (1024 * 1024)}MB")
+            raise HTTPException(413, f"图片处理后太大，最大尺寸为 {MAX_UPLOAD_BYTES // (1024 * 1024)}MB")
         return png_bytes
     except HTTPException:
         raise
     except (binascii.Error, ValueError):
-        raise HTTPException(400, "Invalid base64 image data")
+        raise HTTPException(400, "无效的 base64 图片数据")
     except UnidentifiedImageError:
-        raise HTTPException(400, "Uploaded file is not a valid image")
+        raise HTTPException(400, "上传的文件不是有效图片")
 
 
 def _decode_edit_mask_upload(b64: str, target_size: tuple[int, int]) -> bytes:
     if not b64:
-        raise HTTPException(400, "No mask provided")
+        raise HTTPException(400, "未提供遮罩")
     if "," in b64 and b64.lstrip().startswith("data:"):
         b64 = b64.split(",", 1)[1]
     try:
@@ -3730,14 +3730,14 @@ def _decode_edit_mask_upload(b64: str, target_size: tuple[int, int]) -> bytes:
             opaque_bg.save(output, format="PNG", optimize=True)
             normalized = output.getvalue()
         if len(normalized) > MAX_UPLOAD_BYTES:
-            raise HTTPException(413, f"Mask is too large after processing. Max size is {MAX_UPLOAD_BYTES // (1024 * 1024)}MB")
+            raise HTTPException(413, f"遮罩处理后太大，最大尺寸为 {MAX_UPLOAD_BYTES // (1024 * 1024)}MB")
         return normalized
     except HTTPException:
         raise
     except (binascii.Error, ValueError):
-        raise HTTPException(400, "Invalid base64 mask data")
+        raise HTTPException(400, "无效的 base64 遮罩数据")
     except UnidentifiedImageError:
-        raise HTTPException(400, "Uploaded mask is not a valid image")
+        raise HTTPException(400, "上传的遮罩不是有效图片")
 
 
 # ── 启动事件已迁移到 lifespan 函数（见文件顶部 app=FastAPI(...) 附近） ──
@@ -4136,15 +4136,15 @@ def subscribe_plan(body: dict, request: Request, db: Session = Depends(get_db)):
     user = _require_user(request, db)
     payment = _payment_settings_snapshot(db)
     if not bool(payment.get("enabled")):
-        raise HTTPException(400, "Payment is currently disabled")
+        raise HTTPException(400, "支付当前已禁用")
     plan_id = int(body.get("plan_id") or 0)
     billing_cycle = str(body.get("billing_cycle") or "monthly").strip().lower()
     payment_method = str(body.get("payment_method") or payment.get("default_method") or "mock_qr").strip()
     if billing_cycle not in {"monthly", "yearly"}:
-        raise HTTPException(400, "billing_cycle must be monthly or yearly")
+        raise HTTPException(400, "计费周期必须是 monthly 或 yearly")
     plan = db.get(Plan, plan_id)
     if not plan or not plan.is_visible:
-        raise HTTPException(404, "Plan not found")
+        raise HTTPException(404, "套餐未找到")
     method_options = _payment_method_options(db)
     selected_method = next((item for item in method_options if item["key"] == payment_method), None)
     if not selected_method:
@@ -4153,7 +4153,7 @@ def subscribe_plan(body: dict, request: Request, db: Session = Depends(get_db)):
         elif payment_method == "mapay_qr":
             selected_method = next((item for item in method_options if item["key"].startswith("mapay_")), None)
     if not selected_method:
-        raise HTTPException(400, "Payment method unavailable")
+        raise HTTPException(400, "支付方式不可用")
     selected_method_key = str(selected_method["key"])
 
     amount = plan.yearly_price if billing_cycle == "yearly" and plan.yearly_price is not None else plan.monthly_price
@@ -4213,7 +4213,7 @@ def subscribe_plan(body: dict, request: Request, db: Session = Depends(get_db)):
     sub = _subscription_for_user(user.id, db)
     return {
         "ok": True,
-        "message": "subscription updated" if order.status == "paid" else "checkout created",
+        "message": "订阅已更新" if order.status == "paid" else "结账已创建",
         "status": order.status,
         "subscription": _serialize_subscription_summary(sub, current_plan),
         "order": _serialize_order_with_db(order, db),
@@ -4229,10 +4229,10 @@ def my_order_mock_confirm(order_no: str, request: Request, db: Session = Depends
     if order.status != "pending":
         raise HTTPException(400, f"Order cannot be confirmed from status {order.status}")
     if order.payment_method != "mock_qr":
-        raise HTTPException(400, "Only mock payment orders can be manually confirmed here")
+        raise HTTPException(400, "此处只能手动确认模拟支付订单")
     plan = db.get(Plan, order.plan_id)
     if not plan:
-        raise HTTPException(404, "Plan not found")
+        raise HTTPException(404, "套餐未找到")
     _mark_order_paid(order, db, operator_user_id=user.id, note=f"Mock payment confirmed by {user.name}")
     _write_audit_log(user, "confirm_mock_payment", "billing_order", order.order_no, f"Confirmed mock payment for {plan.name}", db, {
         "order_no": order.order_no,
@@ -4401,9 +4401,9 @@ def admin_create_plan(body: dict, request: Request, db: Session = Depends(get_db
     code = str(body.get("code") or "").strip().lower()
     name = str(body.get("name") or "").strip()
     if not code or not name:
-        raise HTTPException(400, "code and name are required")
+        raise HTTPException(400, "代码和名称必填")
     if db.query(Plan).filter(Plan.code == code).first():
-        raise HTTPException(409, "Plan code already exists")
+        raise HTTPException(409, "套餐代码已存在")
     plan = Plan(
         code=code,
         name=name,
@@ -4437,7 +4437,7 @@ def admin_delete_plan(plan_id: int, request: Request, db: Session = Depends(get_
     _require_admin(request, db)
     plan = db.get(Plan, plan_id)
     if not plan:
-        raise HTTPException(404, "Plan not found")
+        raise HTTPException(404, "套餐未找到")
     subscription_count = db.query(UserSubscription).filter(UserSubscription.plan_id == plan.id).count()
     if subscription_count > 0:
         raise HTTPException(409, f"Plan has {subscription_count} active subscription(s) and cannot be deleted")
@@ -4454,7 +4454,7 @@ def admin_update_plan(plan_id: int, body: dict, request: Request, db: Session = 
     _require_admin(request, db)
     plan = db.get(Plan, plan_id)
     if not plan:
-        raise HTTPException(404, "Plan not found")
+        raise HTTPException(404, "套餐未找到")
     plan.name = str(body.get("name") or plan.name)
     plan.description = str(body.get("description") or plan.description or "")
     if body.get("monthly_price") is not None:
@@ -4473,7 +4473,7 @@ def admin_update_plan(plan_id: int, body: dict, request: Request, db: Session = 
 def admin_plan_features(plan_id: int, request: Request, db: Session = Depends(get_db)):
     _require_admin(request, db)
     if not db.get(Plan, plan_id):
-        raise HTTPException(404, "Plan not found")
+        raise HTTPException(404, "套餐未找到")
     return [{
         "feature_key": f.feature_key,
         "value": (f.value_json or {}).get("value"),
@@ -4484,10 +4484,10 @@ def admin_plan_features(plan_id: int, request: Request, db: Session = Depends(ge
 def admin_save_plan_features(plan_id: int, body: dict, request: Request, db: Session = Depends(get_db)):
     _require_admin(request, db)
     if not db.get(Plan, plan_id):
-        raise HTTPException(404, "Plan not found")
+        raise HTTPException(404, "套餐未找到")
     items = body.get("items", [])
     if not isinstance(items, list):
-        raise HTTPException(400, "items must be list")
+        raise HTTPException(400, "项目必须是列表")
     for item in items:
         if not isinstance(item, dict):
             continue
@@ -4508,7 +4508,7 @@ def admin_save_plan_features(plan_id: int, body: dict, request: Request, db: Ses
 def admin_quota_rules(plan_id: int, request: Request, db: Session = Depends(get_db)):
     _require_admin(request, db)
     if not db.get(Plan, plan_id):
-        raise HTTPException(404, "Plan not found")
+        raise HTTPException(404, "套餐未找到")
     rules = db.query(PlanQuotaRule).filter(PlanQuotaRule.plan_id == plan_id).order_by(PlanQuotaRule.feature_key.asc()).all()
     return [{
         "feature_key": item.feature_key,
@@ -4522,10 +4522,10 @@ def admin_quota_rules(plan_id: int, request: Request, db: Session = Depends(get_
 def admin_save_quota_rules(plan_id: int, body: dict, request: Request, db: Session = Depends(get_db)):
     _require_admin(request, db)
     if not db.get(Plan, plan_id):
-        raise HTTPException(404, "Plan not found")
+        raise HTTPException(404, "套餐未找到")
     items = body.get("items", [])
     if not isinstance(items, list):
-        raise HTTPException(400, "items must be list")
+        raise HTTPException(400, "项目必须是列表")
     for item in items:
         if not isinstance(item, dict):
             continue
@@ -4577,11 +4577,11 @@ def admin_create_user(body: dict, request: Request, db: Session = Depends(get_db
     allow_api_key_override = bool(body.get("allow_api_key_override", False))
     allow_api_url_override = bool(body.get("allow_api_url_override", False))
     if not email or not password:
-        raise HTTPException(400, "email and password are required")
+        raise HTTPException(400, "邮箱和密码必填")
     if role not in {"user", "admin"}:
-        raise HTTPException(400, "role must be user or admin")
+        raise HTTPException(400, "角色必须是 user 或 admin")
     if db.query(User).filter(User.email == email).first():
-        raise HTTPException(409, "Email already exists")
+        raise HTTPException(409, "邮箱已存在")
     user = User(
         email=email,
         password_hash=_password_hash(password),
@@ -4603,25 +4603,25 @@ def admin_update_user(user_id: int, body: dict, request: Request, db: Session = 
     admin = _require_admin(request, db)
     user = db.get(User, user_id)
     if not user:
-        raise HTTPException(404, "User not found")
+        raise HTTPException(404, "用户未找到")
     if body.get("name") is not None:
         user.name = str(body.get("name") or user.name).strip() or user.name
     if body.get("email") is not None:
         email = str(body.get("email") or "").strip().lower()
         existing = db.query(User).filter(User.email == email, User.id != user.id).first()
         if existing:
-            raise HTTPException(409, "Email already exists")
+            raise HTTPException(409, "邮箱已存在")
         if email:
             user.email = email
     if body.get("role") is not None:
         role = str(body.get("role") or "").strip().lower()
         if role not in {"user", "admin"}:
-            raise HTTPException(400, "role must be user or admin")
+            raise HTTPException(400, "角色必须是 user 或 admin")
         user.role = role
     if body.get("status") is not None:
         status = str(body.get("status") or "").strip().lower()
         if status not in {"active", "disabled"}:
-            raise HTTPException(400, "status must be active or disabled")
+            raise HTTPException(400, "状态必须是 active 或 disabled")
         user.status = status
     if body.get("allow_api_key_override") is not None:
         user.allow_api_key_override = bool(body.get("allow_api_key_override"))
@@ -4647,9 +4647,9 @@ def admin_delete_user(user_id: int, request: Request, db: Session = Depends(get_
     admin = _require_admin(request, db)
     user = db.get(User, user_id)
     if not user:
-        raise HTTPException(404, "User not found")
+        raise HTTPException(404, "用户未找到")
     if user.id == admin.id:
-        raise HTTPException(400, "Cannot delete current admin")
+        raise HTTPException(400, "不能删除当前管理员")
     user.status = "disabled"
     _write_audit_log(admin, "disable_user", "user", user.id, f"停用用户 {user.email}", db, {"email": user.email})
     db.commit()
@@ -4661,7 +4661,7 @@ def admin_user_entitlements(user_id: int, request: Request, db: Session = Depend
     _require_admin(request, db)
     user = db.get(User, user_id)
     if not user:
-        raise HTTPException(404, "User not found")
+        raise HTTPException(404, "用户未找到")
     plan = _active_plan_for_user(user.id, db)
     sub = _subscription_for_user(user.id, db)
     return {
@@ -4684,7 +4684,7 @@ def admin_user_stories(user_id: int, request: Request, db: Session = Depends(get
     _require_admin(request, db)
     user = db.get(User, user_id)
     if not user:
-        raise HTTPException(404, "User not found")
+        raise HTTPException(404, "用户未找到")
     stories = (
         db.query(Story)
         .filter(Story.owner_user_id == user.id)
@@ -4718,7 +4718,7 @@ def admin_story_chapters(story_id: int, request: Request, db: Session = Depends(
     _require_admin(request, db)
     story = db.get(Story, story_id)
     if not story:
-        raise HTTPException(404, "Story not found")
+        raise HTTPException(404, "作品未找到")
     chapters = (
         db.query(Chapter)
         .filter(Chapter.story_id == story.id)
@@ -4753,11 +4753,11 @@ def admin_update_user_subscription(user_id: int, body: dict, request: Request, d
     admin = _require_admin(request, db)
     user = db.get(User, user_id)
     if not user:
-        raise HTTPException(404, "User not found")
+        raise HTTPException(404, "用户未找到")
     plan_id = int(body.get("plan_id") or 0)
     plan = db.get(Plan, plan_id)
     if not plan:
-        raise HTTPException(404, "Plan not found")
+        raise HTTPException(404, "套餐未找到")
     _upsert_user_subscription(user.id, plan.id, db, billing_cycle="monthly", effective_at=_utcnow(), extend_if_same_plan=False)
     order = BillingOrder(
         order_no=f"LVADM{datetime.datetime.utcnow().strftime('%Y%m%d%H%M%S')}{secrets.randbelow(10000):04d}",
@@ -4792,13 +4792,13 @@ def admin_grant_user_quota(user_id: int, body: dict, request: Request, db: Sessi
     admin = _require_admin(request, db)
     user = db.get(User, user_id)
     if not user:
-        raise HTTPException(404, "User not found")
+        raise HTTPException(404, "用户未找到")
     feature_key = str(body.get("feature_key") or "").strip()
     amount = int(body.get("amount") or 0)
     if not feature_key:
-        raise HTTPException(400, "feature_key is required")
+        raise HTTPException(400, "功能键必填")
     if amount <= 0:
-        raise HTTPException(400, "amount must be greater than 0")
+        raise HTTPException(400, "数量必须大于 0")
     period_key = _subscription_period_key(user.id, db)
     grant = db.query(UserQuotaGrantMonthly).filter(
         UserQuotaGrantMonthly.user_id == user.id,
@@ -4879,13 +4879,13 @@ def public_platform_icon(db: Session = Depends(get_db)):
     icon_data = _get_platform_setting("platform.icon_data", db, "")
     icon_mime = _get_platform_setting("platform.icon_mime", db, "image/png") or "image/png"
     if not icon_data:
-        raise HTTPException(404, "Platform icon not configured")
+        raise HTTPException(404, "平台图标未配置")
     try:
         import base64
 
         icon_bytes = base64.b64decode(icon_data, validate=True)
     except Exception:
-        raise HTTPException(500, "Stored platform icon is invalid")
+        raise HTTPException(500, "存储的平台图标无效")
     return Response(content=icon_bytes, media_type=str(icon_mime))
 
 
@@ -5046,7 +5046,7 @@ async def admin_start_system_update(body: dict, request: Request, db: Session = 
     admin = _require_admin(request, db)
     target_version = str(body.get("target_version") or "").strip() or None
     if target_version and not UPDATER_VERSION_RE.match(target_version):
-        raise HTTPException(400, "Invalid target version format.")
+        raise HTTPException(400, "无效的目标版本格式")
     status = _sanitize_update_status(await _call_updater("POST", "/update", {"target_version": target_version}))
     _write_audit_log(
         admin,
@@ -5156,7 +5156,7 @@ def admin_update_order_status(order_no: str, body: dict, request: Request, db: S
     admin = _require_admin(request, db)
     order = db.query(BillingOrder).filter(BillingOrder.order_no == order_no).first()
     if not order:
-        raise HTTPException(404, "Order not found")
+        raise HTTPException(404, "订单未找到")
     order = _sync_order_status(order, db)
     next_status = str(body.get("status") or "").strip().lower()
     note = str(body.get("note") or "").strip()
@@ -5168,7 +5168,7 @@ def admin_update_order_status(order_no: str, body: dict, request: Request, db: S
     elif next_status == "expired":
         _mark_order_expired(order, db, note=note or f"Expired by admin {admin.name}")
     else:
-        raise HTTPException(400, "status must be paid, cancelled, or expired")
+        raise HTTPException(400, "状态必须是 paid、cancelled 或 expired")
     _write_audit_log(admin, "admin_update_order_status", "billing_order", order.order_no, f"Updated order to {order.status}", db, {
         "order_no": order.order_no,
         "status": order.status,
@@ -5408,16 +5408,16 @@ async def adjust_story_cover(story_id: int, request: Request, db: Session = Depe
     user = _require_user(request, db)
     story = _require_story_for_user(story_id, user, db)
     if not story.cover_image:
-        raise HTTPException(400, "Story has no cover to adjust")
+        raise HTTPException(400, "作品没有封面可调整")
 
     body = await request.json()
     instruction = str(body.get("instruction") or "").strip()
     if not instruction:
-        raise HTTPException(400, "instruction is required")
+        raise HTTPException(400, "指令必填")
 
     source_path = Path(__file__).resolve().parent / story.cover_image
     if not source_path.exists():
-        raise HTTPException(404, "Existing cover file not found")
+        raise HTTPException(404, "现有封面文件未找到")
 
     prompt = _build_story_cover_prompt(story, f"在现有封面基础上调整：{instruction}")
     output_path = _story_cover_output_path(story_id)
@@ -5526,9 +5526,9 @@ def delete_chapter(chapter_id: int, request: Request, db: Session = Depends(get_
 async def chat(chapter_id: int, body: ChatMessageIn, request: Request, db: Session = Depends(get_db)):
     chapter = db.get(Chapter, chapter_id)
     if not chapter:
-        raise HTTPException(404, "Chapter not found")
+        raise HTTPException(404, "章节未找到")
     if chapter.content_source == "import":
-        raise HTTPException(409, "This chapter was imported from existing novel text and cannot use AI chat")
+        raise HTTPException(409, "此章节是从现有小说文本导入的，无法使用 AI 对话")
 
     # 配额预检
     user = _require_user(request, db)
@@ -5616,13 +5616,13 @@ async def chat(chapter_id: int, body: ChatMessageIn, request: Request, db: Sessi
 async def generate_novel_endpoint(chapter_id: int, request: Request, db: Session = Depends(get_db)):
     chapter = db.get(Chapter, chapter_id)
     if not chapter:
-        raise HTTPException(404, "Chapter not found")
+        raise HTTPException(404, "章节未找到")
     if chapter.content_source == "import":
-        raise HTTPException(409, "This chapter was imported from existing novel text and cannot generate AI novel text")
+        raise HTTPException(409, "此章节是从现有小说文本导入的，无法生成 AI 小说文本")
 
     history = [{"role": m.role, "content": m.content} for m in chapter.messages]
     if not history:
-        raise HTTPException(400, "No chat history to generate novel from")
+        raise HTTPException(400, "没有对话历史可生成小说")
 
     # 配额预检
     user = _require_user(request, db)
@@ -5688,21 +5688,21 @@ async def import_novel_endpoint(chapter_id: int, request: Request, db: Session =
     """
     chapter = db.get(Chapter, chapter_id)
     if not chapter:
-        raise HTTPException(404, "Chapter not found")
+        raise HTTPException(404, "章节未找到")
 
     body = await request.json()
     raw = body.get("content", "")
     if not isinstance(raw, str):
-        raise HTTPException(400, "content must be a string")
+        raise HTTPException(400, "内容必须是字符串")
     text = raw.strip()
     if not text:
-        raise HTTPException(400, "content is empty")
+        raise HTTPException(400, "内容为空")
     if len(text) > MAX_IMPORTED_NOVEL_CHARS:
-        raise HTTPException(413, f"Novel is too long. Max length is {MAX_IMPORTED_NOVEL_CHARS} characters")
+        raise HTTPException(413, f"小说过长，最大长度为 {MAX_IMPORTED_NOVEL_CHARS} 个字符")
     if chapter.content_source == "chat" or chapter.messages:
-        raise HTTPException(409, "This chapter already uses AI chat. Create a new chapter to import existing novel text.")
+        raise HTTPException(409, "此章节已使用 AI 对话，请创建新章节来导入现有小说文本")
     if chapter.images:
-        raise HTTPException(409, "This chapter already has manga images. Create a new chapter to import existing novel text.")
+        raise HTTPException(409, "此章节已有漫画图片，请创建新章节来导入现有小说文本")
 
     _clear_chapter_manga_state(chapter, db)
     db.query(ChatMessage).filter(ChatMessage.chapter_id == chapter_id).delete()
@@ -5720,7 +5720,7 @@ async def update_chapter_content(chapter_id: int, body: ChapterContentUpdate, re
     chapter = _require_chapter(chapter_id, db)
     text = body.content.strip()
     if not text:
-        raise HTTPException(400, "content is empty")
+        raise HTTPException(400, "内容为空")
     _apply_chapter_content(chapter, text, status="draft")
     if not chapter.messages:
         db.add(ChatMessage(chapter_id=chapter_id, role="user", content=text))
@@ -5830,7 +5830,7 @@ async def generate_story_characters_from_framework(story_id: int, request: Reque
             Chapter.novel_content != "",
         ).order_by(Chapter.chapter_number).all()
         if not all_chapters:
-            raise HTTPException(400, "Story has no framework characters or novel content to generate from")
+            raise HTTPException(400, "作品没有框架角色或小说内容可生成")
         combined_content = "\n\n".join(
             f"第 {c.chapter_number} 话：{c.novel_content}" for c in all_chapters
         )
@@ -6101,7 +6101,7 @@ async def generate_story_character_ref_images(story_id: int, request: Request, d
 
     cards = _parse_character_profile_cards(story.character_profiles or "")
     if not cards:
-        raise HTTPException(400, "Story has no character appearance cards to convert")
+        raise HTTPException(400, "作品没有角色外观卡可转换")
 
     body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
     target_name = (body.get("character_name") or "").strip() if isinstance(body, dict) else ""
@@ -6339,13 +6339,13 @@ async def redraw_story_ref_image(story_id: int, filename: str, request: Request,
     user = _require_user(request, db)
     _require_story_for_user(story_id, user, db)
     if "/" in filename or "\\" in filename or ".." in filename:
-        raise HTTPException(400, "invalid filename")
+        raise HTTPException(400, "无效的文件名")
     body = await request.json()
     prompt = str(body.get("prompt") or "").strip()
     mode = str(body.get("mode") or "full").strip().lower()
     path = _story_ref_dir(story_id) / filename
     if not path.exists():
-        raise HTTPException(404, "reference image not found")
+        raise HTTPException(404, "参考图片未找到")
     try:
         _check_and_consume_feature_quota(request, user.id, "manga.regenerate.monthly_limit", 1, db, deduct=False, provider_kind="image")
         mask_bytes = None
@@ -6366,7 +6366,7 @@ async def delete_story_ref_image(story_id: int, filename: str, request: Request,
     user = _require_user(request, db)
     story = _require_story_for_user(story_id, user, db)
     if "/" in filename or "\\" in filename or ".." in filename:
-        raise HTTPException(400, "invalid filename")
+        raise HTTPException(400, "无效的文件名")
     p = _story_ref_dir(story_id) / filename
     _unlink_file(p, "story ref image")
     meta = _load_ref_meta(_story_ref_dir(story_id))
@@ -6412,13 +6412,13 @@ async def redraw_chapter_ref_image(chapter_id: int, filename: str, request: Requ
     user = _require_user(request, db)
     _require_chapter_for_user(chapter_id, user, db)
     if "/" in filename or "\\" in filename or ".." in filename:
-        raise HTTPException(400, "invalid filename")
+        raise HTTPException(400, "无效的文件名")
     body = await request.json()
     prompt = str(body.get("prompt") or "").strip()
     mode = str(body.get("mode") or "full").strip().lower()
     path = _chapter_ref_dir(chapter_id) / filename
     if not path.exists():
-        raise HTTPException(404, "reference image not found")
+        raise HTTPException(404, "参考图片未找到")
     try:
         _check_and_consume_feature_quota(request, user.id, "manga.regenerate.monthly_limit", 1, db, deduct=False, provider_kind="image")
         mask_bytes = None
@@ -6439,7 +6439,7 @@ async def delete_chapter_ref_image(chapter_id: int, filename: str, request: Requ
     user = _require_user(request, db)
     _require_chapter_for_user(chapter_id, user, db)
     if "/" in filename or "\\" in filename or ".." in filename:
-        raise HTTPException(400, "invalid filename")
+        raise HTTPException(400, "无效的文件名")
     p = _chapter_ref_dir(chapter_id) / filename
     _unlink_file(p, "chapter ref image")
     meta = _load_ref_meta(_chapter_ref_dir(chapter_id))
@@ -6491,9 +6491,9 @@ async def set_color_mode(chapter_id: int, body: dict, request: Request, db: Sess
     _require_chapter_for_user(chapter_id, user, db)
     mode = body.get("color_mode", "bw")
     if mode not in ("bw", "color"):
-        raise HTTPException(400, "color_mode must be 'bw' or 'color'")
+        raise HTTPException(400, "颜色模式必须是 'bw' 或 'color'")
     if mode == "color" and not _plan_feature_bool(user.id, "manga.allow_color_mode", db, default=False):
-        raise HTTPException(403, "Current plan does not support color manga mode")
+        raise HTTPException(403, "当前套餐不支持彩色漫画模式")
     _save_color_mode(chapter_id, mode)
     return {"ok": True}
 
@@ -6564,7 +6564,7 @@ async def set_image_count(chapter_id: int, body: dict, request: Request, db: Ses
     user = _require_user(request, db)
     chapter = _require_chapter_for_user(chapter_id, user, db)
     if chapter.images or _chapter_has_scene_file(chapter_id):
-        raise HTTPException(409, "Cannot change image count after scenes or images have been created")
+        raise HTTPException(409, "创建场景或图片后无法更改图片数量")
     count = body.get("image_count", DEFAULT_IMAGE_COUNT)
     if count not in ALLOWED_IMAGE_COUNTS:
         raise HTTPException(400, f"image_count must be one of {ALLOWED_IMAGE_COUNTS}")
@@ -6585,7 +6585,7 @@ async def generate_scenes_endpoint(chapter_id: int, request: Request, db: Sessio
     user = _require_user(request, db)
     chapter = _require_chapter_for_user(chapter_id, user, db)
     if not chapter.messages and not chapter.novel_content:
-        raise HTTPException(400, "No chat messages yet")
+        raise HTTPException(400, "暂无聊天消息")
 
     image_count = _effective_image_count(chapter_id, user.id, db)
     if chapter.messages:
@@ -6608,16 +6608,16 @@ async def generate_scenes_endpoint(chapter_id: int, request: Request, db: Sessio
         while not split_task.done():
             if await request.is_disconnected():
                 split_task.cancel()
-                raise HTTPException(499, "Scene generation was cancelled")
+                raise HTTPException(499, "场景生成已取消")
             await asyncio.sleep(0.25)
         scenes = await split_task
         if await request.is_disconnected():
-            raise HTTPException(499, "Scene generation was cancelled")
+            raise HTTPException(499, "场景生成已取消")
     except ValueError as exc:
         logger.warning("Failed to parse scene split response for chapter %s: %s", chapter_id, exc)
-        raise HTTPException(502, "AI returned invalid scene JSON. Please retry generating scenes.")
+        raise HTTPException(502, "AI 返回无效的场景 JSON，请重试生成场景")
     except asyncio.CancelledError:
-        raise HTTPException(499, "Scene generation was cancelled")
+        raise HTTPException(499, "场景生成已取消")
     finally:
         if not split_task.done():
             split_task.cancel()
@@ -6662,9 +6662,9 @@ async def update_scenes_endpoint(chapter_id: int, body: dict, request: Request, 
     _require_chapter_for_user(chapter_id, user, db)
     scenes = body.get("scenes", [])
     if not isinstance(scenes, list) or not all(isinstance(s, str) and s.strip() for s in scenes):
-        raise HTTPException(400, "Invalid scenes format")
+        raise HTTPException(400, "无效的场景格式")
     if len(scenes) < 1:
-        raise HTTPException(400, "At least one scene is required")
+        raise HTTPException(400, "至少需要一个场景")
 
     # 自动对齐 image_count 和分镜数量
     count_path = _image_count_path(chapter_id)
@@ -6808,7 +6808,7 @@ async def reset_manga_images(chapter_id: int, request: Request, db: Session = De
     user = _require_user(request, db)
     chapter = _require_chapter_for_user(chapter_id, user, db)
     if chapter_id in ACTIVE_MANGA_GENERATIONS:
-        raise HTTPException(409, "Manga generation is already running for this chapter")
+        raise HTTPException(409, "此章节的漫画生成已在运行中")
     _clear_chapter_images_only(chapter, db)
     db.commit()
     return {"ok": True}
@@ -6822,7 +6822,7 @@ async def generate_manga_stream(chapter_id: int, request: Request, db: Session =
     # Load scenes from file (must exist - user should generate/confirm scenes first)
     prompts_file = Path(__file__).resolve().parent / "manga_outputs" / f"chapter_{chapter_id}" / "scenes.txt"
     if not prompts_file.exists():
-        raise HTTPException(400, "No scene prompts found. Generate scenes first.")
+        raise HTTPException(400, "未找到场景提示，请先生成场景")
     image_count = _effective_image_count(chapter_id, user.id, db)
 
     raw = prompts_file.read_text(encoding="utf-8")
@@ -6832,7 +6832,7 @@ async def generate_manga_stream(chapter_id: int, request: Request, db: Session =
             raise HTTPException(403, f"Current plan allows at most {image_count} images per chapter. Please reduce page count or upgrade your plan.")
         raise HTTPException(400, f"Expected {image_count} scenes, found {len(scenes)}")
     if chapter_id in ACTIVE_MANGA_GENERATIONS:
-        raise HTTPException(409, "Manga generation is already running for this chapter")
+        raise HTTPException(409, "此章节的漫画生成已在运行中")
     # 数据库级别检查：防止服务器重启或 SSE 断开后仍允许重复提交
     existing_task = db.query(BackgroundTask).filter(
         BackgroundTask.task_type == "manga_generation",
@@ -6840,7 +6840,7 @@ async def generate_manga_stream(chapter_id: int, request: Request, db: Session =
         BackgroundTask.status.in_(["pending", "running", "retrying"]),
     ).first()
     if existing_task:
-        raise HTTPException(409, "Manga generation is already running for this chapter")
+        raise HTTPException(409, "此章节的漫画生成已在运行中")
     character_profiles = await _load_characters_async(chapter_id, request, db)
     ref_entries = _effective_ref_entries(chapter_id, db)
     color_mode = _effective_color_mode(chapter_id, user.id, db)
@@ -6990,7 +6990,7 @@ async def cancel_manga_generation(chapter_id: int, request: Request, db: Session
     ).first()
 
     if not task:
-        raise HTTPException(404, "No active manga generation task found for this chapter")
+        raise HTTPException(404, "此章节没有活跃的漫画生成任务")
 
     # 1) 设置取消标志，不抛 CancelledError——让当前正在 await 的图片正常完成
     task_manager.request_cancellation(task.task_id)
@@ -7056,7 +7056,7 @@ async def regenerate_single_image(chapter_id: int, image_number: int, body: dict
 
     prompt = body.get("prompt", "").strip()
     if not prompt:
-        raise HTTPException(400, "prompt is required")
+        raise HTTPException(400, "提示词必填")
     mode = str(body.get("mode") or "regenerate").strip().lower()
 
     # Load all scenes for context
@@ -7092,7 +7092,7 @@ async def regenerate_single_image(chapter_id: int, image_number: int, body: dict
         _release_db_transaction(db)
         if mode in {"full", "partial"}:
             if not old_path or not old_path.exists():
-                raise HTTPException(404, "source image not found")
+                raise HTTPException(404, "源图片未找到")
             mask_bytes = None
             if mode == "partial":
                 with Image.open(old_path) as img:
@@ -7144,7 +7144,7 @@ async def regenerate_single_image(chapter_id: int, image_number: int, body: dict
             .first()
         )
         if not manga:
-            raise HTTPException(404, "source image not found")
+            raise HTTPException(404, "源图片未找到")
         manga.image_path = image_result.image_path
         manga.prompt = prompt
     else:
@@ -7189,7 +7189,7 @@ async def onboarding_send_message(story_id: int, request: Request, db: Session =
     previous_collected_info = body.get("collected_info", {})
     current_step = body.get("step")
     if not isinstance(messages_raw, list) or len(messages_raw) == 0:
-        raise HTTPException(400, "messages is required")
+        raise HTTPException(400, "消息必填")
     if not isinstance(previous_collected_info, dict):
         previous_collected_info = {}
     if current_step is not None:
@@ -7204,7 +7204,7 @@ async def onboarding_send_message(story_id: int, request: Request, db: Session =
         if isinstance(msg, dict) and msg.get("role") in ("user", "assistant") and str(msg.get("content", "")).strip()
     ]
     if not safe_messages:
-        raise HTTPException(400, "No valid messages")
+        raise HTTPException(400, "没有有效消息")
 
     # 配额预检
     _check_and_consume_advanced_text_quota(request, user.id, db, deduct=False)
@@ -7321,14 +7321,14 @@ async def import_context_send_message(story_id: int, request: Request, db: Sessi
     user = _require_user(request, db)
     story = _require_story_for_user(story_id, user, db)
     if not _is_import_story(story):
-        raise HTTPException(400, "Only imported stories support import context guidance")
+        raise HTTPException(400, "仅导入的作品支持导入上下文指导")
 
     body = await request.json()
     messages_raw = body.get("messages", [])
     previous_collected_info = body.get("collected_info", {})
     current_step = body.get("step")
     if not isinstance(messages_raw, list) or not messages_raw:
-        raise HTTPException(400, "messages is required")
+        raise HTTPException(400, "消息必填")
     if not isinstance(previous_collected_info, dict):
         previous_collected_info = {}
     if current_step is not None:
@@ -7343,7 +7343,7 @@ async def import_context_send_message(story_id: int, request: Request, db: Sessi
         if isinstance(msg, dict) and msg.get("role") in ("user", "assistant") and str(msg.get("content", "")).strip()
     ]
     if not safe_messages:
-        raise HTTPException(400, "No valid messages")
+        raise HTTPException(400, "没有有效消息")
 
     # 配额预检
     _check_and_consume_advanced_text_quota(request, user.id, db, deduct=False)
@@ -7392,7 +7392,7 @@ async def import_context_confirm(story_id: int, request: Request, db: Session = 
     user = _require_user(request, db)
     story = _require_story_for_user(story_id, user, db)
     if not _is_import_story(story):
-        raise HTTPException(400, "Only imported stories support import context guidance")
+        raise HTTPException(400, "仅导入的作品支持导入上下文指导")
 
     body = await request.json()
     collected_info = body.get("collected_info", {})
@@ -7445,7 +7445,7 @@ async def import_context_skip(story_id: int, request: Request, db: Session = Dep
     user = _require_user(request, db)
     story = _require_story_for_user(story_id, user, db)
     if not _is_import_story(story):
-        raise HTTPException(400, "Only imported stories support import context guidance")
+        raise HTTPException(400, "仅导入的作品支持导入上下文指导")
     story.import_context_completed = True
     db.commit()
     return {"ok": True, "story_id": story.id}
@@ -7587,7 +7587,7 @@ async def get_task_status(task_id: str, request: Request, db: Session = Depends(
     user = _require_user(request, db)
     status = task_manager.get_task_status(task_id)
     if not status:
-        raise HTTPException(404, "Task not found")
+        raise HTTPException(404, "任务未找到")
     return status
 
 
@@ -7640,7 +7640,7 @@ async def generate_framework_endpoint(story_id: int, request: Request, db: Sessi
     if not description or _is_generic_framework_instruction(description):
         description = _build_framework_seed_description(story) or (story.description or "").strip()
     if not description.strip():
-        raise HTTPException(400, "description is required")
+        raise HTTPException(400, "描述必填")
     story_context = _build_framework_ai_context(story, mode="initial_generate", user_instruction=raw_description or description)
 
     requested_min_chapters = _extract_requested_min_chapters([{"role": "user", "content": raw_description or description.strip()}])
@@ -7830,7 +7830,7 @@ def update_outline_chapter_plan(story_id: int, body: OutlineChapterPlanUpdate, r
 
     mode = (body.mode or "").strip().lower()
     if mode not in {"append", "insert_after", "update"}:
-        raise HTTPException(400, "Invalid mode")
+        raise HTTPException(400, "无效的模式")
 
     chapters = _extract_outline_chapters(story.outline)
     plan_map = {item["chapter_number"]: dict(item) for item in chapters}
@@ -7838,10 +7838,10 @@ def update_outline_chapter_plan(story_id: int, body: OutlineChapterPlanUpdate, r
     if mode == "update":
         target_number = body.target_chapter_number
         if not isinstance(target_number, int) or target_number < 1:
-            raise HTTPException(400, "target_chapter_number is required for update")
+            raise HTTPException(400, "更新需要目标章节编号")
         existing = plan_map.get(target_number)
         if not existing:
-            raise HTTPException(404, "Planned chapter not found")
+            raise HTTPException(404, "计划章节未找到")
         fallback_title = existing.get("title") or f"Chapter {target_number}"
         fallback_act = str(existing.get("act") or _infer_manual_plan_act(chapters, target_chapter_number=target_number))
         normalized = _normalize_outline_plan_payload(body.chapter.model_dump(), fallback_title=fallback_title, fallback_act=fallback_act)
@@ -7855,9 +7855,9 @@ def update_outline_chapter_plan(story_id: int, body: OutlineChapterPlanUpdate, r
         else:
             after_number = body.after_chapter_number
             if not isinstance(after_number, int) or after_number < 1:
-                raise HTTPException(400, "after_chapter_number is required for insert_after")
+                raise HTTPException(400, "插入后需要 after_chapter_number")
             if after_number not in plan_map:
-                raise HTTPException(404, "Insert anchor chapter not found")
+                raise HTTPException(404, "插入锚点章节未找到")
 
         new_number = after_number + 1
         fallback_act = _infer_manual_plan_act(chapters, after_chapter_number=after_number)
@@ -8185,7 +8185,7 @@ async def adjust_framework_endpoint(story_id: int, request: Request, db: Session
     body = await request.json()
     messages = body.get("messages", [])
     if not isinstance(messages, list) or not messages:
-        raise HTTPException(400, "messages is required")
+        raise HTTPException(400, "消息必填")
     requested_min_chapters = _extract_requested_min_chapters(messages)
 
     existing_framework = {
@@ -8398,7 +8398,7 @@ async def expand_chapter_endpoint(story_id: int, request: Request, db: Session =
     chapter_number_val = body.get("chapter_number")
 
     if not chapter_title or not isinstance(chapter_title, str) or not chapter_title.strip():
-        raise HTTPException(400, "chapter_title is required")
+        raise HTTPException(400, "章节标题必填")
 
     chapter_info = {
         "title": chapter_title.strip(),
@@ -8528,7 +8528,7 @@ async def rewrite_selection_endpoint(chapter_id: int, request: Request, db: Sess
     chapter_context = body.get("chapter_context", body.get("context", ""))
 
     if not isinstance(selected_text, str) or not selected_text.strip():
-        raise HTTPException(400, "selected_text is required")
+        raise HTTPException(400, "选中文本必填")
     if not isinstance(chapter_context, str):
         chapter_context = ""
 
@@ -8564,9 +8564,9 @@ async def adjust_chapter_content_endpoint(chapter_id: int, request: Request, db:
     instruction = body.get("instruction", "")
 
     if not isinstance(instruction, str) or not instruction.strip():
-        raise HTTPException(400, "instruction is required")
+        raise HTTPException(400, "指令必填")
     if not chapter.novel_content or not chapter.novel_content.strip():
-        raise HTTPException(400, "Chapter has no novel content to adjust")
+        raise HTTPException(400, "章节没有小说内容可调整")
 
     chapter_info = {
         "title": chapter.title or f"第{chapter.chapter_number}话",
@@ -8683,7 +8683,7 @@ async def quality_assess_endpoint(chapter_id: int, request: Request, db: Session
     chapter = _require_chapter_for_user(chapter_id, user, db)
     content = chapter.novel_content or ""
     if not content.strip():
-        raise HTTPException(400, "Chapter has no novel content to assess")
+        raise HTTPException(400, "章节没有小说内容可评估")
 
     deepseek_api_key = _user_deepseek_api_key(request)
     _check_and_consume_advanced_text_quota(request, user.id, db, deduct=False)
@@ -8710,7 +8710,7 @@ async def scenes_from_selection_endpoint(chapter_id: int, request: Request, db: 
     page_count = body.get("page_count", 4)
 
     if not isinstance(selected_text, str) or not selected_text.strip():
-        raise HTTPException(400, "selected_text is required")
+        raise HTTPException(400, "选中文本必填")
     if not isinstance(character_profiles, str):
         character_profiles = str(character_profiles) if character_profiles else ""
     if not isinstance(page_count, int) or page_count < 1:
