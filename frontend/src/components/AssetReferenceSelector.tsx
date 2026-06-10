@@ -78,6 +78,7 @@ export default function AssetReferenceSelector({
     storyboard: availableAssets.filter(a => a.asset_type === 'storyboard_frame' || a.asset_type === 'storyboard'),
     characters: availableAssets.filter(a => (a.asset_type === 'character_reference' || a.asset_type === 'character')),
     scene: availableAssets.filter(a => (a.asset_type === 'scene_reference' || a.asset_type === 'scene' || a.asset_type === 'background')),
+    props: availableAssets.filter(a => a.asset_type === 'prop_reference'),
     frames: availableAssets.filter(a => a.asset_type === 'first_frame' || a.asset_type === 'last_frame'),
   };
 
@@ -125,6 +126,7 @@ export default function AssetReferenceSelector({
             ['分镜图 (故事版)', categorized.storyboard],
             ['人物图 (角色参考)', categorized.characters],
             ['场景图', categorized.scene],
+            ['道具图', categorized.props],
           ] as const).map(([label, items]) => {
             const visible = items.filter(a => !failedImages.has(a.id) && toAssetUrl(a.file_path));
             if (visible.length === 0) {
