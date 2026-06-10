@@ -25,6 +25,8 @@ import {
   deleteVideoAsset,
   clearShotStoryboard,
   clearShotVideo,
+  generateShotSceneAsset,
+  generateShotPropAsset,
 } from '../api';
 import { findCharacterPromptByName } from './videoWorkbenchUtils';
 import ChapterListPanel from './ChapterListPanel';
@@ -462,6 +464,30 @@ export default function VideoStoryboardLayout({
       setCharacterLoading(false);
     }
   }, [story.id]);
+
+  const handleGenerateSceneAsset = useCallback(async (shotId: number, prompt: string) => {
+    try {
+      await generateShotSceneAsset(shotId, { prompt });
+      toast.success('场景参考图已生成');
+      if (resolvedChapter?.id) {
+        await loadChapterAssets(resolvedChapter.id);
+      }
+    } catch (err: any) {
+      toast.error(`场景图生成失败: ${err.message}`);
+    }
+  }, [resolvedChapter?.id, loadChapterAssets]);
+
+  const handleGeneratePropAsset = useCallback(async (shotId: number, propName: string, prompt: string) => {
+    try {
+      await generateShotPropAsset(shotId, { prop_name: propName, prompt });
+      toast.success(`道具「${propName}」参考图已生成`);
+      if (resolvedChapter?.id) {
+        await loadChapterAssets(resolvedChapter.id);
+      }
+    } catch (err: any) {
+      toast.error(`道具图生成失败: ${err.message}`);
+    }
+  }, [resolvedChapter?.id, loadChapterAssets]);
 
   if (!story) {
     return (

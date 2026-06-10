@@ -58,6 +58,10 @@ interface VideoStoryboardPanelProps {
   onAnalyzeSingleShot: (shotId: number) => Promise<void>;
   /** 单镜生成角色资产 */
   onGenerateCharacterAsset: (shotId: number, characterName: string, prompt: string) => Promise<void>;
+  /** 单镜生成场景参考图 */
+  onGenerateSceneAsset?: (shotId: number, prompt: string) => Promise<void>;
+  /** 单镜生成道具参考图 */
+  onGeneratePropAsset?: (shotId: number, propName: string, prompt: string) => Promise<void>;
   /** 单镜生成分镜图 */
   onGenerateShotStoryboard: (shotId: number, referenceAssetIds?: number[]) => Promise<void>;
   /** 资产变更后通知父级刷新 */
@@ -1040,6 +1044,8 @@ export default function VideoStoryboardPanel({
   onGenerateVideo,
   onAnalyzeSingleShot,
   onGenerateCharacterAsset,
+  onGenerateSceneAsset,
+  onGeneratePropAsset,
   onGenerateShotStoryboard,
   onAssetsChanged,
   stylePresets,
@@ -1296,6 +1302,8 @@ export default function VideoStoryboardPanel({
               onGenerateVideo={onGenerateVideo}
               onAnalyzeSingleShot={onAnalyzeSingleShot}
               onGenerateCharacterAsset={onGenerateCharacterAsset}
+              onGenerateSceneAsset={onGenerateSceneAsset}
+              onGeneratePropAsset={onGeneratePropAsset}
               onGenerateShotStoryboard={onGenerateShotStoryboard}
               onOpenAssetWorkbench={handleOpenWorkbench}
               onDirectDeleteAsset={handleDirectDeleteAsset}
