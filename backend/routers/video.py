@@ -5218,8 +5218,9 @@ async def generate_shot_prop_asset(
             "name": asset.name,
             "file_path": _to_video_url(asset.file_path),
             "asset_type": asset.asset_type,
-            "prompt": asset.prompt,
+            "prompt": asset.prompt or "",
             "style_preset": asset.style_preset,
+            "status": asset.status,
             "created_at": _serialize_datetime(asset.created_at),
         },
     }
@@ -5302,8 +5303,9 @@ async def generate_shot_scene_asset(
             "name": asset.name,
             "file_path": _to_video_url(asset.file_path),
             "asset_type": asset.asset_type,
-            "prompt": asset.prompt,
+            "prompt": asset.prompt or "",
             "style_preset": asset.style_preset,
+            "status": asset.status,
             "created_at": _serialize_datetime(asset.created_at),
         },
     }
