@@ -247,7 +247,7 @@ class TaskManager:
 
             for task in stale_tasks:
                 task.status = "failed"
-                task.error_message = "Task timed out and was cleaned up"
+                task.error_message = "任务超时已清理"
                 task.completed_at = datetime.now(timezone.utc).replace(tzinfo=None)
 
                 if task.task_id in self._running_tasks:

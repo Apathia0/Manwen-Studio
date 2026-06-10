@@ -11,7 +11,7 @@ class MissingApiKeyError(RuntimeError):
     def __init__(self, provider: str):
         self.provider = provider
         super().__init__(
-            f"{provider} API Key is missing. Please set it in the frontend settings or backend .env."
+            f"{provider} API Key 缺失，请在前端设置或后端 .env 中配置"
         )
 
 

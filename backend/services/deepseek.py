@@ -93,11 +93,11 @@ def _extract_json_array(raw: str) -> list:
     except json.JSONDecodeError as first_error:
         match = re.search(r"\[[\s\S]*\]", raw)
         if not match:
-            raise ValueError("Scene split response did not contain a JSON array") from first_error
+            raise ValueError("场景分割响应未包含 JSON 数组") from first_error
         try:
             return _loads_json_lenient(match.group(0))
         except json.JSONDecodeError as second_error:
-            raise ValueError("Scene split response was not valid JSON") from second_error
+            raise ValueError("场景分割响应不是有效的 JSON") from second_error
 
 
 def _extract_json_like_string_array(raw: str) -> list[str] | None:
@@ -212,7 +212,7 @@ def _extract_scenes_payload(raw: str) -> list[str]:
             if fallback and all(isinstance(scene, str) for scene in fallback):
                 return fallback
 
-    raise ValueError("Scene split response must be a JSON array of strings")
+    raise ValueError("场景分割响应必须是字符串 JSON 数组")
 
 def _scene_split_prompt(page_count: int = 10) -> str:
     return f"""你是一位专业漫画分镜师。请将小说内容拆分为恰好{page_count}页漫画。
@@ -407,7 +407,7 @@ async def split_scenes(chat_messages: list[dict], character_profiles: str = "", 
         try:
             scenes = _extract_scenes_payload(raw)
             if len(scenes) != page_count:
-                raise ValueError(f"Expected {page_count} scenes, got {len(scenes)}")
+                raise ValueError(f"期望 {page_count} 个场景，实际得到 {len(scenes)} 个")
             return scenes
         except ValueError as exc:
             last_error = exc
@@ -432,17 +432,17 @@ def _extract_json_object(raw: str) -> dict:
         result = _loads_json_lenient(raw)
         if isinstance(result, dict):
             return result
-        raise ValueError("Response is valid JSON but not an object")
+        raise ValueError("响应是有效的 JSON 但不是对象")
     except json.JSONDecodeError as first_error:
         match = re.search(r"\{[\s\S]*\}", raw)
         candidate = match.group(0) if match else _extract_balanced_json_object_text(raw)
         if not candidate:
-            raise ValueError("Response did not contain a JSON object") from first_error
+            raise ValueError("响应未包含 JSON 对象") from first_error
         try:
             result = _loads_json_lenient(candidate)
             if isinstance(result, dict):
                 return result
-            raise ValueError("Extracted JSON is not an object")
+            raise ValueError("提取的 JSON 不是对象")
         except json.JSONDecodeError as second_error:
             balanced = _extract_balanced_json_object_text(candidate)
             if balanced and balanced != candidate:
@@ -452,7 +452,7 @@ def _extract_json_object(raw: str) -> dict:
                         return result
                 except json.JSONDecodeError:
                     pass
-            raise ValueError("Response was not valid JSON") from second_error
+            raise ValueError("响应不是有效的 JSON") from second_error
 
 
 def _strip_code_fences(text: str) -> str:
@@ -1038,7 +1038,7 @@ async def regenerate_tags(story_context: dict, api_key: str | None = None, syste
         result = _extract_json_object(content)
         return result.get("tags", result)
     except ValueError as e:
-        raise ValueError(f"Tag regeneration failed: {e}")
+        raise ValueError(f"标签重新生成失败: {e}")
 
 
 async def regenerate_characters_with_variance(story_context: dict, api_key: str | None = None) -> dict:
@@ -2446,7 +2446,7 @@ async def generate_onboarding_response(
             # 验证必要字段
             reply = result.get("reply", "")
             if not reply.strip():
-                raise ValueError("Empty reply from AI")
+                raise ValueError("AI 返回空回复")
 
             return {
                 "reply": reply,
@@ -2530,7 +2530,7 @@ async def generate_import_guidance_response(
             result = _extract_json_object(content)
             reply = str(result.get("reply") or "").strip()
             if not reply:
-                raise ValueError("Empty reply from AI")
+                raise ValueError("AI 返回空回复")
 
             collected_info = result.get("collected_info", {})
             if not isinstance(collected_info, dict):

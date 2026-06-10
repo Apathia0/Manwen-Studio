@@ -109,7 +109,7 @@ async def generate_shots(
     """Break down a scene into individual shots."""
     cleaned_summary = _clean_text(scene_summary)
     if not cleaned_summary:
-        raise ValueError("Scene summary is empty")
+        raise ValueError("场景摘要为空")
 
     if api_key:
         # 注入角色上下文
