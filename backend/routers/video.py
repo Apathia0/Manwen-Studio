@@ -606,6 +606,137 @@ def _select_character_reference_assets_for_scene(scene: ScriptScene, db: Session
     return matched[:limit]
 
 
+def _select_scene_reference_assets_for_shot(shot: VideoShot, db: Session, limit: int = 3) -> list[VideoAsset]:
+    """选择当前 shot 可用的场景参考图资产（继承逻辑）。"""
+    matched: list[VideoAsset] = []
+    used_ids: set[int] = set()
+
+    current_assets = (
+        db.query(VideoAsset)
+        .filter(
+            VideoAsset.shot_id == shot.id,
+            VideoAsset.asset_type == "scene_reference",
+            VideoAsset.status == "active",
+        )
+        .order_by(VideoAsset.created_at.desc())
+        .all()
+    )
+    for a in current_assets:
+        if a.id not in used_ids:
+            matched.append(a)
+            used_ids.add(a.id)
+            if len(matched) >= limit:
+                return matched[:limit]
+
+    if shot.scene_id:
+        sibling_assets = (
+            db.query(VideoAsset)
+            .filter(
+                VideoAsset.scene_id == shot.scene_id,
+                VideoAsset.asset_type == "scene_reference",
+                VideoAsset.shot_id != shot.id,
+                VideoAsset.status == "active",
+            )
+            .order_by(VideoAsset.created_at.desc())
+            .all()
+        )
+        for a in sibling_assets:
+            if a.id not in used_ids:
+                matched.append(a)
+                used_ids.add(a.id)
+                if len(matched) >= limit:
+                    return matched[:limit]
+
+    if shot.scene and shot.scene.concept_art_asset_id:
+        concept_id = shot.scene.concept_art_asset_id
+        if concept_id not in used_ids:
+            asset = db.get(VideoAsset, concept_id)
+            if asset and asset.status == "active":
+                matched.append(asset)
+                used_ids.add(concept_id)
+
+    return matched[:limit]
+
+
+def _select_prop_reference_assets_for_shot(shot: VideoShot, db: Session, limit: int = 6) -> list[VideoAsset]:
+    """选择当前 shot 可用的道具参考图资产（继承逻辑）。"""
+    matched: list[VideoAsset] = []
+    used_ids: set[int] = set()
+
+    prop_names: list[str] = []
+    if shot.prop_prompts_json:
+        for item in shot.prop_prompts_json:
+            if isinstance(item, dict):
+                name = str(item.get("name") or "").strip()
+                if name:
+                    prop_names.append(name)
+
+    current_assets = (
+        db.query(VideoAsset)
+        .filter(
+            VideoAsset.shot_id == shot.id,
+            VideoAsset.asset_type == "prop_reference",
+            VideoAsset.status == "active",
+        )
+        .order_by(VideoAsset.created_at.desc())
+        .all()
+    )
+    for a in current_assets:
+        if a.id not in used_ids:
+            matched.append(a)
+            used_ids.add(a.id)
+            if len(matched) >= limit:
+                return matched[:limit]
+
+    if shot.scene_id and prop_names:
+        sibling_assets = (
+            db.query(VideoAsset)
+            .filter(
+                VideoAsset.scene_id == shot.scene_id,
+                VideoAsset.asset_type == "prop_reference",
+                VideoAsset.shot_id != shot.id,
+                VideoAsset.status == "active",
+            )
+            .order_by(VideoAsset.created_at.desc())
+            .all()
+        )
+        for name in prop_names:
+            for a in sibling_assets:
+                if a.id in used_ids:
+                    continue
+                if name in (a.name or ""):
+                    matched.append(a)
+                    used_ids.add(a.id)
+                    break
+            if len(matched) >= limit:
+                return matched[:limit]
+
+    chapter_id = shot.scene.chapter_id if shot.scene else None
+    if chapter_id and prop_names:
+        chapter_assets = (
+            db.query(VideoAsset)
+            .filter(
+                VideoAsset.chapter_id == chapter_id,
+                VideoAsset.asset_type == "prop_reference",
+                VideoAsset.status == "active",
+            )
+            .order_by(VideoAsset.created_at.desc())
+            .all()
+        )
+        for name in prop_names:
+            for a in chapter_assets:
+                if a.id in used_ids:
+                    continue
+                if name in (a.name or ""):
+                    matched.append(a)
+                    used_ids.add(a.id)
+                    break
+            if len(matched) >= limit:
+                return matched[:limit]
+
+    return matched[:limit]
+
+
 def _build_reference_constraints_block(character_assets: list[VideoAsset]) -> str:
     """构建参考资产使用说明，按资产类型给出明确角色标注。"""
     if not character_assets:
@@ -615,6 +746,7 @@ def _build_reference_constraints_block(character_assets: list[VideoAsset]) -> st
         "character_reference": "角色身份参考图",
         "story_character_reference": "角色身份参考图",
         "scene_reference": "场景氛围参考图",
+        "prop_reference": "道具参考图",
         "storyboard_frame": "分镜构图参考图",
         "frame": "首尾帧参考图",
     }
@@ -637,9 +769,11 @@ def _build_reference_constraints_block(character_assets: list[VideoAsset]) -> st
         "MANDATORY USAGE RULES: "
         "1. Character reference images: lock face shape, hairstyle, eye color, outfit, body type for each character. All identity markers must match exactly. "
         "2. Storyboard reference image: use as the authoritative shot plan -- follow the panel-by-panel camera framing, character blocking, action progression, and timing shown in the storyboard. The storyboard defines the exact visual sequence to generate. "
-        "3. Scene reference images: match atmosphere, color palette, and lighting setup. "
-        "4. Frame reference images: first frame = start state, last frame = end state. Generate smooth transition between them. "
-        "CRITICAL: The storyboard image is the director's blueprint. The generated video must faithfully follow the shot breakdown, camera movements, and character actions depicted in the storyboard panels."
+        "3. Scene reference images: match atmosphere, color palette, lighting setup, architecture, and environmental details. Keep the same location perspective and spatial layout. "
+        "4. Prop reference images: maintain exact prop appearance -- material, color, size, shape, texture, wear marks, and distinctive features must be identical. Props must stay visually consistent across all shots. "
+        "5. Frame reference images: first frame = start state, last frame = end state. Generate smooth transition between them. "
+        "CRITICAL: The storyboard image is the director's blueprint. The generated video must faithfully follow the shot breakdown, camera movements, and character actions depicted in the storyboard panels. "
+        "CONSISTENCY RULE: All visual elements (characters, scene, props) must remain identical to their reference images throughout the entire video. No drift, no variation, no reinterpretation."
     )
     return " ".join(parts)
 
@@ -4821,6 +4955,8 @@ async def parse_shot_asset_prompts(
 Return JSON schema:
 {{
   "character_prompts": [{{"name":"...", "prompt":"..."}}],
+  "scene_prompt": "...",
+  "prop_prompts": [{{"name":"...", "prompt":"..."}}],
   "storyboard_prompt": "...",
   "first_frame_prompt": "...",
   "last_frame_prompt": "...",
@@ -4830,7 +4966,9 @@ Return JSON schema:
 Rules:
 1. Character prompts are CHARACTER DESIGN SHEETS ONLY. No scene events, no system UI text overlays, no chapter plot reenactment.
 2. Character prompts must request one-page turnaround sheet with: front portrait, side portrait, full-body, expression set, outfit/accessory callouts.
-3. Storyboard prompt MUST be a time-segmented shot breakdown covering ALL content that will appear in the final video. Requirements:
+3. Scene prompt must describe the ENVIRONMENT ONLY (location, architecture, lighting, atmosphere, color palette). No characters, no actions. Example: "A dimly lit medieval tavern with wooden beams, candlelight, stone walls, warm amber tones".
+4. Prop prompts are OBJECT DESIGN SHEETS for key props appearing in this shot. Each prop needs: name, detailed visual description (material, size, color, condition, distinctive features). Only include props that are visually important or appear repeatedly. Example: [{{"name": "Ancient Sword", "prompt": "A weathered double-edged sword with ornate golden hilt, leather-wrapped grip, blade shows battle scratches, 90cm overall length"}}].
+5. Storyboard prompt MUST be a time-segmented shot breakdown covering ALL content that will appear in the final video. Requirements:
    a. Divide the shot into 3-5 equal time segments with [X-Ys] timestamps.
    b. For EACH segment describe: exact camera framing and movement state, precise character positions (foreground/background/left/right), facial expressions, body language, lighting changes, any props or environment details visible.
    c. Each segment description must be 2-4 sentences with vivid visual detail (not just one line).
@@ -4897,6 +5035,19 @@ Base video prompt:
             if not cleaned_char_prompts:
                 cleaned_char_prompts = [{"name": i["name"], "prompt": i["prompt"]} for i in default_character_prompts]
 
+            final_scene_prompt = str(result.get("scene_prompt") or "").strip() or f"Scene at {scene_location}. Mood: {scene_mood}."
+
+            ai_prop_prompts = result.get("prop_prompts", [])
+            cleaned_prop_prompts: list[dict] = []
+            if isinstance(ai_prop_prompts, list):
+                for item in ai_prop_prompts:
+                    if not isinstance(item, dict):
+                        continue
+                    name = str(item.get("name") or "").strip()
+                    prompt = str(item.get("prompt") or "").strip()
+                    if name and prompt:
+                        cleaned_prop_prompts.append({"name": name, "prompt": prompt})
+
             final_storyboard = str(result.get("storyboard_prompt") or "").strip() or base_storyboard
             final_first = str(result.get("first_frame_prompt") or "").strip() or base_first
             final_last = str(result.get("last_frame_prompt") or "").strip() or base_last
@@ -4908,6 +5059,8 @@ Base video prompt:
             shot.first_frame_prompt = final_first
             shot.last_frame_prompt = final_last
             shot.character_prompts_json = cleaned_char_prompts  # pyright: ignore[reportAttributeAccessIssue]
+            shot.scene_prompt = final_scene_prompt
+            shot.prop_prompts_json = cleaned_prop_prompts
             db.commit()
 
             logger.info("Shot %s parse_prompts AI OK: char_count=%d storyboard_len=%d",
@@ -4917,6 +5070,8 @@ Base video prompt:
                 "shot_id": shot_id,
                 "style_preset": style_name,
                 "character_prompts": cleaned_char_prompts,
+                "scene_prompt": final_scene_prompt,
+                "prop_prompts": cleaned_prop_prompts,
                 "storyboard_prompt": final_storyboard,
                 "first_frame_prompt": final_first,
                 "last_frame_prompt": final_last,
@@ -4943,6 +5098,8 @@ Base video prompt:
     shot.first_frame_prompt = fallback_first
     shot.last_frame_prompt = fallback_last
     shot.character_prompts_json = fallback_char  # pyright: ignore[reportAttributeAccessIssue]
+    shot.scene_prompt = f"Scene at {scene_location}. Mood: {scene_mood}."
+    shot.prop_prompts_json = []
     db.commit()
 
     logger.info("Shot %s parse_prompts DONE: char_count=%d storyboard_len=%d video_len=%d",
@@ -4952,6 +5109,8 @@ Base video prompt:
         "shot_id": shot_id,
         "style_preset": style_name,
         "character_prompts": fallback_char,
+        "scene_prompt": f"Scene at {scene_location}. Mood: {scene_mood}.",
+        "prop_prompts": [],
         "storyboard_prompt": fallback_storyboard,
         "first_frame_prompt": fallback_first,
         "last_frame_prompt": fallback_last,
@@ -5034,6 +5193,178 @@ async def generate_shot_character_asset(
     db.add(asset)
     db.commit()
     # 配额扣减
+    _check_and_consume_quota_wrapper(user.id, "manga.image.monthly_limit", 1, db, deduct=True)
+    db.refresh(asset)
+
+    return {
+        "shot_id": shot_id,
+        "asset": {
+            "id": asset.id,
+            "name": asset.name,
+            "file_path": _to_video_url(asset.file_path),
+            "asset_type": asset.asset_type,
+            "prompt": asset.prompt or "",
+            "style_preset": asset.style_preset,
+            "status": asset.status,
+            "created_at": _serialize_datetime(asset.created_at),
+        },
+    }
+
+
+@router.post("/api/shots/{shot_id}/prop-assets/generate")
+async def generate_shot_prop_asset(
+    shot_id: int,
+    body: dict,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Generate a prop reference asset for a shot."""
+    user = _require_user(request, db)
+    shot = db.get(VideoShot, shot_id)
+    if not shot:
+        raise HTTPException(404, "Shot not found")
+    if not shot.scene:
+        raise HTTPException(404, "Scene not found")
+    _require_chapter_for_user(shot.scene.chapter_id, user, db)
+
+    prop_name = str(body.get("prop_name") or "Prop").strip() or "Prop"
+    prompt = str(body.get("prompt") or "").strip()
+    if not prompt:
+        raise HTTPException(400, "Prop prompt is required")
+
+    style_ctx = _resolve_effective_style_for_shot(shot, db, body.get("style_preset"))
+    style_name = style_ctx.get("name") or ""
+    image_style_params = style_ctx.get("image_style_params") or {}
+
+    chapter_id = shot.scene.chapter_id
+    prop_dir = _VIDEO_OUTPUTS_DIR / "prop_refs" / f"chapter_{chapter_id}" / f"shot_{shot_id}"
+    prop_dir.mkdir(parents=True, exist_ok=True)
+    safe_name = re.sub(r"[^\w\u4e00-\u9fff-]+", "_", prop_name)
+    file_name = f"{safe_name}_{uuid.uuid4().hex[:8]}.png"
+    full_path = prop_dir / file_name
+
+    final_prompt = _merge_style_prompt(prompt, style_ctx.get("prompt_template"), style_name)
+    api_key = _user_image_api_key(request)
+    _configure_image_service(request, db)
+
+    _check_and_consume_quota_wrapper(user.id, "manga.image.monthly_limit", 1, db, deduct=False)
+
+    try:
+        await image2_service.generate_reference_image(
+            prompt=final_prompt,
+            output_path=full_path,
+            api_key=api_key or None,
+            size=image_style_params.get("size", "1792x1024"),
+        )
+    except Exception as e:
+        logger.warning("Prop reference generation failed (shot=%s, name=%s): %s", shot_id, prop_name, e)
+        raise HTTPException(502, f"道具参考图生成失败: {e}")
+
+    relative_path = f"prop_refs/chapter_{chapter_id}/shot_{shot_id}/{file_name}"
+    source_asset_ids = body.get("source_asset_ids")
+    if not isinstance(source_asset_ids, list):
+        source_asset_ids = None
+
+    asset = VideoAsset(
+        story_id=shot.scene.chapter.story_id if shot.scene.chapter else None,
+        chapter_id=shot.scene.chapter_id,
+        scene_id=shot.scene_id,
+        shot_id=shot_id,
+        asset_type="prop_reference",
+        name=f"Prop - {prop_name}",
+        file_path=relative_path,
+        provider="image2",
+        prompt=final_prompt,
+        source_asset_ids_json=source_asset_ids,
+        style_preset=style_name or None,
+    )
+    db.add(asset)
+    db.commit()
+    _check_and_consume_quota_wrapper(user.id, "manga.image.monthly_limit", 1, db, deduct=True)
+    db.refresh(asset)
+
+    return {
+        "shot_id": shot_id,
+        "asset": {
+            "id": asset.id,
+            "name": asset.name,
+            "file_path": _to_video_url(asset.file_path),
+            "asset_type": asset.asset_type,
+            "prompt": asset.prompt or "",
+            "style_preset": asset.style_preset,
+            "status": asset.status,
+            "created_at": _serialize_datetime(asset.created_at),
+        },
+    }
+
+
+@router.post("/api/shots/{shot_id}/scene-assets/generate")
+async def generate_shot_scene_asset(
+    shot_id: int,
+    body: dict,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Generate a scene reference asset for a shot (shot-level scene, not scene-level concept art)."""
+    user = _require_user(request, db)
+    shot = db.get(VideoShot, shot_id)
+    if not shot:
+        raise HTTPException(404, "Shot not found")
+    if not shot.scene:
+        raise HTTPException(404, "Scene not found")
+    _require_chapter_for_user(shot.scene.chapter_id, user, db)
+
+    prompt = str(body.get("prompt") or "").strip()
+    if not prompt:
+        prompt = shot.scene_prompt or f"Scene at {shot.scene.location or 'unknown'}. Mood: {shot.scene.mood or 'neutral'}."
+
+    style_ctx = _resolve_effective_style_for_shot(shot, db, body.get("style_preset"))
+    style_name = style_ctx.get("name") or ""
+    image_style_params = style_ctx.get("image_style_params") or {}
+
+    chapter_id = shot.scene.chapter_id
+    scene_dir = _VIDEO_OUTPUTS_DIR / "scene_refs" / f"chapter_{chapter_id}" / f"shot_{shot_id}"
+    scene_dir.mkdir(parents=True, exist_ok=True)
+    file_name = f"scene_{uuid.uuid4().hex[:8]}.png"
+    full_path = scene_dir / file_name
+
+    final_prompt = _merge_style_prompt(prompt, style_ctx.get("prompt_template"), style_name)
+    api_key = _user_image_api_key(request)
+    _configure_image_service(request, db)
+
+    _check_and_consume_quota_wrapper(user.id, "manga.image.monthly_limit", 1, db, deduct=False)
+
+    try:
+        await image2_service.generate_reference_image(
+            prompt=final_prompt,
+            output_path=full_path,
+            api_key=api_key or None,
+            size=image_style_params.get("size", "1792x1024"),
+        )
+    except Exception as e:
+        logger.warning("Scene reference generation failed (shot=%s): %s", shot_id, e)
+        raise HTTPException(502, f"场景参考图生成失败: {e}")
+
+    relative_path = f"scene_refs/chapter_{chapter_id}/shot_{shot_id}/{file_name}"
+    source_asset_ids = body.get("source_asset_ids")
+    if not isinstance(source_asset_ids, list):
+        source_asset_ids = None
+
+    asset = VideoAsset(
+        story_id=shot.scene.chapter.story_id if shot.scene.chapter else None,
+        chapter_id=shot.scene.chapter_id,
+        scene_id=shot.scene_id,
+        shot_id=shot_id,
+        asset_type="scene_reference",
+        name=f"Scene - {shot.scene.title or f'Scene {shot.scene.scene_number}'}",
+        file_path=relative_path,
+        provider="image2",
+        prompt=final_prompt,
+        source_asset_ids_json=source_asset_ids,
+        style_preset=style_name or None,
+    )
+    db.add(asset)
+    db.commit()
     _check_and_consume_quota_wrapper(user.id, "manga.image.monthly_limit", 1, db, deduct=True)
     db.refresh(asset)
 
