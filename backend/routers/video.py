@@ -98,6 +98,7 @@ from schemas import (
     RegenerateShotFrameRequest,
     RegenerateShotRequest,
     ChapterWorkflowStageActionRequest,
+    ChapterWorkflowPromptReanalyzeRequest,
     RetryJobRequest,
     ScriptSceneUpdate,
     StoryboardActionRequest,
@@ -135,7 +136,11 @@ from services.video_chapter_pipeline import (
     parse_chapter_shots,
     generate_storyboards_for_shots,
     generate_videos_for_shots,
+    reanalyze_storyboard_prompts,
+    reanalyze_shot_prompts,
     run_all_stages,
+    clear_shot_storyboard,
+    clear_shot_video,
 )
 
 # 模块级标记：init_db 在整个进程生命周期中只调用一次
@@ -182,6 +187,42 @@ def _user_video_api_key(request: Request) -> tuple[str | None, str, str]:
         effective_key = key or None
 
     return effective_key, resolved_base_url.rstrip("/"), resolved_model
+
+
+def _configure_video_api(
+    resolved_base_url: str,
+    resolved_model: str,
+) -> None:
+    """将解析到的视频 API 配置注入到 video_api 模块的运行时变量。"""
+    video_api_service.configure(
+        base_url=resolved_base_url or video_api_service._resolved_base_url(),
+        model=resolved_model or video_api_service._resolved_model(),
+    )
+
+
+def _configure_image_service(request: Request, db: Session) -> None:
+    """从数据库配置注入 image2 服务的运行时变量（base_url、model）。"""
+    user = getattr(request.state, "current_user", None)
+    capabilities = _user_api_override_capabilities(user, db)
+    override_base_url = request.headers.get("x-image-base-url") or None
+    override_model = request.headers.get("x-image-model") or None
+    admin_base_url = str(_get_platform_setting("api.image.base_url", db, "")).strip()
+    admin_model = str(_get_platform_setting("api.image.model", db, "")).strip()
+    resolved_base_url = (
+        override_base_url.strip()
+        if capabilities["can_override_api_url"] and override_base_url and override_base_url.strip()
+        else admin_base_url
+    )
+    resolved_model = (
+        override_model.strip()
+        if capabilities["can_override_api_url"] and override_model and override_model.strip()
+        else admin_model
+    )
+    if resolved_base_url:
+        image2_service.configure_runtime(
+            base_url=resolved_base_url.rstrip("/"),
+            model=resolved_model or "",
+        )
 
 
 def _user_image_api_key(request: Request) -> str | None:
@@ -236,12 +277,12 @@ def _user_deepseek_api_key(request: Request, db: Session) -> str | None:
     override_model = request.headers.get("x-deepseek-model") or None
     user = getattr(request.state, "current_user", None)
     capabilities = _user_api_override_capabilities(user, db)
-    admin_base_url = str(_get_platform_setting("api.deepseek.base_url", db, deepseek_service.DEEPSEEK_BASE_URL)).strip()
-    admin_model = str(_get_platform_setting("api.deepseek.model", db, deepseek_service.DEEPSEEK_MODEL)).strip()
+    admin_base_url = str(_get_platform_setting("api.deepseek.base_url", db, "")).strip()
+    admin_model = str(_get_platform_setting("api.deepseek.model", db, "")).strip()
     resolved_base_url = override_base_url.strip() if capabilities["can_override_api_url"] and override_base_url and override_base_url.strip() else admin_base_url
     resolved_model = override_model.strip() if capabilities["can_override_api_url"] and override_model and override_model.strip() else admin_model
-    deepseek_service.DEEPSEEK_BASE_URL = resolved_base_url.rstrip("/") or deepseek_service.DEEPSEEK_BASE_URL
-    deepseek_service.DEEPSEEK_MODEL = resolved_model or deepseek_service.DEEPSEEK_MODEL
+    if resolved_base_url:
+        deepseek_service.configure_runtime(base_url=resolved_base_url, model=resolved_model or "")
     if capabilities["can_override_api_key"] and override:
         return override
     return _get_platform_setting("api.deepseek.api_key", db, "") or None
@@ -1565,6 +1606,8 @@ async def generate_scene_concept_art(
     full_path = scene_dir / filename
 
     api_key = _user_image_api_key(request)
+    # 注入 image2 服务的运行时配置（base_url、model）
+    _configure_image_service(request, db)
 
     # 配额预检
     _check_and_consume_quota_wrapper(user.id, "manga.image.monthly_limit", 1, db, deduct=False)
@@ -1764,6 +1807,7 @@ async def update_shot(
     style_template = style_ctx["prompt_template"]
 
     api_key, base_url, resolved_model = _user_video_api_key(request)
+    _configure_video_api(base_url, resolved_model)
     resolved_model = body.model or resolved_model
     aspect_ratio = body.aspect_ratio or video_style_params.get("aspect_ratio") or "16:9"
     grounding = _build_story_grounding_block(shot.scene.chapter.story if shot.scene and shot.scene.chapter else None, shot.scene.chapter if shot.scene else None, shot.scene)
@@ -1955,6 +1999,7 @@ async def render_shot_video_stream(
     style_template = style_ctx["prompt_template"]
 
     api_key, base_url, resolved_model = _user_video_api_key(request)
+    _configure_video_api(base_url, resolved_model)
     resolved_model = body.model or resolved_model
     aspect_ratio = body.aspect_ratio or video_style_params.get("aspect_ratio") or "16:9"
     grounding = _build_story_grounding_block(shot.scene.chapter.story if shot.scene and shot.scene.chapter else None, shot.scene.chapter if shot.scene else None, shot.scene)
@@ -2305,6 +2350,7 @@ async def get_video_job(
 
     if job.status not in {"succeeded", "failed", "cancelled"} and job.provider_job_id:
         api_key, base_url, _model = _user_video_api_key(request)
+        _configure_video_api(base_url, _model)
         latest = await video_gen_service.query_job_status(
             provider=job.provider,
             provider_job_id=job.provider_job_id,
@@ -2342,6 +2388,7 @@ async def get_video_job(
         )
         if clip is None and job.provider_job_id:
             api_key, base_url, _model = _user_video_api_key(request)
+            _configure_video_api(base_url, _model)
             fetched = await video_gen_service.fetch_job_result(
                 provider=job.provider,
                 provider_job_id=job.provider_job_id,
@@ -2764,6 +2811,8 @@ async def regenerate_video_asset(
         raise HTTPException(404, "Source image not found")
 
     api_key = _user_image_api_key(request)
+    # 注入 image2 服务的运行时配置（base_url、model）
+    _configure_image_service(request, db)
     regen_dir = _VIDEO_OUTPUTS_DIR / "regen_assets"
     regen_dir.mkdir(parents=True, exist_ok=True)
     output_filename = f"asset_{asset.id}_regen_{uuid.uuid4().hex[:8]}.png"
@@ -3446,6 +3495,8 @@ async def generate_character_ref_image(
     full_path = char_dir / filename
 
     api_key = _user_image_api_key(request)
+    # 注入 image2 服务的运行时配置（base_url、model）
+    _configure_image_service(request, db)
 
     # 配额预检
     _check_and_consume_quota_wrapper(user.id, "manga.image.monthly_limit", 1, db, deduct=False)
@@ -3558,6 +3609,8 @@ async def redraw_character_ref_image(
     full_path = char_dir / filename
 
     api_key = _user_image_api_key(request)
+    # 注入 image2 服务的运行时配置（base_url、model）
+    _configure_image_service(request, db)
 
     try:
         if mode == "partial" and mask_base64:
@@ -4074,7 +4127,7 @@ async def render_shot_storyboard(
     # 构建故事版 prompt（精简，避免图片 API 超时）
     duration = min(10, shot.duration_seconds or 10)
     content_full = shot.storyboard_prompt or shot.action_description or f"Shot {shot.shot_number}"
-    # 专业电影导演故事板 prompt — 中文输出，9:16 纵向，角色形象由参考图决定
+    # 专业电影导演故事板 prompt — 中文输出，16:9横向，角色形象由参考图决定
     storyboard_prompt = (
         f"你是一位拥有20年经验的好莱坞电影导演和分镜导演。请将以下剧情转换为一张完整的电影级故事板展示图。\n\n"
         f"【剧情内容】\n{content_full}\n\n"
@@ -4113,6 +4166,8 @@ async def render_shot_storyboard(
         style_name,
     )
     api_key = _user_image_api_key(request)
+    # 注入 image2 服务的运行时配置（base_url、model）
+    _configure_image_service(request, db)
 
     # 配额预检
     _check_and_consume_quota_wrapper(user.id, "manga.image.monthly_limit", 1, db, deduct=False)
@@ -4338,6 +4393,7 @@ async def generate_shot_frames(
     ref_paths = _resolve_asset_file_paths(ref_assets)
 
     api_key, _base_url, _model = _user_video_api_key(request)
+    _configure_video_api(_base_url, _model)
     frames_dir = _VIDEO_OUTPUTS_DIR / "frames"
     frames_dir.mkdir(parents=True, exist_ok=True)
 
@@ -4455,6 +4511,8 @@ async def regenerate_shot_frame(
     file_path = f"frames/{filename}"
 
     api_key = _user_image_api_key(request)
+    # 注入 image2 服务的运行时配置（base_url、model）
+    _configure_image_service(request, db)
     prompt = body.prompt or old_asset.prompt or ""
     style_ctx = _resolve_effective_style_for_shot(shot, db, body.style_preset)
     ref_asset_ids = _collect_shot_reference_asset_ids(
@@ -4821,6 +4879,8 @@ async def parse_shot_asset_prompts(
 Return JSON schema:
 {{
   "character_prompts": [{{"name":"...", "prompt":"..."}}],
+  "scene_prompt": "...",
+  "prop_prompts": [{{"name":"...", "prompt":"..."}}],
   "storyboard_prompt": "...",
   "first_frame_prompt": "...",
   "last_frame_prompt": "...",
@@ -4830,16 +4890,18 @@ Return JSON schema:
 Rules:
 1. Character prompts are CHARACTER DESIGN SHEETS ONLY. No scene events, no system UI text overlays, no chapter plot reenactment.
 2. Character prompts must request one-page turnaround sheet with: front portrait, side portrait, full-body, expression set, outfit/accessory callouts.
-3. Storyboard prompt MUST be a time-segmented shot breakdown covering ALL content that will appear in the final video. Requirements:
+3. Scene prompt must describe the ENVIRONMENT ONLY (location, architecture, lighting, atmosphere, color palette). No characters, no actions. Example: "A dimly lit medieval tavern with wooden beams, candlelight, stone walls, warm amber tones".
+4. Prop prompts are OBJECT DESIGN SHEETS for key props appearing in this shot. Each prop needs: name, detailed visual description (material, size, color, condition, distinctive features). Only include props that are visually important or appear repeatedly. Example: [{{"name": "Ancient Sword", "prompt": "A weathered double-edged sword with ornate golden hilt, leather-wrapped grip, blade shows battle scratches, 90cm overall length"}}].
+5. Storyboard prompt MUST be a time-segmented shot breakdown covering ALL content that will appear in the final video. Requirements:
    a. Divide the shot into 3-5 equal time segments with [X-Ys] timestamps.
    b. For EACH segment describe: exact camera framing and movement state, precise character positions (foreground/background/left/right), facial expressions, body language, lighting changes, any props or environment details visible.
    c. Each segment description must be 2-4 sentences with vivid visual detail (not just one line).
    d. Include all dialogue/exactly when it occurs, with speaker and tone.
    e. End with complete camera/director notes: lens choice, focus pull, lighting setup, color temperature, depth of field.
-4. Video prompt must describe the COMPLETE continuous action of the shot from start to end, including all camera movement, character blocking, lighting progression, and sound design. It must be consistent with the storyboard segments.
-5. First/last frame prompts must capture the exact visual state at the beginning and end of the shot.
-6. Keep style consistency with selected style preset.
-7. Output valid JSON object only.
+6. Video prompt must describe the COMPLETE continuous action of the shot from start to end, including all camera movement, character blocking, lighting progression, and sound design. It must be consistent with the storyboard segments.
+7. First/last frame prompts must capture the exact visual state at the beginning and end of the shot.
+8. Keep style consistency with selected style preset.
+9. Output valid JSON object only.
 
 Selected style: {style_name}
 Shot grounding: {shot_grounding}
@@ -4847,6 +4909,9 @@ Inherited character constraints: {inherited_constraints}
 
 Character seeds (keep and improve, do not add scene event):
 {ai_character_json}
+
+Scene location: {scene_location}
+Scene mood: {scene_mood}
 
 Base storyboard prompt:
 {base_storyboard}
@@ -4902,12 +4967,27 @@ Base video prompt:
             final_last = str(result.get("last_frame_prompt") or "").strip() or base_last
             final_video = str(result.get("video_prompt") or "").strip() or base_video
 
+            final_scene_prompt = str(result.get("scene_prompt") or "").strip() or f"Scene at {scene_location}. Mood: {scene_mood}."
+
+            ai_prop_prompts = result.get("prop_prompts", [])
+            cleaned_prop_prompts: list[dict] = []
+            if isinstance(ai_prop_prompts, list):
+                for item in ai_prop_prompts:
+                    if not isinstance(item, dict):
+                        continue
+                    name = str(item.get("name") or "").strip()
+                    prompt = str(item.get("prompt") or "").strip()
+                    if name and prompt:
+                        cleaned_prop_prompts.append({"name": name, "prompt": prompt})
+
             # 持久化到数据库
             shot.storyboard_prompt = final_storyboard
             shot.video_prompt = final_video
             shot.first_frame_prompt = final_first
             shot.last_frame_prompt = final_last
             shot.character_prompts_json = cleaned_char_prompts  # pyright: ignore[reportAttributeAccessIssue]
+            shot.scene_prompt = final_scene_prompt
+            shot.prop_prompts_json = cleaned_prop_prompts  # pyright: ignore[reportAttributeAccessIssue]
             db.commit()
 
             logger.info("Shot %s parse_prompts AI OK: char_count=%d storyboard_len=%d",
@@ -4917,6 +4997,8 @@ Base video prompt:
                 "shot_id": shot_id,
                 "style_preset": style_name,
                 "character_prompts": cleaned_char_prompts,
+                "scene_prompt": final_scene_prompt,
+                "prop_prompts": cleaned_prop_prompts,
                 "storyboard_prompt": final_storyboard,
                 "first_frame_prompt": final_first,
                 "last_frame_prompt": final_last,
@@ -4943,6 +5025,8 @@ Base video prompt:
     shot.first_frame_prompt = fallback_first
     shot.last_frame_prompt = fallback_last
     shot.character_prompts_json = fallback_char  # pyright: ignore[reportAttributeAccessIssue]
+    shot.scene_prompt = f"Scene at {scene_location}. Mood: {scene_mood}."
+    shot.prop_prompts_json = []  # pyright: ignore[reportAttributeAccessIssue]
     db.commit()
 
     logger.info("Shot %s parse_prompts DONE: char_count=%d storyboard_len=%d video_len=%d",
@@ -4952,6 +5036,8 @@ Base video prompt:
         "shot_id": shot_id,
         "style_preset": style_name,
         "character_prompts": fallback_char,
+        "scene_prompt": f"Scene at {scene_location}. Mood: {scene_mood}.",
+        "prop_prompts": [],
         "storyboard_prompt": fallback_storyboard,
         "first_frame_prompt": fallback_first,
         "last_frame_prompt": fallback_last,
@@ -4998,6 +5084,8 @@ async def generate_shot_character_asset(
 
     final_prompt = _merge_style_prompt(prompt, style_ctx.get("prompt_template"), style_name)
     api_key = _user_image_api_key(request)
+    # 注入 image2 服务的运行时配置（base_url、model）
+    _configure_image_service(request, db)
 
     # 配额预检
     _check_and_consume_quota_wrapper(user.id, "manga.image.monthly_limit", 1, db, deduct=False)
@@ -5136,6 +5224,7 @@ async def render_shot_video(
     style_template = style_ctx["prompt_template"]
 
     api_key, base_url, resolved_model = _user_video_api_key(request)
+    _configure_video_api(base_url, resolved_model)
     resolved_model = body.model or resolved_model
     aspect_ratio = body.aspect_ratio or video_style_params.get("aspect_ratio") or "16:9"
     grounding = _build_story_grounding_block(shot.scene.chapter.story if shot.scene and shot.scene.chapter else None, shot.scene.chapter if shot.scene else None, shot.scene)
@@ -5570,11 +5659,7 @@ async def api_create_chapter_workflow(
         video_style=body.video_style,
     )
 
-    # 后台启动流水线（分别传递两个 key，避免 image 误用 deepseek key）
-    deepseek_api_key = _user_deepseek_api_key(request, db)
-    image_api_key = _user_image_api_key(request)
-    await start_workflow_background(wf.id, api_key=deepseek_api_key, image_api_key=image_api_key)
-
+    # 不自动启动流水线——用户需手动触发拆镜/故事版/视频各阶段
     refreshed_workflow = get_chapter_workflow(wf.id)
     return refreshed_workflow or wf
 
@@ -5686,7 +5771,11 @@ async def api_regenerate_shot_storyboard(
         raise HTTPException(403, "无权访问")
 
     api_key = _user_image_api_key(request)
-    updated_shot = await regenerate_shot_storyboard(shot_id, api_key, body.prompt_override)
+    # 注入 image2 服务的运行时配置（base_url、model）
+    _configure_image_service(request, db)
+    # 注入 image2 服务的运行时配置（base_url、model）
+    _configure_image_service(request, db)
+    updated_shot = await regenerate_shot_storyboard(shot_id, api_key, body.prompt_override, ref_asset_ids=body.reference_asset_ids)
 
     if not updated_shot:
         raise HTTPException(500, "重新生成故事版失败")
@@ -5716,7 +5805,11 @@ async def api_regenerate_shot_video(
         raise HTTPException(403, "无权访问")
 
     api_key = _user_image_api_key(request)
-    updated_shot = await regenerate_shot_video(shot_id, api_key, body.prompt_override)
+    # 注入 image2 服务的运行时配置（base_url、model）
+    _configure_image_service(request, db)
+    # 注入 image2 服务的运行时配置（base_url、model）
+    _configure_image_service(request, db)
+    updated_shot = await regenerate_shot_video(shot_id, api_key, body.prompt_override, ref_asset_ids=body.reference_asset_ids)
 
     if not updated_shot:
         raise HTTPException(500, "重新生成视频失败")
@@ -5825,6 +5918,8 @@ async def api_generate_storyboards(
         raise HTTPException(400, f"当前状态 {wf.workflow_status} 不允许故事版操作")
 
     deepseek_api_key = _user_deepseek_api_key(request, db)
+    # 注入 image2 服务的运行时配置（base_url、model）
+    _configure_image_service(request, db)
     image_api_key = _user_image_api_key(request)
 
     if not image_api_key:
@@ -5843,6 +5938,139 @@ async def api_generate_storyboards(
     )
 
     return result
+
+
+@router.post("/api/video/chapter-workflows/{workflow_id}/storyboards/reanalyze-prompt")
+async def api_reanalyze_storyboard_prompts(
+    workflow_id: int,
+    body: ChapterWorkflowPromptReanalyzeRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """仅重新分析故事版提示词（DeepSeek 重新生成 prompt），不生成图片。"""
+    user = _require_user(request, db)
+    wf = get_chapter_workflow(workflow_id)
+    if not wf:
+        raise HTTPException(404, "工作流不存在")
+    story = db.get(Story, wf.story_id)
+    if not story or story.owner_user_id != user.id:
+        raise HTTPException(403, "无权访问")
+
+    deepseek_api_key = _user_deepseek_api_key(request, db)
+    if not deepseek_api_key:
+        raise HTTPException(400, "请配置 DeepSeek API Key")
+
+    result = await reanalyze_storyboard_prompts(
+        workflow_id=workflow_id,
+        shot_ids=body.shot_ids or None,
+        deepseek_api_key=deepseek_api_key,
+    )
+    return result
+
+
+@router.post("/api/video/chapter-workflows/shots/{shot_id}/reanalyze-prompts")
+async def api_reanalyze_chapter_shot_prompts(
+    shot_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """重新分析单镜头的全部提示词（故事版、视频、角色），返回新 prompt。"""
+    user = _require_user(request, db)
+    shot = db.get(ChapterVideoShot, shot_id)
+    if not shot:
+        raise HTTPException(404, "镜头不存在")
+    wf = db.get(ChapterVideoWorkflow, shot.workflow_id)
+    if not wf:
+        raise HTTPException(404, "工作流不存在")
+    story = db.get(Story, wf.story_id)
+    if not story or story.owner_user_id != user.id:
+        raise HTTPException(403, "无权访问")
+
+    deepseek_api_key = _user_deepseek_api_key(request, db)
+    if not deepseek_api_key:
+        raise HTTPException(400, "请配置 DeepSeek API Key")
+
+    result = await reanalyze_shot_prompts(
+        shot_id=shot_id,
+        deepseek_api_key=deepseek_api_key,
+    )
+    return result
+
+
+@router.post("/api/video/chapter-workflows/shots/{shot_id}/clear-storyboard")
+async def api_clear_shot_storyboard(
+    shot_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """清除 shot 的故事版图片（仅清除 URL 字段，不删除磁盘文件）。"""
+    user = _require_user(request, db)
+    shot = db.get(ChapterVideoShot, shot_id)
+    if not shot:
+        raise HTTPException(404, "镜头不存在")
+    wf = db.get(ChapterVideoWorkflow, shot.workflow_id)
+    if not wf:
+        raise HTTPException(404, "工作流不存在")
+    story = db.get(Story, wf.story_id)
+    if not story or story.owner_user_id != user.id:
+        raise HTTPException(403, "无权访问")
+    updated = clear_shot_storyboard(shot_id)
+    return {"ok": True, "shot": ChapterVideoShotOut.model_validate(updated)}
+
+
+@router.post("/api/video/chapter-workflows/shots/{shot_id}/clear-video")
+async def api_clear_shot_video(
+    shot_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """清除 shot 的视频（仅清除 URL 字段，不删除磁盘文件）。"""
+    user = _require_user(request, db)
+    shot = db.get(ChapterVideoShot, shot_id)
+    if not shot:
+        raise HTTPException(404, "镜头不存在")
+    wf = db.get(ChapterVideoWorkflow, shot.workflow_id)
+    if not wf:
+        raise HTTPException(404, "工作流不存在")
+    story = db.get(Story, wf.story_id)
+    if not story or story.owner_user_id != user.id:
+        raise HTTPException(403, "无权访问")
+    updated = clear_shot_video(shot_id)
+    return {"ok": True, "shot": ChapterVideoShotOut.model_validate(updated)}
+
+
+@router.post("/api/video/chapter-workflows/shots/{shot_id}/save-prompts")
+async def api_save_chapter_shot_prompts(
+    shot_id: int,
+    body: dict[str, str | None],
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """保存镜头提示词（storyboard_prompt 或 video_prompt）。"""
+    user = _require_user(request, db)
+    shot = db.get(ChapterVideoShot, shot_id)
+    if not shot:
+        raise HTTPException(404, "镜头不存在")
+    wf = db.get(ChapterVideoWorkflow, shot.workflow_id)
+    if not wf:
+        raise HTTPException(404, "工作流不存在")
+    story = db.get(Story, wf.story_id)
+    if not story or story.owner_user_id != user.id:
+        raise HTTPException(403, "无权访问")
+
+    updates: dict[str, str | None] = {}
+    sp = body.get("storyboard_prompt")
+    if sp is not None:
+        updates["storyboard_prompt"] = str(sp).strip() or None
+    vp = body.get("video_prompt")
+    if vp is not None:
+        updates["video_prompt"] = str(vp).strip() or None
+    if updates:
+        from services.video_chapter_pipeline import update_shot
+        updated = update_shot(shot_id, **updates)
+        return {"ok": True, "shot": ChapterVideoShotOut.model_validate(updated)}
+
+    return {"ok": True, "shot": ChapterVideoShotOut.model_validate(shot)}
 
 
 @router.post("/api/video/chapter-workflows/{workflow_id}/videos")
@@ -5865,6 +6093,8 @@ async def api_generate_videos(
         raise HTTPException(400, f"当前状态 {wf.workflow_status} 不允许视频操作")
 
     deepseek_api_key = _user_deepseek_api_key(request, db)
+    # 注入 image2 服务的运行时配置（base_url、model）
+    _configure_image_service(request, db)
     image_api_key = _user_image_api_key(request)
 
     if not image_api_key:
@@ -5899,6 +6129,8 @@ async def api_run_all_stages(
         raise HTTPException(403, "无权访问")
 
     deepseek_api_key = _user_deepseek_api_key(request, db)
+    # 注入 image2 服务的运行时配置（base_url、model）
+    _configure_image_service(request, db)
     image_api_key = _user_image_api_key(request)
 
     if not deepseek_api_key:
