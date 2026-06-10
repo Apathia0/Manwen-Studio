@@ -647,6 +647,156 @@ def _select_character_reference_assets_for_scene(scene: ScriptScene, db: Session
     return matched[:limit]
 
 
+def _select_scene_reference_assets_for_shot(shot: VideoShot, db: Session, limit: int = 3) -> list[VideoAsset]:
+    """选择当前 shot 可用的场景参考图资产（继承逻辑）。
+
+    优先级：
+    1. 当前 shot 自己的 scene_reference 资产
+    2. 同 scene_id 下其他 shot 的 scene_reference 资产（最近创建的优先）
+    3. Scene 级别的 concept_art_asset_id
+    """
+    matched: list[VideoAsset] = []
+    used_ids: set[int] = set()
+
+    # 第一级：当前 shot 的 scene_reference 资产
+    current_assets = (
+        db.query(VideoAsset)
+        .filter(
+            VideoAsset.shot_id == shot.id,
+            VideoAsset.asset_type == "scene_reference",
+            VideoAsset.status == "active",
+        )
+        .order_by(VideoAsset.created_at.desc())
+        .all()
+    )
+    for a in current_assets:
+        if a.id not in used_ids:
+            matched.append(a)
+            used_ids.add(a.id)
+            if len(matched) >= limit:
+                return matched[:limit]
+
+    # 第二级：同 scene_id 下其他 shot 的 scene_reference 资产
+    if shot.scene_id:
+        sibling_assets = (
+            db.query(VideoAsset)
+            .filter(
+                VideoAsset.scene_id == shot.scene_id,
+                VideoAsset.asset_type == "scene_reference",
+                VideoAsset.shot_id != shot.id,
+                VideoAsset.status == "active",
+            )
+            .order_by(VideoAsset.created_at.desc())
+            .all()
+        )
+        for a in sibling_assets:
+            if a.id not in used_ids:
+                matched.append(a)
+                used_ids.add(a.id)
+                if len(matched) >= limit:
+                    return matched[:limit]
+
+    # 第三级：Scene 级别的 concept_art
+    if shot.scene and shot.scene.concept_art_asset_id:
+        concept_id = shot.scene.concept_art_asset_id
+        if concept_id not in used_ids:
+            asset = db.get(VideoAsset, concept_id)
+            if asset and asset.status == "active":
+                matched.append(asset)
+                used_ids.add(concept_id)
+
+    return matched[:limit]
+
+
+def _select_prop_reference_assets_for_shot(shot: VideoShot, db: Session, limit: int = 6) -> list[VideoAsset]:
+    """选择当前 shot 可用的道具参考图资产（继承逻辑）。
+
+    优先级：
+    1. 当前 shot 自己的 prop_reference 资产
+    2. 同 scene_id 下其他 shot 的同名 prop_reference 资产
+    3. 同 chapter 下其他 shot 的同名 prop_reference 资产
+    """
+    matched: list[VideoAsset] = []
+    used_ids: set[int] = set()
+
+    # 获取当前 shot 的道具名称列表
+    prop_names: list[str] = []
+    if shot.prop_prompts_json:
+        for item in shot.prop_prompts_json:
+            if isinstance(item, dict):
+                name = str(item.get("name") or "").strip()
+                if name:
+                    prop_names.append(name)
+
+    # 第一级：当前 shot 的 prop_reference 资产
+    current_assets = (
+        db.query(VideoAsset)
+        .filter(
+            VideoAsset.shot_id == shot.id,
+            VideoAsset.asset_type == "prop_reference",
+            VideoAsset.status == "active",
+        )
+        .order_by(VideoAsset.created_at.desc())
+        .all()
+    )
+    for a in current_assets:
+        if a.id not in used_ids:
+            matched.append(a)
+            used_ids.add(a.id)
+            if len(matched) >= limit:
+                return matched[:limit]
+
+    # 第二级：同 scene_id 下其他 shot 的同名 prop_reference 资产
+    if shot.scene_id and prop_names:
+        sibling_assets = (
+            db.query(VideoAsset)
+            .filter(
+                VideoAsset.scene_id == shot.scene_id,
+                VideoAsset.asset_type == "prop_reference",
+                VideoAsset.shot_id != shot.id,
+                VideoAsset.status == "active",
+            )
+            .order_by(VideoAsset.created_at.desc())
+            .all()
+        )
+        for name in prop_names:
+            for a in sibling_assets:
+                if a.id in used_ids:
+                    continue
+                if name in (a.name or ""):
+                    matched.append(a)
+                    used_ids.add(a.id)
+                    break
+            if len(matched) >= limit:
+                return matched[:limit]
+
+    # 第三级：同 chapter 下其他 shot 的同名 prop_reference 资产（兜底）
+    chapter_id = shot.scene.chapter_id if shot.scene else None
+    if chapter_id and prop_names:
+        chapter_assets = (
+            db.query(VideoAsset)
+            .filter(
+                VideoAsset.chapter_id == chapter_id,
+                VideoAsset.asset_type == "prop_reference",
+                VideoAsset.status == "active",
+            )
+            .order_by(VideoAsset.created_at.desc())
+            .all()
+        )
+        for name in prop_names:
+            for a in chapter_assets:
+                if a.id in used_ids:
+                    continue
+                if name in (a.name or ""):
+                    matched.append(a)
+                    used_ids.add(a.id)
+                    break
+            if len(matched) >= limit:
+                return matched[:limit]
+
+    return matched[:limit]
+
+
 def _build_reference_constraints_block(character_assets: list[VideoAsset]) -> str:
     """构建参考资产使用说明，按资产类型给出明确角色标注。"""
     if not character_assets:
