@@ -1,17 +1,34 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { ChevronLeft, ChevronRight, RotateCcw, Upload, Trash2, Wand2, X } from 'lucide-react';
+import { createPortal } from 'react-dom';
+import { RotateCcw, Upload, Trash2, Wand2, X, Loader2 } from 'lucide-react';
 import { ImageRedrawModal } from './shared/ImageRedrawModal';
 
 interface VideoCardWorkbenchProps {
   type: 'character' | 'storyboard' | 'video';
   shotId: number;
   assetId?: number;
-  resources: Array<{ id: number; url: string; prompt?: string }>;
+  displayShotIndex?: number;
+  resources: Array<{
+    id: number;
+    assetId?: number;
+    url: string;
+    prompt?: string;
+    label?: string;
+    characterName?: string;
+    hasAsset?: boolean;
+  }>;
   onRegenerate: (resourceId: number) => Promise<void>;
   onUploadReplace: (resourceId: number, file: File) => Promise<void>;
   onDelete: (resourceId: number) => Promise<void>;
-  onRedraw: (resourceId: number, prompt: string, mask?: Blob) => Promise<void>;
+  onRedraw: (resourceId: number, prompt: string, mask?: string) => Promise<void>;
+  onPromptSave?: (resourceId: number, prompt: string) => Promise<void>;
+  onReanalyzePrompt?: (resourceId: number) => Promise<void>;
   onClose: () => void;
+  storyboardRefAssets?: Array<{ id: number; file_path: string; name: string; prompt?: string | null }>;
+  selectedRefAssetIds?: number[];
+  onSelectedRefAssetsChange?: (ids: number[]) => void;
+  /** 视频类型：无视频时显示的故事版参考图 URL */
+  storyboardImageUrl?: string;
 }
 
 interface WorkbenchState {
@@ -19,23 +36,46 @@ interface WorkbenchState {
   zoomLevel: 1 | 1.35 | 1.7;
   isRedrawModalOpen: boolean;
   editingPrompt: string;
+  busy: string | null;
 }
 
-export default function VideoCardWorkbench({ type, shotId, assetId, resources, onRegenerate, onUploadReplace, onDelete, onRedraw, onClose }: VideoCardWorkbenchProps) {
-  const [state, setState] = useState<WorkbenchState>({
-    currentIndex: Math.max(0, resources.findIndex(r => r.id === assetId)),
-    zoomLevel: 1,
-    isRedrawModalOpen: false,
-    editingPrompt: '',
+export default function VideoCardWorkbench({ type, shotId, assetId, displayShotIndex, resources, onRegenerate, onUploadReplace, onDelete, onRedraw, onPromptSave, onReanalyzePrompt, onClose, storyboardRefAssets, selectedRefAssetIds, onSelectedRefAssetsChange, storyboardImageUrl }: VideoCardWorkbenchProps) {
+  const [state, setState] = useState<WorkbenchState>(() => {
+    const initialIndex = Math.max(0, resources.findIndex(r => r.id === assetId));
+    return {
+      currentIndex: initialIndex,
+      zoomLevel: 1,
+      isRedrawModalOpen: false,
+      editingPrompt: resources[initialIndex]?.prompt || '',
+      busy: null,
+    };
   });
 
   const { currentIndex } = state;
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  const currentResource = resources[currentIndex];
+  const previewUrl = currentResource?.url;
+
+  // 选择角色/资源
+  const handleSelectIndex = (idx: number) => {
+    setState(s => ({
+      ...s,
+      currentIndex: idx,
+      editingPrompt: resources[idx]?.prompt || '',
+    }));
+  };
+
   const handleRegenerate = async () => {
-    const resource = resources[currentIndex];
-    if (!resource) return;
-    await onRegenerate(resource.id);
+    if (!currentResource || state.busy) return;
+    setState(s => ({ ...s, busy: 'regenerate' }));
+    try {
+      await onRegenerate(currentResource.id);
+    } catch (err) {
+      console.error('重新生成失败', err);
+    } finally {
+      setState(s => ({ ...s, busy: null }));
+    }
   };
 
   const handleUploadClick = () => {
@@ -44,17 +84,31 @@ export default function VideoCardWorkbench({ type, shotId, assetId, resources, o
 
   const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
-    const resource = resources[currentIndex];
-    if (!file || !resource) return;
-    await onUploadReplace(resource.id, file);
+    if (!file || !currentResource || state.busy) return;
+    setState(s => ({ ...s, busy: 'upload' }));
+    try {
+      await onUploadReplace(currentResource.id, file);
+    } catch (err) {
+      console.error('上传替换失败', err);
+    } finally {
+      setState(s => ({ ...s, busy: null }));
+    }
     e.target.value = '';
   };
 
   const handleDelete = async () => {
-    const resource = resources[currentIndex];
-    if (!resource) return;
+    const resourceId = currentResource?.id;
+    if (resourceId == null || state.busy) return;
     if (!confirm('确定要删除这个资源吗？')) return;
-    await onDelete(resource.id);
+    setState(s => ({ ...s, busy: 'delete' }));
+    try {
+      await onDelete(resourceId);
+    } catch (err) {
+      console.error('删除失败', err);
+      setState(s => ({ ...s, busy: null }));
+      return;
+    }
+    setState(s => ({ ...s, busy: null }));
     if (resources.length === 1) {
       onClose();
     } else {
@@ -62,8 +116,17 @@ export default function VideoCardWorkbench({ type, shotId, assetId, resources, o
     }
   };
 
-  const handleRedrawClick = () => {
-    setState(s => ({ ...s, isRedrawModalOpen: true }));
+  const handleReanalyze = async () => {
+    const resourceId = currentResource?.id;
+    if (resourceId == null || !onReanalyzePrompt || state.busy) return;
+    setState(s => ({ ...s, busy: 'reanalyze' }));
+    try {
+      await onReanalyzePrompt(resourceId);
+    } catch (err) {
+      console.error('重新分析提示词失败', err);
+    } finally {
+      setState(s => ({ ...s, busy: null }));
+    }
   };
 
   // 导航函数
@@ -83,114 +146,573 @@ export default function VideoCardWorkbench({ type, shotId, assetId, resources, o
     }));
   }, [resources]);
 
-  // 键盘快捷键处理
+  // 键盘快捷键处理（仅 video 类型支持键盘导航，modal 类型 ESC 关闭即可）
   const handleKeyDown = useCallback((e: KeyboardEvent) => {
-    switch (e.key) {
-      case 'Escape':
-        onClose();
-        break;
-      case 'ArrowLeft':
-        handlePrev();
-        break;
-      case 'ArrowRight':
-        handleNext();
-        break;
-      case '+':
-      case '=':
-        setState(s => ({ ...s, zoomLevel: s.zoomLevel < 1.7 ? (s.zoomLevel === 1 ? 1.35 : 1.7) : 1 }));
-        break;
-      case '-':
-        setState(s => ({ ...s, zoomLevel: s.zoomLevel > 1 ? (s.zoomLevel === 1.7 ? 1.35 : 1) : 1 }));
-        break;
-      case 'r':
-      case 'R':
-        setState(s => ({ ...s, isRedrawModalOpen: true }));
-        break;
+    if (type === 'video') {
+      switch (e.key) {
+        case 'Escape':
+          onClose();
+          break;
+        case 'ArrowLeft':
+          handlePrev();
+          break;
+        case 'ArrowRight':
+          handleNext();
+          break;
+        case '+':
+        case '=':
+          setState(s => ({ ...s, zoomLevel: s.zoomLevel < 1.7 ? (s.zoomLevel === 1 ? 1.35 : 1.7) : 1 }));
+          break;
+        case '-':
+          setState(s => ({ ...s, zoomLevel: s.zoomLevel > 1 ? (s.zoomLevel === 1.7 ? 1.35 : 1) : 1 }));
+          break;
+        case 'r':
+        case 'R':
+          setState(s => ({ ...s, isRedrawModalOpen: true }));
+          break;
+      }
+    } else {
+      if (e.key === 'Escape') onClose();
     }
-  }, [onClose, handlePrev, handleNext]);
+  }, [type, onClose, handlePrev, handleNext]);
 
   useEffect(() => {
     document.addEventListener('keydown', handleKeyDown);
     return () => document.removeEventListener('keydown', handleKeyDown);
   }, [handleKeyDown]);
 
-  return (
-    <div className="fixed inset-0 z-50 flex flex-col bg-[linear-gradient(180deg,_#0b1220_0%,_#111827_100%)]">
-      {/* 顶部栏 */}
-      <div className="flex items-center justify-between border-b border-white/10 px-5 py-4 text-white">
-        <button onClick={onClose} className="flex items-center gap-2 rounded-lg px-3 py-1.5 text-sm hover:bg-white/10">
-          <ChevronLeft size={16} /> 返回工作台
-        </button>
-        <div className="text-sm font-medium">
-          镜头 {shotId} · {type === 'character' ? '角色资产' : type === 'storyboard' ? '故事版' : '视频'}
-        </div>
-        <div className="flex items-center gap-2">
-          <button onClick={() => setState(s => ({ ...s, zoomLevel: 1 }))} className={`rounded-lg px-2 py-1 text-xs ${state.zoomLevel === 1 ? 'bg-white/20' : 'hover:bg-white/10'}`}>100%</button>
-          <button onClick={() => setState(s => ({ ...s, zoomLevel: 1.35 }))} className={`rounded-lg px-2 py-1 text-xs ${state.zoomLevel === 1.35 ? 'bg-white/20' : 'hover:bg-white/10'}`}>135%</button>
-          <button onClick={() => setState(s => ({ ...s, zoomLevel: 1.7 }))} className={`rounded-lg px-2 py-1 text-xs ${state.zoomLevel === 1.7 ? 'bg-white/20' : 'hover:bg-white/10'}`}>170%</button>
-          <button onClick={onClose} className="ml-2 rounded-lg p-1.5 hover:bg-white/10">
-            <X size={16} />
-          </button>
-        </div>
-      </div>
+  // 拼装缩放按钮
+  const zoomButtons = [1, 1.35, 1.7].map(zoom => (
+    <button
+      key={zoom}
+      type="button"
+      onClick={() => setState(s => ({ ...s, zoomLevel: zoom as 1 | 1.35 | 1.7 }))}
+      className={`rounded-full px-3 py-1.5 text-xs transition-colors ${
+        state.zoomLevel === zoom ? 'bg-white text-slate-900' : 'bg-white/10 text-white hover:bg-white/20'
+      }`}
+    >
+      {Math.round(zoom * 100)}%
+    </button>
+  ));
 
-      {/* 预览区域 */}
-      <div className="flex flex-1 items-center justify-between gap-3 overflow-hidden px-4 py-4">
-        <button onClick={handlePrev} disabled={resources.length <= 1} className="rounded-full bg-white/10 p-2 text-white hover:bg-white/20 disabled:opacity-50">
-          <ChevronLeft size={20} />
-        </button>
-        <div className="flex-1 h-full overflow-auto rounded-[24px] bg-black/20 px-4 py-5">
-          {resources[currentIndex]?.url ? (
-            <img
-              src={resources[currentIndex].url}
-              alt="预览"
-              className="mx-auto h-auto max-h-full object-contain rounded-xl shadow-2xl"
-              style={{ transform: `scale(${state.zoomLevel})` }}
-            />
-          ) : (
-            <div className="mx-auto h-full flex items-center justify-center text-white/50">
-              暂无内容
+  // ────────── 视频类型：居中弹窗布局（与故事版一致）──────────
+  if (type === 'video') {
+    const modal = (
+      <div
+        className="fixed inset-0 z-[68] flex items-center justify-center bg-[rgba(15,23,42,0.62)] p-4 backdrop-blur-sm"
+        onClick={onClose}
+      >
+        <div
+          className="flex h-[88vh] w-[min(1400px,94vw)] flex-col overflow-hidden rounded-[30px] border border-[#d7e3f4] bg-white shadow-[0_30px_90px_rgba(15,23,42,0.28)]"
+          onClick={e => e.stopPropagation()}
+        >
+          {/* 弹窗头部 */}
+          <div className="flex items-center justify-between border-b border-[#e5edf8] px-6 py-4">
+            <div>
+              <div className="text-lg font-semibold text-slate-900">视频工作台</div>
+              <div className="mt-1 text-sm text-slate-500">
+                镜头 {displayShotIndex ?? shotId} · 中间预览视频，右侧查看提示词与操作
+              </div>
             </div>
+            <div className="flex items-center gap-2">
+              <button onClick={onClose} className="ml-2 rounded-full bg-slate-100 p-2 text-slate-600 transition hover:bg-slate-200">
+                <X size={18} />
+              </button>
+            </div>
+          </div>
+
+          {/* 弹窗主体：两栏布局 */}
+          <div className="grid flex-1 gap-0 overflow-hidden lg:grid-cols-[minmax(0,1.5fr)_420px]">
+            {/* 左侧：预览区（深色背景） */}
+            <div className="overflow-auto bg-[linear-gradient(180deg,_#0f172a_0%,_#111827_100%)] p-6">
+              <div className="mb-4 flex items-center justify-between text-white/80">
+                <div className="text-sm font-medium">视频预览</div>
+                <div className="flex items-center gap-2">{zoomButtons}</div>
+              </div>
+              <div className="mx-auto flex min-h-[62vh] w-full items-center justify-center rounded-[24px] border border-white/10 bg-black/20 p-4">
+                <div className="rounded-[24px] bg-[#0b1220] p-4 shadow-2xl">
+                  {previewUrl ? (
+                    <video
+                      src={previewUrl}
+                      controls
+                      className="mx-auto h-auto max-h-[56vh] rounded-xl shadow-2xl"
+                      style={{ transform: `scale(${state.zoomLevel})` }}
+                    />
+                  ) : storyboardImageUrl ? (
+                    <div>
+                      <div className="mb-2 text-center text-xs text-white/50">故事版参考图（视频未生成）</div>
+                      <img
+                        src={storyboardImageUrl}
+                        alt="故事版参考图"
+                        className="mx-auto h-auto max-h-[56vh] rounded-xl shadow-2xl"
+                        style={{ transform: `scale(${state.zoomLevel})` }}
+                      />
+                    </div>
+                  ) : (
+                    <div className="flex min-h-[420px] min-w-[320px] items-center justify-center rounded-xl bg-[linear-gradient(180deg,_#08111d_0%,_#111827_100%)] text-white/70">
+                      暂无内容
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            {/* 右侧：提示词 + 操作 */}
+            <div className="flex flex-col gap-4 overflow-auto border-l border-[#e5edf8] bg-[#f8fbff] p-6">
+              <div className="flex flex-1 min-h-0 flex-col rounded-2xl border border-[#d7e3f4] bg-white p-4">
+                <div className="text-sm font-medium text-slate-800">提示词</div>
+                <textarea
+                  value={state.editingPrompt}
+                  onChange={e => setState(s => ({ ...s, editingPrompt: e.target.value }))}
+                  className="mt-3 w-full flex-1 min-h-0 rounded-2xl border border-[#d7e3f4] bg-[#f8fbff] px-3 py-3 text-sm leading-6 text-slate-900 outline-none resize-none focus:border-blue-400"
+                  placeholder="输入提示词..."
+                />
+                {onPromptSave && (
+                  <div className="mt-3 flex justify-end shrink-0">
+                    <button
+                      onClick={async () => {
+                        if (!currentResource || state.busy) return;
+                        setState(s => ({ ...s, busy: 'savePrompt' }));
+                        try {
+                          await onPromptSave(currentResource.id, state.editingPrompt);
+                        } catch (err) {
+                          console.error('保存提示词失败', err);
+                        } finally {
+                          setState(s => ({ ...s, busy: null }));
+                        }
+                      }}
+                      disabled={state.busy === 'savePrompt'}
+                      className="flex items-center gap-1 rounded-2xl bg-blue-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-700 disabled:opacity-60"
+                    >
+                      {state.busy === 'savePrompt' && <Loader2 size={12} className="animate-spin" />} 保存提示词
+                    </button>
+                  </div>
+                )}
+              </div>
+
+              {storyboardRefAssets && storyboardRefAssets.length > 0 && (
+                <div className="shrink-0 rounded-2xl border border-[#d7e3f4] bg-white p-4">
+                  <div className="text-sm font-medium text-slate-800">角色参考图</div>
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    {storyboardRefAssets.map((asset) => {
+                      const isSelected = selectedRefAssetIds?.includes(asset.id) ?? false;
+                      const imgSrc = (() => {
+                        const fp = asset.file_path;
+                        if (!fp) return '';
+                        if (fp.startsWith('http')) return fp;
+                        if (fp.startsWith('/')) return `/static/video/${fp.replace(/^\/static\/video\//, '')}`;
+                        return `/static/video/${fp}`;
+                      })();
+                      return (
+                        <button
+                          key={asset.id}
+                          type="button"
+                          onClick={() => {
+                            const next = isSelected
+                              ? (selectedRefAssetIds || []).filter((id) => id !== asset.id)
+                              : [...(selectedRefAssetIds || []), asset.id];
+                            onSelectedRefAssetsChange?.(next);
+                          }}
+                          className={`relative flex h-16 w-16 shrink-0 items-center justify-center overflow-hidden rounded-xl border-2 transition ${
+                            isSelected
+                              ? 'border-blue-500 ring-2 ring-blue-200'
+                              : 'border-[#d7e3f4] hover:border-blue-300'
+                          }`}
+                          title={asset.name || '参考图'}
+                        >
+                          {imgSrc ? (
+                            <img
+                              src={imgSrc}
+                              alt={asset.name || ''}
+                              className="h-full w-full object-cover"
+                              onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
+                            />
+                          ) : (
+                            <span className="text-[10px] text-slate-400">无图</span>
+                          )}
+                          {isSelected && (
+                            <div className="absolute right-0.5 top-0.5 flex h-5 w-5 items-center justify-center rounded-full bg-blue-500 text-[10px] text-white">
+                              ✓
+                            </div>
+                          )}
+                        </button>
+                      );
+                    })}
+                  </div>
+                  <div className="mt-2 text-xs text-slate-400">
+                    {selectedRefAssetIds?.length ? `已选 ${selectedRefAssetIds.length} 张参考图` : '点击选择角色参考图，用于参考图生视频'}
+                  </div>
+                </div>
+              )}
+
+              <div className="shrink-0 rounded-2xl border border-[#d7e3f4] bg-white p-4">
+                <div className="text-sm font-medium text-slate-800">操作</div>
+                <div className="mt-3 flex flex-wrap gap-2">
+                  <button onClick={handleRegenerate} disabled={state.busy === 'regenerate'} className="flex items-center gap-1 rounded-xl bg-[#1d4ed8] px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-700 disabled:opacity-60">
+                    {state.busy === 'regenerate' ? <Loader2 size={12} className="animate-spin" /> : <RotateCcw size={12} />} {state.busy === 'regenerate' ? '生成中...' : '重新生成'}
+                  </button>
+                  <button onClick={handleUploadClick} disabled={state.busy === 'upload'} className="flex items-center gap-1 rounded-xl border border-[#d7e3f4] bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-60">
+                    {state.busy === 'upload' ? <Loader2 size={12} className="animate-spin" /> : <Upload size={12} />} {state.busy === 'upload' ? '上传中...' : '上传替换'}
+                  </button>
+                  <button onClick={handleDelete} disabled={state.busy === 'delete'} className="flex items-center gap-1 rounded-xl border border-rose-200 bg-white px-3 py-1.5 text-xs font-medium text-rose-600 hover:bg-rose-50 disabled:opacity-60">
+                    {state.busy === 'delete' ? <Loader2 size={12} className="animate-spin" /> : <Trash2 size={12} />} {state.busy === 'delete' ? '删除中...' : '删除'}
+                  </button>
+                  {onReanalyzePrompt && (
+                    <button onClick={handleReanalyze} disabled={state.busy === 'reanalyze'} className="flex items-center gap-1 rounded-xl border border-amber-200 bg-white px-3 py-1.5 text-xs font-medium text-amber-700 hover:bg-amber-50 disabled:opacity-60">
+                       {state.busy === 'reanalyze' ? <Loader2 size={12} className="animate-spin" /> : <RotateCcw size={12} />} {state.busy === 'reanalyze' ? '分析中...' : '重新分析提示词'}
+                    </button>
+                  )}
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* 重绘弹窗 */}
+          {state.isRedrawModalOpen && (
+            <ImageRedrawModal
+              title="重绘视频"
+              imageSrc={previewUrl || ''}
+              prompt={state.editingPrompt}
+              busy={false}
+              onClose={() => setState(s => ({ ...s, isRedrawModalOpen: false }))}
+              onSubmit={async (payload) => {
+                const resourceId = currentResource?.id;
+                if (resourceId == null) return;
+                setState(s => ({ ...s, isRedrawModalOpen: false }));
+                try {
+                  await onRedraw(resourceId, payload.prompt, payload.mask);
+                } catch (err) {
+                  console.error('重绘失败', err);
+                }
+              }}
+            />
           )}
         </div>
-        <button onClick={handleNext} disabled={resources.length <= 1} className="rounded-full bg-white/10 p-2 text-white hover:bg-white/20 disabled:opacity-50">
-          <ChevronRight size={20} />
-        </button>
       </div>
+    );
 
-      {/* 底部操作栏 */}
-      <div className="border-t border-white/10 px-5 py-4">
-        <div className="flex flex-wrap gap-2">
-          <button onClick={handleRegenerate} className="flex items-center gap-2 rounded-lg bg-blue-600 px-3 py-1.5 text-xs text-white hover:bg-blue-700">
-            <RotateCcw size={12} /> 重新生成
-          </button>
-          <button onClick={handleUploadClick} className="flex items-center gap-2 rounded-lg border border-white/20 px-3 py-1.5 text-xs text-white hover:bg-white/10">
-            <Upload size={12} /> 上传替换
-          </button>
-          <button onClick={handleDelete} className="flex items-center gap-2 rounded-lg border border-white/20 px-3 py-1.5 text-xs text-white hover:bg-white/10">
-            <Trash2 size={12} /> 删除
-          </button>
-          <button onClick={handleRedrawClick} className="flex items-center gap-2 rounded-lg border border-white/20 px-3 py-1.5 text-xs text-white hover:bg-white/10">
-            <Wand2 size={12} /> 重绘
+    return createPortal(modal, document.body);
+  }
+
+  // ────────── 角色/故事版类型：居中弹窗布局（漫画工作台样式）──────────
+  const isCharacter = type === 'character';
+  const previewClass = state.zoomLevel === 1
+    ? 'max-w-[92%] max-h-none'
+    : state.zoomLevel === 1.35
+      ? 'max-w-none w-[780px]'
+      : 'max-w-none w-[940px]';
+
+  const modal = (
+    <div
+      className="fixed inset-0 z-[68] flex items-center justify-center bg-[rgba(15,23,42,0.62)] p-4 backdrop-blur-sm"
+      onClick={onClose}
+    >
+      <div
+        className="flex h-[88vh] w-[min(1400px,94vw)] flex-col overflow-hidden rounded-[30px] border border-[#d7e3f4] bg-white shadow-[0_30px_90px_rgba(15,23,42,0.28)]"
+        onClick={e => e.stopPropagation()}
+      >
+        {/* 弹窗头部 */}
+        <div className="flex items-center justify-between border-b border-[#e5edf8] px-6 py-4">
+          <div>
+            <div className="text-lg font-semibold text-slate-900">
+              {isCharacter ? '角色资产工作台' : '故事版工作台'}
+            </div>
+            <div className="mt-1 text-sm text-slate-500">
+              镜头 {displayShotIndex ?? shotId}
+              {isCharacter ? ' · 左侧选择角色，中间预览，右侧查看提示词与操作' : ' · 中间预览故事版图片，右侧查看提示词与操作'}
+            </div>
+          </div>
+          <button onClick={onClose} className="rounded-full bg-slate-100 p-2 text-slate-600 transition hover:bg-slate-200">
+            <X size={18} />
           </button>
         </div>
+
+        {/* 弹窗主体 */}
+        {isCharacter ? (
+          /* ── 角色：左中右三栏 ── */
+          <div className="grid flex-1 gap-0 overflow-hidden lg:grid-cols-[1fr_6fr_3fr]">
+            {/* 左侧：角色列表 */}
+            <div className="overflow-auto border-r border-[#e5edf8] bg-white p-4">
+              <div className="mb-3 text-xs font-medium text-slate-500">角色资产</div>
+              {resources.length === 0 ? (
+                <div className="text-xs text-slate-400">暂无角色资产</div>
+              ) : (
+                <div className="space-y-2">
+                  {resources.map((res, idx) => (
+                    <button
+                      key={res.id}
+                      type="button"
+                      onClick={() => handleSelectIndex(idx)}
+                      className={`w-full rounded-xl border p-3 text-left transition ${
+                        idx === currentIndex
+                          ? 'border-blue-300 bg-blue-50'
+                          : 'border-[#e5edf8] bg-[#f8fbff] hover:border-blue-200'
+                      }`}
+                    >
+                       <div className="text-xs font-medium text-slate-800 truncate">{res.label || res.prompt || `资产 #${res.id}`}</div>
+                       {res.url ? (
+                         <img
+                           src={res.url}
+                           alt=""
+                           className="mt-2 h-16 w-full rounded-lg object-cover"
+                         />
+                       ) : (
+                         <div className="mt-2 flex h-16 w-full items-center justify-center rounded-lg border border-dashed border-[#d7e3f4] bg-white text-[11px] text-slate-400">
+                           暂无角色参考图
+                         </div>
+                       )}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {/* 中间：预览区 */}
+            <div className="overflow-auto bg-[linear-gradient(180deg,_#0f172a_0%,_#111827_100%)] p-6">
+              <div className="mb-4 flex items-center justify-between text-white/80">
+                <div className="text-sm font-medium">预览</div>
+                <div className="flex items-center gap-2">{zoomButtons}</div>
+              </div>
+              <div className="mx-auto flex min-h-[55vh] w-full items-center justify-center rounded-[24px] border border-white/10 bg-black/20 p-4">
+                <div className="rounded-[24px] bg-[#0b1220] p-4 shadow-2xl">
+                  {previewUrl ? (
+                    <img
+                      src={previewUrl}
+                      alt="预览"
+                      className={`mx-auto h-auto object-contain rounded-xl shadow-2xl ${previewClass}`}
+                    />
+                  ) : (
+                    <div className="flex min-h-[320px] min-w-[280px] items-center justify-center rounded-xl bg-[linear-gradient(180deg,_#08111d_0%,_#111827_100%)] text-white/70">
+                      <Loader2 size={24} className="animate-spin" />
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            {/* 右侧：提示词 + 操作 */}
+            <div className="flex flex-col gap-4 overflow-auto border-l border-[#e5edf8] bg-[#f8fbff] p-6">
+              <div className="flex flex-1 min-h-0 flex-col rounded-2xl border border-[#d7e3f4] bg-white p-4">
+                <div className="text-sm font-medium text-slate-800">提示词</div>
+                <textarea
+                  value={state.editingPrompt}
+                  onChange={e => setState(s => ({ ...s, editingPrompt: e.target.value }))}
+                  className="mt-3 w-full flex-1 min-h-0 rounded-2xl border border-[#d7e3f4] bg-[#f8fbff] px-3 py-3 text-sm leading-6 text-slate-900 outline-none resize-none focus:border-blue-400"
+                  placeholder="输入提示词..."
+                />
+                {onPromptSave && (
+                  <div className="mt-3 flex justify-end shrink-0">
+                    <button
+                      onClick={async () => {
+                        if (!currentResource || state.busy) return;
+                        setState(s => ({ ...s, busy: 'savePrompt' }));
+                        try {
+                          await onPromptSave(currentResource.id, state.editingPrompt);
+                        } catch (err) {
+                          console.error('保存提示词失败', err);
+                        } finally {
+                          setState(s => ({ ...s, busy: null }));
+                        }
+                      }}
+                      disabled={state.busy === 'savePrompt'}
+                      className="flex items-center gap-1 rounded-2xl bg-blue-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-700 disabled:opacity-60"
+                    >
+                      {state.busy === 'savePrompt' && <Loader2 size={12} className="animate-spin" />} 保存提示词
+                    </button>
+                  </div>
+                )}
+              </div>
+
+              <div className="shrink-0 rounded-2xl border border-[#d7e3f4] bg-white p-4">
+                <div className="text-sm font-medium text-slate-800">操作</div>
+                <div className="mt-3 flex flex-wrap gap-2">
+                  <button onClick={handleRegenerate} disabled={state.busy === 'regenerate'} className="flex items-center gap-1 rounded-xl bg-[#1d4ed8] px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-700 disabled:opacity-60">
+                    {state.busy === 'regenerate' ? <Loader2 size={12} className="animate-spin" /> : <RotateCcw size={12} />} {state.busy === 'regenerate' ? '生成中...' : '重新生成'}
+                  </button>
+                  <button onClick={handleUploadClick} disabled={state.busy === 'upload'} className="flex items-center gap-1 rounded-xl border border-[#d7e3f4] bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-60">
+                    {state.busy === 'upload' ? <Loader2 size={12} className="animate-spin" /> : <Upload size={12} />} {state.busy === 'upload' ? '上传中...' : '上传替换'}
+                  </button>
+                  <button onClick={handleDelete} disabled={state.busy === 'delete'} className="flex items-center gap-1 rounded-xl border border-rose-200 bg-white px-3 py-1.5 text-xs font-medium text-rose-600 hover:bg-rose-50 disabled:opacity-60">
+                    {state.busy === 'delete' ? <Loader2 size={12} className="animate-spin" /> : <Trash2 size={12} />} {state.busy === 'delete' ? '删除中...' : '删除'}
+                  </button>
+                  <button onClick={() => setState(s => ({ ...s, isRedrawModalOpen: true }))} disabled={state.busy !== null} className="flex items-center gap-1 rounded-xl border border-[#d7e3f4] bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-60">
+                    <Wand2 size={12} /> 重绘
+                  </button>
+                  {onReanalyzePrompt && (
+                    <button onClick={handleReanalyze} disabled={state.busy === 'reanalyze'} className="flex items-center gap-1 rounded-xl border border-amber-200 bg-white px-3 py-1.5 text-xs font-medium text-amber-700 hover:bg-amber-50 disabled:opacity-60">
+                       {state.busy === 'reanalyze' ? <Loader2 size={12} className="animate-spin" /> : <RotateCcw size={12} />} {state.busy === 'reanalyze' ? '分析中...' : isCharacter ? '重新分析当前角色提示词' : '重新分析提示词'}
+                    </button>
+                  )}
+                </div>
+              </div>
+            </div>
+          </div>
+          ) : (
+          /* ── 故事版：两栏布局（左预览右面板，如 RefPreviewModal） ── */
+          <div className="grid flex-1 gap-0 overflow-hidden lg:grid-cols-[minmax(0,1.5fr)_420px]">
+            {/* 左侧：预览区（深色背景） */}
+            <div className="overflow-auto bg-[linear-gradient(180deg,_#0f172a_0%,_#111827_100%)] p-6">
+              <div className="mb-4 flex items-center justify-between text-white/80">
+                <div className="text-sm font-medium">故事版图片</div>
+                <div className="flex items-center gap-2">{zoomButtons}</div>
+              </div>
+              <div className="mx-auto flex min-h-[62vh] w-full items-center justify-center rounded-[24px] border border-white/10 bg-black/20 p-4">
+                <div className="rounded-[24px] bg-[#0b1220] p-4 shadow-2xl">
+                  {previewUrl ? (
+                    <img
+                      src={previewUrl}
+                      alt="故事版预览"
+                      className={`mx-auto h-auto object-contain rounded-xl shadow-2xl ${previewClass}`}
+                    />
+                  ) : (
+                    <div className="flex min-h-[420px] min-w-[320px] items-center justify-center rounded-xl bg-[linear-gradient(180deg,_#08111d_0%,_#111827_100%)] text-white/70">
+                      <Loader2 size={24} className="animate-spin" />
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            {/* 右侧：提示词 + 参考图 + 操作 */}
+            <div className="flex flex-col gap-4 overflow-auto border-l border-[#e5edf8] bg-[#f8fbff] p-6">
+              <div className="flex flex-1 min-h-0 flex-col rounded-2xl border border-[#d7e3f4] bg-white p-4">
+                <div className="text-sm font-medium text-slate-800">提示词</div>
+                <textarea
+                  value={state.editingPrompt}
+                  onChange={e => setState(s => ({ ...s, editingPrompt: e.target.value }))}
+                  className="mt-3 w-full flex-1 min-h-0 rounded-2xl border border-[#d7e3f4] bg-[#f8fbff] px-3 py-3 text-sm leading-6 text-slate-900 outline-none resize-none focus:border-blue-400"
+                  placeholder="输入提示词..."
+                />
+                {onPromptSave && (
+                  <div className="mt-3 flex justify-end shrink-0">
+                    <button
+                      onClick={async () => {
+                        if (!currentResource || state.busy) return;
+                        setState(s => ({ ...s, busy: 'savePrompt' }));
+                        try {
+                          await onPromptSave(currentResource.id, state.editingPrompt);
+                        } catch (err) {
+                          console.error('保存提示词失败', err);
+                        } finally {
+                          setState(s => ({ ...s, busy: null }));
+                        }
+                      }}
+                      disabled={state.busy === 'savePrompt'}
+                      className="flex items-center gap-1 rounded-2xl bg-blue-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-700 disabled:opacity-60"
+                    >
+                      {state.busy === 'savePrompt' && <Loader2 size={12} className="animate-spin" />} 保存提示词
+                    </button>
+                  </div>
+                )}
+              </div>
+
+              {/* 角色参考图选择区（仅故事版） */}
+              {storyboardRefAssets && storyboardRefAssets.length > 0 && (
+                <div className="shrink-0 rounded-2xl border border-[#d7e3f4] bg-white p-4">
+                  <div className="text-sm font-medium text-slate-800">角色参考图</div>
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    {storyboardRefAssets.map((asset) => {
+                      const isSelected = selectedRefAssetIds?.includes(asset.id) ?? false;
+                      const imgSrc = (() => {
+                        const fp = asset.file_path;
+                        if (!fp) return '';
+                        if (fp.startsWith('http')) return fp;
+                        if (fp.startsWith('/')) return `/static/video/${fp.replace(/^\/static\/video\//, '')}`;
+                        return `/static/video/${fp}`;
+                      })();
+                      return (
+                        <button
+                          key={asset.id}
+                          type="button"
+                          onClick={() => {
+                            const next = isSelected
+                              ? (selectedRefAssetIds || []).filter((id) => id !== asset.id)
+                              : [...(selectedRefAssetIds || []), asset.id];
+                            onSelectedRefAssetsChange?.(next);
+                          }}
+                          className={`relative flex h-16 w-16 shrink-0 items-center justify-center overflow-hidden rounded-xl border-2 transition ${
+                            isSelected
+                              ? 'border-blue-500 ring-2 ring-blue-200'
+                              : 'border-[#d7e3f4] hover:border-blue-300'
+                          }`}
+                          title={asset.name || '参考图'}
+                        >
+                          {imgSrc ? (
+                            <img
+                              src={imgSrc}
+                              alt={asset.name || ''}
+                              className="h-full w-full object-cover"
+                              onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
+                            />
+                          ) : (
+                            <span className="text-[10px] text-slate-400">无图</span>
+                          )}
+                          {isSelected && (
+                            <div className="absolute right-0.5 top-0.5 flex h-5 w-5 items-center justify-center rounded-full bg-blue-500 text-[10px] text-white">
+                              ✓
+                            </div>
+                          )}
+                        </button>
+                      );
+                    })}
+                  </div>
+                  <div className="mt-2 text-xs text-slate-400">
+                    {selectedRefAssetIds?.length ? `已选 ${selectedRefAssetIds.length} 张参考图` : '点击选择角色参考图，用于参考图生图'}
+                  </div>
+                </div>
+              )}
+
+              <div className="shrink-0 rounded-2xl border border-[#d7e3f4] bg-white p-4">
+                <div className="text-sm font-medium text-slate-800">操作</div>
+                <div className="mt-3 flex flex-wrap gap-2">
+                  <button onClick={handleRegenerate} disabled={state.busy === 'regenerate'} className="flex items-center gap-1 rounded-xl bg-[#1d4ed8] px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-700 disabled:opacity-60">
+                    {state.busy === 'regenerate' ? <Loader2 size={12} className="animate-spin" /> : <RotateCcw size={12} />} {state.busy === 'regenerate' ? '生成中...' : '重新生成'}
+                  </button>
+                  <button onClick={handleUploadClick} disabled={state.busy === 'upload'} className="flex items-center gap-1 rounded-xl border border-[#d7e3f4] bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-60">
+                    {state.busy === 'upload' ? <Loader2 size={12} className="animate-spin" /> : <Upload size={12} />} {state.busy === 'upload' ? '上传中...' : '上传替换'}
+                  </button>
+                  <button onClick={handleDelete} disabled={state.busy === 'delete'} className="flex items-center gap-1 rounded-xl border border-rose-200 bg-white px-3 py-1.5 text-xs font-medium text-rose-600 hover:bg-rose-50 disabled:opacity-60">
+                    {state.busy === 'delete' ? <Loader2 size={12} className="animate-spin" /> : <Trash2 size={12} />} {state.busy === 'delete' ? '删除中...' : '删除'}
+                  </button>
+                  <button onClick={() => setState(s => ({ ...s, isRedrawModalOpen: true }))} disabled={state.busy !== null} className="flex items-center gap-1 rounded-xl border border-[#d7e3f4] bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-60">
+                    <Wand2 size={12} /> 重绘
+                  </button>
+                  {onReanalyzePrompt && (
+                    <button onClick={handleReanalyze} disabled={state.busy === 'reanalyze'} className="flex items-center gap-1 rounded-xl border border-amber-200 bg-white px-3 py-1.5 text-xs font-medium text-amber-700 hover:bg-amber-50 disabled:opacity-60">
+                       {state.busy === 'reanalyze' ? <Loader2 size={12} className="animate-spin" /> : <RotateCcw size={12} />} {state.busy === 'reanalyze' ? '分析中...' : '重新分析提示词'}
+                    </button>
+                  )}
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* 重绘弹窗（角色和故事版共用） */}
+        {state.isRedrawModalOpen && (
+          <ImageRedrawModal
+            title={isCharacter ? '重绘角色资产' : '重绘故事版'}
+            imageSrc={previewUrl || ''}
+            prompt={state.editingPrompt}
+            busy={false}
+            onClose={() => setState(s => ({ ...s, isRedrawModalOpen: false }))}
+            onSubmit={async (payload) => {
+              const resourceId = currentResource?.id;
+              if (resourceId == null) return;
+              setState(s => ({ ...s, isRedrawModalOpen: false }));
+              try {
+                await onRedraw(resourceId, payload.prompt, payload.mask);
+              } catch (err) {
+                console.error('重绘失败', err);
+              }
+            }}
+          />
+        )}
+
+        {/* 隐藏的文件上传 input */}
         <input ref={fileInputRef} type="file" accept="image/*" onChange={handleFileChange} className="hidden" />
       </div>
-
-      {/* 重绘弹窗 */}
-      {state.isRedrawModalOpen && (
-        <ImageRedrawModal
-          title="重绘图片"
-          imageSrc={resources[currentIndex]?.url || ''}
-          prompt={state.editingPrompt}
-          busy={false}
-          onClose={() => setState(s => ({ ...s, isRedrawModalOpen: false }))}
-          onSubmit={async (payload) => {
-            setState(s => ({ ...s, isRedrawModalOpen: false }));
-            console.log('重绘提交', payload);
-          }}
-        />
-      )}
     </div>
   );
+  return createPortal(modal, document.body);
 }

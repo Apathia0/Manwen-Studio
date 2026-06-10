@@ -1232,6 +1232,14 @@ export function AdminPlatformSettingsPage({
                 <TextInput type="password" value={settings.api.image_api_key} onChange={(e) => setSettings((prev) => prev ? { ...prev, api: { ...prev.api, image_api_key: e.target.value } } : prev)} placeholder="图片 API Key" />
               </div>
             </div>
+            <div className="rounded-2xl border border-[#e5edf8] bg-[#f8fbff] p-4">
+              <div className="mb-3 text-sm font-semibold text-slate-900">视频模型服务</div>
+              <div className="space-y-3">
+                <TextInput value={settings.api.video_base_url} onChange={(e) => setSettings((prev) => prev ? { ...prev, api: { ...prev.api, video_base_url: e.target.value } } : prev)} placeholder="视频服务 Base URL" />
+                <TextInput value={settings.api.video_model} onChange={(e) => setSettings((prev) => prev ? { ...prev, api: { ...prev.api, video_model: e.target.value } } : prev)} placeholder="视频模型名称" />
+                <TextInput type="password" value={settings.api.video_api_key} onChange={(e) => setSettings((prev) => prev ? { ...prev, api: { ...prev.api, video_api_key: e.target.value } } : prev)} placeholder="视频 API Key" />
+              </div>
+            </div>
           </div>
 
           <div className="mt-4 flex flex-wrap items-center gap-3 rounded-2xl border border-[#d7e3f4] bg-white px-4 py-3 text-sm text-slate-700">

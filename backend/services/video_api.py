@@ -36,7 +36,7 @@ def configure(*, base_url: str | None = None, api_key: str | None = None, model:
 
 
 def _resolved_base_url() -> str:
-    return (_runtime_base_url or os.getenv("VIDEO_API_BASE_URL") or "https://newapi.aifusion6.cn/v1").rstrip("/")
+    return (_runtime_base_url or os.getenv("VIDEO_API_BASE_URL") or "").rstrip("/")
 
 
 def _resolved_api_key() -> str:
@@ -44,7 +44,7 @@ def _resolved_api_key() -> str:
 
 
 def _resolved_model() -> str:
-    return (_runtime_model or os.getenv("VIDEO_MODEL") or "veo3.1-fast")
+    return (_runtime_model or os.getenv("VIDEO_MODEL") or "")
 
 MAX_RETRIES = 3
 RETRY_DELAY = 5
@@ -76,6 +76,13 @@ def _timeout(*, connect: float, read: float, write: float, pool: float = 30.0) -
 
 
 def _auth_headers(api_key: str | None = None) -> dict[str, str]:
+    """获取视频 API 认证头，同时校验必要配置是否已注入。"""
+    base_url = _resolved_base_url()
+    if not base_url:
+        raise ValueError("视频 API 地址未配置，请在后台设置中配置 API 地址后重试。")
+    model = _resolved_model()
+    if not model:
+        raise ValueError("视频生成模型未配置，请在后台设置中配置模型名称后重试。")
     key = (api_key or _resolved_api_key() or "").strip()
     if not key:
         raise MissingApiKeyError("Video")
@@ -94,8 +101,8 @@ def _output_dir() -> Path:
 def _build_api_url(path: str, base_url: str | None = None) -> str:
     """拼接完整 API URL，自动处理 /v1 前缀去重。
 
-    例: base=https://newapi.aifusion6.cn/v1, path=/v1/video/generations
-    → https://newapi.aifusion6.cn/v1/video/generations
+    例: base=https://your-api.com/v1, path=/v1/video/generations
+    → https://your-api.com/v1/video/generations
     """
     base = (base_url or _resolved_base_url()).rstrip("/")
     normalized = "/" + path.lstrip("/")
@@ -189,7 +196,7 @@ async def create_video_job(
         "prompt": prompt.strip(),
         "width": width,
         "height": height,
-        "duration": max(4, duration_seconds),
+        "duration": max(4, min(10, duration_seconds)),
         "n": 1,
     }
     if images:

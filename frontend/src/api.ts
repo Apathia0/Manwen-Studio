@@ -798,6 +798,9 @@ export interface PlatformSettings {
     image_base_url: string;
     image_model: string;
     image_api_key: string;
+    video_base_url: string;
+    video_model: string;
+    video_api_key: string;
     enable_user_override: boolean;
     enable_user_url_override?: boolean;
   };
@@ -2681,6 +2684,74 @@ export interface VideoProject {
   updated_at: string;
 }
 
+export interface StoryVideoCharacterVersion {
+  id: number;
+  label: string;
+  is_default: boolean;
+  ref_asset_id?: number | null;
+  ref_asset_url?: string | null;
+  appearance_card: string;
+  sort_order: number;
+}
+
+export interface StoryVideoCharacter {
+  name: string;
+  versions: StoryVideoCharacterVersion[];
+}
+
+export interface ChapterVideoShot {
+  id: number;
+  workflow_id: number;
+  shot_index: number;
+  source_text_span?: string | null;
+  scene_location?: string | null;
+  time_of_day?: string | null;
+  characters?: string[] | null;
+  story_summary?: string | null;
+  dialogue_or_narration?: string | null;
+  camera_plan?: string | null;
+  motion_plan?: string | null;
+  emotion_plan?: string | null;
+  continuity_notes?: string | null;
+  storyboard_prompt?: string | null;
+  video_prompt?: string | null;
+  character_prompts?: Array<{ name: string; prompt: string }> | null;
+  character_reference_ids?: number[] | null;
+  storyboard_json?: Record<string, unknown> | null;
+  storyboard_image_url?: string | null;
+  video_url?: string | null;
+  status: string;
+  error_message?: string | null;
+  created_at: string;
+}
+
+export interface ChapterVideoWorkflow {
+  id: number;
+  chapter_id: number;
+  story_id: number;
+  workflow_status: string;
+  character_reference_ids?: number[] | null;
+  video_style?: string | null;
+  duration_per_shot: number;
+  total_shots: number;
+  completed_shots: number;
+  failed_shots: number;
+  error_message?: string | null;
+  created_at: string;
+  updated_at: string;
+  shots: ChapterVideoShot[];
+}
+
+export interface ChapterVideoWorkflowStatus {
+  id: number;
+  chapter_id: number;
+  workflow_status: string;
+  total_shots: number;
+  completed_shots: number;
+  failed_shots: number;
+  error_message?: string | null;
+}
+
 export async function generateScreenplay(chapterId: number, payload: {
   mode?: string;
   style?: string;
@@ -2732,7 +2803,7 @@ export async function listSceneShots(sceneId: number): Promise<{ scene_id: numbe
 }
 
 export async function updateVideoShot(shotId: number, payload: Partial<VideoShot>): Promise<VideoShot> {
-  const res = await fetch(`${BASE}/api/video/shots/${shotId}`, {
+  const res = await fetch(`${BASE}/api/shots/${shotId}`, {
     method: 'PATCH',
     headers: apiHeaders(true),
     body: JSON.stringify(payload),
@@ -2742,7 +2813,7 @@ export async function updateVideoShot(shotId: number, payload: Partial<VideoShot
 }
 
 export async function generateShotPrompts(shotId: number, payload: { style?: string; provider?: string; include_references?: boolean; instruction?: string; continuity_notes?: string }): Promise<{ shot: VideoShot }> {
-  const res = await fetch(`${BASE}/api/video/shots/${shotId}/prompts/generate`, {
+  const res = await fetch(`${BASE}/api/shots/${shotId}/prompts/generate`, {
     method: 'POST',
     headers: apiHeaders(true),
     body: JSON.stringify(payload),
@@ -2756,6 +2827,8 @@ export interface ShotAssetPromptDraft {
   shot_id: number;
   style_preset: string;
   character_prompts: Array<{ name: string; prompt: string }>;
+  scene_prompt: string;
+  prop_prompts: Array<{ name: string; prompt: string }>;
   storyboard_prompt: string;
   first_frame_prompt: string;
   last_frame_prompt: string;
@@ -2768,7 +2841,7 @@ export async function parseShotAssetPrompts(shotId: number, payload?: {
   provider?: string;
   instruction?: string;
 }): Promise<ShotAssetPromptDraft> {
-  const res = await fetch(`${BASE}/api/video/shots/${shotId}/prompts/parse`, {
+  const res = await fetch(`${BASE}/api/shots/${shotId}/asset-prompts/parse`, {
     method: 'POST',
     headers: apiHeaders(true),
     body: JSON.stringify(payload || {}),
@@ -2784,7 +2857,202 @@ export async function generateShotCharacterAsset(shotId: number, payload: {
   reference_asset_ids?: number[];
   source_asset_ids?: number[];
 }): Promise<VideoAsset> {
-  const res = await fetch(`${BASE}/api/video/shots/${shotId}/assets/character/generate`, {
+  const res = await fetch(`${BASE}/api/shots/${shotId}/assets/character/generate`, {
+    method: 'POST',
+    headers: apiHeaders(true),
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function generateShotPropAsset(shotId: number, payload: {
+  prop_name: string;
+  prompt: string;
+  style_preset?: string;
+  reference_asset_ids?: number[];
+  source_asset_ids?: number[];
+}): Promise<VideoAsset> {
+  const res = await fetch(`${BASE}/api/shots/${shotId}/prop-assets/generate`, {
+    method: 'POST',
+    headers: apiHeaders(true),
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function generateShotSceneAsset(shotId: number, payload: {
+  prompt: string;
+  style_preset?: string;
+  reference_asset_ids?: number[];
+  source_asset_ids?: number[];
+}): Promise<VideoAsset> {
+  const res = await fetch(`${BASE}/api/shots/${shotId}/scene-assets/generate`, {
+    method: 'POST',
+    headers: apiHeaders(true),
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+/** 一键生成章节分镜（分镜列表） */
+export async function generateChapterStoryboard(chapterId: number, payload?: {
+  provider?: string;
+  style?: string;
+  style_preset?: string;
+}): Promise<{ shots: any[] }> {
+  const res = await fetch(`${BASE}/api/chapters/${chapterId}/storyboard/generate`, {
+    method: 'POST',
+    headers: apiHeaders(true),
+    body: payload ? JSON.stringify(payload) : '{}',
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function createChapterVideoWorkflow(payload: {
+  chapter_id: number;
+  character_reference_ids?: number[];
+  video_style?: string;
+}): Promise<ChapterVideoWorkflow> {
+  const res = await fetch(`${BASE}/api/video/chapter-workflows`, {
+    method: 'POST',
+    headers: apiHeaders(true),
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function getChapterVideoWorkflow(workflowId: number): Promise<ChapterVideoWorkflow> {
+  const res = await fetch(`${BASE}/api/video/chapter-workflows/${workflowId}`, {
+    headers: apiHeaders(),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function listChapterVideoWorkflows(chapterId: number): Promise<{ workflows: ChapterVideoWorkflow[]; total: number }> {
+  const res = await fetch(`${BASE}/api/video/chapter-workflows/by-chapter/${chapterId}`, {
+    headers: apiHeaders(),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function getChapterVideoWorkflowStatus(workflowId: number): Promise<ChapterVideoWorkflowStatus> {
+  const res = await fetch(`${BASE}/api/video/chapter-workflows/${workflowId}/status`, {
+    headers: apiHeaders(),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function regenerateChapterWorkflowStoryboard(shotId: number, promptOverride?: string, referenceAssetIds?: number[]): Promise<ChapterVideoShot> {
+  const res = await fetch(`${BASE}/api/video/chapter-workflows/shots/${shotId}/regenerate-storyboard`, {
+    method: 'POST',
+    headers: apiHeaders(true),
+    body: JSON.stringify({
+      target: 'storyboard',
+      prompt_override: promptOverride ?? null,
+      reference_asset_ids: referenceAssetIds ?? [],
+    }),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function regenerateChapterWorkflowVideo(shotId: number, promptOverride?: string, referenceAssetIds?: number[]): Promise<ChapterVideoShot> {
+  const res = await fetch(`${BASE}/api/video/chapter-workflows/shots/${shotId}/regenerate-video`, {
+    method: 'POST',
+    headers: apiHeaders(true),
+    body: JSON.stringify({
+      target: 'video',
+      prompt_override: promptOverride ?? null,
+      reference_asset_ids: referenceAssetIds ?? [],
+    }),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function concatChapterVideoWorkflow(workflowId: number): Promise<{ video_url: string; shot_count: number; duration_seconds: number; message?: string }> {
+  const res = await fetch(`${BASE}/api/video/chapter-workflows/${workflowId}/concat`, {
+    method: 'POST',
+    headers: apiHeaders(true),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function listStoryVideoCharacters(storyId: number): Promise<{ characters: StoryVideoCharacter[]; video_character_profiles: string }> {
+  const res = await fetch(`${BASE}/api/stories/${storyId}/video-characters`, {
+    headers: apiHeaders(),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function generateStoryVideoCharacters(storyId: number): Promise<{ characters: StoryVideoCharacter[]; video_character_profiles: string }> {
+  const res = await fetch(`${BASE}/api/stories/${storyId}/video-characters/generate`, {
+    method: 'POST',
+    headers: apiHeaders(true),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function parseChapterWorkflowShots(workflowId: number): Promise<Record<string, unknown>> {
+  const res = await fetch(`${BASE}/api/video/chapter-workflows/${workflowId}/parse`, {
+    method: 'POST',
+    headers: apiHeaders(true),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function generateChapterWorkflowStoryboards(
+  workflowId: number,
+  payload: { shot_ids: number[] }
+): Promise<Record<string, unknown>> {
+  const res = await fetch(`${BASE}/api/video/chapter-workflows/${workflowId}/storyboards`, {
+    method: 'POST',
+    headers: apiHeaders(true),
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function generateChapterWorkflowVideos(
+  workflowId: number,
+  payload: { shot_ids: number[] }
+): Promise<Record<string, unknown>> {
+  const res = await fetch(`${BASE}/api/video/chapter-workflows/${workflowId}/videos`, {
+    method: 'POST',
+    headers: apiHeaders(true),
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function runAllChapterWorkflowStages(workflowId: number): Promise<Record<string, unknown>> {
+  const res = await fetch(`${BASE}/api/video/chapter-workflows/${workflowId}/run-all`, {
+    method: 'POST',
+    headers: apiHeaders(true),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function reanalyzeChapterWorkflowStoryboardPrompt(
+  workflowId: number,
+  payload: { shot_ids: number[] }
+): Promise<Record<string, unknown>> {
+  const res = await fetch(`${BASE}/api/video/chapter-workflows/${workflowId}/storyboards/reanalyze-prompt`, {
     method: 'POST',
     headers: apiHeaders(true),
     body: JSON.stringify(payload),
@@ -2801,7 +3069,7 @@ export async function renderStoryboardFrame(shotId: number, payload: {
   prompt?: string;
   reference_asset_ids?: number[];
 }): Promise<{ shot_status: string; asset: VideoAsset; storyboard_locked: boolean }> {
-  const res = await fetch(`${BASE}/api/video/shots/${shotId}/storyboard/render`, {
+  const res = await fetch(`${BASE}/api/shots/${shotId}/storyboard/render`, {
     method: 'POST',
     headers: apiHeaders(true),
     body: JSON.stringify(payload),
@@ -2845,18 +3113,18 @@ export async function renderShotVideo(shotId: number, payload: {
   input_mode?: string;
   source_storyboard_asset_id?: number;
 }): Promise<{ job: VideoGenerationJob }> {
-  const res = await fetch(`${BASE}/api/video/shots/${shotId}/render`, {
+  const res = await fetch(`${BASE}/api/shots/${shotId}/video/render`, {
     method: 'POST',
     headers: apiHeaders(true),
     body: JSON.stringify(payload),
   });
   if (!res.ok) throw new Error(await res.text());
   const data = await res.json();
-  return { job: data };
+  return { job: data.job || data };
 }
 
 export async function approveShotStoryboard(shotId: number): Promise<{ storyboard_locked: boolean; storyboard_asset_id: number }> {
-  const res = await fetch(`${BASE}/api/video/shots/${shotId}/storyboard/approve`, {
+  const res = await fetch(`${BASE}/api/shots/${shotId}/storyboard/approve`, {
     method: 'POST',
     headers: apiHeaders(true),
   });
@@ -2869,7 +3137,7 @@ export async function approveShotStoryboard(shotId: number): Promise<{ storyboar
 }
 
 export async function rejectShotStoryboard(shotId: number): Promise<{ storyboard_locked: boolean; storyboard_asset_id: number }> {
-  const res = await fetch(`${BASE}/api/video/shots/${shotId}/storyboard/reject`, {
+  const res = await fetch(`${BASE}/api/shots/${shotId}/storyboard/reject`, {
     method: 'POST',
     headers: apiHeaders(true),
   });
@@ -2882,7 +3150,7 @@ export async function rejectShotStoryboard(shotId: number): Promise<{ storyboard
 }
 
 export async function setMasterStoryboard(shotId: number, assetId: number): Promise<{ shot_id: number; asset_id: number }> {
-  const res = await fetch(`${BASE}/api/video/shots/${shotId}/storyboard/${assetId}/master`, {
+  const res = await fetch(`${BASE}/api/shots/${shotId}/storyboard/${assetId}/master`, {
     method: 'POST',
     headers: apiHeaders(true),
   });
@@ -2895,7 +3163,7 @@ export async function getShotStoryboards(shotId: number): Promise<{
   active_storyboard_asset_id?: number | null;
   storyboard_locked: boolean;
 }> {
-  const res = await fetch(`${BASE}/api/video/shots/${shotId}/storyboards`, {
+  const res = await fetch(`${BASE}/api/shots/${shotId}/storyboards`, {
     headers: apiHeaders(),
   });
   if (!res.ok) throw new Error(await res.text());
@@ -2908,7 +3176,7 @@ export async function getShotStoryboards(shotId: number): Promise<{
 }
 
 export async function deleteShot(shotId: number): Promise<{ ok: boolean; shot_id: number }> {
-  const res = await fetch(`${BASE}/api/video/shots/${shotId}`, {
+  const res = await fetch(`${BASE}/api/shots/${shotId}`, {
     method: 'DELETE',
     headers: apiHeaders(true),
   });
@@ -2941,7 +3209,7 @@ export async function reorderSceneShots(sceneId: number, payload: { shot_ids: nu
 }
 
 export async function getVideoJob(jobId: number): Promise<VideoGenerationJob> {
-  const res = await fetch(`${BASE}/api/video/jobs/${jobId}`, {
+  const res = await fetch(`${BASE}/api/video-jobs/${jobId}`, {
     headers: apiHeaders(),
   });
   if (!res.ok) throw new Error(await res.text());
@@ -2959,7 +3227,7 @@ export async function retryVideoJob(jobId: number, payload?: { provider?: string
 }
 
 export async function listShotClips(shotId: number): Promise<{ shot_id: number; clips: RenderedClip[]; active_clip_id?: number }> {
-  const res = await fetch(`${BASE}/api/video/shots/${shotId}/clips`, {
+  const res = await fetch(`${BASE}/api/shots/${shotId}/clips`, {
     headers: apiHeaders(),
   });
   if (!res.ok) throw new Error(await res.text());
@@ -2967,7 +3235,7 @@ export async function listShotClips(shotId: number): Promise<{ shot_id: number; 
 }
 
 export async function activateShotClip(shotId: number, clipId: number): Promise<{ active_clip_id: number }> {
-  const res = await fetch(`${BASE}/api/video/shots/${shotId}/clips/${clipId}/activate`, {
+  const res = await fetch(`${BASE}/api/shots/${shotId}/clips/${clipId}/activate`, {
     method: 'POST',
     headers: apiHeaders(true),
   });
@@ -2977,7 +3245,7 @@ export async function activateShotClip(shotId: number, clipId: number): Promise<
 
 export async function listVideoAssets(chapterId: number, assetType?: string): Promise<{ chapter_id: number; assets: VideoAsset[] }> {
   const params = assetType ? `?asset_type=${encodeURIComponent(assetType)}` : '';
-  const res = await fetch(`${BASE}/api/video/chapters/${chapterId}/assets${params}`, {
+  const res = await fetch(`${BASE}/api/chapters/${chapterId}/video-assets${params}`, {
     headers: apiHeaders(),
   });
   if (!res.ok) throw new Error(await res.text());
@@ -2995,7 +3263,7 @@ export async function createVideoAsset(chapterId: number, payload: {
   prompt?: string;
   meta?: Record<string, unknown>;
 }): Promise<VideoAsset> {
-  const res = await fetch(`${BASE}/api/video/chapters/${chapterId}/assets`, {
+  const res = await fetch(`${BASE}/api/chapters/${chapterId}/video-assets`, {
     method: 'POST',
     headers: apiHeaders(true),
     body: JSON.stringify(payload),
@@ -3005,9 +3273,53 @@ export async function createVideoAsset(chapterId: number, payload: {
 }
 
 export async function deleteVideoAsset(assetId: number): Promise<{ ok: boolean; asset_id: number }> {
-  const res = await fetch(`${BASE}/api/video/assets/${assetId}`, {
+  const res = await fetch(`${BASE}/api/video-assets/${assetId}`, {
     method: 'DELETE',
     headers: apiHeaders(true),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export interface ReanalyzeShotPromptsResponse {
+  shot_id: number;
+  storyboard_prompt: string;
+  video_prompt: string;
+  character_prompts: Array<{ name: string; prompt: string }>;
+}
+
+export async function reanalyzeChapterShotPrompts(shotId: number): Promise<ReanalyzeShotPromptsResponse> {
+  const res = await fetch(`${BASE}/api/video/chapter-workflows/shots/${shotId}/reanalyze-prompts`, {
+    method: 'POST',
+    headers: apiHeaders(true),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function clearShotStoryboard(shotId: number): Promise<{ ok: boolean; shot: ChapterVideoShot }> {
+  const res = await fetch(`${BASE}/api/video/chapter-workflows/shots/${shotId}/clear-storyboard`, {
+    method: 'POST',
+    headers: apiHeaders(true),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function clearShotVideo(shotId: number): Promise<{ ok: boolean; shot: ChapterVideoShot }> {
+  const res = await fetch(`${BASE}/api/video/chapter-workflows/shots/${shotId}/clear-video`, {
+    method: 'POST',
+    headers: apiHeaders(true),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function saveChapterShotPrompts(shotId: number, prompts: { storyboard_prompt?: string | null; video_prompt?: string | null }): Promise<{ ok: boolean; shot: ChapterVideoShot }> {
+  const res = await fetch(`${BASE}/api/video/chapter-workflows/shots/${shotId}/save-prompts`, {
+    method: 'POST',
+    headers: apiHeaders(true),
+    body: JSON.stringify(prompts),
   });
   if (!res.ok) throw new Error(await res.text());
   return res.json();
@@ -3022,7 +3334,7 @@ export async function regenerateVideoAsset(assetId: number, payload: {
   instruction?: string;
   overwrite?: boolean;
 }): Promise<VideoAsset> {
-  const res = await fetch(`${BASE}/api/video/assets/${assetId}/regenerate`, {
+  const res = await fetch(`${BASE}/api/video-assets/${assetId}/regenerate`, {
     method: 'POST',
     headers: apiHeaders(true),
     body: JSON.stringify(payload),
@@ -3123,7 +3435,7 @@ export async function generateShotFrames(shotId: number, payload: {
   inherit_scene_assets?: boolean;
   inherit_storyboard_asset?: boolean;
 }): Promise<ShotFramesResponse> {
-  const res = await fetch(`${BASE}/api/video/shots/${shotId}/frames/generate`, {
+  const res = await fetch(`${BASE}/api/shots/${shotId}/frames/generate`, {
     method: 'POST',
     headers: apiHeaders(true),
     body: JSON.stringify(payload),
@@ -3140,7 +3452,7 @@ export async function regenerateShotFrame(shotId: number, payload: {
   style_preset?: string;
   reference_asset_ids?: number[];
 }): Promise<ShotFrameAsset> {
-  const res = await fetch(`${BASE}/api/video/shots/${shotId}/frames/regenerate`, {
+  const res = await fetch(`${BASE}/api/shots/${shotId}/frames/regen`, {
     method: 'POST',
     headers: apiHeaders(true),
     body: JSON.stringify(payload),
@@ -3150,7 +3462,7 @@ export async function regenerateShotFrame(shotId: number, payload: {
 }
 
 export async function getShotFrames(shotId: number): Promise<ShotFramesResponse> {
-  const res = await fetch(`${BASE}/api/video/shots/${shotId}/frames`, {
+  const res = await fetch(`${BASE}/api/shots/${shotId}/frames`, {
     headers: apiHeaders(),
   });
   if (!res.ok) throw new Error(await res.text());
@@ -3194,7 +3506,7 @@ export async function setStoryVideoStylePreset(storyId: number, stylePresetId: n
 }
 
 export async function setShotVideoStylePreset(shotId: number, stylePreset: string): Promise<{ shot_id: number; style_preset: string }> {
-  const res = await fetch(`${BASE}/api/video/shots/${shotId}/style-preset`, {
+  const res = await fetch(`${BASE}/api/shots/${shotId}/style-preset`, {
     method: 'PUT',
     headers: apiHeaders(true),
     body: JSON.stringify({ style_preset: stylePreset }),
@@ -3204,7 +3516,7 @@ export async function setShotVideoStylePreset(shotId: number, stylePreset: strin
 }
 
 export async function deleteShotVideoStylePreset(shotId: number): Promise<{ shot_id: number; style_preset: null }> {
-  const res = await fetch(`${BASE}/api/video/shots/${shotId}/style-preset`, {
+  const res = await fetch(`${BASE}/api/shots/${shotId}/style-preset`, {
     method: 'DELETE',
     headers: apiHeaders(true),
   });
@@ -3228,7 +3540,7 @@ export interface ShotAssetBundle {
 }
 
 export async function getShotAssetBundle(shotId: number): Promise<ShotAssetBundle> {
-  const res = await fetch(`${BASE}/api/video/shots/${shotId}/assets/bundle`, {
+  const res = await fetch(`${BASE}/api/shots/${shotId}/assets/bundle`, {
     headers: apiHeaders(),
   });
   if (!res.ok) throw new Error(await res.text());
@@ -3236,7 +3548,7 @@ export async function getShotAssetBundle(shotId: number): Promise<ShotAssetBundl
 }
 
 export async function updateAssetScope(assetId: number, payload: { usage_scope: string; inherit_to_next_shot?: boolean }): Promise<{ asset_id: number; usage_scope: string; inherit_to_next_shot: boolean }> {
-  const res = await fetch(`${BASE}/api/video/assets/${assetId}/scope`, {
+  const res = await fetch(`${BASE}/api/video-assets/${assetId}/scope`, {
     method: 'PUT',
     headers: apiHeaders(true),
     body: JSON.stringify(payload),
@@ -3246,7 +3558,7 @@ export async function updateAssetScope(assetId: number, payload: { usage_scope: 
 }
 
 export async function promoteAsset(assetId: number, payload: { level: string; inherit_to_next_shot?: boolean }): Promise<{ asset_id: number; level: string }> {
-  const res = await fetch(`${BASE}/api/video/assets/${assetId}/promote`, {
+  const res = await fetch(`${BASE}/api/video-assets/${assetId}/promote`, {
     method: 'POST',
     headers: apiHeaders(true),
     body: JSON.stringify(payload),

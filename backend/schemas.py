@@ -872,5 +872,99 @@ class AdminReviewRequest(BaseModel):
     note: str = ""
 
 
+# ─── 章节视频工作流 Schemas ────────────────────────────
+
+
+class ChapterVideoWorkflowCreate(BaseModel):
+    """创建章节视频工作流请求"""
+    chapter_id: int
+    character_reference_ids: list[int] = []
+    video_style: str | None = None
+
+
+class ChapterVideoShotOut(BaseModel):
+    """10 秒镜头输出"""
+    id: int
+    workflow_id: int
+    shot_index: int
+    source_text_span: str | None = None
+    scene_location: str | None = None
+    time_of_day: str | None = None
+    characters: list[Any] | None = None
+    story_summary: str | None = None
+    dialogue_or_narration: str | None = None
+    camera_plan: str | None = None
+    motion_plan: str | None = None
+    emotion_plan: str | None = None
+    continuity_notes: str | None = None
+    storyboard_prompt: str | None = None
+    video_prompt: str | None = None
+    character_prompts_json: list[dict[str, str]] | None = None
+    character_reference_ids: list[Any] | None = None
+    storyboard_json: dict[str, Any] | None = None
+    storyboard_image_url: str | None = None
+    video_url: str | None = None
+    status: str = "pending"
+    error_message: str | None = None
+    created_at: datetime.datetime
+
+    model_config = {"from_attributes": True}
+
+
+class ChapterVideoWorkflowOut(BaseModel):
+    """章节视频工作流输出"""
+    id: int
+    chapter_id: int
+    story_id: int
+    workflow_status: str = "pending"
+    character_reference_ids: list[Any] | None = None
+    video_style: str | None = None
+    duration_per_shot: int = 10
+    total_shots: int = 0
+    completed_shots: int = 0
+    failed_shots: int = 0
+    error_message: str | None = None
+    created_at: datetime.datetime
+    updated_at: datetime.datetime
+    shots: list[ChapterVideoShotOut] = []
+
+    model_config = {"from_attributes": True}
+
+
+class ChapterVideoWorkflowListOut(BaseModel):
+    workflows: list[ChapterVideoWorkflowOut]
+    total: int
+
+
+class ChapterVideoWorkflowStatusOut(BaseModel):
+    """工作流状态输出（轻量）"""
+    id: int
+    chapter_id: int
+    workflow_status: str
+    total_shots: int
+    completed_shots: int
+    failed_shots: int
+    error_message: str | None = None
+
+
+class ChapterWorkflowStageActionRequest(BaseModel):
+    """分阶段操作请求——用于手动触发拆镜/故事版/视频阶段"""
+    shot_ids: list[int] = []
+    run_all: bool = False
+    auto_continue: bool = False
+
+
+class ChapterWorkflowPromptReanalyzeRequest(BaseModel):
+    """重新分析故事版提示词请求"""
+    shot_ids: list[int] = []
+
+
+class RegenerateShotRequest(BaseModel):
+    """重新生成单镜头的故事版或视频"""
+    target: str = "storyboard"  # "storyboard" | "video"
+    prompt_override: str | None = None
+    reference_asset_ids: list[int] = []
+
+
 # Resolve forward references
 ChapterOut.model_rebuild()

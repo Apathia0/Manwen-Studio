@@ -188,6 +188,7 @@ function App() {
   const [paymentMethods, setPaymentMethods] = useState<PaymentMethodOption[]>([]);
   const [channelPicker, setChannelPicker] = useState<{ planId: number; billingCycle: 'monthly' | 'yearly'; options: PaymentMethodOption[] } | null>(null);
   const [channelLoading, setChannelLoading] = useState<string | null>(null);
+  const [workspaceMode, setWorkspaceMode] = useState<'manga' | 'video'>('manga');
 
   const activeChapter = useMemo(
     () => chapters.find((chapter) => chapter.id === activeChapterId) ?? null,
@@ -800,9 +801,10 @@ function App() {
               chapters={chapters}
               currentChapter={activeChapter}
               entitlements={myEntitlements}
-              workspaceMode="manga"
+              workspaceMode={workspaceMode}
               onChapterChange={handleChapterChange}
               onContentUpdated={refreshWorkspaceData}
+              onWorkspaceModeChange={setWorkspaceMode}
             />
           )}
           {route === 'template-review' && (

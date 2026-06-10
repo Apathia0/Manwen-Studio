@@ -10,7 +10,6 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import httpx
-from dotenv import load_dotenv
 from PIL import Image
 
 from .errors import MangaImageGenerationError, MissingApiKeyError
@@ -19,20 +18,48 @@ from .scene_safety import sanitize_scene_text
 logger = logging.getLogger("image2")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(message)s")
 
-load_dotenv()
-
 # 禁用系统代理（部分 Windows 环境有代理配置但未运行，会导致 httpx 连接超时断开）
 os.environ["NO_PROXY"] = "*"
 os.environ["no_proxy"] = "*"
 
-IMAGE_API_BASE_URL = os.getenv("IMAGE_API_BASE_URL", "https://newapi.aifusion6.cn/v1").rstrip("/")
-IMAGE_API_KEY = os.getenv("IMAGE_API_KEY", "")
-IMAGE_MODEL = "gpt-image-2"
+# 默认值会被 router 层从 PlatformSetting 数据库动态覆盖
+IMAGE_API_BASE_URL = ""
+IMAGE_API_KEY = ""
+IMAGE_MODEL = ""
 IMAGE_SIZE = "1024x1024"
+# 用于所有图片生成请求的负面提示词（抑制解剖学畸形和画面污染）
+IMAGE_NEGATIVE_PROMPT = (
+    "extra limbs, extra hands, extra feet, extra fingers, six fingers, "
+    "deformed face, asymmetric face, blurred face, distorted face, "
+    "overlapping body parts, merged characters, duplicated limbs, "
+    "missing fingers, cropped limbs, fused body parts, "
+    "distorted proportions, unnatural body, twisted body, "
+    "disconnected limbs, cross-eyed, "
+    "multiple heads, conjoined bodies, "
+    "watermark, signature, label, text overlay, Chinese characters on figure, "
+    "diagram, infographic, split screen, multi-panel layout, "
+    "blurry, low quality, bad anatomy, bad proportions, "
+    "poorly drawn, disfigured, mutation, deformed, "
+    "jpeg artifacts, compression artifacts, pixelated"
+)
 OUTPUT_DIR = Path(__file__).resolve().parent.parent / "manga_outputs"
 
 MAX_RETRIES = 3
 RETRY_DELAY = 5
+
+
+def configure_runtime(base_url: str | None = None, api_key: str | None = None, model: str | None = None) -> None:
+    """由 router 层调用，注入数据库中的 API 配置。"""
+    global IMAGE_API_BASE_URL, IMAGE_API_KEY, IMAGE_MODEL
+    if isinstance(base_url, str) and base_url.strip():
+        IMAGE_API_BASE_URL = base_url.strip().rstrip("/")
+    if isinstance(api_key, str):
+        IMAGE_API_KEY = api_key.strip()
+    if isinstance(model, str) and model.strip():
+        clean_model = model.strip()
+        if clean_model.lower() not in ("default", "none", "null", ""):
+            IMAGE_MODEL = clean_model
+            logger.info("image2 模型已更新: %s", IMAGE_MODEL)
 DOWNLOAD_RETRIES = 3
 DOWNLOAD_RETRY_DELAY = 3
 PROMPT_TOO_LONG_KEYWORDS = (
@@ -113,6 +140,21 @@ def _load_pending_download(output_path: Path) -> str:
 
 
 def _image_auth_headers(api_key: str | None = None, json_content: bool = False) -> dict[str, str]:
+    """获取图片 API 认证头，同时校验必要配置是否已注入。"""
+    if not IMAGE_API_BASE_URL:
+        raise MangaImageGenerationError(
+            code="missing_config",
+            user_message="图片 API 地址未配置，请在后台设置中配置 API 地址后重试。",
+            retryable=False,
+            provider_message="IMAGE_API_BASE_URL is empty",
+        )
+    if not IMAGE_MODEL:
+        raise MangaImageGenerationError(
+            code="missing_config",
+            user_message="图片生成模型未配置，请在后台设置中配置模型名称后重试。",
+            retryable=False,
+            provider_message="IMAGE_MODEL is empty",
+        )
     key = (api_key or IMAGE_API_KEY or "").strip()
     if not key:
         raise MissingApiKeyError("Image2")
@@ -278,12 +320,12 @@ def _classify_response_error(
 def _build_manga_style(color_mode: str) -> str:
     if color_mode == "color":
         return (
-            "日式彩色漫画页面，纵向多格分镜，2-6 格构图，镜头清晰，人物一致。"
-            "可以使用对话气泡和音效字，但避免过度拥挤。"
+            "全彩色画面，角色形象鲜明，构图清晰。"
+            "画面干净简洁，人物一致，镜头语言明确。"
         )
     return (
-        "日式黑白漫画页面，纵向多格分镜，2-6 格构图，黑白高对比，网点和线稿清晰。"
-        "可以使用对话气泡和音效字，但避免过度拥挤。"
+        "日式黑白漫画页面，黑白高对比，网点和线稿清晰。"
+        "构图简洁明了，角色形象统一。"
     )
 
 
@@ -297,23 +339,31 @@ def _build_full_prompt(
     color_mode: str,
     ref_layout_desc: str = "",
 ) -> str:
+    """构建完整的提示词内容。
+
+    当有参考图时，在最前面用英文写出"忽略文本外貌描述"的核心规则，
+    确保 gpt-image-2 优先读到视觉参考约束，而非后面 DeepSeek 生成的文本外貌描述。
+    """
     char_block = ""
     if character_profiles and not use_ref:
         char_block = f"【角色外貌设定】\n{character_profiles.strip()}\n\n"
 
+    # 参考图约束块：放在最前，优先级最高
     ref_block = ""
     if use_ref:
+        # 英文指令：确保 gpt-image-2 首先读到并遵循
+        ref_block = (
+            "IMAGES ARE THE SOLE SOURCE OF CHARACTER APPEARANCE. "
+            "Ignore all text descriptions of characters below. "
+            "Match each character to their specific labeled reference image.\n"
+        )
+        # 中文编号说明 —— 说明每张参考图的角色对应关系
         if ref_layout_desc:
-            ref_block = f"{ref_layout_desc}\n\n"
-        else:
-            ref_block = (
-                "【角色参考图说明】\n"
-                "请严格保持参考图中角色的外貌特征（发型、脸型、服装、体型），不要凭空创造新外貌。\n\n"
-            )
+            ref_block += ref_layout_desc + "\n"
 
     style_block = _build_manga_style(color_mode)
+
     if all_scenes:
-        # 只取当前页附近的分镜作为上下文，避免 prompt 过长导致 API 处理失败
         idx = image_number - 1
         window_start = max(0, idx - 1)
         window_end = min(len(all_scenes), idx + 2)
@@ -324,7 +374,7 @@ def _build_full_prompt(
         )
         return (
             f"{ref_block}{char_block}"
-            f"你正在绘制第 {image_number}/{total_pages} 页漫画。\n"
+            f"你正在绘制第 {image_number}/{total_pages} 页。\n"
             f"附近分镜如下，请保持人物、服装和镜头风格一致：\n{script_context}\n\n"
             f"当前只绘制第 {image_number} 页。\n"
             f"{style_block}\n"
@@ -357,21 +407,40 @@ def _prepare_ref_blobs(valid_refs: list[Path], progress_label: str) -> list[tupl
 
 
 def _compose_ref_sheet(ref_paths: list[Path], ref_labels: list[str]) -> tuple[bytes, str]:
-    """多角色参考图合拼为紧凑网格图供 /images/edits 单图使用。
+    """多角色参考图合拼为紧凑网格图，直接在图上绘制角色名标签。
 
-    不在图上绘制文字标签——角色对应关系通过 prompt 编号策略描述。
+    图片上直接标注角色名，确保模型"看见"角色对应关系。
     返回 (PNG bytes, 布局描述)。
     """
+    from PIL import ImageDraw, ImageFont
+
     if len(ref_paths) == 1:
         buf = io.BytesIO()
         with Image.open(ref_paths[0]) as img:
+            # 在图片底部绘制角色名标签
+            draw = ImageDraw.Draw(img)
+            label = ref_labels[0] if ref_labels and ref_labels[0] else ""
+            if label:
+                try:
+                    font = ImageFont.truetype("simhei.ttf", 24)
+                except Exception:
+                    font = ImageFont.load_default()
+                bbox = draw.textbbox((0, 0), label, font=font)
+                tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+                # 底部半透明背景
+                draw.rectangle([0, img.height - th - 10, img.width, img.height], fill=(0, 0, 0, 180))
+                draw.text(((img.width - tw) // 2, img.height - th - 5), label, fill=(255, 255, 255), font=font)
             img.convert("RGB").save(buf, format="PNG", optimize=True)
-        label = ref_labels[0] if ref_labels and ref_labels[0] else ""
-        desc = f"【角色参考图说明】\n角色：{label}。请严格保持该角色外貌特征，将其融入以下漫画场景中。\n" if label else ""
+        desc = (
+            f"REFERENCE IMAGE: character {label}. "
+            f"Match this character's appearance EXACTLY from the reference image. "
+            f"Do NOT describe or create character appearances from text.\n"
+        )
         return buf.getvalue(), desc
 
     cell_size = 384
     padding = 8
+    label_height = 30
     max_cols = 3
 
     images: list[Image.Image] = []
@@ -408,7 +477,30 @@ def _compose_ref_sheet(ref_paths: list[Path], ref_labels: list[str]) -> tuple[by
     for i, img in enumerate(images):
         col = i % cols
         row = i // cols
-        composite.paste(img, (col * (cell_size + padding), row * (cell_size + padding)))
+        x_pos = col * (cell_size + padding)
+        y_pos = row * (cell_size + padding)
+        composite.paste(img, (x_pos, y_pos))
+
+        # 在每张参考图底部绘制角色名
+        label = ref_labels[i] if i < len(ref_labels) and ref_labels[i] else f"角色{i + 1}"
+        try:
+            font = ImageFont.truetype("simhei.ttf", 20)
+        except Exception:
+            font = ImageFont.load_default()
+        draw = ImageDraw.Draw(composite)
+        bbox = draw.textbbox((0, 0), label, font=font)
+        tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+        # 黑色半透明背景条
+        draw.rectangle(
+            [x_pos, y_pos + cell_size - th - 10, x_pos + cell_size, y_pos + cell_size],
+            fill=(0, 0, 0, 200),
+        )
+        draw.text(
+            (x_pos + (cell_size - tw) // 2, y_pos + cell_size - th - 5),
+            f"「{label}」",
+            fill=(255, 255, 255),
+            font=font,
+        )
 
     buf = io.BytesIO()
     composite.save(buf, format="PNG", optimize=True)
@@ -416,13 +508,13 @@ def _compose_ref_sheet(ref_paths: list[Path], ref_labels: list[str]) -> tuple[by
     labels = []
     for i in range(count):
         label = ref_labels[i] if i < len(ref_labels) and ref_labels[i] else f"角色{i + 1}"
-        labels.append(f"角色「{label}」")
+        labels.append(f"「{label}」")
 
     desc = (
-        "【角色参考图说明】\n"
-        f"参考图是一张合拼网格图，包含以下角色：{'、'.join(labels)}。\n"
-        "请根据参考图中各角色的外貌特征，将其融入以下漫画场景中。\n"
-        "严格保持每个角色的发型、脸型、服装和整体气质，不要混淆或错乱角色特征。\n"
+        "REFERENCE IMAGES WITH LABELED CHARACTERS:\n"
+        f"Labels on composite: {', '.join(labels)}\n"
+        "Each character's appearance MUST match their labeled reference image exactly.\n"
+        "Do NOT create new appearances — copy from the reference images.\n"
     )
     return buf.getvalue(), desc
 
@@ -497,26 +589,116 @@ async def _download_image_from_url(url: str, progress_label: str) -> bytes:
     raise RuntimeError("image download failed without a specific exception")
 
 
+def _encode_image_to_data_uri(file_path: str, max_size: int = 512) -> str | None:
+    """将本地图片压缩并编码为 data URI，max_size 为长边最大像素。"""
+    if not os.path.isfile(file_path):
+        return None
+    try:
+        from PIL import Image as PILImage
+        from io import BytesIO
+
+        img = Image.open(file_path).convert("RGB")
+        w, h = img.size
+        if max(w, h) > max_size:
+            ratio = max_size / max(w, h)
+            img = img.resize((int(w * ratio), int(h * ratio)), Image.LANCZOS)
+        buf = BytesIO()
+        img.save(buf, format="JPEG", quality=85, optimize=True)
+        data = buf.getvalue()
+        return f"data:image/jpeg;base64,{base64.b64encode(data).decode()}"
+    except Exception:
+        # fallback: 直接读取原文件
+        try:
+            with open(file_path, "rb") as fh:
+                data = fh.read()
+            ext = os.path.splitext(file_path)[1].lower()
+            mime_map = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp"}
+            mime = mime_map.get(ext, "image/png")
+            return f"data:{mime};base64,{base64.b64encode(data).decode()}"
+        except Exception:
+            return None
+
+
 async def generate_reference_image(
     prompt: str,
     output_path: Path,
     *,
     api_key: str | None = None,
     size: str = "1024x1024",
+    ref_image_paths: list[str] | None = None,
 ) -> str:
     progress_label = f"ref:{output_path.stem}"
     current_prompt = prompt.strip()
     last_err: MangaImageGenerationError | None = None
+    has_refs = bool(ref_image_paths)
 
     for attempt in range(1, MAX_RETRIES + 1):
         try:
-            logger.info("[%s] 开始生成角色参考图（尝试 %s/%s）", progress_label, attempt, MAX_RETRIES)
+            prompt_chars = len(current_prompt)
+            # 粗略估算 token: 英文 ~4chars/token, 中文 ~2chars/token
+            cjk_chars = sum(1 for c in current_prompt if '一' <= c <= '鿿')
+            ascii_chars = prompt_chars - cjk_chars
+            est_tokens = (cjk_chars // 2) + (ascii_chars // 4)
+            logger.info("[%s] 开始生成（尝试 %s/%s）refs=%s prompt_chars=%d est_tokens=%d",
+                        progress_label, attempt, MAX_RETRIES,
+                        len(ref_image_paths) if has_refs else 0,
+                        prompt_chars, est_tokens)
             async with httpx.AsyncClient(timeout=httpx.Timeout(connect=30, read=600, write=120, pool=30)) as client:
-                resp = await client.post(
-                    f"{IMAGE_API_BASE_URL}/images/generations",
-                    json={"model": IMAGE_MODEL, "prompt": current_prompt, "size": size},
-                    headers=_image_auth_headers(api_key, json_content=True),
-                )
+                if has_refs:
+                    # 原图通过 /images/edits multipart 传递（不压缩，保持角色细节）
+                    ref_files = []
+                    for i, p in enumerate(ref_image_paths):
+                        if not os.path.isfile(p):
+                            logger.warning("[%s] 参考图片文件不存在: %s", progress_label, p)
+                            continue
+                        with open(p, "rb") as fh:
+                            data = fh.read()
+                        ext = os.path.splitext(p)[1].lower()
+                        mime = "image/png" if ext == ".png" else "image/jpeg"
+                        ref_files.append(("image[]", (f"ref_{i}{ext}", data, mime)))
+
+                    if ref_files:
+                        # 图生图模式：参考图作为风格/角色参考，prompt 描述要生成的新图
+                        ref_guide = (
+                            f"CREATE A NEW IMAGE. The attached {len(ref_files)} image(s) are CHARACTER "
+                            f"REFERENCE SHEETS. Match every character to their reference EXACTLY: "
+                            f"face, hair, eyes, outfit, body proportions. "
+                            f"Also match the ART STYLE of the reference: line weight, shading technique, "
+                            f"color palette, lighting, and overall aesthetic must be consistent. "
+                            f"Do NOT edit the reference images -- create an entirely NEW image "
+                            f"with the storyboard panels specified below.\n\n"
+                        )
+                        logger.info("[%s] 图生图请求 refs=%d prompt=%dchars", progress_label, len(ref_files), len(current_prompt))
+                        # 打印完整提示词内容
+                        final_api_prompt = ref_guide + current_prompt
+                        logger.info("=" * 70)
+                        logger.info("[%s] 发送给图片 API 的完整提示词（%d 字符）:", progress_label, len(final_api_prompt))
+                        logger.info("-" * 70)
+                        for log_line in final_api_prompt.split("\n"):
+                            logger.info("[PROMPT] %s", log_line)
+                        logger.info("-" * 70)
+                        if ref_files:
+                            logger.info("[%s] 附带参考图: %d 张", progress_label, len(ref_files))
+                        logger.info("=" * 70)
+                        resp = await client.post(
+                            f"{IMAGE_API_BASE_URL}/images/edits",
+                            files=ref_files,
+                            data={"model": IMAGE_MODEL, "prompt": final_api_prompt, "size": size},
+                            headers=_image_auth_headers(api_key),
+                        )
+                    else:
+                        logger.warning("[%s] 所有参考图片均不可用，降级为纯文本生成", progress_label)
+                        resp = await client.post(
+                            f"{IMAGE_API_BASE_URL}/images/generations",
+                            json={"model": IMAGE_MODEL, "prompt": current_prompt, "size": size},
+                            headers=_image_auth_headers(api_key, json_content=True),
+                        )
+                else:
+                    resp = await client.post(
+                        f"{IMAGE_API_BASE_URL}/images/generations",
+                        json={"model": IMAGE_MODEL, "prompt": current_prompt, "size": size},
+                        headers=_image_auth_headers(api_key, json_content=True),
+                    )
 
             if not resp.is_success:
                 raise _classify_response_error(resp, progress_label, current_prompt, False)
@@ -575,7 +757,7 @@ async def generate_cover_image(
     output_path: Path,
     *,
     api_key: str | None = None,
-    size: str = "1024x1536",
+    size: str = "1024x1792",
 ) -> str:
     progress_label = f"cover:{output_path.stem}"
     current_prompt = prompt.strip()
@@ -757,6 +939,7 @@ async def generate_manga_image(
     ref_labels: list[str] | None = None,
     color_mode: str = "bw",
     api_key: str | None = None,
+    size: str | None = None,
 ) -> ImageGenerationResult:
     total_pages = len(all_scenes) if all_scenes else 1
     progress_label = f"{image_number}/{total_pages}"
@@ -774,11 +957,17 @@ async def generate_manga_image(
                 for i in range(1, len(ref_blobs) + 1)
             )
             multi_desc = (
-                "【角色参考图说明】\n"
-                f"{numbered}\n\n"
-                "将以上各角色按以下分镜描述融合到同一漫画画面中。\n"
-                "每张参考图对应一个角色——严格保持该角色在参考图中的发型、脸型、服装和整体气质，\n"
-                "各角色外貌特征不得混淆、交换或错乱。\n"
+                "CHARACTER-TO-REFERENCE MAPPING:\n"
+                + "".join(
+                    f"Reference image {i+1} → character {valid_labels[i] if i < len(valid_labels) else f'Character {i+1}'}\n"
+                    for i in range(len(ref_blobs))
+                    if not (i < len(valid_labels) and valid_labels[i] == "【画面风格参考锚点】")
+                )
+                + "\n"
+                "Each reference image defines ONE character's appearance. "
+                "Copy their appearance EXACTLY from the reference. "
+                "Do NOT swap appearances between characters.\n"
+                "Image labeled '【画面风格参考锚点】' is for ART STYLE only, not character appearance.\n"
             )
             strategies.append(("multi_edits", True, ref_blobs, multi_desc))
 
@@ -793,8 +982,9 @@ async def generate_manga_image(
             desc = ""
             if label:
                 desc = (
-                    "【角色参考图说明】\n"
-                    f"角色：{label}。请严格保持该角色外貌特征，将其融入以下漫画场景中。\n"
+                    f"REFERENCE IMAGE: character {label}. "
+                    f"Match this character's appearance EXACTLY from the reference image. "
+                    f"Do NOT describe or create character appearances from text.\n"
                 )
             strategies.append(("single_edits", True, ref_blobs, desc))
     else:
@@ -819,6 +1009,16 @@ async def generate_manga_image(
                 color_mode=color_mode,
                 ref_layout_desc=strategy_layout,
             )
+            # 打印完整提示词内容（用户可见 + 不可见的系统约束），方便排查生图问题
+            logger.info("=" * 70)
+            logger.info("[%s] 发送给图片 API 的完整提示词（%d 字符）:", progress_label, len(full_prompt))
+            logger.info("-" * 70)
+            for log_line in full_prompt.split("\n"):
+                logger.info("[PROMPT] %s", log_line)
+            logger.info("-" * 70)
+            if strategy_blobs:
+                logger.info("[%s] 附带参考图: %d 张", progress_label, len(strategy_blobs))
+            logger.info("=" * 70)
             heartbeat_task: asyncio.Task | None = None
             try:
                 mode = f"{strategy_name}({len(strategy_blobs)} refs)" if strategy_blobs else "generations"
@@ -847,16 +1047,18 @@ async def generate_manga_image(
                                 ("image[]", (name, io.BytesIO(blob), "image/png"))
                                 for name, blob in strategy_blobs
                             ]
+                        effective_size = size or IMAGE_SIZE
                         resp = await client.post(
                             f"{IMAGE_API_BASE_URL}/images/edits",
                             files=files,
-                            data={"model": IMAGE_MODEL, "prompt": full_prompt, "size": IMAGE_SIZE},
+                            data={"model": IMAGE_MODEL, "prompt": full_prompt, "size": effective_size, "negative_prompt": IMAGE_NEGATIVE_PROMPT},
                             headers=_image_auth_headers(api_key),
                         )
                     else:
+                        effective_size = size or IMAGE_SIZE
                         resp = await client.post(
                             f"{IMAGE_API_BASE_URL}/images/generations",
-                            json={"model": IMAGE_MODEL, "prompt": full_prompt, "size": IMAGE_SIZE},
+                            json={"model": IMAGE_MODEL, "prompt": full_prompt, "size": effective_size, "negative_prompt": IMAGE_NEGATIVE_PROMPT},
                             headers=_image_auth_headers(api_key, json_content=True),
                         )
 

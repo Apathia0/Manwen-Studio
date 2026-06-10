@@ -14,7 +14,7 @@ import {
 import FrameworkPanel from './FrameworkPanel';
 import EditorPanel from './EditorPanel';
 import ScreenplayPanel from './ScreenplayPanel';
-import StoryboardPanel from './StoryboardPanel';
+
 import ShotAssetWorkflowPanel from './ShotAssetWorkflowPanel';
 import ClipTimelinePanel from './ClipTimelinePanel';
 import VideoCharacterLibrary from './VideoCharacterLibrary';
@@ -55,8 +55,8 @@ export default function VideoWorkspaceLayout({
   const [jobs, setJobs] = useState<VideoGenerationJob[]>([]);
   const [clips, setClips] = useState<RenderedClip[]>([]);
   const [activeClipId, setActiveClipId] = useState<number | null>(null);
-  const [scenesLoading, setScenesLoading] = useState(false);
-  const [shotsLoading, setShotsLoading] = useState(false);
+  const [_scenesLoading, setScenesLoading] = useState(false);
+  const [_shotsLoading, setShotsLoading] = useState(false);
   const [stylePresets, setStylePresets] = useState<any[]>([]);
   const [chapterStylePreset, setChapterStylePreset] = useState<any>(null);
   const [storyStylePreset, setStoryStylePreset] = useState<any>(null);
@@ -302,29 +302,9 @@ export default function VideoWorkspaceLayout({
           )}
 
           {activeTab === 'storyboard' && (
-            <StoryboardPanel
-              scene={selectedScene}
-              shots={shots}
-              shotsLoading={shotsLoading}
-              scenesLoading={scenesLoading}
-              entitlements={entitlements}
-              onShotsChange={(nextShots) => {
-                setShots(nextShots);
-
-                if (nextShots.length === 0) {
-                  setSelectedShot(null);
-                  return;
-                }
-
-                setSelectedShot((currentShot) => {
-                  if (!currentShot) return nextShots[0];
-                  return nextShots.find((shot) => shot.id === currentShot.id) ?? nextShots[0];
-                });
-              }}
-              onShotSelect={(shot) => {
-                setSelectedShot(shot);
-              }}
-            />
+            <div className="flex h-full items-center justify-center text-slate-400">
+              <p className="text-sm">分镜设计功能已迁移至新的视频分镜工作台</p>
+            </div>
           )}
 
           {activeTab === 'clips' && (

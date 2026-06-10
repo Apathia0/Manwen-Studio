@@ -1,0 +1,197 @@
+import { useState } from 'react';
+import { X } from 'lucide-react';
+import type { VideoAsset } from '../api';
+
+function toAssetUrl(filePath?: string | null): string {
+  if (!filePath) return '';
+  if (filePath.startsWith('http') || filePath.startsWith('/static/')) return filePath;
+  return `/static/video/${filePath.replace(/\\/g, '/')}`;
+}
+
+interface AssetReferenceSelectorProps {
+  /** 可用资产列表 (本章节+跨章角色库) */
+  availableAssets: VideoAsset[];
+  /** 当前已选资产 ID 集合 */
+  selectedIds: number[];
+  /** 确认回调 */
+  onConfirm: (selectedIds: number[]) => void;
+  /** 关闭回调 */
+  onClose: () => void;
+}
+
+type PresetKey = 'storyboard_and_chars' | 'chars_only' | 'all' | 'custom';
+
+const PRESETS: { key: PresetKey; label: string; description: string }[] = [
+  { key: 'storyboard_and_chars', label: '故事版+人物', description: '故事版分镜图 + 所有出场人物图' },
+  { key: 'chars_only', label: '仅人物', description: '仅使用角色参考图' },
+  { key: 'all', label: '全部资产', description: '使用本章所有已生成资产' },
+  { key: 'custom', label: '自定义', description: '手动勾选需要的资产' },
+];
+
+/**
+ * 参考资产选择弹窗
+ *
+ * 提供 4 种预设模板快速勾选 + 手动微调。
+ * 用于分镜生成视频前指定哪些已生成资产作为参考。
+ */
+export default function AssetReferenceSelector({
+  availableAssets,
+  selectedIds,
+  onConfirm,
+  onClose,
+}: AssetReferenceSelectorProps) {
+  const [currentPreset, setCurrentPreset] = useState<PresetKey>(
+    selectedIds.length === 0 ? 'storyboard_and_chars' : 'custom'
+  );
+  const [checked, setChecked] = useState<Set<number>>(new Set(selectedIds));
+  const [failedImages, setFailedImages] = useState<Set<number>>(new Set());
+
+  const applyPreset = (key: PresetKey) => {
+    setCurrentPreset(key);
+    if (key === 'storyboard_and_chars') {
+      const ids = availableAssets.filter(a =>
+        a.asset_type === 'storyboard_frame' || a.asset_type === 'storyboard' ||
+        a.asset_type === 'character_reference' || a.asset_type === 'character'
+      ).map(a => a.id);
+      setChecked(new Set(ids));
+    } else if (key === 'chars_only') {
+      const ids = availableAssets.filter(a =>
+        a.asset_type === 'character_reference' || a.asset_type === 'character'
+      ).map(a => a.id);
+      setChecked(new Set(ids));
+    } else if (key === 'all') {
+      setChecked(new Set(availableAssets.map(a => a.id)));
+    }
+    // 'custom' 保持当前勾选不变
+  };
+
+  const toggle = (id: number) => {
+    setChecked(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+    setCurrentPreset('custom');
+  };
+
+  const categorized = {
+    storyboard: availableAssets.filter(a => a.asset_type === 'storyboard_frame' || a.asset_type === 'storyboard'),
+    characters: availableAssets.filter(a => (a.asset_type === 'character_reference' || a.asset_type === 'character')),
+    scene: availableAssets.filter(a => (a.asset_type === 'scene_reference' || a.asset_type === 'scene' || a.asset_type === 'background')),
+    frames: availableAssets.filter(a => a.asset_type === 'first_frame' || a.asset_type === 'last_frame'),
+  };
+
+  return (
+    <div className="fixed inset-0 z-[60] flex items-center justify-center bg-[rgba(15,23,42,0.5)] p-4 backdrop-blur-sm" onClick={onClose}>
+      <div
+        className="w-[min(640px,94vw)] max-h-[80vh] flex flex-col overflow-hidden rounded-2xl border border-[#d7e3f4] bg-white shadow-xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        {/* 标题栏 */}
+        <div className="flex items-center justify-between px-5 py-3 border-b border-[#e5edf8]">
+          <div>
+            <div className="text-base font-semibold text-slate-900">选择参考资产</div>
+            <div className="text-xs text-slate-500">已选 {checked.size} 个资产</div>
+          </div>
+          <button onClick={onClose} className="rounded-full p-1.5 text-slate-400 hover:text-slate-600 hover:bg-slate-100">
+            <X size={16} />
+          </button>
+        </div>
+
+        {/* 预设模板 */}
+        <div className="px-5 py-3 border-b border-[#e5edf8]">
+          <div className="text-xs font-medium text-slate-500 mb-2">快速选择</div>
+          <div className="flex flex-wrap gap-2">
+            {PRESETS.map(p => (
+              <button
+                key={p.key}
+                onClick={() => applyPreset(p.key)}
+                className={`px-3 py-1.5 rounded-lg text-xs transition ${
+                  currentPreset === p.key
+                    ? 'bg-[#2563eb] text-white'
+                    : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                }`}
+                title={p.description}
+              >
+                {p.label}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* 资产列表 */}
+        <div className="flex-1 overflow-y-auto px-5 py-3 space-y-4">
+          {([
+            ['分镜图 (故事版)', categorized.storyboard],
+            ['人物图 (角色参考)', categorized.characters],
+            ['场景图', categorized.scene],
+          ] as const).map(([label, items]) => {
+            const visible = items.filter(a => !failedImages.has(a.id) && toAssetUrl(a.file_path));
+            if (visible.length === 0) {
+              return (
+                <div key={label}>
+                  <div className="text-xs font-medium text-slate-400 mb-1.5">{label} <span className="text-slate-300">- 暂无</span></div>
+                </div>
+              );
+            }
+            return (
+              <div key={label}>
+                <div className="text-xs font-medium text-slate-500 mb-1.5">{label}</div>
+                <div className="flex flex-wrap gap-2">
+                  {visible.map(a => (
+                    <div
+                      key={a.id}
+                      onClick={() => toggle(a.id)}
+                      className={`relative group cursor-pointer rounded-xl overflow-hidden border-2 transition-all ${
+                        checked.has(a.id) ? 'border-[#2563eb] ring-2 ring-blue-200' : 'border-transparent hover:border-slate-300'
+                      }`}
+                    >
+                      <div className="w-16 h-16 relative">
+                        <img
+                          src={toAssetUrl(a.file_path)}
+                          alt={a.name}
+                          className="w-full h-full object-cover"
+                          onError={() => setFailedImages(prev => new Set(prev).add(a.id))}
+                        />
+                        <div className="absolute inset-0 bg-black/0 group-hover:bg-black/10 transition-colors" />
+                      </div>
+                      {checked.has(a.id) && (
+                        <div className="absolute top-1 right-1 w-4 h-4 bg-[#2563eb] rounded-full flex items-center justify-center">
+                          <svg className="w-2.5 h-2.5 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}>
+                            <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+                          </svg>
+                        </div>
+                      )}
+                      <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/60 to-transparent p-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                        <div className="text-[8px] text-white truncate">{a.name}</div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            );
+          })}
+          {availableAssets.length === 0 || availableAssets.every(a => failedImages.has(a.id) || !toAssetUrl(a.file_path)) ? (
+            <div className="py-8 text-center text-xs text-slate-400">暂无可用资产，请先生成首尾帧或人物图</div>
+          ) : null}
+        </div>
+
+        {/* 底部按钮 */}
+        <div className="flex justify-end gap-3 px-5 py-3 border-t border-[#e5edf8]">
+          <button
+            onClick={onClose}
+            className="rounded-xl border border-[#d7e3f4] px-4 py-2 text-xs text-slate-600 hover:bg-slate-50"
+          >
+            取消
+          </button>
+          <button
+            onClick={() => onConfirm(Array.from(checked))}
+            className="rounded-xl bg-[#2563eb] px-4 py-2 text-xs text-white hover:bg-blue-700"
+          >
+            确认选择 ({checked.size})
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}

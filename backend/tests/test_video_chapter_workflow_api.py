@@ -124,20 +124,14 @@ def test_regenerate_shot_storyboard_uses_workflow_lookup_for_chapter_id(monkeypa
     assert result is not None
 
 
-def test_api_create_chapter_workflow_passes_image_api_key(monkeypatch):
-    """验证创建章节工作流路由将 image_api_key 传递给 start_workflow_background。"""
+def test_api_create_chapter_workflow_does_not_auto_start(monkeypatch):
+    """创建工作流后不自动启动流水线——用户手动触发各阶段。"""
     db = _FakeDb()
     captured: dict[str, object] = {}
 
-    async def fake_start_background(
-        workflow_id: int,
-        api_key: str | None = None,
-        image_api_key: str | None = None,
-    ):
-        captured['workflow_id'] = workflow_id
-        captured['api_key'] = api_key
-        captured['image_api_key'] = image_api_key
-        return f"chapter_video_{workflow_id}"
+    async def fake_start_background(**kwargs):
+        captured.update(kwargs)
+        return f"chapter_video_77"
 
     monkeypatch.setattr(video_router, "_require_user", lambda request, db_session: SimpleNamespace(id=1))
     monkeypatch.setattr(
@@ -147,8 +141,6 @@ def test_api_create_chapter_workflow_passes_image_api_key(monkeypatch):
     )
     monkeypatch.setattr(video_router, "create_chapter_workflow", lambda **kw: SimpleNamespace(id=77))
     monkeypatch.setattr(video_router, "start_workflow_background", fake_start_background)
-    monkeypatch.setattr(video_router, "_user_deepseek_api_key", lambda request, db_session: "deepseek-key-123")
-    monkeypatch.setattr(video_router, "_user_image_api_key", lambda request: "image-key-456")
     monkeypatch.setattr(video_router, "get_chapter_workflow", lambda workflow_id: SimpleNamespace(id=workflow_id))
     monkeypatch.setattr(video_router, "init_db", lambda **kw: None, raising=False)
 
@@ -159,8 +151,6 @@ def test_api_create_chapter_workflow_passes_image_api_key(monkeypatch):
         )
     )
 
-    assert captured.get("image_api_key") == "image-key-456", \
-        f"应传递 image-api-key，实际: {captured}"
-    assert captured.get("api_key") == "deepseek-key-123", \
-        f"应传递 deepseek-key，实际: {captured}"
-    assert captured.get("workflow_id") == 77
+    assert captured == {}, \
+        f"不应自动启动流水线，但 start_workflow_background 被调用: {captured}"
+    assert result.id == 77

@@ -1,19 +1,16 @@
 import asyncio
 import json
-import os
 import re
 from typing import Any, AsyncGenerator
 
 import httpx
-from dotenv import load_dotenv
 
 from services.framework_utils import _extract_outline_chapters, validate_framework_json
 
-load_dotenv()
-
-DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
-DEEPSEEK_BASE_URL = (os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com") or "https://api.deepseek.com").strip()
-DEEPSEEK_MODEL = (os.getenv("DEEPSEEK_MODEL", "deepseek-chat") or "deepseek-chat").strip()
+# 默认值会被 router 层从 PlatformSetting 数据库动态覆盖
+DEEPSEEK_API_KEY = ""
+DEEPSEEK_BASE_URL = ""
+DEEPSEEK_MODEL = ""
 
 
 def configure_runtime(base_url: str | None = None, model: str | None = None) -> None:
@@ -27,6 +24,10 @@ def configure_runtime(base_url: str | None = None, model: str | None = None) -> 
 
 
 def _deepseek_auth_headers(api_key: str | None = None) -> dict[str, str]:
+    if not DEEPSEEK_BASE_URL:
+        raise ValueError("DeepSeek API 地址未配置，请在后台设置中配置 API 地址后重试。")
+    if not DEEPSEEK_MODEL:
+        raise ValueError("DeepSeek 模型未配置，请在后台设置中配置模型名称后重试。")
     key = (api_key or DEEPSEEK_API_KEY or "").strip()
     if not key:
         from .errors import MissingApiKeyError
@@ -2740,3 +2741,185 @@ async def build_story_bible(
         return result.get("story_bible", result)
     except ValueError as e:
         raise ValueError(f"Story Bible generation failed: {e}")
+
+
+# ─── 章节视频工作流：正文 → 10s 镜头解析 ────────────────
+
+
+def _repair_broken_json_fields(content: str) -> str:
+    """修复 DeepSeek 返回中损坏的嵌套 JSON 字段值。
+
+    DeepSeek 有时会在 storyboard_json 等嵌套对象字段中输出非 JSON 内容，
+    导致整体 JSON 解析失败。策略：找到损坏字段的 {，去掉 { 及其后的损坏内容，
+    替换为 null 并保留下一个 } 以闭合外层对象。
+    """
+    idx = content.find('"storyboard_json"')
+    if idx < 0:
+        return content
+    open_brace = content.find('{', idx)
+    if open_brace < 0:
+        return content
+    close_brace = content.find('}', open_brace)
+    if close_brace < 0:
+        return content
+    # 将 {broken_value} 替换为 null，保留 } 以闭合外层
+    return content[:open_brace] + 'null' + content[close_brace:]
+
+
+async def parse_chapter_to_shots(
+    chapter_text: str,
+    character_profiles: str = "",
+    api_key: str | None = None,
+) -> list[dict]:
+    """调用 DeepSeek 将章节正文解析为 10 秒镜头列表。
+
+    返回格式：
+    [
+        {
+            "shot_index": 1,
+            "source_text_span": "原文片段",
+            "scene_location": "场景",
+            "time_of_day": "时间",
+            "characters": ["角色名"],
+            "story_summary": "摘要",
+            "dialogue_or_narration": "对白/旁白",
+            "camera_plan": "运镜",
+            "motion_plan": "动作",
+            "emotion_plan": "情绪",
+            "continuity_notes": "连续性",
+        },
+        ...
+    ]
+    """
+    from services.video_chapter_prompts import SHOT_PARSE_SYSTEM_PROMPT, build_shot_parse_user_prompt
+
+    user_prompt = build_shot_parse_user_prompt(chapter_text)
+    if character_profiles:
+        user_prompt += f"\n\n## 角色外貌设定（参考）\n{character_profiles}"
+
+    payload = {
+        "model": DEEPSEEK_MODEL,
+        "messages": [
+            {"role": "system", "content": SHOT_PARSE_SYSTEM_PROMPT},
+            {"role": "user", "content": user_prompt},
+        ],
+        "stream": False,
+        "max_tokens": 8192,
+        "response_format": {"type": "json_object"},
+    }
+
+    async with httpx.AsyncClient(timeout=600) as client:
+        resp = await client.post(
+            f"{DEEPSEEK_BASE_URL}/chat/completions",
+            json=payload,
+            headers=_deepseek_auth_headers(api_key),
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        content = data["choices"][0]["message"]["content"]
+
+    try:
+        result = _extract_json_object(content)
+    except ValueError:
+        repaired = _repair_broken_json_fields(content)
+        if repaired != content:
+            try:
+                result = _extract_json_object(repaired)
+            except ValueError as e:
+                raise ValueError(f"章节镜头解析失败：JSON 解析错误 — {e}\n原始响应：{content[:500]}") from e
+        else:
+            raise ValueError(f"章节镜头解析失败：JSON 解析错误，且未发现可修复的损坏字段\n原始响应：{content[:500]}")
+
+    shots = result.get("shots", [])
+    if not isinstance(shots, list) or len(shots) == 0:
+        raise ValueError(f"章节镜头解析失败：shots 数组为空或格式错误 — {content[:500]}")
+
+    return shots
+
+
+async def generate_shot_storyboard_prompt(
+    shot_data: dict,
+    api_key: str | None = None,
+) -> str:
+    """调用 DeepSeek（故事版导演角色）为单个镜头生成完整的 AI 绘图提示词。
+
+    返回的文本是纯净的中文提示词，可直接发送给图片生成 API，
+    不需要任何后续系统模板包装。
+    """
+    from services.video_chapter_prompts import build_storyboard_director_messages
+
+    system_prompt, user_message = build_storyboard_director_messages(
+        scene_location=shot_data.get("scene_location"),
+        time_of_day=shot_data.get("time_of_day"),
+        characters=shot_data.get("characters"),
+        story_summary=shot_data.get("story_summary"),
+        dialogue_or_narration=shot_data.get("dialogue_or_narration"),
+        camera_plan=shot_data.get("camera_plan"),
+        motion_plan=shot_data.get("motion_plan"),
+        emotion_plan=shot_data.get("emotion_plan"),
+        style_preset=shot_data.get("style_preset"),
+    )
+
+    payload = {
+        "model": DEEPSEEK_MODEL,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_message},
+        ],
+        "stream": False,
+        "max_tokens": 4096,
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=120) as client:
+            resp = await client.post(
+                f"{DEEPSEEK_BASE_URL}/chat/completions",
+                json=payload,
+                headers=_deepseek_auth_headers(api_key),
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            content = str(data["choices"][0]["message"]["content"] or "").strip()
+            return content if content else user_message
+    except Exception as exc:
+        logger.warning("故事版导演角色生成失败: %s，使用备用内容", exc)
+        # 降级：直接返回组装好的镜头信息作为提示词
+        return user_message
+
+
+def generate_shot_storyboard_content(
+    shot_data: dict,
+) -> str:
+    """生成仅含镜头内容的简洁故事版描述（不含 LLM 生成）。
+
+    供工作台初始回显。
+    """
+    from services.video_chapter_prompts import build_storyboard_director_messages
+
+    _, user_message = build_storyboard_director_messages(
+        scene_location=shot_data.get("scene_location"),
+        time_of_day=shot_data.get("time_of_day"),
+        characters=shot_data.get("characters"),
+        story_summary=shot_data.get("story_summary"),
+        dialogue_or_narration=shot_data.get("dialogue_or_narration"),
+        camera_plan=shot_data.get("camera_plan"),
+        motion_plan=shot_data.get("motion_plan"),
+        emotion_plan=shot_data.get("emotion_plan"),
+        style_preset=shot_data.get("style_preset"),
+    )
+    return user_message
+
+
+async def generate_shot_video_prompt(
+    shot_data: dict,
+    api_key: str | None = None,
+) -> str:
+    """为单个镜头生成图生视频 prompt。"""
+    from services.video_chapter_prompts import build_video_prompt
+
+    return build_video_prompt(
+        camera_plan=shot_data.get("camera_plan"),
+        motion_plan=shot_data.get("motion_plan"),
+        emotion_plan=shot_data.get("emotion_plan"),
+        continuity_notes=shot_data.get("continuity_notes"),
+    )

@@ -65,7 +65,7 @@ async def submit_video_job(
 
     支持:
       - comfyui → 本地 ComfyUI
-      - 其他 (sora/mock 等) → New API (api.xbyjs.top)
+      - 其他 → New API 兼容端点
     """
     try:
         if provider == "comfyui":
@@ -83,7 +83,7 @@ async def submit_video_job(
                 prompt=prompt,
                 aspect_ratio=aspect_ratio or "16:9",
                 duration_seconds=duration_seconds,
-                images=reference_images,
+                images=reference_images if input_mode == "image_to_video" else None,
                 api_key=api_key,
                 base_url=base_url,
             )

@@ -1,6 +1,6 @@
 import type { Story, Chapter, EntitlementResponse } from '../api';
 import WorkspaceLayout from './WorkspaceLayout';
-import VideoWorkspaceLayout from './VideoWorkspaceLayout';
+import VideoStoryboardLayout from './VideoStoryboardLayout';
 import TemplateBindingPanel from './TemplateBindingPanel';
 
 /** 创作工作台页面 */
@@ -12,6 +12,7 @@ export function WorkspacePage({
   workspaceMode,
   onChapterChange,
   onContentUpdated,
+  onWorkspaceModeChange,
 }: {
   story: Story | null;
   chapters: Chapter[];
@@ -20,6 +21,7 @@ export function WorkspacePage({
   workspaceMode: 'manga' | 'video';
   onChapterChange: (chapter: Chapter) => void;
   onContentUpdated: () => Promise<void>;
+  onWorkspaceModeChange?: (mode: 'manga' | 'video') => void;
 }) {
   if (!story) {
     return (
@@ -30,7 +32,29 @@ export function WorkspacePage({
   }
   return (
     <div className="h-[calc(100vh-120px)] overflow-y-auto rounded-md border border-[#d9dfd7] bg-white">
-      <div className="flex items-center justify-end border-b border-[#e8edf2] px-4 py-2">
+      <div className="flex items-center justify-between border-b border-[#e8edf2] px-4 py-2">
+        <div className="flex items-center gap-1 rounded-xl bg-slate-100 p-0.5">
+          <button
+            onClick={() => onWorkspaceModeChange?.('manga')}
+            className={`rounded-lg px-3 py-1.5 text-xs font-medium transition ${
+              workspaceMode === 'manga'
+                ? 'bg-white text-slate-900 shadow-sm'
+                : 'text-slate-500 hover:text-slate-700'
+            }`}
+          >
+            小说/漫画
+          </button>
+          <button
+            onClick={() => onWorkspaceModeChange?.('video')}
+            className={`rounded-lg px-3 py-1.5 text-xs font-medium transition ${
+              workspaceMode === 'video'
+                ? 'bg-white text-slate-900 shadow-sm'
+                : 'text-slate-500 hover:text-slate-700'
+            }`}
+          >
+            视频创作
+          </button>
+        </div>
         <TemplateBindingPanel storyId={story.id} />
       </div>
       {workspaceMode === 'manga' ? (
@@ -43,7 +67,7 @@ export function WorkspacePage({
           onContentUpdated={onContentUpdated}
         />
       ) : (
-        <VideoWorkspaceLayout
+        <VideoStoryboardLayout
           story={story}
           chapters={chapters}
           currentChapter={currentChapter}

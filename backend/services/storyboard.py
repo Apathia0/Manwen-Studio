@@ -52,18 +52,23 @@ def _normalize_shot(raw_shot: dict[str, Any], index: int, default_duration: int)
 
 
 def _fallback_shot_templates(scene_summary: str, scene_dialogue: list[dict[str, str]], shot_count_hint: int, duration_budget_seconds: int) -> list[dict[str, Any]]:
-    duration = max(3, duration_budget_seconds // max(1, shot_count_hint))
+    duration = min(10, max(3, duration_budget_seconds // max(1, shot_count_hint)))
     dialogue_lines = [str(item.get("text") or "").strip() for item in scene_dialogue if isinstance(item, dict)]
+    
     templates = [
-        ("建立场", "wide", "eye_level", "static", "交代空间关系与人物站位"),
-        ("动作推进", "medium", "over_shoulder", "track", "突出角色动作与互动"),
-        ("情绪反应", "close_up", "eye_level", "static", "给到角色表情与情绪波动"),
-        ("关键细节", "extreme_close_up", "low_angle", "pan", "强调道具、眼神或关键动作"),
+        ("建立镜头", "wide", "eye_level", "static", "交代场景和人物站位"),
+        ("推进镜头", "medium", "over_shoulder", "track", "突出角色动作与互动"),
+        ("高潮镜头", "close_up", "eye_level", "static", "给到角色表情与情绪波动"),
+        ("转折镜头", "extreme_close_up", "low_angle", "pan", "强调道具、眼神或关键动作"),
         ("收束镜头", "full", "high_angle", "dolly", "完成节奏收束或转场"),
     ]
+    
     shots: list[dict[str, Any]] = []
     for index in range(min(shot_count_hint, len(templates))):
         label, shot_type, angle, movement, action = templates[index]
+        start_sec = index * duration
+        end_sec = min((index + 1) * duration, duration_budget_seconds)
+        time_range = f"{start_sec}s-{end_sec}s"
         shots.append(
             {
                 "shot_number": index + 1,
@@ -71,7 +76,7 @@ def _fallback_shot_templates(scene_summary: str, scene_dialogue: list[dict[str, 
                 "shot_type": shot_type,
                 "camera_angle": angle,
                 "camera_movement": movement,
-                "composition": f"{label}，围绕“{scene_summary[:24]}”组织画面重心",
+                "composition": f"{label}，围绕'{scene_summary[:24]}'组织画面重心",
                 "action_description": f"{action}。场景核心内容：{scene_summary[:80]}",
                 "dialogue": dialogue_lines[index] if index < len(dialogue_lines) else "",
                 "sound_design": "保留环境声，并用音乐加强当前情绪",
@@ -89,6 +94,8 @@ def _fallback_shot_templates(scene_summary: str, scene_dialogue: list[dict[str, 
                 "action_segments": "完整动作段落",
                 "frame_composition": "主体位置居中",
                 "status": "draft",
+                "time_range": time_range,
+                "rhythm_mood": "紧张" if index == 2 else "舒缓" if index in [0, 4] else "推进",
             },
         )
     return shots
@@ -100,7 +107,7 @@ async def generate_shots(
     scene_dialogue: list[dict[str, str]],
     scene_mood: str,
     shot_count_hint: int = 4,
-    duration_budget_seconds: int = 18,
+    duration_budget_seconds: int = 40,
     style: str = "cinematic",
     api_key: str | None = None,
     character_profiles: str | None = None,
@@ -204,19 +211,37 @@ async def generate_shot_prompts(
         action_segments = _clean_text(shot_info.get("action_segments")) or "完整动作段落"
         frame_composition = _clean_text(shot_info.get("frame_composition")) or "主体位置居中"
 
-        prompt = f"""请为一个视频镜头生成 storyboard_prompt、video_prompt 和 negative_prompt。
+        prompt = f"""请为一个视频镜头生成专业分镜提示词。
 
-要求：
-1. 只输出 JSON 对象。
-2. 格式必须为：
-{{
-  "storyboard_prompt": "...",
-  "video_prompt": "...",
-  "negative_prompt": "..."
-}}
-3. storyboard_prompt 适合生成关键帧参考图，必须包含所有结构化字段约束。
-4. video_prompt 适合直接喂给 {provider} 视频模型，必须包含所有结构化字段约束。
-5. 必须体现镜头语言、动作、风格、一致性约束。
+【分镜提示词生成框架】
+请按照以下4大模块结构化生成提示词：
+
+一、场景氛围设定（Scene Atmosphere）
+- 建立场景全景定调：地点、时间、天气、光影氛围
+- 确定视觉风格：3D动画/写实/赛博朋克/奇幻等
+- 色彩基调：冷暖对比、饱和度、主色调
+
+二、角色一致性控制（Character Consistency）
+- 角色外貌描述：体型、面部特征、发型、年龄
+- 服装细节：款式、颜色、材质、配饰
+- 角色姿态：站姿、动作、表情
+- 三视图参考：前视图、侧视图、后视图（确保跨镜头一致）
+
+三、镜头分解表（Shot Breakdown Table）
+每个镜头必须包含：
+- 时间轴：0s-3s、3s-6s 等精确分段
+- 景别：全景/中景/近景/特写
+- 运镜方式：固定/推/拉/摇/移/跟/环绕
+- 内容描述：角色动作、环境互动、剧情推进
+- 音效设计：环境声、动作音效、情绪音乐
+- 节奏曲线：紧张/舒缓/高潮/转折
+
+四、视频规格标注（Video Specifications）
+- 模型适配：{provider}
+- 画面比例：16:9
+- 渲染风格：3D CG/写实/动画
+- 光影风格：史诗级/柔和/戏剧性
+- 核心提示：保持角色一致性、画面质量、无文字错乱
 
 【结构化生产字段】
 镜头类型：{shot_type}
@@ -232,6 +257,27 @@ async def generate_shot_prompts(
 动作描述：{action_description}
 连续性要求：{continuity}
 整体风格：{style}
+
+【输出格式】
+请输出 JSON 格式，包含以下字段：
+{{
+  "scene_atmosphere": "场景氛围描述",
+  "character_consistency": "角色一致性要点",
+  "shot_breakdown": [
+    {{
+      "time_range": "0s-3s",
+      "shot_type": "全景",
+      "camera_movement": "缓慢推进",
+      "content_description": "详细内容描述",
+      "sound_design": "音效设计",
+      "rhythm_mood": "情绪氛围"
+    }}
+  ],
+  "video_specs": "视频规格说明",
+  "storyboard_prompt": "完整分镜提示词（英文）",
+  "video_prompt": "视频生成提示词（英文，含动作和运镜）",
+  "negative_prompt": "负面提示词（英文）"
+}}
 """
         payload = {
             "model": deepseek_service.DEEPSEEK_MODEL,
@@ -261,7 +307,7 @@ async def generate_shot_prompts(
                 return {
                     "storyboard_prompt": storyboard_prompt,
                     "video_prompt": video_prompt,
-                    "negative_prompt": negative_prompt or "blurry, distorted, deformed, low detail, broken anatomy",
+                    "negative_prompt": negative_prompt or "blurry, distorted, deformed, low detail, broken anatomy, extra limbs, extra hands, extra feet, six fingers, asymmetric face, merged characters",
                 }
         except Exception:
             pass
@@ -288,5 +334,5 @@ async def generate_shot_prompts(
             f"Action beats: {action_segments}. {action_description}. {continuity}. "
             f"Natural motion, dramatic lighting, high detail, coherent action."
         ),
-        "negative_prompt": "blurry, low quality, deformed, duplicated limbs, inconsistent costume, broken motion",
+        "negative_prompt": "blurry, low quality, deformed, duplicated limbs, inconsistent costume, broken motion, extra hands, extra feet, six fingers, asymmetric face, distorted face, merged characters, overlapping body parts, cropped limbs, distorted proportions, split screen, multi panel, text on figure, watermark, label",
     }
