@@ -209,16 +209,16 @@ def _parse_auth_token(request: Request) -> str | None:
 def _require_user(request: Request, db: Session) -> User:
     token = _parse_auth_token(request)
     if not token:
-        raise HTTPException(401, "Unauthorized")
+        raise HTTPException(401, "未授权")
     session = db.query(UserSession).filter(
         UserSession.token == token,
         UserSession.revoked_at.is_(None),
     ).first()
     if not session:
-        raise HTTPException(401, "Session expired or invalid token")
+        raise HTTPException(401, "会话已过期或令牌无效")
     user = db.get(User, session.user_id)
     if not user or user.status != "active":
-        raise HTTPException(403, "User unavailable")
+        raise HTTPException(403, "用户不可用")
     request.state.current_user = user
     return user
 
@@ -226,16 +226,16 @@ def _require_user(request: Request, db: Session) -> User:
 def _require_chapter(chapter_id: int, db: Session) -> Chapter:
     chapter = db.get(Chapter, chapter_id)
     if not chapter:
-        raise HTTPException(404, "Chapter not found")
+        raise HTTPException(404, "章节未找到")
     return chapter
 
 
 def _require_story_for_user(story_id: int, user: User, db: Session) -> Story:
     story = db.get(Story, story_id)
     if not story:
-        raise HTTPException(404, "Story not found")
+        raise HTTPException(404, "作品未找到")
     if story.owner_user_id != user.id:
-        raise HTTPException(403, "Story access denied")
+        raise HTTPException(403, "作品访问被拒绝")
     return story
 
 
@@ -243,9 +243,9 @@ def _require_chapter_for_user(chapter_id: int, user: User, db: Session) -> Chapt
     chapter = _require_chapter(chapter_id, db)
     story = chapter.story
     if not story:
-        raise HTTPException(404, "Story not found")
+        raise HTTPException(404, "作品未找到")
     if story.owner_user_id != user.id:
-        raise HTTPException(403, "Chapter access denied")
+        raise HTTPException(403, "章节访问被拒绝")
     return chapter
 
 
@@ -1116,7 +1116,7 @@ async def update_scene(
     user = _require_user(request, db)
     scene = db.get(ScriptScene, scene_id)
     if not scene:
-        raise HTTPException(404, "Scene not found")
+        raise HTTPException(404, "场景未找到")
     _require_chapter_for_user(scene.chapter_id, user, db)
 
     update_data = body.model_dump(exclude_unset=True)
@@ -1145,7 +1145,7 @@ async def generate_scene_shots(
     user = _require_user(request, db)
     scene = db.get(ScriptScene, scene_id)
     if not scene:
-        raise HTTPException(404, "Scene not found")
+        raise HTTPException(404, "场景未找到")
     _require_chapter_for_user(scene.chapter_id, user, db)
 
     # Check quota (shot.generate.monthly_limit)
@@ -1225,7 +1225,7 @@ async def list_scene_shots(
     user = _require_user(request, db)
     scene = db.get(ScriptScene, scene_id)
     if not scene:
-        raise HTTPException(404, "Scene not found")
+        raise HTTPException(404, "场景未找到")
     _require_chapter_for_user(scene.chapter_id, user, db)
 
     shots = (
@@ -1254,7 +1254,7 @@ async def generate_scene_concept_art(
     user = _require_user(request, db)
     scene = db.get(ScriptScene, scene_id)
     if not scene:
-        raise HTTPException(404, "Scene not found")
+        raise HTTPException(404, "场景未找到")
     _require_chapter_for_user(scene.chapter_id, user, db)
 
     style_preset_name = (body.get("style_preset") or "").strip()
@@ -1375,7 +1375,7 @@ async def get_scene_concept_art(
     user = _require_user(request, db)
     scene = db.get(ScriptScene, scene_id)
     if not scene:
-        raise HTTPException(404, "Scene not found")
+        raise HTTPException(404, "场景未找到")
     _require_chapter_for_user(scene.chapter_id, user, db)
 
     assets = (
@@ -1421,9 +1421,9 @@ async def update_shot(
     user = _require_user(request, db)
     shot = db.get(VideoShot, shot_id)
     if not shot:
-        raise HTTPException(404, "Shot not found")
+        raise HTTPException(404, "分镜未找到")
     if not shot.scene:
-        raise HTTPException(404, "Scene not found")
+        raise HTTPException(404, "场景未找到")
 
     effective_provider = _resolve_video_provider(body.provider, db)
 
@@ -1608,9 +1608,9 @@ async def render_shot_video_stream(
     user = _require_user(request, db)
     shot = db.get(VideoShot, shot_id)
     if not shot:
-        raise HTTPException(404, "Shot not found")
+        raise HTTPException(404, "分镜未找到")
     if not shot.scene:
-        raise HTTPException(404, "Scene not found")
+        raise HTTPException(404, "场景未找到")
     _require_chapter_for_user(shot.scene.chapter_id, user, db)
 
     effective_provider = _resolve_video_provider(body.provider, db)
@@ -1903,9 +1903,9 @@ async def list_shot_clips(
     user = _require_user(request, db)
     shot = db.get(VideoShot, shot_id)
     if not shot:
-        raise HTTPException(404, "Shot not found")
+        raise HTTPException(404, "分镜未找到")
     if not shot.scene:
-        raise HTTPException(404, "Scene not found")
+        raise HTTPException(404, "场景未找到")
     _require_chapter_for_user(shot.scene.chapter_id, user, db)
 
     clips = (
@@ -1948,14 +1948,14 @@ async def activate_shot_clip(
     user = _require_user(request, db)
     shot = db.get(VideoShot, shot_id)
     if not shot:
-        raise HTTPException(404, "Shot not found")
+        raise HTTPException(404, "分镜未找到")
     if not shot.scene:
-        raise HTTPException(404, "Scene not found")
+        raise HTTPException(404, "场景未找到")
     _require_chapter_for_user(shot.scene.chapter_id, user, db)
 
     clip = db.get(RenderedClip, clip_id)
     if not clip or clip.shot_id != shot_id:
-        raise HTTPException(404, "Clip not found for this shot")
+        raise HTTPException(404, "此分镜未找到片段")
 
     # Deactivate all clips for this shot
     db.query(RenderedClip).filter(RenderedClip.shot_id == shot_id).update(
@@ -1984,12 +1984,12 @@ async def get_video_job(
     user = _require_user(request, db)
     job = db.get(VideoGenerationJob, job_id)
     if not job:
-        raise HTTPException(404, "Video generation job not found")
+        raise HTTPException(404, "视频生成任务未找到")
 
     # Validate ownership via shot -> scene -> chapter
     shot = job.shot
     if not shot or not shot.scene:
-        raise HTTPException(404, "Associated shot not found")
+        raise HTTPException(404, "关联分镜未找到")
     _require_chapter_for_user(shot.scene.chapter_id, user, db)
 
     if job.status not in {"succeeded", "failed", "cancelled"} and job.provider_job_id:
@@ -2143,11 +2143,11 @@ async def retry_video_job(
     user = _require_user(request, db)
     old_job = db.get(VideoGenerationJob, job_id)
     if not old_job:
-        raise HTTPException(404, "Video generation job not found")
+        raise HTTPException(404, "视频生成任务未找到")
 
     shot = old_job.shot
     if not shot or not shot.scene:
-        raise HTTPException(404, "Associated shot not found")
+        raise HTTPException(404, "关联分镜未找到")
     _require_chapter_for_user(shot.scene.chapter_id, user, db)
 
     # 配额预检
@@ -2306,14 +2306,14 @@ async def get_video_asset(
     user = _require_user(request, db)
     asset = db.get(VideoAsset, asset_id)
     if not asset:
-        raise HTTPException(404, "Video asset not found")
+        raise HTTPException(404, "视频素材未找到")
 
     if asset.chapter_id:
         _require_chapter_for_user(asset.chapter_id, user, db)
     elif asset.story_id:
         _require_story_for_user(asset.story_id, user, db)
     else:
-        raise HTTPException(403, "Cannot determine asset ownership")
+        raise HTTPException(403, "无法确定素材所有权")
 
     return {
         "id": asset.id,
@@ -2351,7 +2351,7 @@ async def delete_video_asset(
     user = _require_user(request, db)
     asset = db.get(VideoAsset, asset_id)
     if not asset:
-        raise HTTPException(404, "Video asset not found")
+        raise HTTPException(404, "视频素材未找到")
 
     # Validate ownership via chapter
     if asset.chapter_id:
@@ -2359,7 +2359,7 @@ async def delete_video_asset(
     elif asset.story_id:
         _require_story_for_user(asset.story_id, user, db)
     else:
-        raise HTTPException(403, "Cannot determine asset ownership")
+        raise HTTPException(403, "无法确定素材所有权")
 
     # 清空 script_scenes 对该 asset 的外键引用
     db.query(ScriptScene).filter(
@@ -2382,18 +2382,18 @@ async def regenerate_video_asset(
     user = _require_user(request, db)
     asset = db.get(VideoAsset, asset_id)
     if not asset:
-        raise HTTPException(404, "Video asset not found")
+        raise HTTPException(404, "视频素材未找到")
 
     if asset.chapter_id:
         _require_chapter_for_user(asset.chapter_id, user, db)
     elif asset.story_id:
         _require_story_for_user(asset.story_id, user, db)
     else:
-        raise HTTPException(403, "Cannot determine asset ownership")
+        raise HTTPException(403, "无法确定素材所有权")
 
     prompt = str(body.get("prompt") or "").strip()
     if not prompt:
-        raise HTTPException(400, "prompt is required")
+        raise HTTPException(400, "提示词必填")
     mode = str(body.get("mode") or "full").strip().lower()
     if mode not in {"full", "partial"}:
         mode = "full"
@@ -2401,7 +2401,7 @@ async def regenerate_video_asset(
 
     source_path = _from_video_url(asset.file_path or "")
     if not source_path or not Path(source_path).exists():
-        raise HTTPException(404, "Source image not found")
+        raise HTTPException(404, "源图片未找到")
 
     api_key, _base_url, _model = _user_video_api_key(request)
     regen_dir = _VIDEO_OUTPUTS_DIR / "regen_assets"
@@ -2551,7 +2551,7 @@ async def update_video_style_preset(
     user = _require_user(request, db)
     preset = db.get(VideoStylePreset, preset_id)
     if not preset:
-        raise HTTPException(404, "Video style preset not found")
+        raise HTTPException(404, "视频风格预设未找到")
 
     update_data = body.model_dump(exclude_unset=True)
     for field, value in update_data.items():
@@ -2581,7 +2581,7 @@ async def delete_video_style_preset(
     user = _require_user(request, db)
     preset = db.get(VideoStylePreset, preset_id)
     if not preset:
-        raise HTTPException(404, "Video style preset not found")
+        raise HTTPException(404, "视频风格预设未找到")
 
     db.delete(preset)
     db.commit()
@@ -2631,7 +2631,7 @@ async def set_chapter_video_style_preset(
 
     preset = db.get(VideoStylePreset, body.style_preset_id)
     if not preset:
-        raise HTTPException(404, "Video style preset not found")
+        raise HTTPException(404, "视频风格预设未找到")
 
     chapter.video_style_preset_id = body.style_preset_id
     db.commit()
@@ -2689,7 +2689,7 @@ async def set_story_video_style_preset(
 
     preset = db.get(VideoStylePreset, body.style_preset_id)
     if not preset:
-        raise HTTPException(404, "Video style preset not found")
+        raise HTTPException(404, "视频风格预设未找到")
 
     story.video_style_preset_id = body.style_preset_id
     db.commit()
@@ -3008,7 +3008,7 @@ async def delete_character_version(
 
     version = db.get(StoryCharacterVersion, version_id)
     if not version or version.story_id != story_id or version.character_name != character_name:
-        raise HTTPException(404, "Version not found")
+        raise HTTPException(404, "版本未找到")
 
     remaining = db.query(StoryCharacterVersion).filter(
         StoryCharacterVersion.story_id == story_id,
@@ -3043,7 +3043,7 @@ async def generate_character_ref_image(
 
     version = db.get(StoryCharacterVersion, version_id)
     if not version or version.story_id != story_id or version.character_name != character_name:
-        raise HTTPException(404, "Version not found")
+        raise HTTPException(404, "版本未找到")
     if not (version.appearance_card or "").strip():
         raise HTTPException(400, "该版本尚无外貌卡，请先生成或编辑")
 
@@ -3139,7 +3139,7 @@ async def delete_character_ref_image(
 
     version = db.get(StoryCharacterVersion, version_id)
     if not version or version.story_id != story_id or version.character_name != character_name:
-        raise HTTPException(404, "Version not found")
+        raise HTTPException(404, "版本未找到")
     if not version.ref_asset_id:
         raise HTTPException(404, "该版本尚无参考图")
 
@@ -3172,7 +3172,7 @@ async def redraw_character_ref_image(
 
     version = db.get(StoryCharacterVersion, version_id)
     if not version or version.story_id != story_id or version.character_name != character_name:
-        raise HTTPException(404, "Version not found")
+        raise HTTPException(404, "版本未找到")
     if not version.ref_asset_id:
         raise HTTPException(400, "该版本尚无参考图")
 
@@ -3254,7 +3254,7 @@ async def set_shot_video_style_preset(
     user = _require_user(request, db)
     shot = db.get(VideoShot, shot_id)
     if not shot:
-        raise HTTPException(404, "Video shot not found")
+        raise HTTPException(404, "视频分镜未找到")
 
     shot.style_preset = _normalize_style_name(body.style_preset) or None
     db.commit()
@@ -3274,7 +3274,7 @@ async def delete_shot_video_style_preset(
     user = _require_user(request, db)
     shot = db.get(VideoShot, shot_id)
     if not shot:
-        raise HTTPException(404, "Video shot not found")
+        raise HTTPException(404, "视频分镜未找到")
 
     shot.style_preset = None
     db.commit()
@@ -3296,7 +3296,7 @@ async def get_shot_asset_bundle(
     user = _require_user(request, db)
     shot = db.get(VideoShot, shot_id)
     if not shot:
-        raise HTTPException(404, "Video shot not found")
+        raise HTTPException(404, "视频分镜未找到")
 
     storyboard_asset = None
     if shot.storyboard_asset_id:
@@ -3456,7 +3456,7 @@ async def update_asset_scope(
     user = _require_user(request, db)
     asset = db.get(VideoAsset, asset_id)
     if not asset:
-        raise HTTPException(404, "Video asset not found")
+        raise HTTPException(404, "视频素材未找到")
 
     asset.usage_scope = body.usage_scope
     asset.inherit_to_next_shot = body.inherit_to_next_shot
@@ -3479,7 +3479,7 @@ async def promote_asset(
     user = _require_user(request, db)
     asset = db.get(VideoAsset, asset_id)
     if not asset:
-        raise HTTPException(404, "Video asset not found")
+        raise HTTPException(404, "视频素材未找到")
 
     level = body.level
     if level == "scene_shared":
@@ -3517,7 +3517,7 @@ async def create_scene_shot(
     user = _require_user(request, db)
     scene = db.get(ScriptScene, scene_id)
     if not scene:
-        raise HTTPException(404, "Scene not found")
+        raise HTTPException(404, "场景未找到")
     _require_chapter_for_user(scene.chapter_id, user, db)
 
     max_shot = (
@@ -3561,9 +3561,9 @@ async def delete_shot(
     user = _require_user(request, db)
     shot = db.get(VideoShot, shot_id)
     if not shot:
-        raise HTTPException(404, "Shot not found")
+        raise HTTPException(404, "分镜未找到")
     if not shot.scene:
-        raise HTTPException(404, "Scene not found")
+        raise HTTPException(404, "场景未找到")
     _require_chapter_for_user(shot.scene.chapter_id, user, db)
 
     shot_id_val = shot.id
@@ -3583,7 +3583,7 @@ async def reorder_scene_shots(
     user = _require_user(request, db)
     scene = db.get(ScriptScene, scene_id)
     if not scene:
-        raise HTTPException(404, "Scene not found")
+        raise HTTPException(404, "场景未找到")
     _require_chapter_for_user(scene.chapter_id, user, db)
 
     shot_ids = body.get("shot_ids", [])
@@ -3618,9 +3618,9 @@ async def generate_shot_prompts(
     user = _require_user(request, db)
     shot = db.get(VideoShot, shot_id)
     if not shot:
-        raise HTTPException(404, "Shot not found")
+        raise HTTPException(404, "分镜未找到")
     if not shot.scene:
-        raise HTTPException(404, "Scene not found")
+        raise HTTPException(404, "场景未找到")
     _require_chapter_for_user(shot.scene.chapter_id, user, db)
 
     shot_info = {
@@ -3685,9 +3685,9 @@ async def render_shot_storyboard(
     user = _require_user(request, db)
     shot = db.get(VideoShot, shot_id)
     if not shot:
-        raise HTTPException(404, "Shot not found")
+        raise HTTPException(404, "分镜未找到")
     if not shot.scene:
-        raise HTTPException(404, "Scene not found")
+        raise HTTPException(404, "场景未找到")
     _require_chapter_for_user(shot.scene.chapter_id, user, db)
 
     style_ctx = _resolve_effective_style_for_shot(shot, db, body.style_preset)
@@ -3779,9 +3779,9 @@ async def approve_shot_storyboard(
     user = _require_user(request, db)
     shot = db.get(VideoShot, shot_id)
     if not shot:
-        raise HTTPException(404, "Shot not found")
+        raise HTTPException(404, "分镜未找到")
     if not shot.scene:
-        raise HTTPException(404, "Scene not found")
+        raise HTTPException(404, "场景未找到")
     _require_chapter_for_user(shot.scene.chapter_id, user, db)
 
     shot.storyboard_locked = True
@@ -3805,9 +3805,9 @@ async def reject_shot_storyboard(
     user = _require_user(request, db)
     shot = db.get(VideoShot, shot_id)
     if not shot:
-        raise HTTPException(404, "Shot not found")
+        raise HTTPException(404, "分镜未找到")
     if not shot.scene:
-        raise HTTPException(404, "Scene not found")
+        raise HTTPException(404, "场景未找到")
     _require_chapter_for_user(shot.scene.chapter_id, user, db)
 
     shot.storyboard_locked = False
@@ -3831,18 +3831,18 @@ async def set_master_storyboard(
     user = _require_user(request, db)
     shot = db.get(VideoShot, shot_id)
     if not shot:
-        raise HTTPException(404, "Shot not found")
+        raise HTTPException(404, "分镜未找到")
     if not shot.scene:
-        raise HTTPException(404, "Scene not found")
+        raise HTTPException(404, "场景未找到")
     _require_chapter_for_user(shot.scene.chapter_id, user, db)
 
     asset_id = body.asset_id
     if not asset_id:
-        raise HTTPException(400, "asset_id is required")
+        raise HTTPException(400, "素材 ID 必填")
 
     asset = db.get(VideoAsset, asset_id)
     if not asset:
-        raise HTTPException(404, "Asset not found")
+        raise HTTPException(404, "素材未找到")
 
     shot.storyboard_asset_id = asset_id
     shot.updated_at = datetime.datetime.utcnow()
@@ -3865,9 +3865,9 @@ async def get_shot_storyboards(
     user = _require_user(request, db)
     shot = db.get(VideoShot, shot_id)
     if not shot:
-        raise HTTPException(404, "Shot not found")
+        raise HTTPException(404, "分镜未找到")
     if not shot.scene:
-        raise HTTPException(404, "Scene not found")
+        raise HTTPException(404, "场景未找到")
     _require_chapter_for_user(shot.scene.chapter_id, user, db)
 
     assets = (
@@ -3915,9 +3915,9 @@ async def generate_shot_frames(
     user = _require_user(request, db)
     shot = db.get(VideoShot, shot_id)
     if not shot:
-        raise HTTPException(404, "Shot not found")
+        raise HTTPException(404, "分镜未找到")
     if not shot.scene:
-        raise HTTPException(404, "Scene not found")
+        raise HTTPException(404, "场景未找到")
     _require_chapter_for_user(shot.scene.chapter_id, user, db)
 
     frame_type = body.frame_type or "both"
@@ -4041,14 +4041,14 @@ async def regenerate_shot_frame(
     user = _require_user(request, db)
     shot = db.get(VideoShot, shot_id)
     if not shot:
-        raise HTTPException(404, "Shot not found")
+        raise HTTPException(404, "分镜未找到")
     if not shot.scene:
-        raise HTTPException(404, "Scene not found")
+        raise HTTPException(404, "场景未找到")
     _require_chapter_for_user(shot.scene.chapter_id, user, db)
 
     old_asset = db.get(VideoAsset, body.asset_id)
     if not old_asset or old_asset.shot_id != shot_id:
-        raise HTTPException(404, "Frame asset not found")
+        raise HTTPException(404, "帧素材未找到")
 
     new_revision = (old_asset.revision or 1) + 1
     frames_dir = _VIDEO_OUTPUTS_DIR / "frames"
@@ -4134,9 +4134,9 @@ async def get_shot_frames(
     user = _require_user(request, db)
     shot = db.get(VideoShot, shot_id)
     if not shot:
-        raise HTTPException(404, "Shot not found")
+        raise HTTPException(404, "分镜未找到")
     if not shot.scene:
-        raise HTTPException(404, "Scene not found")
+        raise HTTPException(404, "场景未找到")
     _require_chapter_for_user(shot.scene.chapter_id, user, db)
 
     assets = (
@@ -4244,9 +4244,9 @@ async def parse_shot_asset_prompts(
     user = _require_user(request, db)
     shot = db.get(VideoShot, shot_id)
     if not shot:
-        raise HTTPException(404, "Shot not found")
+        raise HTTPException(404, "分镜未找到")
     if not shot.scene:
-        raise HTTPException(404, "Scene not found")
+        raise HTTPException(404, "场景未找到")
     _require_chapter_for_user(shot.scene.chapter_id, user, db)
 
     scene = shot.scene
@@ -4566,15 +4566,15 @@ async def generate_shot_character_asset(
     user = _require_user(request, db)
     shot = db.get(VideoShot, shot_id)
     if not shot:
-        raise HTTPException(404, "Shot not found")
+        raise HTTPException(404, "分镜未找到")
     if not shot.scene:
-        raise HTTPException(404, "Scene not found")
+        raise HTTPException(404, "场景未找到")
     _require_chapter_for_user(shot.scene.chapter_id, user, db)
 
     character_name = str(body.get("character_name") or "Unknown").strip() or "Unknown"
     prompt = str(body.get("prompt") or "").strip()
     if not prompt:
-        raise HTTPException(400, "Character prompt is required")
+        raise HTTPException(400, "角色提示词必填")
 
     style_ctx = _resolve_effective_style_for_shot(shot, db, body.get("style_preset"))
     style_name = style_ctx.get("name") or ""
@@ -4656,9 +4656,9 @@ async def render_shot_video(
     user = _require_user(request, db)
     shot = db.get(VideoShot, shot_id)
     if not shot:
-        raise HTTPException(404, "Shot not found")
+        raise HTTPException(404, "分镜未找到")
     if not shot.scene:
-        raise HTTPException(404, "Scene not found")
+        raise HTTPException(404, "场景未找到")
     _require_chapter_for_user(shot.scene.chapter_id, user, db)
 
     effective_provider = _resolve_video_provider(body.provider, db)
@@ -4863,7 +4863,7 @@ async def get_video_project(
     user = _require_user(request, db)
     project = db.get(VideoProject, project_id)
     if not project:
-        raise HTTPException(404, "Video project not found")
+        raise HTTPException(404, "视频项目未找到")
 
     # Validate ownership via chapter
     if project.chapter_id:
@@ -4871,7 +4871,7 @@ async def get_video_project(
     elif project.story_id:
         _require_story_for_user(project.story_id, user, db)
     else:
-        raise HTTPException(403, "Cannot determine project ownership")
+        raise HTTPException(403, "无法确定项目所有权")
 
     return {
         "id": project.id,
@@ -4899,14 +4899,14 @@ async def update_video_project(
     user = _require_user(request, db)
     project = db.get(VideoProject, project_id)
     if not project:
-        raise HTTPException(404, "Video project not found")
+        raise HTTPException(404, "视频项目未找到")
 
     if project.chapter_id:
         _require_chapter_for_user(project.chapter_id, user, db)
     elif project.story_id:
         _require_story_for_user(project.story_id, user, db)
     else:
-        raise HTTPException(403, "Cannot determine project ownership")
+        raise HTTPException(403, "无法确定项目所有权")
 
     update_data = body.model_dump(exclude_unset=True)
     field_map = {
@@ -4951,14 +4951,14 @@ async def compile_video_project(
     user = _require_user(request, db)
     project = db.get(VideoProject, project_id)
     if not project:
-        raise HTTPException(404, "Video project not found")
+        raise HTTPException(404, "视频项目未找到")
 
     if project.chapter_id:
         _require_chapter_for_user(project.chapter_id, user, db)
     elif project.story_id:
         _require_story_for_user(project.story_id, user, db)
     else:
-        raise HTTPException(403, "Cannot determine project ownership")
+        raise HTTPException(403, "无法确定项目所有权")
 
     timeline = project.timeline_json or []
     clips = []
@@ -5049,7 +5049,7 @@ def _check_and_consume_quota_wrapper(
     if not plan:
         if not deduct:
             return {"used": 0, "limit": 0, "feature_key": feature_key, "period_key": "", "base_limit": 0, "granted": 0}
-        raise HTTPException(500, "No plan configured")
+        raise HTTPException(500, "未配置套餐")
 
     feature = (
         db.query(PlanFeature)
@@ -5096,9 +5096,9 @@ def _check_and_consume_quota_wrapper(
         }
 
     if limit <= 0:
-        raise HTTPException(403, f"Feature not available in your current plan: {feature_key}")
+        raise HTTPException(403, f"当前套餐不可用此功能: {feature_key}")
     if used + amount > limit:
-        raise HTTPException(429, f"Quota exceeded for {feature_key} ({used}/{limit})")
+        raise HTTPException(429, f"{feature_key} 配额已超限 ({used}/{limit})")
 
     if usage:
         usage.used_amount = used + amount

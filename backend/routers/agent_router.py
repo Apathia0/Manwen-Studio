@@ -58,7 +58,7 @@ def _require_conversation(
 ) -> AgentConversation:
     conversation = db.get(AgentConversation, conversation_id)
     if not conversation or conversation.story_id != story_id or conversation.owner_user_id != user_id:
-        raise HTTPException(404, "Conversation not found")
+        raise HTTPException(404, "对话未找到")
     return conversation
 
 
@@ -78,7 +78,7 @@ def _pending_change_key_from_request(
     try:
         conversation_id = int(raw_conversation_id or 0)
     except (TypeError, ValueError):
-        raise HTTPException(400, "Invalid conversation_id")
+        raise HTTPException(400, "无效的对话 ID")
     if not conversation_id:
         return None
     _require_conversation(db, conversation_id=conversation_id, story_id=story_id, user_id=user_id)
@@ -134,7 +134,7 @@ def create_conversation(
     if chapter_id is not None:
         chapter = db.get(Chapter, chapter_id)
         if not chapter or chapter.story_id != story_id:
-            raise HTTPException(400, "Invalid chapter_id")
+            raise HTTPException(400, "无效的章节 ID")
 
     conversation = AgentConversation(
         story_id=story_id,
@@ -191,9 +191,9 @@ async def agent_chat(
     content = str(body.get("content") or "").strip()
     agent_mode = normalize_agent_mode(body.get("mode"))
     if not conversation_id:
-        raise HTTPException(400, "conversation_id is required")
+        raise HTTPException(400, "对话 ID 必填")
     if not content:
-        raise HTTPException(400, "content is required")
+        raise HTTPException(400, "内容必填")
 
     conversation = _require_conversation(
         db,
