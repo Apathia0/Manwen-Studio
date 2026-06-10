@@ -6051,7 +6051,6 @@ def _select_ref_image_paths_for_scene(scene_prompt: str, ref_entries: list[dict]
             seen.add(key)
             selected.append((path, label))
         return selected
-    # 无匹配时只返回无标签垫图，不返回其他角色的参考图（防止角色形象混用）
     return unlabeled
 
 
@@ -6228,6 +6227,90 @@ async def generate_story_character_ref_images(story_id: int, request: Request, d
         }, ensure_ascii=False)}
 
     return EventSourceResponse(event_generator())
+
+
+@app.post("/api/stories/{story_id}/character-ref-images/upload")
+async def upload_character_ref_image(
+    story_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """上传角色专属参考图"""
+    user = _require_user(request, db)
+    story = _require_story_for_user(story_id, user, db)
+
+    body = await request.json()
+    image_b64 = body.get("image", "")
+    character_name = body.get("character_name", "").strip()
+    replace_existing = body.get("replace_existing", False)
+
+    if not image_b64:
+        raise HTTPException(400, "缺少图片数据")
+    if not character_name:
+        raise HTTPException(400, "缺少角色名")
+
+    img_bytes = _decode_png_upload(image_b64)
+
+    ref_dir = _story_ref_dir(story_id)
+    _migrate_legacy_ref(_legacy_story_ref_image(story_id), ref_dir)
+    ref_dir.mkdir(parents=True, exist_ok=True)
+
+    meta = _load_ref_meta(ref_dir)
+
+    existing_filename = None
+    for fname, info in meta.items():
+        if isinstance(info, dict) and info.get("label") == character_name:
+            existing_filename = fname
+            break
+
+    if existing_filename:
+        if replace_existing:
+            old_path = ref_dir / existing_filename
+            if old_path.exists():
+                _unlink_file(old_path, "character ref image")
+            meta.pop(existing_filename, None)
+            _save_ref_meta(ref_dir, meta)
+        else:
+            images = _serialize_refs(ref_dir, "story", story_id)
+            return {"images": images, "max": MAX_REF_IMAGES_PER_LEVEL}
+
+    filename = _save_uploaded_ref(ref_dir, img_bytes, character_name)
+
+    meta[filename] = {"label": character_name, "kind": "character_uploaded"}
+    _save_ref_meta(ref_dir, meta)
+
+    images = _serialize_refs(ref_dir, "story", story_id)
+    return {"images": images, "max": MAX_REF_IMAGES_PER_LEVEL}
+
+
+@app.delete("/api/stories/{story_id}/character-ref-images/{filename}")
+async def delete_character_ref_image(
+    story_id: int,
+    filename: str,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    user = _require_user(request, db)
+    _require_story_for_user(story_id, user, db)
+
+    ref_dir = _story_ref_dir(story_id)
+    if not ref_dir.exists():
+        raise HTTPException(404, "参考图目录不存在")
+
+    meta = _load_ref_meta(ref_dir)
+
+    if filename not in meta:
+        raise HTTPException(404, "参考图不存在")
+
+    file_path = ref_dir / filename
+    if file_path.exists():
+        _unlink_file(file_path, "character ref image")
+
+    meta.pop(filename, None)
+    _save_ref_meta(ref_dir, meta)
+
+    images = _serialize_refs(ref_dir, "story", story_id)
+    return {"images": images}
 
 
 @app.get("/api/stories/{story_id}/ref-images")

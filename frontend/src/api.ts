@@ -2073,6 +2073,37 @@ export function generateStoryCharRefStream(
   return controller;
 }
 
+export async function uploadCharacterRefImage(
+  storyId: number,
+  characterName: string,
+  imageBase64: string,
+  replaceExisting?: boolean
+): Promise<{ images: RefImage[]; max: number }> {
+  const res = await fetch(`${BASE}/api/stories/${storyId}/character-ref-images/upload`, {
+    method: 'POST',
+    headers: apiHeaders(true),
+    body: JSON.stringify({
+      image: imageBase64,
+      character_name: characterName,
+      replace_existing: replaceExisting,
+    }),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function deleteCharacterRefImage(
+  storyId: number,
+  filename: string
+): Promise<{ images: RefImage[] }> {
+  const res = await fetch(
+    `${BASE}/api/stories/${storyId}/character-ref-images/${encodeURIComponent(filename)}`,
+    { method: 'DELETE', headers: apiHeaders() },
+  );
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
 // ─── Onboarding / Story Bible ────────────────────────────────
 
 export async function sendOnboardingMessage(
@@ -3375,7 +3406,7 @@ export async function generateCharacterRefImage(
   return res.json();
 }
 
-export async function deleteCharacterRefImage(
+export async function deleteVideoCharacterRefImage(
   storyId: number,
   characterName: string,
   versionId: number,

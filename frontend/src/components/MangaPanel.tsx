@@ -1,5 +1,5 @@
-﻿import { memo, useCallback, useEffect, useRef, useState } from 'react';
-import { ChevronUp, ChevronDown, Download, ImageIcon, Loader2, Sparkles, Pencil, RefreshCw, Check, X, ImagePlus, Trash2, Square } from 'lucide-react';
+import { memo, useCallback, useEffect, useRef, useState } from 'react';
+import { ChevronUp, ChevronDown, Download, ImageIcon, Loader2, Sparkles, Pencil, RefreshCw, Check, X, ImagePlus, Trash2, Square, Upload } from 'lucide-react';
 import { useMemo as useMemoValue } from 'react';
 import { createPortal } from 'react-dom';
 import {
@@ -29,6 +29,8 @@ import {
   mangaImageUrl,
   getMangaGenerationStatus,
   cancelMangaGeneration,
+  uploadCharacterRefImage,
+  deleteCharacterRefImage,
   type ImageRedrawMode,
   type Chapter,
   type MangaProgress,
@@ -75,6 +77,7 @@ type ImageEditTarget =
     imageSrc: string;
     prompt: string;
     imageNumber: number;
+    isNewImage?: boolean;
   }
   | {
     kind: 'ref';
@@ -135,6 +138,41 @@ function parseCharacterAppearanceCards(raw: string): CharacterAppearanceCard[] {
 
     return { name: fallbackName, fields, raw: block };
   });
+}
+
+function renameCharacterCard(rawText: string, oldName: string, newName: string): string {
+  const lines = rawText.replace(/\r\n/g, '\n').split('\n');
+  const result: string[] = [];
+  let inTargetBlock = false;
+  let foundRoleName = false;
+
+  for (const line of lines) {
+    const roleNameMatch = line.match(/^角色名[:：]\s*(.+)$/);
+    if (roleNameMatch) {
+      if (inTargetBlock && roleNameMatch[1].trim() === oldName) {
+        result.push(`角色名：${newName}`);
+        foundRoleName = true;
+        continue;
+      }
+      inTargetBlock = true;
+    } else if (roleNameMatch === null && line.trim() === '' && inTargetBlock) {
+      inTargetBlock = false;
+    }
+    result.push(line);
+  }
+
+  if (!foundRoleName) {
+    const blocks = rawText.replace(/\r\n/g, '\n').split(/(?=^角色名[:：])/m);
+    const updatedBlocks = blocks.map((block, idx) => {
+      if (idx === 0 && block.trim()) {
+        return `角色名：${newName}\n${block}`;
+      }
+      return block;
+    });
+    return updatedBlocks.join('\n').trim();
+  }
+
+  return result.join('\n').trim();
 }
 
 function closeWorkspacePreview(
@@ -242,6 +280,11 @@ export default memo(function MangaPanel({
   const refPreloadAttemptsRef = useRef<Record<string, number>>({});
   const backendTaskPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const checkBackendMangaStatusRef = useRef<((chapterId: number) => Promise<void>) | null>(null);
+  const [charRefModalOpen, setCharRefModalOpen] = useState(false);
+  const [charRefModalCharName, setCharRefModalCharName] = useState('');
+  const [charRefModalImage, setCharRefModalImage] = useState<RefImage | null>(null);
+  const [charRefModalUploading, setCharRefModalUploading] = useState(false);
+  const charRefFileRef = useRef<HTMLInputElement>(null);
   const parsedCharacterCards = useMemoValue(() => parseCharacterAppearanceCards(charText), [charText]);
   const maxImagesPerChapter = useMemoValue(() => {
     const configured = entitlementNumber(entitlements, 'manga.max_image_count_per_chapter', DEFAULT_IMAGE_COUNT);
@@ -274,6 +317,8 @@ export default memo(function MangaPanel({
     (key: string) => expandedAppearanceCards[key] ?? true,
     [expandedAppearanceCards],
   );
+  const [editingCardIdx, setEditingCardIdx] = useState<number | null>(null);
+  const [editingCardName, setEditingCardName] = useState('');
 
   // Subscribe to module-level generation store so we re-render when any chapter's gen state changes
   const [, setStoreTick] = useState(0);
@@ -712,6 +757,75 @@ export default memo(function MangaPanel({
     }
   };
 
+  const openCharacterRefModal = (charName: string) => {
+    const refImage = refImageByLabel.get(charName) || null;
+    setCharRefModalCharName(charName);
+    setCharRefModalImage(refImage);
+    setCharRefModalOpen(true);
+  };
+
+  const handleUploadCharacterRef = async (file: File) => {
+    if (!chapter || !charRefModalCharName) return;
+
+    setCharRefModalUploading(true);
+    try {
+      const reader = new FileReader();
+      const base64 = await new Promise<string>((resolve, reject) => {
+        reader.onload = () => resolve(reader.result as string);
+        reader.onerror = reject;
+        reader.readAsDataURL(file);
+      });
+
+      const hasExisting = charRefModalImage !== null;
+      let replaceExisting = false;
+
+      if (hasExisting) {
+        const choice = window.confirm(
+          '该角色已有参考图，是否替换？\n\n点击"确定"替换，点击"取消"保留两者。'
+        );
+        replaceExisting = choice;
+      }
+
+      const result = await uploadCharacterRefImage(
+        chapter.story_id,
+        charRefModalCharName,
+        base64,
+        replaceExisting
+      );
+
+      setRefImages(result.images);
+      setRefSource('story');
+      setRefMax(result.max);
+      setCharRefModalOpen(false);
+    } catch (err) {
+      console.error('上传角色参考图失败:', err);
+      alert('上传失败，请重试');
+    } finally {
+      setCharRefModalUploading(false);
+    }
+  };
+
+  const handleDeleteCharacterRef = async () => {
+    if (!chapter || !charRefModalImage) return;
+
+    const confirmed = window.confirm('确定要删除该参考图吗？');
+    if (!confirmed) return;
+
+    try {
+      const result = await deleteCharacterRefImage(
+        chapter.story_id,
+        charRefModalImage.filename
+      );
+
+      setRefImages(result.images);
+      setRefSource('story');
+      setCharRefModalOpen(false);
+    } catch (err) {
+      console.error('删除角色参考图失败:', err);
+      alert('删除失败，请重试');
+    }
+  };
+
   const handleGenerateCharacterRefImage = async (characterName: string, overwrite = false) => {
     if (!chapter) return;
     if (charRefStreamRef.current) {
@@ -744,13 +858,14 @@ export default memo(function MangaPanel({
 
   const openMangaRedraw = useCallback((imageNumber: number) => {
     const img = displayImages.find((item) => item.image_number === imageNumber);
-    if (!img) return;
+    const scene = scenes[imageNumber - 1] || '';
     setImageEditTarget({
       kind: 'manga',
-      title: `第 ${imageNumber} 格漫画重绘`,
-      imageSrc: imageLoadSrcs[img.image_path] || mangaImageUrl(img.image_path),
-      prompt: scenes[imageNumber - 1] || img.prompt || '',
+      title: img ? `第 ${imageNumber} 格漫画重绘` : `第 ${imageNumber} 格漫画生成`,
+      imageSrc: img ? (imageLoadSrcs[img.image_path] || mangaImageUrl(img.image_path)) : '',
+      prompt: scene || img?.prompt || '',
       imageNumber,
+      isNewImage: !img,
     });
   }, [displayImages, imageLoadSrcs, scenes]);
 
@@ -1495,17 +1610,91 @@ export default memo(function MangaPanel({
                           const generatingRef = charRefGeneratingKey === card.name;
                           return (
                             <div key={cardKey} className="rounded-lg border border-[#d9dfd7] bg-[#fcfcfa]/60">
-                              <button
-                                type="button"
-                                onClick={() => setExpandedAppearanceCards((prev) => ({ ...prev, [cardKey]: !expanded }))}
-                                className="flex w-full items-center justify-between gap-2 px-3 py-2 text-left hover:bg-white transition-colors"
-                              >
-                                <div className="min-w-0">
-                                  <h4 className="truncate text-sm font-semibold text-slate-900">{card.name}</h4>
-                                  <div className="text-[10px] text-slate-500">角色卡 {idx + 1}</div>
-                                </div>
-                                {expanded ? <ChevronUp size={14} className="text-slate-500" /> : <ChevronDown size={14} className="text-slate-500" />}
-                              </button>
+                              <div className="flex items-center justify-between gap-2 px-3 py-2">
+                                <button
+                                  type="button"
+                                  onClick={() => setExpandedAppearanceCards((prev) => ({ ...prev, [cardKey]: !expanded }))}
+                                  className="flex-1 min-w-0 text-left hover:bg-white transition-colors rounded px-1 py-0.5"
+                                >
+                                  <div className="min-w-0">
+                                    {editingCardIdx === idx ? (
+                                      <div className="flex items-center gap-1">
+                                        <input
+                                          type="text"
+                                          value={editingCardName}
+                                          onChange={(e) => setEditingCardName(e.target.value)}
+                                          className="flex-1 text-sm font-semibold text-slate-900 border border-[#1d4ed8] rounded px-1 outline-none"
+                                          autoFocus
+                                          onKeyDown={(e) => {
+                                            if (e.key === 'Enter') {
+                                              const newName = editingCardName.trim();
+                                              if (newName && newName !== card.name) {
+                                                const newText = renameCharacterCard(charText, card.name, newName);
+                                                setCharText(newText);
+                                                setCharDraft(newText);
+                                                if (chapter) {
+                                                  saveCharacters(chapter.id, newText).catch(() => {});
+                                                }
+                                              }
+                                              setEditingCardIdx(null);
+                                            } else if (e.key === 'Escape') {
+                                              setEditingCardIdx(null);
+                                            }
+                                          }}
+                                        />
+                                        <button
+                                          type="button"
+                                          onClick={() => {
+                                            const newName = editingCardName.trim();
+                                            if (newName && newName !== card.name) {
+                                              const newText = renameCharacterCard(charText, card.name, newName);
+                                              setCharText(newText);
+                                              setCharDraft(newText);
+                                              if (chapter) {
+                                                saveCharacters(chapter.id, newText).catch(() => {});
+                                              }
+                                            }
+                                            setEditingCardIdx(null);
+                                          }}
+                                          className="text-emerald-500 hover:text-emerald-600"
+                                        >
+                                          <Check size={14} />
+                                        </button>
+                                        <button
+                                          type="button"
+                                          onClick={() => setEditingCardIdx(null)}
+                                          className="text-slate-400 hover:text-slate-600"
+                                        >
+                                          <X size={14} />
+                                        </button>
+                                      </div>
+                                    ) : (
+                                      <h4 className="truncate text-sm font-semibold text-slate-900">{card.name}</h4>
+                                    )}
+                                    <div className="text-[10px] text-slate-500">角色卡 {idx + 1}</div>
+                                  </div>
+                                </button>
+                                {editingCardIdx !== idx && (
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      setEditingCardIdx(idx);
+                                      setEditingCardName(card.name);
+                                    }}
+                                    className="p-1 text-slate-400 hover:text-slate-600 transition-colors"
+                                    title="重命名角色"
+                                  >
+                                    <Pencil size={12} />
+                                  </button>
+                                )}
+                                <button
+                                  type="button"
+                                  onClick={() => setExpandedAppearanceCards((prev) => ({ ...prev, [cardKey]: !expanded }))}
+                                  className="p-1 text-slate-500 hover:text-slate-700 transition-colors"
+                                >
+                                  {expanded ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+                                </button>
+                              </div>
                               {expanded && (
                                 <div className="border-t border-[#d9dfd7] px-3 py-3 space-y-2">
                   {refImage ? (
@@ -1567,6 +1756,13 @@ export default memo(function MangaPanel({
                                   ))}
                                   {chapter && (
                                     <div className="flex items-center gap-3 pt-1">
+                                      <button
+                                        onClick={() => openCharacterRefModal(card.name)}
+                                        className="flex items-center gap-1 text-xs text-blue-400 hover:text-blue-300 transition-colors"
+                                      >
+                                        <Upload size={11} />
+                                        上传参考图
+                                      </button>
                                       <button
                                         onClick={() => handleGenerateCharacterRefImage(card.name, !!refImage)}
                                         disabled={!!charRefGeneratingKey}
@@ -1931,6 +2127,15 @@ export default memo(function MangaPanel({
                     <span className="text-xs">
                       {img ? (imgLoadFailed ? '图片加载失败，稍后会自动同步' : '图片载入中...') : (generating ? '等待生成...' : '未生成')}
                     </span>
+                    {!img && !generating && scene && (
+                      <button
+                        onClick={() => openMangaRedraw(image_number)}
+                        className="mt-1 flex items-center gap-1 px-3 py-1.5 text-xs font-medium rounded-md bg-amber-500 hover:bg-amber-400 text-slate-900 transition-colors"
+                      >
+                        <Sparkles size={12} />
+                        生成此格
+                      </button>
+                    )}
                   </div>
                 </div>
                 )}
@@ -2272,6 +2477,47 @@ export default memo(function MangaPanel({
               owner: refSource === 'story' ? 'story' : 'chapter',
             });
           }}
+          onUploadReplace={async (file: File) => {
+            if (!chapter) return;
+            const current = refPreviewImage;
+            if (!current) return;
+
+            setRefUploading(true);
+            try {
+              const reader = new FileReader();
+              const base64 = await new Promise<string>((resolve, reject) => {
+                reader.onload = () => resolve(reader.result as string);
+                reader.onerror = reject;
+                reader.readAsDataURL(file);
+              });
+
+              const characterName = current.image.label || '';
+              if (characterName) {
+                const result = await uploadCharacterRefImage(
+                  chapter.story_id,
+                  characterName,
+                  base64,
+                  true
+                );
+                setRefImages(result.images);
+                setRefSource('story');
+                setRefMax(result.max);
+              } else {
+                const b64 = base64.split(',')[1] || base64;
+                const result = await addChapterRefImage(chapter.id, b64);
+                setRefImages(result.images);
+                setRefSource(result.source ?? 'chapter');
+                setRefMax(result.max);
+              }
+
+              setRefImageVersion(Date.now());
+              closeRefWorkspacePreview(setRefPreviewImage, onWorkspacePreviewModeChange);
+            } catch (err: any) {
+              setErrorMsg(`上传替换失败: ${err.message}`);
+            } finally {
+              setRefUploading(false);
+            }
+          }}
         />
       )}
 
@@ -2282,6 +2528,77 @@ export default memo(function MangaPanel({
           onClose={() => setImageEditTarget(null)}
           onSubmit={handleApplyImageRedraw}
         />
+      )}
+
+      {charRefModalOpen && (
+        <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/50">
+          <div className="bg-[#f8fbff] rounded-2xl shadow-2xl w-full max-w-md mx-4 overflow-hidden">
+            <div className="flex items-center justify-between px-6 py-4 border-b border-[#d7e3f4]">
+              <h3 className="text-lg font-semibold text-[#0b1220]">
+                角色参考图管理 - {charRefModalCharName}
+              </h3>
+              <button
+                onClick={() => setCharRefModalOpen(false)}
+                className="text-gray-400 hover:text-gray-600"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <div className="px-6 py-4">
+              <div className="mb-4">
+                {charRefModalImage ? (
+                  <div className="relative">
+                    <img
+                      src={refLoadSrcs[charRefModalImage.image_path] || refImageSrc(charRefModalImage.image_path)}
+                      alt={`${charRefModalCharName} 参考图`}
+                      className="w-full h-48 object-contain rounded-lg border border-[#d7e3f4]"
+                    />
+                    <div className="absolute top-2 right-2 text-xs text-gray-500 bg-white/80 px-2 py-1 rounded">
+                      {charRefModalImage.kind === 'character_generated' ? 'AI 生成' : '用户上传'}
+                    </div>
+                  </div>
+                ) : (
+                  <div className="w-full h-48 flex items-center justify-center bg-gray-50 rounded-lg border-2 border-dashed border-[#d7e3f4]">
+                    <div className="text-center text-gray-400">
+                      <ImageIcon className="w-12 h-12 mx-auto mb-2" />
+                      <p>暂无参考图</p>
+                    </div>
+                  </div>
+                )}
+              </div>
+              <div className="flex gap-3">
+                <button
+                  onClick={() => charRefFileRef.current?.click()}
+                  disabled={charRefModalUploading}
+                  className="flex-1 px-4 py-2 bg-[#1d4ed8] text-white rounded-lg hover:bg-[#1e40af] disabled:opacity-50"
+                >
+                  {charRefModalUploading ? '上传中...' : '上传参考图'}
+                </button>
+                {charRefModalImage && (
+                  <button
+                    onClick={handleDeleteCharacterRef}
+                    className="px-4 py-2 bg-red-500 text-white rounded-lg hover:bg-red-600"
+                  >
+                    删除
+                  </button>
+                )}
+              </div>
+              <input
+                ref={charRefFileRef}
+                type="file"
+                accept="image/*"
+                className="hidden"
+                onChange={(e) => {
+                  const file = e.target.files?.[0];
+                  if (file) {
+                    handleUploadCharacterRef(file);
+                    e.target.value = '';
+                  }
+                }}
+              />
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );
@@ -2462,6 +2779,8 @@ function ImageRedrawModal({
     return maskCanvas.toDataURL('image/png');
   }, [canvasReady]);
 
+  const isNewImage = target.kind === 'manga' && target.isNewImage;
+
   const modal = (
     <div className="fixed inset-0 z-[70] flex items-center justify-center bg-[rgba(15,23,42,0.62)] p-4 backdrop-blur-sm" onClick={onClose}>
       <div
@@ -2471,7 +2790,9 @@ function ImageRedrawModal({
         <div className="flex items-center justify-between border-b border-[#e5edf8] px-6 py-4">
           <div>
             <div className="text-lg font-semibold text-slate-900">{target.title}</div>
-            <div className="mt-1 text-sm text-slate-500">左侧查看和涂抹图片，右侧填写重绘说明并提交。</div>
+            <div className="mt-1 text-sm text-slate-500">
+              {isNewImage ? '填写分镜描述并生成漫画图片。' : '左侧查看和涂抹图片，右侧填写重绘说明并提交。'}
+            </div>
           </div>
           <button onClick={onClose} className="rounded-full bg-slate-100 p-2 text-slate-600 transition hover:bg-slate-200">
             <X size={18} />
@@ -2480,66 +2801,75 @@ function ImageRedrawModal({
         <div className="grid flex-1 gap-0 overflow-hidden lg:grid-cols-[minmax(0,1.5fr)_420px]">
           <div className="overflow-auto bg-[linear-gradient(180deg,_#0f172a_0%,_#111827_100%)] p-6">
             <div className="mb-4 flex items-center justify-between text-white/80">
-              <div className="text-sm font-medium">选中图片</div>
-              <div className="text-xs">{mode === 'partial' ? '在左图直接涂抹需要修改的区域' : '整图将按右侧说明整体重绘'}</div>
+              <div className="text-sm font-medium">{isNewImage ? '预览区域' : '选中图片'}</div>
+              <div className="text-xs">{isNewImage ? '生成后将在此显示图片' : (mode === 'partial' ? '在左图直接涂抹需要修改的区域' : '整图将按右侧说明整体重绘')}</div>
             </div>
             <div className="mx-auto flex min-h-[62vh] w-full items-center justify-center rounded-[24px] border border-white/10 bg-black/20 p-4">
-              <div className="relative inline-block">
-                <img
-                  ref={imageRef}
-                  src={target.imageSrc}
-                  alt={target.title}
-                  onLoad={() => {
-                    setImageLoaded(true);
-                    syncCanvasSize();
-                  }}
-                  draggable={false}
-                  loading="lazy"
-                  decoding="async"
-                  className={`block max-h-[72vh] max-w-full rounded-2xl object-contain shadow-2xl ${imageLoaded ? 'opacity-100' : 'opacity-0'}`}
-                />
-                {!imageLoaded && (
-                  <div className="absolute inset-0 flex min-h-[420px] min-w-[320px] items-center justify-center rounded-2xl bg-[linear-gradient(180deg,_#08111d_0%,_#111827_100%)] text-white/70">
-                    <Loader2 size={24} className="animate-spin" />
-                  </div>
-                )}
-                {mode === 'partial' && (
-                  <canvas
-                    ref={canvasRef}
-                    className={`absolute inset-0 h-full w-full rounded-2xl touch-none ${drawing ? 'cursor-grabbing' : 'cursor-crosshair'}`}
-                    onPointerDown={handlePointerDown}
-                    onPointerMove={handlePointerMove}
-                    onPointerUp={handlePointerUp}
-                    onPointerCancel={stopDrawing}
-                    onLostPointerCapture={stopDrawing}
+              {isNewImage ? (
+                <div className="flex flex-col items-center gap-3 text-white/50">
+                  <ImageIcon size={48} strokeWidth={1} />
+                  <span className="text-sm">填写右侧描述后点击生成</span>
+                </div>
+              ) : (
+                <div className="relative inline-block">
+                  <img
+                    ref={imageRef}
+                    src={target.imageSrc}
+                    alt={target.title}
+                    onLoad={() => {
+                      setImageLoaded(true);
+                      syncCanvasSize();
+                    }}
+                    draggable={false}
+                    loading="lazy"
+                    decoding="async"
+                    className={`block max-h-[72vh] max-w-full rounded-2xl object-contain shadow-2xl ${imageLoaded ? 'opacity-100' : 'opacity-0'}`}
                   />
-                )}
-              </div>
+                  {!imageLoaded && (
+                    <div className="absolute inset-0 flex min-h-[420px] min-w-[320px] items-center justify-center rounded-2xl bg-[linear-gradient(180deg,_#08111d_0%,_#111827_100%)] text-white/70">
+                      <Loader2 size={24} className="animate-spin" />
+                    </div>
+                  )}
+                  {mode === 'partial' && (
+                    <canvas
+                      ref={canvasRef}
+                      className={`absolute inset-0 h-full w-full rounded-2xl touch-none ${drawing ? 'cursor-grabbing' : 'cursor-crosshair'}`}
+                      onPointerDown={handlePointerDown}
+                      onPointerMove={handlePointerMove}
+                      onPointerUp={handlePointerUp}
+                      onPointerCancel={stopDrawing}
+                      onLostPointerCapture={stopDrawing}
+                    />
+                  )}
+                </div>
+              )}
             </div>
           </div>
           <div className="overflow-auto border-l border-[#e5edf8] bg-[#f8fbff] p-6">
             <div className="space-y-5">
-              <div>
-                <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">重绘方式</div>
-                <div className="flex gap-2">
-                  <button
-                    type="button"
-                    onClick={() => setMode('full')}
-                    className={`rounded-2xl px-3 py-2 text-sm transition ${mode === 'full' ? 'bg-[#1d4ed8] text-white' : 'bg-white text-slate-700 border border-[#d7e3f4]'}`}
-                  >
-                    整图重绘
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setMode('partial')}
-                    className={`rounded-2xl px-3 py-2 text-sm transition ${mode === 'partial' ? 'bg-[#1d4ed8] text-white' : 'bg-white text-slate-700 border border-[#d7e3f4]'}`}
-                  >
-                    局部重绘
-                  </button>
+              {!isNewImage && (
+                <div>
+                  <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">重绘方式</div>
+                  <div className="flex gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setMode('full')}
+                      className={`rounded-2xl px-3 py-2 text-sm transition ${mode === 'full' ? 'bg-[#1d4ed8] text-white' : 'bg-white text-slate-700 border border-[#d7e3f4]'}`}
+                    >
+                      整图重绘
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setMode('partial')}
+                      className={`rounded-2xl px-3 py-2 text-sm transition ${mode === 'partial' ? 'bg-[#1d4ed8] text-white' : 'bg-white text-slate-700 border border-[#d7e3f4]'}`}
+                    >
+                      局部重绘
+                    </button>
+                  </div>
                 </div>
-              </div>
+              )}
 
-              {mode === 'partial' && (
+              {!isNewImage && mode === 'partial' && (
                 <div className="rounded-2xl border border-[#d7e3f4] bg-white p-4">
                   <div className="text-sm font-medium text-slate-800">局部涂抹区域</div>
                   <div className="mt-1 text-xs leading-5 text-slate-500">在左侧图片上直接涂抹需要修改的区域，未涂抹部分会尽量保持不变。</div>
@@ -2565,35 +2895,41 @@ function ImageRedrawModal({
               )}
 
               <div>
-                <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">修改提示</div>
+                <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">
+                  {isNewImage ? '分镜描述' : '修改提示'}
+                </div>
                 <textarea
                   value={prompt}
                   onChange={(e) => setPrompt(e.target.value)}
                   rows={12}
                   className="w-full rounded-2xl border border-[#d7e3f4] bg-white px-3 py-3 text-sm text-slate-900 outline-none transition focus:border-[#60a5fa] focus:ring-2 focus:ring-[#bfdbfe]"
-                  placeholder="描述你想调整的局部或整图效果，例如：保留人物五官不变，把衣服改成黑色风衣，并增强光影层次。"
+                  placeholder={isNewImage ? '输入分镜描述，AI 将根据此描述生成漫画图片。' : '描述你想调整的局部或整图效果，例如：保留人物五官不变，把衣服改成黑色风衣，并增强光影层次。'}
                 />
               </div>
 
               <div className="flex gap-3">
                 <button
                   type="button"
-                  disabled={busy}
+                  disabled={busy || (!isNewImage && !prompt.trim())}
                   onClick={async () => {
-                    const payload: { prompt: string; mode: ImageRedrawMode; mask?: string } = { prompt: prompt.trim(), mode };
-                    if (mode === 'partial') {
-                      const mask = exportMask();
-                      if (!mask) {
-                        toast.error('请先在左侧图片上涂抹需要修改的区域。');
-                        return;
+                    if (isNewImage) {
+                      await onSubmit({ prompt: prompt.trim(), mode: 'regenerate' });
+                    } else {
+                      const payload: { prompt: string; mode: ImageRedrawMode; mask?: string } = { prompt: prompt.trim(), mode };
+                      if (mode === 'partial') {
+                        const mask = exportMask();
+                        if (!mask) {
+                          toast.error('请先在左侧图片上涂抹需要修改的区域。');
+                          return;
+                        }
+                        payload.mask = mask;
                       }
-                      payload.mask = mask;
+                      await onSubmit(payload);
                     }
-                    await onSubmit(payload);
                   }}
                   className="rounded-2xl bg-[#1d4ed8] px-4 py-2 text-sm font-medium text-white disabled:opacity-40"
                 >
-                  {busy ? '处理中...' : '开始重绘'}
+                  {busy ? '处理中...' : (isNewImage ? '生成此格' : '开始重绘')}
                 </button>
                 <button
                   type="button"
@@ -2622,6 +2958,7 @@ function RefPreviewModal({
   onZoomChange,
   onClose,
   onStartRedraw,
+  onUploadReplace,
 }: {
   target: RefPreviewTarget;
   imageSrc: string;
@@ -2631,7 +2968,9 @@ function RefPreviewModal({
   onZoomChange: (zoom: 1 | 1.35 | 1.7) => void;
   onClose: () => void;
   onStartRedraw: () => void;
+  onUploadReplace: (file: File) => void;
 }) {
+  const uploadRef = useRef<HTMLInputElement>(null);
   const previewImageClass = zoom === 1
     ? 'max-w-[92%] max-h-none'
     : zoom === 1.35
@@ -2717,12 +3056,33 @@ function RefPreviewModal({
                   </button>
                   <button
                     type="button"
+                    disabled={busy}
+                    onClick={() => uploadRef.current?.click()}
+                    className="rounded-2xl bg-emerald-600 px-4 py-2 text-sm font-medium text-white disabled:opacity-40"
+                  >
+                    上传替换
+                  </button>
+                  <button
+                    type="button"
                     onClick={onClose}
                     className="rounded-2xl border border-[#d7e3f4] bg-white px-4 py-2 text-sm font-medium text-slate-700"
                   >
                     关闭
                   </button>
                 </div>
+                <input
+                  ref={uploadRef}
+                  type="file"
+                  accept="image/*"
+                  className="hidden"
+                  onChange={(e) => {
+                    const file = e.target.files?.[0];
+                    if (file) {
+                      onUploadReplace(file);
+                      e.target.value = '';
+                    }
+                  }}
+                />
               </div>
             </div>
           </div>
