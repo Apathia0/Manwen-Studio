@@ -74,8 +74,6 @@ from models import (
     UserSubscription,
     UserUsageMonthly,
     VideoGenerationJob,
-    ChapterVideoWorkflow,
-    ChapterVideoShot,
 )
 from schemas import (
     ChapterContentUpdate,
