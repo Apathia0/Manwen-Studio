@@ -588,12 +588,13 @@ def _platform_settings_snapshot(db: Session) -> dict:
             "deepseek_base_url": _get_platform_setting("api.deepseek.base_url", db, deepseek_service.DEEPSEEK_BASE_URL),
             "deepseek_model": _get_platform_setting("api.deepseek.model", db, deepseek_service.DEEPSEEK_MODEL),
             "deepseek_api_key": _get_platform_setting("api.deepseek.api_key", db, ""),
-            "image_base_url": _get_platform_setting("api.image.base_url", db, ""),
-            "image_model": _get_platform_setting("api.image.model", db, ""),
+            "image_base_url": _get_platform_setting("api.image.base_url", db, "https://newapi.aifusion6.cn/v1"),
+            "image_model": _get_platform_setting("api.image.model", db, "default"),
             "image_api_key": _get_platform_setting("api.image.api_key", db, ""),
-            "video_base_url": _get_platform_setting("api.video.base_url", db, ""),
-            "video_model": _get_platform_setting("api.video.model", db, ""),
+            "video_base_url": _get_platform_setting("api.video.base_url", db, "https://newapi.aifusion6.cn/v1"),
+            "video_model": _get_platform_setting("api.video.model", db, "veo3.1-fast"),
             "video_api_key": _get_platform_setting("api.video.api_key", db, ""),
+            "video_provider": _get_platform_setting("api.video.provider", db, ""),
             "enable_user_override": bool(_get_platform_setting("api.enable_user_override", db, True)),
             "enable_user_url_override": bool(_get_platform_setting("api.enable_user_url_override", db, False)),
         },
@@ -686,8 +687,9 @@ def _public_platform_settings_snapshot(db: Session) -> dict:
             "deepseek_model": api.get("deepseek_model") or "",
             "image_base_url": api.get("image_base_url") or "",
             "image_model": api.get("image_model") or "",
-            "video_base_url": api.get("video_base_url") or "",
-            "video_model": api.get("video_model") or "",
+            "video_base_url": api.get("video_base_url") or "https://newapi.aifusion6.cn/v1",
+            "video_model": api.get("video_model") or "veo3.1-fast",
+            "video_provider": api.get("video_provider") or "",
         },
         "auth": {
             "require_email_code_for_register": bool(auth.get("require_email_code_for_register")),
@@ -813,13 +815,11 @@ def _user_image_api_key(request: Request) -> str | None:
     admin_model = str(_get_platform_setting("api.image.model", db, image_service.IMAGE_MODEL)).strip()
     resolved_base_url = override_base_url.strip() if capabilities["can_override_api_url"] and override_base_url and override_base_url.strip() else admin_base_url
     resolved_model = override_model.strip() if capabilities["can_override_api_url"] and override_model and override_model.strip() else admin_model
-    # 空字符串时不要覆盖已配置的全局值
-    if resolved_base_url:
-        image_service.configure_runtime(
-            base_url=resolved_base_url.rstrip("/"),
-            api_key="",
-            model=resolved_model or "",
-        )
+    # 过滤掉数据库中的占位值，确保回退到 image2.py 的硬编码默认值
+    if not resolved_model or resolved_model.strip().lower() in ("default", "none", "null"):
+        resolved_model = ""
+    image_service.IMAGE_API_BASE_URL = resolved_base_url.rstrip("/") or image_service.IMAGE_API_BASE_URL
+    image_service.IMAGE_MODEL = resolved_model or image_service.IMAGE_MODEL
     if capabilities["can_override_api_key"] and override:
         return override
     return _get_platform_setting("api.image.api_key", db, "") or None
@@ -1216,15 +1216,16 @@ def _seed_platform_settings(db: Session, *, commit: bool = True) -> None:
         "platform.icp": "",
         "platform.copyright": "© StoryCanvas",
         "platform.notice": "欢迎使用企业级 AI 小说漫画创作平台。",
-        "api.deepseek.base_url": "",
-        "api.deepseek.model": "",
+        "api.deepseek.base_url": deepseek_service.DEEPSEEK_BASE_URL,
+        "api.deepseek.model": deepseek_service.DEEPSEEK_MODEL,
         "api.deepseek.api_key": "",
-        "api.image.base_url": "",
+        "api.image.base_url": "https://newapi.aifusion6.cn/v1",
         "api.image.model": "",
         "api.image.api_key": "",
-        "api.video.base_url": "",
-        "api.video.model": "",
+        "api.video.base_url": "https://newapi.aifusion6.cn/v1",
+        "api.video.model": "veo3.1-fast",
         "api.video.api_key": "",
+        "api.video.provider": "",
         "api.enable_user_override": True,
         "api.enable_user_url_override": False,
         "auth.require_email_code_for_register": False,
@@ -4767,15 +4768,16 @@ def admin_save_platform_settings(body: dict, request: Request, db: Session = Dep
         "platform.icp": basic.get("icp", ""),
         "platform.copyright": basic.get("copyright", ""),
         "platform.notice": basic.get("notice", ""),
-        "api.deepseek.base_url": api.get("deepseek_base_url", ""),
-        "api.deepseek.model": api.get("deepseek_model", ""),
+        "api.deepseek.base_url": api.get("deepseek_base_url", deepseek_service.DEEPSEEK_BASE_URL),
+        "api.deepseek.model": api.get("deepseek_model", deepseek_service.DEEPSEEK_MODEL),
         "api.deepseek.api_key": api.get("deepseek_api_key", ""),
-        "api.image.base_url": api.get("image_base_url", ""),
+        "api.image.base_url": api.get("image_base_url", "https://newapi.aifusion6.cn/v1"),
         "api.image.model": api.get("image_model", ""),
         "api.image.api_key": api.get("image_api_key", ""),
-        "api.video.base_url": api.get("video_base_url", ""),
-        "api.video.model": api.get("video_model", ""),
+        "api.video.base_url": api.get("video_base_url", "https://newapi.aifusion6.cn/v1"),
+        "api.video.model": api.get("video_model", "veo3.1-fast"),
         "api.video.api_key": api.get("video_api_key", ""),
+        "api.video.provider": api.get("video_provider", ""),
         "api.enable_user_override": bool(api.get("enable_user_override", True)),
         "api.enable_user_url_override": bool(api.get("enable_user_url_override", False)),
         "auth.require_email_code_for_register": bool(auth.get("require_email_code_for_register", False)),
@@ -5285,7 +5287,7 @@ async def adjust_story_cover(story_id: int, request: Request, db: Session = Depe
             source_path,
             output_path,
             api_key=image_api_key,
-            size="1024x1792",
+            size="1024x1536",
         )
     except MangaImageGenerationError as exc:
         raise HTTPException(502, exc.to_payload()) from exc

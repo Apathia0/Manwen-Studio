@@ -347,6 +347,98 @@ class FrameworkSnapshot(Base):
     story: Mapped["Story"] = relationship("Story", back_populates="framework_snapshots")
 
 
+# ── 章节视频工作流（新流水线） ──────────────────────────
+
+
+class ChapterVideoWorkflow(Base):
+    """章节视频工作流 — 管理从章节正文到视频的完整流水线
+
+    职责：编排章节正文 → 10s 镜头拆分 → 故事版生成 → 图生视频
+    """
+    __tablename__ = "chapter_video_workflows"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    chapter_id: Mapped[int] = mapped_column(Integer, ForeignKey("chapters.id"), nullable=False, index=True)
+    story_id: Mapped[int] = mapped_column(Integer, ForeignKey("stories.id"), nullable=False, index=True)
+    source_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    workflow_status: Mapped[str] = mapped_column(String(32), default="pending")
+
+    # 配置
+    character_reference_ids: Mapped[list[Any] | None] = mapped_column(JSON, nullable=True)
+    video_style: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    duration_per_shot: Mapped[int] = mapped_column(Integer, default=10)
+
+    # 进度
+    total_shots: Mapped[int] = mapped_column(Integer, default=0)
+    completed_shots: Mapped[int] = mapped_column(Integer, default=0)
+    failed_shots: Mapped[int] = mapped_column(Integer, default=0)
+
+    # 结果
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    created_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+    chapter: Mapped["Chapter"] = relationship("Chapter")
+    story: Mapped["Story"] = relationship("Story")
+    shots: Mapped[list["ChapterVideoShot"]] = relationship(
+        "ChapterVideoShot",
+        back_populates="workflow",
+        cascade="all, delete-orphan",
+        order_by="ChapterVideoShot.shot_index",
+    )
+
+
+class ChapterVideoShot(Base):
+    """章节视频工作流的 10 秒镜头 — 独立于传统 ScriptScene/VideoShot
+
+    每个 shot 对应一个 10 秒的独立视频片段，直接由正文解析产生。
+    """
+    __tablename__ = "chapter_video_shots"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    workflow_id: Mapped[int] = mapped_column(Integer, ForeignKey("chapter_video_workflows.id"), nullable=False, index=True)
+    shot_index: Mapped[int] = mapped_column(Integer, nullable=False)
+
+    # 原文信息
+    source_text_span: Mapped[str | None] = mapped_column(Text, nullable=True)
+    scene_location: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    time_of_day: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    characters: Mapped[list[Any] | None] = mapped_column(JSON, nullable=True)
+
+    # 镜头内容
+    story_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    dialogue_or_narration: Mapped[str | None] = mapped_column(Text, nullable=True)
+    camera_plan: Mapped[str | None] = mapped_column(Text, nullable=True)
+    motion_plan: Mapped[str | None] = mapped_column(Text, nullable=True)
+    emotion_plan: Mapped[str | None] = mapped_column(Text, nullable=True)
+    continuity_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # Prompt
+    storyboard_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
+    video_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
+    character_prompts_json: Mapped[Any] = mapped_column(JSON, nullable=True)
+
+    # 引用
+    character_reference_ids: Mapped[list[Any] | None] = mapped_column(JSON, nullable=True)
+
+    # 故事版结构化 JSON
+    storyboard_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+
+    # 图片和视频
+    storyboard_image_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    video_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+
+    # 状态
+    status: Mapped[str] = mapped_column(String(32), default="pending")
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    created_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+    workflow: Mapped["ChapterVideoWorkflow"] = relationship("ChapterVideoWorkflow", back_populates="shots")
+
+
 # ── 视频工作流模型 ──────────────────────────────────────
 
 

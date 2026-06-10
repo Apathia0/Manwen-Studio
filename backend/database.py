@@ -1,7 +1,6 @@
 import os
 import logging
 import shutil
-from collections.abc import Mapping
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -302,14 +301,12 @@ def _cleanup_duplicate_manga_images(target_engine=None):
                 )
 
 
-def _chapter_score(chapter: dict[str, object], has_dir: bool) -> tuple[int, int, int, int]:
+def _chapter_score(chapter: dict, has_dir: bool) -> tuple[int, int, int, int]:
     novel_score = 1 if chapter["novel_content"] else 0
-    message_count = chapter.get("message_count")
-    image_count = chapter.get("image_count")
     return (
         novel_score,
-        int(message_count) if isinstance(message_count, (int, float, str)) else 0,
-        int(image_count) if isinstance(image_count, (int, float, str)) else 0,
+        int(chapter["message_count"] or 0),
+        int(chapter["image_count"] or 0),
         1 if has_dir else 0,
     )
 
@@ -428,12 +425,6 @@ def _migrate_video_tables(target_engine=None):
                 conn.execute(text("ALTER TABLE video_shots ADD COLUMN last_frame_prompt TEXT"))
             if "character_prompts_json" not in video_shots_cols:
                 conn.execute(text("ALTER TABLE video_shots ADD COLUMN character_prompts_json JSON"))
-            if "scene_prompt" not in video_shots_cols:
-                conn.execute(text("ALTER TABLE video_shots ADD COLUMN scene_prompt TEXT"))
-                video_shots_cols.add("scene_prompt")
-            if "prop_prompts_json" not in video_shots_cols:
-                conn.execute(text("ALTER TABLE video_shots ADD COLUMN prop_prompts_json JSON"))
-                video_shots_cols.add("prop_prompts_json")
 
     video_assets_cols = {c["name"] for c in insp.get_columns("video_assets")} if "video_assets" in insp.get_table_names() else set()
     if video_assets_cols:
@@ -584,14 +575,14 @@ def _seed_video_style_presets(target_engine=None):
                 return
 
             presets = [
-                {"name": "写实电影感", "category": "realistic", "prompt_template": "Realistic cinematic style, movie-grade lighting, natural colors, high detail, film grain", "image_style_params": {"model": "sd3.5", "size": "1792x1024", "style": "cinematic"}, "video_style_params": {"aspect_ratio": "16:9"}, "sort_order": 1},
-                {"name": "日式动漫风", "category": "anime", "prompt_template": "Japanese anime style, cel-shaded, vibrant colors, expressive eyes, clean line art, Studio Ghibli inspired", "image_style_params": {"model": "sd3.5", "size": "1792x1024", "style": "anime"}, "video_style_params": {"aspect_ratio": "16:9"}, "sort_order": 2},
-                {"name": "3A游戏渲染", "category": "game", "prompt_template": "AAA game cinematic render, Unreal Engine 5 quality, photorealistic textures, ray traced lighting, high polygon count", "image_style_params": {"model": "sd3.5", "size": "1792x1024", "style": "photorealistic"}, "video_style_params": {"aspect_ratio": "16:9"}, "sort_order": 3},
-                {"name": "水墨国风", "category": "artistic", "prompt_template": "Chinese ink wash painting style, brush stroke textures, minimalist composition, monochrome with subtle color accents, poetic atmosphere", "image_style_params": {"model": "sd3.5", "size": "1792x1024", "style": "ink-wash"}, "video_style_params": {"aspect_ratio": "16:9"}, "sort_order": 4},
-                {"name": "水彩手绘风", "category": "artistic", "prompt_template": "Watercolor illustration style, soft edges, paper texture visible, light and airy, hand-painted feel, gentle color palette", "image_style_params": {"model": "sd3.5", "size": "1792x1024", "style": "watercolor"}, "video_style_params": {"aspect_ratio": "16:9"}, "sort_order": 5},
-                {"name": "暗黑哥特风", "category": "artistic", "prompt_template": "Dark gothic style, dramatic shadows, muted color palette, high contrast, mysterious atmosphere, ornate details", "image_style_params": {"model": "sd3.5", "size": "1792x1024", "style": "dark"}, "video_style_params": {"aspect_ratio": "16:9"}, "sort_order": 6},
-                {"name": "复古胶片感", "category": "realistic", "prompt_template": "Vintage film look, 1970s cinema aesthetic, warm color grading, film grain, soft focus, retro lens flares", "image_style_params": {"model": "sd3.5", "size": "1792x1024", "style": "vintage"}, "video_style_params": {"aspect_ratio": "16:9"}, "sort_order": 7},
-                {"name": "科技赛博风", "category": "game", "prompt_template": "Cyberpunk sci-fi style, neon lights, dark urban environment, holographic displays, rain-slicked streets, futuristic technology", "image_style_params": {"model": "sd3.5", "size": "1792x1024", "style": "cyberpunk"}, "video_style_params": {"aspect_ratio": "16:9"}, "sort_order": 8},
+                {"name": "写实电影感", "category": "realistic", "prompt_template": "Realistic cinematic style, movie-grade lighting, natural colors, high detail, film grain", "image_style_params": {"model": "sd3.5", "size": "1920x1080", "style": "cinematic"}, "video_style_params": {"aspect_ratio": "16:9"}, "sort_order": 1},
+                {"name": "日式动漫风", "category": "anime", "prompt_template": "Japanese anime style, cel-shaded, vibrant colors, expressive eyes, clean line art, Studio Ghibli inspired", "image_style_params": {"model": "sd3.5", "size": "1920x1080", "style": "anime"}, "video_style_params": {"aspect_ratio": "16:9"}, "sort_order": 2},
+                {"name": "3A游戏渲染", "category": "game", "prompt_template": "AAA game cinematic render, Unreal Engine 5 quality, photorealistic textures, ray traced lighting, high polygon count", "image_style_params": {"model": "sd3.5", "size": "1920x1080", "style": "photorealistic"}, "video_style_params": {"aspect_ratio": "16:9"}, "sort_order": 3},
+                {"name": "水墨国风", "category": "artistic", "prompt_template": "Chinese ink wash painting style, brush stroke textures, minimalist composition, monochrome with subtle color accents, poetic atmosphere", "image_style_params": {"model": "sd3.5", "size": "1920x1080", "style": "ink-wash"}, "video_style_params": {"aspect_ratio": "16:9"}, "sort_order": 4},
+                {"name": "水彩手绘风", "category": "artistic", "prompt_template": "Watercolor illustration style, soft edges, paper texture visible, light and airy, hand-painted feel, gentle color palette", "image_style_params": {"model": "sd3.5", "size": "1920x1080", "style": "watercolor"}, "video_style_params": {"aspect_ratio": "16:9"}, "sort_order": 5},
+                {"name": "暗黑哥特风", "category": "artistic", "prompt_template": "Dark gothic style, dramatic shadows, muted color palette, high contrast, mysterious atmosphere, ornate details", "image_style_params": {"model": "sd3.5", "size": "1920x1080", "style": "dark"}, "video_style_params": {"aspect_ratio": "16:9"}, "sort_order": 6},
+                {"name": "复古胶片感", "category": "realistic", "prompt_template": "Vintage film look, 1970s cinema aesthetic, warm color grading, film grain, soft focus, retro lens flares", "image_style_params": {"model": "sd3.5", "size": "1920x1080", "style": "vintage"}, "video_style_params": {"aspect_ratio": "16:9"}, "sort_order": 7},
+                {"name": "科技赛博风", "category": "game", "prompt_template": "Cyberpunk sci-fi style, neon lights, dark urban environment, holographic displays, rain-slicked streets, futuristic technology", "image_style_params": {"model": "sd3.5", "size": "1920x1080", "style": "cyberpunk"}, "video_style_params": {"aspect_ratio": "16:9"}, "sort_order": 8},
             ]
 
             for preset in presets:
