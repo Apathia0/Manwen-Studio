@@ -647,6 +647,8 @@ function ShotRow({
   onAnalyzeSingleShot,
   onGenerateCharacterAsset,
   onGenerateShotStoryboard,
+  onGenerateSceneAsset,
+  onGeneratePropAsset,
   onOpenAssetWorkbench,
   onDirectDeleteAsset,
   deletingAssetId,
@@ -663,6 +665,8 @@ function ShotRow({
   onAnalyzeSingleShot: (shotId: number) => void;
   onGenerateCharacterAsset: (shotId: number, characterName: string, prompt: string) => Promise<void>;
   onGenerateShotStoryboard: (shotId: number, referenceAssetIds?: number[]) => Promise<void>;
+  onGenerateSceneAsset?: (shotId: number, prompt: string) => Promise<void>;
+  onGeneratePropAsset?: (shotId: number, propName: string, prompt: string) => Promise<void>;
   onOpenAssetWorkbench?: (items: WorkbenchItem[], title: string, refAssets?: VideoAsset[], refIds?: number[], onRefChange?: (ids: number[]) => void, shotId?: number) => void;
   onDirectDeleteAsset?: (shotId: number, assetId: number) => void;
   deletingAssetId?: number | null;
@@ -693,6 +697,47 @@ function ShotRow({
     );
     return [...currentShotChars, ...inheritedChars];
   }, [chapterAssets, shotId, characterNames]);
+
+  // 场景资产（当前 shot + 同 scene 继承）
+  const sceneAssets = useMemo(() => {
+    const isSceneAsset = (a: any) => a.asset_type === 'scene_reference';
+    const currentShotScenes = chapterAssets.filter(a => a.shot_id === shotId && isSceneAsset(a));
+    const sceneId = shot.scene_id;
+    const inheritedScenes = sceneId
+      ? chapterAssets.filter(a => a.shot_id !== shotId && a.scene_id === sceneId && isSceneAsset(a))
+      : [];
+    const seen = new Set(currentShotScenes.map(a => a.id));
+    const result = [...currentShotScenes];
+    for (const a of inheritedScenes) {
+      if (!seen.has(a.id)) {
+        result.push(a);
+        seen.add(a.id);
+      }
+    }
+    return result;
+  }, [chapterAssets, shotId, shot.scene_id]);
+
+  // 道具资产（当前 shot + 同名继承）
+  const propAssets = useMemo(() => {
+    const isPropAsset = (a: any) => a.asset_type === 'prop_reference';
+    const currentShotProps = chapterAssets.filter(a => a.shot_id === shotId && isPropAsset(a));
+    const propNames = (shot.promptDraft?.prop_prompts || []).map(p => p.name);
+    if (propNames.length === 0) return currentShotProps;
+    const normalizedNames = new Set(propNames.map(n => n.trim().toLowerCase()));
+    const inheritedProps = chapterAssets.filter(a =>
+      a.shot_id !== shotId && isPropAsset(a) &&
+      normalizedNames.has((a.name || '').replace(/^Prop\s*-\s*/i, '').trim().toLowerCase())
+    );
+    const seen = new Set(currentShotProps.map(a => a.id));
+    const result = [...currentShotProps];
+    for (const a of inheritedProps) {
+      if (!seen.has(a.id)) {
+        result.push(a);
+        seen.add(a.id);
+      }
+    }
+    return result;
+  }, [chapterAssets, shotId, shot.promptDraft?.prop_prompts]);
 
   const hasPromptDraft = !!shot.promptDraft;
 
@@ -845,6 +890,70 @@ function ShotRow({
               deletingAssetId={deletingAssetId}
             />
 
+            {/* ③ 场景资产 */}
+            <AssetCard3
+              title="🏠 场景资产"
+              assets={sceneAssets}
+              placeholders={
+                hasPromptDraft && shot.promptDraft?.scene_prompt
+                  ? [{
+                      key: 'scene',
+                      label: '场景环境',
+                      prompt: shot.promptDraft.scene_prompt,
+                      hasAsset: sceneAssets.some(a => a.asset_type === 'scene_reference'),
+                      isGenerating: false,
+                      onGenerate: onGenerateSceneAsset
+                        ? async (p: string) => { await onGenerateSceneAsset(shotId, p); }
+                        : undefined,
+                    }]
+                  : [{ key: 'no_scene', label: '待分析场景', prompt: '', hasAsset: false, isGenerating: false }]
+              }
+              onViewAsset={onViewAsset}
+              onRedrawAsset={onRedrawAsset}
+              onDeleteAsset={(aid: number) => onDeleteAsset(shotId, aid)}
+              onReplaceAsset={(aid: number) => onReplaceAsset(shotId, aid)}
+              onOpenWorkbench={onOpenAssetWorkbench}
+              _refAssets={chapterAssets}
+              _refIds={selectedRefIds}
+              _onRefChange={setSelectedRefIds}
+              _shotId={shotId}
+              onDirectDeleteAsset={onDirectDeleteAsset ? (aid: number) => onDirectDeleteAsset(shotId, aid) : undefined}
+              deletingAssetId={deletingAssetId}
+            />
+
+            {/* ④ 道具资产 */}
+            <AssetCard3
+              title="🎒 道具资产"
+              assets={propAssets}
+              placeholders={
+                hasPromptDraft && shot.promptDraft?.prop_prompts && shot.promptDraft.prop_prompts.length > 0
+                  ? shot.promptDraft.prop_prompts.map(pp => ({
+                      key: pp.name,
+                      label: pp.name,
+                      prompt: pp.prompt,
+                      hasAsset: propAssets.some(a => {
+                        const assetPropName = (a.name || '').replace(/^Prop\s*-\s*/i, '').trim().toLowerCase();
+                        return assetPropName === pp.name.trim().toLowerCase();
+                      }),
+                      isGenerating: false,
+                      onGenerate: onGeneratePropAsset
+                        ? async (p: string) => { await onGeneratePropAsset(shotId, pp.name, p); }
+                        : undefined,
+                    }))
+                  : [{ key: 'no_props', label: '待分析道具', prompt: '', hasAsset: false, isGenerating: false }]
+              }
+              onViewAsset={onViewAsset}
+              onRedrawAsset={onRedrawAsset}
+              onDeleteAsset={(aid: number) => onDeleteAsset(shotId, aid)}
+              onReplaceAsset={(aid: number) => onReplaceAsset(shotId, aid)}
+              onOpenWorkbench={onOpenAssetWorkbench}
+              _refAssets={chapterAssets}
+              _refIds={selectedRefIds}
+              _onRefChange={setSelectedRefIds}
+              _shotId={shotId}
+              onDirectDeleteAsset={onDirectDeleteAsset ? (aid: number) => onDirectDeleteAsset(shotId, aid) : undefined}
+              deletingAssetId={deletingAssetId}
+            />
 
             {hasPromptDraft && (
               <div
