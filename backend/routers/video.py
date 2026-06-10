@@ -806,6 +806,7 @@ def _build_reference_constraints_block(character_assets: list[VideoAsset]) -> st
         "character_reference": "角色身份参考图",
         "story_character_reference": "角色身份参考图",
         "scene_reference": "场景氛围参考图",
+        "prop_reference": "道具参考图",
         "storyboard_frame": "分镜构图参考图",
         "frame": "首尾帧参考图",
     }
@@ -828,9 +829,11 @@ def _build_reference_constraints_block(character_assets: list[VideoAsset]) -> st
         "MANDATORY USAGE RULES: "
         "1. Character reference images: lock face shape, hairstyle, eye color, outfit, body type for each character. All identity markers must match exactly. "
         "2. Storyboard reference image: use as the authoritative shot plan -- follow the panel-by-panel camera framing, character blocking, action progression, and timing shown in the storyboard. The storyboard defines the exact visual sequence to generate. "
-        "3. Scene reference images: match atmosphere, color palette, and lighting setup. "
-        "4. Frame reference images: first frame = start state, last frame = end state. Generate smooth transition between them. "
-        "CRITICAL: The storyboard image is the director's blueprint. The generated video must faithfully follow the shot breakdown, camera movements, and character actions depicted in the storyboard panels."
+        "3. Scene reference images: match atmosphere, color palette, lighting setup, architecture, and environmental details. Keep the same location perspective and spatial layout. "
+        "4. Prop reference images: maintain exact prop appearance -- material, color, size, shape, texture, wear marks, and distinctive features must be identical. Props must stay visually consistent across all shots. "
+        "5. Frame reference images: first frame = start state, last frame = end state. Generate smooth transition between them. "
+        "CRITICAL: The storyboard image is the director's blueprint. The generated video must faithfully follow the shot breakdown, camera movements, and character actions depicted in the storyboard panels. "
+        "CONSISTENCY RULE: All visual elements (characters, scene, props) must remain identical to their reference images throughout the entire video. No drift, no variation, no reinterpretation."
     )
     return " ".join(parts)
 
