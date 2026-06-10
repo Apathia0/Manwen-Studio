@@ -238,16 +238,6 @@ export default function VideoCardWorkbench({ type, shotId, assetId, displayShotI
                       className="mx-auto h-auto max-h-[56vh] rounded-xl shadow-2xl"
                       style={{ transform: `scale(${state.zoomLevel})` }}
                     />
-                  ) : storyboardImageUrl ? (
-                    <div>
-                      <div className="mb-2 text-center text-xs text-white/50">故事版参考图（视频未生成）</div>
-                      <img
-                        src={storyboardImageUrl}
-                        alt="故事版参考图"
-                        className="mx-auto h-auto max-h-[56vh] rounded-xl shadow-2xl"
-                        style={{ transform: `scale(${state.zoomLevel})` }}
-                      />
-                    </div>
                   ) : (
                     <div className="flex min-h-[420px] min-w-[320px] items-center justify-center rounded-xl bg-[linear-gradient(180deg,_#08111d_0%,_#111827_100%)] text-white/70">
                       暂无内容
@@ -289,6 +279,34 @@ export default function VideoCardWorkbench({ type, shotId, assetId, displayShotI
                   </div>
                 )}
               </div>
+
+              {storyboardImageUrl && (
+                <div className="shrink-0 rounded-2xl border border-[#d7e3f4] bg-white p-4">
+                  <div className="text-sm font-medium text-slate-800">故事版参考图</div>
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (onRegenerate) {
+                          onRegenerate(currentResource?.id || 0);
+                        }
+                      }}
+                      className="relative flex h-20 w-20 shrink-0 items-center justify-center overflow-hidden rounded-xl border-2 border-[#d7e3f4] hover:border-blue-300 transition"
+                      title="点击使用此故事版图重新生成视频"
+                    >
+                      <img
+                        src={storyboardImageUrl}
+                        alt="故事版参考图"
+                        className="h-full w-full object-cover"
+                        onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
+                      />
+                    </button>
+                  </div>
+                  <div className="mt-2 text-xs text-slate-400">
+                    点击重新生成，将使用此故事版图作为参考
+                  </div>
+                </div>
+              )}
 
               {storyboardRefAssets && storyboardRefAssets.length > 0 && (
                 <div className="shrink-0 rounded-2xl border border-[#d7e3f4] bg-white p-4">
