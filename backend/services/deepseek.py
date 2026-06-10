@@ -1650,6 +1650,34 @@ async def adjust_framework_with_chat(
 - 输出 reply + operations + patches + warnings。
 - reply 只说明实际执行范围，不要说"我会"。
 - 禁止输出完整 framework JSON。
+
+支持的 operation 类型（每个 operation 是 {{"op": "类型", "changes": {{...}}}}）：
+- update_story_description: 修改故事简述，changes 包含 description
+- update_tags: 修改标签，changes 可包含 type/theme/style/audience
+- add_character: 添加角色，changes 包含角色完整信息（name 必填）
+- update_character: 更新角色，target.name 指定角色，changes 包含更新字段
+- remove_character: 删除角色，target.name 指定角色名
+- update_act_summary: 更新幕摘要，target.act 指定幕号，changes.summary 为摘要
+- add_act: 新增一幕，changes.title/summary 指定标题和摘要；target.after_act 可选，指定在哪个幕之后插入（不指定则追加到末尾）
+- delete_act: 删除一幕并重排剩余幕号，target.act 指定要删除的幕号（删除后后续幕号自动前移）
+- add_chapter: 在指定幕末尾添加章节，target.act 指定幕号，changes 包含 chapter_number/title 等
+- insert_chapter_after: 在指定章节后插入，target.chapter_number 指定位置，changes 包含新章节
+- move_chapter_to_act: 移动章节到另一幕，target.chapter_number 指定章节，target.act 指定目标幕
+- update_chapter: 更新章节内容，target.chapter_number 指定章节，changes 包含更新字段
+- delete_chapter: 删除章节，target.chapter_number 指定要删除的章节
+
+⚠️ 大规模结构调整建议（合并幕、压缩幕数、重新划分章节）：使用一个 outline.three_acts patch 直接替换整个三幕数组，而不是用大量 move_chapter_to_act 操作。patch 方式一次完成且不会出错。
+示例：{{"path": "outline.three_acts", "value": [{{"act": "1", "title": "...", "summary": "...", "chapters": [...]}}, ...]}}
+
+支持的 patch path 格式（每个 patch 是 {{"path": "路径", "value": 值}}）：
+- description: 直接设定故事简述
+- tags.type / tags.theme / tags.style / tags.audience: 修改单个标签
+- outline.serial_strategy: 替换连载策略对象
+- outline.themes: 替换主题列表
+- outline.foreshadowing: 替换伏笔列表
+- outline.three_acts: 替换三幕结构（必须为数组）
+- outline.three_acts[N].chapters: 替换第 N 幕的章节列表（N 从 0 开始）
+- 注意：path 不要以 / 开头，用点号分隔层级，数组用 [下标] 访问
 {min_chapter_requirement}"""
 
     MAX_RETRIES = 2
@@ -1740,7 +1768,35 @@ async def continue_framework_with_chat(
 当前框架 JSON：
 {snapshot}
 
-请输出结构化编辑计划（reply + operations + patches + warnings）。"""
+请输出结构化编辑计划（reply + operations + patches + warnings）。
+
+支持的 operation 类型（每个 operation 是 {{"op": "类型", "changes": {{...}}}}）：
+- update_story_description: 修改故事简述，changes 包含 description
+- update_tags: 修改标签，changes 可包含 type/theme/style/audience
+- add_character: 添加角色，changes 包含角色完整信息（name 必填）
+- update_character: 更新角色，target.name 指定角色，changes 包含更新字段
+- remove_character: 删除角色，target.name 指定角色名
+- update_act_summary: 更新幕摘要，target.act 指定幕号，changes.summary 为摘要
+- add_act: 新增一幕，changes.title/summary 指定标题和摘要；target.after_act 可选，指定在哪个幕之后插入（不指定则追加到末尾）
+- delete_act: 删除一幕并重排剩余幕号，target.act 指定要删除的幕号
+- add_chapter: 在指定幕末尾添加章节，target.act 指定幕号，changes 包含 chapter_number/title 等
+- insert_chapter_after: 在指定章节后插入，target.chapter_number 指定位置，changes 包含新章节
+- move_chapter_to_act: 移动章节到另一幕，target.chapter_number 指定章节，target.act 指定目标幕
+- update_chapter: 更新章节内容，target.chapter_number 指定章节，changes 包含更新字段
+- delete_chapter: 删除章节，target.chapter_number 指定要删除的章节
+
+⚠️ 大规模结构调整建议（合并幕、压缩幕数、重新划分章节）：使用一个 outline.three_acts patch 直接替换整个三幕数组，而不是用大量 move_chapter_to_act 操作。
+示例：{{"path": "outline.three_acts", "value": [{{"act": "1", "title": "...", "summary": "...", "chapters": [...]}}, ...]}}
+
+支持的 patch path 格式（每个 patch 是 {{"path": "路径", "value": 值}}）：
+- description: 直接设定故事简述
+- tags.type / tags.theme / tags.style / tags.audience: 修改单个标签
+- outline.serial_strategy: 替换连载策略对象
+- outline.themes: 替换主题列表
+- outline.foreshadowing: 替换伏笔列表
+- outline.three_acts: 替换三幕结构（必须为数组）
+- outline.three_acts[N].chapters: 替换第 N 幕的章节列表（N 从 0 开始）
+- 注意：path 不要以 / 开头，用点号分隔层级，数组用 [下标] 访问"""
 
     MAX_RETRIES = 2
 
