@@ -894,12 +894,12 @@ function ShotRow({
               deletingAssetId={deletingAssetId}
             />
 
-            {/* ③ 场景资产 */}
+            {/* ③ 场景 & 道具资产 */}
             <AssetCard3
-              title="🏠 场景资产"
-              assets={sceneAssets}
-              placeholders={
-                hasPromptDraft && shot.promptDraft?.scene_prompt
+              title="🏠 场景 & 道具"
+              assets={[...sceneAssets, ...propAssets]}
+              placeholders={[
+                ...(hasPromptDraft && shot.promptDraft?.scene_prompt
                   ? [{
                       key: 'scene',
                       label: '场景环境',
@@ -910,29 +910,10 @@ function ShotRow({
                         ? async (p: string) => { await onGenerateSceneAsset(shotId, p); }
                         : undefined,
                     }]
-                  : [{ key: 'no_scene', label: '待分析场景', prompt: '', hasAsset: false, isGenerating: false }]
-              }
-              onViewAsset={onViewAsset}
-              onRedrawAsset={onRedrawAsset}
-              onDeleteAsset={(aid: number) => onDeleteAsset(shotId, aid)}
-              onReplaceAsset={(aid: number) => onReplaceAsset(shotId, aid)}
-              onOpenWorkbench={onOpenAssetWorkbench}
-              _refAssets={chapterAssets}
-              _refIds={selectedRefIds}
-              _onRefChange={setSelectedRefIds}
-              _shotId={shotId}
-              onDirectDeleteAsset={onDirectDeleteAsset ? (aid: number) => onDirectDeleteAsset(shotId, aid) : undefined}
-              deletingAssetId={deletingAssetId}
-            />
-
-            {/* ④ 道具资产 */}
-            <AssetCard3
-              title="🎒 道具资产"
-              assets={propAssets}
-              placeholders={
-                hasPromptDraft && shot.promptDraft?.prop_prompts && shot.promptDraft.prop_prompts.length > 0
+                  : []),
+                ...(hasPromptDraft && shot.promptDraft?.prop_prompts && shot.promptDraft.prop_prompts.length > 0
                   ? shot.promptDraft.prop_prompts.map(pp => ({
-                      key: pp.name,
+                      key: `prop_${pp.name}`,
                       label: pp.name,
                       prompt: pp.prompt,
                       hasAsset: propAssets.some(a => {
@@ -944,8 +925,9 @@ function ShotRow({
                         ? async (p: string) => { await onGeneratePropAsset(shotId, pp.name, p); }
                         : undefined,
                     }))
-                  : [{ key: 'no_props', label: '待分析道具', prompt: '', hasAsset: false, isGenerating: false }]
-              }
+                  : []),
+                ...(!hasPromptDraft ? [{ key: 'no_data', label: '待分析', prompt: '', hasAsset: false, isGenerating: false }] : []),
+              ]}
               onViewAsset={onViewAsset}
               onRedrawAsset={onRedrawAsset}
               onDeleteAsset={(aid: number) => onDeleteAsset(shotId, aid)}
