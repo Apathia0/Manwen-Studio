@@ -63,7 +63,7 @@ const AssetManagementPanel: React.FC<AssetPanelProps> = ({
       setCharacterAssets(assets.filter((a: any) => a.asset_type === 'character_reference' || a.asset_type === 'story_character_reference'));
       setSceneAssets(assets.filter((a: any) => a.asset_type === 'scene_reference'));
     } catch (e) {
-      console.error('Failed to load assets:', e);
+      console.error('加载素材失败:', e);
     }
   };
 
@@ -74,7 +74,7 @@ const AssetManagementPanel: React.FC<AssetPanelProps> = ({
       const data = await res.json();
       setScenes(data.scenes || []);
     } catch (e) {
-      console.error('Failed to load scenes:', e);
+      console.error('加载场景失败:', e);
     }
   };
 
@@ -94,7 +94,7 @@ const AssetManagementPanel: React.FC<AssetPanelProps> = ({
         await loadAssets();
       }
     } catch (e) {
-      console.error('Failed to generate character refs:', e);
+      console.error('生成角色参考图失败:', e);
     } finally {
       setCharacterRefLoading(false);
     }
@@ -113,7 +113,7 @@ const AssetManagementPanel: React.FC<AssetPanelProps> = ({
       });
       await loadAssets();
     } catch (e) {
-      console.error('Failed to generate concept art:', e);
+      console.error('生成概念图失败:', e);
     } finally {
       setGeneratingSceneId(null);
     }
@@ -126,7 +126,7 @@ const AssetManagementPanel: React.FC<AssetPanelProps> = ({
       const data = await listChapterShotFrames(chapter.id);
       setShotFrames(data.shots || []);
     } catch (e) {
-      console.error('Failed to load shot frames:', e);
+      console.error('加载分镜帧失败:', e);
     } finally {
       setShotFramesLoading(false);
     }

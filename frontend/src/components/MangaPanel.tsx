@@ -420,7 +420,7 @@ export default memo(function MangaPanel({
           genStore.patch(chapterId, { current: status.progress, total: status.total });
         }
       } catch (err) {
-        console.error('Backend task polling error:', err);
+        console.error('后端任务轮询错误:', err);
       }
     }, 3000);
   }, [syncChapterImagesFromServer, onChapterRefresh]);
@@ -446,7 +446,7 @@ export default memo(function MangaPanel({
         setErrorMsg(`后台漫画生成任务失败：${status.error_message || '未知错误'}`);
       }
     } catch (err) {
-      console.error('Failed to check backend manga status:', err);
+      console.error('检查后端漫画状态失败:', err);
     }
   }, [syncChapterImagesFromServer, onChapterRefresh, startBackendTaskPolling]);
   checkBackendMangaStatusRef.current = checkBackendMangaStatus;
