@@ -844,7 +844,11 @@ def test_api_parse_chapter_shots_refreshes_source_text_from_db(monkeypatch):
 
     class _ParseRefreshDb:
         def __init__(self):
-            self.wf = SimpleNamespace(id=11, chapter_id=444, story_id=900, source_text="旧的快照内容")
+            self.wf = SimpleNamespace(
+                id=11, chapter_id=444, story_id=900,
+                source_text="旧的快照内容",
+                character_reference_ids=[],
+            )
             self.commit_called = False
 
         def get(self, model, pk):
@@ -872,6 +876,10 @@ def test_api_parse_chapter_shots_refreshes_source_text_from_db(monkeypatch):
         ),
     )
     monkeypatch.setattr(video_router, "_user_deepseek_api_key", lambda request, db_session: "fake-key")
+    monkeypatch.setattr(
+        video_router, "_get_story_character_reference_asset_ids",
+        lambda story_id, db_session: [1001, 1002] if story_id == 900 else [],
+    )
 
     async def fake_parse(**kwargs):
         db_captured["source_text"] = kwargs.get("source_text", "")
@@ -889,7 +897,9 @@ def test_api_parse_chapter_shots_refreshes_source_text_from_db(monkeypatch):
         f"应使用 DB 最新章节内容，而非旧快照，实际: {db_captured.get('source_text')}"
     assert db.wf.source_text == "新的章节正文", \
         "工作流 source_text 应从 DB 同步更新"
-    assert db.commit_called, "应提交 source_text 更新"
+    assert db.wf.character_reference_ids == [1001, 1002], \
+        "工作流 character_reference_ids 应从 DB 刷新（空列表→最新资产）"
+    assert db.commit_called, "应提交更新"
 
 
 def test_api_parse_chapter_shots_raises_400_on_empty_content(monkeypatch):
@@ -987,3 +997,143 @@ def test_storyboard_director_prompt_no_longer_uses_10s_segments():
     assert "10秒" not in system_prompt
     assert "15秒" in system_prompt
     assert "分镜段落" in system_prompt
+
+
+# ── _get_story_character_reference_asset_ids 增强（VideoAsset 兜底） ─────────────────
+
+
+def test_get_story_character_reference_asset_ids_returns_version_refs():
+    """正常路径：StoryCharacterVersion 有 ref_asset_id 时返回这些 ID。"""
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+    from models import Base, StoryCharacterVersion, VideoAsset
+
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+
+    session = Session()
+    try:
+        # 创建 2 个 VideoAsset 作为参考图
+        a1 = VideoAsset(story_id=10, asset_type="story_character_reference", name="林晚晚", file_path="/fake/a1.png", status="active")
+        a2 = VideoAsset(story_id=10, asset_type="story_character_reference", name="顾深", file_path="/fake/a2.png", status="active")
+        session.add_all([a1, a2])
+        session.flush()
+
+        # 创建 2 个 StoryCharacterVersion 并设置 ref_asset_id
+        v1 = StoryCharacterVersion(story_id=10, character_name="林晚晚", version_label="v1",
+                                    appearance_card="黑色长发", is_default=True, ref_asset_id=a1.id)
+        v2 = StoryCharacterVersion(story_id=10, character_name="顾深", version_label="v1",
+                                    appearance_card="深蓝西装", is_default=True, ref_asset_id=a2.id)
+        # 一个非默认版本，不应被返回
+        v3 = StoryCharacterVersion(story_id=10, character_name="程砚", version_label="非默认",
+                                    appearance_card="冷酷", is_default=False, ref_asset_id=None)
+        session.add_all([v1, v2, v3])
+        session.commit()
+
+        result = video_router._get_story_character_reference_asset_ids(story_id=10, db=session)
+        # 应只返回 a1.id 和 a2.id
+        assert sorted(result) == sorted([a1.id, a2.id]), f"预期 [a1.id, a2.id]，实际 {result}"
+    finally:
+        session.close()
+
+
+def test_get_story_character_reference_asset_ids_falls_back_to_video_asset():
+    """兜底路径：StoryCharacterVersion 无 ref_asset_id 时，从 VideoAsset 表查找。"""
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+    from models import Base, StoryCharacterVersion, VideoAsset
+
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+
+    session = Session()
+    try:
+        # StoryCharacterVersion 存在但 ref_asset_id 为 None
+        v = StoryCharacterVersion(story_id=10, character_name="林晚晚", version_label="v1",
+                                   appearance_card="黑色长发", is_default=True, ref_asset_id=None)
+        session.add(v)
+
+        # VideoAsset 有该故事的角色参考图
+        a1 = VideoAsset(story_id=10, asset_type="story_character_reference", name="林晚晚-角色卡",
+                         file_path="/fake/a1.png", status="active")
+        a2 = VideoAsset(story_id=10, asset_type="character_reference", name="林晚晚-镜头级",
+                         file_path="/fake/a2.png", status="active")
+        # 另一个故事的资产，不应被返回
+        a3 = VideoAsset(story_id=99, asset_type="story_character_reference", name="其他故事",
+                         file_path="/fake/a3.png", status="active")
+        session.add_all([a1, a2, a3])
+        session.commit()
+
+        result = video_router._get_story_character_reference_asset_ids(story_id=10, db=session)
+        assert a1.id in result, f"story_character_reference 资产应被找到，结果: {result}"
+        assert a2.id in result, f"character_reference 资产应被找到，结果: {result}"
+        assert a3.id not in result, f"其他故事的资产不应被返回，结果: {result}"
+    finally:
+        session.close()
+
+
+def test_get_story_character_reference_asset_ids_returns_empty_when_nothing_found():
+    """没有任何匹配时返回空列表。"""
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+    from models import Base, StoryCharacterVersion, VideoAsset
+
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+
+    session = Session()
+    try:
+        # 存在版本但 ref_asset_id=None，且没有对应的 VideoAsset
+        v = StoryCharacterVersion(story_id=10, character_name="林晚晚", version_label="v1",
+                                   appearance_card="黑色长发", is_default=True, ref_asset_id=None)
+        session.add(v)
+
+        # 另一个故事的 VideoAsset
+        a = VideoAsset(story_id=99, asset_type="story_character_reference", name="其他",
+                        file_path="/fake/a.png", status="active")
+        session.add(a)
+        session.commit()
+
+        result = video_router._get_story_character_reference_asset_ids(story_id=10, db=session)
+        assert result == [], f"应返回空列表，实际 {result}"
+    finally:
+        session.close()
+
+
+def test_get_story_character_reference_asset_ids_prefers_version_refs_over_video_asset():
+    """优先级：StoryCharacterVersion.ref_asset_id 优先于 VideoAsset 兜底。"""
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+    from models import Base, StoryCharacterVersion, VideoAsset
+
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+
+    session = Session()
+    try:
+        # VideoAsset 存在
+        a = VideoAsset(story_id=10, asset_type="character_reference", name="林晚晚",
+                        file_path="/fake/a.png", status="active")
+        session.add(a)
+        session.flush()
+
+        # StoryCharacterVersion 有 ref_asset_id → 应优先返回
+        v = StoryCharacterVersion(story_id=10, character_name="林晚晚", version_label="v1",
+                                   appearance_card="黑色长发", is_default=True, ref_asset_id=a.id)
+        session.add(v)
+
+        # 额外的 VideoAsset 没有对应版本 → 版本有 ref_asset_id 时不应进入兜底路径
+        a_extra = VideoAsset(story_id=10, asset_type="character_reference", name="顾深-额外",
+                              file_path="/fake/extra.png", status="active")
+        session.add(a_extra)
+        session.commit()
+
+        result = video_router._get_story_character_reference_asset_ids(story_id=10, db=session)
+        # 只有 v.ref_asset_id（a.id），不包括 a_extra.id
+        assert result == [a.id], f"应只返回版本引用的 asset_id，实际 {result}"
+    finally:
+        session.close()

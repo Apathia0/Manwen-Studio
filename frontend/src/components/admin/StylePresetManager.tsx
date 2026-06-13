@@ -7,6 +7,7 @@ import {
   apiHeaders,
   type VideoStylePreset,
 } from '../../api';
+import { Film } from 'lucide-react';
 import { toast } from '../../lib/toast';
 import { confirm } from '../../lib/confirm';
 
@@ -296,7 +297,7 @@ export default function StylePresetManager() {
                   />
                 ) : (
                   <div className="flex h-full items-center justify-center text-slate-400">
-                    <span className="text-2xl">🎬</span>
+                    <Film size={28} className="mx-auto text-slate-300" />
                   </div>
                 )}
               </div>

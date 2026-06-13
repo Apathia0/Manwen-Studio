@@ -3,8 +3,10 @@ import {
   CheckCircle2,
   Clapperboard,
   Film,
+  Home,
   Image as ImageIcon,
   Loader2,
+  Palette,
   RefreshCcw,
   Sparkles,
   Trash2,
@@ -220,7 +222,7 @@ export default function ChapterVideoWorkflowPanel({
             onClick={() => onOpenStyleSelector?.()}
             className="inline-flex items-center gap-1.5 rounded-lg border border-[#d7e3f4] bg-white px-2.5 py-1.5 text-xs text-slate-600 hover:bg-slate-50"
           >
-            🎨 {selectedStyle || '选择风格'}
+            <Palette size={14} /> {selectedStyle || '选择风格'}
             {styleReferenceImageUrl && <span className="text-blue-500">(自定义)</span>}
           </button>
           <button
@@ -462,7 +464,7 @@ export default function ChapterVideoWorkflowPanel({
                           className="rounded-xl border border-[#e5edf8] bg-slate-50 p-2 text-left transition hover:border-blue-300 hover:bg-white"
                         >
                           <div className="mb-2 flex items-center gap-1 text-xs font-medium text-slate-600">
-                            🏠 场景 & 道具
+                            <Home size={14} /> 场景 & 道具
                           </div>
                           <div className="flex h-32 items-center justify-center rounded-lg border border-dashed border-[#d7e3f4] bg-white text-xs text-slate-400">
                             待生成

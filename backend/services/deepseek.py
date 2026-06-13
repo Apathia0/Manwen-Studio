@@ -2803,8 +2803,8 @@ def _repair_truncated_json(content: str) -> str:
 
     in_string = False
     escaped = False
-    brace_depth = 0
-    bracket_depth = 0
+    # 使用栈追踪正确的闭合顺序（LIFO），避免计数器方案在嵌套结构中出现错误顺序
+    stack: list[str] = []
 
     for ch in stripped:
         if in_string:
@@ -2819,24 +2819,43 @@ def _repair_truncated_json(content: str) -> str:
             in_string = True
             continue
         if ch == "{":
-            brace_depth += 1
+            stack.append("{")
         elif ch == "}":
-            brace_depth -= 1
+            if stack and stack[-1] == "{":
+                stack.pop()
         elif ch == "[":
-            bracket_depth += 1
+            stack.append("[")
         elif ch == "]":
-            bracket_depth -= 1
+            if stack and stack[-1] == "[":
+                stack.pop()
 
     if in_string:
         stripped += '"'
-    while brace_depth > 0:
-        stripped += "}"
-        brace_depth -= 1
-    while bracket_depth > 0:
-        stripped += "]"
-        bracket_depth -= 1
+
+    for opener in reversed(stack):
+        if opener == "{":
+            stripped += "}"
+        elif opener == "[":
+            stripped += "]"
+
     if not stripped.endswith("}"):
         stripped += "}"
+
+    try:
+        json.loads(stripped)
+        return stripped
+    except json.JSONDecodeError:
+        pass
+
+    # 从右向左查找被截断的键名：找到 " 后紧跟着闭括号的位置，插入 :null
+    for end_idx in range(len(stripped) - 1, 0, -1):
+        if stripped[end_idx - 1] == '"' and stripped[end_idx] in '}])':
+            candidate = stripped[:end_idx] + ':null' + stripped[end_idx:]
+            try:
+                json.loads(candidate)
+                return candidate
+            except json.JSONDecodeError:
+                continue
 
     return stripped
 
@@ -3166,6 +3185,7 @@ async def generate_shot_storyboard_prompt(
         style_preset=shot_data.get("style_preset"),
         duration_seconds=shot_data.get("duration_seconds", 15),
         source_text_span=shot_data.get("source_text_span"),
+        shot_context=shot_data.get("shot_context"),
     )
 
     sj = shot_data.get("storyboard_json")
@@ -3173,6 +3193,21 @@ async def generate_shot_storyboard_prompt(
         sj_values = [v for v in sj.values() if isinstance(v, str) and v.strip()]
         if sj_values:
             user_message += "\n\n## 故事板导演分析参考\n\n" + "\n".join(sj_values)
+
+    # 如果 shot_context 中包含连续性要求，追加到 system prompt 末尾
+    ctx = shot_data.get("shot_context")
+    if ctx and "前后镜头衔接" in ctx:
+        continuity_rules = """
+## 镜头间连续性规则（必须遵守）
+
+由于当前镜头在完整剧情序列中不是孤立存在的，生成故事版时必须遵守以下规则：
+
+1. **情绪连续性**：角色情绪必须从前一镜头的终点状态自然发展而来，不能跳跃
+2. **时间连续性**：如果时间发生了跳跃（如夜间→白天），画面必须有时间流逝的视觉暗示（光线变化、角色状态变化等）
+3. **空间连续性**：如果场景发生了切换，画面的叙事逻辑必须清晰表达角色如何到达新场景
+4. **动作连续性**：角色的动作和状态应延续自前一镜头，不能出现不合理的动作断裂
+5. **道具连续性**：关键道具（手机、戒指等）的状态必须与前后镜头一致"""
+        system_prompt += continuity_rules
 
     payload = {
         "model": DEEPSEEK_MODEL,

@@ -881,7 +881,31 @@ VideoCardWorkbench（按钮 onClick）
 - `workflowRunning` 为 `true` 时会禁用大部分按钮，但重置按钮不应受此限制
 - `fileInputRef.current?.click()` 需要 `<input ref={fileInputRef}>` 在同一渲染分支中存在
 
+### 17. ⚠️ DeepSeek JSON 截断修复陷阱（反复出问题）
+
+DeepSeek 返回的 JSON 可能被 `max_tokens` 截断，触发 `_repair_truncated_json`（`backend/services/deepseek.py:2792`）。该函数有两个容易出错的点：
+
+**陷阱 1：括号闭合顺序必须是 LIFO**
+- 不要用 `brace_depth`/`bracket_depth` 两个独立计数器
+- 必须用 **栈（list）** 追踪打开顺序，`reversed(stack)` 按 LIFO 闭合
+- 反例：`{[{...` 用计数器会输出 `}}]`，正确应为 `}]}`
+
+**陷阱 2：键名截断需要补 `:null`**
+- 值字符串截断（`"value_`）：补 `"` 即修复
+- 键名截断（`"key_`）：补 `"` 后得到孤儿键 `"key_"`，缺少 `: value`
+- 修复后必须额外做：从右向左找 `"` 紧接 `}])` 的位置，插入 `:null`
+
+**修改任何修复逻辑时必须检查清单**：
+| 检查项 | 说明 |
+|--------|------|
+| ✅ 栈追踪代替计数器 | 所有括号追踪必须 LIFO，禁止计数器 |
+| ✅ `json.loads()` 最终验证 | 任何修复路径最后都要通过 `json.loads()` 验证 |
+| ✅ 同时覆盖两条链路 | `_parse_lite_chunk`（轻量拆镜）和 `_parse_full_chunk`（完整拆镜）共用 `_repair_truncated_json` |
+| ✅ 新增修复后自测 | 至少覆盖 8 个场景：值截断、键名截断、嵌套键名截断、数组内截断、多字段截断、有效JSON不变、空内容、仅空白 |
+
 ---
+
+
 
 ## ⚠️ 已修复 Bug 记录（2026-06-12 批次）
 
@@ -960,6 +984,22 @@ VideoCardWorkbench（按钮 onClick）
 - **根因**：`upload_style_preset_image` 未调用 `_configure_oss_from_db(db)` 读取数据库配置注入运行时，`oss_service.is_enabled()` 返回 False
 - **修复**：在 OSS 上传前调用 `_configure_oss_from_db(db)` 注入配置
 - **文件**：`backend/routers/video.py`
+
+### Bug 9: DeepSeek JSON 被截断导致"JSON 解析错误"
+
+- **症状**：轻量拆镜/完整拆镜时出现 `ValueError: 轻量拆镜失败：JSON 解析错误`，日志中原始响应以 `"key_` 等不完整的字段名结尾
+- **根因**：`_repair_truncated_json` 有两个问题：
+  1. 使用计数器追踪括号深度（`brace_depth`/`bracket_depth`），嵌套结构闭合顺序错误（如 `}}]` 而非 `}]}`）
+  2. 只处理了**值字符串**被截断（补 `"`），未处理**键名**被截断（补 `"` 后得到孤儿键 `"key_"` 缺少 `: value`）
+- **修复**：
+  1. 计数器 → 栈追踪（LIFO），修复嵌套结构的正确闭合顺序
+  2. 基础修复后若 `json.loads` 失败，从右向左查找 `"` 紧接 `}])` 的位置，插入 `:null`
+- **测试**：8 个独立验证用例全部通过，28 个 pipeline 测试无回归
+- **文件**：`backend/services/deepseek.py` — `_repair_truncated_json` 函数
+- **⚠️ 修改此函数时必须检查**：
+  - 新加的闭合逻辑必须用栈追踪，不能用计数器
+  - 任何修复路径最后都必须通过 `json.loads()` 验证
+  - 同时覆盖 `_parse_lite_chunk` 和 `_parse_full_chunk` 两条链路（共用同一修复函数）
 
 ---
 

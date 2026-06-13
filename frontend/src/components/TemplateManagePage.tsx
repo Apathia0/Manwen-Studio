@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { Heart } from 'lucide-react';
 import {
   listMyTemplates,
   listPublicTemplates,
@@ -233,7 +234,7 @@ export default function TemplateManagePage() {
                     tpl.is_liked ? 'bg-rose-50 text-rose-600' : 'text-slate-400 hover:bg-slate-50'
                   }`}
                 >
-                  {tpl.is_liked ? '❤️' : '🤍'} {tpl.like_count}
+                  <Heart size={14} className={tpl.is_liked ? 'fill-rose-500 text-rose-500' : 'text-slate-400'} /> {tpl.like_count}
                 </button>
                 <button
                   onClick={() => handleFork(tpl)}

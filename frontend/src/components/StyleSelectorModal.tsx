@@ -1,5 +1,5 @@
 import { useState, useRef } from 'react';
-import { X, Upload, Check, Loader2 } from 'lucide-react';
+import { X, Upload, Check, Loader2, Film } from 'lucide-react';
 import type { VideoStylePreset } from '../api';
 import { uploadStyleReferenceImage } from '../api';
 
@@ -219,7 +219,7 @@ export default function StyleSelectorModal({
                       ) : (
                         <div className="flex h-full items-center justify-center text-slate-400">
                           <div className="text-center">
-                            <div className="text-2xl">🎬</div>
+                            <Film size={28} className="mx-auto text-slate-300" />
                             <div className="mt-1 text-xs">{preset.name}</div>
                           </div>
                         </div>
@@ -247,9 +247,9 @@ export default function StyleSelectorModal({
         <div className="flex items-center justify-between border-t border-[#e5edf8] px-6 py-4">
           <div className="text-sm text-slate-500">
             {localReferenceUrl
-              ? '✓ 已选择自定义风格参考图'
+              ? '<Check size={12} className="inline-block" /> 已选择自定义风格参考图'
               : localSelectedStyle
-                ? `✓ 已选择: ${localSelectedStyle}`
+                ? `<Check size={12} className="inline-block" /> 已选择: ${localSelectedStyle}`
                 : '未选择风格'}
           </div>
           <div className="flex gap-2">

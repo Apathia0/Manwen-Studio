@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { Palette, User, Image, Film, X } from 'lucide-react';
 import { listChapterShotFrames, apiHeaders, toPublicVideoAssetUrl, type ChapterShotFramesResponse } from '../api';
 
 interface AssetPanelProps {
@@ -404,10 +405,10 @@ const AssetManagementPanel: React.FC<AssetPanelProps> = ({
     <div className="p-4 overflow-y-auto h-full">
       <div className="flex gap-1 mb-4 bg-gray-100 rounded-lg p-1">
         {[
-          { key: 'style' as const, label: '风格预设', icon: '🎨' },
-          { key: 'characters' as const, label: '角色参考', icon: '👤' },
-          { key: 'scenes' as const, label: '场景概念', icon: '🏞' },
-          { key: 'frames' as const, label: '镜头帧', icon: '🎬' },
+          { key: 'style' as const, label: '风格预设', icon: <Palette size={14} /> },
+          { key: 'characters' as const, label: '角色参考', icon: <User size={14} /> },
+          { key: 'scenes' as const, label: '场景概念', icon: <Image size={14} /> },
+          { key: 'frames' as const, label: '镜头帧', icon: <Film size={14} /> },
         ].map((section) => (
           <button
             key={section.key}
@@ -460,7 +461,7 @@ const AssetManagementPanel: React.FC<AssetPanelProps> = ({
                   onClick={() => { setPreviewAsset(null); setPreviewSection(null); }}
                   className="text-gray-400 hover:text-gray-600"
                 >
-                  ✕
+                  <X size={16} />
                 </button>
               </div>
 

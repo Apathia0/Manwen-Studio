@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect, type Dispatch, type SetStateAction } from 'react';
+import { Film } from 'lucide-react';
 import { apiHeaders, renderShotVideo, getVideoJob, type VideoShot, type VideoGenerationJob, type RenderedClip } from '../api';
 
 interface Props {
@@ -277,7 +278,7 @@ export default function VideoPanel({
           </video>
         ) : (
           <div className="text-center text-slate-400">
-            <div className="mb-2 text-3xl">🎬</div>
+            <div className="mb-2"><Film size={32} className="mx-auto text-slate-400" /></div>
             <div className="text-xs">暂无视频</div>
           </div>
         )}

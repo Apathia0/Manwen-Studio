@@ -284,6 +284,10 @@ STORYBOARD_DIRECTOR_USER_MESSAGE_TEMPLATE = """请根据以下剧情，生成一
 动作：{motion_plan}
 情绪：{emotion_plan}
 
+## 剧情连续性上下文（前后镜头衔接）
+
+{shot_context}
+
 ## 视觉风格预设
 
 {style_preset}
@@ -330,12 +334,17 @@ def build_storyboard_director_messages(
     style_preset: str | None = None,
     duration_seconds: int = 15,
     source_text_span: str | None = None,
+    shot_context: str | None = None,
 ) -> tuple[str, str]:
     """构建故事版导演 LLM 的 system 和 user 消息。
 
     返回 (system_prompt, user_message)。
     将 user_message 发送给 DeepSeek，返回的文本就是直接可用
     的 AI 绘图提示词，无需任何后续包装。
+
+    新增 shot_context 参数：传入前后镜头的剧情摘要、场景和时间信息，
+    帮助故事版导演理解当前镜头在整个剧情序列中的位置，
+    确保镜头之间的剧情连贯性和过渡自然性。
     """
     style_desc = style_preset or "电影级写实"
     user_message = STORYBOARD_DIRECTOR_USER_MESSAGE_TEMPLATE.format(
@@ -350,6 +359,7 @@ def build_storyboard_director_messages(
         style_preset=style_desc,
         duration_seconds=duration_seconds,
         source_text_span=source_text_span or "（无原文片段）",
+        shot_context=shot_context or "（当前镜头为独立镜头，无前后衔接要求）",
     )
     system_prompt = STORYBOARD_DIRECTOR_SYSTEM_PROMPT.format(duration_seconds=duration_seconds)
     return system_prompt, user_message

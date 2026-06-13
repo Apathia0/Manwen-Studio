@@ -1,6 +1,6 @@
 import { useState, useMemo, useCallback, useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
-import { Loader2, Film, CheckSquare, Square, ChevronLeft, ChevronRight, ChevronDown, ChevronUp, Sparkles, X } from 'lucide-react';
+import { Loader2, Film, CheckSquare, Square, ChevronLeft, ChevronRight, ChevronDown, ChevronUp, Sparkles, X, RefreshCw, Play, Check } from 'lucide-react';
 import type { VideoShot, VideoAsset, ShotFramesResponse, EntitlementResponse } from '../api';
 import {
   deleteVideoAsset,
@@ -367,7 +367,7 @@ function MultiAssetWorkbench({
                     onClick={() => onReanalyze()}
                     className="w-full rounded-xl border border-[#d7e3f4] bg-white px-3 py-2 text-xs text-slate-600 hover:bg-slate-50 disabled:opacity-50"
                   >
-                    {busy ? '分析中...' : '🔄 重新分析提示词'}
+                    {busy ? '分析中...' : <><RefreshCw size={12} className="inline-block" /> 重新分析提示词</>}
                   </button>
                 )}
                 {/* 参考资产区（已有图时也可重新选择并重新生成） */}
@@ -447,7 +447,7 @@ function MultiAssetWorkbench({
                     onClick={() => onReanalyze?.()}
                     className="rounded-lg border border-[#d7e3f4] px-2 py-1 text-[10px] text-slate-600 hover:bg-slate-50 disabled:opacity-50"
                   >
-                    {busy ? '分析中...' : '🔄 重新分析提示词'}
+                    {busy ? '分析中...' : <><RefreshCw size={12} className="inline-block" /> 重新分析提示词</>}
                   </button>
                 </div>
                 <div>
@@ -540,7 +540,7 @@ function VideoWorkbench({
       <div className="flex h-[88vh] w-[min(1400px,94vw)] flex-col overflow-hidden rounded-[30px] border border-[#d7e3f4] bg-white shadow-[0_30px_90px_rgba(15,23,42,0.28)]" onClick={e => e.stopPropagation()}>
         <div className="flex items-center justify-between border-b border-[#e5edf8] px-6 py-4">
           <div>
-            <div className="text-lg font-semibold text-slate-900">🎬 视频工作台</div>
+            <div className="flex items-center gap-2 text-lg font-semibold text-slate-900"><Film size={20} /> 视频工作台</div>
             <div className="mt-1 text-sm text-slate-500">左侧预览视频，右侧编辑提示词和操作</div>
           </div>
           <button onClick={onClose} className="rounded-full bg-slate-100 p-2 text-slate-600 hover:bg-slate-200">
@@ -574,7 +574,7 @@ function VideoWorkbench({
                   disabled={shot._analyzing}
                   className="w-full rounded-xl border border-[#d7e3f4] bg-white px-3 py-2 text-xs text-slate-600 hover:bg-slate-50 disabled:opacity-50"
                 >
-                  {shot._analyzing ? '分析中...' : '🔄 重新分析视频提示词'}
+                  {shot._analyzing ? '分析中...' : <><RefreshCw size={12} className="inline-block" /> 重新分析视频提示词</>}
                 </button>
               )}
               <div>
@@ -768,15 +768,15 @@ function ShotRow({
             <span className="text-sm text-slate-700 truncate">{shot.title}</span>
             <span className="hidden sm:inline text-xs text-slate-400">{shot.shot_type || 'medium'}</span>
             {hasPromptDraft && (
-              <span className="text-[10px] text-emerald-600 bg-emerald-50 px-1.5 py-0.5 rounded">提示词✓</span>
+              <span className="inline-flex items-center gap-0.5 text-[10px] text-emerald-600 bg-emerald-50 px-1.5 py-0.5 rounded">提示词<Check size={10} /></span>
             )}
             {shot._generatedClip && (
               <span className="text-[10px] text-emerald-600 bg-emerald-50 px-1.5 py-0.5 rounded cursor-pointer"
                 onClick={(e) => { e.stopPropagation(); window.open(toAssetUrl(shot._generatedClip!.video_path), '_blank'); }}
-                title="点击查看视频">▶ 视频已生成</span>
+                title="点击查看视频"><Play size={10} className="inline-block fill-current mr-0.5" /> 视频已生成</span>
             )}
             {shot.status === 'completed' && !shot._generatedClip && (
-              <span className="text-[10px] text-emerald-600 bg-emerald-50 px-1.5 py-0.5 rounded">视频✓</span>
+              <span className="inline-flex items-center gap-0.5 text-[10px] text-emerald-600 bg-emerald-50 px-1.5 py-0.5 rounded">视频<Check size={10} /></span>
             )}
             {shot._analyzing && <Loader2 size={12} className="animate-spin text-violet-500" />}
             {shot._generatingFrame && <Loader2 size={12} className="animate-spin text-blue-500" />}
@@ -829,7 +829,7 @@ function ShotRow({
           <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
             {/* ① 角色资产 */}
             <AssetCard3
-              title="👤 角色资产"
+              title="角色资产"
               assets={charAssets}
               placeholders={
                 hasPromptDraft && shot.promptDraft?.character_prompts
@@ -860,7 +860,7 @@ function ShotRow({
 
             {/* ② 故事版分镜 */}
             <AssetCard3
-              title={`🎬 故事版${selectedRefIds.length > 0 ? ` · ${selectedRefIds.length}个参考` : ''}`}
+              title={`故事版${selectedRefIds.length > 0 ? ` · ${selectedRefIds.length}个参考` : ''}`}
               assets={chapterAssets.filter(a => (a.asset_type === 'storyboard_frame' || a.asset_type === 'storyboard') && a.shot_id === shotId)}
               placeholders={[{
                 key: 'storyboard',
@@ -895,7 +895,7 @@ function ShotRow({
 
             {/* ③ 场景 & 道具资产 */}
             <AssetCard3
-              title="🏠 场景 & 道具"
+              title="场景 & 道具"
               assets={[...sceneAssets, ...propAssets]}
               placeholders={[
                 ...(hasPromptDraft && shot.promptDraft?.scene_prompt
@@ -946,7 +946,7 @@ function ShotRow({
                 className="rounded-xl border border-[#e5edf8] bg-white overflow-hidden cursor-pointer transition-all hover:shadow-md hover:border-blue-200"
               >
                 <div className="flex items-center justify-between px-3 py-2 bg-slate-50 border-b border-[#e5edf8]">
-                  <span className="text-xs font-semibold text-slate-700">🎬 视频</span>
+                  <span className="inline-flex items-center gap-1 text-xs font-semibold text-slate-700"><Film size={14} /> 视频</span>
                   <span className="text-[10px] text-slate-400">{shot._generatingVideo ? '生成中' : shot.promptDraft?.video_prompt ? '已就绪' : '待生成'}</span>
                 </div>
                 <div className="p-2">

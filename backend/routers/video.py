@@ -3396,13 +3396,32 @@ async def set_story_video_style_preset(
 # ─── Story Character Library (Phase 2) ──────────────────────────────
 
 def _get_story_character_reference_asset_ids(story_id: int, db: Session) -> list[int]:
-    """获取 Story 级所有角色默认版本的参考图 asset_id。"""
+    """获取 Story 级所有角色默认版本的参考图 asset_id。
+
+    优先级：
+    1. StoryCharacterVersion 中 is_default=True 且有 ref_asset_id 的版本（角色库生成）
+    2. VideoAsset 中 story_character_reference / character_reference 类型的活跃资产（兜底，覆盖镜头级生成）
+    """
     versions = db.query(StoryCharacterVersion).filter(
         StoryCharacterVersion.story_id == story_id,
         StoryCharacterVersion.is_default == True,
         StoryCharacterVersion.ref_asset_id.isnot(None),
     ).all()
-    return [v.ref_asset_id for v in versions if v.ref_asset_id]
+    result_ids = list({v.ref_asset_id for v in versions if v.ref_asset_id})
+
+    # 兜底：直接从 VideoAsset 表查找该故事的角色参考图
+    # 覆盖以下场景：
+    # - 用户通过镜头级界面生成角色参考图（asset_type="character_reference"），未设置 StoryCharacterVersion.ref_asset_id
+    # - StoryCharacterVersion 的 ref_asset_id 因故丢失
+    if not result_ids:
+        assets = db.query(VideoAsset).filter(
+            VideoAsset.story_id == story_id,
+            VideoAsset.asset_type.in_(["story_character_reference", "character_reference"]),
+            VideoAsset.status == "active",
+        ).all()
+        result_ids = [a.id for a in assets]
+
+    return result_ids
 
 
 def _serialize_character_versions(db: Session, story_id: int, character_name: str) -> list[dict]:
@@ -6633,8 +6652,16 @@ async def api_parse_chapter_shots(
 
     # 同步更新工作流 source_text，确保后续阶段（补全提示词等）使用一致内容
     wf_in_db = db.get(ChapterVideoWorkflow, workflow_id)
-    if wf_in_db and wf_in_db.source_text != current_source_text:
-        wf_in_db.source_text = current_source_text
+    if wf_in_db:
+        if wf_in_db.source_text != current_source_text:
+            wf_in_db.source_text = current_source_text
+        # 刷新角色参考图 asset_id：当 workflow 创建时可能尚无参考图，
+        # 但用户在第一章已生成后，这里需要从 DB 重新获取最新数据
+        if not wf_in_db.character_reference_ids:
+            fresh_ref_ids = _get_story_character_reference_asset_ids(wf_in_db.story_id, db)
+            if fresh_ref_ids:
+                wf_in_db.character_reference_ids = fresh_ref_ids
+                logger.info("拆镜前刷新角色参考图 asset_ids=%s", fresh_ref_ids)
         db.commit()
 
     task_id = f"chapter_video_{workflow_id}_stage_{uuid.uuid4().hex[:8]}"
@@ -6791,13 +6818,23 @@ async def api_generate_storyboards(
 
     task_id = f"chapter_video_{workflow_id}_stage_{uuid.uuid4().hex[:8]}"
 
+    # 刷新角色参考图 asset_id：确保使用最新的角色资产（用户在第一章可能已生成）
+    ref_ids = wf.character_reference_ids
+    if not ref_ids:
+        ref_ids = _get_story_character_reference_asset_ids(wf.story_id, db)
+        if ref_ids:
+            db_wf = db.get(ChapterVideoWorkflow, workflow_id)
+            if db_wf:
+                db_wf.character_reference_ids = ref_ids
+                db.commit()
+
     result = await generate_storyboards_for_shots(
         workflow_id=workflow_id,
         story_id=wf.story_id,
         shot_ids=body.shot_ids or None,
         image_api_key=image_api_key,
         deepseek_api_key=deepseek_api_key,
-        character_reference_ids=wf.character_reference_ids,
+        character_reference_ids=ref_ids,
         task_id=task_id,
     )
 
@@ -6834,6 +6871,25 @@ async def api_generate_videos(
     video_api_key, video_base_url, video_model = _user_video_api_key(request)
 
     task_id = f"chapter_video_{workflow_id}_stage_{uuid.uuid4().hex[:8]}"
+
+    # 刷新角色参考图 asset_id：视频阶段依赖 shot.character_reference_ids，
+    # 若用户在拆镜后新增了参考图，确保 worklfow 和 shots 拿到最新数据
+    ref_ids = wf.character_reference_ids
+    if not ref_ids:
+        ref_ids = _get_story_character_reference_asset_ids(wf.story_id, db)
+        if ref_ids:
+            db_wf = db.get(ChapterVideoWorkflow, workflow_id)
+            if db_wf:
+                db_wf.character_reference_ids = ref_ids
+                # 同步更新尚无参考图 ID 的 shots
+                stale_shots = db.query(ChapterVideoShot).filter(
+                    ChapterVideoShot.workflow_id == workflow_id,
+                    ChapterVideoShot.character_reference_ids == None,
+                ).all()
+                for s in stale_shots:
+                    s.character_reference_ids = ref_ids
+                db.commit()
+                logger.info("视频生成前刷新角色参考图 asset_ids=%s (影响 %d 个镜头)", ref_ids, len(stale_shots))
 
     result = await generate_videos_for_shots(
         workflow_id=workflow_id,
@@ -6879,12 +6935,22 @@ async def api_run_all_stages(
 
     task_id = f"chapter_video_{workflow_id}_stage_{uuid.uuid4().hex[:8]}"
 
+    # 刷新角色参考图 asset_id
+    ref_ids = wf.character_reference_ids
+    if not ref_ids:
+        ref_ids = _get_story_character_reference_asset_ids(wf.story_id, db)
+        if ref_ids:
+            db_wf = db.get(ChapterVideoWorkflow, workflow_id)
+            if db_wf:
+                db_wf.character_reference_ids = ref_ids
+                db.commit()
+
     result = await run_all_stages(
         workflow_id=workflow_id,
         chapter_id=wf.chapter_id,
         story_id=wf.story_id,
         source_text=wf.source_text or "",
-        character_reference_ids=wf.character_reference_ids,
+        character_reference_ids=ref_ids,
         deepseek_api_key=deepseek_api_key,
         image_api_key=image_api_key,
         video_api_key=video_api_key,

@@ -179,6 +179,69 @@ def _clear_workflow_shots(workflow_id: int) -> None:
         db.close()
 
 
+def _build_shot_narrative_context(
+    workflow: ChapterVideoWorkflow | None,
+    current_shot_index: int,
+) -> str:
+    """构建单个镜头在完整剧情中的上下文衔接信息。
+
+    遍历工作流的所有镜头，找出当前镜头的前一个和后一个镜头，
+    提取其场景、时间、情节摘要等信息，格式化为提示词文本块。
+    让故事版导演 AI 知道当前镜头在完整剧情序列中的位置。
+    """
+    if not workflow or not workflow.shots:
+        return ""
+
+    sorted_shots = sorted(workflow.shots, key=lambda s: (s.shot_index or 0))
+    current_idx = None
+    for i, s in enumerate(sorted_shots):
+        if s.shot_index == current_shot_index:
+            current_idx = i
+            break
+
+    if current_idx is None:
+        return ""
+
+    context_parts = []
+
+    # 前一个镜头
+    if current_idx > 0:
+        prev = sorted_shots[current_idx - 1]
+        prev_chars = "、".join(prev.characters or []) if prev.characters else "未明确"
+        context_parts.append(
+            f"【前一个镜头（镜头{prev.shot_index}）】\n"
+            f"场景：{prev.scene_location or '未明确'} | 时间：{prev.time_of_day or '未明确'}\n"
+            f"出场角色：{prev_chars}\n"
+            f"情节摘要：{prev.story_summary or '无'}\n"
+        )
+
+    # 后一个镜头
+    if current_idx < len(sorted_shots) - 1:
+        nxt = sorted_shots[current_idx + 1]
+        nxt_chars = "、".join(nxt.characters or []) if nxt.characters else "未明确"
+        context_parts.append(
+            f"【后一个镜头（镜头{nxt.shot_index}）】\n"
+            f"场景：{nxt.scene_location or '未明确'} | 时间：{nxt.time_of_day or '未明确'}\n"
+            f"出场角色：{nxt_chars}\n"
+            f"情节摘要：{nxt.story_summary or '无'}\n"
+        )
+
+    if context_parts:
+        result = "### 剧情连续性上下文（前后镜头衔接）\n\n"
+        result += "\n".join(context_parts)
+        result += (
+            "\n\n### 连续性要求\n"
+            "当前镜头在完整剧情序列中不是孤立出现的，在生成故事版时必须确保：\n"
+            "1. 角色情绪必须从前一镜头的终点状态自然发展而来\n"
+            "2. 如果时间或场景发生了变化，画面的叙事逻辑必须体现过渡\n"
+            "3. 角色行为和状态应与前后镜头形成自然的因果关系链条\n"
+            "4. 关键道具（如手机、戒指等）的状态应跨镜头保持一致"
+        )
+        return result
+
+    return ""
+
+
 def _normalize_prompt_entries(entries: list[dict[str, object]] | list[dict[str, str]] | None) -> list[dict[str, str]]:
     """统一 prompt 条目中的值类型，避免响应校验失败。"""
     normalized: list[dict[str, str]] = []
@@ -590,6 +653,7 @@ async def reanalyze_storyboard_prompts(
 
     for shot in target_shots:
         try:
+            shot_context = _build_shot_narrative_context(wf, shot.shot_index)
             new_content = await deepseek_service.generate_shot_storyboard_prompt({
                 "shot_index": shot.shot_index,
                 "scene_location": shot.scene_location,
@@ -602,6 +666,7 @@ async def reanalyze_storyboard_prompts(
                 "motion_plan": shot.motion_plan,
                 "emotion_plan": shot.emotion_plan,
                 "style_preset": style_preset,
+                "shot_context": shot_context,
             }, api_key=deepseek_api_key)
 
             update_shot(shot.id, storyboard_prompt=new_content)
@@ -805,6 +870,8 @@ async def _expand_single_shot_prompts(
         if scene_prop_cache is not None:
             scene_prop_cache[cache_key] = (scene_prompt, prop_prompts)
 
+    shot_context = _build_shot_narrative_context(workflow, shot.shot_index)
+    storyboard_payload["shot_context"] = shot_context
     storyboard_prompt = await deepseek_service.generate_shot_storyboard_prompt(storyboard_payload, api_key=deepseek_api_key)
 
     missing_characters = [str(name) for name in (shot.characters or []) if str(name or '').strip() and str(name) not in reused_names]
@@ -1436,6 +1503,7 @@ async def regenerate_shot_storyboard(
     director_prompt = prompt_override or shot.storyboard_prompt
     if not director_prompt:
         # 从故事版导演角色生成并持久化
+        shot_context = _build_shot_narrative_context(workflow, shot.shot_index)
         director_prompt = await deepseek_service.generate_shot_storyboard_prompt({
             "shot_index": shot.shot_index,
             "scene_location": shot.scene_location,
@@ -1448,6 +1516,7 @@ async def regenerate_shot_storyboard(
             "motion_plan": shot.motion_plan,
             "emotion_plan": shot.emotion_plan,
             "style_preset": style_preset,
+            "shot_context": shot_context,
         })
 
     chapter_id = getattr(workflow, "chapter_id", 0) if workflow else 0
