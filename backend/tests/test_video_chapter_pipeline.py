@@ -976,6 +976,38 @@ async def test_expand_shots_with_role_prompts_falls_back_to_ai_for_generic_suppo
     finally:
         session.close()
 
+
+@pytest.mark.asyncio
+async def test_expand_shots_with_role_prompts_does_not_reuse_placeholder_prompt_for_generic_role(workflow_db, monkeypatch):
+    Session, workflow_id = workflow_db
+    from models import Story, StoryCharacterVersion
+
+    session = Session()
+    try:
+        story = Story(id=34, title='测试作品', character_profiles='林秋：黑发白衬衫。')
+        session.add(story)
+        session.add(StoryCharacterVersion(
+            story_id=34,
+            character_name='林秋',
+            version_label='v1-默认',
+            appearance_card='林秋角色设定卡',
+            is_default=True,
+        ))
+        session.add(StoryCharacterVersion(
+            story_id=34,
+            character_name='护士',
+            version_label='v1-默认',
+            appearance_card='护士',
+            is_default=True,
+        ))
+        session.add(ChapterVideoShot(
+            workflow_id=workflow_id, shot_index=1, source_text_span='一', scene_location='医院走廊', time_of_day='白天',
+            characters=['林秋', '护士'], story_summary='林秋在医院见到护士', dialogue_or_narration='护士让开了路。', status='pending'
+        ))
+        session.commit()
+    finally:
+        session.close()
+
     calls = {'character_ai': 0}
 
     async def fake_generate_shot_details(**kwargs):
@@ -991,7 +1023,7 @@ async def test_expand_shots_with_role_prompts_falls_back_to_ai_for_generic_suppo
     async def fake_character_prompts_ai(**kwargs):
         calls['character_ai'] += 1
         assert kwargs['shot_data']['characters'] == ['护士']
-        return [{'name': '护士', 'prompt': '护士角色提示词'}]
+        return [{'name': '护士', 'prompt': '护士，二十五岁，短发，白色护士服，神色焦急。'}]
 
     async def fake_scene_prop_prompts(*args, **kwargs):
         return ('场景提示词', [])
@@ -1019,7 +1051,7 @@ async def test_expand_shots_with_role_prompts_falls_back_to_ai_for_generic_suppo
         shot = session.query(ChapterVideoShot).filter_by(workflow_id=workflow_id, shot_index=1).one()
         assert shot.character_prompts_json == [
             {'name': '林秋', 'prompt': '林秋角色设定卡'},
-            {'name': '护士', 'prompt': '护士角色提示词'},
+            {'name': '护士', 'prompt': '护士，二十五岁，短发，白色护士服，神色焦急。'},
         ]
     finally:
         session.close()

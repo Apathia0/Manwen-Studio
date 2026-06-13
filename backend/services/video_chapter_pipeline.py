@@ -255,6 +255,23 @@ def _normalize_prompt_entries(entries: list[dict[str, object]] | list[dict[str, 
     return normalized
 
 
+def _is_placeholder_character_prompt(character_name: str, prompt: str) -> bool:
+    normalized_name = str(character_name or "").strip()
+    normalized_prompt = str(prompt or "").strip()
+    if not normalized_name or not normalized_prompt:
+        return True
+    compact_prompt = normalized_prompt.replace(" ", "")
+    if compact_prompt == normalized_name:
+        return True
+    if compact_prompt == f"角色设定：{normalized_name}":
+        return True
+    if compact_prompt == f"角色设定:{normalized_name}":
+        return True
+    if compact_prompt == f"{normalized_name}角色设定":
+        return True
+    return False
+
+
 def _normalize_asset_name(name: str | None, prefix: str) -> str:
     raw = (name or "").strip()
     if not raw:
@@ -894,7 +911,7 @@ def _build_chapter_shot_character_prompts(shot: ChapterVideoShot, story: Story |
         if not normalized_name:
             continue
         version_prompt = version_map.get(normalized_name)
-        if version_prompt:
+        if version_prompt and not _is_placeholder_character_prompt(normalized_name, version_prompt):
             prompts.append({"name": normalized_name, "prompt": version_prompt})
             continue
         fallback_parts = [f"角色设定：{normalized_name}"]
