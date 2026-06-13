@@ -172,10 +172,11 @@ export default function VideoStoryboardLayout({
       } else {
         setWorkflowRunning(false);
       }
-    } catch {
+    } catch (err: any) {
       if (!signal?.aborted) {
         setWorkflow(null);
         setWorkflowRunning(false);
+        console.error('加载工作流失败 chapter=%s', chapterId, err);
       }
     } finally {
       if (!signal?.aborted) setWorkflowLoading(false);

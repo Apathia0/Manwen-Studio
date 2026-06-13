@@ -6202,9 +6202,15 @@ async def api_list_chapter_workflows(
     chapter = _require_chapter_for_user(chapter_id, user, db)
 
     workflows = get_chapter_workflows(chapter_id)
+    validated: list[ChapterVideoWorkflowOut] = []
+    for w in workflows:
+        try:
+            validated.append(ChapterVideoWorkflowOut.model_validate(w))
+        except Exception as exc:
+            logger.warning("工作流 %s 数据验证失败（跳过）: %s", w.id, exc)
     return ChapterVideoWorkflowListOut(
-        workflows=[ChapterVideoWorkflowOut.model_validate(w) for w in workflows],
-        total=len(workflows),
+        workflows=validated,
+        total=len(validated),
     )
 
 
