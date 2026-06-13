@@ -1715,6 +1715,13 @@ async def regenerate_shot_storyboard(
     style_preset = getattr(workflow, "video_style", None) if workflow else None
 
     director_prompt = prompt_override or shot.storyboard_prompt
+    if director_prompt:
+        # 校验现有提示词是否有效，防止复用被污染的元响应内容
+        is_valid, reason = deepseek_service.is_valid_storyboard_prompt(director_prompt)
+        if not is_valid:
+            logger.warning("现有 storyboard_prompt 无效 (%s)，强制重新生成", reason)
+            director_prompt = None
+
     if not director_prompt:
         # 从故事版导演角色生成并持久化
         shot_context = _build_shot_narrative_context(workflow, shot.shot_index)
