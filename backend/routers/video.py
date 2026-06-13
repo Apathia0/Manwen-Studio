@@ -6703,6 +6703,12 @@ async def api_parse_chapter_shots(
             if fresh_ref_ids:
                 wf_in_db.character_reference_ids = fresh_ref_ids
                 logger.info("拆镜前刷新角色参考图 asset_ids=%s", fresh_ref_ids)
+        # 刷新风格：用户可能在重置工作流后更换了章节风格预设，或创建时未选风格
+        if chapter and getattr(chapter, "video_style_preset_id", None):
+            preset = db.get(VideoStylePreset, chapter.video_style_preset_id)
+            if preset and preset.name != wf_in_db.video_style:
+                wf_in_db.video_style = preset.name
+                logger.info("拆镜前刷新工作流风格 %s -> %s", wf_in_db.video_style, preset.name)
         db.commit()
 
     task_id = f"chapter_video_{workflow_id}_stage_{uuid.uuid4().hex[:8]}"
