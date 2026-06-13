@@ -494,7 +494,7 @@ export default memo(function FrameworkPanel({ story, chapters, onChapterSelect, 
                   await saveOutlineChapterPlan(story.id, { mode, chapter: payload });
                 } else if (mode === 'insert_after') {
                   if (typeof targetChapterNumber !== 'number') {
-                    throw new Error('Missing insert position');
+                    throw new Error('缺少插入位置');
                   }
                   await saveOutlineChapterPlan(story.id, {
                     mode,
@@ -503,7 +503,7 @@ export default memo(function FrameworkPanel({ story, chapters, onChapterSelect, 
                   });
                 } else {
                   if (typeof targetChapterNumber !== 'number') {
-                    throw new Error('Missing chapter target');
+                    throw new Error('缺少章节目标');
                   }
                   await saveOutlineChapterPlan(story.id, {
                     mode,

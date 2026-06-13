@@ -88,7 +88,8 @@ export const useAgentStore = defineStore('agent', () => {
         body: {
           conversation_id: activeConversationId.value,
           content,
-          chapter_id: chapterId
+          chapter_id: chapterId,
+          mode: 'execute'
         },
         onEvent: (event) => {
           switch (event.type) {
@@ -157,19 +158,19 @@ export const useAgentStore = defineStore('agent', () => {
   }
 
   async function confirmChanges(storyId: number) {
-    const result = await agentApi.confirmChanges(storyId)
+    const result = await agentApi.confirmChanges(storyId, activeConversationId.value ?? undefined)
     pendingChanges.value = []
     return result
   }
 
   async function rollbackChanges(storyId: number) {
-    const result = await agentApi.rollbackChanges(storyId)
+    const result = await agentApi.rollbackChanges(storyId, activeConversationId.value ?? undefined)
     pendingChanges.value = []
     return result
   }
 
   async function loadPendingChanges(storyId: number) {
-    const result = await agentApi.getPendingChanges(storyId)
+    const result = await agentApi.getPendingChanges(storyId, activeConversationId.value ?? undefined)
     pendingChanges.value = result.changes || []
   }
 

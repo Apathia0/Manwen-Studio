@@ -227,7 +227,7 @@ async def _generate_screenplay_with_llm(
     result = deepseek_service._extract_json_object(content)
     raw_scenes = result.get("scenes")
     if not isinstance(raw_scenes, list) or not raw_scenes:
-        raise ValueError("Screenplay generation returned no scenes")
+        raise ValueError("剧本生成未返回场景")
 
     default_duration = max(8, target_duration_seconds // max(1, len(raw_scenes)))
     scenes = [
@@ -257,7 +257,7 @@ async def generate_screenplay(
     """Generate screenplay and scenes from chapter content."""
     cleaned_content = str(chapter_content or "").strip()
     if not cleaned_content:
-        raise ValueError("Chapter content is empty")
+        raise ValueError("章节内容为空")
 
     try:
         if api_key:
@@ -287,7 +287,7 @@ async def regenerate_scenes(
     """Regenerate scenes based on screenplay and user instruction."""
     base_text = str(existing_screenplay or "").strip()
     if not base_text:
-        raise ValueError("Screenplay content is empty")
+        raise ValueError("剧本内容为空")
 
     if api_key:
         prompt = f"""你将收到一段现有影视剧本和一条修改指令，请重新输出场次列表。

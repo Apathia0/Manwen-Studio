@@ -4,12 +4,17 @@
 """
 from __future__ import annotations
 
+import logging
 import re
+import shutil
+from pathlib import Path
 from typing import Any
 
 from sqlalchemy.orm import Session
 
-from models import FrameworkSnapshot
+from models import Chapter, FrameworkSnapshot
+
+logger = logging.getLogger(__name__)
 
 
 # ── 章节号协整 ──────────────────────────────────────────────
@@ -400,6 +405,8 @@ SUPPORTED_FRAMEWORK_OPERATIONS = {
     "update_character",
     "remove_character",
     "update_act_summary",
+    "add_act",
+    "delete_act",
     "add_chapter",
     "insert_chapter_after",
     "move_chapter_to_act",
@@ -434,11 +441,19 @@ def validate_framework_operations(operations: list | None, patches: list | None)
     """校验 operation/patch 白名单，返回错误列表。"""
     errors: list[str] = []
     for index, item in enumerate(operations or []):
-        op = str((item or {}).get("op") or "").strip()
+        # 跳过非字典类型的元素（AI 可能返回字符串）
+        if not isinstance(item, dict):
+            errors.append(f"operations[{index}] 格式无效: 期望字典，得到 {type(item).__name__}")
+            continue
+        op = str(item.get("op") or "").strip()
         if op not in SUPPORTED_FRAMEWORK_OPERATIONS:
             errors.append(f"operations[{index}].op 不支持: {op or '<empty>'}")
     for index, item in enumerate(patches or []):
-        path = str((item or {}).get("path") or "").strip()
+        # 跳过非字典类型的元素（AI 可能返回字符串）
+        if not isinstance(item, dict):
+            errors.append(f"patches[{index}] 格式无效: 期望字典，得到 {type(item).__name__}")
+            continue
+        path = str(item.get("path") or "").strip()
         if not _is_valid_patch_path(path):
             errors.append(f"patches[{index}].path 不支持: {path or '<empty>'}")
     return errors
@@ -592,6 +607,51 @@ def apply_framework_operations(existing_framework: dict, operations: list | None
                     break
             if not matched:
                 warnings.append(f"未找到幕: {act_id}")
+
+        # ── add_act ───────────────────────────────────────────
+        if op == "add_act":
+            title = str(changes.get("title") or "").strip()
+            summary = str(changes.get("summary") or "").strip()
+            after_act = str(((item.get("target") or {}).get("after_act") or "")).strip()
+            acts = framework.setdefault("outline", {}).setdefault("three_acts", [])
+            existing_nums = {a.get("act") for a in acts if a.get("act")}
+            # 计算下一个全局可用编号，保证不重复
+            next_num = max((int(a.get("act", 0)) for a in acts if str(a.get("act", "")).isdigit()), default=0) + 1
+            if after_act and after_act in existing_nums:
+                insert_idx = next((i for i, a in enumerate(acts) if str(a.get("act")) == after_act), -1)
+                if insert_idx >= 0:
+                    new_num = str(next_num)
+                    new_act = {"act": new_num, "title": title, "summary": summary, "chapters": []}
+                    acts.insert(insert_idx + 1, new_act)
+                    # 后移后续幕号
+                    for i in range(insert_idx + 1, len(acts)):
+                        acts[i]["act"] = str(int(acts[i - 1]["act"]) + 1)
+                    applied_operations.append(f"add_act:{new_num}")
+                else:
+                    warnings.append(f"add_act 未找到插入锚点幕: {after_act}")
+            else:
+                # 追加到末尾
+                new_num = str(next_num)
+                new_act = {"act": new_num, "title": title, "summary": summary, "chapters": []}
+                acts.append(new_act)
+                applied_operations.append(f"add_act:{new_num}")
+
+        # ── delete_act ────────────────────────────────────────
+        if op == "delete_act":
+            target_act = str((item.get("target") or {}).get("act") or "").strip()
+            if not target_act:
+                warnings.append("delete_act 缺少 target.act")
+            else:
+                acts = framework.get("outline", {}).get("three_acts", [])
+                new_acts = [a for a in acts if str(a.get("act", "")).strip() != target_act]
+                if len(new_acts) == len(acts):
+                    warnings.append(f"delete_act 未找到 target.act={target_act}")
+                else:
+                    # 重排剩余幕号
+                    for i, a in enumerate(new_acts):
+                        a["act"] = str(i + 1)
+                    framework["outline"]["three_acts"] = new_acts
+                    applied_operations.append(f"delete_act:{target_act}")
 
         # ── add_chapter ──────────────────────────────────────
         if op == "add_chapter":
@@ -1006,6 +1066,55 @@ def _build_current_snapshot_data(story) -> dict:
     }
 
 
+def _cleanup_chapters_beyond_outline(story, db: Session) -> None:
+    """删除超出恢复后大纲范围的孤立 Chapter 记录及其磁盘文件。
+
+    回退框架快照后，大纲中的章节数可能少于数据库中已创建的 Chapter 记录数。
+    如果不清理这些孤立记录，后续框架调整/续写会出现章节编号断层。
+    """
+    outline = story.outline if isinstance(story.outline, dict) else {}
+    chapters_in_outline = _extract_outline_chapters(outline)
+    if not chapters_in_outline:
+        return
+
+    max_outline_number = max(
+        (ch.get("chapter_number") for ch in chapters_in_outline if isinstance(ch.get("chapter_number"), int)),
+        default=0,
+    )
+    if max_outline_number <= 0:
+        return
+
+    # 查找超出大纲范围的 Chapter 记录
+    orphaned = (
+        db.query(Chapter)
+        .filter(Chapter.story_id == story.id, Chapter.chapter_number > max_outline_number)
+        .all()
+    )
+    if not orphaned:
+        return
+
+    logger.info(
+        "快照回滚清理：故事 #%d 恢复大纲至第 %d 章，删除 %d 个孤立章节记录（#%s ~ #%s）",
+        story.id,
+        max_outline_number,
+        len(orphaned),
+        min(c.chapter_number for c in orphaned),
+        max(c.chapter_number for c in orphaned),
+    )
+
+    base_dir = Path(__file__).resolve().parent.parent / "manga_outputs"
+    for ch in orphaned:
+        # 删除章节磁盘目录
+        chapter_dir = base_dir / f"chapter_{ch.id}"
+        if chapter_dir.exists():
+            try:
+                shutil.rmtree(chapter_dir)
+            except OSError as exc:
+                logger.warning("清理孤立章节目录失败 chapter_%d: %s", ch.id, exc)
+        # 删除章节记录（images/messages/script_scenes 通过 cascade 自动删除）
+        db.delete(ch)
+
+
 def restore_framework_snapshot(story, snapshot_id: int, db: Session) -> dict:
     """将故事框架恢复到指定快照的状态。
 
@@ -1036,6 +1145,9 @@ def restore_framework_snapshot(story, snapshot_id: int, db: Session) -> dict:
     story.characters = _normalize_characters_payload(data.get("characters"))
     story.outline = data.get("outline") if isinstance(data.get("outline"), dict) else story.outline
     db.flush()
+
+    # 清理超出恢复后大纲范围的孤立 Chapter 记录
+    _cleanup_chapters_beyond_outline(story, db)
 
     _enforce_framework_snapshot_limit(story.id, max_count=20, db=db)
 

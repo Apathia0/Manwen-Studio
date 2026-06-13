@@ -516,13 +516,11 @@ function App() {
   }
 
   async function purchasePlan(planId: number, billingCycle: 'monthly' | 'yearly' = 'monthly') {
-    // 检查易支付是否有多个通道需要用户选择
-    const epayMethods = paymentMethods.filter((m) => m.provider === 'epay');
-    if (epayMethods.length > 1) {
-      setChannelPicker({ planId, billingCycle, options: epayMethods });
+    if (paymentMethods.length > 1) {
+      setChannelPicker({ planId, billingCycle, options: paymentMethods });
       return;
     }
-    await doSubscribe(planId, billingCycle, epayMethods.length === 1 ? epayMethods[0].key : undefined);
+    await doSubscribe(planId, billingCycle, paymentMethods.length === 1 ? paymentMethods[0].key : undefined);
   }
 
   /** 执行订阅，返回是否成功 */
@@ -562,9 +560,11 @@ function App() {
       const data = await getPaymentConfig();
       if (data.enabled && data.methods) {
         setPaymentMethods(data.methods);
+      } else {
+        setPaymentMethods([]);
       }
     } catch {
-      // Non-critical; defaults will be used
+      setPaymentMethods([]);
     }
   }
 
@@ -926,12 +926,12 @@ function App() {
         }}
       />
 
-      {/* 易支付通道选择弹窗 */}
+      {/* 支付方式选择弹窗 */}
       {channelPicker && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-[rgba(15,23,42,0.48)] px-4">
           <div className="w-full max-w-sm rounded-[28px] border border-[#d7e3f4] bg-white p-6 shadow-[0_24px_60px_rgba(15,23,42,0.2)]">
             <div className="text-base font-semibold text-slate-900">选择支付方式</div>
-            <div className="mt-1 text-sm text-slate-500">请选择要使用的支付通道</div>
+            <div className="mt-1 text-sm text-slate-500">请选择要使用的支付方式</div>
             <div className="mt-4 space-y-2">
               {channelPicker.options.map((opt) => {
                 const loading = channelLoading === opt.key;

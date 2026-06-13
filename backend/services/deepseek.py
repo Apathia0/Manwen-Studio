@@ -117,11 +117,11 @@ def _extract_json_array(raw: str) -> list:
     except json.JSONDecodeError as first_error:
         match = re.search(r"\[[\s\S]*\]", raw)
         if not match:
-            raise ValueError("Scene split response did not contain a JSON array") from first_error
+            raise ValueError("场景分割响应未包含 JSON 数组") from first_error
         try:
             return _loads_json_lenient(match.group(0))
         except json.JSONDecodeError as second_error:
-            raise ValueError("Scene split response was not valid JSON") from second_error
+            raise ValueError("场景分割响应不是有效的 JSON") from second_error
 
 
 def _extract_json_like_string_array(raw: str) -> list[str] | None:
@@ -236,7 +236,7 @@ def _extract_scenes_payload(raw: str) -> list[str]:
             if fallback and all(isinstance(scene, str) for scene in fallback):
                 return fallback
 
-    raise ValueError("Scene split response must be a JSON array of strings")
+    raise ValueError("场景分割响应必须是字符串 JSON 数组")
 
 def _scene_split_prompt(page_count: int = 10) -> str:
     return f"""你是一位专业漫画分镜师。请将小说内容拆分为恰好{page_count}页漫画。
@@ -431,7 +431,7 @@ async def split_scenes(chat_messages: list[dict], character_profiles: str = "", 
         try:
             scenes = _extract_scenes_payload(raw)
             if len(scenes) != page_count:
-                raise ValueError(f"Expected {page_count} scenes, got {len(scenes)}")
+                raise ValueError(f"期望 {page_count} 个场景，实际得到 {len(scenes)} 个")
             return scenes
         except ValueError as exc:
             last_error = exc
@@ -456,17 +456,17 @@ def _extract_json_object(raw: str) -> dict:
         result = _loads_json_lenient(raw)
         if isinstance(result, dict):
             return result
-        raise ValueError("Response is valid JSON but not an object")
+        raise ValueError("响应是有效的 JSON 但不是对象")
     except json.JSONDecodeError as first_error:
         match = re.search(r"\{[\s\S]*\}", raw)
         candidate = match.group(0) if match else _extract_balanced_json_object_text(raw)
         if not candidate:
-            raise ValueError("Response did not contain a JSON object") from first_error
+            raise ValueError("响应未包含 JSON 对象") from first_error
         try:
             result = _loads_json_lenient(candidate)
             if isinstance(result, dict):
                 return result
-            raise ValueError("Extracted JSON is not an object")
+            raise ValueError("提取的 JSON 不是对象")
         except json.JSONDecodeError as second_error:
             balanced = _extract_balanced_json_object_text(candidate)
             if balanced and balanced != candidate:
@@ -476,7 +476,7 @@ def _extract_json_object(raw: str) -> dict:
                         return result
                 except json.JSONDecodeError:
                     pass
-            raise ValueError("Response was not valid JSON") from second_error
+            raise ValueError("响应不是有效的 JSON") from second_error
 
 
 def _strip_code_fences(text: str) -> str:
@@ -1062,7 +1062,7 @@ async def regenerate_tags(story_context: dict, api_key: str | None = None, syste
         result = _extract_json_object(content)
         return result.get("tags", result)
     except ValueError as e:
-        raise ValueError(f"Tag regeneration failed: {e}")
+        raise ValueError(f"标签重新生成失败: {e}")
 
 
 async def regenerate_characters_with_variance(story_context: dict, api_key: str | None = None) -> dict:
@@ -1674,6 +1674,34 @@ async def adjust_framework_with_chat(
 - 输出 reply + operations + patches + warnings。
 - reply 只说明实际执行范围，不要说"我会"。
 - 禁止输出完整 framework JSON。
+
+支持的 operation 类型（每个 operation 是 {{"op": "类型", "changes": {{...}}}}）：
+- update_story_description: 修改故事简述，changes 包含 description
+- update_tags: 修改标签，changes 可包含 type/theme/style/audience
+- add_character: 添加角色，changes 包含角色完整信息（name 必填）
+- update_character: 更新角色，target.name 指定角色，changes 包含更新字段
+- remove_character: 删除角色，target.name 指定角色名
+- update_act_summary: 更新幕摘要，target.act 指定幕号，changes.summary 为摘要
+- add_act: 新增一幕，changes.title/summary 指定标题和摘要；target.after_act 可选，指定在哪个幕之后插入（不指定则追加到末尾）
+- delete_act: 删除一幕并重排剩余幕号，target.act 指定要删除的幕号（删除后后续幕号自动前移）
+- add_chapter: 在指定幕末尾添加章节，target.act 指定幕号，changes 包含 chapter_number/title 等
+- insert_chapter_after: 在指定章节后插入，target.chapter_number 指定位置，changes 包含新章节
+- move_chapter_to_act: 移动章节到另一幕，target.chapter_number 指定章节，target.act 指定目标幕
+- update_chapter: 更新章节内容，target.chapter_number 指定章节，changes 包含更新字段
+- delete_chapter: 删除章节，target.chapter_number 指定要删除的章节
+
+⚠️ 大规模结构调整建议（合并幕、压缩幕数、重新划分章节）：使用一个 outline.three_acts patch 直接替换整个三幕数组，而不是用大量 move_chapter_to_act 操作。patch 方式一次完成且不会出错。
+示例：{{"path": "outline.three_acts", "value": [{{"act": "1", "title": "...", "summary": "...", "chapters": [...]}}, ...]}}
+
+支持的 patch path 格式（每个 patch 是 {{"path": "路径", "value": 值}}）：
+- description: 直接设定故事简述
+- tags.type / tags.theme / tags.style / tags.audience: 修改单个标签
+- outline.serial_strategy: 替换连载策略对象
+- outline.themes: 替换主题列表
+- outline.foreshadowing: 替换伏笔列表
+- outline.three_acts: 替换三幕结构（必须为数组）
+- outline.three_acts[N].chapters: 替换第 N 幕的章节列表（N 从 0 开始）
+- 注意：path 不要以 / 开头，用点号分隔层级，数组用 [下标] 访问
 {min_chapter_requirement}"""
 
     MAX_RETRIES = 2
@@ -1764,7 +1792,35 @@ async def continue_framework_with_chat(
 当前框架 JSON：
 {snapshot}
 
-请输出结构化编辑计划（reply + operations + patches + warnings）。"""
+请输出结构化编辑计划（reply + operations + patches + warnings）。
+
+支持的 operation 类型（每个 operation 是 {{"op": "类型", "changes": {{...}}}}）：
+- update_story_description: 修改故事简述，changes 包含 description
+- update_tags: 修改标签，changes 可包含 type/theme/style/audience
+- add_character: 添加角色，changes 包含角色完整信息（name 必填）
+- update_character: 更新角色，target.name 指定角色，changes 包含更新字段
+- remove_character: 删除角色，target.name 指定角色名
+- update_act_summary: 更新幕摘要，target.act 指定幕号，changes.summary 为摘要
+- add_act: 新增一幕，changes.title/summary 指定标题和摘要；target.after_act 可选，指定在哪个幕之后插入（不指定则追加到末尾）
+- delete_act: 删除一幕并重排剩余幕号，target.act 指定要删除的幕号
+- add_chapter: 在指定幕末尾添加章节，target.act 指定幕号，changes 包含 chapter_number/title 等
+- insert_chapter_after: 在指定章节后插入，target.chapter_number 指定位置，changes 包含新章节
+- move_chapter_to_act: 移动章节到另一幕，target.chapter_number 指定章节，target.act 指定目标幕
+- update_chapter: 更新章节内容，target.chapter_number 指定章节，changes 包含更新字段
+- delete_chapter: 删除章节，target.chapter_number 指定要删除的章节
+
+⚠️ 大规模结构调整建议（合并幕、压缩幕数、重新划分章节）：使用一个 outline.three_acts patch 直接替换整个三幕数组，而不是用大量 move_chapter_to_act 操作。
+示例：{{"path": "outline.three_acts", "value": [{{"act": "1", "title": "...", "summary": "...", "chapters": [...]}}, ...]}}
+
+支持的 patch path 格式（每个 patch 是 {{"path": "路径", "value": 值}}）：
+- description: 直接设定故事简述
+- tags.type / tags.theme / tags.style / tags.audience: 修改单个标签
+- outline.serial_strategy: 替换连载策略对象
+- outline.themes: 替换主题列表
+- outline.foreshadowing: 替换伏笔列表
+- outline.three_acts: 替换三幕结构（必须为数组）
+- outline.three_acts[N].chapters: 替换第 N 幕的章节列表（N 从 0 开始）
+- 注意：path 不要以 / 开头，用点号分隔层级，数组用 [下标] 访问"""
 
     MAX_RETRIES = 2
 
@@ -2470,7 +2526,7 @@ async def generate_onboarding_response(
             # 验证必要字段
             reply = result.get("reply", "")
             if not reply.strip():
-                raise ValueError("Empty reply from AI")
+                raise ValueError("AI 返回空回复")
 
             return {
                 "reply": reply,
@@ -2554,7 +2610,7 @@ async def generate_import_guidance_response(
             result = _extract_json_object(content)
             reply = str(result.get("reply") or "").strip()
             if not reply:
-                raise ValueError("Empty reply from AI")
+                raise ValueError("AI 返回空回复")
 
             collected_info = result.get("collected_info", {})
             if not isinstance(collected_info, dict):

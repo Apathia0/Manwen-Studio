@@ -130,15 +130,20 @@ class EpayGateway(PaymentGateway):
         if qr_code:
             return CheckoutResult(
                 mode="qrcode",
+                payment_url=pay_url,
                 qr_code_text=qr_code,
                 can_mock_confirm=True,
-                extra={"epay_trade_no": trade_no},
+                extra={
+                    "epay_trade_no": trade_no,
+                    "epay_qr_code": qr_code,
+                    "epay_payment_url": pay_url,
+                },
             )
         return CheckoutResult(
             mode="redirect",
             payment_url=pay_url,
             can_mock_confirm=False if pay_type == "wxpay" else True,
-            extra={"epay_trade_no": trade_no},
+            extra={"epay_trade_no": trade_no, "epay_payment_url": pay_url},
         )
 
     def verify_notify(

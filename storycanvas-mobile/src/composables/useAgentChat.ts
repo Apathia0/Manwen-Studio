@@ -8,15 +8,21 @@ export function useAgentChat(storyId: () => number) {
   const messages = ref<AgentMessage[]>([])
   const streamingContent = ref('')
   const pendingChanges = ref<PendingChange[]>([])
+  const activeConversationId = ref<number | null>(null)
 
-  function sendMessage(content: string, chapterId?: number) {
+  function sendMessage(content: string, chapterId?: number, conversationId?: number) {
+    activeConversationId.value = conversationId ?? activeConversationId.value
     messages.value.push({ id: `user-${Date.now()}`, role: 'user', content })
     streamingContent.value = ''
 
     const body: any = { content }
+    if (activeConversationId.value) {
+      body.conversation_id = activeConversationId.value
+    }
     if (chapterId) {
       body.chapter_id = chapterId
     }
+    body.mode = 'execute'
 
     start({
       url: `/api/stories/${storyId()}/agent/chat`,
@@ -80,7 +86,7 @@ export function useAgentChat(storyId: () => number) {
   async function loadPendingChanges() {
     try {
       const { agentApi } = await import('@/api')
-      const result = await agentApi.getPendingChanges(storyId())
+      const result = await agentApi.getPendingChanges(storyId(), activeConversationId.value ?? undefined)
       pendingChanges.value = result.changes || []
     } catch (e) {
       console.error('加载待确认变更失败:', e)
@@ -90,7 +96,7 @@ export function useAgentChat(storyId: () => number) {
   async function confirmChanges() {
     try {
       const { agentApi } = await import('@/api')
-      await agentApi.confirmChanges(storyId())
+      await agentApi.confirmChanges(storyId(), activeConversationId.value ?? undefined)
       pendingChanges.value = []
       uni.showToast({ title: '已确认变更', icon: 'success' })
     } catch (e) {
@@ -101,7 +107,7 @@ export function useAgentChat(storyId: () => number) {
   async function rollbackChanges() {
     try {
       const { agentApi } = await import('@/api')
-      await agentApi.rollbackChanges(storyId())
+      await agentApi.rollbackChanges(storyId(), activeConversationId.value ?? undefined)
       pendingChanges.value = []
       uni.showToast({ title: '已撤回变更', icon: 'success' })
     } catch (e) {
@@ -120,6 +126,7 @@ export function useAgentChat(storyId: () => number) {
     streaming,
     streamingContent,
     pendingChanges,
+    activeConversationId,
     sendMessage,
     loadPendingChanges,
     confirmChanges,

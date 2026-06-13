@@ -15,6 +15,7 @@ class TestGatewayRegistry:
         assert get_gateway("mock_qr") is not None
         assert get_gateway("alipay_qr") is not None
         assert get_gateway("epay_qr") is not None
+        assert get_gateway("mapay_qr") is not None
         assert get_gateway("nonexistent") is None
 
     def test_get_gateway_by_provider(self):
@@ -22,6 +23,7 @@ class TestGatewayRegistry:
         assert get_gateway_by_provider("mock") is not None
         assert get_gateway_by_provider("alipay") is not None
         assert get_gateway_by_provider("epay") is not None
+        assert get_gateway_by_provider("mapay") is not None
         assert get_gateway_by_provider("unknown") is None
 
     def test_all_gateways(self):
@@ -31,6 +33,7 @@ class TestGatewayRegistry:
         assert "mock_qr" in methods
         assert "alipay_qr" in methods
         assert "epay_qr" in methods
+        assert "mapay_qr" in methods
 
     def test_get_method_options_none_enabled(self):
         """模拟支付已移除，仅调用 mock_enabled 不应返回任何选项"""
@@ -69,6 +72,21 @@ class TestGatewayRegistry:
         assert "epay_qqpay" not in keys
         assert labels_by_key["epay_alipay"] == "易支付(支付宝)"
         assert labels_by_key["epay_wxpay"] == "易支付(微信支付)"
+
+    def test_get_method_options_mapay_multi_type(self):
+        init_gateways()
+        config = {
+            "mapay_enabled": True,
+            "mapay_type": "alipay,wxpay,usdt",
+        }
+        options = get_method_options(config)
+        keys = {o["key"] for o in options}
+        labels_by_key = {o["key"]: o["label"] for o in options}
+        assert "mapay_alipay" in keys
+        assert "mapay_wxpay" in keys
+        assert "mapay_usdt" in keys
+        assert labels_by_key["mapay_alipay"] == "码支付(支付宝)"
+        assert labels_by_key["mapay_wxpay"] == "码支付(微信支付)"
 
 
 class TestMockGateway:
@@ -201,4 +219,85 @@ class TestEpayGateway:
 
         import pytest
         with pytest.raises(RuntimeError, match="易支付配置不完整"):
+            gateway.create_checkout(MockOrder(), MockPlan(), {})
+
+
+class TestMaPayGateway:
+    """测试码支付网关"""
+
+    def test_config_defaults(self):
+        init_gateways()
+        gateway = get_gateway("mapay_qr")
+        defaults = gateway.get_config_defaults()
+        assert defaults["payment.mapay_gateway"] == "https://pay.21lili.cn"
+        assert "payment.mapay_enabled" in defaults
+        assert "payment.mapay_pid" in defaults
+        assert "payment.mapay_key" in defaults
+
+    def test_mapay_sign(self):
+        from services.payment.mapay_gateway import _mapay_sign
+        params = {
+            "pid": "1001",
+            "type": "alipay",
+            "out_trade_no": "TEST202501010001",
+            "money": "59.00",
+            "sign_type": "MD5",
+            "empty": "  ",
+        }
+        sign = _mapay_sign(params, "test_key_123")
+        assert isinstance(sign, str)
+        assert len(sign) == 32
+
+    def test_verify_notify_valid(self):
+        init_gateways()
+        gateway = get_gateway("mapay_qr")
+
+        from services.payment.mapay_gateway import _mapay_sign
+        params = {
+            "out_trade_no": "TEST123",
+            "trade_no": "MAPAY202501010001",
+            "type": "alipay",
+            "trade_status": "TRADE_SUCCESS",
+            "money": "59.00",
+        }
+        key = "test_key"
+        params["sign"] = _mapay_sign(params, key)
+        params["sign_type"] = "MD5"
+
+        result = gateway.verify_notify(params, {"mapay_key": key})
+        assert result.verified is True
+        assert result.trade_status == "paid"
+        assert result.trade_no == "MAPAY202501010001"
+
+    def test_verify_notify_invalid_sign(self):
+        init_gateways()
+        gateway = get_gateway("mapay_qr")
+        params = {
+            "out_trade_no": "TEST123",
+            "trade_no": "MAPAY202501010001",
+            "trade_status": "TRADE_SUCCESS",
+            "money": "59.00",
+            "sign": "invalid",
+        }
+        result = gateway.verify_notify(params, {"mapay_key": "test_key"})
+        assert result.verified is False
+
+    def test_create_checkout_missing_config(self):
+        init_gateways()
+        gateway = get_gateway("mapay_qr")
+
+        class MockOrder:
+            order_no = "TEST123"
+            amount = 5900
+            billing_cycle = "monthly"
+            payment_method = "mapay_qr"
+            payment_provider = "mapay"
+            expired_at = None
+            extra_json = {}
+
+        class MockPlan:
+            name = "Pro"
+
+        import pytest
+        with pytest.raises(RuntimeError, match="码支付配置不完整"):
             gateway.create_checkout(MockOrder(), MockPlan(), {})

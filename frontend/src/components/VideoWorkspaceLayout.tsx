@@ -164,7 +164,7 @@ export default function VideoWorkspaceLayout({
       const data = await res.json();
       setStylePresets(data.presets || []);
     } catch (e) {
-      console.error('Failed to load style presets:', e);
+      console.error('加载风格预设失败:', e);
     } finally {
       setAssetsLoading(false);
     }
@@ -177,7 +177,7 @@ export default function VideoWorkspaceLayout({
       const data = await res.json();
       setChapterStylePreset(data);
     } catch (e) {
-      console.error('Failed to load chapter style preset:', e);
+      console.error('加载章节风格预设失败:', e);
     }
   };
 
@@ -187,7 +187,7 @@ export default function VideoWorkspaceLayout({
       const data = await res.json();
       setStoryStylePreset(data);
     } catch (e) {
-      console.error('Failed to load story style preset:', e);
+      console.error('加载作品风格预设失败:', e);
     }
   };
 
@@ -202,7 +202,7 @@ export default function VideoWorkspaceLayout({
         setSelectedShot({ ...selectedShot, style_preset: stylePreset ?? undefined });
       }
     } catch (e) {
-      console.error('Failed to set shot style preset:', e);
+      console.error('设置分镜风格预设失败:', e);
     }
   };
 

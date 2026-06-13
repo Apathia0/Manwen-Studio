@@ -12,11 +12,12 @@ export interface PendingChangeItem {
 interface ChangesBannerProps {
   changes: PendingChangeItem[];
   storyId: number;
+  conversationId?: number | null;
   onConfirm: () => void;
   onRollback: () => void;
 }
 
-export default function ChangesBanner({ changes, storyId, onConfirm, onRollback }: ChangesBannerProps) {
+export default function ChangesBanner({ changes, storyId, conversationId, onConfirm, onRollback }: ChangesBannerProps) {
   const [busy, setBusy] = useState<'confirming' | 'rolling' | null>(null);
   const [showDiff, setShowDiff] = useState(false);
 
@@ -26,7 +27,7 @@ export default function ChangesBanner({ changes, storyId, onConfirm, onRollback 
     setBusy('confirming');
     try {
       const { agentConfirmChanges } = await import('../../api');
-      await agentConfirmChanges(storyId);
+      await agentConfirmChanges(storyId, conversationId);
       onConfirm();
     } finally {
       setBusy(null);
@@ -37,7 +38,7 @@ export default function ChangesBanner({ changes, storyId, onConfirm, onRollback 
     setBusy('rolling');
     try {
       const { agentRollbackChanges } = await import('../../api');
-      await agentRollbackChanges(storyId);
+      await agentRollbackChanges(storyId, conversationId);
       onRollback();
     } finally {
       setBusy(null);
@@ -94,6 +95,7 @@ export default function ChangesBanner({ changes, storyId, onConfirm, onRollback 
       {showDiff && (
         <ChangeDiffModal
           storyId={storyId}
+          conversationId={conversationId}
           onConfirm={() => { setShowDiff(false); onConfirm(); }}
           onRollback={() => { setShowDiff(false); onRollback(); }}
           onClose={() => setShowDiff(false)}

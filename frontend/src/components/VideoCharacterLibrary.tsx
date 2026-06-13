@@ -5,7 +5,7 @@ import {
   createCharacterVersion,
   deleteCharacterVersion,
   generateCharacterRefImage,
-  deleteCharacterRefImage,
+  deleteVideoCharacterRefImage,
   redrawCharacterRefImage,
   type VideoCharacter,
   type CharacterVersion,
@@ -178,7 +178,7 @@ export default function VideoCharacterLibrary({ storyId }: Props) {
     if (!selectedVersion || !selectedName) return;
     if (!(await confirm({ message: '确认删除当前版本的参考图？' }))) return;
     try {
-      await deleteCharacterRefImage(storyId, selectedName, selectedVersion.id);
+      await deleteVideoCharacterRefImage(storyId, selectedName, selectedVersion.id);
       await loadCharacters();
     } catch (err: any) {
       setError(err.message || '删除参考图失败');

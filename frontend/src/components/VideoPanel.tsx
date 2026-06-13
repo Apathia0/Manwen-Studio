@@ -100,7 +100,7 @@ export default function VideoPanel({
     });
     
     if (!response.ok) {
-      console.error('SSE connection failed');
+      console.error('SSE 连接失败');
       return;
     }
     

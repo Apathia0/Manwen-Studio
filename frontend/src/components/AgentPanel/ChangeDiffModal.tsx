@@ -14,6 +14,7 @@ export interface FullChangeData {
 
 interface Props {
   storyId: number;
+  conversationId?: number | null;
   onConfirm: () => void;
   onRollback: () => void;
   onClose: () => void;
@@ -150,7 +151,7 @@ function FieldSection({ change, defaultCollapsed = false }: { change: FullChange
   );
 }
 
-export default function ChangeDiffModal({ storyId, onConfirm, onRollback, onClose }: Props) {
+export default function ChangeDiffModal({ storyId, conversationId, onConfirm, onRollback, onClose }: Props) {
   const [changes, setChanges] = useState<FullChangeData[] | null>(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState<'confirming' | 'rolling' | null>(null);
@@ -161,7 +162,8 @@ export default function ChangeDiffModal({ storyId, onConfirm, onRollback, onClos
     let cancelled = false;
     (async () => {
       try {
-        const res = await fetch(`/api/stories/${storyId}/agent/pending-changes`, {
+        const query = conversationId ? `?conversation_id=${encodeURIComponent(String(conversationId))}` : '';
+        const res = await fetch(`/api/stories/${storyId}/agent/pending-changes${query}`, {
           headers: apiHeaders(),
         });
         if (!cancelled) {
@@ -175,13 +177,13 @@ export default function ChangeDiffModal({ storyId, onConfirm, onRollback, onClos
       }
     })();
     return () => { cancelled = true; };
-  }, [storyId]);
+  }, [storyId, conversationId]);
 
   const handleConfirm = async () => {
     setBusy('confirming');
     try {
       const { agentConfirmChanges } = await import('../../api');
-      await agentConfirmChanges(storyId);
+      await agentConfirmChanges(storyId, conversationId);
       onConfirm();
     } finally {
       setBusy(null);
@@ -192,7 +194,7 @@ export default function ChangeDiffModal({ storyId, onConfirm, onRollback, onClos
     setBusy('rolling');
     try {
       const { agentRollbackChanges } = await import('../../api');
-      await agentRollbackChanges(storyId);
+      await agentRollbackChanges(storyId, conversationId);
       onRollback();
     } finally {
       setBusy(null);

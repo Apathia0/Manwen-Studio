@@ -5,7 +5,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from database import Base
-from models import Story, FrameworkSnapshot
+from models import Story, FrameworkSnapshot, Chapter
 from services.framework_utils import (
     _save_framework_snapshot,
     _enforce_framework_snapshot_limit,
@@ -168,3 +168,75 @@ class TestRestoreSnapshot:
         """回滚不存在的快照应抛出 ValueError。"""
         with pytest.raises(ValueError, match="快照不存在"):
             restore_framework_snapshot(story, 99999, db_session)
+
+    def test_restore_cleans_up_orphaned_chapters(self, db_session: Session, story: Story):
+        """回滚到章节数较少的快照后，超出大纲范围的 Chapter 记录应被自动删除。"""
+        # 构建一个有 5 章的大纲
+        five_chapter_outline = {
+            "three_acts": [{
+                "act": 1,
+                "summary": "测试幕",
+                "chapters": [
+                    {"chapter_number": i, "title": f"第{i}章", "summary": f"内容{i}"}
+                    for i in range(1, 6)
+                ],
+            }]
+        }
+        story.outline = five_chapter_outline
+        db_session.flush()
+
+        # 保存 5 章版本的快照
+        snap_5 = _save_framework_snapshot(
+            story_id=story.id,
+            snapshot_data=_build_current_snapshot_data(story),
+            source="panel_adjust",
+            reply_summary="5章版本",
+            db=db_session,
+        )
+        db_session.commit()
+
+        # 模拟续写到 10 章
+        ten_chapter_outline = {
+            "three_acts": [{
+                "act": 1,
+                "summary": "测试幕",
+                "chapters": [
+                    {"chapter_number": i, "title": f"第{i}章", "summary": f"内容{i}"}
+                    for i in range(1, 11)
+                ],
+            }]
+        }
+        story.outline = ten_chapter_outline
+        db_session.flush()
+
+        # 创建 10 个 Chapter 记录（模拟已生成的章节）
+        for i in range(1, 11):
+            ch = Chapter(story_id=story.id, chapter_number=i, title=f"第{i}章", status="completed")
+            db_session.add(ch)
+        db_session.commit()
+        assert db_session.query(Chapter).filter(Chapter.story_id == story.id).count() == 10
+
+        # 回滚到 5 章版本
+        restore_framework_snapshot(story, snap_5.id, db_session)
+        db_session.commit()
+
+        # 验证：只有前 5 章的 Chapter 记录保留，第 6-10 章被清理
+        remaining = db_session.query(Chapter).filter(Chapter.story_id == story.id).order_by(Chapter.chapter_number).all()
+        assert len(remaining) == 5
+        assert [c.chapter_number for c in remaining] == [1, 2, 3, 4, 5]
+
+    def test_restore_no_chapters_to_clean(self, db_session: Session, story: Story):
+        """回滚时如果没有超出大纲范围的 Chapter 记录，不应报错。"""
+        data = _build_current_snapshot_data(story)
+        snap = _save_framework_snapshot(
+            story_id=story.id, snapshot_data=data, source="panel_adjust",
+            reply_summary="初始", db=db_session,
+        )
+        db_session.commit()
+
+        story.description = "修改后"
+        db_session.flush()
+
+        result = restore_framework_snapshot(story, snap.id, db_session)
+        db_session.commit()
+        assert result["description"] == "原始描述"

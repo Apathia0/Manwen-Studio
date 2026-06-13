@@ -123,6 +123,12 @@ export function paymentMethodLabel(method: string | null | undefined): string {
     const type = method.slice(5);
     return `易支付(${labels[type] || type})`;
   }
+  if (method === 'mapay_qr') return '码支付';
+  if (method.startsWith('mapay_')) {
+    const labels: Record<string, string> = { alipay: '支付宝', wxpay: '微信支付', qqpay: 'QQ钱包', usdt: 'USDT' };
+    const type = method.slice(6);
+    return `码支付(${labels[type] || type})`;
+  }
   if (method === 'manual_adjustment') return '后台人工调整';
   return method;
 }
