@@ -986,6 +986,12 @@ class ChapterVideoWorkflowStatusOut(BaseModel):
     completed_shots: int
     failed_shots: int
     error_message: str | None = None
+    task_id: str | None = None
+    stage: str | None = None
+    message: str | None = None
+    retry_count: int = 0
+    max_retries: int = 0
+    next_retry_at: str | None = None
 
 
 class ChapterWorkflowStageActionRequest(BaseModel):

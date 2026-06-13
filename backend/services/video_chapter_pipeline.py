@@ -22,6 +22,7 @@ from sqlalchemy.orm import selectinload
 from services import deepseek as deepseek_service
 from services import image2 as image_service
 from services import video_generation as video_gen_service
+from services.blocking import run_blocking
 from services.media_locator import ensure_local_media_path, resolve_reference_input
 from services.task_manager import task_manager
 
@@ -498,6 +499,8 @@ async def parse_chapter_shots(
     deepseek_api_key: str | None = None,
     task_id: str | None = None,
     expand_prompts: bool = True,
+    shot_id: int | None = None,
+    **kwargs,
 ) -> dict[str, object]:
     """阶段1：将章节正文解析为 15s 分镜列表，停在工作流状态 shots_ready。"""
     logger.info("阶段1-拆镜 workflow=%s chapter=%s", workflow_id, chapter_id)
@@ -653,6 +656,8 @@ async def generate_shot_details_batch(
     story_id: int,
     deepseek_api_key: str | None = None,
     task_id: str | None = None,
+    shot_id: int | None = None,
+    **kwargs,
 ) -> dict[str, object]:
     """为选中的镜头批量生成详细信息（运镜/动作/情绪/故事版等）。"""
     logger.info("批量生成详情 workflow=%s shot_ids=%s", workflow_id, shot_ids)
@@ -747,6 +752,8 @@ async def generate_storyboards_for_shots(
     deepseek_api_key: str | None = None,
     character_reference_ids: list[int] | None = None,
     task_id: str | None = None,
+    shot_id: int | None = None,
+    **kwargs,
 ) -> dict[str, object]:
     """阶段2：为指定 shots（或全部 pending shots）生成故事版图片。"""
     logger.info("阶段2-故事版 workflow=%s", workflow_id)
@@ -815,6 +822,11 @@ async def reanalyze_storyboard_prompts(
     workflow_id: int,
     shot_ids: list[int] | None = None,
     deepseek_api_key: str | None = None,
+    task_id: str | None = None,
+    story_id: int | None = None,
+    chapter_id: int | None = None,
+    shot_id: int | None = None,
+    **kwargs,
 ) -> dict[str, object]:
     """仅重新分析故事版提示词（DeepSeek 重新生成 prompt），不生成图片。
 
@@ -924,6 +936,10 @@ def _build_chapter_shot_character_prompts(shot: ChapterVideoShot, story: Story |
 async def reanalyze_shot_prompts(
     shot_id: int,
     deepseek_api_key: str | None = None,
+    task_id: str | None = None,
+    story_id: int | None = None,
+    chapter_id: int | None = None,
+    **kwargs,
 ) -> dict[str, object]:
     """重分析单镜头的全部提示词，并返回角色提示词列表。"""
     return await _expand_single_shot_prompts(shot_id, deepseek_api_key=deepseek_api_key)
@@ -1168,6 +1184,10 @@ async def generate_videos_for_shots(
     video_base_url: str | None = None,
     video_model: str | None = None,
     task_id: str | None = None,
+    story_id: int | None = None,
+    chapter_id: int | None = None,
+    shot_id: int | None = None,
+    **kwargs,
 ) -> dict[str, object]:
     """阶段3：为指定 shots（或全部 storyboard_ready shots）生成视频。"""
     logger.info("阶段3-视频 workflow=%s", workflow_id)
@@ -1246,6 +1266,8 @@ async def run_all_stages(
     video_base_url: str | None = None,
     video_model: str | None = None,
     task_id: str | None = None,
+    shot_id: int | None = None,
+    **kwargs,
 ) -> dict[str, object]:
     """一键全自动：依次执行拆镜→故事版→视频三个阶段。
 
@@ -1683,6 +1705,13 @@ async def start_workflow_background(
         image_api_key=image_api_key,
         timeout=None,  # 无任务级硬超时
         max_retries=1,
+        metadata={
+            "workflow_id": workflow_id,
+            "stage": "queued",
+            "message": "章节视频工作流已排队...",
+            "running_stage": "running",
+            "running_message": "正在执行章节视频工作流...",
+        },
         story_id_extra=wf.story_id,
         chapter_id_extra=wf.chapter_id,
     )
@@ -1980,7 +2009,7 @@ async def regenerate_shot_video(
                     oss_details.append((role, img_path))
                     continue
                 logger.info("[video_submit] 尝试将本地参考图上传到 OSS: %s", img_path)
-                oss_url = oss_service.upload_file(img_path)
+                oss_url = await run_blocking(oss_service.upload_file, img_path)
                 if oss_url:
                     logger.info("[video_submit] 本地参考图上 OSS 成功: %s → %s", img_path, oss_url)
                     oss_uploaded.append(oss_url)

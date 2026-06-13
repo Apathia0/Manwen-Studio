@@ -18,6 +18,8 @@ build/
 *.sqlite3
 venv/
 .venv/
+.venv-backend/
+.codegraph/
 
 # ─── Node ───
 node_modules/
@@ -39,6 +41,7 @@ test_ref_C.png
 # ─── Archives ───
 *.tar.gz
 *.zip
+*.rar
 
 # ─── Random generated images ───
 docs/*.jpg

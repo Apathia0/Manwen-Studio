@@ -66,6 +66,7 @@ def _from_video_url(video_url: str) -> str | None:
 
 
 from models import (
+    BackgroundTask,
     Chapter,
     ChapterVideoWorkflow,
     ChapterVideoShot,
@@ -123,6 +124,7 @@ from services import video_generation as video_gen_service
 from services.media_locator import ensure_local_media_path, resolve_local_media_path, resolve_reference_input
 from services import video_api as video_api_service
 from services import video_qa
+from services.blocking import run_blocking
 from services.video_compiler import compile_project
 from services.task_manager import task_manager
 from services.video_chapter_pipeline import (
@@ -152,6 +154,62 @@ logger = logging.getLogger("video_router")
 router = APIRouter()
 
 SHOT_DURATION_SECONDS = 15
+
+
+def _flatten_task_status(task_status: dict | None) -> dict:
+    """Return stable public status fields from task_manager.get_task_status()."""
+    if not task_status:
+        return {
+            "stage": None,
+            "message": None,
+            "provider_status": None,
+            "retry_count": 0,
+            "max_retries": 0,
+            "next_retry_at": None,
+        }
+    meta = task_status.get("metadata_json") if isinstance(task_status.get("metadata_json"), dict) else {}
+    return {
+        "stage": task_status.get("stage") or meta.get("stage"),
+        "message": task_status.get("message") or meta.get("message"),
+        "provider_status": meta.get("provider_status"),
+        "retry_count": task_status.get("retry_count", 0),
+        "max_retries": task_status.get("max_retries", 0),
+        "next_retry_at": task_status.get("next_retry_at") or meta.get("next_retry_at"),
+    }
+
+
+def _flatten_background_task(task: BackgroundTask | None) -> dict:
+    if not task:
+        return _flatten_task_status(None)
+    meta = task.metadata_json if isinstance(task.metadata_json, dict) else {}
+    return {
+        "stage": meta.get("stage"),
+        "message": meta.get("message") or task.error_message,
+        "provider_status": meta.get("provider_status"),
+        "retry_count": task.retry_count,
+        "max_retries": task.max_retries,
+        "next_retry_at": meta.get("next_retry_at"),
+        "task_id": task.task_id,
+    }
+
+
+def _latest_chapter_workflow_task(db: Session, workflow_id: int) -> BackgroundTask | None:
+    prefix = f"chapter_video_{workflow_id}_"
+    active = (
+        db.query(BackgroundTask)
+        .filter(BackgroundTask.task_id.startswith(prefix, autoescape=True))
+        .filter(BackgroundTask.status.in_(["pending", "running", "retrying"]))
+        .order_by(BackgroundTask.created_at.desc())
+        .first()
+    )
+    if active:
+        return active
+    return (
+        db.query(BackgroundTask)
+        .filter(BackgroundTask.task_id.startswith(prefix, autoescape=True))
+        .order_by(BackgroundTask.created_at.desc())
+        .first()
+    )
 
 
 # 鈹€鈹€鈹€ Helper functions (mirrored from main.py patterns) 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
@@ -2038,6 +2096,13 @@ async def update_shot(
         input_mode=input_mode,
         timeout=600,
         max_retries=2,
+        metadata={
+            "stage": "submitting",
+            "message": "正在提交视频生成任务...",
+            "provider_status": "submitting",
+            "running_stage": "submitting",
+            "running_message": "正在提交视频生成任务...",
+        },
     )
 
     job_status = "pending"
@@ -2096,6 +2161,12 @@ async def update_shot(
             "aspect_ratio": job.aspect_ratio,
             "request_payload": job.request_payload_json or {},
             "error_message": job.error_message,
+            "stage": "submitting",
+            "message": "正在提交视频生成任务...",
+            "provider_status": "submitting",
+            "retry_count": 0,
+            "max_retries": 2,
+            "next_retry_at": None,
             "input_mode": job.input_mode,
             "source_storyboard_asset_id": job.source_storyboard_asset_id,
             "submitted_at": _serialize_datetime(job.submitted_at),
@@ -2236,6 +2307,13 @@ async def render_shot_video_stream(
                 input_mode=input_mode,
                 timeout=600,
                 max_retries=2,
+                metadata={
+                    "stage": "submitting",
+                    "message": "正在提交视频生成任务...",
+                    "provider_status": "submitting",
+                    "running_stage": "submitting",
+                    "running_message": "正在提交视频生成任务...",
+                },
             )
 
             job_status = "pending"
@@ -2291,15 +2369,60 @@ async def render_shot_video_stream(
                 
                 # 通过 TaskManager 查询后台任务状态
                 task_status = task_manager.get_task_status(task_id)
+                task_fields = _flatten_task_status(task_status)
                 if task_status is None:
                     current_status = "queued"
                     progress = 0
                 elif task_status["status"] == "succeeded":
-                    # 任务成功，获取 provider_job_id 用于后续轮询
+                    # 提交任务成功，继续轮询上游真实生成状态；不要把“提交成功”当作“视频完成”。
                     result = task_status.get("result_json") or {}
                     provider_job_id = result.get("provider_job_id", provider_job_id)
-                    current_status = "succeeded"
-                    progress = 100
+                    task_fields["provider_status"] = result.get("provider_status") or task_fields.get("provider_status")
+                    if provider_job_id and not provider_job_id.startswith("video_render_"):
+                        latest = await video_gen_service.query_job_status(
+                            provider=provider,
+                            provider_job_id=provider_job_id,
+                            api_key=api_key,
+                            base_url=base_url,
+                        )
+                        current_status = latest.get("status", "queued") or "queued"
+                        progress = int(latest.get("progress") or 0)
+                        task_fields["provider_status"] = latest.get("provider_status") or current_status
+                        if current_status == "succeeded":
+                            task_fields["stage"] = "downloading"
+                            task_fields["message"] = "视频生成完成，正在下载入库..."
+                        elif task_fields["provider_status"] == "query_error":
+                            task_fields["stage"] = "generating"
+                            task_fields["message"] = "上游查询较慢，稍后继续同步状态..."
+                        else:
+                            task_fields["stage"] = "generating"
+                            task_fields["message"] = latest.get("message") or "上游生成中..."
+
+                        write_db = SessionLocal()
+                        try:
+                            db_job = write_db.get(VideoGenerationJob, job_id)
+                            if db_job:
+                                db_job.provider_job_id = provider_job_id
+                                db_job.provider_result_json = {**(db_job.provider_result_json or {}), **latest}
+                                db_job.status = current_status if current_status in {"queued", "running", "succeeded", "failed", "cancelled"} else "running"
+                                db_job.progress = progress
+                                if latest.get("error"):
+                                    db_job.error_message = str(latest["error"])
+                                if current_status in {"succeeded", "failed", "cancelled"}:
+                                    db_job.completed_at = datetime.datetime.utcnow()
+                                write_db.commit()
+                        finally:
+                            write_db.close()
+
+                        if current_status in {"failed", "cancelled"}:
+                            error_msg = latest.get("error") or "视频生成失败"
+                            yield {"event": "error", "data": json.dumps({"job_id": job_id, "error": error_msg}, ensure_ascii=False)}
+                            return
+                    else:
+                        current_status = "queued"
+                        progress = 15
+                        task_fields["stage"] = "submitting"
+                        task_fields["message"] = "任务已提交，等待上游任务编号..."
                 elif task_status["status"] == "failed":
                     error_msg = task_status.get("error_message", "Generation failed")
                     yield {"event": "error", "data": json.dumps({"job_id": job_id, "error": error_msg})}
@@ -2332,7 +2455,16 @@ async def render_shot_video_stream(
                 if current_status == "succeeded":
                     if not download_attempted:
                         progress_val = max(progress, 80)
-                        yield {"event": "progress", "data": json.dumps({"job_id": job_id, "progress": progress_val, "stage": "downloading", "message": "瑙嗛鐢熸垚瀹屾垚锛屾鍦ㄤ笅杞?.."})}
+                        yield {"event": "progress", "data": json.dumps({
+                            "job_id": job_id,
+                            "progress": progress_val,
+                            "stage": "downloading",
+                            "message": "视频生成完成，正在下载入库...",
+                            "provider_status": task_fields.get("provider_status"),
+                            "retry_count": task_fields.get("retry_count", 0),
+                            "max_retries": task_fields.get("max_retries", 0),
+                            "next_retry_at": task_fields.get("next_retry_at"),
+                        }, ensure_ascii=False)}
                         download_attempted = True
                     
                     from models import RenderedClip
@@ -2392,19 +2524,23 @@ async def render_shot_video_stream(
                 # 根据 current_status 动态映射 stage 和 message
                 if current_status == "queued":
                     stage = "queued"
-                    message = "等待执行..."
+                    message = task_fields.get("message") or "等待执行..."
                 elif current_status == "retrying":
                     stage = "retrying"
-                    message = "生成失败，正在重试..."
+                    message = task_fields.get("message") or "生成失败，正在重试..."
                 else:
-                    stage = "generating"
-                    message = f"瑙嗛鐢熸垚涓?.. ({progress_val}%)"
+                    stage = task_fields.get("stage") or "generating"
+                    message = task_fields.get("message") or f"视频生成中... ({progress_val}%)"
                 yield {"event": "progress", "data": json.dumps({
                     "job_id": job_id,
                     "progress": progress_val,
                     "stage": stage,
                     "message": message,
-                })}
+                    "provider_status": task_fields.get("provider_status"),
+                    "retry_count": task_fields.get("retry_count", 0),
+                    "max_retries": task_fields.get("max_retries", 0),
+                    "next_retry_at": task_fields.get("next_retry_at"),
+                }, ensure_ascii=False)}
                 
                 await asyncio.sleep(3)
             
@@ -2519,14 +2655,27 @@ async def get_video_job(
     _require_chapter_for_user(shot.scene.chapter_id, user, db)
 
     # 内部 task_id 时尝试从 task_manager 获取真实 API task_id
+    task_fields = _flatten_task_status(None)
     if job.provider_job_id and job.provider_job_id.startswith("video_render_"):
         task_status = task_manager.get_task_status(job.provider_job_id)
+        task_fields = _flatten_task_status(task_status)
         if task_status and task_status.get("result_json"):
             result = task_status.get("result_json", {})
             real_id = result.get("provider_job_id", "")
+            task_fields["provider_status"] = result.get("provider_status") or task_fields.get("provider_status")
+            if result.get("status"):
+                task_fields["message"] = task_fields.get("message") or "视频任务已提交到上游"
             if real_id and real_id != job.provider_job_id:
                 job.provider_job_id = real_id
+                job.provider_result_json = {**(job.provider_result_json or {}), **result}
                 db.commit()
+        if task_status and task_status.get("status") == "failed":
+            job.status = "failed"
+            job.error_message = task_status.get("error_message") or task_fields.get("message") or "视频任务提交失败"
+            job.completed_at = job.completed_at or datetime.datetime.utcnow()
+            shot.status = "failed"
+            shot.updated_at = datetime.datetime.utcnow()
+            db.commit()
         # task_manager 还没完成提交，跳过本次查询，下次轮询重试
         if job.provider_job_id and job.provider_job_id.startswith("video_render_"):
             logger.info("Video job %s: task submission pending, skip external query", job_id)
@@ -2537,6 +2686,7 @@ async def get_video_job(
                 "progress": job.progress, "duration_seconds": job.duration_seconds,
                 "aspect_ratio": job.aspect_ratio or "",
                 "error_message": job.error_message or "",
+                **task_fields,
                 "submitted_at": _serialize_datetime(job.submitted_at),
                 "completed_at": _serialize_datetime(job.completed_at),
             }
@@ -2552,6 +2702,12 @@ async def get_video_job(
 
         job.status = latest.get("status", job.status) or job.status
         job.progress = int(latest.get("progress", job.progress) or 0)
+        job.provider_result_json = {**(job.provider_result_json or {}), **latest}
+        task_fields.update({
+            "provider_status": latest.get("provider_status") or latest.get("status") or task_fields.get("provider_status"),
+            "stage": "generating" if latest.get("status") in {"queued", "running"} else latest.get("status") or task_fields.get("stage"),
+            "message": latest.get("message") or task_fields.get("message"),
+        })
         if latest.get("error"):
             job.error_message = str(latest["error"])
 
@@ -2664,6 +2820,12 @@ async def get_video_job(
         "duration_seconds": job.duration_seconds,
         "aspect_ratio": job.aspect_ratio or "",
         "error_message": job.error_message or "",
+        "stage": task_fields.get("stage") or (job.provider_result_json or {}).get("stage"),
+        "message": task_fields.get("message") or (job.provider_result_json or {}).get("message") or job.error_message or "",
+        "provider_status": task_fields.get("provider_status") or (job.provider_result_json or {}).get("provider_status"),
+        "retry_count": task_fields.get("retry_count", 0),
+        "max_retries": task_fields.get("max_retries", 0),
+        "next_retry_at": task_fields.get("next_retry_at"),
         "submitted_at": _serialize_datetime(job.submitted_at),
         "completed_at": _serialize_datetime(job.completed_at),
     }
@@ -2983,12 +3145,12 @@ async def replace_video_asset(asset_id: int, request: Request, db: Session = Dep
     asset_dir.mkdir(parents=True, exist_ok=True)
     ext = Path(filename).suffix or ".png"
     output_path = asset_dir / f"replaced_{datetime.datetime.utcnow().strftime('%Y%m%d_%H%M%S')}{ext}"
-    output_path.write_bytes(data)
+    await run_blocking(output_path.write_bytes, data)
 
     # OSS 上传（如已配置）
     from services import oss as oss_service
     _configure_oss_from_db(db)
-    oss_url = oss_service.upload_file(str(output_path)) if oss_service.is_enabled() else None
+    oss_url = await run_blocking(oss_service.upload_file, str(output_path)) if oss_service.is_enabled() else None
     if oss_url:
         try:
             output_path.unlink(missing_ok=True)
@@ -3190,14 +3352,13 @@ async def upload_style_preset_image(
     file_path = os.path.join(upload_dir, filename)
 
     content = await file.read()
-    with open(file_path, "wb") as f:
-        f.write(content)
+    await run_blocking(Path(file_path).write_bytes, content)
 
     relative_path = f"style-presets/{filename}"
 
     from services import oss as oss_service
     _configure_oss_from_db(db)
-    oss_url = oss_service.upload_file(str(file_path))
+    oss_url = await run_blocking(oss_service.upload_file, str(file_path))
     if oss_url:
         logger.info("风格预设图片已上传到 OSS: %s", oss_url)
         relative_path = oss_url
@@ -5760,6 +5921,13 @@ async def render_shot_video(
         input_mode=input_mode,
         timeout=600,
         max_retries=2,
+        metadata={
+            "stage": "submitting",
+            "message": "正在提交视频生成任务...",
+            "provider_status": "submitting",
+            "running_stage": "submitting",
+            "running_message": "正在提交视频生成任务...",
+        },
     )
 
     job_status = "pending"
@@ -6230,6 +6398,23 @@ async def api_get_chapter_workflow_status(
     if not story or story.owner_user_id != user.id:
         raise HTTPException(403, "无权访问")
 
+    task_fields = _flatten_background_task(_latest_chapter_workflow_task(db, workflow_id))
+    message = task_fields.get("message") or wf.error_message
+    if not message:
+        status_messages = {
+            "pending": "等待开始",
+            "parsing_shots": "正在拆解章节分镜...",
+            "shots_ready": "分镜已准备好",
+            "generating_details": "正在补全镜头细节...",
+            "generating_storyboards": "正在生成故事版图片...",
+            "storyboards_ready": "故事版已准备好",
+            "generating_videos": "正在生成镜头视频...",
+            "videos_ready": "镜头视频已准备好",
+            "completed": "章节视频已完成",
+            "failed": "章节视频任务已失败",
+        }
+        message = status_messages.get(wf.workflow_status, wf.workflow_status)
+
     return ChapterVideoWorkflowStatusOut(
         id=wf.id,
         chapter_id=wf.chapter_id,
@@ -6238,6 +6423,12 @@ async def api_get_chapter_workflow_status(
         completed_shots=wf.completed_shots,
         failed_shots=wf.failed_shots,
         error_message=wf.error_message,
+        task_id=task_fields.get("task_id"),
+        stage=task_fields.get("stage") or wf.workflow_status,
+        message=message,
+        retry_count=task_fields.get("retry_count", 0),
+        max_retries=task_fields.get("max_retries", 0),
+        next_retry_at=task_fields.get("next_retry_at"),
     )
 
 
@@ -6257,9 +6448,22 @@ async def api_cancel_chapter_workflow(
     if not story or story.owner_user_id != user.id:
         raise HTTPException(403, "无权访问")
 
-    task_manager.request_cancellation(f"chapter_video_{workflow_id}")
+    task_ids = task_manager.request_cancellation_by_prefix(f"chapter_video_{workflow_id}_")
+    latest_task = _latest_chapter_workflow_task(db, workflow_id)
+    if latest_task and latest_task.task_id not in task_ids:
+        task_manager.request_cancellation(latest_task.task_id)
+        task_ids.append(latest_task.task_id)
+    if latest_task:
+        meta = latest_task.metadata_json if isinstance(latest_task.metadata_json, dict) else {}
+        latest_task.metadata_json = {
+            **meta,
+            "stage": "cancelled",
+            "message": "用户已请求取消章节视频工作流",
+            "next_retry_at": None,
+        }
+        db.commit()
     update_chapter_workflow_status(workflow_id, "failed", "用户取消")
-    return {"ok": True, "message": "已请求取消章节视频工作流"}
+    return {"ok": True, "message": "已请求取消章节视频工作流", "task_ids": task_ids}
 
 
 @router.post("/api/video/chapter-workflows/shots/{shot_id}/regenerate-storyboard")
@@ -6483,13 +6687,13 @@ async def api_upload_shot_storyboard(
     output_dir.mkdir(parents=True, exist_ok=True)
     ext = Path(filename).suffix or ".png"
     output_path = output_dir / f"uploaded_{datetime.datetime.utcnow().strftime('%Y%m%d_%H%M%S')}{ext}"
-    output_path.write_bytes(data)
+    await run_blocking(output_path.write_bytes, data)
     rel_path = str(output_path.relative_to(_VIDEO_OUTPUTS_DIR.resolve()))
     shot.storyboard_image_url = f"/static/video/{rel_path}"
 
     # OSS 上传（如已配置，上传成功后更新 URL 并删除本地文件）
     from services.oss import upload_and_cleanup as _oss_upload
-    oss_url = _oss_upload(str(output_path))
+    oss_url = await run_blocking(_oss_upload, str(output_path))
     if oss_url:
         shot.storyboard_image_url = oss_url
 
@@ -6531,13 +6735,13 @@ async def api_upload_shot_video(
     output_dir.mkdir(parents=True, exist_ok=True)
     ext = Path(filename).suffix or ".mp4"
     output_path = output_dir / f"uploaded_{datetime.datetime.utcnow().strftime('%Y%m%d_%H%M%S')}{ext}"
-    output_path.write_bytes(data)
+    await run_blocking(output_path.write_bytes, data)
     rel_path = str(output_path.relative_to(_VIDEO_OUTPUTS_DIR.resolve()))
     shot.video_url = f"/static/video/{rel_path}"
 
     # OSS 上传（如已配置，上传成功后更新 URL 并删除本地文件）
     from services.oss import upload_and_cleanup as _oss_upload
-    oss_url = _oss_upload(str(output_path))
+    oss_url = await run_blocking(_oss_upload, str(output_path))
     if oss_url:
         shot.video_url = oss_url
 
@@ -6637,7 +6841,7 @@ async def api_concat_chapter_videos(
         raise HTTPException(403, "无权访问")
 
     try:
-        result = concat_chapter_videos(workflow_id)
+        result = await run_blocking(concat_chapter_videos, workflow_id)
         return result
     except ValueError as e:
         raise HTTPException(400, str(e))
@@ -6719,16 +6923,35 @@ async def api_parse_chapter_shots(
 
     task_id = f"chapter_video_{workflow_id}_stage_{uuid.uuid4().hex[:8]}"
 
-    result = await parse_chapter_shots(
-        workflow_id=workflow_id,
-        chapter_id=wf.chapter_id,
-        story_id=wf.story_id,
-        source_text=current_source_text,
-        deepseek_api_key=deepseek_api_key,
-        task_id=task_id,
-    )
+    update_chapter_workflow_status(workflow_id, "parsing_shots")
+    try:
+        await task_manager.submit_task(
+            task_id=task_id,
+            task_type="chapter_video_parse",
+            coro_func=parse_chapter_shots,
+            workflow_id=workflow_id,
+            chapter_id=wf.chapter_id,
+            story_id=wf.story_id,
+            source_text=current_source_text,
+            deepseek_api_key=deepseek_api_key,
+            timeout=600.0,
+            max_retries=1,
+            metadata={
+                "workflow_id": workflow_id,
+                "stage": "parsing_shots",
+                "message": "拆镜任务已提交后台执行...",
+                "running_stage": "parsing_shots",
+                "running_message": "正在拆解章节分镜...",
+            },
+        )
+    except Exception as exc:
+        raise HTTPException(500, f"提交后台任务失败: {exc}")
 
-    return result
+    return {
+        "task_id": task_id,
+        "workflow_status": "parsing_shots",
+        "message": "拆镜任务已提交后台执行",
+    }
 
 
 @router.post("/api/video/chapter-workflows/{workflow_id}/generate-details")
@@ -6773,6 +6996,13 @@ async def api_generate_shot_details(
             deepseek_api_key=deepseek_api_key,
             timeout=120.0,
             max_retries=1,
+            metadata={
+                "workflow_id": workflow_id,
+                "stage": "generating_details",
+                "message": "镜头详情生成任务已排队...",
+                "running_stage": "generating_details",
+                "running_message": "正在生成镜头详情...",
+            },
         )
     except Exception as exc:
         raise HTTPException(500, f"提交后台任务失败: {exc}")
@@ -6816,15 +7046,14 @@ async def api_upload_style_reference(
     file_path = os.path.join(upload_dir, filename)
 
     content = await file.read()
-    with open(file_path, "wb") as f:
-        f.write(content)
+    await run_blocking(Path(file_path).write_bytes, content)
 
     # 更新工作流
     relative_path = f"style_references/{filename}"
 
     from services import oss as oss_service
     _configure_oss_from_db(db)
-    oss_url = oss_service.upload_file(str(file_path))
+    oss_url = await run_blocking(oss_service.upload_file, str(file_path))
     if oss_url:
         logger.info("工作流风格参考图已上传到 OSS: %s", oss_url)
         relative_path = oss_url
@@ -6913,6 +7142,13 @@ async def api_generate_storyboards(
             character_reference_ids=ref_ids,
             timeout=600.0,
             max_retries=1,
+            metadata={
+                "workflow_id": workflow_id,
+                "stage": "generating_storyboards",
+                "message": "故事版生成任务已排队...",
+                "running_stage": "generating_storyboards",
+                "running_message": "正在生成故事版图片...",
+            },
         )
     except Exception as exc:
         raise HTTPException(500, f"提交后台任务失败: {exc}")
@@ -6991,6 +7227,13 @@ async def api_generate_videos(
             video_model=video_model,
             timeout=1800.0,
             max_retries=1,
+            metadata={
+                "workflow_id": workflow_id,
+                "stage": "generating_videos",
+                "message": "视频生成任务已排队...",
+                "running_stage": "generating_videos",
+                "running_message": "正在生成镜头视频...",
+            },
         )
     except Exception as exc:
         raise HTTPException(500, f"提交后台任务失败: {exc}")
@@ -7042,18 +7285,37 @@ async def api_run_all_stages(
                 db_wf.character_reference_ids = ref_ids
                 db.commit()
 
-    result = await run_all_stages(
-        workflow_id=workflow_id,
-        chapter_id=wf.chapter_id,
-        story_id=wf.story_id,
-        source_text=wf.source_text or "",
-        character_reference_ids=ref_ids,
-        deepseek_api_key=deepseek_api_key,
-        image_api_key=image_api_key,
-        video_api_key=video_api_key,
-        video_base_url=video_base_url,
-        video_model=video_model,
-        task_id=task_id,
-    )
+    update_chapter_workflow_status(workflow_id, "parsing_shots")
+    try:
+        await task_manager.submit_task(
+            task_id=task_id,
+            task_type="chapter_video_run_all",
+            coro_func=run_all_stages,
+            workflow_id=workflow_id,
+            chapter_id=wf.chapter_id,
+            story_id=wf.story_id,
+            source_text=wf.source_text or "",
+            character_reference_ids=ref_ids,
+            deepseek_api_key=deepseek_api_key,
+            image_api_key=image_api_key,
+            video_api_key=video_api_key,
+            video_base_url=video_base_url,
+            video_model=video_model,
+            timeout=None,
+            max_retries=1,
+            metadata={
+                "workflow_id": workflow_id,
+                "stage": "parsing_shots",
+                "message": "一键全流程已排队...",
+                "running_stage": "parsing_shots",
+                "running_message": "正在执行一键全流程...",
+            },
+        )
+    except Exception as exc:
+        raise HTTPException(500, f"提交后台任务失败: {exc}")
 
-    return result
+    return {
+        "task_id": task_id,
+        "workflow_status": "parsing_shots",
+        "message": "一键全流程任务已提交后台执行",
+    }

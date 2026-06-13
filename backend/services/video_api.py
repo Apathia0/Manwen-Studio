@@ -10,7 +10,8 @@ from pathlib import Path
 import httpx
 from dotenv import load_dotenv
 
-from .errors import MissingApiKeyError
+from .blocking import run_blocking
+from .errors import MissingApiKeyError, UpstreamServiceError
 
 load_dotenv()
 
@@ -245,7 +246,19 @@ async def create_video_job(
                 if attempt < MAX_RETRIES:
                     await asyncio.sleep(RETRY_DELAY)
                     continue
-            raise RuntimeError(f"视频 API 返回错误 (HTTP {status}): {body_text}")
+            if status == 429 or status >= 500:
+                raise UpstreamServiceError(
+                    f"视频 API 暂时不可用 (HTTP {status}): {body_text}",
+                    retryable=True,
+                    provider="Video",
+                    status_code=status,
+                )
+            raise UpstreamServiceError(
+                f"视频 API 返回错误 (HTTP {status}): {body_text}",
+                retryable=False,
+                provider="Video",
+                status_code=status,
+            )
         except httpx.TimeoutException as exc:
             last_err = exc
             if attempt < MAX_RETRIES:
@@ -255,7 +268,11 @@ async def create_video_job(
             if attempt < MAX_RETRIES:
                 await asyncio.sleep(RETRY_DELAY)
 
-    raise RuntimeError(f"视频任务提交失败，已重试 {MAX_RETRIES} 次") from last_err
+    raise UpstreamServiceError(
+        f"视频任务提交失败，已重试 {MAX_RETRIES} 次",
+        retryable=True,
+        provider="Video",
+    ) from last_err
 
 
 async def query_video_job(
@@ -340,7 +357,7 @@ async def download_video(
 
     # OSS URL 直传：如果 OSS 已配置，直接从 video_url 上传到 OSS
     remote_key = f"video_outputs/shot_{shot_id}/{job_id}{ext}"
-    oss_direct_url = _upload_video_url_to_oss(video_url, remote_key)
+    oss_direct_url = await run_blocking(_upload_video_url_to_oss, video_url, remote_key)
     if oss_direct_url:
         return oss_direct_url
 
@@ -353,10 +370,10 @@ async def download_video(
             ) as client:
                 response = await client.get(video_url)
             if response.is_success:
-                output_path.write_bytes(response.content)
+                await run_blocking(output_path.write_bytes, response.content)
                 logger.info("[video] 下载完成: %s -> %s", job_id, output_path)
                 # OSS 上传（如已配置，上传成功后删除本地文件）
-                oss_url = _upload_to_oss_if_enabled(str(output_path))
+                oss_url = await run_blocking(_upload_to_oss_if_enabled, str(output_path))
                 if oss_url:
                     try:
                         output_path.unlink(missing_ok=True)

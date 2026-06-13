@@ -1941,6 +1941,11 @@ export interface MangaGenStatusResponse {
   progress: number;
   total: number;
   error_message: string | null;
+  stage?: string | null;
+  message?: string | null;
+  retry_count?: number;
+  max_retries?: number;
+  next_retry_at?: string | null;
   created_at: string | null;
   completed_at: string | null;
 }
@@ -2720,6 +2725,12 @@ export interface VideoGenerationJob {
   aspect_ratio?: string | null;
   request_payload?: Record<string, any> | null;
   error_message?: string | null;
+  stage?: string | null;
+  message?: string | null;
+  provider_status?: string | null;
+  retry_count?: number;
+  max_retries?: number;
+  next_retry_at?: string | null;
   input_mode?: string | null;
   source_storyboard_asset_id?: number | null;
   submitted_at: string;
@@ -2826,6 +2837,12 @@ export interface ChapterVideoWorkflow {
   completed_shots: number;
   failed_shots: number;
   error_message?: string | null;
+  task_id?: string | null;
+  stage?: string | null;
+  message?: string | null;
+  retry_count?: number;
+  max_retries?: number;
+  next_retry_at?: string | null;
   created_at: string;
   updated_at: string;
   shots: ChapterVideoShot[];
@@ -2839,6 +2856,12 @@ export interface ChapterVideoWorkflowStatus {
   completed_shots: number;
   failed_shots: number;
   error_message?: string | null;
+  task_id?: string | null;
+  stage?: string | null;
+  message?: string | null;
+  retry_count?: number;
+  max_retries?: number;
+  next_retry_at?: string | null;
 }
 
 export async function generateScreenplay(chapterId: number, payload: {

@@ -15,6 +15,23 @@ class MissingApiKeyError(RuntimeError):
         )
 
 
+class UpstreamServiceError(RuntimeError):
+    """Structured upstream service failure used by background retries."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        retryable: bool,
+        provider: str = "",
+        status_code: int | None = None,
+    ):
+        self.retryable = retryable
+        self.provider = provider
+        self.status_code = status_code
+        super().__init__(message)
+
+
 class MangaImageGenerationError(RuntimeError):
     """Structured upstream image-generation failure."""
 

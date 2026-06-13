@@ -48,6 +48,28 @@ def _loads_json_lenient(text: str):
     return json.loads(text, strict=False)
 
 
+def _response_json(resp: httpx.Response, *, context: str = "DeepSeek") -> dict:
+    """Parse upstream JSON with a useful error when proxies return empty/non-JSON bodies."""
+    text = resp.text or ""
+    if not text.strip():
+        raise ValueError(f"{context} 服务返回空响应，请稍后重试或检查 API 地址、模型与代理配置")
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as exc:
+        preview = text[:300].replace("\n", "\\n").replace("\r", "\\r")
+        logger.warning(
+            "%s returned non-JSON response: status=%s content_type=%s preview=%s",
+            context,
+            resp.status_code,
+            resp.headers.get("content-type", ""),
+            preview,
+        )
+        raise ValueError(f"{context} 服务返回了非 JSON 响应，请稍后重试或检查 API 地址、模型与代理配置") from exc
+    if not isinstance(data, dict):
+        raise ValueError(f"{context} 服务响应格式异常：顶层不是 JSON 对象")
+    return data
+
+
 def _log_shot_summary(logger_obj, content: str, label: str = "拆镜"):
     """解析 JSON 并输出结构化镜头摘要日志，避免原文淹没关键信息。"""
     result = _extract_json_object(content)
@@ -362,7 +384,7 @@ async def generate_novel(messages: list[dict], api_key: str | None = None, frame
             headers=_deepseek_auth_headers(api_key),
         )
         resp.raise_for_status()
-        data = resp.json()
+        data = _response_json(resp, context="DeepSeek")
         return data["choices"][0]["message"]["content"]
 
 
@@ -415,7 +437,7 @@ async def split_scenes(chat_messages: list[dict], character_profiles: str = "", 
                 headers=_deepseek_auth_headers(api_key),
             )
             resp.raise_for_status()
-            data = resp.json()
+            data = _response_json(resp, context="DeepSeek")
             return data["choices"][0]["message"]["content"]
 
     raw = ""
@@ -663,7 +685,7 @@ async def _repair_onboarding_response(
             headers=_deepseek_auth_headers(api_key),
         )
     resp.raise_for_status()
-    data = resp.json()
+    data = _response_json(resp, context="DeepSeek")
     content = data["choices"][0]["message"]["content"]
 
     result = _extract_json_object(content)
@@ -1055,7 +1077,7 @@ async def regenerate_tags(story_context: dict, api_key: str | None = None, syste
             headers=_deepseek_auth_headers(api_key),
         )
         resp.raise_for_status()
-        data = resp.json()
+        data = _response_json(resp, context="DeepSeek")
         content = data["choices"][0]["message"]["content"]
 
     try:
@@ -1105,7 +1127,7 @@ async def regenerate_characters_with_variance(story_context: dict, api_key: str 
             headers=_deepseek_auth_headers(api_key),
         )
         resp.raise_for_status()
-        data = resp.json()
+        data = _response_json(resp, context="DeepSeek")
         content = data["choices"][0]["message"]["content"]
 
     try:
@@ -1181,7 +1203,7 @@ async def generate_character_profiles_from_framework(story_context: dict, api_ke
             headers=_deepseek_auth_headers(api_key),
         )
         resp.raise_for_status()
-        data = resp.json()
+        data = _response_json(resp, context="DeepSeek")
         return str(data["choices"][0]["message"]["content"] or "").strip()
 
 
@@ -1260,7 +1282,7 @@ async def generate_character_profiles_from_content(chapter_content: str, api_key
             headers=_deepseek_auth_headers(api_key),
         )
         resp.raise_for_status()
-        data = resp.json()
+        data = _response_json(resp, context="DeepSeek")
         return str(data["choices"][0]["message"]["content"] or "").strip()
 
 
@@ -1538,7 +1560,7 @@ async def generate_framework(
             headers=_deepseek_auth_headers(api_key),
         )
         resp.raise_for_status()
-        data = resp.json()
+        data = _response_json(resp, context="DeepSeek")
         content = data["choices"][0]["message"]["content"]
 
     try:
@@ -1605,7 +1627,7 @@ async def regenerate_outline(story_context: dict, api_key: str | None = None, st
             headers=_deepseek_auth_headers(api_key),
         )
         resp.raise_for_status()
-        data = resp.json()
+        data = _response_json(resp, context="DeepSeek")
         content = data["choices"][0]["message"]["content"]
 
     try:
@@ -1723,7 +1745,7 @@ async def adjust_framework_with_chat(
                     headers=_deepseek_auth_headers(api_key),
                 )
                 resp.raise_for_status()
-                data = resp.json()
+                data = _response_json(resp, context="DeepSeek")
                 content = data["choices"][0]["message"]["content"]
         except httpx.HTTPStatusError as e:
             if attempt < MAX_RETRIES:
@@ -1841,7 +1863,7 @@ async def continue_framework_with_chat(
                     headers=_deepseek_auth_headers(api_key),
                 )
                 resp.raise_for_status()
-                data = resp.json()
+                data = _response_json(resp, context="DeepSeek")
                 content = data["choices"][0]["message"]["content"]
         except httpx.HTTPStatusError as e:
             if attempt < MAX_RETRIES:
@@ -1961,7 +1983,7 @@ async def summarize_chapter_memory(
             headers=_deepseek_auth_headers(api_key),
         )
         resp.raise_for_status()
-        data = resp.json()
+        data = _response_json(resp, context="DeepSeek")
         content = data["choices"][0]["message"]["content"]
 
     try:
@@ -2085,7 +2107,7 @@ async def expand_chapter_to_content(story_context: dict, chapter_info: dict, api
             headers=_deepseek_auth_headers(api_key),
         )
         resp.raise_for_status()
-        data = resp.json()
+        data = _response_json(resp, context="DeepSeek")
         content = data["choices"][0]["message"]["content"]
         return _sanitize_novel_content(content)
 
@@ -2142,7 +2164,7 @@ async def rewrite_selection(
             headers=_deepseek_auth_headers(api_key),
         )
         resp.raise_for_status()
-        data = resp.json()
+        data = _response_json(resp, context="DeepSeek")
         return _sanitize_novel_content(data["choices"][0]["message"]["content"])
 
 
@@ -2205,7 +2227,7 @@ async def adjust_chapter_content(
             headers=_deepseek_auth_headers(api_key),
         )
         resp.raise_for_status()
-        data = resp.json()
+        data = _response_json(resp, context="DeepSeek")
         return _sanitize_novel_content(data["choices"][0]["message"]["content"])
 
 
@@ -2249,7 +2271,7 @@ async def quality_assess(chapter_content: str, api_key: str | None = None) -> di
             headers=_deepseek_auth_headers(api_key),
         )
         resp.raise_for_status()
-        data = resp.json()
+        data = _response_json(resp, context="DeepSeek")
         content = data["choices"][0]["message"]["content"]
 
     try:
@@ -2324,7 +2346,7 @@ JSON输出格式示例：
             headers=_deepseek_auth_headers(api_key),
         )
         resp.raise_for_status()
-        data = resp.json()
+        data = _response_json(resp, context="DeepSeek")
         content = data["choices"][0]["message"]["content"]
 
     try:
@@ -2440,7 +2462,7 @@ JSON 顶层必须包含：
             headers=_deepseek_auth_headers(api_key),
         )
         resp.raise_for_status()
-        data = resp.json()
+        data = _response_json(resp, context="DeepSeek")
         response_content = data["choices"][0]["message"]["content"]
 
     try:
@@ -2507,7 +2529,7 @@ async def generate_onboarding_response(
                     headers=_deepseek_auth_headers(api_key),
                 )
                 resp.raise_for_status()
-                data = resp.json()
+                data = _response_json(resp, context="DeepSeek")
                 content = data["choices"][0]["message"]["content"]
 
             try:
@@ -2604,7 +2626,7 @@ async def generate_import_guidance_response(
                     headers=_deepseek_auth_headers(api_key),
                 )
                 resp.raise_for_status()
-                data = resp.json()
+                data = _response_json(resp, context="DeepSeek")
                 content = data["choices"][0]["message"]["content"]
 
             result = _extract_json_object(content)
@@ -2678,7 +2700,7 @@ async def build_import_creative_brief(
             headers=_deepseek_auth_headers(api_key),
         )
         resp.raise_for_status()
-        data = resp.json()
+        data = _response_json(resp, context="DeepSeek")
         content = data["choices"][0]["message"]["content"]
 
     result = _extract_json_object(content)
@@ -2744,7 +2766,7 @@ async def build_creative_brief(
             headers=_deepseek_auth_headers(api_key),
         )
         resp.raise_for_status()
-        data = resp.json()
+        data = _response_json(resp, context="DeepSeek")
         content = data["choices"][0]["message"]["content"]
 
     try:
@@ -2812,7 +2834,7 @@ async def build_story_bible(
             headers=_deepseek_auth_headers(api_key),
         )
         resp.raise_for_status()
-        data = resp.json()
+        data = _response_json(resp, context="DeepSeek")
         content = data["choices"][0]["message"]["content"]
 
     try:
@@ -3032,7 +3054,7 @@ async def _parse_full_chunk(
             headers=_deepseek_auth_headers(api_key),
         )
         resp.raise_for_status()
-        data = resp.json()
+        data = _response_json(resp, context="DeepSeek")
         content = data["choices"][0]["message"]["content"]
 
         # 解析后输出结构化日志摘要
@@ -3151,7 +3173,7 @@ async def _parse_lite_chunk(
             headers=_deepseek_auth_headers(api_key),
         )
         resp.raise_for_status()
-        data = resp.json()
+        data = _response_json(resp, context="DeepSeek")
         content = data["choices"][0]["message"]["content"]
         try:
             _log_shot_summary(logger, content, f"轻量拆镜{chunk_label or ''}")
@@ -3366,7 +3388,7 @@ async def generate_shot_storyboard_prompt(
                 headers=_deepseek_auth_headers(api_key),
             )
             resp.raise_for_status()
-            data = resp.json()
+            data = _response_json(resp, context="DeepSeek")
             content = str(data["choices"][0]["message"]["content"] or "").strip()
             if not content:
                 return user_message
@@ -3480,7 +3502,7 @@ async def generate_shot_details(
             headers=_deepseek_auth_headers(api_key),
         )
         resp.raise_for_status()
-        data = resp.json()
+        data = _response_json(resp, context="DeepSeek")
         content = data["choices"][0]["message"]["content"]
 
     try:
@@ -3544,7 +3566,7 @@ async def generate_shot_scene_prop_prompts(
             headers=_deepseek_auth_headers(api_key),
         )
         resp.raise_for_status()
-        data = resp.json()
+        data = _response_json(resp, context="DeepSeek")
         content = data["choices"][0]["message"]["content"]
 
     try:
@@ -3609,7 +3631,7 @@ async def generate_shot_character_prompts_ai(
             headers=_deepseek_auth_headers(api_key),
         )
         resp.raise_for_status()
-        data = resp.json()
+        data = _response_json(resp, context="DeepSeek")
         content = data["choices"][0]["message"]["content"]
 
     try:
@@ -3670,7 +3692,7 @@ async def generate_shot_video_prompt_ai(
             headers=_deepseek_auth_headers(api_key),
         )
         resp.raise_for_status()
-        data = resp.json()
+        data = _response_json(resp, context="DeepSeek")
         content = data["choices"][0]["message"]["content"]
 
     try:

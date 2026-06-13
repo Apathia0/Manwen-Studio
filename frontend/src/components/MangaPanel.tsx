@@ -417,8 +417,14 @@ export default memo(function MangaPanel({
           genStore.finish(chapterId, status.error_message || '未知错误');
         } else if (status.status === 'running' || status.status === 'pending' || status.status === 'retrying') {
           // 后台任务仍在进行，更新进度
+          const message = status.message || (
+            status.status === 'retrying'
+              ? `上游较慢，正在自动重试 ${status.retry_count ?? 0}/${status.max_retries ?? 0}`
+              : `后台正在生成漫画 (${status.progress}/${status.total})`
+          );
           setProgress({ current: status.progress, total: status.total });
-          genStore.patch(chapterId, { current: status.progress, total: status.total });
+          setStatusMsg(message);
+          genStore.patch(chapterId, { current: status.progress, total: status.total, statusMsg: message });
         }
       } catch (err) {
         console.error('后端任务轮询错误:', err);
@@ -433,10 +439,15 @@ export default memo(function MangaPanel({
       const status = await getMangaGenerationStatus(chapterId);
       if (status.status === 'running' || status.status === 'pending' || status.status === 'retrying') {
         // 后台有正在运行的任务，恢复进度显示并开始轮询
+        const message = status.message || (
+          status.status === 'retrying'
+            ? `上游较慢，正在自动重试 ${status.retry_count ?? 0}/${status.max_retries ?? 0}`
+            : `后台正在生成漫画 (${status.progress}/${status.total})`
+        );
         setProgress({ current: status.progress, total: status.total });
-        setStatusMsg(`检测到后台正在生成漫画 (${status.progress}/${status.total})`);
+        setStatusMsg(message);
         genStore.start(chapterId, status.total, []);
-        genStore.patch(chapterId, { current: status.progress, total: status.total, statusMsg: `后台正在生成漫画 (${status.progress}/${status.total})` });
+        genStore.patch(chapterId, { current: status.progress, total: status.total, statusMsg: message });
         startBackendTaskPolling(chapterId);
       } else if (status.status === 'succeeded') {
         // 后台任务已经完成，同步最新图片
@@ -1051,15 +1062,25 @@ export default memo(function MangaPanel({
     const controller = generateMangaStream(targetId, (event: MangaProgress) => {
       switch (event.type) {
         case 'status':
-          genStore.patch(targetId, { statusMsg: event.data.message });
+          if (event.data.message) {
+            setStatusMsg(event.data.message);
+            genStore.patch(targetId, { statusMsg: event.data.message });
+          }
           break;
-        case 'progress':
+        case 'progress': {
+          const progressMessage = event.data.message || (
+            event.data.retry_count > 0
+              ? `上游较慢，正在自动重试 ${event.data.retry_count}/${event.data.max_retries ?? 0}`
+              : `正在生成第 ${event.data.current}/${event.data.total} 张漫画`
+          );
+          setStatusMsg(progressMessage);
           genStore.patch(targetId, {
             current: event.data.current,
             total: event.data.total,
-            statusMsg: `正在生成第 ${event.data.current}/${event.data.total} 张漫画`,
+            statusMsg: progressMessage,
           });
           break;
+        }
         case 'image':
           genStore.pushImage(targetId, {
             image_number: event.data.image_number,

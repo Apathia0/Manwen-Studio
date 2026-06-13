@@ -14,6 +14,7 @@ from pathlib import Path
 import httpx
 from PIL import Image
 
+from .blocking import run_blocking
 from .errors import MangaImageGenerationError, MissingApiKeyError
 from .scene_safety import sanitize_scene_text
 
@@ -25,9 +26,11 @@ os.environ["NO_PROXY"] = "*"
 os.environ["no_proxy"] = "*"
 
 # 默认值会被 router 层从 PlatformSetting 数据库动态覆盖
-IMAGE_API_BASE_URL = ""
+DEFAULT_IMAGE_API_BASE_URL = ""
+DEFAULT_IMAGE_MODEL = ""
+IMAGE_API_BASE_URL = DEFAULT_IMAGE_API_BASE_URL
 IMAGE_API_KEY = ""
-IMAGE_MODEL = ""
+IMAGE_MODEL = DEFAULT_IMAGE_MODEL
 IMAGE_SIZE = "1024x1024"
 # 用于所有图片生成请求的负面提示词（抑制解剖学畸形和画面污染）
 IMAGE_NEGATIVE_PROMPT = (
@@ -876,16 +879,19 @@ async def generate_reference_image(
 
             # OSS URL 直传：跳过本地下载
             remote_key = str(output_path.relative_to(OUTPUT_DIR.parent)).replace("\\", "/") if output_path.is_absolute() else str(output_path)
-            oss_url = _upload_image_url_to_oss(image_entry, remote_key)
+            oss_url = await run_blocking(_upload_image_url_to_oss, image_entry, remote_key)
             if oss_url:
                 logger.info("[%s] 角色参考图 OSS 直传成功，跳过本地下载", progress_label)
                 return oss_url
 
-            image_bytes = normalize_image_bytes(await _download_generated_image(image_entry, progress_label))
+            image_bytes = await run_blocking(
+                normalize_image_bytes,
+                await _download_generated_image(image_entry, progress_label),
+            )
             output_path.parent.mkdir(parents=True, exist_ok=True)
-            output_path.write_bytes(image_bytes)
+            await run_blocking(output_path.write_bytes, image_bytes)
             logger.info("[%s] 角色参考图已保存到 %s", progress_label, output_path)
-            oss_url = _upload_to_oss_if_enabled(str(output_path))
+            oss_url = await run_blocking(_upload_to_oss_if_enabled, str(output_path))
             if oss_url:
                 try:
                     output_path.unlink(missing_ok=True)
@@ -964,16 +970,19 @@ async def generate_cover_image(
 
             # OSS URL 直传：跳过本地下载
             remote_key = f"manga_outputs/covers/{output_path.name}"
-            oss_url = _upload_image_url_to_oss(image_entry, remote_key)
+            oss_url = await run_blocking(_upload_image_url_to_oss, image_entry, remote_key)
             if oss_url:
                 logger.info("[%s] 封面 OSS 直传成功，跳过本地下载", progress_label)
                 return oss_url
 
-            image_bytes = normalize_image_bytes(await _download_generated_image(image_entry, progress_label))
+            image_bytes = await run_blocking(
+                normalize_image_bytes,
+                await _download_generated_image(image_entry, progress_label),
+            )
             output_path.parent.mkdir(parents=True, exist_ok=True)
-            output_path.write_bytes(image_bytes)
+            await run_blocking(output_path.write_bytes, image_bytes)
             logger.info("[%s] 小说封面已保存到 %s", progress_label, output_path)
-            oss_url = _upload_to_oss_if_enabled(str(output_path))
+            oss_url = await run_blocking(_upload_to_oss_if_enabled, str(output_path))
             if oss_url:
                 try:
                     output_path.unlink(missing_ok=True)
@@ -1049,7 +1058,10 @@ async def edit_existing_image(
             provider_message=str(source_image_path),
         )
 
-    source_bytes = normalize_image_bytes(source_image_path.read_bytes())
+    source_bytes = await run_blocking(
+        normalize_image_bytes,
+        await run_blocking(source_image_path.read_bytes),
+    )
     if not size:
         try:
             with Image.open(io.BytesIO(source_bytes)) as img:
@@ -1083,16 +1095,19 @@ async def edit_existing_image(
 
             # OSS URL 直传：跳过本地下载
             remote_key = str(output_path.relative_to(OUTPUT_DIR.parent)).replace("\\", "/") if output_path.is_absolute() else str(output_path)
-            oss_url = _upload_image_url_to_oss(image_entry, remote_key)
+            oss_url = await run_blocking(_upload_image_url_to_oss, image_entry, remote_key)
             if oss_url:
                 logger.info("[%s] 图片编辑 OSS 直传成功，跳过本地下载", progress_label)
                 return oss_url
 
-            image_bytes = normalize_image_bytes(await _download_generated_image(image_entry, progress_label))
+            image_bytes = await run_blocking(
+                normalize_image_bytes,
+                await _download_generated_image(image_entry, progress_label),
+            )
             output_path.parent.mkdir(parents=True, exist_ok=True)
-            output_path.write_bytes(image_bytes)
+            await run_blocking(output_path.write_bytes, image_bytes)
             logger.info("[%s] 图片编辑完成并保存到 %s", progress_label, output_path)
-            oss_url = _upload_to_oss_if_enabled(str(output_path))
+            oss_url = await run_blocking(_upload_to_oss_if_enabled, str(output_path))
             if oss_url:
                 try:
                     output_path.unlink(missing_ok=True)
@@ -1162,7 +1177,7 @@ async def generate_manga_image(
     # 构建策略列表——每个策略都保证角色参考图被使用，绝不降级到无图模式
     strategies: list[tuple[str, bool, list[tuple[str, bytes]], str]] = []
     if valid_refs:
-        ref_blobs = _prepare_ref_blobs(valid_refs, progress_label)
+        ref_blobs = await run_blocking(_prepare_ref_blobs, valid_refs, progress_label)
         if len(ref_blobs) > 1:
             # 策略1：多图 image[] + 官方编号 prompt——模型知道每张图对应哪个角色
             numbered = "\n".join(
@@ -1186,7 +1201,7 @@ async def generate_manga_image(
 
             # 策略2：合拼单图编辑——image[] 返回空时的后备，同样用视觉参考保证角色一致
             try:
-                comp_blob, comp_desc = _compose_ref_sheet(valid_refs, valid_labels)
+                comp_blob, comp_desc = await run_blocking(_compose_ref_sheet, valid_refs, valid_labels)
                 strategies.append(("composite_edits", True, [("ref_composite.png", comp_blob)], comp_desc))
             except Exception as exc:
                 logger.warning("[%s] 合拼参考图生成失败，将仅使用多图策略: %s", progress_label, exc)
@@ -1300,7 +1315,7 @@ async def generate_manga_image(
                     chapter_dir.mkdir(parents=True, exist_ok=True)
                     filename = f"panel_{image_number:02d}_{uuid.uuid4().hex[:8]}.png"
                     remote_key = f"manga_outputs/chapter_{chapter_id}/{filename}"
-                    oss_url = _upload_image_url_to_oss(image_entry, remote_key)
+                    oss_url = await run_blocking(_upload_image_url_to_oss, image_entry, remote_key)
                     if oss_url:
                         logger.info("[%s] OSS URL 直传成功，跳过本地下载: %s", progress_label, oss_url)
                         return ImageGenerationResult(
@@ -1310,15 +1325,18 @@ async def generate_manga_image(
                         )
 
                     # 回退到本地下载→保存→上传 OSS
-                    image_bytes = normalize_image_bytes(await _download_generated_image(image_entry, progress_label))
+                    image_bytes = await run_blocking(
+                        normalize_image_bytes,
+                        await _download_generated_image(image_entry, progress_label),
+                    )
 
                     filepath = chapter_dir / filename
-                    filepath.write_bytes(image_bytes)
+                    await run_blocking(filepath.write_bytes, image_bytes)
                     logger.info("[%s] 已保存到 %s", progress_label, filepath)
 
                     # OSS 上传（如已配置，上传成功后删除本地文件）
                     image_path = f"manga_outputs/chapter_{chapter_id}/{filename}"
-                    oss_url = _upload_to_oss_if_enabled(str(filepath))
+                    oss_url = await run_blocking(_upload_to_oss_if_enabled, str(filepath))
                     if oss_url:
                         image_path = oss_url
                         try:

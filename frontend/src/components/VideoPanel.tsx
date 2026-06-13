@@ -21,7 +21,15 @@ export default function VideoPanel({
   const [error, setError] = useState<string | null>(null);
   const [showUnlockWarning, setShowUnlockWarning] = useState(false);
   const [sseConnected, setSseConnected] = useState(false);
-  const [sseProgress, setSseProgress] = useState<{progress: number; stage: string; message: string} | null>(null);
+  const [sseProgress, setSseProgress] = useState<{
+    progress: number;
+    stage: string;
+    message: string;
+    provider_status?: string | null;
+    retry_count?: number;
+    max_retries?: number;
+    next_retry_at?: string | null;
+  } | null>(null);
 
   // 用于组件卸载时清理轮询定时器
   const pollingRef = useRef<{ timeoutId: ReturnType<typeof setTimeout> | null; mounted: boolean }>({
@@ -135,6 +143,10 @@ export default function VideoPanel({
                 progress: parsed.progress || 0,
                 stage: parsed.stage || '',
                 message: parsed.message || '',
+                provider_status: parsed.provider_status ?? null,
+                retry_count: parsed.retry_count ?? 0,
+                max_retries: parsed.max_retries ?? 0,
+                next_retry_at: parsed.next_retry_at ?? null,
               });
             } else if (currentEvent === 'done') {
               setSseProgress({ progress: 100, stage: 'done', message: '生成完成！' });
@@ -357,6 +369,11 @@ export default function VideoPanel({
           {sseProgress.message && (
             <p className="text-xs text-indigo-500 mt-1">{sseProgress.message}</p>
           )}
+          {(sseProgress.retry_count ?? 0) > 0 && (
+            <p className="text-xs text-amber-600 mt-1">
+              自动重试 {sseProgress.retry_count}/{sseProgress.max_retries ?? 0}
+            </p>
+          )}
         </div>
       )}
 
@@ -399,8 +416,15 @@ export default function VideoPanel({
                 </div>
                 <div className="mt-1 flex gap-2 text-slate-400">
                   <span>Provider: {job.provider}</span>
+                  {job.provider_status && <span>· 上游：{job.provider_status}</span>}
                   {job.input_mode && <span>· {job.input_mode === 'image_to_video' ? '图生视频' : '文生视频'}</span>}
                 </div>
+                {job.message && (
+                  <div className="mt-1 text-slate-500">{job.message}</div>
+                )}
+                {(job.retry_count ?? 0) > 0 && (
+                  <div className="mt-1 text-amber-600">自动重试 {job.retry_count}/{job.max_retries ?? 0}</div>
+                )}
               </div>
             ))}
           </div>

@@ -200,7 +200,9 @@ export default function ChapterVideoWorkflowPanel({
     }
   }, []);
 
-  const getWorkflowRunningLabel = (s: string): string => {
+  const getWorkflowRunningLabel = (item: ChapterVideoWorkflow | null): string => {
+    if (item?.message) return item.message;
+    const s = item?.stage || item?.workflow_status || '';
     const labels: Record<string, string> = {
       parsing_shots: '正在拆镜...',
       generating_storyboards: '正在生成故事版...',
@@ -220,6 +222,9 @@ export default function ChapterVideoWorkflowPanel({
   }
 
   const status = workflow?.workflow_status ?? '';
+  const retryHint = workflow && (workflow.retry_count ?? 0) > 0
+    ? `自动重试 ${workflow.retry_count}/${workflow.max_retries ?? 0}`
+    : '';
 
   const canParse = canStartChapterWorkflowParse({
     workflowExists: Boolean(workflow),
@@ -329,7 +334,8 @@ export default function ChapterVideoWorkflowPanel({
               <div className="absolute inset-0 z-10 flex items-center justify-center bg-white/80 backdrop-blur-sm">
                 <div className="flex flex-col items-center gap-3">
                   <Loader2 size={32} className="animate-spin text-blue-500" />
-                  <span className="text-sm font-medium text-slate-600">正在拆镜...</span>
+                  <span className="text-sm font-medium text-slate-600">{workflow?.message || '正在拆镜...'}</span>
+                  {retryHint && <span className="text-xs text-amber-600">{retryHint}</span>}
                 </div>
               </div>
             )}
@@ -338,7 +344,8 @@ export default function ChapterVideoWorkflowPanel({
               <div className="absolute inset-0 z-10 flex items-center justify-center bg-white/80 backdrop-blur-sm">
                 <div className="flex flex-col items-center gap-3">
                   <Loader2 size={32} className="animate-spin text-blue-500" />
-                  <span className="text-sm font-medium text-slate-600">{getWorkflowRunningLabel(status)}</span>
+                  <span className="text-sm font-medium text-slate-600">{getWorkflowRunningLabel(workflow)}</span>
+                  {retryHint && <span className="text-xs text-amber-600">{retryHint}</span>}
                 </div>
               </div>
             )}

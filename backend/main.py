@@ -6547,6 +6547,21 @@ DEFAULT_IMAGE_COUNT = 10
 ALLOWED_IMAGE_COUNTS = [4, 6, 8, 10, 12, 15, 20]
 
 
+def _load_manga_image_concurrency() -> int:
+    try:
+        configured = int(os.getenv("MANGA_IMAGE_CONCURRENCY", "4"))
+    except (TypeError, ValueError):
+        configured = 4
+    return max(1, min(8, configured))
+
+
+MANGA_IMAGE_CONCURRENCY = _load_manga_image_concurrency()
+
+
+def _manga_image_concurrency(total: int) -> int:
+    return max(1, min(total, MANGA_IMAGE_CONCURRENCY))
+
+
 def _image_count_path(chapter_id: int) -> Path:
     return Path(__file__).resolve().parent / "manga_outputs" / f"chapter_{chapter_id}" / "image_count.txt"
 
@@ -6749,6 +6764,13 @@ async def _background_manga_generation(
     logger.info(f"Background manga generation started: chapter={chapter_id}, images={image_count}")
     completed = 0
     total = len(scenes)
+    task_manager.update_task_metadata(
+        task_id,
+        stage="preparing",
+        message=f"正在准备生成 {total} 张漫画...",
+        current=0,
+        total=total,
+    )
 
     # 提前设置 result_json，使 get_manga_generation_status 能获取 total
     init_db = SessionLocal()
@@ -6761,6 +6783,14 @@ async def _background_manga_generation(
         init_db.close()
 
     for i, scene_prompt in enumerate(scenes, start=1):
+        task_manager.update_task_metadata(
+            task_id,
+            stage="generating",
+            message=f"正在生成第 {i}/{total} 张漫画...",
+            current=completed,
+            total=total,
+            current_image=i,
+        )
         # 检查用户是否请求取消（优雅取消：当前 await 完成后才生效）
         if task_manager.is_cancellation_requested(task_id):
             logger.info(f"Background manga generation cancelled by user at image {i}/{total}")
@@ -6775,6 +6805,14 @@ async def _background_manga_generation(
             ).first()
             if existing:
                 completed += 1
+                task_manager.update_task_metadata(
+                    task_id,
+                    stage="generating",
+                    message=f"已存在第 {i}/{total} 张漫画，继续后续图片...",
+                    current=completed,
+                    total=total,
+                    current_image=i,
+                )
                 continue
         finally:
             check_db.close()
@@ -6805,9 +6843,27 @@ async def _background_manga_generation(
                 _write_scenes_file(chapter_id, scenes, sanitized_indices)
                 scene_prompt = image_result.final_prompt
         except (MangaImageGenerationError, Exception) as e:
+            task_manager.update_task_metadata(
+                task_id,
+                stage="retrying" if getattr(e, "retryable", False) else "failed",
+                message=str(e),
+                current=completed,
+                total=total,
+                current_image=i,
+                retryable=bool(getattr(e, "retryable", False)),
+            )
             logger.error(f"Background manga image {i} failed: {e}")
             raise  # 让 TaskManager 处理重试/失败
         
+        task_manager.update_task_metadata(
+            task_id,
+            stage="saving",
+            message=f"第 {i}/{total} 张漫画已生成，正在保存结果...",
+            current=completed,
+            total=total,
+            current_image=i,
+        )
+
         # 保存到数据库
         write_db = SessionLocal()
         try:
@@ -6827,6 +6883,13 @@ async def _background_manga_generation(
             write_db.close()
         
         completed += 1
+        task_manager.update_task_metadata(
+            task_id,
+            stage="generating",
+            message=f"已完成 {completed}/{total} 张漫画...",
+            current=completed,
+            total=total,
+        )
     
     # 如果因用户取消而退出循环，在 DB 标记失败（_on_task_complete 不会覆盖已存在的 failed）
     if task_manager.is_cancellation_requested(task_id):
@@ -6838,11 +6901,309 @@ async def _background_manga_generation(
                 bg_task.status = "failed"
                 bg_task.error_message = f"用户手动取消了任务，已完成 {completed}/{total} 张"
                 bg_task.completed_at = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
+                meta = bg_task.metadata_json if isinstance(bg_task.metadata_json, dict) else {}
+                bg_task.metadata_json = {
+                    **meta,
+                    "stage": "cancelled",
+                    "message": bg_task.error_message,
+                    "current": completed,
+                    "total": total,
+                    "next_retry_at": None,
+                }
                 cancel_db.commit()
         finally:
             cancel_db.close()
+        logger.info(f"Background manga generation cancelled: chapter={chapter_id}, completed={completed}/{total}")
+        return {"completed_images": completed, "total_images": total, "cancelled": True}
     
+    task_manager.update_task_metadata(
+        task_id,
+        stage="succeeded",
+        message=f"漫画生成完成，共 {completed}/{total} 张",
+        current=completed,
+        total=total,
+        next_retry_at=None,
+    )
     logger.info(f"Background manga generation completed: chapter={chapter_id}, completed={completed}/{total}")
+    return {"completed_images": completed, "total_images": total}
+
+
+async def _background_manga_generation_concurrent(
+    chapter_id: int,
+    scenes: list,
+    image_count: int,
+    character_profiles: str,
+    ref_entries: list,
+    color_mode: str,
+    image_api_key: str,
+    custom_image_provider: bool,
+    user_id: int,
+    task_id: str | None = None,
+    **kwargs,
+) -> dict:
+    """Generate chapter manga pages concurrently with a bounded fan-out."""
+
+    total = len(scenes)
+    concurrency = _manga_image_concurrency(total)
+    completed = 0
+    running_images: set[int] = set()
+    progress_lock = asyncio.Lock()
+    scenes_lock = asyncio.Lock()
+    page_semaphore = asyncio.Semaphore(concurrency)
+    stop_scheduling = asyncio.Event()
+
+    logger.info(
+        "Concurrent manga generation started: chapter=%s, images=%s, concurrency=%s",
+        chapter_id,
+        total,
+        concurrency,
+    )
+
+    def _write_result_progress(done: int) -> None:
+        db = SessionLocal()
+        try:
+            bg_task = db.query(BackgroundTask).filter(BackgroundTask.task_id == task_id).first()
+            if bg_task:
+                bg_task.result_json = {"completed_images": done, "total_images": total}
+                db.commit()
+        finally:
+            db.close()
+
+    def _update_progress(
+        *,
+        stage: str,
+        message: str,
+        current_image: int | None = None,
+        **extra: Any,
+    ) -> None:
+        task_manager.update_task_metadata(
+            task_id,
+            stage=stage,
+            message=message,
+            current=completed,
+            total=total,
+            current_image=current_image,
+            running_images=sorted(running_images),
+            concurrency=concurrency,
+            next_retry_at=None,
+            **extra,
+        )
+
+    task_manager.update_task_metadata(
+        task_id,
+        stage="preparing",
+        message=f"正在准备并发生成 {total} 张漫画，最多同时 {concurrency} 张...",
+        current=0,
+        total=total,
+        concurrency=concurrency,
+    )
+    _write_result_progress(0)
+
+    async def _generate_one(image_number: int, scene_prompt: str) -> dict[str, Any]:
+        nonlocal completed
+
+        async with page_semaphore:
+            if task_manager.is_cancellation_requested(task_id) or stop_scheduling.is_set():
+                return {"status": "cancelled", "image_number": image_number}
+
+            async with progress_lock:
+                running_images.add(image_number)
+                _update_progress(
+                    stage="generating",
+                    message=(
+                        f"正在并发生成漫画 {completed}/{total}，"
+                        f"第 {image_number} 张已开始（最多同时 {concurrency} 张）..."
+                    ),
+                    current_image=image_number,
+                )
+
+            final_prompt = scene_prompt
+            try:
+                check_db = SessionLocal()
+                try:
+                    existing = check_db.query(MangaImage).filter(
+                        MangaImage.chapter_id == chapter_id,
+                        MangaImage.image_number == image_number,
+                    ).first()
+                finally:
+                    check_db.close()
+
+                if existing:
+                    async with progress_lock:
+                        running_images.discard(image_number)
+                        completed += 1
+                        _write_result_progress(completed)
+                        _update_progress(
+                            stage="generating",
+                            message=(
+                                f"第 {image_number}/{total} 张漫画已存在，"
+                                f"已完成 {completed}/{total} 张。"
+                            ),
+                            current_image=image_number,
+                        )
+                    return {"status": "skipped", "image_number": image_number}
+
+                ref_imgs = _select_ref_image_paths_for_scene(scene_prompt, ref_entries)
+                ref_paths = [str(p) for p, _ in ref_imgs]
+                ref_labels = [label for _, label in ref_imgs]
+
+                image_result = await generate_manga_image(
+                    scene_prompt,
+                    chapter_id,
+                    image_number,
+                    all_scenes=list(scenes),
+                    character_profiles=character_profiles,
+                    ref_image_paths=ref_paths if ref_paths else None,
+                    ref_labels=ref_labels if any(ref_labels) else None,
+                    color_mode=color_mode,
+                    api_key=image_api_key,
+                )
+
+                if image_result.prompt_sanitized and image_result.final_prompt != scene_prompt:
+                    async with scenes_lock:
+                        scenes[image_number - 1] = image_result.final_prompt
+                        meta = _load_scene_meta(chapter_id)
+                        sanitized_indices = sorted(set((meta.get("sanitized_indices", []) or []) + [image_number - 1]))
+                        _write_scenes_file(chapter_id, scenes, sanitized_indices)
+                        final_prompt = image_result.final_prompt
+
+                async with progress_lock:
+                    _update_progress(
+                        stage="saving",
+                        message=f"第 {image_number}/{total} 张漫画已生成，正在保存结果...",
+                        current_image=image_number,
+                    )
+
+                write_db = SessionLocal()
+                try:
+                    existing = write_db.query(MangaImage).filter(
+                        MangaImage.chapter_id == chapter_id,
+                        MangaImage.image_number == image_number,
+                    ).first()
+                    if not existing:
+                        manga = MangaImage(
+                            chapter_id=chapter_id,
+                            image_number=image_number,
+                            image_path=image_result.image_path,
+                            prompt=final_prompt,
+                        )
+                        write_db.add(manga)
+                        if custom_image_provider:
+                            write_db.commit()
+                        else:
+                            _check_and_consume_quota(
+                                user_id,
+                                "manga.image.monthly_limit",
+                                1,
+                                write_db,
+                                deduct=True,
+                            )
+                        write_db.refresh(manga)
+                finally:
+                    write_db.close()
+
+                async with progress_lock:
+                    running_images.discard(image_number)
+                    completed += 1
+                    _write_result_progress(completed)
+                    _update_progress(
+                        stage="generating" if completed < total else "saving",
+                        message=f"已完成 {completed}/{total} 张漫画。",
+                        current_image=image_number,
+                    )
+                return {"status": "completed", "image_number": image_number}
+
+            except Exception as exc:
+                stop_scheduling.set()
+                async with progress_lock:
+                    running_images.discard(image_number)
+                    _update_progress(
+                        stage="retrying" if getattr(exc, "retryable", False) else "failed",
+                        message=f"第 {image_number}/{total} 张漫画生成失败：{exc}",
+                        current_image=image_number,
+                        failed_image=image_number,
+                        retryable=bool(getattr(exc, "retryable", False)),
+                    )
+                logger.error("Background manga image %s failed: %s", image_number, exc)
+                return {"status": "failed", "image_number": image_number, "exception": exc}
+
+    tasks = [
+        asyncio.create_task(_generate_one(i, scene_prompt))
+        for i, scene_prompt in enumerate(scenes, start=1)
+    ]
+    results: list[dict[str, Any]] = []
+    for finished in asyncio.as_completed(tasks):
+        results.append(await finished)
+
+    if task_manager.is_cancellation_requested(task_id):
+        task_manager.clear_cancellation_flag(task_id)
+        cancel_db = SessionLocal()
+        try:
+            bg_task = cancel_db.query(BackgroundTask).filter(BackgroundTask.task_id == task_id).first()
+            if bg_task and bg_task.status != "failed":
+                bg_task.status = "failed"
+                bg_task.error_message = f"用户手动取消了任务，已完成 {completed}/{total} 张"
+                bg_task.completed_at = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
+                meta = bg_task.metadata_json if isinstance(bg_task.metadata_json, dict) else {}
+                bg_task.metadata_json = {
+                    **meta,
+                    "stage": "cancelled",
+                    "message": bg_task.error_message,
+                    "current": completed,
+                    "total": total,
+                    "running_images": [],
+                    "next_retry_at": None,
+                }
+                cancel_db.commit()
+        finally:
+            cancel_db.close()
+        logger.info(
+            "Concurrent manga generation cancelled: chapter=%s, completed=%s/%s",
+            chapter_id,
+            completed,
+            total,
+        )
+        return {"completed_images": completed, "total_images": total, "cancelled": True}
+
+    failures = [result for result in results if result.get("status") == "failed"]
+    if failures:
+        first_failure = failures[0]
+        failed_image = first_failure["image_number"]
+        exc = first_failure["exception"]
+        async with progress_lock:
+            running_images.clear()
+            _update_progress(
+                stage="retrying" if getattr(exc, "retryable", False) else "failed",
+                message=f"第 {failed_image}/{total} 张漫画生成失败，已完成 {completed}/{total} 张：{exc}",
+                current_image=failed_image,
+                failed_image=failed_image,
+                retryable=bool(getattr(exc, "retryable", False)),
+            )
+        raise exc
+
+    if completed < total:
+        raise MangaImageGenerationError(
+            code="incomplete_generation",
+            user_message=f"漫画生成未完整完成，已完成 {completed}/{total} 张，请稍后重试。",
+            retryable=True,
+        )
+
+    task_manager.update_task_metadata(
+        task_id,
+        stage="succeeded",
+        message=f"漫画生成完成，共 {completed}/{total} 张。",
+        current=completed,
+        total=total,
+        running_images=[],
+        concurrency=concurrency,
+        next_retry_at=None,
+    )
+    logger.info(
+        "Concurrent manga generation completed: chapter=%s, completed=%s/%s",
+        chapter_id,
+        completed,
+        total,
+    )
     return {"completed_images": completed, "total_images": total}
 
 
@@ -6895,15 +7256,16 @@ async def generate_manga_stream(chapter_id: int, request: Request, db: Session =
     user_id = user.id
     _release_db_transaction(db)
 
-    # 漫画生成超时常量，与 submit_task 的 timeout 参数同步
-    _manga_gen_timeout = 1800  # 30 minutes
+    # 慢上游下按图片数量动态放宽整章超时；页内图片使用受控并发执行。
+    _manga_gen_timeout = max(1800, len(scenes) * 900)
+    _manga_concurrency = _manga_image_concurrency(len(scenes))
 
     # 提交后台任务到 TaskManager
     task_id = f"manga_gen_{chapter_id}_{int(datetime.datetime.utcnow().timestamp())}"
     await task_manager.submit_task(
         task_id=task_id,
         task_type="manga_generation",
-        coro_func=_background_manga_generation,
+        coro_func=_background_manga_generation_concurrent,
         chapter_id=chapter_id,
         scenes=scenes,
         image_count=image_count,
@@ -6914,7 +7276,16 @@ async def generate_manga_stream(chapter_id: int, request: Request, db: Session =
         custom_image_provider=custom_image_provider,
         user_id=user_id,
         timeout=_manga_gen_timeout,
-        max_retries=0,
+        max_retries=1,
+        metadata={
+            "stage": "queued",
+            "message": f"漫画生成任务已排队，共 {len(scenes)} 张，最多同时 {_manga_concurrency} 张...",
+            "current": 0,
+            "total": len(scenes),
+            "concurrency": _manga_concurrency,
+            "running_stage": "preparing",
+            "running_message": f"正在准备并发漫画生成，最多同时 {_manga_concurrency} 张...",
+        },
     )
 
     # 已发送过的图片编号集合，防止重复推送
@@ -6932,8 +7303,31 @@ async def generate_manga_stream(chapter_id: int, request: Request, db: Session =
                 poll_count += 1
                 task_status = task_manager.get_task_status(task_id)
 
+                def progress_payload(
+                    current: int,
+                    prompt: str,
+                    *,
+                    status_info: dict | None = None,
+                ) -> dict:
+                    info = status_info or {}
+                    message = info.get("message") or prompt
+                    return {
+                        "current": current,
+                        "total": image_count,
+                        "prompt": message,
+                        "stage": info.get("stage"),
+                        "message": message,
+                        "retry_count": info.get("retry_count", 0),
+                        "max_retries": info.get("max_retries", 0),
+                        "next_retry_at": info.get("next_retry_at"),
+                        "running_images": info.get("running_images") or [],
+                        "current_image": info.get("current_image"),
+                        "failed_image": info.get("failed_image"),
+                        "concurrency": info.get("concurrency"),
+                    }
+
                 if task_status is None:
-                    yield {"event": "progress", "data": json.dumps({"current": 0, "total": image_count, "prompt": "正在排队..."}, ensure_ascii=False)}
+                    yield {"event": "progress", "data": json.dumps(progress_payload(0, "正在排队..."), ensure_ascii=False)}
                     await asyncio.sleep(2)
                     continue
 
@@ -6961,7 +7355,7 @@ async def generate_manga_stream(chapter_id: int, request: Request, db: Session =
                     return
 
                 elif status == "failed":
-                    error_msg = task_status.get("error_message", "Generation failed")
+                    error_msg = task_status.get("message") or task_status.get("error_message", "Generation failed")
                     yield {"event": "error", "data": json.dumps({"error": error_msg}, ensure_ascii=False)}
                     return
 
@@ -6976,11 +7370,11 @@ async def generate_manga_stream(chapter_id: int, request: Request, db: Session =
                         check_db2.close()
 
                     completed_count = len(existing_imgs)
-                    yield {"event": "progress", "data": json.dumps({
-                        "current": completed_count,
-                        "total": image_count,
-                        "prompt": f"正在生成第 {completed_count + 1}/{image_count} 张漫画",
-                    }, ensure_ascii=False)}
+                    yield {"event": "progress", "data": json.dumps(progress_payload(
+                        completed_count,
+                        f"正在生成第 {completed_count + 1}/{image_count} 张漫画",
+                        status_info=task_status,
+                    ), ensure_ascii=False)}
 
                     # 仅发送增量图片（防止重复推送）
                     for img_obj in existing_imgs:
@@ -6997,10 +7391,14 @@ async def generate_manga_stream(chapter_id: int, request: Request, db: Session =
                             }
 
                 elif status == "pending":
-                    yield {"event": "progress", "data": json.dumps({"current": 0, "total": image_count, "prompt": "正在排队..."}, ensure_ascii=False)}
+                    yield {"event": "progress", "data": json.dumps(progress_payload(0, "正在排队...", status_info=task_status), ensure_ascii=False)}
 
                 elif status == "retrying":
-                    yield {"event": "progress", "data": json.dumps({"current": 0, "total": image_count, "prompt": "正在重试..."}, ensure_ascii=False)}
+                    yield {"event": "progress", "data": json.dumps(progress_payload(
+                        int((task_status.get("metadata_json") or {}).get("current") or 0),
+                        "上游较慢，正在自动重试...",
+                        status_info=task_status,
+                    ), ensure_ascii=False)}
 
                 await asyncio.sleep(2)
 
@@ -7043,6 +7441,13 @@ async def cancel_manga_generation(chapter_id: int, request: Request, db: Session
     task.status = "failed"
     task.error_message = "用户手动取消了任务"
     task.completed_at = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
+    meta = task.metadata_json if isinstance(task.metadata_json, dict) else {}
+    task.metadata_json = {
+        **meta,
+        "stage": "cancelled",
+        "message": "用户手动取消了任务",
+        "next_retry_at": None,
+    }
     db.commit()
 
     # 3) 清理活跃集合
@@ -7075,12 +7480,26 @@ async def get_manga_generation_status(chapter_id: int, request: Request, db: Ses
         MangaImage.chapter_id == chapter_id,
     ).count()
 
+    meta = task.metadata_json if isinstance(task.metadata_json, dict) else {}
+    friendly_message = meta.get("message") or task.error_message
+    if not friendly_message:
+        friendly_message = "漫画生成完成" if task.status == "succeeded" else "漫画生成中"
+
     return {
         "task_id": task.task_id,
         "status": task.status,
         "progress": image_count,
         "total": task.result_json.get("total_images", image_count) if task.result_json else image_count,
         "error_message": task.error_message,
+        "stage": meta.get("stage"),
+        "message": friendly_message,
+        "retry_count": task.retry_count,
+        "max_retries": task.max_retries,
+        "next_retry_at": meta.get("next_retry_at"),
+        "running_images": meta.get("running_images") or [],
+        "current_image": meta.get("current_image"),
+        "failed_image": meta.get("failed_image"),
+        "concurrency": meta.get("concurrency"),
         "created_at": task.created_at.isoformat() if task.created_at else None,
         "completed_at": task.completed_at.isoformat() if task.completed_at else None,
     }

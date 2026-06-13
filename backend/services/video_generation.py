@@ -4,6 +4,7 @@ from typing import Any
 
 from . import video_api
 from . import video_comfyui
+from .errors import MissingApiKeyError, UpstreamServiceError
 
 logger = logging.getLogger(__name__)
 
@@ -68,50 +69,50 @@ async def submit_video_job(
       - comfyui → 本地 ComfyUI
       - 其他 → New API 兼容端点
     """
-    try:
-        if provider == "comfyui":
-            result = await video_comfyui.submit_job(
-                input_mode=input_mode,
-                prompt=prompt,
-                model=model,
-                reference_images=reference_images,
-                duration_seconds=duration_seconds,
-                base_url=base_url,
-            )
-        else:
-            result = await video_api.create_video_job(
-                model=model or video_api._resolved_model(),
-                prompt=prompt,
-                aspect_ratio=aspect_ratio or "16:9",
-                duration_seconds=duration_seconds,
-                images=reference_images if input_mode == "image_to_video" else None,
-                api_key=api_key,
-                base_url=base_url,
-            )
-            result["provider_job_id"] = result.get("task_id", "")
-
-        provider_job_id = result.get("provider_job_id", "")
-        status = _map_status(result.get("status", "queued"))
-        progress = _parse_progress(result.get("progress"))
-        logger.info(
-            "Video job submitted: shot=%s provider=%s model=%s job_id=%s status=%s",
-            shot_id, provider, model, provider_job_id, status,
+    if provider == "comfyui":
+        result = await video_comfyui.submit_job(
+            input_mode=input_mode,
+            prompt=prompt,
+            model=model,
+            reference_images=reference_images,
+            duration_seconds=duration_seconds,
+            base_url=base_url,
         )
-        return {
-            "provider_job_id": provider_job_id,
-            "status": status,
-            "progress": progress,
-            "provider_status": result.get("status", ""),
-            "enhanced_prompt": result.get("enhanced_prompt", ""),
-        }
-    except Exception as exc:
-        logger.error("Failed to submit video job for shot %s: %s", shot_id, exc)
-        return {
-            "provider_job_id": "",
-            "status": "failed",
-            "progress": 0,
-            "error": str(exc),
-        }
+    else:
+        result = await video_api.create_video_job(
+            model=model or video_api._resolved_model(),
+            prompt=prompt,
+            aspect_ratio=aspect_ratio or "16:9",
+            duration_seconds=duration_seconds,
+            images=reference_images if input_mode == "image_to_video" else None,
+            api_key=api_key,
+            base_url=base_url,
+        )
+        result["provider_job_id"] = result.get("task_id", "")
+
+    provider_job_id = str(result.get("provider_job_id", "") or "").strip()
+    provider_status = result.get("status", "queued")
+    status = _map_status(provider_status)
+    if status in {"failed", "cancelled"} or not provider_job_id:
+        error = str(result.get("error") or result.get("message") or "视频上游未返回有效任务 ID")
+        raise UpstreamServiceError(
+            error,
+            retryable=status != "cancelled",
+            provider=provider,
+        )
+
+    progress = _parse_progress(result.get("progress"))
+    logger.info(
+        "Video job submitted: shot=%s provider=%s model=%s job_id=%s status=%s",
+        shot_id, provider, model, provider_job_id, status,
+    )
+    return {
+        "provider_job_id": provider_job_id,
+        "status": status,
+        "progress": progress,
+        "provider_status": provider_status,
+        "enhanced_prompt": result.get("enhanced_prompt", ""),
+    }
 
 
 async def query_job_status(
@@ -163,9 +164,17 @@ async def query_job_status(
             "enhanced_prompt": result.get("enhanced_prompt", ""),
             "error": result.get("error", ""),
         }
-    except Exception as exc:
+    except MissingApiKeyError as exc:
         logger.error("Failed to query job %s: %s", provider_job_id, exc)
         return {"status": "failed", "progress": 0, "error": str(exc)}
+    except Exception as exc:
+        logger.warning("Transient query failure for job %s: %s", provider_job_id, exc)
+        return {
+            "status": "queued",
+            "progress": 0,
+            "provider_status": "query_error",
+            "error": str(exc),
+        }
 
 
 async def fetch_job_result(

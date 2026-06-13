@@ -121,7 +121,7 @@ export default function VideoStoryboardLayout({
       try {
         const status = await getChapterVideoWorkflowStatus(workflowId);
         const detail = await getChapterVideoWorkflow(workflowId);
-        setWorkflow(detail);
+        setWorkflow({ ...detail, ...status });
 
         const running = ACTIVE_STATUSES.has(status.workflow_status);
         setWorkflowRunning(running);
@@ -247,16 +247,16 @@ export default function VideoStoryboardLayout({
         setWorkflow(wf);
       }
 
-      await parseChapterWorkflowShots(wf.id);
-      toast.success('拆镜完成');
+      const status = await parseChapterWorkflowShots(wf.id);
+      setWorkflow((prev) => (prev && prev.id === wf!.id ? { ...prev, ...(status as Partial<ChapterVideoWorkflow>) } : prev));
+      toast.success('拆镜任务已提交');
       void pollWorkflowUntilSettled(wf.id);
     } catch (error: any) {
-      toast.error(`拆镜失败: ${error.message || '未知错误'}`);
-    } finally {
       setWorkflowRunning(false);
       setParsing(false);
+      toast.error(`拆镜失败: ${error.message || '未知错误'}`);
     }
-  }, [parsing, pollWorkflowUntilSettled, workflow, workflowRunning, resolvedChapter?.id, selectedReferenceIds, selectedStyle]);
+  }, [parsing, pollWorkflowUntilSettled, workflow, workflowRunning, resolvedChapter?.id, selectedReferenceIds, selectedStyle, styleReferenceImageUrl]);
 
   const handleGenerateShotDetails = useCallback(async (shotIds: number[]) => {
     if (!workflow || shotIds.length === 0) return;
@@ -266,7 +266,8 @@ export default function VideoStoryboardLayout({
     }
     try {
       setWorkflowRunning(true);
-      await generateChapterWorkflowShotDetails(workflow.id, { shot_ids: shotIds });
+      const status = await generateChapterWorkflowShotDetails(workflow.id, { shot_ids: shotIds });
+      setWorkflow((prev) => (prev && prev.id === workflow.id ? { ...prev, ...(status as Partial<ChapterVideoWorkflow>) } : prev));
       toast.success('镜头详情生成任务已提交');
       void pollWorkflowUntilSettled(workflow.id);
     } catch (error: any) {
@@ -400,7 +401,8 @@ export default function VideoStoryboardLayout({
     }
     try {
       setWorkflowRunning(true);
-      await generateChapterWorkflowStoryboards(workflow.id, { shot_ids: shotIds });
+      const status = await generateChapterWorkflowStoryboards(workflow.id, { shot_ids: shotIds });
+      setWorkflow((prev) => (prev && prev.id === workflow.id ? { ...prev, ...(status as Partial<ChapterVideoWorkflow>) } : prev));
       toast.success('故事版生成任务已提交');
       void pollWorkflowUntilSettled(workflow.id);
     } catch (error: any) {
@@ -417,7 +419,8 @@ export default function VideoStoryboardLayout({
     }
     try {
       setWorkflowRunning(true);
-      await generateChapterWorkflowVideos(workflow.id, { shot_ids: shotIds });
+      const status = await generateChapterWorkflowVideos(workflow.id, { shot_ids: shotIds });
+      setWorkflow((prev) => (prev && prev.id === workflow.id ? { ...prev, ...(status as Partial<ChapterVideoWorkflow>) } : prev));
       toast.success('视频生成任务已提交');
       void pollWorkflowUntilSettled(workflow.id);
     } catch (error: any) {
@@ -482,7 +485,8 @@ export default function VideoStoryboardLayout({
     if (shotIds.length === 0) return;
     try {
       setWorkflowRunning(true);
-      await reanalyzeChapterWorkflowStoryboardPrompt(workflow.id, { shot_ids: shotIds });
+      const status = await reanalyzeChapterWorkflowStoryboardPrompt(workflow.id, { shot_ids: shotIds });
+      setWorkflow((prev) => (prev && prev.id === workflow.id ? { ...prev, ...(status as Partial<ChapterVideoWorkflow>) } : prev));
       toast.success('提示词重新分析任务已提交');
       void pollWorkflowUntilSettled(workflow.id);
     } catch (error: any) {

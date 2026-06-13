@@ -327,12 +327,91 @@ class TestTaskManager:
             nonlocal call_count
             call_count += 1
             if call_count < 3:
-                raise ValueError("Temporary error")
+                raise RuntimeError("Temporary network timeout")
             return "success"
 
         result = asyncio.get_event_loop().run_until_complete(failing_task())
         assert result == "success"
         assert call_count == 3
+
+    def test_update_task_metadata_merges_existing_values(self, task_manager, db_session, monkeypatch):
+        """任务 metadata 更新应合并而不是覆盖已有字段"""
+        import services.task_manager as tm
+
+        engine = getattr(db_session, "_test_engine", None)
+        monkeypatch.setattr(tm, "SessionLocal", sessionmaker(bind=engine))
+
+        task = BackgroundTask(
+            task_id="metadata-merge",
+            task_type="manga_generation",
+            metadata_json={"stage": "queued", "chapter_id": 1},
+        )
+        db_session.add(task)
+        db_session.commit()
+
+        task_manager.update_task_metadata("metadata-merge", stage="running", message="正在生成第 1 张")
+
+        saved = db_session.query(BackgroundTask).filter_by(task_id="metadata-merge").first()
+        assert saved.metadata_json == {
+            "stage": "running",
+            "chapter_id": 1,
+            "message": "正在生成第 1 张",
+        }
+
+    def test_update_task_retry_sets_retrying_metadata(self, task_manager, db_session, monkeypatch):
+        """进入重试等待时应写入 retrying 状态和用户可读提示"""
+        import services.task_manager as tm
+
+        engine = getattr(db_session, "_test_engine", None)
+        monkeypatch.setattr(tm, "SessionLocal", sessionmaker(bind=engine))
+
+        task = BackgroundTask(
+            task_id="retry-state",
+            task_type="video_render",
+            max_retries=2,
+            metadata_json={"stage": "submitting"},
+        )
+        db_session.add(task)
+        db_session.commit()
+
+        task_manager._update_task_retry("retry-state", 1, "upstream 503")
+
+        saved = db_session.query(BackgroundTask).filter_by(task_id="retry-state").first()
+        assert saved.status == "retrying"
+        assert saved.retry_count == 1
+        assert saved.error_message == "upstream 503"
+        assert saved.metadata_json["stage"] == "retrying"
+        assert "自动重试" in saved.metadata_json["message"]
+
+    def test_with_retry_does_not_retry_value_error(self, task_manager):
+        """参数/配置类错误不应进入自动重试"""
+        call_count = 0
+
+        @task_manager.with_retry(max_retries=3, base_delay=0.01)
+        async def invalid_task():
+            nonlocal call_count
+            call_count += 1
+            raise ValueError("invalid request")
+
+        with pytest.raises(ValueError, match="invalid request"):
+            asyncio.get_event_loop().run_until_complete(invalid_task())
+
+        assert call_count == 1
+
+    def test_request_cancellation_by_prefix(self, task_manager):
+        """章节视频取消可按真实 task_id 前缀命中运行任务"""
+        task_manager._running_tasks = {
+            "chapter_video_12_parse": object(),
+            "chapter_video_12_videos": object(),
+            "chapter_video_13_videos": object(),
+        }
+
+        matched = task_manager.request_cancellation_by_prefix("chapter_video_12_")
+
+        assert matched == ["chapter_video_12_parse", "chapter_video_12_videos"]
+        assert task_manager.is_cancellation_requested("chapter_video_12_parse")
+        assert task_manager.is_cancellation_requested("chapter_video_12_videos")
+        assert not task_manager.is_cancellation_requested("chapter_video_13_videos")
 
     def test_with_retry_exhausted(self, task_manager):
         """测试重试耗尽"""
