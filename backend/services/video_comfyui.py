@@ -186,7 +186,7 @@ async def submit_job(
     )
 
     try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(connect=10, read=30, write=30)) as client:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(connect=10, read=300, write=30)) as client:
             response = await client.post(url, json=payload)
     except httpx.ConnectError as exc:
         raise RuntimeError(
@@ -224,7 +224,7 @@ async def query_job(
     url = (base_url or comfyui_base_url).rstrip("/") + f"/history/{provider_job_id}"
 
     try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(connect=5, read=15, write=5)) as client:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(connect=5, read=300, write=5)) as client:
             response = await client.get(url)
     except (httpx.ConnectError, httpx.TimeoutException):
         return {"status": "running", "progress": 50}
@@ -304,5 +304,14 @@ async def download_video(
 
     output_path.write_bytes(response.content)
     logger.info("[comfyui] 下载完成: job=%s dest=%s", job_id, output_path)
+
+    # OSS 上传（如已配置，上传成功后删除本地文件）
+    try:
+        from .oss import upload_and_cleanup as _oss_upload
+        oss_url = _oss_upload(str(output_path))
+        if oss_url:
+            return oss_url
+    except Exception:
+        pass
 
     return str(output_path)

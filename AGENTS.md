@@ -814,6 +814,153 @@ Docker PostgreSQL 容器首次启动时通过环境变量 `POSTGRES_PASSWORD` �
 ### 14. 宿主机与 Docker 的 PostgreSQL 端口冲突
 宿主机本身可能运行 PostgreSQL（监听 `127.0.0.1:5432`）。Docker compose 的 postgres 容器默认不暴露端口到宿主机，但通过 `docker compose exec` 访问时不受影响。从宿主机执行 `psql -h 127.0.0.1` 时连接的是**宿主机数据库**而非 Docker 数据库，注意区分。
 
+### 15. ⚠️ AI 模型配置必须从数据库注入（关键）
+项目使用三个 AI 服务，每个都有全局变量。**必须在调用任何 AI 函数前通过配置函数注入数据库配置。**
+
+| 服务 | 全局变量 | 配置函数 | 错误症状 |
+|------|---------|---------|---------|
+| **DeepSeek** | `DEEPSEEK_BASE_URL`, `DEEPSEEK_MODEL` | `deepseek_service.configure_runtime()` | `DeepSeek API 地址未配置` |
+| **Image2** | `IMAGE_API_BASE_URL`, `IMAGE_API_KEY`, `IMAGE_MODEL` | `image2_service.configure_runtime()` | `图片 API 地址未配置` |
+| **Video API** | `_runtime_base_url`, `_runtime_api_key`, `_runtime_model` | `video_api_service.configure()` | `视频 API 地址未配置` |
+
+**Router 层配置函数**（必须在调用对应服务前调用）：
+```python
+# DeepSeek - 已集成到 _user_deepseek_api_key() 中，无需额外调用
+deepseek_api_key = _user_deepseek_api_key(request, db)
+
+# Image2 - 必须在调用图片生成函数前调用
+_configure_image_service_from_db(request, db)
+
+# Video API - 必须在调用视频生成函数前调用
+_configure_video_service_from_db(request, db)
+```
+
+**⚠️ 绝对不能只调用 `_user_xxx_api_key()` 就直接调用 AI 生成函数！必须同时调用对应的 `_configure_xxx_service_from_db()`。**
+
+**已知受影响的端点**：
+- `api_regenerate_shot_storyboard`（已修复）
+- 所有调用 `image2_service.generate_*` 的端点
+- 所有调用 `video_api_service.*` 的端点
+
+**如果新增调用 AI 生成的端点，必须在调用前配置对应的服务。**
+
+### 16. ⚠️ 工作台按钮绑定规范（反复出问题，必须遵守）
+
+工作台（VideoCardWorkbench）的按钮绑定涉及三层数据流，任何一层断裂都会导致按钮点击无反应。
+
+**三层数据流**：
+```
+VideoCardWorkbench（按钮 onClick）
+  → ChapterVideoWorkflowPanel（handler 变量赋值）
+    → VideoStoryboardLayout（handler 实现 + API 调用）
+      → 后端 API 端点
+```
+
+**修改工作台按钮时必须检查的清单**：
+
+| 检查项 | 说明 |
+|--------|------|
+| ✅ `VideoCardWorkbench.tsx` 按钮有 `onClick` | 每个按钮必须绑定到 handler 函数 |
+| ✅ handler 函数有正确的保护逻辑 | 检查 `currentResource`、`state.busy` 等 |
+| ✅ `ChapterVideoWorkflowPanel.tsx` 每种 type 都有 handler 赋值 | character/storyboard/video 三种类型分别处理 |
+| ✅ handler 不是空 `async () => {}` 空壳 | 空壳函数需要实现或明确标注为 TODO |
+| ✅ `VideoStoryboardLayout.tsx` handler 实现正确 | 有正确的 API 调用和错误处理 |
+| ✅ 后端 API 端点存在且可访问 | 检查路由注册和权限验证 |
+| ✅ 所有渲染分支都有必要的 DOM 元素 | 如 `<input type="file">` 在所有 modal 类型中都必须存在 |
+
+**已知空壳 handler（尚未实现）**：
+- 无（所有 handler 已实现）
+
+**已实现的 handler**：
+- `onRegenerate`：character 类型调用 `regenerateVideoAsset`，storyboard/video 类型调用对应的 regenerate 端点
+- `onUploadReplace`：character 类型调用 `replaceVideoAsset`，storyboard 类型调用 `uploadShotStoryboard`，video 类型调用 `uploadShotVideo`
+- `onRedraw`：character 类型调用 `regenerateVideoAsset`（支持 mask），storyboard/video 类型调用对应的 regenerate 端点
+
+**已知陷阱**：
+- 视频类型 modal（`type === 'video'`）在 line 366 提前 `return`，后续添加的 DOM 元素不会被渲染
+- `workflowRunning` 为 `true` 时会禁用大部分按钮，但重置按钮不应受此限制
+- `fileInputRef.current?.click()` 需要 `<input ref={fileInputRef}>` 在同一渲染分支中存在
+
+---
+
+## ⚠️ 已修复 Bug 记录（2026-06-12 批次）
+
+### Bug 1: 故事版重生成路由漏传 reference_asset_ids
+
+- **症状**：选择引用角色资产图生成故事版时，日志显示 `ref_asset_ids=None effective=[]`，走的纯文本 generations 而非图生图模式
+- **根因**：`api_regenerate_shot_storyboard` 未把请求体中的 `reference_asset_ids` 传给 `regenerate_shot_storyboard()` 函数
+- **修复**：在 `backend/routers/video.py:6221` 加上 `ref_asset_ids = body.reference_asset_ids or None` 并透传给服务层
+- **测试**：`test_regenerate_shot_storyboard_passes_reference_asset_ids`
+- **文件**：`backend/routers/video.py`
+
+### Bug 2: `_resolve_ref_image_paths` 不认 HTTP/OSS URL
+
+- **症状**：`ref_asset_ids` 已传到服务层，但日志显示 `resolved paths=None`，走 generations
+- **根因**：`_resolve_ref_image_paths()` 只检查本地文件路径（`/static/video/`、绝对路径等），如果 `VideoAsset.file_path` 是 OSS URL 则跳过
+- **修复**：在 `backend/services/video_chapter_pipeline.py:907` 复用 `resolve_reference_input(fp, "video")` 优先解析，支持 HTTP URL 透传
+- **测试**：`test_resolve_ref_image_paths_accepts_http_urls`
+- **文件**：`backend/services/video_chapter_pipeline.py`
+
+### Bug 3: 视频链路错误地把角色资产 ID 当成故事版镜头 ID
+
+- **症状**：`reference_asset_ids=[86, 194]` 中角色资产 `86` 被误当作 `ChapterVideoShot.id` 去查故事版
+- **根因**：`regenerate_shot_video()` 中 `shot_ids_in_refs = [rid for rid in effective_ref_ids if rid > 0]` 把 **所有** 正数 ID 都拿去查故事版表，角色参考图被混乱
+- **修复**：改成了只有 `shot.id in effective_ref_ids` 或 `-1` sentinel 时才使用当前镜头故事版；其余 ID 保留给角色图解析
+- **测试**：`test_regenerate_shot_video_keeps_character_refs_separate_from_storyboard_refs`
+- **文件**：`backend/services/video_chapter_pipeline.py`
+
+### Bug 4: 视频链路参考图路径不一致（本地 vs 远程）
+
+- **症状**：日志中 storyboard `[local] .media_cache`、character `[remote] OSS`、style `[local]`，三种路径格式混用
+- **根因**：故事版/风格参考图使用 `ensure_local_media_path()`（主动下载到 `.media_cache`），角色参考图使用 `resolve_reference_input()`（保持远程 URL）
+- **修复**：视频链路全部改为优先 `resolve_reference_input()` 保持远程 URL，只有拿不到远程时才回退本地路径
+- **测试**：`test_regenerate_shot_video_prefers_remote_urls_for_all_reference_images`
+- **文件**：`backend/services/video_chapter_pipeline.py`
+
+### Bug 5: 视频提交日志未标明参考图用途
+
+- **症状**：`[video_submit] 参考图列表` 只输出编号和路径，看不出每张图是 storyboard/character/style
+- **修复**：日志改为 `[video_submit]   参考图 1 [storyboard][remote]: ...` 格式，包含用途和来源类型
+- **测试**：`test_regenerate_shot_storyboard_logs_reference_inputs`、`test_regenerate_shot_video_logs_reference_roles`
+- **文件**：`backend/services/video_chapter_pipeline.py`
+
+### Bug 6: 后台风格预设配置页入口丢失
+
+- **症状**：管理后台没有"风格预设"菜单项，页面不可访问
+- **根因**：`StylePresetManager` 组件存在，但 `App.tsx` 的 `RouteKey`、`ADMIN_NAV` 和渲染分支都没有接上
+- **修复**：新增 `style-presets` 路由 key、菜单项和页面渲染分支
+- **文件**：`frontend/src/App.tsx`
+
+### Bug 7 (15秒迁移): 故事版导演提示词仍输出10秒分镜
+
+- **症状**：镜头拆分已改为15秒，但故事版提示词仍输出 `8.5-10s` 等10秒固定分段内容，不符合15秒要求
+- **根因**：`STORYBOARD_DIRECTOR_SYSTEM_PROMPT` 中硬编码了"10秒镜头约束"、固定6格分镜（0-1.5s/1.5-3s/3-5s/5-7s/7-8.5s/8.5-10s），AI 直接套用旧模板
+- **修复**：
+  - 将"10秒镜头约束"改为"15秒镜头容量建模约束"，要求 AI 动态决定分镜段落数量，不再固定6段
+  - 核心故事板区从硬编码6格改为动态段落（示例0-4.2s/4.2-9.5s/9.5-15s，允许变化）
+  - 项目栏改为 `{duration_seconds}` 参数化
+  - `build_storyboard_director_messages` 增加 `duration_seconds` 参数，统一传入15
+  - 所有调用方传递 `duration_seconds=15` 或从 `shot_data` 读取
+  - 清理残留的旧 `VIDEO_PROMPT_TEMPLATE`（0-3/3-7/7-10 模板）改为15秒动态描述
+  - `concat_chapter_videos` 中 `duration_seconds=10` 改为15
+- **测试**：`test_storyboard_director_prompt_no_longer_uses_10s_segments`
+- **文件**：`backend/services/video_chapter_prompts.py`、`backend/services/deepseek.py`、`backend/services/video_chapter_pipeline.py`
+
+### Bug 8: 分析提示词后 storyboard prompt 与 video prompt 场景不一致
+
+- **症状**：点击"分析提示词"后，storyboard prompt 描述的是完整场景（如少年少女在天台望月），但 video prompt 变成只有月亮移动的空镜
+- **根因**：`reanalyze_shot_prompts` 中两次独立 AI 调用互不感知。`generate_shot_video_prompt_ai` 只基于镜头结构化字段生成，不知道同一镜头的 storyboard prompt 写了什么内容，导致 AI 自行编造不同的场景描述
+- **修复**：在 `SHOT_VIDEO_USER_TEMPLATE` 增加 `storyboard_prompt` 字段，`generate_shot_video_prompt_ai` 增加 `storyboard_prompt` 参数，`reanalyze_shot_prompts` 和 `regenerate_shot_video` 在生成 video prompt 时把同一镜头的 storyboard prompt 传入作为上下文
+- **测试**：`test_shot_video_user_prompt_includes_storyboard_prompt`
+- **文件**：`backend/services/video_chapter_prompts.py`、`backend/services/deepseek.py`、`backend/services/video_chapter_pipeline.py`
+
+### Bug 8: 风格预设图片上传不走 OSS
+
+- **症状**：日志显示 `风格预设图片未上传到 OSS（未配置或上传失败）`
+- **根因**：`upload_style_preset_image` 未调用 `_configure_oss_from_db(db)` 读取数据库配置注入运行时，`oss_service.is_enabled()` 返回 False
+- **修复**：在 OSS 上传前调用 `_configure_oss_from_db(db)` 注入配置
+- **文件**：`backend/routers/video.py`
+
 ---
 
 ## Sisyphus Agent 工作文件

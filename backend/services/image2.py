@@ -527,7 +527,7 @@ async def _download_generated_image(image_entry: dict, progress_label: str) -> b
     if image_entry.get("url"):
         logger.info("[%s] 收到图片 URL，开始下载", progress_label)
         try:
-            async with httpx.AsyncClient(timeout=120, follow_redirects=True) as client:
+            async with httpx.AsyncClient(timeout=300, follow_redirects=True) as client:
                 img_resp = await client.get(image_entry["url"])
                 img_resp.raise_for_status()
                 image_bytes = img_resp.content
@@ -536,7 +536,7 @@ async def _download_generated_image(image_entry: dict, progress_label: str) -> b
             if "CERTIFICATE_VERIFY_FAILED" not in err_text and "Hostname mismatch" not in err_text:
                 raise
             logger.warning("[%s] 图片下载证书校验失败，尝试关闭校验后重试: %s", progress_label, err_text)
-            async with httpx.AsyncClient(timeout=120, follow_redirects=True, verify=False) as insecure_client:
+            async with httpx.AsyncClient(timeout=300, follow_redirects=True, verify=False) as insecure_client:
                 img_resp = await insecure_client.get(image_entry["url"])
                 img_resp.raise_for_status()
                 image_bytes = img_resp.content
@@ -554,7 +554,7 @@ async def _download_image_from_url(url: str, progress_label: str) -> bytes:
     for attempt in range(1, DOWNLOAD_RETRIES + 1):
         try:
             logger.info("[%s] 开始下载图片 URL（尝试 %s/%s）", progress_label, attempt, DOWNLOAD_RETRIES)
-            timeout = httpx.Timeout(connect=45, read=180, write=30, pool=30)
+            timeout = httpx.Timeout(connect=45, read=300, write=30, pool=30)
             async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
                 img_resp = await client.get(url)
                 img_resp.raise_for_status()
@@ -565,7 +565,7 @@ async def _download_image_from_url(url: str, progress_label: str) -> bytes:
             if "CERTIFICATE_VERIFY_FAILED" in err_text or "Hostname mismatch" in err_text:
                 logger.warning("[%s] 图片下载证书校验失败，尝试关闭校验后重试: %s", progress_label, err_text)
                 try:
-                    timeout = httpx.Timeout(connect=45, read=180, write=30, pool=30)
+                    timeout = httpx.Timeout(connect=45, read=300, write=30, pool=30)
                     async with httpx.AsyncClient(timeout=timeout, follow_redirects=True, verify=False) as insecure_client:
                         img_resp = await insecure_client.get(url)
                         img_resp.raise_for_status()
@@ -626,6 +626,7 @@ async def generate_reference_image(
     api_key: str | None = None,
     size: str = "1024x1024",
     ref_image_paths: list[str] | None = None,
+    ref_type: str = "character",
 ) -> str:
     progress_label = f"ref:{output_path.stem}"
     current_prompt = prompt.strip()
@@ -659,15 +660,27 @@ async def generate_reference_image(
 
                     if ref_files:
                         # 图生图模式：参考图作为风格/角色参考，prompt 描述要生成的新图
-                        ref_guide = (
-                            f"CREATE A NEW IMAGE. The attached {len(ref_files)} image(s) are CHARACTER "
-                            f"REFERENCE SHEETS. Match every character to their reference EXACTLY: "
-                            f"face, hair, eyes, outfit, body proportions. "
-                            f"Also match the ART STYLE of the reference: line weight, shading technique, "
-                            f"color palette, lighting, and overall aesthetic must be consistent. "
-                            f"Do NOT edit the reference images -- create an entirely NEW image "
-                            f"with the storyboard panels specified below.\n\n"
-                        )
+                        if ref_type == "style":
+                            ref_guide = (
+                                f"CREATE A NEW IMAGE. The attached {len(ref_files)} image(s) are STYLE "
+                                f"REFERENCE SAMPLES. Match the ART STYLE of the reference EXACTLY: "
+                                f"line weight, shading technique, color palette, lighting, "
+                                f"and overall aesthetic must be consistent. "
+                                f"The content/characters in the reference are for style illustration only "
+                                f"-- create an entirely NEW image based on the prompt below. "
+                                f"Do NOT reproduce the specific characters or scenes from the reference "
+                                f"images.\n\n"
+                            )
+                        else:
+                            ref_guide = (
+                                f"CREATE A NEW IMAGE. The attached {len(ref_files)} image(s) are CHARACTER "
+                                f"REFERENCE SHEETS. Match every character to their reference EXACTLY: "
+                                f"face, hair, eyes, outfit, body proportions. "
+                                f"Also match the ART STYLE of the reference: line weight, shading technique, "
+                                f"color palette, lighting, and overall aesthetic must be consistent. "
+                                f"Do NOT edit the reference images -- create an entirely NEW image "
+                                f"with the storyboard panels specified below.\n\n"
+                            )
                         logger.info("[%s] 图生图请求 refs=%d prompt=%dchars", progress_label, len(ref_files), len(current_prompt))
                         # 打印完整提示词内容
                         final_api_prompt = ref_guide + current_prompt
@@ -705,10 +718,25 @@ async def generate_reference_image(
 
             data = resp.json()
             image_entry = _extract_data_image_entry(data, progress_label)
+
+            # OSS URL 直传：跳过本地下载
+            remote_key = str(output_path.relative_to(OUTPUT_DIR.parent)).replace("\\", "/") if output_path.is_absolute() else str(output_path)
+            oss_url = _upload_image_url_to_oss(image_entry, remote_key)
+            if oss_url:
+                logger.info("[%s] 角色参考图 OSS 直传成功，跳过本地下载", progress_label)
+                return oss_url
+
             image_bytes = normalize_image_bytes(await _download_generated_image(image_entry, progress_label))
             output_path.parent.mkdir(parents=True, exist_ok=True)
             output_path.write_bytes(image_bytes)
             logger.info("[%s] 角色参考图已保存到 %s", progress_label, output_path)
+            oss_url = _upload_to_oss_if_enabled(str(output_path))
+            if oss_url:
+                try:
+                    output_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+                return oss_url
             return str(output_path)
         except httpx.TimeoutException as exc:
             last_err = MangaImageGenerationError(
@@ -778,10 +806,25 @@ async def generate_cover_image(
 
             data = resp.json()
             image_entry = _extract_data_image_entry(data, progress_label)
+
+            # OSS URL 直传：跳过本地下载
+            remote_key = f"manga_outputs/covers/{output_path.name}"
+            oss_url = _upload_image_url_to_oss(image_entry, remote_key)
+            if oss_url:
+                logger.info("[%s] 封面 OSS 直传成功，跳过本地下载", progress_label)
+                return oss_url
+
             image_bytes = normalize_image_bytes(await _download_generated_image(image_entry, progress_label))
             output_path.parent.mkdir(parents=True, exist_ok=True)
             output_path.write_bytes(image_bytes)
             logger.info("[%s] 小说封面已保存到 %s", progress_label, output_path)
+            oss_url = _upload_to_oss_if_enabled(str(output_path))
+            if oss_url:
+                try:
+                    output_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+                return oss_url
             return str(output_path)
         except httpx.TimeoutException as exc:
             last_err = MangaImageGenerationError(
@@ -882,10 +925,25 @@ async def edit_existing_image(
 
             data = resp.json()
             image_entry = _extract_data_image_entry(data, progress_label)
+
+            # OSS URL 直传：跳过本地下载
+            remote_key = str(output_path.relative_to(OUTPUT_DIR.parent)).replace("\\", "/") if output_path.is_absolute() else str(output_path)
+            oss_url = _upload_image_url_to_oss(image_entry, remote_key)
+            if oss_url:
+                logger.info("[%s] 图片编辑 OSS 直传成功，跳过本地下载", progress_label)
+                return oss_url
+
             image_bytes = normalize_image_bytes(await _download_generated_image(image_entry, progress_label))
             output_path.parent.mkdir(parents=True, exist_ok=True)
             output_path.write_bytes(image_bytes)
             logger.info("[%s] 图片编辑完成并保存到 %s", progress_label, output_path)
+            oss_url = _upload_to_oss_if_enabled(str(output_path))
+            if oss_url:
+                try:
+                    output_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+                return oss_url
             return str(output_path)
         except httpx.TimeoutException as exc:
             last_err = MangaImageGenerationError(
@@ -1079,19 +1137,54 @@ async def generate_manga_image(
 
                 logger.info("[%s] API 返回成功，耗时 %.1fs", progress_label, time.time() - t0)
                 image_entry = _extract_data_image_entry(data, progress_label)
-                image_bytes = normalize_image_bytes(await _download_generated_image(image_entry, progress_label))
 
-                chapter_dir = OUTPUT_DIR / f"chapter_{chapter_id}"
-                chapter_dir.mkdir(parents=True, exist_ok=True)
-                filename = f"panel_{image_number:02d}_{uuid.uuid4().hex[:8]}.png"
-                filepath = chapter_dir / filename
-                filepath.write_bytes(image_bytes)
-                logger.info("[%s] 已保存到 %s", progress_label, filepath)
-                return ImageGenerationResult(
-                    image_path=f"manga_outputs/chapter_{chapter_id}/{filename}",
-                    final_prompt=current_prompt,
-                    prompt_sanitized=prompt_sanitized,
-                )
+                # --- API 调用成功，后续下载/上传失败不再重试 API（避免浪费额度） ---
+                try:
+                    # OSS URL 直传：如果 API 返回了图片 URL 且 OSS 已配置，直接从 URL 上传到 OSS
+                    chapter_dir = OUTPUT_DIR / f"chapter_{chapter_id}"
+                    chapter_dir.mkdir(parents=True, exist_ok=True)
+                    filename = f"panel_{image_number:02d}_{uuid.uuid4().hex[:8]}.png"
+                    remote_key = f"manga_outputs/chapter_{chapter_id}/{filename}"
+                    oss_url = _upload_image_url_to_oss(image_entry, remote_key)
+                    if oss_url:
+                        logger.info("[%s] OSS URL 直传成功，跳过本地下载: %s", progress_label, oss_url)
+                        return ImageGenerationResult(
+                            image_path=oss_url,
+                            final_prompt=current_prompt,
+                            prompt_sanitized=prompt_sanitized,
+                        )
+
+                    # 回退到本地下载→保存→上传 OSS
+                    image_bytes = normalize_image_bytes(await _download_generated_image(image_entry, progress_label))
+
+                    filepath = chapter_dir / filename
+                    filepath.write_bytes(image_bytes)
+                    logger.info("[%s] 已保存到 %s", progress_label, filepath)
+
+                    # OSS 上传（如已配置，上传成功后删除本地文件）
+                    image_path = f"manga_outputs/chapter_{chapter_id}/{filename}"
+                    oss_url = _upload_to_oss_if_enabled(str(filepath))
+                    if oss_url:
+                        image_path = oss_url
+                        try:
+                            filepath.unlink(missing_ok=True)
+                            logger.info("[%s] OSS 上传成功，已删除本地文件", progress_label)
+                        except Exception:
+                            pass
+
+                    return ImageGenerationResult(
+                        image_path=image_path,
+                        final_prompt=current_prompt,
+                        prompt_sanitized=prompt_sanitized,
+                    )
+                except Exception as download_exc:
+                    # API 调用成功但下载/上传失败：不重试，直接报错
+                    raise MangaImageGenerationError(
+                        code="download_failed",
+                        user_message=f"图片已生成但下载失败，请稍后重试。",
+                        retryable=False,
+                        provider_message=str(download_exc),
+                    )
 
             except httpx.TimeoutException as exc:
                 last_err = MangaImageGenerationError(
@@ -1156,3 +1249,78 @@ async def generate_manga_image(
     if prompt_sanitized and not last_err.optimized_prompt:
         last_err.optimized_prompt = current_prompt
     raise last_err
+
+
+def _upload_to_oss_if_enabled(local_path: str) -> str | None:
+    """如果 OSS 已配置，上传文件并返回公网 URL。
+
+    首次调用时会自动从数据库加载配置（如果尚未配置）。
+    """
+    try:
+        from . import oss as oss_service
+        if not oss_service.is_enabled():
+            _auto_configure_oss()
+        if oss_service.is_enabled():
+            return oss_service.upload_file(local_path)
+    except Exception as exc:
+        logger.warning("OSS 上传失败（不影响本地文件）: %s", exc)
+    return None
+
+
+def _upload_image_url_to_oss(image_entry: dict, remote_key: str) -> str | None:
+    """如果 OSS 已配置且 API 返回了图片 URL，直接从 URL 上传到 OSS。
+
+    跳过本地下载→本地保存→上传 OSS 的流程，直接 CDN → OSS。
+    大幅减少耗时，尤其避免 CDN 到本地的慢速下载。
+
+    Args:
+        image_entry: API 返回的图片条目（含 url 字段）
+        remote_key: OSS 对象键
+
+    Returns:
+        OSS 公网 URL，失败返回 None
+    """
+    image_url = image_entry.get("url") if isinstance(image_entry, dict) else None
+    if not image_url:
+        return None
+    try:
+        from . import oss as oss_service
+        if not oss_service.is_enabled():
+            _auto_configure_oss()
+        if oss_service.is_enabled():
+            return oss_service.upload_from_url(str(image_url), remote_key)
+    except Exception as exc:
+        logger.warning("OSS URL 直传失败（将回退到本地下载）: %s", exc)
+    return None
+
+
+def _auto_configure_oss() -> None:
+    """从数据库自动加载 OSS 配置。"""
+    try:
+        from database import SessionLocal
+        from models import PlatformSetting
+        db = SessionLocal()
+        try:
+            def get_setting(key: str, default=None):
+                setting = db.query(PlatformSetting).filter(PlatformSetting.setting_key == key).first()
+                if not setting:
+                    return default
+                payload = setting.value_json or {}
+                return payload.get("value", default)
+
+            from . import oss as oss_service
+            enabled = bool(get_setting("oss.enabled", False))
+            if enabled:
+                oss_service.configure(
+                    enabled=True,
+                    access_key_id=str(get_setting("oss.access_key_id", "") or "").strip(),
+                    access_key_secret=str(get_setting("oss.access_key_secret", "") or "").strip(),
+                    endpoint=str(get_setting("oss.endpoint", "") or "").strip(),
+                    bucket=str(get_setting("oss.bucket", "") or "").strip(),
+                    public_url_base=str(get_setting("oss.public_url_base", "") or "").strip(),
+                )
+                logger.info("OSS 已自动从数据库加载配置")
+        finally:
+            db.close()
+    except Exception as exc:
+        logger.warning("OSS 自动配置加载失败: %s", exc)

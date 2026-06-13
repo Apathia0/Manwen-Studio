@@ -1,9 +1,12 @@
 import asyncio
 import json
+import logging
 import re
 from typing import Any, AsyncGenerator
 
 import httpx
+
+logger = logging.getLogger(__name__)
 
 from services.framework_utils import _extract_outline_chapters, validate_framework_json
 
@@ -43,6 +46,26 @@ def _loads_json_lenient(text: str):
     # strings. strict=False accepts those without treating the whole response as
     # invalid JSON.
     return json.loads(text, strict=False)
+
+
+def _log_shot_summary(logger_obj, content: str, label: str = "拆镜"):
+    """解析 JSON 并输出结构化镜头摘要日志，避免原文淹没关键信息。"""
+    result = _extract_json_object(content)
+    all_shots = result.get("shots", [])
+    if not isinstance(all_shots, list):
+        logger_obj.info("%s: 返回非数组 shots=%s", label, str(all_shots)[:200])
+        return
+    parts = []
+    for s in all_shots[:5]:
+        idx = s.get("shot_index", "?")
+        loc = (s.get("scene_location") or "")[:20]
+        chars = s.get("characters", [])
+        chars_str = ",".join(chars[:3]) if isinstance(chars, list) else str(chars)[:30]
+        summary = (s.get("story_summary") or "")[:40]
+        parts.append(f"#{idx}[{loc}] {chars_str} | {summary}")
+    if len(all_shots) > 5:
+        parts.append(f"... 共 {len(all_shots)} 个镜头")
+    logger_obj.info("%s 返回 %d 个镜头: %s", label, len(all_shots), "；".join(parts))
 
 
 def _sanitize_novel_content(text: str) -> str:
@@ -2746,13 +2769,89 @@ async def build_story_bible(
 # ─── 章节视频工作流：正文 → 10s 镜头解析 ────────────────
 
 
-def _repair_broken_json_fields(content: str) -> str:
-    """修复 DeepSeek 返回中损坏的嵌套 JSON 字段值。
+def _repair_missing_commas(content: str) -> str:
+    """修复 JSON 中缺少逗号的问题。"""
+    # 修复数组中对象之间缺少逗号: } {
+    content = re.sub(r'\}\s*\{', '}, {', content)
+    # 修复对象中键值对之间缺少逗号
+    content = re.sub(r'"\s*\n\s*"', '",\n"', content)
+    # 修复 "value" { 的情况
+    content = re.sub(r'"\s*\n\s*\{', '",\n{', content)
+    # 修复 } "key": 的情况
+    content = re.sub(r'\}\s*\n\s*"', '},\n"', content)
+    return content
 
-    DeepSeek 有时会在 storyboard_json 等嵌套对象字段中输出非 JSON 内容，
-    导致整体 JSON 解析失败。策略：找到损坏字段的 {，去掉 { 及其后的损坏内容，
-    替换为 null 并保留下一个 } 以闭合外层对象。
+
+def _repair_trailing_commas(content: str) -> str:
+    """修复 JSON 中数组/对象末尾多余逗号。"""
+    content = re.sub(r',\s*\}', '}', content)
+    content = re.sub(r',\s*\]', ']', content)
+    return content
+
+
+def _repair_truncated_json(content: str) -> str:
+    """修复 DeepSeek 返回中被截断的 JSON（缺少结尾引号/括号），尝试补齐。"""
+    stripped = content.rstrip()
+    if not stripped:
+        return content
+
+    try:
+        json.loads(stripped)
+        return content
+    except json.JSONDecodeError:
+        pass
+
+    in_string = False
+    escaped = False
+    brace_depth = 0
+    bracket_depth = 0
+
+    for ch in stripped:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+            continue
+        if ch == "{":
+            brace_depth += 1
+        elif ch == "}":
+            brace_depth -= 1
+        elif ch == "[":
+            bracket_depth += 1
+        elif ch == "]":
+            bracket_depth -= 1
+
+    if in_string:
+        stripped += '"'
+    while brace_depth > 0:
+        stripped += "}"
+        brace_depth -= 1
+    while bracket_depth > 0:
+        stripped += "]"
+        bracket_depth -= 1
+    if not stripped.endswith("}"):
+        stripped += "}"
+
+    return stripped
+
+
+def _repair_broken_json_fields(content: str) -> str:
+    """修复 DeepSeek 返回中损坏的 JSON。
+
+    处理三类问题：
+    1. 缺少逗号分隔符（通过 _repair_missing_commas 修复）
+    2. 数组/对象末尾多余逗号（通过 _repair_trailing_commas 修复）
+    3. 损坏的嵌套字段（如 storyboard_json，替换为 null）
     """
+    content = _repair_missing_commas(content)
+    content = _repair_trailing_commas(content)
+
     idx = content.find('"storyboard_json"')
     if idx < 0:
         return content
@@ -2762,7 +2861,6 @@ def _repair_broken_json_fields(content: str) -> str:
     close_brace = content.find('}', open_brace)
     if close_brace < 0:
         return content
-    # 将 {broken_value} 替换为 null，保留 } 以闭合外层
     return content[:open_brace] + 'null' + content[close_brace:]
 
 
@@ -2771,7 +2869,10 @@ async def parse_chapter_to_shots(
     character_profiles: str = "",
     api_key: str | None = None,
 ) -> list[dict]:
-    """调用 DeepSeek 将章节正文解析为 10 秒镜头列表。
+    """调用 DeepSeek 将章节正文解析为 15 秒完整分镜列表。
+
+    自动处理超长正文：超出 MAX_PARSE_INPUT_CHARS 时按段落边界分段，
+    分段调用 AI 后合并 shot_index 返回完整镜头列表。
 
     返回格式：
     [
@@ -2791,9 +2892,48 @@ async def parse_chapter_to_shots(
         ...
     ]
     """
+    if len(chapter_text) <= MAX_PARSE_INPUT_CHARS:
+        return await _parse_full_chunk(chapter_text, character_profiles, api_key)
+
+    chunks = _split_text_at_paragraph_boundaries(chapter_text, MAX_PARSE_INPUT_CHARS)
+    all_shots: list[dict] = []
+    shot_offset = 0
+    errors: list[str] = []
+
+    for i, chunk in enumerate(chunks):
+        chunk_label = f"（第 {i + 1}/{len(chunks)} 段）"
+        try:
+            chunk_shots = await _parse_full_chunk(chunk, character_profiles, api_key, chunk_label)
+        except ValueError as e:
+            errors.append(str(e))
+            continue
+
+        for shot in chunk_shots:
+            idx = shot.get("shot_index", 1)
+            shot["shot_index"] = idx + shot_offset
+        shot_offset += len(chunk_shots)
+        all_shots.extend(chunk_shots)
+
+    if not all_shots:
+        error_detail = "\n".join(errors[:3]) if errors else "未知错误"
+        raise ValueError(f"分段拆镜失败：所有段落均未返回有效镜头\n分段详情：{len(chunks)} 段，{len(errors)} 段失败\n{error_detail}")
+
+    return all_shots
+
+
+async def _parse_full_chunk(
+    chunk_text: str,
+    character_profiles: str = "",
+    api_key: str | None = None,
+    chunk_label: str = "",
+) -> list[dict]:
+    """对单段正文调用 DeepSeek 进行完整拆镜（10 字段）。"""
     from services.video_chapter_prompts import SHOT_PARSE_SYSTEM_PROMPT, build_shot_parse_user_prompt
 
-    user_prompt = build_shot_parse_user_prompt(chapter_text)
+    if chunk_label:
+        user_prompt = f"{chunk_label}\n\n{SHOT_PARSE_SYSTEM_PROMPT}\n\n{chunk_text}"
+    else:
+        user_prompt = build_shot_parse_user_prompt(chunk_text)
     if character_profiles:
         user_prompt += f"\n\n## 角色外貌设定（参考）\n{character_profiles}"
 
@@ -2801,6 +2941,118 @@ async def parse_chapter_to_shots(
         "model": DEEPSEEK_MODEL,
         "messages": [
             {"role": "system", "content": SHOT_PARSE_SYSTEM_PROMPT},
+            {"role": "user", "content": user_prompt},
+        ],
+        "stream": False,
+        "max_tokens": 32768,
+        "response_format": {"type": "json_object"},
+    }
+
+    async with httpx.AsyncClient(timeout=600) as client:
+        resp = await client.post(
+            f"{DEEPSEEK_BASE_URL}/chat/completions",
+            json=payload,
+            headers=_deepseek_auth_headers(api_key),
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        content = data["choices"][0]["message"]["content"]
+
+        # 解析后输出结构化日志摘要
+        try:
+            _log_shot_summary(logger, content, "完整拆镜")
+        except Exception:
+            logger.info("完整拆镜原始返回: %s", content[:500])
+
+    try:
+        result = _extract_json_object(content)
+    except ValueError:
+        # DeepSeek 偶发返回 JSON 数组 [shot, ...] 而非 {"shots": [...]}
+        try:
+            raw_parsed = _loads_json_lenient(content)
+        except json.JSONDecodeError:
+            raw_parsed = None
+        if isinstance(raw_parsed, list) and all(isinstance(item, dict) for item in raw_parsed):
+            result = {"shots": raw_parsed}
+        else:
+            repaired = _repair_broken_json_fields(content)
+            if repaired != content:
+                try:
+                    result = _extract_json_object(repaired)
+                except ValueError as e:
+                    raise ValueError(f"完整拆镜失败（{chunk_label or '单段'}）：JSON 解析错误 — {e}\n原始响应：{content[:500]}") from e
+            else:
+                truncated_repaired = _repair_truncated_json(content)
+                if truncated_repaired != content:
+                    try:
+                        result = _extract_json_object(truncated_repaired)
+                    except ValueError as e:
+                        raise ValueError(f"完整拆镜失败（{chunk_label or '单段'}）：JSON 截断修复后仍无法解析 — {e}\n原始响应：{content[:500]}") from e
+                else:
+                    raise ValueError(f"完整拆镜失败（{chunk_label or '单段'}）：JSON 解析错误，且未发现可修复的损坏字段\n原始响应：{content[:500]}")
+    
+    shots = result.get("shots", [])
+    if not isinstance(shots, list) or len(shots) == 0:
+        raise ValueError(f"完整拆镜失败（{chunk_label or '单段'}）：shots 数组为空或格式错误 — {content[:500]}")
+
+    return shots
+
+
+# 单段拆镜输入最大安全字符数
+MAX_PARSE_INPUT_CHARS = 4000
+MAX_LITE_PARSE_INPUT_CHARS = 4000
+
+
+def _split_text_at_paragraph_boundaries(text: str, max_chars: int) -> list[str]:
+    """按段落边界拆分文本，每段不超过 max_chars 字符。"""
+    paragraphs = text.split("\n\n")
+    chunks: list[str] = []
+    current_chunk: list[str] = []
+    current_len = 0
+
+    for para in paragraphs:
+        para_len = len(para)
+        if para_len > max_chars:
+            if current_chunk:
+                chunks.append("\n\n".join(current_chunk))
+                current_chunk = []
+                current_len = 0
+            for i in range(0, para_len, max_chars):
+                chunks.append(para[i:i + max_chars])
+            continue
+        if current_chunk and current_len + para_len > max_chars:
+            chunks.append("\n\n".join(current_chunk))
+            current_chunk = [para]
+            current_len = para_len
+        else:
+            current_chunk.append(para)
+            current_len += para_len
+
+    if current_chunk:
+        chunks.append("\n\n".join(current_chunk))
+    return chunks or [text]
+
+
+async def _parse_lite_chunk(
+    chunk_text: str,
+    character_profiles: str = "",
+    api_key: str | None = None,
+    chunk_label: str = "",
+) -> list[dict]:
+    """对单段正文调用 DeepSeek 进行轻量拆镜。"""
+    from services.video_chapter_prompts import SHOT_PARSE_LITE_SYSTEM_PROMPT, SHOT_PARSE_LITE_USER_PROMPT_HEADER
+
+    if chunk_label:
+        user_prompt = f"{chunk_label}\n\n{SHOT_PARSE_LITE_USER_PROMPT_HEADER}{chunk_text}"
+    else:
+        user_prompt = SHOT_PARSE_LITE_USER_PROMPT_HEADER + chunk_text
+    if character_profiles:
+        user_prompt += f"\n\n## 角色外貌设定（参考）\n{character_profiles}"
+
+    payload = {
+        "model": DEEPSEEK_MODEL,
+        "messages": [
+            {"role": "system", "content": SHOT_PARSE_LITE_SYSTEM_PROMPT},
             {"role": "user", "content": user_prompt},
         ],
         "stream": False,
@@ -2817,24 +3069,78 @@ async def parse_chapter_to_shots(
         resp.raise_for_status()
         data = resp.json()
         content = data["choices"][0]["message"]["content"]
+        try:
+            _log_shot_summary(logger, content, f"轻量拆镜{chunk_label or ''}")
+        except Exception:
+            logger.info("轻量拆镜原始返回: %s", content[:500])
 
     try:
         result = _extract_json_object(content)
     except ValueError:
-        repaired = _repair_broken_json_fields(content)
-        if repaired != content:
-            try:
-                result = _extract_json_object(repaired)
-            except ValueError as e:
-                raise ValueError(f"章节镜头解析失败：JSON 解析错误 — {e}\n原始响应：{content[:500]}") from e
+        # DeepSeek 偶发返回 JSON 数组 [shot, ...] 而非 {"shots": [...]}
+        try:
+            raw_parsed = _loads_json_lenient(content)
+        except json.JSONDecodeError:
+            raw_parsed = None
+        if isinstance(raw_parsed, list) and all(isinstance(item, dict) for item in raw_parsed):
+            result = {"shots": raw_parsed}
         else:
-            raise ValueError(f"章节镜头解析失败：JSON 解析错误，且未发现可修复的损坏字段\n原始响应：{content[:500]}")
+            repaired = _repair_broken_json_fields(content)
+            if repaired != content:
+                try:
+                    result = _extract_json_object(repaired)
+                except ValueError as e:
+                    raise ValueError(f"轻量拆镜失败（{chunk_label or '单段'}）：JSON 解析错误 — {e}\n原始响应：{content[:500]}") from e
+            else:
+                truncated_repaired = _repair_truncated_json(content)
+                if truncated_repaired != content:
+                    try:
+                        result = _extract_json_object(truncated_repaired)
+                    except ValueError as e:
+                        raise ValueError(f"轻量拆镜失败（{chunk_label or '单段'}）：JSON 截断修复后仍无法解析 — {e}\n原始响应：{content[:500]}") from e
+                else:
+                    raise ValueError(f"轻量拆镜失败（{chunk_label or '单段'}）：JSON 解析错误，且未发现可修复的损坏字段\n原始响应：{content[:500]}")
 
     shots = result.get("shots", [])
     if not isinstance(shots, list) or len(shots) == 0:
-        raise ValueError(f"章节镜头解析失败：shots 数组为空或格式错误 — {content[:500]}")
+        raise ValueError(f"轻量拆镜失败（{chunk_label or '单段'}）：shots 数组为空或格式错误 — {content[:500]}")
 
     return shots
+
+
+async def parse_chapter_to_shots_lite(
+    chapter_text: str,
+    character_profiles: str = "",
+    api_key: str | None = None,
+) -> list[dict]:
+    """轻量拆镜：只输出 7 个基础字段。正文超出 MAX_LITE_PARSE_INPUT_CHARS 时自动分段。"""
+    if len(chapter_text) <= MAX_LITE_PARSE_INPUT_CHARS:
+        return await _parse_lite_chunk(chapter_text, character_profiles, api_key)
+
+    chunks = _split_text_at_paragraph_boundaries(chapter_text, MAX_LITE_PARSE_INPUT_CHARS)
+    all_shots: list[dict] = []
+    shot_offset = 0
+    errors: list[str] = []
+
+    for i, chunk in enumerate(chunks):
+        chunk_label = f"（第 {i + 1}/{len(chunks)} 段）"
+        try:
+            chunk_shots = await _parse_lite_chunk(chunk, character_profiles, api_key, chunk_label)
+        except ValueError as e:
+            errors.append(str(e))
+            continue
+
+        for shot in chunk_shots:
+            idx = shot.get("shot_index", 1)
+            shot["shot_index"] = idx + shot_offset
+        shot_offset += len(chunk_shots)
+        all_shots.extend(chunk_shots)
+
+    if not all_shots:
+        error_detail = "\n".join(errors[:3]) if errors else "未知错误"
+        raise ValueError(f"分段拆镜失败：所有段落均未返回有效镜头\n分段详情：{len(chunks)} 段，{len(errors)} 段失败\n{error_detail}")
+
+    return all_shots
 
 
 async def generate_shot_storyboard_prompt(
@@ -2858,7 +3164,15 @@ async def generate_shot_storyboard_prompt(
         motion_plan=shot_data.get("motion_plan"),
         emotion_plan=shot_data.get("emotion_plan"),
         style_preset=shot_data.get("style_preset"),
+        duration_seconds=shot_data.get("duration_seconds", 15),
+        source_text_span=shot_data.get("source_text_span"),
     )
+
+    sj = shot_data.get("storyboard_json")
+    if isinstance(sj, dict):
+        sj_values = [v for v in sj.values() if isinstance(v, str) and v.strip()]
+        if sj_values:
+            user_message += "\n\n## 故事板导演分析参考\n\n" + "\n".join(sj_values)
 
     payload = {
         "model": DEEPSEEK_MODEL,
@@ -2867,11 +3181,11 @@ async def generate_shot_storyboard_prompt(
             {"role": "user", "content": user_message},
         ],
         "stream": False,
-        "max_tokens": 4096,
+        "max_tokens": 8192,
     }
 
     try:
-        async with httpx.AsyncClient(timeout=120) as client:
+        async with httpx.AsyncClient(timeout=300) as client:
             resp = await client.post(
                 f"{DEEPSEEK_BASE_URL}/chat/completions",
                 json=payload,
@@ -2906,6 +3220,8 @@ def generate_shot_storyboard_content(
         motion_plan=shot_data.get("motion_plan"),
         emotion_plan=shot_data.get("emotion_plan"),
         style_preset=shot_data.get("style_preset"),
+        duration_seconds=shot_data.get("duration_seconds", 15),
+        source_text_span=shot_data.get("source_text_span"),
     )
     return user_message
 
@@ -2923,3 +3239,244 @@ async def generate_shot_video_prompt(
         emotion_plan=shot_data.get("emotion_plan"),
         continuity_notes=shot_data.get("continuity_notes"),
     )
+
+
+async def generate_shot_details(
+    chapter_text: str,
+    shots_basic_info: list[dict],
+    character_profiles: str = "",
+    api_key: str | None = None,
+) -> list[dict]:
+    """为已拆分的镜头批量生成详细信息（运镜/动作/情绪/故事版等），最多 5 个。"""
+    from services.video_chapter_prompts import SHOT_DETAIL_SYSTEM_PROMPT, build_shot_detail_user_prompt
+
+    if len(shots_basic_info) > 5:
+        raise ValueError(f"批量详情生成最多支持 5 个镜头，当前 {len(shots_basic_info)} 个")
+
+    user_prompt = build_shot_detail_user_prompt(chapter_text, shots_basic_info, character_profiles)
+
+    payload = {
+        "model": DEEPSEEK_MODEL,
+        "messages": [
+            {"role": "system", "content": SHOT_DETAIL_SYSTEM_PROMPT},
+            {"role": "user", "content": user_prompt},
+        ],
+        "stream": False,
+        "max_tokens": 16392,
+        "response_format": {"type": "json_object"},
+    }
+
+    async with httpx.AsyncClient(timeout=600) as client:
+        resp = await client.post(
+            f"{DEEPSEEK_BASE_URL}/chat/completions",
+            json=payload,
+            headers=_deepseek_auth_headers(api_key),
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        content = data["choices"][0]["message"]["content"]
+
+    try:
+        result = _extract_json_object(content)
+    except ValueError:
+        repaired = _repair_broken_json_fields(content)
+        if repaired != content:
+            try:
+                result = _extract_json_object(repaired)
+            except ValueError as e:
+                raise ValueError(f"批量详情生成失败：JSON 解析错误 — {e}\n原始响应：{content[:500]}") from e
+        else:
+            raise ValueError(f"批量详情生成失败：JSON 解析错误，且未发现可修复的损坏字段\n原始响应：{content[:500]}")
+
+    shots = result.get("shots", [])
+    if not isinstance(shots, list) or len(shots) == 0:
+        raise ValueError(f"批量详情生成失败：shots 数组为空或格式错误 — {content[:500]}")
+
+    return shots
+
+
+async def generate_shot_scene_prop_prompts(
+    shot_data: dict,
+    api_key: str | None = None,
+) -> tuple[str, list[dict[str, str]]]:
+    """为单个镜头生成场景描述和道具提示词。"""
+    from services.video_chapter_prompts import SHOT_SCENE_PROP_SYSTEM_PROMPT, build_shot_scene_prop_user_prompt
+
+    style_preset = shot_data.get("style_preset")
+    system_prompt = SHOT_SCENE_PROP_SYSTEM_PROMPT
+    if style_preset:
+        system_prompt += f"\n\n📌 当前风格参考图：{style_preset}\n场景和道具的画风必须与「{style_preset}」风格完全一致，色调、线条、笔触质感、整体氛围都必须与风格参考图匹配。"
+
+    user_prompt = build_shot_scene_prop_user_prompt(
+        scene_location=shot_data.get("scene_location"),
+        time_of_day=shot_data.get("time_of_day"),
+        story_summary=shot_data.get("story_summary"),
+        dialogue_or_narration=shot_data.get("dialogue_or_narration"),
+        camera_plan=shot_data.get("camera_plan"),
+        motion_plan=shot_data.get("motion_plan"),
+        continuity_notes=shot_data.get("continuity_notes"),
+        key_props=shot_data.get("key_props"),
+        scene_asset_candidates=shot_data.get("scene_asset_candidates"),
+    )
+
+    payload = {
+        "model": DEEPSEEK_MODEL,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        "stream": False,
+        "max_tokens": 8192,
+        "response_format": {"type": "json_object"},
+    }
+
+    async with httpx.AsyncClient(timeout=300) as client:
+        resp = await client.post(
+            f"{DEEPSEEK_BASE_URL}/chat/completions",
+            json=payload,
+            headers=_deepseek_auth_headers(api_key),
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        content = data["choices"][0]["message"]["content"]
+
+    try:
+        result = _extract_json_object(content)
+    except ValueError:
+        repaired = _repair_broken_json_fields(content)
+        try:
+            result = _extract_json_object(repaired)
+        except ValueError:
+            truncated = _repair_truncated_json(content)
+            try:
+                result = _extract_json_object(truncated)
+            except ValueError:
+                return "", []
+
+    scene_prompt = result.get("scene_prompt", "") or ""
+    prop_prompts = result.get("prop_prompts", []) or []
+    if not isinstance(prop_prompts, list):
+        prop_prompts = []
+
+    return scene_prompt, prop_prompts
+
+
+async def generate_shot_character_prompts_ai(
+    shot_data: dict,
+    character_profiles: str = "",
+    api_key: str | None = None,
+) -> list[dict[str, str]]:
+    """使用 DeepSeek 为镜头中的每个角色生成详细的 AI 绘图提示词。"""
+    from services.video_chapter_prompts import SHOT_CHARACTER_SYSTEM_PROMPT, build_shot_character_user_prompt
+
+    characters = shot_data.get("characters", [])
+    if not characters:
+        return []
+
+    user_prompt = build_shot_character_user_prompt(
+        characters=characters,
+        scene_location=shot_data.get("scene_location"),
+        time_of_day=shot_data.get("time_of_day"),
+        story_summary=shot_data.get("story_summary"),
+        camera_plan=shot_data.get("camera_plan"),
+        motion_plan=shot_data.get("motion_plan"),
+        emotion_plan=shot_data.get("emotion_plan"),
+        character_profiles=character_profiles,
+    )
+
+    payload = {
+        "model": DEEPSEEK_MODEL,
+        "messages": [
+            {"role": "system", "content": SHOT_CHARACTER_SYSTEM_PROMPT},
+            {"role": "user", "content": user_prompt},
+        ],
+        "stream": False,
+        "max_tokens": 8192,
+        "response_format": {"type": "json_object"},
+    }
+
+    async with httpx.AsyncClient(timeout=300) as client:
+        resp = await client.post(
+            f"{DEEPSEEK_BASE_URL}/chat/completions",
+            json=payload,
+            headers=_deepseek_auth_headers(api_key),
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        content = data["choices"][0]["message"]["content"]
+
+    try:
+        result = _extract_json_object(content)
+    except ValueError:
+        repaired = _repair_broken_json_fields(content)
+        try:
+            result = _extract_json_object(repaired)
+        except ValueError:
+            truncated = _repair_truncated_json(content)
+            try:
+                result = _extract_json_object(truncated)
+            except ValueError:
+                return []
+
+    prompts = result.get("character_prompts", []) or []
+    if not isinstance(prompts, list):
+        prompts = []
+
+    return prompts
+
+
+async def generate_shot_video_prompt_ai(
+    shot_data: dict,
+    api_key: str | None = None,
+    storyboard_prompt: str | None = None,
+) -> str:
+    """使用 DeepSeek 为镜头生成专业的图生视频提示词。"""
+    from services.video_chapter_prompts import SHOT_VIDEO_SYSTEM_PROMPT, build_shot_video_user_prompt
+
+    user_prompt = build_shot_video_user_prompt(
+        scene_location=shot_data.get("scene_location"),
+        time_of_day=shot_data.get("time_of_day"),
+        characters=shot_data.get("characters"),
+        story_summary=shot_data.get("story_summary"),
+        camera_plan=shot_data.get("camera_plan"),
+        motion_plan=shot_data.get("motion_plan"),
+        emotion_plan=shot_data.get("emotion_plan"),
+        continuity_notes=shot_data.get("continuity_notes"),
+        storyboard_prompt=storyboard_prompt,
+    )
+
+    payload = {
+        "model": DEEPSEEK_MODEL,
+        "messages": [
+            {"role": "system", "content": SHOT_VIDEO_SYSTEM_PROMPT},
+            {"role": "user", "content": user_prompt},
+        ],
+        "stream": False,
+        "max_tokens": 4096,
+        "response_format": {"type": "json_object"},
+    }
+
+    async with httpx.AsyncClient(timeout=300) as client:
+        resp = await client.post(
+            f"{DEEPSEEK_BASE_URL}/chat/completions",
+            json=payload,
+            headers=_deepseek_auth_headers(api_key),
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        content = data["choices"][0]["message"]["content"]
+
+    try:
+        result = _extract_json_object(content)
+    except ValueError:
+        repaired = _repair_broken_json_fields(content)
+        try:
+            result = _extract_json_object(repaired)
+        except ValueError:
+            truncated = _repair_truncated_json(content)
+            try:
+                result = _extract_json_object(truncated)
+            except ValueError:
+                return ""
+
+    return result.get("video_prompt", "") or ""

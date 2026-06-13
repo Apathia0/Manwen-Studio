@@ -214,7 +214,7 @@ async def _generate_screenplay_with_llm(
         "response_format": {"type": "json_object"},
     }
 
-    async with httpx.AsyncClient(timeout=180) as client:
+    async with httpx.AsyncClient(timeout=300) as client:
         response = await client.post(
             f"{deepseek_service.DEEPSEEK_BASE_URL}/chat/completions",
             json=payload,
@@ -315,7 +315,7 @@ async def regenerate_scenes(
             "response_format": {"type": "json_object"},
         }
         try:
-            async with httpx.AsyncClient(timeout=180) as client:
+            async with httpx.AsyncClient(timeout=300) as client:
                 response = await client.post(
                     f"{deepseek_service.DEEPSEEK_BASE_URL}/chat/completions",
                     json=payload,

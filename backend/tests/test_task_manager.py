@@ -14,6 +14,7 @@ def db_session():
     Base.metadata.create_all(engine)
     Session = sessionmaker(bind=engine)
     session = Session()
+    session._test_engine = engine
     yield session
     session.close()
 
@@ -209,6 +210,37 @@ class TestBackgroundTaskLifecycle:
         assert saved.status == "failed"
         assert saved.retry_count == 3
         assert saved.error_message == "重试耗尽"
+
+    def test_submit_task_without_timeout_does_not_use_wait_for(self, db_session, monkeypatch):
+        """timeout=None 时不包裹 asyncio.wait_for"""
+        from services.task_manager import TaskManager
+        from sqlalchemy.orm import sessionmaker
+
+        import services.task_manager as tm
+        engine = getattr(db_session, "_test_engine", None)
+        if engine:
+            monkeypatch.setattr(tm, "SessionLocal", sessionmaker(bind=engine))
+
+        manager = TaskManager()
+        wait_for_called = {"value": False}
+
+        original_wait_for = asyncio.wait_for
+
+        async def fake_wait_for(*args, **kwargs):
+            wait_for_called["value"] = True
+            return await original_wait_for(*args, **kwargs)
+
+        async def fake_coro(*args, **kwargs):
+            return {"ok": True}
+
+        monkeypatch.setattr(asyncio, "wait_for", fake_wait_for)
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(manager.submit_task("task-1", "video", fake_coro, timeout=None, max_retries=0))
+        finally:
+            loop.close()
+
+        assert wait_for_called["value"] is False
 
     def test_updated_at_auto_update(self, db_session):
         """updated_at 在更新时自动变化"""

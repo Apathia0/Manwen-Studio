@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   CheckCircle2,
   Clapperboard,
@@ -7,6 +7,7 @@ import {
   Loader2,
   RefreshCcw,
   Sparkles,
+  Trash2,
   UserRound,
   Wand2,
   SquarePen,
@@ -15,11 +16,11 @@ import {
   SkipForward,
 } from 'lucide-react';
 import type { ChapterVideoWorkflow, StoryVideoCharacter, VideoAsset } from '../api';
-import { saveChapterShotPrompts } from '../api';
+import { saveChapterShotPrompts, replaceVideoAsset, regenerateVideoAsset, uploadShotStoryboard, uploadShotVideo, createVideoAsset, generateShotSceneAsset, generateShotPropAsset, toPublicVideoAssetUrl } from '../api';
 import AssetReferenceSelector from './AssetReferenceSelector';
 
 import VideoCardWorkbench from './VideoCardWorkbench';
-import { buildCharacterWorkbenchResources } from './videoWorkbenchUtils';
+import { buildCharacterWorkbenchResources, replaceWorkbenchAssetAndRefresh, uploadCharacterWorkbenchAsset, uploadWorkbenchAsset } from './videoWorkbenchUtils';
 
 interface ChapterVideoWorkflowPanelProps {
   workflow: ChapterVideoWorkflow | null;
@@ -28,6 +29,7 @@ interface ChapterVideoWorkflowPanelProps {
   chapterAssets: VideoAsset[];
   selectedReferenceIds: number[];
   selectedStyle: string;
+  styleReferenceImageUrl?: string | null;
   stylePresets: Array<{ id: number; name: string; category: string }>;
   concatVideoUrl: string | null;
   selectedShotIds: Set<number>;
@@ -36,9 +38,11 @@ interface ChapterVideoWorkflowPanelProps {
   onRefreshWorkflow: () => Promise<void> | void;
   onConcatWorkflow: () => Promise<void> | void;
   onRegenerateStoryboard: (shotId: number, refAssetIds?: number[]) => Promise<void> | void;
-  onRegenerateVideo: (shotId: number, refAssetIds?: number[]) => Promise<void> | void;
-  onStyleChange: (style: string) => void;
+  onRegenerateVideo: (shotId: number, refAssetIds?: number[], aspectRatio?: '16:9' | '9:16') => Promise<void> | void;
+  onStyleChange: (style: string, referenceImageUrl?: string | null) => void;
+  onOpenStyleSelector?: () => void;
   onParseShots: () => Promise<void> | void;
+  onGenerateShotDetails: (shotIds: number[]) => Promise<void> | void;
   onGenerateStoryboards: (shotIds: number[]) => Promise<void> | void;
   onGenerateVideos: (shotIds: number[]) => Promise<void> | void;
   onToggleShotSelection: (shotId: number) => void;
@@ -53,7 +57,10 @@ interface ChapterVideoWorkflowPanelProps {
   videoCharacters: StoryVideoCharacter[];
   characterLoading: boolean;
   onGenerateCharacters: () => Promise<void> | void;
+  onResetWorkflow?: () => Promise<void> | void;
   parsing?: boolean;
+  videoAspectRatio?: '16:9' | '9:16';
+  onVideoAspectRatioChange?: (value: '16:9' | '9:16') => void;
 }
 
 function shotStatusLabel(status: string): string {
@@ -76,9 +83,7 @@ function shotStatusLabel(status: string): string {
 }
 
 function toAssetUrl(filePath?: string | null): string {
-  if (!filePath) return '';
-  if (filePath.startsWith('http') || filePath.startsWith('/static/')) return filePath;
-  return `/static/video/${filePath.replace(/\\/g, '/')}`;
+  return toPublicVideoAssetUrl(filePath) || '';
 }
 
 export default function ChapterVideoWorkflowPanel({
@@ -88,6 +93,7 @@ export default function ChapterVideoWorkflowPanel({
   chapterAssets,
   selectedReferenceIds,
   selectedStyle,
+  styleReferenceImageUrl,
   stylePresets,
   concatVideoUrl,
   selectedShotIds,
@@ -98,7 +104,9 @@ export default function ChapterVideoWorkflowPanel({
   onRegenerateStoryboard,
   onRegenerateVideo,
   onStyleChange,
+  onOpenStyleSelector,
   onParseShots,
+  onGenerateShotDetails,
   onGenerateStoryboards,
   onGenerateVideos,
   onToggleShotSelection,
@@ -110,17 +118,45 @@ export default function ChapterVideoWorkflowPanel({
   onDeleteChapterAsset,
   onDeleteStoryboard,
   onDeleteVideo,
+  onResetWorkflow,
   parsing,
+  videoAspectRatio = '16:9',
+  onVideoAspectRatioChange,
 }: ChapterVideoWorkflowPanelProps) {
   const [selectorOpen, setSelectorOpen] = useState(false);
+  const [concatModalOpen, setConcatModalOpen] = useState(false);
 
   const [videoWorkbench, setVideoWorkbench] = useState<{
     shotId: number;
-    type: 'character' | 'storyboard' | 'video';
+    type: 'character' | 'storyboard' | 'video' | 'scene';
     assetId?: number;
   } | null>(null);
 
   const [workbenchRefAssetIds, setWorkbenchRefAssetIds] = useState<number[]>([]);
+
+  const normalizeAssetText = (value?: string | null) => (value || '').trim().toLowerCase();
+
+  const collectRecommendedAssetIds = (shot: ChapterVideoWorkflow['shots'][number]): number[] => {
+    const ids = new Set<number>(selectedReferenceIds);
+    const sceneCandidates = (shot.scene_asset_candidates || []).map(normalizeAssetText).filter(Boolean);
+    const propCandidates = (shot.key_props || []).map(normalizeAssetText).filter(Boolean);
+
+    chapterAssets.forEach((asset) => {
+      const name = normalizeAssetText(asset.name);
+      const prompt = normalizeAssetText(asset.prompt);
+      const isSceneAsset = asset.asset_type === 'scene_reference' || asset.asset_type === 'scene' || asset.asset_type === 'background';
+      const isPropAsset = asset.asset_type === 'prop_reference';
+
+      if (isSceneAsset && sceneCandidates.some((candidate) => name.includes(candidate) || prompt.includes(candidate) || candidate.includes(name))) {
+        ids.add(asset.id);
+      }
+      if (isPropAsset && propCandidates.some((candidate) => name.includes(candidate) || prompt.includes(candidate) || candidate.includes(name))) {
+        ids.add(asset.id);
+      }
+    });
+
+    return Array.from(ids);
+  };
 
   const characterAssets = useMemo(
     () => chapterAssets.filter((asset) => asset.asset_type === 'character_reference' || asset.asset_type === 'character'),
@@ -136,6 +172,13 @@ export default function ChapterVideoWorkflowPanel({
     [workflow?.shots],
   );
 
+  useEffect(() => {
+    if (!videoWorkbench || (videoWorkbench.type !== 'storyboard' && videoWorkbench.type !== 'video')) return;
+    const shot = sortedShots.find((item) => item.id === videoWorkbench.shotId);
+    if (!shot) return;
+    setWorkbenchRefAssetIds(collectRecommendedAssetIds(shot));
+  }, [videoWorkbench, sortedShots, chapterAssets, selectedReferenceIds]);
+
   if (workflowLoading && !videoWorkbench) {
     return (
       <div className="flex h-full items-center justify-center text-slate-500">
@@ -146,10 +189,10 @@ export default function ChapterVideoWorkflowPanel({
 
   const status = workflow?.workflow_status ?? '';
 
-  const canParse = (!workflow || ['pending', 'failed'].includes(status)) && !workflowRunning;
+  const canParse = !workflow || ['pending', 'shots_ready', 'failed'].includes(status) || !workflow.shots?.length;
   const canStoryboard = ['shots_ready', 'generating_storyboards', 'failed'].includes(status) && !workflowRunning;
   const canVideo = ['storyboards_ready', 'generating_videos', 'failed'].includes(status) && !workflowRunning;
-  const canConcat = ['completed', 'videos_ready'].includes(status) && !workflowRunning;
+  const canConcat = ['completed', 'videos_ready', 'storyboards_ready', 'generating_videos', 'shots_ready'].includes(status) && !workflowRunning;
 
   const storyboardReadyShots = workflow?.shots?.filter((shot) => shot.status === 'storyboard_ready') ?? [];
   const videoReadyShots = workflow?.shots?.filter((shot) => shot.status === 'video_ready') ?? [];
@@ -173,17 +216,13 @@ export default function ChapterVideoWorkflowPanel({
       <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#d7e3f4] bg-white/80 px-4 py-2.5 backdrop-blur">
         <div className="flex items-center gap-2">
           <span className="mr-1 text-sm font-medium text-slate-900">电影分镜流水线</span>
-          {stylePresets.length > 0 && (
-            <select
-              value={selectedStyle}
-              onChange={(e) => onStyleChange(e.target.value)}
-              className="rounded-lg border border-[#d7e3f4] bg-white px-2 py-1 text-xs text-slate-600 outline-none"
-            >
-              {stylePresets.map((preset) => (
-                <option key={preset.id} value={preset.name}>{preset.name}</option>
-              ))}
-            </select>
-          )}
+          <button
+            onClick={() => onOpenStyleSelector?.()}
+            className="inline-flex items-center gap-1.5 rounded-lg border border-[#d7e3f4] bg-white px-2.5 py-1.5 text-xs text-slate-600 hover:bg-slate-50"
+          >
+            🎨 {selectedStyle || '选择风格'}
+            {styleReferenceImageUrl && <span className="text-blue-500">(自定义)</span>}
+          </button>
           <button
             onClick={() => setSelectorOpen(true)}
             className="rounded-lg border border-[#d7e3f4] bg-white px-2.5 py-1.5 text-xs text-slate-600 hover:bg-slate-50"
@@ -202,37 +241,15 @@ export default function ChapterVideoWorkflowPanel({
             {parsing ? <Loader2 size={12} className="animate-spin" /> : <StepForward size={12} />}
             {parsing ? '拆镜中...' : '拆镜'}
           </button>
-          {workflow && (
-            <>
-              <button
-                onClick={() => void onGenerateStoryboards(activeShotIds)}
-                disabled={!canStoryboard || activeShotIds.length === 0}
-                title="阶段2：为选中的镜头生成故事版图片"
-                className="inline-flex items-center gap-1 rounded-lg border border-[#d7e3f4] px-2.5 py-1.5 text-xs text-slate-600 hover:bg-slate-50 disabled:opacity-40 disabled:cursor-not-allowed"
-              >
-                <ImageIcon size={12} />
-                故事版
-              </button>
-              <button
-                onClick={() => void onGenerateVideos(activeShotIds)}
-                disabled={!canVideo || activeShotIds.length === 0}
-                title="阶段3：为选中的镜头生成视频"
-                className="inline-flex items-center gap-1 rounded-lg border border-[#d7e3f4] px-2.5 py-1.5 text-xs text-slate-600 hover:bg-slate-50 disabled:opacity-40 disabled:cursor-not-allowed"
-              >
-                <Film size={12} />
-                视频
-              </button>
-              <button
-                onClick={() => void onConcatWorkflow()}
-                disabled={!canConcat}
-                title="阶段4：拼接已完成视频为整章成片"
-                className="inline-flex items-center gap-1 rounded-lg border border-[#d7e3f4] px-2.5 py-1.5 text-xs text-slate-600 hover:bg-slate-50 disabled:opacity-40 disabled:cursor-not-allowed"
-              >
-                <PanelBottomOpen size={12} />
-                拼接
-              </button>
-            </>
-          )}
+          <button
+            onClick={() => setConcatModalOpen(true)}
+            disabled={!canConcat}
+            title="阶段4：拼接已完成视频为整章成片"
+            className="inline-flex items-center gap-1 rounded-lg border border-[#d7e3f4] px-2.5 py-1.5 text-xs text-slate-600 hover:bg-slate-50 disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            <PanelBottomOpen size={12} />
+            拼接
+          </button>
           <button
             onClick={() => void onRefreshWorkflow()}
             disabled={workflowRunning}
@@ -241,6 +258,19 @@ export default function ChapterVideoWorkflowPanel({
             <RefreshCcw size={12} />
             刷新
           </button>
+          {onResetWorkflow && workflow && (
+            <button
+              onClick={() => {
+                if (window.confirm('确定要重置工作流吗？将清除所有镜头和生成数据，此操作不可撤销。')) {
+                  void onResetWorkflow();
+                }
+              }}
+              className="inline-flex items-center gap-1 rounded-lg border border-rose-200 px-2.5 py-1.5 text-xs text-rose-600 hover:bg-rose-50"
+            >
+              <Trash2 size={12} />
+              重置
+            </button>
+          )}
         </div>
       </div>
 
@@ -339,10 +369,21 @@ export default function ChapterVideoWorkflowPanel({
                                   ? 'bg-emerald-50 text-emerald-600'
                                   : hasStoryboard
                                     ? 'bg-violet-50 text-violet-600'
-                                    : 'bg-slate-100 text-slate-600'
+                                    : !shot.camera_plan
+                                      ? 'bg-amber-50 text-amber-600'
+                                      : 'bg-slate-100 text-slate-600'
                             }`}
                           >
-                            {shotStatusLabel(shot.status)}
+                            {isFailed
+                              ? shotStatusLabel(shot.status)
+                              : hasVideo
+                                ? shotStatusLabel(shot.status)
+                                : hasStoryboard
+                                  ? shotStatusLabel(shot.status)
+                                  : !shot.camera_plan
+                                    ? '待生成详情'
+                                    : shotStatusLabel(shot.status)
+                            }
                           </span>
                           {shot.characters && shot.characters.length > 0 && (
                             <span className="rounded-full bg-blue-50 px-2 py-0.5 text-[11px] text-blue-600">
@@ -371,7 +412,7 @@ export default function ChapterVideoWorkflowPanel({
                         </div>
 
                       {/* 右侧：故事版/视频预览 */}
-                      <div className="grid shrink-0 grid-cols-1 gap-3 sm:grid-cols-3 xl:w-[640px]">
+                      <div className="grid shrink-0 grid-cols-2 gap-3 sm:grid-cols-4 xl:w-[880px]">
                         <button
                           type="button"
                           onClick={() => setVideoWorkbench({ shotId: shot.id, type: 'character', assetId: undefined })}
@@ -412,6 +453,19 @@ export default function ChapterVideoWorkflowPanel({
                                 </div>
                               );
                             })()}
+                          </div>
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() => setVideoWorkbench({ shotId: shot.id, type: 'scene' })}
+                          className="rounded-xl border border-[#e5edf8] bg-slate-50 p-2 text-left transition hover:border-blue-300 hover:bg-white"
+                        >
+                          <div className="mb-2 flex items-center gap-1 text-xs font-medium text-slate-600">
+                            🏠 场景 & 道具
+                          </div>
+                          <div className="flex h-32 items-center justify-center rounded-lg border border-dashed border-[#d7e3f4] bg-white text-xs text-slate-400">
+                            待生成
                           </div>
                         </button>
 
@@ -466,23 +520,11 @@ export default function ChapterVideoWorkflowPanel({
                          disabled={workflowRunning}
                          className="inline-flex items-center gap-1 rounded-lg border border-amber-200 px-3 py-1.5 text-xs text-amber-700 hover:bg-amber-50 disabled:opacity-50"
                        >
-                         <Sparkles size={12} /> 重新分析提示词
+                         <Sparkles size={12} /> {shot.storyboard_prompt ? '重新分析提示词' : '分析提示词'}
                        </button>
                        {isFailed && (
-                         <>
-                           <button
-                             onClick={() => void onRegenerateStoryboard(shot.id)}
-                             className="inline-flex items-center gap-1 rounded-lg border border-rose-200 px-3 py-1.5 text-xs text-rose-600 hover:bg-rose-50"
-                          >
-                            <RefreshCcw size={12} /> 重试故事版
-                          </button>
-                          <button
-                            onClick={() => void onRegenerateVideo(shot.id)}
-                            className="inline-flex items-center gap-1 rounded-lg border border-rose-200 px-3 py-1.5 text-xs text-rose-600 hover:bg-rose-50"
-                          >
-                            <RefreshCcw size={12} /> 重试视频
-                          </button>
-                          {!skippedShotIds.has(shot.id) && (
+                          <>
+                           {!skippedShotIds.has(shot.id) && (
                             <button
                               onClick={() => void onSkipShot(shot.id)}
                               className="inline-flex items-center gap-1 rounded-lg border border-slate-200 px-3 py-1.5 text-xs text-slate-500 hover:bg-slate-50"
@@ -508,7 +550,7 @@ export default function ChapterVideoWorkflowPanel({
                       {hasVideo && (
                         <>
                           <button
-                            onClick={() => void onRegenerateVideo(shot.id)}
+                            onClick={() => void onRegenerateVideo(shot.id, undefined, videoAspectRatio)}
                             className="inline-flex items-center gap-1 rounded-lg border border-[#d7e3f4] px-3 py-1.5 text-xs text-slate-600 hover:bg-slate-50"
                           >
                             <Wand2 size={12} /> 重生视频
@@ -529,36 +571,6 @@ export default function ChapterVideoWorkflowPanel({
               })}
             </div>
             </div>
-
-            {/* ── 紧凑版整章成片卡片 ── */}
-            {sortedShots.length > 0 && (
-              <div className="hidden shrink-0 xl:block xl:w-[280px]">
-                <div className="rounded-2xl border border-[#d7e3f4] bg-white p-4 shadow-sm">
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <div className="text-sm font-semibold text-slate-900">整章成片</div>
-                      <div className="mt-0.5 text-xs text-slate-500">
-                        {storyboardReadyShots.length} 镜故事版 · {videoReadyShots.length} 镜视频
-                      </div>
-                    </div>
-                    <button
-                      onClick={() => void onConcatWorkflow()}
-                      disabled={!canConcat}
-                      className="rounded-lg bg-slate-900 px-2.5 py-1 text-xs text-white disabled:opacity-40"
-                    >
-                      拼接
-                    </button>
-                  </div>
-                  {concatVideoUrl ? (
-                    <video src={toAssetUrl(concatVideoUrl)} controls className="mt-3 h-28 w-full rounded-xl bg-slate-950 object-contain" />
-                  ) : (
-                    <div className="mt-3 flex h-28 items-center justify-center rounded-xl border border-dashed border-[#d7e3f4] bg-slate-50 text-xs text-slate-400">
-                      暂无
-                    </div>
-                  )}
-                </div>
-              </div>
-            )}
           </div>
         </>
       )}
@@ -567,12 +579,49 @@ export default function ChapterVideoWorkflowPanel({
         <AssetReferenceSelector
           availableAssets={characterAssets}
           selectedIds={selectedReferenceIds}
+          shotStoryboards={sortedShots.filter(s => s.storyboard_image_url).map(s => ({
+            id: s.id,
+            file_path: s.storyboard_image_url || '',
+            name: `镜头${s.shot_index} 故事版`,
+          }))}
           onConfirm={(ids) => {
             onSelectReferenceIds(ids);
             setSelectorOpen(false);
           }}
           onClose={() => setSelectorOpen(false)}
         />
+      )}
+
+      {concatModalOpen && (
+        <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/50 backdrop-blur-sm" onClick={() => setConcatModalOpen(false)}>
+          <div className="w-full max-w-lg rounded-2xl bg-white p-6 shadow-2xl" onClick={e => e.stopPropagation()}>
+            <div className="mb-4 flex items-center justify-between">
+              <h3 className="text-lg font-semibold text-slate-900">整章成片</h3>
+              <button onClick={() => setConcatModalOpen(false)} className="rounded-full bg-slate-100 p-1.5 text-slate-500 hover:bg-slate-200">
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M12 4L4 12M4 4l8 8" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/></svg>
+              </button>
+            </div>
+            <div className="text-sm text-slate-500">
+              {storyboardReadyShots.length} 镜故事版 · {videoReadyShots.length} 镜视频
+            </div>
+            {concatVideoUrl ? (
+              <video src={toAssetUrl(concatVideoUrl)} controls className="mt-4 h-48 w-full rounded-xl bg-slate-950 object-contain" />
+            ) : (
+              <div className="mt-4 flex h-48 items-center justify-center rounded-xl border border-dashed border-[#d7e3f4] bg-slate-50 text-sm text-slate-400">
+                暂无成片
+              </div>
+            )}
+            <div className="mt-4 flex justify-end">
+              <button
+                onClick={() => { void onConcatWorkflow(); }}
+                disabled={!canConcat}
+                className="rounded-lg bg-slate-900 px-4 py-2 text-sm text-white hover:bg-slate-800 disabled:opacity-40"
+              >
+                拼接
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
       {/* 二级工作台 */}
@@ -586,6 +635,14 @@ export default function ChapterVideoWorkflowPanel({
             (a.name || '').includes(name) || (a.prompt || '').includes(name)
           )
         );
+        const shotStoryboardAssets = sortedShots
+          .filter((s) => s.storyboard_image_url)
+          .map((s) => ({
+            id: -(s.id + 300000),
+            file_path: s.storyboard_image_url || '',
+            name: `镜头${s.shot_index} 故事版`,
+            prompt: s.storyboard_prompt || null,
+          }));
 
         let resources: Array<{ id: number; assetId?: number; url: string; prompt?: string; label?: string; characterName?: string; hasAsset?: boolean }>;
         let onRegenerate: (resourceId: number) => Promise<void>;
@@ -609,8 +666,31 @@ export default function ChapterVideoWorkflowPanel({
             characterName: resource.characterName,
             hasAsset: resource.hasAsset,
           }));
-          onRegenerate = async () => {};
-          onUploadReplace = async () => {};
+          onRegenerate = async (resourceId: number) => {
+            const resource = resources.find(r => r.id === resourceId);
+            let assetId = resource?.assetId;
+            if (!assetId && workflow) {
+              // 不传 shot_id: workbenchShot.id 是因为 workbenchShot 是 ChapterVideoShot，
+              // 其 id 属于 chapter_video_shots 表，而 VideoAsset.shot_id 外键引用 video_shots 表，
+              // 两个表 ID 序列独立，传入会导致外键冲突。shot_id 可为 null，占位资产不需要它。
+              const created = await createVideoAsset(workflow.chapter_id, {
+                asset_type: 'character_reference',
+                name: resource?.characterName || resource?.label || '角色资产',
+                file_path: '',
+                prompt: resource?.prompt || '',
+              });
+              assetId = created.id;
+            }
+            if (assetId) {
+              await regenerateVideoAsset(assetId, resource?.prompt);
+              if (onRefreshWorkflow) await onRefreshWorkflow();
+            }
+          };
+          onUploadReplace = async (resourceId: number, file: File) => {
+            const asset = resources.find(r => r.id === resourceId);
+            if (!asset || !workflow) return;
+            await uploadCharacterWorkbenchAsset(asset, workflow.chapter_id, file, createVideoAsset, replaceVideoAsset, onRefreshWorkflow);
+          };
           onDelete = async (resourceId: number) => {
             if (resourceId > 0 && onDeleteChapterAsset) await onDeleteChapterAsset(resourceId);
           };
@@ -634,11 +714,16 @@ export default function ChapterVideoWorkflowPanel({
           onRegenerate = async (resourceId: number) => {
             await onRegenerateStoryboard(resourceId, workbenchRefAssetIds);
           };
-          onUploadReplace = async () => {};
+          onUploadReplace = async (resourceId: number, file: File) => {
+            await uploadShotStoryboard(resourceId, file);
+            if (onRefreshWorkflow) await onRefreshWorkflow();
+          };
           onDelete = async (resourceId: number) => {
             if (onDeleteStoryboard) await onDeleteStoryboard(resourceId);
           };
-          onRedraw = async () => {};
+          onRedraw = async (resourceId: number, prompt: string) => {
+            await onRegenerateStoryboard(resourceId, workbenchRefAssetIds);
+          };
           onPromptSave = async (resourceId: number, prompt: string) => {
             await saveChapterShotPrompts(resourceId, { storyboard_prompt: prompt });
             if (onRefreshWorkflow) await onRefreshWorkflow();
@@ -653,18 +738,71 @@ export default function ChapterVideoWorkflowPanel({
             url: toAssetUrl(workbenchShot.video_url),
             prompt: workbenchShot.video_prompt ?? '',
           }];
-          onRegenerate = async (resourceId: number) => { await onRegenerateVideo(resourceId, workbenchRefAssetIds); };
-          onUploadReplace = async () => {};
+          onRegenerate = async (resourceId: number, aspectRatio?: '16:9' | '9:16') => { await onRegenerateVideo(resourceId, workbenchRefAssetIds, aspectRatio ?? videoAspectRatio); };
+          onUploadReplace = async (resourceId: number, file: File) => {
+            await uploadShotVideo(resourceId, file);
+            if (onRefreshWorkflow) await onRefreshWorkflow();
+          };
           onDelete = async (resourceId: number) => {
             if (onDeleteVideo) await onDeleteVideo(resourceId);
           };
-          onRedraw = async () => {};
+          onRedraw = async (resourceId: number, prompt: string) => {
+            await onRegenerateVideo(resourceId, workbenchRefAssetIds, videoAspectRatio);
+          };
           onPromptSave = async (resourceId: number, prompt: string) => {
             await saveChapterShotPrompts(resourceId, { video_prompt: prompt });
             if (onRefreshWorkflow) await onRefreshWorkflow();
           };
           onWorkbenchReanalyze = async (resourceId: number) => {
             await onReanalyzePrompt([resourceId]);
+            if (onRefreshWorkflow) await onRefreshWorkflow();
+          };
+        } else if (videoWorkbench.type === 'scene') {
+          const existingSceneAsset = chapterAssets.find((asset) => asset.asset_type === 'scene_reference' && asset.prompt === workbenchShot.scene_prompt);
+          const sceneRes = workbenchShot.scene_prompt
+            ? [{ id: workbenchShot.id + 100000, assetId: existingSceneAsset?.id, url: existingSceneAsset?.file_path || '', prompt: workbenchShot.scene_prompt, label: '场景', characterName: '__scene__' }]
+            : [];
+          const propRes = (workbenchShot.prop_prompts ?? []).map((p, i) => ({
+            id: workbenchShot.id + 200000 + i,
+            assetId: chapterAssets.find((asset) => asset.asset_type === 'prop_reference' && ((asset.name || '').trim() === `Prop - ${p.name || `道具${i + 1}`}` || (asset.prompt || '').trim() === p.prompt))?.id,
+            url: chapterAssets.find((asset) => asset.asset_type === 'prop_reference' && ((asset.name || '').trim() === `Prop - ${p.name || `道具${i + 1}`}` || (asset.prompt || '').trim() === p.prompt))?.file_path || '',
+            prompt: p.prompt,
+            label: p.name || `道具${i + 1}`,
+            characterName: p.name || `道具${i + 1}`,
+          }));
+          resources = [...sceneRes, ...propRes];
+          onRegenerate = async (resourceId: number) => {
+            const r = resources.find(res => res.id === resourceId);
+            if (!r || !workbenchShot) return;
+            if (r.characterName === '__scene__') {
+              await generateShotSceneAsset(workbenchShot.id, { prompt: r.prompt });
+            } else {
+              await generateShotPropAsset(workbenchShot.id, { prop_name: r.label, prompt: r.prompt });
+            }
+            if (onRefreshWorkflow) await onRefreshWorkflow();
+          };
+          onUploadReplace = async (resourceId: number, file: File) => {
+            const resource = resources.find((res) => res.id === resourceId);
+            if (!resource || !workflow) return;
+            await uploadWorkbenchAsset(
+              {
+                assetId: resource.assetId,
+                assetType: resource.characterName === '__scene__' ? 'scene_reference' : 'prop_reference',
+                label: resource.label || (resource.characterName === '__scene__' ? '场景' : '道具资产'),
+                prompt: resource.prompt || '',
+              },
+              workflow.chapter_id,
+              file,
+              createVideoAsset,
+              replaceVideoAsset,
+              onRefreshWorkflow,
+            );
+          };
+          onDelete = async () => {};
+          onRedraw = async () => {};
+          onPromptSave = undefined;
+          onWorkbenchReanalyze = async (resourceId: number) => {
+            await onReanalyzePrompt([workbenchShot.id]);
             if (onRefreshWorkflow) await onRefreshWorkflow();
           };
         } else {
@@ -692,11 +830,22 @@ export default function ChapterVideoWorkflowPanel({
             onPromptSave={onPromptSave}
             onReanalyzePrompt={onWorkbenchReanalyze}
             onClose={() => setVideoWorkbench(null)}
-          storyboardRefAssets={(videoWorkbench.type === 'storyboard' || videoWorkbench.type === 'video') ? workbenchStoryboardAssets : undefined}
+          storyboardRefAssets={(videoWorkbench.type === 'storyboard' || videoWorkbench.type === 'video') ? [...workbenchStoryboardAssets, ...shotStoryboardAssets] : undefined}
           selectedRefAssetIds={workbenchRefAssetIds}
           onSelectedRefAssetsChange={setWorkbenchRefAssetIds}
           displayShotIndex={workbenchShot.shot_index}
           storyboardImageUrl={toAssetUrl(workbenchShot.storyboard_image_url)}
+            chapterAssets={chapterAssets}
+            shotStoryboards={sortedShots.filter(s => s.storyboard_image_url).map(s => ({
+              id: s.id,
+              file_path: s.storyboard_image_url || '',
+              name: `镜头${s.shot_index} 故事版`,
+            }))}
+            videoAspectRatio={videoAspectRatio}
+            onVideoAspectRatioChange={onVideoAspectRatioChange}
+            recommendedSceneAssets={videoWorkbench.type === 'scene' ? (workbenchShot.scene_asset_candidates || []) : undefined}
+            recommendedKeyProps={videoWorkbench.type === 'scene' ? (workbenchShot.key_props || []) : undefined}
+            recommendedReferenceAssetIds={(videoWorkbench.type === 'storyboard' || videoWorkbench.type === 'video') ? workbenchRefAssetIds : undefined}
         />
         );
       })()}

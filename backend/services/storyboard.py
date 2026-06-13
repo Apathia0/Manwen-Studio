@@ -165,7 +165,7 @@ async def generate_shots(
             "response_format": {"type": "json_object"},
         }
         try:
-            async with httpx.AsyncClient(timeout=180) as client:
+            async with httpx.AsyncClient(timeout=300) as client:
                 response = await client.post(
                     f"{deepseek_service.DEEPSEEK_BASE_URL}/chat/completions",
                     json=payload,
@@ -290,7 +290,7 @@ async def generate_shot_prompts(
             "response_format": {"type": "json_object"},
         }
         try:
-            async with httpx.AsyncClient(timeout=120) as client:
+            async with httpx.AsyncClient(timeout=300) as client:
                 response = await client.post(
                     f"{deepseek_service.DEEPSEEK_BASE_URL}/chat/completions",
                     json=payload,

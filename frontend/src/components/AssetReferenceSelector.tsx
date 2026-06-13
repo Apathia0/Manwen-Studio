@@ -1,11 +1,9 @@
 import { useState } from 'react';
 import { X } from 'lucide-react';
-import type { VideoAsset } from '../api';
+import { toPublicVideoAssetUrl, type VideoAsset } from '../api';
 
 function toAssetUrl(filePath?: string | null): string {
-  if (!filePath) return '';
-  if (filePath.startsWith('http') || filePath.startsWith('/static/')) return filePath;
-  return `/static/video/${filePath.replace(/\\/g, '/')}`;
+  return toPublicVideoAssetUrl(filePath) || '';
 }
 
 interface AssetReferenceSelectorProps {
@@ -17,6 +15,10 @@ interface AssetReferenceSelectorProps {
   onConfirm: (selectedIds: number[]) => void;
   /** 关闭回调 */
   onClose: () => void;
+  /** 额外的故事版图片（来自 shot 的 storyboard_image_url） */
+  shotStoryboards?: Array<{ id: number; file_path: string; name: string }>;
+  /** 系统推荐优先引用的资产 */
+  recommendedIds?: number[];
 }
 
 type PresetKey = 'storyboard_and_chars' | 'chars_only' | 'all' | 'custom';
@@ -39,6 +41,8 @@ export default function AssetReferenceSelector({
   selectedIds,
   onConfirm,
   onClose,
+  shotStoryboards,
+  recommendedIds,
 }: AssetReferenceSelectorProps) {
   const [currentPreset, setCurrentPreset] = useState<PresetKey>(
     selectedIds.length === 0 ? 'storyboard_and_chars' : 'custom'
@@ -48,11 +52,9 @@ export default function AssetReferenceSelector({
 
   const applyPreset = (key: PresetKey) => {
     setCurrentPreset(key);
+    const allStoryboardIds = [...availableAssets.filter(a => a.asset_type === 'storyboard_frame' || a.asset_type === 'storyboard'), ...shotStoryboardAssets].map(a => a.id);
     if (key === 'storyboard_and_chars') {
-      const ids = availableAssets.filter(a =>
-        a.asset_type === 'storyboard_frame' || a.asset_type === 'storyboard' ||
-        a.asset_type === 'character_reference' || a.asset_type === 'character'
-      ).map(a => a.id);
+      const ids = [...allStoryboardIds, ...availableAssets.filter(a => a.asset_type === 'character_reference' || a.asset_type === 'character').map(a => a.id)];
       setChecked(new Set(ids));
     } else if (key === 'chars_only') {
       const ids = availableAssets.filter(a =>
@@ -60,7 +62,7 @@ export default function AssetReferenceSelector({
       ).map(a => a.id);
       setChecked(new Set(ids));
     } else if (key === 'all') {
-      setChecked(new Set(availableAssets.map(a => a.id)));
+      setChecked(new Set([...availableAssets.map(a => a.id), ...allStoryboardIds]));
     }
     // 'custom' 保持当前勾选不变
   };
@@ -74,8 +76,23 @@ export default function AssetReferenceSelector({
     setCurrentPreset('custom');
   };
 
+  const shotStoryboardAssets: VideoAsset[] = (shotStoryboards || []).map(s => ({
+    id: s.id,
+    story_id: 0,
+    chapter_id: 0,
+    scene_id: null,
+    shot_id: 0,
+    asset_type: 'storyboard_frame',
+    name: s.name,
+    file_path: s.file_path,
+    provider: null,
+    prompt: null,
+    meta: {},
+    created_at: '',
+  } as unknown as VideoAsset));
+
   const categorized = {
-    storyboard: availableAssets.filter(a => a.asset_type === 'storyboard_frame' || a.asset_type === 'storyboard'),
+    storyboard: [...availableAssets.filter(a => a.asset_type === 'storyboard_frame' || a.asset_type === 'storyboard'), ...shotStoryboardAssets],
     characters: availableAssets.filter(a => (a.asset_type === 'character_reference' || a.asset_type === 'character')),
     scene: availableAssets.filter(a => (a.asset_type === 'scene_reference' || a.asset_type === 'scene' || a.asset_type === 'background')),
     props: availableAssets.filter(a => a.asset_type === 'prop_reference'),
@@ -141,12 +158,12 @@ export default function AssetReferenceSelector({
                 <div className="text-xs font-medium text-slate-500 mb-1.5">{label}</div>
                 <div className="flex flex-wrap gap-2">
                   {visible.map(a => (
-                    <div
-                      key={a.id}
-                      onClick={() => toggle(a.id)}
-                      className={`relative group cursor-pointer rounded-xl overflow-hidden border-2 transition-all ${
-                        checked.has(a.id) ? 'border-[#2563eb] ring-2 ring-blue-200' : 'border-transparent hover:border-slate-300'
-                      }`}
+                      <div
+                        key={a.id}
+                        onClick={() => toggle(a.id)}
+                        className={`relative group cursor-pointer rounded-xl overflow-hidden border-2 transition-all ${
+                          checked.has(a.id) ? 'border-[#2563eb] ring-2 ring-blue-200' : 'border-transparent hover:border-slate-300'
+                        }`}
                     >
                       <div className="w-16 h-16 relative">
                         <img
@@ -162,6 +179,11 @@ export default function AssetReferenceSelector({
                           <svg className="w-2.5 h-2.5 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}>
                             <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
                           </svg>
+                        </div>
+                      )}
+                      {(recommendedIds || []).includes(a.id) && (
+                        <div className="absolute top-1 left-1 rounded bg-amber-500 px-1.5 py-0.5 text-[8px] font-medium text-white">
+                          推荐
                         </div>
                       )}
                       <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/60 to-transparent p-1 opacity-0 group-hover:opacity-100 transition-opacity">

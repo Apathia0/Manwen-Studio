@@ -1240,6 +1240,24 @@ export function AdminPlatformSettingsPage({
                 <TextInput type="password" value={settings.api.video_api_key} onChange={(e) => setSettings((prev) => prev ? { ...prev, api: { ...prev.api, video_api_key: e.target.value } } : prev)} placeholder="视频 API Key" />
               </div>
             </div>
+            <div className="rounded-2xl border border-[#e5edf8] bg-[#f8fbff] p-4">
+              <div className="mb-3 text-sm font-semibold text-slate-900">云存储 OSS</div>
+              <div className="space-y-3">
+                <label className="flex items-center gap-2 text-sm text-slate-700">
+                  <input
+                    type="checkbox"
+                    checked={settings.api.oss_enabled ?? false}
+                    onChange={(e) => setSettings((prev) => prev ? { ...prev, api: { ...prev.api, oss_enabled: e.target.checked } } : prev)}
+                  />
+                  启用 OSS 云存储
+                </label>
+                <TextInput value={settings.api.oss_access_key_id ?? ''} onChange={(e) => setSettings((prev) => prev ? { ...prev, api: { ...prev.api, oss_access_key_id: e.target.value } } : prev)} placeholder="Access Key ID" />
+                <TextInput type="password" value={settings.api.oss_access_key_secret ?? ''} onChange={(e) => setSettings((prev) => prev ? { ...prev, api: { ...prev.api, oss_access_key_secret: e.target.value } } : prev)} placeholder="Access Key Secret" />
+                <TextInput value={settings.api.oss_endpoint ?? ''} onChange={(e) => setSettings((prev) => prev ? { ...prev, api: { ...prev.api, oss_endpoint: e.target.value } } : prev)} placeholder="Endpoint (如 oss-cn-hangzhou.aliyuncs.com)" />
+                <TextInput value={settings.api.oss_bucket ?? ''} onChange={(e) => setSettings((prev) => prev ? { ...prev, api: { ...prev.api, oss_bucket: e.target.value } } : prev)} placeholder="Bucket 名称" />
+                <TextInput value={settings.api.oss_public_url_base ?? ''} onChange={(e) => setSettings((prev) => prev ? { ...prev, api: { ...prev.api, oss_public_url_base: e.target.value } } : prev)} placeholder="公网域名 (可选，如 https://cdn.yourdomain.com)" />
+              </div>
+            </div>
           </div>
 
           <div className="mt-4 flex flex-wrap items-center gap-3 rounded-2xl border border-[#d7e3f4] bg-white px-4 py-3 text-sm text-slate-700">

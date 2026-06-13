@@ -177,10 +177,10 @@ class TaskManager:
         async def _wrapped_task():
             async with self._semaphore:
                 try:
-                    return await asyncio.wait_for(
-                        coro_func(*args, task_id=task_id, story_id=story_id, chapter_id=chapter_id, shot_id=shot_id, **kwargs),
-                        timeout=timeout
-                    )
+                    coro = coro_func(*args, task_id=task_id, story_id=story_id, chapter_id=chapter_id, shot_id=shot_id, **kwargs)
+                    if timeout is None:
+                        return await coro
+                    return await asyncio.wait_for(coro, timeout=timeout)
                 except asyncio.TimeoutError:
                     logger.error(f"Task {task_id} timed out after {timeout}s")
                     raise

@@ -353,7 +353,7 @@ class FrameworkSnapshot(Base):
 class ChapterVideoWorkflow(Base):
     """章节视频工作流 — 管理从章节正文到视频的完整流水线
 
-    职责：编排章节正文 → 10s 镜头拆分 → 故事版生成 → 图生视频
+    职责：编排章节正文 → 15s 分镜拆分 → 故事版生成 → 图生视频
     """
     __tablename__ = "chapter_video_workflows"
 
@@ -366,7 +366,8 @@ class ChapterVideoWorkflow(Base):
     # 配置
     character_reference_ids: Mapped[list[Any] | None] = mapped_column(JSON, nullable=True)
     video_style: Mapped[str | None] = mapped_column(String(50), nullable=True)
-    duration_per_shot: Mapped[int] = mapped_column(Integer, default=10)
+    style_reference_image_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    duration_per_shot: Mapped[int] = mapped_column(Integer, default=15)
 
     # 进度
     total_shots: Mapped[int] = mapped_column(Integer, default=0)
@@ -390,9 +391,9 @@ class ChapterVideoWorkflow(Base):
 
 
 class ChapterVideoShot(Base):
-    """章节视频工作流的 10 秒镜头 — 独立于传统 ScriptScene/VideoShot
+    """章节视频工作流的 15 秒分镜 — 独立于传统 ScriptScene/VideoShot
 
-    每个 shot 对应一个 10 秒的独立视频片段，直接由正文解析产生。
+    每个 shot 对应一个固定 15 秒的独立视频片段，直接由正文解析产生。
     """
     __tablename__ = "chapter_video_shots"
 
@@ -418,6 +419,10 @@ class ChapterVideoShot(Base):
     storyboard_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
     video_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
     character_prompts_json: Mapped[Any] = mapped_column(JSON, nullable=True)
+    scene_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
+    prop_prompts_json: Mapped[Any] = mapped_column(JSON, nullable=True)
+    key_props_json: Mapped[list[Any] | None] = mapped_column(JSON, nullable=True)
+    scene_asset_candidates_json: Mapped[list[Any] | None] = mapped_column(JSON, nullable=True)
 
     # 引用
     character_reference_ids: Mapped[list[Any] | None] = mapped_column(JSON, nullable=True)
@@ -461,6 +466,7 @@ class VideoStylePreset(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     name: Mapped[str] = mapped_column(String(100), nullable=False)
     category: Mapped[str] = mapped_column(String(50), nullable=False)
+    image_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
     prompt_template: Mapped[str | None] = mapped_column(Text, nullable=True)
     image_style_params: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     video_style_params: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)

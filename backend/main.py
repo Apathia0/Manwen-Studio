@@ -141,6 +141,7 @@ from services.deepseek import (
 from services.errors import MangaImageGenerationError, MissingApiKeyError
 from services.prompt_template import get_effective_prompt, get_system_prompt, set_system_prompt, get_template_story_length, SYSTEM_PROMPT_KEYS
 from services.image2 import edit_existing_image, generate_cover_image, generate_manga_image, generate_reference_image
+from services.media_locator import ensure_local_media_path
 from services.scene_safety import sanitize_scene_list
 from services import deepseek as deepseek_service
 from services import image2 as image_service
@@ -597,6 +598,12 @@ def _platform_settings_snapshot(db: Session) -> dict:
             "video_provider": _get_platform_setting("api.video.provider", db, ""),
             "enable_user_override": bool(_get_platform_setting("api.enable_user_override", db, True)),
             "enable_user_url_override": bool(_get_platform_setting("api.enable_user_url_override", db, False)),
+            "oss_enabled": bool(_get_platform_setting("oss.enabled", db, False)),
+            "oss_access_key_id": _get_platform_setting("oss.access_key_id", db, ""),
+            "oss_access_key_secret": _get_platform_setting("oss.access_key_secret", db, ""),
+            "oss_endpoint": _get_platform_setting("oss.endpoint", db, ""),
+            "oss_bucket": _get_platform_setting("oss.bucket", db, ""),
+            "oss_public_url_base": _get_platform_setting("oss.public_url_base", db, ""),
         },
         "auth": {
             "require_email_code_for_register": bool(_get_platform_setting("auth.require_email_code_for_register", db, False)),
@@ -1228,6 +1235,12 @@ def _seed_platform_settings(db: Session, *, commit: bool = True) -> None:
         "api.video.provider": "",
         "api.enable_user_override": True,
         "api.enable_user_url_override": False,
+        "oss.enabled": False,
+        "oss.access_key_id": "",
+        "oss.access_key_secret": "",
+        "oss.endpoint": "",
+        "oss.bucket": "",
+        "oss.public_url_base": "",
         "auth.require_email_code_for_register": False,
         "auth.require_email_code_for_login": False,
         "auth.email_code_expire_minutes": 10,
@@ -1765,6 +1778,14 @@ def _replace_story_cover_from_path(story: Story, generated_path: Path) -> str:
             logger.warning("Old story cover remained after replacement: %s", old)
     story.cover_image = relative
     return relative
+
+
+def _store_story_cover_result(story: Story, generated_path: Path, stored_path: str) -> str:
+    normalized = str(stored_path or "").strip()
+    if normalized.startswith(("http://", "https://")):
+        story.cover_image = normalized
+        return normalized
+    return _replace_story_cover_from_path(story, generated_path)
 
 
 def _build_story_cover_prompt(story: Story, instruction: str = "") -> str:
@@ -4780,6 +4801,12 @@ def admin_save_platform_settings(body: dict, request: Request, db: Session = Dep
         "api.video.provider": api.get("video_provider", ""),
         "api.enable_user_override": bool(api.get("enable_user_override", True)),
         "api.enable_user_url_override": bool(api.get("enable_user_url_override", False)),
+        "oss.enabled": bool(api.get("oss_enabled", False)),
+        "oss.access_key_id": str(api.get("oss_access_key_id", "") or ""),
+        "oss.access_key_secret": str(api.get("oss_access_key_secret", "") or ""),
+        "oss.endpoint": str(api.get("oss_endpoint", "") or ""),
+        "oss.bucket": str(api.get("oss_bucket", "") or ""),
+        "oss.public_url_base": str(api.get("oss_public_url_base", "") or ""),
         "auth.require_email_code_for_register": bool(auth.get("require_email_code_for_register", False)),
         "auth.require_email_code_for_login": bool(auth.get("require_email_code_for_login", False)),
         "auth.email_code_expire_minutes": int(auth.get("email_code_expire_minutes", 10) or 10),
@@ -5200,7 +5227,17 @@ async def upload_story_cover(story_id: int, request: Request, db: Session = Depe
     img_bytes = _decode_png_upload(b64)
     output_path = _story_cover_output_path(story_id)
     _write_bytes_or_conflict(output_path, img_bytes, "story cover")
-    _replace_story_cover_from_path(story, output_path)
+    # OSS 上传（如已配置）
+    from services import oss as oss_service
+    oss_url = oss_service.upload_file(str(output_path)) if oss_service.is_enabled() else None
+    if oss_url:
+        try:
+            output_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+        story.cover_image = oss_url
+    else:
+        _replace_story_cover_from_path(story, output_path)
     db.commit()
     db.refresh(story)
     return {"cover_image": story.cover_image}
@@ -5228,7 +5265,7 @@ async def generate_story_cover(story_id: int, request: Request, db: Session = De
     )
     _release_db_transaction(db)
     try:
-        await generate_cover_image(
+        generated_cover_path = await generate_cover_image(
             prompt,
             output_path,
             api_key=image_api_key,
@@ -5237,7 +5274,7 @@ async def generate_story_cover(story_id: int, request: Request, db: Session = De
         raise HTTPException(502, exc.to_payload()) from exc
 
     story = _require_story_for_user(story_id, user, db)
-    _replace_story_cover_from_path(story, output_path)
+    _store_story_cover_result(story, output_path, generated_cover_path)
     _check_and_consume_feature_quota(
         request,
         user.id,
@@ -5264,9 +5301,10 @@ async def adjust_story_cover(story_id: int, request: Request, db: Session = Depe
     if not instruction:
         raise HTTPException(400, "instruction is required")
 
-    source_path = Path(__file__).resolve().parent / story.cover_image
-    if not source_path.exists():
+    source_path_str = ensure_local_media_path(story.cover_image, "manga")
+    if not source_path_str:
         raise HTTPException(404, "Existing cover file not found")
+    source_path = Path(source_path_str)
 
     prompt = _build_story_cover_prompt(story, f"在现有封面基础上调整：{instruction}")
     output_path = _story_cover_output_path(story_id)
@@ -5282,7 +5320,7 @@ async def adjust_story_cover(story_id: int, request: Request, db: Session = Depe
     )
     _release_db_transaction(db)
     try:
-        await edit_existing_image(
+        generated_cover_path = await edit_existing_image(
             prompt,
             source_path,
             output_path,
@@ -5293,7 +5331,7 @@ async def adjust_story_cover(story_id: int, request: Request, db: Session = Depe
         raise HTTPException(502, exc.to_payload()) from exc
 
     story = _require_story_for_user(story_id, user, db)
-    _replace_story_cover_from_path(story, output_path)
+    _store_story_cover_result(story, output_path, generated_cover_path)
     _check_and_consume_feature_quota(
         request,
         user.id,
@@ -5909,7 +5947,12 @@ def _save_uploaded_ref(ref_dir: Path, img_bytes: bytes, label: str) -> str:
         raise HTTPException(409, f"Maximum {MAX_REF_IMAGES_PER_LEVEL} reference images allowed")
     ref_dir.mkdir(parents=True, exist_ok=True)
     filename = f"ref_{uuid.uuid4().hex[:8]}.png"
-    _write_bytes_or_conflict(ref_dir / filename, img_bytes, label)
+    filepath = ref_dir / filename
+    _write_bytes_or_conflict(filepath, img_bytes, label)
+    # OSS 上传（如已配置，保留本地文件供 _serialize_refs 使用）
+    from services.oss import auto_configure_from_db, upload_file
+    auto_configure_from_db()
+    upload_file(str(filepath))
     return filename
 
 
@@ -6867,15 +6910,17 @@ async def regenerate_single_image(chapter_id: int, image_number: int, body: dict
             chapter_dir.mkdir(parents=True, exist_ok=True)
             filename = f"panel_{image_number:02d}_{uuid.uuid4().hex[:8]}.png"
             output_path = chapter_dir / filename
-            await edit_existing_image(
+            saved_path = await edit_existing_image(
                 prompt,
                 old_path,
                 output_path,
                 mask_bytes=mask_bytes,
                 api_key=image_api_key,
             )
+            # edit_existing_image 可能返回 OSS URL
+            saved_path_str = str(saved_path) if saved_path else str(output_path)
             image_result = image_service.ImageGenerationResult(
-                image_path=f"manga_outputs/chapter_{chapter_id}/{filename}",
+                image_path=saved_path_str if saved_path_str.startswith("http") else f"manga_outputs/chapter_{chapter_id}/{filename}",
                 final_prompt=prompt,
                 prompt_sanitized=False,
             )

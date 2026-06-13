@@ -1,10 +1,12 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { createPortal } from 'react-dom';
-import { RotateCcw, Upload, Trash2, Wand2, X, Loader2 } from 'lucide-react';
+import { RotateCcw, Upload, Trash2, Wand2, X, Loader2, CheckSquare } from 'lucide-react';
 import { ImageRedrawModal } from './shared/ImageRedrawModal';
+import AssetReferenceSelector from './AssetReferenceSelector';
+import type { VideoAsset } from '../api';
 
 interface VideoCardWorkbenchProps {
-  type: 'character' | 'storyboard' | 'video';
+  type: 'character' | 'storyboard' | 'video' | 'scene';
   shotId: number;
   assetId?: number;
   displayShotIndex?: number;
@@ -17,7 +19,7 @@ interface VideoCardWorkbenchProps {
     characterName?: string;
     hasAsset?: boolean;
   }>;
-  onRegenerate: (resourceId: number) => Promise<void>;
+  onRegenerate: (resourceId: number, aspectRatio?: '16:9' | '9:16') => Promise<void>;
   onUploadReplace: (resourceId: number, file: File) => Promise<void>;
   onDelete: (resourceId: number) => Promise<void>;
   onRedraw: (resourceId: number, prompt: string, mask?: string) => Promise<void>;
@@ -29,6 +31,15 @@ interface VideoCardWorkbenchProps {
   onSelectedRefAssetsChange?: (ids: number[]) => void;
   /** 视频类型：无视频时显示的故事版参考图 URL */
   storyboardImageUrl?: string;
+  /** 当前章节所有资产（用于选择引用资产弹窗） */
+  chapterAssets?: VideoAsset[];
+  /** 镜头故事版图片（来自 shot 的 storyboard_image_url） */
+  shotStoryboards?: Array<{ id: number; file_path: string; name: string }>;
+  videoAspectRatio?: '16:9' | '9:16';
+  onVideoAspectRatioChange?: (value: '16:9' | '9:16') => void;
+  recommendedSceneAssets?: string[];
+  recommendedKeyProps?: string[];
+  recommendedReferenceAssetIds?: number[];
 }
 
 interface WorkbenchState {
@@ -39,7 +50,10 @@ interface WorkbenchState {
   busy: string | null;
 }
 
-export default function VideoCardWorkbench({ type, shotId, assetId, displayShotIndex, resources, onRegenerate, onUploadReplace, onDelete, onRedraw, onPromptSave, onReanalyzePrompt, onClose, storyboardRefAssets, selectedRefAssetIds, onSelectedRefAssetsChange, storyboardImageUrl }: VideoCardWorkbenchProps) {
+/** 故事版图片在 selectedRefAssetIds 中的特殊标识 */
+const STORYBOARD_REF_ID = -1;
+
+export default function VideoCardWorkbench({ type, shotId, assetId, displayShotIndex, resources, onRegenerate, onUploadReplace, onDelete, onRedraw, onPromptSave, onReanalyzePrompt, onClose, storyboardRefAssets, selectedRefAssetIds, onSelectedRefAssetsChange, storyboardImageUrl, chapterAssets, shotStoryboards, videoAspectRatio = '16:9', onVideoAspectRatioChange, recommendedSceneAssets, recommendedKeyProps, recommendedReferenceAssetIds }: VideoCardWorkbenchProps) {
   const [state, setState] = useState<WorkbenchState>(() => {
     const initialIndex = Math.max(0, resources.findIndex(r => r.id === assetId));
     return {
@@ -50,6 +64,8 @@ export default function VideoCardWorkbench({ type, shotId, assetId, displayShotI
       busy: null,
     };
   });
+
+  const [isRefSelectorOpen, setIsRefSelectorOpen] = useState(false);
 
   const { currentIndex } = state;
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -70,7 +86,7 @@ export default function VideoCardWorkbench({ type, shotId, assetId, displayShotI
     if (!currentResource || state.busy) return;
     setState(s => ({ ...s, busy: 'regenerate' }));
     try {
-      await onRegenerate(currentResource.id);
+      await onRegenerate(currentResource.id, type === 'video' ? videoAspectRatio : undefined);
     } catch (err) {
       console.error('重新生成失败', err);
     } finally {
@@ -280,94 +296,49 @@ export default function VideoCardWorkbench({ type, shotId, assetId, displayShotI
                 )}
               </div>
 
-              {storyboardImageUrl && (
-                <div className="shrink-0 rounded-2xl border border-[#d7e3f4] bg-white p-4">
-                  <div className="text-sm font-medium text-slate-800">故事版参考图</div>
-                  <div className="mt-3 flex flex-wrap gap-2">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        if (onRegenerate) {
-                          onRegenerate(currentResource?.id || 0);
-                        }
-                      }}
-                      className="relative flex h-20 w-20 shrink-0 items-center justify-center overflow-hidden rounded-xl border-2 border-[#d7e3f4] hover:border-blue-300 transition"
-                      title="点击使用此故事版图重新生成视频"
-                    >
-                      <img
-                        src={storyboardImageUrl}
-                        alt="故事版参考图"
-                        className="h-full w-full object-cover"
-                        onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
-                      />
-                    </button>
-                  </div>
-                  <div className="mt-2 text-xs text-slate-400">
-                    点击重新生成，将使用此故事版图作为参考
-                  </div>
-                </div>
-              )}
-
-              {storyboardRefAssets && storyboardRefAssets.length > 0 && (
-                <div className="shrink-0 rounded-2xl border border-[#d7e3f4] bg-white p-4">
-                  <div className="text-sm font-medium text-slate-800">角色参考图</div>
-                  <div className="mt-3 flex flex-wrap gap-2">
-                    {storyboardRefAssets.map((asset) => {
-                      const isSelected = selectedRefAssetIds?.includes(asset.id) ?? false;
-                      const imgSrc = (() => {
-                        const fp = asset.file_path;
-                        if (!fp) return '';
-                        if (fp.startsWith('http')) return fp;
-                        if (fp.startsWith('/')) return `/static/video/${fp.replace(/^\/static\/video\//, '')}`;
-                        return `/static/video/${fp}`;
-                      })();
-                      return (
-                        <button
-                          key={asset.id}
-                          type="button"
-                          onClick={() => {
-                            const next = isSelected
-                              ? (selectedRefAssetIds || []).filter((id) => id !== asset.id)
-                              : [...(selectedRefAssetIds || []), asset.id];
-                            onSelectedRefAssetsChange?.(next);
-                          }}
-                          className={`relative flex h-16 w-16 shrink-0 items-center justify-center overflow-hidden rounded-xl border-2 transition ${
-                            isSelected
-                              ? 'border-blue-500 ring-2 ring-blue-200'
-                              : 'border-[#d7e3f4] hover:border-blue-300'
-                          }`}
-                          title={asset.name || '参考图'}
-                        >
-                          {imgSrc ? (
-                            <img
-                              src={imgSrc}
-                              alt={asset.name || ''}
-                              className="h-full w-full object-cover"
-                              onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
-                            />
-                          ) : (
-                            <span className="text-[10px] text-slate-400">无图</span>
-                          )}
-                          {isSelected && (
-                            <div className="absolute right-0.5 top-0.5 flex h-5 w-5 items-center justify-center rounded-full bg-blue-500 text-[10px] text-white">
-                              ✓
-                            </div>
-                          )}
-                        </button>
-                      );
-                    })}
-                  </div>
-                  <div className="mt-2 text-xs text-slate-400">
-                    {selectedRefAssetIds?.length ? `已选 ${selectedRefAssetIds.length} 张参考图` : '点击选择角色参考图，用于参考图生视频'}
-                  </div>
-                </div>
-              )}
-
               <div className="shrink-0 rounded-2xl border border-[#d7e3f4] bg-white p-4">
                 <div className="text-sm font-medium text-slate-800">操作</div>
+                {type === 'scene' && ((recommendedSceneAssets?.length ?? 0) > 0 || (recommendedKeyProps?.length ?? 0) > 0) && (
+                  <div className="mt-3 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                    {(recommendedSceneAssets?.length ?? 0) > 0 && (
+                      <div>推荐继承场景：{recommendedSceneAssets?.join('、')}</div>
+                    )}
+                    {(recommendedKeyProps?.length ?? 0) > 0 && (
+                      <div className="mt-1">推荐关键道具：{recommendedKeyProps?.join('、')}</div>
+                    )}
+                  </div>
+                )}
                 <div className="mt-3 flex flex-wrap gap-2">
+                  {type === 'video' && onVideoAspectRatioChange && (
+                    <div className="flex items-center gap-2 rounded-xl border border-[#d7e3f4] bg-[#f8fbff] px-3 py-1.5 text-xs text-slate-700">
+                      <span>视频比例</span>
+                      <select
+                        value={videoAspectRatio}
+                        onChange={(e) => onVideoAspectRatioChange(e.target.value as '16:9' | '9:16')}
+                        className="rounded-lg border border-[#d7e3f4] bg-white px-2 py-1 text-xs text-slate-700 outline-none"
+                      >
+                        <option value="16:9">16:9</option>
+                        <option value="9:16">9:16</option>
+                      </select>
+                    </div>
+                  )}
+                  {chapterAssets && chapterAssets.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => setIsRefSelectorOpen(true)}
+                      className="flex items-center gap-1 rounded-xl border border-[#d7e3f4] bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50"
+                    >
+                      <CheckSquare size={12} />
+                      选择引用资产
+                      {(selectedRefAssetIds?.length ?? 0) > 0 && (
+                        <span className="ml-1 rounded-full bg-blue-100 px-1.5 py-0.5 text-[10px] text-blue-600">
+                          {selectedRefAssetIds?.length}
+                        </span>
+                      )}
+                    </button>
+                  )}
                   <button onClick={handleRegenerate} disabled={state.busy === 'regenerate'} className="flex items-center gap-1 rounded-xl bg-[#1d4ed8] px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-700 disabled:opacity-60">
-                    {state.busy === 'regenerate' ? <Loader2 size={12} className="animate-spin" /> : <RotateCcw size={12} />} {state.busy === 'regenerate' ? '生成中...' : '重新生成'}
+                    {state.busy === 'regenerate' ? <Loader2 size={12} className="animate-spin" /> : <RotateCcw size={12} />} {state.busy === 'regenerate' ? '生成中...' : (previewUrl ? '重新生成' : '生成')}
                   </button>
                   <button onClick={handleUploadClick} disabled={state.busy === 'upload'} className="flex items-center gap-1 rounded-xl border border-[#d7e3f4] bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-60">
                     {state.busy === 'upload' ? <Loader2 size={12} className="animate-spin" /> : <Upload size={12} />} {state.busy === 'upload' ? '上传中...' : '上传替换'}
@@ -377,7 +348,7 @@ export default function VideoCardWorkbench({ type, shotId, assetId, displayShotI
                   </button>
                   {onReanalyzePrompt && (
                     <button onClick={handleReanalyze} disabled={state.busy === 'reanalyze'} className="flex items-center gap-1 rounded-xl border border-amber-200 bg-white px-3 py-1.5 text-xs font-medium text-amber-700 hover:bg-amber-50 disabled:opacity-60">
-                       {state.busy === 'reanalyze' ? <Loader2 size={12} className="animate-spin" /> : <RotateCcw size={12} />} {state.busy === 'reanalyze' ? '分析中...' : '重新分析提示词'}
+                       {state.busy === 'reanalyze' ? <Loader2 size={12} className="animate-spin" /> : <RotateCcw size={12} />} {state.busy === 'reanalyze' ? '分析中...' : (currentResource?.prompt ? '重新分析提示词' : '分析提示词')}
                     </button>
                   )}
                 </div>
@@ -405,6 +376,22 @@ export default function VideoCardWorkbench({ type, shotId, assetId, displayShotI
               }}
             />
           )}
+
+          {/* 选择引用资产弹窗 */}
+          {isRefSelectorOpen && chapterAssets && (
+            <AssetReferenceSelector
+              availableAssets={chapterAssets}
+              selectedIds={selectedRefAssetIds || []}
+              shotStoryboards={shotStoryboards}
+              recommendedIds={recommendedReferenceAssetIds}
+              onConfirm={(ids) => {
+                onSelectedRefAssetsChange?.(ids);
+                setIsRefSelectorOpen(false);
+              }}
+              onClose={() => setIsRefSelectorOpen(false)}
+            />
+          )}
+          <input ref={fileInputRef} type="file" accept="image/*" onChange={handleFileChange} className="hidden" />
         </div>
       </div>
     );
@@ -412,8 +399,9 @@ export default function VideoCardWorkbench({ type, shotId, assetId, displayShotI
     return createPortal(modal, document.body);
   }
 
-  // ────────── 角色/故事版类型：居中弹窗布局（漫画工作台样式）──────────
+  // ────────── 角色/故事版/场景类型：居中弹窗布局（漫画工作台样式）──────────
   const isCharacter = type === 'character';
+  const isScene = type === 'scene';
   const previewClass = state.zoomLevel === 1
     ? 'max-w-[92%] max-h-none'
     : state.zoomLevel === 1.35
@@ -433,11 +421,11 @@ export default function VideoCardWorkbench({ type, shotId, assetId, displayShotI
         <div className="flex items-center justify-between border-b border-[#e5edf8] px-6 py-4">
           <div>
             <div className="text-lg font-semibold text-slate-900">
-              {isCharacter ? '角色资产工作台' : '故事版工作台'}
+              {isCharacter ? '角色资产工作台' : isScene ? '场景 & 道具工作台' : '故事版工作台'}
             </div>
             <div className="mt-1 text-sm text-slate-500">
               镜头 {displayShotIndex ?? shotId}
-              {isCharacter ? ' · 左侧选择角色，中间预览，右侧查看提示词与操作' : ' · 中间预览故事版图片，右侧查看提示词与操作'}
+              {isCharacter ? ' · 左侧选择角色，中间预览，右侧查看提示词与操作' : isScene ? ' · 左侧选择场景/道具，中间预览，右侧查看提示词与操作' : ' · 中间预览故事版图片，右侧查看提示词与操作'}
             </div>
           </div>
           <button onClick={onClose} className="rounded-full bg-slate-100 p-2 text-slate-600 transition hover:bg-slate-200">
@@ -446,14 +434,14 @@ export default function VideoCardWorkbench({ type, shotId, assetId, displayShotI
         </div>
 
         {/* 弹窗主体 */}
-        {isCharacter ? (
-          /* ── 角色：左中右三栏 ── */
+        {(isCharacter || isScene) ? (
+          /* ── 角色/场景：左中右三栏 ── */
           <div className="grid flex-1 gap-0 overflow-hidden lg:grid-cols-[1fr_6fr_3fr]">
-            {/* 左侧：角色列表 */}
+            {/* 左侧：资产列表 */}
             <div className="overflow-auto border-r border-[#e5edf8] bg-white p-4">
-              <div className="mb-3 text-xs font-medium text-slate-500">角色资产</div>
+              <div className="mb-3 text-xs font-medium text-slate-500">{isScene ? '场景 & 道具资产' : '角色资产'}</div>
               {resources.length === 0 ? (
-                <div className="text-xs text-slate-400">暂无角色资产</div>
+                <div className="text-xs text-slate-400">{isScene ? '暂无场景/道具资产' : '暂无角色资产'}</div>
               ) : (
                 <div className="space-y-2">
                   {resources.map((res, idx) => (
@@ -476,7 +464,7 @@ export default function VideoCardWorkbench({ type, shotId, assetId, displayShotI
                          />
                        ) : (
                          <div className="mt-2 flex h-16 w-full items-center justify-center rounded-lg border border-dashed border-[#d7e3f4] bg-white text-[11px] text-slate-400">
-                           暂无角色参考图
+                           {isScene ? '暂无场景/道具参考图' : '暂无角色参考图'}
                          </div>
                        )}
                     </button>
@@ -545,7 +533,7 @@ export default function VideoCardWorkbench({ type, shotId, assetId, displayShotI
                 <div className="text-sm font-medium text-slate-800">操作</div>
                 <div className="mt-3 flex flex-wrap gap-2">
                   <button onClick={handleRegenerate} disabled={state.busy === 'regenerate'} className="flex items-center gap-1 rounded-xl bg-[#1d4ed8] px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-700 disabled:opacity-60">
-                    {state.busy === 'regenerate' ? <Loader2 size={12} className="animate-spin" /> : <RotateCcw size={12} />} {state.busy === 'regenerate' ? '生成中...' : '重新生成'}
+                    {state.busy === 'regenerate' ? <Loader2 size={12} className="animate-spin" /> : <RotateCcw size={12} />} {state.busy === 'regenerate' ? '生成中...' : (previewUrl ? '重新生成' : '生成')}
                   </button>
                   <button onClick={handleUploadClick} disabled={state.busy === 'upload'} className="flex items-center gap-1 rounded-xl border border-[#d7e3f4] bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-60">
                     {state.busy === 'upload' ? <Loader2 size={12} className="animate-spin" /> : <Upload size={12} />} {state.busy === 'upload' ? '上传中...' : '上传替换'}
@@ -558,7 +546,7 @@ export default function VideoCardWorkbench({ type, shotId, assetId, displayShotI
                   </button>
                   {onReanalyzePrompt && (
                     <button onClick={handleReanalyze} disabled={state.busy === 'reanalyze'} className="flex items-center gap-1 rounded-xl border border-amber-200 bg-white px-3 py-1.5 text-xs font-medium text-amber-700 hover:bg-amber-50 disabled:opacity-60">
-                       {state.busy === 'reanalyze' ? <Loader2 size={12} className="animate-spin" /> : <RotateCcw size={12} />} {state.busy === 'reanalyze' ? '分析中...' : isCharacter ? '重新分析当前角色提示词' : '重新分析提示词'}
+                       {state.busy === 'reanalyze' ? <Loader2 size={12} className="animate-spin" /> : <RotateCcw size={12} />} {state.busy === 'reanalyze' ? '分析中...' : (currentResource?.prompt ? (isCharacter ? '重新分析当前角色提示词' : '重新分析提示词') : '分析提示词')}
                     </button>
                   )}
                 </div>
@@ -624,67 +612,26 @@ export default function VideoCardWorkbench({ type, shotId, assetId, displayShotI
                 )}
               </div>
 
-              {/* 角色参考图选择区（仅故事版） */}
-              {storyboardRefAssets && storyboardRefAssets.length > 0 && (
-                <div className="shrink-0 rounded-2xl border border-[#d7e3f4] bg-white p-4">
-                  <div className="text-sm font-medium text-slate-800">角色参考图</div>
-                  <div className="mt-3 flex flex-wrap gap-2">
-                    {storyboardRefAssets.map((asset) => {
-                      const isSelected = selectedRefAssetIds?.includes(asset.id) ?? false;
-                      const imgSrc = (() => {
-                        const fp = asset.file_path;
-                        if (!fp) return '';
-                        if (fp.startsWith('http')) return fp;
-                        if (fp.startsWith('/')) return `/static/video/${fp.replace(/^\/static\/video\//, '')}`;
-                        return `/static/video/${fp}`;
-                      })();
-                      return (
-                        <button
-                          key={asset.id}
-                          type="button"
-                          onClick={() => {
-                            const next = isSelected
-                              ? (selectedRefAssetIds || []).filter((id) => id !== asset.id)
-                              : [...(selectedRefAssetIds || []), asset.id];
-                            onSelectedRefAssetsChange?.(next);
-                          }}
-                          className={`relative flex h-16 w-16 shrink-0 items-center justify-center overflow-hidden rounded-xl border-2 transition ${
-                            isSelected
-                              ? 'border-blue-500 ring-2 ring-blue-200'
-                              : 'border-[#d7e3f4] hover:border-blue-300'
-                          }`}
-                          title={asset.name || '参考图'}
-                        >
-                          {imgSrc ? (
-                            <img
-                              src={imgSrc}
-                              alt={asset.name || ''}
-                              className="h-full w-full object-cover"
-                              onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
-                            />
-                          ) : (
-                            <span className="text-[10px] text-slate-400">无图</span>
-                          )}
-                          {isSelected && (
-                            <div className="absolute right-0.5 top-0.5 flex h-5 w-5 items-center justify-center rounded-full bg-blue-500 text-[10px] text-white">
-                              ✓
-                            </div>
-                          )}
-                        </button>
-                      );
-                    })}
-                  </div>
-                  <div className="mt-2 text-xs text-slate-400">
-                    {selectedRefAssetIds?.length ? `已选 ${selectedRefAssetIds.length} 张参考图` : '点击选择角色参考图，用于参考图生图'}
-                  </div>
-                </div>
-              )}
-
               <div className="shrink-0 rounded-2xl border border-[#d7e3f4] bg-white p-4">
                 <div className="text-sm font-medium text-slate-800">操作</div>
                 <div className="mt-3 flex flex-wrap gap-2">
+                  {chapterAssets && chapterAssets.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => setIsRefSelectorOpen(true)}
+                      className="flex items-center gap-1 rounded-xl border border-[#d7e3f4] bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50"
+                    >
+                      <CheckSquare size={12} />
+                      选择引用资产
+                      {(selectedRefAssetIds?.length ?? 0) > 0 && (
+                        <span className="ml-1 rounded-full bg-blue-100 px-1.5 py-0.5 text-[10px] text-blue-600">
+                          {selectedRefAssetIds?.length}
+                        </span>
+                      )}
+                    </button>
+                  )}
                   <button onClick={handleRegenerate} disabled={state.busy === 'regenerate'} className="flex items-center gap-1 rounded-xl bg-[#1d4ed8] px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-700 disabled:opacity-60">
-                    {state.busy === 'regenerate' ? <Loader2 size={12} className="animate-spin" /> : <RotateCcw size={12} />} {state.busy === 'regenerate' ? '生成中...' : '重新生成'}
+                    {state.busy === 'regenerate' ? <Loader2 size={12} className="animate-spin" /> : <RotateCcw size={12} />} {state.busy === 'regenerate' ? '生成中...' : (previewUrl ? '重新生成' : '生成')}
                   </button>
                   <button onClick={handleUploadClick} disabled={state.busy === 'upload'} className="flex items-center gap-1 rounded-xl border border-[#d7e3f4] bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-60">
                     {state.busy === 'upload' ? <Loader2 size={12} className="animate-spin" /> : <Upload size={12} />} {state.busy === 'upload' ? '上传中...' : '上传替换'}
@@ -697,7 +644,7 @@ export default function VideoCardWorkbench({ type, shotId, assetId, displayShotI
                   </button>
                   {onReanalyzePrompt && (
                     <button onClick={handleReanalyze} disabled={state.busy === 'reanalyze'} className="flex items-center gap-1 rounded-xl border border-amber-200 bg-white px-3 py-1.5 text-xs font-medium text-amber-700 hover:bg-amber-50 disabled:opacity-60">
-                       {state.busy === 'reanalyze' ? <Loader2 size={12} className="animate-spin" /> : <RotateCcw size={12} />} {state.busy === 'reanalyze' ? '分析中...' : '重新分析提示词'}
+                       {state.busy === 'reanalyze' ? <Loader2 size={12} className="animate-spin" /> : <RotateCcw size={12} />} {state.busy === 'reanalyze' ? '分析中...' : (currentResource?.prompt ? '重新分析提示词' : '分析提示词')}
                     </button>
                   )}
                 </div>
@@ -724,6 +671,20 @@ export default function VideoCardWorkbench({ type, shotId, assetId, displayShotI
                 console.error('重绘失败', err);
               }
             }}
+          />
+        )}
+
+        {/* 选择引用资产弹窗 */}
+        {isRefSelectorOpen && chapterAssets && (
+          <AssetReferenceSelector
+            availableAssets={chapterAssets}
+            selectedIds={selectedRefAssetIds || []}
+            shotStoryboards={shotStoryboards}
+            onConfirm={(ids) => {
+              onSelectedRefAssetsChange?.(ids);
+              setIsRefSelectorOpen(false);
+            }}
+            onClose={() => setIsRefSelectorOpen(false)}
           />
         )}
 

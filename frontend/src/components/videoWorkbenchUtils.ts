@@ -59,3 +59,85 @@ export function buildCharacterWorkbenchResources(
   });
   return resources;
 }
+
+type WorkbenchUploadSeed = {
+  assetId?: number;
+  assetType: string;
+  label: string;
+  prompt: string;
+  characterName?: string;
+};
+
+function buildAssetName(resource: WorkbenchUploadSeed): string {
+  if (resource.assetType === 'character_reference') {
+    return resource.characterName || resource.label || '角色资产';
+  }
+  if (resource.assetType === 'scene_reference') {
+    return resource.label || '场景资产';
+  }
+  if (resource.assetType === 'prop_reference') {
+    return resource.label || '道具资产';
+  }
+  return resource.label || '资产';
+}
+
+export async function uploadWorkbenchAsset(
+  resource: WorkbenchUploadSeed,
+  chapterId: number,
+  file: File,
+  createAsset: (
+    chapterId: number,
+    payload: { asset_type: string; name: string; file_path: string; prompt: string },
+  ) => Promise<{ id: number }>,
+  replaceAsset: (assetId: number, file: File) => Promise<unknown>,
+  refresh?: () => Promise<void> | void,
+): Promise<void> {
+  let assetId = resource.assetId;
+  if (!assetId) {
+    const created = await createAsset(chapterId, {
+      asset_type: resource.assetType,
+      name: buildAssetName(resource),
+      file_path: '',
+      prompt: resource.prompt || '',
+    });
+    assetId = created.id;
+  }
+  await replaceWorkbenchAssetAndRefresh(assetId, file, replaceAsset, refresh);
+}
+
+type CharacterUploadSeed = Pick<WorkbenchUploadSeed, 'assetId' | 'label' | 'prompt' | 'characterName'>;
+
+export async function uploadCharacterWorkbenchAsset(
+  resource: CharacterUploadSeed,
+  chapterId: number,
+  file: File,
+  createAsset: (
+    chapterId: number,
+    payload: { asset_type: string; name: string; file_path: string; prompt: string },
+  ) => Promise<{ id: number }>,
+  replaceAsset: (assetId: number, file: File) => Promise<unknown>,
+  refresh?: () => Promise<void> | void,
+): Promise<void> {
+  await uploadWorkbenchAsset(
+    {
+      ...resource,
+      assetType: 'character_reference',
+    },
+    chapterId,
+    file,
+    createAsset,
+    replaceAsset,
+    refresh,
+  );
+}
+
+export async function replaceWorkbenchAssetAndRefresh(
+  assetId: number | undefined,
+  file: File,
+  replaceAsset: (assetId: number, file: File) => Promise<unknown>,
+  refresh?: () => Promise<void> | void,
+): Promise<void> {
+  if (!assetId) return;
+  await replaceAsset(assetId, file);
+  await refresh?.();
+}

@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { listChapterShotFrames, apiHeaders, type ChapterShotFramesResponse } from '../api';
+import { listChapterShotFrames, apiHeaders, toPublicVideoAssetUrl, type ChapterShotFramesResponse } from '../api';
 
 interface AssetPanelProps {
   chapter: any;
@@ -133,9 +133,7 @@ const AssetManagementPanel: React.FC<AssetPanelProps> = ({
   };
 
   const getAssetFileUrl = (filePath: string) => {
-    if (!filePath) return '';
-    if (filePath.startsWith('http')) return filePath;
-    return `/static/video/${filePath.replace(/\\/g, '/')}`;
+    return toPublicVideoAssetUrl(filePath) || '';
   };
 
   const renderStyleSection = () => (

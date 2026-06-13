@@ -801,8 +801,15 @@ export interface PlatformSettings {
     video_base_url: string;
     video_model: string;
     video_api_key: string;
+    video_provider?: string;
     enable_user_override: boolean;
     enable_user_url_override?: boolean;
+    oss_enabled?: boolean;
+    oss_access_key_id?: string;
+    oss_access_key_secret?: string;
+    oss_endpoint?: string;
+    oss_bucket?: string;
+    oss_public_url_base?: string;
   };
   auth: {
     require_email_code_for_register: boolean;
@@ -1482,9 +1489,28 @@ export async function adjustStoryCover(storyId: number, instruction: string): Pr
   return res.json();
 }
 
+function isAbsoluteAssetUrl(value: string): boolean {
+  return /^https?:\/\//.test(value);
+}
+
+function normalizeAssetPath(value: string): string {
+  return value.replace(/\\/g, '/');
+}
+
+export function toPublicMangaAssetUrl(filePath: string | null | undefined): string | null {
+  if (!filePath) return null;
+  if (isAbsoluteAssetUrl(filePath) || filePath.startsWith('/static/')) return filePath;
+  return `${BASE}/static/manga/${normalizeAssetPath(filePath).replace('manga_outputs/', '')}`;
+}
+
+export function toPublicVideoAssetUrl(filePath: string | null | undefined): string | null {
+  if (!filePath) return null;
+  if (isAbsoluteAssetUrl(filePath) || filePath.startsWith('/static/')) return filePath;
+  return `${BASE}/static/video/${normalizeAssetPath(filePath).replace('video_outputs/', '')}`;
+}
+
 export function coverImageUrl(coverPath: string | null | undefined): string | null {
-  if (!coverPath) return null;
-  return `${BASE}/static/manga/${coverPath.replace('manga_outputs/', '')}`;
+  return toPublicMangaAssetUrl(coverPath);
 }
 
 // ─── Chapter ────────────────────────────────────────────────
@@ -2592,6 +2618,8 @@ export interface VideoShot {
   first_frame_prompt?: string | null;
   last_frame_prompt?: string | null;
   character_prompts_json?: Array<{ name: string; prompt: string }> | null;
+  scene_prompt?: string | null;
+  prop_prompts_json?: Array<{ name: string; prompt: string }> | null;
   continuity_notes?: string | null;
   status: string;
   style_preset?: string | null;
@@ -2623,6 +2651,10 @@ export interface VideoAsset {
   is_master: boolean;
   status: string;
   hash_key?: string | null;
+  usage_scope?: string | null;
+  inherit_to_next_shot?: boolean | null;
+  story_level_default?: boolean | null;
+  chapter_level_default?: boolean | null;
   created_at: string;
 }
 
@@ -2716,6 +2748,10 @@ export interface ChapterVideoShot {
   storyboard_prompt?: string | null;
   video_prompt?: string | null;
   character_prompts?: Array<{ name: string; prompt: string }> | null;
+  scene_prompt?: string | null;
+  prop_prompts?: Array<{ name: string; prompt: string }> | null;
+  key_props?: string[] | null;
+  scene_asset_candidates?: string[] | null;
   character_reference_ids?: number[] | null;
   storyboard_json?: Record<string, unknown> | null;
   storyboard_image_url?: string | null;
@@ -2732,6 +2768,7 @@ export interface ChapterVideoWorkflow {
   workflow_status: string;
   character_reference_ids?: number[] | null;
   video_style?: string | null;
+  style_reference_image_url?: string | null;
   duration_per_shot: number;
   total_shots: number;
   completed_shots: number;
@@ -2916,6 +2953,7 @@ export async function createChapterVideoWorkflow(payload: {
   chapter_id: number;
   character_reference_ids?: number[];
   video_style?: string;
+  style_reference_image_url?: string | null;
 }): Promise<ChapterVideoWorkflow> {
   const res = await fetch(`${BASE}/api/video/chapter-workflows`, {
     method: 'POST',
@@ -2964,7 +3002,7 @@ export async function regenerateChapterWorkflowStoryboard(shotId: number, prompt
   return res.json();
 }
 
-export async function regenerateChapterWorkflowVideo(shotId: number, promptOverride?: string, referenceAssetIds?: number[]): Promise<ChapterVideoShot> {
+export async function regenerateChapterWorkflowVideo(shotId: number, promptOverride?: string, referenceAssetIds?: number[], aspectRatio: '16:9' | '9:16' = '16:9'): Promise<ChapterVideoShot> {
   const res = await fetch(`${BASE}/api/video/chapter-workflows/shots/${shotId}/regenerate-video`, {
     method: 'POST',
     headers: apiHeaders(true),
@@ -2972,6 +3010,7 @@ export async function regenerateChapterWorkflowVideo(shotId: number, promptOverr
       target: 'video',
       prompt_override: promptOverride ?? null,
       reference_asset_ids: referenceAssetIds ?? [],
+      aspect_ratio: aspectRatio,
     }),
   });
   if (!res.ok) throw new Error(await res.text());
@@ -3008,6 +3047,34 @@ export async function parseChapterWorkflowShots(workflowId: number): Promise<Rec
   const res = await fetch(`${BASE}/api/video/chapter-workflows/${workflowId}/parse`, {
     method: 'POST',
     headers: apiHeaders(true),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function generateChapterWorkflowShotDetails(
+  workflowId: number,
+  payload: { shot_ids: number[] }
+): Promise<Record<string, unknown>> {
+  const res = await fetch(`${BASE}/api/video/chapter-workflows/${workflowId}/generate-details`, {
+    method: 'POST',
+    headers: apiHeaders(true),
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function uploadStyleReferenceImage(
+  workflowId: number,
+  file: File
+): Promise<{ success: boolean; style_reference_image_url: string }> {
+  const formData = new FormData();
+  formData.append('file', file);
+  const res = await fetch(`${BASE}/api/video/chapter-workflows/${workflowId}/style-reference`, {
+    method: 'POST',
+    headers: apiHeaders(),
+    body: formData,
   });
   if (!res.ok) throw new Error(await res.text());
   return res.json();
@@ -3286,6 +3353,8 @@ export interface ReanalyzeShotPromptsResponse {
   storyboard_prompt: string;
   video_prompt: string;
   character_prompts: Array<{ name: string; prompt: string }>;
+  scene_prompt?: string;
+  prop_prompts?: Array<{ name: string; prompt: string }>;
 }
 
 export async function reanalyzeChapterShotPrompts(shotId: number): Promise<ReanalyzeShotPromptsResponse> {
@@ -3315,29 +3384,69 @@ export async function clearShotVideo(shotId: number): Promise<{ ok: boolean; sho
   return res.json();
 }
 
-export async function saveChapterShotPrompts(shotId: number, prompts: { storyboard_prompt?: string | null; video_prompt?: string | null }): Promise<{ ok: boolean; shot: ChapterVideoShot }> {
-  const res = await fetch(`${BASE}/api/video/chapter-workflows/shots/${shotId}/save-prompts`, {
+export async function resetChapterWorkflow(workflowId: number): Promise<{ ok: boolean; workflow_status: string }> {
+  const res = await fetch(`${BASE}/api/video/chapter-workflows/${workflowId}/reset`, {
     method: 'POST',
     headers: apiHeaders(true),
-    body: JSON.stringify(prompts),
   });
   if (!res.ok) throw new Error(await res.text());
   return res.json();
 }
 
-export async function regenerateVideoAsset(assetId: number, payload: {
-  prompt?: string;
-  style?: string;
-  provider?: string;
-  model?: string;
-  reference_asset_ids?: number[];
-  instruction?: string;
-  overwrite?: boolean;
-}): Promise<VideoAsset> {
-  const res = await fetch(`${BASE}/api/video-assets/${assetId}/regenerate`, {
+export async function replaceVideoAsset(assetId: number, file: File): Promise<{ ok: boolean; asset: { id: number; file_path: string; revision: number } }> {
+  const formData = new FormData();
+  formData.append('file', file);
+  const res = await fetch(`${BASE}/api/video-assets/${assetId}/replace`, {
+    method: 'POST',
+    headers: apiHeaders(),
+    body: formData,
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function regenerateVideoAsset(assetId: number, prompt?: string, mask?: string): Promise<{ ok: boolean; asset: { id: number; file_path: string; revision: number } }> {
+  const body: Record<string, unknown> = {};
+  if (prompt) body.prompt = prompt;
+  if (mask) { body.mask = mask; body.mode = 'partial'; }
+  const res = await fetch(`${BASE}/api/video-assets/${assetId}/regen`, {
     method: 'POST',
     headers: apiHeaders(true),
-    body: JSON.stringify(payload),
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function uploadShotStoryboard(shotId: number, file: File): Promise<{ ok: boolean; shot: ChapterVideoShot }> {
+  const formData = new FormData();
+  formData.append('file', file);
+  const res = await fetch(`${BASE}/api/video/chapter-workflows/shots/${shotId}/upload-storyboard`, {
+    method: 'POST',
+    headers: apiHeaders(),
+    body: formData,
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function uploadShotVideo(shotId: number, file: File): Promise<{ ok: boolean; shot: ChapterVideoShot }> {
+  const formData = new FormData();
+  formData.append('file', file);
+  const res = await fetch(`${BASE}/api/video/chapter-workflows/shots/${shotId}/upload-video`, {
+    method: 'POST',
+    headers: apiHeaders(),
+    body: formData,
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function saveChapterShotPrompts(shotId: number, prompts: { storyboard_prompt?: string | null; video_prompt?: string | null }): Promise<{ ok: boolean; shot: ChapterVideoShot }> {
+  const res = await fetch(`${BASE}/api/video/chapter-workflows/shots/${shotId}/save-prompts`, {
+    method: 'POST',
+    headers: apiHeaders(true),
+    body: JSON.stringify(prompts),
   });
   if (!res.ok) throw new Error(await res.text());
   return res.json();
@@ -3481,6 +3590,7 @@ export interface VideoStylePreset {
   id: number;
   name: string;
   category: string;
+  image_url?: string | null;
   prompt_template?: string | null;
   image_style_params?: Record<string, unknown> | null;
   video_style_params?: Record<string, unknown> | null;
@@ -3568,11 +3678,58 @@ export async function promoteAsset(assetId: number, payload: { level: string; in
 }
 
 export async function listStylePresets(): Promise<{ presets: VideoStylePreset[] }> {
-  const res = await fetch(`${BASE}/api/video/style-presets`, {
+  const res = await fetch(`${BASE}/api/video-style-presets`, {
     headers: apiHeaders(),
   });
   if (!res.ok) throw new Error(await res.text());
   return res.json();
+}
+
+export async function createStylePreset(data: {
+  name: string;
+  category?: string;
+  image_url?: string | null;
+  prompt_template?: string;
+  image_style_params?: Record<string, unknown>;
+  video_style_params?: Record<string, unknown>;
+  sort_order?: number;
+}): Promise<VideoStylePreset> {
+  const res = await fetch(`${BASE}/api/video-style-presets`, {
+    method: 'POST',
+    headers: apiHeaders(true),
+    body: JSON.stringify(data),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function updateStylePreset(
+  presetId: number,
+  data: {
+    name?: string;
+    category?: string;
+    image_url?: string | null;
+    prompt_template?: string;
+    image_style_params?: Record<string, unknown>;
+    video_style_params?: Record<string, unknown>;
+    sort_order?: number;
+  }
+): Promise<VideoStylePreset> {
+  const res = await fetch(`${BASE}/api/video-style-presets/${presetId}`, {
+    method: 'PUT',
+    headers: apiHeaders(true),
+    body: JSON.stringify(data),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function deleteStylePreset(presetId: number): Promise<void> {
+  const res = await fetch(`${BASE}/api/video-style-presets/${presetId}`, {
+    method: 'DELETE',
+    headers: apiHeaders(true),
+  });
+  if (!res.ok) throw new Error(await res.text());
 }
 
 export interface CharacterVersion {

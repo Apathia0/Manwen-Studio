@@ -32,6 +32,7 @@ import {
   AdminSystemPromptsPage,
   AdminUserManagementPage,
 } from './components/admin/AdminPages';
+import StylePresetManager from './components/admin/StylePresetManager';
 import { LoginPage } from './components/LoginPage';
 import { ForgotPasswordPage } from './components/ForgotPasswordPage';
 import { RegisterPage } from './components/RegisterPage';
@@ -106,7 +107,8 @@ type RouteKey =
   | 'audit-logs'
   | 'announcement'
   | 'system-update'
-  | 'system-prompts';
+  | 'system-prompts'
+  | 'style-presets';
 
 type NavItem = {
   key: RouteKey;
@@ -133,6 +135,7 @@ const ADMIN_NAV: NavItem[] = [
   { key: 'revenue', label: '收入看板', icon: BarChart3 },
   { key: 'audit-logs', label: '操作审计', icon: MessageSquareQuote },
   { key: 'announcement', label: '公告管理', icon: MessageSquareQuote },
+  { key: 'style-presets', label: '风格预设', icon: Brush },
   { key: 'template-review', label: '模板审核', icon: Library },
   { key: 'system-prompts', label: '系统提示词', icon: MessageSquareQuote },
   { key: 'system-update', label: '系统更新', icon: Settings2 },
@@ -144,9 +147,10 @@ ADMIN_NAV[2].label = '用户管理';
 ADMIN_NAV[3].label = '收入与订单';
 ADMIN_NAV[4].label = '操作审计';
 ADMIN_NAV[5].label = '公告管理';
-ADMIN_NAV[6].label = '模板审核';
-ADMIN_NAV[7].label = '系统提示词';
-ADMIN_NAV[8].label = '系统更新';
+ADMIN_NAV[6].label = '风格预设';
+ADMIN_NAV[7].label = '模板审核';
+ADMIN_NAV[8].label = '系统提示词';
+ADMIN_NAV[9].label = '系统更新';
 
 function App() {
   const [session, setSession] = useState<AuthUser | null>(null);
@@ -855,6 +859,7 @@ function App() {
           {route === 'announcement' && session.role === 'admin' && (
             <AdminAnnouncementPage onError={(message) => toast.error(message)} />
           )}
+          {route === 'style-presets' && session.role === 'admin' && <StylePresetManager />}
           {route === 'system-prompts' && session.role === 'admin' && (
             <AdminSystemPromptsPage onError={(message: string) => toast.error(message)} />
           )}

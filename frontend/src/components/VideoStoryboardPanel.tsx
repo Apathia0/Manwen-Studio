@@ -6,6 +6,7 @@ import {
   deleteVideoAsset,
   getShotFrames,
   regenerateShotFrame,
+  toPublicVideoAssetUrl,
   type ImageRedrawMode,
   type ShotAssetPromptDraft,
 } from '../api';
@@ -73,9 +74,7 @@ interface VideoStoryboardPanelProps {
 
 /** 获取资产文件的展示 URL */
 function toAssetUrl(filePath?: string | null): string {
-  if (!filePath) return '';
-  if (filePath.startsWith('http') || filePath.startsWith('/static/')) return filePath;
-  return `/static/video/${filePath.replace(/\\/g, '/')}`;
+  return toPublicVideoAssetUrl(filePath) || '';
 }
 
 function paginate<T>(items: T[], page: number, perPage: number): T[] {
@@ -1147,6 +1146,7 @@ export default function VideoStoryboardPanel({
         });
         if (!res.ok) throw new Error(await res.text());
         toast.success('资产图已替换');
+        await onAssetsChanged?.();
         if (shotId) {
           const frames = await getShotFrames(shotId);
           onShotsChange(shots.map(s => s.id === shotId ? { ...s, frames } : s));
@@ -1158,7 +1158,7 @@ export default function VideoStoryboardPanel({
       }
     };
     input.click();
-  }, [shots, onShotsChange]);
+  }, [shots, onShotsChange, onAssetsChanged]);
 
   const handleRedrawSubmit = useCallback(async (payload: { prompt: string; mode: ImageRedrawMode; mask?: string }) => {
     if (!redrawTarget) return;

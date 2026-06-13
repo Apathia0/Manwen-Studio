@@ -60,13 +60,13 @@ def get_db(request: Request):
 def init_db(*, run_migrations: bool | None = None, bind_engine=None, raise_errors: bool = False):
     target_engine = bind_engine or engine
     if run_migrations is None:
-        run_migrations = _env_flag("RUN_STARTUP_MIGRATIONS", False)
+        run_migrations = _env_flag("RUN_STARTUP_MIGRATIONS", True)
     try:
         Base.metadata.create_all(bind=target_engine)
         if run_migrations:
             _migrate(target_engine)
         else:
-            logger.info("Skipping startup database migrations; set RUN_STARTUP_MIGRATIONS=true to enable.")
+            logger.info("跳过启动时数据库迁移（RUN_STARTUP_MIGRATIONS=false）")
     except Exception as exc:
         logger.warning("数据库初始化失败（将在下次启动时重试）: %s", exc)
         if raise_errors:
@@ -526,6 +526,19 @@ def _migrate_video_tables(target_engine=None):
             _prepare_migration_conn(conn)
             conn.execute(text("ALTER TABLE stories ADD COLUMN video_style_preset_id INTEGER REFERENCES video_style_presets(id)"))
 
+    # 风格参考图字段迁移
+    video_style_presets_cols = {c["name"] for c in insp.get_columns("video_style_presets")} if "video_style_presets" in insp.get_table_names() else set()
+    if video_style_presets_cols and "image_url" not in video_style_presets_cols:
+        with db_engine.begin() as conn:
+            _prepare_migration_conn(conn)
+            conn.execute(text("ALTER TABLE video_style_presets ADD COLUMN image_url VARCHAR(500)"))
+
+    chapter_video_workflows_cols = {c["name"] for c in insp.get_columns("chapter_video_workflows")} if "chapter_video_workflows" in insp.get_table_names() else set()
+    if chapter_video_workflows_cols and "style_reference_image_url" not in chapter_video_workflows_cols:
+        with db_engine.begin() as conn:
+            _prepare_migration_conn(conn)
+            conn.execute(text("ALTER TABLE chapter_video_workflows ADD COLUMN style_reference_image_url VARCHAR(500)"))
+
     script_scenes_cols = {c["name"] for c in insp.get_columns("script_scenes")} if "script_scenes" in insp.get_table_names() else set()
     if "concept_art_asset_id" not in script_scenes_cols:
         with db_engine.begin() as conn:
@@ -557,6 +570,20 @@ def _migrate_video_tables(target_engine=None):
         with db_engine.begin() as conn:
             _prepare_migration_conn(conn)
             conn.execute(text("ALTER TABLE video_shots ADD COLUMN scene_mood VARCHAR(50)"))
+
+    # chapter_video_shots 表迁移
+    chapter_video_shots_cols = {c["name"] for c in insp.get_columns("chapter_video_shots")} if "chapter_video_shots" in insp.get_table_names() else set()
+    if chapter_video_shots_cols:
+        with db_engine.begin() as conn:
+            _prepare_migration_conn(conn)
+            if "scene_prompt" not in chapter_video_shots_cols:
+                conn.execute(text("ALTER TABLE chapter_video_shots ADD COLUMN scene_prompt TEXT"))
+            if "prop_prompts_json" not in chapter_video_shots_cols:
+                conn.execute(text("ALTER TABLE chapter_video_shots ADD COLUMN prop_prompts_json JSON"))
+            if "key_props_json" not in chapter_video_shots_cols:
+                conn.execute(text("ALTER TABLE chapter_video_shots ADD COLUMN key_props_json JSON"))
+            if "scene_asset_candidates_json" not in chapter_video_shots_cols:
+                conn.execute(text("ALTER TABLE chapter_video_shots ADD COLUMN scene_asset_candidates_json JSON"))
 
 
 def _seed_video_style_presets(target_engine=None):

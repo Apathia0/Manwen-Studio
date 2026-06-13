@@ -75,13 +75,13 @@ def _timeout(*, connect: float, read: float, write: float, pool: float = 30.0) -
     return httpx.Timeout(connect=connect, read=read, write=write, pool=pool)
 
 
-def _auth_headers(api_key: str | None = None) -> dict[str, str]:
+def _auth_headers(api_key: str | None = None, base_url: str | None = None, model: str | None = None) -> dict[str, str]:
     """获取视频 API 认证头，同时校验必要配置是否已注入。"""
-    base_url = _resolved_base_url()
-    if not base_url:
+    effective_base_url = (base_url or _resolved_base_url() or "").rstrip("/")
+    if not effective_base_url:
         raise ValueError("视频 API 地址未配置，请在后台设置中配置 API 地址后重试。")
-    model = _resolved_model()
-    if not model:
+    effective_model = model or _resolved_model()
+    if not effective_model:
         raise ValueError("视频生成模型未配置，请在后台设置中配置模型名称后重试。")
     key = (api_key or _resolved_api_key() or "").strip()
     if not key:
@@ -134,6 +134,18 @@ def _resolution_from(aspect_ratio: str, size: str) -> tuple[int, int]:
     return dims["long"], dims["short"]
 
 
+def _aspect_to_orientation(aspect_ratio: str) -> str:
+    """将 aspect_ratio（如 '16:9'、'9:16'）转为 LingDong 的 orientation 参数。"""
+    parts = aspect_ratio.strip().split(":")
+    if len(parts) == 2:
+        try:
+            w, h = int(parts[0]), int(parts[1])
+            return "landscape" if w >= h else "portrait"
+        except ValueError:
+            pass
+    return "landscape"
+
+
 def extract_video_url(payload: dict) -> str:
     """从 New API 查询响应中提取视频下载 URL。
 
@@ -149,6 +161,9 @@ def extract_video_url(payload: dict) -> str:
         return payload["video_url"].strip()
     data = payload.get("data") or payload.get("video") or {}
     if isinstance(data, dict):
+        # LingDong API: data.result_url
+        if isinstance(data.get("result_url"), str) and data["result_url"].strip():
+            return data["result_url"].strip()
         if isinstance(data.get("url"), str) and data["url"].strip():
             return data["url"].strip()
         if isinstance(data.get("video_url"), str) and data["video_url"].strip():
@@ -177,7 +192,7 @@ async def create_video_job(
     api_key: str | None = None,
     base_url: str | None = None,
 ) -> dict:
-    """创建视频生成任务 (POST /v1/video/generations)."""
+    """创建视频生成任务 (POST /v1/videos - LingDong API)."""
     if not prompt.strip():
         raise ValueError("prompt 不能为空")
 
@@ -187,31 +202,31 @@ async def create_video_job(
     if size not in ALLOWED_SIZES:
         size = "720P"
 
-    width, height = _resolution_from(aspect_ratio, size)
-    headers = _auth_headers(api_key)
-    url = _build_api_url("/v1/video/generations", base_url=base_url)
+    headers = _auth_headers(api_key, base_url=base_url, model=model)
+    url = _build_api_url("/v1/videos", base_url=base_url)
 
     payload: dict = {
         "model": model,
         "prompt": prompt.strip(),
-        "width": width,
-        "height": height,
-        "duration": max(4, min(10, duration_seconds)),
-        "n": 1,
+        "size": "large",
+        "duration": max(4, min(15, duration_seconds)),
+        "orientation": _aspect_to_orientation(aspect_ratio),
     }
     if images:
-        payload["image"] = images[0]
-        if len(images) > 1:
-            payload["image_urls"] = images
+        remote_images = [img for img in images if img.lower().startswith(("http://", "https://"))]
+        if remote_images:
+            payload["images"] = remote_images
+            logger.info("[video] 参考图 %d 张（已过滤 %d 张本地不可达路径）: %s",
+                         len(remote_images), len(images) - len(remote_images),
+                         [u[:60] for u in remote_images])
 
+    logger.info("[video] 提交任务 payload: model=%s prompt_len=%d size=%s orientation=%s duration=%s refs=%s url=%s",
+                 model, len(prompt), payload.get("size"), payload.get("orientation"), payload.get("duration"),
+                 [u[:60] for u in payload.get("images", [])], url)
     last_err: Exception | None = None
     for attempt in range(1, MAX_RETRIES + 1):
         try:
-            logger.info(
-                "[video] 提交任务: model=%s prompt_len=%d %dx%d dur=%ds (尝试 %s/%s)",
-                model, len(prompt), width, height, duration_seconds, attempt, MAX_RETRIES,
-            )
-            async with httpx.AsyncClient(timeout=_timeout(connect=30, read=120, write=30)) as client:
+            async with httpx.AsyncClient(timeout=_timeout(connect=30, read=300, write=30)) as client:
                 response = await client.post(url, json=payload, headers=headers)
 
             if response.is_success:
@@ -248,16 +263,17 @@ async def query_video_job(
     *,
     api_key: str | None = None,
     base_url: str | None = None,
+    model: str | None = None,
 ) -> dict:
     """查询视频生成任务状态 (GET /v1/video/generations/{task_id})."""
     if not job_id.strip():
         raise ValueError("job_id 不能为空")
 
-    headers = _auth_headers(api_key)
+    headers = _auth_headers(api_key, base_url=base_url, model=model)
     url = _build_api_url(f"/v1/video/generations/{job_id}", base_url=base_url)
 
     try:
-        async with httpx.AsyncClient(timeout=_timeout(connect=15, read=30, write=15)) as client:
+        async with httpx.AsyncClient(timeout=_timeout(connect=15, read=300, write=15)) as client:
             response = await client.get(url, headers=headers)
 
         if response.is_success:
@@ -266,16 +282,22 @@ async def query_video_job(
             nested = data.get("data") if isinstance(data, dict) and isinstance(data.get("data"), dict) else {}
             normalized = dict(data) if isinstance(data, dict) else {}
             if isinstance(nested, dict):
-                for key in ("url", "video_url", "progress", "status", "seconds", "size", "model", "id", "created_at"):
+                for key in ("url", "video_url", "result_url", "progress", "status", "seconds", "size", "model", "id", "created_at"):
                     if key in nested and key not in normalized:
                         normalized[key] = nested[key]
                 if "status" in nested:
                     normalized["upstream_status"] = nested.get("upstream_status") or nested.get("status")
+            # LingDong API 在失败时返回 fail_reason 而非 error
+            if "error" not in normalized:
+                if isinstance(data, dict) and isinstance(data.get("fail_reason"), str) and data["fail_reason"].strip():
+                    normalized["error"] = data["fail_reason"]
+                elif isinstance(nested, dict) and isinstance(nested.get("fail_reason"), str) and nested["fail_reason"].strip():
+                    normalized["error"] = nested["fail_reason"]
             if "task_id" not in normalized:
                 normalized["task_id"] = job_id
             if "status" not in normalized:
                 normalized["status"] = normalized.get("upstream_status") or "unknown"
-            logger.info("[video] 查询成功: job=%s status=%s", job_id, normalized.get("status", ""))
+            logger.info("[video] 查询成功: job=%s status=%s err=%s", job_id, normalized.get("status", ""), normalized.get("error", "")[:80])
             return normalized
 
         status = response.status_code
@@ -316,6 +338,12 @@ async def download_video(
     if output_path.exists():
         return str(output_path)
 
+    # OSS URL 直传：如果 OSS 已配置，直接从 video_url 上传到 OSS
+    remote_key = f"video_outputs/shot_{shot_id}/{job_id}{ext}"
+    oss_direct_url = _upload_video_url_to_oss(video_url, remote_key)
+    if oss_direct_url:
+        return oss_direct_url
+
     last_err: Exception | None = None
     for attempt in range(1, DOWNLOAD_RETRIES + 1):
         try:
@@ -327,6 +355,15 @@ async def download_video(
             if response.is_success:
                 output_path.write_bytes(response.content)
                 logger.info("[video] 下载完成: %s -> %s", job_id, output_path)
+                # OSS 上传（如已配置，上传成功后删除本地文件）
+                oss_url = _upload_to_oss_if_enabled(str(output_path))
+                if oss_url:
+                    try:
+                        output_path.unlink(missing_ok=True)
+                        logger.info("[video] OSS 上传成功，已删除本地文件: %s", output_path)
+                    except Exception:
+                        pass
+                    return oss_url
                 return str(output_path)
             if attempt < DOWNLOAD_RETRIES:
                 await asyncio.sleep(DOWNLOAD_RETRY_DELAY)
@@ -336,6 +373,68 @@ async def download_video(
                 await asyncio.sleep(DOWNLOAD_RETRY_DELAY)
 
     raise RuntimeError(f"视频下载失败，已重试 {DOWNLOAD_RETRIES} 次") from last_err
+
+
+def _upload_video_url_to_oss(source_url: str, remote_key: str) -> str | None:
+    """如果 OSS 已配置，从视频 URL 直接上传到 OSS，跳过本地下载。"""
+    try:
+        from . import oss as oss_service
+        if not oss_service.is_enabled():
+            from .oss import auto_configure_from_db
+            auto_configure_from_db()
+        if oss_service.is_enabled():
+            return oss_service.upload_from_url(str(source_url), remote_key)
+    except Exception as exc:
+        logger.warning("视频 URL 直传 OSS 失败（将回退到本地下载）: %s", exc)
+    return None
+
+
+def _upload_to_oss_if_enabled(local_path: str) -> str | None:
+    """如果 OSS 已配置，上传文件并返回公网 URL。
+
+    首次调用时会自动从数据库加载配置（如果尚未配置）。
+    """
+    try:
+        from . import oss as oss_service
+        if not oss_service.is_enabled():
+            _auto_configure_oss()
+        if oss_service.is_enabled():
+            return oss_service.upload_file(local_path)
+    except Exception as exc:
+        logger.warning("OSS 上传失败（不影响本地文件）: %s", exc)
+    return None
+
+
+def _auto_configure_oss() -> None:
+    """从数据库自动加载 OSS 配置。"""
+    try:
+        from database import SessionLocal
+        from models import PlatformSetting
+        db = SessionLocal()
+        try:
+            def get_setting(key: str, default=None):
+                setting = db.query(PlatformSetting).filter(PlatformSetting.setting_key == key).first()
+                if not setting:
+                    return default
+                payload = setting.value_json or {}
+                return payload.get("value", default)
+
+            from . import oss as oss_service
+            enabled = bool(get_setting("oss.enabled", False))
+            if enabled:
+                oss_service.configure(
+                    enabled=True,
+                    access_key_id=str(get_setting("oss.access_key_id", "") or "").strip(),
+                    access_key_secret=str(get_setting("oss.access_key_secret", "") or "").strip(),
+                    endpoint=str(get_setting("oss.endpoint", "") or "").strip(),
+                    bucket=str(get_setting("oss.bucket", "") or "").strip(),
+                    public_url_base=str(get_setting("oss.public_url_base", "") or "").strip(),
+                )
+                logger.info("OSS 已自动从数据库加载配置")
+        finally:
+            db.close()
+    except Exception as exc:
+        logger.warning("OSS 自动配置加载失败: %s", exc)
 
 
 def get_supported_models() -> list[dict]:

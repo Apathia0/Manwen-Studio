@@ -21,6 +21,7 @@ import {
   type VideoGenerationJob,
   type VideoShot,
   type EntitlementResponse,
+  toPublicVideoAssetUrl,
 } from '../api';
 import ShotFrameRegenerationModal from './ShotFrameRegenerationModal';
 import { confirm } from '../lib/confirm';
@@ -62,9 +63,7 @@ const SECTION_LABELS: Record<SectionKey, string> = {
 };
 
 function toAssetUrl(filePath?: string | null) {
-  if (!filePath) return '';
-  if (filePath.startsWith('http') || filePath.startsWith('/static/')) return filePath;
-  return `/static/video/${filePath.replace(/\\/g, '/')}`;
+  return toPublicVideoAssetUrl(filePath) || '';
 }
 
 function formatStyleName(name?: string | null) {

@@ -351,6 +351,7 @@ class VideoStylePresetOut(BaseModel):
     id: int
     name: str
     category: str
+    image_url: Optional[str] = None
     prompt_template: Optional[str] = None
     image_style_params: Optional[dict[str, Any]] = None
     video_style_params: Optional[dict[str, Any]] = None
@@ -362,6 +363,7 @@ class VideoStylePresetOut(BaseModel):
 class VideoStylePresetCreate(BaseModel):
     name: str
     category: str = "realistic"
+    image_url: Optional[str] = None
     prompt_template: Optional[str] = None
     image_style_params: Optional[dict[str, Any]] = None
     video_style_params: Optional[dict[str, Any]] = None
@@ -371,6 +373,7 @@ class VideoStylePresetCreate(BaseModel):
 class VideoStylePresetUpdate(BaseModel):
     name: Optional[str] = None
     category: Optional[str] = None
+    image_url: Optional[str] = None
     prompt_template: Optional[str] = None
     image_style_params: Optional[dict[str, Any]] = None
     video_style_params: Optional[dict[str, Any]] = None
@@ -453,6 +456,11 @@ class VideoShotOut(BaseModel):
     storyboard_prompt: Optional[str] = None
     video_prompt: Optional[str] = None
     negative_prompt: Optional[str] = None
+    first_frame_prompt: Optional[str] = None
+    last_frame_prompt: Optional[str] = None
+    character_prompts_json: Optional[list] = None
+    scene_prompt: Optional[str] = None
+    prop_prompts_json: Optional[list] = None
     continuity_notes: Optional[str] = None
     status: str = "draft"
     style_preset: Optional[str] = None
@@ -876,14 +884,15 @@ class AdminReviewRequest(BaseModel):
 
 
 class ChapterVideoWorkflowCreate(BaseModel):
-    """创建章节视频工作流请求"""
+    """创建章节视频工作流"""
     chapter_id: int
     character_reference_ids: list[int] = []
     video_style: str | None = None
+    style_reference_image_url: str | None = None
 
 
 class ChapterVideoShotOut(BaseModel):
-    """10 秒镜头输出"""
+    """15 秒分镜输出"""
     id: int
     workflow_id: int
     shot_index: int
@@ -900,6 +909,14 @@ class ChapterVideoShotOut(BaseModel):
     storyboard_prompt: str | None = None
     video_prompt: str | None = None
     character_prompts_json: list[dict[str, str]] | None = None
+    character_prompts: list[dict[str, str]] | None = None
+    scene_prompt: str | None = None
+    prop_prompts_json: list[dict[str, str]] | None = None
+    prop_prompts: list[dict[str, str]] | None = None
+    key_props_json: list[str] | None = None
+    key_props: list[str] | None = None
+    scene_asset_candidates_json: list[str] | None = None
+    scene_asset_candidates: list[str] | None = None
     character_reference_ids: list[Any] | None = None
     storyboard_json: dict[str, Any] | None = None
     storyboard_image_url: str | None = None
@@ -910,6 +927,27 @@ class ChapterVideoShotOut(BaseModel):
 
     model_config = {"from_attributes": True}
 
+    @model_validator(mode='after')
+    def _sync_json_fields(self) -> "ChapterVideoShotOut":
+        """让 _json 字段和非 _json 字段保持同步，前端用 character_prompts/prop_prompts"""
+        if self.character_prompts_json is not None and self.character_prompts is None:
+            self.character_prompts = self.character_prompts_json
+        if self.prop_prompts_json is not None and self.prop_prompts is None:
+            self.prop_prompts = self.prop_prompts_json
+        if self.character_prompts is not None and self.character_prompts_json is None:
+            self.character_prompts_json = self.character_prompts
+        if self.prop_prompts is not None and self.prop_prompts_json is None:
+            self.prop_prompts_json = self.prop_prompts
+        if self.key_props_json is not None and self.key_props is None:
+            self.key_props = self.key_props_json
+        if self.key_props is not None and self.key_props_json is None:
+            self.key_props_json = self.key_props
+        if self.scene_asset_candidates_json is not None and self.scene_asset_candidates is None:
+            self.scene_asset_candidates = self.scene_asset_candidates_json
+        if self.scene_asset_candidates is not None and self.scene_asset_candidates_json is None:
+            self.scene_asset_candidates_json = self.scene_asset_candidates
+        return self
+
 
 class ChapterVideoWorkflowOut(BaseModel):
     """章节视频工作流输出"""
@@ -919,6 +957,7 @@ class ChapterVideoWorkflowOut(BaseModel):
     workflow_status: str = "pending"
     character_reference_ids: list[Any] | None = None
     video_style: str | None = None
+    style_reference_image_url: str | None = None
     duration_per_shot: int = 10
     total_shots: int = 0
     completed_shots: int = 0
@@ -964,6 +1003,7 @@ class RegenerateShotRequest(BaseModel):
     target: str = "storyboard"  # "storyboard" | "video"
     prompt_override: str | None = None
     reference_asset_ids: list[int] = []
+    aspect_ratio: str | None = "16:9"
 
 
 # Resolve forward references

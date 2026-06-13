@@ -98,6 +98,8 @@ def test_stage_routes_pass_task_id(monkeypatch):
     monkeypatch.setattr(video_router, "_require_user", lambda request, db: SimpleNamespace(id=1))
     monkeypatch.setattr(video_router, "_user_deepseek_api_key", lambda request, db: "test-ds-key")
     monkeypatch.setattr(video_router, "_user_image_api_key", lambda request: "test-img-key")
+    monkeypatch.setattr(video_router, "_configure_video_service_from_db", lambda request, db: None)
+    monkeypatch.setattr(video_router, "_user_video_api_key", lambda request: ("key", "url", "model"))
 
     wf_mock = SimpleNamespace(
         id=99, story_id=34, chapter_id=12, workflow_status="pending",
@@ -205,6 +207,7 @@ def test_run_all_stages_skips_parse_when_shots_ready(monkeypatch, workflow_with_
     session.close()
 
     parse_called = False
+    expand_called = False
     storyboard_called = False
 
     async def fake_parse(**kw):
@@ -217,10 +220,16 @@ def test_run_all_stages_skips_parse_when_shots_ready(monkeypatch, workflow_with_
         storyboard_called = True
         return {"workflow_status": "storyboards_ready", "shot_count": 0}
 
+    async def fake_expand(**kw):
+        nonlocal expand_called
+        expand_called = True
+        return {"workflow_status": "shots_ready", "expanded_shot_count": 0, "failed_shot_ids": []}
+
     async def fake_videos(**kw):
         return {"workflow_status": "videos_ready", "shot_count": 0}
 
     monkeypatch.setattr(video_chapter_pipeline, "parse_chapter_shots", fake_parse)
+    monkeypatch.setattr(video_chapter_pipeline, "expand_shots_with_role_prompts", fake_expand)
     monkeypatch.setattr(video_chapter_pipeline, "generate_storyboards_for_shots", fake_storyboards)
     monkeypatch.setattr(video_chapter_pipeline, "generate_videos_for_shots", fake_videos)
 
@@ -230,6 +239,7 @@ def test_run_all_stages_skips_parse_when_shots_ready(monkeypatch, workflow_with_
     ))
 
     assert not parse_called, "shots_ready 状态不应调用 parse_chapter_shots"
+    assert expand_called, "shots_ready 状态应先补全角色提示词"
     assert storyboard_called, "应从故事版阶段继续"
 
 
@@ -427,7 +437,11 @@ def test_parse_stage_stops_at_shots_ready(monkeypatch):
             "emotion_plan": "警觉", "continuity_notes": "保持服装一致",
         }]
 
-    monkeypatch.setattr(deepseek_service, "parse_chapter_to_shots", fake_parse)
+    async def fake_expand(**kwargs):
+        return {"workflow_status": "shots_ready", "expanded_shot_count": 1, "failed_shot_ids": []}
+
+    monkeypatch.setattr(deepseek_service, "parse_chapter_to_shots_lite", fake_parse)
+    monkeypatch.setattr(video_chapter_pipeline, "expand_shots_with_role_prompts", fake_expand)
 
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(engine)
@@ -450,6 +464,7 @@ def test_parse_stage_stops_at_shots_ready(monkeypatch):
 
     assert result["workflow_status"] == "shots_ready"
     assert result["shot_count"] == 1
+    assert result["expanded_shot_count"] == 1
 
 
 def test_generate_storyboards_uses_image_api_key(monkeypatch, workflow_with_shots):
@@ -559,7 +574,7 @@ def test_regenerate_shot_storyboard_uses_image_api_key(monkeypatch):
 
     captured_key = [None]
 
-    async def fake_regenerate(shot_id, api_key=None, prompt_override=None):
+    async def fake_regenerate(shot_id, api_key=None, prompt_override=None, ref_asset_ids=None):
         captured_key[0] = api_key
         return None
 
@@ -593,6 +608,53 @@ def test_regenerate_shot_storyboard_uses_image_api_key(monkeypatch):
         f"应使用 image-api-key，实际使用: {captured_key[0]}"
 
 
+def test_regenerate_shot_storyboard_passes_reference_asset_ids(monkeypatch):
+    """验证单镜头重新生成故事版路由会把引用资产 ID 传给服务层。"""
+    from routers import video as video_router
+    from schemas import RegenerateShotRequest
+
+    captured: dict[str, object] = {}
+
+    async def fake_regenerate(shot_id, api_key=None, prompt_override=None, ref_asset_ids=None):
+        captured.update({
+            "shot_id": shot_id,
+            "api_key": api_key,
+            "prompt_override": prompt_override,
+            "ref_asset_ids": ref_asset_ids,
+        })
+        return SimpleNamespace(id=shot_id, workflow_id=99)
+
+    monkeypatch.setattr(video_router, "regenerate_shot_storyboard", fake_regenerate)
+    monkeypatch.setattr(video_router, "_require_user", lambda request, db: SimpleNamespace(id=1))
+    monkeypatch.setattr(video_router, "_user_image_api_key", lambda request: "image-key")
+    monkeypatch.setattr(video_router, "_configure_image_service_from_db", lambda request, db: None)
+    monkeypatch.setattr(video_router, "get_chapter_workflow",
+                        lambda wid: SimpleNamespace(id=wid, story_id=34))
+    monkeypatch.setattr(video_router, "ChapterVideoShotOut", SimpleNamespace(model_validate=lambda shot: shot))
+
+    class FakeDb:
+        def get(self, model, pk):
+            name = getattr(model, "__name__", "")
+            if name == "ChapterVideoShot":
+                return SimpleNamespace(id=pk, workflow_id=99)
+            return SimpleNamespace(id=34, owner_user_id=1)
+
+    result = asyncio.run(video_router.api_regenerate_shot_storyboard(
+        shot_id=1,
+        body=RegenerateShotRequest(prompt_override="测试 prompt", reference_asset_ids=[7, 9]),
+        request=SimpleNamespace(),
+        db=FakeDb(),
+    ))
+
+    assert captured == {
+        "shot_id": 1,
+        "api_key": "image-key",
+        "prompt_override": "测试 prompt",
+        "ref_asset_ids": [7, 9],
+    }
+    assert result.id == 1
+
+
 def test_regenerate_shot_video_uses_image_api_key(monkeypatch):
     """验证单镜头重新生成视频路由使用 image_api_key 而非 deepseek_api_key。"""
     from routers import video as video_router
@@ -601,14 +663,16 @@ def test_regenerate_shot_video_uses_image_api_key(monkeypatch):
 
     captured_key = [None]
 
-    async def fake_regenerate(shot_id, api_key=None, prompt_override=None):
-        captured_key[0] = api_key
-        return None
+    async def fake_regenerate(shot_id, api_key=None, prompt_override=None, **kwargs):
+            captured_key[0] = api_key
+            return None
 
     monkeypatch.setattr(video_router, "regenerate_shot_video", fake_regenerate)
     monkeypatch.setattr(video_router, "_require_user", lambda request, db: SimpleNamespace(id=1))
     monkeypatch.setattr(video_router, "_user_deepseek_api_key", lambda request, db: "deepseek-key")
     monkeypatch.setattr(video_router, "_user_image_api_key", lambda request: "image-key")
+    monkeypatch.setattr(video_router, "_configure_video_service_from_db", lambda request, db: None)
+    monkeypatch.setattr(video_router, "_user_video_api_key", lambda request: ("image-key", "url", "model"))
     monkeypatch.setattr(video_router, "get_chapter_workflow",
                         lambda wid: SimpleNamespace(id=wid, story_id=34))
 

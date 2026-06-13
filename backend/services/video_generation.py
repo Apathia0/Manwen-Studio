@@ -34,6 +34,7 @@ _STATUS_MAP = {
     "completed": "succeeded",
     "succeeded": "succeeded",
     "failed": "failed",
+    "failure": "failed",
     "error": "failed",
     "cancelled": "cancelled",
     "canceled": "cancelled",
@@ -118,6 +119,7 @@ async def query_job_status(
     provider_job_id: str,
     api_key: str | None = None,
     base_url: str | None = None,
+    model: str | None = None,
 ) -> dict[str, Any]:
     """查询视频任务状态，根据 provider 分发到不同后端。"""
     if not provider_job_id:
@@ -134,6 +136,7 @@ async def query_job_status(
                 job_id=provider_job_id,
                 api_key=api_key,
                 base_url=base_url,
+                model=model,
             )
             result["video_url"] = video_api.extract_video_url(result)
 
@@ -171,6 +174,7 @@ async def fetch_job_result(
     shot_id: int,
     api_key: str | None = None,
     base_url: str | None = None,
+    model: str | None = None,
 ) -> dict[str, Any]:
     """获取已完成视频任务的结果，根据 provider 分发下载。"""
     try:
@@ -185,6 +189,7 @@ async def fetch_job_result(
                 job_id=provider_job_id,
                 api_key=api_key,
                 base_url=base_url,
+                model=model,
             )
             video_url = video_api.extract_video_url(result)
 

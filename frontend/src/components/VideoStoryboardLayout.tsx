@@ -14,6 +14,7 @@ import {
   listChapterVideoWorkflows,
   listVideoAssets,
   parseChapterWorkflowShots,
+  generateChapterWorkflowShotDetails,
   generateChapterWorkflowStoryboards,
   generateChapterWorkflowVideos,
   generateStoryVideoCharacters,
@@ -27,10 +28,14 @@ import {
   clearShotVideo,
   generateShotSceneAsset,
   generateShotPropAsset,
+  resetChapterWorkflow,
+  uploadStyleReferenceImage,
+  type VideoStylePreset,
 } from '../api';
 import { findCharacterPromptByName } from './videoWorkbenchUtils';
 import ChapterListPanel from './ChapterListPanel';
 import ChapterVideoWorkflowPanel from './ChapterVideoWorkflowPanel';
+import StyleSelectorModal from './StyleSelectorModal';
 import { toast } from '../lib/toast';
 
 interface Props {
@@ -57,8 +62,11 @@ export default function VideoStoryboardLayout({
   const [workflowRunning, setWorkflowRunning] = useState(false);
   const [concatVideoUrl, setConcatVideoUrl] = useState<string | null>(null);
   const [selectedReferenceIds, setSelectedReferenceIds] = useState<number[]>([]);
-  const [stylePresets, setStylePresets] = useState<Array<{ id: number; name: string; category: string }>>([]);
+  const [stylePresets, setStylePresets] = useState<VideoStylePreset[]>([]);
   const [selectedStyle, setSelectedStyle] = useState('写实电影感');
+  const [styleReferenceImageUrl, setStyleReferenceImageUrl] = useState<string | null>(null);
+  const [styleSelectorOpen, setStyleSelectorOpen] = useState(false);
+  const [videoAspectRatio, setVideoAspectRatio] = useState<'16:9' | '9:16'>('16:9');
   const [selectedShotIds, setSelectedShotIds] = useState<Set<number>>(new Set());
   const [skippedShotIds, setSkippedShotIds] = useState<Set<number>>(new Set());
   const [videoCharacters, setVideoCharacters] = useState<StoryVideoCharacter[]>([]);
@@ -152,7 +160,7 @@ export default function VideoStoryboardLayout({
 
       if (latest) {
         setSelectedReferenceIds(latest.character_reference_ids || []);
-        if (latest.workflow_status === 'completed' || latest.workflow_status === 'failed') {
+        if (latest.workflow_status === 'completed' || latest.workflow_status === 'failed' || latest.workflow_status === 'shots_ready' || latest.workflow_status === 'pending') {
           await loadWorkflowDetail(latest.id, signal);
           setWorkflowRunning(false);
         } else {
@@ -181,12 +189,12 @@ export default function VideoStoryboardLayout({
           const savedStyle = localStorage.getItem(lsKey);
           if (savedStyle) {
             setSelectedStyle(savedStyle);
-            return;
+            // 不 return，继续从 API 同步，确保与后端一致
           }
           fetch(`/api/chapters/${resolvedChapter.id}/video-style-preset`, { headers: apiHeaders() })
             .then((response) => response.json())
             .then((payload) => {
-              if (payload?.name) setSelectedStyle(payload.name);
+              if (payload?.style_preset?.name) setSelectedStyle(payload.style_preset.name);
             })
             .catch(() => {});
         }
@@ -229,24 +237,58 @@ export default function VideoStoryboardLayout({
           chapter_id: resolvedChapter.id,
           character_reference_ids: selectedReferenceIds,
           video_style: selectedStyle,
+          style_reference_image_url: styleReferenceImageUrl,
         });
         setWorkflow(wf);
       }
 
       await parseChapterWorkflowShots(wf.id);
-      toast.success('拆镜任务已启动');
+      toast.success('拆镜完成');
       void pollWorkflowUntilSettled(wf.id);
     } catch (error: any) {
+      toast.error(`拆镜失败: ${error.message || '未知错误'}`);
+    } finally {
       setWorkflowRunning(false);
       setParsing(false);
-      toast.error(`拆镜失败: ${error.message || '未知错误'}`);
     }
   }, [pollWorkflowUntilSettled, workflow, resolvedChapter?.id, selectedReferenceIds, selectedStyle]);
 
+  const handleGenerateShotDetails = useCallback(async (shotIds: number[]) => {
+    if (!workflow || shotIds.length === 0) return;
+    if (shotIds.length > 5) {
+      toast.error('最多支持 5 个镜头');
+      return;
+    }
+    try {
+      setWorkflowRunning(true);
+      const result = await generateChapterWorkflowShotDetails(workflow.id, { shot_ids: shotIds });
+      if (result.success) {
+        toast.success(`已为 ${result.total} 个镜头生成详情`);
+      } else {
+        toast.error(result.error || '生成详情失败');
+      }
+      const detail = await getChapterVideoWorkflow(workflow.id);
+      setWorkflow(detail);
+    } catch (error: any) {
+      toast.error(`生成详情失败: ${error.message || '未知错误'}`);
+    } finally {
+      setWorkflowRunning(false);
+    }
+  }, [workflow]);
+
   const handleRefreshWorkflow = useCallback(async () => {
     if (!resolvedChapter?.id) return;
-    await loadLatestWorkflow(resolvedChapter.id);
-  }, [loadLatestWorkflow, resolvedChapter?.id]);  const handleConcatWorkflow = useCallback(async () => {
+    await Promise.all([
+      loadLatestWorkflow(resolvedChapter.id),
+      loadChapterAssets(resolvedChapter.id),
+    ]);
+    // 确保强制加载工作流完整详情（含 shots 的 prompts），
+    // loadLatestWorkflow 在非终态时不会加载详情
+    if (workflow?.id) {
+      await loadWorkflowDetail(workflow.id);
+    }
+  }, [loadLatestWorkflow, loadChapterAssets, resolvedChapter?.id, workflow?.id, loadWorkflowDetail]);
+  const handleConcatWorkflow = useCallback(async () => {
     if (!workflow) return;
     try {
       const result = await concatChapterVideoWorkflow(workflow.id);
@@ -270,10 +312,10 @@ export default function VideoStoryboardLayout({
     }
   }, [loadChapterAssets, workflow]);
 
-  const handleRegenerateVideo = useCallback(async (shotId: number, refAssetIds?: number[]) => {
+  const handleRegenerateVideo = useCallback(async (shotId: number, refAssetIds?: number[], aspectRatio: '16:9' | '9:16' = '16:9') => {
     if (!workflow) return;
     try {
-      await regenerateChapterWorkflowVideo(shotId, undefined, refAssetIds);
+      await regenerateChapterWorkflowVideo(shotId, undefined, refAssetIds, aspectRatio);
       toast.success('视频已重新生成');
       const detail = await getChapterVideoWorkflow(workflow.id);
       setWorkflow(detail);
@@ -319,8 +361,9 @@ export default function VideoStoryboardLayout({
     }
   }, [resolvedChapter?.id, loadChapterAssets]);
 
-  const handleStyleChange = useCallback(async (styleName: string) => {
+  const handleStyleChange = useCallback(async (styleName: string, referenceImageUrl: string | null = null) => {
     setSelectedStyle(styleName);
+    setStyleReferenceImageUrl(referenceImageUrl);
     if (resolvedChapter?.id) {
       localStorage.setItem(`video_style_preset_${resolvedChapter.id}`, styleName);
     }
@@ -336,7 +379,19 @@ export default function VideoStoryboardLayout({
         // 静默失败，不阻断主流程
       }
     }
-  }, [resolvedChapter?.id, stylePresets]);
+    // 如果工作流已存在，更新其风格参考图
+    if (workflow?.id && referenceImageUrl) {
+      try {
+        await fetch(`/api/video/chapter-workflows/${workflow.id}/style-reference-url`, {
+          method: 'PUT',
+          headers: apiHeaders(true),
+          body: JSON.stringify({ style_reference_image_url: referenceImageUrl }),
+        });
+      } catch {
+        // 静默失败，不阻断主流程
+      }
+    }
+  }, [resolvedChapter?.id, stylePresets, workflow?.id]);
 
   const handleGenerateStoryboards = useCallback(async (shotIds: number[]) => {
     if (!workflow) return;
@@ -371,6 +426,18 @@ export default function VideoStoryboardLayout({
       toast.error(`视频生成失败: ${error.message || '未知错误'}`);
     }
   }, [pollWorkflowUntilSettled, workflow]);
+
+  const handleResetWorkflow = useCallback(async () => {
+    if (!workflow) return;
+    try {
+      await resetChapterWorkflow(workflow.id);
+      toast.success('工作流已重置');
+      const detail = await getChapterVideoWorkflow(workflow.id);
+      setWorkflow(detail);
+    } catch (error: any) {
+      toast.error(`重置失败: ${error.message || '未知错误'}`);
+    }
+  }, [workflow]);
 
   const handleToggleShotSelection = useCallback((shotId: number) => {
     setSelectedShotIds((prev) => {
@@ -434,10 +501,11 @@ export default function VideoStoryboardLayout({
       const matched = findCharacterPromptByName(result.character_prompts, characterName);
       if (matched) {
         toast.success(`角色「${characterName}」提示词已重新分析`);
-        await handleRefreshWorkflow();
       } else {
-        toast.info(`未重新识别到当前角色「${characterName}」`);
+        toast.info(`角色「${characterName}」提示词已重新分析（名称未完全匹配，已更新全局提示词）`);
       }
+      // 始终刷新工作流，确保所有提示词（角色/场景/道具/故事版/视频）同步更新
+      await handleRefreshWorkflow();
     } catch (error: any) {
       toast.error(`重新分析失败: ${error.message || '未知错误'}`);
     }
@@ -519,6 +587,7 @@ export default function VideoStoryboardLayout({
           chapterAssets={chapterAssets}
           selectedReferenceIds={selectedReferenceIds}
           selectedStyle={selectedStyle}
+          styleReferenceImageUrl={styleReferenceImageUrl}
           stylePresets={stylePresets}
           concatVideoUrl={concatVideoUrl}
           selectedShotIds={selectedShotIds}
@@ -529,8 +598,10 @@ export default function VideoStoryboardLayout({
           onRegenerateStoryboard={handleRegenerateStoryboard}
           onRegenerateVideo={handleRegenerateVideo}
           onStyleChange={handleStyleChange}
+          onOpenStyleSelector={() => setStyleSelectorOpen(true)}
           onParseShots={handleParseShots}
           parsing={parsing}
+          onGenerateShotDetails={handleGenerateShotDetails}
           onGenerateStoryboards={handleGenerateStoryboards}
           onGenerateVideos={handleGenerateVideos}
           onToggleShotSelection={handleToggleShotSelection}
@@ -545,8 +616,24 @@ export default function VideoStoryboardLayout({
           videoCharacters={videoCharacters}
           characterLoading={characterLoading}
           onGenerateCharacters={handleGenerateCharacters}
+          onResetWorkflow={handleResetWorkflow}
+          videoAspectRatio={videoAspectRatio}
+          onVideoAspectRatioChange={setVideoAspectRatio}
         />
       </div>
+
+      {/* 风格选择弹窗 */}
+      <StyleSelectorModal
+        isOpen={styleSelectorOpen}
+        onClose={() => setStyleSelectorOpen(false)}
+        presets={stylePresets}
+        selectedStyleName={selectedStyle}
+        styleReferenceImageUrl={styleReferenceImageUrl}
+        workflowId={workflow?.id ?? null}
+        onStyleSelect={(styleName, refUrl) => {
+          handleStyleChange(styleName, refUrl);
+        }}
+      />
     </div>
   );
 }
