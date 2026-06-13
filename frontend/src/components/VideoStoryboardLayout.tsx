@@ -27,10 +27,7 @@ import {
   deleteVideoAsset,
   clearShotStoryboard,
   clearShotVideo,
-  generateShotSceneAsset,
-  generateShotPropAsset,
   resetChapterWorkflow,
-  uploadStyleReferenceImage,
   type VideoStylePreset,
 } from '../api';
 import { findCharacterPromptByName } from './videoWorkbenchUtils';
@@ -531,6 +528,7 @@ export default function VideoStoryboardLayout({
     }
   }, [story.id]);
 
+  /* TODO: 以下两个函数将在后续 PR 中接入 UI 按钮时启用
   const handleGenerateSceneAsset = useCallback(async (shotId: number, prompt: string) => {
     try {
       await generateShotSceneAsset(shotId, { prompt });
@@ -554,6 +552,7 @@ export default function VideoStoryboardLayout({
       toast.error(`道具图生成失败: ${err.message}`);
     }
   }, [resolvedChapter?.id, loadChapterAssets]);
+  */
 
   if (!story) {
     return (

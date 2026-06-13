@@ -100,6 +100,17 @@ def test_stage_routes_pass_task_id(monkeypatch):
     monkeypatch.setattr(video_router, "_user_image_api_key", lambda request: "test-img-key")
     monkeypatch.setattr(video_router, "_configure_video_service_from_db", lambda request, db: None)
     monkeypatch.setattr(video_router, "_user_video_api_key", lambda request: ("key", "url", "model"))
+    monkeypatch.setattr(video_router, "_get_story_character_reference_asset_ids", lambda story_id, db: [])
+    monkeypatch.setattr(video_router, "update_chapter_workflow_status", lambda wid, status: None)
+
+    async def fake_submit_task(task_id=None, coro_func=None, **kwargs):
+        """模拟 task_manager.submit_task 直接调用协程函数。"""
+        import inspect
+        sig = inspect.signature(coro_func)
+        call_kwargs = {k: v for k, v in kwargs.items() if k in sig.parameters}
+        return await coro_func(**call_kwargs, task_id=task_id)
+
+    monkeypatch.setattr(video_router.task_manager, "submit_task", fake_submit_task)
 
     wf_mock = SimpleNamespace(
         id=99, story_id=34, chapter_id=12, workflow_status="pending",
@@ -117,16 +128,25 @@ def test_stage_routes_pass_task_id(monkeypatch):
         source_text="正文", character_reference_ids=None,
     )
 
+    chapter_mock = SimpleNamespace(novel_content="正文")
+
     story_mock = SimpleNamespace(id=34, owner_user_id=1)
 
     class FakeDb:
         def get(self, model, pk):
+            name = getattr(model, "__name__", "")
+            if name == "Chapter":
+                return chapter_mock
+            if name == "ChapterVideoWorkflow":
+                return wf_mock
             return story_mock
         def query(self, model):
             class Q:
                 def filter(self, *a, **kw): return self
                 def first(self): return None
             return Q()
+        def commit(self):
+            pass
 
     # 测试 /parse 路由
     monkeypatch.setattr(video_router, "get_chapter_workflow", lambda wid: wf_mock)
@@ -534,24 +554,33 @@ def test_parse_route_accepts_valid_workflow_id(monkeypatch):
     monkeypatch.setattr(video_router, "parse_chapter_shots", fake_parse)
     monkeypatch.setattr(video_router, "_require_user", lambda request, db: SimpleNamespace(id=1))
     monkeypatch.setattr(video_router, "_user_deepseek_api_key", lambda request, db: "test-ds-key")
+    monkeypatch.setattr(video_router, "_get_story_character_reference_asset_ids", lambda story_id, db: [])
 
     wf_mock = SimpleNamespace(
         id=99, story_id=34, chapter_id=12, workflow_status="pending",
         total_shots=0, completed_shots=0, failed_shots=0, error_message=None,
-        source_text="正文",
+        source_text="正文", character_reference_ids=None,
     )
     monkeypatch.setattr(video_router, "get_chapter_workflow", lambda wid: wf_mock)
 
     story_mock = SimpleNamespace(id=34, owner_user_id=1)
+    chapter_mock = SimpleNamespace(novel_content="正文")
 
     class FakeDb:
         def get(self, model, pk):
+            name = getattr(model, "__name__", "")
+            if name == "Chapter":
+                return chapter_mock
+            if name == "ChapterVideoWorkflow":
+                return wf_mock
             return story_mock
         def query(self, model):
             class Q:
                 def filter(self, *a, **kw): return self
                 def first(self): return None
             return Q()
+        def commit(self):
+            pass
 
     async def run():
         return await video_router.api_parse_chapter_shots(

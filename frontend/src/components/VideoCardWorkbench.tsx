@@ -51,10 +51,7 @@ interface WorkbenchState {
   busy: string | null;
 }
 
-/** 故事版图片在 selectedRefAssetIds 中的特殊标识 */
-const STORYBOARD_REF_ID = -1;
-
-export default function VideoCardWorkbench({ type, shotId, assetId, displayShotIndex, resources, onRegenerate, onUploadReplace, onDelete, onRedraw, onPromptSave, onReanalyzePrompt, onClose, storyboardRefAssets, selectedRefAssetIds, onSelectedRefAssetsChange, storyboardImageUrl, chapterAssets, shotStoryboards, videoAspectRatio = '16:9', onVideoAspectRatioChange, recommendedSceneAssets, recommendedKeyProps, recommendedReferenceAssetIds, externalBusy = null }: VideoCardWorkbenchProps) {
+export default function VideoCardWorkbench({ type, shotId, assetId, displayShotIndex, resources, onRegenerate, onUploadReplace, onDelete, onRedraw, onPromptSave, onReanalyzePrompt, onClose, selectedRefAssetIds, onSelectedRefAssetsChange, chapterAssets, shotStoryboards, videoAspectRatio = '16:9', onVideoAspectRatioChange, recommendedReferenceAssetIds, externalBusy = null }: VideoCardWorkbenchProps) {
   const [state, setState] = useState<WorkbenchState>(() => {
     const initialIndex = Math.max(0, resources.findIndex(r => r.id === assetId));
     return {
@@ -300,16 +297,7 @@ export default function VideoCardWorkbench({ type, shotId, assetId, displayShotI
 
               <div className="shrink-0 rounded-2xl border border-[#d7e3f4] bg-white p-4">
                 <div className="text-sm font-medium text-slate-800">操作</div>
-                {type === 'scene' && ((recommendedSceneAssets?.length ?? 0) > 0 || (recommendedKeyProps?.length ?? 0) > 0) && (
-                  <div className="mt-3 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
-                    {(recommendedSceneAssets?.length ?? 0) > 0 && (
-                      <div>推荐继承场景：{recommendedSceneAssets?.join('、')}</div>
-                    )}
-                    {(recommendedKeyProps?.length ?? 0) > 0 && (
-                      <div className="mt-1">推荐关键道具：{recommendedKeyProps?.join('、')}</div>
-                    )}
-                  </div>
-                )}
+
                 <div className="mt-3 flex flex-wrap gap-2">
                   {type === 'video' && onVideoAspectRatioChange && (
                     <div className="flex items-center gap-2 rounded-xl border border-[#d7e3f4] bg-[#f8fbff] px-3 py-1.5 text-xs text-slate-700">

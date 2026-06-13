@@ -53,18 +53,8 @@ MAX_RETRIES = 3
 RETRY_DELAY = 5
 
 
-def configure_runtime(base_url: str | None = None, api_key: str | None = None, model: str | None = None) -> None:
-    """由 router 层调用，注入数据库中的 API 配置。"""
-    global IMAGE_API_BASE_URL, IMAGE_API_KEY, IMAGE_MODEL
-    if isinstance(base_url, str) and base_url.strip():
-        IMAGE_API_BASE_URL = base_url.strip().rstrip("/")
-    if isinstance(api_key, str):
-        IMAGE_API_KEY = api_key.strip()
-    if isinstance(model, str) and model.strip():
-        clean_model = model.strip()
-        if clean_model.lower() not in ("default", "none", "null", ""):
-            IMAGE_MODEL = clean_model
-            logger.info("image2 模型已更新: %s", IMAGE_MODEL)
+DEFAULT_IMAGE_SIZE = "1024x1024"
+
 DOWNLOAD_RETRIES = 3
 DOWNLOAD_RETRY_DELAY = 3
 PROMPT_TOO_LONG_KEYWORDS = (

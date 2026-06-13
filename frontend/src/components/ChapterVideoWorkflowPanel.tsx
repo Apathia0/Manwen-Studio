@@ -29,7 +29,6 @@ import {
   findCharacterAssetByName,
   findBusyWorkbenchResourceId,
   isWorkbenchResourceBusy,
-  replaceWorkbenchAssetAndRefresh,
   uploadCharacterWorkbenchAsset,
   uploadWorkbenchAsset,
 } from './videoWorkbenchUtils';
@@ -106,7 +105,6 @@ export default function ChapterVideoWorkflowPanel({
   selectedReferenceIds,
   selectedStyle,
   styleReferenceImageUrl,
-  stylePresets,
   concatVideoUrl,
   selectedShotIds,
   skippedShotIds,
@@ -115,10 +113,8 @@ export default function ChapterVideoWorkflowPanel({
   onConcatWorkflow,
   onRegenerateStoryboard,
   onRegenerateVideo,
-  onStyleChange,
   onOpenStyleSelector,
   onParseShots,
-  onGenerateShotDetails,
   onGenerateStoryboards,
   onGenerateVideos,
   onToggleShotSelection,
@@ -126,7 +122,6 @@ export default function ChapterVideoWorkflowPanel({
   onSkipShot,
   onReanalyzePrompt,
   onReanalyzeCurrentCharacter,
-  onStoryboardPromptChange,
   onDeleteChapterAsset,
   onDeleteStoryboard,
   onDeleteVideo,
@@ -752,7 +747,7 @@ export default function ChapterVideoWorkflowPanel({
             const asset = resources.find(r => r.id === resourceId);
             if (!asset || !workflow) return;
             await runForResource(asset, 'upload', async () => {
-              await uploadCharacterWorkbenchAsset(asset, workflow.chapter_id, file, createVideoAsset, replaceVideoAsset, onRefreshWorkflow);
+              await uploadCharacterWorkbenchAsset({ ...asset, prompt: asset.prompt || '', label: asset.label || '' }, workflow.chapter_id, file, createVideoAsset, replaceVideoAsset, onRefreshWorkflow);
             });
           };
           onDelete = async (resourceId: number) => {
@@ -803,7 +798,7 @@ export default function ChapterVideoWorkflowPanel({
               await onDeleteStoryboard(resourceId);
             });
           };
-          onRedraw = async (resourceId: number, prompt: string) => {
+          onRedraw = async (resourceId: number, _prompt: string) => {
             const resource = resources[0];
             await runForResource(resource, 'redraw', async () => {
               await onRegenerateStoryboard(resourceId, workbenchRefAssetIds);
@@ -849,7 +844,7 @@ export default function ChapterVideoWorkflowPanel({
               await onDeleteVideo(resourceId);
             });
           };
-          onRedraw = async (resourceId: number, prompt: string) => {
+          onRedraw = async (resourceId: number, _prompt: string) => {
             const resource = resources[0];
             await runForResource(resource, 'redraw', async () => {
               await onRegenerateVideo(resourceId, workbenchRefAssetIds, videoAspectRatio);

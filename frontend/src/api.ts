@@ -3494,7 +3494,7 @@ export async function uploadShotVideo(shotId: number, file: File): Promise<{ ok:
   return res.json();
 }
 
-export async function saveChapterShotPrompts(shotId: number, prompts: { storyboard_prompt?: string | null; video_prompt?: string | null }): Promise<{ ok: boolean; shot: ChapterVideoShot }> {
+export async function saveChapterShotPrompts(shotId: number, prompts: { storyboard_prompt?: string | null; video_prompt?: string | null; scene_prompt?: string | null; prop_prompts?: Array<{ name: string; prompt: string }> | null }): Promise<{ ok: boolean; shot: ChapterVideoShot }> {
   const res = await fetch(`${BASE}/api/video/chapter-workflows/shots/${shotId}/save-prompts`, {
     method: 'POST',
     headers: apiHeaders(true),

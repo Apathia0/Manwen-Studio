@@ -213,6 +213,8 @@ export default function ShotAssetWorkflowPanel({
         shot_id: shot.id,
         style_preset: shot.style_preset || '',
         character_prompts: charPrompts,
+        scene_prompt: shot.scene_prompt || '',
+        prop_prompts: shot.prop_prompts_json || [],
         storyboard_prompt: shot.storyboard_prompt || '',
         first_frame_prompt: shot.first_frame_prompt || '',
         last_frame_prompt: shot.last_frame_prompt || '',
@@ -425,7 +427,7 @@ export default function ShotAssetWorkflowPanel({
     setPreviewBusy(true);
     setError(null);
     try {
-      await regenerateVideoAsset(previewAsset.id, payload);
+      await regenerateVideoAsset(previewAsset.id, payload.prompt, payload.mask);
       await Promise.all([loadAssets(), loadStoryboards(), loadFrames()]);
       setPreviewAsset(null);
     } catch (err: any) {

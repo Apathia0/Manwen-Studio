@@ -1037,7 +1037,7 @@ def test_json_array_bypasses_all_repair_mechanisms():
     ]
     content = json.dumps(shots)
 
-    with pytest.raises(ValueError, match="not an object"):
+    with pytest.raises(ValueError, match="不是对象"):
         deepseek._extract_json_object(content)
 
     repaired = deepseek._repair_broken_json_fields(content)

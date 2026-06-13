@@ -249,7 +249,8 @@ def _configure_image_service_from_db(request: Request, db: Session) -> None:
     if base_url:
         image_service.configure_runtime(base_url=base_url, model=model)
     elif api_key:
-        image_service.configure_runtime(api_key=api_key)
+        # 仅有 API Key 时至少初始化一次运行时的 base_url 默认值
+        image_service.configure_runtime()
 
 
 def _configure_video_service_from_db(request: Request, db: Session) -> None:
