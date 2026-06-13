@@ -12,9 +12,8 @@ import httpx
 from database import SessionLocal
 from models import Chapter, Story
 from sqlalchemy.orm import Session
+from services import deepseek as _deepseek_service
 from services.deepseek import (
-    DEEPSEEK_BASE_URL,
-    DEEPSEEK_MODEL,
     _deepseek_auth_headers,
     _build_story_snapshot_tiered,
     adjust_framework_with_chat,
@@ -1676,7 +1675,7 @@ class AgentService:
                 iteration_count += 1
 
                 payload = {
-                    "model": DEEPSEEK_MODEL,
+                    "model": _deepseek_service.DEEPSEEK_MODEL,
                     "messages": all_messages,
                     "stream": True,
                     "tools": self.tool_registry.get_tool_specs(mode=mode),
@@ -1690,7 +1689,7 @@ class AgentService:
                 async with httpx.AsyncClient(timeout=600) as client:
                     async with client.stream(
                         "POST",
-                        f"{DEEPSEEK_BASE_URL}/chat/completions",
+                        f"{_deepseek_service.DEEPSEEK_BASE_URL}/chat/completions",
                         json=payload,
                         headers=_deepseek_auth_headers(api_key),
                     ) as response:
