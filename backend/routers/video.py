@@ -125,6 +125,7 @@ from services.media_locator import ensure_local_media_path, resolve_local_media_
 from services import video_api as video_api_service
 from services import video_qa
 from services.blocking import run_blocking
+from services.errors import UpstreamServiceError
 from services.video_compiler import compile_project
 from services.task_manager import task_manager
 from services.video_chapter_pipeline import (
@@ -6587,6 +6588,9 @@ async def api_regenerate_shot_video(
     ref_asset_ids = body.reference_asset_ids or None
     try:
         updated_shot = await regenerate_shot_video(shot_id, api_key, body.prompt_override, ref_asset_ids=ref_asset_ids, base_url=base_url, model=model, deepseek_api_key=deepseek_api_key, aspect_ratio=body.aspect_ratio or "16:9")
+    except UpstreamServiceError as exc:
+        logger.warning("Regenerate shot video upstream failed: shot_id=%s provider=%s err=%s", shot_id, exc.provider, exc)
+        raise HTTPException(502, str(exc))
     except Exception as exc:
         if "视频 API 地址未配置" in str(exc) or "视频生成模型未配置" in str(exc):
             raise HTTPException(400, str(exc))

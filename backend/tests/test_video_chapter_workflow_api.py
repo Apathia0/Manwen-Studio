@@ -786,6 +786,27 @@ def test_poll_video_job_defaults_to_7200_seconds():
     assert video_chapter_pipeline._poll_video_job.__defaults__[3] == 7200
 
 
+def test_poll_video_job_failed_status_raises_upstream_error(monkeypatch):
+    from services.errors import UpstreamServiceError
+
+    async def fake_query_job_status(**kwargs):
+        return {"status": "failed", "error": "Lingdong video task failed"}
+
+    monkeypatch.setattr(video_chapter_pipeline.video_gen_service, "query_job_status", fake_query_job_status)
+
+    with pytest.raises(UpstreamServiceError, match="Lingdong video task failed") as exc_info:
+        asyncio.run(
+            video_chapter_pipeline._poll_video_job(
+                provider="sora",
+                provider_job_id="job-failed",
+                poll_interval=0,
+            )
+        )
+
+    assert exc_info.value.retryable is False
+    assert exc_info.value.provider == "sora"
+
+
 def test_chapter_storyboard_prompt_mentions_15_second_shots():
     style_preset = 'cinematic'
     hint_line = 'Target approximately 12 shots.'

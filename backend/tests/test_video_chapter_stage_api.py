@@ -739,6 +739,52 @@ def test_regenerate_shot_video_uses_image_api_key(monkeypatch):
 # ── Fix 6: 路由级别 image_api_key 存在性校验 ────────────
 
 
+def test_regenerate_shot_video_upstream_error_returns_502(monkeypatch):
+    """Upstream provider failures should not bubble up as server tracebacks."""
+    from fastapi import HTTPException
+    from routers import video as video_router
+    from schemas import RegenerateShotRequest
+    from services.errors import UpstreamServiceError
+
+    async def fake_regenerate(*args, **kwargs):
+        raise UpstreamServiceError(
+            "Lingdong video task failed. Please check media URLs and request parameters.",
+            retryable=False,
+            provider="sora",
+        )
+
+    monkeypatch.setattr(video_router, "regenerate_shot_video", fake_regenerate)
+    monkeypatch.setattr(video_router, "_require_user", lambda request, db: SimpleNamespace(id=1))
+    monkeypatch.setattr(video_router, "_user_deepseek_api_key", lambda request, db: "deepseek-key")
+    monkeypatch.setattr(video_router, "_configure_video_service_from_db", lambda request, db: None)
+    monkeypatch.setattr(video_router, "_user_video_api_key", lambda request: ("image-key", "url", "model"))
+    monkeypatch.setattr(
+        video_router,
+        "get_chapter_workflow",
+        lambda wid: SimpleNamespace(id=wid, story_id=34),
+    )
+
+    class FakeDb:
+        def get(self, model, pk):
+            name = getattr(model, "__name__", "")
+            if name == "ChapterVideoShot":
+                return SimpleNamespace(id=pk, workflow_id=99)
+            return SimpleNamespace(id=34, owner_user_id=1)
+
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(
+            video_router.api_regenerate_shot_video(
+                shot_id=1,
+                body=RegenerateShotRequest(),
+                request=SimpleNamespace(),
+                db=FakeDb(),
+            )
+        )
+
+    assert exc_info.value.status_code == 502
+    assert "Lingdong video task failed" in exc_info.value.detail
+
+
 def test_storyboard_route_rejects_missing_image_api_key(monkeypatch):
     """/storyboards 路由在缺少 image_api_key 时返回 400。"""
     from routers import video as video_router

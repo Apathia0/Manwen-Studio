@@ -23,6 +23,7 @@ from services import deepseek as deepseek_service
 from services import image2 as image_service
 from services import video_generation as video_gen_service
 from services.blocking import run_blocking
+from services.errors import UpstreamServiceError
 from services.media_locator import ensure_local_media_path, resolve_reference_input
 from services.task_manager import task_manager
 
@@ -1671,7 +1672,12 @@ async def _poll_video_job(
                     return f"/static/video/{Path(video_path).name}"
             return status.get("video_url", "")
         elif status.get("status") == "failed":
-            raise Exception(f"视频任务失败: {status.get('error', '未知错误')}")
+            error = str(status.get("error") or status.get("message") or "Unknown video task failure")
+            raise UpstreamServiceError(
+                error,
+                retryable=False,
+                provider=provider,
+            )
         await asyncio.sleep(poll_interval)
     raise TimeoutError(f"视频任务超时（{max_poll_seconds}s）")
 
@@ -2065,7 +2071,11 @@ async def regenerate_shot_video(
             )
             update_shot(shot_id, status="video_ready", video_url=video_url or "")
         else:
-            raise Exception(f"视频任务提交失败: {result.get('error', '未知错误')}")
+            raise UpstreamServiceError(
+                str(result.get("error") or result.get("message") or "Video task submission failed"),
+                retryable=True,
+                provider=DEFAULT_VIDEO_PROVIDER,
+            )
     except Exception as exc:
         update_shot(shot_id, status="failed", error_message=str(exc))
         raise
