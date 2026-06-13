@@ -555,6 +555,13 @@ def test_parse_route_accepts_valid_workflow_id(monkeypatch):
     monkeypatch.setattr(video_router, "_require_user", lambda request, db: SimpleNamespace(id=1))
     monkeypatch.setattr(video_router, "_user_deepseek_api_key", lambda request, db: "test-ds-key")
     monkeypatch.setattr(video_router, "_get_story_character_reference_asset_ids", lambda story_id, db: [])
+    monkeypatch.setattr(video_router, "update_chapter_workflow_status", lambda wid, status: None)
+
+    async def fake_submit_task(task_id=None, coro_func=None, **kwargs):
+        captured.update(kwargs)
+        return task_id
+
+    monkeypatch.setattr(video_router.task_manager, "submit_task", fake_submit_task)
 
     wf_mock = SimpleNamespace(
         id=99, story_id=34, chapter_id=12, workflow_status="pending",
@@ -588,7 +595,8 @@ def test_parse_route_accepts_valid_workflow_id(monkeypatch):
         )
 
     result = asyncio.run(run())
-    assert result["workflow_status"] == "shots_ready"
+    assert result["workflow_status"] == "parsing_shots"
+    assert result["task_id"].startswith("chapter_video_99_stage_")
     assert captured["workflow_id"] == 99
 
 

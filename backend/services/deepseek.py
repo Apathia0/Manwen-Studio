@@ -50,7 +50,15 @@ def _loads_json_lenient(text: str):
 
 def _response_json(resp: httpx.Response, *, context: str = "DeepSeek") -> dict:
     """Parse upstream JSON with a useful error when proxies return empty/non-JSON bodies."""
-    text = resp.text or ""
+    text = getattr(resp, "text", None)
+    if text is None:
+        json_loader = getattr(resp, "json", None)
+        if callable(json_loader):
+            data = json_loader()
+            if not isinstance(data, dict):
+                raise ValueError(f"{context} 服务响应格式异常：顶层不是 JSON 对象")
+            return data
+        text = ""
     if not text.strip():
         raise ValueError(f"{context} 服务返回空响应，请稍后重试或检查 API 地址、模型与代理配置")
     try:
@@ -60,8 +68,8 @@ def _response_json(resp: httpx.Response, *, context: str = "DeepSeek") -> dict:
         logger.warning(
             "%s returned non-JSON response: status=%s content_type=%s preview=%s",
             context,
-            resp.status_code,
-            resp.headers.get("content-type", ""),
+            getattr(resp, "status_code", None),
+            (getattr(resp, "headers", {}) or {}).get("content-type", ""),
             preview,
         )
         raise ValueError(f"{context} 服务返回了非 JSON 响应，请稍后重试或检查 API 地址、模型与代理配置") from exc

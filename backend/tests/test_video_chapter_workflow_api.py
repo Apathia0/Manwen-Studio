@@ -922,6 +922,14 @@ def test_api_parse_chapter_shots_refreshes_source_text_from_db(monkeypatch):
         return {"workflow_status": "shots_ready", "shot_count": 3}
 
     monkeypatch.setattr(video_router, "parse_chapter_shots", fake_parse)
+    monkeypatch.setattr(video_router, "update_chapter_workflow_status", lambda workflow_id, status: None)
+
+    async def fake_submit_task(task_id=None, coro_func=None, **kwargs):
+        db_captured["source_text"] = kwargs.get("source_text", "")
+        db_captured["task_id"] = task_id
+        return task_id
+
+    monkeypatch.setattr(video_router.task_manager, "submit_task", fake_submit_task)
 
     result = asyncio.run(
         video_router.api_parse_chapter_shots(
@@ -929,6 +937,8 @@ def test_api_parse_chapter_shots_refreshes_source_text_from_db(monkeypatch):
         )
     )
 
+    assert result["workflow_status"] == "parsing_shots"
+    assert str(db_captured.get("task_id", "")).startswith("chapter_video_11_stage_")
     assert db_captured.get("source_text") == "新的章节正文", \
         f"应使用 DB 最新章节内容，而非旧快照，实际: {db_captured.get('source_text')}"
     assert db.wf.source_text == "新的章节正文", \
