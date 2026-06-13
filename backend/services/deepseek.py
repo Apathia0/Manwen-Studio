@@ -3234,6 +3234,68 @@ async def parse_chapter_to_shots_lite(
     return all_shots
 
 
+def is_valid_storyboard_prompt(text: str) -> tuple[bool, str]:
+    """校验故事板导演生成的提示词是否有效（无元响应、格式完整）。
+
+    用于防止 AI 输出元响应（角色扮演对话）替代实际提示词，
+    并确保输出格式统一包含必需的五个区域。
+
+    返回 (is_valid: bool, reason: str)
+    """
+    if not text or len(text) < 200:
+        return False, "内容过短或为空"
+
+    head = text[:400]
+
+    # ── 检查元响应特征（AI 对用户说话而非输出提示词） ──
+    meta_patterns = [
+        "你提出的要求", "好的，", "好的 ", "以下是根据",
+        "我会严格遵循", "交给我来处理", "作为您指定的",
+        "已经收到", "已完整接收", "作为你的", "听从你的指示",
+        "按照你的要求", "我理解你的", "明白你的需求",
+        "以下是为你定制的", "以下是为你生成的",
+        "让我来", "我来为你", "交给我",
+    ]
+    for pat in meta_patterns:
+        if pat in head:
+            return False, f"检测到元响应前缀: '{pat}'"
+
+    # ── 检查是否以提示词格式开头 ──
+    # 合法的开头模式：'#' / '电影级故事板' / '一张' / '```'
+    valid_starts = False
+    stripped = text.lstrip()
+    for prefix in ("#", "电影级故事板", "一张完整", "```", "电影故事板", "## 项目"):
+        if stripped.startswith(prefix):
+            valid_starts = True
+            break
+    if not valid_starts:
+        return False, "开头格式不符合提示词规范"
+
+    # ── 检查必需的区域标识 ──
+    required_markers = ["项目总设定栏", "核心分镜故事板"]
+    for marker in required_markers:
+        if marker not in text:
+            return False, f"缺少必需区域: '{marker}'"
+
+    # ── 检查是否包含画面描述类内容 ──
+    content_markers = ["景别", "镜头运动", "画面", "构图"]
+    if not any(m in text for m in content_markers):
+        return False, "缺少画面描述内容"
+
+    return True, ""
+
+
+# 重试时追加到 user_message 末尾的强化指令（不修改模板本身）
+_STORYBOARD_RETRY_REINFORCEMENT = """
+
+## ⚠️ 输出格式强制要求（必须遵守）
+
+直接输出 AI 绘图提示词本身。
+禁止输出任何开场白、解释、角色扮演回复、自我介绍、说明性文字。
+禁止输出：'好的'、'以下是根据'、'我会'、'作为'、'交给我'、'我理解' 等元内容。
+直接以 '# 电影故事板生成提示词' 或 '电影级故事板' 开头，输出完整的生图提示词。"""
+
+
 async def generate_shot_storyboard_prompt(
     shot_data: dict,
     api_key: str | None = None,
@@ -3242,6 +3304,11 @@ async def generate_shot_storyboard_prompt(
 
     返回的文本是纯净的中文提示词，可直接发送给图片生成 API，
     不需要任何后续系统模板包装。
+
+    校验机制：
+    - 自动检测并过滤 AI 元响应（角色扮演对话）
+    - 检测到无效内容时自动重试（追加强化格式指令）
+    - 重试仍失败时记录警告并返回原始结果
     """
     from services.video_chapter_prompts import build_storyboard_director_messages
 
@@ -3301,7 +3368,40 @@ async def generate_shot_storyboard_prompt(
             resp.raise_for_status()
             data = resp.json()
             content = str(data["choices"][0]["message"]["content"] or "").strip()
-            return content if content else user_message
+            if not content:
+                return user_message
+
+            # ── 校验输出 ──
+            is_valid, reason = is_valid_storyboard_prompt(content)
+            if is_valid:
+                return content
+
+            # ── 校验失败，重试一次 ──
+            logger.warning("故事版提示词校验失败 (%s)，重试中...", reason)
+            retry_payload = {
+                **payload,
+                "messages": [
+                    payload["messages"][0],
+                    {"role": "user", "content": user_message + _STORYBOARD_RETRY_REINFORCEMENT},
+                ],
+            }
+            try:
+                resp2 = await client.post(
+                    f"{DEEPSEEK_BASE_URL}/chat/completions",
+                    json=retry_payload,
+                    headers=_deepseek_auth_headers(api_key),
+                )
+                resp2.raise_for_status()
+                data2 = resp2.json()
+                content2 = str(data2["choices"][0]["message"]["content"] or "").strip()
+                is_valid2, reason2 = is_valid_storyboard_prompt(content2)
+                if is_valid2:
+                    return content2
+                logger.warning("重试后仍无效 (%s)，使用原始结果", reason2)
+            except Exception as exc2:
+                logger.warning("重试也失败: %s，使用原始结果", exc2)
+
+            return content
     except Exception as exc:
         logger.warning("故事版导演角色生成失败: %s，使用备用内容", exc)
         # 降级：直接返回组装好的镜头信息作为提示词

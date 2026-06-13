@@ -11,6 +11,42 @@ from routers import video as video_router
 from schemas import ChapterVideoWorkflowCreate
 from services import video_chapter_pipeline
 
+# 符合 is_valid_storyboard_prompt 校验的测试用提示词
+_VALID_STORYBOARD_PROMPT = """# 电影故事板生成提示词
+
+## 项目总设定栏（顶部窄栏）
+
+【镜头】测试镜头 | 【类型】情感短剧 | 【时长】15秒 | 【风格】日式动漫风
+【地点】旧宅走廊·夜 | 【情绪】迟疑转为警觉 | 【叙事】递进
+
+### 角色设定区
+
+角色：林秋 | 动作：站在走廊中央，正对镜头 | 表情：警觉
+
+## 场景与环境设定区
+
+场景：旧宅走廊，月光从半掩窗户洒入，木质地板上投下窗棂阴影
+空间布局：林秋站在画面中央偏左，右侧是通往二楼的楼梯
+
+## 核心分镜故事板
+
+### 段落1：0-4.2s
+画面：林秋停在走廊中央，月光从半掩窗户洒入
+景别：中景
+镜头运动：缓慢推近
+情绪：迟疑
+
+### 段落2：4.2-9.5s
+画面：林秋缓缓转头看向楼梯方向
+景别：中近景
+镜头运动：跟随视线平摇
+
+## 灯光/镜头/剪辑/声音设计区
+
+灯光：月光为主光源（冷白），辅以走廊顶灯（暖黄）
+焦距：50mm
+节奏：慢速递进"""
+
 
 class _FakeDb:
     def __init__(self):
@@ -110,7 +146,7 @@ def test_regenerate_shot_storyboard_uses_workflow_lookup_for_chapter_id(monkeypa
             camera_plan='中景缓慢推近',
             motion_plan='停步，抬眼',
             emotion_plan='迟疑转为警觉',
-            storyboard_prompt='现成 prompt',
+            storyboard_prompt=_VALID_STORYBOARD_PROMPT,
             character_reference_ids=[],
         ),
     )
@@ -147,7 +183,7 @@ def test_regenerate_shot_storyboard_uses_reference_images_and_labels(monkeypatch
             camera_plan='中景缓慢推近',
             motion_plan='停步，抬眼',
             emotion_plan='迟疑转为警觉',
-            storyboard_prompt='现成 prompt',
+            storyboard_prompt=_VALID_STORYBOARD_PROMPT,
             character_reference_ids=[12],
         ),
     )
@@ -189,7 +225,7 @@ def test_regenerate_shot_storyboard_logs_reference_inputs(monkeypatch, caplog):
             camera_plan='中景缓慢推近',
             motion_plan='停步，抬眼',
             emotion_plan='迟疑转为警觉',
-            storyboard_prompt='现成 prompt',
+            storyboard_prompt=_VALID_STORYBOARD_PROMPT,
             character_reference_ids=[12],
         ),
     )
@@ -236,7 +272,7 @@ def test_regenerate_shot_storyboard_localizes_remote_refs_before_generation(monk
             camera_plan='中景缓慢推近',
             motion_plan='停步，抬眼',
             emotion_plan='迟疑转为警觉',
-            storyboard_prompt='现成 prompt',
+            storyboard_prompt=_VALID_STORYBOARD_PROMPT,
             character_reference_ids=[12],
         ),
     )
