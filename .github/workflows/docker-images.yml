@@ -12,10 +12,25 @@ permissions:
 
 env:
   REGISTRY: ghcr.io
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   test-and-build:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: manga_novel
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -30,7 +45,7 @@ jobs:
       - name: Install backend dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r backend/requirements.txt pytest
+          pip install -r backend/requirements.txt pytest pytest-asyncio
 
       - name: Backend syntax and tests
         working-directory: backend
@@ -124,7 +139,7 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
           git fetch origin pro
-          git checkout pro
+          git checkout -B pro origin/pro
 
           PUBLISHED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           cat > update-manifest.json << EOF
@@ -142,5 +157,6 @@ jobs:
             echo "No manifest changes to commit"
           else
             git commit -m "chore: update version manifest to ${{ steps.meta.outputs.app_version }} [skip ci]"
+            git pull --rebase origin pro || echo "Rebase skipped, attempting push..."
             git push origin pro
           fi
