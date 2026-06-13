@@ -40,6 +40,7 @@ interface VideoCardWorkbenchProps {
   recommendedSceneAssets?: string[];
   recommendedKeyProps?: string[];
   recommendedReferenceAssetIds?: number[];
+  externalBusy?: string | null;
 }
 
 interface WorkbenchState {
@@ -53,7 +54,7 @@ interface WorkbenchState {
 /** 故事版图片在 selectedRefAssetIds 中的特殊标识 */
 const STORYBOARD_REF_ID = -1;
 
-export default function VideoCardWorkbench({ type, shotId, assetId, displayShotIndex, resources, onRegenerate, onUploadReplace, onDelete, onRedraw, onPromptSave, onReanalyzePrompt, onClose, storyboardRefAssets, selectedRefAssetIds, onSelectedRefAssetsChange, storyboardImageUrl, chapterAssets, shotStoryboards, videoAspectRatio = '16:9', onVideoAspectRatioChange, recommendedSceneAssets, recommendedKeyProps, recommendedReferenceAssetIds }: VideoCardWorkbenchProps) {
+export default function VideoCardWorkbench({ type, shotId, assetId, displayShotIndex, resources, onRegenerate, onUploadReplace, onDelete, onRedraw, onPromptSave, onReanalyzePrompt, onClose, storyboardRefAssets, selectedRefAssetIds, onSelectedRefAssetsChange, storyboardImageUrl, chapterAssets, shotStoryboards, videoAspectRatio = '16:9', onVideoAspectRatioChange, recommendedSceneAssets, recommendedKeyProps, recommendedReferenceAssetIds, externalBusy = null }: VideoCardWorkbenchProps) {
   const [state, setState] = useState<WorkbenchState>(() => {
     const initialIndex = Math.max(0, resources.findIndex(r => r.id === assetId));
     return {
@@ -72,6 +73,7 @@ export default function VideoCardWorkbench({ type, shotId, assetId, displayShotI
 
   const currentResource = resources[currentIndex];
   const previewUrl = currentResource?.url;
+  const effectiveBusy = state.busy ?? externalBusy;
 
   // 选择角色/资源
   const handleSelectIndex = (idx: number) => {
@@ -83,12 +85,12 @@ export default function VideoCardWorkbench({ type, shotId, assetId, displayShotI
   };
 
   const handleRegenerate = async () => {
-    if (!currentResource || state.busy) return;
+    if (!currentResource || effectiveBusy) return;
     setState(s => ({ ...s, busy: 'regenerate' }));
     try {
       await onRegenerate(currentResource.id, type === 'video' ? videoAspectRatio : undefined);
     } catch (err) {
-      console.error('重新生成失败', err);
+      console.error(previewUrl ? '重新生成失败' : '生成失败', err);
     } finally {
       setState(s => ({ ...s, busy: null }));
     }
@@ -100,7 +102,7 @@ export default function VideoCardWorkbench({ type, shotId, assetId, displayShotI
 
   const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
-    if (!file || !currentResource || state.busy) return;
+    if (!file || !currentResource || effectiveBusy) return;
     setState(s => ({ ...s, busy: 'upload' }));
     try {
       await onUploadReplace(currentResource.id, file);
@@ -114,7 +116,7 @@ export default function VideoCardWorkbench({ type, shotId, assetId, displayShotI
 
   const handleDelete = async () => {
     const resourceId = currentResource?.id;
-    if (resourceId == null || state.busy) return;
+    if (resourceId == null || effectiveBusy) return;
     if (!confirm('确定要删除这个资源吗？')) return;
     setState(s => ({ ...s, busy: 'delete' }));
     try {
@@ -134,7 +136,7 @@ export default function VideoCardWorkbench({ type, shotId, assetId, displayShotI
 
   const handleReanalyze = async () => {
     const resourceId = currentResource?.id;
-    if (resourceId == null || !onReanalyzePrompt || state.busy) return;
+    if (resourceId == null || !onReanalyzePrompt || effectiveBusy) return;
     setState(s => ({ ...s, busy: 'reanalyze' }));
     try {
       await onReanalyzePrompt(resourceId);
@@ -277,7 +279,7 @@ export default function VideoCardWorkbench({ type, shotId, assetId, displayShotI
                   <div className="mt-3 flex justify-end shrink-0">
                     <button
                       onClick={async () => {
-                        if (!currentResource || state.busy) return;
+                        if (!currentResource || effectiveBusy) return;
                         setState(s => ({ ...s, busy: 'savePrompt' }));
                         try {
                           await onPromptSave(currentResource.id, state.editingPrompt);
@@ -287,10 +289,10 @@ export default function VideoCardWorkbench({ type, shotId, assetId, displayShotI
                           setState(s => ({ ...s, busy: null }));
                         }
                       }}
-                      disabled={state.busy === 'savePrompt'}
+                      disabled={state.busy === 'savePrompt' || Boolean(externalBusy)}
                       className="flex items-center gap-1 rounded-2xl bg-blue-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-700 disabled:opacity-60"
                     >
-                      {state.busy === 'savePrompt' && <Loader2 size={12} className="animate-spin" />} 保存提示词
+                      {(state.busy === 'savePrompt' || effectiveBusy === 'savePrompt') && <Loader2 size={12} className="animate-spin" />} {effectiveBusy === 'savePrompt' ? '保存中...' : '保存提示词'}
                     </button>
                   </div>
                 )}
@@ -337,18 +339,18 @@ export default function VideoCardWorkbench({ type, shotId, assetId, displayShotI
                       )}
                     </button>
                   )}
-                  <button onClick={handleRegenerate} disabled={state.busy === 'regenerate'} className="flex items-center gap-1 rounded-xl bg-[#1d4ed8] px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-700 disabled:opacity-60">
-                    {state.busy === 'regenerate' ? <Loader2 size={12} className="animate-spin" /> : <RotateCcw size={12} />} {state.busy === 'regenerate' ? '生成中...' : (previewUrl ? '重新生成' : '生成')}
+                  <button onClick={handleRegenerate} disabled={Boolean(effectiveBusy)} className="flex items-center gap-1 rounded-xl bg-[#1d4ed8] px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-700 disabled:opacity-60">
+                    {effectiveBusy === 'regenerate' ? <Loader2 size={12} className="animate-spin" /> : <RotateCcw size={12} />} {effectiveBusy === 'regenerate' ? '生成中...' : (previewUrl ? '重新生成' : '生成')}
                   </button>
-                  <button onClick={handleUploadClick} disabled={state.busy === 'upload'} className="flex items-center gap-1 rounded-xl border border-[#d7e3f4] bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-60">
-                    {state.busy === 'upload' ? <Loader2 size={12} className="animate-spin" /> : <Upload size={12} />} {state.busy === 'upload' ? '上传中...' : '上传替换'}
+                  <button onClick={handleUploadClick} disabled={Boolean(effectiveBusy)} className="flex items-center gap-1 rounded-xl border border-[#d7e3f4] bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-60">
+                    {effectiveBusy === 'upload' ? <Loader2 size={12} className="animate-spin" /> : <Upload size={12} />} {effectiveBusy === 'upload' ? '上传中...' : '上传替换'}
                   </button>
-                  <button onClick={handleDelete} disabled={state.busy === 'delete'} className="flex items-center gap-1 rounded-xl border border-rose-200 bg-white px-3 py-1.5 text-xs font-medium text-rose-600 hover:bg-rose-50 disabled:opacity-60">
-                    {state.busy === 'delete' ? <Loader2 size={12} className="animate-spin" /> : <Trash2 size={12} />} {state.busy === 'delete' ? '删除中...' : '删除'}
+                  <button onClick={handleDelete} disabled={Boolean(effectiveBusy)} className="flex items-center gap-1 rounded-xl border border-rose-200 bg-white px-3 py-1.5 text-xs font-medium text-rose-600 hover:bg-rose-50 disabled:opacity-60">
+                    {effectiveBusy === 'delete' ? <Loader2 size={12} className="animate-spin" /> : <Trash2 size={12} />} {effectiveBusy === 'delete' ? '删除中...' : '删除'}
                   </button>
                   {onReanalyzePrompt && (
-                    <button onClick={handleReanalyze} disabled={state.busy === 'reanalyze'} className="flex items-center gap-1 rounded-xl border border-amber-200 bg-white px-3 py-1.5 text-xs font-medium text-amber-700 hover:bg-amber-50 disabled:opacity-60">
-                       {state.busy === 'reanalyze' ? <Loader2 size={12} className="animate-spin" /> : <RotateCcw size={12} />} {state.busy === 'reanalyze' ? '分析中...' : (currentResource?.prompt ? '重新分析提示词' : '分析提示词')}
+                    <button onClick={handleReanalyze} disabled={Boolean(effectiveBusy)} className="flex items-center gap-1 rounded-xl border border-amber-200 bg-white px-3 py-1.5 text-xs font-medium text-amber-700 hover:bg-amber-50 disabled:opacity-60">
+                       {effectiveBusy === 'reanalyze' ? <Loader2 size={12} className="animate-spin" /> : <RotateCcw size={12} />} {effectiveBusy === 'reanalyze' ? '分析中...' : (currentResource?.prompt ? '重新分析提示词' : '分析提示词')}
                     </button>
                   )}
                 </div>
@@ -510,7 +512,7 @@ export default function VideoCardWorkbench({ type, shotId, assetId, displayShotI
                   <div className="mt-3 flex justify-end shrink-0">
                     <button
                       onClick={async () => {
-                        if (!currentResource || state.busy) return;
+                        if (!currentResource || effectiveBusy) return;
                         setState(s => ({ ...s, busy: 'savePrompt' }));
                         try {
                           await onPromptSave(currentResource.id, state.editingPrompt);
@@ -520,7 +522,7 @@ export default function VideoCardWorkbench({ type, shotId, assetId, displayShotI
                           setState(s => ({ ...s, busy: null }));
                         }
                       }}
-                      disabled={state.busy === 'savePrompt'}
+                      disabled={state.busy === 'savePrompt' || Boolean(externalBusy)}
                       className="flex items-center gap-1 rounded-2xl bg-blue-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-700 disabled:opacity-60"
                     >
                       {state.busy === 'savePrompt' && <Loader2 size={12} className="animate-spin" />} 保存提示词
@@ -532,21 +534,21 @@ export default function VideoCardWorkbench({ type, shotId, assetId, displayShotI
               <div className="shrink-0 rounded-2xl border border-[#d7e3f4] bg-white p-4">
                 <div className="text-sm font-medium text-slate-800">操作</div>
                 <div className="mt-3 flex flex-wrap gap-2">
-                  <button onClick={handleRegenerate} disabled={state.busy === 'regenerate'} className="flex items-center gap-1 rounded-xl bg-[#1d4ed8] px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-700 disabled:opacity-60">
-                    {state.busy === 'regenerate' ? <Loader2 size={12} className="animate-spin" /> : <RotateCcw size={12} />} {state.busy === 'regenerate' ? '生成中...' : (previewUrl ? '重新生成' : '生成')}
+                  <button onClick={handleRegenerate} disabled={Boolean(effectiveBusy)} className="flex items-center gap-1 rounded-xl bg-[#1d4ed8] px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-700 disabled:opacity-60">
+                    {effectiveBusy === 'regenerate' ? <Loader2 size={12} className="animate-spin" /> : <RotateCcw size={12} />} {effectiveBusy === 'regenerate' ? '生成中...' : (previewUrl ? '重新生成' : '生成')}
                   </button>
-                  <button onClick={handleUploadClick} disabled={state.busy === 'upload'} className="flex items-center gap-1 rounded-xl border border-[#d7e3f4] bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-60">
-                    {state.busy === 'upload' ? <Loader2 size={12} className="animate-spin" /> : <Upload size={12} />} {state.busy === 'upload' ? '上传中...' : '上传替换'}
+                  <button onClick={handleUploadClick} disabled={Boolean(effectiveBusy)} className="flex items-center gap-1 rounded-xl border border-[#d7e3f4] bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-60">
+                    {effectiveBusy === 'upload' ? <Loader2 size={12} className="animate-spin" /> : <Upload size={12} />} {effectiveBusy === 'upload' ? '上传中...' : '上传替换'}
                   </button>
-                  <button onClick={handleDelete} disabled={state.busy === 'delete'} className="flex items-center gap-1 rounded-xl border border-rose-200 bg-white px-3 py-1.5 text-xs font-medium text-rose-600 hover:bg-rose-50 disabled:opacity-60">
-                    {state.busy === 'delete' ? <Loader2 size={12} className="animate-spin" /> : <Trash2 size={12} />} {state.busy === 'delete' ? '删除中...' : '删除'}
+                  <button onClick={handleDelete} disabled={Boolean(effectiveBusy)} className="flex items-center gap-1 rounded-xl border border-rose-200 bg-white px-3 py-1.5 text-xs font-medium text-rose-600 hover:bg-rose-50 disabled:opacity-60">
+                    {effectiveBusy === 'delete' ? <Loader2 size={12} className="animate-spin" /> : <Trash2 size={12} />} {effectiveBusy === 'delete' ? '删除中...' : '删除'}
                   </button>
-                  <button onClick={() => setState(s => ({ ...s, isRedrawModalOpen: true }))} disabled={state.busy !== null} className="flex items-center gap-1 rounded-xl border border-[#d7e3f4] bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-60">
-                    <Wand2 size={12} /> 重绘
+                  <button onClick={() => setState(s => ({ ...s, isRedrawModalOpen: true }))} disabled={Boolean(effectiveBusy)} className="flex items-center gap-1 rounded-xl border border-[#d7e3f4] bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-60">
+                    {effectiveBusy === 'redraw' ? <Loader2 size={12} className="animate-spin" /> : <Wand2 size={12} />} {effectiveBusy === 'redraw' ? '重绘中...' : '重绘'}
                   </button>
                   {onReanalyzePrompt && (
-                    <button onClick={handleReanalyze} disabled={state.busy === 'reanalyze'} className="flex items-center gap-1 rounded-xl border border-amber-200 bg-white px-3 py-1.5 text-xs font-medium text-amber-700 hover:bg-amber-50 disabled:opacity-60">
-                       {state.busy === 'reanalyze' ? <Loader2 size={12} className="animate-spin" /> : <RotateCcw size={12} />} {state.busy === 'reanalyze' ? '分析中...' : (currentResource?.prompt ? (isCharacter ? '重新分析当前角色提示词' : '重新分析提示词') : '分析提示词')}
+                    <button onClick={handleReanalyze} disabled={Boolean(effectiveBusy)} className="flex items-center gap-1 rounded-xl border border-amber-200 bg-white px-3 py-1.5 text-xs font-medium text-amber-700 hover:bg-amber-50 disabled:opacity-60">
+                       {effectiveBusy === 'reanalyze' ? <Loader2 size={12} className="animate-spin" /> : <RotateCcw size={12} />} {effectiveBusy === 'reanalyze' ? '分析中...' : (currentResource?.prompt ? (isCharacter ? '重新分析当前角色提示词' : '重新分析提示词') : '分析提示词')}
                     </button>
                   )}
                 </div>
@@ -593,7 +595,7 @@ export default function VideoCardWorkbench({ type, shotId, assetId, displayShotI
                   <div className="mt-3 flex justify-end shrink-0">
                     <button
                       onClick={async () => {
-                        if (!currentResource || state.busy) return;
+                        if (!currentResource || effectiveBusy) return;
                         setState(s => ({ ...s, busy: 'savePrompt' }));
                         try {
                           await onPromptSave(currentResource.id, state.editingPrompt);
@@ -603,10 +605,10 @@ export default function VideoCardWorkbench({ type, shotId, assetId, displayShotI
                           setState(s => ({ ...s, busy: null }));
                         }
                       }}
-                      disabled={state.busy === 'savePrompt'}
+                      disabled={state.busy === 'savePrompt' || Boolean(externalBusy)}
                       className="flex items-center gap-1 rounded-2xl bg-blue-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-700 disabled:opacity-60"
                     >
-                      {state.busy === 'savePrompt' && <Loader2 size={12} className="animate-spin" />} 保存提示词
+                      {(state.busy === 'savePrompt' || effectiveBusy === 'savePrompt') && <Loader2 size={12} className="animate-spin" />} {effectiveBusy === 'savePrompt' ? '保存中...' : '保存提示词'}
                     </button>
                   </div>
                 )}
@@ -630,21 +632,21 @@ export default function VideoCardWorkbench({ type, shotId, assetId, displayShotI
                       )}
                     </button>
                   )}
-                  <button onClick={handleRegenerate} disabled={state.busy === 'regenerate'} className="flex items-center gap-1 rounded-xl bg-[#1d4ed8] px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-700 disabled:opacity-60">
-                    {state.busy === 'regenerate' ? <Loader2 size={12} className="animate-spin" /> : <RotateCcw size={12} />} {state.busy === 'regenerate' ? '生成中...' : (previewUrl ? '重新生成' : '生成')}
+                  <button onClick={handleRegenerate} disabled={Boolean(effectiveBusy)} className="flex items-center gap-1 rounded-xl bg-[#1d4ed8] px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-700 disabled:opacity-60">
+                    {effectiveBusy === 'regenerate' ? <Loader2 size={12} className="animate-spin" /> : <RotateCcw size={12} />} {effectiveBusy === 'regenerate' ? '生成中...' : (previewUrl ? '重新生成' : '生成')}
                   </button>
-                  <button onClick={handleUploadClick} disabled={state.busy === 'upload'} className="flex items-center gap-1 rounded-xl border border-[#d7e3f4] bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-60">
-                    {state.busy === 'upload' ? <Loader2 size={12} className="animate-spin" /> : <Upload size={12} />} {state.busy === 'upload' ? '上传中...' : '上传替换'}
+                  <button onClick={handleUploadClick} disabled={Boolean(effectiveBusy)} className="flex items-center gap-1 rounded-xl border border-[#d7e3f4] bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-60">
+                    {effectiveBusy === 'upload' ? <Loader2 size={12} className="animate-spin" /> : <Upload size={12} />} {effectiveBusy === 'upload' ? '上传中...' : '上传替换'}
                   </button>
-                  <button onClick={handleDelete} disabled={state.busy === 'delete'} className="flex items-center gap-1 rounded-xl border border-rose-200 bg-white px-3 py-1.5 text-xs font-medium text-rose-600 hover:bg-rose-50 disabled:opacity-60">
-                    {state.busy === 'delete' ? <Loader2 size={12} className="animate-spin" /> : <Trash2 size={12} />} {state.busy === 'delete' ? '删除中...' : '删除'}
+                  <button onClick={handleDelete} disabled={Boolean(effectiveBusy)} className="flex items-center gap-1 rounded-xl border border-rose-200 bg-white px-3 py-1.5 text-xs font-medium text-rose-600 hover:bg-rose-50 disabled:opacity-60">
+                    {effectiveBusy === 'delete' ? <Loader2 size={12} className="animate-spin" /> : <Trash2 size={12} />} {effectiveBusy === 'delete' ? '删除中...' : '删除'}
                   </button>
-                  <button onClick={() => setState(s => ({ ...s, isRedrawModalOpen: true }))} disabled={state.busy !== null} className="flex items-center gap-1 rounded-xl border border-[#d7e3f4] bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-60">
-                    <Wand2 size={12} /> 重绘
+                  <button onClick={() => setState(s => ({ ...s, isRedrawModalOpen: true }))} disabled={Boolean(effectiveBusy)} className="flex items-center gap-1 rounded-xl border border-[#d7e3f4] bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-60">
+                    {effectiveBusy === 'redraw' ? <Loader2 size={12} className="animate-spin" /> : <Wand2 size={12} />} {effectiveBusy === 'redraw' ? '重绘中...' : '重绘'}
                   </button>
                   {onReanalyzePrompt && (
-                    <button onClick={handleReanalyze} disabled={state.busy === 'reanalyze'} className="flex items-center gap-1 rounded-xl border border-amber-200 bg-white px-3 py-1.5 text-xs font-medium text-amber-700 hover:bg-amber-50 disabled:opacity-60">
-                       {state.busy === 'reanalyze' ? <Loader2 size={12} className="animate-spin" /> : <RotateCcw size={12} />} {state.busy === 'reanalyze' ? '分析中...' : (currentResource?.prompt ? '重新分析提示词' : '分析提示词')}
+                    <button onClick={handleReanalyze} disabled={Boolean(effectiveBusy)} className="flex items-center gap-1 rounded-xl border border-amber-200 bg-white px-3 py-1.5 text-xs font-medium text-amber-700 hover:bg-amber-50 disabled:opacity-60">
+                       {effectiveBusy === 'reanalyze' ? <Loader2 size={12} className="animate-spin" /> : <RotateCcw size={12} />} {effectiveBusy === 'reanalyze' ? '分析中...' : (currentResource?.prompt ? '重新分析提示词' : '分析提示词')}
                     </button>
                   )}
                 </div>

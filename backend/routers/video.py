@@ -2762,6 +2762,27 @@ async def list_chapter_video_assets(
 
     assets = list(query.order_by(VideoAsset.created_at.desc()).all())
 
+    if chapter.story_id:
+        same_story_types = ["story_character_reference", "character_reference", "scene_reference", "prop_reference"]
+        if asset_type:
+            same_story_types = [asset_type] if asset_type in same_story_types else []
+        if same_story_types:
+            same_story_assets = (
+                db.query(VideoAsset)
+                .filter(
+                    VideoAsset.story_id == chapter.story_id,
+                    VideoAsset.asset_type.in_(same_story_types),
+                    VideoAsset.status == "active",
+                )
+                .order_by(VideoAsset.created_at.desc())
+                .all()
+            )
+            existing_ids = {a.id for a in assets}
+            for asset in same_story_assets:
+                if asset.id not in existing_ids:
+                    assets.append(asset)
+                    existing_ids.add(asset.id)
+
     # 查询角色资产时，补充 Story 级角色库中的参考图
     if asset_type == "character_reference" and chapter.story_id:
         story_char_assets = (
@@ -6538,16 +6559,32 @@ async def api_reanalyze_storyboard_prompts(
 
     deepseek_api_key = _user_deepseek_api_key(request, db)
     shot_ids = body.get("shot_ids")
+    if not shot_ids:
+        raise HTTPException(400, "请指定至少一个镜头")
+
+    task_id = f"chapter_video_{workflow_id}_reanalyze_{uuid.uuid4().hex[:8]}"
+
+    update_chapter_workflow_status(workflow_id, "reanalyzing_prompts")
+
     try:
-        result = await reanalyze_storyboard_prompts(
-            workflow_id,
+        await task_manager.submit_task(
+            task_id=task_id,
+            task_type="chapter_video_reanalyze",
+            coro_func=reanalyze_storyboard_prompts,
+            workflow_id=workflow_id,
             shot_ids=shot_ids,
             deepseek_api_key=deepseek_api_key,
+            timeout=300.0,
+            max_retries=1,
         )
     except Exception as exc:
-        raise HTTPException(500, f"重新分析失败: {exc}")
+        raise HTTPException(500, f"提交后台任务失败: {exc}")
 
-    return result
+    return {
+        "task_id": task_id,
+        "workflow_status": "reanalyzing_prompts",
+        "message": "提示词重新分析任务已提交后台执行",
+    }
 
 
 @router.post("/api/video/chapter-workflows/{workflow_id}/reset")
@@ -6637,7 +6674,10 @@ async def api_parse_chapter_shots(
     if not story or story.owner_user_id != user.id:
         raise HTTPException(403, "无权访问")
 
-    if wf.workflow_status not in ("pending", "shots_ready", "parsing_shots", "failed"):
+    if wf.workflow_status == "parsing_shots":
+        raise HTTPException(400, "当前工作流正在拆镜中，请稍候刷新结果")
+
+    if wf.workflow_status not in ("pending", "shots_ready", "failed"):
         raise HTTPException(400, f"当前状态 {wf.workflow_status} 不允许拆镜操作")
 
     deepseek_api_key = _user_deepseek_api_key(request, db)
@@ -6704,15 +6744,31 @@ async def api_generate_shot_details(
     if not deepseek_api_key:
         raise HTTPException(400, "请配置 DeepSeek API Key")
 
-    result = await generate_shot_details_batch(
-        workflow_id=workflow_id,
-        shot_ids=body.shot_ids,
-        chapter_text=wf.source_text or "",
-        story_id=wf.story_id,
-        deepseek_api_key=deepseek_api_key,
-    )
+    task_id = f"chapter_video_{workflow_id}_detail_{uuid.uuid4().hex[:8]}"
 
-    return result
+    update_chapter_workflow_status(workflow_id, "generating_details")
+
+    try:
+        await task_manager.submit_task(
+            task_id=task_id,
+            task_type="chapter_video_generate_details",
+            coro_func=generate_shot_details_batch,
+            workflow_id=workflow_id,
+            shot_ids=body.shot_ids,
+            chapter_text=wf.source_text or "",
+            story_id=wf.story_id,
+            deepseek_api_key=deepseek_api_key,
+            timeout=120.0,
+            max_retries=1,
+        )
+    except Exception as exc:
+        raise HTTPException(500, f"提交后台任务失败: {exc}")
+
+    return {
+        "task_id": task_id,
+        "workflow_status": "generating_details",
+        "message": "镜头详情生成任务已提交后台执行",
+    }
 
 
 @router.post("/api/video/chapter-workflows/{workflow_id}/style-reference")
@@ -6828,17 +6884,31 @@ async def api_generate_storyboards(
                 db_wf.character_reference_ids = ref_ids
                 db.commit()
 
-    result = await generate_storyboards_for_shots(
-        workflow_id=workflow_id,
-        story_id=wf.story_id,
-        shot_ids=body.shot_ids or None,
-        image_api_key=image_api_key,
-        deepseek_api_key=deepseek_api_key,
-        character_reference_ids=ref_ids,
-        task_id=task_id,
-    )
+    # 先设置工作流状态，确保前端轮询能立即检测到
+    update_chapter_workflow_status(workflow_id, "generating_storyboards")
 
-    return result
+    try:
+        await task_manager.submit_task(
+            task_id=task_id,
+            task_type="chapter_video_storyboards",
+            coro_func=generate_storyboards_for_shots,
+            workflow_id=workflow_id,
+            story_id=wf.story_id,
+            shot_ids=body.shot_ids or None,
+            image_api_key=image_api_key,
+            deepseek_api_key=deepseek_api_key,
+            character_reference_ids=ref_ids,
+            timeout=600.0,
+            max_retries=1,
+        )
+    except Exception as exc:
+        raise HTTPException(500, f"提交后台任务失败: {exc}")
+
+    return {
+        "task_id": task_id,
+        "workflow_status": "generating_storyboards",
+        "message": "故事版生成任务已提交后台执行",
+    }
 
 
 @router.post("/api/video/chapter-workflows/{workflow_id}/videos")
@@ -6872,6 +6942,9 @@ async def api_generate_videos(
 
     task_id = f"chapter_video_{workflow_id}_stage_{uuid.uuid4().hex[:8]}"
 
+    # 先设置工作流状态，确保前端轮询能立即检测到
+    update_chapter_workflow_status(workflow_id, "generating_videos")
+
     # 刷新角色参考图 asset_id：视频阶段依赖 shot.character_reference_ids，
     # 若用户在拆镜后新增了参考图，确保 worklfow 和 shots 拿到最新数据
     ref_ids = wf.character_reference_ids
@@ -6891,18 +6964,29 @@ async def api_generate_videos(
                 db.commit()
                 logger.info("视频生成前刷新角色参考图 asset_ids=%s (影响 %d 个镜头)", ref_ids, len(stale_shots))
 
-    result = await generate_videos_for_shots(
-        workflow_id=workflow_id,
-        shot_ids=body.shot_ids or None,
-        image_api_key=image_api_key,
-        deepseek_api_key=deepseek_api_key,
-        video_api_key=video_api_key,
-        video_base_url=video_base_url,
-        video_model=video_model,
-        task_id=task_id,
-    )
+    try:
+        await task_manager.submit_task(
+            task_id=task_id,
+            task_type="chapter_video_videos",
+            coro_func=generate_videos_for_shots,
+            workflow_id=workflow_id,
+            shot_ids=body.shot_ids or None,
+            image_api_key=image_api_key,
+            deepseek_api_key=deepseek_api_key,
+            video_api_key=video_api_key,
+            video_base_url=video_base_url,
+            video_model=video_model,
+            timeout=1800.0,
+            max_retries=1,
+        )
+    except Exception as exc:
+        raise HTTPException(500, f"提交后台任务失败: {exc}")
 
-    return result
+    return {
+        "task_id": task_id,
+        "workflow_status": "generating_videos",
+        "message": "视频生成任务已提交后台执行",
+    }
 
 
 @router.post("/api/video/chapter-workflows/{workflow_id}/run-all")

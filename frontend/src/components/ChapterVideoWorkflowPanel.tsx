@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   CheckCircle2,
   Clapperboard,
@@ -18,11 +18,21 @@ import {
   SkipForward,
 } from 'lucide-react';
 import type { ChapterVideoWorkflow, StoryVideoCharacter, VideoAsset } from '../api';
-import { saveChapterShotPrompts, replaceVideoAsset, regenerateVideoAsset, uploadShotStoryboard, uploadShotVideo, createVideoAsset, generateShotSceneAsset, generateShotPropAsset, toPublicVideoAssetUrl } from '../api';
+import { saveChapterShotPrompts, replaceVideoAsset, regenerateVideoAsset, uploadShotStoryboard, uploadShotVideo, createVideoAsset, toPublicVideoAssetUrl } from '../api';
 import AssetReferenceSelector from './AssetReferenceSelector';
+import { canStartChapterWorkflowParse } from './chapterWorkflowUtils';
 
 import VideoCardWorkbench from './VideoCardWorkbench';
-import { buildCharacterWorkbenchResources, replaceWorkbenchAssetAndRefresh, uploadCharacterWorkbenchAsset, uploadWorkbenchAsset } from './videoWorkbenchUtils';
+import {
+  buildCharacterWorkbenchResources,
+  buildWorkbenchBusyKey,
+  findCharacterAssetByName,
+  findBusyWorkbenchResourceId,
+  isWorkbenchResourceBusy,
+  replaceWorkbenchAssetAndRefresh,
+  uploadCharacterWorkbenchAsset,
+  uploadWorkbenchAsset,
+} from './videoWorkbenchUtils';
 
 interface ChapterVideoWorkflowPanelProps {
   workflow: ChapterVideoWorkflow | null;
@@ -133,6 +143,7 @@ export default function ChapterVideoWorkflowPanel({
     type: 'character' | 'storyboard' | 'video' | 'scene';
     assetId?: number;
   } | null>(null);
+  const [workbenchBusyMap, setWorkbenchBusyMap] = useState<Record<string, string>>({});
 
   const [workbenchRefAssetIds, setWorkbenchRefAssetIds] = useState<number[]>([]);
 
@@ -181,6 +192,30 @@ export default function ChapterVideoWorkflowPanel({
     setWorkbenchRefAssetIds(collectRecommendedAssetIds(shot));
   }, [videoWorkbench, sortedShots, chapterAssets, selectedReferenceIds]);
 
+  const runWithWorkbenchBusy = useCallback(async (busyKey: string, busyKind: string, action: () => Promise<void>) => {
+    setWorkbenchBusyMap((prev) => ({ ...prev, [busyKey]: busyKind }));
+    try {
+      await action();
+    } finally {
+      setWorkbenchBusyMap((prev) => {
+        const next = { ...prev };
+        delete next[busyKey];
+        return next;
+      });
+    }
+  }, []);
+
+  const getWorkflowRunningLabel = (s: string): string => {
+    const labels: Record<string, string> = {
+      parsing_shots: '正在拆镜...',
+      generating_storyboards: '正在生成故事版...',
+      generating_videos: '正在生成视频...',
+      generating_details: '正在生成镜头详情...',
+      reanalyzing_prompts: '正在重新分析提示词...',
+    };
+    return labels[s] || '任务执行中...';
+  };
+
   if (workflowLoading && !videoWorkbench) {
     return (
       <div className="flex h-full items-center justify-center text-slate-500">
@@ -191,7 +226,13 @@ export default function ChapterVideoWorkflowPanel({
 
   const status = workflow?.workflow_status ?? '';
 
-  const canParse = !workflow || ['pending', 'shots_ready', 'failed'].includes(status) || !workflow.shots?.length;
+  const canParse = canStartChapterWorkflowParse({
+    workflowExists: Boolean(workflow),
+    status,
+    hasShots: Boolean(workflow?.shots?.length),
+    parsing: Boolean(parsing),
+    workflowRunning,
+  });
   const canStoryboard = ['shots_ready', 'generating_storyboards', 'failed'].includes(status) && !workflowRunning;
   const canVideo = ['storyboards_ready', 'generating_videos', 'failed'].includes(status) && !workflowRunning;
   const canConcat = ['completed', 'videos_ready', 'storyboards_ready', 'generating_videos', 'shots_ready'].includes(status) && !workflowRunning;
@@ -203,11 +244,7 @@ export default function ChapterVideoWorkflowPanel({
     if (!names?.length) return [];
     return names.map((name) => {
       const trimmed = name.trim();
-      const normalizedName = trimmed.toLowerCase();
-      const asset = characterAssets.find((a) => {
-        const haystacks = [a.name, a.prompt].filter((v): v is string => Boolean(v?.trim()));
-        return haystacks.some((v) => v.toLowerCase().includes(normalizedName));
-      });
+      const asset = findCharacterAssetByName(characterAssets, trimmed);
       const thumbnailUrl = asset?.file_path || null;
       return { name: trimmed, thumbnailUrl };
     });
@@ -298,6 +335,15 @@ export default function ChapterVideoWorkflowPanel({
                 <div className="flex flex-col items-center gap-3">
                   <Loader2 size={32} className="animate-spin text-blue-500" />
                   <span className="text-sm font-medium text-slate-600">正在拆镜...</span>
+                </div>
+              </div>
+            )}
+            {/* 后台任务执行中遮罩 */}
+            {workflowRunning && !parsing && (
+              <div className="absolute inset-0 z-10 flex items-center justify-center bg-white/80 backdrop-blur-sm">
+                <div className="flex flex-col items-center gap-3">
+                  <Loader2 size={32} className="animate-spin text-blue-500" />
+                  <span className="text-sm font-medium text-slate-600">{getWorkflowRunningLabel(status)}</span>
                 </div>
               </div>
             )}
@@ -653,6 +699,20 @@ export default function ChapterVideoWorkflowPanel({
         let onRedraw: (resourceId: number, prompt: string, mask?: string) => Promise<void>;
         let onPromptSave: ((resourceId: number, prompt: string) => Promise<void>) | undefined;
         let onWorkbenchReanalyze: ((resourceId: number) => Promise<void>) | undefined;
+        const getBusyType = (resource: { characterName?: string; label?: string; id: number }) => {
+          if (videoWorkbench.type === 'character') return 'character' as const;
+          if (videoWorkbench.type === 'storyboard') return 'storyboard' as const;
+          if (videoWorkbench.type === 'video') return 'video' as const;
+          return resource.characterName === '__scene__' ? 'scene' as const : 'prop' as const;
+        };
+        const runForResource = async (
+          resource: { characterName?: string; label?: string; id: number },
+          busyKind: string,
+          action: () => Promise<void>,
+        ) => {
+          const busyKey = buildWorkbenchBusyKey(getBusyType(resource), workbenchShot.id, resource);
+          await runWithWorkbenchBusy(busyKey, busyKind, action);
+        };
 
         if (videoWorkbench.type === 'character') {
           resources = buildCharacterWorkbenchResources(
@@ -670,40 +730,50 @@ export default function ChapterVideoWorkflowPanel({
           }));
           onRegenerate = async (resourceId: number) => {
             const resource = resources.find(r => r.id === resourceId);
+            if (!resource) return;
             let assetId = resource?.assetId;
-            if (!assetId && workflow) {
-              // 不传 shot_id: workbenchShot.id 是因为 workbenchShot 是 ChapterVideoShot，
-              // 其 id 属于 chapter_video_shots 表，而 VideoAsset.shot_id 外键引用 video_shots 表，
-              // 两个表 ID 序列独立，传入会导致外键冲突。shot_id 可为 null，占位资产不需要它。
-              const created = await createVideoAsset(workflow.chapter_id, {
-                asset_type: 'character_reference',
-                name: resource?.characterName || resource?.label || '角色资产',
-                file_path: '',
-                prompt: resource?.prompt || '',
-              });
-              assetId = created.id;
-            }
-            if (assetId) {
-              await regenerateVideoAsset(assetId, resource?.prompt);
-              if (onRefreshWorkflow) await onRefreshWorkflow();
-            }
+            await runForResource(resource, 'regenerate', async () => {
+              if (!assetId && workflow) {
+                const created = await createVideoAsset(workflow.chapter_id, {
+                  asset_type: 'character_reference',
+                  name: resource?.characterName || resource?.label || '角色资产',
+                  file_path: '',
+                  prompt: resource?.prompt || '',
+                });
+                assetId = created.id;
+              }
+              if (assetId) {
+                await regenerateVideoAsset(assetId, resource?.prompt);
+                if (onRefreshWorkflow) await onRefreshWorkflow();
+              }
+            });
           };
           onUploadReplace = async (resourceId: number, file: File) => {
             const asset = resources.find(r => r.id === resourceId);
             if (!asset || !workflow) return;
-            await uploadCharacterWorkbenchAsset(asset, workflow.chapter_id, file, createVideoAsset, replaceVideoAsset, onRefreshWorkflow);
+            await runForResource(asset, 'upload', async () => {
+              await uploadCharacterWorkbenchAsset(asset, workflow.chapter_id, file, createVideoAsset, replaceVideoAsset, onRefreshWorkflow);
+            });
           };
           onDelete = async (resourceId: number) => {
-            if (resourceId > 0 && onDeleteChapterAsset) await onDeleteChapterAsset(resourceId);
+            const resource = resources.find(r => r.id === resourceId);
+            if (!resource || resourceId <= 0 || !onDeleteChapterAsset) return;
+            await runForResource(resource, 'delete', async () => {
+              await onDeleteChapterAsset(resourceId);
+            });
           };
           onRedraw = async () => {};
           onPromptSave = undefined;
           onWorkbenchReanalyze = onReanalyzeCurrentCharacter
             ? async (_resourceId: number) => {
-                const currentIdx = resources.findIndex(r => r.id === _resourceId);
-                const charName = resources[currentIdx >= 0 ? currentIdx : 0]?.characterName;
-                if (charName && workbenchShot) {
-                  await onReanalyzeCurrentCharacter(workbenchShot.id, charName);
+              const currentIdx = resources.findIndex(r => r.id === _resourceId);
+              const charName = resources[currentIdx >= 0 ? currentIdx : 0]?.characterName;
+              if (charName && workbenchShot) {
+                  const resource = resources[currentIdx >= 0 ? currentIdx : 0];
+                  if (!resource) return;
+                  await runForResource(resource, 'reanalyze', async () => {
+                    await onReanalyzeCurrentCharacter(workbenchShot.id, charName);
+                  });
                 }
               }
             : undefined;
@@ -714,25 +784,44 @@ export default function ChapterVideoWorkflowPanel({
             prompt: workbenchShot.storyboard_prompt ?? '',
           }];
           onRegenerate = async (resourceId: number) => {
-            await onRegenerateStoryboard(resourceId, workbenchRefAssetIds);
+            const resource = resources[0];
+            await runForResource(resource, 'regenerate', async () => {
+              await onRegenerateStoryboard(resourceId, workbenchRefAssetIds);
+            });
           };
           onUploadReplace = async (resourceId: number, file: File) => {
-            await uploadShotStoryboard(resourceId, file);
-            if (onRefreshWorkflow) await onRefreshWorkflow();
+            const resource = resources[0];
+            await runForResource(resource, 'upload', async () => {
+              await uploadShotStoryboard(resourceId, file);
+              if (onRefreshWorkflow) await onRefreshWorkflow();
+            });
           };
           onDelete = async (resourceId: number) => {
-            if (onDeleteStoryboard) await onDeleteStoryboard(resourceId);
+            const resource = resources[0];
+            if (!onDeleteStoryboard) return;
+            await runForResource(resource, 'delete', async () => {
+              await onDeleteStoryboard(resourceId);
+            });
           };
           onRedraw = async (resourceId: number, prompt: string) => {
-            await onRegenerateStoryboard(resourceId, workbenchRefAssetIds);
+            const resource = resources[0];
+            await runForResource(resource, 'redraw', async () => {
+              await onRegenerateStoryboard(resourceId, workbenchRefAssetIds);
+            });
           };
           onPromptSave = async (resourceId: number, prompt: string) => {
-            await saveChapterShotPrompts(resourceId, { storyboard_prompt: prompt });
-            if (onRefreshWorkflow) await onRefreshWorkflow();
+            const resource = resources[0];
+            await runForResource(resource, 'savePrompt', async () => {
+              await saveChapterShotPrompts(resourceId, { storyboard_prompt: prompt });
+              if (onRefreshWorkflow) await onRefreshWorkflow();
+            });
           };
           onWorkbenchReanalyze = async (resourceId: number) => {
-            await onReanalyzePrompt([resourceId]);
-            if (onRefreshWorkflow) await onRefreshWorkflow();
+            const resource = resources[0];
+            await runForResource(resource, 'reanalyze', async () => {
+              await onReanalyzePrompt([resourceId]);
+              if (onRefreshWorkflow) await onRefreshWorkflow();
+            });
           };
         } else if (videoWorkbench.type === 'video') {
           resources = [{
@@ -740,34 +829,60 @@ export default function ChapterVideoWorkflowPanel({
             url: toAssetUrl(workbenchShot.video_url),
             prompt: workbenchShot.video_prompt ?? '',
           }];
-          onRegenerate = async (resourceId: number, aspectRatio?: '16:9' | '9:16') => { await onRegenerateVideo(resourceId, workbenchRefAssetIds, aspectRatio ?? videoAspectRatio); };
+          onRegenerate = async (resourceId: number, aspectRatio?: '16:9' | '9:16') => {
+            const resource = resources[0];
+            await runForResource(resource, 'regenerate', async () => {
+              await onRegenerateVideo(resourceId, workbenchRefAssetIds, aspectRatio ?? videoAspectRatio);
+            });
+          };
           onUploadReplace = async (resourceId: number, file: File) => {
-            await uploadShotVideo(resourceId, file);
-            if (onRefreshWorkflow) await onRefreshWorkflow();
+            const resource = resources[0];
+            await runForResource(resource, 'upload', async () => {
+              await uploadShotVideo(resourceId, file);
+              if (onRefreshWorkflow) await onRefreshWorkflow();
+            });
           };
           onDelete = async (resourceId: number) => {
-            if (onDeleteVideo) await onDeleteVideo(resourceId);
+            const resource = resources[0];
+            if (!onDeleteVideo) return;
+            await runForResource(resource, 'delete', async () => {
+              await onDeleteVideo(resourceId);
+            });
           };
           onRedraw = async (resourceId: number, prompt: string) => {
-            await onRegenerateVideo(resourceId, workbenchRefAssetIds, videoAspectRatio);
+            const resource = resources[0];
+            await runForResource(resource, 'redraw', async () => {
+              await onRegenerateVideo(resourceId, workbenchRefAssetIds, videoAspectRatio);
+            });
           };
           onPromptSave = async (resourceId: number, prompt: string) => {
-            await saveChapterShotPrompts(resourceId, { video_prompt: prompt });
-            if (onRefreshWorkflow) await onRefreshWorkflow();
+            const resource = resources[0];
+            await runForResource(resource, 'savePrompt', async () => {
+              await saveChapterShotPrompts(resourceId, { video_prompt: prompt });
+              if (onRefreshWorkflow) await onRefreshWorkflow();
+            });
           };
           onWorkbenchReanalyze = async (resourceId: number) => {
-            await onReanalyzePrompt([resourceId]);
-            if (onRefreshWorkflow) await onRefreshWorkflow();
+            const resource = resources[0];
+            await runForResource(resource, 'reanalyze', async () => {
+              await onReanalyzePrompt([resourceId]);
+              if (onRefreshWorkflow) await onRefreshWorkflow();
+            });
           };
         } else if (videoWorkbench.type === 'scene') {
-          const existingSceneAsset = chapterAssets.find((asset) => asset.asset_type === 'scene_reference' && asset.prompt === workbenchShot.scene_prompt);
+          const existingSceneAsset = (workbenchShot.scene_reference_ids || [])
+            .map((assetId) => chapterAssets.find((asset) => asset.id === assetId))
+            .find(Boolean)
+            || chapterAssets.find((asset) => asset.asset_type === 'scene_reference' && asset.prompt === workbenchShot.scene_prompt);
           const sceneRes = workbenchShot.scene_prompt
             ? [{ id: workbenchShot.id + 100000, assetId: existingSceneAsset?.id, url: existingSceneAsset?.file_path || '', prompt: workbenchShot.scene_prompt, label: '场景', characterName: '__scene__' }]
             : [];
           const propRes = (workbenchShot.prop_prompts ?? []).map((p, i) => ({
+            assetId: workbenchShot.prop_reference_ids?.[i]
+              ?? chapterAssets.find((asset) => asset.asset_type === 'prop_reference' && ((asset.name || '').trim() === `Prop - ${p.name || `道具${i + 1}`}` || (asset.prompt || '').trim() === p.prompt))?.id,
             id: workbenchShot.id + 200000 + i,
-            assetId: chapterAssets.find((asset) => asset.asset_type === 'prop_reference' && ((asset.name || '').trim() === `Prop - ${p.name || `道具${i + 1}`}` || (asset.prompt || '').trim() === p.prompt))?.id,
-            url: chapterAssets.find((asset) => asset.asset_type === 'prop_reference' && ((asset.name || '').trim() === `Prop - ${p.name || `道具${i + 1}`}` || (asset.prompt || '').trim() === p.prompt))?.file_path || '',
+            url: chapterAssets.find((asset) => asset.id === (workbenchShot.prop_reference_ids?.[i] ?? -1))?.file_path
+              || chapterAssets.find((asset) => asset.asset_type === 'prop_reference' && ((asset.name || '').trim() === `Prop - ${p.name || `道具${i + 1}`}` || (asset.prompt || '').trim() === p.prompt))?.file_path || '',
             prompt: p.prompt,
             label: p.name || `道具${i + 1}`,
             characterName: p.name || `道具${i + 1}`,
@@ -775,37 +890,69 @@ export default function ChapterVideoWorkflowPanel({
           resources = [...sceneRes, ...propRes];
           onRegenerate = async (resourceId: number) => {
             const r = resources.find(res => res.id === resourceId);
-            if (!r || !workbenchShot) return;
-            if (r.characterName === '__scene__') {
-              await generateShotSceneAsset(workbenchShot.id, { prompt: r.prompt });
-            } else {
-              await generateShotPropAsset(workbenchShot.id, { prop_name: r.label, prompt: r.prompt });
-            }
-            if (onRefreshWorkflow) await onRefreshWorkflow();
+            if (!r || !workflow) return;
+            await runForResource(r, 'regenerate', async () => {
+              let assetId = r.assetId;
+              if (!assetId) {
+                const created = await createVideoAsset(workflow.chapter_id, {
+                  asset_type: r.characterName === '__scene__' ? 'scene_reference' : 'prop_reference',
+                  name: r.label || (r.characterName === '__scene__' ? '场景' : '道具资产'),
+                  file_path: '',
+                  prompt: r.prompt || '',
+                });
+                assetId = created.id;
+              }
+              if (assetId) {
+                await regenerateVideoAsset(assetId, r.prompt);
+              }
+              if (onRefreshWorkflow) await onRefreshWorkflow();
+            });
           };
           onUploadReplace = async (resourceId: number, file: File) => {
             const resource = resources.find((res) => res.id === resourceId);
             if (!resource || !workflow) return;
-            await uploadWorkbenchAsset(
-              {
-                assetId: resource.assetId,
-                assetType: resource.characterName === '__scene__' ? 'scene_reference' : 'prop_reference',
-                label: resource.label || (resource.characterName === '__scene__' ? '场景' : '道具资产'),
-                prompt: resource.prompt || '',
-              },
-              workflow.chapter_id,
-              file,
-              createVideoAsset,
-              replaceVideoAsset,
-              onRefreshWorkflow,
-            );
+            await runForResource(resource, 'upload', async () => {
+              await uploadWorkbenchAsset(
+                {
+                  assetId: resource.assetId,
+                  assetType: resource.characterName === '__scene__' ? 'scene_reference' : 'prop_reference',
+                  label: resource.label || (resource.characterName === '__scene__' ? '场景' : '道具资产'),
+                  prompt: resource.prompt || '',
+                },
+                workflow.chapter_id,
+                file,
+                createVideoAsset,
+                replaceVideoAsset,
+                onRefreshWorkflow,
+              );
+            });
           };
           onDelete = async () => {};
           onRedraw = async () => {};
-          onPromptSave = undefined;
+          onPromptSave = async (resourceId: number, prompt: string) => {
+            const resource = resources.find((res) => res.id === resourceId);
+            if (!resource) return;
+            await runForResource(resource, 'savePrompt', async () => {
+              if (resource.characterName === '__scene__') {
+                await saveChapterShotPrompts(workbenchShot.id, { scene_prompt: prompt });
+              } else {
+                const propPrompts = [...(workbenchShot.prop_prompts ?? [])];
+                const propIndex = resources.findIndex((res) => res.id === resourceId) - sceneRes.length;
+                if (propIndex >= 0 && propPrompts[propIndex]) {
+                  propPrompts[propIndex] = { ...propPrompts[propIndex], prompt };
+                  await saveChapterShotPrompts(workbenchShot.id, { prop_prompts: propPrompts });
+                }
+              }
+              if (onRefreshWorkflow) await onRefreshWorkflow();
+            });
+          };
           onWorkbenchReanalyze = async (resourceId: number) => {
-            await onReanalyzePrompt([workbenchShot.id]);
-            if (onRefreshWorkflow) await onRefreshWorkflow();
+            const resource = resources.find((res) => res.id === resourceId);
+            if (!resource) return;
+            await runForResource(resource, 'reanalyze', async () => {
+              await onReanalyzePrompt([workbenchShot.id]);
+              if (onRefreshWorkflow) await onRefreshWorkflow();
+            });
           };
         } else {
           // fallback（无匹配类型）
@@ -818,12 +965,28 @@ export default function ChapterVideoWorkflowPanel({
           onWorkbenchReanalyze = undefined;
         }
 
+        const busyType = videoWorkbench.type === 'scene'
+          ? undefined
+          : videoWorkbench.type;
+        const busyResourceId = videoWorkbench.type === 'scene'
+          ? resources.find((resource) => {
+              const resourceType = resource.characterName === '__scene__' ? 'scene' : 'prop';
+              return isWorkbenchResourceBusy(resourceType, workbenchShot.id, resource, new Set(Object.keys(workbenchBusyMap)));
+            })?.id
+          : busyType
+            ? findBusyWorkbenchResourceId(busyType, workbenchShot.id, resources, new Set(Object.keys(workbenchBusyMap)))
+            : undefined;
+        const currentBusyResource = resources.find((resource) => resource.id === (busyResourceId ?? videoWorkbench.assetId ?? resources[0]?.id));
+        const externalBusy = currentBusyResource
+          ? workbenchBusyMap[buildWorkbenchBusyKey(getBusyType(currentBusyResource), workbenchShot.id, currentBusyResource)] || null
+          : null;
+
         return (
           <VideoCardWorkbench
             key={JSON.stringify(resources)}
             type={videoWorkbench.type}
             shotId={videoWorkbench.shotId}
-            assetId={videoWorkbench.assetId}
+            assetId={busyResourceId ?? videoWorkbench.assetId}
             resources={resources}
             onRegenerate={onRegenerate}
             onUploadReplace={onUploadReplace}
@@ -848,6 +1011,7 @@ export default function ChapterVideoWorkflowPanel({
             recommendedSceneAssets={videoWorkbench.type === 'scene' ? (workbenchShot.scene_asset_candidates || []) : undefined}
             recommendedKeyProps={videoWorkbench.type === 'scene' ? (workbenchShot.key_props || []) : undefined}
             recommendedReferenceAssetIds={(videoWorkbench.type === 'storyboard' || videoWorkbench.type === 'video') ? workbenchRefAssetIds : undefined}
+            externalBusy={externalBusy}
         />
         );
       })()}

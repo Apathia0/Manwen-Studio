@@ -2753,6 +2753,8 @@ export interface ChapterVideoShot {
   key_props?: string[] | null;
   scene_asset_candidates?: string[] | null;
   character_reference_ids?: number[] | null;
+  scene_reference_ids?: number[] | null;
+  prop_reference_ids?: Array<number | null> | null;
   storyboard_json?: Record<string, unknown> | null;
   storyboard_image_url?: string | null;
   video_url?: string | null;

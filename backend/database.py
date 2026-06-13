@@ -584,6 +584,10 @@ def _migrate_video_tables(target_engine=None):
                 conn.execute(text("ALTER TABLE chapter_video_shots ADD COLUMN key_props_json JSON"))
             if "scene_asset_candidates_json" not in chapter_video_shots_cols:
                 conn.execute(text("ALTER TABLE chapter_video_shots ADD COLUMN scene_asset_candidates_json JSON"))
+            if "scene_reference_ids" not in chapter_video_shots_cols:
+                conn.execute(text("ALTER TABLE chapter_video_shots ADD COLUMN scene_reference_ids JSON"))
+            if "prop_reference_ids" not in chapter_video_shots_cols:
+                conn.execute(text("ALTER TABLE chapter_video_shots ADD COLUMN prop_reference_ids JSON"))
 
 
 def _seed_video_style_presets(target_engine=None):

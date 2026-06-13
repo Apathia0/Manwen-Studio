@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 from database import SessionLocal
-from models import ChapterVideoWorkflow, ChapterVideoShot, BackgroundTask, Story, StoryCharacterVersion
+from models import ChapterVideoWorkflow, ChapterVideoShot, BackgroundTask, Story, StoryCharacterVersion, VideoAsset
 from sqlalchemy import func
 from sqlalchemy.orm import selectinload
 from services import deepseek as deepseek_service
@@ -133,7 +133,12 @@ def save_shots_from_parse(workflow_id: int, shots_data: list[dict[str, Any]]) ->
                 emotion_plan=shot_data.get("emotion_plan"),
                 continuity_notes=shot_data.get("continuity_notes"),
                 storyboard_prompt=shot_data.get("storyboard_prompt") or "",  # ← 新增：保存 DeepSeek 生成的简洁提示词
+                character_prompts_json=shot_data.get("character_prompts_json"),
+                scene_prompt=shot_data.get("scene_prompt"),
+                prop_prompts_json=shot_data.get("prop_prompts_json"),
                 character_reference_ids=shot_data.get("character_reference_ids") or default_reference_ids,
+                scene_reference_ids=shot_data.get("scene_reference_ids"),
+                prop_reference_ids=shot_data.get("prop_reference_ids"),
                 storyboard_json=shot_data.get("storyboard_json"),
                 status="pending",
             )
@@ -250,6 +255,174 @@ def _normalize_prompt_entries(entries: list[dict[str, object]] | list[dict[str, 
     return normalized
 
 
+def _normalize_asset_name(name: str | None, prefix: str) -> str:
+    raw = (name or "").strip()
+    if not raw:
+        return ""
+    if raw.startswith(prefix):
+        return raw[len(prefix):].strip()
+    return raw
+
+
+def _build_story_reuse_cache(story_id: int) -> dict[str, Any]:
+    db = SessionLocal()
+    try:
+        cache: dict[str, Any] = {
+            "characters": {},
+            "scenes": {},
+            "props": {},
+        }
+
+        character_versions = db.query(StoryCharacterVersion).filter(
+            StoryCharacterVersion.story_id == story_id,
+            StoryCharacterVersion.is_default == True,
+        ).all()
+        scene_assets = db.query(VideoAsset).filter(
+            VideoAsset.story_id == story_id,
+            VideoAsset.asset_type == "scene_reference",
+            VideoAsset.status == "active",
+        ).order_by(VideoAsset.created_at.desc()).all()
+        prop_assets = db.query(VideoAsset).filter(
+            VideoAsset.story_id == story_id,
+            VideoAsset.asset_type == "prop_reference",
+            VideoAsset.status == "active",
+        ).order_by(VideoAsset.created_at.desc()).all()
+        character_assets = db.query(VideoAsset).filter(
+            VideoAsset.story_id == story_id,
+            VideoAsset.asset_type.in_(["story_character_reference", "character_reference"]),
+            VideoAsset.status == "active",
+        ).order_by(VideoAsset.created_at.desc()).all()
+        shots = db.query(ChapterVideoShot).join(ChapterVideoWorkflow).filter(
+            ChapterVideoWorkflow.story_id == story_id,
+        ).order_by(ChapterVideoShot.updated_at.desc(), ChapterVideoShot.id.desc()).all()
+
+        for version in character_versions:
+            name = (version.character_name or "").strip()
+            if not name or name in cache["characters"]:
+                continue
+            asset_ids: list[int] = []
+            ref_asset_id = version.ref_asset_id
+            if ref_asset_id:
+                asset_ids.append(int(ref_asset_id))
+            else:
+                for asset in character_assets:
+                    asset_name = _normalize_asset_name(asset.name, "Character -")
+                    if asset_name == name:
+                        asset_ids.append(asset.id)
+            cache["characters"][name] = {
+                "prompt": (version.appearance_card or "").strip(),
+                "asset_ids": asset_ids,
+            }
+
+        for shot in shots:
+            scene_prompt = (shot.scene_prompt or "").strip()
+            scene_location = (shot.scene_location or "").strip()
+            time_of_day = (shot.time_of_day or "").strip()
+            if scene_prompt and scene_location:
+                key = (scene_location, time_of_day)
+                if key not in cache["scenes"]:
+                    asset_ids = list(shot.scene_reference_ids or [])
+                    if not asset_ids:
+                        asset_ids = [asset.id for asset in scene_assets if (asset.prompt or "").strip() == scene_prompt]
+                    cache["scenes"][key] = {
+                        "prompt": scene_prompt,
+                        "asset_ids": asset_ids,
+                    }
+
+            prop_prompts = _normalize_prompt_entries(shot.prop_prompts_json)
+            prop_reference_ids = list(shot.prop_reference_ids or [])
+            for index, prop in enumerate(prop_prompts):
+                prop_name = (prop.get("name") or "").strip()
+                prop_prompt = (prop.get("prompt") or "").strip()
+                if not prop_name or not prop_prompt or prop_name in cache["props"]:
+                    continue
+                asset_ids: list[int] = []
+                if index < len(prop_reference_ids):
+                    try:
+                        asset_ids.append(int(prop_reference_ids[index]))
+                    except Exception:
+                        pass
+                if not asset_ids:
+                    for asset in prop_assets:
+                        asset_name = _normalize_asset_name(asset.name, "Prop -")
+                        if asset_name == prop_name or (asset.prompt or "").strip() == prop_prompt:
+                            asset_ids.append(asset.id)
+                            break
+                cache["props"][prop_name] = {
+                    "prompt": prop_prompt,
+                    "asset_ids": asset_ids,
+                }
+
+        return cache
+    except Exception as exc:
+        logger.warning("构建 story 复用缓存失败 story=%s: %s", story_id, exc)
+        return {
+            "characters": {},
+            "scenes": {},
+            "props": {},
+        }
+    finally:
+        db.close()
+
+
+def _apply_story_reuse_cache_to_shots(shots_data: list[dict[str, Any]], story_cache: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if not story_cache:
+        return shots_data
+    characters_cache = story_cache.get("characters") or {}
+    scenes_cache = story_cache.get("scenes") or {}
+    props_cache = story_cache.get("props") or {}
+    hydrated: list[dict[str, Any]] = []
+    for shot_data in shots_data:
+        current = dict(shot_data)
+        character_prompts: list[dict[str, str]] = []
+        character_reference_ids: list[int] = []
+        for raw_name in current.get("characters") or []:
+            name = str(raw_name or "").strip()
+            entry = characters_cache.get(name)
+            if not name or not entry:
+                continue
+            prompt = str(entry.get("prompt") or "").strip()
+            if prompt:
+                character_prompts.append({"name": name, "prompt": prompt})
+            for asset_id in entry.get("asset_ids") or []:
+                if asset_id not in character_reference_ids:
+                    character_reference_ids.append(asset_id)
+        if character_prompts:
+            current["character_prompts_json"] = character_prompts
+        if character_reference_ids:
+            current["character_reference_ids"] = character_reference_ids
+
+        scene_location = str(current.get("scene_location") or "").strip()
+        time_of_day = str(current.get("time_of_day") or "").strip()
+        scene_entry = scenes_cache.get((scene_location, time_of_day))
+        if scene_entry:
+            scene_prompt = str(scene_entry.get("prompt") or "").strip()
+            if scene_prompt:
+                current["scene_prompt"] = scene_prompt
+            scene_reference_ids = [asset_id for asset_id in (scene_entry.get("asset_ids") or []) if asset_id]
+            if scene_reference_ids:
+                current["scene_reference_ids"] = scene_reference_ids
+
+        prop_prompts_json: list[dict[str, str]] = []
+        prop_reference_ids: list[int | None] = []
+        for raw_name in current.get("key_props") or []:
+            prop_name = str(raw_name or "").strip()
+            entry = props_cache.get(prop_name)
+            if not prop_name or not entry:
+                continue
+            prompt = str(entry.get("prompt") or "").strip()
+            if prompt:
+                prop_prompts_json.append({"name": prop_name, "prompt": prompt})
+            asset_ids = [asset_id for asset_id in (entry.get("asset_ids") or []) if asset_id]
+            prop_reference_ids.append(asset_ids[0] if asset_ids else None)
+        if prop_prompts_json:
+            current["prop_prompts_json"] = prop_prompts_json
+        if any(asset_id is not None for asset_id in prop_reference_ids):
+            current["prop_reference_ids"] = prop_reference_ids
+        hydrated.append(current)
+    return hydrated
+
+
 def get_shot(shot_id: int) -> ChapterVideoShot | None:
     """获取单个 shot。"""
     db = SessionLocal()
@@ -325,6 +498,8 @@ async def parse_chapter_shots(
         character_profiles=character_profiles,
         api_key=deepseek_api_key,
     )
+    story_cache = _build_story_reuse_cache(story_id)
+    shots_data = _apply_story_reuse_cache_to_shots(shots_data, story_cache)
 
     saved_shots = save_shots_from_parse(workflow_id, shots_data)
     logger.info("章节 %s 解析出 %d 个镜头", chapter_id, len(saved_shots))
@@ -465,6 +640,8 @@ async def generate_shot_details_batch(
     """为选中的镜头批量生成详细信息（运镜/动作/情绪/故事版等）。"""
     logger.info("批量生成详情 workflow=%s shot_ids=%s", workflow_id, shot_ids)
 
+    update_workflow_status(workflow_id, "generating_details")
+
     if len(shot_ids) > 5:
         return {"success": False, "error": f"最多支持 5 个镜头，当前 {len(shot_ids)} 个"}
 
@@ -527,6 +704,8 @@ async def generate_shot_details_batch(
                 failed_ids.append(shot.id)
 
         db.commit()
+
+        update_workflow_status(workflow_id, "shots_ready")
 
         return {
             "success": True,
@@ -627,7 +806,13 @@ async def reanalyze_storyboard_prompts(
     """
     logger.info("重新分析故事版提示词 workflow=%s shot_ids=%s", workflow_id, shot_ids)
 
+    # 保存旧状态并设置分析中状态
+    _wf = get_workflow(workflow_id)
+    _prev_status = _wf.workflow_status if _wf else "shots_ready"
+    update_workflow_status(workflow_id, "reanalyzing_prompts")
+
     if not shot_ids:
+        update_workflow_status(workflow_id, _prev_status)
         return {"workflow_status": "ok", "updated_shot_ids": [], "prompts": {}}
 
     db = SessionLocal()
@@ -644,6 +829,7 @@ async def reanalyze_storyboard_prompts(
         db.close()
 
     if not target_shots:
+        update_workflow_status(workflow_id, _prev_status)
         return {"workflow_status": "ok", "updated_shot_ids": [], "prompts": {}}
 
     updated_ids: list[int] = []
@@ -676,6 +862,7 @@ async def reanalyze_storyboard_prompts(
             logger.error("重新分析 shot %s 提示词失败: %s", shot.id, exc)
 
     logger.info("重新分析完成: updated=%s", updated_ids)
+    update_workflow_status(workflow_id, _prev_status)
     return {
         "workflow_status": "ok",
         "updated_shot_ids": updated_ids,
@@ -848,7 +1035,9 @@ async def _expand_single_shot_prompts(
         "style_preset": style_preset,
     }
 
-    character_prompts = _normalize_prompt_entries(_build_chapter_shot_character_prompts(shot, story))
+    character_prompts = _normalize_prompt_entries(shot.character_prompts_json)
+    if not character_prompts:
+        character_prompts = _normalize_prompt_entries(_build_chapter_shot_character_prompts(shot, story))
     if character_prompts:
         logger.info("character prompts reused shot=%s count=%s", shot_id, len(character_prompts))
     reused_names = {entry.get("name", "") for entry in character_prompts}
@@ -860,7 +1049,11 @@ async def _expand_single_shot_prompts(
         tuple(str(item) for item in (shot.scene_asset_candidates_json or [])),
         style_preset or "",
     )
-    if scene_prop_cache is not None and cache_key in scene_prop_cache:
+    if shot.scene_prompt and shot.prop_prompts_json:
+        scene_prompt = shot.scene_prompt
+        prop_prompts = _normalize_prompt_entries(shot.prop_prompts_json)
+        logger.info("scene_prop db reused shot=%s key=%s", shot_id, cache_key)
+    elif scene_prop_cache is not None and cache_key in scene_prop_cache:
         logger.info("scene_prop cache hit shot=%s key=%s", shot_id, cache_key)
         scene_prompt, prop_prompts = scene_prop_cache[cache_key]
     else:
@@ -1340,18 +1533,22 @@ def _pick_style_anchor_image(workflow_id: int, current_shot_id: int) -> str | No
     """
     db = SessionLocal()
     try:
-        anchor = (
-            db.query(ChapterVideoShot)
-            .filter(
-                ChapterVideoShot.workflow_id == workflow_id,
-                ChapterVideoShot.id != current_shot_id,
-                ChapterVideoShot.status == "storyboard_ready",
-                ChapterVideoShot.storyboard_image_url.isnot(None),
-                ChapterVideoShot.storyboard_image_url != "",
+        try:
+            anchor = (
+                db.query(ChapterVideoShot)
+                .filter(
+                    ChapterVideoShot.workflow_id == workflow_id,
+                    ChapterVideoShot.id != current_shot_id,
+                    ChapterVideoShot.status == "storyboard_ready",
+                    ChapterVideoShot.storyboard_image_url.isnot(None),
+                    ChapterVideoShot.storyboard_image_url != "",
+                )
+                .order_by(ChapterVideoShot.shot_index.asc())
+                .first()
             )
-            .order_by(ChapterVideoShot.shot_index.asc())
-            .first()
-        )
+        except Exception as exc:
+            logger.warning("加载风格锚点失败 workflow=%s shot=%s: %s", workflow_id, current_shot_id, exc)
+            return None
         if anchor and anchor.storyboard_image_url:
             local_path = _resolve_storyboard_local_path(anchor.storyboard_image_url)
             if local_path:

@@ -942,6 +942,42 @@ def test_api_parse_chapter_shots_raises_400_on_empty_content(monkeypatch):
     assert "章节正文为空" in exc_info.value.detail
 
 
+def test_api_parse_chapter_shots_rejects_concurrent_parse(monkeypatch):
+    from fastapi import HTTPException
+
+    class _Db:
+        def get(self, model, pk):
+            name = getattr(model, "__name__", "")
+            if name == "Story":
+                return SimpleNamespace(id=pk, owner_user_id=1)
+            return None
+
+        def commit(self):
+            pass
+
+    db = _Db()
+
+    monkeypatch.setattr(video_router, "_require_user", lambda request, db_session: SimpleNamespace(id=1))
+    monkeypatch.setattr(
+        video_router, "get_chapter_workflow",
+        lambda workflow_id: SimpleNamespace(
+            id=workflow_id, chapter_id=444, story_id=900,
+            workflow_status="parsing_shots", source_text="旧快照",
+            character_reference_ids=[],
+        ),
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(
+            video_router.api_parse_chapter_shots(
+                workflow_id=11, request=SimpleNamespace(), db=db,
+            )
+        )
+
+    assert exc_info.value.status_code == 400
+    assert "正在拆镜中" in exc_info.value.detail
+
+
 def test_build_shot_character_prompts_only_returns_prompts_for_profiled_characters():
     """角色不在 story.character_profiles 时由 AI fallback 生成，本函数不返回提示词。"""
     from services.video_chapter_pipeline import _build_chapter_shot_character_prompts

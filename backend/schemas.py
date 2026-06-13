@@ -918,6 +918,8 @@ class ChapterVideoShotOut(BaseModel):
     scene_asset_candidates_json: list[str] | None = None
     scene_asset_candidates: list[str] | None = None
     character_reference_ids: list[Any] | None = None
+    scene_reference_ids: list[Any] | None = None
+    prop_reference_ids: list[Any] | None = None
     storyboard_json: dict[str, Any] | None = None
     storyboard_image_url: str | None = None
     video_url: str | None = None

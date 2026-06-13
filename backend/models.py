@@ -426,6 +426,8 @@ class ChapterVideoShot(Base):
 
     # 引用
     character_reference_ids: Mapped[list[Any] | None] = mapped_column(JSON, nullable=True)
+    scene_reference_ids: Mapped[list[Any] | None] = mapped_column(JSON, nullable=True)
+    prop_reference_ids: Mapped[list[Any] | None] = mapped_column(JSON, nullable=True)
 
     # 故事版结构化 JSON
     storyboard_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)

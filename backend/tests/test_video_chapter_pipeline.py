@@ -172,7 +172,12 @@ def test_save_shots_from_parse_persists_storyboard_json_and_reference_ids(workfl
                     "visual_focus": "林秋站在门厅正中望向黑暗深处",
                     "main_beat": "2-8秒镜头缓慢推近，突出呼吸停顿",
                 },
+                "character_prompts_json": [{"name": "林秋", "prompt": "林秋角色设定卡"}],
+                "scene_prompt": "旧宅门厅场景提示词",
+                "prop_prompts_json": [{"name": "旧钥匙", "prompt": "旧钥匙道具提示词"}],
                 "character_reference_ids": [101, 202],
+                "scene_reference_ids": [303],
+                "prop_reference_ids": [404, 405],
             }
         ],
     )
@@ -186,11 +191,126 @@ def test_save_shots_from_parse_persists_storyboard_json_and_reference_ids(workfl
             "visual_focus": "林秋站在门厅正中望向黑暗深处",
             "main_beat": "2-8秒镜头缓慢推近，突出呼吸停顿",
         }
+        assert shot.character_prompts_json == [{"name": "林秋", "prompt": "林秋角色设定卡"}]
+        assert shot.scene_prompt == "旧宅门厅场景提示词"
+        assert shot.prop_prompts_json == [{"name": "旧钥匙", "prompt": "旧钥匙道具提示词"}]
         assert shot.character_reference_ids == [101, 202]
+        assert shot.scene_reference_ids == [303]
+        assert shot.prop_reference_ids == [404, 405]
         assert shot.key_props_json == ["旧钥匙", "铜钟"]
         assert shot.scene_asset_candidates_json == ["旧宅门厅"]
     finally:
         session.close()
+
+
+def test_apply_story_reuse_cache_to_shots_prefills_prompts_and_asset_ids():
+    shots_data = [
+        {
+            "shot_index": 1,
+            "source_text_span": "林秋停在旧宅门厅。",
+            "scene_location": "旧宅门厅",
+            "time_of_day": "夜",
+            "characters": ["林秋"],
+            "story_summary": "林秋停下脚步",
+            "dialogue_or_narration": "她没有继续向前。",
+            "key_props": ["旧钥匙", "铜钟"],
+            "scene_asset_candidates": ["旧宅门厅"],
+        }
+    ]
+    story_cache = {
+        "characters": {
+            "林秋": {
+                "prompt": "林秋角色设定卡",
+                "asset_ids": [101, 202],
+            }
+        },
+        "scenes": {
+            ("旧宅门厅", "夜"): {
+                "prompt": "旧宅门厅场景提示词",
+                "asset_ids": [303],
+            }
+        },
+        "props": {
+            "旧钥匙": {
+                "prompt": "旧钥匙道具提示词",
+                "asset_ids": [404],
+            },
+            "铜钟": {
+                "prompt": "铜钟道具提示词",
+                "asset_ids": [405],
+            },
+        },
+    }
+
+    hydrated = video_chapter_pipeline._apply_story_reuse_cache_to_shots(shots_data, story_cache)
+
+    assert hydrated[0]["character_prompts_json"] == [{"name": "林秋", "prompt": "林秋角色设定卡"}]
+    assert hydrated[0]["character_reference_ids"] == [101, 202]
+    assert hydrated[0]["scene_prompt"] == "旧宅门厅场景提示词"
+    assert hydrated[0]["scene_reference_ids"] == [303]
+    assert hydrated[0]["prop_prompts_json"] == [
+        {"name": "旧钥匙", "prompt": "旧钥匙道具提示词"},
+        {"name": "铜钟", "prompt": "铜钟道具提示词"},
+    ]
+    assert hydrated[0]["prop_reference_ids"] == [404, 405]
+
+
+@pytest.mark.asyncio
+async def test_parse_chapter_shots_prefills_story_reuse_cache_before_expand(monkeypatch):
+    captured: dict[str, object] = {}
+
+    async def fake_parse(**kwargs):
+        return [{
+            'shot_index': 1,
+            'source_text_span': '她停在门厅。',
+            'scene_location': '旧宅门厅',
+            'time_of_day': '夜',
+            'characters': ['林秋'],
+            'story_summary': '她停下脚步',
+            'dialogue_or_narration': '她没有继续向前。',
+            'key_props': ['旧钥匙'],
+            'scene_asset_candidates': ['旧宅门厅'],
+        }]
+
+    async def fake_expand(**kwargs):
+        return {'workflow_status': 'shots_ready', 'expanded_shot_count': 1, 'failed_shot_ids': []}
+
+    monkeypatch.setattr(video_chapter_pipeline, '_load_character_profiles', lambda story_id: '')
+    monkeypatch.setattr(video_chapter_pipeline.deepseek_service, 'parse_chapter_to_shots_lite', fake_parse)
+    monkeypatch.setattr(video_chapter_pipeline, 'expand_shots_with_role_prompts', fake_expand)
+    monkeypatch.setattr(video_chapter_pipeline, 'update_workflow_status', lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        video_chapter_pipeline,
+        '_build_story_reuse_cache',
+        lambda story_id: {
+            'characters': {'林秋': {'prompt': '林秋角色设定卡', 'asset_ids': [11]}},
+            'scenes': {('旧宅门厅', '夜'): {'prompt': '旧宅门厅场景提示词', 'asset_ids': [22]}},
+            'props': {'旧钥匙': {'prompt': '旧钥匙道具提示词', 'asset_ids': [33]}},
+        },
+    )
+
+    def fake_save(workflow_id, shots_data):
+        captured['shots_data'] = shots_data
+        return [SimpleNamespace(id=1)]
+
+    monkeypatch.setattr(video_chapter_pipeline, 'save_shots_from_parse', fake_save)
+
+    result = await video_chapter_pipeline.parse_chapter_shots(
+        workflow_id=11,
+        chapter_id=22,
+        story_id=33,
+        source_text='正文',
+        deepseek_api_key='test-ds-key',
+    )
+
+    hydrated = captured['shots_data'][0]
+    assert result['workflow_status'] == 'shots_ready'
+    assert hydrated['character_prompts_json'] == [{'name': '林秋', 'prompt': '林秋角色设定卡'}]
+    assert hydrated['character_reference_ids'] == [11]
+    assert hydrated['scene_prompt'] == '旧宅门厅场景提示词'
+    assert hydrated['scene_reference_ids'] == [22]
+    assert hydrated['prop_prompts_json'] == [{'name': '旧钥匙', 'prompt': '旧钥匙道具提示词'}]
+    assert hydrated['prop_reference_ids'] == [33]
 
 
 def test_chapter_video_workflow_supports_stage_statuses():
@@ -981,6 +1101,75 @@ async def test_parse_lite_chunk_accepts_json_array(monkeypatch):
     assert result[0]["shot_index"] == 1
     assert result[0]["story_summary"] == "加班中收到邀请"
     assert result[1]["shot_index"] == 2
+
+
+def test_repair_truncated_json_fixes_truncated_key_name_object():
+    content = '{"shots":[{"shot_index":1,"source_text_span":"林晚晚加班","scene_location":"林晚晚办公室","time_of_day":"夜","characters":["林晚晚"],"story_summary":"林晚晚加班时收到顾深邀约看月亮的微信","dialogue_or_narration":"林晚晚打字：我在加班，明天见。","key_'
+
+    repaired = deepseek._repair_truncated_json(content)
+
+    parsed = json.loads(repaired)
+    assert isinstance(parsed, dict)
+    assert isinstance(parsed.get("shots"), list)
+    assert parsed["shots"][0]["shot_index"] == 1
+
+
+@pytest.mark.asyncio
+async def test_parse_lite_chunk_accepts_truncated_key_name_json(monkeypatch):
+    response_content = '{"shots":[{"shot_index":1,"source_text_span":"林晚晚加班","scene_location":"林晚晚办公室","time_of_day":"夜","characters":["林晚晚"],"story_summary":"林晚晚加班时收到顾深邀约看月亮的微信","dialogue_or_narration":"林晚晚打字：我在加班，明天见。","key_'
+
+    class FakeResponse:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"choices": [{"message": {"content": response_content}}]}
+
+    async def fake_post(self, *args, **kwargs):
+        return FakeResponse()
+
+    monkeypatch.setattr(httpx.AsyncClient, "post", fake_post)
+
+    deepseek.DEEPSEEK_BASE_URL = "https://api.deepseek.com"
+    deepseek.DEEPSEEK_MODEL = "deepseek-chat"
+
+    result = await deepseek._parse_lite_chunk(
+        "林晚晚正对着电脑屏幕上的Excel表格头疼。",
+        api_key="test-key",
+    )
+
+    assert len(result) == 1
+    assert result[0]["shot_index"] == 1
+    assert result[0]["scene_location"] == "林晚晚办公室"
+
+
+@pytest.mark.asyncio
+async def test_parse_lite_chunk_accepts_missing_comma_and_truncated_key_name_json(monkeypatch):
+    response_content = '{"shots":[{"shot_index":1\n"source_text_span":"林晚晚加班","scene_location":"林晚晚办公室","time_of_day":"夜","characters":["林晚晚"],"story_summary":"林晚晚加班时收到顾深邀约看月亮的微信","dialogue_or_narration":"林晚晚打字：我在加班，明天见。","key_'
+
+    class FakeResponse:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"choices": [{"message": {"content": response_content}}]}
+
+    async def fake_post(self, *args, **kwargs):
+        return FakeResponse()
+
+    monkeypatch.setattr(httpx.AsyncClient, "post", fake_post)
+
+    deepseek.DEEPSEEK_BASE_URL = "https://api.deepseek.com"
+    deepseek.DEEPSEEK_MODEL = "deepseek-chat"
+
+    result = await deepseek._parse_lite_chunk(
+        "林晚晚正对着电脑屏幕上的Excel表格头疼。",
+        api_key="test-key",
+    )
+
+    assert len(result) == 1
+    assert result[0]["shot_index"] == 1
+    assert result[0]["source_text_span"] == "林晚晚加班"
 
 
 # ── 跨章节角色提示词复用 ─────────────────────────────

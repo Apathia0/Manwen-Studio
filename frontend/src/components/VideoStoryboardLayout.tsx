@@ -20,6 +20,7 @@ import {
   generateStoryVideoCharacters,
   listStoryVideoCharacters,
   reanalyzeChapterShotPrompts,
+  reanalyzeChapterWorkflowStoryboardPrompt,
   saveChapterShotPrompts,
   regenerateChapterWorkflowStoryboard,
   regenerateChapterWorkflowVideo,
@@ -117,7 +118,7 @@ export default function VideoStoryboardLayout({
     stopPolling();
 
     // 只有后台真正在处理的状态才算 running，等待用户操作的空闲状态不算
-    const ACTIVE_STATUSES = new Set(['parsing_shots', 'generating_storyboards', 'generating_videos']);
+    const ACTIVE_STATUSES = new Set(['parsing_shots', 'generating_storyboards', 'generating_videos', 'reanalyzing_prompts', 'generating_details']);
 
     const tick = async () => {
       try {
@@ -160,11 +161,16 @@ export default function VideoStoryboardLayout({
 
       if (latest) {
         setSelectedReferenceIds(latest.character_reference_ids || []);
-        if (latest.workflow_status === 'completed' || latest.workflow_status === 'failed' || latest.workflow_status === 'shots_ready' || latest.workflow_status === 'pending') {
+        const ACTIVE_STATUSES = new Set(['parsing_shots', 'generating_storyboards', 'generating_videos', 'reanalyzing_prompts', 'generating_details']);
+        const isActive = ACTIVE_STATUSES.has(latest.workflow_status);
+        if (isActive) {
+          // 立即设置运行状态，防止按钮在轮询启动前可点击
+          setWorkflowRunning(true);
+          void pollWorkflowUntilSettled(latest.id);
+        } else {
+          // 已结束或待机状态：加载完整详情
           await loadWorkflowDetail(latest.id, signal);
           setWorkflowRunning(false);
-        } else {
-          void pollWorkflowUntilSettled(latest.id);
         }
       } else {
         setWorkflowRunning(false);
@@ -226,6 +232,7 @@ export default function VideoStoryboardLayout({
 
   const handleParseShots = useCallback(async () => {
     if (!resolvedChapter?.id) return;
+    if (parsing || workflowRunning) return;
     try {
       setWorkflowRunning(true);
       setParsing(true);
@@ -251,7 +258,7 @@ export default function VideoStoryboardLayout({
       setWorkflowRunning(false);
       setParsing(false);
     }
-  }, [pollWorkflowUntilSettled, workflow, resolvedChapter?.id, selectedReferenceIds, selectedStyle]);
+  }, [parsing, pollWorkflowUntilSettled, workflow, workflowRunning, resolvedChapter?.id, selectedReferenceIds, selectedStyle]);
 
   const handleGenerateShotDetails = useCallback(async (shotIds: number[]) => {
     if (!workflow || shotIds.length === 0) return;
@@ -261,20 +268,14 @@ export default function VideoStoryboardLayout({
     }
     try {
       setWorkflowRunning(true);
-      const result = await generateChapterWorkflowShotDetails(workflow.id, { shot_ids: shotIds });
-      if (result.success) {
-        toast.success(`已为 ${result.total} 个镜头生成详情`);
-      } else {
-        toast.error(result.error || '生成详情失败');
-      }
-      const detail = await getChapterVideoWorkflow(workflow.id);
-      setWorkflow(detail);
+      await generateChapterWorkflowShotDetails(workflow.id, { shot_ids: shotIds });
+      toast.success('镜头详情生成任务已提交');
+      void pollWorkflowUntilSettled(workflow.id);
     } catch (error: any) {
-      toast.error(`生成详情失败: ${error.message || '未知错误'}`);
-    } finally {
       setWorkflowRunning(false);
+      toast.error(`生成详情失败: ${error.message || '未知错误'}`);
     }
-  }, [workflow]);
+  }, [pollWorkflowUntilSettled, workflow]);
 
   const handleRefreshWorkflow = useCallback(async () => {
     if (!resolvedChapter?.id) return;
@@ -402,7 +403,7 @@ export default function VideoStoryboardLayout({
     try {
       setWorkflowRunning(true);
       await generateChapterWorkflowStoryboards(workflow.id, { shot_ids: shotIds });
-      toast.success('故事版生成任务已启动');
+      toast.success('故事版生成任务已提交');
       void pollWorkflowUntilSettled(workflow.id);
     } catch (error: any) {
       setWorkflowRunning(false);
@@ -419,7 +420,7 @@ export default function VideoStoryboardLayout({
     try {
       setWorkflowRunning(true);
       await generateChapterWorkflowVideos(workflow.id, { shot_ids: shotIds });
-      toast.success('视频生成任务已启动');
+      toast.success('视频生成任务已提交');
       void pollWorkflowUntilSettled(workflow.id);
     } catch (error: any) {
       setWorkflowRunning(false);
@@ -483,17 +484,14 @@ export default function VideoStoryboardLayout({
     if (shotIds.length === 0) return;
     try {
       setWorkflowRunning(true);
-      for (const shotId of shotIds) {
-        await reanalyzeChapterShotPrompts(shotId);
-      }
-      toast.success(`提示词已重新分析（${shotIds.length} 个镜头）`);
-      await handleRefreshWorkflow();
+      await reanalyzeChapterWorkflowStoryboardPrompt(workflow.id, { shot_ids: shotIds });
+      toast.success('提示词重新分析任务已提交');
+      void pollWorkflowUntilSettled(workflow.id);
     } catch (error: any) {
-      toast.error(`重新分析失败: ${error.message || '未知错误'}`);
-    } finally {
       setWorkflowRunning(false);
+      toast.error(`重新分析失败: ${error.message || '未知错误'}`);
     }
-  }, [workflow, handleRefreshWorkflow]);
+  }, [pollWorkflowUntilSettled, workflow]);
 
   const handleReanalyzeCurrentCharacter = useCallback(async (shotId: number, characterName: string) => {
     try {

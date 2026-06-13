@@ -2775,6 +2775,8 @@ def _repair_missing_commas(content: str) -> str:
     content = re.sub(r'\}\s*\{', '}, {', content)
     # 修复对象中键值对之间缺少逗号
     content = re.sub(r'"\s*\n\s*"', '",\n"', content)
+    content = re.sub(r'(\d)\s*\n\s*"', r'\1,\n"', content)
+    content = re.sub(r'(true|false|null)\s*\n\s*"', r'\1,\n"', content)
     # 修复 "value" { 的情况
     content = re.sub(r'"\s*\n\s*\{', '",\n{', content)
     # 修复 } "key": 的情况
@@ -2999,7 +3001,14 @@ async def _parse_full_chunk(
                 try:
                     result = _extract_json_object(repaired)
                 except ValueError as e:
-                    raise ValueError(f"完整拆镜失败（{chunk_label or '单段'}）：JSON 解析错误 — {e}\n原始响应：{content[:500]}") from e
+                    truncated_repaired = _repair_truncated_json(repaired)
+                    if truncated_repaired != repaired:
+                        try:
+                            result = _extract_json_object(truncated_repaired)
+                        except ValueError as truncated_error:
+                            raise ValueError(f"完整拆镜失败（{chunk_label or '单段'}）：JSON 截断修复后仍无法解析 — {truncated_error}\n原始响应：{content[:500]}") from truncated_error
+                    else:
+                        raise ValueError(f"完整拆镜失败（{chunk_label or '单段'}）：JSON 解析错误 — {e}\n原始响应：{content[:500]}") from e
             else:
                 truncated_repaired = _repair_truncated_json(content)
                 if truncated_repaired != content:
@@ -3109,7 +3118,14 @@ async def _parse_lite_chunk(
                 try:
                     result = _extract_json_object(repaired)
                 except ValueError as e:
-                    raise ValueError(f"轻量拆镜失败（{chunk_label or '单段'}）：JSON 解析错误 — {e}\n原始响应：{content[:500]}") from e
+                    truncated_repaired = _repair_truncated_json(repaired)
+                    if truncated_repaired != repaired:
+                        try:
+                            result = _extract_json_object(truncated_repaired)
+                        except ValueError as truncated_error:
+                            raise ValueError(f"轻量拆镜失败（{chunk_label or '单段'}）：JSON 截断修复后仍无法解析 — {truncated_error}\n原始响应：{content[:500]}") from truncated_error
+                    else:
+                        raise ValueError(f"轻量拆镜失败（{chunk_label or '单段'}）：JSON 解析错误 — {e}\n原始响应：{content[:500]}") from e
             else:
                 truncated_repaired = _repair_truncated_json(content)
                 if truncated_repaired != content:
