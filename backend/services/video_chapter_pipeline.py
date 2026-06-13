@@ -17,6 +17,7 @@ from typing import Any, Awaitable, Callable
 
 from database import SessionLocal
 from models import ChapterVideoWorkflow, ChapterVideoShot, BackgroundTask, Story, StoryCharacterVersion
+from sqlalchemy import func
 from sqlalchemy.orm import selectinload
 from services import deepseek as deepseek_service
 from services import image2 as image_service
@@ -328,6 +329,20 @@ async def expand_shots_with_role_prompts(
         story = db.query(Story).filter(Story.id == story_id).first()
     finally:
         db.close()
+
+    # 并发展开前预填充角色提示词版本，避免同一角色被多次并发 AI 调用
+    # 仅从 story.character_profiles 中提取已知角色的基础描述
+    profile_text = (story.character_profiles or '').strip() if story else ''
+    all_character_names: set[str] = set()
+    for shot in target_shots:
+        for name in shot.characters or []:
+            normalized = str(name or '').strip()
+            if normalized:
+                all_character_names.add(normalized)
+    for name in all_character_names:
+        if not profile_text or name not in profile_text:
+            continue
+        _ensure_character_version(story_id, name, f"角色设定：{name}；参考角色档案：{profile_text[:280]}")
 
     semaphore = asyncio.Semaphore(4)
     scene_prop_cache: dict[tuple[object, ...], tuple[str, list[dict[str, str]]]] = {}
@@ -645,6 +660,44 @@ async def reanalyze_shot_prompts(
     return await _expand_single_shot_prompts(shot_id, deepseek_api_key=deepseek_api_key)
 
 
+def _ensure_character_version(story_id: int, name: str, prompt: str) -> None:
+    """将 AI 生成的角色提示词持久化到 StoryCharacterVersion，供后续章节复用。
+
+    仅当该角色尚无默认版本时才写入，不会覆盖用户手动创建的版本。
+    """
+    name = name.strip()
+    prompt = prompt.strip()
+    if not name or not prompt:
+        return
+    db = SessionLocal()
+    try:
+        existing = db.query(StoryCharacterVersion).filter(
+            StoryCharacterVersion.story_id == story_id,
+            StoryCharacterVersion.character_name == name,
+            StoryCharacterVersion.is_default == True,
+        ).first()
+        if existing:
+            return
+        max_order = db.query(func.max(StoryCharacterVersion.sort_order)).filter(
+            StoryCharacterVersion.story_id == story_id,
+            StoryCharacterVersion.character_name == name,
+        ).scalar() or 0
+        version = StoryCharacterVersion(
+            story_id=story_id,
+            character_name=name,
+            version_label="",
+            appearance_card=prompt,
+            sort_order=max_order + 1,
+            is_default=True,
+        )
+        db.add(version)
+        db.commit()
+    except Exception:
+        logger.exception("保存 AI 角色提示词失败 story=%s name=%s", story_id, name)
+    finally:
+        db.close()
+
+
 async def _expand_single_shot_prompts(
     shot_id: int,
     deepseek_api_key: str | None = None,
@@ -772,6 +825,9 @@ async def _expand_single_shot_prompts(
             api_key=deepseek_api_key,
         ))
         character_prompts.extend(ai_character_prompts)
+        if ai_character_prompts and story:
+            for entry in ai_character_prompts:
+                _ensure_character_version(story.id, entry.get("name", ""), entry.get("prompt", ""))
 
     video_prompt = await deepseek_service.generate_shot_video_prompt_ai(
         shot_data={

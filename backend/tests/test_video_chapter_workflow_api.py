@@ -932,6 +932,40 @@ def test_api_parse_chapter_shots_raises_400_on_empty_content(monkeypatch):
     assert "章节正文为空" in exc_info.value.detail
 
 
+def test_build_shot_character_prompts_only_returns_prompts_for_profiled_characters():
+    """角色不在 story.character_profiles 时由 AI fallback 生成，本函数不返回提示词。"""
+    from services.video_chapter_pipeline import _build_chapter_shot_character_prompts
+
+    shot = SimpleNamespace(characters=["林晚晚", "顾深"])
+    story = SimpleNamespace(id=1, character_profiles="\n顾深：男主角，性格温柔。\n程砚：男二，冷酷总裁。")
+
+    result = _build_chapter_shot_character_prompts(shot, story)
+
+    names = {e["name"] for e in result}
+    assert "林晚晚" not in names, "林晚晚不在 character_profiles 中，应留给 AI fallback"
+    assert "顾深" in names, "顾深在 character_profiles 中，应获得提示词"
+    gu_entry = next(e for e in result if e["name"] == "顾深")
+    assert "参考角色档案" in gu_entry["prompt"], "顾深在 profiles 中，应包含角色档案引用"
+
+
+def test_build_shot_character_prompts_skips_when_profiles_is_none():
+    """story.character_profiles 为 None 时，所有角色留待 AI fallback。"""
+    from services.video_chapter_pipeline import _build_chapter_shot_character_prompts
+
+    shot = SimpleNamespace(characters=["林晚晚"])
+    story = SimpleNamespace(id=1, character_profiles=None)
+
+    result = _build_chapter_shot_character_prompts(shot, story)
+    assert len(result) == 0, "character_profiles 为 None 时不应返回任何提示词"
+
+
+def test_build_shot_character_prompts_empty_chars_returns_empty():
+    from services.video_chapter_pipeline import _build_chapter_shot_character_prompts
+    shot = SimpleNamespace(characters=[])
+    story = SimpleNamespace(id=1, character_profiles="顾深：男主角")
+    assert _build_chapter_shot_character_prompts(shot, story) == []
+
+
 def test_storyboard_director_prompt_no_longer_uses_10s_segments():
     from services.video_chapter_prompts import build_storyboard_director_messages
 

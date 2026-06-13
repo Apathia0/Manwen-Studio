@@ -981,3 +981,153 @@ async def test_parse_lite_chunk_accepts_json_array(monkeypatch):
     assert result[0]["shot_index"] == 1
     assert result[0]["story_summary"] == "加班中收到邀请"
     assert result[1]["shot_index"] == 2
+
+
+# ── 跨章节角色提示词复用 ─────────────────────────────
+
+
+def test_ensure_character_version_creates_new_version(monkeypatch):
+    from models import StoryCharacterVersion
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    monkeypatch.setattr(video_chapter_pipeline, "SessionLocal", Session)
+
+    video_chapter_pipeline._ensure_character_version(
+        story_id=1, name="林晚晚", prompt="黑色长发，职场女性，气质干练"
+    )
+
+    session = Session()
+    try:
+        versions = session.query(StoryCharacterVersion).filter(
+            StoryCharacterVersion.story_id == 1,
+            StoryCharacterVersion.character_name == "林晚晚",
+        ).all()
+        assert len(versions) == 1
+        assert versions[0].appearance_card == "黑色长发，职场女性，气质干练"
+        assert versions[0].is_default is True
+    finally:
+        session.close()
+
+
+def test_ensure_character_version_does_not_overwrite_existing_default(monkeypatch):
+    from models import StoryCharacterVersion
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    monkeypatch.setattr(video_chapter_pipeline, "SessionLocal", Session)
+
+    session = Session()
+    try:
+        session.add(StoryCharacterVersion(
+            story_id=1, character_name="林晚晚", version_label="v1-默认",
+            appearance_card="用户手动创建的版本", is_default=True,
+        ))
+        session.commit()
+    finally:
+        session.close()
+
+    video_chapter_pipeline._ensure_character_version(
+        story_id=1, name="林晚晚", prompt="AI 生成的新版本"
+    )
+
+    session = Session()
+    try:
+        versions = session.query(StoryCharacterVersion).filter(
+            StoryCharacterVersion.story_id == 1,
+            StoryCharacterVersion.character_name == "林晚晚",
+        ).all()
+        assert len(versions) == 1
+        assert versions[0].appearance_card == "用户手动创建的版本", "不应覆盖用户手动创建的版本"
+    finally:
+        session.close()
+
+
+def test_ensure_character_version_skips_on_empty_prompt(monkeypatch):
+    from models import StoryCharacterVersion
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    monkeypatch.setattr(video_chapter_pipeline, "SessionLocal", Session)
+
+    video_chapter_pipeline._ensure_character_version(story_id=1, name="", prompt="有内容")
+    video_chapter_pipeline._ensure_character_version(story_id=1, name="林晚晚", prompt="")
+    video_chapter_pipeline._ensure_character_version(story_id=1, name="  ", prompt="  ")
+
+    session = Session()
+    try:
+        count = session.query(StoryCharacterVersion).filter(
+            StoryCharacterVersion.story_id == 1,
+        ).count()
+        assert count == 0
+    finally:
+        session.close()
+
+
+@pytest.mark.asyncio
+async def test_expand_shots_saves_ai_character_prompts_to_story_character_version(workflow_db, monkeypatch):
+    Session, workflow_id = workflow_db
+    from models import Story, StoryCharacterVersion
+
+    session = Session()
+    try:
+        story = Story(id=34, title='测试作品', character_profiles='')
+        session.add(story)
+        session.add(ChapterVideoShot(
+            workflow_id=workflow_id, shot_index=1,
+            source_text_span='一', scene_location='咖啡店', time_of_day='夜',
+            characters=['林晚晚'], story_summary='林晚晚走进咖啡店',
+            dialogue_or_narration='她推开门。', status='pending'
+        ))
+        session.commit()
+    finally:
+        session.close()
+
+    async def fake_generate_shot_details(**kwargs):
+        return [{'shot_index': 1, 'camera_plan': '中景', 'motion_plan': '推门', 'emotion_plan': '平静',
+                 'continuity_notes': '', 'storyboard_json': {}}]
+
+    async def fake_storyboard_prompt(*args, **kwargs):
+        return '故事版提示词'
+
+    async def fake_scene_prop_prompts(*args, **kwargs):
+        return ('场景提示词', [])
+
+    async def fake_video_prompt_ai(*args, **kwargs):
+        return '视频提示词'
+
+    async def fake_character_prompts_ai(**kwargs):
+        return [{'name': '林晚晚', 'prompt': '黑色长发，职场女性，气质干练'}]
+
+    monkeypatch.setattr(video_chapter_pipeline.deepseek_service, 'generate_shot_details', fake_generate_shot_details)
+    monkeypatch.setattr(video_chapter_pipeline.deepseek_service, 'generate_shot_storyboard_prompt', fake_storyboard_prompt)
+    monkeypatch.setattr(video_chapter_pipeline.deepseek_service, 'generate_shot_scene_prop_prompts', fake_scene_prop_prompts)
+    monkeypatch.setattr(video_chapter_pipeline.deepseek_service, 'generate_shot_video_prompt_ai', fake_video_prompt_ai)
+    monkeypatch.setattr(video_chapter_pipeline.deepseek_service, 'generate_shot_character_prompts_ai', fake_character_prompts_ai)
+
+    await video_chapter_pipeline.expand_shots_with_role_prompts(
+        workflow_id=workflow_id,
+        story_id=34,
+        deepseek_api_key='test-ds-key',
+    )
+
+    session = Session()
+    try:
+        version = session.query(StoryCharacterVersion).filter(
+            StoryCharacterVersion.story_id == 34,
+            StoryCharacterVersion.character_name == '林晚晚',
+            StoryCharacterVersion.is_default == True,
+        ).first()
+        assert version is not None, "AI 生成的角色提示词应保存到 StoryCharacterVersion"
+        assert version.appearance_card == '黑色长发，职场女性，气质干练'
+    finally:
+        session.close()

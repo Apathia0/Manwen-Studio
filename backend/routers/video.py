@@ -6108,12 +6108,17 @@ async def api_create_chapter_workflow(
         init_db(run_migrations=True, raise_errors=True)
         _db_schema_verified = True
 
+    # 若未传入参考图 ID，从角色库默认版本自动填充
+    ref_ids = body.character_reference_ids
+    if not ref_ids:
+        ref_ids = _get_story_character_reference_asset_ids(chapter.story_id, db)
+
     # 创建工作流
     wf = create_chapter_workflow(
         chapter_id=body.chapter_id,
         story_id=chapter.story_id,
         source_text=chapter.novel_content or "",
-        character_reference_ids=body.character_reference_ids,
+        character_reference_ids=ref_ids,
         video_style=body.video_style,
         style_reference_image_url=body.style_reference_image_url,
     )
