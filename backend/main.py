@@ -1209,12 +1209,6 @@ def _ensure_plan_feature_seed(db: Session, *, commit: bool = True) -> None:
                 default_value = plan_defaults.get(feature_key, 0)
                 db.add(PlanFeature(plan_id=plan.id, feature_key=feature_key, value_json={"value": default_value}))
                 changed = True
-            elif feature_key in plan_defaults:
-                default_value = plan_defaults[feature_key]
-                current = feature_row.value_json or {}
-                if current.get("value") != default_value:
-                    feature_row.value_json = {"value": default_value}
-                    changed = True
             rule_row = db.query(PlanQuotaRule).filter(PlanQuotaRule.plan_id == plan.id, PlanQuotaRule.feature_key == feature_key).first()
             if not rule_row:
                 default_rule = feature.get("default_rule") if isinstance(feature.get("default_rule"), dict) else {}
