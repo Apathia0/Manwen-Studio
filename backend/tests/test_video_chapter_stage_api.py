@@ -175,6 +175,7 @@ def test_stage_routes_pass_task_id(monkeypatch):
 
     # 测试 /parse 路由
     monkeypatch.setattr(video_router, "get_chapter_workflow", lambda wid: wf_mock)
+    monkeypatch.setattr(video_router, "_check_and_consume_quota_wrapper", lambda user_id, feature_key, amount, db, deduct: {"used": 1, "limit": 999})
     result = asyncio.run(video_router.api_parse_chapter_shots(
         workflow_id=99, request=SimpleNamespace(), db=FakeDb(),
     ))
