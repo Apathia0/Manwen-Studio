@@ -324,12 +324,17 @@ export default function VideoStoryboardLayout({
   const handleRegenerateVideo = useCallback(async (shotId: number, refAssetIds?: number[], aspectRatio: '16:9' | '9:16' = '16:9') => {
     if (!workflow) return;
     try {
+      // 为该镜头创建初始 loading 状态
+      videoGenStore.startJob(shotId, 0);
+
       await regenerateChapterWorkflowVideo(shotId, undefined, refAssetIds, aspectRatio);
       toast.success('视频已重新生成');
       const detail = await getChapterVideoWorkflow(workflow.id);
       setWorkflow(detail);
       void pollWorkflowUntilSettled(workflow.id);
     } catch (error: any) {
+      // 清理占位状态，防止状态残留
+      videoGenStore.clear(shotId);
       toast.error(`视频重生成失败: ${error.message || '未知错误'}`);
     }
   }, [pollWorkflowUntilSettled, workflow]);
