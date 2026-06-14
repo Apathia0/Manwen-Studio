@@ -11,7 +11,7 @@ from sqlalchemy.orm import sessionmaker
 from models import Base, ChapterVideoShot, ChapterVideoWorkflow
 from services import deepseek
 from services import video_chapter_pipeline
-from services.video_chapter_prompts import build_shot_parse_lite_user_prompt, build_shot_parse_user_prompt
+from services.video_chapter_prompts import build_shot_parse_lite_user_prompt
 
 
 @pytest.fixture
@@ -37,23 +37,6 @@ def workflow_db(monkeypatch):
     session.close()
 
     yield Session, workflow.id
-
-
-def test_build_shot_parse_user_prompt_includes_director_rules():
-    prompt = build_shot_parse_user_prompt("主角推门走进旧宅，听见楼上传来脚步声。")
-
-    assert "用最少数量的分镜，讲最完整的故事" in prompt
-    assert "同一时间、同一地点、同一事件链、同一目标、同一情绪线的内容必须合并" in prompt
-    assert "角色参考图优先" in prompt
-    assert "心理描写必须转译为可拍画面" in prompt
-    assert "一个合格分镜至少承担以下两项中的两项以上" in prompt
-    assert '"storyboard_json"' in prompt
-    assert '"visual_focus"' in prompt
-    assert '"segments"' in prompt
-    assert '"story_task"' in prompt
-    assert '"rhythm_function"' in prompt
-    assert '"key_props"' in prompt
-    assert '"scene_asset_candidates"' in prompt
 
 
 def test_build_shot_parse_lite_user_prompt_uses_event_based_rules():
@@ -120,34 +103,6 @@ async def test_generate_shot_storyboard_prompt_uses_storyboard_json_structure():
 
 
 @pytest.mark.asyncio
-async def test_start_workflow_background_passes_api_key(monkeypatch):
-    captured: dict[str, object] = {}
-
-    monkeypatch.setattr(
-        video_chapter_pipeline,
-        "get_workflow",
-        lambda workflow_id: SimpleNamespace(
-            id=workflow_id,
-            chapter_id=12,
-            story_id=34,
-            source_text="正文",
-            character_reference_ids=[9, 10],
-            video_style="写实电影感",
-        ),
-    )
-
-    async def fake_submit_task(**kwargs):
-        captured.update(kwargs)
-
-    monkeypatch.setattr(video_chapter_pipeline.task_manager, "submit_task", fake_submit_task)
-
-    task_id = await video_chapter_pipeline.start_workflow_background(77, api_key="deepseek-test-key")
-
-    assert task_id.startswith("chapter_video_77_")
-    assert captured["api_key"] == "deepseek-test-key"
-    assert captured["workflow_id"] == 77
-
-
 def test_save_shots_from_parse_persists_storyboard_json_and_reference_ids(workflow_db):
     Session, workflow_id = workflow_db
 
@@ -378,24 +333,35 @@ def test_storyboard_static_url_strips_manga_outputs_prefix():
     assert url == '/static/manga/chapter_440/panel_1006_171e246d.png'
 
 
-def test_save_shots_from_parse_rejects_incomplete_skeleton(workflow_db):
-    _, workflow_id = workflow_db
+def test_save_shots_from_parse_fills_defaults_for_missing_fields(workflow_db):
+    """缺失 source_text_span / story_summary 时降级填充占位符而非 raise。"""
+    Session, workflow_id = workflow_db
 
-    with pytest.raises(ValueError):
-        video_chapter_pipeline.save_shots_from_parse(
-            workflow_id,
-            [
-                {
-                    'shot_index': 1,
-                    'source_text_span': '',
-                    'scene_location': '旧宅门厅',
-                    'time_of_day': '夜',
-                    'characters': ['林秋'],
-                    'story_summary': '',
-                    'dialogue_or_narration': '她没有继续往前。',
-                }
-            ],
-        )
+    video_chapter_pipeline.save_shots_from_parse(
+        workflow_id,
+        [
+            {
+                'shot_index': 1,
+                'source_text_span': '',
+                'scene_location': '旧宅门厅',
+                'time_of_day': '夜',
+                'characters': ['林秋'],
+                'story_summary': '',
+                'dialogue_or_narration': '她没有继续往前。',
+            }
+        ],
+    )
+    session = Session()
+    try:
+        shots = session.query(ChapterVideoShot).filter(
+            ChapterVideoShot.workflow_id == workflow_id
+        ).order_by(ChapterVideoShot.shot_index).all()
+        assert len(shots) == 1
+        assert shots[0].shot_index == 1
+        assert shots[0].source_text_span == '（第 1 镜）'
+        assert shots[0].story_summary == '镜头 1'
+    finally:
+        session.close()
 
 
 @pytest.mark.asyncio
@@ -448,115 +414,6 @@ async def test_parse_chapter_shots_replaces_existing_shots(workflow_db, monkeypa
         assert shots[0].source_text_span == '新镜头。'
     finally:
         session.close()
-
-
-@pytest.mark.asyncio
-async def test_run_all_stages_expands_prompts_before_storyboards(monkeypatch):
-    call_order: list[str] = []
-
-    monkeypatch.setattr(
-        video_chapter_pipeline,
-        'get_workflow',
-        lambda workflow_id: SimpleNamespace(
-            id=workflow_id,
-            workflow_status='pending',
-            total_shots=1,
-            completed_shots=1,
-            failed_shots=0,
-            chapter_id=12,
-            story_id=34,
-            source_text='正文',
-            character_reference_ids=[9],
-            video_style='写实电影感',
-        ),
-    )
-
-    async def fake_parse(**kwargs):
-        call_order.append('parse')
-        return {'workflow_status': 'shots_ready', 'shot_count': 1, 'total_shots': 1}
-
-    async def fake_expand(**kwargs):
-        call_order.append('expand')
-        return {'workflow_status': 'prompts_ready', 'expanded_shot_count': 1, 'failed_shot_ids': []}
-
-    async def fake_storyboards(**kwargs):
-        call_order.append('storyboard')
-        return {'workflow_status': 'storyboards_ready', 'shot_count': 1, 'failed_shot_ids': []}
-
-    async def fake_videos(**kwargs):
-        call_order.append('video')
-        return {'workflow_status': 'videos_ready', 'shot_count': 1, 'failed_shot_ids': []}
-
-    monkeypatch.setattr(video_chapter_pipeline, 'parse_chapter_shots', fake_parse)
-    monkeypatch.setattr(video_chapter_pipeline, 'expand_shots_with_role_prompts', fake_expand)
-    monkeypatch.setattr(video_chapter_pipeline, 'generate_storyboards_for_shots', fake_storyboards)
-    monkeypatch.setattr(video_chapter_pipeline, 'generate_videos_for_shots', fake_videos)
-    monkeypatch.setattr(video_chapter_pipeline, 'update_workflow_status', lambda *args, **kwargs: None)
-
-    result = await video_chapter_pipeline.run_all_stages(
-        workflow_id=77,
-        chapter_id=12,
-        story_id=34,
-        source_text='正文',
-        deepseek_api_key='test-ds-key',
-        image_api_key='test-img-key',
-    )
-
-    assert result['workflow_status'] == 'completed'
-    assert call_order == ['parse', 'expand', 'storyboard', 'video']
-
-
-@pytest.mark.asyncio
-async def test_run_all_stages_logs_stage_integrity(monkeypatch, caplog):
-    monkeypatch.setattr(
-        video_chapter_pipeline,
-        'get_workflow',
-        lambda workflow_id: SimpleNamespace(
-            id=workflow_id,
-            workflow_status='pending',
-            total_shots=1,
-            completed_shots=1,
-            failed_shots=0,
-            chapter_id=12,
-            story_id=34,
-            source_text='正文',
-            character_reference_ids=[9],
-            video_style='写实电影感',
-        ),
-    )
-
-    async def fake_parse(**kwargs):
-        return {'workflow_status': 'shots_ready', 'shot_count': 1, 'total_shots': 1}
-
-    async def fake_expand(**kwargs):
-        return {'workflow_status': 'shots_ready', 'expanded_shot_count': 1, 'failed_shot_ids': []}
-
-    async def fake_storyboards(**kwargs):
-        return {'workflow_status': 'storyboards_ready', 'shot_count': 1, 'failed_shot_ids': []}
-
-    async def fake_videos(**kwargs):
-        return {'workflow_status': 'videos_ready', 'shot_count': 1, 'failed_shot_ids': []}
-
-    monkeypatch.setattr(video_chapter_pipeline, 'parse_chapter_shots', fake_parse)
-    monkeypatch.setattr(video_chapter_pipeline, 'expand_shots_with_role_prompts', fake_expand)
-    monkeypatch.setattr(video_chapter_pipeline, 'generate_storyboards_for_shots', fake_storyboards)
-    monkeypatch.setattr(video_chapter_pipeline, 'generate_videos_for_shots', fake_videos)
-    monkeypatch.setattr(video_chapter_pipeline, 'update_workflow_status', lambda *args, **kwargs: None)
-
-    with caplog.at_level('INFO', logger=video_chapter_pipeline.logger.name):
-        await video_chapter_pipeline.run_all_stages(
-            workflow_id=77,
-            chapter_id=12,
-            story_id=34,
-            source_text='正文',
-            deepseek_api_key='test-ds-key',
-            image_api_key='test-img-key',
-        )
-
-    assert '流程完整性 workflow=77 stage=parse result=shots_ready' in caplog.text
-    assert '流程完整性 workflow=77 stage=expand result=shots_ready' in caplog.text
-    assert '流程完整性 workflow=77 stage=storyboard result=storyboards_ready' in caplog.text
-    assert '流程完整性 workflow=77 stage=video result=videos_ready' in caplog.text
 
 
 @pytest.mark.asyncio

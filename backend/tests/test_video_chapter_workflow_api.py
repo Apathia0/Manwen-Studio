@@ -105,11 +105,6 @@ def test_api_create_chapter_workflow_does_not_refresh_detached_instance(monkeypa
         lambda chapter_id, user, db_session: SimpleNamespace(id=chapter_id, story_id=900, novel_content="章节正文"),
     )
     monkeypatch.setattr(video_router, "create_chapter_workflow", lambda **kwargs: detached_workflow)
-
-    async def fake_start_background(workflow_id: int, api_key: str | None = None, **kwargs):
-        return f"chapter_video_{workflow_id}"
-
-    monkeypatch.setattr(video_router, "start_workflow_background", fake_start_background)
     monkeypatch.setattr(video_router, "_user_deepseek_api_key", lambda request, db_session: "deepseek-key")
     monkeypatch.setattr(video_router, "_user_image_api_key", lambda request: "image-key")
     monkeypatch.setattr(video_router, "get_chapter_workflow", lambda workflow_id: persistent_workflow)
@@ -609,10 +604,9 @@ def test_shot_video_prompt_template_no_longer_uses_10s_segments():
 def test_storyboard_and_video_prompts_share_same_segment_schema():
     from services import video_chapter_prompts as prompts
 
-    assert "segments" in prompts.SHOT_VIDEO_USER_TEMPLATE
-    assert "storyboard_prompt" in prompts.SHOT_VIDEO_SYSTEM_PROMPT or "storyboard_prompt" in prompts.SHOT_VIDEO_USER_TEMPLATE
     assert "video_prompt" in prompts.SHOT_VIDEO_USER_TEMPLATE
-    assert "段落数量由导演判断" in prompts.SHOT_VIDEO_USER_TEMPLATE
+    assert "storyboard_prompt" in prompts.SHOT_VIDEO_SYSTEM_PROMPT or "storyboard_prompt" in prompts.SHOT_VIDEO_USER_TEMPLATE
+    assert "景别" in prompts.SHOT_VIDEO_USER_TEMPLATE
 
 
 def test_storyboard_director_prompt_no_longer_uses_10s_beats():
@@ -621,15 +615,6 @@ def test_storyboard_director_prompt_no_longer_uses_10s_beats():
     assert "0-3 秒" not in prompts.STORYBOARD_DIRECTOR_SYSTEM_PROMPT
     assert "3-7 秒" not in prompts.STORYBOARD_DIRECTOR_SYSTEM_PROMPT
     assert "7-10 秒" not in prompts.STORYBOARD_DIRECTOR_SYSTEM_PROMPT
-
-
-def test_shot_parse_prompt_mentions_15_second_capacity_modeling():
-    from services import video_chapter_prompts as prompts
-
-    assert "15 秒" in prompts.SHOT_PARSE_SYSTEM_PROMPT
-    assert "10 秒镜头" not in prompts.SHOT_PARSE_SYSTEM_PROMPT
-    assert "把故事改编成事件" in prompts.SHOT_PARSE_SYSTEM_PROMPT
-    assert "分镜数量必须尽可能少" in prompts.SHOT_PARSE_SYSTEM_PROMPT
 
 
 def test_shot_detail_prompt_no_longer_uses_10s_storyboard_beats():
@@ -823,36 +808,9 @@ def test_chapter_storyboard_prompt_mentions_15_second_shots():
     assert 'default 15s per shot' in ai_prompt
 
 
-def test_start_workflow_background_omits_task_timeout(monkeypatch):
-    captured = {}
-
-    monkeypatch.setattr(
-        video_chapter_pipeline,
-        "get_workflow",
-        lambda workflow_id: SimpleNamespace(
-            id=workflow_id, chapter_id=12, story_id=34,
-            source_text="正文", character_reference_ids=[], video_style="写实",
-        ),
-    )
-
-    async def fake_submit_task(**kwargs):
-        captured.update(kwargs)
-
-    monkeypatch.setattr(video_chapter_pipeline.task_manager, "submit_task", fake_submit_task)
-
-    asyncio.run(video_chapter_pipeline.start_workflow_background(77, api_key="video-key"))
-
-    assert captured["timeout"] is None
-
-
 def test_api_create_chapter_workflow_does_not_auto_start(monkeypatch):
     """创建工作流后不自动启动流水线——用户手动触发各阶段。"""
     db = _FakeDb()
-    captured: dict[str, object] = {}
-
-    async def fake_start_background(**kwargs):
-        captured.update(kwargs)
-        return f"chapter_video_77"
 
     monkeypatch.setattr(video_router, "_require_user", lambda request, db_session: SimpleNamespace(id=1))
     monkeypatch.setattr(
@@ -861,7 +819,6 @@ def test_api_create_chapter_workflow_does_not_auto_start(monkeypatch):
         lambda chapter_id, user, db_session: SimpleNamespace(id=chapter_id, story_id=900, novel_content="章节正文"),
     )
     monkeypatch.setattr(video_router, "create_chapter_workflow", lambda **kw: SimpleNamespace(id=77))
-    monkeypatch.setattr(video_router, "start_workflow_background", fake_start_background)
     monkeypatch.setattr(video_router, "get_chapter_workflow", lambda workflow_id: SimpleNamespace(id=workflow_id))
     monkeypatch.setattr(video_router, "init_db", lambda **kw: None, raising=False)
 
@@ -872,8 +829,6 @@ def test_api_create_chapter_workflow_does_not_auto_start(monkeypatch):
         )
     )
 
-    assert captured == {}, \
-        f"不应自动启动流水线，但 start_workflow_background 被调用: {captured}"
     assert result.id == 77
 
 

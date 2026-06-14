@@ -132,7 +132,6 @@ from services.video_chapter_pipeline import (
     create_workflow as create_chapter_workflow,
     get_workflow as get_chapter_workflow,
     get_workflows_for_chapter as get_chapter_workflows,
-    start_workflow_background,
     update_workflow_status as update_chapter_workflow_status,
     regenerate_shot_storyboard,
     regenerate_shot_video,
@@ -144,7 +143,6 @@ from services.video_chapter_pipeline import (
     generate_storyboards_for_shots,
     generate_videos_for_shots,
     generate_shot_details_batch,
-    run_all_stages,
 )
 
 # 模块级标记：init_db 在整个进程生命周期中只调用一次
@@ -7249,77 +7247,4 @@ async def api_generate_videos(
     }
 
 
-@router.post("/api/video/chapter-workflows/{workflow_id}/run-all")
-async def api_run_all_stages(
-    workflow_id: int,
-    request: Request,
-    db: Session = Depends(get_db),
-):
-    """一键全自动：依次执行拆镜→故事版→视频三个阶段。"""
-    user = _require_user(request, db)
-    wf = get_chapter_workflow(workflow_id)
-    if not wf:
-        raise HTTPException(404, "工作流不存在")
-    story = db.get(Story, wf.story_id)
-    if not story or story.owner_user_id != user.id:
-        raise HTTPException(403, "无权访问")
 
-    deepseek_api_key = _user_deepseek_api_key(request, db)
-    image_api_key = _user_image_api_key(request)
-
-    if not deepseek_api_key:
-        raise HTTPException(400, "请配置 DeepSeek API Key")
-
-    if not image_api_key:
-        raise HTTPException(400, "请提供 Image API Key")
-
-    # 从数据库读取视频 API 配置并注入运行时
-    _configure_video_service_from_db(request, db)
-    video_api_key, video_base_url, video_model = _user_video_api_key(request)
-
-    task_id = f"chapter_video_{workflow_id}_stage_{uuid.uuid4().hex[:8]}"
-
-    # 刷新角色参考图 asset_id
-    ref_ids = wf.character_reference_ids
-    if not ref_ids:
-        ref_ids = _get_story_character_reference_asset_ids(wf.story_id, db)
-        if ref_ids:
-            db_wf = db.get(ChapterVideoWorkflow, workflow_id)
-            if db_wf:
-                db_wf.character_reference_ids = ref_ids
-                db.commit()
-
-    update_chapter_workflow_status(workflow_id, "parsing_shots")
-    try:
-        await task_manager.submit_task(
-            task_id=task_id,
-            task_type="chapter_video_run_all",
-            coro_func=run_all_stages,
-            workflow_id=workflow_id,
-            chapter_id=wf.chapter_id,
-            story_id=wf.story_id,
-            source_text=wf.source_text or "",
-            character_reference_ids=ref_ids,
-            deepseek_api_key=deepseek_api_key,
-            image_api_key=image_api_key,
-            video_api_key=video_api_key,
-            video_base_url=video_base_url,
-            video_model=video_model,
-            timeout=None,
-            max_retries=1,
-            metadata={
-                "workflow_id": workflow_id,
-                "stage": "parsing_shots",
-                "message": "一键全流程已排队...",
-                "running_stage": "parsing_shots",
-                "running_message": "正在执行一键全流程...",
-            },
-        )
-    except Exception as exc:
-        raise HTTPException(500, f"提交后台任务失败: {exc}")
-
-    return {
-        "task_id": task_id,
-        "workflow_status": "parsing_shots",
-        "message": "一键全流程任务已提交后台执行",
-    }
