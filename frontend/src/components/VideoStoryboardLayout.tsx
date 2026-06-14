@@ -432,6 +432,8 @@ export default function VideoStoryboardLayout({
       void pollWorkflowUntilSettled(workflow.id);
     } catch (error: any) {
       setWorkflowRunning(false);
+      // 清理占位状态，防止状态残留
+      shotIds.forEach(shotId => videoGenStore.clear(shotId));
       toast.error(`视频生成失败: ${error.message || '未知错误'}`);
     }
   }, [pollWorkflowUntilSettled, workflow]);
