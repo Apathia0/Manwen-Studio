@@ -235,11 +235,11 @@ export default function StoryLibraryPage({
                 ) : (
                   <>
                     {story.cover_image ? (
-                      <div className="mb-3 overflow-hidden rounded-md border border-[#d9dfd7] bg-[#f7f8f5]">
+                      <div className="mb-3 flex aspect-[3/4] items-center justify-center overflow-hidden rounded-md border border-[#d9dfd7] bg-[#f7f8f5] p-2">
                         <img
                           src={coverImageUrl(story.cover_image) || ''}
                           alt={`${story.title} 封面`}
-                          className="h-36 w-full object-cover"
+                          className="h-full w-full object-contain"
                           loading="lazy"
                           decoding="async"
                         />
