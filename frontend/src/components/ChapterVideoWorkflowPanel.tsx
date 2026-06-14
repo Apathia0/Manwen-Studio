@@ -525,7 +525,7 @@ export default function ChapterVideoWorkflowPanel({
                           </div>
                           {(() => {
                             const videoState = videoGenStore.get(shot.id);
-                            const isGenerating = videoState?.active && videoState.status === 'pending';
+                            const isGenerating = videoState?.active;
 
                             if (hasVideo) {
                               return (
