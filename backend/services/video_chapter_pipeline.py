@@ -1579,7 +1579,7 @@ async def regenerate_shot_storyboard(
             chapter_id=chapter_id,
             image_number=1000 + shot.shot_index,
             api_key=api_key,
-            color_mode="color",
+            color_mode="bw",
             size="3840x2160",
             ref_image_paths=combined_refs if combined_refs else None,
             ref_labels=combined_labels if combined_labels else None,
