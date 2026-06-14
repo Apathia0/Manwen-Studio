@@ -649,7 +649,7 @@ async def test_reanalyze_shot_prompts_returns_character_prompts_from_story_versi
 
     assert result['shot_id'] == shot_id
     assert result['storyboard_prompt'] == '故事版:林秋停下脚步'
-    assert result['video_prompt'] == '视频:停步后抬眼'
+    assert result['video_prompt'] == '故事版:林秋停下脚步'
     assert result['character_prompts'] == [
         {'name': '林秋', 'prompt': '林秋角色设定卡'}
     ]

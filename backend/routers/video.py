@@ -867,44 +867,80 @@ def _select_prop_reference_assets_for_shot(shot: VideoShot, db: Session, limit: 
 
 
 def _build_reference_constraints_block(character_assets: list[VideoAsset]) -> str:
-    """构建参考资产使用说明，按资产类型给出明确角色标注。"""
+    """构建参考资产使用说明，按资产类型给出中文编号的角色标注。"""
     if not character_assets:
         return ""
 
-    type_roles = {
-        "character_reference": "角色身份参考图",
-        "story_character_reference": "角色身份参考图",
-        "scene_reference": "场景氛围参考图",
-        "prop_reference": "道具参考图",
-        "storyboard_frame": "分镜构图参考图",
-        "frame": "首尾帧参考图",
-    }
-
+    # 按资产类型分组
     groups: dict[str, list[VideoAsset]] = {}
     for a in character_assets:
         at = a.asset_type or "reference"
         groups.setdefault(at, []).append(a)
 
-    parts = ["<<<REFERENCE_ASSET_GUIDE>>>"]
-    parts.append("以下图片已作为视觉参考传入。各图片用途如下：")
+    # 按固定顺序排列：故事版 → 人物 → 场景 → 道具 → 首尾帧
+    type_order = [
+        ("storyboard_frame", "故事版图片"),
+        ("character_reference", "人物参考图"),
+        ("story_character_reference", "人物参考图"),
+        ("scene_reference", "场景参考图"),
+        ("prop_reference", "道具参考图"),
+        ("frame", "首尾帧参考图"),
+    ]
 
+    ordered_groups: list[tuple[str, list[VideoAsset]]] = []
+    seen_types: set[str] = set()
+    for at, label in type_order:
+        if at in groups and at not in seen_types:
+            ordered_groups.append((label, groups[at]))
+            seen_types.add(at)
     for at, assets in groups.items():
-        role = type_roles.get(at, f"{at}参考图")
-        names = ", ".join(a.name or "unnamed" for a in assets[:5])
-        parts.append(f"- {role} ({len(assets)}张): {names}")
+        if at not in seen_types:
+            ordered_groups.append((f"{at}参考图", assets))
+            seen_types.add(at)
 
+    # 全局编号
+    img_index = 0
+    guide_parts: list[str] = []
+    constraint_parts: list[str] = []
+
+    for label, assets in ordered_groups:
+        for a in assets[:3]:  # 每种最多 3 张
+            img_index += 1
+            name = a.name or "未命名"
+            guide_parts.append(f"图{img_index}是{label}：{name}")
+
+    # 按类型生成约束
+    for label, assets in ordered_groups:
+        if not assets:
+            continue
+        if "故事版" in label:
+            constraint_parts.append(
+                "故事版图片是导演蓝图：必须严格遵循分镜脚本中的镜头运动、人物动作、情绪变化和时间分配，不得偏离。"
+            )
+        elif "人物" in label:
+            constraint_parts.append(
+                "人物参考图确保角色一致性：视频中角色的外貌、服装、发型、体型必须与人物参考图完全一致，禁止任何变化。"
+            )
+        elif "场景" in label:
+            constraint_parts.append(
+                "场景参考图确保环境一致性：光线、色调、空间布局、建筑细节必须与场景参考图保持一致。"
+            )
+        elif "道具" in label:
+            constraint_parts.append(
+                "道具参考图确保道具一致性：材质、颜色、大小、形状、纹理必须与道具参考图完全相同。"
+            )
+
+    parts = ["<<<REFERENCE_ASSET_GUIDE>>>"]
+    parts.append("以下参考图已传入视频模型。各图片编号和用途如下：")
+    parts.extend(guide_parts)
+    parts.append("")
+    parts.append("<<<CONSTRAINT_RULES>>>")
+    parts.extend(constraint_parts)
     parts.append(
-        "<<<END_GUIDE>>> "
-        "MANDATORY USAGE RULES: "
-        "1. Character reference images: lock face shape, hairstyle, eye color, outfit, body type for each character. All identity markers must match exactly. "
-        "2. Storyboard reference image: use as the authoritative shot plan -- follow the panel-by-panel camera framing, character blocking, action progression, and timing shown in the storyboard. The storyboard defines the exact visual sequence to generate. "
-        "3. Scene reference images: match atmosphere, color palette, lighting setup, architecture, and environmental details. Keep the same location perspective and spatial layout. "
-        "4. Prop reference images: maintain exact prop appearance -- material, color, size, shape, texture, wear marks, and distinctive features must be identical. Props must stay visually consistent across all shots. "
-        "5. Frame reference images: first frame = start state, last frame = end state. Generate smooth transition between them. "
-        "CRITICAL: The storyboard image is the director's blueprint. The generated video must faithfully follow the shot breakdown, camera movements, and character actions depicted in the storyboard panels. "
-        "CONSISTENCY RULE: All visual elements (characters, scene, props) must remain identical to their reference images throughout the entire video. No drift, no variation, no reinterpretation."
+        "核心约束：所有参考图中的视觉元素（角色外貌、场景环境、道具外观）"
+        "必须在视频全过程中保持完全一致，不得漂移、不得变化、不得重新解读。"
     )
-    return " ".join(parts)
+    return "\n".join(parts)
 
 
 def _resolve_asset_reference_urls(
@@ -2037,17 +2073,18 @@ async def update_shot(
     storyboard_guide = ""
     if shot.storyboard_prompt:
         storyboard_guide = (
-            f"\n\n<<<STORYBOARD_BLUEPRINT>>>\n"
-            f"This is the shot-by-shot storyboard that the video MUST follow:\n"
+            f"\n\n<<<故事版蓝图_STORYBOARD_BLUEPRINT>>>\n"
+            f"以下分镜脚本是视频生成的导演蓝图，视频必须严格遵循：\n"
             f"{shot.storyboard_prompt}\n"
-            f"<<<END_BLUEPRINT>>>\n"
-            f"CRITICAL: Generate video matching EVERY time segment, camera movement, "
-            f"character action, and dialogue in the storyboard blueprint above."
+            f"<<<蓝图结束_END_BLUEPRINT>>>\n"
+            f"核心要求：生成的视频必须严格匹配蓝图中的每一个时间段、镜头运动方式、"
+            f"角色动作和情绪变化，不得偏离分镜脚本的任何细节。"
         )
     full_prompt = _merge_style_prompt(
-        f"{body.prompt or shot.video_prompt or ''}{storyboard_guide} {ref_block} Grounding: {grounding}".strip(),
+        f"{body.prompt or storyboard_guide} {ref_block} Grounding: {grounding}".strip(),
         style_template, style_name,
     )
+    logger.info("视频提交提示词 shot=%s:\n%s", shot_id, full_prompt)
 
     task_id = f"video_render_{shot_id}_{int(datetime.datetime.utcnow().timestamp())}"
     await task_manager.submit_task(
@@ -2235,17 +2272,18 @@ async def render_shot_video_stream(
     storyboard_guide = ""
     if shot.storyboard_prompt:
         storyboard_guide = (
-            f"\n\n<<<STORYBOARD_BLUEPRINT>>>\n"
-            f"This is the shot-by-shot storyboard that the video MUST follow:\n"
+            f"\n\n<<<故事版蓝图_STORYBOARD_BLUEPRINT>>>\n"
+            f"以下分镜脚本是视频生成的导演蓝图，视频必须严格遵循：\n"
             f"{shot.storyboard_prompt}\n"
-            f"<<<END_BLUEPRINT>>>\n"
-            f"CRITICAL: Generate video matching EVERY time segment, camera movement, "
-            f"character action, and dialogue in the storyboard blueprint above."
+            f"<<<蓝图结束_END_BLUEPRINT>>>\n"
+            f"核心要求：生成的视频必须严格匹配蓝图中的每一个时间段、镜头运动方式、"
+            f"角色动作和情绪变化，不得偏离分镜脚本的任何细节。"
         )
     full_prompt = _merge_style_prompt(
-        f"{body.prompt or shot.video_prompt or ''}{storyboard_guide} {ref_block} Grounding: {grounding}".strip(),
+        f"{body.prompt or storyboard_guide} {ref_block} Grounding: {grounding}".strip(),
         style_template, style_name,
     )
+    logger.info("视频提交提示词 shot=%s:\n%s", shot_id, full_prompt)
 
     async def event_generator():
         nonlocal db, base_url
@@ -5854,17 +5892,18 @@ async def render_shot_video(
     storyboard_guide = ""
     if shot.storyboard_prompt:
         storyboard_guide = (
-            f"\n\n<<<STORYBOARD_BLUEPRINT>>>\n"
-            f"This is the shot-by-shot storyboard that the video MUST follow:\n"
+            f"\n\n<<<故事版蓝图_STORYBOARD_BLUEPRINT>>>\n"
+            f"以下分镜脚本是视频生成的导演蓝图，视频必须严格遵循：\n"
             f"{shot.storyboard_prompt}\n"
-            f"<<<END_BLUEPRINT>>>\n"
-            f"CRITICAL: Generate video matching EVERY time segment, camera movement, "
-            f"character action, and dialogue in the storyboard blueprint above."
+            f"<<<蓝图结束_END_BLUEPRINT>>>\n"
+            f"核心要求：生成的视频必须严格匹配蓝图中的每一个时间段、镜头运动方式、"
+            f"角色动作和情绪变化，不得偏离分镜脚本的任何细节。"
         )
     full_prompt = _merge_style_prompt(
-        f"{body.prompt or shot.video_prompt or ''}{storyboard_guide} {ref_block} Grounding: {grounding}".strip(),
+        f"{body.prompt or storyboard_guide} {ref_block} Grounding: {grounding}".strip(),
         style_template, style_name,
     )
+    logger.info("视频提交提示词 shot=%s:\n%s", shot_id, full_prompt)
 
     task_id = f"video_render_{shot_id}_{int(datetime.datetime.utcnow().timestamp())}"
     await task_manager.submit_task(

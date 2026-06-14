@@ -1151,24 +1151,8 @@ async def _expand_single_shot_prompts(
             for entry in ai_character_prompts:
                 _ensure_character_version(story.id, entry.get("name", ""), entry.get("prompt", ""))
 
-    try:
-        video_prompt = await deepseek_service.generate_shot_video_prompt_ai(
-            shot_data={
-                "scene_location": shot.scene_location,
-                "time_of_day": shot.time_of_day,
-                "characters": shot.characters,
-                "story_summary": shot.story_summary,
-                "camera_plan": camera_plan,
-                "motion_plan": motion_plan,
-                "emotion_plan": emotion_plan,
-                "continuity_notes": continuity_notes,
-            },
-            api_key=deepseek_api_key,
-            storyboard_prompt=storyboard_prompt,
-        )
-    except Exception as exc:
-        logger.warning("视频提示词生成失败 shot=%s: %s", shot_id, exc)
-        video_prompt = shot.video_prompt or shot.storyboard_prompt or ""
+    # 视频提示词：直接使用故事版分镜脚本作为视频生成依据，不再调用 AI 分析
+    video_prompt = storyboard_prompt or shot.video_prompt or ""
 
     update_shot(
         shot_id,
@@ -1637,20 +1621,11 @@ async def regenerate_shot_video(
     # 清理：去除 shot.video_prompt 中残留的旧 enrichments（以 === 开头的内容）
     if video_prompt and "===" in video_prompt:
         video_prompt = video_prompt.split("===")[0].strip()
-    # 检测：如果 prompt 仍残留旧固定时序模板结构或为空，用 AI 重新生成
+    # 如果 prompt 为空或残留旧模板，直接用故事版分镜脚本
     import re
     is_stale_template = bool(video_prompt) and bool(re.search(r"\d+(?:\.\d+)?-\d+(?:\.\d+)?\s*秒", video_prompt))
     if not video_prompt or is_stale_template:
-        video_prompt = await deepseek_service.generate_shot_video_prompt_ai({
-            "scene_location": shot.scene_location,
-            "time_of_day": shot.time_of_day,
-            "characters": shot.characters,
-            "story_summary": shot.story_summary,
-            "camera_plan": shot.camera_plan,
-            "motion_plan": shot.motion_plan,
-            "emotion_plan": shot.emotion_plan,
-            "continuity_notes": shot.continuity_notes,
-        }, api_key=deepseek_api_key, storyboard_prompt=shot.storyboard_prompt)
+        video_prompt = shot.storyboard_prompt or ""
 
     workflow = get_workflow(shot.workflow_id)
     story_id = workflow.story_id if workflow else 0
@@ -1753,8 +1728,17 @@ async def regenerate_shot_video(
     # Part 1: 系统提示词 - 参考图说明与约束
     prompt_sections.append("\n".join(system_prompt_parts))
 
-    # Part 2: 视频生成提示词（由 AI 分析生成的内容描述）
-    prompt_sections.append(video_prompt)
+    # Part 2: 视频生成指令
+    if prompt_override:
+        prompt_sections.append(prompt_override)
+    elif has_storyboard_ref:
+        prompt_sections.append(
+            "按照故事版图片中的分镜脚本内容生成15秒视频。"
+            "严格遵循分镜中每个时间段指定的镜头运动、画面内容、人物动作和情绪变化。"
+            "不得添加分镜中未描述的元素，不得改变分镜中的场景关系和叙事逻辑。"
+        )
+    else:
+        prompt_sections.append(video_prompt or "生成15秒视频，保持画面流畅自然。")
 
     # Part 3: 风格参考图约束（仅当有风格参考图时）
     if has_style_ref:

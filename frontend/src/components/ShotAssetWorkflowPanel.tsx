@@ -146,7 +146,6 @@ export default function ShotAssetWorkflowPanel({
   const [storyboardPromptDraft, setStoryboardPromptDraft] = useState('');
   const [firstFramePromptDraft, setFirstFramePromptDraft] = useState('');
   const [lastFramePromptDraft, setLastFramePromptDraft] = useState('');
-  const [videoPromptDraft, setVideoPromptDraft] = useState('');
 
   const [previewAsset, setPreviewAsset] = useState<VideoAsset | null>(null);
   const [previewTitle, setPreviewTitle] = useState('');
@@ -224,7 +223,6 @@ export default function ShotAssetWorkflowPanel({
       setStoryboardPromptDraft(draft.storyboard_prompt || '');
       setFirstFramePromptDraft(draft.first_frame_prompt || '');
       setLastFramePromptDraft(draft.last_frame_prompt || '');
-      setVideoPromptDraft(draft.video_prompt || '');
       const first = charPrompts[0];
       setSelectedCharacterName(first?.name || '');
       setSelectedCharacterPrompt(first?.prompt || '');
@@ -237,7 +235,6 @@ export default function ShotAssetWorkflowPanel({
     setStoryboardPromptDraft('');
     setFirstFramePromptDraft('');
     setLastFramePromptDraft('');
-    setVideoPromptDraft('');
     setSelectedCharacterName('');
     setSelectedCharacterPrompt('');
     if (!shot || !chapter) return;
@@ -288,7 +285,6 @@ export default function ShotAssetWorkflowPanel({
       setStoryboardPromptDraft(draft.storyboard_prompt || '');
       setFirstFramePromptDraft(draft.first_frame_prompt || '');
       setLastFramePromptDraft(draft.last_frame_prompt || '');
-      setVideoPromptDraft(draft.video_prompt || '');
       const first = draft.character_prompts?.[0];
       setSelectedCharacterName(first?.name || '');
       setSelectedCharacterPrompt(first?.prompt || '');
@@ -464,7 +460,6 @@ export default function ShotAssetWorkflowPanel({
         fps: 24,
         reference_asset_ids: selectedReferenceAssetIds,
         input_mode: selectedReferenceAssetIds.length > 0 ? 'image_to_video' : 'text_to_video',
-        prompt: videoPromptDraft || undefined,
       });
       onJobsChange((prev) => [result.job, ...prev]);
       pollJob(result.job.id);
@@ -625,7 +620,6 @@ export default function ShotAssetWorkflowPanel({
                 ))}
               </div>
             </div>
-            <textarea value={videoPromptDraft} onChange={e => setVideoPromptDraft(e.target.value)} className="h-28 w-full rounded-lg border border-[#d7e3f4] p-2 text-xs resize-y" placeholder="视频生成提示词（AI 解析或手动编辑）" />
             <div className="flex items-center justify-between gap-3">
               {videoSecondsLimit > 0 && (
                 <span className="text-xs text-slate-400">本月视频时长配额 {videoSecondsLimit}s</span>

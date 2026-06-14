@@ -245,37 +245,37 @@ export default function VideoCardWorkbench({ type, shotId, assetId, displayShotI
               </div>
             </div>
 
-            {/* 右侧：提示词 + 操作 */}
+            {/* 右侧：引用资产 + 操作 */}
             <div className="flex flex-col gap-4 overflow-auto border-l border-[#e5edf8] bg-[#f8fbff] p-6">
               <div className="flex flex-1 min-h-0 flex-col rounded-2xl border border-[#d7e3f4] bg-white p-4">
-                <div className="text-sm font-medium text-slate-800">提示词</div>
-                <textarea
-                  value={state.editingPrompt}
-                  onChange={e => setState(s => ({ ...s, editingPrompt: e.target.value }))}
-                  className="mt-3 w-full flex-1 min-h-0 rounded-2xl border border-[#d7e3f4] bg-[#f8fbff] px-3 py-3 text-sm leading-6 text-slate-900 outline-none resize-none focus:border-blue-400"
-                  placeholder="输入提示词..."
-                />
-                {onPromptSave && (
-                  <div className="mt-3 flex justify-end shrink-0">
-                    <button
-                      onClick={async () => {
-                        if (!currentResource || effectiveBusy) return;
-                        setState(s => ({ ...s, busy: 'savePrompt' }));
-                        try {
-                          await onPromptSave(currentResource.id, state.editingPrompt);
-                        } catch (err) {
-                          console.error('保存提示词失败', err);
-                        } finally {
-                          setState(s => ({ ...s, busy: null }));
-                        }
-                      }}
-                      disabled={state.busy === 'savePrompt' || Boolean(externalBusy)}
-                      className="flex items-center gap-1 rounded-2xl bg-blue-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-700 disabled:opacity-60"
-                    >
-                      {(state.busy === 'savePrompt' || effectiveBusy === 'savePrompt') && <Loader2 size={12} className="animate-spin" />} {effectiveBusy === 'savePrompt' ? '保存中...' : '保存提示词'}
-                    </button>
-                  </div>
-                )}
+                <div className="text-sm font-medium text-slate-800">引用资产</div>
+                <div className="mt-3 text-xs text-slate-500 leading-relaxed">
+                  选择引用资产后直接生成视频。系统会根据以下资产自动构建视频提示词：
+                </div>
+                <ul className="mt-2 flex-1 space-y-1 text-xs text-slate-600">
+                  {!selectedRefAssetIds || selectedRefAssetIds.length === 0 ? (
+                    <li className="text-slate-400">未选择引用资产，将使用纯文本模式生成</li>
+                  ) : (
+                    selectedRefAssetIds.map((assetId, idx) => {
+                      const chapterAsset = chapterAssets?.find(a => a.id === assetId);
+                      const storyboardAsset = shotStoryboards?.find(s => s.id === assetId);
+                      const label = chapterAsset
+                        ? (chapterAsset.asset_type === 'storyboard_frame' ? '故事版图片' :
+                           chapterAsset.asset_type === 'character_reference' ? '人物参考图' :
+                           chapterAsset.asset_type === 'scene_reference' ? '场景参考图' :
+                           chapterAsset.asset_type === 'prop_reference' ? '道具参考图' :
+                           chapterAsset.asset_type === 'frame' ? '首尾帧参考图' : '参考图')
+                        : storyboardAsset ? '故事版图片' : '参考图';
+                      const name = chapterAsset?.name || storyboardAsset?.name || `资产 #${assetId}`;
+                      return (
+                        <li key={assetId} className="flex items-center gap-1">
+                          <span className="text-blue-500 font-medium">图{idx + 1}</span>
+                          <span>是{label}：{name}</span>
+                        </li>
+                      );
+                    })
+                  )}
+                </ul>
               </div>
 
               <div className="shrink-0 rounded-2xl border border-[#d7e3f4] bg-white p-4">
@@ -319,11 +319,6 @@ export default function VideoCardWorkbench({ type, shotId, assetId, displayShotI
                   <button onClick={handleDelete} disabled={Boolean(effectiveBusy)} className="flex items-center gap-1 rounded-xl border border-rose-200 bg-white px-3 py-1.5 text-xs font-medium text-rose-600 hover:bg-rose-50 disabled:opacity-60">
                     {effectiveBusy === 'delete' ? <Loader2 size={12} className="animate-spin" /> : <Trash2 size={12} />} {effectiveBusy === 'delete' ? '删除中...' : '删除'}
                   </button>
-                  {onReanalyzePrompt && (
-                    <button onClick={handleReanalyze} disabled={Boolean(effectiveBusy)} className="flex items-center gap-1 rounded-xl border border-amber-200 bg-white px-3 py-1.5 text-xs font-medium text-amber-700 hover:bg-amber-50 disabled:opacity-60">
-                       {effectiveBusy === 'reanalyze' ? <Loader2 size={12} className="animate-spin" /> : <RotateCcw size={12} />} {effectiveBusy === 'reanalyze' ? '分析中...' : (currentResource?.prompt ? '重新分析提示词' : '分析提示词')}
-                    </button>
-                  )}
                 </div>
               </div>
             </div>

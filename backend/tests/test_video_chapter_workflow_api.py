@@ -695,8 +695,6 @@ def test_regenerate_shot_video_submits_15_second_duration(monkeypatch):
 
 
 def test_regenerate_shot_video_rebuilds_legacy_10s_prompt(monkeypatch):
-    captured: dict[str, object] = {}
-
     monkeypatch.setattr(
         video_chapter_pipeline,
         'get_shot',
@@ -728,11 +726,6 @@ def test_regenerate_shot_video_rebuilds_legacy_10s_prompt(monkeypatch):
     monkeypatch.setattr(video_chapter_pipeline, 'resolve_reference_input', lambda value, kind: value)
     monkeypatch.setattr(video_chapter_pipeline, '_resolve_style_ref_local_path', lambda value: None)
 
-    async def fake_generate_shot_video_prompt_ai(payload, api_key=None, **kwargs):
-        captured['payload'] = payload
-        captured['storyboard_prompt'] = kwargs.get('storyboard_prompt')
-        return '新的15秒视频提示词'
-
     async def fake_poll_video_job(**kwargs):
         return 'https://cdn.example.com/video.mp4'
 
@@ -757,13 +750,11 @@ def test_regenerate_shot_video_rebuilds_legacy_10s_prompt(monkeypatch):
             return None
 
     monkeypatch.setattr(video_chapter_pipeline, 'SessionLocal', lambda: _Db())
-    monkeypatch.setattr(video_chapter_pipeline.deepseek_service, 'generate_shot_video_prompt_ai', fake_generate_shot_video_prompt_ai)
     monkeypatch.setattr(video_chapter_pipeline, '_poll_video_job', fake_poll_video_job)
     monkeypatch.setattr(video_chapter_pipeline.video_gen_service, 'submit_video_job', fake_submit_video_job)
 
     result = asyncio.run(video_chapter_pipeline.regenerate_shot_video(194, api_key='video-key', ref_asset_ids=[86]))
 
-    assert captured['payload']['scene_location'] == '办公室'
     assert result is not None
 
 
