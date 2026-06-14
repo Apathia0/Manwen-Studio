@@ -134,6 +134,14 @@ export default function VideoStoryboardLayout({
           return;
         }
 
+        detail.shots.forEach(shot => {
+          if (shot.status === 'video_ready') {
+            videoGenStore.markSucceeded(shot.id);
+          } else if (shot.status === 'failed') {
+            videoGenStore.markFailed(shot.id, '视频生成失败');
+          }
+        });
+
         // 解析完成，清除 parsing 状态
         setParsing(false);
         await loadChapterAssets(status.chapter_id);
