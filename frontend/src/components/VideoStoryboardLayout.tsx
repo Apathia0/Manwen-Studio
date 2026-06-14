@@ -594,7 +594,6 @@ export default function VideoStoryboardLayout({
           concatVideoUrl={concatVideoUrl}
           selectedShotIds={selectedShotIds}
           skippedShotIds={skippedShotIds}
-          onSelectReferenceIds={setSelectedReferenceIds}
           onRefreshWorkflow={handleRefreshWorkflow}
           onConcatWorkflow={handleConcatWorkflow}
           onRegenerateStoryboard={handleRegenerateStoryboard}
