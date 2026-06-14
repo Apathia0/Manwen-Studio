@@ -1,5 +1,5 @@
 import { useRef, useState, useCallback, useEffect, type CSSProperties, type ReactNode } from 'react';
-import { RotateCcw } from 'lucide-react';
+import { RotateCcw, Download } from 'lucide-react';
 
 interface ImageZoomViewProps {
   src: string;
@@ -34,6 +34,8 @@ export default function ImageZoomView({
   const [imgStatus, setImgStatus] = useState<'loading' | 'loaded' | 'error'>('loading');
 
   const lastTouchDistanceRef = useRef<number | null>(null);
+
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
 
   const isModified = Math.abs(zoom - fitZoomRef.current) > 0.01 || translateX !== 0 || translateY !== 0;
 
@@ -151,6 +153,24 @@ export default function ImageZoomView({
     lastTouchDistanceRef.current = null;
   }, []);
 
+  const handleContextMenu = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    setContextMenu({ x: e.clientX, y: e.clientY });
+  }, []);
+
+  const handleDownload = useCallback(() => {
+    window.open(src, '_blank');
+    setContextMenu(null);
+  }, [src]);
+
+  // 右键菜单外点关闭
+  useEffect(() => {
+    if (!contextMenu) return;
+    const close = () => setContextMenu(null);
+    window.addEventListener('click', close);
+    return () => window.removeEventListener('click', close);
+  }, [contextMenu]);
+
   const handleImageLoad = useCallback(() => {
     const img = imgRef.current;
     const container = containerRef.current;
@@ -198,6 +218,7 @@ export default function ImageZoomView({
       onTouchStart={handleTouchStart}
       onTouchMove={handleTouchMove}
       onTouchEnd={handleTouchEnd}
+      onContextMenu={handleContextMenu}
     >
       {imgStatus !== 'error' && (
         <img
@@ -236,6 +257,22 @@ export default function ImageZoomView({
       {imgStatus === 'error' && (
         <div className="absolute inset-0 flex items-center justify-center">
           {fallback || <div className="text-sm text-white/50">图片加载失败</div>}
+        </div>
+      )}
+
+      {contextMenu && (
+        <div
+          className="fixed z-[100] min-w-[140px] overflow-hidden rounded-xl border border-white/10 bg-[#1e293b] py-1 shadow-2xl backdrop-blur-xl"
+          style={{ left: contextMenu.x, top: contextMenu.y }}
+        >
+          <button
+            type="button"
+            onClick={handleDownload}
+            className="flex w-full items-center gap-2 px-4 py-2 text-left text-sm text-white/90 transition hover:bg-white/10"
+          >
+            <Download size={14} />
+            下载图片
+          </button>
         </div>
       )}
     </div>
