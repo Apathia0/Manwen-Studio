@@ -347,7 +347,7 @@ def build_storyboard_director_messages(
         shot_segments_content=formatted_segments,
         shot_context=shot_context or "（当前镜头为独立镜头，无前后衔接要求）",
     )
-    system_prompt = STORYBOARD_DIRECTOR_SYSTEM_PROMPT.format(duration_seconds=duration_seconds)
+    system_prompt = STORYBOARD_DIRECTOR_SYSTEM_PROMPT.format(duration_seconds=duration_seconds, style_preset=style_desc)
     return system_prompt, user_message
 
 
