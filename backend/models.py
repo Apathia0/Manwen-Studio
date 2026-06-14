@@ -661,6 +661,11 @@ class BackgroundTask(Base):
     # 元数据
     metadata_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
 
+    # 配额回退字段（异步任务失败时自动回退）
+    quota_user_id: Mapped[int | None] = mapped_column(Integer, nullable=True, default=None)
+    quota_feature_key: Mapped[str | None] = mapped_column(String(128), nullable=True, default=None)
+    quota_amount: Mapped[int | None] = mapped_column(Integer, nullable=True, default=0)
+
 
 # ── 提示词模板系统 ──────────────────────────────────────
 

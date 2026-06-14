@@ -1,7 +1,8 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { createPortal } from 'react-dom';
-import { RotateCcw, Upload, Trash2, Wand2, X, Loader2, CheckSquare } from 'lucide-react';
+import { RotateCcw, Upload, Trash2, Wand2, X, Loader2, CheckSquare, MousePointer } from 'lucide-react';
 import { ImageRedrawModal } from './shared/ImageRedrawModal';
+import ImageZoomView from './shared/ImageZoomView';
 import AssetReferenceSelector from './AssetReferenceSelector';
 import type { VideoAsset } from '../api';
 
@@ -45,7 +46,6 @@ interface VideoCardWorkbenchProps {
 
 interface WorkbenchState {
   currentIndex: number;
-  zoomLevel: 1 | 1.35 | 1.7;
   isRedrawModalOpen: boolean;
   editingPrompt: string;
   busy: string | null;
@@ -56,7 +56,6 @@ export default function VideoCardWorkbench({ type, shotId, assetId, displayShotI
     const initialIndex = Math.max(0, resources.findIndex(r => r.id === assetId));
     return {
       currentIndex: initialIndex,
-      zoomLevel: 1,
       isRedrawModalOpen: false,
       editingPrompt: resources[initialIndex]?.prompt || '',
       busy: null,
@@ -174,13 +173,6 @@ export default function VideoCardWorkbench({ type, shotId, assetId, displayShotI
         case 'ArrowRight':
           handleNext();
           break;
-        case '+':
-        case '=':
-          setState(s => ({ ...s, zoomLevel: s.zoomLevel < 1.7 ? (s.zoomLevel === 1 ? 1.35 : 1.7) : 1 }));
-          break;
-        case '-':
-          setState(s => ({ ...s, zoomLevel: s.zoomLevel > 1 ? (s.zoomLevel === 1.7 ? 1.35 : 1) : 1 }));
-          break;
         case 'r':
         case 'R':
           setState(s => ({ ...s, isRedrawModalOpen: true }));
@@ -196,19 +188,12 @@ export default function VideoCardWorkbench({ type, shotId, assetId, displayShotI
     return () => document.removeEventListener('keydown', handleKeyDown);
   }, [handleKeyDown]);
 
-  // 拼装缩放按钮
-  const zoomButtons = [1, 1.35, 1.7].map(zoom => (
-    <button
-      key={zoom}
-      type="button"
-      onClick={() => setState(s => ({ ...s, zoomLevel: zoom as 1 | 1.35 | 1.7 }))}
-      className={`rounded-full px-3 py-1.5 text-xs transition-colors ${
-        state.zoomLevel === zoom ? 'bg-white text-slate-900' : 'bg-white/10 text-white hover:bg-white/20'
-      }`}
-    >
-      {Math.round(zoom * 100)}%
-    </button>
-  ));
+  const zoomHint = (
+    <div className="flex items-center gap-1.5 rounded-full bg-white/10 px-3 py-1.5 text-xs text-white/60">
+      <MousePointer size={12} />
+      <span>滚轮缩放 · 拖拽平移</span>
+    </div>
+  );
 
   // ────────── 视频类型：居中弹窗布局（与故事版一致）──────────
   if (type === 'video') {
@@ -239,19 +224,17 @@ export default function VideoCardWorkbench({ type, shotId, assetId, displayShotI
           {/* 弹窗主体：两栏布局 */}
           <div className="grid flex-1 gap-0 overflow-hidden lg:grid-cols-[minmax(0,1.5fr)_420px]">
             {/* 左侧：预览区（深色背景） */}
-            <div className="overflow-auto bg-[linear-gradient(180deg,_#0f172a_0%,_#111827_100%)] p-6">
+            <div className="overflow-hidden bg-[linear-gradient(180deg,_#0f172a_0%,_#111827_100%)] p-6">
               <div className="mb-4 flex items-center justify-between text-white/80">
                 <div className="text-sm font-medium">视频预览</div>
-                <div className="flex items-center gap-2">{zoomButtons}</div>
               </div>
-              <div className="mx-auto flex min-h-[62vh] w-full items-center justify-center rounded-[24px] border border-white/10 bg-black/20 p-4">
+              <div className="mx-auto flex h-[62vh] w-full items-center justify-center rounded-[24px] border border-white/10 bg-black/20 p-4">
                 <div className="rounded-[24px] bg-[#0b1220] p-4 shadow-2xl">
                   {previewUrl ? (
                     <video
                       src={previewUrl}
                       controls
                       className="mx-auto h-auto max-h-[56vh] rounded-xl shadow-2xl"
-                      style={{ transform: `scale(${state.zoomLevel})` }}
                     />
                   ) : (
                     <div className="flex min-h-[420px] min-w-[320px] items-center justify-center rounded-xl bg-[linear-gradient(180deg,_#08111d_0%,_#111827_100%)] text-white/70">
@@ -392,11 +375,6 @@ export default function VideoCardWorkbench({ type, shotId, assetId, displayShotI
   // ────────── 角色/故事版/场景类型：居中弹窗布局（漫画工作台样式）──────────
   const isCharacter = type === 'character';
   const isScene = type === 'scene';
-  const previewClass = state.zoomLevel === 1
-    ? 'max-w-[92%] max-h-none'
-    : state.zoomLevel === 1.35
-      ? 'max-w-none w-[780px]'
-      : 'max-w-none w-[940px]';
 
   const modal = (
     <div
@@ -464,25 +442,23 @@ export default function VideoCardWorkbench({ type, shotId, assetId, displayShotI
             </div>
 
             {/* 中间：预览区 */}
-            <div className="overflow-auto bg-[linear-gradient(180deg,_#0f172a_0%,_#111827_100%)] p-6">
+            <div className="overflow-hidden bg-[linear-gradient(180deg,_#0f172a_0%,_#111827_100%)] p-6">
               <div className="mb-4 flex items-center justify-between text-white/80">
                 <div className="text-sm font-medium">预览</div>
-                <div className="flex items-center gap-2">{zoomButtons}</div>
+                {zoomHint}
               </div>
-              <div className="mx-auto flex min-h-[55vh] w-full items-center justify-center rounded-[24px] border border-white/10 bg-black/20 p-4">
-                <div className="rounded-[24px] bg-[#0b1220] p-4 shadow-2xl">
-                  {previewUrl ? (
-                    <img
-                      src={previewUrl}
-                      alt="预览"
-                      className={`mx-auto h-auto object-contain rounded-xl shadow-2xl ${previewClass}`}
-                    />
-                  ) : (
-                    <div className="flex min-h-[320px] min-w-[280px] items-center justify-center rounded-xl bg-[linear-gradient(180deg,_#08111d_0%,_#111827_100%)] text-white/70">
-                      <Loader2 size={24} className="animate-spin" />
-                    </div>
-                  )}
-                </div>
+              <div className="mx-auto flex h-[55vh] w-full items-center justify-center rounded-[24px] border border-white/10 bg-black/20 p-4">
+                {previewUrl ? (
+                  <ImageZoomView
+                    src={previewUrl}
+                    alt="预览"
+                    className="h-full w-full rounded-xl"
+                  />
+                ) : (
+                  <div className="flex min-h-[320px] min-w-[280px] items-center justify-center rounded-xl bg-[linear-gradient(180deg,_#08111d_0%,_#111827_100%)] text-white/70">
+                    <Loader2 size={24} className="animate-spin" />
+                  </div>
+                )}
               </div>
             </div>
 
@@ -547,25 +523,23 @@ export default function VideoCardWorkbench({ type, shotId, assetId, displayShotI
           /* ── 故事版：两栏布局（左预览右面板，如 RefPreviewModal） ── */
           <div className="grid flex-1 gap-0 overflow-hidden lg:grid-cols-[minmax(0,1.5fr)_420px]">
             {/* 左侧：预览区（深色背景） */}
-            <div className="overflow-auto bg-[linear-gradient(180deg,_#0f172a_0%,_#111827_100%)] p-6">
+            <div className="overflow-hidden bg-[linear-gradient(180deg,_#0f172a_0%,_#111827_100%)] p-6">
               <div className="mb-4 flex items-center justify-between text-white/80">
                 <div className="text-sm font-medium">故事版图片</div>
-                <div className="flex items-center gap-2">{zoomButtons}</div>
+                {zoomHint}
               </div>
-              <div className="mx-auto flex min-h-[62vh] w-full items-center justify-center rounded-[24px] border border-white/10 bg-black/20 p-4">
-                <div className="rounded-[24px] bg-[#0b1220] p-4 shadow-2xl">
-                  {previewUrl ? (
-                    <img
-                      src={previewUrl}
-                      alt="故事版预览"
-                      className={`mx-auto h-auto object-contain rounded-xl shadow-2xl ${previewClass}`}
-                    />
-                  ) : (
-                    <div className="flex min-h-[420px] min-w-[320px] items-center justify-center rounded-xl bg-[linear-gradient(180deg,_#08111d_0%,_#111827_100%)] text-white/70">
-                      <Loader2 size={24} className="animate-spin" />
-                    </div>
-                  )}
-                </div>
+              <div className="mx-auto flex h-[62vh] w-full items-center justify-center rounded-[24px] border border-white/10 bg-black/20 p-4">
+                {previewUrl ? (
+                  <ImageZoomView
+                    src={previewUrl}
+                    alt="故事版预览"
+                    className="h-full w-full rounded-xl"
+                  />
+                ) : (
+                  <div className="flex min-h-[420px] min-w-[320px] items-center justify-center rounded-xl bg-[linear-gradient(180deg,_#08111d_0%,_#111827_100%)] text-white/70">
+                    <Loader2 size={24} className="animate-spin" />
+                  </div>
+                )}
               </div>
             </div>
 

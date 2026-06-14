@@ -213,6 +213,16 @@ def _migrate(target_engine=None):
                 conn.execute(text("ALTER TABLE users ADD COLUMN allow_api_key_override BOOLEAN DEFAULT FALSE"))
             if "allow_api_url_override" not in cols:
                 conn.execute(text("ALTER TABLE users ADD COLUMN allow_api_url_override BOOLEAN DEFAULT FALSE"))
+    if "background_tasks" in insp.get_table_names():
+        cols = {c["name"] for c in insp.get_columns("background_tasks")}
+        with db_engine.begin() as conn:
+            _prepare_migration_conn(conn)
+            if "quota_user_id" not in cols:
+                conn.execute(text("ALTER TABLE background_tasks ADD COLUMN quota_user_id INTEGER"))
+            if "quota_feature_key" not in cols:
+                conn.execute(text("ALTER TABLE background_tasks ADD COLUMN quota_feature_key VARCHAR(128)"))
+            if "quota_amount" not in cols:
+                conn.execute(text("ALTER TABLE background_tasks ADD COLUMN quota_amount INTEGER DEFAULT 0"))
     _migrate_video_tables(db_engine)
     _migrate_video_character_tables(db_engine)
     _seed_video_style_presets(db_engine)

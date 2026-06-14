@@ -11,6 +11,7 @@ import {
   type ShotAssetPromptDraft,
 } from '../api';
 import { ImageRedrawModal } from './shared/ImageRedrawModal';
+import ImageZoomView from './shared/ImageZoomView';
 import AssetReferenceSelector from './AssetReferenceSelector';
 import { toast } from '../lib/toast';
 
@@ -339,7 +340,7 @@ function MultiAssetWorkbench({
             })}
           </div>
 
-          <div className="flex-1 overflow-auto bg-[linear-gradient(180deg,_#0f172a_0%,_#111827_100%)] p-4 flex items-center justify-center">
+          <div className="flex-1 overflow-hidden bg-[linear-gradient(180deg,_#0f172a_0%,_#111827_100%)] p-4 flex items-center justify-center">
             {isGenerating ? (
               <div className="text-white/60 text-center">
                 <Loader2 size={48} className="animate-spin text-violet-400 mx-auto mb-3" />
@@ -348,7 +349,11 @@ function MultiAssetWorkbench({
                 <div className="text-xs mt-2 opacity-40">请稍候，生成完成后将自动更新</div>
               </div>
             ) : selected?.isAsset && selected?.imageSrc ? (
-              <img src={selected.imageSrc} alt={selected.label} className="max-h-full max-w-full rounded-2xl object-contain shadow-2xl" />
+              <ImageZoomView
+                src={selected.imageSrc}
+                alt={selected.label}
+                className="h-full w-full rounded-2xl"
+              />
             ) : (
               <div className="text-white/60 text-center">
                 <Sparkles size={32} className="mx-auto mb-2 opacity-40" />

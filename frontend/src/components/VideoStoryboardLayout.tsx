@@ -138,7 +138,7 @@ export default function VideoStoryboardLayout({
           if (shot.status === 'video_ready') {
             videoGenStore.markSucceeded(shot.id);
           } else if (shot.status === 'failed') {
-            videoGenStore.markFailed(shot.id, '视频生成失败');
+            videoGenStore.markFailed(shot.id, shot.error_message || '视频生成失败');
           }
         });
 
