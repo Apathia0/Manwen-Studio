@@ -3,6 +3,7 @@ import { X, Loader2 } from 'lucide-react';
 import { createPortal } from 'react-dom';
 import { toast } from '../../lib/toast';
 import type { ImageRedrawMode } from '../../api';
+import ImageZoomView from './ImageZoomView';
 
 /** 通用的图片重绘弹窗 Props */
 export interface ImageRedrawModalProps {
@@ -227,24 +228,30 @@ export function ImageRedrawModal({
               <div className="text-sm font-medium">选中图片</div>
               <div className="text-xs">{mode === 'partial' ? '在左图直接涂抹需要修改的区域' : '整图将按右侧说明整体重绘'}</div>
             </div>
-            <div className="mx-auto flex min-h-[62vh] w-full items-center justify-center rounded-[24px] border border-white/10 bg-black/20 p-4">
-              <div className="relative inline-block">
-                <img
-                  ref={imageRef}
+            <div className="mx-auto flex h-[62vh] w-full items-center justify-center rounded-[24px] border border-white/10 bg-black/20 p-4">
+              {mode === 'full' ? (
+                <ImageZoomView
                   src={imageSrc}
                   alt={title}
-                  onLoad={() => { setImageLoaded(true); syncCanvasSize(); }}
-                  draggable={false}
-                  loading="lazy"
-                  decoding="async"
-                  className={`block max-h-[72vh] max-w-full rounded-2xl object-contain shadow-2xl ${imageLoaded ? 'opacity-100' : 'opacity-0'}`}
+                  className="h-full w-full rounded-2xl"
                 />
-                {!imageLoaded && (
-                  <div className="absolute inset-0 flex min-h-[420px] min-w-[320px] items-center justify-center rounded-2xl bg-[linear-gradient(180deg,_#08111d_0%,_#111827_100%)] text-white/70">
-                    <Loader2 size={24} className="animate-spin" />
-                  </div>
-                )}
-                {mode === 'partial' && (
+              ) : (
+                <div className="relative inline-block">
+                  <img
+                    ref={imageRef}
+                    src={imageSrc}
+                    alt={title}
+                    onLoad={() => { setImageLoaded(true); syncCanvasSize(); }}
+                    draggable={false}
+                    loading="lazy"
+                    decoding="async"
+                    className={`block max-h-[72vh] max-w-full rounded-2xl object-contain shadow-2xl ${imageLoaded ? 'opacity-100' : 'opacity-0'}`}
+                  />
+                  {!imageLoaded && (
+                    <div className="absolute inset-0 flex min-h-[420px] min-w-[320px] items-center justify-center rounded-2xl bg-[linear-gradient(180deg,_#08111d_0%,_#111827_100%)] text-white/70">
+                      <Loader2 size={24} className="animate-spin" />
+                    </div>
+                  )}
                   <canvas
                     ref={canvasRef}
                     className={`absolute inset-0 h-full w-full rounded-2xl touch-none ${drawing ? 'cursor-grabbing' : 'cursor-crosshair'}`}
@@ -254,8 +261,8 @@ export function ImageRedrawModal({
                     onPointerCancel={stopDrawing}
                     onLostPointerCapture={stopDrawing}
                   />
-                )}
-              </div>
+                </div>
+              )}
             </div>
           </div>
 

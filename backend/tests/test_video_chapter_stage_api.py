@@ -645,6 +645,8 @@ def test_regenerate_shot_video_uses_image_api_key(monkeypatch):
     monkeypatch.setattr(video_router, "_user_video_api_key", lambda request: ("image-key", "url", "model"))
     monkeypatch.setattr(video_router, "get_chapter_workflow",
                         lambda wid: SimpleNamespace(id=wid, story_id=34))
+    monkeypatch.setattr(video_router, "_check_and_consume_quota_wrapper",
+                        lambda *a, **kw: {"used": 0, "limit": 999, "feature_key": "", "period_key": "", "base_limit": 0, "granted": 0})
 
     class FakeDb:
         def get(self, model, pk):

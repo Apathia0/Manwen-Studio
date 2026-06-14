@@ -32,6 +32,7 @@ _require_story_for_user = _main._require_story_for_user
 _user_deepseek_api_key = _main._user_deepseek_api_key
 _release_db_transaction = _main._release_db_transaction
 _check_and_consume_advanced_text_quota = _main._check_and_consume_advanced_text_quota
+_refund_quota = _main._refund_quota
 _build_framework_context = _main._build_framework_context
 
 
@@ -185,7 +186,7 @@ async def agent_chat(
 ):
     user = _require_user(request, db)
     story = _require_story_for_user(story_id, user, db)
-    _check_and_consume_advanced_text_quota(request, user.id, db, deduct=False)
+    _check_and_consume_advanced_text_quota(request, user.id, db, deduct=True)
 
     conversation_id = int(body.get("conversation_id") or 0)
     content = str(body.get("content") or "").strip()
@@ -321,6 +322,7 @@ async def agent_chat(
             raise
         except Exception as exc:
             logger.exception("Agent stream failed")
+            _refund_quota(persisted_user_id, "ai.text.advanced_calls.monthly_limit", 1, db)
             if not assistant_saved:
                 persist_assistant_message(f"错误: {exc}")
             yield {"event": "error", "data": json.dumps({"error": str(exc)}, ensure_ascii=False)}

@@ -241,6 +241,42 @@ FEATURE_CATALOG: list[dict] = [
 
 FEATURE_CATALOG_MAP = {item["key"]: item for item in FEATURE_CATALOG}
 
+PLAN_SEED_DEFAULTS: dict[str, dict[str, int | bool]] = {
+    "free": {
+        "framework.generate.monthly_limit": 5,
+        "chapter.expand.monthly_limit": 20,
+        "scene.generate.monthly_limit": 15,
+        "manga.image.generate.monthly_limit": 100,
+        "ai.text.advanced_calls.monthly_limit": 20,
+        "manga.max_image_count_per_chapter": 6,
+        "manga.allow_color_mode": False,
+        "video.shot.split.monthly_limit": 0,
+        "video.generate.count.monthly_limit": 0,
+    },
+    "pro": {
+        "framework.generate.monthly_limit": 50,
+        "chapter.expand.monthly_limit": 200,
+        "scene.generate.monthly_limit": 120,
+        "manga.image.generate.monthly_limit": 1100,
+        "ai.text.advanced_calls.monthly_limit": 180,
+        "manga.max_image_count_per_chapter": 12,
+        "manga.allow_color_mode": True,
+        "video.shot.split.monthly_limit": 5,
+        "video.generate.count.monthly_limit": 5,
+    },
+    "premium": {
+        "framework.generate.monthly_limit": 200,
+        "chapter.expand.monthly_limit": 1000,
+        "scene.generate.monthly_limit": 500,
+        "manga.image.generate.monthly_limit": 5500,
+        "ai.text.advanced_calls.monthly_limit": 600,
+        "manga.max_image_count_per_chapter": 20,
+        "manga.allow_color_mode": True,
+        "video.shot.split.monthly_limit": 10,
+        "video.generate.count.monthly_limit": 15,
+    },
+}
+
 @contextlib.asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用生命周期管理 — 替代废弃的 @app.on_event('startup') 语法"""
@@ -1102,43 +1138,8 @@ def _ensure_platform_seed(
     db.add_all([free, pro, premium])
     db.flush()
 
-    defaults = {
-    "free": {
-        "framework.generate.monthly_limit": 5,
-        "chapter.expand.monthly_limit": 20,
-        "scene.generate.monthly_limit": 15,
-        "manga.image.generate.monthly_limit": 100,
-        "ai.text.advanced_calls.monthly_limit": 20,
-        "manga.max_image_count_per_chapter": 6,
-        "manga.allow_color_mode": False,
-        "video.shot.split.monthly_limit": 0,
-        "video.generate.count.monthly_limit": 0,
-    },
-    "pro": {
-        "framework.generate.monthly_limit": 50,
-        "chapter.expand.monthly_limit": 200,
-        "scene.generate.monthly_limit": 120,
-        "manga.image.generate.monthly_limit": 1100,
-        "ai.text.advanced_calls.monthly_limit": 180,
-        "manga.max_image_count_per_chapter": 12,
-        "manga.allow_color_mode": True,
-        "video.shot.split.monthly_limit": 5,
-        "video.generate.count.monthly_limit": 5,
-    },
-    "premium": {
-        "framework.generate.monthly_limit": 200,
-        "chapter.expand.monthly_limit": 1000,
-        "scene.generate.monthly_limit": 500,
-        "manga.image.generate.monthly_limit": 5500,
-        "ai.text.advanced_calls.monthly_limit": 600,
-        "manga.max_image_count_per_chapter": 20,
-        "manga.allow_color_mode": True,
-        "video.shot.split.monthly_limit": 10,
-        "video.generate.count.monthly_limit": 15,
-    },
-    }
     for plan in [free, pro, premium]:
-        for key, value in defaults[plan.code].items():
+        for key, value in PLAN_SEED_DEFAULTS[plan.code].items():
             db.add(
                 PlanFeature(
                     plan_id=plan.id,
@@ -1197,21 +1198,10 @@ def _create_install_admin_user(normalized_admin: dict[str, str], db: Session) ->
 
 
 def _ensure_plan_feature_seed(db: Session, *, commit: bool = True) -> None:
-    default_limits = {
-        "free": {
-            "ai.text.advanced_calls.monthly_limit": 20,
-        },
-        "pro": {
-            "ai.text.advanced_calls.monthly_limit": 180,
-        },
-        "premium": {
-            "ai.text.advanced_calls.monthly_limit": 600,
-        },
-    }
     changed = False
     plans = db.query(Plan).all()
     for plan in plans:
-        plan_defaults = default_limits.get(plan.code, {})
+        plan_defaults = PLAN_SEED_DEFAULTS.get(plan.code, {})
         for feature in FEATURE_CATALOG:
             feature_key = str(feature["key"])
             feature_row = db.query(PlanFeature).filter(PlanFeature.plan_id == plan.id, PlanFeature.feature_key == feature_key).first()
@@ -1219,6 +1209,12 @@ def _ensure_plan_feature_seed(db: Session, *, commit: bool = True) -> None:
                 default_value = plan_defaults.get(feature_key, 0)
                 db.add(PlanFeature(plan_id=plan.id, feature_key=feature_key, value_json={"value": default_value}))
                 changed = True
+            elif feature_key in plan_defaults:
+                default_value = plan_defaults[feature_key]
+                current = feature_row.value_json or {}
+                if current.get("value") != default_value:
+                    feature_row.value_json = {"value": default_value}
+                    changed = True
             rule_row = db.query(PlanQuotaRule).filter(PlanQuotaRule.plan_id == plan.id, PlanQuotaRule.feature_key == feature_key).first()
             if not rule_row:
                 default_rule = feature.get("default_rule") if isinstance(feature.get("default_rule"), dict) else {}
@@ -2116,6 +2112,11 @@ def _check_and_consume_quota(
     return {"feature_key": feature_key, "used": used, "base_limit": base_limit, "granted": granted, "limit": limit, "period_key": period_key}
 
 
+def _refund_quota(user_id: int, feature_key: str, amount: int, db: Session) -> None:
+    """退还已扣除的配额（AI 调用失败时回退）。"""
+    task_manager.refund_quota(user_id, feature_key, amount, db)
+
+
 def _serialize_order(order: BillingOrder) -> dict:
     operator = None
     user_name = None
@@ -2297,7 +2298,6 @@ def _usage_entries_for_user(user_id: int, db: Session) -> list[dict]:
         "framework.generate.monthly_limit",
         "chapter.expand.monthly_limit",
         "scene.generate.monthly_limit",
-        "manga.image.generate.monthly_limit",
         "manga.image.generate.monthly_limit",
         "ai.text.advanced_calls.monthly_limit",
         "video.shot.split.monthly_limit",
@@ -8207,6 +8207,9 @@ async def generate_framework_endpoint(story_id: int, request: Request, db: Sessi
         captured_outline,
         timeout=600,  # 10分钟超时
         max_retries=2,
+        quota_user_id=user.id,
+        quota_feature_key="framework.generate.monthly_limit",
+        quota_amount=1,
         # 注意：story_id 已作为第一个 positional arg 传入，不要再传 story_id= 关键字参数
     )
 

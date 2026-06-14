@@ -8,6 +8,7 @@ import {
   uploadStoryCover,
   type Story,
 } from '../api';
+import ImageZoomView from './shared/ImageZoomView';
 
 interface Props {
   story: Story;
@@ -22,9 +23,7 @@ export default function NovelCoverEditModal({ story, onClose, onUpdated }: Props
   const [instruction, setInstruction] = useState('');
   const [loading, setLoading] = useState<LoadingAction>(null);
   const [error, setError] = useState('');
-  const [zoom, setZoom] = useState<1 | 1.35 | 1.7>(1.35);
   const [currentCover, setCurrentCover] = useState(story.cover_image);
-  const [imageLoaded, setImageLoaded] = useState(false);
 
   const coverUrl = coverImageUrl(currentCover);
 
@@ -60,7 +59,6 @@ export default function NovelCoverEditModal({ story, onClose, onUpdated }: Props
   const handleGenerate = async () => {
     setLoading('generate');
     setError('');
-    setImageLoaded(false);
     try {
       const result = await generateStoryCover(story.id, instruction.trim());
       setCurrentCover(result.cover_image);
@@ -79,7 +77,6 @@ export default function NovelCoverEditModal({ story, onClose, onUpdated }: Props
     }
     setLoading('adjust');
     setError('');
-    setImageLoaded(false);
     try {
       const result = await adjustStoryCover(story.id, instruction.trim());
       setCurrentCover(result.cover_image);
@@ -95,7 +92,6 @@ export default function NovelCoverEditModal({ story, onClose, onUpdated }: Props
     setInstruction('');
     setLoading('generate');
     setError('');
-    setImageLoaded(false);
     try {
       const result = await generateStoryCover(story.id, '');
       setCurrentCover(result.cover_image);
@@ -106,13 +102,6 @@ export default function NovelCoverEditModal({ story, onClose, onUpdated }: Props
       setLoading(null);
     }
   };
-
-  const previewImageClass =
-    zoom === 1
-      ? 'max-w-[92%] max-h-none'
-      : zoom === 1.35
-        ? 'max-w-none w-[780px]'
-        : 'max-w-none w-[940px]';
 
   const modal = (
     <div
@@ -141,45 +130,20 @@ export default function NovelCoverEditModal({ story, onClose, onUpdated }: Props
         </div>
 
         <div className="grid flex-1 gap-0 overflow-hidden lg:grid-cols-[minmax(0,1.5fr)_420px]">
-          <div className="relative overflow-auto bg-[linear-gradient(180deg,_#0f172a_0%,_#111827_100%)] p-6">
+          <div className="relative overflow-hidden bg-[linear-gradient(180deg,_#0f172a_0%,_#111827_100%)] p-6">
             <div className="mb-4 flex items-center justify-between text-white/80">
               <div className="text-sm font-medium">封面效果预览</div>
-              <div className="flex items-center gap-2">
-                <span className="text-xs text-white/60">缩放</span>
-                {[1, 1.35, 1.7].map((value) => (
-                  <button
-                    key={value}
-                    type="button"
-                    onClick={() => setZoom(value as 1 | 1.35 | 1.7)}
-                    className={`rounded-full px-3 py-1.5 text-xs transition-colors ${
-                      zoom === value
-                        ? 'bg-white text-slate-900'
-                        : 'bg-white/10 text-white hover:bg-white/20'
-                    }`}
-                  >
-                    {Math.round(value * 100)}%
-                  </button>
-                ))}
-              </div>
             </div>
-            <div className="relative mx-auto flex min-h-[62vh] w-full items-center justify-center rounded-[24px] border border-white/10 bg-black/20 p-4">
+            <div className="relative mx-auto flex h-[62vh] w-full items-center justify-center rounded-[24px] border border-white/10 bg-black/20 p-4">
               {coverUrl ? (
-                <div className="relative rounded-[24px] bg-[#0b1220] p-4 shadow-2xl">
-                  <img
+                <div className="relative h-full w-full">
+                  <ImageZoomView
                     src={coverUrl}
                     alt={`${story.title} 封面`}
-                    onLoad={() => setImageLoaded(true)}
-                    loading="lazy"
-                    decoding="async"
-                    className={`mx-auto h-auto max-h-[72vh] object-contain rounded-xl shadow-2xl transition-opacity ${previewImageClass} ${imageLoaded ? 'opacity-100' : 'opacity-0'}`}
+                    className="h-full w-full rounded-xl"
                   />
-                  {!imageLoaded && (
-                    <div className="flex min-h-[420px] min-w-[280px] items-center justify-center rounded-xl bg-[linear-gradient(180deg,_#08111d_0%,_#111827_100%)] text-white/70">
-                      <Loader2 size={24} className="animate-spin" />
-                    </div>
-                  )}
                   {loading !== null && (
-                    <div className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-3 rounded-[24px] bg-black/70 backdrop-blur-sm">
+                    <div className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-3 rounded-xl bg-black/70 backdrop-blur-sm">
                       <Loader2 size={40} className="animate-spin text-white" />
                       <span className="text-sm font-medium text-white/90">
                         {loading === 'generate' && 'AI 生成封面中...'}
