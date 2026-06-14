@@ -22,6 +22,7 @@ import { saveChapterShotPrompts, replaceVideoAsset, regenerateVideoAsset, upload
 import { canStartChapterWorkflowParse } from './chapterWorkflowUtils';
 
 import VideoCardWorkbench from './VideoCardWorkbench';
+import { videoGenStore } from '../videoGenStore';
 import {
   buildCharacterWorkbenchResources,
   buildWorkbenchBusyKey,
@@ -137,6 +138,10 @@ export default function ChapterVideoWorkflowPanel({
   const [workbenchBusyMap, setWorkbenchBusyMap] = useState<Record<string, string>>({});
 
   const [workbenchRefAssetIds, setWorkbenchRefAssetIds] = useState<number[]>([]);
+
+  // 订阅 videoGenStore 以响应式更新视频卡片 loading 状态
+  const [, setVideoGenTick] = useState(0);
+  useEffect(() => videoGenStore.subscribe(() => setVideoGenTick((t) => t + 1)), []);
 
   const normalizeAssetText = (value?: string | null) => (value || '').trim().toLowerCase();
 
@@ -518,17 +523,36 @@ export default function ChapterVideoWorkflowPanel({
                           <div className="mb-2 flex items-center gap-1 text-xs font-medium text-slate-600">
                             <Film size={12} /> 视频
                           </div>
-                          {hasVideo ? (
-                            <video
-                              src={toAssetUrl(shot.video_url)}
-                              controls
-                              className="h-32 w-full rounded-lg bg-slate-950 object-contain"
-                            />
-                          ) : (
-                            <div className="flex h-32 items-center justify-center rounded-lg border border-dashed border-[#d7e3f4] bg-white text-xs text-slate-400">
-                              暂无视频
-                            </div>
-                          )}
+                          {(() => {
+                            const videoState = videoGenStore.get(shot.id);
+                            const isGenerating = videoState?.active && videoState.status === 'pending';
+
+                            if (hasVideo) {
+                              return (
+                                <video
+                                  src={toAssetUrl(shot.video_url)}
+                                  controls
+                                  className="h-32 w-full rounded-lg bg-slate-950 object-contain"
+                                />
+                              );
+                            } else if (isGenerating) {
+                              return (
+                                <div className="flex h-32 flex-col items-center justify-center rounded-lg border-2 border-dashed border-blue-200 bg-blue-50">
+                                  <Loader2 className="h-8 w-8 animate-spin text-blue-500" />
+                                  <span className="mt-2 text-sm text-blue-600">视频生成中...</span>
+                                  {videoState.statusMsg && (
+                                    <span className="mt-1 text-xs text-blue-500">{videoState.statusMsg}</span>
+                                  )}
+                                </div>
+                              );
+                            } else {
+                              return (
+                                <div className="flex h-32 items-center justify-center rounded-lg border border-dashed border-[#d7e3f4] bg-white text-xs text-slate-400">
+                                  暂无视频
+                                </div>
+                              );
+                            }
+                          })()}
                         </button>
                       </div>
                     </div>
