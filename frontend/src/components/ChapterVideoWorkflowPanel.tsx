@@ -19,7 +19,6 @@ import {
 } from 'lucide-react';
 import type { ChapterVideoWorkflow, StoryVideoCharacter, VideoAsset } from '../api';
 import { saveChapterShotPrompts, replaceVideoAsset, regenerateVideoAsset, uploadShotStoryboard, uploadShotVideo, createVideoAsset, toPublicVideoAssetUrl } from '../api';
-import AssetReferenceSelector from './AssetReferenceSelector';
 import { canStartChapterWorkflowParse } from './chapterWorkflowUtils';
 
 import VideoCardWorkbench from './VideoCardWorkbench';
@@ -45,7 +44,6 @@ interface ChapterVideoWorkflowPanelProps {
   concatVideoUrl: string | null;
   selectedShotIds: Set<number>;
   skippedShotIds: Set<number>;
-  onSelectReferenceIds: (ids: number[]) => void;
   onRefreshWorkflow: () => Promise<void> | void;
   onConcatWorkflow: () => Promise<void> | void;
   onRegenerateStoryboard: (shotId: number, refAssetIds?: number[]) => Promise<void> | void;
@@ -108,7 +106,6 @@ export default function ChapterVideoWorkflowPanel({
   concatVideoUrl,
   selectedShotIds,
   skippedShotIds,
-  onSelectReferenceIds,
   onRefreshWorkflow,
   onConcatWorkflow,
   onRegenerateStoryboard,
@@ -130,7 +127,6 @@ export default function ChapterVideoWorkflowPanel({
   videoAspectRatio = '16:9',
   onVideoAspectRatioChange,
 }: ChapterVideoWorkflowPanelProps) {
-  const [selectorOpen, setSelectorOpen] = useState(false);
   const [concatModalOpen, setConcatModalOpen] = useState(false);
 
   const [videoWorkbench, setVideoWorkbench] = useState<{
@@ -200,18 +196,7 @@ export default function ChapterVideoWorkflowPanel({
     }
   }, []);
 
-  const getWorkflowRunningLabel = (item: ChapterVideoWorkflow | null): string => {
-    if (item?.message) return item.message;
-    const s = item?.stage || item?.workflow_status || '';
-    const labels: Record<string, string> = {
-      parsing_shots: '正在拆镜...',
-      generating_storyboards: '正在生成故事版...',
-      generating_videos: '正在生成视频...',
-      generating_details: '正在生成镜头详情...',
-      reanalyzing_prompts: '正在重新分析提示词...',
-    };
-    return labels[s] || '任务执行中...';
-  };
+
 
   if (workflowLoading && !videoWorkbench) {
     return (
@@ -262,12 +247,6 @@ export default function ChapterVideoWorkflowPanel({
             <Palette size={14} /> {selectedStyle || '选择风格'}
             {styleReferenceImageUrl && <span className="text-blue-500">(自定义)</span>}
           </button>
-          <button
-            onClick={() => setSelectorOpen(true)}
-            className="rounded-lg border border-[#d7e3f4] bg-white px-2.5 py-1.5 text-xs text-slate-600 hover:bg-slate-50"
-          >
-            角色参考图 {selectedReferenceIds.length > 0 ? `(${selectedReferenceIds.length})` : ''}
-          </button>
         </div>
 
         <div className="flex items-center gap-1.5">
@@ -314,7 +293,7 @@ export default function ChapterVideoWorkflowPanel({
       </div>
 
       {/* ── 空状态 ── */}
-      {!workflow && (
+      {(!workflow || (!parsing && sortedShots.length === 0)) && (
         <div className="flex flex-1 items-center justify-center">
           <div className="max-w-md px-8 text-center text-slate-400">
             <Clapperboard size={46} className="mx-auto mb-3 opacity-40" />
@@ -339,16 +318,7 @@ export default function ChapterVideoWorkflowPanel({
                 </div>
               </div>
             )}
-            {/* 后台任务执行中遮罩 */}
-            {workflowRunning && !parsing && (
-              <div className="absolute inset-0 z-10 flex items-center justify-center bg-white/80 backdrop-blur-sm">
-                <div className="flex flex-col items-center gap-3">
-                  <Loader2 size={32} className="animate-spin text-blue-500" />
-                  <span className="text-sm font-medium text-slate-600">{getWorkflowRunningLabel(workflow)}</span>
-                  {retryHint && <span className="text-xs text-amber-600">{retryHint}</span>}
-                </div>
-              </div>
-            )}
+            {/* 后台任务执行中：不使用全屏遮罩，通过各按钮 disabled 状态和状态标签提示用户 */}
             {/* ── 镜头列表 ── */}
             <div className="flex-1 min-w-0 overflow-y-auto">
             {/* 镜头操作栏 */}
@@ -625,23 +595,6 @@ export default function ChapterVideoWorkflowPanel({
         </>
       )}
 
-      {selectorOpen && (
-        <AssetReferenceSelector
-          availableAssets={characterAssets}
-          selectedIds={selectedReferenceIds}
-          shotStoryboards={sortedShots.filter(s => s.storyboard_image_url).map(s => ({
-            id: s.id,
-            file_path: s.storyboard_image_url || '',
-            name: `镜头${s.shot_index} 故事版`,
-          }))}
-          onConfirm={(ids) => {
-            onSelectReferenceIds(ids);
-            setSelectorOpen(false);
-          }}
-          onClose={() => setSelectorOpen(false)}
-        />
-      )}
-
       {concatModalOpen && (
         <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/50 backdrop-blur-sm" onClick={() => setConcatModalOpen(false)}>
           <div className="w-full max-w-lg rounded-2xl bg-white p-6 shadow-2xl" onClick={e => e.stopPropagation()}>
@@ -872,23 +825,55 @@ export default function ChapterVideoWorkflowPanel({
             });
           };
         } else if (videoWorkbench.type === 'scene') {
+          const extractSceneName = (prompt?: string | null): string => {
+            if (!prompt) return '';
+            const lines = prompt.split('\n').map(l => l.replace(/【[^】]*】/g, '').trim()).filter(Boolean);
+            for (const line of lines) {
+              if (line.startsWith('Part') || line.startsWith('ENVIRONMENT')) continue;
+              const cleaned = line.replace(/^[：:]\s*/, '');
+              if (cleaned.length >= 2) return cleaned.slice(0, 20);
+            }
+            return '';
+          };
+          // 场景资产匹配：ID → 归一化名称（去掉 Scene - 前缀，双向包含）→ 提示词 → 任意有图的场景
           const existingSceneAsset = (workbenchShot.scene_reference_ids || [])
             .map((assetId) => chapterAssets.find((asset) => asset.id === assetId))
             .find(Boolean)
-            || chapterAssets.find((asset) => asset.asset_type === 'scene_reference' && asset.prompt === workbenchShot.scene_prompt);
+            || (() => {
+              if (!workbenchShot.scene_location) return null;
+              const targetLoc = workbenchShot.scene_location.trim().toLowerCase();
+              return chapterAssets.find((asset) => {
+                if (asset.asset_type !== 'scene_reference') return false;
+                const normalizedName = (asset.name || '').replace(/^Scene\s*-\s*/i, '').trim().toLowerCase();
+                return normalizedName.includes(targetLoc) || targetLoc.includes(normalizedName);
+              });
+            })()
+            || chapterAssets.find((asset) => asset.asset_type === 'scene_reference' && asset.prompt === workbenchShot.scene_prompt)
+            || chapterAssets.find((asset) => asset.asset_type === 'scene_reference' && asset.file_path);
           const sceneRes = workbenchShot.scene_prompt
-            ? [{ id: workbenchShot.id + 100000, assetId: existingSceneAsset?.id, url: existingSceneAsset?.file_path || '', prompt: workbenchShot.scene_prompt, label: '场景', characterName: '__scene__' }]
+            ? [{ id: workbenchShot.id + 100000, assetId: existingSceneAsset?.id, url: existingSceneAsset?.file_path || '', prompt: workbenchShot.scene_prompt, label: existingSceneAsset?.name || workbenchShot.scene_location || extractSceneName(workbenchShot.scene_prompt) || '场景', characterName: '__scene__' }]
             : [];
-          const propRes = (workbenchShot.prop_prompts ?? []).map((p, i) => ({
-            assetId: workbenchShot.prop_reference_ids?.[i]
-              ?? chapterAssets.find((asset) => asset.asset_type === 'prop_reference' && ((asset.name || '').trim() === `Prop - ${p.name || `道具${i + 1}`}` || (asset.prompt || '').trim() === p.prompt))?.id,
-            id: workbenchShot.id + 200000 + i,
-            url: chapterAssets.find((asset) => asset.id === (workbenchShot.prop_reference_ids?.[i] ?? -1))?.file_path
-              || chapterAssets.find((asset) => asset.asset_type === 'prop_reference' && ((asset.name || '').trim() === `Prop - ${p.name || `道具${i + 1}`}` || (asset.prompt || '').trim() === p.prompt))?.file_path || '',
-            prompt: p.prompt,
-            label: p.name || `道具${i + 1}`,
-            characterName: p.name || `道具${i + 1}`,
-          }));
+          // 道具资产匹配：ID → 归一化名称（去掉 Prop - 前缀，忽略大小写）→ 提示词
+          const propRes = (workbenchShot.prop_prompts ?? []).map((p, i) => {
+            const targetName = (p.name || `道具${i + 1}`).trim().toLowerCase();
+            const findPropAsset = () => chapterAssets.find((asset) => {
+              if (asset.asset_type !== 'prop_reference') return false;
+              const normalizedName = (asset.name || '').replace(/^Prop\s*-\s*/i, '').trim().toLowerCase();
+              return normalizedName === targetName || (asset.prompt || '').trim() === p.prompt;
+            });
+            const matchedAsset = workbenchShot.prop_reference_ids?.[i]
+              ? chapterAssets.find((asset) => asset.id === workbenchShot.prop_reference_ids![i])
+              : null;
+            const existingPropAsset = matchedAsset || findPropAsset();
+            return {
+              assetId: existingPropAsset?.id,
+              id: workbenchShot.id + 200000 + i,
+              url: existingPropAsset?.file_path || '',
+              prompt: p.prompt,
+              label: p.name || `道具${i + 1}`,
+              characterName: p.name || `道具${i + 1}`,
+            };
+          });
           resources = [...sceneRes, ...propRes];
           onRegenerate = async (resourceId: number) => {
             const r = resources.find(res => res.id === resourceId);

@@ -7,5 +7,5 @@ export function canStartChapterWorkflowParse(params: {
 }): boolean {
   if (params.parsing || params.workflowRunning) return false;
   if (!params.workflowExists) return true;
-  return ['pending', 'shots_ready', 'failed'].includes(params.status) || !params.hasShots;
+  return !params.hasShots;
 }

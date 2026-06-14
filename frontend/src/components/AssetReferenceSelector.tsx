@@ -67,6 +67,17 @@ export default function AssetReferenceSelector({
     // 'custom' 保持当前勾选不变
   };
 
+  const getThumbLabel = (a: VideoAsset): string => {
+    if (a.asset_type === 'storyboard_frame' || a.asset_type === 'storyboard') {
+      const m = a.name.match(/分镜\s*(\d+)/);
+      return m ? `分镜${m[1]}的故事版` : a.name || '故事版';
+    }
+    if (a.asset_type === 'character_reference' || a.asset_type === 'character') return a.name || '角色';
+    if (a.asset_type === 'scene_reference' || a.asset_type === 'scene' || a.asset_type === 'background') return a.name || '场景';
+    if (a.asset_type === 'prop_reference') return a.name || '道具';
+    return a.name;
+  };
+
   const toggle = (id: number) => {
     setChecked(prev => {
       const next = new Set(prev);
@@ -102,7 +113,7 @@ export default function AssetReferenceSelector({
   return (
     <div className="fixed inset-0 z-[60] flex items-center justify-center bg-[rgba(15,23,42,0.5)] p-4 backdrop-blur-sm" onClick={onClose}>
       <div
-        className="w-[min(640px,94vw)] max-h-[80vh] flex flex-col overflow-hidden rounded-2xl border border-[#d7e3f4] bg-white shadow-xl"
+        className="flex h-[85vh] w-[min(1200px,90vw)] flex-col overflow-hidden rounded-[30px] border border-[#d7e3f4] bg-white shadow-[0_30px_90px_rgba(15,23,42,0.28)]"
         onClick={(e) => e.stopPropagation()}
       >
         {/* 标题栏 */}
@@ -165,7 +176,7 @@ export default function AssetReferenceSelector({
                           checked.has(a.id) ? 'border-[#2563eb] ring-2 ring-blue-200' : 'border-transparent hover:border-slate-300'
                         }`}
                     >
-                      <div className="w-16 h-16 relative">
+                      <div className="w-24 h-24 relative">
                         <img
                           src={toAssetUrl(a.file_path)}
                           alt={a.name}
@@ -182,12 +193,12 @@ export default function AssetReferenceSelector({
                         </div>
                       )}
                       {(recommendedIds || []).includes(a.id) && (
-                        <div className="absolute top-1 left-1 rounded bg-amber-500 px-1.5 py-0.5 text-[8px] font-medium text-white">
+                        <div className="absolute top-1 left-1 rounded bg-amber-500 px-1.5 py-0.5 text-[9px] font-medium text-white">
                           推荐
                         </div>
                       )}
-                      <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/60 to-transparent p-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                        <div className="text-[8px] text-white truncate">{a.name}</div>
+                      <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/70 via-black/40 to-transparent p-1.5 pt-4">
+                        <div className="text-[10px] text-white truncate leading-tight">{getThumbLabel(a)}</div>
                       </div>
                     </div>
                   ))}
