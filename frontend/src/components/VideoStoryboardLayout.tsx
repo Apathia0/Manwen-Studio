@@ -35,6 +35,7 @@ import ChapterListPanel from './ChapterListPanel';
 import ChapterVideoWorkflowPanel from './ChapterVideoWorkflowPanel';
 import StyleSelectorModal from './StyleSelectorModal';
 import { toast } from '../lib/toast';
+import { videoGenStore } from '../videoGenStore';
 
 interface Props {
   story: Story;
@@ -419,6 +420,12 @@ export default function VideoStoryboardLayout({
     }
     try {
       setWorkflowRunning(true);
+      
+      // 为每个选中的镜头创建初始状态
+      shotIds.forEach(shotId => {
+        videoGenStore.startJob(shotId, 0);
+      });
+      
       const status = await generateChapterWorkflowVideos(workflow.id, { shot_ids: shotIds });
       setWorkflow((prev) => (prev && prev.id === workflow.id ? { ...prev, ...(status as Partial<ChapterVideoWorkflow>) } : prev));
       toast.success('视频生成任务已提交');
