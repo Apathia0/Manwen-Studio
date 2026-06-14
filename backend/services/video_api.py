@@ -66,10 +66,14 @@ SUPPORTED_MODELS: dict[str, dict] = {
     "jimeng-video-3.0-fast": {"name": "即梦视频 3.0 Fast", "supports_image": False},
     "jimeng-video-3.5-pro": {"name": "即梦视频 3.5 Pro", "supports_image": False},
     "dance2-fast": {"name": "Dance2 Fast", "supports_image": False},
+    # ── Lingdong API (灵动中转站) 模型 ──
+    "sd-2-vip": {"name": "Seedance 2.0 VIP (九参素材版)", "supports_image": True},
+    "sd-2-vip-720": {"name": "Seedance 2.0 VIP 720", "supports_image": True},
+    "seedance-2.0-fast": {"name": "Seedance 2.0 Fast", "supports_image": True},
 }
 
 ALLOWED_ASPECT_RATIOS = ["16:9", "9:16", "1:1", "4:3", "3:4", "3:2", "2:3"]
-ALLOWED_SIZES = ["720P", "1080P", "4K"]
+ALLOWED_SIZES = ["720P", "1080P", "1K", "2K", "4K"]
 
 
 def _timeout(*, connect: float, read: float, write: float, pool: float = 30.0) -> httpx.Timeout:
@@ -200,7 +204,12 @@ async def create_video_job(
     model = model or _resolved_model()
     if aspect_ratio not in ALLOWED_ASPECT_RATIOS:
         aspect_ratio = "16:9"
-    if size not in ALLOWED_SIZES:
+    model_lower = model.lower()
+    # seedance-2.0-fast 的 resolution 参数不接受 720P
+    if "seedance" in model_lower and "fast" in model_lower:
+        if size not in ("1080P", "1K", "2K", "4K"):
+            size = "1080P"
+    elif size not in ALLOWED_SIZES:
         size = "720P"
 
     headers = _auth_headers(api_key, base_url=base_url, model=model)
@@ -209,20 +218,60 @@ async def create_video_job(
     payload: dict = {
         "model": model,
         "prompt": prompt.strip(),
-        "size": "large",
         "duration": max(4, min(15, duration_seconds)),
-        "orientation": _aspect_to_orientation(aspect_ratio),
     }
-    if images:
-        remote_images = [img for img in images if img.lower().startswith(("http://", "https://"))]
-        if remote_images:
-            payload["images"] = remote_images
-            logger.info("[video] 参考图 %d 张（已过滤 %d 张本地不可达路径）: %s",
-                         len(remote_images), len(images) - len(remote_images),
-                         [u[:60] for u in remote_images])
 
-    logger.info("[video] 提交任务 payload: model=%s prompt_len=%d size=%s orientation=%s duration=%s refs=%s url=%s",
-                 model, len(prompt), payload.get("size"), payload.get("orientation"), payload.get("duration"),
+    # ── 模型感知参数适配 ──
+    # Lingdong API: seedance-2.0-fast 系列使用 ratio+resolution，
+    # sd-2-vip 系列使用 size+orientation
+    model_lower = model.lower()
+    if "seedance" in model_lower and "fast" in model_lower:
+        # seedance-2.0-fast / seedance-2.0-fast-xxx
+        payload["ratio"] = aspect_ratio
+        payload["resolution"] = size
+        # 可选的 watermark / first_frame 等不由调用方传入，保持默认
+    else:
+        # sd-2-vip, sd-2-vip-720 及其他 New API 模型
+        payload["size"] = "large"
+        payload["orientation"] = _aspect_to_orientation(aspect_ratio)
+
+    if images:
+        # ── 自动将本地图片上传到 OSS，确保第三方 API 可访问 ──
+        oss_urls: list[str] = []
+        local_paths: list[str] = []
+        for img in images:
+            img = img.strip()
+            if img.lower().startswith(("http://", "https://")):
+                oss_urls.append(img)
+            else:
+                local_paths.append(img)
+        if local_paths:
+            # 确保 OSS 已从数据库加载配置
+            from . import oss as oss_service
+            if not oss_service.is_enabled():
+                oss_service.auto_configure_from_db()
+            if oss_service.is_enabled():
+                for local_path in local_paths:
+                    try:
+                        oss_url = await run_blocking(oss_service.upload_file, local_path)
+                        if oss_url:
+                            oss_urls.append(oss_url)
+                            logger.info("[video] 本地参考图上 OSS 成功: %s → %s", local_path, oss_url)
+                        else:
+                            logger.warning("[video] 本地参考图上 OSS 返回空，跳过: %s", local_path)
+                    except Exception as exc:
+                        logger.warning("[video] 本地参考图上 OSS 失败: %s — %s", local_path, exc)
+            else:
+                logger.warning("[video] OSS 未配置，无法上传本地参考图: %s", local_paths)
+        if oss_urls:
+            payload["images"] = oss_urls
+            logger.info("[video] 参考图 %d 张: %s",
+                         len(oss_urls), [u[:60] for u in oss_urls])
+        else:
+            logger.warning("[video] 所有参考图均为本地路径且 OSS 上传失败，本次任务无参考图")
+
+    logger.info("[video] 提交任务 payload: model=%s prompt_len=%d duration=%s refs=%s url=%s",
+                 model, len(prompt), payload.get("duration"),
                  [u[:60] for u in payload.get("images", [])], url)
     last_err: Exception | None = None
     for attempt in range(1, MAX_RETRIES + 1):

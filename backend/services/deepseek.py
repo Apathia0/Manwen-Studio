@@ -2971,149 +2971,7 @@ def _repair_broken_json_fields(content: str) -> str:
     return content[:open_brace] + 'null' + content[close_brace:]
 
 
-async def parse_chapter_to_shots(
-    chapter_text: str,
-    character_profiles: str = "",
-    api_key: str | None = None,
-) -> list[dict]:
-    """调用 DeepSeek 将章节正文解析为 15 秒完整分镜列表。
-
-    自动处理超长正文：超出 MAX_PARSE_INPUT_CHARS 时按段落边界分段，
-    分段调用 AI 后合并 shot_index 返回完整镜头列表。
-
-    返回格式：
-    [
-        {
-            "shot_index": 1,
-            "source_text_span": "原文片段",
-            "scene_location": "场景",
-            "time_of_day": "时间",
-            "characters": ["角色名"],
-            "story_summary": "摘要",
-            "dialogue_or_narration": "对白/旁白",
-            "camera_plan": "运镜",
-            "motion_plan": "动作",
-            "emotion_plan": "情绪",
-            "continuity_notes": "连续性",
-        },
-        ...
-    ]
-    """
-    if len(chapter_text) <= MAX_PARSE_INPUT_CHARS:
-        return await _parse_full_chunk(chapter_text, character_profiles, api_key)
-
-    chunks = _split_text_at_paragraph_boundaries(chapter_text, MAX_PARSE_INPUT_CHARS)
-    all_shots: list[dict] = []
-    shot_offset = 0
-    errors: list[str] = []
-
-    for i, chunk in enumerate(chunks):
-        chunk_label = f"（第 {i + 1}/{len(chunks)} 段）"
-        try:
-            chunk_shots = await _parse_full_chunk(chunk, character_profiles, api_key, chunk_label)
-        except ValueError as e:
-            errors.append(str(e))
-            continue
-
-        for shot in chunk_shots:
-            idx = shot.get("shot_index", 1)
-            shot["shot_index"] = idx + shot_offset
-        shot_offset += len(chunk_shots)
-        all_shots.extend(chunk_shots)
-
-    if not all_shots:
-        error_detail = "\n".join(errors[:3]) if errors else "未知错误"
-        raise ValueError(f"分段拆镜失败：所有段落均未返回有效镜头\n分段详情：{len(chunks)} 段，{len(errors)} 段失败\n{error_detail}")
-
-    return all_shots
-
-
-async def _parse_full_chunk(
-    chunk_text: str,
-    character_profiles: str = "",
-    api_key: str | None = None,
-    chunk_label: str = "",
-) -> list[dict]:
-    """对单段正文调用 DeepSeek 进行完整拆镜（10 字段）。"""
-    from services.video_chapter_prompts import SHOT_PARSE_SYSTEM_PROMPT, build_shot_parse_user_prompt
-
-    if chunk_label:
-        user_prompt = f"{chunk_label}\n\n{SHOT_PARSE_SYSTEM_PROMPT}\n\n{chunk_text}"
-    else:
-        user_prompt = build_shot_parse_user_prompt(chunk_text)
-    if character_profiles:
-        user_prompt += f"\n\n## 角色外貌设定（参考）\n{character_profiles}"
-
-    payload = {
-        "model": DEEPSEEK_MODEL,
-        "messages": [
-            {"role": "system", "content": SHOT_PARSE_SYSTEM_PROMPT},
-            {"role": "user", "content": user_prompt},
-        ],
-        "stream": False,
-        "max_tokens": 32768,
-        "response_format": {"type": "json_object"},
-    }
-
-    async with httpx.AsyncClient(timeout=600) as client:
-        resp = await client.post(
-            f"{DEEPSEEK_BASE_URL}/chat/completions",
-            json=payload,
-            headers=_deepseek_auth_headers(api_key),
-        )
-        resp.raise_for_status()
-        data = _response_json(resp, context="DeepSeek")
-        content = data["choices"][0]["message"]["content"]
-
-        # 解析后输出结构化日志摘要
-        try:
-            _log_shot_summary(logger, content, "完整拆镜")
-        except Exception:
-            logger.info("完整拆镜原始返回: %s", content[:500])
-
-    try:
-        result = _extract_json_object(content)
-    except ValueError:
-        # DeepSeek 偶发返回 JSON 数组 [shot, ...] 而非 {"shots": [...]}
-        try:
-            raw_parsed = _loads_json_lenient(content)
-        except json.JSONDecodeError:
-            raw_parsed = None
-        if isinstance(raw_parsed, list) and all(isinstance(item, dict) for item in raw_parsed):
-            result = {"shots": raw_parsed}
-        else:
-            repaired = _repair_broken_json_fields(content)
-            if repaired != content:
-                try:
-                    result = _extract_json_object(repaired)
-                except ValueError as e:
-                    truncated_repaired = _repair_truncated_json(repaired)
-                    if truncated_repaired != repaired:
-                        try:
-                            result = _extract_json_object(truncated_repaired)
-                        except ValueError as truncated_error:
-                            raise ValueError(f"完整拆镜失败（{chunk_label or '单段'}）：JSON 截断修复后仍无法解析 — {truncated_error}\n原始响应：{content[:500]}") from truncated_error
-                    else:
-                        raise ValueError(f"完整拆镜失败（{chunk_label or '单段'}）：JSON 解析错误 — {e}\n原始响应：{content[:500]}") from e
-            else:
-                truncated_repaired = _repair_truncated_json(content)
-                if truncated_repaired != content:
-                    try:
-                        result = _extract_json_object(truncated_repaired)
-                    except ValueError as e:
-                        raise ValueError(f"完整拆镜失败（{chunk_label or '单段'}）：JSON 截断修复后仍无法解析 — {e}\n原始响应：{content[:500]}") from e
-                else:
-                    raise ValueError(f"完整拆镜失败（{chunk_label or '单段'}）：JSON 解析错误，且未发现可修复的损坏字段\n原始响应：{content[:500]}")
-    
-    shots = result.get("shots", [])
-    if not isinstance(shots, list) or len(shots) == 0:
-        raise ValueError(f"完整拆镜失败（{chunk_label or '单段'}）：shots 数组为空或格式错误 — {content[:500]}")
-
-    return shots
-
-
 # 单段拆镜输入最大安全字符数
-MAX_PARSE_INPUT_CHARS = 4000
 MAX_LITE_PARSE_INPUT_CHARS = 4000
 
 
@@ -3170,7 +3028,7 @@ async def _parse_lite_chunk(
             {"role": "user", "content": user_prompt},
         ],
         "stream": False,
-        "max_tokens": 8192,
+        "max_tokens": 32768,
         "response_format": {"type": "json_object"},
     }
 
@@ -3320,10 +3178,28 @@ _STORYBOARD_RETRY_REINFORCEMENT = """
 
 ## ⚠️ 输出格式强制要求（必须遵守）
 
-直接输出 AI 绘图提示词本身。
-禁止输出任何开场白、解释、角色扮演回复、自我介绍、说明性文字。
-禁止输出：'好的'、'以下是根据'、'我会'、'作为'、'交给我'、'我理解' 等元内容。
-直接以 '# 电影故事板生成提示词' 或 '电影级故事板' 开头，输出完整的生图提示词。"""
+直接输出 AI 绘图提示词本身，禁止输出任何开场白、解释、角色扮演回复、自我介绍、说明性文字。
+
+禁止输出以下元内容：
+- ❌ "好的，" / "好的 " / "以下是根据" / "我会严格遵循"
+- ❌ "交给我来处理" / "作为您指定的" / "已经收到"
+- ❌ "作为你的" / "听从你的指示" / "按照你的要求"
+- ❌ "我理解你的" / "明白你的需求" / "以下是为你定制的"
+- ❌ "让我来" / "我来为你" / "交给我" / "已完整接收"
+
+必须以以下格式之一开头：
+- '# 电影故事板生成提示词'
+- '# 电影级故事板'
+- '## 项目'
+- '电影级故事板'
+- '一张完整'
+
+必须包含以下五个区域（缺一不可）：
+1. 项目总设定栏（顶部窄栏）
+2. 角色/主体设定区（左上部）
+3. 场景与环境设定区（右上部）
+4. 核心分镜故事板（中部主区域）
+5. 灯光/镜头/剪辑/声音设计区（底部）"""
 
 
 async def generate_shot_storyboard_prompt(
@@ -3342,6 +3218,36 @@ async def generate_shot_storyboard_prompt(
     """
     from services.video_chapter_prompts import build_storyboard_director_messages
 
+    # ── 从 storyboard_json 中提取分段内容 ──
+    sj = shot_data.get("storyboard_json")
+    shot_segments_content = None
+    additional_sj_reference = ""
+    if isinstance(sj, dict):
+        segments = sj.get("segments")
+        if segments and isinstance(segments, list):
+            parts = []
+            for seg in segments:
+                start = seg.get("start_second", 0)
+                end = seg.get("end_second", 0)
+                task = seg.get("story_task", "")
+                visual = seg.get("visual_action", "")
+                dialogue = seg.get("dialogue_or_narration", "") or ""
+                inner = seg.get("inner_thoughts", "") or ""
+                line = f"- {start}-{end}s：{task}"
+                if visual:
+                    line += f"，动作：{visual}"
+                if dialogue:
+                    line += f"，对白：「{dialogue}」"
+                if inner:
+                    line += f"，内心：「{inner}」"
+                parts.append(line)
+            if parts:
+                shot_segments_content = "\n".join(parts)
+        # storyboard_json 的非 segments 字符串字段作为补充参考
+        sj_values = [v for v in sj.values() if isinstance(v, str) and v.strip() and v != str(segments)]
+        if sj_values:
+            additional_sj_reference = "\n\n## 故事板导演分析参考\n\n" + "\n".join(sj_values)
+
     system_prompt, user_message = build_storyboard_director_messages(
         scene_location=shot_data.get("scene_location"),
         time_of_day=shot_data.get("time_of_day"),
@@ -3355,13 +3261,11 @@ async def generate_shot_storyboard_prompt(
         duration_seconds=shot_data.get("duration_seconds", 15),
         source_text_span=shot_data.get("source_text_span"),
         shot_context=shot_data.get("shot_context"),
+        shot_segments_content=shot_segments_content,
     )
 
-    sj = shot_data.get("storyboard_json")
-    if isinstance(sj, dict):
-        sj_values = [v for v in sj.values() if isinstance(v, str) and v.strip()]
-        if sj_values:
-            user_message += "\n\n## 故事板导演分析参考\n\n" + "\n".join(sj_values)
+    if additional_sj_reference:
+        user_message += additional_sj_reference
 
     # 如果 shot_context 中包含连续性要求，追加到 system prompt 末尾
     ctx = shot_data.get("shot_context")
@@ -3689,7 +3593,7 @@ async def generate_shot_video_prompt_ai(
             {"role": "user", "content": user_prompt},
         ],
         "stream": False,
-        "max_tokens": 4096,
+        "max_tokens": 8192,
         "response_format": {"type": "json_object"},
     }
 

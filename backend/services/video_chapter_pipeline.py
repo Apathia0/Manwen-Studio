@@ -162,12 +162,20 @@ def save_shots_from_parse(workflow_id: int, shots_data: list[dict[str, Any]]) ->
 
 
 def _validate_shot_skeleton(shot_data: dict[str, Any]) -> None:
-    """校验拆镜骨架的必填字段。"""
+    """校验拆镜骨架的必填字段，缺失 story_summary/source_text_span 时降级填充而非阻断。"""
     shot_index = int(shot_data.get("shot_index", 0) or 0)
+    if shot_index <= 0:
+        raise ValueError(f"拆镜骨架 shot_index 无效: {shot_index}")
+
     source_text_span = str(shot_data.get("source_text_span") or "").strip()
+    if not source_text_span:
+        logger.warning("镜头 %d 缺少 source_text_span，设为空占位", shot_index)
+        shot_data["source_text_span"] = f"（第 {shot_index} 镜）"
+
     story_summary = str(shot_data.get("story_summary") or "").strip()
-    if shot_index <= 0 or not source_text_span or not story_summary:
-        raise ValueError(f"拆镜骨架字段不完整: shot_index={shot_index} source_text_span={bool(source_text_span)} story_summary={bool(story_summary)}")
+    if not story_summary:
+        logger.warning("镜头 %d 缺少 story_summary，设为空占位", shot_index)
+        shot_data["story_summary"] = f"镜头 {shot_index}"
 
 
 def _clear_workflow_shots(workflow_id: int) -> None:
@@ -514,18 +522,21 @@ async def parse_chapter_shots(
 
     _clear_workflow_shots(workflow_id)
     character_profiles = _load_character_profiles(story_id)
-    shots_data = await deepseek_service.parse_chapter_to_shots_lite(
-        chapter_text=source_text,
-        character_profiles=character_profiles,
-        api_key=deepseek_api_key,
-    )
+    try:
+        shots_data = await deepseek_service.parse_chapter_to_shots_lite(
+            chapter_text=source_text,
+            character_profiles=character_profiles,
+            api_key=deepseek_api_key,
+        )
+    except Exception as exc:
+        logger.error("镜头解析失败 workflow=%s: %s", workflow_id, exc)
+        update_workflow_status(workflow_id, "failed", f"镜头解析失败: {exc}")
+        return {"workflow_status": "failed", "error": str(exc)}
     story_cache = _build_story_reuse_cache(story_id)
     shots_data = _apply_story_reuse_cache_to_shots(shots_data, story_cache)
 
     saved_shots = save_shots_from_parse(workflow_id, shots_data)
     logger.info("章节 %s 解析出 %d 个镜头", chapter_id, len(saved_shots))
-
-    update_workflow_status(workflow_id, "shots_ready")
 
     result: dict[str, object] = {
         "workflow_status": "shots_ready",
@@ -533,26 +544,28 @@ async def parse_chapter_shots(
         "total_shots": len(saved_shots),
     }
 
-    if not expand_prompts:
-        return result
+    if expand_prompts:
+        expand_result = await expand_shots_with_role_prompts(
+            workflow_id=workflow_id,
+            story_id=story_id,
+            shot_ids=None,
+            deepseek_api_key=deepseek_api_key,
+            task_id=task_id,
+        )
+        logger.info(
+            "流程完整性 workflow=%s stage=expand result=%s",
+            workflow_id,
+            expand_result.get("workflow_status"),
+        )
+        if expand_result.get("workflow_status") == "failed":
+            return expand_result
 
-    expand_result = await expand_shots_with_role_prompts(
-        workflow_id=workflow_id,
-        story_id=story_id,
-        shot_ids=None,
-        deepseek_api_key=deepseek_api_key,
-        task_id=task_id,
-    )
-    logger.info(
-        "流程完整性 workflow=%s stage=expand result=%s",
-        workflow_id,
-        expand_result.get("workflow_status"),
-    )
-    if expand_result.get("workflow_status") == "failed":
-        return expand_result
+        result["expanded_shot_count"] = expand_result.get("expanded_shot_count", 0)
+        result["failed_shot_ids"] = expand_result.get("failed_shot_ids", [])
 
-    result["expanded_shot_count"] = expand_result.get("expanded_shot_count", 0)
-    result["failed_shot_ids"] = expand_result.get("failed_shot_ids", [])
+    # 在提示词扩展（Phase 1.5）完成后才标记 shots_ready，
+    # 确保前端轮询到 shots_ready 时所有提示词已写入 DB
+    update_workflow_status(workflow_id, "shots_ready")
     return result
 
 
@@ -883,6 +896,7 @@ async def reanalyze_storyboard_prompts(
                 "emotion_plan": shot.emotion_plan,
                 "style_preset": style_preset,
                 "shot_context": shot_context,
+                "storyboard_json": shot.storyboard_json,
             }, api_key=deepseek_api_key)
 
             update_shot(shot.id, storyboard_prompt=new_content)
@@ -1092,51 +1106,69 @@ async def _expand_single_shot_prompts(
         scene_prompt, prop_prompts = scene_prop_cache[cache_key]
     else:
         logger.info("scene_prop cache miss shot=%s key=%s", shot_id, cache_key)
-        scene_prompt, prop_prompts = await deepseek_service.generate_shot_scene_prop_prompts(scene_prop_payload, api_key=deepseek_api_key)
-        prop_prompts = _normalize_prompt_entries(prop_prompts)
-        if scene_prop_cache is not None:
-            scene_prop_cache[cache_key] = (scene_prompt, prop_prompts)
+        try:
+            scene_prompt, prop_prompts = await deepseek_service.generate_shot_scene_prop_prompts(scene_prop_payload, api_key=deepseek_api_key)
+            prop_prompts = _normalize_prompt_entries(prop_prompts)
+            if scene_prop_cache is not None:
+                scene_prop_cache[cache_key] = (scene_prompt, prop_prompts)
+        except Exception as exc:
+            logger.warning("场景/道具提示词生成失败 shot=%s: %s", shot_id, exc)
+            scene_prompt = shot.scene_prompt or ""
+            prop_prompts = _normalize_prompt_entries(shot.prop_prompts_json) or []
 
     shot_context = _build_shot_narrative_context(workflow, shot.shot_index)
     storyboard_payload["shot_context"] = shot_context
-    storyboard_prompt = await deepseek_service.generate_shot_storyboard_prompt(storyboard_payload, api_key=deepseek_api_key)
+    try:
+        storyboard_prompt = await deepseek_service.generate_shot_storyboard_prompt(storyboard_payload, api_key=deepseek_api_key)
+    except Exception as exc:
+        logger.warning("故事版提示词生成失败 shot=%s: %s", shot_id, exc)
+        storyboard_prompt = shot.storyboard_prompt or ""
 
     missing_characters = [str(name) for name in (shot.characters or []) if str(name or '').strip() and str(name) not in reused_names]
     if missing_characters:
         logger.info("character prompts fallback to ai shot=%s names=%s", shot_id, missing_characters)
-        ai_character_prompts = _normalize_prompt_entries(await deepseek_service.generate_shot_character_prompts_ai(
-            shot_data={
-                "shot_index": shot.shot_index,
-                "scene_location": shot.scene_location,
-                "time_of_day": shot.time_of_day,
-                "characters": missing_characters,
-                "story_summary": shot.story_summary,
-                "camera_plan": camera_plan,
-                "motion_plan": motion_plan,
-                "emotion_plan": emotion_plan,
-            },
-            character_profiles=character_profiles,
-            api_key=deepseek_api_key,
-        ))
+        try:
+            ai_character_prompts_raw = await deepseek_service.generate_shot_character_prompts_ai(
+                shot_data={
+                    "shot_index": shot.shot_index,
+                    "scene_location": shot.scene_location,
+                    "time_of_day": shot.time_of_day,
+                    "characters": missing_characters,
+                    "story_summary": shot.story_summary,
+                    "camera_plan": camera_plan,
+                    "motion_plan": motion_plan,
+                    "emotion_plan": emotion_plan,
+                },
+                character_profiles=character_profiles,
+                api_key=deepseek_api_key,
+            )
+            ai_character_prompts = _normalize_prompt_entries(ai_character_prompts_raw)
+        except Exception as exc:
+            logger.warning("AI 角色提示词生成失败 shot=%s: %s", shot_id, exc)
+            ai_character_prompts = []
         character_prompts.extend(ai_character_prompts)
         if ai_character_prompts and story:
             for entry in ai_character_prompts:
                 _ensure_character_version(story.id, entry.get("name", ""), entry.get("prompt", ""))
 
-    video_prompt = await deepseek_service.generate_shot_video_prompt_ai(
-        shot_data={
-            "scene_location": shot.scene_location,
-            "time_of_day": shot.time_of_day,
-            "characters": shot.characters,
-            "story_summary": shot.story_summary,
-            "camera_plan": camera_plan,
-            "motion_plan": motion_plan,
-            "emotion_plan": emotion_plan,
-            "continuity_notes": continuity_notes,
-        },
-        api_key=deepseek_api_key,
-        storyboard_prompt=storyboard_prompt,
-    )
+    try:
+        video_prompt = await deepseek_service.generate_shot_video_prompt_ai(
+            shot_data={
+                "scene_location": shot.scene_location,
+                "time_of_day": shot.time_of_day,
+                "characters": shot.characters,
+                "story_summary": shot.story_summary,
+                "camera_plan": camera_plan,
+                "motion_plan": motion_plan,
+                "emotion_plan": emotion_plan,
+                "continuity_notes": continuity_notes,
+            },
+            api_key=deepseek_api_key,
+            storyboard_prompt=storyboard_prompt,
+        )
+    except Exception as exc:
+        logger.warning("视频提示词生成失败 shot=%s: %s", shot_id, exc)
+        video_prompt = shot.video_prompt or shot.storyboard_prompt or ""
 
     update_shot(
         shot_id,
@@ -1250,232 +1282,6 @@ async def generate_videos_for_shots(
         "shot_count": len(target_shots),
         "failed_shot_ids": [],
     }
-
-
-# ── run-all 包装 ──────────────────────────────────────────
-
-
-async def run_all_stages(
-    workflow_id: int,
-    chapter_id: int,
-    story_id: int,
-    source_text: str,
-    character_reference_ids: list[int] | None = None,
-    deepseek_api_key: str | None = None,
-    image_api_key: str | None = None,
-    video_api_key: str | None = None,
-    video_base_url: str | None = None,
-    video_model: str | None = None,
-    task_id: str | None = None,
-    shot_id: int | None = None,
-    **kwargs,
-) -> dict[str, object]:
-    """一键全自动：依次执行拆镜→故事版→视频三个阶段。
-
-    根据工作流当前状态智能跳过已完成阶段。
-    每个阶段独立调用，但统一汇报最终状态。
-    """
-    logger.info("一键全自动 workflow=%s", workflow_id)
-
-    # 检查当前工作流状态，跳过已完成阶段
-    current_wf = get_workflow(workflow_id)
-    current_status = current_wf.workflow_status if current_wf else "pending"
-
-    if current_status in ("storyboards_ready", "generating_videos", "videos_ready"):
-        # 拆镜和故事版已完成，直接从视频阶段继续
-        logger.info("工作流状态 %s，跳过拆镜和故事版阶段", current_status)
-        video_result = await generate_videos_for_shots(
-            workflow_id=workflow_id,
-            shot_ids=None,
-            image_api_key=image_api_key,
-            deepseek_api_key=deepseek_api_key,
-            video_api_key=video_api_key,
-            video_base_url=video_base_url,
-            video_model=video_model,
-            task_id=task_id,
-        )
-        logger.info(
-            "流程完整性 workflow=%s stage=video result=%s",
-            workflow_id,
-            video_result.get("workflow_status"),
-        )
-        if video_result.get("workflow_status") in ("failed", "generating_videos"):
-            return video_result
-        wf = get_workflow(workflow_id)
-        if wf and wf.failed_shots == wf.total_shots:
-            update_workflow_status(workflow_id, "failed", "所有镜头均失败")
-            return {"workflow_status": "failed", "error": "所有镜头均失败"}
-        elif wf and wf.completed_shots > 0:
-            update_workflow_status(workflow_id, "completed")
-            return {"workflow_status": "completed", "workflow_id": workflow_id}
-        else:
-            update_workflow_status(workflow_id, "failed", "无成功镜头")
-            return {"workflow_status": "failed", "error": "无成功镜头"}
-
-    if current_status in ("shots_ready", "generating_storyboards"):
-        logger.info("工作流状态 %s，跳过拆镜阶段", current_status)
-        if current_status == "shots_ready":
-            expand_result = await expand_shots_with_role_prompts(
-                workflow_id=workflow_id,
-                story_id=story_id,
-                shot_ids=None,
-                deepseek_api_key=deepseek_api_key,
-                task_id=task_id,
-            )
-            logger.info(
-                "流程完整性 workflow=%s stage=expand result=%s",
-                workflow_id,
-                expand_result.get("workflow_status"),
-            )
-            if expand_result.get("workflow_status") == "failed":
-                return expand_result
-        storyboard_result = await generate_storyboards_for_shots(
-            workflow_id=workflow_id,
-            story_id=story_id,
-            shot_ids=None,
-            image_api_key=image_api_key,
-            deepseek_api_key=deepseek_api_key,
-            character_reference_ids=character_reference_ids,
-            task_id=task_id,
-        )
-        logger.info(
-            "流程完整性 workflow=%s stage=storyboard result=%s",
-            workflow_id,
-            storyboard_result.get("workflow_status"),
-        )
-        if storyboard_result.get("workflow_status") in ("failed", "generating_storyboards"):
-            return storyboard_result
-    else:
-        # pending/parsing_shots：阶段1：拆镜
-        parse_result = await parse_chapter_shots(
-            workflow_id=workflow_id,
-            chapter_id=chapter_id,
-            story_id=story_id,
-            source_text=source_text,
-            deepseek_api_key=deepseek_api_key,
-            task_id=task_id,
-            expand_prompts=False,
-        )
-        logger.info(
-            "流程完整性 workflow=%s stage=parse result=%s",
-            workflow_id,
-            parse_result.get("workflow_status"),
-        )
-        if parse_result.get("workflow_status") == "failed":
-            return parse_result
-
-        expand_result = await expand_shots_with_role_prompts(
-            workflow_id=workflow_id,
-            story_id=story_id,
-            shot_ids=None,
-            deepseek_api_key=deepseek_api_key,
-            task_id=task_id,
-        )
-        logger.info(
-            "流程完整性 workflow=%s stage=expand result=%s",
-            workflow_id,
-            expand_result.get("workflow_status"),
-        )
-        if expand_result.get("workflow_status") == "failed":
-            return expand_result
-
-        # 阶段2：故事版
-        storyboard_result = await generate_storyboards_for_shots(
-            workflow_id=workflow_id,
-            story_id=story_id,
-            shot_ids=None,
-            image_api_key=image_api_key,
-            deepseek_api_key=deepseek_api_key,
-            character_reference_ids=character_reference_ids,
-            task_id=task_id,
-        )
-        logger.info(
-            "流程完整性 workflow=%s stage=storyboard result=%s",
-            workflow_id,
-            storyboard_result.get("workflow_status"),
-        )
-        if storyboard_result.get("workflow_status") in ("failed", "generating_storyboards"):
-            return storyboard_result
-
-    # 阶段3：视频（两个路径都汇合到这里）
-    video_result = await generate_videos_for_shots(
-        workflow_id=workflow_id,
-        shot_ids=None,
-        image_api_key=image_api_key,
-        deepseek_api_key=deepseek_api_key,
-        video_api_key=video_api_key,
-        video_base_url=video_base_url,
-        video_model=video_model,
-        task_id=task_id,
-    )
-    logger.info(
-        "流程完整性 workflow=%s stage=video result=%s",
-        workflow_id,
-        video_result.get("workflow_status"),
-    )
-    if video_result.get("workflow_status") in ("failed", "generating_videos"):
-        return video_result
-
-    # 最终状态检查
-    wf = get_workflow(workflow_id)
-    if wf and wf.failed_shots == wf.total_shots:
-        update_workflow_status(workflow_id, "failed", "所有镜头均失败")
-        return {"workflow_status": "failed", "error": "所有镜头均失败"}
-    elif wf and wf.completed_shots > 0:
-        update_workflow_status(workflow_id, "completed")
-        return {"workflow_status": "completed", "workflow_id": workflow_id}
-    else:
-        update_workflow_status(workflow_id, "failed", "无成功镜头")
-        return {"workflow_status": "failed", "error": "无成功镜头"}
-
-
-# ── 核心编排逻辑 ──────────────────────────────────────────
-
-
-async def run_chapter_video_workflow(
-    workflow_id: int,
-    chapter_id: int,
-    story_id: int,
-    source_text: str,
-    character_reference_ids: list[int] | None = None,
-    video_style: str | None = None,
-    api_key: str | None = None,
-    task_id: str | None = None,
-    **kwargs,
-) -> dict[str, Any]:
-    """执行完整的章节视频工作流（一键全自动模式）。
-
-    内部使用 run_all_stages。image_api_key 和 deepseek_api_key 由调用方分别传递。
-    """
-    deepseek_api_key = api_key
-    image_api_key = kwargs.get("image_api_key")
-
-    logger.info("开始章节视频工作流（一键） workflow=%s chapter=%s", workflow_id, chapter_id)
-
-    try:
-        result = await run_all_stages(
-            workflow_id=workflow_id,
-            chapter_id=chapter_id,
-            story_id=story_id,
-            source_text=source_text,
-            character_reference_ids=character_reference_ids,
-            deepseek_api_key=deepseek_api_key,
-            image_api_key=image_api_key,
-            task_id=task_id,
-        )
-
-        ws = result.get("workflow_status", "failed")
-        if ws == "completed":
-            logger.info("章节视频工作流完成 workflow=%s", workflow_id)
-            return {"status": "completed", "workflow_id": workflow_id}
-        else:
-            logger.warning("章节视频工作流未全部完成 workflow=%s status=%s", workflow_id, ws)
-            return {"status": ws, "workflow_id": workflow_id}
-
-    except Exception as exc:
-        logger.error("章节视频工作流失败 workflow=%s: %s", workflow_id, exc)
-        update_workflow_status(workflow_id, "failed", str(exc))
-        raise
 
 
 # ── 辅助工具 ──────────────────────────────────────────────
@@ -1685,46 +1491,6 @@ async def _poll_video_job(
 # ── 后台任务启动 ──────────────────────────────────────────
 
 
-async def start_workflow_background(
-    workflow_id: int,
-    api_key: str | None = None,
-    image_api_key: str | None = None,
-) -> str:
-    """在后台启动章节视频工作流。"""
-    wf = get_workflow(workflow_id)
-    if not wf:
-        raise ValueError(f"工作流不存在: {workflow_id}")
-
-    task_id = f"chapter_video_{workflow_id}_{uuid.uuid4().hex[:8]}"
-
-    await task_manager.submit_task(
-        task_id=task_id,
-        task_type="chapter_video_workflow",
-        coro_func=run_chapter_video_workflow,
-        workflow_id=workflow_id,
-        chapter_id=wf.chapter_id,
-        story_id=wf.story_id,
-        source_text=wf.source_text or "",
-        character_reference_ids=wf.character_reference_ids,
-        video_style=wf.video_style,
-        api_key=api_key,
-        image_api_key=image_api_key,
-        timeout=None,  # 无任务级硬超时
-        max_retries=1,
-        metadata={
-            "workflow_id": workflow_id,
-            "stage": "queued",
-            "message": "章节视频工作流已排队...",
-            "running_stage": "running",
-            "running_message": "正在执行章节视频工作流...",
-        },
-        story_id_extra=wf.story_id,
-        chapter_id_extra=wf.chapter_id,
-    )
-
-    return task_id
-
-
 # ── 单镜头重新生成 ────────────────────────────────────────
 
 
@@ -1773,6 +1539,7 @@ async def regenerate_shot_storyboard(
             "emotion_plan": shot.emotion_plan,
             "style_preset": style_preset,
             "shot_context": shot_context,
+            "storyboard_json": shot.storyboard_json,
         })
 
     chapter_id = getattr(workflow, "chapter_id", 0) if workflow else 0
