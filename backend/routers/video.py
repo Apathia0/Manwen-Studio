@@ -1314,9 +1314,6 @@ async def generate_chapter_screenplay(
     user = _require_user(request, db)
     chapter = _require_chapter_for_user(chapter_id, user, db)
 
-    # Check quota (screenplay.generate.monthly_limit)
-    _check_and_consume_quota_wrapper(user.id, "screenplay.generate.monthly_limit", 1, db, deduct=False)
-
     # 娉ㄥ叆鏁呬簨绾т笂涓嬫枃淇℃伅
     story = chapter.story
 
@@ -1359,20 +1356,14 @@ async def generate_chapter_screenplay(
 
     db.commit()
 
-    # Consume quota
-    _check_and_consume_quota_wrapper(user.id, "screenplay.generate.monthly_limit", 1, db, deduct=True)
-
     # Refresh to get IDs
     for scene in scenes:
         db.refresh(scene)
-
-    quota_result = _check_and_consume_quota_wrapper(user.id, "screenplay.generate.monthly_limit", 0, db, deduct=False)
 
     return {
         "chapter_id": chapter_id,
         "screenplay": chapter.screenplay_text or "",
         "scenes": [_serialize_scene(s) for s in scenes],
-        "usage": _serialize_usage(quota_result["used"], quota_result["limit"]),
     }
 
 
@@ -1411,9 +1402,6 @@ async def regenerate_chapter_scenes(
 
     _clear_chapter_scenes(chapter_id, db)
 
-    # 配额预检
-    _check_and_consume_quota_wrapper(user.id, "screenplay.generate.monthly_limit", 1, db, deduct=False)
-
     # Generate new scenes
     scenes_data = await regenerate_scenes(
         existing_screenplay=chapter.screenplay_text or chapter.novel_content or "",
@@ -1443,8 +1431,6 @@ async def regenerate_chapter_scenes(
         scenes.append(scene)
 
     db.commit()
-    # 配额扣减
-    _check_and_consume_quota_wrapper(user.id, "screenplay.generate.monthly_limit", 1, db, deduct=True)
 
     for scene in scenes:
         db.refresh(scene)
@@ -1478,7 +1464,6 @@ async def generate_chapter_storyboard(chapter_id: int, body: dict, request: Requ
     story = chapter.story
     if not chapter.novel_content or not chapter.novel_content.strip():
         raise HTTPException(400, "Chapter content is empty")
-    _check_and_consume_quota_wrapper(user.id, "shot.generate.monthly_limit", 1, db, deduct=False)
 
     shot_count_hint = int(body.get("shot_count_hint") or 0) or 0
     style_preset = str(body.get("style_preset") or "").strip() or "cinematic"
@@ -1611,14 +1596,11 @@ async def generate_chapter_storyboard(chapter_id: int, body: dict, request: Requ
         shots.append(shot)
 
     db.commit()
-    _check_and_consume_quota_wrapper(user.id, "shot.generate.monthly_limit", 1, db, deduct=True)
     for shot in shots:
         db.refresh(shot)
-    quota_result = _check_and_consume_quota_wrapper(user.id, "shot.generate.monthly_limit", 0, db, deduct=False)
     return {
         "chapter_id": chapter_id, "shots": [_serialize_shot(s) for s in shots],
         "total_count": len(shots),
-        "usage": _serialize_usage(quota_result["used"], quota_result["limit"]),
     }
 
 
@@ -1709,9 +1691,6 @@ async def generate_scene_shots(
         raise HTTPException(404, "场景未找到")
     _require_chapter_for_user(scene.chapter_id, user, db)
 
-    # Check quota (shot.generate.monthly_limit)
-    _check_and_consume_quota_wrapper(user.id, "shot.generate.monthly_limit", 1, db, deduct=False)
-
     # 娉ㄥ叆瑙掕壊涓婁笅鏂囦俊鎭?
     chapter = db.query(Chapter).filter(Chapter.id == scene.chapter_id).first()
     story = db.query(Story).filter(Story.id == chapter.story_id).first() if chapter else None
@@ -1762,18 +1741,12 @@ async def generate_scene_shots(
 
     db.commit()
 
-    # Consume quota
-    _check_and_consume_quota_wrapper(user.id, "shot.generate.monthly_limit", 1, db, deduct=True)
-
     for shot in shots:
         db.refresh(shot)
-
-    quota_result = _check_and_consume_quota_wrapper(user.id, "shot.generate.monthly_limit", 0, db, deduct=False)
 
     return {
         "scene_id": scene_id,
         "shots": [_serialize_shot(s) for s in shots],
-        "usage": _serialize_usage(quota_result["used"], quota_result["limit"]),
     }
 
 
@@ -1862,7 +1835,7 @@ async def generate_scene_concept_art(
     api_key = _user_image_api_key(request)
 
     # 配额预检
-    _check_and_consume_quota_wrapper(user.id, "manga.image.monthly_limit", 1, db, deduct=False)
+    _check_and_consume_quota_wrapper(user.id, "manga.image.generate.monthly_limit", 1, db, deduct=False)
 
     try:
         await image2_service.generate_reference_image(
@@ -1911,7 +1884,7 @@ async def generate_scene_concept_art(
 
     db.commit()
     # 配额扣减
-    _check_and_consume_quota_wrapper(user.id, "manga.image.monthly_limit", 1, db, deduct=True)
+    _check_and_consume_quota_wrapper(user.id, "manga.image.generate.monthly_limit", 1, db, deduct=True)
     db.refresh(asset)
 
     return {
@@ -1988,10 +1961,9 @@ async def update_shot(
 
     effective_provider = _resolve_video_provider(body.provider, db)
 
-    # Check quota for video generation (by seconds)
     duration = max(1, min(SHOT_DURATION_SECONDS, body.duration_seconds or shot.duration_seconds or SHOT_DURATION_SECONDS))
     _check_and_consume_quota_wrapper(
-        user.id, "video.generate.seconds.monthly_limit", duration, db, deduct=False,
+        user.id, "video.generate.count.monthly_limit", 1, db, deduct=False,
     )
 
     source_storyboard_asset_id = body.source_storyboard_asset_id or shot.storyboard_asset_id
@@ -2137,15 +2109,11 @@ async def update_shot(
     shot.updated_at = datetime.datetime.utcnow()
 
     _check_and_consume_quota_wrapper(
-        user.id, "video.generate.seconds.monthly_limit", duration, db, deduct=True,
+        user.id, "video.generate.count.monthly_limit", 1, db, deduct=True,
     )
 
     db.commit()
     db.refresh(job)
-
-    quota_result = _check_and_consume_quota_wrapper(
-        user.id, "video.generate.seconds.monthly_limit", 0, db, deduct=False,
-    )
 
     return {
         "job": {
@@ -2172,7 +2140,6 @@ async def update_shot(
             "completed_at": _serialize_datetime(job.completed_at),
         },
         "shot_status": shot.status,
-        "usage": _serialize_usage(quota_result["used"], quota_result["limit"]),
     }
 
 
@@ -2202,7 +2169,7 @@ async def render_shot_video_stream(
 
     duration = max(1, min(SHOT_DURATION_SECONDS, body.duration_seconds or shot.duration_seconds or SHOT_DURATION_SECONDS))
     _check_and_consume_quota_wrapper(
-        user.id, "video.generate.seconds.monthly_limit", duration, db, deduct=False,
+        user.id, "video.generate.count.monthly_limit", 1, db, deduct=False,
     )
 
     source_storyboard_asset_id = body.source_storyboard_asset_id or shot.storyboard_asset_id
@@ -2350,7 +2317,7 @@ async def render_shot_video_stream(
             shot.updated_at = datetime.datetime.utcnow()
 
             _check_and_consume_quota_wrapper(
-                user.id, "video.generate.seconds.monthly_limit", duration, db, deduct=True,
+                user.id, "video.generate.count.monthly_limit", 1, db, deduct=True,
             )
 
             db.commit()
@@ -2862,8 +2829,7 @@ async def retry_video_job(
 
     # 配额预检
     _check_and_consume_quota_wrapper(
-        user.id, "video.generate.seconds.monthly_limit",
-        min(10, old_job.duration_seconds or 10), db, deduct=False,
+        user.id, "video.generate.count.monthly_limit", 1, db, deduct=False,
     )
 
     # Create new job with same shot_id
@@ -2882,8 +2848,7 @@ async def retry_video_job(
     db.commit()
     # 配额扣减
     _check_and_consume_quota_wrapper(
-        user.id, "video.generate.seconds.monthly_limit",
-        min(10, old_job.duration_seconds or 10), db, deduct=True,
+        user.id, "video.generate.count.monthly_limit", 1, db, deduct=True,
     )
     db.refresh(new_job)
 
@@ -3213,7 +3178,7 @@ async def regenerate_video_asset(
     output_path = regen_dir / output_filename
 
     # 配额预检
-    _check_and_consume_quota_wrapper(user.id, "manga.image.monthly_limit", 1, db, deduct=False)
+    _check_and_consume_quota_wrapper(user.id, "manga.image.generate.monthly_limit", 1, db, deduct=False)
 
     try:
         if has_source:
@@ -3281,7 +3246,7 @@ async def regenerate_video_asset(
 
     db.commit()
     # 配额扣减
-    _check_and_consume_quota_wrapper(user.id, "manga.image.monthly_limit", 1, db, deduct=True)
+    _check_and_consume_quota_wrapper(user.id, "manga.image.generate.monthly_limit", 1, db, deduct=True)
     db.refresh(new_asset)
 
     return {
@@ -3977,7 +3942,7 @@ async def generate_character_ref_image(
     api_key = _user_image_api_key(request)
 
     # 配额预检
-    _check_and_consume_quota_wrapper(user.id, "manga.image.monthly_limit", 1, db, deduct=False)
+    _check_and_consume_quota_wrapper(user.id, "manga.image.generate.monthly_limit", 1, db, deduct=False)
 
     try:
         await image2_service.generate_reference_image(
@@ -4006,7 +3971,7 @@ async def generate_character_ref_image(
     version.ref_asset_id = ref_asset.id
     db.commit()
     # 配额扣减
-    _check_and_consume_quota_wrapper(user.id, "manga.image.monthly_limit", 1, db, deduct=True)
+    _check_and_consume_quota_wrapper(user.id, "manga.image.generate.monthly_limit", 1, db, deduct=True)
     db.refresh(ref_asset)
 
     return {
@@ -4091,6 +4056,8 @@ async def redraw_character_ref_image(
 
     api_key = _user_image_api_key(request)
 
+    _check_and_consume_quota_wrapper(user.id, "manga.image.generate.monthly_limit", 1, db, deduct=False)
+
     try:
         if mode == "partial" and mask_base64:
             import base64
@@ -4126,6 +4093,7 @@ async def redraw_character_ref_image(
     db.flush()
     version.ref_asset_id = new_asset.id
     db.commit()
+    _check_and_consume_quota_wrapper(user.id, "manga.image.generate.monthly_limit", 1, db, deduct=True)
     db.refresh(new_asset)
 
     return {
@@ -4647,7 +4615,7 @@ async def render_shot_storyboard(
     api_key = _user_image_api_key(request)
 
     # 配额预检
-    _check_and_consume_quota_wrapper(user.id, "manga.image.monthly_limit", 1, db, deduct=False)
+    _check_and_consume_quota_wrapper(user.id, "manga.image.generate.monthly_limit", 1, db, deduct=False)
 
     try:
         await image2_service.generate_reference_image(
@@ -4681,7 +4649,7 @@ async def render_shot_storyboard(
     shot.updated_at = datetime.datetime.utcnow()
     db.commit()
     # 配额扣减
-    _check_and_consume_quota_wrapper(user.id, "manga.image.monthly_limit", 1, db, deduct=True)
+    _check_and_consume_quota_wrapper(user.id, "manga.image.generate.monthly_limit", 1, db, deduct=True)
     db.refresh(shot)
     db.refresh(asset)
 
@@ -4875,7 +4843,7 @@ async def generate_shot_frames(
 
     # 配额预检（按实际生成帧数）
     frame_count = 2 if frame_type == "both" else 1
-    _check_and_consume_quota_wrapper(user.id, "manga.image.monthly_limit", frame_count, db, deduct=False)
+    _check_and_consume_quota_wrapper(user.id, "manga.image.generate.monthly_limit", frame_count, db, deduct=False)
 
     assets = []
 
@@ -4934,7 +4902,7 @@ async def generate_shot_frames(
 
     db.commit()
     # 配额扣减
-    _check_and_consume_quota_wrapper(user.id, "manga.image.monthly_limit", frame_count, db, deduct=True)
+    _check_and_consume_quota_wrapper(user.id, "manga.image.generate.monthly_limit", frame_count, db, deduct=True)
     for a in assets:
         db.refresh(a)
 
@@ -5002,6 +4970,7 @@ async def regenerate_shot_frame(
     ref_block = _build_reference_constraints_block(ref_assets)
     ref_paths = _resolve_asset_file_paths(ref_assets)
     prompt = _merge_style_prompt(f"{prompt} {ref_block}".strip(), style_ctx.get("prompt_template"), style_ctx.get("name"))
+    _check_and_consume_quota_wrapper(user.id, "manga.image.generate.monthly_limit", 1, db, deduct=False)
     try:
         await image2_service.generate_reference_image(
             prompt=prompt,
@@ -5033,6 +5002,7 @@ async def regenerate_shot_frame(
     db.add(new_asset)
     old_asset.status = "replaced"
     db.commit()
+    _check_and_consume_quota_wrapper(user.id, "manga.image.generate.monthly_limit", 1, db, deduct=True)
     db.refresh(new_asset)
 
     return {
@@ -5562,7 +5532,7 @@ async def generate_shot_character_asset(
     ref_paths = [style_ref_path] if style_ref_path else None
 
     # 配额预检
-    _check_and_consume_quota_wrapper(user.id, "manga.image.monthly_limit", 1, db, deduct=False)
+    _check_and_consume_quota_wrapper(user.id, "manga.image.generate.monthly_limit", 1, db, deduct=False)
 
     try:
         await image2_service.generate_reference_image(
@@ -5598,7 +5568,7 @@ async def generate_shot_character_asset(
     db.add(asset)
     db.commit()
     # 配额扣减
-    _check_and_consume_quota_wrapper(user.id, "manga.image.monthly_limit", 1, db, deduct=True)
+    _check_and_consume_quota_wrapper(user.id, "manga.image.generate.monthly_limit", 1, db, deduct=True)
     db.refresh(asset)
 
     return {
@@ -5656,7 +5626,7 @@ async def generate_shot_prop_asset(
     style_ref_path = _resolve_workflow_style_ref_path(chapter_id, db)
     ref_paths = [style_ref_path] if style_ref_path else None
 
-    _check_and_consume_quota_wrapper(user.id, "manga.image.monthly_limit", 1, db, deduct=False)
+    _check_and_consume_quota_wrapper(user.id, "manga.image.generate.monthly_limit", 1, db, deduct=False)
 
     try:
         await image2_service.generate_reference_image(
@@ -5691,7 +5661,7 @@ async def generate_shot_prop_asset(
     )
     db.add(asset)
     db.commit()
-    _check_and_consume_quota_wrapper(user.id, "manga.image.monthly_limit", 1, db, deduct=True)
+    _check_and_consume_quota_wrapper(user.id, "manga.image.generate.monthly_limit", 1, db, deduct=True)
     db.refresh(asset)
 
     return {
@@ -5747,7 +5717,7 @@ async def generate_shot_scene_asset(
     style_ref_path = _resolve_workflow_style_ref_path(chapter_id, db)
     ref_paths = [style_ref_path] if style_ref_path else None
 
-    _check_and_consume_quota_wrapper(user.id, "manga.image.monthly_limit", 1, db, deduct=False)
+    _check_and_consume_quota_wrapper(user.id, "manga.image.generate.monthly_limit", 1, db, deduct=False)
 
     try:
         await image2_service.generate_reference_image(
@@ -5782,7 +5752,7 @@ async def generate_shot_scene_asset(
     )
     db.add(asset)
     db.commit()
-    _check_and_consume_quota_wrapper(user.id, "manga.image.monthly_limit", 1, db, deduct=True)
+    _check_and_consume_quota_wrapper(user.id, "manga.image.generate.monthly_limit", 1, db, deduct=True)
     db.refresh(asset)
 
     return {
@@ -5822,7 +5792,7 @@ async def render_shot_video(
 
     duration = max(1, min(SHOT_DURATION_SECONDS, body.duration_seconds or shot.duration_seconds or SHOT_DURATION_SECONDS))
     _check_and_consume_quota_wrapper(
-        user.id, "video.generate.seconds.monthly_limit", duration, db, deduct=False,
+        user.id, "video.generate.count.monthly_limit", 1, db, deduct=False,
     )
 
     source_storyboard_asset_id = body.source_storyboard_asset_id or shot.storyboard_asset_id
@@ -5961,7 +5931,7 @@ async def render_shot_video(
     shot.updated_at = datetime.datetime.utcnow()
 
     _check_and_consume_quota_wrapper(
-        user.id, "video.generate.seconds.monthly_limit", duration, db, deduct=True,
+        user.id, "video.generate.count.monthly_limit", 1, db, deduct=True,
     )
 
     db.commit()
@@ -6202,6 +6172,18 @@ async def compile_video_project(
 
 # 鈹€鈹€鈹€ Internal helpers 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 
+_FEATURE_NAME_MAP: dict[str, str] = {
+    "manga.image.generate.monthly_limit": "生图配额",
+    "video.shot.split.monthly_limit": "拆镜次数",
+    "video.generate.count.monthly_limit": "视频生成次数",
+    "ai.text.advanced_calls.monthly_limit": "高级文本 AI 调用次数",
+    "manga.max_image_count_per_chapter": "单章节最大出图数",
+    "scene.generate.monthly_limit": "分镜生成次数",
+    "framework.generate.monthly_limit": "小说框架生成次数",
+    "chapter.expand.monthly_limit": "章节扩写次数",
+}
+
+
 def _check_and_consume_quota_wrapper(
     user_id: int,
     feature_key: str,
@@ -6270,10 +6252,11 @@ def _check_and_consume_quota_wrapper(
             "granted": granted,
         }
 
+    feature_name = _FEATURE_NAME_MAP.get(feature_key, feature_key)
     if limit <= 0:
-        raise HTTPException(403, f"当前套餐不可用此功能: {feature_key}")
+        raise HTTPException(403, f"当前套餐不可用「{feature_name}」")
     if used + amount > limit:
-        raise HTTPException(429, f"{feature_key} 配额已超限 ({used}/{limit})")
+        raise HTTPException(429, f"「{feature_name}」配额已超限 ({used}/{limit})")
 
     if usage:
         usage.used_amount = used + amount
@@ -6489,6 +6472,7 @@ async def api_regenerate_shot_storyboard(
     api_key = _user_image_api_key(request)
     _configure_image_service_from_db(request, db)
     ref_asset_ids = body.reference_asset_ids or None
+    _check_and_consume_quota_wrapper(user.id, "manga.image.generate.monthly_limit", 1, db, deduct=False)
     updated_shot = await regenerate_shot_storyboard(
         shot_id,
         api_key,
@@ -6499,6 +6483,7 @@ async def api_regenerate_shot_storyboard(
     if not updated_shot:
         raise HTTPException(500, "重新生成故事版失败")
 
+    _check_and_consume_quota_wrapper(user.id, "manga.image.generate.monthly_limit", 1, db, deduct=True)
     return ChapterVideoShotOut.model_validate(updated_shot)
 
 
@@ -6565,6 +6550,7 @@ async def api_regenerate_shot_video(
 ):
     """重新生成单镜头的视频。"""
     user = _require_user(request, db)
+    _check_and_consume_quota_wrapper(user.id, "video.generate.count.monthly_limit", 1, db, deduct=False)
     shot = db.get(ChapterVideoShot, shot_id)
     if not shot:
         raise HTTPException(404, "镜头不存在")
@@ -6597,6 +6583,7 @@ async def api_regenerate_shot_video(
     if not updated_shot:
         raise HTTPException(500, "重新生成视频失败")
 
+    _check_and_consume_quota_wrapper(user.id, "video.generate.count.monthly_limit", 1, db, deduct=True)
     return ChapterVideoShotOut.model_validate(updated_shot)
 
 
@@ -6880,6 +6867,7 @@ async def api_parse_chapter_shots(
 ):
     """阶段1-拆镜：将章节正文解析为 10s 镜头列表，停在 shots_ready。"""
     user = _require_user(request, db)
+    _check_and_consume_quota_wrapper(user.id, "video.shot.split.monthly_limit", 1, db, deduct=False)
     wf = get_chapter_workflow(workflow_id)
     if not wf:
         raise HTTPException(404, "工作流不存在")
@@ -6948,6 +6936,8 @@ async def api_parse_chapter_shots(
         )
     except Exception as exc:
         raise HTTPException(500, f"提交后台任务失败: {exc}")
+
+    _check_and_consume_quota_wrapper(user.id, "video.shot.split.monthly_limit", 1, db, deduct=True)
 
     return {
         "task_id": task_id,
@@ -7131,6 +7121,11 @@ async def api_generate_storyboards(
     # 先设置工作流状态，确保前端轮询能立即检测到
     update_chapter_workflow_status(workflow_id, "generating_storyboards")
 
+    shot_ids_list = body.shot_ids or []
+    shot_count = len(shot_ids_list)
+    if shot_count > 0:
+        _check_and_consume_quota_wrapper(user.id, "manga.image.generate.monthly_limit", shot_count, db, deduct=False)
+
     try:
         await task_manager.submit_task(
             task_id=task_id,
@@ -7154,6 +7149,9 @@ async def api_generate_storyboards(
         )
     except Exception as exc:
         raise HTTPException(500, f"提交后台任务失败: {exc}")
+
+    if shot_count > 0:
+        _check_and_consume_quota_wrapper(user.id, "manga.image.generate.monthly_limit", shot_count, db, deduct=True)
 
     return {
         "task_id": task_id,

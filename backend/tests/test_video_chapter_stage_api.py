@@ -132,6 +132,11 @@ def test_stage_routes_pass_task_id(monkeypatch):
 
     story_mock = SimpleNamespace(id=34, owner_user_id=1)
 
+    plan_mock = SimpleNamespace(id=1, code="free")
+    plan_feature_mock = SimpleNamespace(feature_key="video.shot.split.monthly_limit", value_json={"value": 999})
+    quota_rule_mock = SimpleNamespace(feature_key="video.shot.split.monthly_limit", reset_period="monthly", deduct_mode="on_success")
+    subscription_mock = SimpleNamespace(user_id=1, plan_id=1)
+
     class FakeDb:
         def get(self, model, pk):
             name = getattr(model, "__name__", "")
@@ -139,12 +144,32 @@ def test_stage_routes_pass_task_id(monkeypatch):
                 return chapter_mock
             if name == "ChapterVideoWorkflow":
                 return wf_mock
+            if name == "Plan":
+                return plan_mock
             return story_mock
         def query(self, model):
+            name = getattr(model, "__name__", "")
             class Q:
-                def filter(self, *a, **kw): return self
-                def first(self): return None
+                def filter(self, *a, **kw):
+                    class Q2:
+                        def first(self):
+                            if name == "Plan":
+                                return plan_mock
+                            if name == "UserSubscription":
+                                return subscription_mock
+                            if name == "PlanFeature":
+                                return plan_feature_mock
+                            if name == "PlanQuotaRule":
+                                return quota_rule_mock
+                            return None
+                    return Q2()
+                def all(self):
+                    return []
             return Q()
+        def add(self, obj):
+            pass
+        def flush(self):
+            pass
         def commit(self):
             pass
 
@@ -461,6 +486,7 @@ def test_parse_route_accepts_valid_workflow_id(monkeypatch):
     monkeypatch.setattr(video_router, "_require_user", lambda request, db: SimpleNamespace(id=1))
     monkeypatch.setattr(video_router, "_user_deepseek_api_key", lambda request, db: "test-ds-key")
     monkeypatch.setattr(video_router, "_get_story_character_reference_asset_ids", lambda story_id, db: [])
+    monkeypatch.setattr(video_router, "_check_and_consume_quota_wrapper", lambda *a, **kw: {"used": 0, "limit": 999, "feature_key": "", "period_key": "", "base_limit": 0, "granted": 0})
     monkeypatch.setattr(video_router, "update_chapter_workflow_status", lambda wid, status: None)
 
     async def fake_submit_task(task_id=None, coro_func=None, **kwargs):
@@ -573,6 +599,7 @@ def test_regenerate_shot_storyboard_passes_reference_asset_ids(monkeypatch):
     monkeypatch.setattr(video_router, "_configure_image_service_from_db", lambda request, db: None)
     monkeypatch.setattr(video_router, "get_chapter_workflow",
                         lambda wid: SimpleNamespace(id=wid, story_id=34))
+    monkeypatch.setattr(video_router, "_check_and_consume_quota_wrapper", lambda *a, **kw: {"used": 0, "limit": 999, "feature_key": "", "period_key": "", "base_limit": 0, "granted": 0})
     monkeypatch.setattr(video_router, "ChapterVideoShotOut", SimpleNamespace(model_validate=lambda shot: shot))
 
     class FakeDb:
@@ -664,6 +691,7 @@ def test_regenerate_shot_video_upstream_error_returns_502(monkeypatch):
     monkeypatch.setattr(video_router, "_user_deepseek_api_key", lambda request, db: "deepseek-key")
     monkeypatch.setattr(video_router, "_configure_video_service_from_db", lambda request, db: None)
     monkeypatch.setattr(video_router, "_user_video_api_key", lambda request: ("image-key", "url", "model"))
+    monkeypatch.setattr(video_router, "_check_and_consume_quota_wrapper", lambda *a, **kw: {"used": 0, "limit": 999, "feature_key": "", "period_key": "", "base_limit": 0, "granted": 0})
     monkeypatch.setattr(
         video_router,
         "get_chapter_workflow",

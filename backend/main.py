@@ -190,17 +190,9 @@ FEATURE_CATALOG: list[dict] = [
         "default_rule": {"reset_period": "monthly", "deduct_mode": "on_success"},
     },
     {
-        "key": "manga.image.monthly_limit",
-        "name": "\u6f2b\u753b\u56fe\u7247\u751f\u6210\u5f20\u6570",
-        "description": "\u7528\u6237\u6bcf\u6708\u53ef\u751f\u6210\u7684\u6f2b\u753b\u56fe\u7247\u603b\u5f20\u6570\u3002",
-        "category": "\u6f2b\u753b\u751f\u6210",
-        "value_type": "number",
-        "default_rule": {"reset_period": "monthly", "deduct_mode": "on_success"},
-    },
-    {
-        "key": "manga.regenerate.monthly_limit",
-        "name": "\u6f2b\u753b\u91cd\u7ed8\u6b21\u6570",
-        "description": "\u7528\u6237\u6bcf\u6708\u53ef\u91cd\u65b0\u751f\u6210\u5355\u5f20\u6f2b\u753b\u56fe\u7247\u7684\u6b21\u6570\u3002",
+        "key": "manga.image.generate.monthly_limit",
+        "name": "\u751f\u56fe\u914d\u989d",
+        "description": "\u7528\u6237\u6bcf\u6708\u53ef\u751f\u6210\u7684\u56fe\u7247\u603b\u5f20\u6570\uff08\u542b\u65b0\u751f\u6210\u548c\u91cd\u7ed8\uff09\u3002",
         "category": "\u6f2b\u753b\u751f\u6210",
         "value_type": "number",
         "default_rule": {"reset_period": "monthly", "deduct_mode": "on_success"},
@@ -230,25 +222,17 @@ FEATURE_CATALOG: list[dict] = [
         "default_rule": {"reset_period": "monthly", "deduct_mode": "on_success"},
     },
     {
-        "key": "video.generate.seconds.monthly_limit",
-        "name": "视频生成总时长",
-        "description": "用户每月可生成的视频总秒数。",
+        "key": "video.shot.split.monthly_limit",
+        "name": "拆镜次数",
+        "description": "用户每月可拆镜次数，每次点击顶部拆镜按钮消耗 1 次。",
         "category": "视频创作",
         "value_type": "number",
         "default_rule": {"reset_period": "monthly", "deduct_mode": "on_success"},
     },
     {
-        "key": "screenplay.generate.monthly_limit",
-        "name": "剧本生成次数",
-        "description": "用户每月可生成影视剧本的次数。",
-        "category": "视频创作",
-        "value_type": "number",
-        "default_rule": {"reset_period": "monthly", "deduct_mode": "on_success"},
-    },
-    {
-        "key": "shot.generate.monthly_limit",
-        "name": "分镜生成次数",
-        "description": "用户每月可生成分镜任务卡的次数。",
+        "key": "video.generate.count.monthly_limit",
+        "name": "视频生成次数",
+        "description": "用户每月可生成视频次数，每次生成一个分镜视频消耗 1 次。",
         "category": "视频创作",
         "value_type": "number",
         "default_rule": {"reset_period": "monthly", "deduct_mode": "on_success"},
@@ -1119,45 +1103,39 @@ def _ensure_platform_seed(
     db.flush()
 
     defaults = {
-        "free": {
-            "framework.generate.monthly_limit": 5,
-            "chapter.expand.monthly_limit": 20,
-            "scene.generate.monthly_limit": 15,
-            "manga.image.monthly_limit": 80,
-            "manga.regenerate.monthly_limit": 20,
-            "ai.text.advanced_calls.monthly_limit": 20,
-            "manga.max_image_count_per_chapter": 6,
-            "manga.allow_color_mode": False,
-            "video.generate.seconds.monthly_limit": 60,
-            "screenplay.generate.monthly_limit": 3,
-            "shot.generate.monthly_limit": 10,
-        },
-        "pro": {
-            "framework.generate.monthly_limit": 50,
-            "chapter.expand.monthly_limit": 200,
-            "scene.generate.monthly_limit": 120,
-            "manga.image.monthly_limit": 800,
-            "manga.regenerate.monthly_limit": 300,
-            "ai.text.advanced_calls.monthly_limit": 180,
-            "manga.max_image_count_per_chapter": 12,
-            "manga.allow_color_mode": True,
-            "video.generate.seconds.monthly_limit": 900,
-            "screenplay.generate.monthly_limit": 30,
-            "shot.generate.monthly_limit": 100,
-        },
-        "premium": {
-            "framework.generate.monthly_limit": 200,
-            "chapter.expand.monthly_limit": 1000,
-            "scene.generate.monthly_limit": 500,
-            "manga.image.monthly_limit": 4000,
-            "manga.regenerate.monthly_limit": 1500,
-            "ai.text.advanced_calls.monthly_limit": 600,
-            "manga.max_image_count_per_chapter": 20,
-            "manga.allow_color_mode": True,
-            "video.generate.seconds.monthly_limit": 3600,
-            "screenplay.generate.monthly_limit": 100,
-            "shot.generate.monthly_limit": 500,
-        },
+    "free": {
+        "framework.generate.monthly_limit": 5,
+        "chapter.expand.monthly_limit": 20,
+        "scene.generate.monthly_limit": 15,
+        "manga.image.generate.monthly_limit": 100,
+        "ai.text.advanced_calls.monthly_limit": 20,
+        "manga.max_image_count_per_chapter": 6,
+        "manga.allow_color_mode": False,
+        "video.shot.split.monthly_limit": 0,
+        "video.generate.count.monthly_limit": 0,
+    },
+    "pro": {
+        "framework.generate.monthly_limit": 50,
+        "chapter.expand.monthly_limit": 200,
+        "scene.generate.monthly_limit": 120,
+        "manga.image.generate.monthly_limit": 1100,
+        "ai.text.advanced_calls.monthly_limit": 180,
+        "manga.max_image_count_per_chapter": 12,
+        "manga.allow_color_mode": True,
+        "video.shot.split.monthly_limit": 5,
+        "video.generate.count.monthly_limit": 5,
+    },
+    "premium": {
+        "framework.generate.monthly_limit": 200,
+        "chapter.expand.monthly_limit": 1000,
+        "scene.generate.monthly_limit": 500,
+        "manga.image.generate.monthly_limit": 5500,
+        "ai.text.advanced_calls.monthly_limit": 600,
+        "manga.max_image_count_per_chapter": 20,
+        "manga.allow_color_mode": True,
+        "video.shot.split.monthly_limit": 10,
+        "video.generate.count.monthly_limit": 15,
+    },
     }
     for plan in [free, pro, premium]:
         for key, value in defaults[plan.code].items():
@@ -1252,6 +1230,22 @@ def _ensure_plan_feature_seed(db: Session, *, commit: bool = True) -> None:
                     extra_config={"carry_over_enabled": False},
                 ))
                 changed = True
+        # 清理已从 FEATURE_CATALOG 中移除的旧功能项
+        valid_keys = {str(f["key"]) for f in FEATURE_CATALOG}
+        stale_features = db.query(PlanFeature).filter(
+            PlanFeature.plan_id == plan.id,
+            ~PlanFeature.feature_key.in_(valid_keys),
+        ).all()
+        for sf in stale_features:
+            db.delete(sf)
+            changed = True
+        stale_rules = db.query(PlanQuotaRule).filter(
+            PlanQuotaRule.plan_id == plan.id,
+            ~PlanQuotaRule.feature_key.in_(valid_keys),
+        ).all()
+        for sr in stale_rules:
+            db.delete(sr)
+            changed = True
     if changed and commit:
         db.commit()
 
@@ -2103,10 +2097,11 @@ def _check_and_consume_quota(
         UserUsageMonthly.period_key == period_key,
     ).first()
     used = _coerce_int(usage.used_amount if usage else 0, default=0)
+    feature_name = FEATURE_CATALOG_MAP.get(feature_key, {}).get("name", feature_key)
     if limit <= 0:
-        raise HTTPException(403, f"当前套餐不可用此功能: {feature_key}")
+        raise HTTPException(403, f"当前套餐不可用「{feature_name}」")
     if used + amount > limit:
-        raise HTTPException(429, f"{feature_key} 配额已超限 ({used}/{limit})")
+        raise HTTPException(429, f"「{feature_name}」配额已超限 ({used}/{limit})")
     if deduct:
         if usage:
             usage.used_amount = used + amount
@@ -2302,12 +2297,11 @@ def _usage_entries_for_user(user_id: int, db: Session) -> list[dict]:
         "framework.generate.monthly_limit",
         "chapter.expand.monthly_limit",
         "scene.generate.monthly_limit",
-        "manga.image.monthly_limit",
-        "manga.regenerate.monthly_limit",
+        "manga.image.generate.monthly_limit",
+        "manga.image.generate.monthly_limit",
         "ai.text.advanced_calls.monthly_limit",
-        "video.generate.seconds.monthly_limit",
-        "screenplay.generate.monthly_limit",
-        "shot.generate.monthly_limit",
+        "video.shot.split.monthly_limit",
+        "video.generate.count.monthly_limit",
     ]
     entries = []
     for key in tracked:
@@ -5408,7 +5402,7 @@ async def generate_story_cover(story_id: int, request: Request, db: Session = De
     _check_and_consume_feature_quota(
         request,
         user.id,
-        "manga.image.monthly_limit",
+        "manga.image.generate.monthly_limit",
         1,
         db,
         deduct=False,
@@ -5429,7 +5423,7 @@ async def generate_story_cover(story_id: int, request: Request, db: Session = De
     _check_and_consume_feature_quota(
         request,
         user.id,
-        "manga.image.monthly_limit",
+        "manga.image.generate.monthly_limit",
         1,
         db,
         deduct=True,
@@ -5463,7 +5457,7 @@ async def adjust_story_cover(story_id: int, request: Request, db: Session = Depe
     _check_and_consume_feature_quota(
         request,
         user.id,
-        "manga.image.monthly_limit",
+        "manga.image.generate.monthly_limit",
         1,
         db,
         deduct=False,
@@ -5486,7 +5480,7 @@ async def adjust_story_cover(story_id: int, request: Request, db: Session = Depe
     _check_and_consume_feature_quota(
         request,
         user.id,
-        "manga.image.monthly_limit",
+        "manga.image.generate.monthly_limit",
         1,
         db,
         deduct=True,
@@ -6181,7 +6175,7 @@ async def generate_story_character_ref_images(story_id: int, request: Request, d
         _check_and_consume_feature_quota(
             request,
             user.id,
-            "manga.image.monthly_limit",
+            "manga.image.generate.monthly_limit",
             len(pending_targets),
             db,
             deduct=False,
@@ -6253,7 +6247,7 @@ async def generate_story_character_ref_images(story_id: int, request: Request, d
                 _check_and_consume_feature_quota(
                     request,
                     user_id,
-                    "manga.image.monthly_limit",
+                    "manga.image.generate.monthly_limit",
                     len(generated),
                     quota_db,
                     deduct=True,
@@ -6390,7 +6384,7 @@ async def redraw_story_ref_image(story_id: int, filename: str, request: Request,
     if not path.exists():
         raise HTTPException(404, "参考图片未找到")
     try:
-        _check_and_consume_feature_quota(request, user.id, "manga.regenerate.monthly_limit", 1, db, deduct=False, provider_kind="image")
+        _check_and_consume_feature_quota(request, user.id, "manga.image.generate.monthly_limit", 1, db, deduct=False, provider_kind="image")
         mask_bytes = None
         if mode == "partial":
             with Image.open(path) as img:
@@ -6400,7 +6394,7 @@ async def redraw_story_ref_image(story_id: int, filename: str, request: Request,
         await edit_existing_image(prompt, path, path, mask_bytes=mask_bytes, api_key=image_api_key)
     except MangaImageGenerationError as exc:
         raise HTTPException(502, exc.to_payload()) from exc
-    _check_and_consume_feature_quota(request, user.id, "manga.regenerate.monthly_limit", 1, db, deduct=True, provider_kind="image")
+    _check_and_consume_feature_quota(request, user.id, "manga.image.generate.monthly_limit", 1, db, deduct=True, provider_kind="image")
     return {"images": _serialize_refs(_story_ref_dir(story_id), "story", story_id), "max": MAX_REF_IMAGES_PER_LEVEL}
 
 
@@ -6463,7 +6457,7 @@ async def redraw_chapter_ref_image(chapter_id: int, filename: str, request: Requ
     if not path.exists():
         raise HTTPException(404, "参考图片未找到")
     try:
-        _check_and_consume_feature_quota(request, user.id, "manga.regenerate.monthly_limit", 1, db, deduct=False, provider_kind="image")
+        _check_and_consume_feature_quota(request, user.id, "manga.image.generate.monthly_limit", 1, db, deduct=False, provider_kind="image")
         mask_bytes = None
         if mode == "partial":
             with Image.open(path) as img:
@@ -6473,7 +6467,7 @@ async def redraw_chapter_ref_image(chapter_id: int, filename: str, request: Requ
         await edit_existing_image(prompt, path, path, mask_bytes=mask_bytes, api_key=image_api_key)
     except MangaImageGenerationError as exc:
         raise HTTPException(502, exc.to_payload()) from exc
-    _check_and_consume_feature_quota(request, user.id, "manga.regenerate.monthly_limit", 1, db, deduct=True, provider_kind="image")
+    _check_and_consume_feature_quota(request, user.id, "manga.image.generate.monthly_limit", 1, db, deduct=True, provider_kind="image")
     return {"images": _serialize_refs(_chapter_ref_dir(chapter_id), "chapter", chapter_id), "source": "chapter", "max": MAX_REF_IMAGES_PER_LEVEL}
 
 
@@ -6877,7 +6871,7 @@ async def _background_manga_generation(
             if custom_image_provider:
                 write_db.commit()
             else:
-                _check_and_consume_quota(user_id, "manga.image.monthly_limit", 1, write_db, deduct=True)
+                _check_and_consume_quota(user_id, "manga.image.generate.monthly_limit", 1, write_db, deduct=True)
             write_db.refresh(manga)
         finally:
             write_db.close()
@@ -7093,7 +7087,7 @@ async def _background_manga_generation_concurrent(
                         else:
                             _check_and_consume_quota(
                                 user_id,
-                                "manga.image.monthly_limit",
+                                "manga.image.generate.monthly_limit",
                                 1,
                                 write_db,
                                 deduct=True,
@@ -7250,7 +7244,7 @@ async def generate_manga_stream(chapter_id: int, request: Request, db: Session =
     color_mode = _effective_color_mode(chapter_id, user.id, db)
     image_api_key = _user_image_api_key(request)
     custom_image_provider = _custom_image_provider_active(request)
-    _check_and_consume_feature_quota(request, user.id, "manga.image.monthly_limit", len(scenes), db, deduct=False, provider_kind="image")
+    _check_and_consume_feature_quota(request, user.id, "manga.image.generate.monthly_limit", len(scenes), db, deduct=False, provider_kind="image")
     ACTIVE_MANGA_GENERATIONS.add(chapter_id)
     # 在释放事务前提取 user_id，避免异步 generator 中 user 对象 session 已关闭
     user_id = user.id
@@ -7550,7 +7544,7 @@ async def regenerate_single_image(chapter_id: int, image_number: int, body: dict
     ref_paths = [str(p) for p, _ in ref_imgs]
     ref_labels = [label for _, label in ref_imgs]
     try:
-        _check_and_consume_feature_quota(request, user.id, "manga.regenerate.monthly_limit", 1, db, deduct=False, provider_kind="image")
+        _check_and_consume_feature_quota(request, user.id, "manga.image.generate.monthly_limit", 1, db, deduct=False, provider_kind="image")
         _release_db_transaction(db)
         if mode in {"full", "partial"}:
             if not old_path or not old_path.exists():
@@ -7622,7 +7616,7 @@ async def regenerate_single_image(chapter_id: int, image_number: int, body: dict
     if custom_image_provider:
         db.commit()
     else:
-        _check_and_consume_feature_quota(request, user.id, "manga.regenerate.monthly_limit", 1, db, deduct=True, provider_kind="image")
+        _check_and_consume_feature_quota(request, user.id, "manga.image.generate.monthly_limit", 1, db, deduct=True, provider_kind="image")
     db.commit()
     db.refresh(manga)
 

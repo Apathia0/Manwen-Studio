@@ -1,8 +1,9 @@
 import { memo, useCallback, useEffect, useRef, useState } from 'react';
-import { ChevronUp, ChevronDown, Download, ImageIcon, Loader2, Sparkles, Pencil, RefreshCw, Check, X, ImagePlus, Trash2, Square, Upload } from 'lucide-react';
+import { ChevronUp, ChevronDown, Download, ImageIcon, Loader2, Sparkles, Pencil, RefreshCw, Check, X, ImagePlus, Trash2, Square, Upload, MousePointer } from 'lucide-react';
 import { useMemo as useMemoValue } from 'react';
 import { createPortal } from 'react-dom';
 import { ImageRedrawModal } from './shared/ImageRedrawModal';
+import ImageZoomView from './shared/ImageZoomView';
 import {
   generateMangaStream,
   generateScenes, scenesFromSelection,
@@ -273,7 +274,6 @@ export default memo(function MangaPanel({
   const [refLoadSrcs, setRefLoadSrcs] = useState<Record<string, string>>({});
   const [lightboxZoom, setLightboxZoom] = useState<1 | 1.35 | 1.7>(1.35);
   const [refPreviewImage, setRefPreviewImage] = useState<RefPreviewTarget | null>(null);
-  const [refPreviewZoom, setRefPreviewZoom] = useState<1 | 1.35 | 1.7>(1.35);
   const [imageEditTarget, setImageEditTarget] = useState<ImageEditTarget | null>(null);
   const [refImageVersion, setRefImageVersion] = useState(0);
   const mangaAbortRef = useRef<Map<number, AbortController>>(new Map());
@@ -346,7 +346,6 @@ export default memo(function MangaPanel({
     onWorkspacePreviewModeChange?.(false);
     setLightboxZoom(1.35);
     setRefPreviewImage(null);
-    setRefPreviewZoom(1.35);
     setImageEditTarget(null);
     setScenes([]);
     setSanitizedSceneIdxs([]);
@@ -2476,11 +2475,9 @@ export default memo(function MangaPanel({
       {refPreviewImage && (
         <RefPreviewModal
           target={refPreviewImage}
-          zoom={refPreviewZoom}
           busy={refUploading}
           imageSrc={refLoadSrcs[refPreviewImage.image.image_path] || refImageSrc(refPreviewImage.image.image_path)}
           ready={refLoadStates[refPreviewImage.image.image_path] === 'ready'}
-          onZoomChange={setRefPreviewZoom}
           onClose={() => closeRefWorkspacePreview(setRefPreviewImage, onWorkspacePreviewModeChange)}
           onStartRedraw={() => {
             const current = refPreviewImage;
@@ -2635,8 +2632,6 @@ function RefPreviewModal({
   imageSrc,
   ready,
   busy,
-  zoom,
-  onZoomChange,
   onClose,
   onStartRedraw,
   onUploadReplace,
@@ -2645,18 +2640,11 @@ function RefPreviewModal({
   imageSrc: string;
   ready: boolean;
   busy: boolean;
-  zoom: 1 | 1.35 | 1.7;
-  onZoomChange: (zoom: 1 | 1.35 | 1.7) => void;
   onClose: () => void;
   onStartRedraw: () => void;
   onUploadReplace: (file: File) => void;
 }) {
   const uploadRef = useRef<HTMLInputElement>(null);
-  const previewImageClass = zoom === 1
-    ? 'max-w-[92%] max-h-none'
-    : zoom === 1.35
-      ? 'max-w-none w-[780px]'
-      : 'max-w-none w-[940px]';
 
   const modal = (
     <div className="fixed inset-0 z-[68] flex items-center justify-center bg-[rgba(15,23,42,0.62)] p-4 backdrop-blur-sm" onClick={onClose}>
@@ -2674,41 +2662,26 @@ function RefPreviewModal({
           </button>
         </div>
         <div className="grid flex-1 gap-0 overflow-hidden lg:grid-cols-[minmax(0,1.5fr)_420px]">
-          <div className="overflow-auto bg-[linear-gradient(180deg,_#0f172a_0%,_#111827_100%)] p-6">
+          <div className="overflow-hidden bg-[linear-gradient(180deg,_#0f172a_0%,_#111827_100%)] p-6">
             <div className="mb-4 flex items-center justify-between text-white/80">
               <div className="text-sm font-medium">角色参考图</div>
-              <div className="flex items-center gap-2">
-                <span className="text-xs text-white/60">缩放</span>
-                {[1, 1.35, 1.7].map((value) => (
-                  <button
-                    key={value}
-                    type="button"
-                    onClick={() => onZoomChange(value as 1 | 1.35 | 1.7)}
-                    className={`rounded-full px-3 py-1.5 text-xs transition-colors ${
-                      zoom === value ? 'bg-white text-slate-900' : 'bg-white/10 text-white hover:bg-white/20'
-                    }`}
-                  >
-                    {Math.round(value * 100)}%
-                  </button>
-                ))}
+              <div className="flex items-center gap-1.5 rounded-full bg-white/10 px-3 py-1.5 text-xs text-white/60">
+                <MousePointer size={12} />
+                <span>滚轮缩放 · 拖拽平移</span>
               </div>
             </div>
-            <div className="mx-auto flex min-h-[62vh] w-full items-center justify-center rounded-[24px] border border-white/10 bg-black/20 p-4">
-              <div className="rounded-[24px] bg-[#0b1220] p-4 shadow-2xl">
-                {ready ? (
-                  <img
-                    src={imageSrc}
-                    alt={target.image.filename}
-                    className={`mx-auto h-auto object-contain rounded-xl shadow-2xl ${previewImageClass}`}
-                    loading="lazy"
-                    decoding="async"
-                  />
-                ) : (
-                  <div className="flex min-h-[420px] min-w-[320px] items-center justify-center rounded-xl bg-[linear-gradient(180deg,_#08111d_0%,_#111827_100%)] text-white/70">
-                    <Loader2 size={24} className="animate-spin" />
-                  </div>
-                )}
-              </div>
+            <div className="mx-auto flex h-[62vh] w-full items-center justify-center rounded-[24px] border border-white/10 bg-black/20 p-4">
+              {ready ? (
+                <ImageZoomView
+                  src={imageSrc}
+                  alt={target.image.filename}
+                  className="h-full w-full rounded-xl"
+                />
+              ) : (
+                <div className="flex min-h-[420px] min-w-[320px] items-center justify-center rounded-xl bg-[linear-gradient(180deg,_#08111d_0%,_#111827_100%)] text-white/70">
+                  <Loader2 size={24} className="animate-spin" />
+                </div>
+              )}
             </div>
           </div>
           <div className="overflow-auto border-l border-[#e5edf8] bg-[#f8fbff] p-6">

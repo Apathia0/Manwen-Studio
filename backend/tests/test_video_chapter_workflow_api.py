@@ -898,6 +898,7 @@ def test_api_parse_chapter_shots_refreshes_source_text_from_db(monkeypatch):
         return {"workflow_status": "shots_ready", "shot_count": 3}
 
     monkeypatch.setattr(video_router, "parse_chapter_shots", fake_parse)
+    monkeypatch.setattr(video_router, "_check_and_consume_quota_wrapper", lambda *a, **kw: {"used": 0, "limit": 999, "feature_key": "", "period_key": "", "base_limit": 0, "granted": 0})
     monkeypatch.setattr(video_router, "update_chapter_workflow_status", lambda workflow_id, status: None)
 
     async def fake_submit_task(task_id=None, coro_func=None, **kwargs):
@@ -951,6 +952,7 @@ def test_api_parse_chapter_shots_raises_400_on_empty_content(monkeypatch):
             character_reference_ids=[],
         ),
     )
+    monkeypatch.setattr(video_router, "_check_and_consume_quota_wrapper", lambda *a, **kw: {"used": 0, "limit": 999, "feature_key": "", "period_key": "", "base_limit": 0, "granted": 0})
     monkeypatch.setattr(video_router, "_user_deepseek_api_key", lambda request, db_session: "fake-key")
 
     with pytest.raises(HTTPException) as exc_info:
@@ -980,6 +982,7 @@ def test_api_parse_chapter_shots_rejects_concurrent_parse(monkeypatch):
     db = _Db()
 
     monkeypatch.setattr(video_router, "_require_user", lambda request, db_session: SimpleNamespace(id=1))
+    monkeypatch.setattr(video_router, "_check_and_consume_quota_wrapper", lambda *a, **kw: {"used": 0, "limit": 999, "feature_key": "", "period_key": "", "base_limit": 0, "granted": 0})
     monkeypatch.setattr(
         video_router, "get_chapter_workflow",
         lambda workflow_id: SimpleNamespace(

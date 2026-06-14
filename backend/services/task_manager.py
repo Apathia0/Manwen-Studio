@@ -4,7 +4,7 @@ from functools import wraps
 from datetime import datetime, timedelta, timezone
 from typing import Callable, Any, Optional
 from database import SessionLocal
-from models import BackgroundTask
+from models import BackgroundTask, UserUsageMonthly
 from services.errors import MissingApiKeyError
 
 logger = logging.getLogger(__name__)
@@ -192,6 +192,10 @@ class TaskManager:
                 task.status = "failed"
                 task.error_message = error
                 task.completed_at = _now_naive()
+                # 自动回退配额（异步任务失败时回退已扣除的次数）
+                if task.quota_user_id and task.quota_feature_key and (task.quota_amount or 0) > 0:
+                    refund_amount = task.quota_amount or 0
+                    self.refund_quota(task.quota_user_id, task.quota_feature_key, refund_amount, db)
                 self._merge_task_metadata(
                     task,
                     {
@@ -240,6 +244,9 @@ class TaskManager:
         chapter_id: Optional[int] = None,
         shot_id: Optional[int] = None,
         metadata: Optional[dict[str, Any]] = None,
+        quota_user_id: Optional[int] = None,
+        quota_feature_key: Optional[str] = None,
+        quota_amount: int = 0,
     ) -> None:
         """Create a persisted task record."""
         db = SessionLocal()
@@ -253,6 +260,9 @@ class TaskManager:
                 chapter_id=chapter_id,
                 shot_id=shot_id,
                 metadata_json=metadata,
+                quota_user_id=quota_user_id,
+                quota_feature_key=quota_feature_key,
+                quota_amount=quota_amount,
             )
             db.add(task)
             db.commit()
@@ -270,6 +280,21 @@ class TaskManager:
         else:
             self._mark_task_succeeded(task_id, task.result())
 
+    def refund_quota(self, user_id: int, feature_key: str, amount: int, db) -> None:
+        """当异步任务失败时回退已扣除的配额。"""
+        if amount <= 0:
+            return
+        period_key = datetime.utcnow().strftime("%Y%m")
+        usage = db.query(UserUsageMonthly).filter(
+            UserUsageMonthly.user_id == user_id,
+            UserUsageMonthly.feature_key == feature_key,
+            UserUsageMonthly.period_key == period_key,
+        ).first()
+        if usage:
+            usage.used_amount = max(0, usage.used_amount - amount)
+            db.commit()
+            logger.info("配额回退: user=%s key=%s amount=%s", user_id, feature_key, amount)
+
     async def submit_task(
         self,
         task_id: str,
@@ -282,6 +307,9 @@ class TaskManager:
         chapter_id: Optional[int] = None,
         shot_id: Optional[int] = None,
         metadata: Optional[dict[str, Any]] = None,
+        quota_user_id: Optional[int] = None,
+        quota_feature_key: Optional[str] = None,
+        quota_amount: int = 0,
         **kwargs
     ) -> str:
         """Submit a coroutine to run in the background."""
@@ -289,7 +317,8 @@ class TaskManager:
         if metadata:
             initial_metadata.update(metadata)
         self._create_task_record(
-            task_id, task_type, max_retries, story_id, chapter_id, shot_id, initial_metadata
+            task_id, task_type, max_retries, story_id, chapter_id, shot_id,
+            initial_metadata, quota_user_id, quota_feature_key, quota_amount,
         )
 
         @self.with_retry(max_retries=max_retries, task_id=task_id)
