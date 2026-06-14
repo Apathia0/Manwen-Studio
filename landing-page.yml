@@ -1,0 +1,201 @@
+- generic [ref=e3]:
+  - banner [ref=e4]:
+    - generic [ref=e5]:
+      - button "ss logo ss AI 小说漫画创作平台" [ref=e257]:
+        - img "ss logo" [ref=e258]
+        - generic [ref=e8]:
+          - generic [ref=e9]: ss
+          - generic [ref=e10]: AI 小说漫画创作平台
+      - generic [ref=e11]:
+        - button "套餐" [ref=e12]
+        - button "登录" [ref=e13]
+        - button "开始创作" [ref=e14]:
+          - text: 开始创作
+          - img [ref=e15]
+  - main [ref=e17]:
+    - generic [ref=e18]:
+      - generic [ref=e19]:
+        - generic [ref=e20]: 用一条完整工作流把灵感变成可持续更新的内容 IP
+        - heading "从小说框架到漫画成图， 让创作、设定与出图在一个平台闭环完成。" [level=1] [ref=e21]:
+          - text: 从小说框架到漫画成图，
+          - generic [ref=e22]: 让创作、设定与出图在一个平台闭环完成。
+        - paragraph [ref=e23]: ss 面向小说作者、漫画团队和内容创业者，把大纲生成、角色设定、章节扩写、分镜拆解和漫画生成串成一条真正可落地的创作链路。 不再在多个工具之间来回切换，也不再让设定、文稿与画面彼此脱节。
+        - generic [ref=e24]:
+          - button "免费开始创作" [ref=e25]:
+            - text: 免费开始创作
+            - img [ref=e26]
+          - button "查看套餐方案" [ref=e28]:
+            - text: 查看套餐方案
+            - img [ref=e29]
+        - generic [ref=e31]:
+          - generic [ref=e32]:
+            - generic [ref=e33]: 5 步
+            - generic [ref=e34]: 覆盖从灵感、大纲、设定到分镜与漫画出图的完整流程。
+          - generic [ref=e35]:
+            - generic [ref=e36]: 统一
+            - generic [ref=e37]: 角色设定、参考图和章节内容始终在同一项目里协同更新。
+          - generic [ref=e38]:
+            - generic [ref=e39]: 连载友好
+            - generic [ref=e40]: 更适合长篇、连载和持续打磨，不只是一次性的单次生成。
+      - generic [ref=e44]:
+        - generic [ref=e45]:
+          - generic [ref=e46]:
+            - generic [ref=e47]: ss 创作工作台
+            - generic [ref=e48]: 把文本规划、设定管理、分镜生成和漫画出图放进同一个项目上下文里。
+          - generic [ref=e49]: 项目协同流
+        - generic [ref=e50]:
+          - generic [ref=e52]:
+            - generic [ref=e53]:
+              - img [ref=e55]
+              - generic [ref=e62]:
+                - generic [ref=e63]: 故事框架生成
+                - generic [ref=e64]: 题材、主线冲突、卷宗规划
+            - generic [ref=e65]: 起稿阶段
+          - generic [ref=e66]:
+            - generic [ref=e67]:
+              - generic [ref=e68]:
+                - img [ref=e69]
+                - text: 角色资料库
+              - generic [ref=e74]:
+                - generic [ref=e75]: 姓名、外貌、关系、口头禅统一管理
+                - generic [ref=e76]: 全局参考图同步给章节与漫画流程
+            - generic [ref=e77]:
+              - generic [ref=e78]:
+                - img [ref=e79]
+                - text: 章节推进
+              - generic [ref=e81]:
+                - generic [ref=e82]: 从提纲扩成章节正文草稿
+                - generic [ref=e83]: 保留可继续润色和二次编辑的空间
+          - generic [ref=e84]:
+            - generic [ref=e85]:
+              - generic [ref=e86]:
+                - generic [ref=e87]: 小说转分镜，再到漫画出图
+                - generic [ref=e88]: 镜头、对白、页面节奏与画面生成串行衔接，适合做持续连载和 IP 孵化。
+              - img [ref=e90]
+            - generic [ref=e93]:
+              - generic [ref=e94]: 场景拆分与分镜脚本
+              - generic [ref=e95]: 角色一致性参考
+              - generic [ref=e96]: 单图重绘与修正
+    - generic [ref=e98]:
+      - generic [ref=e99]:
+        - img [ref=e101]
+        - heading "AI 小说框架" [level=3] [ref=e108]
+        - paragraph [ref=e109]: 自动生成题材、角色、三幕式大纲与章节规划，让灵感可以迅速落成一套可执行的长篇方案。
+      - generic [ref=e110]:
+        - img [ref=e112]
+        - heading "章节扩写与迭代" [level=3] [ref=e117]
+        - paragraph [ref=e118]: 把大纲推进成可继续打磨的正文内容，既保留效率，也保留作者对风格与细节的掌控。
+      - generic [ref=e119]:
+        - img [ref=e121]
+        - heading "漫画生成与重绘" [level=3] [ref=e125]
+        - paragraph [ref=e126]: 从分镜脚本到画面生成一体衔接，支持单图调整，适合做内容试水和正式连载。
+    - generic [ref=e127]:
+      - generic [ref=e128]:
+        - generic [ref=e129]: 完整创作流程
+        - heading "不是单点功能堆叠，而是一条能持续推进内容生产的工作链。" [level=2] [ref=e130]
+        - paragraph [ref=e131]: 参考主流 AI 创作平台常见的首页节奏，我们保留了清晰入口和能力展示，但把重点收束到 ss 最核心的价值上： 从故事一路走到成图，过程不断层。
+      - generic [ref=e132]:
+        - generic [ref=e133]:
+          - generic [ref=e134]: "01"
+          - generic [ref=e135]: 一句灵感生成故事框架
+          - paragraph [ref=e136]: 从题材、世界观、主线冲突到三幕式大纲，先把长篇创作最难的起步阶段铺平。
+        - generic [ref=e137]:
+          - generic [ref=e138]: "02"
+          - generic [ref=e139]: 角色设定与外观统一管理
+          - paragraph [ref=e140]: 角色小传、关系线、外观描述和参考图统一沉淀，减少后续章节与漫画出图的设定漂移。
+        - generic [ref=e141]:
+          - generic [ref=e142]: "03"
+          - generic [ref=e143]: 章节扩写与节奏推进
+          - paragraph [ref=e144]: 把大纲快速扩成可继续打磨的正文草稿，保持叙事节奏、情绪推进与信息密度。
+        - generic [ref=e145]:
+          - generic [ref=e146]: "04"
+          - generic [ref=e147]: 小说转分镜脚本
+          - paragraph [ref=e148]: 自动拆分场景、镜头与对白，直接为漫画镜头、页节奏和画面生成做准备。
+        - generic [ref=e149]:
+          - generic [ref=e150]: "05"
+          - generic [ref=e151]: 漫画生成与单图重绘
+          - paragraph [ref=e152]: 从分镜到成图一条链路完成，支持局部修正和重绘，让内容产出更适合连载。
+    - generic [ref=e155]:
+      - generic [ref=e156]:
+        - generic [ref=e157]: 平台优势
+        - heading "更适合小说与漫画长期创作，而不是只做一次性的随机生成。" [level=2] [ref=e158]
+        - paragraph [ref=e159]: 相比只强调“生成快、出图多”的首页表达，ss 更强调创作上下文的连续性，让你的设定、正文和漫画结果彼此有据可循。
+        - button "现在开始创建项目" [ref=e160]:
+          - text: 现在开始创建项目
+          - img [ref=e161]
+      - generic [ref=e163]:
+        - generic [ref=e164]:
+          - img [ref=e165]
+          - generic [ref=e168]: 统一管理角色与参考
+          - paragraph [ref=e169]: 人物设定、外观描述和参考图集中存放，后续章节与漫画生成都能沿用同一套上下文。
+        - generic [ref=e170]:
+          - img [ref=e171]
+          - generic [ref=e174]: 从文本到镜头自然衔接
+          - paragraph [ref=e175]: 不是把章节丢给另一个工具重新开始，而是直接把正文语义转换为分镜和画面表达。
+        - generic [ref=e176]:
+          - img [ref=e177]
+          - generic [ref=e181]: 支持试水、迭代与重绘
+          - paragraph [ref=e182]: 先快速验证角色和画风，再对关键画面做单图修正，更适合实际内容生产的反复打磨。
+        - generic [ref=e183]:
+          - img [ref=e184]
+          - generic [ref=e187]: 兼顾创作与运营配置
+          - paragraph [ref=e188]: 平台内置套餐、额度和后台管理能力，后续如果面向用户开放，也有完整的商业化承接基础。
+    - generic [ref=e190]:
+      - generic [ref=e191]:
+        - generic [ref=e192]: 核心能力组合
+        - heading "围绕内容生产最常见的断点，补齐真正有价值的协作环节。" [level=2] [ref=e193]
+        - generic [ref=e194]:
+          - generic [ref=e195]:
+            - generic [ref=e196]:
+              - img [ref=e197]
+              - text: 大纲与情节推进
+            - paragraph [ref=e201]: 帮助创作者快速进入状态，避免从空白文档开始反复卡住。
+          - generic [ref=e202]:
+            - generic [ref=e203]:
+              - img [ref=e204]
+              - text: 人物一致性
+            - paragraph [ref=e209]: 让角色资料与参考图成为贯穿全项目的基础设施，而不是一次性备注。
+          - generic [ref=e210]:
+            - generic [ref=e211]:
+              - img [ref=e212]
+              - text: 分镜结构化输出
+            - paragraph [ref=e215]: 为漫画创作预先整理镜头逻辑、对白密度和画面拆分方式。
+          - generic [ref=e216]:
+            - generic [ref=e217]:
+              - img [ref=e218]
+              - text: 漫画生成与修正
+            - paragraph [ref=e222]: 把最终产出继续留在项目链路中，方便复盘、重绘和版本迭代。
+      - generic [ref=e223]:
+        - generic [ref=e224]: 适合谁使用
+        - heading "面向想把内容持续做下去的人，而不是只想试一次的人。" [level=2] [ref=e225]
+        - generic [ref=e226]:
+          - generic [ref=e227]:
+            - generic [ref=e228]: 网文作者
+            - paragraph [ref=e229]: 快速搭建长篇框架，稳定推进日更、周更和多卷连载。
+          - generic [ref=e230]:
+            - generic [ref=e231]: 漫画工作室
+            - paragraph [ref=e232]: 把剧本、分镜和角色参考整合在同一工作流里，减少沟通成本。
+          - generic [ref=e233]:
+            - generic [ref=e234]: 内容创业团队
+            - paragraph [ref=e235]: 适合做 IP 孵化、短篇试水、爆款验证和图文内容矩阵扩展。
+        - generic [ref=e236]: 如果你现在的流程还是“文案在一个工具、分镜在一个工具、画图又在另一个工具”，ss 会更像一个真正的创作工作台，而不是功能拼盘。
+    - generic [ref=e239]:
+      - generic [ref=e240]:
+        - generic [ref=e241]: 准备开始你的第一个项目
+        - heading "从一句故事灵感出发，逐步长成可更新、可出图、可运营的内容作品。" [level=2] [ref=e242]
+        - paragraph [ref=e243]: 现在就体验 ss，把世界观、角色、章节和漫画结果放到同一条生产线上，减少重复操作，提升内容稳定性。
+      - generic [ref=e244]:
+        - button "立即免费开始" [ref=e245]:
+          - text: 立即免费开始
+          - img [ref=e246]
+        - button "查看套餐与额度" [ref=e248]:
+          - text: 查看套餐与额度
+          - img [ref=e249]
+    - generic [ref=e253]:
+      - generic [ref=e254]:
+        - generic [ref=e255]: ss
+        - generic [ref=e256]: AI 小说漫画创作平台
+        - generic [ref=e259]: 欢迎使用企业级 AI 小说漫画创作平台。
+      - generic [ref=e260]:
+        - generic [ref=e261]: 客服邮箱：support@lorevista.ai
+        - generic [ref=e262]: © LoreVista

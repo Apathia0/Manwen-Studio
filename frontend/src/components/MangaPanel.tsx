@@ -272,7 +272,6 @@ export default memo(function MangaPanel({
   const [imageLoadSrcs, setImageLoadSrcs] = useState<Record<string, string>>({});
   const [refLoadStates, setRefLoadStates] = useState<Record<string, ImageLoadStatus>>({});
   const [refLoadSrcs, setRefLoadSrcs] = useState<Record<string, string>>({});
-  const [lightboxZoom, setLightboxZoom] = useState<1 | 1.35 | 1.7>(1.35);
   const [refPreviewImage, setRefPreviewImage] = useState<RefPreviewTarget | null>(null);
   const [imageEditTarget, setImageEditTarget] = useState<ImageEditTarget | null>(null);
   const [refImageVersion, setRefImageVersion] = useState(0);
@@ -344,7 +343,6 @@ export default memo(function MangaPanel({
     setErrorMsg('');
     setLightboxIdx(-1);
     onWorkspacePreviewModeChange?.(false);
-    setLightboxZoom(1.35);
     setRefPreviewImage(null);
     setImageEditTarget(null);
     setScenes([]);
@@ -1200,17 +1198,6 @@ export default memo(function MangaPanel({
   }, []);
 
   const generating = isLiveGenerating || phase === 'generating-images';
-  const lightboxImageClass = isWorkspacePreviewMode
-    ? (lightboxZoom === 1
-      ? 'max-w-[94%] max-h-none'
-      : lightboxZoom === 1.35
-        ? 'max-w-none w-[1120px]'
-        : 'max-w-none w-[1420px]')
-    : (lightboxZoom === 1
-      ? 'max-w-[92vw] max-h-[82vh]'
-      : lightboxZoom === 1.35
-        ? 'max-w-[110vw] max-h-[96vh]'
-        : 'max-w-[128vw] max-h-[118vh]');
 
   // Tick every 1s while generating so the stall indicator re-renders.
   const [, setNowTick] = useState(0);
@@ -2271,19 +2258,6 @@ export default memo(function MangaPanel({
               </div>
             </div>
             <div className="flex items-center gap-2">
-              <span className="text-xs text-white/60">缩放</span>
-              {[1, 1.35, 1.7].map((zoom) => (
-                <button
-                  key={zoom}
-                  type="button"
-                  onClick={() => setLightboxZoom(zoom as 1 | 1.35 | 1.7)}
-                  className={`rounded-full px-3 py-1.5 text-xs transition-colors ${
-                    lightboxZoom === zoom ? 'bg-white text-slate-900' : 'bg-white/10 text-white hover:bg-white/20'
-                  }`}
-                >
-                  {Math.round(zoom * 100)}%
-                </button>
-              ))}
               <button
                 type="button"
                 onClick={() => closeWorkspacePreview(setLightboxIdx, onWorkspacePreviewModeChange)}
@@ -2304,13 +2278,11 @@ export default memo(function MangaPanel({
               <ChevronUp size={22} className="-rotate-90" />
             </button>
 
-            <div className="flex-1 h-full overflow-auto rounded-[24px] bg-black/20 px-4 py-5">
-              <img
+            <div className="flex-1 h-full overflow-hidden rounded-[24px] bg-black/20 px-4 py-5">
+              <ImageZoomView
                 src={imageLoadSrcs[lightboxImg!.image_path] || mangaImageUrl(lightboxImg!.image_path)}
                 alt={`Panel ${lightboxImg!.image_number}`}
-                className={`mx-auto h-auto object-contain rounded-xl shadow-2xl ${lightboxImageClass}`}
-                loading="lazy"
-                decoding="async"
+                className="h-full w-full rounded-xl"
               />
             </div>
 

@@ -1784,6 +1784,7 @@ export interface RefImagesPayload {
 export type ImageRedrawMode = 'regenerate' | 'full' | 'partial';
 
 export function refImageUrl(imagePath: string): string {
+  if (imagePath.startsWith('http://') || imagePath.startsWith('https://')) return imagePath;
   return `${BASE}/static/manga/${imagePath.replace('manga_outputs/', '')}`;
 }
 
@@ -2450,8 +2451,13 @@ export async function scenesFromSelection(
 }
 
 export function mangaImageUrl(imagePath: string, cacheBust?: number): string {
-  // imagePath is like "manga_outputs/chapter_1/panel_01_abc12345.png"
-  // Served at /static/manga/chapter_1/panel_01_abc12345.png
+  // imagePath could be:
+  //   - "manga_outputs/chapter_1/panel_01_abc12345.png" (local)
+  //   - "https://oss.../manga_outputs/chapter_1/panel_01_abc12345.png" (OSS URL)
+  // For OSS/full URLs, use directly; otherwise proxy through /static/manga/
+  if (imagePath.startsWith('http://') || imagePath.startsWith('https://')) {
+    return cacheBust ? `${imagePath}?t=${cacheBust}` : imagePath;
+  }
   const url = `${BASE}/static/manga/${imagePath.replace('manga_outputs/', '')}`;
   return cacheBust ? `${url}?t=${cacheBust}` : url;
 }

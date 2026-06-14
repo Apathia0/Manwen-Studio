@@ -1963,7 +1963,7 @@ async def update_shot(
 
     duration = max(1, min(SHOT_DURATION_SECONDS, body.duration_seconds or shot.duration_seconds or SHOT_DURATION_SECONDS))
     _check_and_consume_quota_wrapper(
-        user.id, "video.generate.count.monthly_limit", 1, db, deduct=False,
+        user.id, "video.generate.count.monthly_limit", 1, db, deduct=True,
     )
 
     source_storyboard_asset_id = body.source_storyboard_asset_id or shot.storyboard_asset_id
@@ -2065,16 +2065,19 @@ async def update_shot(
         api_key=api_key,
         base_url=base_url,
         input_mode=input_mode,
-        timeout=600,
-        max_retries=2,
-        metadata={
-            "stage": "submitting",
-            "message": "正在提交视频生成任务...",
-            "provider_status": "submitting",
-            "running_stage": "submitting",
-            "running_message": "正在提交视频生成任务...",
-        },
-    )
+            timeout=600,
+            max_retries=2,
+            quota_user_id=user.id,
+            quota_feature_key="video.generate.count.monthly_limit",
+            quota_amount=1,
+            metadata={
+                "stage": "submitting",
+                "message": "正在提交视频生成任务...",
+                "provider_status": "submitting",
+                "running_stage": "submitting",
+                "running_message": "正在提交视频生成任务...",
+            },
+        )
 
     job_status = "pending"
     job = VideoGenerationJob(
@@ -2107,10 +2110,6 @@ async def update_shot(
     # Update shot status
     shot.status = "rendering"
     shot.updated_at = datetime.datetime.utcnow()
-
-    _check_and_consume_quota_wrapper(
-        user.id, "video.generate.count.monthly_limit", 1, db, deduct=True,
-    )
 
     db.commit()
     db.refresh(job)
@@ -2153,9 +2152,9 @@ async def render_shot_video_stream(
     """SSE-streaming video render endpoint.
     
     Events:
-      event: progress 鈫?{ job_id, progress, stage, message }
-      event: done     鈫?{ job_id, clip }
-      event: error    鈫?{ job_id, error }
+      event: progress -> { job_id, progress, stage, message }
+      event: done      -> { job_id, clip }
+      event: error     -> { job_id, error }
     """
     user = _require_user(request, db)
     shot = db.get(VideoShot, shot_id)
@@ -2169,7 +2168,7 @@ async def render_shot_video_stream(
 
     duration = max(1, min(SHOT_DURATION_SECONDS, body.duration_seconds or shot.duration_seconds or SHOT_DURATION_SECONDS))
     _check_and_consume_quota_wrapper(
-        user.id, "video.generate.count.monthly_limit", 1, db, deduct=False,
+        user.id, "video.generate.count.monthly_limit", 1, db, deduct=True,
     )
 
     source_storyboard_asset_id = body.source_storyboard_asset_id or shot.storyboard_asset_id
@@ -2273,6 +2272,9 @@ async def render_shot_video_stream(
                 input_mode=input_mode,
                 timeout=600,
                 max_retries=2,
+                quota_user_id=user.id,
+                quota_feature_key="video.generate.count.monthly_limit",
+                quota_amount=1,
                 metadata={
                     "stage": "submitting",
                     "message": "正在提交视频生成任务...",
@@ -2315,10 +2317,6 @@ async def render_shot_video_stream(
             
             shot.status = "rendering"
             shot.updated_at = datetime.datetime.utcnow()
-
-            _check_and_consume_quota_wrapper(
-                user.id, "video.generate.count.monthly_limit", 1, db, deduct=True,
-            )
 
             db.commit()
 
@@ -2829,7 +2827,7 @@ async def retry_video_job(
 
     # 配额预检
     _check_and_consume_quota_wrapper(
-        user.id, "video.generate.count.monthly_limit", 1, db, deduct=False,
+        user.id, "video.generate.count.monthly_limit", 1, db, deduct=True,
     )
 
     # Create new job with same shot_id
@@ -2846,10 +2844,6 @@ async def retry_video_job(
     )
     db.add(new_job)
     db.commit()
-    # 配额扣减
-    _check_and_consume_quota_wrapper(
-        user.id, "video.generate.count.monthly_limit", 1, db, deduct=True,
-    )
     db.refresh(new_job)
 
     return {
@@ -3178,7 +3172,7 @@ async def regenerate_video_asset(
     output_path = regen_dir / output_filename
 
     # 配额预检
-    _check_and_consume_quota_wrapper(user.id, "manga.image.generate.monthly_limit", 1, db, deduct=False)
+    _check_and_consume_quota_wrapper(user.id, "manga.image.generate.monthly_limit", 1, db, deduct=True)
 
     try:
         if has_source:
@@ -5792,7 +5786,7 @@ async def render_shot_video(
 
     duration = max(1, min(SHOT_DURATION_SECONDS, body.duration_seconds or shot.duration_seconds or SHOT_DURATION_SECONDS))
     _check_and_consume_quota_wrapper(
-        user.id, "video.generate.count.monthly_limit", 1, db, deduct=False,
+        user.id, "video.generate.count.monthly_limit", 1, db, deduct=True,
     )
 
     source_storyboard_asset_id = body.source_storyboard_asset_id or shot.storyboard_asset_id
@@ -5888,16 +5882,19 @@ async def render_shot_video(
         api_key=api_key,
         base_url=base_url,
         input_mode=input_mode,
-        timeout=600,
-        max_retries=2,
-        metadata={
-            "stage": "submitting",
-            "message": "正在提交视频生成任务...",
-            "provider_status": "submitting",
-            "running_stage": "submitting",
-            "running_message": "正在提交视频生成任务...",
-        },
-    )
+            timeout=600,
+            max_retries=2,
+            quota_user_id=user.id,
+            quota_feature_key="video.generate.count.monthly_limit",
+            quota_amount=1,
+            metadata={
+                "stage": "submitting",
+                "message": "正在提交视频生成任务...",
+                "provider_status": "submitting",
+                "running_stage": "submitting",
+                "running_message": "正在提交视频生成任务...",
+            },
+        )
 
     job_status = "pending"
     job = VideoGenerationJob(
@@ -5929,10 +5926,6 @@ async def render_shot_video(
 
     shot.status = "rendering"
     shot.updated_at = datetime.datetime.utcnow()
-
-    _check_and_consume_quota_wrapper(
-        user.id, "video.generate.count.monthly_limit", 1, db, deduct=True,
-    )
 
     db.commit()
 
@@ -6191,92 +6184,122 @@ def _check_and_consume_quota_wrapper(
     db: Session,
     deduct: bool,
 ) -> dict:
-    """Minimal quota check/consume inline (avoids circular import from main.py)."""
+    """Minimal quota check/consume inline (avoids circular import from main.py).
+    扣减时自动使用独立 session，避免受中间件自动回滚影响。"""
     if amount <= 0:
         amount = 1
 
     from models import Plan, PlanFeature, UserSubscription, UserUsageMonthly, UserQuotaGrantMonthly
 
-    sub = db.query(UserSubscription).filter(UserSubscription.user_id == user_id).first()
-    plan = None
-    if sub:
-        plan = db.get(Plan, sub.plan_id)
-    if not plan:
-        plan = db.query(Plan).filter(Plan.code == "free").first()
-    if not plan:
-        if not deduct:
-            return {"used": 0, "limit": 0, "feature_key": feature_key, "period_key": "", "base_limit": 0, "granted": 0}
-        raise HTTPException(500, "未配置套餐")
+    # 扣减路径使用独立 session，预检查使用传入的 db
+    own_session = deduct
+    work_db = SessionLocal() if own_session else db
 
-    feature = (
-        db.query(PlanFeature)
-        .filter(PlanFeature.plan_id == plan.id, PlanFeature.feature_key == feature_key)
-        .first()
-    )
-    base_limit = 0
-    if feature and feature.value_json:
-        base_limit = int(feature.value_json.get("value", 0))
+    try:
+        sub = work_db.query(UserSubscription).filter(UserSubscription.user_id == user_id).first()
+        plan = None
+        if sub:
+            plan = work_db.get(Plan, sub.plan_id)
+        if not plan:
+            plan = work_db.query(Plan).filter(Plan.code == "free").first()
+        if not plan:
+            if not deduct:
+                return {"used": 0, "limit": 0, "feature_key": feature_key, "period_key": "", "base_limit": 0, "granted": 0}
+            raise HTTPException(500, "未配置套餐")
 
-    period_key = datetime.datetime.utcnow().strftime("%Y%m")
-
-    grant = (
-        db.query(UserQuotaGrantMonthly)
-        .filter(
-            UserQuotaGrantMonthly.user_id == user_id,
-            UserQuotaGrantMonthly.feature_key == feature_key,
-            UserQuotaGrantMonthly.period_key == period_key,
+        feature = (
+            work_db.query(PlanFeature)
+            .filter(PlanFeature.plan_id == plan.id, PlanFeature.feature_key == feature_key)
+            .first()
         )
-        .first()
-    )
-    granted = int(grant.granted_amount) if grant else 0
-    limit = base_limit + granted
+        base_limit = 0
+        if feature and feature.value_json:
+            base_limit = int(feature.value_json.get("value", 0))
 
-    usage = (
-        db.query(UserUsageMonthly)
-        .filter(
+        # period_key 需要与 main.py _subscription_period_key 保持一致
+        # 有订阅→订阅周期；无订阅→当前月份
+        sub_row = work_db.query(UserSubscription).filter(
+            UserSubscription.user_id == user_id,
+            UserSubscription.status == "active",
+        ).first()
+        if sub_row and sub_row.current_period_start and sub_row.current_period_end:
+            period_key = f"{sub_row.current_period_start.strftime('%Y%m%d')}{sub_row.current_period_end.strftime('%Y%m%d')}"
+        else:
+            period_key = datetime.datetime.utcnow().strftime("%Y%m")
+
+        grant = (
+            work_db.query(UserQuotaGrantMonthly)
+            .filter(
+                UserQuotaGrantMonthly.user_id == user_id,
+                UserQuotaGrantMonthly.feature_key == feature_key,
+                UserQuotaGrantMonthly.period_key == period_key,
+            )
+            .first()
+        )
+        granted = int(grant.granted_amount) if grant else 0
+        limit = base_limit + granted
+
+        usage = (
+            work_db.query(UserUsageMonthly)
+            .filter(
+                UserUsageMonthly.user_id == user_id,
+                UserUsageMonthly.feature_key == feature_key,
+                UserUsageMonthly.period_key == period_key,
+            )
+            .first()
+        )
+        used = int(usage.used_amount) if usage else 0
+
+        feature_name = _FEATURE_NAME_MAP.get(feature_key, feature_key)
+        if limit <= 0:
+            raise HTTPException(403, f"当前套餐不可用「{feature_name}」")
+        if used + amount > limit:
+            raise HTTPException(429, f"「{feature_name}」配额已超限 ({used}/{limit})")
+
+        if not deduct:
+            return {
+                "used": used,
+                "limit": limit,
+                "feature_key": feature_key,
+                "period_key": period_key,
+                "base_limit": base_limit,
+                "granted": granted,
+            }
+
+        if usage:
+            usage.used_amount = used + amount
+        else:
+            work_db.add(UserUsageMonthly(
+                user_id=user_id,
+                feature_key=feature_key,
+                period_key=period_key,
+                used_amount=amount,
+            ))
+        work_db.commit()
+        logger.info("配额扣除成功: user=%s feature=%s amount=%s used=%s/%s period=%s",
+                    user_id, feature_key, amount, used + amount, limit, period_key)
+        # 即时回读验证
+        verify = work_db.query(UserUsageMonthly).filter(
             UserUsageMonthly.user_id == user_id,
             UserUsageMonthly.feature_key == feature_key,
             UserUsageMonthly.period_key == period_key,
-        )
-        .first()
-    )
-    used = int(usage.used_amount) if usage else 0
+        ).first()
+        logger.info("配额回读验证: user=%s feature=%s db_used=%s session_id=%s",
+                    user_id, feature_key,
+                    verify.used_amount if verify else "NOT_FOUND",
+                    id(work_db))
 
-    if not deduct:
         return {
-            "used": used,
+            "used": used + amount,
             "limit": limit,
             "feature_key": feature_key,
             "period_key": period_key,
             "base_limit": base_limit,
             "granted": granted,
         }
-
-    feature_name = _FEATURE_NAME_MAP.get(feature_key, feature_key)
-    if limit <= 0:
-        raise HTTPException(403, f"当前套餐不可用「{feature_name}」")
-    if used + amount > limit:
-        raise HTTPException(429, f"「{feature_name}」配额已超限 ({used}/{limit})")
-
-    if usage:
-        usage.used_amount = used + amount
-    else:
-        db.add(UserUsageMonthly(
-            user_id=user_id,
-            feature_key=feature_key,
-            period_key=period_key,
-            used_amount=amount,
-        ))
-    db.flush()
-
-    return {
-        "used": used + amount,
-        "limit": limit,
-        "feature_key": feature_key,
-        "period_key": period_key,
-        "base_limit": base_limit,
-        "granted": granted,
-    }
+    finally:
+        if own_session:
+            work_db.close()
 
 
 # ── 章节视频工作流 API ────────────────────────────────────
@@ -6550,7 +6573,7 @@ async def api_regenerate_shot_video(
 ):
     """重新生成单镜头的视频。"""
     user = _require_user(request, db)
-    _check_and_consume_quota_wrapper(user.id, "video.generate.count.monthly_limit", 1, db, deduct=False)
+    _check_and_consume_quota_wrapper(user.id, "video.generate.count.monthly_limit", 1, db, deduct=True)
     shot = db.get(ChapterVideoShot, shot_id)
     if not shot:
         raise HTTPException(404, "镜头不存在")
@@ -6583,7 +6606,6 @@ async def api_regenerate_shot_video(
     if not updated_shot:
         raise HTTPException(500, "重新生成视频失败")
 
-    _check_and_consume_quota_wrapper(user.id, "video.generate.count.monthly_limit", 1, db, deduct=True)
     return ChapterVideoShotOut.model_validate(updated_shot)
 
 
@@ -6867,7 +6889,6 @@ async def api_parse_chapter_shots(
 ):
     """阶段1-拆镜：将章节正文解析为 10s 镜头列表，停在 shots_ready。"""
     user = _require_user(request, db)
-    _check_and_consume_quota_wrapper(user.id, "video.shot.split.monthly_limit", 1, db, deduct=False)
     wf = get_chapter_workflow(workflow_id)
     if not wf:
         raise HTTPException(404, "工作流不存在")
@@ -6911,6 +6932,9 @@ async def api_parse_chapter_shots(
                 logger.info("拆镜前刷新工作流风格 %s -> %s", wf_in_db.video_style, preset.name)
         db.commit()
 
+    # 直接扣除配额（wrapper 内部自动使用独立 session，不受中间件回滚影响）
+    _check_and_consume_quota_wrapper(user.id, "video.shot.split.monthly_limit", 1, db, deduct=True)
+
     task_id = f"chapter_video_{workflow_id}_stage_{uuid.uuid4().hex[:8]}"
 
     update_chapter_workflow_status(workflow_id, "parsing_shots")
@@ -6926,6 +6950,9 @@ async def api_parse_chapter_shots(
             deepseek_api_key=deepseek_api_key,
             timeout=600.0,
             max_retries=1,
+            quota_user_id=user.id,
+            quota_feature_key="video.shot.split.monthly_limit",
+            quota_amount=1,
             metadata={
                 "workflow_id": workflow_id,
                 "stage": "parsing_shots",
@@ -6935,9 +6962,12 @@ async def api_parse_chapter_shots(
             },
         )
     except Exception as exc:
+        refund_db = SessionLocal()
+        try:
+            task_manager.refund_quota(user.id, "video.shot.split.monthly_limit", 1, refund_db)
+        finally:
+            refund_db.close()
         raise HTTPException(500, f"提交后台任务失败: {exc}")
-
-    _check_and_consume_quota_wrapper(user.id, "video.shot.split.monthly_limit", 1, db, deduct=True)
 
     return {
         "task_id": task_id,
@@ -7124,7 +7154,7 @@ async def api_generate_storyboards(
     shot_ids_list = body.shot_ids or []
     shot_count = len(shot_ids_list)
     if shot_count > 0:
-        _check_and_consume_quota_wrapper(user.id, "manga.image.generate.monthly_limit", shot_count, db, deduct=False)
+        _check_and_consume_quota_wrapper(user.id, "manga.image.generate.monthly_limit", shot_count, db, deduct=True)
 
     try:
         await task_manager.submit_task(
@@ -7139,6 +7169,9 @@ async def api_generate_storyboards(
             character_reference_ids=ref_ids,
             timeout=600.0,
             max_retries=1,
+            quota_user_id=user.id,
+            quota_feature_key="manga.image.generate.monthly_limit",
+            quota_amount=shot_count,
             metadata={
                 "workflow_id": workflow_id,
                 "stage": "generating_storyboards",
@@ -7148,10 +7181,13 @@ async def api_generate_storyboards(
             },
         )
     except Exception as exc:
+        if shot_count > 0:
+            refund_db = SessionLocal()
+            try:
+                task_manager.refund_quota(user.id, "manga.image.generate.monthly_limit", shot_count, refund_db)
+            finally:
+                refund_db.close()
         raise HTTPException(500, f"提交后台任务失败: {exc}")
-
-    if shot_count > 0:
-        _check_and_consume_quota_wrapper(user.id, "manga.image.generate.monthly_limit", shot_count, db, deduct=True)
 
     return {
         "task_id": task_id,

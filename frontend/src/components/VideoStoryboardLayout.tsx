@@ -135,9 +135,18 @@ export default function VideoStoryboardLayout({
         }
 
         detail.shots.forEach(shot => {
+          if (shot.status === 'storyboard_ready') {
+            videoGenStore.markSucceeded(shot.id, 'storyboard');
+          }
           if (shot.status === 'video_ready') {
             videoGenStore.markSucceeded(shot.id);
-          } else if (shot.status === 'failed') {
+          }
+          if (shot.status === 'failed') {
+            // 仅清除或标记仍在 active 的故事版状态
+            const sbState = videoGenStore.get(shot.id, 'storyboard');
+            if (sbState?.active) {
+              videoGenStore.markFailed(shot.id, shot.error_message || '故事版生成失败', 'storyboard');
+            }
             videoGenStore.markFailed(shot.id, shot.error_message || '视频生成失败');
           }
         });
@@ -172,11 +181,35 @@ export default function VideoStoryboardLayout({
         if (isActive) {
           // 立即设置运行状态，防止按钮在轮询启动前可点击
           setWorkflowRunning(true);
+          // 恢复拆镜遮罩（用户切走章节时会被清除，切回时若任务仍进行中则恢复）
+          if (latest.workflow_status === 'parsing_shots') {
+            setParsing(true);
+          }
           void pollWorkflowUntilSettled(latest.id);
         } else {
           // 已结束或待机状态：加载完整详情
-          await loadWorkflowDetail(latest.id, signal);
+          const detail = await loadWorkflowDetail(latest.id, signal);
           setWorkflowRunning(false);
+          setParsing(false);
+
+          // 清除可能残留的 storyboard/video 状态（用户切走时轮询被 stopPolling 终止导致状态未清除）
+          if (detail && !signal?.aborted) {
+            detail.shots.forEach(shot => {
+              if (shot.status === 'storyboard_ready') {
+                videoGenStore.markSucceeded(shot.id, 'storyboard');
+              }
+              if (shot.status === 'video_ready') {
+                videoGenStore.markSucceeded(shot.id);
+              }
+              if (shot.status === 'failed') {
+                const sbState = videoGenStore.get(shot.id, 'storyboard');
+                if (sbState?.active) {
+                  videoGenStore.markFailed(shot.id, shot.error_message || '故事版生成失败', 'storyboard');
+                }
+                videoGenStore.markFailed(shot.id, shot.error_message || '视频生成失败');
+              }
+            });
+          }
         }
       } else {
         setWorkflowRunning(false);
@@ -219,6 +252,8 @@ export default function VideoStoryboardLayout({
     if (!resolvedChapter?.id) return;
     const aborter = new AbortController();
     setWorkflow(null);
+    setWorkflowRunning(false);
+    setParsing(false);
     setConcatVideoUrl(null);
     stopPolling();
     void loadChapterAssets(resolvedChapter.id, aborter.signal);
@@ -311,12 +346,15 @@ export default function VideoStoryboardLayout({
   const handleRegenerateStoryboard = useCallback(async (shotId: number, refAssetIds?: number[]) => {
     if (!workflow) return;
     try {
+      videoGenStore.startJob(shotId, 0, 'storyboard');
       await regenerateChapterWorkflowStoryboard(shotId, undefined, refAssetIds);
       toast.success('故事版已重新生成');
       const detail = await getChapterVideoWorkflow(workflow.id);
       setWorkflow(detail);
       await loadChapterAssets(detail.chapter_id);
+      videoGenStore.markSucceeded(shotId, 'storyboard');
     } catch (error: any) {
+      videoGenStore.markFailed(shotId, error.message || '故事版重生成失败', 'storyboard');
       toast.error(`故事版重生成失败: ${error.message || '未知错误'}`);
     }
   }, [loadChapterAssets, workflow]);
@@ -415,12 +453,18 @@ export default function VideoStoryboardLayout({
     }
     try {
       setWorkflowRunning(true);
+      // 为每个选中镜头创建故事版 loading 状态
+      shotIds.forEach(shotId => {
+        videoGenStore.startJob(shotId, 0, 'storyboard');
+      });
       const status = await generateChapterWorkflowStoryboards(workflow.id, { shot_ids: shotIds });
       setWorkflow((prev) => (prev && prev.id === workflow.id ? { ...prev, ...(status as Partial<ChapterVideoWorkflow>) } : prev));
       toast.success('故事版生成任务已提交');
       void pollWorkflowUntilSettled(workflow.id);
     } catch (error: any) {
       setWorkflowRunning(false);
+      // 清除占位状态
+      shotIds.forEach(shotId => videoGenStore.clear(shotId, 'storyboard'));
       toast.error(`故事版生成失败: ${error.message || '未知错误'}`);
     }
   }, [pollWorkflowUntilSettled, workflow]);
@@ -598,6 +642,8 @@ export default function VideoStoryboardLayout({
         onSelect={(chapter) => {
           onChapterChange(chapter);
           setWorkflow(null);
+          setWorkflowRunning(false);
+          setParsing(false);
           setConcatVideoUrl(null);
         }}
         onToggleCollapse={() => setLeftCollapsed((value) => !value)}

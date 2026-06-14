@@ -6,7 +6,6 @@ interface ImageZoomViewProps {
   alt?: string;
   className?: string;
   style?: CSSProperties;
-  minZoom?: number;
   maxZoom?: number;
   fallback?: ReactNode;
   onZoomChange?: (zoom: number) => void;
@@ -17,7 +16,6 @@ export default function ImageZoomView({
   alt = '',
   className = '',
   style,
-  minZoom = 0.5,
   maxZoom = 5,
   fallback,
   onZoomChange,
@@ -62,9 +60,9 @@ export default function ImageZoomView({
     (e: React.WheelEvent) => {
       e.preventDefault();
       const delta = e.deltaY > 0 ? 0.9 : 1.1;
-      setZoom((prev) => Math.max(minZoom, Math.min(maxZoom, prev * delta)));
+      setZoom((prev) => Math.max(fitZoomRef.current, Math.min(maxZoom, prev * delta)));
     },
-    [minZoom, maxZoom]
+    [maxZoom]
   );
 
   const handleMouseDown = useCallback(
@@ -133,7 +131,7 @@ export default function ImageZoomView({
         const distance = Math.sqrt(dx * dx + dy * dy);
         const scale = distance / lastTouchDistanceRef.current;
         lastTouchDistanceRef.current = distance;
-        setZoom((prev) => Math.max(minZoom, Math.min(maxZoom, prev * scale)));
+        setZoom((prev) => Math.max(fitZoomRef.current, Math.min(maxZoom, prev * scale)));
       } else if (e.touches.length === 1 && isDragging) {
         e.preventDefault();
         const dx = e.touches[0].clientX - dragStartRef.current.x;
@@ -145,7 +143,7 @@ export default function ImageZoomView({
         setTranslateY(clamped.y);
       }
     },
-    [isDragging, minZoom, maxZoom, clampTranslate]
+    [isDragging, maxZoom, clampTranslate]
   );
 
   const handleTouchEnd = useCallback(() => {

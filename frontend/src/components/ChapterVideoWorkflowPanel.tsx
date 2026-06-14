@@ -127,6 +127,7 @@ export default function ChapterVideoWorkflowPanel({
   parsing,
   videoAspectRatio = '16:9',
   onVideoAspectRatioChange,
+  characterLoading,
 }: ChapterVideoWorkflowPanelProps) {
   const [concatModalOpen, setConcatModalOpen] = useState(false);
 
@@ -448,6 +449,14 @@ export default function ChapterVideoWorkflowPanel({
                           </div>
                           <div className="flex h-32 flex-col items-center justify-center rounded-lg border border-dashed border-[#d7e3f4] bg-white text-xs text-slate-400">
                             {(() => {
+                              if (characterLoading && shot.characters?.length) {
+                                return (
+                                  <div className="flex h-full w-full flex-col items-center justify-center rounded-lg border-2 border-dashed border-blue-200 bg-blue-50">
+                                    <Loader2 className="h-8 w-8 animate-spin text-blue-500" />
+                                    <span className="mt-2 text-sm text-blue-600">角色资产生成中...</span>
+                                  </div>
+                                );
+                              }
                               const thumbnails = getCharacterThumbnails(shot.characters);
                               if (thumbnails.length === 0) {
                                 return <div>暂无角色</div>;
@@ -489,9 +498,25 @@ export default function ChapterVideoWorkflowPanel({
                           <div className="mb-2 flex items-center gap-1 text-xs font-medium text-slate-600">
                             <Home size={14} /> 场景 & 道具
                           </div>
-                          <div className="flex h-32 items-center justify-center rounded-lg border border-dashed border-[#d7e3f4] bg-white text-xs text-slate-400">
-                            待生成
-                          </div>
+                          {(() => {
+                            const sceneState = videoGenStore.get(shot.id, 'scene');
+                            if (sceneState?.active) {
+                              return (
+                                <div className="flex h-32 flex-col items-center justify-center rounded-lg border-2 border-dashed border-blue-200 bg-blue-50">
+                                  <Loader2 className="h-8 w-8 animate-spin text-blue-500" />
+                                  <span className="mt-2 text-sm text-blue-600">场景生成中...</span>
+                                  {sceneState.statusMsg && (
+                                    <span className="mt-1 text-xs text-blue-500">{sceneState.statusMsg}</span>
+                                  )}
+                                </div>
+                              );
+                            }
+                            return (
+                              <div className="flex h-32 items-center justify-center rounded-lg border border-dashed border-[#d7e3f4] bg-white text-xs text-slate-400">
+                                待生成
+                              </div>
+                            );
+                          })()}
                         </button>
 
                         <button
@@ -502,17 +527,34 @@ export default function ChapterVideoWorkflowPanel({
                           <div className="mb-2 flex items-center gap-1 text-xs font-medium text-slate-600">
                             <ImageIcon size={12} /> 故事版
                           </div>
-                          {hasStoryboard ? (
-                            <img
-                              src={toAssetUrl(shot.storyboard_image_url)}
-                              alt={`镜头 ${shot.shot_index} 故事版`}
-                              className="h-32 w-full rounded-lg object-cover"
-                            />
-                          ) : (
-                            <div className="flex h-32 items-center justify-center rounded-lg border border-dashed border-[#d7e3f4] bg-white text-xs text-slate-400">
-                              暂无故事版
-                            </div>
-                          )}
+                          {(() => {
+                            const sbState = videoGenStore.get(shot.id, 'storyboard');
+                            if (sbState?.active) {
+                              return (
+                                <div className="flex h-32 flex-col items-center justify-center rounded-lg border-2 border-dashed border-blue-200 bg-blue-50">
+                                  <Loader2 className="h-8 w-8 animate-spin text-blue-500" />
+                                  <span className="mt-2 text-sm text-blue-600">故事版生成中...</span>
+                                  {sbState.statusMsg && (
+                                    <span className="mt-1 text-xs text-blue-500">{sbState.statusMsg}</span>
+                                  )}
+                                </div>
+                              );
+                            }
+                            if (hasStoryboard) {
+                              return (
+                                <img
+                                  src={toAssetUrl(shot.storyboard_image_url)}
+                                  alt={`镜头 ${shot.shot_index} 故事版`}
+                                  className="h-32 w-full rounded-lg object-cover"
+                                />
+                              );
+                            }
+                            return (
+                              <div className="flex h-32 items-center justify-center rounded-lg border border-dashed border-[#d7e3f4] bg-white text-xs text-slate-400">
+                                暂无故事版
+                              </div>
+                            );
+                          })()}
                         </button>
 
                         <button

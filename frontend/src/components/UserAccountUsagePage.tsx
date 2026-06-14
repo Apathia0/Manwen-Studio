@@ -16,6 +16,7 @@ import {
   statusLabel,
   paymentMethodLabel,
   orderSourceLabel,
+  LEGACY_FEATURE_KEY_MAP,
 } from '../lib/format';
 import { toast } from '../lib/toast';
 import { PasswordChangeForm } from './PasswordChangeForm';
@@ -238,7 +239,13 @@ export function UserAccountUsagePage({
             </tr>
           </thead>
           <tbody>
-            {(usage?.items || []).map((item) => {
+            {(() => {
+              const items = usage?.items || [];
+              const activeKeys = new Set(items.map(i => i.feature_key));
+              const deduped = items.filter(
+                item => !(item.feature_key in LEGACY_FEATURE_KEY_MAP && LEGACY_FEATURE_KEY_MAP[item.feature_key] && activeKeys.has(LEGACY_FEATURE_KEY_MAP[item.feature_key]))
+              );
+              return deduped.filter((item) => featureLabel(item.feature_key)).map((item) => {
               const percent = item.limit > 0 ? Math.max(0, Math.min(100, Math.round((item.remaining / item.limit) * 100))) : 0;
               return (
                 <tr key={item.feature_key} className="border-t border-[#e5edf8] align-top">
@@ -256,7 +263,8 @@ export function UserAccountUsagePage({
                   </td>
                 </tr>
               );
-            })}
+            });
+            })()}
           </tbody>
         </table>
       </div>
@@ -266,7 +274,7 @@ export function UserAccountUsagePage({
           <div className="text-sm font-semibold text-slate-900">当前权益说明</div>
           <div className="mt-1 text-xs text-slate-500">这里展示你的套餐已经开通的能力项和对应额度，不再显示难理解的内部系统键名。</div>
           <div className="mt-4 space-y-3">
-            {entitlementEntries.map(([key, value]) => (
+            {entitlementEntries.filter(([key]) => featureLabel(key)).map(([key, value]) => (
               <div key={key} className="rounded-2xl bg-[#f8fbff] px-4 py-3">
                 <div className="flex items-center justify-between gap-4">
                   <div>
