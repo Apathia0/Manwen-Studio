@@ -302,13 +302,9 @@ def test_batch_video_uses_same_helper_as_regenerate(monkeypatch, workflow_with_s
     async def fake_poll_video_job(*args, **kwargs):
         return "/static/video/test.mp4"
 
-    async def fake_video_prompt(*args, **kwargs):
-        return "video prompt"
-
     from services import video_generation as video_gen_service
     monkeypatch.setattr(video_gen_service, "submit_video_job", fake_submit_video_job)
     monkeypatch.setattr(video_chapter_pipeline, "_poll_video_job", fake_poll_video_job)
-    monkeypatch.setattr(deepseek_service, "generate_shot_video_prompt", fake_video_prompt)
 
     result = asyncio.run(video_chapter_pipeline.generate_videos_for_shots(
         workflow_id=workflow_id, shot_ids=None,
@@ -354,13 +350,9 @@ def test_video_stage_only_processes_storyboard_ready_shots(monkeypatch, workflow
     async def fake_poll_video_job(*args, **kwargs):
         return "/static/video/test.mp4"
 
-    async def fake_video_prompt(*args, **kwargs):
-        return "video prompt"
-
     from services import video_generation as video_gen_service
     monkeypatch.setattr(video_gen_service, "submit_video_job", fake_submit_video_job)
     monkeypatch.setattr(video_chapter_pipeline, "_poll_video_job", fake_poll_video_job)
-    monkeypatch.setattr(deepseek_service, "generate_shot_video_prompt", fake_video_prompt)
 
     result = asyncio.run(video_chapter_pipeline.generate_videos_for_shots(
         workflow_id=workflow_id, shot_ids=None,

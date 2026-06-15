@@ -594,21 +594,6 @@ def test_fallback_chapter_storyboard_uses_15_seconds():
     assert all(shot["duration_seconds"] == 15 for shot in shots)
 
 
-def test_shot_video_prompt_template_no_longer_uses_10s_segments():
-    from services import video_chapter_prompts as prompts
-
-    assert "7-10秒" not in prompts.SHOT_VIDEO_SYSTEM_PROMPT
-    assert "8.5-10秒" not in prompts.SHOT_VIDEO_SYSTEM_PROMPT
-
-
-def test_storyboard_and_video_prompts_share_same_segment_schema():
-    from services import video_chapter_prompts as prompts
-
-    assert "video_prompt" in prompts.SHOT_VIDEO_USER_TEMPLATE
-    assert "storyboard_prompt" in prompts.SHOT_VIDEO_SYSTEM_PROMPT or "storyboard_prompt" in prompts.SHOT_VIDEO_USER_TEMPLATE
-    assert "景别" in prompts.SHOT_VIDEO_USER_TEMPLATE
-
-
 def test_storyboard_director_prompt_no_longer_uses_10s_beats():
     from services import video_chapter_prompts as prompts
 
@@ -821,24 +806,6 @@ def test_api_create_chapter_workflow_does_not_auto_start(monkeypatch):
     )
 
     assert result.id == 77
-
-
-def test_shot_video_user_prompt_includes_storyboard_prompt():
-    from services.video_chapter_prompts import build_shot_video_user_prompt
-
-    result = build_shot_video_user_prompt(
-        scene_location="天台上",
-        time_of_day="夜",
-        characters=["少年", "少女"],
-        story_summary="两人在天台望月",
-        camera_plan="远景缓慢推近",
-        motion_plan="站定望月",
-        emotion_plan="孤独转静谧",
-        continuity_notes="保持角色一致",
-        storyboard_prompt="少年和少女站在城市天台上仰望巨大圆月",
-    )
-
-    assert "少年和少女站在城市天台上仰望巨大圆月" in result
 
 
 def test_api_parse_chapter_shots_refreshes_source_text_from_db(monkeypatch):

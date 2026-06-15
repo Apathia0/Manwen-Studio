@@ -504,14 +504,10 @@ async def test_expand_shots_with_role_prompts_reuses_character_prompts_from_stor
     async def fake_scene_prop_prompts(*args, **kwargs):
         return ('场景提示词', [])
 
-    async def fake_video_prompt_ai(*args, **kwargs):
-        return '视频提示词'
-
     monkeypatch.setattr(video_chapter_pipeline.deepseek_service, 'generate_shot_details', fake_generate_shot_details)
     monkeypatch.setattr(video_chapter_pipeline.deepseek_service, 'generate_shot_storyboard_prompt', fake_storyboard_prompt)
     monkeypatch.setattr(video_chapter_pipeline.deepseek_service, 'generate_shot_character_prompts_ai', fake_character_prompts_ai)
     monkeypatch.setattr(video_chapter_pipeline.deepseek_service, 'generate_shot_scene_prop_prompts', fake_scene_prop_prompts)
-    monkeypatch.setattr(video_chapter_pipeline.deepseek_service, 'generate_shot_video_prompt_ai', fake_video_prompt_ai)
 
     result = await video_chapter_pipeline.expand_shots_with_role_prompts(
         workflow_id=workflow_id,
@@ -561,9 +557,6 @@ async def test_expand_shots_with_role_prompts_reuses_scene_prop_analysis_for_sam
         calls['scene_prop'] += 1
         return ('天桥场景提示词', [{'name': '铜钟', 'prompt': '铜钟道具提示词'}])
 
-    async def fake_video_prompt_ai(*args, **kwargs):
-        return '视频提示词'
-
     async def fake_character_prompts_ai(**kwargs):
         return [{'name': '林晚晚', 'prompt': '角色提示词'}]
 
@@ -571,7 +564,6 @@ async def test_expand_shots_with_role_prompts_reuses_scene_prop_analysis_for_sam
     monkeypatch.setattr(video_chapter_pipeline.deepseek_service, 'generate_shot_storyboard_prompt', fake_storyboard_prompt)
     monkeypatch.setattr(video_chapter_pipeline.deepseek_service, 'generate_shot_character_prompts_ai', fake_character_prompts_ai)
     monkeypatch.setattr(video_chapter_pipeline.deepseek_service, 'generate_shot_scene_prop_prompts', fake_scene_prop_prompts)
-    monkeypatch.setattr(video_chapter_pipeline.deepseek_service, 'generate_shot_video_prompt_ai', fake_video_prompt_ai)
 
     result = await video_chapter_pipeline.expand_shots_with_role_prompts(
         workflow_id=workflow_id,
@@ -631,9 +623,6 @@ async def test_reanalyze_shot_prompts_returns_character_prompts_from_story_versi
     async def fake_storyboard_prompt(payload, **kwargs):
         return f"故事版:{payload['story_summary']}"
 
-    async def fake_video_prompt_ai(shot_data, **kwargs):
-        return f"视频:{shot_data['motion_plan']}"
-
     async def fake_character_prompts(**kwargs):
         return [{"name": "林秋", "prompt": "林秋角色设定卡"}]
 
@@ -641,7 +630,6 @@ async def test_reanalyze_shot_prompts_returns_character_prompts_from_story_versi
         return ("场景提示词", [])
 
     monkeypatch.setattr(video_chapter_pipeline.deepseek_service, 'generate_shot_storyboard_prompt', fake_storyboard_prompt)
-    monkeypatch.setattr(video_chapter_pipeline.deepseek_service, 'generate_shot_video_prompt_ai', fake_video_prompt_ai)
     monkeypatch.setattr(video_chapter_pipeline.deepseek_service, 'generate_shot_character_prompts_ai', fake_character_prompts)
     monkeypatch.setattr(video_chapter_pipeline.deepseek_service, 'generate_shot_scene_prop_prompts', fake_scene_prop_prompts)
 
@@ -729,9 +717,6 @@ async def test_expand_shots_with_role_prompts_logs_scene_prop_cache_hit(workflow
     async def fake_scene_prop_prompts(*args, **kwargs):
         return ('天桥场景提示词', [{'name': '铜钟', 'prompt': '铜钟道具提示词'}])
 
-    async def fake_video_prompt_ai(*args, **kwargs):
-        return '视频提示词'
-
     async def fake_character_prompts_ai(**kwargs):
         return [{'name': '林晚晚', 'prompt': '角色提示词'}]
 
@@ -739,7 +724,6 @@ async def test_expand_shots_with_role_prompts_logs_scene_prop_cache_hit(workflow
     monkeypatch.setattr(video_chapter_pipeline.deepseek_service, 'generate_shot_storyboard_prompt', fake_storyboard_prompt)
     monkeypatch.setattr(video_chapter_pipeline.deepseek_service, 'generate_shot_character_prompts_ai', fake_character_prompts_ai)
     monkeypatch.setattr(video_chapter_pipeline.deepseek_service, 'generate_shot_scene_prop_prompts', fake_scene_prop_prompts)
-    monkeypatch.setattr(video_chapter_pipeline.deepseek_service, 'generate_shot_video_prompt_ai', fake_video_prompt_ai)
 
     with caplog.at_level('INFO', logger=video_chapter_pipeline.logger.name):
         result = await video_chapter_pipeline.expand_shots_with_role_prompts(
@@ -790,13 +774,9 @@ async def test_expand_shots_with_role_prompts_logs_character_prompt_source(workf
     async def fake_scene_prop_prompts(*args, **kwargs):
         return ('场景提示词', [])
 
-    async def fake_video_prompt_ai(*args, **kwargs):
-        return '视频提示词'
-
     monkeypatch.setattr(video_chapter_pipeline.deepseek_service, 'generate_shot_details', fake_generate_shot_details)
     monkeypatch.setattr(video_chapter_pipeline.deepseek_service, 'generate_shot_storyboard_prompt', fake_storyboard_prompt)
     monkeypatch.setattr(video_chapter_pipeline.deepseek_service, 'generate_shot_scene_prop_prompts', fake_scene_prop_prompts)
-    monkeypatch.setattr(video_chapter_pipeline.deepseek_service, 'generate_shot_video_prompt_ai', fake_video_prompt_ai)
 
     with caplog.at_level('INFO', logger=video_chapter_pipeline.logger.name):
         result = await video_chapter_pipeline.expand_shots_with_role_prompts(
@@ -885,14 +865,10 @@ async def test_expand_shots_with_role_prompts_does_not_reuse_placeholder_prompt_
     async def fake_scene_prop_prompts(*args, **kwargs):
         return ('场景提示词', [])
 
-    async def fake_video_prompt_ai(*args, **kwargs):
-        return '视频提示词'
-
     monkeypatch.setattr(video_chapter_pipeline.deepseek_service, 'generate_shot_details', fake_generate_shot_details)
     monkeypatch.setattr(video_chapter_pipeline.deepseek_service, 'generate_shot_storyboard_prompt', fake_storyboard_prompt)
     monkeypatch.setattr(video_chapter_pipeline.deepseek_service, 'generate_shot_character_prompts_ai', fake_character_prompts_ai)
     monkeypatch.setattr(video_chapter_pipeline.deepseek_service, 'generate_shot_scene_prop_prompts', fake_scene_prop_prompts)
-    monkeypatch.setattr(video_chapter_pipeline.deepseek_service, 'generate_shot_video_prompt_ai', fake_video_prompt_ai)
 
     result = await video_chapter_pipeline.expand_shots_with_role_prompts(
         workflow_id=workflow_id,
@@ -1180,16 +1156,12 @@ async def test_expand_shots_saves_ai_character_prompts_to_story_character_versio
     async def fake_scene_prop_prompts(*args, **kwargs):
         return ('场景提示词', [])
 
-    async def fake_video_prompt_ai(*args, **kwargs):
-        return '视频提示词'
-
     async def fake_character_prompts_ai(**kwargs):
         return [{'name': '林晚晚', 'prompt': '黑色长发，职场女性，气质干练'}]
 
     monkeypatch.setattr(video_chapter_pipeline.deepseek_service, 'generate_shot_details', fake_generate_shot_details)
     monkeypatch.setattr(video_chapter_pipeline.deepseek_service, 'generate_shot_storyboard_prompt', fake_storyboard_prompt)
     monkeypatch.setattr(video_chapter_pipeline.deepseek_service, 'generate_shot_scene_prop_prompts', fake_scene_prop_prompts)
-    monkeypatch.setattr(video_chapter_pipeline.deepseek_service, 'generate_shot_video_prompt_ai', fake_video_prompt_ai)
     monkeypatch.setattr(video_chapter_pipeline.deepseek_service, 'generate_shot_character_prompts_ai', fake_character_prompts_ai)
 
     await video_chapter_pipeline.expand_shots_with_role_prompts(
