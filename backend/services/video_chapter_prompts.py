@@ -1,9 +1,8 @@
-"""章节视频工作流 — 正文解析 + 故事版 + 图生视频 Prompt 模板
+"""章节视频工作流 — 正文解析 + 故事版 Prompt 模板
 
-包含三个核心 prompt：
+包含两个核心 prompt：
 1. SHOT_PARSE_PROMPT — 正文 → 15s 镜头列表
 2. STORYBOARD_DIRECTOR_SYSTEM_PROMPT — 故事版导演角色，用于 AI 生成完整可用的故事版提示词
-3. VIDEO_PROMPT_TEMPLATE — 故事版图 → 图生视频
 """
 
 
@@ -278,29 +277,6 @@ STORYBOARD_DIRECTOR_USER_MESSAGE_TEMPLATE = """请根据以下剧情，生成一
 必须包含以下画面描述关键词（至少一个）：
 景别、镜头运动、画面、构图"""
 
-VIDEO_PROMPT_TEMPLATE = """根据输入的15秒镜头故事版生产说明图生成电影感视频。
-输入图是一张专业分镜板。请将这张静态分镜板转换为动态视频，严格遵循以下时间线节奏：
-
-每个15秒镜头内的分镜段落数量不固定，由镜头内容的剧情复杂度、动作密度和情绪推进动态决定。
-总时长必须严格等于15秒。
-
-严格遵循分镜板中的时间线、画面变化、运镜手法、人物动作、情绪节奏和空间关系。
-保持角色外貌、服装、发型与输入图一致。
-不要新增角色，不改变剧情，不改变场景关系。
-
-镜头运动：
-{camera_plan}
-
-人物动作：
-{motion_plan}
-
-情绪节奏：
-{emotion_plan}
-
-连续性要求：
-{continuity_notes}"""
-
-
 def build_storyboard_director_messages(
     scene_location: str | None,
     time_of_day: str | None,
@@ -349,21 +325,6 @@ def build_storyboard_director_messages(
     )
     system_prompt = STORYBOARD_DIRECTOR_SYSTEM_PROMPT.format(duration_seconds=duration_seconds, style_preset=style_desc)
     return system_prompt, user_message
-
-
-def build_video_prompt(
-    camera_plan: str | None,
-    motion_plan: str | None,
-    emotion_plan: str | None,
-    continuity_notes: str | None,
-) -> str:
-    """构建图生视频 prompt。"""
-    return VIDEO_PROMPT_TEMPLATE.format(
-        camera_plan=camera_plan or "",
-        motion_plan=motion_plan or "",
-        emotion_plan=emotion_plan or "",
-        continuity_notes=continuity_notes or "",
-    )
 
 
 # ── 分批拆镜 Phase 1：轻量拆镜 prompt ──────────────────────
@@ -1535,129 +1496,4 @@ def build_shot_character_user_prompt(
     )
 
 
-# ── 视频提示词生成 prompt ─────────────────────────
 
-SHOT_VIDEO_SYSTEM_PROMPT = """你是视频制作专家。你要先为单个15秒镜头进行容量建模，再生成专业的图生视频提示词。
-
-## 核心规则
-1. 提示词必须描述动态：角色动作、镜头运动、环境变化
-2. 必须先判断这个15秒镜头应拆成多少个分镜段落，每个段落分别承担什么画面任务与节奏功能
-3. 必须描述镜头运动方式：推、拉、摇、移、跟、环绕等
-4. 必须描述角色的连续动作，不是静态姿态
-5. 提示词必须可直接用于AI视频生成模型
-6. 禁止输出静态描述，必须是动态描述
-7. 所有描述必须使用简体中文
-8. storyboard_prompt 与 video_prompt 必须基于同一份分镜脚本结构，不允许各自生成不同节奏
-
-## 图生图约束（必须遵守）
-本提示词将结合故事版图片、角色资产图片、场景道具图片一起输入AI视频模型。必须确保：
-1. **角色一致性**：视频中的角色外貌、服装、发型必须与角色资产图片完全一致，禁止任何变化
-2. **场景一致性**：视频中的场景环境、光线、色调必须与场景道具图片完全一致
-3. **构图一致性**：视频的构图、景别、镜头角度必须与故事版图片保持一致
-4. **禁止画面飘逸**：禁止在视频中出现故事版未描述的新元素（新角色、新道具、新场景）
-5. **动作连贯性**：角色动作必须与故事版中描述的动作完全一致，禁止添加额外动作
-6. **风格统一**：视频的整体风格、线条、质感必须与输入图片保持一致
-
-## 风格参考图强约束（最高优先级）
-
-📌 如果本请求附带了风格参考图（style_reference_image），必须严格遵守：
-- **画风强制一致**：视频的整体画风、线条风格、笔触质感必须与风格参考图完全一致
-- **色调强制一致**：视频的整体色调、色彩饱和度、明暗对比必须与风格参考图完全一致
-- **禁止风格漂移**：禁止在视频的任何帧中出现与风格参考图不同的画风
-- **跨镜头一致性**：所有镜头必须保持相同的风格，确保视频整体风格统一
-- **动态一致性**：视频中的动态变化必须保持与风格参考图一致的风格特征
-
-## 15秒镜头容量建模要求
-- 先判断当前镜头在15秒内应拆成多少个分镜段落，段落数量不是固定值
-- 每个段落都要明确：起止时间、画面任务、角色动作、镜头运动、节奏功能
-- 所有段落的总时长必须严格落在15秒内
-- 如果剧情信息超过15秒承载能力，必须拆到下一个镜头，不能强行塞进当前镜头
-- 如果剧情信息不足15秒，必须补足环境互动、动作推进、情绪变化和镜头表达，而不是简单拉长空镜
-
-## 详细度要求（最高优先级）
-- video_prompt 的详细程度必须与 storyboard_prompt（故事版分镜脚本）完全一致
-- 每个分镜段落必须包含：景别、镜头运动、画面内容、人物动作、情绪、对白/旁白/音效（如有）
-- 禁止将故事版中的多行详细描述压缩为一行简略概括
-- 故事版中出现的每个视觉元素（标注、道具、环境细节）都必须保留在 video_prompt 中
-- 故事版中的对白、旁白、内心独白必须原样引用，不得省略或改写
-
-## 禁止事项
-- ❌ 禁止添加故事版未描述的新角色
-- ❌ 禁止添加故事版未描述的新道具
-- ❌ 禁止改变故事版中角色的服装或发型
-- ❌ 禁止改变故事版中的场景环境
-- ❌ 禁止添加与故事版情绪不符的动作
-- ❌ 禁止使用夸张的镜头运动（除非故事版明确要求）
-- ❌ 禁止简化故事版中的详细描述"""
-
-SHOT_VIDEO_USER_TEMPLATE = """请为以下15秒镜头生成专业的图生视频提示词。
-
-## 镜头信息
-- 场景地点：{scene_location}
-- 时间：{time_of_day}
-- 角色：{characters}
-- 情节摘要：{story_summary}
-- 运镜计划：{camera_plan}
-- 动作计划：{motion_plan}
-- 情绪计划：{emotion_plan}
-- 连续性要求：{continuity_notes}
-- 故事版提示词（当前镜头的故事版绘图内容参考，视频必须基于此图描述的场景和角色，不得偏离）：{storyboard_prompt}
-
-## 关键要求
-1. 先判断该15秒镜头应该拆成多少个分镜段落，再生成统一的分镜脚本
-2. 视频必须严格遵循故事版输出的分镜脚本段落、时间分配和情绪变化
-3. 忽略故事版描述中的排版/布局/格框等绘图指令，只关注每段分镜的画面内容
-4. 生成的提示词应该是15秒连续镜头的流畅描述，包含镜头运动、角色动作、情绪变化
-4. 角色外貌、服装、场景布置必须与参考图完全一致
-5. ⚠️ 精确提取：故事版中的具体数字（时间、日期）、角色姓名、对话内容、道具名称等必须原样保留，不得修改或编造。例如故事版写"23:47"就不能写成"02:47"，写"顾深"就不能改成其他人名
-6. ⚠️ 禁止AI幻觉：如果故事版描述中未提及某个具体细节，不要自行补充编造。输出内容必须严格基于故事版提供的信息
-7. ⚠️ 时间分段数量不是固定值，但必须严格对齐故事版生成的分镜脚本段落。每段的时间范围和内容必须与故事版一一对应
-8. ⚠️ 生成的视频提示词中不包含任何风格描述（如画风、色调、渲染质感等）。风格由附带的风格参考图定义，视频提示词只描述画面内容和动态
-9. ⚠️ 分镜脚本段落数量由导演判断，不允许套用固定3段、5段或6段模板
-
-## 输出要求
-
-输出 JSON 对象，格式为：
-{{
-  "video_prompt": "基于分镜脚本段落串联出的15秒图生视频提示词"
-}}
-
-## 提示词格式示例（段落数量动态决定）
-"0-5秒：景别：特写 | 镜头运动：从手机屏幕缓缓推进 | 画面内容：手机屏幕上显示月亮照片和未接来电'顾深19:32'，手指停在屏幕上 | 人物动作：林晚晚的食指悬停在'返回'按钮上 | 情绪：惊讶与犹豫 | 标注：【手机屏幕上的月亮照片】【未接来电提示】。5-10秒：景别：中近景 | 镜头运动：缓慢上摇至面部 | 画面内容：林晚晚咬嘴唇，眼神低垂，拿起水杯喝一口，手机被翻面放倒 | 人物动作：放下水杯后把手机翻面 | 情绪：内疚与回避 | 对白/旁白：（内心独白）"先赶方案吧……"。10-15秒：景别：全景 | 镜头运动：固定镜头 | 画面内容：办公室全景，林晚晚背对镜头，电脑屏幕亮着，窗外夜景，周围空旷，键盘声回响 | 人物动作：继续打字，肩膀微微下垂 | 情绪：孤独与无奈 | 音效：键盘敲击声、空调嗡鸣声 | 标注：【整层楼只剩她一人】【深夜加班】。"
-
-⚠️ 关键：每个分镜段落必须包含以下字段，缺一不可：
-- 景别（特写/近景/中近景/中景/全景/远景）
-- 镜头运动（推/拉/摇/移/跟/固定/环绕等）
-- 画面内容（具体场景细节、环境元素）
-- 人物动作（具体身体动作，不是静态姿态）
-- 情绪（角色当前情绪状态）
-- 对白/旁白/内心独白（如有，必须原样引用故事版原文）
-- 音效/标注（如有）
-以上字段参照故事版分镜脚本逐段提取，不得遗漏或简化
-"""
-
-
-def build_shot_video_user_prompt(
-    scene_location: str | None,
-    time_of_day: str | None,
-    characters: list[str] | None,
-    story_summary: str | None,
-    camera_plan: str | None,
-    motion_plan: str | None,
-    emotion_plan: str | None,
-    continuity_notes: str | None,
-    storyboard_prompt: str | None = None,
-) -> str:
-    """构建视频提示词生成的 user prompt。"""
-    chars_str = "、".join(characters) if isinstance(characters, list) else str(characters or "未明确")
-    return SHOT_VIDEO_USER_TEMPLATE.format(
-        scene_location=scene_location or "未明确",
-        time_of_day=time_of_day or "白天",
-        characters=chars_str,
-        story_summary=story_summary or "",
-        camera_plan=camera_plan or "",
-        motion_plan=motion_plan or "",
-        emotion_plan=emotion_plan or "",
-        continuity_notes=continuity_notes or "",
-        storyboard_prompt=storyboard_prompt or "（无）",
-    )

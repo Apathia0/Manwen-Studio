@@ -3367,21 +3367,6 @@ def generate_shot_storyboard_content(
     return user_message
 
 
-async def generate_shot_video_prompt(
-    shot_data: dict,
-    api_key: str | None = None,
-) -> str:
-    """为单个镜头生成图生视频 prompt。"""
-    from services.video_chapter_prompts import build_video_prompt
-
-    return build_video_prompt(
-        camera_plan=shot_data.get("camera_plan"),
-        motion_plan=shot_data.get("motion_plan"),
-        emotion_plan=shot_data.get("emotion_plan"),
-        continuity_notes=shot_data.get("continuity_notes"),
-    )
-
-
 async def generate_shot_details(
     chapter_text: str,
     shots_basic_info: list[dict],
@@ -3564,60 +3549,3 @@ async def generate_shot_character_prompts_ai(
         prompts = []
 
     return prompts
-
-
-async def generate_shot_video_prompt_ai(
-    shot_data: dict,
-    api_key: str | None = None,
-    storyboard_prompt: str | None = None,
-) -> str:
-    """使用 DeepSeek 为镜头生成专业的图生视频提示词。"""
-    from services.video_chapter_prompts import SHOT_VIDEO_SYSTEM_PROMPT, build_shot_video_user_prompt
-
-    user_prompt = build_shot_video_user_prompt(
-        scene_location=shot_data.get("scene_location"),
-        time_of_day=shot_data.get("time_of_day"),
-        characters=shot_data.get("characters"),
-        story_summary=shot_data.get("story_summary"),
-        camera_plan=shot_data.get("camera_plan"),
-        motion_plan=shot_data.get("motion_plan"),
-        emotion_plan=shot_data.get("emotion_plan"),
-        continuity_notes=shot_data.get("continuity_notes"),
-        storyboard_prompt=storyboard_prompt,
-    )
-
-    payload = {
-        "model": DEEPSEEK_MODEL,
-        "messages": [
-            {"role": "system", "content": SHOT_VIDEO_SYSTEM_PROMPT},
-            {"role": "user", "content": user_prompt},
-        ],
-        "stream": False,
-        "max_tokens": 8192,
-        "response_format": {"type": "json_object"},
-    }
-
-    async with httpx.AsyncClient(timeout=300) as client:
-        resp = await client.post(
-            f"{DEEPSEEK_BASE_URL}/chat/completions",
-            json=payload,
-            headers=_deepseek_auth_headers(api_key),
-        )
-        resp.raise_for_status()
-        data = _response_json(resp, context="DeepSeek")
-        content = data["choices"][0]["message"]["content"]
-
-    try:
-        result = _extract_json_object(content)
-    except ValueError:
-        repaired = _repair_broken_json_fields(content)
-        try:
-            result = _extract_json_object(repaired)
-        except ValueError:
-            truncated = _repair_truncated_json(content)
-            try:
-                result = _extract_json_object(truncated)
-            except ValueError:
-                return ""
-
-    return result.get("video_prompt", "") or ""
