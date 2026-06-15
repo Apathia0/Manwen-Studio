@@ -524,7 +524,7 @@ export function AdminUserManagementPage({ onError }: { onError: (message: string
   const [query, setQuery] = useState('');
   const [selectedUserId, setSelectedUserId] = useState<number | null>(null);
   const [entitlementPreview, setEntitlementPreview] = useState<any>(null);
-  const [grantFeatureKey, setGrantFeatureKey] = useState('manga.image.monthly_limit');
+  const [grantFeatureKey, setGrantFeatureKey] = useState('manga.image.generate.monthly_limit');
   const [grantAmount, setGrantAmount] = useState('10');
   const [selectedPlanId, setSelectedPlanId] = useState<number | null>(null);
   const [reviewStories, setReviewStories] = useState<AdminReviewStory[]>([]);

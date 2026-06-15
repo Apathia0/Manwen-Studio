@@ -16,9 +16,9 @@ export function UserPricingPage({
   subscribingPlanId?: number | null;
 }) {
   const fallback = [
-    { id: 0, name: 'Free', monthly_price: 0, description: '适合体验和轻量创作', features: { 'manga.image.monthly_limit': 80, 'framework.generate.monthly_limit': 5, 'scene.generate.monthly_limit': 15, 'ai.text.advanced_calls.monthly_limit': 20, 'manga.max_image_count_per_chapter': 6, 'manga.allow_color_mode': false } },
-    { id: 1, name: 'Pro', monthly_price: 59, description: '适合稳定更新的个人创作者', features: { 'manga.image.monthly_limit': 800, 'framework.generate.monthly_limit': 50, 'scene.generate.monthly_limit': 120, 'ai.text.advanced_calls.monthly_limit': 180, 'manga.max_image_count_per_chapter': 12, 'manga.allow_color_mode': true } },
-    { id: 2, name: 'Premium', monthly_price: 199, description: '适合高频产出的团队和工作室', features: { 'manga.image.monthly_limit': 4000, 'framework.generate.monthly_limit': 200, 'scene.generate.monthly_limit': 500, 'ai.text.advanced_calls.monthly_limit': 600, 'manga.max_image_count_per_chapter': 20, 'manga.allow_color_mode': true } },
+    { id: 0, name: 'Free', monthly_price: 0, description: '适合体验和轻量创作', features: { 'framework.generate.monthly_limit': 5, 'chapter.expand.monthly_limit': 20, 'scene.generate.monthly_limit': 15, 'manga.image.generate.monthly_limit': 100, 'ai.text.advanced_calls.monthly_limit': 20, 'manga.max_image_count_per_chapter': 6, 'manga.allow_color_mode': false, 'video.shot.split.monthly_limit': 0, 'video.generate.count.monthly_limit': 0 } },
+    { id: 1, name: 'Pro', monthly_price: 59, description: '适合稳定更新的个人创作者', features: { 'framework.generate.monthly_limit': 50, 'chapter.expand.monthly_limit': 200, 'scene.generate.monthly_limit': 120, 'manga.image.generate.monthly_limit': 1100, 'ai.text.advanced_calls.monthly_limit': 180, 'manga.max_image_count_per_chapter': 12, 'manga.allow_color_mode': true, 'video.shot.split.monthly_limit': 5, 'video.generate.count.monthly_limit': 5 } },
+    { id: 2, name: 'Premium', monthly_price: 199, description: '适合高频产出的团队和工作室', features: { 'framework.generate.monthly_limit': 200, 'chapter.expand.monthly_limit': 1000, 'scene.generate.monthly_limit': 500, 'manga.image.generate.monthly_limit': 5500, 'ai.text.advanced_calls.monthly_limit': 600, 'manga.max_image_count_per_chapter': 20, 'manga.allow_color_mode': true, 'video.shot.split.monthly_limit': 10, 'video.generate.count.monthly_limit': 15 } },
   ];
   const data = plans.length > 0 ? plans : (fallback as any[]);
 
@@ -31,8 +31,12 @@ export function UserPricingPage({
           const isCurrent = subscription?.subscription.plan.id === plan.id;
           const highlights = [
             ['framework.generate.monthly_limit', plan.features?.['framework.generate.monthly_limit'] ?? 0],
+            ['chapter.expand.monthly_limit', plan.features?.['chapter.expand.monthly_limit'] ?? 0],
             ['scene.generate.monthly_limit', plan.features?.['scene.generate.monthly_limit'] ?? 0],
-            ['manga.image.monthly_limit', plan.features?.['manga.image.monthly_limit'] ?? 0],
+            ['manga.image.generate.monthly_limit', plan.features?.['manga.image.generate.monthly_limit'] ?? 0],
+            ['ai.text.advanced_calls.monthly_limit', plan.features?.['ai.text.advanced_calls.monthly_limit'] ?? 0],
+            ['video.shot.split.monthly_limit', plan.features?.['video.shot.split.monthly_limit'] ?? 0],
+            ['video.generate.count.monthly_limit', plan.features?.['video.generate.count.monthly_limit'] ?? 0],
           ] as const;
 
           return (
