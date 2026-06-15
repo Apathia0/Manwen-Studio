@@ -1742,9 +1742,10 @@ async def regenerate_shot_video(
 
     # Part 3: 风格参考图约束（仅当有风格参考图时）
     if has_style_ref:
-        prompt_sections.append(
-            "本视频的画风、色彩、光影以风格参考图为准，保持画面风格稳定统一。"
-        )
+        style_constraint = "本视频的画风、色彩、光影以风格参考图为准，保持画面风格稳定统一。"
+        if has_storyboard_ref:
+            style_constraint += "\n故事版仅提供构图和动作参考，视频色彩、光影、渲染质感不受故事版影响，完全以风格参考图为准。"
+        prompt_sections.append(style_constraint)
 
     # 保存核心 prompt 到 DB（不含 enrichments，避免重复累积）
     core_prompt = video_prompt
