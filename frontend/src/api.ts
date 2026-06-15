@@ -1918,12 +1918,12 @@ export async function regenerateImage(
   chapterId: number,
   imageNumber: number,
   prompt: string,
-  options?: { mode?: ImageRedrawMode; mask?: string },
+  options?: { mode?: ImageRedrawMode; mask?: string; size?: string; stylePresetName?: string; styleRefUrl?: string },
 ): Promise<{ id: number; image_number: number; image_path: string; prompt: string }> {
   const res = await fetch(`${BASE}/api/chapters/${chapterId}/regenerate-image/${imageNumber}`, {
     method: 'POST',
     headers: apiHeaders(true),
-    body: JSON.stringify({ prompt, mode: options?.mode, mask: options?.mask }),
+    body: JSON.stringify({ prompt, mode: options?.mode, mask: options?.mask, size: options?.size, style_preset_name: options?.stylePresetName, style_ref_url: options?.styleRefUrl }),
   });
   if (!res.ok) throw new Error(await res.text());
   return res.json();
@@ -1981,12 +1981,21 @@ export async function resetMangaImages(chapterId: number): Promise<void> {
 export function generateMangaStream(
   chapterId: number,
   onEvent: (event: MangaProgress) => void,
+  size?: string,
+  stylePresetName?: string,
+  styleRefUrl?: string,
 ): AbortController {
   const controller = new AbortController();
 
+  const body: Record<string, string> = {};
+  if (size) body.size = size;
+  if (stylePresetName) body.style_preset_name = stylePresetName;
+  if (styleRefUrl) body.style_ref_url = styleRefUrl;
+
   fetch(`${BASE}/api/chapters/${chapterId}/generate-manga-stream`, {
     method: 'POST',
-    headers: apiHeaders(),
+    headers: apiHeaders(true),
+    body: JSON.stringify(body),
     signal: controller.signal,
   })
     .then(async (res) => {
@@ -3761,6 +3770,18 @@ export async function promoteAsset(assetId: number, payload: { level: string; in
 export async function listStylePresets(): Promise<{ presets: VideoStylePreset[] }> {
   const res = await fetch(`${BASE}/api/video-style-presets`, {
     headers: apiHeaders(),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function uploadMangaStyleReference(chapterId: number, file: File): Promise<{ success: boolean; style_reference_image_url: string }> {
+  const formData = new FormData();
+  formData.append('file', file);
+  const res = await fetch(`${BASE}/api/chapters/${chapterId}/upload-style-reference`, {
+    method: 'POST',
+    headers: apiHeaders(),
+    body: formData,
   });
   if (!res.ok) throw new Error(await res.text());
   return res.json();

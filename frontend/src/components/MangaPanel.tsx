@@ -1,9 +1,10 @@
 import { memo, useCallback, useEffect, useRef, useState } from 'react';
-import { ChevronUp, ChevronDown, Download, ImageIcon, Loader2, Sparkles, Pencil, RefreshCw, Check, X, ImagePlus, Trash2, Square, Upload, MousePointer } from 'lucide-react';
+import { ChevronUp, ChevronDown, Download, ImageIcon, Loader2, Sparkles, Pencil, RefreshCw, Check, X, ImagePlus, Trash2, Square, Upload, MousePointer, Palette } from 'lucide-react';
 import { useMemo as useMemoValue } from 'react';
 import { createPortal } from 'react-dom';
 import { ImageRedrawModal } from './shared/ImageRedrawModal';
 import ImageZoomView from './shared/ImageZoomView';
+import StyleSelectorModal from './StyleSelectorModal';
 import {
   generateMangaStream,
   generateScenes, scenesFromSelection,
@@ -33,6 +34,8 @@ import {
   cancelMangaGeneration,
   uploadCharacterRefImage,
   deleteCharacterRefImage,
+  listStylePresets,
+  uploadMangaStyleReference,
   type ImageRedrawMode,
   type Chapter,
   type MangaProgress,
@@ -40,6 +43,7 @@ import {
   type EntitlementResponse,
   type RefSource,
   type RefImage,
+  type VideoStylePreset,
 } from '../api';
 import { genStore } from '../genStore';
 import { toast } from '../lib/toast';
@@ -196,6 +200,14 @@ function closeRefWorkspacePreview(
 type Phase = 'idle' | 'generating-scenes' | 'editing-scenes' | 'generating-images';
 const DEFAULT_IMAGE_COUNT = 10;
 
+const ASPECT_RATIO_OPTIONS = [
+  { label: '9:16', size: '1024x1792' },
+  { label: '2:3', size: '1024x1536' },
+  { label: '1:1', size: '1024x1024' },
+  { label: '3:2', size: '1536x1024' },
+  { label: '16:9', size: '1792x1024' },
+] as const;
+
 function entitlementNumber(entitlements: EntitlementResponse | null | undefined, key: string, fallback: number): number {
   const raw = entitlements?.entitlements?.[key];
   if (typeof raw === 'number' && Number.isFinite(raw)) return raw;
@@ -241,6 +253,7 @@ export default memo(function MangaPanel({
   const [editText, setEditText] = useState('');
   const [savingScenes, setSavingScenes] = useState(false);
   const [regenIdx, setRegenIdx] = useState<number>(-1);
+  const [panelGenLoading, setPanelGenLoading] = useState<number[]>([]);
   const [charText, setCharText] = useState('');
   const [charSource, setCharSource] = useState<'chapter' | 'story' | 'none'>('none');
   const [charEditing, setCharEditing] = useState(false);
@@ -257,6 +270,11 @@ export default memo(function MangaPanel({
   const [refModalOpen, setRefModalOpen] = useState(false);
   const [colorMode, setColorModeState] = useState<ColorMode>('bw');
   const [imageCount, setImageCountState] = useState(DEFAULT_IMAGE_COUNT);
+const [aspectRatio, setAspectRatio] = useState<string>('9:16');
+  const [stylePresets, setStylePresets] = useState<VideoStylePreset[]>([]);
+  const [selectedStylePresetName, setSelectedStylePresetName] = useState<string>('');
+  const [styleReferenceImageUrl, setStyleReferenceImageUrl] = useState<string | null>(null);
+  const [styleSelectorOpen, setStyleSelectorOpen] = useState(false);
   const [showColorMenu, setShowColorMenu] = useState(false);
   const colorMenuRef = useRef<HTMLDivElement>(null);
   const refFileRef = useRef<HTMLInputElement>(null);
@@ -475,6 +493,18 @@ export default memo(function MangaPanel({
       }).catch(() => {});
       getImageCount(chapter.id).then((c) => {
         if (chapterLoadRequestRef.current === requestId) setImageCountState(c);
+      }).catch(() => {});
+      listStylePresets().then((result) => {
+        if (chapterLoadRequestRef.current === requestId) {
+          setStylePresets(result.presets);
+          // 默认选中"日式动漫风"
+          if (result.presets.length > 0) {
+            const animePreset = result.presets.find(p => p.name === '日式动漫风')
+              || result.presets.find(p => p.category === 'anime')
+              || result.presets[0];
+            setSelectedStylePresetName(animePreset.name);
+          }
+        }
       }).catch(() => {});
       getScenes(chapter.id).then((result) => {
         if (chapterLoadRequestRef.current !== requestId) return;
@@ -745,7 +775,7 @@ export default memo(function MangaPanel({
     try {
       // Save scenes first
       await updateScenes(chapter.id, scenes);
-      const result = await regenerateImage(chapter.id, imageNumber, prompt);
+      const result = await regenerateImage(chapter.id, imageNumber, prompt, { size: ASPECT_RATIO_OPTIONS.find(o => o.label === aspectRatio)?.size, stylePresetName: selectedStylePresetName || undefined, styleRefUrl: styleReferenceImageUrl || undefined });
       // Update in images list
       const newItem: ImageItem = {
         image_number: result.image_number,
@@ -763,6 +793,15 @@ export default memo(function MangaPanel({
       setErrorMsg(`第 ${imageNumber} 张重新生成失败：${err.message}`);
     } finally {
       setRegenIdx(-1);
+    }
+  };
+
+  const handleGeneratePanel = async (imageNumber: number) => {
+    setPanelGenLoading((prev) => [...prev, imageNumber]);
+    try {
+      await handleRegenImage(imageNumber);
+    } finally {
+      setPanelGenLoading((prev) => prev.filter((n) => n !== imageNumber));
     }
   };
 
@@ -907,7 +946,7 @@ export default memo(function MangaPanel({
       setErrorMsg('');
       try {
         await updateScenes(chapter.id, scenes);
-        const result = await regenerateImage(chapter.id, imageEditTarget.imageNumber, payload.prompt, payload);
+        const result = await regenerateImage(chapter.id, imageEditTarget.imageNumber, payload.prompt, { ...payload, size: ASPECT_RATIO_OPTIONS.find(o => o.label === aspectRatio)?.size, stylePresetName: selectedStylePresetName || undefined, styleRefUrl: styleReferenceImageUrl || undefined });
         const newItem: ImageItem = {
           image_number: result.image_number,
           image_path: result.image_path,
@@ -950,7 +989,7 @@ export default memo(function MangaPanel({
     } finally {
       setRefUploading(false);
     }
-  }, [chapter, imageEditTarget, scenes, existingImages]);
+  }, [chapter, imageEditTarget, scenes, existingImages, aspectRatio]);
 
   // 鈹€鈹€ Close color menu on outside click 鈹€鈹€
   useEffect(() => {
@@ -1056,6 +1095,9 @@ export default memo(function MangaPanel({
 
     genStore.start(targetId, targetTotal, seedImages);
 
+    const currentSize = ASPECT_RATIO_OPTIONS.find(o => o.label === aspectRatio)?.size;
+    const currentStylePresetName = selectedStylePresetName || undefined;
+    const currentStyleRefUrl = styleReferenceImageUrl || undefined;
     const controller = generateMangaStream(targetId, (event: MangaProgress) => {
       switch (event.type) {
         case 'status':
@@ -1128,7 +1170,7 @@ export default memo(function MangaPanel({
           break;
         }
       }
-    });
+    }, currentSize, currentStylePresetName, currentStyleRefUrl);
     mangaAbortRef.current.set(targetId, controller);
   };
 
@@ -1232,6 +1274,7 @@ export default memo(function MangaPanel({
     : -1;
 
   return (
+    <>
     <div className="flex flex-col h-full bg-[#fcfcfa]">
       {/* Header */}
       <div className="px-3 md:px-5 py-3 border-b border-[#d9dfd7] flex items-center justify-between gap-2">
@@ -1391,6 +1434,35 @@ export default memo(function MangaPanel({
                   </div>
                 )}
               </div>
+              {/* 比例选择器 */}
+              <div className="flex items-center gap-0.5 bg-[#f3f5f0] rounded-md border border-[#d9dfd7] p-0.5">
+                {ASPECT_RATIO_OPTIONS.map((opt) => (
+                  <button
+                    key={opt.label}
+                    onClick={() => setAspectRatio(opt.label)}
+                    className={`px-2 py-1 text-xs font-medium rounded-sm transition-colors ${
+                      aspectRatio === opt.label
+                        ? 'bg-white text-slate-900 shadow-sm'
+                        : 'text-slate-500 hover:text-slate-700'
+                    }`}
+                  >
+                    {opt.label}
+                  </button>
+                ))}
+              </div>
+              {/* 风格预设选择器 */}
+              <button
+                onClick={() => setStyleSelectorOpen(true)}
+                className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md border border-[#d9dfd7] bg-white hover:bg-slate-50 transition-colors"
+              >
+                <Palette size={14} className={selectedStylePresetName || styleReferenceImageUrl ? 'text-blue-500' : 'text-slate-400'} />
+                <span className={selectedStylePresetName || styleReferenceImageUrl ? 'text-slate-900' : 'text-slate-500'}>
+                  {selectedStylePresetName || (styleReferenceImageUrl ? '自定义风格' : '选择风格')}
+                </span>
+                {(selectedStylePresetName || styleReferenceImageUrl) && (
+                  <span className="text-[10px] text-blue-500">(已选)</span>
+                )}
+              </button>
               {/* Generate button */}
               <button
                 onClick={handleGenerateImages}
@@ -2137,11 +2209,20 @@ export default memo(function MangaPanel({
                     </span>
                     {!img && !generating && scene && (
                       <button
-                        onClick={() => openMangaRedraw(image_number)}
-                        className="mt-1 flex items-center gap-1 px-3 py-1.5 text-xs font-medium rounded-md bg-amber-500 hover:bg-amber-400 text-slate-900 transition-colors"
+                        onClick={() => handleGeneratePanel(image_number)}
+                        disabled={panelGenLoading.includes(image_number)}
+                        className={`mt-1 flex items-center gap-1 px-3 py-1.5 text-xs font-medium rounded-md transition-colors ${
+                          panelGenLoading.includes(image_number)
+                            ? 'bg-amber-300 text-amber-700 cursor-wait'
+                            : 'bg-amber-500 hover:bg-amber-400 text-slate-900'
+                        }`}
                       >
-                        <Sparkles size={12} />
-                        生成此格
+                        {panelGenLoading.includes(image_number) ? (
+                          <Loader2 size={12} className="animate-spin" />
+                        ) : (
+                          <Sparkles size={12} />
+                        )}
+                        {panelGenLoading.includes(image_number) ? '生成中...' : '生成此格'}
                       </button>
                     )}
                   </div>
@@ -2594,6 +2675,22 @@ export default memo(function MangaPanel({
         </div>
       )}
     </div>
+    {createPortal(
+      <StyleSelectorModal
+        isOpen={styleSelectorOpen}
+        onClose={() => setStyleSelectorOpen(false)}
+        presets={stylePresets}
+        selectedStyleName={selectedStylePresetName}
+        styleReferenceImageUrl={styleReferenceImageUrl}
+        onFileUpload={chapter ? (file) => uploadMangaStyleReference(chapter.id, file).then(r => r.style_reference_image_url) : undefined}
+        onStyleSelect={(styleName, refUrl) => {
+          setSelectedStylePresetName(styleName);
+          setStyleReferenceImageUrl(refUrl);
+        }}
+      />,
+      document.body
+    )}
+    </>
   );
 })
 

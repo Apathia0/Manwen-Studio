@@ -9,7 +9,8 @@ interface StyleSelectorModalProps {
   presets: VideoStylePreset[];
   selectedStyleName: string;
   styleReferenceImageUrl: string | null;
-  workflowId: number | null;
+  workflowId?: number | null;
+  onFileUpload?: (file: File) => Promise<string>;
   onStyleSelect: (styleName: string, referenceImageUrl: string | null) => void;
 }
 
@@ -37,6 +38,7 @@ export default function StyleSelectorModal({
   selectedStyleName,
   styleReferenceImageUrl,
   workflowId,
+  onFileUpload,
   onStyleSelect,
 }: StyleSelectorModalProps) {
   const [activeCategory, setActiveCategory] = useState('all');
@@ -71,17 +73,22 @@ export default function StyleSelectorModal({
     const file = e.target.files?.[0];
     if (!file) return;
 
-    if (!workflowId) {
-      // 如果没有工作流，先提示用户
+    if (!onFileUpload && !workflowId) {
       alert('请先创建工作流后再上传风格参考图');
       return;
     }
 
     setUploading(true);
     try {
-      const result = await uploadStyleReferenceImage(workflowId, file);
-      setLocalReferenceUrl(result.style_reference_image_url);
-      setLocalSelectedStyle(''); // 使用自定义参考图时清除内置风格
+      let url: string;
+      if (onFileUpload) {
+        url = await onFileUpload(file);
+      } else {
+        const result = await uploadStyleReferenceImage(workflowId!, file);
+        url = result.style_reference_image_url;
+      }
+      setLocalReferenceUrl(url);
+      setLocalSelectedStyle('');
     } catch (err) {
       console.error('上传风格参考图失败:', err);
     } finally {
@@ -102,7 +109,7 @@ export default function StyleSelectorModal({
 
   return (
     <div
-      className="fixed inset-0 z-[70] flex items-center justify-center bg-[rgba(15,23,42,0.62)] p-4 backdrop-blur-sm"
+      className="fixed inset-0 z-[100] flex items-center justify-center bg-[rgba(15,23,42,0.62)] p-4 backdrop-blur-sm"
       onClick={handleCancel}
     >
       <div
