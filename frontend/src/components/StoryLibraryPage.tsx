@@ -182,19 +182,18 @@ export default function StoryLibraryPage({
       {loading ? (
         <div className="rounded-md border border-[#d9dfd7] bg-white p-5 text-sm text-slate-600">加载中...</div>
       ) : (
-        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+        <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6">
           {stories.map((story) => {
             const isEditing = editingId === story.id;
             const isSaving = savingId === story.id;
-            const isDeleting = deletingId === story.id;
             const isExporting = exportingStoryId === story.id;
             return (
               <div
                 key={story.id}
-                className="rounded-md border border-[#d9dfd7] bg-white p-4 transition-colors hover:border-[#9fb3ad]"
+                className="group relative flex flex-col"
               >
                 {isEditing ? (
-                  <div className="space-y-3">
+                  <div className="space-y-3 rounded-lg border border-[#d9dfd7] bg-white p-3">
                     <input
                       autoFocus
                       value={editTitle}
@@ -210,84 +209,106 @@ export default function StoryLibraryPage({
                     />
                     <div className="flex items-center justify-between gap-2">
                       <div className="text-xs text-slate-500">
-                        创建于 {new Date(story.created_at).toLocaleDateString('zh-CN')}
+                        {new Date(story.created_at).toLocaleDateString('zh-CN')}
                       </div>
-                      <div className="flex items-center gap-2">
+                      <div className="flex items-center gap-1">
                         <button
                           onClick={cancelEdit}
                           disabled={isSaving}
-                          className="inline-flex items-center gap-1 rounded-md border border-[#d9dfd7] bg-white px-2 py-1.5 text-xs text-slate-700 disabled:cursor-not-allowed disabled:opacity-60"
+                          className="rounded-md border border-[#d9dfd7] bg-white px-2 py-1 text-xs text-slate-700 disabled:cursor-not-allowed disabled:opacity-60"
                         >
                           <X size={12} />
-                          取消
                         </button>
                         <button
                           onClick={() => void handleSaveEdit()}
                           disabled={isSaving}
-                          className="inline-flex items-center gap-1 rounded-md bg-[#1f5f58] px-2 py-1.5 text-xs text-white disabled:cursor-not-allowed disabled:opacity-60"
+                          className="rounded-md bg-[#1f5f58] px-2 py-1 text-xs text-white disabled:cursor-not-allowed disabled:opacity-60"
                         >
                           <Check size={12} />
-                          {isSaving ? '保存中...' : '保存'}
                         </button>
                       </div>
                     </div>
                   </div>
                 ) : (
                   <>
-                    {story.cover_image ? (
-                      <div className="mb-3 flex aspect-[3/4] items-center justify-center overflow-hidden rounded-md border border-[#d9dfd7] bg-[#f7f8f5] p-2">
-                        <img
-                          src={coverImageUrl(story.cover_image) || ''}
-                          alt={`${story.title} 封面`}
-                          className="h-full w-full object-contain"
-                          loading="lazy"
-                          decoding="async"
-                        />
-                      </div>
-                    ) : null}
-                    <button onClick={() => void onOpen(story)} className="w-full text-left">
-                      <div className="text-sm font-semibold">{story.title}</div>
-                      <div className="mt-1 min-h-[40px] line-clamp-2 text-xs leading-5 text-slate-600">
-                        {story.description || '尚未填写简介，点击进入开始创作。'}
+                    <button
+                      onClick={() => void onOpen(story)}
+                      className="group/book relative block w-full overflow-hidden rounded-lg border border-[#e2e8f0] bg-gradient-to-br from-slate-50 to-slate-100 shadow-sm transition-all hover:shadow-md"
+                    >
+                      {story.cover_image ? (
+                        <div className="aspect-[2/3] w-full">
+                          <img
+                            src={coverImageUrl(story.cover_image) || ''}
+                            alt={story.title}
+                            className="h-full w-full object-cover"
+                            loading="lazy"
+                            decoding="async"
+                          />
+                        </div>
+                      ) : (
+                        <div className="flex aspect-[2/3] w-full items-center justify-center bg-gradient-to-br from-blue-50 to-indigo-50 p-4">
+                          <span className="text-4xl font-bold text-blue-200/80 select-none">
+                            {story.title.charAt(0)}
+                          </span>
+                        </div>
+                      )}
+                      
+                      <div className="absolute inset-0 flex items-end justify-center bg-gradient-to-t from-black/60 via-transparent to-transparent p-3 opacity-0 transition-opacity group-hover/book:opacity-100">
+                        <div className="flex gap-1.5">
+                          <span
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              if (isExporting || savingId !== null || deletingId !== null) return;
+                              void handleExport(story);
+                            }}
+                            className={`rounded-md px-2 py-1.5 text-xs font-medium backdrop-blur-sm transition hover:bg-white ${isExporting || savingId !== null || deletingId !== null ? 'cursor-not-allowed opacity-60' : 'cursor-pointer'} bg-white/90 text-slate-700`}
+                            title="导出"
+                          >
+                            <ScrollText size={14} />
+                          </span>
+                          <span
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              if (savingId !== null || deletingId !== null) return;
+                              setCoverEditorStoryId(story.id);
+                            }}
+                            className={`rounded-md px-2 py-1.5 text-xs font-medium backdrop-blur-sm transition hover:bg-white ${savingId !== null || deletingId !== null ? 'cursor-not-allowed opacity-60' : 'cursor-pointer'} bg-white/90 text-[#1d4ed8]`}
+                            title="封面编辑"
+                          >
+                            <ImageIcon size={14} />
+                          </span>
+                          <span
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              if (savingId !== null || deletingId !== null) return;
+                              startEdit(story);
+                            }}
+                            className={`rounded-md px-2 py-1.5 text-xs font-medium backdrop-blur-sm transition hover:bg-white ${savingId !== null || deletingId !== null ? 'cursor-not-allowed opacity-60' : 'cursor-pointer'} bg-white/90 text-slate-700`}
+                            title="编辑"
+                          >
+                            <Pencil size={14} />
+                          </span>
+                          <span
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              if (savingId !== null || deletingId !== null) return;
+                              void handleDelete(story);
+                            }}
+                            className={`rounded-md px-2 py-1.5 text-xs font-medium backdrop-blur-sm transition hover:bg-white ${savingId !== null || deletingId !== null ? 'cursor-not-allowed opacity-60' : 'cursor-pointer'} bg-white/90 text-rose-600`}
+                            title="删除"
+                          >
+                            <Trash2 size={14} />
+                          </span>
+                        </div>
                       </div>
                     </button>
-                    <div className="mt-3 flex items-center justify-between gap-3">
-                      <div className="text-xs text-slate-500">
-                        创建于 {new Date(story.created_at).toLocaleDateString('zh-CN')}
+                    
+                    <div className="mt-2 px-0.5">
+                      <div className="truncate text-sm font-medium text-slate-800" title={story.title}>
+                        {story.title}
                       </div>
-                      <div className="flex items-center gap-2">
-                        <button
-                          onClick={() => void handleExport(story)}
-                          disabled={isExporting || savingId !== null || deletingId !== null}
-                          className="inline-flex items-center gap-1 rounded-md border border-[#d9dfd7] bg-white px-2 py-1.5 text-xs text-slate-700 hover:bg-[#f7f8f5] disabled:cursor-not-allowed disabled:opacity-60"
-                        >
-                          <ScrollText size={12} />
-                          {isExporting ? '导出中...' : '导出'}
-                        </button>
-                        <button
-                          onClick={() => setCoverEditorStoryId(story.id)}
-                          disabled={savingId !== null || deletingId !== null}
-                          className="inline-flex items-center gap-1 rounded-md border border-[#bfdbfe] bg-[#eff6ff] px-2 py-1.5 text-xs text-[#1d4ed8] hover:bg-[#dbeafe] disabled:cursor-not-allowed disabled:opacity-60"
-                        >
-                          <ImageIcon size={12} />
-                          小说封面编辑
-                        </button>
-                        <button
-                          onClick={() => startEdit(story)}
-                          disabled={savingId !== null || deletingId !== null}
-                          className="inline-flex items-center gap-1 rounded-md border border-[#d9dfd7] bg-white px-2 py-1.5 text-xs text-slate-700 hover:bg-[#f7f8f5] disabled:cursor-not-allowed disabled:opacity-60"
-                        >
-                          <Pencil size={12} />
-                          编辑
-                        </button>
-                        <button
-                          onClick={() => void handleDelete(story)}
-                          disabled={savingId !== null || deletingId !== null}
-                          className="inline-flex items-center gap-1 rounded-md border border-rose-200 bg-rose-50 px-2 py-1.5 text-xs text-rose-700 hover:bg-rose-100 disabled:cursor-not-allowed disabled:opacity-60"
-                        >
-                          <Trash2 size={12} />
-                          {isDeleting ? '删除中...' : '删除'}
-                        </button>
+                      <div className="mt-0.5 text-xs text-slate-400">
+                        {new Date(story.created_at).toLocaleDateString('zh-CN')}
                       </div>
                     </div>
                   </>
@@ -296,8 +317,8 @@ export default function StoryLibraryPage({
             );
           })}
           {stories.length === 0 && (
-            <div className="rounded-md border border-dashed border-[#c8d0c8] bg-white p-5 text-sm text-slate-500">
-              还没有作品。你可以先新建作品，也可以直接导入已有章节文稿。
+            <div className="col-span-full flex aspect-[2/3] w-full max-w-[200px] items-center justify-center rounded-lg border border-dashed border-slate-300 bg-slate-50 p-5 text-center text-sm text-slate-500">
+              还没有作品。点击「新建作品」开始创作。
             </div>
           )}
         </div>
