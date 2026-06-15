@@ -73,7 +73,9 @@ from models import (
     UserSession,
     UserSubscription,
     UserUsageMonthly,
+    VideoAsset,
     VideoGenerationJob,
+    VideoStylePreset,
 )
 from schemas import (
     ChapterContentUpdate,
@@ -5343,6 +5345,8 @@ def delete_story(story_id: int, request: Request, db: Session = Depends(get_db))
             db.delete(img)
         for msg in chapter.messages:
             db.delete(msg)
+        for asset in db.query(VideoAsset).filter(VideoAsset.chapter_id == chapter.id):
+            db.delete(asset)
         db.delete(chapter)
     if story.cover_image:
         cover_path = Path(__file__).resolve().parent / story.cover_image
@@ -5464,7 +5468,7 @@ async def adjust_story_cover(story_id: int, request: Request, db: Session = Depe
             source_path,
             output_path,
             api_key=image_api_key,
-            size="1024x1536",
+            size="1024x1792",
         )
     except MangaImageGenerationError as exc:
         raise HTTPException(502, exc.to_payload()) from exc
@@ -5541,6 +5545,8 @@ def delete_chapter(chapter_id: int, request: Request, db: Session = Depends(get_
         db.delete(img)
     for msg in chapter.messages:
         db.delete(msg)
+    for asset in db.query(VideoAsset).filter(VideoAsset.chapter_id == chapter.id):
+        db.delete(asset)
     db.delete(chapter)
     db.commit()
     return {"ok": True}
@@ -6535,6 +6541,20 @@ DEFAULT_IMAGE_COUNT = 10
 ALLOWED_IMAGE_COUNTS = [4, 6, 8, 10, 12, 15, 20]
 
 
+def _resolve_style_preset_ref(db: Session, style_preset_name: str | None) -> str | None:
+    """根据风格预设名称解析出本地图片路径（下载 OSS URL 到缓存），供漫画作为风格参考图。"""
+    if not style_preset_name:
+        return None
+    try:
+        preset = db.query(VideoStylePreset).filter(VideoStylePreset.name == style_preset_name.strip()).first()
+        if not preset or not preset.image_url:
+            return None
+        return ensure_local_media_path(preset.image_url, "manga")
+    except Exception as exc:
+        logger.error("解析风格预设参考图失败: %s", exc)
+        return None
+
+
 def _load_manga_image_concurrency() -> int:
     try:
         configured = int(os.getenv("MANGA_IMAGE_CONCURRENCY", "4"))
@@ -6737,18 +6757,9 @@ async def _background_manga_generation(
     task_id: str | None = None,
     **kwargs,
 ) -> dict:
-    """后台漫画生成任务，由 TaskManager 调度
-    
-    Args:
-        task_id: 由 TaskManager 传入的任务ID
-        其他参数与 generate_manga_stream 一致
-    
-    Returns:
-        dict: {
-            "completed_images": int,
-            "total_images": int,
-        }
-    """
+    """后台漫画生成任务，由 TaskManager 调度"""
+    manga_image_size = kwargs.get("manga_image_size")
+    style_ref_path: str | None = kwargs.get("style_ref_path")
     logger.info(f"Background manga generation started: chapter={chapter_id}, images={image_count}")
     completed = 0
     total = len(scenes)
@@ -6821,6 +6832,8 @@ async def _background_manga_generation(
                 ref_labels=ref_labels if any(ref_labels) else None,
                 color_mode=color_mode,
                 api_key=image_api_key,
+                size=manga_image_size,
+                style_ref_path=style_ref_path,
             )
             
             # 如果有 sanitized prompt，更新 scenes 文件
@@ -6930,6 +6943,9 @@ async def _background_manga_generation_concurrent(
     **kwargs,
 ) -> dict:
     """Generate chapter manga pages concurrently with a bounded fan-out."""
+
+    manga_image_size = kwargs.get("manga_image_size")
+    style_ref_path: str | None = kwargs.get("style_ref_path")
 
     total = len(scenes)
     concurrency = _manga_image_concurrency(total)
@@ -7045,6 +7061,8 @@ async def _background_manga_generation_concurrent(
                     ref_labels=ref_labels if any(ref_labels) else None,
                     color_mode=color_mode,
                     api_key=image_api_key,
+                    size=manga_image_size,
+                    style_ref_path=style_ref_path,
                 )
 
                 if image_result.prompt_sanitized and image_result.final_prompt != scene_prompt:
@@ -7206,10 +7224,58 @@ async def reset_manga_images(chapter_id: int, request: Request, db: Session = De
     return {"ok": True}
 
 
+@app.post("/api/chapters/{chapter_id}/upload-style-reference")
+async def upload_manga_style_reference(chapter_id: int, request: Request, file: UploadFile = File(...), db: Session = Depends(get_db)):
+    """上传漫画章节的自定义风格参考图"""
+    user = _require_user(request, db)
+    _require_chapter_for_user(chapter_id, user, db)
+
+    if not file.content_type or not file.content_type.startswith("image/"):
+        raise HTTPException(400, "请上传图片文件")
+
+    from services.blocking import run_blocking
+
+    upload_dir = Path(__file__).resolve().parent / "manga_outputs" / "style_references"
+    upload_dir.mkdir(parents=True, exist_ok=True)
+
+    import datetime
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    ext = Path(file.filename or "ref.png").suffix or ".png"
+    filename = f"style_ref_ch{chapter_id}_{timestamp}{ext}"
+    file_path = upload_dir / filename
+
+    content = await file.read()
+    await run_blocking(file_path.write_bytes, content)
+
+    relative_path = f"style_references/{filename}"
+
+    from services import oss as oss_service
+    _configure_oss_from_db(db)
+    oss_url = await run_blocking(oss_service.upload_file, str(file_path))
+    if oss_url:
+        logger.info("漫画风格参考图已上传到 OSS: %s", oss_url)
+        relative_path = oss_url
+    else:
+        logger.info("漫画风格参考图使用本地路径: %s", relative_path)
+
+    return {"success": True, "style_reference_image_url": relative_path}
+
+
 @app.post("/api/chapters/{chapter_id}/generate-manga-stream")
 async def generate_manga_stream(chapter_id: int, request: Request, db: Session = Depends(get_db)):
     user = _require_user(request, db)
     chapter = _require_chapter_for_user(chapter_id, user, db)
+
+    # 可选：读取请求体中的尺寸参数和风格预设
+    try:
+        body = await request.json()
+        manga_size: str | None = body.get("size")
+        style_preset_name: str | None = body.get("style_preset_name")
+        style_ref_url: str | None = body.get("style_ref_url")
+    except Exception:
+        manga_size = None
+        style_preset_name = None
+        style_ref_url = None
 
     # Load scenes from file (must exist - user should generate/confirm scenes first)
     prompts_file = Path(__file__).resolve().parent / "manga_outputs" / f"chapter_{chapter_id}" / "scenes.txt"
@@ -7238,6 +7304,15 @@ async def generate_manga_stream(chapter_id: int, request: Request, db: Session =
     color_mode = _effective_color_mode(chapter_id, user.id, db)
     image_api_key = _user_image_api_key(request)
     custom_image_provider = _custom_image_provider_active(request)
+    # 解析风格预设参考图（在释放 DB session 之前）
+    # 优先使用自定义参考图 URL，否则从预设名称解析
+    style_ref_path = None
+    if style_ref_url:
+        from services.media_locator import ensure_local_media_path
+        style_ref_path = ensure_local_media_path(style_ref_url, "manga")
+    if not style_ref_path:
+        style_ref_path = _resolve_style_preset_ref(db, style_preset_name)
+
     _check_and_consume_feature_quota(request, user.id, "manga.image.generate.monthly_limit", len(scenes), db, deduct=False, provider_kind="image")
     ACTIVE_MANGA_GENERATIONS.add(chapter_id)
     # 在释放事务前提取 user_id，避免异步 generator 中 user 对象 session 已关闭
@@ -7262,6 +7337,8 @@ async def generate_manga_stream(chapter_id: int, request: Request, db: Session =
         color_mode=color_mode,
         image_api_key=image_api_key,
         custom_image_provider=custom_image_provider,
+        manga_image_size=manga_size,
+        style_ref_path=style_ref_path,
         user_id=user_id,
         timeout=_manga_gen_timeout,
         max_retries=1,
@@ -7508,6 +7585,15 @@ async def regenerate_single_image(chapter_id: int, image_number: int, body: dict
     if not prompt:
         raise HTTPException(400, "提示词必填")
     mode = str(body.get("mode") or "regenerate").strip().lower()
+    manga_size: str | None = body.get("size")
+    style_preset_name: str | None = body.get("style_preset_name")
+    style_ref_url: str | None = body.get("style_ref_url")
+    style_ref_path = None
+    if style_ref_url:
+        from services.media_locator import ensure_local_media_path
+        style_ref_path = ensure_local_media_path(style_ref_url, "manga")
+    if not style_ref_path:
+        style_ref_path = _resolve_style_preset_ref(db, style_preset_name)
 
     # Load all scenes for context
     prompts_file = Path(__file__).resolve().parent / "manga_outputs" / f"chapter_{chapter_id}" / "scenes.txt"
@@ -7576,6 +7662,8 @@ async def regenerate_single_image(chapter_id: int, image_number: int, body: dict
                 ref_labels=ref_labels if any(ref_labels) else None,
                 color_mode=color_mode,
                 api_key=image_api_key,
+                size=manga_size,
+                style_ref_path=style_ref_path,
             )
     except MangaImageGenerationError as exc:
         raise HTTPException(502, exc.to_payload()) from exc

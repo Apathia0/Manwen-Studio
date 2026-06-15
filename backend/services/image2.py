@@ -49,7 +49,6 @@ IMAGE_NEGATIVE_PROMPT = (
 )
 OUTPUT_DIR = Path(__file__).resolve().parent.parent / "manga_outputs"
 
-OFFICIAL_IMAGE_SIZES = {"1024x1024", "1536x1024", "1024x1536", "auto"}
 IMAGE2_SIZE_PATTERN = re.compile(r"^\d{1,5}x\d{1,5}$")
 
 MAX_RETRIES = 3
@@ -215,20 +214,10 @@ def _runtime_base_url() -> str:
 def _normalize_image_size(size: str | None) -> str:
     runtime = _runtime_settings()
     candidate = (size or runtime.size).strip() or DEFAULT_IMAGE_SIZE
-    model = (runtime.model or "").strip().lower()
-    if model == "gpt-image-2" and IMAGE2_SIZE_PATTERN.match(candidate):
-        return candidate
-    if candidate in OFFICIAL_IMAGE_SIZES:
-        return candidate
-    fallback = runtime.size if runtime.size in OFFICIAL_IMAGE_SIZES else DEFAULT_IMAGE_SIZE
     if IMAGE2_SIZE_PATTERN.match(candidate):
-        logger.warning(
-            "Image size %s is only enabled for gpt-image-2; using %s for model %s",
-            candidate,
-            fallback,
-            runtime.model,
-        )
-    return fallback
+        return candidate
+    logger.warning("尺寸格式 %s 不合法，回退到 %s", candidate, DEFAULT_IMAGE_SIZE)
+    return DEFAULT_IMAGE_SIZE
 
 
 def _base_image_payload(prompt: str, size: str | None) -> dict[str, str | int]:
@@ -496,6 +485,7 @@ def _build_full_prompt(
     use_ref: bool,
     color_mode: str,
     ref_layout_desc: str = "",
+    has_style_ref: bool = False,
 ) -> str:
     """构建完整的提示词内容。
 
@@ -509,12 +499,23 @@ def _build_full_prompt(
     # 参考图约束块：放在最前，优先级最高
     ref_block = ""
     if use_ref:
-        # 英文指令：确保 gpt-image-2 首先读到并遵循
-        ref_block = (
-            "IMAGES ARE THE SOLE SOURCE OF CHARACTER APPEARANCE. "
-            "Ignore all text descriptions of characters below. "
-            "Match each character to their specific labeled reference image.\n"
-        )
+        if has_style_ref:
+            # 风格参考锚点模式：严格约束只借鉴画风
+            ref_block = (
+                "IMAGES ARE THE SOLE SOURCE OF CHARACTER APPEARANCE. "
+                "Below reference images may include ART STYLE reference images. "
+                "Images labeled '【画面风格参考锚点】' are for ART STYLE ONLY — "
+                "borrow their painting style, color palette, lighting, and composition, "
+                "but do NOT copy their characters, props, or scene content. "
+                "The generated manga must follow the scene script content exactly, "
+                "only borrowing style elements from style reference images.\n"
+            )
+        else:
+            ref_block = (
+                "IMAGES ARE THE SOLE SOURCE OF CHARACTER APPEARANCE. "
+                "Ignore all text descriptions of characters below. "
+                "Match each character to their specific labeled reference image.\n"
+            )
         # 中文编号说明 —— 说明每张参考图的角色对应关系
         if ref_layout_desc:
             ref_block += ref_layout_desc + "\n"
@@ -1168,11 +1169,22 @@ async def generate_manga_image(
     color_mode: str = "bw",
     api_key: str | None = None,
     size: str | None = None,
+    style_ref_path: str | None = None,
 ) -> ImageGenerationResult:
     total_pages = len(all_scenes) if all_scenes else 1
     progress_label = f"{image_number}/{total_pages}"
     valid_refs = [Path(p) for p in (ref_image_paths or []) if p and Path(p).exists()]
     valid_labels = [l for l in (ref_labels or [])[:len(valid_refs)] if l]
+
+    # 注入风格参考锚点图（如已选风格预设）
+    has_style_ref = False
+    if style_ref_path and Path(style_ref_path).exists():
+        style_path = Path(style_ref_path)
+        # 避免重复添加
+        if style_path not in valid_refs:
+            valid_refs.append(style_path)
+            valid_labels.append("【画面风格参考锚点】")
+            has_style_ref = True
 
     # 构建策略列表——每个策略都保证角色参考图被使用，绝不降级到无图模式
     strategies: list[tuple[str, bool, list[tuple[str, bytes]], str]] = []
@@ -1236,6 +1248,7 @@ async def generate_manga_image(
                 use_ref=strategy_use_ref,
                 color_mode=color_mode,
                 ref_layout_desc=strategy_layout,
+                has_style_ref=has_style_ref,
             )
             # 打印完整提示词内容（用户可见 + 不可见的系统约束），方便排查生图问题
             logger.info("=" * 70)

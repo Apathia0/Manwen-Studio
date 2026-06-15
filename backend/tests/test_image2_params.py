@@ -66,14 +66,14 @@ def test_edit_payload_includes_input_fidelity_and_shared_params():
     assert payload["input_fidelity"] == "high"
 
 
-def test_custom_size_is_only_kept_for_gpt_image_2():
+def test_custom_size_is_always_allowed_when_valid():
+    """任何模型都接受合法的尺寸格式（不再按模型名硬编码限制）"""
     _reset_image_runtime()
-    image2.configure_runtime(model="gpt-image-1", size="1920x1080")
+    image2.configure_runtime(model="any-model", size="1920x1080")
 
     payload = image2._generation_payload("draw a frame", None)
 
-    assert payload["model"] == "gpt-image-1"
-    assert payload["size"] == "1024x1024"
+    assert payload["size"] == "1920x1080"
 
 
 def test_custom_size_is_allowed_for_gpt_image_2():
