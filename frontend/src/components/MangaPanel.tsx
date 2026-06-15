@@ -202,9 +202,11 @@ const DEFAULT_IMAGE_COUNT = 10;
 
 const ASPECT_RATIO_OPTIONS = [
   { label: '9:16', size: '1024x1792' },
+  { label: '3:4', size: '1024x1365' },
   { label: '2:3', size: '1024x1536' },
   { label: '1:1', size: '1024x1024' },
   { label: '3:2', size: '1536x1024' },
+  { label: '4:3', size: '1365x1024' },
   { label: '16:9', size: '1792x1024' },
 ] as const;
 
@@ -1277,214 +1279,215 @@ const [aspectRatio, setAspectRatio] = useState<string>('9:16');
     <>
     <div className="flex flex-col h-full bg-[#fcfcfa]">
       {/* Header */}
-      <div className="px-3 md:px-5 py-3 border-b border-[#d9dfd7] flex items-center justify-between gap-2">
-        <h2 className="text-sm font-semibold text-slate-800 tracking-wide uppercase shrink-0 hidden md:block">
-          第 {chapter?.chapter_number ?? '-'} 话 · 漫画
-        </h2>
-        <div className="flex items-center gap-1.5 md:gap-2 flex-wrap justify-end">
-          {/* Reference images */}
-          <div className="flex items-center gap-1">
-            <input
-              ref={refFileRef}
-              type="file"
-              accept="image/*"
-              className="hidden"
-              onChange={async (e) => {
-                const file = e.target.files?.[0];
-                if (!file || !chapter) return;
-                setRefUploading(true);
-                try {
-                  const reader = new FileReader();
-                  const b64 = await new Promise<string>((resolve) => {
-                    reader.onload = () => resolve((reader.result as string).split(',')[1]);
-                    reader.readAsDataURL(file);
-                  });
-                  const r = await addChapterRefImage(chapter.id, b64);
-                  setRefImages(r.images);
-                  setRefSource(r.source ?? 'chapter');
-                  setRefMax(r.max);
-                } catch (err: any) {
-                  setErrorMsg(`上传垫图失败: ${err.message}`);
-                } finally {
-                  setRefUploading(false);
-                  e.target.value = '';
-                }
-              }}
-            />
-            <button
-              onClick={() => setRefModalOpen(true)}
-              disabled={!chapter}
-              className={`flex items-center gap-1 px-3 py-1.5 text-xs font-medium rounded-md transition-colors
-                ${refImages.length > 0
-                  ? 'bg-emerald-900/50 hover:bg-emerald-800 text-emerald-300 border border-emerald-700'
-                  : 'bg-[#f3f5f0] hover:bg-[#e8ece6] text-slate-700'
-                } disabled:opacity-40`}
-              title={
-                refImages.length > 0
-                  ? refSource === 'story'
-                    ? `全局垫图 ${refImages.length} 张，点击查看/管理`
-                    : `已设置 ${refImages.length} 张垫图，点击查看/管理`
-                  : '点击上传垫图参考'
-              }
-            >
-              <ImagePlus size={13} />
-              {refImages.length > 0
-                ? refSource === 'story'
-                  ? `全局垫图 ${refImages.length}`
-                  : `已垫图 ${refImages.length}`
-                : '垫图'}
-            </button>
-          </div>
-          {/* Image count selector */}
-          {!generating && (phase === 'idle' || phase === 'editing-scenes') && (
-            <select
-              value={imageCount}
-              onChange={async (e) => {
-                const count = Number(e.target.value);
-                const previous = imageCount;
-                setImageCountState(count);
-                if (chapter) {
+      <div className="px-3 md:px-5 py-3 border-b border-[#d9dfd7]">
+        {/* 第一行：标题 + 垫图 + 张数 + 下载 */}
+        <div className="flex items-center justify-between gap-2 mb-2">
+          <h2 className="text-sm font-semibold text-slate-800 tracking-wide uppercase shrink-0 hidden md:block">
+            第 {chapter?.chapter_number ?? '-'} 话 · 漫画
+          </h2>
+          <div className="flex items-center gap-1.5 md:gap-2 flex-wrap justify-end">
+            {/* Reference images */}
+            <div className="flex items-center gap-1">
+              <input
+                ref={refFileRef}
+                type="file"
+                accept="image/*"
+                className="hidden"
+                onChange={async (e) => {
+                  const file = e.target.files?.[0];
+                  if (!file || !chapter) return;
+                  setRefUploading(true);
                   try {
-                    await setImageCount(chapter.id, count);
+                    const reader = new FileReader();
+                    const b64 = await new Promise<string>((resolve) => {
+                      reader.onload = () => resolve((reader.result as string).split(',')[1]);
+                      reader.readAsDataURL(file);
+                    });
+                    const r = await addChapterRefImage(chapter.id, b64);
+                    setRefImages(r.images);
+                    setRefSource(r.source ?? 'chapter');
+                    setRefMax(r.max);
                   } catch (err: any) {
-                    setImageCountState(previous);
-                    setErrorMsg(`保存生成张数失败: ${err.message}`);
+                    setErrorMsg(`上传垫图失败: ${err.message}`);
+                  } finally {
+                    setRefUploading(false);
+                    e.target.value = '';
                   }
+                }}
+              />
+              <button
+                onClick={() => setRefModalOpen(true)}
+                disabled={!chapter}
+                className={`flex items-center gap-1 px-3 py-1.5 text-xs font-medium rounded-md transition-colors
+                  ${refImages.length > 0
+                    ? 'bg-emerald-900/50 hover:bg-emerald-800 text-emerald-300 border border-emerald-700'
+                    : 'bg-[#f3f5f0] hover:bg-[#e8ece6] text-slate-700'
+                  } disabled:opacity-40`}
+                title={
+                  refImages.length > 0
+                    ? refSource === 'story'
+                      ? `全局垫图 ${refImages.length} 张，点击查看/管理`
+                      : `已设置 ${refImages.length} 张垫图，点击查看/管理`
+                    : '点击上传垫图参考'
                 }
-              }}
-              disabled={!canChangeImageCount}
-              className="px-2 py-1.5 text-xs font-medium rounded-md bg-[#f3f5f0] text-slate-700 border border-[#d9dfd7] outline-none focus:border-[#1f5f58] transition-colors disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
-              title={canChangeImageCount ? '生成张数' : '已有分镜或图片时不能修改生成张数'}
+              >
+                <ImagePlus size={13} />
+                {refImages.length > 0
+                  ? refSource === 'story'
+                    ? `全局垫图 ${refImages.length}`
+                    : `已垫图 ${refImages.length}`
+                  : '垫图'}
+              </button>
+            </div>
+            {/* Image count selector */}
+            {!generating && (phase === 'idle' || phase === 'editing-scenes') && (
+              <select
+                value={imageCount}
+                onChange={async (e) => {
+                  const count = Number(e.target.value);
+                  const previous = imageCount;
+                  setImageCountState(count);
+                  if (chapter) {
+                    try {
+                      await setImageCount(chapter.id, count);
+                    } catch (err: any) {
+                      setImageCountState(previous);
+                      setErrorMsg(`保存生成张数失败: ${err.message}`);
+                    }
+                  }
+                }}
+                disabled={!canChangeImageCount}
+                className="px-2 py-1.5 text-xs font-medium rounded-md bg-[#f3f5f0] text-slate-700 border border-[#d9dfd7] outline-none focus:border-[#1f5f58] transition-colors disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
+                title={canChangeImageCount ? '生成张数' : '已有分镜或图片时不能修改生成张数'}
+              >
+                {selectableImageCounts.map((n) => (
+                  <option key={n} value={n}>{n}张</option>
+                ))}
+              </select>
+            )}
+            {hasImages && (
+              <button
+                onClick={() => {
+                  displayImages.forEach((img) => {
+                    const a = document.createElement('a');
+                    a.href = mangaImageUrl(img.image_path);
+                    a.download = `panel_${img.image_number.toString().padStart(2, '0')}.png`;
+                    a.click();
+                  });
+                }}
+                className="flex items-center gap-1 px-3 py-1.5 text-xs font-medium rounded-md
+                           bg-[#f3f5f0] hover:bg-[#e8ece6] text-slate-700 transition-colors"
+              >
+                <Download size={13} />
+                下载
+              </button>
+            )}
+            {!generating && (phase === 'idle' || phase === 'editing-scenes') && (
+              <button
+                onClick={handleGenerateScenes}
+                disabled={!chapter || (!chapter?.messages?.length && !chapter?.novel_content)}
+                className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md
+                           bg-[#1f5f58] hover:bg-[#184c46] text-white disabled:opacity-40
+                           disabled:cursor-not-allowed transition-colors"
+              >
+                <RefreshCw size={13} />
+                {scenes.length > 0 ? '重新生成分镜' : '生成分镜'}
+              </button>
+            )}
+          </div>
+        </div>
+        {/* 第二行：风格/比例/彩色/生成按钮 */}
+        {canContinueGeneration && (
+          <div className="flex items-center gap-1.5 md:gap-2 flex-wrap justify-end">
+            {/* Color mode selector */}
+            <div className="relative" ref={colorMenuRef}>
+              <button
+                onClick={() => setShowColorMenu((v) => !v)}
+                className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md transition-colors
+                  ${colorMode === 'color'
+                    ? 'bg-pink-900/50 hover:bg-pink-800 text-pink-300 border border-pink-700'
+                    : 'bg-[#f3f5f0] hover:bg-[#e8ece6] text-slate-700'}`}
+              >
+                {colorMode === 'color' ? (
+                  <span className="w-3 h-3 rounded-full bg-gradient-to-br from-pink-400 via-blue-400 to-green-400 shrink-0" />
+                ) : (
+                  <span className="w-3 h-3 rounded-full bg-gradient-to-br from-white to-gray-600 shrink-0" />
+                )}
+                {colorMode === 'color' ? '彩色' : '黑白'}
+                <ChevronDown size={11} className={`transition-transform ${showColorMenu ? 'rotate-180' : ''}`} />
+              </button>
+              {showColorMenu && (
+                <div className="absolute right-0 top-full mt-1 w-40 rounded-lg border border-[#d9dfd7] bg-white shadow-xl z-50 overflow-hidden">
+                  <button
+                    onClick={() => handleSelectColorMode('bw')}
+                    className={`w-full flex items-center gap-2 px-3 py-2.5 text-xs transition-colors hover:bg-[#f3f5f0]
+                      ${colorMode === 'bw' ? 'text-amber-400 font-semibold' : 'text-slate-700'}`}
+                  >
+                    <span className="w-4 h-4 rounded border-2 border-gray-500 bg-gradient-to-br from-white to-gray-900 shrink-0" />
+                    黑白漫画
+                    {colorMode === 'bw' && <Check size={12} className="ml-auto text-amber-400" />}
+                  </button>
+                  {allowColorMode && (
+                    <button
+                      onClick={() => handleSelectColorMode('color')}
+                      className={`w-full flex items-center gap-2 px-3 py-2.5 text-xs transition-colors hover:bg-[#f3f5f0]
+                        ${colorMode === 'color' ? 'text-amber-400 font-semibold' : 'text-slate-700'}`}
+                    >
+                      <span className="w-4 h-4 rounded border-2 border-gray-500 bg-gradient-to-br from-pink-400 via-blue-400 to-green-400 shrink-0" />
+                      彩色漫画
+                      {colorMode === 'color' && <Check size={12} className="ml-auto text-amber-400" />}
+                    </button>
+                  )}
+                </div>
+              )}
+            </div>
+            {/* 比例选择器 */}
+            <select
+              value={aspectRatio}
+              onChange={(e) => setAspectRatio(e.target.value)}
+              className="px-2 py-1.5 text-xs font-medium rounded-md border border-[#d9dfd7] bg-white text-slate-700 outline-none cursor-pointer focus:border-[#1f5f58]"
             >
-              {selectableImageCounts.map((n) => (
-                <option key={n} value={n}>{n}张</option>
+              {ASPECT_RATIO_OPTIONS.map((opt) => (
+                <option key={opt.label} value={opt.label}>
+                  {opt.label}
+                </option>
               ))}
             </select>
-          )}
-          {hasImages && (
+            {/* 风格预设选择器 */}
             <button
-              onClick={() => {
-                displayImages.forEach((img) => {
-                  const a = document.createElement('a');
-                  a.href = mangaImageUrl(img.image_path);
-                  a.download = `panel_${img.image_number.toString().padStart(2, '0')}.png`;
-                  a.click();
-                });
-              }}
-              className="flex items-center gap-1 px-3 py-1.5 text-xs font-medium rounded-md
-                         bg-[#f3f5f0] hover:bg-[#e8ece6] text-slate-700 transition-colors"
+              onClick={() => setStyleSelectorOpen(true)}
+              className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md border border-[#d9dfd7] bg-white hover:bg-slate-50 transition-colors"
             >
-              <Download size={13} />
-              下载
-            </button>
-          )}
-          {!generating && (phase === 'idle' || phase === 'editing-scenes') && (
-            <button
-              onClick={handleGenerateScenes}
-              disabled={!chapter || (!chapter?.messages?.length && !chapter?.novel_content)}
-              className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md
-                         bg-[#1f5f58] hover:bg-[#184c46] text-white disabled:opacity-40
-                         disabled:cursor-not-allowed transition-colors"
-            >
-              <RefreshCw size={13} />
-              {scenes.length > 0 ? '重新生成分镜' : '生成分镜'}
-            </button>
-          )}
-          {canContinueGeneration && (
-            <>
-              {/* Color mode selector */}
-              <div className="relative" ref={colorMenuRef}>
-                <button
-                  onClick={() => setShowColorMenu((v) => !v)}
-                  className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md transition-colors
-                    ${colorMode === 'color'
-                      ? 'bg-pink-900/50 hover:bg-pink-800 text-pink-300 border border-pink-700'
-                      : 'bg-[#f3f5f0] hover:bg-[#e8ece6] text-slate-700'}`}
-                >
-                  {colorMode === 'color' ? (
-                    <span className="w-3 h-3 rounded-full bg-gradient-to-br from-pink-400 via-blue-400 to-green-400 shrink-0" />
-                  ) : (
-                    <span className="w-3 h-3 rounded-full bg-gradient-to-br from-white to-gray-600 shrink-0" />
-                  )}
-                  {colorMode === 'color' ? '彩色' : '黑白'}
-                  <ChevronDown size={11} className={`transition-transform ${showColorMenu ? 'rotate-180' : ''}`} />
-                </button>
-                {showColorMenu && (
-                  <div className="absolute right-0 top-full mt-1 w-40 rounded-lg border border-[#d9dfd7] bg-white shadow-xl z-50 overflow-hidden">
-                    <button
-                      onClick={() => handleSelectColorMode('bw')}
-                      className={`w-full flex items-center gap-2 px-3 py-2.5 text-xs transition-colors hover:bg-[#f3f5f0]
-                        ${colorMode === 'bw' ? 'text-amber-400 font-semibold' : 'text-slate-700'}`}
-                    >
-                      <span className="w-4 h-4 rounded border-2 border-gray-500 bg-gradient-to-br from-white to-gray-900 shrink-0" />
-                      黑白漫画
-                      {colorMode === 'bw' && <Check size={12} className="ml-auto text-amber-400" />}
-                    </button>
-                    {allowColorMode && (
-                      <button
-                        onClick={() => handleSelectColorMode('color')}
-                        className={`w-full flex items-center gap-2 px-3 py-2.5 text-xs transition-colors hover:bg-[#f3f5f0]
-                          ${colorMode === 'color' ? 'text-amber-400 font-semibold' : 'text-slate-700'}`}
-                      >
-                        <span className="w-4 h-4 rounded border-2 border-gray-500 bg-gradient-to-br from-pink-400 via-blue-400 to-green-400 shrink-0" />
-                        彩色漫画
-                        {colorMode === 'color' && <Check size={12} className="ml-auto text-amber-400" />}
-                      </button>
-                    )}
-                  </div>
-                )}
-              </div>
-              {/* 比例选择器 */}
-              <div className="flex items-center gap-0.5 bg-[#f3f5f0] rounded-md border border-[#d9dfd7] p-0.5">
-                {ASPECT_RATIO_OPTIONS.map((opt) => (
-                  <button
-                    key={opt.label}
-                    onClick={() => setAspectRatio(opt.label)}
-                    className={`px-2 py-1 text-xs font-medium rounded-sm transition-colors ${
-                      aspectRatio === opt.label
-                        ? 'bg-white text-slate-900 shadow-sm'
-                        : 'text-slate-500 hover:text-slate-700'
-                    }`}
-                  >
-                    {opt.label}
-                  </button>
-                ))}
-              </div>
-              {/* 风格预设选择器 */}
-              <button
-                onClick={() => setStyleSelectorOpen(true)}
-                className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md border border-[#d9dfd7] bg-white hover:bg-slate-50 transition-colors"
-              >
-                <Palette size={14} className={selectedStylePresetName || styleReferenceImageUrl ? 'text-blue-500' : 'text-slate-400'} />
-                <span className={selectedStylePresetName || styleReferenceImageUrl ? 'text-slate-900' : 'text-slate-500'}>
-                  {selectedStylePresetName || (styleReferenceImageUrl ? '自定义风格' : '选择风格')}
-                </span>
-                {(selectedStylePresetName || styleReferenceImageUrl) && (
-                  <span className="text-[10px] text-blue-500">(已选)</span>
-                )}
-              </button>
-              {/* Generate button */}
-              <button
-                onClick={handleGenerateImages}
-                className="flex items-center gap-1.5 px-4 py-1.5 text-xs font-medium rounded-md
-                           bg-amber-500 hover:bg-amber-400 text-slate-900 transition-colors"
-              >
-                <Sparkles size={13} />
-                {hasPartialImages ? '继续生成漫画' : '生成漫画'}
-              </button>
-              {canRestartGeneration && (
-                <button
-                  onClick={handleRestartManga}
-                  className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md
-                             bg-[#f3f5f0] hover:bg-[#e8ece6] text-slate-800 border border-[#d9dfd7] transition-colors"
-                  title="清空已生成图片，从第 1 张重新开始"
-                >
-                  <RefreshCw size={13} />
-                  重新生成全部
-                </button>
+              <Palette size={14} className={selectedStylePresetName || styleReferenceImageUrl ? 'text-blue-500' : 'text-slate-400'} />
+              <span className={selectedStylePresetName || styleReferenceImageUrl ? 'text-slate-900' : 'text-slate-500'}>
+                {selectedStylePresetName || (styleReferenceImageUrl ? '自定义风格' : '选择风格')}
+              </span>
+              {(selectedStylePresetName || styleReferenceImageUrl) && (
+                <span className="text-[10px] text-blue-500">(已选)</span>
               )}
-            </>
-          )}
+            </button>
+            {/* Generate button */}
+            <button
+              onClick={handleGenerateImages}
+              className="flex items-center gap-1.5 px-4 py-1.5 text-xs font-medium rounded-md
+                         bg-amber-500 hover:bg-amber-400 text-slate-900 transition-colors"
+            >
+              <Sparkles size={13} />
+              {hasPartialImages ? '继续生成漫画' : '生成漫画'}
+            </button>
+            {canRestartGeneration && (
+              <button
+                onClick={handleRestartManga}
+                className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md
+                           bg-[#f3f5f0] hover:bg-[#e8ece6] text-slate-800 border border-[#d9dfd7] transition-colors"
+                title="清空已生成图片，从第 1 张重新开始"
+              >
+                <RefreshCw size={13} />
+                重新生成全部
+              </button>
+            )}
+          </div>
+        )}
           {phase === 'generating-scenes' && (
             <div className="flex items-center gap-2">
               <span className="flex items-center gap-1.5 text-xs text-slate-600">
@@ -1503,7 +1506,6 @@ const [aspectRatio, setAspectRatio] = useState<string>('9:16');
             </div>
           )}
         </div>
-      </div>
 
       <div className={`${showWorkspacePreview ? 'hidden' : 'flex flex-col flex-1 min-h-0'}`}>
       {/* Progress bar */}
