@@ -4,6 +4,7 @@ import { RotateCcw, Upload, Trash2, Wand2, X, Loader2, CheckSquare, MousePointer
 import { ImageRedrawModal } from './shared/ImageRedrawModal';
 import ImageZoomView from './shared/ImageZoomView';
 import AssetReferenceSelector from './AssetReferenceSelector';
+import { previewVideoPrompt } from '../api';
 import type { VideoAsset } from '../api';
 
 interface VideoCardWorkbenchProps {
@@ -20,7 +21,7 @@ interface VideoCardWorkbenchProps {
     characterName?: string;
     hasAsset?: boolean;
   }>;
-  onRegenerate: (resourceId: number, aspectRatio?: '16:9' | '9:16') => Promise<void>;
+  onRegenerate: (resourceId: number, aspectRatio?: '16:9' | '9:16', promptOverride?: string) => Promise<void>;
   onUploadReplace: (resourceId: number, file: File) => Promise<void>;
   onDelete: (resourceId: number) => Promise<void>;
   onRedraw: (resourceId: number, prompt: string, mask?: string) => Promise<void>;
@@ -63,6 +64,11 @@ export default function VideoCardWorkbench({ type, shotId, assetId, displayShotI
   });
 
   const [isRefSelectorOpen, setIsRefSelectorOpen] = useState(false);
+  const [editedVideoPrompt, setEditedVideoPrompt] = useState('');
+  const [assembledPrompt, setAssembledPrompt] = useState('');
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [refSectionCollapsed, setRefSectionCollapsed] = useState(false);
+  const [promptSectionCollapsed, setPromptSectionCollapsed] = useState(false);
 
   const { currentIndex } = state;
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -84,7 +90,8 @@ export default function VideoCardWorkbench({ type, shotId, assetId, displayShotI
     if (!currentResource || effectiveBusy) return;
     setState(s => ({ ...s, busy: 'regenerate' }));
     try {
-      await onRegenerate(currentResource.id, type === 'video' ? videoAspectRatio : undefined);
+      const promptOverride = type === 'video' && editedVideoPrompt.trim() ? editedVideoPrompt.trim() : undefined;
+      await onRegenerate(currentResource.id, type === 'video' ? videoAspectRatio : undefined, promptOverride);
     } catch (err) {
       console.error(previewUrl ? '重新生成失败' : '生成失败', err);
     } finally {
@@ -188,6 +195,39 @@ export default function VideoCardWorkbench({ type, shotId, assetId, displayShotI
     return () => document.removeEventListener('keydown', handleKeyDown);
   }, [handleKeyDown]);
 
+  // 初始化视频提示词编辑状态
+  useEffect(() => {
+    if (type === 'video' && currentResource) {
+      setEditedVideoPrompt(currentResource.prompt || '');
+    }
+  }, [type, currentResource?.id, currentResource?.prompt]);
+
+  // 获取组装后的视频提示词预览
+  const fetchAssembledPrompt = useCallback(async () => {
+    if (type !== 'video' || !currentResource) return;
+    setPreviewLoading(true);
+    try {
+      const result = await previewVideoPrompt(
+        currentResource.id,
+        selectedRefAssetIds,
+        editedVideoPrompt.trim() || undefined,
+      );
+      setAssembledPrompt(result.assembled_prompt);
+    } catch (err) {
+      console.error('获取提示词预览失败', err);
+      setAssembledPrompt('预览加载失败');
+    } finally {
+      setPreviewLoading(false);
+    }
+  }, [type, currentResource?.id, selectedRefAssetIds, editedVideoPrompt]);
+
+  // 自动获取组装后的提示词
+  useEffect(() => {
+    if (type === 'video' && currentResource) {
+      fetchAssembledPrompt();
+    }
+  }, [type, currentResource?.id, selectedRefAssetIds, fetchAssembledPrompt]);
+
   const zoomHint = (
     <div className="flex items-center gap-1.5 rounded-full bg-white/10 px-3 py-1.5 text-xs text-white/60">
       <MousePointer size={12} />
@@ -247,35 +287,98 @@ export default function VideoCardWorkbench({ type, shotId, assetId, displayShotI
 
             {/* 右侧：引用资产 + 操作 */}
             <div className="flex flex-col gap-4 overflow-auto border-l border-[#e5edf8] bg-[#f8fbff] p-6">
-              <div className="flex flex-1 min-h-0 flex-col rounded-2xl border border-[#d7e3f4] bg-white p-4">
-                <div className="text-sm font-medium text-slate-800">引用资产</div>
-                <div className="mt-3 text-xs text-slate-500 leading-relaxed">
-                  选择引用资产后直接生成视频。系统会根据以下资产自动构建视频提示词：
-                </div>
-                <ul className="mt-2 flex-1 space-y-1 text-xs text-slate-600">
-                  {!selectedRefAssetIds || selectedRefAssetIds.length === 0 ? (
-                    <li className="text-slate-400">未选择引用资产，将使用纯文本模式生成</li>
-                  ) : (
-                    selectedRefAssetIds.map((assetId, idx) => {
-                      const chapterAsset = chapterAssets?.find(a => a.id === assetId);
-                      const storyboardAsset = shotStoryboards?.find(s => s.id === assetId);
-                      const label = chapterAsset
-                        ? (chapterAsset.asset_type === 'storyboard_frame' ? '故事版图片' :
-                           chapterAsset.asset_type === 'character_reference' ? '人物参考图' :
-                           chapterAsset.asset_type === 'scene_reference' ? '场景参考图' :
-                           chapterAsset.asset_type === 'prop_reference' ? '道具参考图' :
-                           chapterAsset.asset_type === 'frame' ? '首尾帧参考图' : '参考图')
-                        : storyboardAsset ? '故事版图片' : '参考图';
-                      const name = chapterAsset?.name || storyboardAsset?.name || `资产 #${assetId}`;
-                      return (
-                        <li key={assetId} className="flex items-center gap-1">
-                          <span className="text-blue-500 font-medium">图{idx + 1}</span>
-                          <span>是{label}：{name}</span>
-                        </li>
-                      );
-                    })
-                  )}
-                </ul>
+              <div className="rounded-2xl border border-[#d7e3f4] bg-white p-4">
+                <button
+                  type="button"
+                  onClick={() => setRefSectionCollapsed(c => !c)}
+                  className="flex w-full items-center justify-between text-sm font-medium text-slate-800"
+                >
+                  <span>引用资产</span>
+                  <span className="text-slate-400 text-xs">{refSectionCollapsed ? '展开' : '收起'}</span>
+                </button>
+                {!refSectionCollapsed && (
+                  <>
+                    <div className="mt-3 text-xs text-slate-500 leading-relaxed">
+                      选择引用资产后直接生成视频。系统会根据以下资产自动构建视频提示词：
+                    </div>
+                    <ul className="mt-2 space-y-1 text-xs text-slate-600">
+                      {!selectedRefAssetIds || selectedRefAssetIds.length === 0 ? (
+                        <li className="text-slate-400">未选择引用资产，将使用纯文本模式生成</li>
+                      ) : (
+                        selectedRefAssetIds.map((assetId, idx) => {
+                          const chapterAsset = chapterAssets?.find(a => a.id === assetId);
+                          const storyboardAsset = shotStoryboards?.find(s => s.id === assetId);
+                          const label = chapterAsset
+                            ? (chapterAsset.asset_type === 'storyboard_frame' ? '故事版图片' :
+                               chapterAsset.asset_type === 'character_reference' ? '人物参考图' :
+                               chapterAsset.asset_type === 'scene_reference' ? '场景参考图' :
+                               chapterAsset.asset_type === 'prop_reference' ? '道具参考图' :
+                               chapterAsset.asset_type === 'frame' ? '首尾帧参考图' : '参考图')
+                            : storyboardAsset ? '故事版图片' : '参考图';
+                          const name = chapterAsset?.name || storyboardAsset?.name || `资产 #${assetId}`;
+                          return (
+                            <li key={assetId} className="flex items-center gap-1">
+                              <span className="text-blue-500 font-medium">图{idx + 1}</span>
+                              <span>是{label}：{name}</span>
+                            </li>
+                          );
+                        })
+                      )}
+                    </ul>
+                  </>
+                )}
+              </div>
+
+              <div className="rounded-2xl border border-[#d7e3f4] bg-white p-4">
+                <button
+                  type="button"
+                  onClick={() => setPromptSectionCollapsed(c => !c)}
+                  className="flex w-full items-center justify-between text-sm font-medium text-slate-800"
+                >
+                  <span>视频提示词</span>
+                  <span className="text-slate-400 text-xs">{promptSectionCollapsed ? '展开' : '收起'}</span>
+                </button>
+                {!promptSectionCollapsed && (
+                  <>
+                    <div className="mt-3 text-xs text-slate-500 mb-2">编辑核心提示词（Part 2），系统会自动组装参考图说明和风格约束：</div>
+                    <textarea
+                      value={editedVideoPrompt}
+                      onChange={e => setEditedVideoPrompt(e.target.value)}
+                      className="w-full h-32 rounded-xl border border-[#d7e3f4] bg-[#f8fbff] px-3 py-3 text-sm leading-6 text-slate-900 outline-none resize-none focus:border-blue-400"
+                      placeholder="输入视频生成提示词..."
+                    />
+                    {onPromptSave && (
+                      <div className="mt-2 flex justify-end">
+                        <button
+                          onClick={async () => {
+                            if (!currentResource || effectiveBusy) return;
+                            setState(s => ({ ...s, busy: 'savePrompt' }));
+                            try {
+                              await onPromptSave(currentResource.id, editedVideoPrompt);
+                              fetchAssembledPrompt();
+                            } catch (err) {
+                              console.error('保存提示词失败', err);
+                            } finally {
+                              setState(s => ({ ...s, busy: null }));
+                            }
+                          }}
+                          disabled={state.busy === 'savePrompt' || Boolean(externalBusy)}
+                          className="flex items-center gap-1 rounded-xl bg-blue-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-700 disabled:opacity-60"
+                        >
+                          {state.busy === 'savePrompt' && <Loader2 size={12} className="animate-spin" />} 保存提示词
+                        </button>
+                      </div>
+                    )}
+                    <div className="mt-3 text-xs font-medium text-slate-600">组装后完整提示词预览：</div>
+                    <div className="mt-2 max-h-40 overflow-auto rounded-xl border border-[#e5edf8] bg-[#f8fbff] px-3 py-3 text-xs leading-5 text-slate-700 whitespace-pre-wrap">
+                      {previewLoading ? (
+                        <span className="flex items-center gap-1 text-slate-400"><Loader2 size={12} className="animate-spin" /> 加载中...</span>
+                      ) : (
+                        assembledPrompt || '暂无预览'
+                      )}
+                    </div>
+                  </>
+                )}
               </div>
 
               <div className="shrink-0 rounded-2xl border border-[#d7e3f4] bg-white p-4">

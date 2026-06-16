@@ -48,7 +48,7 @@ interface ChapterVideoWorkflowPanelProps {
   onRefreshWorkflow: () => Promise<void> | void;
   onConcatWorkflow: () => Promise<void> | void;
   onRegenerateStoryboard: (shotId: number, refAssetIds?: number[]) => Promise<void> | void;
-  onRegenerateVideo: (shotId: number, refAssetIds?: number[], aspectRatio?: '16:9' | '9:16') => Promise<void> | void;
+  onRegenerateVideo: (shotId: number, refAssetIds?: number[], aspectRatio?: '16:9' | '9:16', promptOverride?: string) => Promise<void> | void;
   onStyleChange: (style: string, referenceImageUrl?: string | null) => void;
   onOpenStyleSelector?: () => void;
   onParseShots: () => Promise<void> | void;
@@ -850,10 +850,10 @@ export default function ChapterVideoWorkflowPanel({
             url: toAssetUrl(workbenchShot.video_url),
             prompt: workbenchShot.video_prompt ?? '',
           }];
-          onRegenerate = async (resourceId: number, aspectRatio?: '16:9' | '9:16') => {
+          onRegenerate = async (resourceId: number, aspectRatio?: '16:9' | '9:16', promptOverride?: string) => {
             const resource = resources[0];
             await runForResource(resource, 'regenerate', async () => {
-              await onRegenerateVideo(resourceId, workbenchRefAssetIds, aspectRatio ?? videoAspectRatio);
+              await onRegenerateVideo(resourceId, workbenchRefAssetIds, aspectRatio ?? videoAspectRatio, promptOverride);
             });
           };
           onUploadReplace = async (resourceId: number, file: File) => {

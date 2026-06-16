@@ -359,13 +359,13 @@ export default function VideoStoryboardLayout({
     }
   }, [loadChapterAssets, workflow]);
 
-  const handleRegenerateVideo = useCallback(async (shotId: number, refAssetIds?: number[], aspectRatio: '16:9' | '9:16' = '16:9') => {
+  const handleRegenerateVideo = useCallback(async (shotId: number, refAssetIds?: number[], aspectRatio: '16:9' | '9:16' = '16:9', promptOverride?: string) => {
     if (!workflow) return;
     try {
       // 为该镜头创建初始 loading 状态
       videoGenStore.startJob(shotId, 0);
 
-      await regenerateChapterWorkflowVideo(shotId, undefined, refAssetIds, aspectRatio);
+      await regenerateChapterWorkflowVideo(shotId, promptOverride, refAssetIds, aspectRatio);
       toast.success('视频已重新生成');
       const detail = await getChapterVideoWorkflow(workflow.id);
       setWorkflow(detail);

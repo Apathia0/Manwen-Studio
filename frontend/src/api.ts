@@ -3107,6 +3107,25 @@ export async function regenerateChapterWorkflowVideo(shotId: number, promptOverr
   return res.json();
 }
 
+export async function previewVideoPrompt(
+  shotId: number,
+  referenceAssetIds?: number[],
+  promptOverride?: string,
+): Promise<{ assembled_prompt: string; parts: { part1: string; part2: string; part3: string | null } }> {
+  const params = new URLSearchParams();
+  if (referenceAssetIds && referenceAssetIds.length > 0) {
+    params.set('reference_asset_ids', referenceAssetIds.join(','));
+  }
+  if (promptOverride) {
+    params.set('prompt_override', promptOverride);
+  }
+  const qs = params.toString();
+  const url = `${BASE}/api/video/chapter-workflows/shots/${shotId}/preview-video-prompt${qs ? `?${qs}` : ''}`;
+  const res = await fetch(url, { headers: apiHeaders(true) });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
 export async function concatChapterVideoWorkflow(workflowId: number): Promise<{ video_url: string; shot_count: number; duration_seconds: number; message?: string }> {
   const res = await fetch(`${BASE}/api/video/chapter-workflows/${workflowId}/concat`, {
     method: 'POST',

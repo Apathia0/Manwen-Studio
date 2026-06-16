@@ -143,6 +143,7 @@ from services.video_chapter_pipeline import (
     generate_storyboards_for_shots,
     generate_videos_for_shots,
     generate_shot_details_batch,
+    assemble_video_prompt_text,
 )
 
 # 模块级标记：init_db 在整个进程生命周期中只调用一次
@@ -6673,6 +6674,37 @@ async def api_save_shot_prompts(
     db.commit()
     db.refresh(shot)
     return {"ok": True, "shot": ChapterVideoShotOut.model_validate(shot)}
+
+
+@router.get("/api/video/chapter-workflows/shots/{shot_id}/preview-video-prompt")
+async def api_preview_video_prompt(
+    shot_id: int,
+    reference_asset_ids: str = Query(default="", description="逗号分隔的参考资产 ID"),
+    prompt_override: str | None = Query(default=None, description="用户编辑的 prompt 覆写"),
+    request: Request = None,  # type: ignore[assignment]
+    db: Session = Depends(get_db),
+):
+    """预览组装后的视频提示词（不提交生成）。"""
+    user = _require_user(request, db)
+    shot = db.get(ChapterVideoShot, shot_id)
+    if not shot:
+        raise HTTPException(404, "镜头不存在")
+    wf = get_chapter_workflow(shot.workflow_id)
+    if not wf:
+        raise HTTPException(404, "工作流不存在")
+    story = db.get(Story, wf.story_id)
+    if not story or story.owner_user_id != user.id:
+        raise HTTPException(403, "无权访问")
+
+    ref_ids = None
+    if reference_asset_ids:
+        try:
+            ref_ids = [int(x) for x in reference_asset_ids.split(",") if x.strip()]
+        except ValueError:
+            raise HTTPException(400, "reference_asset_ids 格式无效")
+
+    result = assemble_video_prompt_text(shot_id, ref_asset_ids=ref_ids, prompt_override=prompt_override)
+    return result
 
 
 @router.post("/api/video/chapter-workflows/shots/{shot_id}/reanalyze-prompts")
