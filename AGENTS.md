@@ -766,6 +766,76 @@ async def my_func(*args, task_id=None, story_id=None, chapter_id=None, shot_id=N
 - 指数退避重试 + prompt 太长自动截断 + 内容安全策略检测
 - 图片存储到 `manga_outputs/`
 
+### ⚠️ 视频 API 调用规范 — 图生视频（Lingdong / Seedance 系列）
+
+所有视频提交走 `services/video_api.py` 的 `create_video_job()`：
+
+**参考图片参数命名规则**：必须使用 `input_reference`（管道符 `|` 分隔的字符串），**禁止使用 `images`（JSON 数组）**。
+
+```
+# ✅ 正确（匹配灵动人形 API 主示例）
+payload["input_reference"] = "|".join(oss_urls)
+
+# ❌ 错误（Lingdong API 处理引擎可能解析失败）
+payload["images"] = oss_urls
+```
+
+**完整 payload 模板**（`sd-2-vip` / `sd-2-vip-720` / `seedance2.0-480p` / `seedance2.0-720p`）：
+
+```json
+{
+  "model": "sd-2-vip-720",
+  "prompt": "三段式视频 prompt...",
+  "duration": 15,
+  "size": "large",
+  "orientation": "landscape",
+  "input_reference": "https://oss.url/image1.png|https://oss.url/image2.png"
+}
+```
+
+**`seedance-2.0-fast` 系列**使用 `ratio` + `resolution` 代替 `size` + `orientation`：
+
+```json
+{
+  "model": "seedance-2.0-fast",
+  "prompt": "...",
+  "duration": 15,
+  "ratio": "16:9",
+  "resolution": "1080P",
+  "input_reference": "https://oss.url/image1.png"
+}
+```
+
+**图生视频数据流**（管线提交 → API 调用）：
+
+```
+regenerate_shot_video() / generate_videos_for_shots()
+  ├─ 收集 3 类参考图：故事版 / 角色 / 风格预设
+  ├─ 本地路径 → OSS 上传（oss_service.upload_file）
+  ├─ OSS URL → 传入 submit_video_job(input_mode="image_to_video")
+  │    └─ video_generation.submit_video_job()
+  │         └─ video_api.create_video_job(images=reference_images)
+  │              └─ payload["input_reference"] = "|".join(oss_urls)  ← 固定格式
+  └─ POST {base_url}/v1/videos
+```
+
+**参考图数量限制**：最多 9 张（JPG/PNG/WebP/GIF，单张 ≤30MB）。总素材数（图片+视频+音频）不超过 12。
+
+**参考图 OSS 上传流程**（有两层保障）：
+1. `video_chapter_pipeline.py:1897-1918` — 管线层上传本地路径到 OSS
+2. `video_api.py:249-265` — API 客户端层兜底上传（若管线层未完成）
+
+**已知陷阱**：
+| 陷阱 | 说明 |
+|------|------|
+| `images` 数组格式 | 禁止使用！灵动人形 API 处理引擎可能因 `images` 数组解析失败，必须用 `input_reference` 管道符格式 |
+| OSS URL 需公网可访问 | 阿里云香港 OSS 可能被大陆上游服务器限制，需确认 endpoint 为公网 endpoint |
+| 配置注入顺序 | 必须在调用 `create_video_job()` 前调用 `_configure_video_service_from_db(request, db)` |
+| input_mode | `submit_video_job` 默认 `input_mode="text_to_video"`，图生视频时必须显式传 `input_mode="image_to_video"` |
+| provider_router 不传 input_mode | `video_provider_router.submit()` 调用 `submit_video_job` 时不传 `input_mode`，默认为 text_to_video，不会传递参考图 |
+
+**效果验证**：提交成功返回 task_id + 状态轮询（NOT_START → IN_PROGRESS → SUCCESS/FAILURE）。如果返回 `"Lingdong video task failed. Please check media URLs and request parameters."`，优先检查 `input_reference` 参数格式和 OSS URL 公网可达性。
+
 ---
 
 ## 常见陷阱

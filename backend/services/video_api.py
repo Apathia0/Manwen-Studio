@@ -264,15 +264,18 @@ async def create_video_job(
             else:
                 logger.warning("[video] OSS 未配置，无法上传本地参考图: %s", local_paths)
         if oss_urls:
-            payload["images"] = oss_urls
+            # 使用 input_reference（管道符分隔字符串）而非 images（数组）
+            # 灵动人形 API 的主示例使用 input_reference 格式，兼容性更好
+            payload["input_reference"] = "|".join(oss_urls)
+            ref_log = payload["input_reference"]
             logger.info("[video] 参考图 %d 张: %s",
-                         len(oss_urls), [u[:60] for u in oss_urls])
+                         len(oss_urls), ref_log[:120])
         else:
             logger.warning("[video] 所有参考图均为本地路径且 OSS 上传失败，本次任务无参考图")
 
-    logger.info("[video] 提交任务 payload: model=%s prompt_len=%d duration=%s refs=%s url=%s",
-                 model, len(prompt), payload.get("duration"),
-                 [u[:60] for u in payload.get("images", [])], url)
+    ref_preview = (payload.get("input_reference", "") or "")[:120]
+    logger.info("[video] 提交任务 payload: model=%s prompt_len=%d duration=%s input_reference=%s url=%s",
+                 model, len(prompt), payload.get("duration"), ref_preview, url)
     last_err: Exception | None = None
     for attempt in range(1, MAX_RETRIES + 1):
         try:
