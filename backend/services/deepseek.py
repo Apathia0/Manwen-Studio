@@ -2935,15 +2935,20 @@ def _repair_truncated_json(content: str) -> str:
     except json.JSONDecodeError:
         pass
 
-    # 从右向左查找被截断的键名：找到 " 后紧跟着闭括号的位置，插入 :null
+    # 从右向左查找被截断的键名：找到 " 后跟随可选空白再接闭括号的位置，插入 :null
     for end_idx in range(len(stripped) - 1, 0, -1):
-        if stripped[end_idx - 1] == '"' and stripped[end_idx] in '}])':
-            candidate = stripped[:end_idx] + ':null' + stripped[end_idx:]
-            try:
-                json.loads(candidate)
-                return candidate
-            except json.JSONDecodeError:
-                continue
+        if stripped[end_idx] in '}])':
+            # 向左跳过空白，查找紧邻的 "
+            j = end_idx - 1
+            while j >= 0 and stripped[j] in ' \t\n\r':
+                j -= 1
+            if j >= 0 and stripped[j] == '"':
+                candidate = stripped[:j + 1] + ':null' + stripped[end_idx:]
+                try:
+                    json.loads(candidate)
+                    return candidate
+                except json.JSONDecodeError:
+                    continue
 
     return stripped
 
