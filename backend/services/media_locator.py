@@ -99,4 +99,12 @@ def resolve_reference_input(value: str | None, kind: str) -> str | None:
         return local_path
     if _looks_like_http_url(raw):
         return raw
+    if kind == "manga":
+        if raw.startswith("style-presets/"):
+            return f"/static/manga/{raw}"
+        if raw.startswith("manga_outputs/"):
+            return f"/static/manga/{raw[len('manga_outputs/'):]}"
+    if kind == "video":
+        if raw.startswith("video_outputs/"):
+            return f"/static/video/{raw[len('video_outputs/'):]}"
     return None

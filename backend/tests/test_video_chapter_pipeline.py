@@ -1214,6 +1214,16 @@ def test_assemble_video_prompt_text_generates_separate_lines_for_multiple_charac
         session.commit()
         session.refresh(shot)
 
+        # 预写一条虚拟资产，让 video_assets 表的自增 ID 跳过 1，
+        # 避免与 shot.id == 1 碰撞导致故事版被意外包含
+        dummy = VideoAsset(
+            story_id=99, chapter_id=99, shot_id=shot.id,
+            asset_type="reference", name="dummy",
+            file_path="/static/video/dummy.png", status="archived",
+        )
+        session.add(dummy)
+        session.commit()
+
         char_a = VideoAsset(
             story_id=34, chapter_id=12, shot_id=shot.id,
             asset_type="character_reference", name="角色A",
@@ -1285,5 +1295,297 @@ def test_assemble_video_prompt_text_storyboard_plus_character_ref(workflow_db):
         assert len(lines) == 2
         assert "故事版构图参考" in lines[0]
         assert "角色外观参考" in lines[1]
+    finally:
+        session.close()
+
+
+# ──────────────────────────────────────────────────────────────
+# regenerate_shot_video 多资产类型 prompt 组装测试
+# ──────────────────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_regenerate_shot_video_assigns_correct_roles_for_mixed_asset_types(workflow_db):
+    """多资产场景：道具、角色、场景资产应各自获得正确的 prompt 角色标签。"""
+    from models import ChapterVideoShot, VideoAsset
+
+    Session, workflow_id = workflow_db
+    session = Session()
+    try:
+        shot = ChapterVideoShot(
+            workflow_id=workflow_id,
+            shot_index=1,
+            status="storyboard_ready",
+            storyboard_image_url="/static/manga/sb1.png",
+            storyboard_prompt="少年站在天台",
+            video_prompt="生成视频",
+        )
+        session.add(shot)
+        session.commit()
+        session.refresh(shot)
+
+        dummy = VideoAsset(
+            story_id=99, chapter_id=99, shot_id=shot.id,
+            asset_type="reference", name="dummy",
+            file_path="/static/video/dummy.png", status="archived",
+        )
+        session.add(dummy)
+        session.commit()
+
+        char_a = VideoAsset(
+            story_id=34, chapter_id=12, shot_id=shot.id,
+            asset_type="character_reference", name="角色A",
+            file_path="/static/video/char_a.png", status="active",
+        )
+        prop_x = VideoAsset(
+            story_id=34, chapter_id=12, shot_id=shot.id,
+            asset_type="prop_reference", name="道具X",
+            file_path="/static/video/prop_x.png", status="active",
+        )
+        scene = VideoAsset(
+            story_id=34, chapter_id=12, shot_id=shot.id,
+            asset_type="scene_reference", name="场景图",
+            file_path="/static/video/scene.png", status="active",
+        )
+        char_b = VideoAsset(
+            story_id=34, chapter_id=12, shot_id=shot.id,
+            asset_type="character_reference", name="角色B",
+            file_path="/static/video/char_b.png", status="active",
+        )
+        prop_y = VideoAsset(
+            story_id=34, chapter_id=12, shot_id=shot.id,
+            asset_type="prop_reference", name="道具Y",
+            file_path="/static/video/prop_y.png", status="active",
+        )
+        session.add_all([char_a, prop_x, scene, char_b, prop_y])
+        session.commit()
+        session.refresh(char_a)
+        session.refresh(prop_x)
+        session.refresh(scene)
+        session.refresh(char_b)
+        session.refresh(prop_y)
+
+        submitted_prompt = {}
+        submitted_images = {}
+
+        async def fake_submit_video_job(**kwargs):
+            submitted_prompt["value"] = kwargs.get("prompt", "")
+            submitted_images["value"] = kwargs.get("reference_images") or []
+            return {"task_id": "fake_123", "provider_job_id": "fake_123", "status": "queued"}
+
+        from services import video_chapter_pipeline as vcp
+        from types import SimpleNamespace
+        async def _fake_run_blocking(fn, *a, **kw):
+            return a[0] if a else None
+        async def _fake_poll_job(**kwargs):
+            return "http://fake/video.mp4"
+        vcp.video_gen_service = SimpleNamespace(
+            submit_video_job=fake_submit_video_job,
+            query_job_status=lambda **kw: {"status": "completed"},
+        )
+        vcp.resolve_reference_input = lambda val, kind: val
+        vcp._resolve_storyboard_local_path = lambda val: val
+        vcp._resolve_style_ref_local_path = lambda val: val
+        vcp.run_blocking = _fake_run_blocking
+        vcp._poll_video_job = _fake_poll_job
+        await vcp.regenerate_shot_video(
+            shot.id,
+            ref_asset_ids=[char_a.id, prop_x.id, scene.id, char_b.id, prop_y.id],
+            api_key="test_key",
+        )
+
+        prompt = submitted_prompt.get("value", "")
+        images = submitted_images.get("value", [])
+
+        # 应有 5 张引用图（不含故事版，因为 shot.id 不在 ref_asset_ids 中）
+        assert len(images) == 5, f"应有 5 张参考图，实际: {len(images)}"
+
+        # 检查 prompt 中的 @image 标签顺序和角色
+        lines = [l for l in prompt.splitlines() if "@image" in l]
+        assert len(lines) == 5, f"应有 5 行 @image 说明，实际: {lines}"
+
+        # 按用户选择顺序验证标签
+        assert "角色外观参考" in lines[0], f"image1 应为角色外观参考: {lines[0]}"
+        assert "道具参考" in lines[1], f"image2 应为道具参考: {lines[1]}"
+        assert "场景参考" in lines[2], f"image3 应为场景参考: {lines[2]}"
+        assert "角色外观参考" in lines[3], f"image4 应为角色外观参考: {lines[3]}"
+        assert "道具参考" in lines[4], f"image5 应为道具参考: {lines[4]}"
+    finally:
+        session.close()
+
+
+@pytest.mark.asyncio
+async def test_regenerate_shot_video_preserves_user_selection_order(workflow_db):
+    """用户选择顺序应与 prompt 中 @image 编号和提交的图片顺序一致。"""
+    from models import ChapterVideoShot, VideoAsset
+
+    Session, workflow_id = workflow_db
+    session = Session()
+    try:
+        shot = ChapterVideoShot(
+            workflow_id=workflow_id,
+            shot_index=1,
+            status="storyboard_ready",
+            storyboard_image_url="/static/manga/sb1.png",
+            storyboard_prompt="少年站在天台",
+            video_prompt="生成视频",
+        )
+        session.add(shot)
+        session.commit()
+        session.refresh(shot)
+
+        dummy = VideoAsset(
+            story_id=99, chapter_id=99, shot_id=shot.id,
+            asset_type="reference", name="dummy",
+            file_path="/static/video/dummy.png", status="archived",
+        )
+        session.add(dummy)
+        session.commit()
+
+        asset_b = VideoAsset(
+            story_id=34, chapter_id=12, shot_id=shot.id,
+            asset_type="prop_reference", name="道具B",
+            file_path="/static/video/prop_b.png", status="active",
+        )
+        asset_a = VideoAsset(
+            story_id=34, chapter_id=12, shot_id=shot.id,
+            asset_type="character_reference", name="角色A",
+            file_path="/static/video/char_a.png", status="active",
+        )
+        asset_c = VideoAsset(
+            story_id=34, chapter_id=12, shot_id=shot.id,
+            asset_type="scene_reference", name="场景C",
+            file_path="/static/video/scene_c.png", status="active",
+        )
+        session.add_all([asset_b, asset_a, asset_c])
+        session.commit()
+        session.refresh(asset_b)
+        session.refresh(asset_a)
+        session.refresh(asset_c)
+
+        submitted_images = {}
+        submitted_prompt = {}
+
+        async def fake_submit_video_job(**kwargs):
+            submitted_images["value"] = kwargs.get("reference_images") or []
+            submitted_prompt["value"] = kwargs.get("prompt", "")
+            return {"task_id": "fake_456", "provider_job_id": "fake_456", "status": "queued"}
+
+        from services import video_chapter_pipeline as vcp
+        from types import SimpleNamespace
+        async def _fake_run_blocking(fn, *a, **kw):
+            return a[0] if a else None
+        async def _fake_poll_job(**kwargs):
+            return "http://fake/video.mp4"
+        vcp.video_gen_service = SimpleNamespace(
+            submit_video_job=fake_submit_video_job,
+            query_job_status=lambda **kw: {"status": "completed"},
+        )
+        vcp.resolve_reference_input = lambda val, kind: val
+        vcp._resolve_storyboard_local_path = lambda val: val
+        vcp._resolve_style_ref_local_path = lambda val: val
+        vcp.run_blocking = _fake_run_blocking
+        vcp._poll_video_job = _fake_poll_job
+        await vcp.regenerate_shot_video(
+            shot.id,
+            ref_asset_ids=[asset_b.id, asset_a.id, asset_c.id],
+            api_key="test_key",
+        )
+
+        prompt = submitted_prompt.get("value", "")
+        images = submitted_images.get("value", [])
+
+        # 图片顺序应与用户选择一致：prop_b → char_a → scene_c
+        assert len(images) == 3
+        assert "prop_b.png" in images[0]
+        assert "char_a.png" in images[1]
+        assert "scene_c.png" in images[2]
+
+        # prompt 中 @image 编号应与图片顺序匹配
+        lines = [l for l in prompt.splitlines() if "@image" in l]
+        assert len(lines) == 3
+        # image1 = 道具B（用户第一个选的）
+        assert "道具参考" in lines[0], f"image1 应为道具参考: {lines[0]}"
+        # image2 = 角色A（用户第二个选的）
+        assert "角色外观参考" in lines[1], f"image2 应为角色外观参考: {lines[1]}"
+        # image3 = 场景C（用户第三个选的）
+        assert "场景参考" in lines[2], f"image3 应为场景参考: {lines[2]}"
+    finally:
+        session.close()
+
+
+@pytest.mark.asyncio
+async def test_regenerate_shot_video_storyboard_plus_mixed_assets(workflow_db):
+    """故事版+多类型资产：故事版应为 image1，其余按顺序编号。"""
+    from models import ChapterVideoShot, VideoAsset
+
+    Session, workflow_id = workflow_db
+    session = Session()
+    try:
+        shot = ChapterVideoShot(
+            workflow_id=workflow_id,
+            shot_index=1,
+            status="storyboard_ready",
+            storyboard_image_url="/static/manga/sb1.png",
+            storyboard_prompt="少年站在天台",
+            video_prompt="生成视频",
+        )
+        session.add(shot)
+        session.commit()
+        session.refresh(shot)
+
+        prop = VideoAsset(
+            story_id=34, chapter_id=12, shot_id=shot.id,
+            asset_type="prop_reference", name="座钟",
+            file_path="/static/video/clock.png", status="active",
+        )
+        char = VideoAsset(
+            story_id=34, chapter_id=12, shot_id=shot.id,
+            asset_type="character_reference", name="角色A",
+            file_path="/static/video/char_a.png", status="active",
+        )
+        session.add_all([prop, char])
+        session.commit()
+        session.refresh(prop)
+        session.refresh(char)
+
+        submitted_prompt = {}
+        submitted_images = {}
+
+        async def fake_submit_video_job(**kwargs):
+            submitted_prompt["value"] = kwargs.get("prompt", "")
+            submitted_images["value"] = kwargs.get("reference_images") or []
+            return {"task_id": "fake_789", "provider_job_id": "fake_789", "status": "queued"}
+
+        from services import video_chapter_pipeline as vcp
+        from types import SimpleNamespace
+        async def _fake_run_blocking(fn, *a, **kw):
+            return a[0] if a else None
+        async def _fake_poll_job(**kwargs):
+            return "http://fake/video.mp4"
+        vcp.video_gen_service = SimpleNamespace(
+            submit_video_job=fake_submit_video_job,
+            query_job_status=lambda **kw: {"status": "completed"},
+        )
+        vcp.resolve_reference_input = lambda val, kind: val
+        vcp._resolve_storyboard_local_path = lambda val: val
+        vcp._resolve_style_ref_local_path = lambda val: val
+        vcp.run_blocking = _fake_run_blocking
+        vcp._poll_video_job = _fake_poll_job
+        await vcp.regenerate_shot_video(
+            shot.id,
+            ref_asset_ids=[-1, prop.id, char.id],
+            api_key="test_key",
+        )
+
+        prompt = submitted_prompt.get("value", "")
+        images = submitted_images.get("value", [])
+
+        assert len(images) == 3
+
+        lines = [l for l in prompt.splitlines() if "@image" in l]
+        assert len(lines) == 3
+        assert "故事版构图参考" in lines[0], f"image1 应为故事版: {lines[0]}"
+        assert "道具参考" in lines[1], f"image2 应为道具参考: {lines[1]}"
+        assert "角色外观参考" in lines[2], f"image3 应为角色外观参考: {lines[2]}"
     finally:
         session.close()

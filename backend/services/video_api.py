@@ -18,6 +18,7 @@ load_dotenv()
 logger = logging.getLogger("video_api")
 
 _VIDEO_OUTPUTS_DIR = Path(__file__).resolve().parent.parent / "video_outputs"
+_MANGA_OUTPUTS_DIR = Path(__file__).resolve().parent.parent / "manga_outputs"
 
 # 运行时配置（由调用方通过 configure() 注入）
 _runtime_base_url: str | None = None
@@ -243,6 +244,12 @@ async def create_video_job(
             img = img.strip()
             if img.lower().startswith(("http://", "https://")):
                 oss_urls.append(img)
+            elif img.startswith("/static/manga/"):
+                local_path = str(_MANGA_OUTPUTS_DIR / img[len("/static/manga/"):])
+                local_paths.append(local_path)
+            elif img.startswith("/static/video/"):
+                local_path = str(_VIDEO_OUTPUTS_DIR / img[len("/static/video/"):])
+                local_paths.append(local_path)
             else:
                 local_paths.append(img)
         if local_paths:
@@ -264,17 +271,19 @@ async def create_video_job(
             else:
                 logger.warning("[video] OSS 未配置，无法上传本地参考图: %s", local_paths)
         if oss_urls:
-            # 使用 input_reference（管道符分隔字符串）而非 images（数组）
-            # 灵动人形 API 的主示例使用 input_reference 格式，兼容性更好
-            payload["input_reference"] = "|".join(oss_urls)
-            ref_log = payload["input_reference"]
+            # 使用 images 数组而非 input_reference 管道符格式
+            # 灵动人形 API 的 @imageN 提示词引用依赖于 images 数组的元素索引。
+            # 示例: images=["url1","url2"] → @image1 引用 url1, @image2 引用 url2
+            # 若使用 input_reference 管道符格式，@imageN 无法正确映射到对应图片。
+            payload["images"] = oss_urls
+            ref_log = "|".join(oss_urls)
             logger.info("[video] 参考图 %d 张: %s",
                          len(oss_urls), ref_log[:120])
         else:
             logger.warning("[video] 所有参考图均为本地路径且 OSS 上传失败，本次任务无参考图")
 
-    ref_preview = (payload.get("input_reference", "") or "")[:120]
-    logger.info("[video] 提交任务 payload: model=%s prompt_len=%d duration=%s input_reference=%s url=%s",
+    ref_preview = str(payload.get("images", []) or [])[:120]
+    logger.info("[video] 提交任务 payload: model=%s prompt_len=%d duration=%s images=%s url=%s",
                  model, len(prompt), payload.get("duration"), ref_preview, url)
     last_err: Exception | None = None
     for attempt in range(1, MAX_RETRIES + 1):

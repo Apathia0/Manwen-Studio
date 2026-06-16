@@ -1768,6 +1768,19 @@ async def regenerate_shot_video(
     effective_ref_ids = ref_asset_ids or (shot.character_reference_ids or [])
     # 过滤掉特殊 ID -1（故事版图片），只查询实际的资产 ID
     real_asset_ids = [rid for rid in effective_ref_ids if rid != -1]
+
+    asset_type_map: dict[int, str] = {}
+    if real_asset_ids:
+        db_types = SessionLocal()
+        try:
+            for a in db_types.query(VideoAsset).filter(
+                VideoAsset.id.in_(real_asset_ids),
+                VideoAsset.status == "active",
+            ).all():
+                asset_type_map[a.id] = a.asset_type or "reference"
+        finally:
+            db_types.close()
+
     ref_image_paths = _resolve_ref_image_paths(story_id, real_asset_ids) if real_asset_ids else None
 
     # ── 构建三段式视频 prompt ──────────────────────────
@@ -1806,11 +1819,21 @@ async def regenerate_shot_video(
                 reference_image_details.append(("storyboard", storyboard_local_path))
                 has_storyboard_ref = True
 
-    if ref_image_paths:
-        for path in ref_image_paths:
-            if path not in reference_images:
-                reference_images.append(path)
-                reference_image_details.append(("character", path))
+    type_to_role = {
+        "character_reference": "character",
+        "scene_reference": "scene",
+        "prop_reference": "prop",
+        "storyboard_frame": "storyboard",
+    }
+    if real_asset_ids and ref_image_paths:
+        for rid, path in zip(real_asset_ids, ref_image_paths):
+            if path in reference_images:
+                continue
+            asset_type = asset_type_map.get(rid, "reference")
+            role = type_to_role.get(asset_type, "reference")
+            reference_images.append(path)
+            reference_image_details.append((role, path))
+            if role == "character":
                 has_character_ref = True
 
     # 风格参考图：优先从 workflow，回退到章节预设
@@ -1849,6 +1872,14 @@ async def regenerate_shot_video(
         elif ref_role == "character":
             system_prompt_parts.append(
                 f"使用 @image{img_idx} 作为角色外观参考：角色面貌、服装、体型必须在视频中保持一致。"
+            )
+        elif ref_role == "prop":
+            system_prompt_parts.append(
+                f"使用 @image{img_idx} 作为道具参考：道具外观、材质、细节必须与这张图保持一致。"
+            )
+        elif ref_role == "scene":
+            system_prompt_parts.append(
+                f"使用 @image{img_idx} 作为场景参考：场景布局、环境元素、空间关系必须与这张图保持一致。"
             )
         elif ref_role == "style":
             system_prompt_parts.append(
