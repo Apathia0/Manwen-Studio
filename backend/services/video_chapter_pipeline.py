@@ -1343,6 +1343,142 @@ def _resolve_storyboard_local_path(storyboard_url: str | None) -> str | None:
     return ensure_local_media_path(storyboard_url, "manga")
 
 
+def assemble_video_prompt_text(
+    shot_id: int,
+    ref_asset_ids: list[int] | None = None,
+    prompt_override: str | None = None,
+) -> dict:
+    """组装三段式视频 prompt 文本（仅预览，不提交生成）。
+
+    返回 {"assembled_prompt": str, "parts": {"part1": str, "part2": str, "part3": str | None}}。
+    """
+    shot = get_shot(shot_id)
+    if not shot:
+        return {"assembled_prompt": "", "parts": {"part1": "", "part2": "", "part3": None}}
+
+    workflow = get_workflow(shot.workflow_id)
+    effective_ref_ids = ref_asset_ids or (shot.character_reference_ids or [])
+
+    # ── 按照 ref_asset_ids 的实际顺序确定每张图的类型和 @image 编号 ──
+    from models import VideoAsset
+    ref_details: list[tuple[int, str]] = []  # (asset_id, type_label)
+    asset_type_map: dict[int, str] = {}
+
+    real_asset_ids = [rid for rid in effective_ref_ids if rid != -1]
+    if real_asset_ids:
+        db = SessionLocal()
+        try:
+            assets = db.query(VideoAsset).filter(
+                VideoAsset.id.in_(real_asset_ids),
+                VideoAsset.status == "active",
+            ).all()
+            for a in assets:
+                asset_type_map[a.id] = a.asset_type or "reference"
+        finally:
+            db.close()
+
+    for rid in effective_ref_ids:
+        if rid in asset_type_map:
+            ref_details.append((rid, asset_type_map[rid]))
+        elif rid == -1 or rid == shot.id:
+            ref_details.append((rid, "storyboard"))
+        else:
+            ref_details.append((rid, "reference"))
+
+    has_storyboard_ref = any(rt == "storyboard" for _, rt in ref_details)
+
+    # ── Part 1: 按实际顺序生成参考图说明 ──
+    system_prompt_parts: list[str] = []
+    image_index = 1
+    for _rid, ref_type in ref_details:
+        if ref_type == "storyboard":
+            system_prompt_parts.append(
+                f"使用 @image{image_index} 作为故事版构图参考：场景布局、镜头角度、人物站位必须严格匹配这张图。"
+            )
+            image_index += 1
+        elif ref_type in ("character_reference", "character"):
+            system_prompt_parts.append(
+                f"使用 @image{image_index} 作为角色外观参考：角色面貌、服装、体型必须在视频中保持一致。"
+            )
+            image_index += 1
+        elif ref_type in ("scene_reference", "scene"):
+            system_prompt_parts.append(
+                f"使用 @image{image_index} 作为场景参考：环境布局、空间关系以这张图为准。"
+            )
+            image_index += 1
+        elif ref_type in ("prop_reference", "prop"):
+            system_prompt_parts.append(
+                f"使用 @image{image_index} 作为道具参考：道具外观、材质以这张图为准。"
+            )
+            image_index += 1
+        else:
+            system_prompt_parts.append(
+                f"使用 @image{image_index} 作为参考图。"
+            )
+            image_index += 1
+
+    # 风格参考图（来自工作流/章节预设，不在 ref_asset_ids 中）
+    has_style_ref = False
+    style_ref_source = workflow.style_reference_image_url if workflow else None
+    if style_ref_source:
+        has_style_ref = True
+    if not has_style_ref and workflow:
+        try:
+            db_for_style = SessionLocal()
+            from models import Chapter, VideoStylePreset
+            chapter = db_for_style.query(Chapter).filter(Chapter.id == workflow.chapter_id).first()
+            if chapter and chapter.video_style_preset_id:
+                preset = db_for_style.get(VideoStylePreset, chapter.video_style_preset_id)
+                if preset and preset.image_url:
+                    has_style_ref = True
+        finally:
+            db_for_style.close()
+    if has_style_ref:
+        system_prompt_parts.append(
+            f"使用 @image{image_index} 作为画面风格参考：画风、色调、光影、渲染质感以这张图为准。"
+        )
+
+    if not system_prompt_parts:
+        system_prompt_parts.append("本次生成未使用参考图片。")
+    part1 = "\n".join(system_prompt_parts)
+
+    # ── Part 2: 视频生成指令 ──
+    video_prompt = prompt_override or shot.video_prompt
+    if video_prompt and "===" in video_prompt:
+        video_prompt = video_prompt.split("===")[0].strip()
+    if not video_prompt:
+        video_prompt = shot.storyboard_prompt or ""
+
+    if prompt_override:
+        part2 = prompt_override
+    elif has_storyboard_ref:
+        part2 = (
+            "按照故事版图片中的分镜脚本内容生成15秒视频。"
+            "严格遵循分镜中每个时间段指定的镜头运动、画面内容、人物动作和情绪变化。"
+            "不得添加分镜中未描述的元素，不得改变分镜中的场景关系和叙事逻辑。"
+        )
+    else:
+        part2 = video_prompt or "生成15秒视频，保持画面流畅自然。"
+
+    # ── Part 3: 风格约束（可选） ──
+    part3 = None
+    if has_style_ref:
+        part3 = "本视频的画风、色彩、光影以风格参考图为准，保持画面风格稳定统一。"
+        if has_storyboard_ref:
+            part3 += "\n故事版仅提供构图和动作参考，视频色彩、光影、渲染质感不受故事版影响，完全以风格参考图为准。"
+
+    # ── 组装 ──
+    sections = [part1, part2]
+    if part3:
+        sections.append(part3)
+    assembled = "\n\n".join(sections)
+
+    return {
+        "assembled_prompt": assembled,
+        "parts": {"part1": part1, "part2": part2, "part3": part3},
+    }
+
+
 def _to_storyboard_static_url(image_path: str | None) -> str:
     """将 generate_manga_image 返回的本地路径标准化为可访问的静态 URL。"""
     if not image_path:
@@ -1703,22 +1839,25 @@ async def regenerate_shot_video(
     else:
         logger.info("风格参考图来源: 章节预设 (video_style_preset_id=%s) 解析结果=%s", getattr(workflow, 'chapter_id', None) if workflow else None, style_ref_path)
 
-    # 第2步：构建系统提示词（根据实际引入的图片类型自动说明）
+    # 第2步：构建系统提示词（按 reference_image_details 实际顺序，每张图独立说明）
     system_prompt_parts: list[str] = []
-    if has_storyboard_ref:
-        system_prompt_parts.append(
-            "使用 @image1 作为故事版构图参考：场景布局、镜头角度、人物站位必须严格匹配这张图。"
-        )
-    if has_character_ref:
-        character_ref_index = 2 if has_storyboard_ref else 1
-        system_prompt_parts.append(
-            f"使用 @image{character_ref_index} 作为角色外观参考：角色面貌、服装、体型必须在视频中保持一致。"
-        )
-    if has_style_ref:
-        style_ref_index = sum([has_storyboard_ref, has_character_ref]) + 1
-        system_prompt_parts.append(
-            f"使用 @image{style_ref_index} 作为画面风格参考：画风、色调、光影、渲染质感以这张图为准。"
-        )
+    for img_idx, (ref_role, _ref_path) in enumerate(reference_image_details, start=1):
+        if ref_role == "storyboard":
+            system_prompt_parts.append(
+                f"使用 @image{img_idx} 作为故事版构图参考：场景布局、镜头角度、人物站位必须严格匹配这张图。"
+            )
+        elif ref_role == "character":
+            system_prompt_parts.append(
+                f"使用 @image{img_idx} 作为角色外观参考：角色面貌、服装、体型必须在视频中保持一致。"
+            )
+        elif ref_role == "style":
+            system_prompt_parts.append(
+                f"使用 @image{img_idx} 作为画面风格参考：画风、色调、光影、渲染质感以这张图为准。"
+            )
+        else:
+            system_prompt_parts.append(
+                f"使用 @image{img_idx} 作为参考图。"
+            )
     if not reference_images:
         system_prompt_parts.append("本次生成未使用参考图片。")
 

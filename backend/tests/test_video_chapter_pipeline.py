@@ -979,6 +979,18 @@ def test_repair_truncated_json_fixes_truncated_key_name_object():
     assert parsed["shots"][0]["shot_index"] == 1
 
 
+def test_repair_truncated_json_fixes_truncated_key_with_space_before_brace():
+    content = '{"shots":[{"shot_index":1,"emotion_plan":"平静","continuity_notes '
+
+    repaired = deepseek._repair_truncated_json(content)
+
+    parsed = json.loads(repaired)
+    assert isinstance(parsed, dict)
+    assert isinstance(parsed.get("shots"), list)
+    assert parsed["shots"][0]["shot_index"] == 1
+    assert parsed["shots"][0]["continuity_notes"] is None
+
+
 @pytest.mark.asyncio
 async def test_parse_lite_chunk_accepts_truncated_key_name_json(monkeypatch):
     response_content = '{"shots":[{"shot_index":1,"source_text_span":"林晚晚加班","scene_location":"林晚晚办公室","time_of_day":"夜","characters":["林晚晚"],"story_summary":"林晚晚加班时收到顾深邀约看月亮的微信","dialogue_or_narration":"林晚晚打字：我在加班，明天见。","key_'
@@ -1179,5 +1191,99 @@ async def test_expand_shots_saves_ai_character_prompts_to_story_character_versio
         ).first()
         assert version is not None, "AI 生成的角色提示词应保存到 StoryCharacterVersion"
         assert version.appearance_card == '黑色长发，职场女性，气质干练'
+    finally:
+        session.close()
+
+
+def test_assemble_video_prompt_text_generates_separate_lines_for_multiple_character_refs(workflow_db):
+    """多个角色引用资产应各自生成独立的 @image 说明行。"""
+    from models import ChapterVideoShot, VideoAsset
+
+    Session, workflow_id = workflow_db
+    session = Session()
+    try:
+        shot = ChapterVideoShot(
+            workflow_id=workflow_id,
+            shot_index=1,
+            status="video_ready",
+            storyboard_image_url="/static/manga/sb1.png",
+            storyboard_prompt="少年站在天台",
+            video_prompt="生成视频",
+        )
+        session.add(shot)
+        session.commit()
+        session.refresh(shot)
+
+        char_a = VideoAsset(
+            story_id=34, chapter_id=12, shot_id=shot.id,
+            asset_type="character_reference", name="角色A",
+            file_path="/static/video/char_a.png", status="active",
+        )
+        char_b = VideoAsset(
+            story_id=34, chapter_id=12, shot_id=shot.id,
+            asset_type="character_reference", name="角色B",
+            file_path="/static/video/char_b.png", status="active",
+        )
+        session.add_all([char_a, char_b])
+        session.commit()
+        session.refresh(char_a)
+        session.refresh(char_b)
+
+        from services.video_chapter_pipeline import assemble_video_prompt_text
+        result = assemble_video_prompt_text(
+            shot.id,
+            ref_asset_ids=[char_a.id, char_b.id],
+        )
+
+        part1 = result["parts"]["part1"]
+        assert "@image1" in part1
+        assert "@image2" in part1
+        lines = [l for l in part1.splitlines() if "@image" in l]
+        assert len(lines) == 2, f"应有 2 行 @image 说明，实际: {lines}"
+        assert "角色外观参考" in lines[0]
+        assert "角色外观参考" in lines[1]
+    finally:
+        session.close()
+
+
+def test_assemble_video_prompt_text_storyboard_plus_character_ref(workflow_db):
+    """故事版+角色引用各自独立一行，不互相干扰。"""
+    from models import ChapterVideoShot, VideoAsset
+
+    Session, workflow_id = workflow_db
+    session = Session()
+    try:
+        shot = ChapterVideoShot(
+            workflow_id=workflow_id,
+            shot_index=1,
+            status="video_ready",
+            storyboard_image_url="/static/manga/sb1.png",
+            storyboard_prompt="少年站在天台",
+            video_prompt="生成视频",
+        )
+        session.add(shot)
+        session.commit()
+        session.refresh(shot)
+
+        char_asset = VideoAsset(
+            story_id=34, chapter_id=12, shot_id=shot.id,
+            asset_type="character_reference", name="角色A",
+            file_path="/static/video/char_a.png", status="active",
+        )
+        session.add(char_asset)
+        session.commit()
+        session.refresh(char_asset)
+
+        from services.video_chapter_pipeline import assemble_video_prompt_text
+        result = assemble_video_prompt_text(
+            shot.id,
+            ref_asset_ids=[-1, char_asset.id],
+        )
+
+        part1 = result["parts"]["part1"]
+        lines = [l for l in part1.splitlines() if "@image" in l]
+        assert len(lines) == 2
+        assert "故事版构图参考" in lines[0]
+        assert "角色外观参考" in lines[1]
     finally:
         session.close()
