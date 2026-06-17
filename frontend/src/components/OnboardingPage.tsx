@@ -18,7 +18,7 @@ import {
 } from '../api';
 
 const INITIAL_PROMPT =
-  '你好！我是灵感捕手，很高兴能帮你梳理创作思路。说说你想写一个怎样的故事吧？主角是什么样的人？大概会发生什么？';
+  '你好，我是设定提取助手。请先描述你的故事概念：它属于什么类型（如都市、玄幻、科幻）？主角是谁、什么身份？开篇从什么事件切入？';
 
 interface Props {
   story: Story;
@@ -37,6 +37,9 @@ export default function OnboardingPage({ story, onComplete, onBack }: Props) {
   const [showBrief, setShowBrief] = useState(false);
   const [creativeBrief, setCreativeBrief] = useState<CreativeBrief | null>(null);
   const [error, setError] = useState('');
+  type OnboardingPhase = 'chatting' | 'confirming' | 'ready' | 'error';
+  const [phase, setPhase] = useState<OnboardingPhase>('chatting');
+  const [confirmError, setConfirmError] = useState('');
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
@@ -100,12 +103,14 @@ export default function OnboardingPage({ story, onComplete, onBack }: Props) {
 
   const handleConfirm = async () => {
     setLoading(true);
-    setError('');
+    setPhase('confirming');
+    setConfirmError('');
     try {
       await confirmOnboarding(story.id, understanding as Record<string, string>, messages, creativeBrief ?? undefined);
-      onComplete(story.id);
+      setPhase('ready');
     } catch (err: any) {
-      setError(err.message || '确认失败，请重试');
+      setConfirmError(err.message || '确认失败');
+      setPhase('error');
     } finally {
       setLoading(false);
     }
@@ -145,21 +150,21 @@ export default function OnboardingPage({ story, onComplete, onBack }: Props) {
           <div>
             <div className="flex items-center gap-2 text-sm font-semibold text-slate-900">
               <Sparkles size={16} className="text-[#2563eb]" />
-              AI 引导建书
+              AI 设定提取
             </div>
             <div className="text-xs text-slate-500">{story.title}</div>
           </div>
         </div>
         <div className="flex items-center gap-2 text-xs text-slate-500">
           <Cpu size={14} />
-          <span>理解深度</span>
+          <span>提取进度</span>
           <div className="w-24 h-1.5 bg-slate-100 rounded-full overflow-hidden">
             <div
               className="h-full bg-[#2563eb] rounded-full transition-all duration-500"
               style={{ width: `${understandingDepth}%` }}
             />
           </div>
-          <span>{understandingDepth}%</span>
+          <span>{Object.values(understanding).filter(Boolean).length}/5</span>
         </div>
       </div>
 
@@ -170,7 +175,7 @@ export default function OnboardingPage({ story, onComplete, onBack }: Props) {
           <div className="flex-1 overflow-y-auto px-5 py-4">
             {/* 系统消息提示 */}
             <div className="mb-4 rounded-2xl border border-[#bfdbfe] bg-[#eff6ff] px-4 py-3 text-xs leading-6 text-[#1d4ed8]">
-              这是 AI 引导建书模式。AI 会逐步提问，帮助你梳理创作思路。回答越详细，后续框架生成越精准。
+              AI 正逐步提取你的故事设定：类型→世界观→标签→目标→主角。回答越具体，框架生成越精准。
             </div>
 
             {messages.map((msg, idx) => (
@@ -210,51 +215,121 @@ export default function OnboardingPage({ story, onComplete, onBack }: Props) {
             <div ref={messagesEndRef} />
           </div>
 
-          {/* 输入区域 */}
-          <div className="border-t border-[#e5edf8] bg-white px-5 py-3">
-            <div className="flex items-end gap-2">
-              <textarea
-                ref={inputRef}
-                value={input}
-                onChange={(e) => setInput(e.target.value)}
-                onKeyDown={handleKeyDown}
-                placeholder={
-                  showBrief
-                    ? '继续补充你的想法...'
-                    : '输入你的想法，按 Enter 发送，Shift+Enter 换行...'
-                }
-                rows={2}
-                disabled={loading}
-                className="min-h-[44px] flex-1 resize-none rounded-2xl border border-[#d7e3f4] bg-[#fafdff] px-4 py-3 text-sm text-slate-900 outline-none transition placeholder:text-slate-400 focus:border-[#93c5fd] focus:bg-white focus:ring-4 focus:ring-[#dbeafe] disabled:cursor-not-allowed disabled:opacity-60"
-              />
-              <button
-                onClick={() => void handleSend()}
-                disabled={loading || !input.trim()}
-                className="flex h-[44px] w-[44px] shrink-0 items-center justify-center rounded-2xl bg-[#2563eb] text-white transition hover:bg-[#1d4ed8] disabled:cursor-not-allowed disabled:opacity-60"
-              >
-                {loading ? (
-                  <Loader2 size={18} className="animate-spin" />
-                ) : (
-                  <Send size={18} />
-                )}
-              </button>
-            </div>
-            {error && (
-              <div className="mt-2 text-xs text-rose-600">{error}</div>
-            )}
-            <div className="mt-3 flex items-center justify-between">
-              <button
-                onClick={() => void handleSkipOnboarding()}
-                disabled={loading}
-                className="rounded-2xl border border-[#d7e3f4] bg-white px-4 py-2 text-sm text-slate-500 transition hover:bg-[#f8fbff] disabled:cursor-not-allowed disabled:opacity-60"
-              >
-                跳过引导，直接开始
-              </button>
-              <div className="text-xs text-slate-400">
-                已有故事内容可跳过引导
+          {/* 底部区域：对话输入或过渡态 */}
+          {phase === 'chatting' ? (
+            <div className="border-t border-[#e5edf8] bg-white px-5 py-3">
+              <div className="flex items-end gap-2">
+                <textarea
+                  ref={inputRef}
+                  value={input}
+                  onChange={(e) => setInput(e.target.value)}
+                  onKeyDown={handleKeyDown}
+                  placeholder={
+                    showBrief
+                      ? '继续补充你的想法...'
+                      : '输入你的想法，按 Enter 发送，Shift+Enter 换行...'
+                  }
+                  rows={2}
+                  disabled={loading}
+                  className="min-h-[44px] flex-1 resize-none rounded-2xl border border-[#d7e3f4] bg-[#fafdff] px-4 py-3 text-sm text-slate-900 outline-none transition placeholder:text-slate-400 focus:border-[#93c5fd] focus:bg-white focus:ring-4 focus:ring-[#dbeafe] disabled:cursor-not-allowed disabled:opacity-60"
+                />
+                <button
+                  onClick={() => void handleSend()}
+                  disabled={loading || !input.trim()}
+                  className="flex h-[44px] w-[44px] shrink-0 items-center justify-center rounded-2xl bg-[#2563eb] text-white transition hover:bg-[#1d4ed8] disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  {loading ? (
+                    <Loader2 size={18} className="animate-spin" />
+                  ) : (
+                    <Send size={18} />
+                  )}
+                </button>
+              </div>
+              {error && (
+                <div className="mt-2 text-xs text-rose-600">{error}</div>
+              )}
+              <div className="mt-3 flex items-center justify-between">
+                <button
+                  onClick={() => void handleSkipOnboarding()}
+                  disabled={loading}
+                  className="rounded-2xl border border-[#d7e3f4] bg-white px-4 py-2 text-sm text-slate-500 transition hover:bg-[#f8fbff] disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  跳过引导，直接开始
+                </button>
+                <div className="text-xs text-slate-400">
+                  已有故事内容可跳过引导
+                </div>
               </div>
             </div>
-          </div>
+          ) : (
+            <div className="border-t border-[#e5edf8] bg-white px-5 py-4">
+              {phase === 'confirming' && (
+                <div className="flex items-center gap-3 py-2">
+                  <Loader2 size={20} className="animate-spin text-[#2563eb]" />
+                  <div>
+                    <div className="text-sm font-medium text-slate-800">正在构建故事框架...</div>
+                    <div className="mt-0.5 text-xs text-slate-500">
+                      生成大纲 · 角色设定 · 标签 · 章节规划
+                    </div>
+                  </div>
+                  <div className="ml-auto">
+                    <div className="h-2 w-24 overflow-hidden rounded-full bg-slate-100">
+                      <div className="h-full w-2/3 animate-pulse rounded-full bg-[#2563eb]" />
+                    </div>
+                  </div>
+                </div>
+              )}
+              {phase === 'ready' && (
+                <div>
+                  <div className="flex items-center gap-3 rounded-2xl border border-[#bbf7d0] bg-[#f0fdf4] px-4 py-3">
+                    <div className="flex h-8 w-8 items-center justify-center rounded-full bg-[#22c55e] text-sm font-bold text-white">✓</div>
+                    <div>
+                      <div className="text-sm font-medium text-slate-800">故事框架已就绪！</div>
+                      <div className="mt-0.5 text-xs text-slate-500">
+                        大纲、角色、标签已自动生成，进入工作台即可查看
+                      </div>
+                    </div>
+                  </div>
+                  <div className="mt-3 flex items-center justify-between">
+                    <button
+                      onClick={() => void handleSkipOnboarding()}
+                      className="rounded-2xl border border-[#d7e3f4] bg-white px-4 py-2 text-sm text-slate-500 transition hover:bg-[#f8fbff]"
+                    >
+                      跳过引导，直接开始
+                    </button>
+                    <button
+                      onClick={() => onComplete(story.id)}
+                      className="rounded-2xl bg-[#2563eb] px-6 py-2 text-sm font-medium text-white transition hover:bg-[#1d4ed8]"
+                    >
+                      进入工作台
+                    </button>
+                  </div>
+                </div>
+              )}
+              {phase === 'error' && (
+                <div>
+                  <div className="rounded-2xl border border-[#fecaca] bg-[#fef2f2] px-4 py-3 text-sm text-rose-700">
+                    {confirmError}
+                  </div>
+                  <div className="mt-3 flex gap-2">
+                    <button
+                      onClick={() => void handleConfirm()}
+                      disabled={loading}
+                      className="rounded-2xl bg-[#2563eb] px-4 py-2 text-sm font-medium text-white transition hover:bg-[#1d4ed8] disabled:opacity-60"
+                    >
+                      重试
+                    </button>
+                    <button
+                      onClick={() => { setPhase('chatting'); setError(''); }}
+                      className="rounded-2xl border border-[#d7e3f4] bg-white px-4 py-2 text-sm text-slate-600"
+                    >
+                      返回对话
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
         </div>
 
         {/* 右侧摘要面板 */}
@@ -265,7 +340,7 @@ export default function OnboardingPage({ story, onComplete, onBack }: Props) {
           <div className="mt-3 space-y-3">
             {understanding.concept ? (
               <div className="rounded-2xl border border-[#d7e3f4] bg-white p-3">
-                <div className="text-[11px] font-medium text-[#2563eb]">💡 故事概念</div>
+                <div className="text-[11px] font-medium text-[#2563eb]">💡 核心概念</div>
                 <div className="mt-1 text-xs leading-5 text-slate-600 line-clamp-4">
                   {understanding.concept}
                 </div>
@@ -273,7 +348,7 @@ export default function OnboardingPage({ story, onComplete, onBack }: Props) {
             ) : null}
             {understanding.setting ? (
               <div className="rounded-2xl border border-[#d7e3f4] bg-white p-3">
-                <div className="text-[11px] font-medium text-[#2563eb]">🌍 世界观设定</div>
+                <div className="text-[11px] font-medium text-[#2563eb]">🌍 世界观与规则</div>
                 <div className="mt-1 text-xs leading-5 text-slate-600">
                   {understanding.setting}
                 </div>
@@ -281,7 +356,7 @@ export default function OnboardingPage({ story, onComplete, onBack }: Props) {
             ) : null}
             {understanding.tone ? (
               <div className="rounded-2xl border border-[#d7e3f4] bg-white p-3">
-                <div className="text-[11px] font-medium text-[#2563eb]">🎭 风格基调</div>
+                <div className="text-[11px] font-medium text-[#2563eb]">🏷️ 风格标签</div>
                 <div className="mt-1 text-xs leading-5 text-slate-600">
                   {understanding.tone}
                 </div>
@@ -297,17 +372,17 @@ export default function OnboardingPage({ story, onComplete, onBack }: Props) {
             ) : null}
             {understanding.synthesis ? (
               <div className="rounded-2xl border border-[#d7e3f4] bg-[#eff6ff] p-3">
-                <div className="text-[11px] font-medium text-[#2563eb]">📝 综合理解</div>
+                <div className="text-[11px] font-medium text-[#2563eb]">👤 主角设定</div>
                 <div className="mt-1 text-xs leading-5 text-slate-600">
                   {understanding.synthesis}
                 </div>
               </div>
             ) : null}
-            {Object.keys(understanding).length === 0 && (
+            {Object.values(understanding).every(v => !v) && (
               <div className="flex flex-col items-center gap-2 py-8 text-center text-xs text-slate-400">
                 <MessageSquare size={24} className="opacity-40" />
-                <div>AI 正在理解你的创意...</div>
-                <div>在左侧对话后，这里会显示实时摘要</div>
+                <div>等待提取设定...</div>
+                <div>AI 会在左侧逐步提问，提取的信息实时显示在这里</div>
               </div>
             )}
           </div>

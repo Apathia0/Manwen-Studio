@@ -375,7 +375,7 @@ export interface OnboardingMessageOut {
   // 新字段
   understanding: Understanding;
   understanding_depth: number;
-  phase: 'exploring' | 'refining' | 'synthesizing';
+  phase: 'extracting';
   has_brief: boolean;
   creative_brief?: CreativeBrief;
   // 保留兼容字段
@@ -433,6 +433,11 @@ export interface OnboardingConfirmResponse {
   story_id: number;
   story_bible: StoryBible;
   creative_brief: CreativeBrief;
+  framework?: {
+    tags?: Tags;
+    characters?: Character[];
+    outline?: Outline;
+  } | null;
 }
 
 export interface Story {

@@ -2513,8 +2513,8 @@ async def generate_onboarding_response(
     onboarding_state_hint = (
         "\n\n## 当前已确认理解\n"
         f"- current_understanding: {understanding_snapshot}\n"
-        "请在此基础上更新 understanding。对于「是的/嗯/对」这类确认回答，"
-        "不要把这些确认词直接写入字段，而应保留上一轮你已经判断出的内容。"
+        "更新 understanding 时遵守：对于「是的/嗯/对」这类确认回答，"
+        "保留上一轮已判断出的内容，不要清空。"
     )
 
     for attempt in range(max_retries + 1):
@@ -2526,7 +2526,7 @@ async def generate_onboarding_response(
                     *messages,
                 ],
                 "stream": False,
-                "max_tokens": 4096,
+                "max_tokens": 300,
             }
 
             async with httpx.AsyncClient(timeout=120) as client:
@@ -2547,7 +2547,7 @@ async def generate_onboarding_response(
                     "reply": content.strip(),
                     "understanding": understanding or {},
                     "understanding_depth": 0,
-                    "phase": "exploring",
+                    "phase": "extracting",
                     "has_brief": False,
                     "creative_brief": None,
                 }
@@ -2569,9 +2569,9 @@ async def generate_onboarding_response(
                 "reply": reply,
                 "understanding": merged_understanding,
                 "understanding_depth": int(result.get("understanding_depth", 0)),
-                "phase": str(result.get("phase", "exploring")),
+                "phase": str(result.get("phase", "extracting")),
                 "has_brief": bool(result.get("has_brief", False)),
-                "creative_brief": result.get("creative_brief"),
+                "creative_brief": None,  # 后端 confirm 时自动构建，AI 不输出
             }
 
         except (httpx.HTTPError, json.JSONDecodeError, ValueError, KeyError) as e:

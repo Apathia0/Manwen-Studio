@@ -195,4 +195,6 @@ class TestGenerateOnboardingResponse:
             )
 
             assert result["has_brief"] is True
-            assert result["creative_brief"]["project_positioning"] == "都市律师题材"
+            # creative_brief 现在由后端 _build_creative_brief_from_understanding
+            # 在 confirm 阶段构建，AI 不输出 creative_brief
+            assert result["creative_brief"] is None

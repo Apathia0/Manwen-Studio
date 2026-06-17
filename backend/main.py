@@ -118,7 +118,6 @@ from services.deepseek import (
     adjust_framework_with_chat,
     analyze_import_material,
     analyze_content_framework,
-    build_creative_brief,
     build_import_creative_brief,
     build_story_bible,
     chat_stream,
@@ -1594,87 +1593,48 @@ CONTINUATION_PROMPT_SEED = """你是故事框架续写规划器。你的任务�
 5. 不要把长篇故事压缩成短篇结局，保持后续升级、扩盘、反转空间。
 6. reply 只说明实际续写的章节范围，不要说"我会"。"""
 
-ONBOARDING_PROMPT_SEED = """你是「灵感捕手」——一位资深小说创作顾问。
+ONBOARDING_PROMPT_SEED = """你是字段填充机器人。任务：从对话中按顺序填满 5 个字段，填满即结束。
 
-## 你的角色
-你是一个有温度的创作伙伴，不是表单收集器。你的目标是通过自然对话，
-深度理解用户的创作意图，帮助他们把模糊的想法变成清晰的方向。
+## 绝对禁止的行为（违反会使整个引导失败）
+- 禁止写任何样章、正文片段、场景描写、对白
+- 禁止对用户的构思做文学分析、点评、赞赏或评价（如"这个设定有趣"）
+- 禁止给任何创作建议、商业化建议、市场分析
+- 禁止推荐选项——除非用户明确说"你定"或"推荐"，才给出 2-3 个简洁选项
+- 禁止一次问多个问题——每轮只针对当前字段问一个问题
+- 禁止超过 80 字回复
 
-## 对话策略
+## 5 个字段（严格按顺序填充）
+字段 1 — concept（故事概念）：类型+主角身份+开篇事件，用一句话概括
+字段 2 — setting（世界观规则）：力量体系核心规则+世界背景
+字段 3 — tone（风格标签）：3-5 个标签词，如：都市、诡异、契约、悬疑、写实
+字段 4 — goals（创作目标）：预期篇幅（短/中/长）+ 目标读者群体
+字段 5 — synthesis（主角设定）：主角姓名+核心人设+弧线方向
 
-1. **主动追问**：当用户的描述模糊时，追问具体细节
-   - 用户说"写个玄幻" → 追问"是什么类型的玄幻？修仙？异世？都市异能？"
-   - 用户说"主角很厉害" → 追问"厉害在哪？战斗力？智慧？特殊能力？"
+## 工作流程
+每一轮只做一件事：
+1. 看当前字段是否已填充
+2. 已填充 → 进入下一字段
+3. 未填充 → 针对该字段问一个问题
+4. 用户回答 → 提取关键信息填入 understanding 对应字段
+5. 回复必须包含 JSON
 
-2. **深度解读**：不只是记录，而是理解并反馈
-   - 用户说"偏喜剧" → 你理解为"轻松幽默的基调，用喜剧手法处理严肃主题"
-   - 在回复中展示你的理解，让用户确认
+## 对话示例
+第一次消息 → concept 字段为空 → AI：
+"作品属于什么类型？主角的身份是什么？"{"reply":"作品属于什么类型？主角的身份是什么？","understanding":{"concept":"","setting":"","tone":"","goals":"","synthesis":""},"understanding_depth":0,"phase":"extracting","has_brief":false,"creative_brief":null}
 
-3. **渐进深入**：从核心灵感出发，逐步扩展到设定、基调、目标
-   - 不要一次性问完所有问题
-   - 根据用户的回答自然推进
+用户回答"都市诡异，程序员主角" → AI 提取 concept：
+"已记录：都市诡异题材，程序员主角。"{"reply":"已记录。接下来描述世界观：力量体系的核心规则是什么？比如契约、寄生还是道具？","understanding":{"concept":"都市诡异，程序员主角","setting":"","tone":"","goals":"","synthesis":""},"understanding_depth":20,"phase":"extracting","has_brief":false,"creative_brief":null}
 
-4. **阶段感知**（内部，不告诉用户）：
-   - exploring：探索核心灵感和概念
-   - refining：深化设定、基调、目标
-   - synthesizing：综合所有信息，输出分析卡
+## 模糊回答处理
+用户说"你定/推荐/都可以"时：基于已有信息给出 2 个简洁选项（一行一个），不要展开描述。
+用户选择后填入当前字段，继续下一字段。
 
-## 输出格式
-每轮回复必须包含 JSON（在回复文本之后）：
-{
-    "reply": "你的自然语言回复",
-    "understanding": {
-        "concept": "提炼的故事概念",
-        "setting": "提炼的世界观设定",
-        "tone": "提炼的风格基调",
-        "goals": "提炼的创作目标",
-        "synthesis": "综合理解"
-    },
-    "understanding_depth": 65,
-    "phase": "exploring",
-    "has_brief": false,
-    "creative_brief": null
-}
+## 填充完成条件
+当 concept 和 goals 都非空 + 至少还有 1 个字段非空 → has_brief=true，reply 写"提取完毕，准备生成。"
+此时不再提问，用户点击确认后后端自动构建框架。
 
-## understanding_depth 参考标准
-- 有核心概念（故事类型+核心创意）：+20
-- 有世界观/设定（背景+力量体系）：+20
-- 有风格基调（幽默/严肃/热血等+读者定位）：+20
-- 有创作目标（篇幅+连载计划+商业目标）：+20
-- 有综合理解（能用一段话概括整个故事）：+20
-
-## 输出创意分析卡的时机
-当你对用户的创意有了充分理解（understanding_depth >= 80）时：
-1. 设置 has_brief = true
-2. 在 creative_brief 中输出完整的创意分析卡：
-{
-    "project_positioning": "作品定位",
-    "genre": "题材",
-    "audience": "目标读者",
-    "tone": "风格基调",
-    "core_hook": "核心卖点",
-    "one_line_premise": "一句话梗概",
-    "protagonist_core": "主角核心设定",
-    "main_conflict": "主线矛盾",
-    "longline_mystery": "长线悬念",
-    "serial_length_target": "目标篇幅",
-    "must_keep_rules": ["必保留设定"],
-    "reveal_strategy": "揭秘策略",
-    "pacing_strategy": "节奏策略"
-}
-3. 在 reply 中说"我已经理解了你的想法，这是我的分析..."
-
-## 迭代修改
-用户可能在分析卡输出后继续对话，修改任何不满意的地方。
-此时你需要更新 understanding 和 creative_brief，而不是从头开始。
-当用户说"确认"或"可以了"时，设置 has_brief = true 输出最终版本。
-
-## 重要规则
-- 保持轻松但有创作专业感的语气
-- 对模糊回答做适当解读并请作者确认，不要强行归类
-- 如果用户明确传递了某个信息，即使没按顺序，也应更新到 understanding
-- 当信息足够充分时，可以直接输出分析卡
-- 不要使用选择题清单，用引导性问题"""
+## 输出格式（所有回复必须以此格式结尾）
+{"reply":"提问或确认（≤80字）","understanding":{"concept":"","setting":"","tone":"","goals":"","synthesis":""},"understanding_depth":0,"phase":"extracting","has_brief":false,"creative_brief":null}"""
 
 IMPORT_CONTEXT_PROMPT_SEED = """你是一位职业网文策划编辑，正在帮助作者补充"导入作品"的创作上下文。
 
@@ -1702,10 +1662,15 @@ _SYSTEM_PROMPT_SEEDS: dict[str, str] = {
 
 
 def _seed_system_prompts(db: Session, *, commit: bool = True) -> None:
-    """首次启动时写入系统提示词种子数据。"""
+    """写入系统提示词种子数据。已存在的 key 跳过（onboarding 例外：旧版「灵感捕手」强制覆盖）。"""
     for key, value in _SYSTEM_PROMPT_SEEDS.items():
         setting = db.query(PlatformSetting).filter(PlatformSetting.setting_key == key).first()
         if setting:
+            # 检测旧版 onboarding prompt（含「灵感捕手」或「创作灵感」），强制更新
+            if key == "prompt.onboarding":
+                cur = setting.value_json.get("value", "") if isinstance(setting.value_json, dict) else ""
+                if "灵感捕手" in cur or "创作灵感" in cur:
+                    setting.value_json = {"value": value}
             continue
         db.add(PlatformSetting(setting_key=key, value_json={"value": value}))
     if commit:
@@ -3023,6 +2988,30 @@ def _is_generic_framework_instruction(text: str | None) -> bool:
         "请生成框架",
     )
     return any(token in normalized for token in generic_tokens) and len(normalized) <= 30
+
+
+def _build_creative_brief_from_understanding(understanding: dict) -> dict:
+    """从 understanding 字段自动构建创意分析卡，免去 AI 调用"""
+    concept = str(understanding.get("concept", "") or "")
+    setting = str(understanding.get("setting", "") or "")
+    tone = str(understanding.get("tone", "") or "")
+    goals = str(understanding.get("goals", "") or "")
+    synthesis = str(understanding.get("synthesis", "") or "")
+    return {
+        "project_positioning": concept,
+        "genre": concept,
+        "audience": goals,
+        "tone": tone,
+        "core_hook": setting,
+        "one_line_premise": concept,
+        "protagonist_core": synthesis,
+        "main_conflict": setting,
+        "longline_mystery": "",
+        "serial_length_target": goals,
+        "must_keep_rules": [],
+        "reveal_strategy": "",
+        "pacing_strategy": "",
+    }
 
 
 def _build_framework_seed_description(story: Story) -> str:
@@ -7798,9 +7787,12 @@ async def onboarding_send_message(story_id: int, request: Request, db: Session =
             api_key=deepseek_api_key,
             system_prompt=onboard_prompt,
         )
-        # 如果 AI 输出了分析卡，提取 creative_brief
+        # 构建 creative_brief：AI 输出优先，否则从 understanding 自动构建
         if bool(result.get("has_brief")) and result.get("creative_brief"):
             creative_brief = result["creative_brief"]
+        elif bool(result.get("has_brief")):
+            ai_understanding = result.get("understanding") or {}
+            creative_brief = _build_creative_brief_from_understanding(ai_understanding)
     except Exception as e:
         raise HTTPException(502, f"AI 服务调用失败: {e}")
 
@@ -7865,14 +7857,11 @@ async def onboarding_confirm(story_id: int, request: Request, db: Session = Depe
 
     _release_db_transaction(db)
     try:
-        # 优先使用前端传来的 creative_brief，否则重新生成
-        if creative_brief_input and isinstance(creative_brief_input, dict):
+        # 优先使用前端传来的 creative_brief，否则从 understanding 自动构建
+        if creative_brief_input and isinstance(creative_brief_input, dict) and any(creative_brief_input.values()):
             creative_brief = creative_brief_input
         else:
-            creative_brief = await build_creative_brief(
-                understanding,
-                api_key=deepseek_api_key,
-            )
+            creative_brief = _build_creative_brief_from_understanding(understanding)
         story_bible = await build_story_bible(
             creative_brief,
             raw_input,
@@ -7886,7 +7875,58 @@ async def onboarding_confirm(story_id: int, request: Request, db: Session = Depe
     story.description = story_bible.get("creative_brief", {}).get("one_line_premise", story.description or "")
     story.onboarding_completed = True
     db.commit()
-    # 配额扣减
+
+    # --- 新增：自动生成故事框架 ---
+    framework_result = None
+    try:
+        description = _build_framework_seed_description(story)
+        if description.strip():
+            story_context = _build_framework_ai_context(story, mode="initial_generate")
+            template_fw_prompt = get_effective_prompt(story_id, "framework", db)
+            # 配额预检
+            _check_and_consume_feature_quota(request, user.id, "framework.generate.monthly_limit", 1, db, deduct=False, provider_kind="text")
+            # 释放 DB 事务，避免 AI 调用期间长连接占用
+            _release_db_transaction(db)
+
+            framework = await generate_framework(
+                description.strip(),
+                api_key=deepseek_api_key,
+                story_bible=story_bible,
+                story_context=story_context,
+                launch_ready_required=True,
+                system_prompt=template_fw_prompt or None,
+            )
+
+            story = _require_story_for_user(story_id, user, db)
+            story.tags = framework.get("tags") if isinstance(framework.get("tags"), dict) else story.tags
+            story.characters = _normalize_characters_payload(framework.get("characters"))
+            story.outline = _merge_framework_outline({}, framework.get("outline"), framework.get("chapters"))
+            db.commit()
+
+            _save_framework_snapshot(
+                story_id=story.id,
+                snapshot_data=_build_current_snapshot_data(story),
+                source="initial_generate",
+                reply_summary="引导生成初始框架",
+                db=db,
+            )
+            _enforce_framework_snapshot_limit(story.id, max_count=20, db=db)
+            db.commit()
+
+            # 配额扣减
+            _check_and_consume_feature_quota(request, user.id, "framework.generate.monthly_limit", 1, db, deduct=True, provider_kind="text")
+
+            framework_result = {
+                "tags": story.tags,
+                "characters": story.characters,
+                "outline": story.outline,
+            }
+    except Exception as e:
+        logger.warning(f"[onboarding] 自动框架生成失败，优雅降级: {e}")
+        framework_result = None
+    # --- 新增结束 ---
+
+    # 高级文本配额扣减
     _check_and_consume_advanced_text_quota(request, user.id, db, deduct=True)
     db.refresh(story)
 
@@ -7894,6 +7934,7 @@ async def onboarding_confirm(story_id: int, request: Request, db: Session = Depe
         "story_id": story.id,
         "story_bible": story_bible,
         "creative_brief": creative_brief,
+        "framework": framework_result,
     }
 
 

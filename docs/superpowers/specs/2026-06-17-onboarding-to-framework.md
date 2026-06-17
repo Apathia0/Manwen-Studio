@@ -71,7 +71,7 @@ def confirm_onboarding(..., auto_generate=True):
 - 复用 `_build_framework_seed_description` 和 `_build_framework_ai_context`（已有函数）
 - 复用 `generate_framework`（已有函数），传 `story_bible` 和 `story_context`
 - 自动保存初始快照（`_save_framework_snapshot`）
-- 需扣减 `framework.generate.monthly_limit` 配额
+- 配额扣减：在调用 `generate_framework` 前 pre-check（`deduct=False`），保存成功后 deduct（`deduct=True`），与 `generate_framework_endpoint` 中的模式一致
 
 ### 前端改动
 
