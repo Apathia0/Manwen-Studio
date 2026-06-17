@@ -7770,17 +7770,11 @@ async def onboarding_send_message(story_id: int, request: Request, db: Session =
     story = _require_story_for_user(story_id, user, db)
     body = await request.json()
     messages_raw = body.get("messages", [])
-    previous_collected_info = body.get("collected_info", {})
-    current_step = body.get("step")
+    previous_understanding = body.get("understanding", {})
     if not isinstance(messages_raw, list) or len(messages_raw) == 0:
         raise HTTPException(400, "消息必填")
-    if not isinstance(previous_collected_info, dict):
-        previous_collected_info = {}
-    if current_step is not None:
-        try:
-            current_step = int(current_step)
-        except (TypeError, ValueError):
-            current_step = None
+    if not isinstance(previous_understanding, dict):
+        previous_understanding = {}
 
     safe_messages = [
         {"role": msg["role"], "content": str(msg["content"])}
@@ -7800,32 +7794,40 @@ async def onboarding_send_message(story_id: int, request: Request, db: Session =
     try:
         result = await generate_onboarding_response(
             safe_messages,
-            previous_collected_info=previous_collected_info,
-            current_step=current_step,
+            understanding=previous_understanding,
             api_key=deepseek_api_key,
             system_prompt=onboard_prompt,
         )
-        if bool(result.get("is_complete")):
-            try:
-                creative_brief = await build_creative_brief(
-                    result.get("collected_info", {}),
-                    api_key=deepseek_api_key,
-                )
-            except Exception as exc:
-                logger.warning("Failed to preview creative brief during onboarding: %s", exc)
+        # 如果 AI 输出了分析卡，提取 creative_brief
+        if bool(result.get("has_brief")) and result.get("creative_brief"):
+            creative_brief = result["creative_brief"]
     except Exception as e:
         raise HTTPException(502, f"AI 服务调用失败: {e}")
 
     # 配额扣减
     _check_and_consume_advanced_text_quota(request, user.id, db, deduct=True)
 
+    # 构建兼容的 collected_info
+    understanding = result.get("understanding", {})
+    collected_info = {
+        "story_concept": understanding.get("concept", ""),
+        "genre_audience": understanding.get("setting", ""),
+        "core_hook": understanding.get("tone", ""),
+        "target_length": understanding.get("goals", ""),
+        "must_keep": understanding.get("synthesis", ""),
+    }
+
     return OnboardingMessageOut(
         reply=result.get("reply", ""),
-        collected_info=result.get("collected_info", {}),
-        step=int(result.get("step", 1)),
-        total_steps=int(result.get("total_steps", 5)),
-        is_complete=bool(result.get("is_complete", False)),
+        understanding=understanding,
+        understanding_depth=int(result.get("understanding_depth", 0)),
+        phase=str(result.get("phase", "exploring")),
+        has_brief=bool(result.get("has_brief", False)),
         creative_brief=creative_brief,
+        collected_info=collected_info,
+        step=1,
+        total_steps=5,
+        is_complete=bool(result.get("has_brief", False)),
     )
 
 
@@ -7835,13 +7837,15 @@ async def onboarding_confirm(story_id: int, request: Request, db: Session = Depe
     user = _require_user(request, db)
     story = _require_story_for_user(story_id, user, db)
     body = await request.json()
-    collected_info = body.get("collected_info", {})
+    understanding = body.get("understanding", {})
+    creative_brief_input = body.get("creative_brief", {})
     messages_raw = body.get("messages", [])
 
+    # 从 understanding 构建 raw_input
     raw_input = {
-        "raw_idea": collected_info.get("story_concept", ""),
-        "raw_length_goal": collected_info.get("target_length", ""),
-        "raw_must_keep": collected_info.get("must_keep", ""),
+        "raw_idea": understanding.get("concept", ""),
+        "raw_length_goal": understanding.get("goals", ""),
+        "raw_must_keep": understanding.get("synthesis", ""),
         "raw_hidden_setting": "",
         "raw_notes": "",
     }
@@ -7861,10 +7865,14 @@ async def onboarding_confirm(story_id: int, request: Request, db: Session = Depe
 
     _release_db_transaction(db)
     try:
-        creative_brief = await build_creative_brief(
-            collected_info,
-            api_key=deepseek_api_key,
-        )
+        # 优先使用前端传来的 creative_brief，否则重新生成
+        if creative_brief_input and isinstance(creative_brief_input, dict):
+            creative_brief = creative_brief_input
+        else:
+            creative_brief = await build_creative_brief(
+                understanding,
+                api_key=deepseek_api_key,
+            )
         story_bible = await build_story_bible(
             creative_brief,
             raw_input,
