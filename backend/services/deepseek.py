@@ -563,6 +563,8 @@ def _extract_candidate_genre(raw_content: str) -> str:
     return ""
 
 
+# DEPRECATED: 旧的 collected_info 合并逻辑，已被 understanding 替代
+# 保留用于向后兼容，新代码不要使用
 def _merge_onboarding_collected_info(
     previous_collected_info: dict[str, str] | None,
     current_step: int | None,
@@ -2500,22 +2502,19 @@ async def scenes_from_selection(selected_text: str, character_profiles: str = ""
 
 async def generate_onboarding_response(
     messages: list[dict],
-    previous_collected_info: dict[str, str] | None = None,
-    current_step: int | None = None,
+    understanding: dict[str, str] | None = None,
     api_key: str | None = None,
     max_retries: int = 2,
     system_prompt: str | None = None,
 ) -> dict:
     """生成引导建书对话中 AI 的下一轮回复，含自动重试韧性"""
     last_error: Exception | None = None
-    current_snapshot = json.dumps(previous_collected_info or {}, ensure_ascii=False)
-    step_hint = int(current_step or _infer_onboarding_next_step(previous_collected_info or {}))
+    understanding_snapshot = json.dumps(understanding or {}, ensure_ascii=False)
     onboarding_state_hint = (
-        "\n\n## 当前已确认信息\n"
-        f"- current_step: {step_hint}\n"
-        f"- current_collected_info: {current_snapshot}\n"
-        "请在此基础上更新 collected_info。对于「是的/嗯/对」这类确认回答，不要把这些确认词直接写入字段，"
-        "而应保留上一轮你已经判断出的内容。"
+        "\n\n## 当前已确认理解\n"
+        f"- current_understanding: {understanding_snapshot}\n"
+        "请在此基础上更新 understanding。对于「是的/嗯/对」这类确认回答，"
+        "不要把这些确认词直接写入字段，而应保留上一轮你已经判断出的内容。"
     )
 
     for attempt in range(max_retries + 1):
@@ -2543,27 +2542,36 @@ async def generate_onboarding_response(
             try:
                 result = _extract_json_object(content)
             except ValueError:
-                fallback = _build_onboarding_fallback_response(
-                    messages,
-                    content,
-                    previous_collected_info=previous_collected_info,
-                    current_step=current_step,
-                )
-                if fallback.get("reply"):
-                    return fallback
-                raise
+                # fallback：从纯文本提取 reply
+                return {
+                    "reply": content.strip(),
+                    "understanding": understanding or {},
+                    "understanding_depth": 0,
+                    "phase": "exploring",
+                    "has_brief": False,
+                    "creative_brief": None,
+                }
 
             # 验证必要字段
             reply = result.get("reply", "")
             if not reply.strip():
                 raise ValueError("AI 返回空回复")
 
+            # 提取 understanding
+            ai_understanding = result.get("understanding", {})
+            if not isinstance(ai_understanding, dict):
+                ai_understanding = {}
+
+            # 合并：AI 输出的 understanding 覆盖旧值
+            merged_understanding = {**(understanding or {}), **ai_understanding}
+
             return {
                 "reply": reply,
-                "collected_info": result.get("collected_info", {}),
-                "step": int(result.get("step", 1)),
-                "total_steps": int(result.get("total_steps", 5)),
-                "is_complete": bool(result.get("is_complete", False)),
+                "understanding": merged_understanding,
+                "understanding_depth": int(result.get("understanding_depth", 0)),
+                "phase": str(result.get("phase", "exploring")),
+                "has_brief": bool(result.get("has_brief", False)),
+                "creative_brief": result.get("creative_brief"),
             }
 
         except (httpx.HTTPError, json.JSONDecodeError, ValueError, KeyError) as e:
