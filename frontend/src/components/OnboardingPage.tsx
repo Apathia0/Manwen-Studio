@@ -1,14 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ArrowLeft,
-  Check,
-  ChevronRight,
   Cpu,
   Loader2,
   MessageSquare,
   Send,
   Sparkles,
-  X,
 } from 'lucide-react';
 import {
   confirmOnboarding,
@@ -17,9 +14,8 @@ import {
   type CreativeBrief,
   type OnboardingChatMessage,
   type Story,
+  type Understanding,
 } from '../api';
-
-const STEPS = ['故事概念', '题材定位', '核心卖点', '目标体量', '核心设定'];
 
 const INITIAL_PROMPT =
   '你好！我是灵感捕手，很高兴能帮你梳理创作思路。说说你想写一个怎样的故事吧？主角是什么样的人？大概会发生什么？';
@@ -36,13 +32,10 @@ export default function OnboardingPage({ story, onComplete, onBack }: Props) {
   ]);
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
-  const [collectedInfo, setCollectedInfo] = useState<Record<string, string>>({});
+  const [understanding, setUnderstanding] = useState<Partial<Understanding>>({});
+  const [understandingDepth, setUnderstandingDepth] = useState(0);
+  const [showBrief, setShowBrief] = useState(false);
   const [creativeBrief, setCreativeBrief] = useState<CreativeBrief | null>(null);
-  const [step, setStep] = useState(1);
-  const [totalSteps] = useState(5);
-  const [isComplete, setIsComplete] = useState(false);
-  const [showConfirm, setShowConfirm] = useState(false);
-  const [confirmLoading, setConfirmLoading] = useState(false);
   const [error, setError] = useState('');
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -70,26 +63,33 @@ export default function OnboardingPage({ story, onComplete, onBack }: Props) {
     setLoading(true);
 
     try {
-      const result = await sendOnboardingMessage(story.id, updatedMessages, collectedInfo, step);
-      const assistantMsg: OnboardingChatMessage = {
-        role: 'assistant',
-        content: result.reply,
-      };
-      setMessages((prev) => [...prev, assistantMsg]);
-      setCollectedInfo(result.collected_info);
-      setCreativeBrief((result.creative_brief as CreativeBrief | undefined) ?? null);
-      setStep(result.step);
-      setIsComplete(result.is_complete);
+      const result = await sendOnboardingMessage(story.id, updatedMessages, understanding as Record<string, string>);
 
-      if (result.is_complete) {
-        setShowConfirm(true);
+      setUnderstanding(result.understanding || {});
+      setUnderstandingDepth(result.understanding_depth || 0);
+
+      if (result.has_brief && result.creative_brief) {
+        setCreativeBrief(result.creative_brief);
+        setShowBrief(true);
+        const briefMsg: OnboardingChatMessage = {
+          role: 'assistant',
+          content: result.reply,
+          creative_brief: result.creative_brief,
+        };
+        setMessages((prev) => [...prev, briefMsg]);
+      } else {
+        const assistantMsg: OnboardingChatMessage = {
+          role: 'assistant',
+          content: result.reply,
+        };
+        setMessages((prev) => [...prev, assistantMsg]);
       }
     } catch (err: any) {
       setError(err.message || '对话失败，请重试');
     } finally {
       setLoading(false);
     }
-  }, [collectedInfo, input, loading, messages, step, story.id]);
+  }, [understanding, input, loading, messages, story.id]);
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -99,20 +99,20 @@ export default function OnboardingPage({ story, onComplete, onBack }: Props) {
   };
 
   const handleConfirm = async () => {
-    setConfirmLoading(true);
+    setLoading(true);
     setError('');
     try {
-      await confirmOnboarding(story.id, collectedInfo, messages);
+      await confirmOnboarding(story.id, understanding as Record<string, string>, messages, creativeBrief ?? undefined);
       onComplete(story.id);
     } catch (err: any) {
       setError(err.message || '确认失败，请重试');
     } finally {
-      setConfirmLoading(false);
+      setLoading(false);
     }
   };
 
   const handleContinueEdit = () => {
-    setShowConfirm(false);
+    setShowBrief(false);
     setInput('');
     inputRef.current?.focus();
   };
@@ -152,44 +152,15 @@ export default function OnboardingPage({ story, onComplete, onBack }: Props) {
         </div>
         <div className="flex items-center gap-2 text-xs text-slate-500">
           <Cpu size={14} />
-          <span>
-            第 {step} 步 / 共 {totalSteps} 步
-          </span>
+          <span>理解深度</span>
+          <div className="w-24 h-1.5 bg-slate-100 rounded-full overflow-hidden">
+            <div
+              className="h-full bg-[#2563eb] rounded-full transition-all duration-500"
+              style={{ width: `${understandingDepth}%` }}
+            />
+          </div>
+          <span>{understandingDepth}%</span>
         </div>
-      </div>
-
-      {/* 步骤进度条 */}
-      <div className="flex items-center gap-1 border-b border-[#e5edf8] bg-white px-5 py-3">
-        {STEPS.map((label, idx) => {
-          const stepNum = idx + 1;
-          const isActive = stepNum === step;
-          const isDone = stepNum < step || (stepNum === step && isComplete);
-          return (
-            <div key={label} className="flex items-center gap-1">
-              <div
-                className={`flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium transition ${
-                  isActive
-                    ? 'bg-[#2563eb] text-white shadow-[0_4px_12px_rgba(37,99,235,0.3)]'
-                    : isDone
-                      ? 'bg-[#dbeafe] text-[#1d4ed8]'
-                      : 'bg-[#f1f5f9] text-slate-400'
-                }`}
-              >
-                {isDone ? (
-                  <Check size={12} />
-                ) : (
-                  <span className="flex h-3.5 w-3.5 items-center justify-center rounded-full text-[10px] font-bold">
-                    {stepNum}
-                  </span>
-                )}
-                <span className="hidden sm:inline">{label}</span>
-              </div>
-              {idx < STEPS.length - 1 && (
-                <ChevronRight size={14} className="text-slate-300" />
-              )}
-            </div>
-          );
-        })}
       </div>
 
       {/* 主体内容 */}
@@ -207,15 +178,23 @@ export default function OnboardingPage({ story, onComplete, onBack }: Props) {
                 key={idx}
                 className={`mb-4 flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
               >
-                <div
-                  className={`max-w-[75%] whitespace-pre-wrap rounded-2xl px-4 py-3 text-sm leading-6 ${
-                    msg.role === 'user'
-                      ? 'bg-[#2563eb] text-white shadow-[0_4px_12px_rgba(37,99,235,0.2)]'
-                      : 'border border-[#e5edf8] bg-[#f8fbff] text-slate-700'
-                  }`}
-                >
-                  {msg.content}
-                </div>
+                {msg.role === 'assistant' && msg.creative_brief ? (
+                  <BriefCardInline
+                    brief={msg.creative_brief}
+                    onConfirm={() => void handleConfirm()}
+                    onContinue={handleContinueEdit}
+                  />
+                ) : (
+                  <div
+                    className={`max-w-[75%] whitespace-pre-wrap rounded-2xl px-4 py-3 text-sm leading-6 ${
+                      msg.role === 'user'
+                        ? 'bg-[#2563eb] text-white shadow-[0_4px_12px_rgba(37,99,235,0.2)]'
+                        : 'border border-[#e5edf8] bg-[#f8fbff] text-slate-700'
+                    }`}
+                  >
+                    {msg.content}
+                  </div>
+                )}
               </div>
             ))}
 
@@ -240,7 +219,7 @@ export default function OnboardingPage({ story, onComplete, onBack }: Props) {
                 onChange={(e) => setInput(e.target.value)}
                 onKeyDown={handleKeyDown}
                 placeholder={
-                  showConfirm
+                  showBrief
                     ? '继续补充你的想法...'
                     : '输入你的想法，按 Enter 发送，Shift+Enter 换行...'
                 }
@@ -284,58 +263,47 @@ export default function OnboardingPage({ story, onComplete, onBack }: Props) {
             当前理解
           </div>
           <div className="mt-3 space-y-3">
-            {creativeBrief?.one_line_premise ? (
-              <div className="rounded-2xl border border-[#d7e3f4] bg-[#eff6ff] p-3">
-                <div className="text-[11px] font-medium text-[#2563eb]">创意理解卡</div>
-                <div className="mt-1 text-xs leading-5 text-slate-600">
-                  {creativeBrief.one_line_premise}
-                </div>
-                <div className="mt-2 text-[11px] text-slate-500">
-                  {creativeBrief.genre} · {creativeBrief.audience} · {creativeBrief.serial_length_target}
-                </div>
-              </div>
-            ) : null}
-            {collectedInfo.story_concept ? (
+            {understanding.concept ? (
               <div className="rounded-2xl border border-[#d7e3f4] bg-white p-3">
-                <div className="text-[11px] font-medium text-[#2563eb]">故事概念</div>
+                <div className="text-[11px] font-medium text-[#2563eb]">💡 故事概念</div>
                 <div className="mt-1 text-xs leading-5 text-slate-600 line-clamp-4">
-                  {collectedInfo.story_concept}
+                  {understanding.concept}
                 </div>
               </div>
             ) : null}
-            {collectedInfo.genre_audience ? (
+            {understanding.setting ? (
               <div className="rounded-2xl border border-[#d7e3f4] bg-white p-3">
-                <div className="text-[11px] font-medium text-[#2563eb]">题材方向</div>
+                <div className="text-[11px] font-medium text-[#2563eb]">🌍 世界观设定</div>
                 <div className="mt-1 text-xs leading-5 text-slate-600">
-                  {collectedInfo.genre_audience}
+                  {understanding.setting}
                 </div>
               </div>
             ) : null}
-            {collectedInfo.core_hook ? (
+            {understanding.tone ? (
               <div className="rounded-2xl border border-[#d7e3f4] bg-white p-3">
-                <div className="text-[11px] font-medium text-[#2563eb]">核心卖点</div>
+                <div className="text-[11px] font-medium text-[#2563eb]">🎭 风格基调</div>
                 <div className="mt-1 text-xs leading-5 text-slate-600">
-                  {collectedInfo.core_hook}
+                  {understanding.tone}
                 </div>
               </div>
             ) : null}
-            {collectedInfo.target_length ? (
+            {understanding.goals ? (
               <div className="rounded-2xl border border-[#d7e3f4] bg-white p-3">
-                <div className="text-[11px] font-medium text-[#2563eb]">目标体量</div>
+                <div className="text-[11px] font-medium text-[#2563eb]">🎯 创作目标</div>
                 <div className="mt-1 text-xs leading-5 text-slate-600">
-                  {collectedInfo.target_length}
+                  {understanding.goals}
                 </div>
               </div>
             ) : null}
-            {collectedInfo.must_keep ? (
-              <div className="rounded-2xl border border-[#d7e3f4] bg-white p-3">
-                <div className="text-[11px] font-medium text-[#2563eb]">必保留设定</div>
+            {understanding.synthesis ? (
+              <div className="rounded-2xl border border-[#d7e3f4] bg-[#eff6ff] p-3">
+                <div className="text-[11px] font-medium text-[#2563eb]">📝 综合理解</div>
                 <div className="mt-1 text-xs leading-5 text-slate-600">
-                  {collectedInfo.must_keep}
+                  {understanding.synthesis}
                 </div>
               </div>
             ) : null}
-            {Object.keys(collectedInfo).length === 0 && (
+            {Object.keys(understanding).length === 0 && (
               <div className="flex flex-col items-center gap-2 py-8 text-center text-xs text-slate-400">
                 <MessageSquare size={24} className="opacity-40" />
                 <div>AI 正在理解你的创意...</div>
@@ -346,127 +314,70 @@ export default function OnboardingPage({ story, onComplete, onBack }: Props) {
         </div>
       </div>
 
-      {/* 创意理解卡确认弹窗 */}
-      {showConfirm && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
-          <div className="max-h-[85vh] w-full max-w-2xl overflow-y-auto rounded-[28px] border border-[#d7e3f4] bg-white p-6 shadow-[0_24px_60px_rgba(15,23,42,0.2)]">
-            <div className="flex items-start justify-between gap-4">
-              <div className="flex items-center gap-2">
-                <Sparkles size={20} className="text-[#2563eb]" />
-                <div className="text-lg font-semibold text-slate-900">
-                  创意理解卡
-                </div>
-              </div>
-              <button
-                onClick={handleContinueEdit}
-                className="rounded-full border border-[#d7e3f4] bg-white p-1.5 text-slate-400 transition hover:bg-[#f8fbff]"
-              >
-                <X size={16} />
-              </button>
-            </div>
-            <p className="mt-1 text-sm text-slate-500">
-              AI 已经理解了你关于《{story.title}》的创作构思。请确认以下理解是否准确：
-            </p>
-
-            <div className="mt-4 space-y-3">
-              <div className="rounded-2xl border border-[#d7e3f4] bg-[#f8fbff] p-4">
-                <div className="text-xs font-medium uppercase tracking-wide text-[#2563eb]">
-                  作品定位
-                </div>
-                <div className="mt-1.5 text-sm leading-6 text-slate-700">
-                  {creativeBrief?.project_positioning || collectedInfo.story_concept || '等待确认...'}
-                </div>
-              </div>
-              {creativeBrief && (
-                <div className="grid gap-3 sm:grid-cols-2">
-                  <BriefCard label="一句话梗概" value={creativeBrief.one_line_premise} />
-                  <BriefCard label="核心卖点" value={creativeBrief.core_hook} />
-                  <BriefCard label="主线矛盾" value={creativeBrief.main_conflict} />
-                  <BriefCard label="长线悬念" value={creativeBrief.longline_mystery} />
-                  <BriefCard label="目标篇幅" value={creativeBrief.serial_length_target} />
-                  <BriefCard label="揭秘策略" value={creativeBrief.reveal_strategy} />
-                  <BriefCard label="节奏策略" value={creativeBrief.pacing_strategy} />
-                  <BriefCard label="主角核心" value={creativeBrief.protagonist_core} />
-                </div>
-              )}
-              <div className="grid gap-3 sm:grid-cols-2">
-                {collectedInfo.genre_audience && (
-                  <div className="rounded-2xl border border-[#d7e3f4] bg-white p-3">
-                    <div className="text-xs font-medium text-[#2563eb]">题材与受众</div>
-                    <div className="mt-1 text-sm text-slate-700">
-                      {collectedInfo.genre_audience}
-                    </div>
-                  </div>
-                )}
-                {collectedInfo.core_hook && (
-                  <div className="rounded-2xl border border-[#d7e3f4] bg-white p-3">
-                    <div className="text-xs font-medium text-[#2563eb]">核心卖点</div>
-                    <div className="mt-1 text-sm text-slate-700">
-                      {collectedInfo.core_hook}
-                    </div>
-                  </div>
-                )}
-                {collectedInfo.target_length && (
-                  <div className="rounded-2xl border border-[#d7e3f4] bg-white p-3">
-                    <div className="text-xs font-medium text-[#2563eb]">目标体量</div>
-                    <div className="mt-1 text-sm text-slate-700">
-                      {collectedInfo.target_length}
-                    </div>
-                  </div>
-                )}
-                {collectedInfo.must_keep && (
-                  <div className="rounded-2xl border border-[#d7e3f4] bg-white p-3">
-                    <div className="text-xs font-medium text-[#2563eb]">必保留设定</div>
-                    <div className="mt-1 text-sm text-slate-700">
-                      {collectedInfo.must_keep}
-                    </div>
-                  </div>
-                )}
-              </div>
-            </div>
-
-            <div className="mt-6 flex flex-wrap items-center justify-end gap-3">
-              <button
-                onClick={handleContinueEdit}
-                disabled={confirmLoading}
-                className="rounded-2xl border border-[#d7e3f4] bg-white px-4 py-2.5 text-sm font-medium text-slate-700 transition hover:bg-[#f8fbff] disabled:cursor-not-allowed disabled:opacity-60"
-              >
-                我再补充
-              </button>
-              <button
-                onClick={() => void handleConfirm()}
-                disabled={confirmLoading}
-                className="inline-flex items-center gap-1.5 rounded-2xl bg-[#2563eb] px-5 py-2.5 text-sm font-medium text-white shadow-[0_10px_24px_rgba(37,99,235,0.24)] transition hover:bg-[#1d4ed8] disabled:cursor-not-allowed disabled:opacity-60"
-              >
-                {confirmLoading ? (
-                  <>
-                    <Loader2 size={14} className="animate-spin" />
-                    正在生成作品圣经...
-                  </>
-                ) : (
-                  <>
-                    <Check size={14} />
-                    按此生成
-                  </>
-                )}
-              </button>
-            </div>
-            {error && (
-              <div className="mt-3 text-xs text-rose-600">{error}</div>
-            )}
-          </div>
-        </div>
-      )}
     </div>
   );
 }
 
-function BriefCard({ label, value }: { label: string; value?: string }) {
+function BriefField({ label, value }: { label: string; value?: string }) {
   if (!value) return null;
   return (
     <div className="rounded-2xl border border-[#d7e3f4] bg-white p-3">
       <div className="text-xs font-medium text-[#2563eb]">{label}</div>
       <div className="mt-1 text-sm text-slate-700">{value}</div>
+    </div>
+  );
+}
+
+function BriefCardInline({
+  brief,
+  onConfirm,
+  onContinue,
+}: {
+  brief: CreativeBrief;
+  onConfirm: () => void;
+  onContinue: () => void;
+}) {
+  return (
+    <div className="w-full max-w-[85%] rounded-2xl border border-[#bfdbfe] bg-[#f0f7ff] p-4">
+      <div className="flex items-center gap-2 text-sm font-semibold text-[#1d4ed8]">
+        <Sparkles size={14} />
+        创意分析卡
+      </div>
+      <p className="mt-1 text-xs text-slate-500">
+        我已经理解了你的创作构思，请确认以下分析是否准确：
+      </p>
+      <div className="mt-3 space-y-2">
+        {brief.project_positioning && (
+          <div className="rounded-xl bg-white p-3">
+            <div className="text-[11px] font-medium text-[#2563eb]">作品定位</div>
+            <div className="mt-1 text-sm text-slate-700">{brief.project_positioning}</div>
+          </div>
+        )}
+        <div className="grid gap-2 sm:grid-cols-2">
+          {brief.one_line_premise && <BriefField label="一句话梗概" value={brief.one_line_premise} />}
+          {brief.core_hook && <BriefField label="核心卖点" value={brief.core_hook} />}
+          {brief.main_conflict && <BriefField label="主线矛盾" value={brief.main_conflict} />}
+          {brief.longline_mystery && <BriefField label="长线悬念" value={brief.longline_mystery} />}
+          {brief.serial_length_target && <BriefField label="目标篇幅" value={brief.serial_length_target} />}
+          {brief.reveal_strategy && <BriefField label="揭秘策略" value={brief.reveal_strategy} />}
+          {brief.pacing_strategy && <BriefField label="节奏策略" value={brief.pacing_strategy} />}
+          {brief.protagonist_core && <BriefField label="主角核心" value={brief.protagonist_core} />}
+        </div>
+      </div>
+      <div className="mt-4 flex gap-2">
+        <button
+          onClick={onContinue}
+          className="rounded-xl border border-[#d7e3f4] bg-white px-4 py-2 text-sm text-slate-600 hover:bg-[#f8fbff]"
+        >
+          继续对话修改
+        </button>
+        <button
+          onClick={onConfirm}
+          className="rounded-xl bg-[#2563eb] px-4 py-2 text-sm font-medium text-white hover:bg-[#1d4ed8]"
+        >
+          确认生成
+        </button>
+      </div>
     </div>
   );
 }
