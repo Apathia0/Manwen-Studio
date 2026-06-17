@@ -359,15 +359,30 @@ export interface FrameworkRestoreResponse {
 export interface OnboardingChatMessage {
   role: 'user' | 'assistant';
   content: string;
+  creative_brief?: CreativeBrief;  // 分析卡（仅 assistant 消息）
+}
+
+export interface Understanding {
+  concept: string;
+  setting: string;
+  tone: string;
+  goals: string;
+  synthesis: string;
 }
 
 export interface OnboardingMessageOut {
   reply: string;
+  // 新字段
+  understanding: Understanding;
+  understanding_depth: number;
+  phase: 'exploring' | 'refining' | 'synthesizing';
+  has_brief: boolean;
+  creative_brief?: CreativeBrief;
+  // 保留兼容字段
   collected_info: Record<string, string>;
   step: number;
   total_steps: number;
   is_complete: boolean;
-  creative_brief?: Record<string, any>;
 }
 
 export interface CreativeBrief {
@@ -2153,13 +2168,12 @@ export async function deleteCharacterRefImage(
 export async function sendOnboardingMessage(
   storyId: number,
   messages: { role: string; content: string }[],
-  collectedInfo: Record<string, string> = {},
-  step = 1,
+  understanding: Record<string, string> = {},
 ): Promise<OnboardingMessageOut> {
   const res = await fetch(`${BASE}/api/stories/${storyId}/onboarding/message`, {
     method: 'POST',
     headers: apiHeaders(true),
-    body: JSON.stringify({ messages, collected_info: collectedInfo, step }),
+    body: JSON.stringify({ messages, understanding }),
   });
   if (!res.ok) throw new Error(await readErrorMessage(res, '引导对话失败'));
   return res.json();
@@ -2167,13 +2181,14 @@ export async function sendOnboardingMessage(
 
 export async function confirmOnboarding(
   storyId: number,
-  collectedInfo: Record<string, string>,
+  understanding: Record<string, string>,
   messages: { role: string; content: string }[],
+  creativeBrief?: CreativeBrief,
 ): Promise<OnboardingConfirmResponse> {
   const res = await fetch(`${BASE}/api/stories/${storyId}/onboarding/confirm`, {
     method: 'POST',
     headers: apiHeaders(true),
-    body: JSON.stringify({ collected_info: collectedInfo, messages }),
+    body: JSON.stringify({ understanding, messages, creative_brief: creativeBrief }),
   });
   if (!res.ok) throw new Error(await readErrorMessage(res, '确认引导失败'));
   return res.json();
