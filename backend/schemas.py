@@ -282,6 +282,15 @@ class FrameworkAnalyzeResponse(BaseModel):
 # ─── Onboarding / Story Bible ────────────────────────────────
 
 
+class Understanding(BaseModel):
+    """AI 对用户创意的理解（结构化）"""
+    concept: str = ""      # 故事概念
+    setting: str = ""      # 世界观/设定
+    tone: str = ""         # 风格基调
+    goals: str = ""        # 创作目标
+    synthesis: str = ""    # 综合理解
+
+
 class OnboardingMessageIn(BaseModel):
     """用户发送的引导对话消息"""
     messages: list[dict[str, str]]  # [{role, content}, ...]
@@ -295,11 +304,17 @@ class OnboardingConfirmIn(BaseModel):
 class OnboardingMessageOut(BaseModel):
     """AI 引导回复"""
     reply: str
+    # 新字段：结构化理解
+    understanding: Understanding = Understanding()
+    understanding_depth: int = 0
+    phase: str = "exploring"  # exploring | refining | synthesizing
+    has_brief: bool = False
+    creative_brief: dict[str, Any] | None = None
+    # 保留兼容字段
     collected_info: dict[str, Any] = {}
     step: int = 1
     total_steps: int = 5
     is_complete: bool = False
-    creative_brief: dict[str, Any] | None = None
 
 
 class CreativeBriefOut(BaseModel):
