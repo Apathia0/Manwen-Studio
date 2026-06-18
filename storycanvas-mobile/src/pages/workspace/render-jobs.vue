@@ -32,6 +32,15 @@
             <lv-progress :percentage="job.progress" show-info />
           </view>
           <text v-if="job.error_message" class="render-jobs__card-error">{{ job.error_message }}</text>
+          <!-- 重试按钮（T23） -->
+          <view v-if="job.status === 'FAILURE' || job.status === 'failed'" class="render-jobs__card-actions">
+            <view
+              :class="['render-jobs__retry-btn', { 'render-jobs__retry-btn--busy': retryingJobId === job.id }]"
+              @tap="handleRetry(job)"
+            >
+              <text>⟳ {{ retryingJobId === job.id ? '重试中…' : '重试' }}</text>
+            </view>
+          </view>
           <text class="render-jobs__card-time">提交: {{ formatTime(job.submitted_at) }}</text>
           <view v-if="job.status === 'SUCCESS' || job.status === 'succeeded'" class="render-jobs__card-play">
             <lv-icon name="Play" :size="12" color="#2563eb" />
@@ -86,6 +95,7 @@ const shotId = ref(0)
 const videoPreviewUrl = ref('')
 const shotVideoUrlCache = ref<Record<number, string>>({})
 const renderParams = ref<RenderParams>({})
+const retryingJobId = ref<number | null>(null)
 
 onLoad((options) => {
   shotId.value = Number(options?.shotId || 0)
@@ -146,6 +156,22 @@ async function handleRender() {
     uni.showToast({ title: e?.message || e?.errMsg || '渲染失败', icon: 'none' })
   } finally {
     rendering.value = false
+  }
+}
+
+/** 重试失败的视频作业（T23） */
+async function handleRetry(job: VideoGenerationJob) {
+  if (retryingJobId.value) return
+  retryingJobId.value = job.id
+  try {
+    await videoApi.retryVideoJob(job.id)
+    uni.showToast({ title: '已重新提交视频作业', icon: 'success' })
+    // 重新加载作业列表
+    await loadJobs()
+  } catch (e: any) {
+    uni.showToast({ title: e?.message || '重试失败', icon: 'none' })
+  } finally {
+    retryingJobId.value = null
   }
 }
 
@@ -300,6 +326,33 @@ function formatTime(iso: string): string {
     font-size: $lv-font-xs;
     color: #ef4444;
     margin-bottom: 8rpx;
+  }
+
+  // ── 重试按钮（T23）──
+  &__card-actions {
+    display: flex;
+    gap: 12rpx;
+    margin-bottom: 8rpx;
+  }
+
+  &__retry-btn {
+    padding: 8rpx 24rpx;
+    border-radius: $lv-radius-sm;
+    background: $lv-primary;
+    font-size: $lv-font-xs;
+    color: $lv-text-on-primary;
+    font-weight: 500;
+    transition: all 0.2s;
+
+    &:active {
+      background: $lv-primary-dark;
+      transform: scale(0.96);
+    }
+
+    &--busy {
+      opacity: 0.7;
+      pointer-events: none;
+    }
   }
 
   &__card-time {

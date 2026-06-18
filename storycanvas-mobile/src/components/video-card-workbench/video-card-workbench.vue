@@ -118,6 +118,84 @@
             </view>
           </view>
 
+          <!-- 镜头风格预设选择器（T21） -->
+          <view class="vwb__style-preset-section">
+            <view class="vwb__style-preset-header">
+              <text class="vwb__section-title">镜头风格预设</text>
+              <view
+                v-if="stylePresetsLoading"
+                class="vwb__versions-refresh vwb__versions-refresh--spin"
+              >
+                <text>⟳</text>
+              </view>
+            </view>
+            <!-- 当前绑定 -->
+            <view v-if="shotStylePresetName" class="vwb__style-current">
+              <view class="vwb__style-current-badge">
+                <text class="vwb__style-current-name">{{ shotStylePresetName }}</text>
+              </view>
+              <view
+                :class="['vwb__style-clear', { 'vwb__style-clear--disabled': busy }]"
+                @tap="handleClearShotStylePreset"
+              >
+                <text>清除风格预设</text>
+              </view>
+            </view>
+            <view v-else class="vwb__style-current--empty">
+              <text class="vwb__placeholder-desc">未绑定风格预设</text>
+            </view>
+            <!-- 预设选择列表 -->
+            <view v-if="stylePresets.length > 0" class="vwb__style-chips-wrap">
+              <view
+                v-for="preset in stylePresets"
+                :key="preset.id"
+                :class="['vwb__style-chip', { 'vwb__style-chip--active': selectedStylePresetId === preset.id }]"
+                @tap="handleSelectStylePreset(preset)"
+              >
+                <text class="vwb__style-chip-text">{{ preset.name }}</text>
+              </view>
+            </view>
+          </view>
+
+          <!-- 渲染故事版帧（T23） -->
+          <view class="vwb__render-frame-section">
+            <view class="vwb__render-frame-header">
+              <text class="vwb__section-title">渲染故事版帧</text>
+            </view>
+            <!-- 渲染面板 -->
+            <view v-if="showRenderFramePanel" class="vwb__redraw-panel">
+              <text class="vwb__redraw-panel-title">提示词（可选，留空则使用镜头默认提示词）</text>
+              <textarea
+                v-model="renderFramePrompt"
+                class="vwb__redraw-textarea"
+                placeholder="输入自定义渲染提示词"
+                :maxlength="2000"
+                :auto-height="true"
+              />
+              <view class="vwb__redraw-panel-actions">
+                <view class="vwb__action-btn vwb__action-btn--secondary" @tap="cancelRenderFrame">
+                  <text class="vwb__action-label">取消</text>
+                </view>
+                <view
+                  :class="['vwb__action-btn', 'vwb__action-btn--primary', { 'vwb__action-btn--disabled': busy === 'renderFrame' }]"
+                  @tap="confirmRenderFrame"
+                >
+                  <text class="vwb__action-label">{{ busy === 'renderFrame' ? '渲染中…' : '确认渲染' }}</text>
+                </view>
+              </view>
+            </view>
+            <!-- 触发按钮 -->
+            <view
+              v-else
+              :class="['vwb__action-btn', 'vwb__action-btn--secondary', { 'vwb__action-btn--disabled': busy || !shotId }]"
+              style="flex: none"
+              @tap="showRenderFramePanel = true"
+            >
+              <text class="vwb__action-icon">🖼</text>
+              <text class="vwb__action-label">渲染故事版帧</text>
+            </view>
+          </view>
+
           <!-- 故事版提示词编辑区（T13） -->
           <view class="vwb__prompt-editor">
             <view class="vwb__prompt-editor-header">
@@ -423,6 +501,12 @@
             </view>
           </view>
 
+          <!-- 视频片段管理（T22） -->
+          <ClipTimeline
+            :shot-id="shotId"
+            @updated="emit('updated')"
+          />
+
           <!-- 宽高比选择器（T14） -->
           <view class="vwb__param-section">
             <text class="vwb__section-title">宽高比</text>
@@ -650,7 +734,8 @@ import { ref, computed, watch, nextTick } from 'vue'
 import { videoApi } from '@/api'
 import { BASE_URL } from '@/utils/constants'
 import { videoAssetUrl } from '@/utils/url'
-import type { ChapterVideoShot, VideoAsset } from '@/api/types'
+import ClipTimeline from '@/components/clip-timeline/clip-timeline.vue'
+import type { ChapterVideoShot, VideoAsset, VideoStylePreset } from '@/api/types'
 
 // ── 卡片类型定义 ──
 type CardType = 'character' | 'storyboard' | 'scene' | 'video'
@@ -746,6 +831,22 @@ const editedScenePrompt = ref('')
 const originalScenePrompt = ref('')
 /** 是否显示场景重绘面板 */
 const showSceneRedrawPrompt = ref(false)
+
+// ── 渲染故事版帧相关状态（T23）──
+/** 是否显示渲染帧面板 */
+const showRenderFramePanel = ref(false)
+/** 渲染帧提示词 */
+const renderFramePrompt = ref('')
+
+// ── 镜头风格预设相关状态（T21）──
+/** 风格预设列表 */
+const stylePresets = ref<VideoStylePreset[]>([])
+/** 风格预设加载中 */
+const stylePresetsLoading = ref(false)
+/** 当前镜头绑定的风格预设名称 */
+const shotStylePresetName = ref('')
+/** 当前选中的预设 ID */
+const selectedStylePresetId = ref<number | null>(null)
 
 // ── 预览组装提示词（T17）──
 /** 预览面板是否可见 */
@@ -965,6 +1066,8 @@ function switchTab(type: CardType) {
   // 切换标签时取消重绘面板
   showRedrawPrompt.value = false
   showSceneRedrawPrompt.value = false
+  showRenderFramePanel.value = false
+  renderFramePrompt.value = ''
   // 重置预览提示词状态
   previewPromptVisible.value = false
   previewPromptText.value = ''
@@ -1127,6 +1230,7 @@ watch(currentType, (type) => {
     loadCharacterAssets()
   } else if (type === 'storyboard') {
     loadStoryboardVersions()
+    loadStylePresets()
     // 同步提示词编辑区
     editedStoryboardPrompt.value = props.shotData?.storyboard_prompt || ''
     originalStoryboardPrompt.value = props.shotData?.storyboard_prompt || ''
@@ -1185,6 +1289,7 @@ watch(
           loadCharacterAssets()
         } else if (currentType.value === 'storyboard') {
           loadStoryboardVersions()
+          loadStylePresets()
           editedStoryboardPrompt.value = props.shotData?.storyboard_prompt || ''
           originalStoryboardPrompt.value = props.shotData?.storyboard_prompt || ''
         } else if (currentType.value === 'scene') {
@@ -1202,6 +1307,8 @@ watch(
       // 关闭时重置状态
       showRedrawPrompt.value = false
       showSceneRedrawPrompt.value = false
+      showRenderFramePanel.value = false
+      renderFramePrompt.value = ''
       redrawPromptText.value = ''
     }
   }
@@ -1214,6 +1321,8 @@ function handleClose() {
   busy.value = null
   showRedrawPrompt.value = false
   showSceneRedrawPrompt.value = false
+  showRenderFramePanel.value = false
+  renderFramePrompt.value = ''
   previewPromptVisible.value = false
   previewPromptText.value = ''
   previewPromptParts.value = null
@@ -1640,6 +1749,101 @@ function getTypeLabel(type: CardType): string {
     video: '视频',
   }
   return labels[type] || type
+}
+
+// ── T21：镜头风格预设 ──
+
+/** 加载风格预设列表（T21） */
+async function loadStylePresets() {
+  stylePresetsLoading.value = true
+  try {
+    const result = await videoApi.listStylePresets()
+    stylePresets.value = result.presets || []
+  } catch (e: any) {
+    uni.showToast({ title: e?.message || '加载风格预设失败', icon: 'none' })
+  } finally {
+    stylePresetsLoading.value = false
+  }
+}
+
+/** 选择镜头风格预设（T21） */
+async function handleSelectStylePreset(preset: VideoStylePreset) {
+  if (busy.value || !props.shotId) return
+  busy.value = 'stylePreset'
+  try {
+    await videoApi.setShotVideoStylePreset(props.shotId, preset.name)
+    shotStylePresetName.value = preset.name
+    selectedStylePresetId.value = preset.id
+    uni.showToast({ title: `已绑定风格「${preset.name}」`, icon: 'success' })
+    emit('updated')
+  } catch (e: any) {
+    uni.showToast({ title: e?.message || '设置风格预设失败', icon: 'none' })
+  } finally {
+    busy.value = null
+  }
+}
+
+/** 清除镜头风格预设（T21） */
+async function handleClearShotStylePreset() {
+  if (busy.value || !props.shotId) return
+  if (!shotStylePresetName.value) return
+  const confirmRes = await uni.showModal({
+    title: '清除风格预设',
+    content: `确定要清除当前镜头的风格预设「${shotStylePresetName.value}」吗？`,
+  })
+  if (!confirmRes.confirm) return
+  busy.value = 'clearStylePreset'
+  try {
+    await videoApi.deleteShotVideoStylePreset(props.shotId)
+    shotStylePresetName.value = ''
+    selectedStylePresetId.value = null
+    uni.showToast({ title: '已清除风格预设', icon: 'success' })
+    emit('updated')
+  } catch (e: any) {
+    uni.showToast({ title: e?.message || '清除风格预设失败', icon: 'none' })
+  } finally {
+    busy.value = null
+  }
+}
+
+// ── T23：渲染故事版帧 ──
+
+/** 取消渲染帧 */
+function cancelRenderFrame() {
+  showRenderFramePanel.value = false
+  renderFramePrompt.value = ''
+}
+
+/** 确认渲染故事版帧（T23） */
+async function confirmRenderFrame() {
+  if (busy.value || !props.shotId) return
+  busy.value = 'renderFrame'
+  showRenderFramePanel.value = false
+  try {
+    const payload: {
+      provider?: string
+      aspect_ratio?: string
+      overwrite?: boolean
+      style_preset?: string
+      prompt?: string
+      reference_asset_ids?: number[]
+    } = {}
+    if (renderFramePrompt.value) {
+      payload.prompt = renderFramePrompt.value
+    }
+    if (shotStylePresetName.value) {
+      payload.style_preset = shotStylePresetName.value
+    }
+    const result = await videoApi.renderStoryboardFrame(props.shotId, payload)
+    uni.showToast({ title: `故事版帧已提交渲染（状态: ${result.shot_status}）`, icon: 'success' })
+    await loadStoryboardVersions()
+    emit('updated', result)
+  } catch (e: any) {
+    uni.showToast({ title: e?.message || '渲染故事版帧失败', icon: 'none' })
+  } finally {
+    busy.value = null
+    renderFramePrompt.value = ''
+  }
 }
 </script>
 
@@ -2465,5 +2669,124 @@ function getTypeLabel(type: CardType): string {
 
 .vwb__placeholder--compact .vwb__placeholder-desc {
   font-size: $lv-font-xs;
+}
+
+// ── 镜头风格预设（T21）──
+.vwb__style-preset-section {
+  display: flex;
+  flex-direction: column;
+  gap: 12rpx;
+  padding: 20rpx;
+  background: $lv-surface-solid;
+  border-radius: $lv-radius-sm;
+  border: 1rpx solid $lv-border-light;
+}
+
+.vwb__style-preset-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.vwb__style-current {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12rpx;
+
+  &--empty {
+    padding: 8rpx 0;
+  }
+}
+
+.vwb__style-current-badge {
+  padding: 6rpx 16rpx;
+  border-radius: $lv-radius-full;
+  background: $lv-primary-lighter;
+}
+
+.vwb__style-current-name {
+  font-size: $lv-font-sm;
+  color: $lv-primary;
+  font-weight: 600;
+}
+
+.vwb__style-clear {
+  padding: 8rpx 20rpx;
+  border-radius: $lv-radius-sm;
+  background: $lv-error-bg;
+  font-size: $lv-font-xs;
+  color: $lv-error;
+  font-weight: 500;
+  transition: all 0.2s;
+
+  &:active:not(&--disabled) {
+    background: #fde2e7;
+    transform: scale(0.96);
+  }
+
+  &--disabled {
+    opacity: 0.45;
+    pointer-events: none;
+  }
+}
+
+.vwb__style-chips-wrap {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10rpx;
+}
+
+.vwb__style-chip {
+  padding: 10rpx 22rpx;
+  border-radius: $lv-radius-full;
+  background: $lv-bg-end;
+  border: 1rpx solid $lv-border-light;
+  transition: all 0.2s;
+
+  &--active {
+    background: $lv-primary-lighter;
+    border-color: $lv-primary;
+  }
+
+  &:active {
+    transform: scale(0.96);
+  }
+}
+
+.vwb__style-chip-text {
+  font-size: $lv-font-xs;
+  color: $lv-text-secondary;
+  font-weight: 500;
+
+  .vwb__style-chip--active & {
+    color: $lv-primary;
+    font-weight: 600;
+  }
+}
+
+.vwb__style-loading {
+  display: flex;
+  justify-content: center;
+  padding: 16rpx 0;
+  font-size: $lv-font-xs;
+  color: $lv-text-muted;
+}
+
+// ── 渲染故事版帧（T23）──
+.vwb__render-frame-section {
+  display: flex;
+  flex-direction: column;
+  gap: 12rpx;
+  padding: 20rpx;
+  background: $lv-surface-solid;
+  border-radius: $lv-radius-sm;
+  border: 1rpx solid $lv-border-light;
+}
+
+.vwb__render-frame-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
 }
 </style>
