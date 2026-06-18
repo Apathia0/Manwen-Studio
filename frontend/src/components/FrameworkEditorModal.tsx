@@ -4,7 +4,6 @@ import {
   X,
   Save,
   Eye,
-  Edit3,
   Tag,
   Users,
   BookOpen,
@@ -680,7 +679,7 @@ function CharacterEditorCard({
           <div>
             <div className="text-[11px] font-medium text-slate-500 mb-2">大五人格</div>
             <div className="grid grid-cols-5 gap-3">
-              {BIG_FIVE_META.map(({ key, label, hue }) => {
+              {BIG_FIVE_META.map(({ key, hue }) => {
                 const val = character.big_five?.[key];
                 const numVal = typeof val === 'number' ? val : 50;
                 return (
