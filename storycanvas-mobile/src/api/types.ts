@@ -118,6 +118,25 @@ export interface MangaImage {
   created_at: string
 }
 
+/** 漫画生成状态 */
+export interface MangaGenerationStatus {
+  task_id: string | null
+  status: 'none' | 'pending' | 'running' | 'succeeded' | 'failed' | 'retrying'
+  progress: number
+  total: number
+  error_message: string | null
+  stage?: string | null
+  message?: string | null
+  retry_count?: number
+  max_retries?: number
+  next_retry_at?: string | null
+  created_at: string | null
+  completed_at: string | null
+}
+
+/** 参考图重绘模式 */
+export type ImageRedrawMode = 'regenerate' | 'full' | 'partial'
+
 export interface AgentConversationSummary {
   id: number
   story_id: number
@@ -390,10 +409,11 @@ export interface ChapterVideoWorkflow {
   completed_shots: number
   failed_shots: number
   error_message?: string | null
+  retry_count?: number
+  max_retries?: number
   stage?: string | null
   message?: string | null
   created_at: string
-  updated_at: string
   shots: ChapterVideoShot[]
 }
 
@@ -403,6 +423,7 @@ export interface VideoModel {
   description: string
 }
 
+/** 章节视频工作流状态 */
 export interface ChapterVideoWorkflowStatus {
   id: number
   chapter_id: number
@@ -419,6 +440,7 @@ export interface ChapterVideoWorkflowStatus {
   next_retry_at?: string | null
 }
 
+/** 视频风格预设 */
 export interface VideoStylePreset {
   id: number
   name: string
@@ -430,6 +452,7 @@ export interface VideoStylePreset {
   sort_order: number
 }
 
+/** 重新分析镜头提示词响应 */
 export interface ReanalyzeShotPromptsResponse {
   shot_id: number
   storyboard_prompt: string
@@ -439,6 +462,7 @@ export interface ReanalyzeShotPromptsResponse {
   prop_prompts?: Array<{ name: string; prompt: string }>
 }
 
+/** 预览视频提示词响应 */
 export interface PreviewVideoPromptResponse {
   assembled_prompt: string
   parts: { part1: string; part2: string; part3: string | null }

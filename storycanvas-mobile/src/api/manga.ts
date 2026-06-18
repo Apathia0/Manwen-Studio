@@ -1,5 +1,6 @@
 import { get, post, put, del } from '@/utils/request'
-import type { MangaImage } from './types'
+import { uploadFile } from '@/utils/upload'
+import type { MangaImage, MangaGenerationStatus, ImageRedrawMode } from './types'
 
 interface RefImage {
   filename: string
@@ -46,8 +47,18 @@ export function clearMangaImages(chapterId: number): Promise<void> {
 }
 
 /** 重绘单图 */
-export function regenerateImage(chapterId: number, imageNumber: number, prompt: string, mode?: string): Promise<MangaImage> {
-  return post<MangaImage>(`/api/chapters/${chapterId}/regenerate-image/${imageNumber}`, { prompt, mode: mode || 'regenerate' })
+export function regenerateImage(
+  chapterId: number,
+  imageNumber: number,
+  prompt: string,
+  mode?: string,
+  options?: { size?: string; stylePresetName?: string; styleRefUrl?: string }
+): Promise<MangaImage> {
+  const body: Record<string, any> = { prompt, mode: mode || 'regenerate' }
+  if (options?.size) body.size = options.size
+  if (options?.stylePresetName) body.style_preset_name = options.stylePresetName
+  if (options?.styleRefUrl) body.style_ref_url = options.styleRefUrl
+  return post<MangaImage>(`/api/chapters/${chapterId}/regenerate-image/${imageNumber}`, body)
 }
 
 /** 获取色彩模式 */
@@ -133,4 +144,63 @@ export function deleteChapterRefImage(chapterId: number, filename: string): Prom
 /** 角色参考图生成 (SSE) — 返回 URL */
 export function characterRefImagesUrl(storyId: number): string {
   return `/api/stories/${storyId}/character-ref-images/generate`
+}
+
+/** 上传漫画章节的自定义风格参考图（multipart FormData） */
+export function uploadStyleReferenceImage(
+  chapterId: number,
+  filePath: string
+): Promise<{ success: boolean; style_reference_image_url: string }> {
+  return uploadFile(
+    `/api/chapters/${chapterId}/upload-style-reference`,
+    filePath,
+    'file'
+  )
+}
+
+/** 获取漫画生成状态 */
+export function getMangaGenerationStatus(chapterId: number): Promise<MangaGenerationStatus> {
+  return get(`/api/chapters/${chapterId}/manga-generation-status`)
+}
+
+/** 取消漫画生成 */
+export function cancelMangaGeneration(chapterId: number): Promise<{ ok: boolean; message: string }> {
+  return post(`/api/chapters/${chapterId}/cancel-manga-generation`)
+}
+
+/** 重绘故事参考图 */
+export function redrawStoryRefImage(
+  storyId: number,
+  filename: string,
+  payload: { prompt: string; mode: ImageRedrawMode; mask?: string }
+): Promise<RefImagesPayload> {
+  return post(`/api/stories/${storyId}/ref-images/${encodeURIComponent(filename)}/redraw`, payload)
+}
+
+/** 重绘章节参考图 */
+export function redrawChapterRefImage(
+  chapterId: number,
+  filename: string,
+  payload: { prompt: string; mode: ImageRedrawMode; mask?: string }
+): Promise<RefImagesPayload> {
+  return post(`/api/chapters/${chapterId}/ref-images/${encodeURIComponent(filename)}/redraw`, payload)
+}
+
+/** 上传角色参考图 */
+export function uploadCharacterRefImage(
+  storyId: number,
+  file: string,
+  characterName: string,
+  replaceExisting?: boolean
+): Promise<RefImagesPayload> {
+  return post(`/api/stories/${storyId}/character-ref-images/upload`, {
+    image: file,
+    character_name: characterName,
+    replace_existing: replaceExisting,
+  })
+}
+
+/** 删除角色参考图 */
+export function deleteCharacterRefImage(storyId: number, filename: string): Promise<RefImagesPayload> {
+  return del(`/api/stories/${storyId}/character-ref-images/${encodeURIComponent(filename)}`)
 }
