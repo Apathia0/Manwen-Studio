@@ -467,3 +467,48 @@ export interface PreviewVideoPromptResponse {
   assembled_prompt: string
   parts: { part1: string; part2: string; part3: string | null }
 }
+
+/** 渲染的视频片段 */
+export interface RenderedClip {
+  id: number
+  shot_id: number
+  job_id?: number | null
+  video_path: string
+  thumbnail_path?: string | null
+  duration_seconds?: number | null
+  resolution?: string | null
+  version: number
+  is_active: boolean
+  meta?: Record<string, any> | null
+  source_storyboard_asset_id?: number | null
+  style_preset?: string | null
+  continuity_score?: number | null
+  quality_score?: number | null
+  review_status?: string
+  created_at: string
+}
+
+/** 视频角色版本（新架构） */
+export interface CharacterVersion {
+  id: number
+  version: string
+  label: string
+  appearance_card: string
+  ref_asset?: VideoAsset | null
+  ref_asset_id?: number | null
+  ref_asset_url?: string | undefined
+  is_default: boolean
+  sort_order: number
+}
+
+/** 视频角色（新架构） */
+export interface VideoCharacter {
+  name: string
+  versions: CharacterVersion[]
+}
+
+/** 视频角色列表响应（新架构） */
+export interface VideoCharactersResponse {
+  characters: VideoCharacter[]
+  video_character_profiles: string
+}

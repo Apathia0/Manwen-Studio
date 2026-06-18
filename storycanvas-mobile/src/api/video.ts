@@ -1,11 +1,17 @@
 import { get, post, put, del } from '@/utils/request'
 import { uploadFile } from '@/utils/upload'
+
+// 视频生成不设超时（24 小时，实际无限）
+const NO_TIMEOUT = 86400000
+
 import type {
   ScriptScene, VideoShot, VideoAsset, VideoGenerationJob,
   StoryVideoCharacter, ChapterVideoWorkflow, ChapterVideoShot,
   VideoModel, ChapterVideoWorkflowStatus, VideoStylePreset,
   ReanalyzeShotPromptsResponse, PreviewVideoPromptResponse,
+  RenderedClip, CharacterVersion, VideoCharacter, VideoCharactersResponse,
 } from './types'
+import type { ImageRedrawMode } from './types'
 
 // ── 剧本 (Screenplay) ──
 
@@ -111,12 +117,12 @@ export function regenerateChapterWorkflowVideo(shotId: number, promptOverride?: 
     prompt_override: promptOverride ?? null,
     reference_asset_ids: referenceAssetIds ?? [],
     aspect_ratio: aspectRatio,
-  })
+  }, undefined, NO_TIMEOUT)
 }
 
 /** 拼接章节视频 */
 export function concatChapterVideoWorkflow(workflowId: number): Promise<{ video_url: string; shot_count: number; duration_seconds: number; message?: string }> {
-  return post(`/api/video/chapter-workflows/${workflowId}/concat`)
+  return post(`/api/video/chapter-workflows/${workflowId}/concat`, undefined, undefined, NO_TIMEOUT)
 }
 
 // ── 角色 (Characters) ──
@@ -142,7 +148,7 @@ export function renderShotVideo(shotId: number, payload: {
   orientation?: string
   input_reference?: string
 }): Promise<VideoGenerationJob> {
-  return post(`/api/shots/${shotId}/render`, payload)
+  return post(`/api/shots/${shotId}/render`, payload, undefined, NO_TIMEOUT)
 }
 
 /** 获取视频模型列表 */
@@ -198,12 +204,12 @@ export function generateChapterWorkflowVideos(
   workflowId: number,
   payload: { shot_ids: number[] }
 ): Promise<Record<string, unknown>> {
-  return post(`/api/video/chapter-workflows/${workflowId}/videos`, payload)
+  return post(`/api/video/chapter-workflows/${workflowId}/videos`, payload, undefined, NO_TIMEOUT)
 }
 
 /** 全自动执行所有阶段 */
 export function runAllChapterWorkflowStages(workflowId: number): Promise<Record<string, unknown>> {
-  return post(`/api/video/chapter-workflows/${workflowId}/run-all`)
+  return post(`/api/video/chapter-workflows/${workflowId}/run-all`, undefined, undefined, NO_TIMEOUT)
 }
 
 /** 重新分析故事版提示词 */
@@ -302,4 +308,200 @@ export function uploadStyleReferenceImage(
   filePath: string
 ): Promise<{ success: boolean; style_reference_image_url: string }> {
   return uploadFile(`/api/video/chapter-workflows/${workflowId}/style-reference`, filePath)
+}
+
+// ── 上传：故事版 / 视频 / 资产替换 ──
+
+/** 上传镜头故事版图片 */
+export function uploadShotStoryboard(
+  shotId: number,
+  filePath: string
+): Promise<{ ok: boolean; shot: ChapterVideoShot }> {
+  return uploadFile(`/api/video/chapter-workflows/shots/${shotId}/upload-storyboard`, filePath)
+}
+
+/** 上传镜头视频 */
+export function uploadShotVideo(
+  shotId: number,
+  filePath: string
+): Promise<{ ok: boolean; shot: ChapterVideoShot }> {
+  return uploadFile(`/api/video/chapter-workflows/shots/${shotId}/upload-video`, filePath)
+}
+
+/** 替换视频资产文件 */
+export function replaceVideoAsset(
+  assetId: number,
+  filePath: string
+): Promise<{ ok: boolean; asset: { id: number; file_path: string; revision: number } }> {
+  return uploadFile(`/api/video-assets/${assetId}/replace`, filePath)
+}
+
+// ── 资产管理 ──
+
+/** 重绘视频资产（支持 prompt 和局部重绘 mask） */
+export function regenerateVideoAsset(
+  assetId: number,
+  payload: { prompt?: string; mask?: string }
+): Promise<{ ok: boolean; asset: { id: number; file_path: string; revision: number } }> {
+  return post(`/api/video-assets/${assetId}/regen`, payload)
+}
+
+/** 创建视频资产 */
+export function createVideoAsset(
+  chapterId: number,
+  payload: {
+    story_id?: number
+    scene_id?: number
+    shot_id?: number
+    asset_type: string
+    name: string
+    file_path: string
+    provider?: string
+    prompt?: string
+    meta?: Record<string, unknown>
+  }
+): Promise<VideoAsset> {
+  return post(`/api/chapters/${chapterId}/video-assets`, payload)
+}
+
+// ── 视频作业 ──
+
+/** 重试视频生成作业 */
+export function retryVideoJob(
+  jobId: number,
+  payload?: Record<string, unknown>
+): Promise<VideoGenerationJob> {
+  return post(`/api/video/jobs/${jobId}/retry`, payload || {})
+}
+
+// ── 渲染片段 ──
+
+/** 获取镜头渲染片段列表 */
+export function listShotClips(shotId: number): Promise<{ shot_id: number; clips: RenderedClip[]; active_clip_id?: number }> {
+  return get(`/api/shots/${shotId}/clips`)
+}
+
+/** 激活镜头渲染片段 */
+export function activateShotClip(shotId: number, clipId: number): Promise<{ active_clip_id: number }> {
+  return post(`/api/shots/${shotId}/clips/${clipId}/activate`)
+}
+
+// ── 故事版渲染与主版管理 ──
+
+/** 渲染故事版帧 */
+export function renderStoryboardFrame(
+  shotId: number,
+  payload: {
+    provider?: string
+    aspect_ratio?: string
+    overwrite?: boolean
+    style_preset?: string
+    prompt?: string
+    reference_asset_ids?: number[]
+  }
+): Promise<{ shot_status: string; asset: VideoAsset; storyboard_locked: boolean }> {
+  return post(`/api/shots/${shotId}/storyboard/render`, payload)
+}
+
+/** 设置主故事版 */
+export function setMasterStoryboard(shotId: number, assetId: number): Promise<{ shot_id: number; asset_id: number }> {
+  return post(`/api/shots/${shotId}/storyboard/${assetId}/master`)
+}
+
+/** 获取镜头故事版列表 */
+export function getShotStoryboards(shotId: number): Promise<{
+  assets: VideoAsset[]
+  active_storyboard_asset_id?: number | null
+  storyboard_locked: boolean
+}> {
+  return get(`/api/shots/${shotId}/storyboards`)
+}
+
+// ── 角色版本（新架构 /api/video/stories/.../characters） ──
+
+/** 获取视频角色列表（新架构） */
+export function listVideoCharacters(storyId: number): Promise<VideoCharactersResponse> {
+  return get(`/api/video/stories/${storyId}/characters`)
+}
+
+/** 生成视频角色（新架构） */
+export function generateVideoCharacters(storyId: number): Promise<VideoCharactersResponse> {
+  return post(`/api/video/stories/${storyId}/characters/generate`)
+}
+
+/** 创建角色版本 */
+export function createCharacterVersion(
+  storyId: number,
+  characterName: string,
+  payload: { version_label: string; appearance_card?: string; set_default?: boolean }
+): Promise<{ version: CharacterVersion }> {
+  return post(`/api/video/stories/${storyId}/characters/${encodeURIComponent(characterName)}/versions`, payload)
+}
+
+/** 删除角色版本 */
+export function deleteCharacterVersion(
+  storyId: number,
+  characterName: string,
+  label: string
+): Promise<{ ok: boolean }> {
+  return del(`/api/video/stories/${storyId}/characters/${encodeURIComponent(characterName)}/versions/${encodeURIComponent(label)}`)
+}
+
+/** 生成角色参考图 */
+export function generateCharacterRefImage(
+  storyId: number,
+  characterName: string,
+  payload: { version_id: number; style_preset?: string }
+): Promise<VideoAsset> {
+  return post(`/api/video/stories/${storyId}/characters/${encodeURIComponent(characterName)}/ref-image/generate`, payload)
+}
+
+/** 删除角色参考图 */
+export function deleteVideoCharacterRefImage(
+  storyId: number,
+  characterName: string
+): Promise<{ ok: boolean }> {
+  return del(`/api/video/stories/${storyId}/characters/${encodeURIComponent(characterName)}/ref-image`)
+}
+
+/** 重绘角色参考图 */
+export function redrawCharacterRefImage(
+  storyId: number,
+  characterName: string,
+  payload: { version_id: number; prompt: string; mode: ImageRedrawMode; mask?: string }
+): Promise<VideoAsset> {
+  return post(`/api/video/stories/${storyId}/characters/${encodeURIComponent(characterName)}/ref-image/redraw`, payload)
+}
+
+// ── 镜头风格预设 ──
+
+/** 设置镜头视频风格预设 */
+export function setShotVideoStylePreset(shotId: number, stylePreset: string): Promise<{ shot_id: number; style_preset: string }> {
+  return put(`/api/shots/${shotId}/style-preset`, { style_preset: stylePreset })
+}
+
+/** 删除镜头视频风格预设 */
+export function deleteShotVideoStylePreset(shotId: number): Promise<{ shot_id: number; style_preset: null }> {
+  return del(`/api/shots/${shotId}/style-preset`)
+}
+
+// ── 场景镜头管理 ──
+
+/** 创建场景镜头 */
+export function createSceneShot(sceneId: number, payload?: Partial<VideoShot>): Promise<VideoShot> {
+  return post(`/api/video/scenes/${sceneId}/shots`, payload || {})
+}
+
+/** 重排场景镜头顺序 */
+export function reorderSceneShots(sceneId: number, shotIds: number[]): Promise<{ scene_id: number; shots: VideoShot[] }> {
+  return post(`/api/video/scenes/${sceneId}/shots/reorder`, { shot_ids: shotIds })
+}
+
+/**
+ * 将视频资产路径转为完整的可访问 URL
+ */
+import { videoAssetUrl } from '@/utils/url'
+
+export function toPublicVideoAssetUrl(filePath: string | null | undefined): string | null {
+  return videoAssetUrl(filePath ?? null)
 }
