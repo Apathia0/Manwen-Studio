@@ -47,6 +47,43 @@
           </view>
         </view>
 
+        <!-- 故事版版本列表 -->
+        <view class="storyboard__versions">
+          <text class="storyboard__versions-title">历史版本</text>
+          <view v-if="versionLoading" class="storyboard__loading">
+            <lv-loading />
+          </view>
+          <view v-else-if="versions.length === 0" class="storyboard__versions-empty">
+            <text class="storyboard__versions-empty-text">暂无其他版本</text>
+          </view>
+          <view v-else class="storyboard__versions-list">
+            <view
+              v-for="ver in versions"
+              :key="ver.id"
+              :class="['storyboard__version', { 'storyboard__version--master': ver.is_master }]"
+            >
+              <image
+                :src="versionThumbUrl(ver)"
+                mode="aspectFill"
+                class="storyboard__version-thumb"
+              />
+              <view class="storyboard__version-info">
+                <text class="storyboard__version-revision">v{{ ver.revision }}</text>
+                <text v-if="ver.is_master" class="storyboard__version-master-badge">主版本</text>
+              </view>
+              <lv-button
+                v-if="!ver.is_master"
+                size="sm"
+                @tap="handleSetMaster(ver.id)"
+                :loading="settingMaster"
+                class="storyboard__version-btn"
+              >
+                设为主版本
+              </lv-button>
+            </view>
+          </view>
+        </view>
+
         <!-- 操作按钮 -->
         <view class="storyboard__actions">
           <template v-if="!shot.storyboard_image_url">
@@ -84,7 +121,8 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
 import { videoApi } from '@/api'
-import type { ChapterVideoShot } from '@/api/types'
+import type { ChapterVideoShot, VideoAsset } from '@/api/types'
+import { videoAssetUrl } from '@/utils/url'
 import LvNavbar from '@/components/lv-navbar/lv-navbar.vue'
 import LvButton from '@/components/lv-button/lv-button.vue'
 import LvLoading from '@/components/lv-loading/lv-loading.vue'
@@ -94,6 +132,9 @@ const loading = ref(false)
 const generating = ref(false)
 const reanalyzingPrompt = ref(false)
 const shot = ref<ChapterVideoShot | null>(null)
+const versions = ref<VideoAsset[]>([])
+const versionLoading = ref(false)
+const settingMaster = ref(false)
 
 const statusLabel = computed(() => {
   if (!shot.value) return ''
@@ -205,6 +246,41 @@ function goToRender() {
   uni.navigateTo({ url: `/pages/workspace/render-jobs?shotId=${shotId}` })
 }
 
+function versionThumbUrl(asset: VideoAsset): string {
+  return videoAssetUrl(asset.file_path) || asset.file_path
+}
+
+// ── T24b: 故事版版本列表 ──
+
+async function loadVersions(shotId: number) {
+  versionLoading.value = true
+  try {
+    const result = await videoApi.getShotStoryboards(shotId)
+    versions.value = result.assets || []
+  } catch (e: any) {
+    uni.showToast({ title: e.message || '加载版本列表失败', icon: 'none' })
+  } finally {
+    versionLoading.value = false
+  }
+}
+
+async function handleSetMaster(assetId: number) {
+  const pages = getCurrentPages()
+  const page = pages[pages.length - 1] as any
+  const shotId = Number(page.options?.shotId || 0)
+  if (!shotId) return
+  settingMaster.value = true
+  try {
+    await videoApi.setMasterStoryboard(shotId, assetId)
+    uni.showToast({ title: '已设为主版本', icon: 'success' })
+    await loadVersions(shotId)
+  } catch (e: any) {
+    uni.showToast({ title: e.message || '设置失败', icon: 'none' })
+  } finally {
+    settingMaster.value = false
+  }
+}
+
 onMounted(() => {
   const pages = getCurrentPages()
   const page = pages[pages.length - 1] as any
@@ -215,6 +291,7 @@ onMounted(() => {
     return
   }
   loadShot(shotId, workflowId || undefined)
+  loadVersions(shotId)
 })
 </script>
 
@@ -314,6 +391,85 @@ onMounted(() => {
 
   &__btn-render {
     margin-top: 8rpx;
+  }
+
+  // 版本列表
+  &__versions {
+    margin-bottom: 20rpx;
+  }
+
+  &__versions-title {
+    font-size: $lv-font-base;
+    font-weight: 600;
+    color: $lv-text-primary;
+    margin-bottom: 12rpx;
+    display: block;
+  }
+
+  &__versions-empty {
+    padding: 24rpx 0;
+    display: flex;
+    justify-content: center;
+  }
+
+  &__versions-empty-text {
+    font-size: $lv-font-sm;
+    color: $lv-text-muted;
+  }
+
+  &__versions-list {
+    display: flex;
+    flex-direction: column;
+    gap: 12rpx;
+  }
+
+  &__version {
+    display: flex;
+    align-items: center;
+    gap: 12rpx;
+    padding: 12rpx;
+    background: $lv-surface-solid;
+    border-radius: 16rpx;
+    border: 2rpx solid #e5edf8;
+
+    &--master {
+      border-color: $lv-primary;
+      background: #f0f7ff;
+    }
+  }
+
+  &__version-thumb {
+    width: 100rpx;
+    height: 100rpx;
+    border-radius: $lv-radius-sm;
+    background: #f1f5f9;
+    flex-shrink: 0;
+  }
+
+  &__version-info {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 4rpx;
+  }
+
+  &__version-revision {
+    font-size: $lv-font-sm;
+    font-weight: 600;
+    color: $lv-text-primary;
+  }
+
+  &__version-master-badge {
+    font-size: $lv-font-xs;
+    color: $lv-primary;
+    padding: 1rpx 10rpx;
+    background: #dbeafe;
+    border-radius: $lv-radius-full;
+    align-self: flex-start;
+  }
+
+  &__version-btn {
+    flex-shrink: 0;
   }
 }
 </style>
