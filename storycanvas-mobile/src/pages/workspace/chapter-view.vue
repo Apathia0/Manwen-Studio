@@ -17,13 +17,31 @@
     </view>
 
     <lv-swiper-tabs
-      :tabs="['框架', '编辑', '漫画', '助手']"
+      :tabs="['框架', '编辑', '漫画', '视频', '助手']"
       v-model:current="activeTabIndex"
     >
       <!-- 框架标签 -->
       <template #tab-0>
         <scroll-view scroll-y class="chapter-view__tab-scroll">
           <view class="chapter-view__tab">
+            <!-- 封面 banner -->
+            <view class="fp__cover-banner" @tap="handleCoverEdit">
+              <image
+                v-if="coverImageForPopup"
+                :src="coverImageUrl(coverImageForPopup) || ''"
+                class="fp__cover-img"
+                mode="aspectFill"
+              />
+              <view v-else class="fp__cover-placeholder">
+                <lv-icon name="ImagePlus" :size="32" color="#94a3b8" />
+                <text class="fp__cover-text">设置封面</text>
+              </view>
+              <view class="fp__cover-info">
+                <text class="fp__cover-title">{{ storyStore.activeStory?.title || '未命名' }}</text>
+                <text class="fp__cover-edit">点击编辑封面</text>
+              </view>
+            </view>
+
             <!-- 模板绑定 -->
             <template-binding
               v-if="storyStore.activeStoryId"
@@ -68,8 +86,9 @@
                   <text class="fp__section-label">框架 AI 对话</text>
                 </view>
                 <view class="fp__header-actions">
-                  <view v-if="hasFramework" class="fp__header-btn" @tap="handleContinueFramework">
-                    <lv-icon name="Sparkles" :size="12" color="#2563eb" style="margin-right: 4rpx;" />一键续写
+                  <view v-if="hasFramework" class="fp__header-btn" :class="{ 'fp__header-btn--disabled': continuingFramework }" @tap="!continuingFramework && handleContinueFramework()">
+                    <lv-icon v-if="continuingFramework" name="Loader" :size="12" color="#2563eb" style="margin-right: 4rpx; animation: spin 1s linear infinite;" />
+                    <lv-icon v-else name="Sparkles" :size="12" color="#2563eb" style="margin-right: 4rpx;" />{{ continuingFramework ? '续写中...' : '一键续写' }}
                   </view>
                   <text class="fp__header-btn" @tap="toggleSnapshots">{{ showSnapshots ? '收起' : '历史版本' }}</text>
                 </view>
@@ -88,7 +107,7 @@
                     <text class="fp__snapshot-num">#{{ i + 1 }}</text>
                     <text class="fp__snapshot-time">{{ snap.created_at }}</text>
                     <text class="fp__snapshot-desc">{{ snap.reply_summary || snap.description || '' }}</text>
-                    <lv-button size="sm" secondary @tap="handleRestoreSnapshot(snap.id)">回滚</lv-button>
+                    <lv-button size="sm" secondary @tap="handleRestoreSnapshot(snap.id)" :loading="restoringSnapshot === snap.id" :disabled="restoringSnapshot > 0">回滚</lv-button>
                   </view>
                 </view>
               </view>
@@ -131,8 +150,7 @@
                 <textarea class="fp__textarea fp__textarea--mono" v-model="manualDraft" placeholder="{ ... }" />
                 <view class="fp__actions">
                   <lv-button size="sm" secondary @tap="cancelManualEdit">取消</lv-button>
-                  <lv-button size="sm" @tap="saveManualEdit" :loading="manualSaving">保存框架</lv-button>
-                </view>
+                  <lv-button size="sm" @tap="saveManualEdit" :loading="manualSaving">保存框架</lv-button>                </view>
                 <text v-if="manualError" class="fp__error">{{ manualError }}</text>
               </view>
             </view>
@@ -208,8 +226,9 @@
                   <text class="fp__section-label">章节列表</text>
                 </view>
                 <view class="fp__header-actions">
-                  <view class="fp__header-btn" @tap="handleRegenerateChapters" v-if="chapters.length > 0">
-                    <lv-icon name="RefreshCw" :size="12" color="#64748b" style="margin-right: 4rpx;" />AI 生成章节
+                  <view class="fp__header-btn" :class="{ 'fp__header-btn--disabled': regeneratingChapters }" @tap="!regeneratingChapters && handleRegenerateChapters()" v-if="chapters.length > 0">
+                    <lv-icon v-if="regeneratingChapters" name="Loader" :size="12" color="#64748b" style="margin-right: 4rpx; animation: spin 1s linear infinite;" />
+                    <lv-icon v-else name="RefreshCw" :size="12" color="#64748b" style="margin-right: 4rpx;" />{{ regeneratingChapters ? '生成中...' : 'AI 生成章节' }}
                   </view>
                 </view>
               </view>
@@ -360,8 +379,26 @@
         </scroll-view>
       </template>
 
-      <!-- 助手标签 -->
+      <!-- 视频标签 -->
       <template #tab-3>
+        <scroll-view scroll-y class="chapter-view__tab-scroll">
+          <view class="chapter-view__tab">
+            <view class="chapter-view__video-entry-card" @tap="goToVideoWorkflow">
+              <view class="chapter-view__video-entry-icon">
+                <lv-icon name="Video" :size="40" color="#2563eb" />
+              </view>
+              <view class="chapter-view__video-entry-body">
+                <text class="chapter-view__video-entry-title">视频工作流</text>
+                <text class="chapter-view__video-entry-desc">创建视频工作流，AI 自动拆镜生成分镜视频</text>
+              </view>
+              <lv-icon name="ChevronRight" :size="20" color="#94a3b8" />
+            </view>
+          </view>
+        </scroll-view>
+      </template>
+
+      <!-- 助手标签 -->
+      <template #tab-4>
         <view class="chapter-view__agent-wrapper">
           <view class="chapter-view__agent-header">
             <lv-button size="sm" @tap="startNewAgentConversation">新对话</lv-button>
@@ -411,6 +448,14 @@
         </view>
       </template>
     </lv-swiper-tabs>
+
+    <!-- 封面编辑弹窗 -->
+    <cover-edit-popup
+      v-model="showCoverPopup"
+      :story-id="storyStore.activeStoryId || 0"
+      :cover-image="coverImageForPopup"
+      @cover-updated="handleCoverUpdated"
+    />
   </view>
 </template>
 
@@ -446,6 +491,9 @@ import ChatInput from '@/components/chat-input/chat-input.vue'
 import ChangesBanner from '@/components/changes-banner/changes-banner.vue'
 import TemplateBinding from '@/components/template-binding/template-binding.vue'
 import BibleSummary from '@/components/bible-summary/bible-summary.vue'
+import CoverEditPopup from '@/components/cover-edit-popup/cover-edit-popup.vue'
+import { coverImageUrl } from '@/utils/url'
+import { useVideoWorkflowStore } from '@/stores/videoWorkflow'
 
 const workspaceStore = useWorkspaceStore()
 const editorStore = useEditorStore()
@@ -455,6 +503,8 @@ const storyStore = useStoriesStore()
 const uiStore = useUiStore()
 
 const activeTabIndex = ref(0)
+const showCoverPopup = ref(false)
+const coverImageForPopup = computed(() => storyStore.activeStory?.cover_image || '')
 const continuitySummary = ref('')
 const agentInputText = ref('')
 const localEditing = ref(false)
@@ -464,6 +514,17 @@ const imageCountIndex = ref(1)
 const agentScrollTarget = ref('')
 const agentInitialized = ref(false)
 const quickActions = ['阅读当前章节', '修改当前章节', '优化故事框架', '质量评估', '优化分镜脚本', '角色设定建议']
+
+// 按钮级 loading 状态(独立于全局 loading,提供按钮即时视觉反馈)
+const generatingChapterNum = ref(0)      // 正在生成正文的章节号(0 = 无)
+const assessingChapterNum = ref(0)       // 正在质量评估的章节号(框架标签)
+const regeneratingChapters = ref(false)  // AI 生成章节
+const continuingFramework = ref(false)   // 一键续写
+const restoringSnapshot = ref(0)         // 回滚快照 ID
+const assessingQuality = ref(false)      // 编辑标签质量评估
+const creatingAgentConv = ref(false)     // 新建 Agent 对话
+const confirmingChanges = ref(false)     // 确认变更
+const rollbackingChanges = ref(false)    // 撤回变更
 
 const imageCountOptions = [
   { label: '4张', value: 4 },
@@ -496,6 +557,20 @@ const storyDesc = computed(() => frameworkStory.value?.description || '')
 
 // --- Story Bible ---
 const storyBible = computed(() => frameworkStory.value?.story_bible || {})
+
+// --- 封面编辑 ---
+function handleCoverEdit() {
+  showCoverPopup.value = true
+}
+
+function handleCoverUpdated(newCoverPath: string) {
+  // activeStory 是 computed(只读),通过修改 list 中的对应项触发响应式更新
+  const story = storyStore.list.find(s => s.id === storyStore.activeStoryId)
+  if (story) {
+    story.cover_image = newCoverPath
+  }
+  uni.showToast({ title: '封面已更新', icon: 'success' })
+}
 
 function onTemplateBound() {
   // 模板绑定后可刷新框架相关数据
@@ -588,18 +663,21 @@ async function loadSnapshots() {
 }
 
 async function handleRestoreSnapshot(snapshotId: number) {
-  if (!storyId.value) return
+  if (!storyId.value || restoringSnapshot.value) return
   uni.showModal({
     title: '确认回滚',
     content: '回滚将先保存当前状态再恢复所选版本，确认继续？',
     success: async (res) => {
       if (!res.confirm) return
+      restoringSnapshot.value = snapshotId
       try {
         await frameworkApi.restoreSnapshot(storyId.value, snapshotId)
         uiStore.success('已回滚')
         await loadStoryData()
       } catch (e: any) {
         uiStore.error(e.message || '回滚失败')
+      } finally {
+        restoringSnapshot.value = 0
       }
     }
   })
@@ -668,7 +746,8 @@ async function handleFrameworkChat() {
 }
 
 async function handleContinueFramework() {
-  if (!hasFramework.value || chatLoading.value) return
+  if (!hasFramework.value || chatLoading.value || continuingFramework.value) return
+  continuingFramework.value = true
   chatLoading.value = true
   chatError.value = ''
   try {
@@ -680,6 +759,7 @@ async function handleContinueFramework() {
     chatError.value = e.message || '续写失败'
   } finally {
     chatLoading.value = false
+    continuingFramework.value = false
   }
 }
 
@@ -756,12 +836,13 @@ function handleChapterSelect(ch: OutlineChapter) {
 }
 
 async function handleGenerateChapter(ch: OutlineChapter) {
+  if (generatingChapterNum.value) return
   const act = outlineActs.value.find(a => a.chapters.some(c => c.chapter_number === ch.chapter_number))
   if (!act) {
     uiStore.error('找不到所属幕')
     return
   }
-  uiStore.setLoading(true)
+  generatingChapterNum.value = ch.chapter_number
   try {
     await frameworkApi.expandChapter(storyId.value, {
       act: String(act.act),
@@ -769,47 +850,48 @@ async function handleGenerateChapter(ch: OutlineChapter) {
       chapter_title: ch.title,
       summary: ch.summary || undefined,
     })
-    uiStore.setLoading(false)
     uiStore.success('正文已生成')
     await loadStoryData()
     await loadChapters()
     handleChapterSelect(ch)
   } catch (e: any) {
-    uiStore.setLoading(false)
     uiStore.error(e.message || '生成正文失败')
+  } finally {
+    generatingChapterNum.value = 0
   }
 }
 
 async function handleAssessQuality(ch: OutlineChapter) {
+  if (assessingChapterNum.value) return
   const actual = chapterMap.value.get(ch.chapter_number)
   if (!actual?.id) {
     uiStore.error('该章节尚未生成，无法评估')
     return
   }
-  uiStore.setLoading(true)
+  assessingChapterNum.value = ch.chapter_number
   try {
     const result = await chaptersApi.qualityAssess(actual.id)
-    uiStore.setLoading(false)
     const scores = result.scores || {}
     const lines = Object.entries(scores).map(([k, v]) => `${k}: ${v}/10`).join('\n')
     uni.showModal({ title: '质量评估', content: lines, showCancel: false })
   } catch (e: any) {
-    uiStore.setLoading(false)
     uiStore.error(e.message || '评估失败')
+  } finally {
+    assessingChapterNum.value = 0
   }
 }
 
 async function handleRegenerateChapters() {
-  if (!storyId.value) return
-  uiStore.setLoading(true)
+  if (!storyId.value || regeneratingChapters.value) return
+  regeneratingChapters.value = true
   try {
     await frameworkApi.regenerateOutline(storyId.value)
-    uiStore.setLoading(false)
     uiStore.success('章节已更新')
     await loadStoryData()
   } catch (e: any) {
-    uiStore.setLoading(false)
     uiStore.error(e.message || '生成失败')
+  } finally {
+    regeneratingChapters.value = false
   }
 }
 
@@ -908,7 +990,7 @@ watch(() => workspaceStore.activeChapterId, async (newId) => {
 
 // 首次切换到助手tab时，自动加载最近会话
 watch(() => activeTabIndex.value, async (tabIndex) => {
-  if (tabIndex !== 3 || agentInitialized.value) return
+  if (tabIndex !== 4 || agentInitialized.value) return
   agentInitialized.value = true
   if (!storyId.value) return
   try {
@@ -1020,6 +1102,15 @@ function goGallery(imageNumber: number) {
   }
 }
 
+function goToVideoWorkflow() {
+  const chapterId = workspaceStore.activeChapterId
+  if (!chapterId) {
+    uni.showToast({ title: '请先选择章节', icon: 'none' })
+    return
+  }
+  uni.navigateTo({ url: `/pages/workspace/video-workflow?chapterId=${chapterId}` })
+}
+
 // =================== 编辑标签 ===================
 
 function startLocalEdit() {
@@ -1049,7 +1140,8 @@ async function saveLocalEdit() {
 
 async function handleQualityAssess() {
   const chapter = workspaceStore.activeChapter
-  if (!chapter) return
+  if (!chapter || assessingQuality.value) return
+  assessingQuality.value = true
   try {
     const result = await chaptersApi.qualityAssess(chapter.id)
     const scores = result.scores || {}
@@ -1061,6 +1153,8 @@ async function handleQualityAssess() {
     })
   } catch (e: any) {
     uiStore.error(e.message || '评估失败')
+  } finally {
+    assessingQuality.value = false
   }
 }
 
@@ -1096,12 +1190,15 @@ async function handleGenerateManga() {
 // =================== 助手标签 ===================
 
 async function startNewAgentConversation() {
-  if (!storyId.value) return
+  if (!storyId.value || creatingAgentConv.value) return
+  creatingAgentConv.value = true
   try {
     await agentStore.createConversation(storyId.value)
     agentStore.messages = [{ id: 'welcome', role: 'assistant', content: '我是你的AI写作助手，有什么可以帮到你的？' }]
   } catch (e: any) {
     uiStore.error(e.message || '创建失败')
+  } finally {
+    creatingAgentConv.value = false
   }
 }
 
@@ -1126,20 +1223,28 @@ function handleViewChanges() {
 }
 
 async function handleConfirmChanges() {
+  if (confirmingChanges.value) return
+  confirmingChanges.value = true
   try {
     await agentStore.confirmChanges(storyId.value)
     uiStore.success('变更已确认')
   } catch (e: any) {
     uiStore.error(e.message || '确认失败')
+  } finally {
+    confirmingChanges.value = false
   }
 }
 
 async function handleRollbackChanges() {
+  if (rollbackingChanges.value) return
+  rollbackingChanges.value = true
   try {
     await agentStore.rollbackChanges(storyId.value)
     uiStore.success('变更已撤回')
   } catch (e: any) {
     uiStore.error(e.message || '撤回失败')
+  } finally {
+    rollbackingChanges.value = false
   }
 }
 
@@ -1182,6 +1287,60 @@ function showEditorMore() {
 </script>
 
 <style lang="scss" scoped>
+.fp__cover-banner {
+  display: flex;
+  align-items: center;
+  gap: 24rpx;
+  background: #fff;
+  border-radius: $lv-radius-md;
+  padding: 20rpx;
+  margin-bottom: $lv-section-gap;
+  box-shadow: $lv-shadow-sm;
+}
+
+.fp__cover-img {
+  width: 120rpx;
+  height: 160rpx;
+  border-radius: $lv-radius-sm;
+  flex-shrink: 0;
+}
+
+.fp__cover-placeholder {
+  width: 120rpx;
+  height: 160rpx;
+  background: $lv-primary-lighter;
+  border-radius: $lv-radius-sm;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8rpx;
+  flex-shrink: 0;
+}
+
+.fp__cover-text {
+  font-size: $lv-font-xs;
+  color: $lv-text-muted;
+}
+
+.fp__cover-info {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 8rpx;
+}
+
+.fp__cover-title {
+  font-size: $lv-font-base;
+  font-weight: 600;
+  color: $lv-text-primary;
+}
+
+.fp__cover-edit {
+  font-size: $lv-font-sm;
+  color: $lv-primary;
+}
+
 .chapter-view {
   height: 100vh;
   display: flex;
@@ -1423,6 +1582,27 @@ function showEditorMore() {
     padding: 0 $lv-page-padding;
     overflow: hidden;
   }
+
+  &__video-entry-card {
+    display: flex;
+    align-items: center;
+    gap: 16rpx;
+    padding: 24rpx;
+    background: $lv-surface-solid;
+    border-radius: $lv-radius-lg;
+    margin-bottom: 20rpx;
+    &:active { opacity: 0.8; }
+  }
+  &__video-entry-icon {
+    width: 80rpx; height: 80rpx;
+    border-radius: $lv-radius-md;
+    background: $lv-primary-light;
+    display: flex; align-items: center; justify-content: center;
+    flex-shrink: 0;
+  }
+  &__video-entry-body { flex: 1; }
+  &__video-entry-title { font-size: $lv-font-base; font-weight: 600; color: $lv-text-primary; display: block; margin-bottom: 4rpx; }
+  &__video-entry-desc { font-size: $lv-font-sm; color: $lv-text-muted; }
 }
 
 // =================== Framework 卡片样式 ===================
