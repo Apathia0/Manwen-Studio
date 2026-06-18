@@ -1667,7 +1667,7 @@ function sendQuickAction(action: string) {
 
 function showMore() {
   uni.showActionSheet({
-    itemList: ['角色外观', '连贯性记忆', '质量评估', '参考图'],
+    itemList: ['角色外观', '连贯性记忆', '质量评估', '参考图', '资产管理'],
     success: (res) => {
       switch (res.tapIndex) {
         case 0: goCharacterProfiles(); break
@@ -1680,6 +1680,13 @@ function showMore() {
         }
         case 2: handleQualityAssess(); break
         case 3: goRefImages(); break
+        case 4: {
+          const chapter = workspaceStore.activeChapter
+          if (chapter) {
+            uni.navigateTo({ url: `/pages/workspace/video-assets?chapterId=${chapter.id}` })
+          }
+          break
+        }
       }
     }
   })

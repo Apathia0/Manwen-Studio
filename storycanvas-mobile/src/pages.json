@@ -119,6 +119,12 @@
           }
         },
         {
+          "path": "framework-editor",
+          "style": {
+            "navigationStyle": "custom"
+          }
+        },
+        {
           "path": "manga",
           "style": {
             "navigationStyle": "custom"
@@ -203,7 +209,7 @@
           }
         },
         {
-          "path": "pages/workspace/video-workflow",
+          "path": "video-workflow",
           "style": {
             "navigationBarTitleText": "视频工作流",
             "navigationBarBackgroundColor": "#ffffff",
@@ -211,9 +217,17 @@
           }
         },
         {
-          "path": "pages/workspace/video-shots",
+          "path": "video-shots",
           "style": {
             "navigationBarTitleText": "镜头列表",
+            "navigationBarBackgroundColor": "#ffffff",
+            "navigationBarTextStyle": "black"
+          }
+        },
+        {
+          "path": "video-assets",
+          "style": {
+            "navigationBarTitleText": "资产管理",
             "navigationBarBackgroundColor": "#ffffff",
             "navigationBarTextStyle": "black"
           }
