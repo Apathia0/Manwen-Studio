@@ -49,7 +49,7 @@ export function PaymentCheckoutDialog({
   }, [checkout]);
 
   useEffect(() => {
-    const orderNo = checkout?.orderNo;
+    const orderNo: string = checkout?.orderNo ?? '';
     if (!orderNo) return;
     paidHandledRef.current = false;
     let cancelled = false;
