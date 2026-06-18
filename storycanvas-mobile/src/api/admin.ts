@@ -288,6 +288,10 @@ export interface PlatformSettings {
     image_base_url: string
     image_model: string
     image_api_key: string
+    video_base_url: string
+    video_model: string
+    video_api_key: string
+    video_provider?: string
     image_size: string
     image_quality: string
     image_background: string
@@ -297,6 +301,12 @@ export interface PlatformSettings {
     image_input_fidelity: string
     enable_user_override: boolean
     enable_user_url_override?: boolean
+    oss_enabled?: boolean
+    oss_access_key_id?: string
+    oss_access_key_secret?: string
+    oss_endpoint?: string
+    oss_bucket?: string
+    oss_public_url_base?: string
   }
   auth: {
     require_email_code_for_register: boolean
@@ -414,4 +424,141 @@ export function updateStylePreset(presetId: number, data: {
 /** 删除风格预设 */
 export function deleteStylePreset(presetId: number): Promise<void> {
   return del(`/api/video-style-presets/${presetId}`)
+}
+
+// --- 系统默认提示词管理 ---
+
+export interface AdminSystemPrompt {
+  key: string
+  name: string
+  content: string
+}
+
+export interface AdminSystemPromptsResponse {
+  [shortKey: string]: AdminSystemPrompt
+}
+
+export interface AdminUpdateSystemPromptsResponse {
+  updated: string[]
+  prompts: AdminSystemPromptsResponse
+}
+
+export function getAdminSystemPrompts(): Promise<AdminSystemPromptsResponse> {
+  return get('/api/admin/system-prompts')
+}
+
+export function updateAdminSystemPrompts(payload: Record<string, string>): Promise<AdminUpdateSystemPromptsResponse> {
+  return put('/api/admin/system-prompts', payload)
+}
+
+// --- 系统更新 ---
+
+export interface AdminSystemUpdateStatus {
+  status: 'idle' | 'queued' | 'running' | 'succeeded' | 'failed' | 'unknown' | string
+  message: string
+  running: boolean
+  target_version?: string | null
+  current_version?: string
+  started_at?: string | null
+  finished_at?: string | null
+  exit_code?: number | null
+  log_tail: string[]
+}
+
+export interface AdminSystemUpdateCheck {
+  configured: boolean
+  current_version: string
+  latest_version?: string | null
+  update_available: boolean
+  release_notes: string
+  published_at?: string | null
+  min_supported_version?: string | null
+  channel?: string | null
+  manifest_url?: string
+  message: string
+}
+
+/** 获取系统更新状态 */
+export function getAdminSystemUpdateStatus(): Promise<AdminSystemUpdateStatus> {
+  return get('/api/admin/system/update/status')
+}
+
+/** 检测系统更新 */
+export function checkAdminSystemUpdate(): Promise<AdminSystemUpdateCheck> {
+  return get('/api/admin/system/update/check')
+}
+
+/** 启动系统更新 */
+export function startAdminSystemUpdate(targetVersion?: string): Promise<AdminSystemUpdateStatus> {
+  return post('/api/admin/system/update', targetVersion ? { target_version: targetVersion } : {})
+}
+
+// --- 收入与订单 ---
+
+export interface AdminRevenueSummary {
+  total_revenue: number
+  total_orders: number
+  paid_orders: number
+  cancelled_orders: number
+  expired_orders: number
+  monthly_revenue: number
+  monthly_orders: number
+  monthly_paid_orders: number
+  conversion_rate: number
+  active_subscriptions: number
+  monthly_new_users: number
+}
+
+export interface AdminRevenueMonthlyItem {
+  period: string
+  revenue: number
+  orders: number
+  paid: number
+  cancelled: number
+  expired: number
+}
+
+/** 获取收入汇总 */
+export function getAdminRevenueSummary(): Promise<AdminRevenueSummary> {
+  return get('/api/admin/revenue/summary')
+}
+
+/** 获取月度收入 */
+export function getAdminRevenueMonthly(months = 12): Promise<AdminRevenueMonthlyItem[]> {
+  return get('/api/admin/revenue/monthly', { months })
+}
+
+/** 搜索订单 */
+export function searchAdminOrders(params: {
+  page?: number
+  page_size?: number
+  status?: string
+  start_date?: string
+  end_date?: string
+}): Promise<{ items: AdminOrderItem[]; total: number; page: number; page_size: number; total_pages: number }> {
+  return get('/api/admin/orders/search', params)
+}
+
+// --- 视频资产管理 ---
+
+/** 更新视频资产使用范围 */
+export function updateAssetScope(
+  assetId: number,
+  payload: {
+    usage_scope: string
+    inherit_to_next_shot?: boolean
+  }
+): Promise<{ asset_id: number; usage_scope: string; inherit_to_next_shot: boolean }> {
+  return put(`/api/video-assets/${assetId}/scope`, payload)
+}
+
+/** 提升视频资产级别 */
+export function promoteAsset(
+  assetId: number,
+  payload: {
+    level: string
+    inherit_to_next_shot?: boolean
+  }
+): Promise<{ asset_id: number; level: string }> {
+  return post(`/api/video-assets/${assetId}/promote`, payload)
 }
