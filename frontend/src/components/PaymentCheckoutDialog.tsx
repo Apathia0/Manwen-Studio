@@ -59,6 +59,10 @@ export function PaymentCheckoutDialog({
 
   if (!checkout) return null;
 
+  const isQuotaPurchase = checkout.source === 'quota_purchase';
+  const itemLabel = isQuotaPurchase ? '购买内容' : '套餐';
+  const cycleLabel = isQuotaPurchase ? '单次购买' : (checkout.billing_cycle === 'yearly' ? '年付' : '月付');
+
   const canCheckManually =
     checkout.method === 'alipay_qr' ||
     checkout.method === 'mapay_qr' ||
@@ -115,7 +119,7 @@ export function PaymentCheckoutDialog({
               <div className="text-sm font-semibold text-slate-900">订单信息</div>
               <div className="mt-4 grid gap-3 sm:grid-cols-2">
                 <div className="rounded-2xl bg-[#f8fbff] px-4 py-3">
-                  <div className="text-xs text-slate-500">套餐</div>
+                  <div className="text-xs text-slate-500">{itemLabel}</div>
                   <div className="mt-1 text-sm font-medium text-slate-900">{checkout.plan_name}</div>
                 </div>
                 <div className="rounded-2xl bg-[#f8fbff] px-4 py-3">
@@ -123,8 +127,8 @@ export function PaymentCheckoutDialog({
                   <div className="mt-1 text-sm font-medium text-slate-900">{checkout.currency} {formatMoney(checkout.amount)}</div>
                 </div>
                 <div className="rounded-2xl bg-[#f8fbff] px-4 py-3">
-                  <div className="text-xs text-slate-500">计费周期</div>
-                  <div className="mt-1 text-sm font-medium text-slate-900">{checkout.billing_cycle === 'yearly' ? '年付' : '月付'}</div>
+                  <div className="text-xs text-slate-500">{isQuotaPurchase ? '购买类型' : '计费周期'}</div>
+                  <div className="mt-1 text-sm font-medium text-slate-900">{cycleLabel}</div>
                 </div>
                 <div className="rounded-2xl bg-[#f8fbff] px-4 py-3">
                   <div className="text-xs text-slate-500">失效时间</div>

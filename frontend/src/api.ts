@@ -613,6 +613,7 @@ export interface PaymentSettings {
 export interface BillingCheckout {
   method: string;
   provider: string;
+  source?: string;
   instructions: string;
   amount: number;
   currency: string;
