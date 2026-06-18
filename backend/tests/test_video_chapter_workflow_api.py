@@ -368,6 +368,9 @@ def test_regenerate_shot_video_keeps_character_refs_separate_from_storyboard_ref
         def filter(self, *args, **kwargs):
             return self
 
+        def all(self):
+            return []
+
         def first(self):
             return None
 
@@ -445,6 +448,10 @@ def test_regenerate_shot_video_logs_reference_roles(monkeypatch, caplog):
                 def first(self):
                     return None
 
+                def all(self):
+                    from types import SimpleNamespace
+                    return [SimpleNamespace(id=86, asset_type='character_reference')]
+
             return _Query()
 
         def get(self, model, pk):
@@ -514,6 +521,9 @@ def test_regenerate_shot_video_prefers_remote_urls_for_all_reference_images(monk
 
                 def first(self):
                     return None
+
+                def all(self):
+                    return []
 
             return _Query()
 
@@ -657,6 +667,9 @@ def test_regenerate_shot_video_submits_15_second_duration(monkeypatch):
                 def first(self):
                     return None
 
+                def all(self):
+                    return []
+
             return _Query()
 
         def get(self, model, pk):
@@ -725,6 +738,9 @@ def test_regenerate_shot_video_rebuilds_legacy_10s_prompt(monkeypatch):
 
                 def first(self):
                     return None
+
+                def all(self):
+                    return []
 
             return _Query()
 

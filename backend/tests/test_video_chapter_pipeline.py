@@ -1304,7 +1304,7 @@ def test_assemble_video_prompt_text_storyboard_plus_character_ref(workflow_db):
 # ──────────────────────────────────────────────────────────────
 
 @pytest.mark.asyncio
-async def test_regenerate_shot_video_assigns_correct_roles_for_mixed_asset_types(workflow_db):
+async def test_regenerate_shot_video_assigns_correct_roles_for_mixed_asset_types(monkeypatch, workflow_db):
     """多资产场景：道具、角色、场景资产应各自获得正确的 prompt 角色标签。"""
     from models import ChapterVideoShot, VideoAsset
 
@@ -1378,15 +1378,15 @@ async def test_regenerate_shot_video_assigns_correct_roles_for_mixed_asset_types
             return a[0] if a else None
         async def _fake_poll_job(**kwargs):
             return "http://fake/video.mp4"
-        vcp.video_gen_service = SimpleNamespace(
+        monkeypatch.setattr(vcp, 'video_gen_service', SimpleNamespace(
             submit_video_job=fake_submit_video_job,
             query_job_status=lambda **kw: {"status": "completed"},
-        )
-        vcp.resolve_reference_input = lambda val, kind: val
-        vcp._resolve_storyboard_local_path = lambda val: val
-        vcp._resolve_style_ref_local_path = lambda val: val
-        vcp.run_blocking = _fake_run_blocking
-        vcp._poll_video_job = _fake_poll_job
+        ))
+        monkeypatch.setattr(vcp, 'resolve_reference_input', lambda val, kind: val)
+        monkeypatch.setattr(vcp, '_resolve_storyboard_local_path', lambda val: val)
+        monkeypatch.setattr(vcp, '_resolve_style_ref_local_path', lambda val: val)
+        monkeypatch.setattr(vcp, 'run_blocking', _fake_run_blocking)
+        monkeypatch.setattr(vcp, '_poll_video_job', _fake_poll_job)
         await vcp.regenerate_shot_video(
             shot.id,
             ref_asset_ids=[char_a.id, prop_x.id, scene.id, char_b.id, prop_y.id],
@@ -1414,7 +1414,7 @@ async def test_regenerate_shot_video_assigns_correct_roles_for_mixed_asset_types
 
 
 @pytest.mark.asyncio
-async def test_regenerate_shot_video_preserves_user_selection_order(workflow_db):
+async def test_regenerate_shot_video_preserves_user_selection_order(monkeypatch, workflow_db):
     """用户选择顺序应与 prompt 中 @image 编号和提交的图片顺序一致。"""
     from models import ChapterVideoShot, VideoAsset
 
@@ -1476,15 +1476,15 @@ async def test_regenerate_shot_video_preserves_user_selection_order(workflow_db)
             return a[0] if a else None
         async def _fake_poll_job(**kwargs):
             return "http://fake/video.mp4"
-        vcp.video_gen_service = SimpleNamespace(
+        monkeypatch.setattr(vcp, 'video_gen_service', SimpleNamespace(
             submit_video_job=fake_submit_video_job,
             query_job_status=lambda **kw: {"status": "completed"},
-        )
-        vcp.resolve_reference_input = lambda val, kind: val
-        vcp._resolve_storyboard_local_path = lambda val: val
-        vcp._resolve_style_ref_local_path = lambda val: val
-        vcp.run_blocking = _fake_run_blocking
-        vcp._poll_video_job = _fake_poll_job
+        ))
+        monkeypatch.setattr(vcp, 'resolve_reference_input', lambda val, kind: val)
+        monkeypatch.setattr(vcp, '_resolve_storyboard_local_path', lambda val: val)
+        monkeypatch.setattr(vcp, '_resolve_style_ref_local_path', lambda val: val)
+        monkeypatch.setattr(vcp, 'run_blocking', _fake_run_blocking)
+        monkeypatch.setattr(vcp, '_poll_video_job', _fake_poll_job)
         await vcp.regenerate_shot_video(
             shot.id,
             ref_asset_ids=[asset_b.id, asset_a.id, asset_c.id],
@@ -1514,7 +1514,7 @@ async def test_regenerate_shot_video_preserves_user_selection_order(workflow_db)
 
 
 @pytest.mark.asyncio
-async def test_regenerate_shot_video_storyboard_plus_mixed_assets(workflow_db):
+async def test_regenerate_shot_video_storyboard_plus_mixed_assets(monkeypatch, workflow_db):
     """故事版+多类型资产：故事版应为 image1，其余按顺序编号。"""
     from models import ChapterVideoShot, VideoAsset
 
@@ -1562,15 +1562,15 @@ async def test_regenerate_shot_video_storyboard_plus_mixed_assets(workflow_db):
             return a[0] if a else None
         async def _fake_poll_job(**kwargs):
             return "http://fake/video.mp4"
-        vcp.video_gen_service = SimpleNamespace(
+        monkeypatch.setattr(vcp, 'video_gen_service', SimpleNamespace(
             submit_video_job=fake_submit_video_job,
             query_job_status=lambda **kw: {"status": "completed"},
-        )
-        vcp.resolve_reference_input = lambda val, kind: val
-        vcp._resolve_storyboard_local_path = lambda val: val
-        vcp._resolve_style_ref_local_path = lambda val: val
-        vcp.run_blocking = _fake_run_blocking
-        vcp._poll_video_job = _fake_poll_job
+        ))
+        monkeypatch.setattr(vcp, 'resolve_reference_input', lambda val, kind: val)
+        monkeypatch.setattr(vcp, '_resolve_storyboard_local_path', lambda val: val)
+        monkeypatch.setattr(vcp, '_resolve_style_ref_local_path', lambda val: val)
+        monkeypatch.setattr(vcp, 'run_blocking', _fake_run_blocking)
+        monkeypatch.setattr(vcp, '_poll_video_job', _fake_poll_job)
         await vcp.regenerate_shot_video(
             shot.id,
             ref_asset_ids=[-1, prop.id, char.id],
