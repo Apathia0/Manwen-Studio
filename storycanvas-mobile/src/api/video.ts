@@ -143,6 +143,7 @@ export function generateStoryVideoCharacters(storyId: number): Promise<{ charact
 export function renderShotVideo(shotId: number, payload: {
   model: string
   prompt?: string
+  aspect_ratio?: string
   duration?: number
   size?: string
   orientation?: string
