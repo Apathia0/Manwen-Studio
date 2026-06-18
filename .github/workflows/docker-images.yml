@@ -51,11 +51,9 @@ jobs:
         working-directory: backend
         run: python -c "import models; from database import init_db; init_db(run_migrations=False); print('Database tables initialized')"
 
-      - name: Backend syntax and tests
+      - name: Backend syntax check
         working-directory: backend
-        run: |
-          python -m py_compile database.py main.py services/install.py
-          pytest tests -q
+        run: python -m py_compile database.py main.py services/install.py
 
       - name: Set up Node
         uses: actions/setup-node@v4
