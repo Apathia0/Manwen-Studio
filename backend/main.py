@@ -12,6 +12,7 @@ import shutil
 import smtplib
 import uuid
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+from types import SimpleNamespace
 from email.message import EmailMessage
 from pathlib import Path
 from typing import Any
@@ -2535,6 +2536,7 @@ def _order_checkout_payload(order: BillingOrder, plan: Plan, db: Session, paymen
                 "mode": "qrcode" if qr_code_text else "redirect",
                 "method": method,
                 "provider": provider,
+                "source": order.source or "",
                 "instructions": str(payment.get("instructions") or ""),
                 "amount": _money_to_number(order.amount),
                 "currency": order.currency,
@@ -2564,6 +2566,7 @@ def _order_checkout_payload(order: BillingOrder, plan: Plan, db: Session, paymen
     return {
         "method": method,
         "provider": provider,
+        "source": order.source or "",
         "instructions": str(payment.get("instructions") or ""),
         "amount": _money_to_number(order.amount),
         "currency": order.currency,
@@ -4370,6 +4373,12 @@ def purchase_quota(body: dict, request: Request, db: Session = Depends(get_db)):
     )
     db.add(order)
 
+    feature_name = FEATURE_CATALOG_MAP.get(feature_key, {}).get("name", feature_key)
+    quota_display_plan = SimpleNamespace(
+        name=f"购买 {feature_name} x{amount}",
+        description=f"配额购买：{feature_name} x{amount}",
+    )
+
     checkout_override = None
     if _coerce_money(total_price) <= Decimal("0.00"):
         _mark_order_paid(order, db, operator_user_id=user.id, note="Zero-amount quota purchase auto-confirmed")
@@ -4379,12 +4388,12 @@ def purchase_quota(body: dict, request: Request, db: Session = Depends(get_db)):
             try:
                 payment_with_ip = dict(payment)
                 payment_with_ip["client_ip"] = request.client.host if request.client else ""
-                checkout_data = gateway.create_checkout(order, current_plan, payment_with_ip)
+                checkout_data = gateway.create_checkout(order, quota_display_plan, payment_with_ip)
                 if checkout_data.extra:
                     merged = dict(order.extra_json or {})
                     merged.update(checkout_data.extra)
                     order.extra_json = merged
-                checkout_override = gateway.build_checkout_response(order, current_plan, payment, checkout_data)
+                checkout_override = gateway.build_checkout_response(order, quota_display_plan, payment, checkout_data)
             except RuntimeError as exc:
                 raise HTTPException(502, f"{gateway.label} checkout failed: {exc}") from exc
 
@@ -4404,7 +4413,7 @@ def purchase_quota(body: dict, request: Request, db: Session = Depends(get_db)):
         "message": "配额购买订单已创建",
         "status": order.status,
         "order": _serialize_order_with_db(order, db),
-        "checkout": checkout_override or _order_checkout_payload(order, current_plan, db),
+        "checkout": checkout_override or _order_checkout_payload(order, quota_display_plan, db),
     }
 
 

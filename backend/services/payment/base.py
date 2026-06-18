@@ -84,6 +84,7 @@ class PaymentGateway(ABC):
             "mode": checkout.mode,
             "method": order.payment_method if hasattr(order, "payment_method") else self.method_key,
             "provider": order.payment_provider if hasattr(order, "payment_provider") else self.provider,
+            "source": getattr(order, "source", "") or "",
             "instructions": str(payment_config.get("instructions") or ""),
             "amount": amount_num,
             "currency": order.currency if hasattr(order, "currency") else "CNY",
