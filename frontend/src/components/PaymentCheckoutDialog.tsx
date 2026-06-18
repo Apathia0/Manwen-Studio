@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import QRCode from 'qrcode';
 import { X } from 'lucide-react';
 import { syncMyOrder, type BillingCheckout } from '../api';
@@ -16,6 +16,10 @@ export function PaymentCheckoutDialog({
 }) {
   const [qrDataUrl, setQrDataUrl] = useState<string>('');
   const [checkingPayment, setCheckingPayment] = useState(false);
+  const onSuccessRef = useRef(onSuccess);
+  onSuccessRef.current = onSuccess;
+  const pollingRef = useRef(false);
+  const paidHandledRef = useRef(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -44,12 +48,47 @@ export function PaymentCheckoutDialog({
     };
   }, [checkout]);
 
+  useEffect(() => {
+    if (!checkout?.orderNo) return;
+    paidHandledRef.current = false;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout>;
+
+    async function pollOrderStatus() {
+      if (cancelled || pollingRef.current || paidHandledRef.current) return;
+      pollingRef.current = true;
+      try {
+        const result = await syncMyOrder(checkout.orderNo);
+        if (cancelled) return;
+        if (result.status === 'paid') {
+          paidHandledRef.current = true;
+          onSuccessRef.current('支付成功，订单已自动确认。');
+          return;
+        }
+      } catch {
+        // 轮询失败静默，下个周期继续
+      } finally {
+        pollingRef.current = false;
+      }
+      if (!cancelled) {
+        timer = setTimeout(pollOrderStatus, 3000);
+      }
+    }
+
+    timer = setTimeout(pollOrderStatus, 3000);
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, [checkout?.orderNo]);
+
   async function confirmPaymentPaid() {
-    if (!checkout?.orderNo || checkingPayment) return;
+    if (!checkout?.orderNo || checkingPayment || paidHandledRef.current) return;
     setCheckingPayment(true);
     try {
       const result = await syncMyOrder(checkout.orderNo);
       if (result.status === 'paid') {
+        paidHandledRef.current = true;
         onSuccess(`支付成功，${result.subscription.plan.name} 已生效。`);
       }
     } finally {
@@ -161,6 +200,10 @@ export function PaymentCheckoutDialog({
                   {checkingPayment ? '正在确认支付...' : '我已完成支付'}
                 </button>
               ) : null}
+              <div className="mt-4 flex items-center gap-2 text-xs text-slate-400">
+                <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-400" />
+                系统正在自动检测支付状态，无需手动操作
+              </div>
             </div>
           </div>
         </div>
