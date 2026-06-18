@@ -25,6 +25,12 @@
       }
     },
     {
+      "path": "pages/templates/index",
+      "style": {
+        "navigationStyle": "custom"
+      }
+    },
+    {
       "path": "pages/auth/login",
       "style": {
         "navigationBarTitleText": "登录"
@@ -165,6 +171,52 @@
           "style": {
             "navigationBarTitleText": "模板编辑"
           }
+        },
+        {
+          "path": "storyboard",
+          "style": {
+            "navigationBarTitleText": "故事版"
+          }
+        },
+        {
+          "path": "video-characters",
+          "style": {
+            "navigationBarTitleText": "视频角色"
+          }
+        },
+        {
+          "path": "render-jobs",
+          "style": {
+            "navigationBarTitleText": "渲染作业"
+          }
+        },
+        {
+          "path": "screenplay",
+          "style": {
+            "navigationBarTitleText": "视频剧本"
+          }
+        },
+        {
+          "path": "shot-list",
+          "style": {
+            "navigationBarTitleText": "镜头列表"
+          }
+        },
+        {
+          "path": "pages/workspace/video-workflow",
+          "style": {
+            "navigationBarTitleText": "视频工作流",
+            "navigationBarBackgroundColor": "#ffffff",
+            "navigationBarTextStyle": "black"
+          }
+        },
+        {
+          "path": "pages/workspace/video-shots",
+          "style": {
+            "navigationBarTitleText": "镜头列表",
+            "navigationBarBackgroundColor": "#ffffff",
+            "navigationBarTextStyle": "black"
+          }
         }
       ]
     },
@@ -221,17 +273,6 @@
       ]
     },
     {
-      "root": "pages/templates",
-      "pages": [
-        {
-          "path": "index",
-          "style": {
-            "navigationStyle": "custom"
-          }
-        }
-      ]
-    },
-    {
       "root": "pages/admin",
       "pages": [
         {
@@ -250,6 +291,18 @@
           "path": "users",
           "style": {
             "navigationBarTitleText": "用户管理"
+          }
+        },
+        {
+          "path": "user-detail",
+          "style": {
+            "navigationStyle": "custom"
+          }
+        },
+        {
+          "path": "plan-detail",
+          "style": {
+            "navigationStyle": "custom"
           }
         },
         {
@@ -287,6 +340,24 @@
           "style": {
             "navigationBarTitleText": "风格预设"
           }
+        },
+        {
+          "path": "system-prompts",
+          "style": {
+            "navigationBarTitleText": "系统提示词"
+          }
+        },
+        {
+          "path": "system-update",
+          "style": {
+            "navigationBarTitleText": "系统更新"
+          }
+        },
+        {
+          "path": "revenue",
+          "style": {
+            "navigationBarTitleText": "收入看板"
+          }
         }
       ]
     }
@@ -309,18 +380,24 @@
         "iconPath": "static/tab/compose.png",
         "selectedIconPath": "static/tab/compose-active.png"
       },
-      {
-        "pagePath": "pages/discover/index",
-        "text": "发现",
-        "iconPath": "static/tab/star.png",
-        "selectedIconPath": "static/tab/star-active.png"
-      },
-      {
-        "pagePath": "pages/profile/index",
-        "text": "我的",
-        "iconPath": "static/tab/person.png",
-        "selectedIconPath": "static/tab/person-active.png"
-      }
+    {
+      "pagePath": "pages/templates/index",
+      "text": "模板",
+      "iconPath": "static/tab/template.png",
+      "selectedIconPath": "static/tab/template-active.png"
+    },
+    {
+      "pagePath": "pages/discover/index",
+      "text": "发现",
+      "iconPath": "static/tab/star.png",
+      "selectedIconPath": "static/tab/star-active.png"
+    },
+    {
+      "pagePath": "pages/profile/index",
+      "text": "我的",
+      "iconPath": "static/tab/person.png",
+      "selectedIconPath": "static/tab/person-active.png"
+    }
     ]
   },
   "globalStyle": {
