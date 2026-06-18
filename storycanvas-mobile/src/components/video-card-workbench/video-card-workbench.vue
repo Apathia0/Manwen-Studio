@@ -187,9 +187,50 @@
           </view>
         </view>
 
-        <!-- ========== 场景卡片（T14 待实现）========== -->
+        <!-- ========== 场景卡片（T15）========== -->
         <view v-else-if="currentType === 'scene'" class="vwb__card-content">
-          <view class="vwb__info-section">
+          <!-- 加载中 -->
+          <view v-if="sceneLoading" class="vwb__placeholder">
+            <text class="vwb__placeholder-icon">⏳</text>
+            <text class="vwb__placeholder-title">加载场景资产中…</text>
+          </view>
+
+          <!-- 场景参考图预览 -->
+          <view v-if="sceneAssets.length > 0 && !sceneLoading" class="vwb__preview-section">
+            <image
+              :src="videoAssetUrl(sceneAssets[0].file_path)"
+              class="vwb__preview-image"
+              mode="aspectFit"
+            />
+          </view>
+
+          <!-- 场景资产列表（多选） -->
+          <view v-if="sceneAssets.length > 0 && !sceneLoading" class="vwb__asset-list">
+            <view
+              v-for="asset in sceneAssets"
+              :key="asset.id"
+              :class="['vwb__asset-card', { 'vwb__asset-card--selected': selectedSceneAssetId === asset.id }]"
+              @tap="selectSceneAsset(asset.id)"
+            >
+              <image
+                :src="videoAssetUrl(asset.file_path)"
+                class="vwb__asset-thumb"
+                mode="aspectFill"
+              />
+              <view class="vwb__asset-info">
+                <text class="vwb__asset-name">{{ asset.name || '场景资产' }}</text>
+                <view :class="['vwb__badge', `vwb__badge--${assetStatusBadge(asset)}`]">
+                  <text>{{ assetStatusLabel(asset) }}</text>
+                </view>
+              </view>
+              <view v-if="selectedSceneAssetId === asset.id" class="vwb__asset-check">
+                <text>✓</text>
+              </view>
+            </view>
+          </view>
+
+          <!-- 场景信息 -->
+          <view v-if="!sceneLoading" class="vwb__info-section">
             <view v-if="shotData?.scene_location" class="vwb__info-row">
               <text class="vwb__info-label">场景位置</text>
               <text class="vwb__info-text">{{ shotData.scene_location }}</text>
@@ -198,27 +239,101 @@
               <text class="vwb__info-label">时间</text>
               <text class="vwb__info-text">{{ shotData.time_of_day }}</text>
             </view>
-            <view v-if="shotData?.scene_prompt" class="vwb__info-row">
+            <view v-if="shotData?.dialogue_or_narration" class="vwb__info-row">
+              <text class="vwb__info-label">氛围/对白</text>
+              <text class="vwb__info-text vwb__info-text--prompt">{{ shotData.dialogue_or_narration }}</text>
+            </view>
+          </view>
+
+          <!-- 场景提示词编辑区（T15） -->
+          <view v-if="!sceneLoading" class="vwb__prompt-editor">
+            <view class="vwb__prompt-editor-header">
               <text class="vwb__info-label">场景提示词</text>
-              <text class="vwb__info-text vwb__info-text--prompt">{{ shotData.scene_prompt }}</text>
+              <view v-if="scenePromptEdited" class="vwb__prompt-dirty-badge">
+                <text>已修改</text>
+              </view>
             </view>
-            <view v-if="!shotData?.scene_location && !shotData?.scene_prompt" class="vwb__placeholder">
-              <text class="vwb__placeholder-icon">🏞</text>
-              <text class="vwb__placeholder-title">暂无场景详情</text>
-              <text class="vwb__placeholder-desc">先生成镜头详情以获取场景信息</text>
+            <textarea
+              v-model="editedScenePrompt"
+              class="vwb__prompt-textarea"
+              placeholder="暂无场景提示词"
+              :maxlength="2000"
+              :auto-height="true"
+            />
+          </view>
+
+          <!-- 场景重绘面板 -->
+          <view v-if="showSceneRedrawPrompt && !sceneLoading" class="vwb__redraw-panel">
+            <text class="vwb__redraw-panel-title">重绘提示词（可选）</text>
+            <textarea
+              v-model="redrawPromptText"
+              class="vwb__redraw-textarea"
+              placeholder="输入重绘提示词，留空则使用默认提示词"
+              :maxlength="500"
+              :auto-height="true"
+            />
+            <view class="vwb__redraw-panel-actions">
+              <view class="vwb__action-btn vwb__action-btn--secondary" @tap="cancelSceneRedraw">
+                <text class="vwb__action-label">取消</text>
+              </view>
+              <view class="vwb__action-btn vwb__action-btn--primary" @tap="confirmSceneRedraw">
+                <text class="vwb__action-label">确认重绘</text>
+              </view>
             </view>
+          </view>
+
+          <!-- 空状态 -->
+          <view v-if="!sceneLoading && sceneAssets.length === 0 && !shotData?.scene_location" class="vwb__placeholder">
+            <text class="vwb__placeholder-icon">🏞</text>
+            <text class="vwb__placeholder-title">暂无场景详情</text>
+            <text class="vwb__placeholder-desc">先生成镜头详情以获取场景信息，或点击下方"重新生成"创建场景参考图</text>
           </view>
         </view>
 
-        <!-- ========== 视频卡片（T15 待完善）========== -->
+        <!-- ========== 视频卡片（T14）========== -->
         <view v-else-if="currentType === 'video'" class="vwb__card-content">
+          <!-- 视频播放器 -->
           <view v-if="shotData?.video_url" class="vwb__preview-section">
+            <!-- #ifdef MP-WEIXIN -->
+            <view class="vwb__fallback">
+              <text class="vwb__fallback-icon">▶</text>
+              <text class="vwb__fallback-title">小程序内不支持播放视频</text>
+              <text class="vwb__fallback-desc">视频为跨域资源，请复制链接在浏览器中打开</text>
+              <button
+                class="vwb__fallback-btn"
+                open-type="launchApp"
+                @tap="openVideoInBrowser"
+              >
+                请在浏览器中打开
+              </button>
+            </view>
+            <!-- #endif -->
+            <!-- #ifndef MP-WEIXIN -->
             <video
               :src="assetUrl(shotData.video_url)"
               class="vwb__preview-video"
               controls
             />
+            <!-- #endif -->
           </view>
+
+          <!-- 生成失败提示 + 重试 -->
+          <view v-if="shotData?.status === 'failed'" class="vwb__error-section">
+            <text class="vwb__error-icon">⚠</text>
+            <view class="vwb__error-content">
+              <text class="vwb__error-title">视频生成失败</text>
+              <text v-if="shotData?.error_message" class="vwb__error-desc">{{ shotData.error_message }}</text>
+            </view>
+            <view
+              :class="['vwb__action-btn', 'vwb__action-btn--primary', { 'vwb__action-btn--disabled': busy || !shotData }]"
+              @tap="handleVideoRetry"
+            >
+              <text class="vwb__action-icon">⟳</text>
+              <text class="vwb__action-label">重试</text>
+            </view>
+          </view>
+
+          <!-- 视频元数据 -->
           <view class="vwb__info-section">
             <view class="vwb__info-row">
               <text class="vwb__info-label">状态</text>
@@ -226,15 +341,93 @@
                 <text>{{ statusLabel(shotData) }}</text>
               </view>
             </view>
-            <view v-if="shotData?.video_prompt" class="vwb__info-row">
+            <view v-if="videoMetaInfo" class="vwb__info-row">
+              <text class="vwb__info-label">视频元信息</text>
+              <text class="vwb__info-text">{{ videoMetaInfo }}</text>
+            </view>
+          </view>
+
+          <!-- 宽高比选择器（T14） -->
+          <view class="vwb__param-section">
+            <text class="vwb__section-title">宽高比</text>
+            <view class="vwb__param-options">
+              <view
+                v-for="ratio in aspectRatioOptions"
+                :key="ratio.value"
+                :class="['vwb__param-chip', { 'vwb__param-chip--active': selectedAspectRatio === ratio.value }]"
+                @tap="selectedAspectRatio = ratio.value"
+              >
+                <text>{{ ratio.label }}</text>
+              </view>
+            </view>
+          </view>
+
+          <!-- 渲染参数：时长选择（T14） -->
+          <view class="vwb__param-section">
+            <text class="vwb__section-title">视频时长</text>
+            <view class="vwb__param-options">
+              <view
+                v-for="dur in durationOptions"
+                :key="dur"
+                :class="['vwb__param-chip', { 'vwb__param-chip--active': selectedDuration === dur }]"
+                @tap="selectedDuration = dur"
+              >
+                <text>{{ dur }}s</text>
+              </view>
+            </view>
+          </view>
+
+          <!-- 渲染参数：尺寸 / 方向（T14） -->
+          <view class="vwb__param-section">
+            <text class="vwb__section-title">视频尺寸</text>
+            <view class="vwb__param-options">
+              <view
+                v-for="size in sizeOptions"
+                :key="size.value"
+                :class="['vwb__param-chip', { 'vwb__param-chip--active': selectedSize === size.value }]"
+                @tap="selectedSize = size.value"
+              >
+                <text>{{ size.label }}</text>
+              </view>
+            </view>
+          </view>
+
+          <view class="vwb__param-section">
+            <text class="vwb__section-title">画面方向</text>
+            <view class="vwb__param-options">
+              <view
+                v-for="ori in orientationOptions"
+                :key="ori.value"
+                :class="['vwb__param-chip', { 'vwb__param-chip--active': selectedOrientation === ori.value }]"
+                @tap="selectedOrientation = ori.value"
+              >
+                <text>{{ ori.label }}</text>
+              </view>
+            </view>
+          </view>
+
+          <!-- 视频提示词编辑区（T14） -->
+          <view class="vwb__prompt-editor">
+            <view class="vwb__prompt-editor-header">
               <text class="vwb__info-label">视频提示词</text>
-              <text class="vwb__info-text vwb__info-text--prompt">{{ shotData.video_prompt }}</text>
+              <view v-if="videoPromptEdited" class="vwb__prompt-dirty-badge">
+                <text>已修改</text>
+              </view>
             </view>
-            <view v-if="!shotData?.video_url" class="vwb__placeholder">
-              <text class="vwb__placeholder-icon">▶</text>
-              <text class="vwb__placeholder-title">暂无视频</text>
-              <text class="vwb__placeholder-desc">点击下方"重新生成"生成视频</text>
-            </view>
+            <textarea
+              v-model="editedVideoPrompt"
+              class="vwb__prompt-textarea"
+              placeholder="暂无视频提示词"
+              :maxlength="3000"
+              :auto-height="true"
+            />
+          </view>
+
+          <!-- 空状态 -->
+          <view v-if="!shotData?.video_url && shotData?.status !== 'failed'" class="vwb__placeholder">
+            <text class="vwb__placeholder-icon">▶</text>
+            <text class="vwb__placeholder-title">暂无视频</text>
+            <text class="vwb__placeholder-desc">点击下方"重新生成"生成视频</text>
           </view>
         </view>
       </scroll-view>
@@ -374,12 +567,66 @@ const showRedrawPrompt = ref(false)
 /** 重绘提示词文本 */
 const redrawPromptText = ref('')
 
+// ── 视频相关状态（T14）──
+/** 编辑中的视频提示词 */
+const editedVideoPrompt = ref('')
+/** 原始视频提示词 */
+const originalVideoPrompt = ref('')
+/** 选中的宽高比 */
+const selectedAspectRatio = ref<'16:9' | '9:16' | '1:1' | '4:3' | '3:2' | '2:3'>('16:9')
+/** 选中的视频时长（秒） */
+const selectedDuration = ref<5 | 10 | 15>(15)
+/** 选中的视频尺寸 */
+const selectedSize = ref<'small' | 'medium' | 'large'>('large')
+/** 选中的画面方向 */
+const selectedOrientation = ref<'landscape' | 'portrait'>('landscape')
+
+// ── 场景相关状态（T15）──
+/** 场景资产列表 */
+const sceneAssets = ref<VideoAsset[]>([])
+/** 场景资产加载中 */
+const sceneLoading = ref(false)
+/** 当前选中的场景资产 ID */
+const selectedSceneAssetId = ref<number | null>(null)
+/** 编辑中的场景提示词 */
+const editedScenePrompt = ref('')
+/** 原始场景提示词 */
+const originalScenePrompt = ref('')
+/** 是否显示场景重绘面板 */
+const showSceneRedrawPrompt = ref(false)
+
 // ── 提示词编辑追踪 ──
 /** 原始故事版提示词（用于判断是否修改） */
 const originalStoryboardPrompt = ref('')
 /** 提示词是否被修改 */
 const promptEdited = computed(() => {
   return editedStoryboardPrompt.value !== originalStoryboardPrompt.value
+})
+
+/** 视频提示词是否被修改（T14） */
+const videoPromptEdited = computed(() => {
+  return editedVideoPrompt.value !== originalVideoPrompt.value
+})
+
+/** 场景提示词是否被修改（T15） */
+const scenePromptEdited = computed(() => {
+  return editedScenePrompt.value !== originalScenePrompt.value
+})
+
+/** 视频元信息（时长、分辨率等展示文本）（T14） */
+const videoMetaInfo = computed(() => {
+  const parts: string[] = []
+  if (selectedDuration.value) {
+    parts.push(`时长 ${selectedDuration.value}s`)
+  }
+  if (selectedAspectRatio.value) {
+    parts.push(`宽高比 ${selectedAspectRatio.value}`)
+  }
+  if (selectedSize.value) {
+    parts.push(`尺寸 ${selectedSize.value === 'large' ? '大' : selectedSize.value === 'medium' ? '中' : '小'}`)
+  }
+  parts.push(`方向 ${selectedOrientation.value === 'landscape' ? '横屏' : '竖屏'}`)
+  return parts.length > 0 ? parts.join(' · ') : ''
 })
 
 /** 标签栏配置 */
@@ -394,6 +641,34 @@ const tabs: TabConfig[] = [
   { key: 'storyboard', label: '故事版', icon: '🎬' },
   { key: 'scene', label: '场景', icon: '🏞' },
   { key: 'video', label: '视频', icon: '▶' },
+]
+
+// ── 选项常量（T14）──
+
+/** 宽高比选项 */
+const aspectRatioOptions: Array<{ value: '16:9' | '9:16' | '1:1' | '4:3' | '3:2' | '2:3'; label: string }> = [
+  { value: '16:9', label: '16:9' },
+  { value: '9:16', label: '9:16' },
+  { value: '1:1', label: '1:1' },
+  { value: '4:3', label: '4:3' },
+  { value: '3:2', label: '3:2' },
+  { value: '2:3', label: '2:3' },
+]
+
+/** 视频时长选项 */
+const durationOptions: Array<5 | 10 | 15> = [5, 10, 15]
+
+/** 视频尺寸选项 */
+const sizeOptions: Array<{ value: 'small' | 'medium' | 'large'; label: string }> = [
+  { value: 'small', label: '小' },
+  { value: 'medium', label: '中' },
+  { value: 'large', label: '大' },
+]
+
+/** 画面方向选项 */
+const orientationOptions: Array<{ value: 'landscape' | 'portrait'; label: string }> = [
+  { value: 'landscape', label: '横屏' },
+  { value: 'portrait', label: '竖屏' },
 ]
 
 /** 镜头序号（从 shotData 中读取） */
@@ -527,6 +802,7 @@ function switchTab(type: CardType) {
   currentType.value = type
   // 切换标签时取消重绘面板
   showRedrawPrompt.value = false
+  showSceneRedrawPrompt.value = false
 }
 
 // ── 加载数据 ──
@@ -568,6 +844,93 @@ async function refreshStoryboardVersions() {
   await loadStoryboardVersions()
 }
 
+/** 加载场景资产列表（T15） */
+async function loadSceneAssets() {
+  if (!props.chapterId) return
+  sceneLoading.value = true
+  try {
+    const result = await videoApi.listVideoAssets(props.chapterId, 'scene')
+    sceneAssets.value = (result.assets || []).filter(
+      // 只显示属于当前镜头的场景资产（如果有 shot_id 则过滤）
+      (a) => a.shot_id == null || a.shot_id === props.shotId
+    )
+  } catch (e: any) {
+    uni.showToast({ title: e?.message || '加载场景资产失败', icon: 'none' })
+    sceneAssets.value = []
+  } finally {
+    sceneLoading.value = false
+  }
+}
+
+/** 选择场景资产（T15） */
+function selectSceneAsset(assetId: number) {
+  selectedSceneAssetId.value = assetId === selectedSceneAssetId.value ? null : assetId
+}
+
+/** 视频重试（T14） */
+async function handleVideoRetry() {
+  if (busy.value || !props.shotId) return
+  busy.value = 'retryVideo'
+  try {
+    await videoApi.regenerateChapterWorkflowVideo(props.shotId, undefined, undefined, selectedAspectRatio.value as '16:9' | '9:16')
+    uni.showToast({ title: '视频重新生成已提交', icon: 'success' })
+    emit('updated')
+  } catch (e: any) {
+    uni.showToast({ title: e?.message || '重试视频生成失败', icon: 'none' })
+  } finally {
+    busy.value = null
+  }
+}
+
+/** 小程序视频兜底：在浏览器中打开（T14） */
+function openVideoInBrowser() {
+  const url = props.shotData?.video_url
+  if (!url) return
+  const fullUrl = assetUrl(url)
+  // uni-app 复制链接到剪贴板
+  uni.setClipboardData({
+    data: fullUrl,
+    success() {
+      uni.showToast({ title: '链接已复制，请在浏览器中粘贴打开', icon: 'none', duration: 2500 })
+    },
+    fail() {
+      // H5 环境兜底
+      uni.showModal({
+        title: '请在浏览器中打开',
+        content: fullUrl,
+        showCancel: false,
+      })
+    },
+  })
+}
+
+/** 取消场景重绘（T15） */
+function cancelSceneRedraw() {
+  showSceneRedrawPrompt.value = false
+  redrawPromptText.value = ''
+}
+
+/** 确认场景重绘（T15） */
+async function confirmSceneRedraw() {
+  if (busy.value || !selectedSceneAssetId.value) return
+  showSceneRedrawPrompt.value = false
+  busy.value = 'redraw'
+  try {
+    const assetId = selectedSceneAssetId.value
+    await videoApi.regenerateVideoAsset(assetId, {
+      prompt: redrawPromptText.value || undefined,
+    })
+    uni.showToast({ title: '已提交场景重绘', icon: 'success' })
+    await loadSceneAssets()
+    emit('updated')
+  } catch (e: any) {
+    uni.showToast({ title: e?.message || '场景重绘失败', icon: 'none' })
+  } finally {
+    busy.value = null
+    redrawPromptText.value = ''
+  }
+}
+
 /** 选择角色资产 */
 function selectCharacterAsset(assetId: number) {
   selectedCharacterAssetId.value = assetId === selectedCharacterAssetId.value ? null : assetId
@@ -601,6 +964,15 @@ watch(currentType, (type) => {
     // 同步提示词编辑区
     editedStoryboardPrompt.value = props.shotData?.storyboard_prompt || ''
     originalStoryboardPrompt.value = props.shotData?.storyboard_prompt || ''
+  } else if (type === 'scene') {
+    // T15：加载场景资产 + 同步场景提示词
+    loadSceneAssets()
+    editedScenePrompt.value = props.shotData?.scene_prompt || ''
+    originalScenePrompt.value = props.shotData?.scene_prompt || ''
+  } else if (type === 'video') {
+    // T14：同步视频提示词
+    editedVideoPrompt.value = props.shotData?.video_prompt || ''
+    originalVideoPrompt.value = props.shotData?.video_prompt || ''
   }
 })
 
@@ -611,6 +983,28 @@ watch(
     if (currentType.value === 'storyboard') {
       editedStoryboardPrompt.value = newPrompt || ''
       originalStoryboardPrompt.value = newPrompt || ''
+    }
+  }
+)
+
+/** 监听 shotData 视频提示词变化（T14） */
+watch(
+  () => props.shotData?.video_prompt,
+  (newPrompt) => {
+    if (currentType.value === 'video') {
+      editedVideoPrompt.value = newPrompt || ''
+      originalVideoPrompt.value = newPrompt || ''
+    }
+  }
+)
+
+/** 监听 shotData 场景提示词变化（T15） */
+watch(
+  () => props.shotData?.scene_prompt,
+  (newPrompt) => {
+    if (currentType.value === 'scene') {
+      editedScenePrompt.value = newPrompt || ''
+      originalScenePrompt.value = newPrompt || ''
     }
   }
 )
@@ -627,11 +1021,21 @@ watch(
           loadStoryboardVersions()
           editedStoryboardPrompt.value = props.shotData?.storyboard_prompt || ''
           originalStoryboardPrompt.value = props.shotData?.storyboard_prompt || ''
+        } else if (currentType.value === 'scene') {
+          // T15：初始加载场景数据
+          loadSceneAssets()
+          editedScenePrompt.value = props.shotData?.scene_prompt || ''
+          originalScenePrompt.value = props.shotData?.scene_prompt || ''
+        } else if (currentType.value === 'video') {
+          // T14：初始同步视频提示词
+          editedVideoPrompt.value = props.shotData?.video_prompt || ''
+          originalVideoPrompt.value = props.shotData?.video_prompt || ''
         }
       })
     } else {
       // 关闭时重置状态
       showRedrawPrompt.value = false
+      showSceneRedrawPrompt.value = false
       redrawPromptText.value = ''
     }
   }
@@ -643,6 +1047,7 @@ watch(
 function handleClose() {
   busy.value = null
   showRedrawPrompt.value = false
+  showSceneRedrawPrompt.value = false
   emit('close')
 }
 
@@ -683,9 +1088,26 @@ async function handleRegenerate() {
         await loadStoryboardVersions()
         break
       case 'video':
-        // T11/T15：重新生成视频
-        await videoApi.regenerateChapterWorkflowVideo(props.shotId)
+        // T14：重新生成视频（传递渲染参数）
+        await videoApi.regenerateChapterWorkflowVideo(
+          props.shotId,
+          editedVideoPrompt.value || undefined,
+          undefined, // reference_asset_ids 由后端按工作流配置取
+          selectedAspectRatio.value as '16:9' | '9:16'
+        )
         uni.showToast({ title: '已提交重新生成', icon: 'success' })
+        break
+      case 'scene':
+        // T15：重新生成场景参考图
+        if (!selectedSceneAssetId.value) {
+          uni.showToast({ title: '请先选择场景资产，或先生成场景参考图', icon: 'none' })
+          return
+        }
+        await videoApi.regenerateVideoAsset(selectedSceneAssetId.value, {
+          prompt: editedScenePrompt.value || undefined,
+        })
+        uni.showToast({ title: '已提交场景重新生成', icon: 'success' })
+        await loadSceneAssets()
         break
       default:
         uni.showToast({ title: `${getTypeLabel(currentType.value)} 重新生成即将实现`, icon: 'none' })
@@ -736,11 +1158,24 @@ async function handleUploadReplace() {
         emit('updated')
       }
     } else if (type === 'video') {
-      // T11/T15：选择视频后上传
+      // T14：选择视频后上传
       const res = await uni.chooseVideo({ sourceType: ['album'] })
       if (res.tempFilePath) {
         await videoApi.uploadShotVideo(props.shotId, res.tempFilePath)
         uni.showToast({ title: '视频已上传', icon: 'success' })
+        emit('updated')
+      }
+    } else if (type === 'scene') {
+      // T15：选择图片后替换场景资产
+      if (!selectedSceneAssetId.value) {
+        uni.showToast({ title: '请先选择要替换的场景资产', icon: 'none' })
+        return
+      }
+      const res = await uni.chooseImage({ count: 1, sizeType: ['compressed'] })
+      if (res.tempFilePaths.length > 0) {
+        await videoApi.replaceVideoAsset(selectedSceneAssetId.value, res.tempFilePaths[0])
+        uni.showToast({ title: '场景资产已替换', icon: 'success' })
+        await loadSceneAssets()
         emit('updated')
       }
     } else {
@@ -784,10 +1219,18 @@ async function handleRedraw() {
         await loadStoryboardVersions()
         break
       case 'video':
-        // T11/T15：重新生成视频
-        await videoApi.regenerateChapterWorkflowVideo(props.shotId)
-        uni.showToast({ title: '已提交重新生成', icon: 'success' })
+        // T14：视频类型不支持蒙版重绘
+        uni.showToast({ title: '视频类型不支持蒙版重绘，请使用"重新生成"', icon: 'none' })
         break
+      case 'scene':
+        // T15：场景重绘（需先选中场景资产）
+        if (!selectedSceneAssetId.value) {
+          uni.showToast({ title: '请先选择要重绘的场景资产', icon: 'none' })
+          return
+        }
+        showSceneRedrawPrompt.value = true
+        redrawPromptText.value = ''
+        return // 退出函数，等待用户在面板中确认
       default:
         uni.showToast({ title: `${getTypeLabel(currentType.value)} 重绘即将实现`, icon: 'none' })
         break
@@ -874,9 +1317,20 @@ async function handleDelete() {
         storyboardVersions.value = []
         break
       case 'video':
-        // T11/T15：清除视频
+        // T14：清除视频
         await videoApi.clearShotVideo(props.shotId)
         uni.showToast({ title: '视频已清除', icon: 'success' })
+        break
+      case 'scene':
+        // T15：删除场景资产
+        if (!selectedSceneAssetId.value) {
+          uni.showToast({ title: '请先选择要删除的场景资产', icon: 'none' })
+          return
+        }
+        await videoApi.deleteVideoAsset(selectedSceneAssetId.value)
+        uni.showToast({ title: '场景资产已删除', icon: 'success' })
+        selectedSceneAssetId.value = null
+        await loadSceneAssets()
         break
       default:
         uni.showToast({ title: `${getTypeLabel(currentType.value)} 类型不支持删除`, icon: 'none' })
@@ -929,10 +1383,10 @@ async function handlePromptSave() {
       prompts.storyboard_prompt = editedStoryboardPrompt.value || null
     }
     if (currentType.value === 'video') {
-      prompts.video_prompt = props.shotData?.video_prompt ?? null
+      prompts.video_prompt = editedVideoPrompt.value || null
     }
     if (currentType.value === 'scene') {
-      prompts.scene_prompt = props.shotData?.scene_prompt ?? null
+      prompts.scene_prompt = editedScenePrompt.value || null
     }
 
     if (Object.keys(prompts).length > 0) {
@@ -940,6 +1394,10 @@ async function handlePromptSave() {
       // 更新原始提示词记录
       if (currentType.value === 'storyboard') {
         originalStoryboardPrompt.value = editedStoryboardPrompt.value
+      } else if (currentType.value === 'video') {
+        originalVideoPrompt.value = editedVideoPrompt.value
+      } else if (currentType.value === 'scene') {
+        originalScenePrompt.value = editedScenePrompt.value
       }
       uni.showToast({ title: '提示词已保存', icon: 'success' })
     } else {
@@ -1500,6 +1958,125 @@ function getTypeLabel(type: CardType): string {
 
   &:active {
     background: $lv-primary-dark;
+    transform: scale(0.96);
+  }
+}
+
+// ── 小程序视频兜底（T14）──
+.vwb__fallback {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 16rpx;
+  padding: 40rpx 32rpx;
+  text-align: center;
+}
+
+.vwb__fallback-icon {
+  font-size: 64rpx;
+  opacity: 0.4;
+}
+
+.vwb__fallback-title {
+  font-size: $lv-font-base;
+  font-weight: 600;
+  color: $lv-text-secondary;
+}
+
+.vwb__fallback-desc {
+  font-size: $lv-font-sm;
+  color: $lv-text-muted;
+  line-height: 1.5;
+}
+
+.vwb__fallback-btn {
+  margin-top: 8rpx;
+  padding: 16rpx 40rpx;
+  font-size: $lv-font-base;
+  color: $lv-text-on-primary;
+  background: $lv-primary;
+  border-radius: $lv-radius-sm;
+  border: none;
+  line-height: 1.4;
+
+  &::after {
+    border: none;
+  }
+}
+
+// ── 错误/重试区（T14）──
+.vwb__error-section {
+  display: flex;
+  align-items: flex-start;
+  gap: 16rpx;
+  padding: 20rpx;
+  background: $lv-error-bg;
+  border-radius: $lv-radius-sm;
+  border: 1rpx solid #f5c6cb;
+}
+
+.vwb__error-icon {
+  font-size: 36rpx;
+  flex-shrink: 0;
+  margin-top: 2rpx;
+}
+
+.vwb__error-content {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 6rpx;
+  min-width: 0;
+}
+
+.vwb__error-title {
+  font-size: $lv-font-sm;
+  font-weight: 600;
+  color: $lv-error;
+}
+
+.vwb__error-desc {
+  font-size: $lv-font-xs;
+  color: $lv-text-secondary;
+  line-height: 1.5;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+}
+
+// ── 参数选择区（T14）──
+.vwb__param-section {
+  display: flex;
+  flex-direction: column;
+  gap: 10rpx;
+}
+
+.vwb__param-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10rpx;
+}
+
+.vwb__param-chip {
+  padding: 10rpx 22rpx;
+  border-radius: $lv-radius-full;
+  background: $lv-surface-solid;
+  border: 1rpx solid $lv-border-light;
+  font-size: $lv-font-xs;
+  color: $lv-text-secondary;
+  transition: all 0.2s;
+
+  &--active {
+    background: $lv-primary-lighter;
+    border-color: $lv-primary;
+    color: $lv-primary;
+    font-weight: 600;
+  }
+
+  &:active {
     transform: scale(0.96);
   }
 }
