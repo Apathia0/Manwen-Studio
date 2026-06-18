@@ -8,6 +8,9 @@ import type {
 
 export type VideoWorkflowPhase = 'idle' | 'screenplay' | 'shots' | 'storyboard' | 'video' | 'concat'
 
+/** 工作台卡片类型 */
+export type WorkbenchCardType = 'character' | 'storyboard' | 'scene' | 'video'
+
 export const useVideoWorkflowStore = defineStore('videoWorkflow', () => {
   const screenplay = ref('')
   const scenes = ref<ScriptScene[]>([])
@@ -31,6 +34,12 @@ export const useVideoWorkflowStore = defineStore('videoWorkflow', () => {
   const loading = ref(false)
   const generating = ref(false)
   const phase = ref<VideoWorkflowPhase>('idle')
+
+  // 工作台状态
+  const workbenchVisible = ref(false)
+  const workbenchShotId = ref<number | null>(null)
+  const workbenchShotData = ref<ChapterVideoShot | null>(null)
+  const workbenchInitialType = ref<WorkbenchCardType | null>(null)
 
   const isBusy = computed(() => generating.value)
 
@@ -352,6 +361,20 @@ export const useVideoWorkflowStore = defineStore('videoWorkflow', () => {
     selectedShotIds.value = []
   }
 
+  function openWorkbench(shotId: number, shotData: ChapterVideoShot | null, initialType?: WorkbenchCardType) {
+    workbenchVisible.value = true
+    workbenchShotId.value = shotId
+    workbenchShotData.value = shotData
+    workbenchInitialType.value = initialType || null
+  }
+
+  function closeWorkbench() {
+    workbenchVisible.value = false
+    workbenchShotId.value = null
+    workbenchShotData.value = null
+    workbenchInitialType.value = null
+  }
+
   return {
     screenplay,
     scenes,
@@ -363,6 +386,7 @@ export const useVideoWorkflowStore = defineStore('videoWorkflow', () => {
     currentWorkflow, currentShots, chapterAssets, stylePresets,
     selectedReferenceIds, selectedStyle, styleReferenceImageUrl,
     videoAspectRatio, selectedShotIds, skippedShotIds, workflowRunning, concatVideoUrl,
+    workbenchVisible, workbenchShotId, workbenchShotData, workbenchInitialType,
     loading,
     generating,
     phase,
@@ -381,5 +405,6 @@ export const useVideoWorkflowStore = defineStore('videoWorkflow', () => {
     runAllStages, concatVideo, resetWorkflow,
     clearShotStoryboard, clearShotVideo, saveShotPrompts, uploadStyleReferenceImage,
     toggleShotSelection, toggleShotSkip, selectAllShots, clearSelection,
+    openWorkbench, closeWorkbench,
   }
 })
