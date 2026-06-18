@@ -135,6 +135,82 @@
             />
           </view>
 
+          <!-- 预览组装提示词（T13+T17） -->
+          <view class="vwb__preview-section">
+            <view class="vwb__preview-header">
+              <text class="vwb__section-title">预览组装提示词</text>
+              <view
+                :class="['vwb__versions-refresh', { 'vwb__versions-refresh--spin': previewPromptLoading && currentType === 'storyboard' }]"
+                @tap="handlePreviewPrompt"
+              >
+                <text>{{ (previewPromptLoading && currentType === 'storyboard') ? '⟳' : '🔍' }}</text>
+                <text>{{ (previewPromptLoading && currentType === 'storyboard') ? '加载中…' : '获取' }}</text>
+              </view>
+            </view>
+
+            <!-- 组装后三段式展示 -->
+            <view v-if="previewPromptParts && previewPromptVisible && currentType === 'storyboard'" class="vwb__preview-parts">
+              <view v-if="previewPromptParts.part1" class="vwb__preview-part">
+                <text class="vwb__preview-part-label">Part 1 — 描述</text>
+                <textarea
+                  :value="previewPromptParts.part1"
+                  class="vwb__preview-textarea"
+                  disabled
+                  :maxlength="-1"
+                  :auto-height="true"
+                />
+              </view>
+              <view v-if="previewPromptParts.part2" class="vwb__preview-part">
+                <text class="vwb__preview-part-label">Part 2 — 运镜</text>
+                <textarea
+                  :value="previewPromptParts.part2"
+                  class="vwb__preview-textarea"
+                  disabled
+                  :maxlength="-1"
+                  :auto-height="true"
+                />
+              </view>
+              <view v-if="previewPromptParts.part3" class="vwb__preview-part">
+                <text class="vwb__preview-part-label">Part 3 — 质量/风格</text>
+                <textarea
+                  :value="previewPromptParts.part3"
+                  class="vwb__preview-textarea"
+                  disabled
+                  :maxlength="-1"
+                  :auto-height="true"
+                />
+              </view>
+
+              <!-- 完整组装提示词 -->
+              <view class="vwb__preview-part">
+                <text class="vwb__preview-part-label">完整组装</text>
+                <textarea
+                  :value="previewPromptText"
+                  class="vwb__preview-textarea vwb__preview-textarea--full"
+                  disabled
+                  :maxlength="-1"
+                  :auto-height="true"
+                />
+              </view>
+
+              <!-- 复制按钮 -->
+              <view class="vwb__preview-actions">
+                <view class="vwb__action-btn vwb__action-btn--secondary" @tap="copyPreviewPrompt">
+                  <text class="vwb__action-icon">📋</text>
+                  <text class="vwb__action-label">复制完整提示词</text>
+                </view>
+                <view class="vwb__action-btn vwb__action-btn--secondary" @tap="closePreviewPrompt">
+                  <text class="vwb__action-label">收起</text>
+                </view>
+              </view>
+            </view>
+
+            <!-- 空状态 -->
+            <view v-if="!previewPromptText && !previewPromptLoading && currentType === 'storyboard'" class="vwb__placeholder vwb__placeholder--compact">
+              <text class="vwb__placeholder-desc">点击"获取"查看后端组装后的完整提示词</text>
+            </view>
+          </view>
+
           <!-- 故事版版本列表（T13） -->
           <view v-if="storyboardVersions.length > 0" class="vwb__versions">
             <view class="vwb__versions-header">
@@ -423,6 +499,82 @@
             />
           </view>
 
+          <!-- 预览组装提示词（T14+T17） -->
+          <view class="vwb__preview-section">
+            <view class="vwb__preview-header">
+              <text class="vwb__section-title">预览组装提示词</text>
+              <view
+                :class="['vwb__versions-refresh', { 'vwb__versions-refresh--spin': previewPromptLoading && currentType === 'video' }]"
+                @tap="handlePreviewPrompt"
+              >
+                <text>{{ (previewPromptLoading && currentType === 'video') ? '⟳' : '🔍' }}</text>
+                <text>{{ (previewPromptLoading && currentType === 'video') ? '加载中…' : '获取' }}</text>
+              </view>
+            </view>
+
+            <!-- 组装后三段式展示 -->
+            <view v-if="previewPromptParts && previewPromptVisible && currentType === 'video'" class="vwb__preview-parts">
+              <view v-if="previewPromptParts.part1" class="vwb__preview-part">
+                <text class="vwb__preview-part-label">Part 1 — 描述</text>
+                <textarea
+                  :value="previewPromptParts.part1"
+                  class="vwb__preview-textarea"
+                  disabled
+                  :maxlength="-1"
+                  :auto-height="true"
+                />
+              </view>
+              <view v-if="previewPromptParts.part2" class="vwb__preview-part">
+                <text class="vwb__preview-part-label">Part 2 — 运镜</text>
+                <textarea
+                  :value="previewPromptParts.part2"
+                  class="vwb__preview-textarea"
+                  disabled
+                  :maxlength="-1"
+                  :auto-height="true"
+                />
+              </view>
+              <view v-if="previewPromptParts.part3" class="vwb__preview-part">
+                <text class="vwb__preview-part-label">Part 3 — 质量/风格</text>
+                <textarea
+                  :value="previewPromptParts.part3"
+                  class="vwb__preview-textarea"
+                  disabled
+                  :maxlength="-1"
+                  :auto-height="true"
+                />
+              </view>
+
+              <!-- 完整组装提示词 -->
+              <view class="vwb__preview-part">
+                <text class="vwb__preview-part-label">完整组装</text>
+                <textarea
+                  :value="previewPromptText"
+                  class="vwb__preview-textarea vwb__preview-textarea--full"
+                  disabled
+                  :maxlength="-1"
+                  :auto-height="true"
+                />
+              </view>
+
+              <!-- 复制按钮 -->
+              <view class="vwb__preview-actions">
+                <view class="vwb__action-btn vwb__action-btn--secondary" @tap="copyPreviewPrompt">
+                  <text class="vwb__action-icon">📋</text>
+                  <text class="vwb__action-label">复制完整提示词</text>
+                </view>
+                <view class="vwb__action-btn vwb__action-btn--secondary" @tap="closePreviewPrompt">
+                  <text class="vwb__action-label">收起</text>
+                </view>
+              </view>
+            </view>
+
+            <!-- 空状态 -->
+            <view v-if="!previewPromptText && !previewPromptLoading && currentType === 'video'" class="vwb__placeholder vwb__placeholder--compact">
+              <text class="vwb__placeholder-desc">点击"获取"查看后端组装后的完整提示词</text>
+            </view>
+          </view>
+
           <!-- 空状态 -->
           <view v-if="!shotData?.video_url && shotData?.status !== 'failed'" class="vwb__placeholder">
             <text class="vwb__placeholder-icon">▶</text>
@@ -594,6 +746,16 @@ const editedScenePrompt = ref('')
 const originalScenePrompt = ref('')
 /** 是否显示场景重绘面板 */
 const showSceneRedrawPrompt = ref(false)
+
+// ── 预览组装提示词（T17）──
+/** 预览面板是否可见 */
+const previewPromptVisible = ref(false)
+/** 组装后的完整提示词文本 */
+const previewPromptText = ref('')
+/** 提示词三段式分解 */
+const previewPromptParts = ref<{ part1: string; part2: string; part3: string | null } | null>(null)
+/** 预览加载中 */
+const previewPromptLoading = ref(false)
 
 // ── 提示词编辑追踪 ──
 /** 原始故事版提示词（用于判断是否修改） */
@@ -803,6 +965,10 @@ function switchTab(type: CardType) {
   // 切换标签时取消重绘面板
   showRedrawPrompt.value = false
   showSceneRedrawPrompt.value = false
+  // 重置预览提示词状态
+  previewPromptVisible.value = false
+  previewPromptText.value = ''
+  previewPromptParts.value = null
 }
 
 // ── 加载数据 ──
@@ -1048,6 +1214,9 @@ function handleClose() {
   busy.value = null
   showRedrawPrompt.value = false
   showSceneRedrawPrompt.value = false
+  previewPromptVisible.value = false
+  previewPromptText.value = ''
+  previewPromptParts.value = null
   emit('close')
 }
 
@@ -1409,6 +1578,57 @@ async function handlePromptSave() {
   } finally {
     busy.value = null
   }
+}
+
+/**
+ * 7. 预览组装提示词（T17）
+ * 从后端获取组装后的完整提示词，在面板中展示三段式分解和完整文本
+ */
+async function handlePreviewPrompt() {
+  if (previewPromptLoading.value || !props.shotId) return
+  // 仅 storyboard 和 video 类型支持
+  if (currentType.value !== 'storyboard' && currentType.value !== 'video') {
+    uni.showToast({ title: '仅故事版和视频支持预览提示词', icon: 'none' })
+    return
+  }
+  previewPromptLoading.value = true
+  try {
+    const result = await videoApi.previewVideoPrompt(props.shotId)
+    previewPromptText.value = result.assembled_prompt || ''
+    previewPromptParts.value = result.parts || null
+    previewPromptVisible.value = true
+  } catch (e: any) {
+    uni.showToast({ title: e?.message || '获取组装提示词失败', icon: 'none' })
+    previewPromptText.value = ''
+    previewPromptParts.value = null
+    previewPromptVisible.value = false
+  } finally {
+    previewPromptLoading.value = false
+  }
+}
+
+/** 复制完整提示词到剪贴板 */
+function copyPreviewPrompt() {
+  if (!previewPromptText.value) {
+    uni.showToast({ title: '暂无提示词可复制', icon: 'none' })
+    return
+  }
+  uni.setClipboardData({
+    data: previewPromptText.value,
+    success() {
+      uni.showToast({ title: '已复制到剪贴板', icon: 'success' })
+    },
+    fail() {
+      uni.showToast({ title: '复制失败', icon: 'none' })
+    },
+  })
+}
+
+/** 关闭预览面板 */
+function closePreviewPrompt() {
+  previewPromptVisible.value = false
+  previewPromptText.value = ''
+  previewPromptParts.value = null
 }
 
 /** 获取卡片类型中文标签 */
@@ -2181,5 +2401,69 @@ function getTypeLabel(type: CardType): string {
 .vwb__action-label {
   font-size: $lv-font-sm;
   white-space: nowrap;
+}
+
+// ── 预览组装提示词（T17）──
+.vwb__preview-section {
+  display: flex;
+  flex-direction: column;
+  gap: 12rpx;
+}
+
+.vwb__preview-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.vwb__preview-parts {
+  display: flex;
+  flex-direction: column;
+  gap: 12rpx;
+}
+
+.vwb__preview-part {
+  display: flex;
+  flex-direction: column;
+  gap: 6rpx;
+}
+
+.vwb__preview-part-label {
+  font-size: $lv-font-xs;
+  color: $lv-text-muted;
+  font-weight: 500;
+  padding-left: 4rpx;
+}
+
+.vwb__preview-textarea {
+  width: 100%;
+  min-height: 100rpx;
+  padding: 16rpx 20rpx;
+  font-size: $lv-font-sm;
+  color: $lv-text-primary;
+  background: $lv-surface-solid;
+  border-radius: $lv-radius-sm;
+  border: 1rpx solid $lv-border-light;
+  box-sizing: border-box;
+  line-height: 1.6;
+
+  &--full {
+    min-height: 160rpx;
+    background: $lv-primary-lighter;
+    border-color: $lv-primary;
+  }
+}
+
+.vwb__preview-actions {
+  display: flex;
+  gap: 12rpx;
+}
+
+.vwb__placeholder--compact {
+  padding: 24rpx 20rpx;
+}
+
+.vwb__placeholder--compact .vwb__placeholder-desc {
+  font-size: $lv-font-xs;
 }
 </style>
