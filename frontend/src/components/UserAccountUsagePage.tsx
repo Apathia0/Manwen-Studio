@@ -1,10 +1,11 @@
-import { useState } from 'react';
-import type { AuthUser, PublicPlatformSettings, UsageResponse, MySubscriptionResponse, EntitlementResponse, AdminOrderItem } from '../api';
+import { useState, useEffect } from 'react';
+import type { AuthUser, PublicPlatformSettings, UsageResponse, MySubscriptionResponse, EntitlementResponse, AdminOrderItem, QuotaPriceItem } from '../api';
 import {
   getApiKeySettings,
   saveApiKeySettings,
   clearApiKeySettings,
   changePassword as changePasswordApi,
+  getQuotaPrices,
 } from '../api';
 import {
   formatDateTime,
@@ -20,6 +21,7 @@ import {
 } from '../lib/format';
 import { toast } from '../lib/toast';
 import { PasswordChangeForm } from './PasswordChangeForm';
+import { QuotaPurchaseDialog } from './QuotaPurchaseDialog';
 
 /** 用户账户与用量页面 */
 export function UserAccountUsagePage({
@@ -32,6 +34,7 @@ export function UserAccountUsagePage({
   actioningOrderNo,
   onConfirmMockPayment,
   onCancelOrder,
+  onRefreshUsage,
 }: {
   session: AuthUser | null;
   platform: PublicPlatformSettings;
@@ -42,12 +45,20 @@ export function UserAccountUsagePage({
   actioningOrderNo: string | null;
   onConfirmMockPayment: (orderNo: string) => void;
   onCancelOrder: (orderNo: string) => void;
+  onRefreshUsage?: () => void;
 }) {
   const [apiSettings, setApiSettings] = useState(() => getApiKeySettings());
+  const [showQuotaDialog, setShowQuotaDialog] = useState<string | null>(null);
+  const [quotaPrices, setQuotaPrices] = useState<QuotaPriceItem[]>([]);
   const entitlementEntries = Object.entries(entitlements?.entitlements || {});
   const pendingOrder = orders.find((order) => order.status === 'pending') || null;
   const canOverrideApiKey = Boolean(session?.can_override_api_key);
   const canOverrideApiUrl = Boolean(session?.can_override_api_url);
+  const purchasableKeys = new Set(quotaPrices.map(p => p.feature_key));
+
+  useEffect(() => {
+    getQuotaPrices().then(setQuotaPrices).catch(() => {});
+  }, []);
 
   return (
     <div>
@@ -236,6 +247,7 @@ export function UserAccountUsagePage({
               <th className="px-4 py-3 font-medium">总量</th>
               <th className="px-4 py-3 font-medium">已用</th>
               <th className="px-4 py-3 font-medium">剩余</th>
+              <th className="px-4 py-3 font-medium">操作</th>
             </tr>
           </thead>
           <tbody>
@@ -260,6 +272,16 @@ export function UserAccountUsagePage({
                     <div className="mt-2 h-2.5 rounded-full bg-[#e5edf8]">
                       <div className="h-2.5 rounded-full bg-[#3b82f6]" style={{ width: `${percent}%` }} />
                     </div>
+                  </td>
+                  <td className="px-4 py-3">
+                    {purchasableKeys.has(item.feature_key) ? (
+                      <button
+                        onClick={() => setShowQuotaDialog(item.feature_key)}
+                        className="rounded-xl bg-[#1d4ed8] px-3 py-1.5 text-xs font-medium text-white hover:bg-[#1d4ed8]/90 transition"
+                      >
+                        购买
+                      </button>
+                    ) : null}
                   </td>
                 </tr>
               );
@@ -342,6 +364,15 @@ export function UserAccountUsagePage({
           </div>
         </div>
       </div>
+
+      {showQuotaDialog ? (
+        <QuotaPurchaseDialog
+          featureKey={showQuotaDialog}
+          usage={usage?.items?.find(i => i.feature_key === showQuotaDialog) || null}
+          onClose={() => setShowQuotaDialog(null)}
+          onSuccess={() => onRefreshUsage?.()}
+        />
+      ) : null}
     </div>
   );
 }

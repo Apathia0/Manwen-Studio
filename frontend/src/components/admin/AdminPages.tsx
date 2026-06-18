@@ -1083,11 +1083,22 @@ export function AdminAnnouncementPage({ onError }: { onError: (message: string) 
   );
 }
 
+const PRICING_ITEMS = [
+  { key: 'quota_framework_generate', label: '小说框架生成次数', desc: '用户每月可生成世界观、角色与大纲的次数', defaultPrice: 1.0 },
+  { key: 'quota_chapter_expand', label: '章节扩写次数', desc: '用户每月可将章节计划扩写成正文的次数', defaultPrice: 0.5 },
+  { key: 'quota_scene_generate', label: '分镜生成次数', desc: '用户每月可将文本拆分为漫画分镜的次数', defaultPrice: 0.3 },
+  { key: 'quota_manga_image_generate', label: '生图配额', desc: '用户每月可生成的图片总张数', defaultPrice: 0.2 },
+  { key: 'quota_ai_text_advanced', label: '高级文本 AI 调用次数', desc: '框架调整、继续扩展、文本改写等高级文本能力', defaultPrice: 0.3 },
+  { key: 'quota_video_shot_split', label: '拆镜次数', desc: '用户每月可拆镜次数', defaultPrice: 1.0 },
+  { key: 'quota_video_generate', label: '视频生成次数', desc: '用户每月可生成视频次数', defaultPrice: 2.0 },
+] as const;
+
 const PLATFORM_SETTINGS_TABS = [
   { key: 'basic', label: '基础信息' },
   { key: 'api', label: 'AI API 配置' },
   { key: 'auth-email', label: '认证与邮箱' },
   { key: 'payment', label: '支付配置' },
+  { key: 'pricing', label: '配额定价' },
 ] as const;
 
 export function AdminPlatformSettingsPage({
@@ -1371,6 +1382,39 @@ export function AdminPlatformSettingsPage({
                 </div>
               </div>
             </div>
+          </div>
+        </SectionCard>
+      )}
+
+      {activeTab === 'pricing' && (
+        <SectionCard title="配额定价" description="设置各项可消耗配额的单价（元/单位），用户在「账户与用量」页面购买配额时使用此价格。">
+          <div className="mt-1 grid gap-3 sm:grid-cols-2">
+            {PRICING_ITEMS.map((item) => {
+              const value = String(settings.pricing?.[item.key] ?? item.defaultPrice);
+              return (
+                <div key={item.key} className="rounded-2xl border border-[#e5edf8] bg-[#f8fbff] p-4">
+                  <div className="mb-1 text-sm font-semibold text-slate-900">{item.label}</div>
+                  <div className="mb-2 text-xs text-slate-500">{item.desc}</div>
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="number"
+                      min={0}
+                      step={0.1}
+                      value={value}
+                      onChange={(e) => {
+                        const v = parseFloat(e.target.value) || 0;
+                        setSettings((prev) => prev
+                          ? { ...prev, pricing: { ...prev.pricing, [item.key]: v } }
+                          : prev
+                        );
+                      }}
+                      className="w-28 rounded-xl border border-[#d7e3f4] px-3 py-1.5 text-sm text-slate-900 outline-none focus:border-[#60a5fa]"
+                    />
+                    <span className="text-sm text-slate-500">元/次</span>
+                  </div>
+                </div>
+              );
+            })}
           </div>
         </SectionCard>
       )}

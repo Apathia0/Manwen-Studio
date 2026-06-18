@@ -828,6 +828,7 @@ function App() {
               actioningOrderNo={actioningOrderNo}
               onConfirmMockPayment={confirmPendingOrder}
               onCancelOrder={cancelPendingOrder}
+              onRefreshUsage={refreshUsage}
             />
           )}
           {route === 'pricing' && (

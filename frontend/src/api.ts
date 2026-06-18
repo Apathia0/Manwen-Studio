@@ -624,6 +624,23 @@ export interface BillingCheckout {
   can_mock_confirm: boolean;
 }
 
+export interface QuotaPriceItem {
+  feature_key: string;
+  name: string;
+  description: string;
+  category: string;
+  price_per_unit: number;
+  unit: string;
+}
+
+export interface PurchaseQuotaResponse {
+  ok: boolean;
+  message: string;
+  status: string;
+  order: AdminOrderItem;
+  checkout: BillingCheckout;
+}
+
 export interface UsageItem {
   feature_key: string;
   limit: number;
@@ -865,6 +882,15 @@ export interface PlatformSettings {
     smtp_use_ssl: boolean;
   };
   payment: PaymentSettings;
+  pricing: {
+    quota_framework_generate: number;
+    quota_chapter_expand: number;
+    quota_scene_generate: number;
+    quota_manga_image_generate: number;
+    quota_ai_text_advanced: number;
+    quota_video_shot_split: number;
+    quota_video_generate: number;
+  };
 }
 
 export interface PublicPlatformSettings {
@@ -1053,6 +1079,28 @@ export async function getPaymentConfig(): Promise<{
   methods: PaymentMethodOption[];
 }> {
   const res = await fetch(`${BASE}/api/billing/payment-config`);
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function getQuotaPrices(): Promise<QuotaPriceItem[]> {
+  const res = await fetch(`${BASE}/api/billing/quota-prices`);
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function purchaseQuota(
+  featureKey: string,
+  amount: number,
+  paymentMethod?: string,
+): Promise<PurchaseQuotaResponse> {
+  const body: Record<string, unknown> = { feature_key: featureKey, amount };
+  if (paymentMethod) body.payment_method = paymentMethod;
+  const res = await fetch(`${BASE}/api/billing/purchase-quota`, {
+    method: 'POST',
+    headers: apiHeaders(true),
+    body: JSON.stringify(body),
+  });
   if (!res.ok) throw new Error(await res.text());
   return res.json();
 }

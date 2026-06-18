@@ -168,57 +168,67 @@ def _default_reload_enabled() -> bool:
 FEATURE_CATALOG: list[dict] = [
     {
         "key": "framework.generate.monthly_limit",
-        "name": "\u5c0f\u8bf4\u6846\u67b6\u751f\u6210\u6b21\u6570",
-        "description": "\u7528\u6237\u6bcf\u6708\u53ef\u751f\u6210\u4e16\u754c\u89c2\u3001\u89d2\u8272\u4e0e\u5927\u7eb2\u7684\u6b21\u6570\u3002",
-        "category": "\u5c0f\u8bf4\u521b\u4f5c",
+        "name": "小说框架生成次数",
+        "description": "用户每月可生成世界观、角色与大纲的次数。",
+        "category": "小说创作",
         "value_type": "number",
+        "purchasable": True,
+        "price_per_unit": 1.0,
         "default_rule": {"reset_period": "monthly", "deduct_mode": "on_success"},
     },
     {
         "key": "chapter.expand.monthly_limit",
-        "name": "\u7ae0\u8282\u6269\u5199\u6b21\u6570",
-        "description": "\u7528\u6237\u6bcf\u6708\u53ef\u5c06\u7ae0\u8282\u8ba1\u5212\u6269\u5199\u6210\u6b63\u6587\u7684\u6b21\u6570\u3002",
-        "category": "\u5c0f\u8bf4\u521b\u4f5c",
+        "name": "章节扩写次数",
+        "description": "用户每月可将章节计划扩写成正文的次数。",
+        "category": "小说创作",
         "value_type": "number",
+        "purchasable": True,
+        "price_per_unit": 0.5,
         "default_rule": {"reset_period": "monthly", "deduct_mode": "on_success"},
     },
     {
         "key": "scene.generate.monthly_limit",
-        "name": "\u5206\u955c\u751f\u6210\u6b21\u6570",
-        "description": "\u7528\u6237\u6bcf\u6708\u53ef\u5c06\u6587\u672c\u62c6\u5206\u4e3a\u6f2b\u753b\u5206\u955c\u7684\u6b21\u6570\u3002",
-        "category": "\u6f2b\u753b\u751f\u6210",
+        "name": "分镜生成次数",
+        "description": "用户每月可将文本拆分为漫画分镜的次数。",
+        "category": "漫画生成",
         "value_type": "number",
+        "purchasable": True,
+        "price_per_unit": 0.3,
         "default_rule": {"reset_period": "monthly", "deduct_mode": "on_success"},
     },
     {
         "key": "manga.image.generate.monthly_limit",
-        "name": "\u751f\u56fe\u914d\u989d",
-        "description": "\u7528\u6237\u6bcf\u6708\u53ef\u751f\u6210\u7684\u56fe\u7247\u603b\u5f20\u6570\uff08\u542b\u65b0\u751f\u6210\u548c\u91cd\u7ed8\uff09\u3002",
-        "category": "\u6f2b\u753b\u751f\u6210",
+        "name": "生图配额",
+        "description": "用户每月可生成的图片总张数（含新生成和重绘）。",
+        "category": "漫画生成",
         "value_type": "number",
+        "purchasable": True,
+        "price_per_unit": 0.2,
         "default_rule": {"reset_period": "monthly", "deduct_mode": "on_success"},
     },
     {
         "key": "ai.text.advanced_calls.monthly_limit",
-        "name": "\u9ad8\u7ea7\u6587\u672c AI \u8c03\u7528\u6b21\u6570",
-        "description": "\u7528\u4e8e\u6846\u67b6\u8c03\u6574\u3001\u7ee7\u7eed\u6269\u5c55\u3001\u6587\u672c\u6539\u5199\u3001\u6b63\u6587\u8c03\u6574\u3001\u8d28\u91cf\u8bc4\u4f30\u4e0e\u5355\u9879\u91cd\u751f\u6210\u7b49\u9ad8\u7ea7\u6587\u672c\u80fd\u529b\u3002",
-        "category": "\u9ad8\u7ea7\u6587\u672c\u80fd\u529b",
+        "name": "高级文本 AI 调用次数",
+        "description": "用于框架调整、继续扩展、文本改写、正文调整、质量评估与单项重生成等高级文本能力。",
+        "category": "高级文本能力",
         "value_type": "number",
+        "purchasable": True,
+        "price_per_unit": 0.3,
         "default_rule": {"reset_period": "monthly", "deduct_mode": "on_success"},
     },
     {
         "key": "manga.max_image_count_per_chapter",
-        "name": "\u5355\u7ae0\u8282\u6700\u5927\u51fa\u56fe\u6570",
-        "description": "\u5355\u4e2a\u7ae0\u8282\u5141\u8bb8\u751f\u6210\u7684\u6700\u5927\u6f2b\u753b\u9875\u6570\u3002",
-        "category": "\u6f2b\u753b\u751f\u6210",
+        "name": "单章节最大出图数",
+        "description": "单个章节允许生成的最大漫画页数。",
+        "category": "漫画生成",
         "value_type": "number",
         "default_rule": {"reset_period": "monthly", "deduct_mode": "on_success"},
     },
     {
         "key": "manga.allow_color_mode",
-        "name": "\u5141\u8bb8\u5f69\u6f2b\u6a21\u5f0f",
-        "description": "\u63a7\u5236\u8be5\u5957\u9910\u7528\u6237\u662f\u5426\u53ef\u5207\u6362\u5f69\u8272\u6f2b\u753b\u8f93\u51fa\u3002",
-        "category": "\u6f2b\u753b\u751f\u6210",
+        "name": "允许彩漫模式",
+        "description": "控制该套餐用户是否可切换彩色漫画输出。",
+        "category": "漫画生成",
         "value_type": "boolean",
         "default_rule": {"reset_period": "monthly", "deduct_mode": "on_success"},
     },
@@ -228,6 +238,8 @@ FEATURE_CATALOG: list[dict] = [
         "description": "用户每月可拆镜次数，每次点击顶部拆镜按钮消耗 1 次。",
         "category": "视频创作",
         "value_type": "number",
+        "purchasable": True,
+        "price_per_unit": 1.0,
         "default_rule": {"reset_period": "monthly", "deduct_mode": "on_success"},
     },
     {
@@ -236,11 +248,16 @@ FEATURE_CATALOG: list[dict] = [
         "description": "用户每月可生成视频次数，每次生成一个分镜视频消耗 1 次。",
         "category": "视频创作",
         "value_type": "number",
+        "purchasable": True,
+        "price_per_unit": 2.0,
         "default_rule": {"reset_period": "monthly", "deduct_mode": "on_success"},
     },
 ]
 
 FEATURE_CATALOG_MAP = {item["key"]: item for item in FEATURE_CATALOG}
+
+# 可购买的配额功能集合
+PURCHASABLE_FEATURE_KEYS = {f["key"] for f in FEATURE_CATALOG if f.get("purchasable")}
 
 PLAN_SEED_DEFAULTS: dict[str, dict[str, int | bool]] = {
     "free": {
@@ -654,6 +671,15 @@ def _platform_settings_snapshot(db: Session) -> dict:
             "enabled": bool(_get_platform_setting("platform.announcement.enabled", db, False)),
             "title": str(_get_platform_setting("platform.announcement.title", db, "") or ""),
             "content": str(_get_platform_setting("platform.announcement.content", db, "") or ""),
+        },
+        "pricing": {
+            "quota_framework_generate": float(_get_platform_setting("pricing.quota.framework.generate.monthly_limit", db, 1.0) or 1.0),
+            "quota_chapter_expand": float(_get_platform_setting("pricing.quota.chapter.expand.monthly_limit", db, 0.5) or 0.5),
+            "quota_scene_generate": float(_get_platform_setting("pricing.quota.scene.generate.monthly_limit", db, 0.3) or 0.3),
+            "quota_manga_image_generate": float(_get_platform_setting("pricing.quota.manga.image.generate.monthly_limit", db, 0.2) or 0.2),
+            "quota_ai_text_advanced": float(_get_platform_setting("pricing.quota.ai.text.advanced_calls.monthly_limit", db, 0.3) or 0.3),
+            "quota_video_shot_split": float(_get_platform_setting("pricing.quota.video.shot.split.monthly_limit", db, 1.0) or 1.0),
+            "quota_video_generate": float(_get_platform_setting("pricing.quota.video.generate.count.monthly_limit", db, 2.0) or 2.0),
         },
         "payment": {
             "enabled": bool(_get_platform_setting("payment.enabled", db, True)),
@@ -1308,6 +1334,14 @@ def _seed_platform_settings(db: Session, *, commit: bool = True) -> None:
         "payment.alipay_public_key": "",
         "payment.alipay_notify_url": "",
         "payment.epay_enabled": False,
+        # 配额购买定价（元/单位）
+        "pricing.quota.framework.generate.monthly_limit": "1.0",
+        "pricing.quota.chapter.expand.monthly_limit": "0.5",
+        "pricing.quota.scene.generate.monthly_limit": "0.3",
+        "pricing.quota.manga.image.generate.monthly_limit": "0.2",
+        "pricing.quota.ai.text.advanced_calls.monthly_limit": "0.3",
+        "pricing.quota.video.shot.split.monthly_limit": "1.0",
+        "pricing.quota.video.generate.count.monthly_limit": "2.0",
         "payment.epay_gateway": "",
         "payment.epay_pid": "",
         "payment.epay_key": "",
@@ -2410,6 +2444,32 @@ def _mark_order_paid(order: BillingOrder, db: Session, *, operator_user_id: int 
         order.operator_user_id = operator_user_id
     if note:
         order.note = note
+
+    # 配额购买订单：追加配额到 UserQuotaGrantMonthly，不改套餐
+    if order.source == "quota_purchase":
+        extra = order.extra_json or {}
+        feature_key = extra.get("feature_key", "")
+        amount = int(extra.get("amount") or 0)
+        if feature_key and amount > 0:
+            period_key = extra.get("period_key") or _subscription_period_key(order.user_id, db)
+            grant = db.query(UserQuotaGrantMonthly).filter(
+                UserQuotaGrantMonthly.user_id == order.user_id,
+                UserQuotaGrantMonthly.feature_key == feature_key,
+                UserQuotaGrantMonthly.period_key == period_key,
+            ).first()
+            if grant:
+                grant.granted_amount += amount
+            else:
+                db.add(UserQuotaGrantMonthly(
+                    user_id=order.user_id,
+                    feature_key=feature_key,
+                    period_key=period_key,
+                    granted_amount=amount,
+                ))
+        db.flush()
+        return order
+
+    # 普通订阅订单：更新套餐订阅
     _upsert_user_subscription(
         order.user_id,
         order.plan_id,
@@ -4192,6 +4252,162 @@ def billing_payment_config(db: Session = Depends(get_db)):
     return _public_payment_config(db)
 
 
+@app.get("/api/billing/quota-prices")
+def billing_quota_prices(db: Session = Depends(get_db)):
+    """返回可购买的配额清单及单价"""
+    _ensure_platform_seed(db)
+    prices = []
+    for feature in FEATURE_CATALOG:
+        if not feature.get("purchasable"):
+            continue
+        key = str(feature["key"])
+        price_str = _get_platform_setting(f"pricing.quota.{key}", db)
+        if not price_str:
+            price = float(feature.get("price_per_unit", 0))
+        else:
+            try:
+                price = float(price_str)
+            except (ValueError, TypeError):
+                price = float(feature.get("price_per_unit", 0))
+        unit = "次" if any(s in key for s in ["count", "calls", "split"]) else "张"
+        prices.append({
+            "feature_key": key,
+            "name": feature.get("name", key),
+            "description": feature.get("description", ""),
+            "category": feature.get("category", ""),
+            "price_per_unit": price,
+            "unit": unit,
+        })
+    return prices
+
+
+@app.post("/api/billing/purchase-quota")
+def purchase_quota(body: dict, request: Request, db: Session = Depends(get_db)):
+    """用户自助购买配额"""
+    _ensure_platform_seed(db)
+    user = _require_user(request, db)
+    payment = _payment_settings_snapshot(db)
+    if not bool(payment.get("enabled")):
+        raise HTTPException(400, "支付当前已禁用")
+
+    feature_key = str(body.get("feature_key") or "").strip()
+    amount = int(body.get("amount") or 0)
+
+    if not feature_key:
+        raise HTTPException(400, "feature_key 必填")
+    if feature_key not in PURCHASABLE_FEATURE_KEYS:
+        raise HTTPException(400, "该功能不支持配额购买")
+    if amount <= 0:
+        raise HTTPException(400, "购买数量必须大于 0")
+
+    # 获取单价：优先读 PlatformSetting，回退到 FEATURE_CATALOG 默认值
+    price_str = _get_platform_setting(f"pricing.quota.{feature_key}", db)
+    if not price_str:
+        catalog_item = next((f for f in FEATURE_CATALOG if f["key"] == feature_key), None)
+        unit_price = float(catalog_item.get("price_per_unit", 0)) if catalog_item else 0
+    else:
+        try:
+            unit_price = float(price_str)
+        except (ValueError, TypeError):
+            unit_price = 0
+
+    if unit_price <= 0:
+        raise HTTPException(400, "该功能暂未定价，无法购买")
+
+    total_price = round(unit_price * amount, 2)
+    payment_method = str(body.get("payment_method") or payment.get("default_method") or "mock_qr").strip()
+    method_options = _payment_method_options(db)
+    selected_method = next((item for item in method_options if item["key"] == payment_method), None)
+    if not selected_method:
+        if payment_method == "epay_qr":
+            selected_method = next((item for item in method_options if item["key"].startswith("epay_")), None)
+        elif payment_method == "mapay_qr":
+            selected_method = next((item for item in method_options if item["key"].startswith("mapay_")), None)
+    if not selected_method:
+        raise HTTPException(400, "支付方式不可用")
+    selected_method_key = str(selected_method["key"])
+
+    expire_minutes = int(payment.get("order_expire_minutes") or 30)
+    expires_at = datetime.datetime.utcnow() + datetime.timedelta(minutes=expire_minutes)
+    period_key = _subscription_period_key(user.id, db)
+    current_plan = _active_plan_for_user(user.id, db)
+
+    # 取消同一用户的旧的待支付配额订单
+    stale_orders = (
+        db.query(BillingOrder)
+        .filter(
+            BillingOrder.user_id == user.id,
+            BillingOrder.status == "pending",
+            BillingOrder.source == "quota_purchase",
+        )
+        .all()
+    )
+    for stale_order in stale_orders:
+        _mark_order_cancelled(stale_order, db, operator_user_id=user.id, note="Superseded by a newer quota purchase request")
+
+    order = BillingOrder(
+        order_no=f"LVQP{datetime.datetime.utcnow().strftime('%Y%m%d%H%M%S')}{secrets.randbelow(10000):04d}",
+        user_id=user.id,
+        plan_id=current_plan.id,
+        amount=_coerce_money(total_price),
+        currency="CNY",
+        status="pending",
+        source="quota_purchase",
+        billing_cycle="monthly",
+        payment_provider=str(selected_method.get("provider") or "mock"),
+        payment_method=selected_method_key,
+        operator_user_id=user.id,
+        note=f"购买 {feature_key} 配额 x{amount}",
+        extra_json={
+            "action": "quota_purchase",
+            "feature_key": feature_key,
+            "amount": amount,
+            "unit_price": unit_price,
+            "total_price": total_price,
+            "period_key": period_key,
+        },
+        expired_at=expires_at,
+    )
+    db.add(order)
+
+    checkout_override = None
+    if _coerce_money(total_price) <= Decimal("0.00"):
+        _mark_order_paid(order, db, operator_user_id=user.id, note="Zero-amount quota purchase auto-confirmed")
+    else:
+        gateway = get_gateway(selected_method_key)
+        if gateway is not None:
+            try:
+                payment_with_ip = dict(payment)
+                payment_with_ip["client_ip"] = request.client.host if request.client else ""
+                checkout_data = gateway.create_checkout(order, current_plan, payment_with_ip)
+                if checkout_data.extra:
+                    merged = dict(order.extra_json or {})
+                    merged.update(checkout_data.extra)
+                    order.extra_json = merged
+                checkout_override = gateway.build_checkout_response(order, current_plan, payment, checkout_data)
+            except RuntimeError as exc:
+                raise HTTPException(502, f"{gateway.label} checkout failed: {exc}") from exc
+
+    _write_audit_log(user, "purchase_quota", "billing_order", order.order_no,
+                     f"购买 {feature_key} 配额 x{amount}，金额 {total_price} 元", db, {
+        "feature_key": feature_key,
+        "amount": amount,
+        "unit_price": unit_price,
+        "total_price": total_price,
+        "payment_method": selected_method_key,
+    })
+    db.commit()
+    db.refresh(order)
+
+    return {
+        "ok": True,
+        "message": "配额购买订单已创建",
+        "status": order.status,
+        "order": _serialize_order_with_db(order, db),
+        "checkout": checkout_override or _order_checkout_payload(order, current_plan, db),
+    }
+
+
 @app.post("/api/billing/subscribe")
 def subscribe_plan(body: dict, request: Request, db: Session = Depends(get_db)):
     _ensure_platform_seed(db)
@@ -4960,6 +5176,7 @@ def admin_save_platform_settings(body: dict, request: Request, db: Session = Dep
     email = body.get("email") if isinstance(body.get("email"), dict) else {}
     payment = body.get("payment") if isinstance(body.get("payment"), dict) else {}
     announcement = body.get("announcement") if isinstance(body.get("announcement"), dict) else {}
+    pricing = body.get("pricing") if isinstance(body.get("pricing"), dict) else {}
     mappings = {
         "platform.site_name": basic.get("site_name", "StoryCanvas"),
         "platform.site_slogan": basic.get("site_slogan", ""),
@@ -5039,6 +5256,13 @@ def admin_save_platform_settings(body: dict, request: Request, db: Session = Dep
         "platform.announcement.enabled": bool(announcement.get("enabled", False)),
         "platform.announcement.title": announcement.get("title", ""),
         "platform.announcement.content": announcement.get("content", ""),
+        "pricing.quota.framework.generate.monthly_limit": pricing.get("quota_framework_generate", 1.0),
+        "pricing.quota.chapter.expand.monthly_limit": pricing.get("quota_chapter_expand", 0.5),
+        "pricing.quota.scene.generate.monthly_limit": pricing.get("quota_scene_generate", 0.3),
+        "pricing.quota.manga.image.generate.monthly_limit": pricing.get("quota_manga_image_generate", 0.2),
+        "pricing.quota.ai.text.advanced_calls.monthly_limit": pricing.get("quota_ai_text_advanced", 0.3),
+        "pricing.quota.video.shot.split.monthly_limit": pricing.get("quota_video_shot_split", 1.0),
+        "pricing.quota.video.generate.count.monthly_limit": pricing.get("quota_video_generate", 2.0),
     }
     icon_data = basic.get("icon_data")
     icon_mime = basic.get("icon_mime", "image/png")
