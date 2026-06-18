@@ -63,7 +63,7 @@ Thumbs.db
 test/
 releases/
 test_*.py
-!backend/tests/test_*.py
+backend/tests/
 test_*.png
 test_*.txt
 generate_image.py
