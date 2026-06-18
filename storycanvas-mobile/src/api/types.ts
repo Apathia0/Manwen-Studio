@@ -499,6 +499,7 @@ export interface CharacterVersion {
   ref_asset_url?: string | undefined
   is_default: boolean
   sort_order: number
+  created_at?: string
 }
 
 /** 视频角色（新架构） */

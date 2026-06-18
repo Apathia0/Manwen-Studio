@@ -8,46 +8,32 @@
 
       <view v-else-if="characters.length > 0" class="video-characters__list">
         <view v-for="char in characters" :key="char.name" class="video-characters__card">
-          <text class="video-characters__name">{{ char.name }}</text>
+          <view class="video-characters__header">
+            <text class="video-characters__name">{{ char.name }}</text>
+            <lv-button size="sm" type="secondary" @tap="handleCreateVersion(char)">创建新版本</lv-button>
+          </view>
           <text class="video-characters__version-count">{{ char.versions.length }} 个版本</text>
           <view
             v-for="ver in char.versions"
             :key="ver.id"
             class="video-characters__version"
+            :class="{ 'video-characters__version--active': activeVersionId === ver.id }"
+            @tap="handleVersionClick(ver)"
           >
-            <view class="video-characters__version-header" @tap="showDetail(ver)">
-              <text class="video-characters__label">{{ ver.label }}</text>
-              <text class="video-characters__appearance">{{ truncate(ver.appearance_card, 60) }}</text>
-            </view>
-            <!-- 参考图缩略图 -->
             <image
-              v-if="getRefImageUrl(char.name, ver.id)"
-              :src="getRefImageUrl(char.name, ver.id)!"
+              v-if="ver.ref_asset_url"
+              class="video-characters__thumbnail"
+              :src="ver.ref_asset_url"
               mode="aspectFill"
-              class="video-characters__ref-thumb"
             />
-            <!-- 参考图操作按钮 -->
-            <view class="video-characters__ref-actions">
-              <lv-button
-                v-if="!getRefImageUrl(char.name, ver.id)"
-                size="sm"
-                :loading="isRefGenLoading(char.name, ver.id)"
-                @tap="handleGenRefImage(char.name, ver.id)"
-              >生成参考图</lv-button>
-              <template v-else>
-                <lv-button
-                  size="sm"
-                  type="secondary"
-                  :loading="isRefGenLoading(char.name, ver.id)"
-                  @tap="handleRedrawRefImage(char.name, ver.id)"
-                >重绘参考图</lv-button>
-                <lv-button
-                  size="sm"
-                  type="danger"
-                  :loading="isRefGenLoading(char.name, ver.id)"
-                  @tap="handleDeleteRefImage(char.name, ver.id)"
-                >删除参考图</lv-button>
-              </template>
+            <view class="video-characters__version-body">
+              <text class="video-characters__label">{{ ver.label }}</text>
+              <text v-if="ver.created_at" class="video-characters__created-at">{{ formatTime(ver.created_at) }}</text>
+              <text class="video-characters__appearance" @tap.stop="showDetail(ver)">{{ truncate(ver.appearance_card, 60) }}</text>
+            </view>
+            <view class="video-characters__version-actions">
+              <text class="video-characters__action" @tap.stop="handleSetCurrent(ver)">设为当前</text>
+              <text class="video-characters__action video-characters__action--danger" @tap.stop="handleDeleteVersion(char, ver)">删除</text>
             </view>
           </view>
         </view>
@@ -68,8 +54,7 @@
 import { ref } from 'vue'
 import { onLoad } from '@dcloudio/uni-app'
 import { videoApi } from '@/api'
-import type { StoryVideoCharacter } from '@/api/types'
-import { videoAssetUrl } from '@/utils/url'
+import type { VideoCharacter, CharacterVersion } from '@/api/types'
 import LvNavbar from '@/components/lv-navbar/lv-navbar.vue'
 import LvButton from '@/components/lv-button/lv-button.vue'
 import LvLoading from '@/components/lv-loading/lv-loading.vue'
@@ -78,17 +63,12 @@ import LvModal from '@/components/lv-modal/lv-modal.vue'
 
 const loading = ref(false)
 const generating = ref(false)
-const characters = ref<StoryVideoCharacter[]>([])
+const characters = ref<VideoCharacter[]>([])
 const storyId = ref(0)
+const activeVersionId = ref(0)
 
 const detailVisible = ref(false)
 const detailText = ref('')
-
-/* ── 参考图管理状态 ── */
-/** 记录每个版本 ref 请求的加载状态，key 为 `${charName}::${verId}` */
-const refGenLoading = ref<Record<string, boolean>>({})
-/** 记录每个角色/版本的 ref 图片 URL 缓存 */
-const refImageCache = ref<Record<string, string | null>>({})
 
 onLoad((options) => {
   storyId.value = Number(options?.storyId || 0)
@@ -98,10 +78,19 @@ onLoad((options) => {
 async function loadCharacters() {
   loading.value = true
   try {
-    const data = await videoApi.listStoryVideoCharacters(storyId.value)
+    const data = await videoApi.listVideoCharacters(storyId.value)
     characters.value = data.characters
-  } catch (e: any) {
-    uni.showToast({ title: e.message || '加载失败', icon: 'none' })
+    // 自动选中第一个默认版本
+    for (const char of data.characters) {
+      const defVer = char.versions.find((v) => v.is_default)
+      if (defVer) {
+        activeVersionId.value = defVer.id
+        break
+      }
+    }
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : '加载失败'
+    uni.showToast({ title: msg, icon: 'none' })
   } finally {
     loading.value = false
   }
@@ -110,17 +99,71 @@ async function loadCharacters() {
 async function handleGenerate() {
   generating.value = true
   try {
-    const data = await videoApi.generateStoryVideoCharacters(storyId.value)
+    const data = await videoApi.generateVideoCharacters(storyId.value)
     characters.value = data.characters
+    activeVersionId.value = 0
     uni.showToast({ title: '角色生成成功', icon: 'success' })
-  } catch (e: any) {
-    uni.showToast({ title: e.message || '生成失败', icon: 'none' })
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : '生成失败'
+    uni.showToast({ title: msg, icon: 'none' })
   } finally {
     generating.value = false
   }
 }
 
-function showDetail(ver: StoryVideoCharacter['versions'][number]) {
+async function handleCreateVersion(char: VideoCharacter) {
+  uni.showModal({
+    title: '创建新版本',
+    content: '请输入版本标签',
+    editable: true,
+    placeholderText: '例如：现代装、古风版',
+    success: async (res) => {
+      if (!res.confirm || !res.content) return
+      const label = res.content.trim()
+      if (!label) return
+      try {
+        await videoApi.createCharacterVersion(storyId.value, char.name, { version_label: label })
+        uni.showToast({ title: '版本创建成功', icon: 'success' })
+        await loadCharacters()
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : '创建失败'
+        uni.showToast({ title: msg, icon: 'none' })
+      }
+    },
+  })
+}
+
+async function handleDeleteVersion(char: VideoCharacter, ver: CharacterVersion) {
+  uni.showModal({
+    title: '删除版本',
+    content: `确定删除版本「${ver.label}」吗？此操作不可撤销。`,
+    success: async (res) => {
+      if (!res.confirm) return
+      try {
+        await videoApi.deleteCharacterVersion(storyId.value, char.name, ver.label)
+        uni.showToast({ title: '版本已删除', icon: 'success' })
+        if (activeVersionId.value === ver.id) {
+          activeVersionId.value = 0
+        }
+        await loadCharacters()
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : '删除失败'
+        uni.showToast({ title: msg, icon: 'none' })
+      }
+    },
+  })
+}
+
+function handleVersionClick(ver: CharacterVersion) {
+  activeVersionId.value = ver.id
+  showDetail(ver)
+}
+
+function handleSetCurrent(ver: CharacterVersion) {
+  activeVersionId.value = ver.id
+}
+
+function showDetail(ver: CharacterVersion) {
   detailText.value = ver.appearance_card
   detailVisible.value = true
 }
@@ -129,111 +172,11 @@ function truncate(text: string, max: number): string {
   return text.length > max ? text.slice(0, max) + '...' : text
 }
 
-/* ── 参考图管理 ── */
-
-/** 获取缓存的参考图 URL */
-function getRefImageUrl(charName: string, verId: number): string | null {
-  const key = `${charName}::${verId}`
-  const cached = refImageCache.value[key]
-  if (cached !== undefined) return cached
-  const char = characters.value.find(c => c.name === charName)
-  const ver = char?.versions.find(v => v.id === verId)
-  const url = ver?.ref_asset_url ?? null
-  refImageCache.value[key] = url
-  return url
-}
-
-/** 设置参考图加载状态 */
-function setRefGenLoading(charName: string, verId: number, loading: boolean): void {
-  refGenLoading.value[`${charName}::${verId}`] = loading
-}
-
-/** 检查参考图是否正在加载 */
-function isRefGenLoading(charName: string, verId: number): boolean {
-  return !!refGenLoading.value[`${charName}::${verId}`]
-}
-
-/** 生成角色参考图 */
-async function handleGenRefImage(charName: string, verId: number): Promise<void> {
-  setRefGenLoading(charName, verId, true)
-  try {
-    const asset = await videoApi.generateCharacterRefImage(storyId.value, charName, {
-      version_id: verId,
-    })
-    const url = videoAssetUrl(asset.file_path)
-    refImageCache.value[`${charName}::${verId}`] = url
-    const char = characters.value.find(c => c.name === charName)
-    const ver = char?.versions.find(v => v.id === verId)
-    if (ver && url) {
-      ver.ref_asset_url = url
-    }
-    uni.showToast({ title: '参考图生成成功', icon: 'success' })
-  } catch (e: any) {
-    uni.showToast({ title: e.message || '生成参考图失败', icon: 'none' })
-  } finally {
-    setRefGenLoading(charName, verId, false)
-  }
-}
-
-/** 重绘角色参考图 */
-async function handleRedrawRefImage(charName: string, verId: number): Promise<void> {
-  uni.showModal({
-    title: '重绘参考图',
-    content: '请输入重绘提示词（可留空，默认使用完整重绘）',
-    editable: true,
-    placeholderText: '（可选）描述希望如何修改参考图',
-    success: async (res) => {
-      if (!res.confirm) return
-      const prompt = res.content?.trim() || ''
-      setRefGenLoading(charName, verId, true)
-      try {
-        const asset = await videoApi.redrawCharacterRefImage(storyId.value, charName, {
-          version_id: verId,
-          prompt: prompt || '',
-          mode: 'full',
-        })
-        const url = videoAssetUrl(asset.file_path)
-        refImageCache.value[`${charName}::${verId}`] = url
-        const char = characters.value.find(c => c.name === charName)
-        const ver = char?.versions.find(v => v.id === verId)
-        if (ver && url) {
-          ver.ref_asset_url = url
-        }
-        uni.showToast({ title: '参考图重绘成功', icon: 'success' })
-      } catch (e: any) {
-        uni.showToast({ title: e.message || '重绘参考图失败', icon: 'none' })
-      } finally {
-        setRefGenLoading(charName, verId, false)
-      }
-    },
-  })
-}
-
-/** 删除角色参考图 */
-async function handleDeleteRefImage(charName: string, verId: number): Promise<void> {
-  const res = await new Promise<UniApp.ShowModalRes>((resolve) => {
-    uni.showModal({
-      title: '删除参考图',
-      content: `确定要删除 ${charName} 的参考图吗？此操作不可恢复。`,
-      success: resolve,
-    })
-  })
-  if (!res.confirm) return
-  setRefGenLoading(charName, verId, true)
-  try {
-    await videoApi.deleteVideoCharacterRefImage(storyId.value, charName)
-    refImageCache.value[`${charName}::${verId}`] = null
-    const char = characters.value.find(c => c.name === charName)
-    const ver = char?.versions.find(v => v.id === verId)
-    if (ver) {
-      ver.ref_asset_url = null
-    }
-    uni.showToast({ title: '参考图已删除', icon: 'success' })
-  } catch (e: any) {
-    uni.showToast({ title: e.message || '删除参考图失败', icon: 'none' })
-  } finally {
-    setRefGenLoading(charName, verId, false)
-  }
+function formatTime(isoStr: string): string {
+  const d = new Date(isoStr)
+  if (isNaN(d.getTime())) return isoStr
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
 }
 </script>
 
@@ -253,8 +196,12 @@ async function handleDeleteRefImage(charName: string, verId: number): Promise<vo
     background: #fff; border-radius: 24rpx; padding: 28rpx; margin-bottom: 16rpx;
   }
 
+  &__header {
+    display: flex; align-items: center; justify-content: space-between;
+  }
+
   &__name {
-    font-size: 32rpx; font-weight: 600; color: $lv-text-primary; display: block;
+    font-size: 32rpx; font-weight: 600; color: $lv-text-primary;
   }
 
   &__version-count {
@@ -263,26 +210,44 @@ async function handleDeleteRefImage(charName: string, verId: number): Promise<vo
 
   &__version {
     background: $lv-bg-start; border-radius: 16rpx; padding: 20rpx; margin-bottom: 12rpx;
+    display: flex; align-items: flex-start; gap: 16rpx;
+    border: 2rpx solid transparent;
+
+    &--active {
+      border-color: $lv-primary;
+    }
   }
 
-  &__version-header {
-    // clickable area for version detail
+  &__thumbnail {
+    width: 80rpx; height: 80rpx; border-radius: 12rpx; flex-shrink: 0; background: $lv-bg-muted;
+  }
+
+  &__version-body {
+    flex: 1; min-width: 0;
   }
 
   &__label {
-    font-size: 26rpx; font-weight: 500; color: $lv-primary; display: block; margin-bottom: 8rpx;
+    font-size: 26rpx; font-weight: 500; color: $lv-primary; display: block; margin-bottom: 4rpx;
+  }
+
+  &__created-at {
+    font-size: 22rpx; color: $lv-text-muted; display: block; margin-bottom: 6rpx;
   }
 
   &__appearance {
     font-size: 24rpx; color: $lv-text-secondary; display: block; line-height: 1.6;
   }
 
-  &__ref-thumb {
-    width: 100%; height: 240rpx; border-radius: 12rpx; margin-top: 16rpx; background: #e5e5e5;
+  &__version-actions {
+    display: flex; flex-direction: column; gap: 8rpx; flex-shrink: 0; padding-top: 4rpx;
   }
 
-  &__ref-actions {
-    display: flex; gap: 12rpx; margin-top: 16rpx;
+  &__action {
+    font-size: 22rpx; color: $lv-primary; padding: 4rpx 8rpx;
+
+    &--danger {
+      color: $lv-danger;
+    }
   }
 
   &__detail-scroll {
