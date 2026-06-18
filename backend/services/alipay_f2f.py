@@ -104,7 +104,14 @@ def call_api(
         params["notify_url"] = notify_url.strip()
     params["sign"] = _rsa2_sign(_ordered_sign_content(params), private_key, charset=charset)
 
-    response = httpx.post(gateway.strip(), data=params, timeout=timeout_seconds)
+    # 支付宝官方规范：公共参数放 URL query string，biz_content 放 POST body。
+    # charset 必须出现在 URL query 中，否则支付宝服务端无法确定编码导致验签失败。
+    gateway_url = gateway.strip().rstrip("?")
+    public_params = {k: v for k, v in params.items() if k != "biz_content"}
+    url = build_gateway_url(gateway_url, public_params)
+    body = {"biz_content": params["biz_content"]}
+
+    response = httpx.post(url, data=body, timeout=timeout_seconds)
     response.raise_for_status()
     try:
         payload = response.json()
