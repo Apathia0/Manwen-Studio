@@ -243,3 +243,203 @@ export interface ExpandChapterData {
   payoff?: string
   highlight?: string
 }
+
+// ── 视频创作管线类型 ──
+
+export interface ScriptScene {
+  id: number
+  chapter_id: number
+  scene_number: number
+  title: string
+  location?: string | null
+  time_of_day?: string | null
+  characters: string[]
+  summary: string
+  dialogue: { speaker: string; text: string }[]
+  voiceover?: string | null
+  mood?: string | null
+  estimated_duration_seconds?: number | null
+  source_type: string
+  status: string
+  created_at: string
+  updated_at: string
+}
+
+export interface VideoShot {
+  id: number
+  scene_id: number
+  shot_number: number
+  title: string
+  shot_type?: string | null
+  camera_angle?: string | null
+  camera_movement?: string | null
+  composition?: string | null
+  action_description?: string | null
+  dialogue?: string | null
+  sound_design?: string | null
+  duration_seconds?: number | null
+  storyboard_prompt?: string | null
+  video_prompt?: string | null
+  negative_prompt?: string | null
+  character_prompts_json?: Array<{ name: string; prompt: string }> | null
+  scene_prompt?: string | null
+  prop_prompts_json?: Array<{ name: string; prompt: string }> | null
+  continuity_notes?: string | null
+  status: string
+  style_preset?: string | null
+  storyboard_asset_id?: number | null
+  storyboard_locked: boolean
+  created_at: string
+  updated_at: string
+}
+
+export interface VideoAsset {
+  id: number
+  story_id?: number | null
+  chapter_id?: number | null
+  scene_id?: number | null
+  shot_id?: number | null
+  asset_type: string
+  name: string
+  file_path: string
+  provider?: string | null
+  prompt?: string | null
+  meta_json?: Record<string, unknown> | null
+  asset_subtype?: string | null
+  source_asset_ids_json?: number[] | null
+  style_preset?: string | null
+  locked: boolean
+  revision: number
+  is_master: boolean
+  status: string
+  hash_key?: string | null
+  usage_scope?: string | null
+  created_at: string
+}
+
+export interface VideoGenerationJob {
+  id: number
+  shot_id: number
+  provider: string
+  provider_job_id?: string | null
+  model?: string | null
+  status: string
+  progress: number
+  duration_seconds?: number | null
+  aspect_ratio?: string | null
+  error_message?: string | null
+  stage?: string | null
+  message?: string | null
+  provider_status?: string | null
+  retry_count?: number
+  max_retries?: number
+  input_mode?: string | null
+  submitted_at: string
+  completed_at?: string | null
+}
+
+export interface StoryVideoCharacter {
+  name: string
+  versions: Array<{
+    id: number
+    label: string
+    is_default: boolean
+    ref_asset_id?: number | null
+    ref_asset_url?: string | null
+    appearance_card: string
+    sort_order: number
+  }>
+}
+
+export interface ChapterVideoShot {
+  id: number
+  workflow_id: number
+  shot_index: number
+  source_text_span?: string | null
+  scene_location?: string | null
+  time_of_day?: string | null
+  characters?: string[] | null
+  story_summary?: string | null
+  dialogue_or_narration?: string | null
+  camera_plan?: string | null
+  motion_plan?: string | null
+  emotion_plan?: string | null
+  continuity_notes?: string | null
+  storyboard_prompt?: string | null
+  video_prompt?: string | null
+  character_prompts?: Array<{ name: string; prompt: string }> | null
+  scene_prompt?: string | null
+  prop_prompts?: Array<{ name: string; prompt: string }> | null
+  storyboard_image_url?: string | null
+  video_url?: string | null
+  status: string
+  error_message?: string | null
+  created_at: string
+}
+
+export interface ChapterVideoWorkflow {
+  id: number
+  chapter_id: number
+  story_id: number
+  workflow_status: string
+  character_reference_ids?: number[] | null
+  video_style?: string | null
+  style_reference_image_url?: string | null
+  duration_per_shot: number
+  total_shots: number
+  completed_shots: number
+  failed_shots: number
+  error_message?: string | null
+  stage?: string | null
+  message?: string | null
+  created_at: string
+  updated_at: string
+  shots: ChapterVideoShot[]
+}
+
+export interface VideoModel {
+  name: string
+  value: string
+  description: string
+}
+
+export interface ChapterVideoWorkflowStatus {
+  id: number
+  chapter_id: number
+  workflow_status: string
+  total_shots: number
+  completed_shots: number
+  failed_shots: number
+  error_message?: string | null
+  task_id?: string | null
+  stage?: string | null
+  message?: string | null
+  retry_count?: number
+  max_retries?: number
+  next_retry_at?: string | null
+}
+
+export interface VideoStylePreset {
+  id: number
+  name: string
+  category: string
+  image_url?: string | null
+  prompt_template?: string | null
+  image_style_params?: Record<string, unknown> | null
+  video_style_params?: Record<string, unknown> | null
+  sort_order: number
+}
+
+export interface ReanalyzeShotPromptsResponse {
+  shot_id: number
+  storyboard_prompt: string
+  video_prompt: string
+  character_prompts: Array<{ name: string; prompt: string }>
+  scene_prompt?: string
+  prop_prompts?: Array<{ name: string; prompt: string }>
+}
+
+export interface PreviewVideoPromptResponse {
+  assembled_prompt: string
+  parts: { part1: string; part2: string; part3: string | null }
+}
