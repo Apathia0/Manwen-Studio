@@ -281,6 +281,12 @@
           "style": {
             "navigationBarTitleText": "模板审核"
           }
+        },
+        {
+          "path": "style-presets",
+          "style": {
+            "navigationBarTitleText": "风格预设"
+          }
         }
       ]
     }

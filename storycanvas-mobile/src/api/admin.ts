@@ -366,3 +366,52 @@ export function approveTemplate(id: number, visibility: string, note?: string): 
 export function rejectTemplate(id: number, note: string): Promise<PromptTemplateItem> {
   return post(`/api/admin/prompt-templates/${id}/reject`, { note })
 }
+
+// --- 风格预设管理 ---
+
+export interface VideoStylePreset {
+  id: number
+  name: string
+  category: string
+  image_url: string | null
+  prompt_template: string | null
+  image_style_params: Record<string, unknown> | null
+  video_style_params: Record<string, unknown> | null
+  sort_order: number
+}
+
+/** 获取风格预设列表 */
+export function listStylePresets(): Promise<{ presets: VideoStylePreset[] }> {
+  return get('/api/video-style-presets')
+}
+
+/** 创建风格预设 */
+export function createStylePreset(data: {
+  name: string
+  category?: string
+  image_url?: string | null
+  prompt_template?: string
+  image_style_params?: Record<string, unknown>
+  video_style_params?: Record<string, unknown>
+  sort_order?: number
+}): Promise<VideoStylePreset> {
+  return post('/api/video-style-presets', data)
+}
+
+/** 更新风格预设 */
+export function updateStylePreset(presetId: number, data: {
+  name?: string
+  category?: string
+  image_url?: string | null
+  prompt_template?: string
+  image_style_params?: Record<string, unknown>
+  video_style_params?: Record<string, unknown>
+  sort_order?: number
+}): Promise<VideoStylePreset> {
+  return put(`/api/video-style-presets/${presetId}`, data)
+}
+
+/** 删除风格预设 */
+export function deleteStylePreset(presetId: number): Promise<void> {
+  return del(`/api/video-style-presets/${presetId}`)
+}
