@@ -36,6 +36,9 @@
 
         <view class="workspace-page__actions">
           <lv-button block @tap="goWorkspace">进入工作台</lv-button>
+          <lv-button block secondary @tap="goVideoWorkflow">
+            <lv-icon name="Video" :size="16" color="#2563eb" style="margin-right: 8rpx;" />视频创作
+          </lv-button>
           <lv-button v-if="!storyStore.activeStory.onboarding_completed" secondary block @tap="goOnboarding">
             <lv-icon name="Sparkles" :size="16" color="#2563eb" style="margin-right: 8rpx;" />引导创作
           </lv-button>
@@ -69,6 +72,12 @@ function goStoryList() {
 function goWorkspace() {
   if (storyStore.activeStory) {
     uni.navigateTo({ url: `/pages/workspace/chapter-view?storyId=${storyStore.activeStory.id}` })
+  }
+}
+
+function goVideoWorkflow() {
+  if (storyStore.activeStory) {
+    uni.navigateTo({ url: `/pages/workspace/video-workflow` })
   }
 }
 
