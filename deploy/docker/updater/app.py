@@ -197,7 +197,7 @@ def _tag_exists_in_registry(tag: str) -> bool | None:
 
     ghcr.io 使用 token 认证流程：
     1. 用 docker config 中的 basic auth 凭证换取 Bearer token
-    2. 用 Bearer token 查询 tag 列表
+    2. 用 Bearer token 分页查询 tag 列表
     返回 True/False，API 不可用时返回 None。
     """
     docker_config = Path("/root/.docker/config.json")
@@ -233,18 +233,26 @@ def _tag_exists_in_registry(tag: str) -> bool | None:
     except Exception:
         return None
 
-    # 用 Bearer token 查询 tag 列表
-    registry_url = f"https://ghcr.io/v2/{repo}/tags/list"
+    # 分页查询 tag 列表（ghcr.io 默认每页 100 条，Link 头返回相对 URL）
+    link_re = re.compile(r'<([^>]+)>;\s*rel="?next"?(?:;|$)')
+    base_url = f"https://ghcr.io/v2/{repo}/tags/list"
+    page_url: str | None = f"{base_url}?n=100"
     try:
-        req = urllib.request.Request(registry_url)
-        req.add_header("Authorization", f"Bearer {bearer_token}")
-        req.add_header("Accept", "application/json")
-        with urllib.request.urlopen(req, timeout=UPDATE_MANIFEST_TIMEOUT_SECONDS) as resp:
-            data = json.loads(resp.read(512 * 1024).decode())
+        while page_url:
+            req = urllib.request.Request(page_url)
+            req.add_header("Authorization", f"Bearer {bearer_token}")
+            req.add_header("Accept", "application/json")
+            with urllib.request.urlopen(req, timeout=UPDATE_MANIFEST_TIMEOUT_SECONDS) as resp:
+                data = json.loads(resp.read(512 * 1024).decode())
+            tags = data.get("tags") or []
+            if tag in tags:
+                return True
+            link_header = resp.headers.get("Link", "")
+            match = link_re.search(link_header)
+            page_url = urllib.parse.urljoin(base_url, match.group(1)) if match else None
     except Exception:
         return None
-    tags = data.get("tags") or []
-    return tag in tags
+    return False
 
 
 def _get_image_ref(service: str, target_version: str) -> str:

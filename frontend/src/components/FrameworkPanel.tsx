@@ -1,5 +1,5 @@
 import { memo, useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
-import { ChevronDown, Loader2, MessageSquare, Pencil, Save, Sparkles, Wand2 } from 'lucide-react';
+import { ChevronDown, Edit3, Loader2, MessageSquare, Sparkles, Wand2 } from 'lucide-react';
 import {
   adjustFramework,
   continueFramework,
@@ -8,7 +8,6 @@ import {
   regenerateOutline,
   restoreFrameworkSnapshot,
   saveOutlineChapterPlan,
-  updateStory,
   type Chapter,
   type FrameworkChatMessage,
   type FrameworkSnapshotItem,
@@ -22,6 +21,7 @@ import ChapterListSection from './framework/ChapterListSection';
 import CharacterSection from './framework/CharacterSection';
 import OutlineSection from './framework/OutlineSection';
 import TagSection from './framework/TagSection';
+import FrameworkEditorModal from './FrameworkEditorModal';
 
 interface Props {
   story: Story;
@@ -45,10 +45,7 @@ export default memo(function FrameworkPanel({ story, chapters, onChapterSelect, 
   const [continueLoading, setContinueLoading] = useState(false);
   const [chatError, setChatError] = useState('');
   const [chatMessages, setChatMessages] = useState<FrameworkChatMessage[]>([]);
-  const [manualMode, setManualMode] = useState(false);
-  const [manualDraft, setManualDraft] = useState('');
-  const [manualSaving, setManualSaving] = useState(false);
-  const [manualError, setManualError] = useState('');
+  const [showEditor, setShowEditor] = useState(false);
   const [expanded, setExpanded] = useState<Record<SectionKey, boolean>>({
     tags: true,
     characters: true,
@@ -63,16 +60,8 @@ export default memo(function FrameworkPanel({ story, chapters, onChapterSelect, 
     setChatMessages([]);
     setChatInput('');
     setChatError('');
-    setManualMode(false);
-    setManualError('');
-    setManualDraft(buildFrameworkDraft(story));
+    setShowEditor(false);
   }, [story.id]);
-
-  useEffect(() => {
-    if (!manualMode) {
-      setManualDraft(buildFrameworkDraft(story));
-    }
-  }, [manualMode, story.description, story.tags, story.characters, story.outline]);
 
   const frameworkChapters = useMemo(() => buildFrameworkChapters(story, chapters), [story, chapters]);
 
@@ -152,21 +141,6 @@ export default memo(function FrameworkPanel({ story, chapters, onChapterSelect, 
     }
   };
 
-  const handleManualSave = async () => {
-    setManualSaving(true);
-    setManualError('');
-    try {
-      const payload = parseFrameworkDraft(manualDraft);
-      await updateStory(story.id, payload);
-      await onFrameworkUpdate();
-      setManualMode(false);
-    } catch (err: any) {
-      setManualError(err.message || '保存框架失败。');
-    } finally {
-      setManualSaving(false);
-    }
-  };
-
   const handleContinueFramework = async () => {
     if (!hasFrameworkContent(story) || continueLoading || chatLoading) return;
     setContinueLoading(true);
@@ -202,6 +176,7 @@ export default memo(function FrameworkPanel({ story, chapters, onChapterSelect, 
   };
 
   return (
+    <>
     <div className="flex flex-col h-full bg-[#fcfcfa]">
       <div className="flex items-center justify-between px-5 py-3 border-b border-[#d9dfd7] shrink-0">
         <div className="flex items-center gap-2">
@@ -376,51 +351,23 @@ export default memo(function FrameworkPanel({ story, chapters, onChapterSelect, 
           <div className="rounded-xl border border-[#d9dfd7] bg-white overflow-hidden">
             <div className="flex items-center justify-between px-3 py-2 border-b border-[#d9dfd7]">
               <div className="flex items-center gap-2">
-                <Pencil size={13} className="text-blue-500" />
+                <Edit3 size={13} className="text-blue-500" />
                 <span className="text-xs font-semibold text-slate-700 uppercase tracking-wide">手动编辑框架</span>
               </div>
               <button
-                onClick={() => {
-                  setManualMode((prev) => !prev);
-                  setManualDraft(buildFrameworkDraft(story));
-                  setManualError('');
-                }}
-                className="text-[11px] text-slate-500 hover:text-slate-700 transition-colors"
+                onClick={() => setShowEditor(true)}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg
+                           bg-blue-600 hover:bg-blue-500 text-white transition-colors"
               >
-                {manualMode ? '收起编辑器' : '打开编辑器'}
+                <Edit3 size={12} />
+                打开可视化编辑器
               </button>
             </div>
-            {manualMode ? (
-              <div className="px-3 py-3 space-y-2">
-                <textarea
-                  value={manualDraft}
-                  onChange={(e) => setManualDraft(e.target.value)}
-                  rows={18}
-                  spellCheck={false}
-                  className="w-full rounded-lg border border-[#d9dfd7] bg-[#fcfcfa] px-3 py-2 font-mono text-xs text-slate-800
-                             outline-none focus:border-blue-400 resize-y leading-relaxed"
-                />
-                <div className="flex items-center justify-between gap-2">
-                  <span className="text-[11px] text-slate-500">支持直接编辑 `description`、`tags`、`characters`、`outline`。</span>
-                  <button
-                    onClick={handleManualSave}
-                    disabled={manualSaving}
-                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg
-                               bg-blue-600 hover:bg-blue-500 text-white disabled:opacity-40 transition-colors"
-                  >
-                    {manualSaving ? <Loader2 size={13} className="animate-spin" /> : <Save size={13} />}
-                    保存框架
-                  </button>
-                </div>
-                {manualError && <p className="text-xs text-red-500">{manualError}</p>}
-              </div>
-            ) : (
-              <div className="px-3 py-3">
-                <p className="text-xs text-slate-500 leading-relaxed">
-                  当 AI 调整还不够精确时，可以直接编辑完整框架 JSON，然后一次性保存回标签、角色和大纲。
-                </p>
-              </div>
-            )}
+            <div className="px-3 py-3">
+              <p className="text-xs text-slate-500 leading-relaxed">
+                使用可视化编辑器直接修改框架的各个模块（描述、标签、角色、大纲），左侧实时预览，右侧按标签页编辑。
+              </p>
+            </div>
           </div>
         </div>
 
@@ -520,76 +467,16 @@ export default memo(function FrameworkPanel({ story, chapters, onChapterSelect, 
         <div className="h-4" />
       </div>
     </div>
+    {showEditor && (
+      <FrameworkEditorModal
+        story={story}
+        onClose={() => setShowEditor(false)}
+        onSaved={onFrameworkUpdate}
+      />
+    )}
+  </>
   );
 })
-
-function buildFrameworkDraft(story: Story): string {
-  return JSON.stringify(
-    {
-      description: story.description || '',
-      tags: story.tags ?? {},
-      characters: story.characters ?? [],
-      outline: story.outline ?? {},
-    },
-    null,
-    2,
-  );
-}
-
-function parseFrameworkDraft(raw: string): {
-  description?: string;
-  tags?: Record<string, unknown>;
-  characters?: Record<string, unknown>[];
-  outline?: Record<string, unknown>;
-} {
-  let parsed: any;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    throw new Error('框架 JSON 格式不正确，请先修正后再保存。');
-  }
-
-  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-    throw new Error('框架内容必须是一个 JSON 对象。');
-  }
-
-  const payload: {
-    description?: string;
-    tags?: Record<string, unknown>;
-    characters?: Record<string, unknown>[];
-    outline?: Record<string, unknown>;
-  } = {};
-
-  if ('description' in parsed) {
-    if (parsed.description !== undefined && typeof parsed.description !== 'string') {
-      throw new Error('description 必须是字符串。');
-    }
-    payload.description = parsed.description ?? '';
-  }
-
-  if ('tags' in parsed) {
-    if (parsed.tags !== undefined && (typeof parsed.tags !== 'object' || parsed.tags === null || Array.isArray(parsed.tags))) {
-      throw new Error('tags 必须是对象。');
-    }
-    payload.tags = parsed.tags ?? {};
-  }
-
-  if ('characters' in parsed) {
-    if (parsed.characters !== undefined && !Array.isArray(parsed.characters)) {
-      throw new Error('characters 必须是数组。');
-    }
-    payload.characters = parsed.characters ?? [];
-  }
-
-  if ('outline' in parsed) {
-    if (parsed.outline !== undefined && (typeof parsed.outline !== 'object' || parsed.outline === null || Array.isArray(parsed.outline))) {
-      throw new Error('outline 必须是对象。');
-    }
-    payload.outline = parsed.outline ?? {};
-  }
-
-  return payload;
-}
 
 function hasFrameworkContent(story: Story): boolean {
   const acts = Array.isArray(story.outline?.three_acts) ? story.outline?.three_acts : [];
