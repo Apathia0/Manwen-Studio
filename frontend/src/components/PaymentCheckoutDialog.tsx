@@ -49,7 +49,8 @@ export function PaymentCheckoutDialog({
   }, [checkout]);
 
   useEffect(() => {
-    if (!checkout?.orderNo) return;
+    const orderNo = checkout?.orderNo;
+    if (!orderNo) return;
     paidHandledRef.current = false;
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout>;
@@ -58,7 +59,7 @@ export function PaymentCheckoutDialog({
       if (cancelled || pollingRef.current || paidHandledRef.current) return;
       pollingRef.current = true;
       try {
-        const result = await syncMyOrder(checkout.orderNo);
+        const result = await syncMyOrder(orderNo);
         if (cancelled) return;
         if (result.status === 'paid') {
           paidHandledRef.current = true;
