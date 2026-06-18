@@ -32,21 +32,74 @@
         </view>
       </scroll-view>
 
-      <!-- 内容区域 - 按卡片类型显示占位内容 -->
+      <!-- 内容区域 - 按卡片类型显示完整内容 -->
       <scroll-view scroll-y class="vwb__content">
-        <!-- 角色卡片 -->
+        <!-- ========== 角色卡片 (T12) ========== -->
         <view v-if="currentType === 'character'" class="vwb__card-content">
-          <view class="vwb__placeholder">
+          <!-- 加载中 -->
+          <view v-if="characterLoading" class="vwb__placeholder">
+            <text class="vwb__placeholder-icon">⏳</text>
+            <text class="vwb__placeholder-title">加载角色资产中…</text>
+          </view>
+
+          <!-- 空状态 -->
+          <view v-else-if="characterAssets.length === 0" class="vwb__placeholder">
             <text class="vwb__placeholder-icon">👤</text>
-            <text class="vwb__placeholder-title">角色资产</text>
-            <text class="vwb__placeholder-desc">管理本镜头的角色参考图和外观设定</text>
-            <!-- TODO: T12 将实现角色卡片完整内容 -->
-            <text class="vwb__placeholder-todo">🚧 T12 - 角色卡片功能开发中</text>
+            <text class="vwb__placeholder-title">暂无角色资产</text>
+            <text class="vwb__placeholder-desc">请先生成角色参考图后再来管理</text>
+          </view>
+
+          <!-- 角色资产列表 -->
+          <view v-else class="vwb__asset-list">
+            <view
+              v-for="asset in characterAssets"
+              :key="asset.id"
+              :class="['vwb__asset-card', { 'vwb__asset-card--selected': selectedCharacterAssetId === asset.id }]"
+              @tap="selectCharacterAsset(asset.id)"
+            >
+              <image
+                :src="characterAssetThumb(asset)"
+                class="vwb__asset-thumb"
+                mode="aspectFill"
+                @error="onAssetThumbError(asset.id)"
+              />
+              <view class="vwb__asset-info">
+                <text class="vwb__asset-name">{{ asset.name }}</text>
+                <view :class="['vwb__badge', `vwb__badge--${assetStatusBadge(asset)}`]">
+                  <text>{{ assetStatusLabel(asset) }}</text>
+                </view>
+              </view>
+              <!-- 选中标记 -->
+              <view v-if="selectedCharacterAssetId === asset.id" class="vwb__asset-check">
+                <text>✓</text>
+              </view>
+            </view>
+          </view>
+
+          <!-- 重绘提示词输入区（inline） -->
+          <view v-if="showRedrawPrompt" class="vwb__redraw-panel">
+            <text class="vwb__redraw-panel-title">重绘提示词（可选）</text>
+            <textarea
+              v-model="redrawPromptText"
+              class="vwb__redraw-textarea"
+              placeholder="输入重绘提示词，留空则使用默认提示词"
+              :maxlength="500"
+              :auto-height="true"
+            />
+            <view class="vwb__redraw-panel-actions">
+              <view class="vwb__action-btn vwb__action-btn--secondary" @tap="cancelRedraw">
+                <text class="vwb__action-label">取消</text>
+              </view>
+              <view class="vwb__action-btn vwb__action-btn--primary" @tap="confirmRedraw">
+                <text class="vwb__action-label">确认重绘</text>
+              </view>
+            </view>
           </view>
         </view>
 
-        <!-- 故事版卡片 -->
+        <!-- ========== 故事版卡片 (T13) ========== -->
         <view v-else-if="currentType === 'storyboard'" class="vwb__card-content">
+          <!-- 当前故事版预览 -->
           <view v-if="shotData?.storyboard_image_url" class="vwb__preview-section">
             <image
               :src="assetUrl(shotData.storyboard_image_url)"
@@ -54,6 +107,8 @@
               mode="aspectFit"
             />
           </view>
+
+          <!-- 状态信息 -->
           <view class="vwb__info-section">
             <view class="vwb__info-row">
               <text class="vwb__info-label">状态</text>
@@ -61,19 +116,78 @@
                 <text>{{ statusLabel(shotData) }}</text>
               </view>
             </view>
-            <view v-if="shotData?.storyboard_prompt" class="vwb__info-row">
+          </view>
+
+          <!-- 故事版提示词编辑区（T13） -->
+          <view class="vwb__prompt-editor">
+            <view class="vwb__prompt-editor-header">
               <text class="vwb__info-label">故事版提示词</text>
-              <text class="vwb__info-text vwb__info-text--prompt">{{ shotData.storyboard_prompt }}</text>
+              <view v-if="promptEdited" class="vwb__prompt-dirty-badge">
+                <text>已修改</text>
+              </view>
             </view>
-            <view v-if="!shotData?.storyboard_image_url" class="vwb__placeholder">
-              <text class="vwb__placeholder-icon">🎬</text>
-              <text class="vwb__placeholder-title">暂无故事版</text>
-              <text class="vwb__placeholder-desc">点击下方"重新生成"创建故事版图片</text>
+            <textarea
+              v-model="editedStoryboardPrompt"
+              class="vwb__prompt-textarea"
+              placeholder="暂无故事版提示词"
+              :maxlength="2000"
+              :auto-height="true"
+            />
+          </view>
+
+          <!-- 故事版版本列表（T13） -->
+          <view v-if="storyboardVersions.length > 0" class="vwb__versions">
+            <view class="vwb__versions-header">
+              <text class="vwb__section-title">历史版本（{{ storyboardVersions.length }}）</text>
+              <view
+                v-if="storyboardVersionsLoading"
+                class="vwb__versions-refresh vwb__versions-refresh--spin"
+                @tap="refreshStoryboardVersions"
+              >
+                <text>⟳</text>
+              </view>
+              <view v-else class="vwb__versions-refresh" @tap="refreshStoryboardVersions">
+                <text>⟳ 刷新</text>
+              </view>
             </view>
+
+            <view
+              v-for="ver in storyboardVersions"
+              :key="ver.id"
+              :class="['vwb__version-item', { 'vwb__version-item--master': ver.is_master }]"
+            >
+              <image
+                :src="videoAssetUrl(ver.file_path)"
+                class="vwb__version-thumb"
+                mode="aspectFill"
+                @error="onVersionThumbError(ver.id)"
+              />
+              <view class="vwb__version-info">
+                <text class="vwb__version-name">{{ ver.name }}</text>
+                <text class="vwb__version-meta">rev {{ ver.revision }}</text>
+                <view v-if="ver.is_master" class="vwb__version-master-tag">
+                  <text>当前主版</text>
+                </view>
+              </view>
+              <view
+                v-if="!ver.is_master"
+                class="vwb__version-action"
+                @tap="setAsMasterStoryboard(ver.id)"
+              >
+                <text>设为主版本</text>
+              </view>
+            </view>
+          </view>
+
+          <!-- 故事版空状态 -->
+          <view v-if="!shotData?.storyboard_image_url && storyboardVersions.length === 0" class="vwb__placeholder">
+            <text class="vwb__placeholder-icon">🎬</text>
+            <text class="vwb__placeholder-title">暂无故事版</text>
+            <text class="vwb__placeholder-desc">点击下方"重新生成"创建故事版图片</text>
           </view>
         </view>
 
-        <!-- 场景卡片 -->
+        <!-- ========== 场景卡片（T14 待实现）========== -->
         <view v-else-if="currentType === 'scene'" class="vwb__card-content">
           <view class="vwb__info-section">
             <view v-if="shotData?.scene_location" class="vwb__info-row">
@@ -96,7 +210,7 @@
           </view>
         </view>
 
-        <!-- 视频卡片 -->
+        <!-- ========== 视频卡片（T15 待完善）========== -->
         <view v-else-if="currentType === 'video'" class="vwb__card-content">
           <view v-if="shotData?.video_url" class="vwb__preview-section">
             <video
@@ -183,17 +297,15 @@
         </view>
       </view>
     </view>
-
-    <!-- 隐藏的文件选择器（用于上传替换） -->
-    <!-- uni-app 中通过 uni.chooseImage/uni.chooseVideo 实现，此处不需要 DOM input -->
   </view>
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch } from 'vue'
+import { ref, computed, watch, nextTick } from 'vue'
 import { videoApi } from '@/api'
 import { BASE_URL } from '@/utils/constants'
-import type { ChapterVideoShot } from '@/api/types'
+import { videoAssetUrl } from '@/utils/url'
+import type { ChapterVideoShot, VideoAsset } from '@/api/types'
 
 // ── 卡片类型定义 ──
 type CardType = 'character' | 'storyboard' | 'scene' | 'video'
@@ -238,6 +350,38 @@ watch(
   }
 )
 
+// ── 角色资产相关状态（T12）──
+/** 角色资产列表 */
+const characterAssets = ref<VideoAsset[]>([])
+/** 资产加载中 */
+const characterLoading = ref(false)
+/** 当前选中的角色资产 ID */
+const selectedCharacterAssetId = ref<number | null>(null)
+/** 图片加载失败的资产 ID 集合 */
+const assetImageErrors = ref<Set<number>>(new Set())
+
+// ── 故事版相关状态（T13）──
+/** 故事版历史版本列表 */
+const storyboardVersions = ref<VideoAsset[]>([])
+/** 版本加载中 */
+const storyboardVersionsLoading = ref(false)
+/** 编辑中的故事版提示词 */
+const editedStoryboardPrompt = ref('')
+
+// ── 重绘相关状态 ──
+/** 是否显示重绘提示词面板 */
+const showRedrawPrompt = ref(false)
+/** 重绘提示词文本 */
+const redrawPromptText = ref('')
+
+// ── 提示词编辑追踪 ──
+/** 原始故事版提示词（用于判断是否修改） */
+const originalStoryboardPrompt = ref('')
+/** 提示词是否被修改 */
+const promptEdited = computed(() => {
+  return editedStoryboardPrompt.value !== originalStoryboardPrompt.value
+})
+
 /** 标签栏配置 */
 interface TabConfig {
   key: CardType
@@ -262,20 +406,21 @@ const currentResource = computed(() => {
 
   switch (currentType.value) {
     case 'character':
-      // 角色资源：从 shot.characters 和 character_prompts 派生
+      // 角色资源：从 shot.characters 和 character_prompts 派生，附加选中资产
       return {
         id: shot.id,
         type: 'character' as const,
         characters: shot.characters || [],
         prompts: shot.character_prompts || [],
+        selectedAssetId: selectedCharacterAssetId.value,
       }
     case 'storyboard':
       // 故事版资源：图片 URL + 提示词
       return {
         id: shot.id,
         type: 'storyboard' as const,
-        url: shot.storyboard_image_url || null,
-        prompt: shot.storyboard_prompt || null,
+        url: shot.storyboard_image_url ?? null,
+        prompt: shot.storyboard_prompt ?? null,
         hasAsset: !!shot.storyboard_image_url,
       }
     case 'scene':
@@ -283,17 +428,17 @@ const currentResource = computed(() => {
       return {
         id: shot.id,
         type: 'scene' as const,
-        location: shot.scene_location || null,
-        timeOfDay: shot.time_of_day || null,
-        prompt: shot.scene_prompt || null,
+        location: shot.scene_location ?? null,
+        timeOfDay: shot.time_of_day ?? null,
+        prompt: shot.scene_prompt ?? null,
       }
     case 'video':
       // 视频资源：URL + 提示词
       return {
         id: shot.id,
         type: 'video' as const,
-        url: shot.video_url || null,
-        prompt: shot.video_prompt || null,
+        url: shot.video_url ?? null,
+        prompt: shot.video_prompt ?? null,
         hasAsset: !!shot.video_url,
       }
     default:
@@ -308,6 +453,26 @@ function assetUrl(path?: string | null): string {
   if (!path) return ''
   if (path.startsWith('http://') || path.startsWith('https://') || path.startsWith('/static/')) return path
   return `${BASE_URL}/static/video/${path.replace(/^video_outputs[/\\]/, '')}`
+}
+
+/** 角色资产缩略图 URL */
+function characterAssetThumb(asset: VideoAsset): string {
+  // 如果该资产之前加载失败，返回占位图
+  if (assetImageErrors.value.has(asset.id)) {
+    return ''
+  }
+  // 使用统一的 videoAssetUrl 处理远程/本地路径
+  return videoAssetUrl(asset.file_path) || ''
+}
+
+/** 资产缩略图加载失败回调 */
+function onAssetThumbError(assetId: number) {
+  assetImageErrors.value.add(assetId)
+}
+
+/** 版本缩略图加载失败回调（降级处理，不阻塞） */
+function onVersionThumbError(_versionId: number) {
+  // 静默处理，图片组件会显示默认占位
 }
 
 /** 状态徽标样式类名 */
@@ -333,22 +498,155 @@ function statusLabel(shot: ChapterVideoShot | null): string {
   return labels[shot.status] || shot.status
 }
 
+/** 资产状态徽标样式 */
+function assetStatusBadge(asset: VideoAsset): string {
+  if (asset.status === 'ready' || asset.status === 'completed') return 'success'
+  if (asset.status === 'failed') return 'failed'
+  if (asset.status === 'processing' || asset.status === 'generating') return 'info'
+  return 'pending'
+}
+
+/** 资产状态文本 */
+function assetStatusLabel(asset: VideoAsset): string {
+  const labels: Record<string, string> = {
+    ready: '已完成',
+    completed: '已完成',
+    failed: '失败',
+    processing: '处理中',
+    generating: '生成中',
+    pending: '待处理',
+    draft: '草稿',
+  }
+  return labels[asset.status] || asset.status
+}
+
 // ── 标签切换 ──
 
 /** 切换当前激活的卡片类型 */
 function switchTab(type: CardType) {
   currentType.value = type
+  // 切换标签时取消重绘面板
+  showRedrawPrompt.value = false
 }
+
+// ── 加载数据 ──
+
+/** 加载角色资产列表 */
+async function loadCharacterAssets() {
+  if (!props.chapterId) return
+  characterLoading.value = true
+  try {
+    const result = await videoApi.listVideoAssets(props.chapterId, 'character')
+    characterAssets.value = result.assets || []
+    // 首次加载时清除错误记录
+    assetImageErrors.value = new Set()
+  } catch (e: any) {
+    uni.showToast({ title: e?.message || '加载角色资产失败', icon: 'none' })
+    characterAssets.value = []
+  } finally {
+    characterLoading.value = false
+  }
+}
+
+/** 加载故事版版本列表 */
+async function loadStoryboardVersions() {
+  if (!props.shotId) return
+  storyboardVersionsLoading.value = true
+  try {
+    const result = await videoApi.getShotStoryboards(props.shotId)
+    storyboardVersions.value = result.assets || []
+  } catch (e: any) {
+    uni.showToast({ title: e?.message || '加载故事版版本失败', icon: 'none' })
+    storyboardVersions.value = []
+  } finally {
+    storyboardVersionsLoading.value = false
+  }
+}
+
+/** 刷新故事版版本列表 */
+async function refreshStoryboardVersions() {
+  await loadStoryboardVersions()
+}
+
+/** 选择角色资产 */
+function selectCharacterAsset(assetId: number) {
+  selectedCharacterAssetId.value = assetId === selectedCharacterAssetId.value ? null : assetId
+}
+
+/** 设置故事版主版本 */
+async function setAsMasterStoryboard(assetId: number) {
+  if (busy.value) return
+  busy.value = 'setMaster'
+  try {
+    await videoApi.setMasterStoryboard(props.shotId, assetId)
+    uni.showToast({ title: '已设为主版本', icon: 'success' })
+    // 刷新版本列表和镜头数据
+    await loadStoryboardVersions()
+    emit('updated')
+  } catch (e: any) {
+    uni.showToast({ title: e?.message || '设置主版本失败', icon: 'none' })
+  } finally {
+    busy.value = null
+  }
+}
+
+// ── 监听：标签切换时加载对应数据 ──
+
+/** 监听 currentType 变化，加载对应数据 */
+watch(currentType, (type) => {
+  if (type === 'character') {
+    loadCharacterAssets()
+  } else if (type === 'storyboard') {
+    loadStoryboardVersions()
+    // 同步提示词编辑区
+    editedStoryboardPrompt.value = props.shotData?.storyboard_prompt || ''
+    originalStoryboardPrompt.value = props.shotData?.storyboard_prompt || ''
+  }
+})
+
+/** 监听 shotData 变化，刷新提示词编辑区 */
+watch(
+  () => props.shotData?.storyboard_prompt,
+  (newPrompt) => {
+    if (currentType.value === 'storyboard') {
+      editedStoryboardPrompt.value = newPrompt || ''
+      originalStoryboardPrompt.value = newPrompt || ''
+    }
+  }
+)
+
+/** 监听弹窗打开，加载初始数据 */
+watch(
+  () => props.visible,
+  (vis) => {
+    if (vis) {
+      nextTick(() => {
+        if (currentType.value === 'character') {
+          loadCharacterAssets()
+        } else if (currentType.value === 'storyboard') {
+          loadStoryboardVersions()
+          editedStoryboardPrompt.value = props.shotData?.storyboard_prompt || ''
+          originalStoryboardPrompt.value = props.shotData?.storyboard_prompt || ''
+        }
+      })
+    } else {
+      // 关闭时重置状态
+      showRedrawPrompt.value = false
+      redrawPromptText.value = ''
+    }
+  }
+)
 
 // ── 关闭弹窗 ──
 
 /** 关闭工作台 */
 function handleClose() {
   busy.value = null
+  showRedrawPrompt.value = false
   emit('close')
 }
 
-// ── 6 个操作 Handler（骨架 + 保护逻辑 + TODO 注释）──
+// ── 6 个操作 Handler ──
 
 /**
  * 1. 重新生成
@@ -356,23 +654,41 @@ function handleClose() {
  */
 async function handleRegenerate() {
   if (busy.value || !currentResource.value) return
+
+  // 角色类型需要先选中资产
+  if (currentType.value === 'character' && !selectedCharacterAssetId.value) {
+    uni.showToast({ title: '请先选择要重新生成的角色资产', icon: 'none' })
+    return
+  }
+
   busy.value = 'regenerate'
   try {
-    // TODO: T12-T15 将根据卡片类型实现完整的重新生成逻辑
-    //   character  → regenerateVideoAsset (T12)
-    //   storyboard → regenerateChapterWorkflowStoryboard (T13)
-    //   scene      → reanalyzeChapterShotPrompts (T14)
-    //   video      → regenerateChapterWorkflowVideo (T15)
-    const type = currentType.value
-    switch (type) {
+    switch (currentType.value) {
+      case 'character': {
+        // T12：重新生成角色参考图
+        const assetId = selectedCharacterAssetId.value!
+        const selectedAsset = characterAssets.value.find((a) => a.id === assetId)
+        await videoApi.regenerateVideoAsset(assetId, {
+          prompt: selectedAsset?.prompt || undefined,
+        })
+        uni.showToast({ title: '已提交重新生成', icon: 'success' })
+        // 刷新资产列表
+        await loadCharacterAssets()
+        break
+      }
       case 'storyboard':
+        // T13：重新生成故事版
         await videoApi.regenerateChapterWorkflowStoryboard(props.shotId)
+        uni.showToast({ title: '已提交重新生成', icon: 'success' })
+        await loadStoryboardVersions()
         break
       case 'video':
+        // T11/T15：重新生成视频
         await videoApi.regenerateChapterWorkflowVideo(props.shotId)
+        uni.showToast({ title: '已提交重新生成', icon: 'success' })
         break
       default:
-        uni.showToast({ title: `${currentType.value} 重新生成功能即将实现`, icon: 'none' })
+        uni.showToast({ title: `${getTypeLabel(currentType.value)} 重新生成即将实现`, icon: 'none' })
         break
     }
     emit('updated')
@@ -389,28 +705,42 @@ async function handleRegenerate() {
  */
 async function handleUploadReplace() {
   if (busy.value || !currentResource.value) return
+
+  // 角色类型需要先选中资产
+  if (currentType.value === 'character' && !selectedCharacterAssetId.value) {
+    uni.showToast({ title: '请先选择要替换的角色资产', icon: 'none' })
+    return
+  }
+
   busy.value = 'upload'
   try {
-    // TODO: T12-T15 将根据卡片类型实现完整的上传替换逻辑
-    //   character  → replaceVideoAsset (T12)
-    //   storyboard → uploadShotStoryboard (T13)
-    //   video      → uploadShotVideo (T15)
-    //   scene      → 场景类型不支持上传替换，但保留入口
-
-    // uni-app 中使用 uni.chooseImage / uni.chooseVideo 选择文件
     const type = currentType.value
-    if (type === 'storyboard' || type === 'character') {
+
+    if (type === 'character') {
+      // T12：选择图片后调用 replaceVideoAsset 替换角色资产
       const res = await uni.chooseImage({ count: 1, sizeType: ['compressed'] })
       if (res.tempFilePaths.length > 0) {
-        if (type === 'storyboard') {
-          await videoApi.uploadShotStoryboard(props.shotId, res.tempFilePaths[0])
-        }
+        const assetId = selectedCharacterAssetId.value!
+        await videoApi.replaceVideoAsset(assetId, res.tempFilePaths[0])
+        uni.showToast({ title: '角色资产已替换', icon: 'success' })
+        await loadCharacterAssets()
+        emit('updated')
+      }
+    } else if (type === 'storyboard') {
+      // T13：选择图片后上传故事版
+      const res = await uni.chooseImage({ count: 1, sizeType: ['compressed'] })
+      if (res.tempFilePaths.length > 0) {
+        await videoApi.uploadShotStoryboard(props.shotId, res.tempFilePaths[0])
+        uni.showToast({ title: '故事版已上传', icon: 'success' })
+        await loadStoryboardVersions()
         emit('updated')
       }
     } else if (type === 'video') {
+      // T11/T15：选择视频后上传
       const res = await uni.chooseVideo({ sourceType: ['album'] })
       if (res.tempFilePath) {
         await videoApi.uploadShotVideo(props.shotId, res.tempFilePath)
+        uni.showToast({ title: '视频已上传', icon: 'success' })
         emit('updated')
       }
     } else {
@@ -425,27 +755,41 @@ async function handleUploadReplace() {
 
 /**
  * 3. 重绘
- * 根据 currentType 调用对应的重绘/重新生成 API
+ * 根据 currentType 调用对应的重绘 API
  */
 async function handleRedraw() {
   if (busy.value || !currentResource.value) return
+
+  // 角色类型需要先选中资产
+  if (currentType.value === 'character' && !selectedCharacterAssetId.value) {
+    uni.showToast({ title: '请先选择要重绘的角色资产', icon: 'none' })
+    return
+  }
+
+  // 角色类型显示重绘提示词面板（inline）
+  if (currentType.value === 'character') {
+    showRedrawPrompt.value = true
+    redrawPromptText.value = ''
+    return
+  }
+
+  // 非角色类型直接执行重绘
   busy.value = 'redraw'
   try {
-    // TODO: T12-T15 将根据卡片类型实现完整的重绘逻辑
-    //   character  → regenerateVideoAsset（支持 mask 局部重绘）(T12)
-    //   storyboard → regenerateChapterWorkflowStoryboard (T13)
-    //   video      → regenerateChapterWorkflowVideo (T15)
-    //   scene      → 场景类型通过重新分析提示词实现 (T14)
-    const type = currentType.value
-    switch (type) {
+    switch (currentType.value) {
       case 'storyboard':
+        // T13：重新生成故事版
         await videoApi.regenerateChapterWorkflowStoryboard(props.shotId)
+        uni.showToast({ title: '已提交重新生成', icon: 'success' })
+        await loadStoryboardVersions()
         break
       case 'video':
+        // T11/T15：重新生成视频
         await videoApi.regenerateChapterWorkflowVideo(props.shotId)
+        uni.showToast({ title: '已提交重新生成', icon: 'success' })
         break
       default:
-        uni.showToast({ title: `${currentType.value} 重绘功能即将实现`, icon: 'none' })
+        uni.showToast({ title: `${getTypeLabel(currentType.value)} 重绘即将实现`, icon: 'none' })
         break
     }
     emit('updated')
@@ -456,36 +800,86 @@ async function handleRedraw() {
   }
 }
 
+/** 取消重绘 */
+function cancelRedraw() {
+  showRedrawPrompt.value = false
+  redrawPromptText.value = ''
+}
+
+/** 确认重绘（角色类型） */
+async function confirmRedraw() {
+  if (busy.value || !selectedCharacterAssetId.value) return
+  showRedrawPrompt.value = false
+  busy.value = 'redraw'
+  try {
+    const assetId = selectedCharacterAssetId.value
+    await videoApi.regenerateVideoAsset(assetId, {
+      prompt: redrawPromptText.value || undefined,
+    })
+    uni.showToast({ title: '已提交重绘', icon: 'success' })
+    await loadCharacterAssets()
+    emit('updated')
+  } catch (e: any) {
+    uni.showToast({ title: e?.message || '重绘失败', icon: 'none' })
+  } finally {
+    busy.value = null
+    redrawPromptText.value = ''
+  }
+}
+
 /**
  * 4. 删除
  * 删除当前卡片资源（需确认）
  */
 async function handleDelete() {
   if (busy.value) return
-  // uni-app 确认对话框
+
+  // 角色类型需要先选中资产
+  if (currentType.value === 'character' && !selectedCharacterAssetId.value) {
+    uni.showToast({ title: '请先选择要删除的角色资产', icon: 'none' })
+    return
+  }
+
+  // 构建确认消息
+  let confirmContent: string
+  if (currentType.value === 'character') {
+    const asset = characterAssets.value.find((a) => a.id === selectedCharacterAssetId.value)
+    confirmContent = `确定要删除角色资产「${asset?.name || '未知'}」吗？此操作不可撤销。`
+  } else {
+    confirmContent = `确定要删除当前${getTypeLabel(currentType.value)}资源吗？此操作不可撤销。`
+  }
+
   const confirmRes = await uni.showModal({
     title: '确认删除',
-    content: `确定要删除当前${getTypeLabel(currentType.value)}资源吗？此操作不可撤销。`,
+    content: confirmContent,
   })
   if (!confirmRes.confirm) return
 
   busy.value = 'delete'
   try {
-    // TODO: T12-T15 将根据卡片类型实现完整的删除逻辑
-    //   character  → deleteVideoAsset (T12)
-    //   storyboard → clearShotStoryboard (T13)
-    //   video      → clearShotVideo (T15)
-    //   scene      → 场景类型不支持删除
-    const type = currentType.value
-    switch (type) {
+    switch (currentType.value) {
+      case 'character': {
+        // T12：删除角色资产
+        const assetId = selectedCharacterAssetId.value!
+        await videoApi.deleteVideoAsset(assetId)
+        uni.showToast({ title: '角色资产已删除', icon: 'success' })
+        selectedCharacterAssetId.value = null
+        await loadCharacterAssets()
+        break
+      }
       case 'storyboard':
+        // T13：清除故事版
         await videoApi.clearShotStoryboard(props.shotId)
+        uni.showToast({ title: '故事版已清除', icon: 'success' })
+        storyboardVersions.value = []
         break
       case 'video':
+        // T11/T15：清除视频
         await videoApi.clearShotVideo(props.shotId)
+        uni.showToast({ title: '视频已清除', icon: 'success' })
         break
       default:
-        uni.showToast({ title: `${currentType.value} 删除功能即将实现`, icon: 'none' })
+        uni.showToast({ title: `${getTypeLabel(currentType.value)} 类型不支持删除`, icon: 'none' })
         break
     }
     emit('updated')
@@ -504,12 +898,9 @@ async function handleReanalyzePrompt() {
   if (busy.value || !currentResource.value) return
   busy.value = 'reanalyze'
   try {
-    // TODO: T12-T15 将根据卡片类型实现完整分析提示词逻辑
-    //   character  → 角色提示词分析 (T12)
-    //   storyboard → reanalyzeChapterWorkflowStoryboardPrompt (T13)
-    //   scene      → reanalyzeChapterShotPrompts (T14)
-    //   video      → reanalyzeChapterShotPrompts (T15)
+    // 所有类型统一调用镜头提示词重新分析
     await videoApi.reanalyzeChapterShotPrompts(props.shotId)
+    uni.showToast({ title: '提示词分析已提交', icon: 'success' })
     emit('updated')
   } catch (e: any) {
     uni.showToast({ title: e?.message || '分析提示词失败', icon: 'none' })
@@ -524,20 +915,32 @@ async function handleReanalyzePrompt() {
  */
 async function handlePromptSave() {
   if (busy.value || !currentResource.value) return
+
+  // 角色类型不支持提示词编辑
+  if (currentType.value === 'character') {
+    uni.showToast({ title: '角色类型不支持提示词编辑', icon: 'none' })
+    return
+  }
+
   busy.value = 'savePrompt'
   try {
-    // TODO: T12-T15 将根据卡片类型实现完整的保存提示词逻辑
-    //   character  → 保存角色提示词 (T12)
-    //   storyboard → saveChapterShotPrompts (storyboard_prompt) (T13)
-    //   scene      → saveChapterShotPrompts (scene_prompt) (T14)
-    //   video      → saveChapterShotPrompts (video_prompt) (T15)
     const prompts: Record<string, string | null> = {}
-    if (currentType.value === 'storyboard') prompts.storyboard_prompt = currentResource.value.prompt
-    if (currentType.value === 'video') prompts.video_prompt = currentResource.value.prompt
-    if (currentType.value === 'scene') prompts.scene_prompt = currentResource.value.prompt
+    if (currentType.value === 'storyboard') {
+      prompts.storyboard_prompt = editedStoryboardPrompt.value || null
+    }
+    if (currentType.value === 'video') {
+      prompts.video_prompt = props.shotData?.video_prompt ?? null
+    }
+    if (currentType.value === 'scene') {
+      prompts.scene_prompt = props.shotData?.scene_prompt ?? null
+    }
 
     if (Object.keys(prompts).length > 0) {
       await videoApi.saveChapterShotPrompts(props.shotId, prompts)
+      // 更新原始提示词记录
+      if (currentType.value === 'storyboard') {
+        originalStoryboardPrompt.value = editedStoryboardPrompt.value
+      }
       uni.showToast({ title: '提示词已保存', icon: 'success' })
     } else {
       uni.showToast({ title: '暂无提示词可保存', icon: 'none' })
@@ -842,13 +1245,263 @@ function getTypeLabel(type: CardType): string {
   text-align: center;
 }
 
-.vwb__placeholder-todo {
-  margin-top: 8rpx;
+// ── 角色资产列表（T12）──
+.vwb__asset-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12rpx;
+}
+
+.vwb__asset-card {
+  display: flex;
+  align-items: center;
+  gap: 16rpx;
+  padding: 16rpx;
+  background: $lv-surface-solid;
+  border-radius: $lv-radius-sm;
+  border: 2rpx solid $lv-border-light;
+  transition: all 0.2s;
+  position: relative;
+
+  &--selected {
+    border-color: $lv-primary;
+    background: $lv-primary-lighter;
+    box-shadow: 0 0 0 2rpx $lv-primary-light;
+  }
+
+  &:active {
+    transform: scale(0.98);
+  }
+}
+
+.vwb__asset-thumb {
+  width: 120rpx;
+  height: 120rpx;
+  border-radius: $lv-radius-xs;
+  background: $lv-bg-end;
+  flex-shrink: 0;
+}
+
+.vwb__asset-info {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 6rpx;
+  min-width: 0;
+}
+
+.vwb__asset-name {
+  font-size: $lv-font-base;
+  font-weight: 500;
+  color: $lv-text-primary;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.vwb__asset-check {
+  position: absolute;
+  top: 8rpx;
+  right: 8rpx;
+  width: 40rpx;
+  height: 40rpx;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: $lv-radius-full;
+  background: $lv-primary;
+  color: $lv-text-on-primary;
+  font-size: $lv-font-sm;
+  font-weight: 700;
+}
+
+// ── 重绘面板（T12）──
+.vwb__redraw-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12rpx;
+  padding: 20rpx;
+  background: $lv-surface-solid;
+  border-radius: $lv-radius-sm;
+  border: 1rpx solid $lv-border-light;
+}
+
+.vwb__redraw-panel-title {
+  font-size: $lv-font-sm;
+  font-weight: 600;
+  color: $lv-text-primary;
+}
+
+.vwb__redraw-textarea {
+  width: 100%;
+  min-height: 120rpx;
+  padding: 16rpx;
+  font-size: $lv-font-sm;
+  color: $lv-text-primary;
+  background: $lv-bg-end;
+  border-radius: $lv-radius-xs;
+  border: 1rpx solid $lv-border-light;
+  box-sizing: border-box;
+
+  &:focus {
+    border-color: $lv-border-focus;
+  }
+}
+
+.vwb__redraw-panel-actions {
+  display: flex;
+  gap: 12rpx;
+}
+
+// ── 提示词编辑区（T13）──
+.vwb__prompt-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 8rpx;
+}
+
+.vwb__prompt-editor-header {
+  display: flex;
+  align-items: center;
+  gap: 12rpx;
+}
+
+.vwb__prompt-dirty-badge {
+  padding: 2rpx 12rpx;
+  border-radius: $lv-radius-full;
+  background: $lv-warning-bg;
   font-size: $lv-font-xs;
   color: $lv-warning;
-  background: $lv-warning-bg;
-  padding: 8rpx 20rpx;
+}
+
+.vwb__prompt-textarea {
+  width: 100%;
+  min-height: 160rpx;
+  padding: 16rpx 20rpx;
+  font-size: $lv-font-sm;
+  color: $lv-text-primary;
+  background: $lv-surface-solid;
+  border-radius: $lv-radius-sm;
+  border: 1rpx solid $lv-border-light;
+  box-sizing: border-box;
+  line-height: 1.6;
+
+  &:focus {
+    border-color: $lv-border-focus;
+  }
+}
+
+// ── 故事版版本列表（T13）──
+.vwb__versions {
+  display: flex;
+  flex-direction: column;
+  gap: 12rpx;
+}
+
+.vwb__versions-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.vwb__section-title {
+  font-size: $lv-font-base;
+  font-weight: 600;
+  color: $lv-text-primary;
+}
+
+.vwb__versions-refresh {
+  display: flex;
+  align-items: center;
+  gap: 4rpx;
+  padding: 6rpx 16rpx;
   border-radius: $lv-radius-full;
+  background: $lv-primary-lighter;
+  font-size: $lv-font-xs;
+  color: $lv-primary;
+  transition: all 0.2s;
+
+  &:active {
+    background: $lv-primary;
+    color: $lv-text-on-primary;
+  }
+
+  &--spin {
+    opacity: 0.6;
+    pointer-events: none;
+    animation: vwb-spin 0.8s linear infinite;
+  }
+}
+
+.vwb__version-item {
+  display: flex;
+  align-items: center;
+  gap: 16rpx;
+  padding: 16rpx;
+  background: $lv-surface-solid;
+  border-radius: $lv-radius-sm;
+  border: 1rpx solid $lv-border-light;
+  transition: all 0.2s;
+
+  &--master {
+    border-color: $lv-primary;
+    background: $lv-primary-lighter;
+  }
+}
+
+.vwb__version-thumb {
+  width: 100rpx;
+  height: 100rpx;
+  border-radius: $lv-radius-xs;
+  background: $lv-bg-end;
+  flex-shrink: 0;
+}
+
+.vwb__version-info {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 4rpx;
+  min-width: 0;
+}
+
+.vwb__version-name {
+  font-size: $lv-font-sm;
+  font-weight: 500;
+  color: $lv-text-primary;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.vwb__version-meta {
+  font-size: $lv-font-xs;
+  color: $lv-text-muted;
+}
+
+.vwb__version-master-tag {
+  align-self: flex-start;
+  padding: 2rpx 10rpx;
+  border-radius: $lv-radius-full;
+  background: $lv-primary;
+  font-size: $lv-font-xs;
+  color: $lv-text-on-primary;
+}
+
+.vwb__version-action {
+  flex-shrink: 0;
+  padding: 10rpx 20rpx;
+  border-radius: $lv-radius-sm;
+  background: $lv-primary;
+  font-size: $lv-font-xs;
+  color: $lv-text-on-primary;
+  font-weight: 500;
+  transition: all 0.2s;
+
+  &:active {
+    background: $lv-primary-dark;
+    transform: scale(0.96);
+  }
 }
 
 // ── 底部操作栏 ──
