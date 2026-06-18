@@ -1301,32 +1301,31 @@ async def generate_character_profiles_from_content(chapter_content: str, api_key
 
 def _long_form_framework_rules() -> str:
     return """
-1. 大纲必须覆盖完整主线：从开头到终局，不能只规划前几十章。
-2. 默认按长篇节奏规划（100章+），除非用户明确要求短篇。
-3. 核心冲突至少升级三次，每次升级改变角色处境和故事格局。
-4. 终局高潮必须放在规划后段，不要在前20章内用完核心矛盾。
-5. 章节规划体现「铺垫→升级→扩盘→反转→决战→余波」节奏。
+1. 初始大纲只规划前 10 章详细章节，后续章节只以幕/卷级大纲给出核心冲突线和关键里程碑，不要求输出每章明细。
+2. 默认按长篇节奏规划（100章以上潜力），不要在前 10 章内写完主要矛盾。
+3. 核心冲突至少预留三次升级空间，每次升级改变角色处境和故事格局，但后续升级只需在幕级描述中标明方向。
+4. 终局方向可以标注，但不要强制写出结局——保留开放扩展空间，让作者后续逐步完善。
+5. 章节规划体现「铺垫→升级→扩盘→反转→决战→余波」节奏，但只在第一个阶段用满章节明细。
 6. 角色成长渐进，不要把人物弧光一夜完成。
 7. 世界观揭秘分层递进，每次只给读者部分真相。
 8. 感情线、友情线、敌对线都要有独立的发展曲线。
-9. 阶段结构灵活——3幕、4幕、5篇均可，按题材最适合的方式组织。
-10. 每个章节必须有钩子——让读者想继续读下去的悬念、疑问或期待。
-11. 前10章的每章必须标注 goal, conflict, hook，确保开篇有足够抓力。
+9. 前 10 章的每章必须标注 goal, conflict, hook，确保开篇有足够抓力。
+10. 后续阶段不要强制写出终局结局——用 serial_strategy 标注故事发展方向即可。
 """.strip()
 
 
 def _medium_form_framework_rules() -> str:
     return """
-1. 大纲覆盖完整主线，规划 50-100 章，不要在前 30 章内收束主线。
-2. 核心冲突升级 2-3 次，每次升级改变角色处境和故事格局。
-3. 阶段结构 3-5 个，每个阶段至少包含 10 个以上章节。
+1. 初始大纲只规划前 10 章详细章节，后续章节只以幕/卷级大纲给出核心冲突线和方向，不要求输出每章明细。
+2. 核心冲突升级 2-3 次，每次升级改变角色处境和故事格局，后续升级在幕级描述中标明方向即可。
+3. 阶段结构 3-5 个，每个阶段标注核心冲突方向和关键情节点。
 4. 阶段间要有明确的转折点，不能平铺直叙地过渡。
 5. 角色成长渐进，每个阶段角色至少有一个关键变化。
 6. 世界观分 2-3 层揭秘，不要一次性交代完毕。
 7. 中段要保留升级空间和悬念递进，不能让故事在中段塌陷。
 8. 感情线、友情线、敌对线都要有独立的发展曲线。
-9. 每个章节必须有钩子——让读者想继续读下去的悬念、疑问或期待。
-10. 前10章的每章必须标注 goal, conflict, hook，确保开篇有足够抓力。
+9. 前 10 章的每章必须标注 goal, conflict, hook，确保开篇有足够抓力。
+10. 不要强制写出终局结局——用 serial_strategy 标注故事发展方向即可。
 """.strip()
 
 
@@ -1495,12 +1494,12 @@ async def generate_framework(
         else:
             launch_ready_hint = """
 9. 这次是"平台可发布级开书框架"生成，必须达到开书可用标准，而不是只给概念草稿。
-10. 不要求一次性列完未来全部 200-500 章，但必须至少给出前 10 章的完整开书规划；如果能做到，前 20 章更好。
-11. 前 10 章必须尽量细到能直接写，至少 6 章要补齐 `summary`，并尽量给出 `goal`、`conflict`、`hook`、`payoff`、`highlight`。
+10. 初始大纲只规划前 10 章详细章节，后续章节只以幕/卷级大纲给出核心冲突线和方向，不要求输出每章明细。
+11. 前 10 章的章节必须尽量细到能直接写，每章要补齐 `summary`，并给出 `goal`、`conflict`、`hook`、`payoff`、`highlight`。
 12. `outline` 至少要有 2 个以上主要阶段，明确开书阶段和后续扩展阶段；如果能拆到 3 个以上更好。
 13. `outline.serial_strategy` 至少完整给出 `positioning`、`opening_hook`、`first_3_chapter_hook`、`chapter_10_climax`，其余字段尽量补充。
 14. 第 1 章必须有强钩子，第 3 章前要建立明确追读动力，第 10 章要有小高潮。
-15. 如果你觉得整本书篇幅很长，可以把 10 章之后转为卷级/阶段级规划，但不能缺少可发布的开书结构。
+15. 不要强制写出终局结局——用 `serial_strategy.late_game_direction` 标注故事发展方向即可，保留开放扩展空间。
 """.strip()
     quality_feedback_hint = ""
     if quality_feedback:
@@ -1523,35 +1522,36 @@ async def generate_framework(
 {launch_ready_hint}
 {quality_feedback_hint}"""
     elif effective_length == "medium":
-        user_prompt = f"""请根据以下故事描述，生成一版适合中篇创作的完整小说框架：
+        user_prompt = f"""请根据以下故事描述，生成一版适合中篇创作的扩展型小说框架：
 
 {description}
 {story_bible_hint}
 
 额外要求：
-1. `outline` 覆盖完整主线，阶段结构 3-5 个，每个阶段至少 10 章。
-2. `chapters` 总数规划 50-100 章，核心冲突升级 2-3 次。
-3. 前 1-20 章尽量细化到"能直接写"的粒度；21-50 章保持较细规划；50 章后可逐步转为阶段性推进。
-4. 每个 `chapters` 条目除 `chapter_number`、`title`、`act` 外，还应尽量包含 `summary`、`goal`、`conflict`、`hook`、`payoff`、`highlight`、`key_events`。{min_chapter_requirement}
-5. `outline` 中必须额外包含 `serial_strategy` 对象，至少给出 `positioning`、`opening_hook`、`first_3_chapter_hook`、`chapter_10_climax`、`chapter_20_payoff`。
+1. `outline` 覆盖开书阶段和后续发展，阶段结构 3-5 个，核心冲突升级 2-3 次。
+2. 初始大纲只规划前 10 章详细章节，后续章节只以幕/卷级大纲给出核心冲突线和方向，不要求输出每章明细。
+3. 后续阶段不需要输出终局章节明细，用 `serial_strategy` 的 `midgame_engine` 和 `late_game_direction` 标注发展方向。
+4. 前 10 章的每个 `chapters` 条目除 `chapter_number`、`title`、`act` 外，还应尽量包含 `summary`、`goal`、`conflict`、`hook`、`payoff`、`highlight`、`key_events`。{min_chapter_requirement}
+5. `outline` 中必须额外包含 `serial_strategy` 对象，至少给出 `positioning`、`opening_hook`、`first_3_chapter_hook`、`chapter_10_climax`。
 6. 只输出 JSON，包含 `tags`、`characters`、`outline`、`chapters` 四个字段。
 {launch_ready_hint}
 {quality_feedback_hint}"""
     else:
-        user_prompt = f"""请根据以下故事描述，生成一版适合长篇创作的完整小说框架：
+        user_prompt = f"""请根据以下故事描述，生成一版适合长篇创作的扩展型小说框架：
 
 {description}
 {story_bible_hint}
 
 额外要求：
-1. `outline` 要尽量完整，覆盖整部小说的主要阶段、阶段目标、冲突升级和终局方向。
-2. 阶段数量不固定，可以是 2 幕、4 幕、5 个篇章或其他更适合题材的结构，不要为了形式强行写成三幕。
-3. `chapters` 要提供一版完整章节规划，但不要把节奏做得过快，不要在前几十章内把整部小说讲完。
-4. 前 1-30 章尽量细化到"能直接写"的粒度；31-100 章保持较细规划；100 章后可逐步转为阶段性推进，但仍要覆盖完整主线。
-5. `outline` 中必须额外包含 `serial_strategy` 对象，至少给出 `positioning`、`opening_hook`、`first_3_chapter_hook`、`chapter_10_climax`、`chapter_20_payoff`、`midgame_engine`、`late_game_direction`。
-6. 每个 `chapters` 条目除 `chapter_number`、`title`、`act` 外，还应尽量包含 `summary`、`goal`、`conflict`、`hook`、`payoff`、`highlight`、`key_events`，让它更像章节任务卡而不是纯标题目录。{min_chapter_requirement}
-7. 如果题材天然适合长篇连载，请优先规划成更有延展性的长篇，而不是短篇速通。
-8. 只输出 JSON，包含 `tags`、`characters`、`outline`、`chapters` 四个字段。
+1. 初始大纲只规划前 10 章详细章节，后续章节只以幕/卷级大纲给出核心冲突线和关键里程碑，不要求输出每章明细。
+2. 阶段数量不固定，可以是 3 幕、4 幕、5 个篇章或其他更适合题材的结构，不要为了形式强行写成三幕。
+3. 前 10 章尽量细化到"能直接写"的粒度，每章标注 goal, conflict, hook。
+4. 后续阶段（第二幕及以后）的 `chapters` 可以为空数组或只包含 3-5 个里程碑章节——这些阶段的核心冲突方向和关键情节点只需在 `act.summary` 中描述清楚即可。
+5. 不要强制写出终局结局，保留开放扩展空间。如果规划到后期，用 `serial_strategy.late_game_direction` 标注大致故事发展方向，不需要在 chapters 中产出终结性章节。
+6. `outline` 中必须额外包含 `serial_strategy` 对象，至少给出 `positioning`、`opening_hook`、`first_3_chapter_hook`、`chapter_10_climax`、`midgame_engine`，`late_game_direction` 可选。
+7. 前 10 章的 `chapters` 条目除 `chapter_number`、`title`、`act` 外，还应尽量包含 `summary`、`goal`、`conflict`、`hook`、`payoff`、`highlight`、`key_events`，让它更像章节任务卡而不是纯标题目录。{min_chapter_requirement}
+8. 后期阶段的 `chapters` 如有则标注核心里程碑（如"主角失去力量"、"真相揭示"等大事件），无需细节执行信息。
+9. 只输出 JSON，包含 `tags`、`characters`、`outline`、`chapters` 四个字段。
 {launch_ready_hint}
 {quality_feedback_hint}"""
 
@@ -2526,7 +2526,7 @@ async def generate_onboarding_response(
                     *messages,
                 ],
                 "stream": False,
-                "max_tokens": 300,
+                "max_tokens": 500,
             }
 
             async with httpx.AsyncClient(timeout=120) as client:
@@ -2542,7 +2542,19 @@ async def generate_onboarding_response(
             try:
                 result = _extract_json_object(content)
             except ValueError:
-                # fallback：从纯文本提取 reply
+                # 尝试从可能不完整的JSON中提取reply字段
+                reply_match = re.search(r'"reply"\s*:\s*"((?:[^"\\]|\\.)*)"', content)
+                if reply_match:
+                    reply_text = reply_match.group(1).replace('\\"', '"').replace('\\n', '\n')
+                    return {
+                        "reply": reply_text,
+                        "understanding": understanding or {},
+                        "understanding_depth": 0,
+                        "phase": "extracting",
+                        "has_brief": False,
+                        "creative_brief": None,
+                    }
+                # fallback：返回纯文本内容
                 return {
                     "reply": content.strip(),
                     "understanding": understanding or {},
