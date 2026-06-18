@@ -1,4 +1,5 @@
 import { get, post, put, del } from '@/utils/request'
+import { uploadFile } from '@/utils/upload'
 import type {
   ScriptScene, VideoShot, VideoAsset, VideoGenerationJob,
   StoryVideoCharacter, ChapterVideoWorkflow, ChapterVideoShot,
@@ -291,4 +292,14 @@ export function listVideoAssets(chapterId: number, assetType?: string): Promise<
 /** 删除视频资产 */
 export function deleteVideoAsset(assetId: number): Promise<{ ok: boolean; asset_id: number }> {
   return del(`/api/video-assets/${assetId}`)
+}
+
+// ── 上传 (Upload) ──
+
+/** 上传风格参考图 */
+export function uploadStyleReferenceImage(
+  workflowId: number,
+  filePath: string
+): Promise<{ success: boolean; style_reference_image_url: string }> {
+  return uploadFile(`/api/video/chapter-workflows/${workflowId}/style-reference`, filePath)
 }
