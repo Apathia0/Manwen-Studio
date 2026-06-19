@@ -160,6 +160,15 @@ export default function StoryBibleSummaryCard({ storyId, storyBible, onUpdated }
                           <div className="mt-0.5 text-xs leading-5 text-slate-600">{brief.world_setting.hidden_truths}</div>
                         </div>
                       ) : null}
+                      {Object.entries(brief.world_setting)
+                        .filter(([key]) => !['power_system', 'society_structure', 'key_locations', 'world_history', 'hidden_truths'].includes(key))
+                        .map(([key, val]) => (val && String(val).trim() ? (
+                          <div key={key} className="rounded-lg border border-[#e5edf8] bg-[#fafdff] p-2">
+                            <div className="text-[10px] font-medium text-slate-500">{key}</div>
+                            <div className="mt-0.5 text-xs leading-5 text-slate-600">{String(val)}</div>
+                          </div>
+                        ) : null))
+                      }
                     </div>
                   </div>
                 ) : (
