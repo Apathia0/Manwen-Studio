@@ -29,6 +29,8 @@ type StoryBibleFormState = {
   late_game_direction: string;
   forbidden_patterns: string;
   preferred_plot_patterns: string;
+  world_setting: string;
+  open_story_notes: string;
 };
 
 export default function StoryBibleSummaryCard({ storyId, storyBible, onUpdated }: Props) {
@@ -123,6 +125,50 @@ export default function StoryBibleSummaryCard({ storyId, storyBible, onUpdated }
               <InfoItem label="目标篇幅" value={brief.serial_length_target} />
               <InfoItem label="揭秘策略" value={brief.reveal_strategy} />
               <InfoItem label="节奏策略" value={brief.pacing_strategy} />
+              {brief.world_setting ? (
+                typeof brief.world_setting === 'object' ? (
+                  <div className="rounded-xl border border-[#d7e3f4] bg-white/90 p-3 sm:col-span-2 lg:col-span-3">
+                    <div className="mb-2 text-[11px] font-medium text-[#2563eb]">世界观设定</div>
+                    <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                      {brief.world_setting.power_system ? (
+                        <div className="rounded-lg border border-[#e5edf8] bg-[#fafdff] p-2">
+                          <div className="text-[10px] font-medium text-slate-500">力量体系</div>
+                          <div className="mt-0.5 text-xs leading-5 text-slate-600">{brief.world_setting.power_system}</div>
+                        </div>
+                      ) : null}
+                      {brief.world_setting.society_structure ? (
+                        <div className="rounded-lg border border-[#e5edf8] bg-[#fafdff] p-2">
+                          <div className="text-[10px] font-medium text-slate-500">社会结构</div>
+                          <div className="mt-0.5 text-xs leading-5 text-slate-600">{brief.world_setting.society_structure}</div>
+                        </div>
+                      ) : null}
+                      {brief.world_setting.key_locations ? (
+                        <div className="rounded-lg border border-[#e5edf8] bg-[#fafdff] p-2">
+                          <div className="text-[10px] font-medium text-slate-500">关键地点</div>
+                          <div className="mt-0.5 text-xs leading-5 text-slate-600">{brief.world_setting.key_locations}</div>
+                        </div>
+                      ) : null}
+                      {brief.world_setting.world_history ? (
+                        <div className="rounded-lg border border-[#e5edf8] bg-[#fafdff] p-2">
+                          <div className="text-[10px] font-medium text-slate-500">世界历史</div>
+                          <div className="mt-0.5 text-xs leading-5 text-slate-600">{brief.world_setting.world_history}</div>
+                        </div>
+                      ) : null}
+                      {brief.world_setting.hidden_truths ? (
+                        <div className="rounded-lg border border-[#e5edf8] bg-[#fafdff] p-2">
+                          <div className="text-[10px] font-medium text-slate-500">隐藏真相</div>
+                          <div className="mt-0.5 text-xs leading-5 text-slate-600">{brief.world_setting.hidden_truths}</div>
+                        </div>
+                      ) : null}
+                    </div>
+                  </div>
+                ) : (
+                  <InfoItem label="世界观设定" value={brief.world_setting} />
+                )
+              ) : null}
+              {brief.open_story_notes ? (
+                <InfoItem label="开放故事笔记" value={brief.open_story_notes} />
+              ) : null}
               {mustKeepRules.length > 0 ? (
                 <ListItem label="必保留设定" items={mustKeepRules} tone="blue" />
               ) : null}
@@ -187,6 +233,21 @@ export default function StoryBibleSummaryCard({ storyId, storyBible, onUpdated }
                     onChange={(value) => handleChange('must_keep_rules', value)}
                     multiline
                     rows={5}
+                  />
+                  <Field
+                    label="世界观设定"
+                    hint="JSON 格式"
+                    value={form.world_setting}
+                    onChange={(value) => handleChange('world_setting', value)}
+                    multiline
+                    rows={6}
+                  />
+                  <Field
+                    label="开放故事笔记"
+                    value={form.open_story_notes}
+                    onChange={(value) => handleChange('open_story_notes', value)}
+                    multiline
+                    rows={4}
                   />
                 </div>
               </div>
@@ -355,7 +416,15 @@ function createFormState(storyBible: StoryBible): StoryBibleFormState {
     late_game_direction: guidance?.late_game_direction ?? '',
     forbidden_patterns: (guidance?.forbidden_patterns ?? []).join('\n'),
     preferred_plot_patterns: (guidance?.preferred_plot_patterns ?? []).join('\n'),
+    world_setting: formatWorldSettingForForm(brief?.world_setting),
+    open_story_notes: brief?.open_story_notes ?? '',
   };
+}
+
+function formatWorldSettingForForm(ws: any): string {
+  if (ws == null) return '';
+  if (typeof ws === 'object') return JSON.stringify(ws, null, 2);
+  return String(ws);
 }
 
 function buildStoryBiblePayload(form: StoryBibleFormState, storyBible: StoryBible): Partial<StoryBible> {
@@ -375,6 +444,8 @@ function buildStoryBiblePayload(form: StoryBibleFormState, storyBible: StoryBibl
       must_keep_rules: toLineList(form.must_keep_rules),
       reveal_strategy: form.reveal_strategy.trim(),
       pacing_strategy: form.pacing_strategy.trim(),
+      world_setting: parseWorldSetting(form.world_setting),
+      open_story_notes: form.open_story_notes.trim(),
     },
     writing_guidance: {
       opening_strategy: form.opening_strategy.trim(),
@@ -385,6 +456,16 @@ function buildStoryBiblePayload(form: StoryBibleFormState, storyBible: StoryBibl
       preferred_plot_patterns: toLineList(form.preferred_plot_patterns),
     },
   };
+}
+
+function parseWorldSetting(value: string): any {
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    return trimmed;
+  }
 }
 
 function toLineList(value: string): string[] {

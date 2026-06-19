@@ -399,6 +399,8 @@ export interface CreativeBrief {
   must_keep_rules: string[];
   reveal_strategy: string;
   pacing_strategy: string;
+  world_setting?: any;
+  open_story_notes?: string;
 }
 
 export interface StoryBible {
