@@ -38,7 +38,7 @@ from services.framework_utils import (
 @dataclass
 class PendingChange:
     """单次修改的快照记录，用于确认或撤回。"""
-    type: str  # "chapter" | "story" | "scenes_file"
+    type: str  # "chapter" | "story" | "scenes_file" | "story_bible"
     record_id: int
     display_name: str  # 用户可读的名称，如"第1章"
     field: str  # 修改的字段名，如"novel_content"
@@ -136,6 +136,11 @@ class PendingChangesTracker:
                     if obj:
                         setattr(obj, change.field, change.old_value)
                         results.append({"ok": True, "type": "story", "id": change.record_id, "field": change.field})
+                elif change.type == "story_bible":
+                    obj = db.get(Story, change.record_id)
+                    if obj:
+                        setattr(obj, change.field, change.old_value)
+                        results.append({"ok": True, "type": "story_bible", "id": change.record_id, "field": change.field})
                 elif change.type == "scenes_file":
                     scenes_path = _scenes_path(change.record_id)
                     if change.old_value:
@@ -811,6 +816,69 @@ async def update_story_info(story_id: int, title: str | None = None, description
                 _current_pending_changes().update_new_value("story", story.id, f, getattr(story, f))
         db.commit()
         return {"ok": True, "updated_fields": updated_fields}
+    finally:
+        db.close()
+
+
+@tool_registry.register(
+    name="update_story_bible",
+    description="更新作品圣经（Story Bible），包含世界观设定、创意简报、写作指导。支持部分更新——只更新提供的字段，未提供的字段保留原值。用户要求调整世界观、修改核心设定、改创意简报时用此工具。",
+    is_write=True,
+    parameters={
+        "type": "object",
+        "properties": {
+            "story_id": {"type": "integer", "description": "故事 ID"},
+            "story_bible": {
+                "type": "object",
+                "description": "要更新的作品圣经字段（partial merge）。顶层 key 可包括 creative_brief、writing_guidance、import_guidance。只需提供要修改的部分，未提供的会保留原值。",
+                "additionalProperties": True,
+            },
+        },
+        "required": ["story_id", "story_bible"],
+    },
+)
+async def update_story_bible(story_id: int, story_bible: dict) -> dict:
+    db = SessionLocal()
+    try:
+        story = _validate_story_ownership(db, story_id, _current_story_id())
+        if not story:
+            return {"error": "故事不存在或无权访问"}
+        if not isinstance(story_bible, dict) or not story_bible:
+            return {"error": "story_bible 必须是非空对象"}
+
+        if _current_pending_changes():
+            _current_pending_changes().record(PendingChange(
+                type="story_bible",
+                record_id=story.id,
+                display_name=story.title,
+                field="story_bible",
+                old_value=dict(story.story_bible) if isinstance(story.story_bible, dict) else {},
+                new_value=None,
+            ))
+
+        current = dict(story.story_bible) if isinstance(story.story_bible, dict) else {}
+        for top_key, top_value in story_bible.items():
+            if isinstance(top_value, dict) and isinstance(current.get(top_key), dict):
+                merged_section = dict(current[top_key])
+                merged_section.update(top_value)
+                current[top_key] = merged_section
+            else:
+                current[top_key] = top_value
+        story.story_bible = current
+
+        creative_brief = current.get("creative_brief") if isinstance(current.get("creative_brief"), dict) else {}
+        next_description = str(creative_brief.get("one_line_premise") or "").strip()
+        if not next_description:
+            next_description = str(creative_brief.get("project_positioning") or "").strip()
+        if next_description:
+            story.description = next_description
+
+        if _current_pending_changes():
+            _current_pending_changes().update_new_value("story_bible", story.id, "story_bible", dict(story.story_bible))
+
+        db.commit()
+        updated_sections = list(story_bible.keys())
+        return {"ok": True, "updated_sections": updated_sections}
     finally:
         db.close()
 
@@ -1533,6 +1601,7 @@ class AgentService:
 - `rewrite_text_segment` — 查找并替换章节中的特定段落（精确匹配替换）
 - `adjust_chapter_by_instruction` — 根据用户指令让 AI 重写整章（消耗高级配额）
 - `update_story_info` — 修改标题/描述/标签
+- `update_story_bible` — 更新作品圣经（世界观设定/创意简报/写作指导），支持部分更新。用户要求调整世界观、修改核心设定时用此工具
 - `update_characters` — 替换角色设定列表
 - `apply_framework_ops` — **直接执行框架编辑操作**，不调用 AI，适合明确的增删改（如"把主角改名"、"加个反派"、"改章节标题"）
 - `adjust_framework` — 根据指令调整故事框架/大纲，**适合需要 AI 创作的场景**（如"帮我重新设计第二幕"、"让故事更悬疑"）。消耗高级配额。如果改动明确请优先用 apply_framework_ops
@@ -1553,6 +1622,7 @@ class AgentService:
 | "把这段改成……"（附具体文本） | 调 `rewrite_text_segment` 或 `update_chapter_content` 直接执行 |
 | "帮我重写这一章，改成……风格"（无具体文本） | 先调 `get_chapter_full` 读取本章 → 给出重写方案/方向让用户确认 → 再调 `adjust_chapter_by_instruction` |
 | "帮我修改角色设定" | 调 `get_framework_detail` 查看当前角色 → 给出修改方案 → 待确认后调 `update_characters` |
+| "帮我调整世界观/修改核心设定/改作品圣经" | 调 `get_story_bible` 查看当前圣经 → 给出调整方案 → 待确认后调 `update_story_bible` |
 | "帮我调整大纲/结构" | 调 `get_framework_detail` 查看当前大纲 → 给出调整方案 → 待确认后调 `apply_framework_ops`（明确改动）或 `adjust_framework`（需要 AI 创作） |
 | "添加一个新章节" | 调 `get_framework_detail` 查看现有章节 → 给出新章节建议位置 → 待确认后调 `add_chapter_plan` |
 | "看看这一章写了什么" | 调 `get_chapter_full` → 总结/展示内容 |
