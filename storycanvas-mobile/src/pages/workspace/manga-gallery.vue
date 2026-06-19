@@ -55,6 +55,7 @@
       :image-url="currentImageUrl"
       :image-number="currentImageNumber"
       :chapter-id="chapterId"
+      ref-type="manga"
       @close="showRedrawModal = false"
       @success="handleRedrawSuccess"
     />

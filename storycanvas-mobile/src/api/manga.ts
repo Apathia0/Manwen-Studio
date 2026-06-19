@@ -46,7 +46,7 @@ export function clearMangaImages(chapterId: number): Promise<void> {
   return del(`/api/chapters/${chapterId}/manga-images`)
 }
 
-/** 重绘单图 */
+/** 重绘单图（支持局部重绘蒙版） */
 export function regenerateImage(
   chapterId: number,
   imageNumber: number,
@@ -54,7 +54,7 @@ export function regenerateImage(
   mode?: string,
   options?: { size?: string; stylePresetName?: string; styleRefUrl?: string; mask?: string }
 ): Promise<MangaImage> {
-  const body: Record<string, unknown> = { prompt, mode: mode || 'regenerate' }
+  const body: Record<string, any> = { prompt, mode: mode || 'regenerate' }
   if (options?.size) body.size = options.size
   if (options?.stylePresetName) body.style_preset_name = options.stylePresetName
   if (options?.styleRefUrl) body.style_ref_url = options.styleRefUrl

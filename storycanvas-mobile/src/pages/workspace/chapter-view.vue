@@ -455,14 +455,33 @@
             </view>
 
             <view class="chapter-view__manga-grid">
-              <manga-image-card
+              <view
                 v-for="img in mangaStore.images"
                 :key="img.id"
-                :image-path="img.image_path"
-                :image-number="img.image_number"
-                @tap="goGallery(img.image_number)"
-              />
+                class="chapter-view__manga-grid-item"
+              >
+                <manga-image-card
+                  :image-path="img.image_path"
+                  :image-number="img.image_number"
+                  :cache-bust="redrawCacheBust"
+                  @tap="goGallery(img.image_number)"
+                />
+                <view class="chapter-view__manga-redraw-btn" @tap.stop="openRedraw(img)">
+                  <text class="chapter-view__manga-redraw-btn-text">重绘</text>
+                </view>
+              </view>
             </view>
+
+            <!-- 图片重绘弹窗 -->
+            <image-redraw-modal
+              :visible="showRedrawModal"
+              :image-url="redrawImageUrl"
+              :image-number="redrawImageNumber"
+              :chapter-id="workspaceStore.activeChapterId"
+              ref-type="manga"
+              @close="showRedrawModal = false"
+              @success="onRedrawSuccess"
+            />
 
             <lv-empty v-if="!mangaStore.isGenerating && !isPolling && mangaStore.images.length === 0 && mangaStore.scenes.length === 0" title="暂无漫画" description="点击生成漫画开始创作" />
 
@@ -599,11 +618,12 @@ import ChatInput from '@/components/chat-input/chat-input.vue'
 import ChangesBanner from '@/components/changes-banner/changes-banner.vue'
 import TemplateBinding from '@/components/template-binding/template-binding.vue'
 import BibleSummary from '@/components/bible-summary/bible-summary.vue'
-import { coverImageUrl } from '@/utils/url'
+import { coverImageUrl, mangaImageUrl } from '@/utils/url'
 import { useVideoWorkflowStore } from '@/stores/videoWorkflow'
 import ChapterVideoWorkflowContent from '@/components/chapter-video-workflow-content/chapter-video-workflow-content.vue'
 import StyleSelector from '@/components/style-selector/style-selector.vue'
 import CharacterRefSection from '@/components/character-ref-section/character-ref-section.vue'
+import ImageRedrawModal from '@/components/image-redraw-modal/image-redraw-modal.vue'
 
 const workspaceStore = useWorkspaceStore()
 const editorStore = useEditorStore()
@@ -643,6 +663,27 @@ const rollbackingChanges = ref(false)    // 撤回变更
 const editingMangaSceneIndex = ref(-1)
 const editingMangaSceneDraft = ref('')
 const regeneratingMangaScenes = ref(false)
+
+// ── 图片重绘 ──
+const showRedrawModal = ref(false)
+const redrawImageUrl = ref('')
+const redrawImageNumber = ref(0)
+const redrawCacheBust = ref(0)
+
+function openRedraw(img: any) {
+  redrawImageUrl.value = mangaImageUrl(img.image_path)
+  redrawImageNumber.value = img.image_number
+  showRedrawModal.value = true
+}
+
+function onRedrawSuccess() {
+  // 刷新后缓存升级
+  redrawCacheBust.value = Date.now()
+  // 重新加载漫画图片列表
+  if (workspaceStore.activeChapterId) {
+    mangaStore.loadChapterManga(workspaceStore.activeChapterId)
+  }
+}
 
 function startMangaSceneEdit(index: number, text: string) {
   editingMangaSceneIndex.value = index
@@ -1983,6 +2024,33 @@ function showEditorMore() {
     grid-template-columns: 1fr 1fr;
     gap: 16rpx;
     margin: 16rpx 0;
+  }
+
+  &__manga-grid-item {
+    position: relative;
+  }
+
+  &__manga-redraw-btn {
+    position: absolute;
+    top: 8rpx;
+    right: 8rpx;
+    padding: 6rpx 14rpx;
+    background: rgba(0, 0, 0, 0.6);
+    border-radius: $lv-radius-sm;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 2;
+
+    &:active {
+      opacity: 0.7;
+    }
+  }
+
+  &__manga-redraw-btn-text {
+    font-size: 20rpx;
+    color: #ffffff;
+    font-weight: 500;
   }
 
   &__manga-links {
