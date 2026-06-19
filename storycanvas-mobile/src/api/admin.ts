@@ -541,6 +541,20 @@ export function searchAdminOrders(params: {
 
 // --- 视频资产管理 ---
 
+export interface AdminAssetScopeResult {
+  asset_id: number
+  usage_scope: string
+  inherit_to_next_shot: boolean
+}
+
+export interface AdminAssetPromoteResult {
+  id: number
+  usage_scope: string
+  inherit_to_next_shot: boolean
+  chapter_level_default: boolean
+  story_level_default: boolean
+}
+
 /** 更新视频资产使用范围 */
 export function updateAssetScope(
   assetId: number,
@@ -548,7 +562,7 @@ export function updateAssetScope(
     usage_scope: string
     inherit_to_next_shot?: boolean
   }
-): Promise<{ asset_id: number; usage_scope: string; inherit_to_next_shot: boolean }> {
+): Promise<AdminAssetScopeResult> {
   return put(`/api/video-assets/${assetId}/scope`, payload)
 }
 
@@ -559,6 +573,6 @@ export function promoteAsset(
     level: string
     inherit_to_next_shot?: boolean
   }
-): Promise<{ asset_id: number; level: string }> {
+): Promise<AdminAssetPromoteResult> {
   return post(`/api/video-assets/${assetId}/promote`, payload)
 }

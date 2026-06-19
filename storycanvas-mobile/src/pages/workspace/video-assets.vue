@@ -283,7 +283,7 @@ function handlePromote(asset: VideoAsset) {
             if (idx >= 0) {
               assets.value[idx] = {
                 ...assets.value[idx],
-                usage_scope: (result as any).usage_scope || assets.value[idx].usage_scope,
+                usage_scope: result.usage_scope || assets.value[idx].usage_scope,
               }
             }
             uni.showToast({ title: '已提升', icon: 'success' })
