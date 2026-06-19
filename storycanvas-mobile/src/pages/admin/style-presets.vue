@@ -6,13 +6,28 @@
       <lv-button size="sm" @tap="openCreateModal">新建预设</lv-button>
     </view>
 
+    <!-- 分类筛选 -->
+    <scroll-view scroll-x class="admin-style-presets__filter" v-if="!loading && presets.length > 0">
+      <view class="admin-style-presets__filter-inner">
+        <view
+          v-for="cat in categories"
+          :key="cat.value"
+          class="admin-style-presets__filter-chip"
+          :class="{ 'admin-style-presets__filter-chip--active': selectedCategory === cat.value }"
+          @tap="selectedCategory = cat.value"
+        >
+          <text>{{ cat.label }}</text>
+        </view>
+      </view>
+    </scroll-view>
+
     <lv-loading v-if="loading" />
 
-    <lv-empty v-else-if="presets.length === 0" title="暂无风格预设" />
+    <lv-empty v-else-if="filteredPresets.length === 0" title="暂无风格预设" />
 
     <view v-else class="admin-style-presets__grid">
       <view
-        v-for="preset in presets"
+        v-for="preset in filteredPresets"
         :key="preset.id"
         class="admin-style-presets__card"
         @tap="openEditModal(preset)"
@@ -28,7 +43,7 @@
         </view>
         <view class="admin-style-presets__card-info">
           <text class="admin-style-presets__card-name">{{ preset.name }}</text>
-          <text class="admin-style-presets__card-category">{{ preset.category }}</text>
+          <text class="admin-style-presets__card-category">{{ preset.category }} · 排序: {{ preset.sort_order }}</text>
         </view>
       </view>
     </view>
@@ -80,11 +95,10 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { adminApi } from '@/api'
 import type { VideoStylePreset } from '@/api/admin'
-import { BASE_URL } from '@/utils/constants'
-import { getToken } from '@/utils/storage'
+import { uploadAsset } from '@/utils/upload'
 import LvButton from '@/components/lv-button/lv-button.vue'
 import LvInput from '@/components/lv-input/lv-input.vue'
 import LvLoading from '@/components/lv-loading/lv-loading.vue'
@@ -99,6 +113,22 @@ const editingId = ref<number | null>(null)
 const saving = ref(false)
 const deleting = ref(false)
 const uploading = ref(false)
+
+// 分类筛选
+const categories = [
+  { label: '全部', value: 'all' },
+  { label: '写实', value: 'realistic' },
+  { label: '动漫', value: 'anime' },
+  { label: '艺术', value: 'artistic' },
+  { label: '游戏', value: 'game' },
+  { label: '电影', value: 'cinematic' },
+]
+const selectedCategory = ref('all')
+
+const filteredPresets = computed(() => {
+  if (selectedCategory.value === 'all') return presets.value
+  return presets.value.filter(p => p.category === selectedCategory.value)
+})
 
 const form = ref({
   name: '',
@@ -185,30 +215,10 @@ function chooseImage() {
 }
 
 function uploadImage(filePath: string): Promise<{ success: boolean; url: string }> {
-  return new Promise((resolve, reject) => {
-    const token = getToken()
-    const headers: Record<string, string> = {}
-    if (token) {
-      headers['Authorization'] = `Bearer ${token}`
-    }
-    uni.uploadFile({
-      url: `${BASE_URL}/api/video-style-presets/upload-image`,
-      filePath,
-      name: 'file',
-      header: headers,
-      success: (res) => {
-        if (res.statusCode >= 200 && res.statusCode < 300) {
-          resolve(JSON.parse(res.data))
-        } else {
-          const data = JSON.parse(res.data)
-          reject(new Error(data.detail || data.message || '上传失败'))
-        }
-      },
-      fail: (err) => {
-        reject(new Error(err.errMsg || '上传失败'))
-      },
-    })
-  })
+  return uploadAsset({
+    url: '/api/video-style-presets/upload-image',
+    filePath,
+  }).then(res => res.data as { success: boolean; url: string })
 }
 
 function parseJSON(str: string): Record<string, unknown> | null {
@@ -231,9 +241,9 @@ async function handleSave() {
       name: form.value.name.trim(),
       category: form.value.category.trim() || 'realistic',
       image_url: form.value.image_url || null,
-      prompt_template: form.value.prompt_template.trim() || null,
-      image_style_params: parseJSON(form.value.image_style_params),
-      video_style_params: parseJSON(form.value.video_style_params),
+      prompt_template: form.value.prompt_template.trim() || undefined,
+      image_style_params: parseJSON(form.value.image_style_params) || undefined,
+      video_style_params: parseJSON(form.value.video_style_params) || undefined,
       sort_order: parseInt(form.value.sort_order) || 0,
     }
     if (editingId.value) {
@@ -294,6 +304,34 @@ function handleDelete() {
     font-size: $lv-font-lg;
     font-weight: 600;
     color: $lv-text-primary;
+  }
+
+  &__filter {
+    white-space: nowrap;
+    padding: 20rpx $lv-page-padding;
+  }
+
+  &__filter-inner {
+    display: inline-flex;
+    gap: 12rpx;
+  }
+
+  &__filter-chip {
+    display: inline-flex;
+    align-items: center;
+    padding: 10rpx 24rpx;
+    border-radius: $lv-radius-xl;
+    font-size: $lv-font-sm;
+    color: $lv-text-secondary;
+    background: $lv-surface-solid;
+    border: 1rpx solid $lv-border;
+    transition: all 0.2s;
+
+    &--active {
+      color: $lv-text-on-primary;
+      background: $lv-primary;
+      border-color: $lv-primary;
+    }
   }
 
   &__grid {
