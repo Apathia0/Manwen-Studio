@@ -1498,6 +1498,7 @@ def _build_bible_compact(story_bible: dict | None) -> dict[str, Any]:
         "project_positioning", "one_line_premise", "core_hook",
         "protagonist_core", "main_conflict", "longline_mystery",
         "serial_length_target", "reveal_strategy", "pacing_strategy",
+        "world_setting", "open_story_notes",
     ):
         value = str(creative_brief.get(key) or "").strip()
         if value:
