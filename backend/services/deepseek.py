@@ -954,9 +954,10 @@ def _build_story_snapshot_tiered(story_context: dict, tier: str = "auto") -> str
     Tier levels:
     - "full": 保留所有字段的完整 JSON（同 _build_story_snapshot）
     - "auto": 按每个字段的 JSON 大小逐字段决策：
-        <2KB  → 全量嵌入
-        2-10KB → 摘要（保留结构骨架）
-        >10KB  → 仅元数据（如 "N 个角色"）
+        <8KB     → 全量嵌入
+        8-32KB   → 摘要（保留结构骨架）
+        >32KB    → 核心摘要（保留关键叙事骨架，不丢失世界观/角色/大纲核心）
+        >64KB    → 仅提取世界观核心字段（仅 creative_brief 和 writing_guidance）
     """
     if tier == "full":
         return _build_story_snapshot(story_context)
@@ -969,9 +970,25 @@ def _build_story_snapshot_tiered(story_context: dict, tier: str = "auto") -> str
         creative_brief = story_bible.get("creative_brief")
         writing_guidance = story_bible.get("writing_guidance")
         if creative_brief:
-            parts.append(f"作品圣经-创意理解: {json.dumps(creative_brief, ensure_ascii=False)}")
+            cb_raw = json.dumps(creative_brief, ensure_ascii=False)
+            if len(cb_raw.encode("utf-8")) < 65536:
+                parts.append(f"作品圣经-创意理解: {cb_raw}")
+            else:
+                core = {k: v for k, v in creative_brief.items()
+                        if k in ("world_setting", "main_conflict", "longline_mystery",
+                                "protagonist_core", "must_keep_rules", "open_story_notes",
+                                "project_positioning", "core_hook", "tone",
+                                "reveal_strategy", "pacing_strategy")}
+                parts.append(f"作品圣经-创意理解(核心摘要): {json.dumps(core, ensure_ascii=False)}")
         if writing_guidance:
-            parts.append(f"作品圣经-写作指导: {json.dumps(writing_guidance, ensure_ascii=False)}")
+            wg_raw = json.dumps(writing_guidance, ensure_ascii=False)
+            if len(wg_raw.encode("utf-8")) < 65536:
+                parts.append(f"作品圣经-写作指导: {wg_raw}")
+            else:
+                core_wg = {k: v for k, v in writing_guidance.items()
+                          if k in ("opening_strategy", "midgame_engine", "late_game_direction",
+                                  "forbidden_patterns", "preferred_plot_patterns")}
+                parts.append(f"作品圣经-写作指导(核心摘要): {json.dumps(core_wg, ensure_ascii=False)}")
 
     tags = story_context.get("tags")
     if tags:
@@ -982,21 +999,42 @@ def _build_story_snapshot_tiered(story_context: dict, tier: str = "auto") -> str
     if characters:
         serialized = json.dumps(characters, ensure_ascii=False)
         size = len(serialized.encode("utf-8"))
-        if size < 2048:
+        if size < 8192:
             parts.append(f"现有角色: {serialized}")
-        elif size < 10240:
-            summary = [{"name": c.get("name", "?"), "role": c.get("role", "?")} for c in characters if isinstance(c, dict)]
+        elif size < 32768:
+            summary = [
+                {
+                    "name": c.get("name", "?"),
+                    "role": c.get("role", "?"),
+                }
+                for c in characters if isinstance(c, dict)
+            ]
             parts.append(f"现有角色(摘要共{len(characters)}个): {json.dumps(summary, ensure_ascii=False)}")
         else:
-            parts.append(f"现有角色: {len(characters)} 个角色（已省略详细设定）")
+            # 超大时保留名称、角色类型、弧线方向，不丢失核心人物关系骨架
+            enhanced_summary = []
+            for c in (characters or []):
+                if not isinstance(c, dict):
+                    continue
+                entry: dict = {"name": c.get("name", "?"), "role": c.get("role", "?")}
+                if isinstance(c.get("arc"), dict):
+                    arc = c["arc"]
+                    arc_part = {k: arc[k] for k in ("direction", "type") if k in arc}
+                    if arc_part:
+                        entry["arc"] = arc_part
+                archetype = c.get("species") or c.get("archetype") or ""
+                if archetype:
+                    entry["archetype"] = archetype
+                enhanced_summary.append(entry)
+            parts.append(f"现有角色(核心摘要共{len(characters)}个): {json.dumps(enhanced_summary, ensure_ascii=False)}")
 
     outline = story_context.get("outline")
     if outline:
         serialized = json.dumps(outline, ensure_ascii=False)
         size = len(serialized.encode("utf-8"))
-        if size < 2048:
+        if size < 8192:
             parts.append(f"现有大纲: {serialized}")
-        elif size < 10240:
+        elif size < 32768:
             if isinstance(outline, dict):
                 summary_outline = {}
                 for key, value in outline.items():
@@ -1016,13 +1054,25 @@ def _build_story_snapshot_tiered(story_context: dict, tier: str = "auto") -> str
                         summary_outline[key] = value
                 parts.append(f"现有大纲(摘要): {json.dumps(summary_outline, ensure_ascii=False)}")
             else:
-                parts.append(f"现有大纲: {serialized[:2000]}...(截断)")
+                parts.append(f"现有大纲: {serialized[:3000]}...(截断)")
         else:
-            stage_count = 0
+            # 超大时保留 act 标题和摘要+连载策略，不丢失核心叙事框架
             if isinstance(outline, dict):
                 acts = outline.get("three_acts") or []
-                stage_count = len(acts)
-            parts.append(f"现有大纲: {stage_count} 个阶段（已省略详细大纲）")
+                act_summaries = []
+                for act in acts:
+                    if isinstance(act, dict):
+                        entry = {"act": act.get("act"), "title": act.get("title", "")}
+                        summary_text = str(act.get("summary") or "").strip()
+                        if summary_text:
+                            entry["summary"] = summary_text
+                        act_summaries.append(entry)
+                enhanced_outline = {"three_acts": act_summaries}
+                if outline.get("serial_strategy"):
+                    enhanced_outline["serial_strategy"] = outline["serial_strategy"]
+                parts.append(f"现有大纲(阶段摘要): {json.dumps(enhanced_outline, ensure_ascii=False)}")
+            else:
+                parts.append(f"现有大纲: (已省略详细大纲)")
 
     description = story_context.get("description")
     if description:
