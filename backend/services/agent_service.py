@@ -500,6 +500,7 @@ async def get_story_bible(story_id: int) -> dict:
             "creative_brief": bible.get("creative_brief", {}),
             "writing_guidance": bible.get("writing_guidance", {}),
             "import_guidance": bible.get("import_guidance", {}),
+            "raw_input": bible.get("raw_input", {}),
         }
     finally:
         db.close()

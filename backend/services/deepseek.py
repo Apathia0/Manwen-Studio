@@ -789,6 +789,8 @@ def _build_framework_runtime_brief(story_context: dict, include_outline_json: bo
                 "serial_length_target",
                 "reveal_strategy",
                 "pacing_strategy",
+                "world_setting",
+                "open_story_notes",
             ):
                 value = str(creative_brief.get(key) or "").strip()
                 if value:
@@ -2874,6 +2876,14 @@ writing_guidance 需要额外生成以下字段：
 - late_game_direction: 后期方向（后期剧情走向）
 - forbidden_patterns: ["需要避免的创作模式"]
 - preferred_plot_patterns: ["推荐使用的情节模式"]
+
+## world_setting 结构化要求
+creative_brief 中的 world_setting 字段请按以下 5 个维度输出为嵌套 JSON 对象（而非平铺字符串）。每个维度写 1-3 句具体描述，非空则填字符串，暂未确定的字段留空字符串 ""：
+- power_system: 力量体系的核心规则、触发方式、等级划分、能力分类与限制条件
+- society_structure: 掌握力量者与普通人的社会关系、相关组织/势力、政府管控方式
+- key_locations: 故事核心场景、重要地标及其特点
+- world_history: 世界观背景历史、关键时间节点与重大事件
+- hidden_truths: 只有主角/部分角色知道的深层真相或世界秘密
 
 请输出完整的故事圣经 JSON。"""
 

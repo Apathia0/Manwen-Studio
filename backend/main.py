@@ -1644,11 +1644,13 @@ ONBOARDING_PROMPT_SEED = """你是小说创意提取专家。任务：从对话�
 - 开篇核心事件或冲突
 - 示例：「都市诡异题材，程序员主角加班后被困在诡异公司，被迫与鬼签订契约才能逃脱」
 
-字段 2 — setting（世界观规则）：用 2-3 句话描述，包含：
-- 力量体系的核心规则（如契约、寄生、道具等）
-- 世界背景与运行逻辑
-- 关键设定要素
-- 示例：「契约体系——与鬼签订契约可获得鬼技，以鬼对抗鬼。世界存在表里两层，普通人看不见诡异，只有被选中的人才能进入里世界」
+字段 2 — setting（世界观规则）：引导用户从 5 个维度详细描述世界观，每个维度提取 1-3 句：
+- 力量体系核心规则（如何获得力量、等级划分、能力分类、限制条件）
+- 社会结构（掌握力量者与普通人的关系、相关组织/势力、管控方式）
+- 关键场景地标（故事核心场所及其特点）
+- 世界观历史背景（演化脉络、关键事件）
+- 隐藏真相（只有主角或部分角色知道的秘密）
+每轮聚焦一个维度追问，不要一次性全问。示例值：「契约体系——与鬼签订契约可获得鬼技，以鬼对抗鬼。世界存在表里两层，普通人看不见诡异，只有被选中的人才能进入里世界」
 
 字段 3 — tone（风格标签）：3-5 个标签词，如：都市、诡异、契约、悬疑、写实
 
@@ -2638,7 +2640,7 @@ def _build_framework_context(story: Story | None, chapter: Chapter | None = None
     writing_guidance = story_bible.get("writing_guidance") if isinstance(story_bible.get("writing_guidance"), dict) else {}
     import_guidance = story_bible.get("import_guidance") if isinstance(story_bible.get("import_guidance"), dict) else {}
     if creative_brief:
-        bible_summary = {
+        bible_raw = {
             "作品定位": creative_brief.get("project_positioning"),
             "一句话梗概": creative_brief.get("one_line_premise"),
             "核心卖点": creative_brief.get("core_hook"),
@@ -2649,8 +2651,12 @@ def _build_framework_context(story: Story | None, chapter: Chapter | None = None
             "揭秘策略": creative_brief.get("reveal_strategy"),
             "节奏策略": creative_brief.get("pacing_strategy"),
             "必保留设定": creative_brief.get("must_keep_rules"),
+            "世界观设定": creative_brief.get("world_setting"),
+            "开放故事笔记": creative_brief.get("open_story_notes"),
         }
-        parts.append(f"作品圣经摘要: {json.dumps(bible_summary, ensure_ascii=False)}")
+        bible_summary = {k: v for k, v in bible_raw.items() if v not in (None, "", [], {})}
+        if bible_summary:
+            parts.append(f"作品圣经摘要: {json.dumps(bible_summary, ensure_ascii=False)}")
     if writing_guidance:
         guidance_summary = {
             "开书策略": writing_guidance.get("opening_strategy"),
@@ -3092,6 +3098,8 @@ def _build_creative_brief_from_understanding(understanding: dict) -> dict:
         "must_keep_rules": [],
         "reveal_strategy": "",
         "pacing_strategy": "",
+        "world_setting": setting,
+        "open_story_notes": "",
     }
 
 
@@ -3146,6 +3154,8 @@ def _build_story_bible_compact(story_bible: dict | None) -> dict[str, Any]:
         "serial_length_target",
         "reveal_strategy",
         "pacing_strategy",
+        "world_setting",
+        "open_story_notes",
     ):
         value = str(creative_brief.get(key) or "").strip()
         if value:
