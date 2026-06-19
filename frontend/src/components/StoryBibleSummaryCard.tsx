@@ -162,12 +162,60 @@ export default function StoryBibleSummaryCard({ storyId, storyBible, onUpdated }
                       ) : null}
                       {Object.entries(brief.world_setting)
                         .filter(([key]) => !['power_system', 'society_structure', 'key_locations', 'world_history', 'hidden_truths'].includes(key))
-                        .map(([key, val]) => (val && String(val).trim() ? (
-                          <div key={key} className="rounded-lg border border-[#e5edf8] bg-[#fafdff] p-2">
-                            <div className="text-[10px] font-medium text-slate-500">{key}</div>
-                            <div className="mt-0.5 text-xs leading-5 text-slate-600">{String(val)}</div>
-                          </div>
-                        ) : null))
+                        .map(([key, val]) => {
+                          if (val == null) return null;
+                          // 纯字符串
+                          if (typeof val === 'string' && val.trim()) {
+                            return (
+                              <div key={key} className="rounded-lg border border-[#e5edf8] bg-[#fafdff] p-2">
+                                <div className="text-[10px] font-medium text-slate-500">{key}</div>
+                                <div className="mt-0.5 text-xs leading-5 text-slate-600">{val}</div>
+                              </div>
+                            );
+                          }
+                          // 对象（非数组）→ 遍历子键
+                          if (typeof val === 'object' && !Array.isArray(val)) {
+                            const entries = Object.entries(val).filter(([, v]) => v != null && String(v).trim());
+                            if (!entries.length) return null;
+                            return (
+                              <div key={key} className="rounded-lg border border-[#e5edf8] bg-[#fafdff] p-2 sm:col-span-2 lg:col-span-3">
+                                <div className="text-[10px] font-medium text-slate-500">{key}</div>
+                                <div className="mt-1 space-y-1">
+                                  {entries.map(([sk, sv]) => (
+                                    <div key={sk} className="text-xs leading-5 text-slate-600">
+                                      <span className="font-medium text-slate-500">{sk}：</span>
+                                      {typeof sv === 'object' ? JSON.stringify(sv, null, 1) : String(sv)}
+                                    </div>
+                                  ))}
+                                </div>
+                              </div>
+                            );
+                          }
+                          // 数组 → 逐项渲染
+                          if (Array.isArray(val) && val.length) {
+                            const items = val.filter(v => v != null);
+                            if (!items.length) return null;
+                            return (
+                              <div key={key} className="rounded-lg border border-[#e5edf8] bg-[#fafdff] p-2 sm:col-span-2 lg:col-span-3">
+                                <div className="text-[10px] font-medium text-slate-500">{key}</div>
+                                <ul className="mt-1 list-inside list-disc space-y-0.5 text-xs leading-5 text-slate-600">
+                                  {items.map((item, i) => (
+                                    <li key={i}>{typeof item === 'object' ? JSON.stringify(item) : String(item)}</li>
+                                  ))}
+                                </ul>
+                              </div>
+                            );
+                          }
+                          // 其他原始类型（number/boolean）
+                          const str = String(val);
+                          if (!str.trim()) return null;
+                          return (
+                            <div key={key} className="rounded-lg border border-[#e5edf8] bg-[#fafdff] p-2">
+                              <div className="text-[10px] font-medium text-slate-500">{key}</div>
+                              <div className="mt-0.5 text-xs leading-5 text-slate-600">{str}</div>
+                            </div>
+                          );
+                        })
                       }
                     </div>
                   </div>

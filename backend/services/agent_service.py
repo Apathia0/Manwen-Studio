@@ -1624,6 +1624,7 @@ class AgentService:
 | "帮我重写这一章，改成……风格"（无具体文本） | 先调 `get_chapter_full` 读取本章 → 给出重写方案/方向让用户确认 → 再调 `adjust_chapter_by_instruction` |
 | "帮我修改角色设定" | 调 `get_framework_detail` 查看当前角色 → 给出修改方案 → 待确认后调 `update_characters` |
 | "帮我调整世界观/修改核心设定/改作品圣经" | 调 `get_story_bible` 查看当前圣经 → 给出调整方案 → 待确认后调 `update_story_bible` |
+| **用户在对话中详细描述了世界观设定**（如力量体系、势力分布、等级划分、世界历史等具体内容） | **主动调用 `update_story_bible`** 将讨论确认的内容保存到 world_setting 中。不要等用户说出"改作品圣经"才保存。world_setting 是 `creative_brief` 下的嵌套 JSON，建议包含 power_system（力量体系）、society_structure（社会结构）、key_locations（关键地点）、world_history（世界历史）、hidden_truths（隐藏真相）等子字段，也接受任意其他键名。保存后说明存入了哪些设定模块 |
 | "帮我调整大纲/结构" | 调 `get_framework_detail` 查看当前大纲 → 给出调整方案 → 待确认后调 `apply_framework_ops`（明确改动）或 `adjust_framework`（需要 AI 创作） |
 | "添加一个新章节" | 调 `get_framework_detail` 查看现有章节 → 给出新章节建议位置 → 待确认后调 `add_chapter_plan` |
 | "看看这一章写了什么" | 调 `get_chapter_full` → 总结/展示内容 |
