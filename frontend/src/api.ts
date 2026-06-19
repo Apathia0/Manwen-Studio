@@ -2239,11 +2239,21 @@ export async function confirmOnboarding(
   messages: { role: string; content: string }[],
   creativeBrief?: CreativeBrief,
 ): Promise<OnboardingConfirmResponse> {
-  const res = await fetch(`${BASE}/api/stories/${storyId}/onboarding/confirm`, {
-    method: 'POST',
-    headers: apiHeaders(true),
-    body: JSON.stringify({ understanding, messages, creative_brief: creativeBrief }),
-  });
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 300_000);
+  let res: Response;
+  try {
+    res = await fetch(`${BASE}/api/stories/${storyId}/onboarding/confirm`, {
+      method: 'POST',
+      headers: apiHeaders(true),
+      body: JSON.stringify({ understanding, messages, creative_brief: creativeBrief }),
+      signal: controller.signal,
+    });
+  } catch (e) {
+    clearTimeout(timer);
+    throw new Error(e instanceof DOMException && e.name === 'AbortError' ? '确认引导超时，请重试' : '确认引导失败');
+  }
+  clearTimeout(timer);
   if (!res.ok) throw new Error(await readErrorMessage(res, '确认引导失败'));
   return res.json();
 }
@@ -2316,11 +2326,21 @@ export async function updateStoryBible(storyId: number, storyBible: Partial<Stor
 // ─── InkAI Framework ────────────────────────────────────────
 
 export async function generateFramework(storyId: number, description: string): Promise<FrameworkGenerateResponse> {
-  const res = await fetch(`${BASE}/api/stories/${storyId}/framework/generate`, {
-    method: 'POST',
-    headers: apiHeaders(true),
-    body: JSON.stringify({ description }),
-  });
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 300_000);
+  let res: Response;
+  try {
+    res = await fetch(`${BASE}/api/stories/${storyId}/framework/generate`, {
+      method: 'POST',
+      headers: apiHeaders(true),
+      body: JSON.stringify({ description }),
+      signal: controller.signal,
+    });
+  } catch (e) {
+    clearTimeout(timer);
+    throw new Error(e instanceof DOMException && e.name === 'AbortError' ? '框架生成超时，请重试' : '框架生成失败');
+  }
+  clearTimeout(timer);
   if (!res.ok) throw new Error(await res.text());
   return res.json();
 }
