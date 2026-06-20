@@ -7,7 +7,8 @@ import os
 os.chdir(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, '.')
 
-from main import _build_story_memory_compact, _merge_story_memory, _build_framework_ai_context
+from main import _merge_story_memory, _build_framework_ai_context
+from services.story_state import build_story_memory_compact
 from services.deepseek import (
     _build_story_snapshot, _build_story_snapshot_tiered,
     expand_chapter_to_content, NOVEL_SYSTEM_PROMPT,
@@ -113,11 +114,11 @@ check("recent_chapter_summaries 有记录", len(merged.get("recent_chapter_summa
 check("包含 ending_scene", ch1_summary.get("ending_scene") == "林越瞳孔一缩。GM来了。")
 
 # ===================================================
-# 测试 2：_build_story_memory_compact - 压缩是否完整
+# 测试 2：build_story_memory_compact - 压缩是否完整
 # ===================================================
 print(f"\n{BOLD}--- 测试 2：story_memory_compact 压缩 ---{RESET}")
 
-compact = _build_story_memory_compact(merged)
+compact = build_story_memory_compact(merged)
 check("compact 非空", bool(compact))
 check("compact 包含 story_state", "story_state" in compact)
 check("compact 包含 open_loops", "open_loops" in compact)
@@ -173,7 +174,7 @@ print(f"\n{BOLD}--- 测试 6：previous_chapter_summary 构建 ---{RESET}")
 
 # 模拟 expand_chapter_endpoint 中的构建逻辑
 ending_text = ch1_content[-800:]
-memory_compact = _build_story_memory_compact(merged)
+    memory_compact = build_story_memory_compact(merged)
 parts_list = [f"上一章《第1章：铁匠铺的觉醒》结尾：\n{ending_text}"]
 if memory_compact.get("story_state"):
     parts_list.append(f"当前故事状态：{memory_compact['story_state']}")
@@ -304,7 +305,7 @@ big_memory = {
     "recent_chapter_summaries": [{"chapter_number": i, "title": f"Ch{i}", "summary": "x"}
                                   for i in range(50)],
 }
-big_compact = _build_story_memory_compact(big_memory)
+    big_compact = build_story_memory_compact(big_memory)
 check("open_loops 上限 12 项", len(big_compact.get("open_loops", [])) <= 12)
 check("continuity_facts 上限 12 项", len(big_compact.get("continuity_facts", [])) <= 12)
 check("resolved_loops 上限 12 项", len(big_compact.get("resolved_loops", [])) <= 12)

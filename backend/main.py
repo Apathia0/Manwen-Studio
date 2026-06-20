@@ -149,6 +149,7 @@ from services import deepseek as deepseek_service
 from services import image2 as image_service
 from services import license_checker
 from services.payment import init_gateways, get_gateway, get_gateway_by_provider, get_method_options
+from services.story_state import build_story_bible_compact, build_story_memory_compact
 from routers.video import router as video_router
 
 load_dotenv()
@@ -1894,7 +1895,7 @@ def _store_story_cover_result(story: Story, generated_path: Path, stored_path: s
 
 
 def _build_story_cover_prompt(story: Story, instruction: str = "") -> str:
-    story_bible_compact = _build_story_bible_compact(story.story_bible)
+    story_bible_compact = build_story_bible_compact(story.story_bible)
     outline_compact = _build_outline_compact(story.outline or {}, recent_chapter_limit=3)
     title = str(story.title or "").strip() or "Untitled Story"
     premise = str(
@@ -2683,7 +2684,7 @@ def _build_framework_context(story: Story | None, chapter: Chapter | None = None
         )
     story_memory = story.story_memory if isinstance(story.story_memory, dict) else {}
     if story_memory:
-        memory_summary = _build_story_memory_compact(story_memory)
+        memory_summary = build_story_memory_compact(story_memory)
         if memory_summary:
             parts.append(f"作品连续性记忆: {json.dumps(memory_summary, ensure_ascii=False)}")
     if story.tags:
@@ -3135,96 +3136,98 @@ def _build_framework_seed_description(story: Story) -> str:
     return "\n".join(segments).strip()
 
 
-def _build_story_bible_compact(story_bible: dict | None) -> dict[str, Any]:
-    if not isinstance(story_bible, dict):
-        return {}
-    creative_brief = story_bible.get("creative_brief") if isinstance(story_bible.get("creative_brief"), dict) else {}
-    raw_input = story_bible.get("raw_input") if isinstance(story_bible.get("raw_input"), dict) else {}
-    writing_guidance = story_bible.get("writing_guidance") if isinstance(story_bible.get("writing_guidance"), dict) else {}
-    import_guidance = story_bible.get("import_guidance") if isinstance(story_bible.get("import_guidance"), dict) else {}
+# [已迁移至 services.story_state.build_story_bible_compact，保留此处供 diff 参考]
+# def _build_story_bible_compact(story_bible: dict | None) -> dict[str, Any]:
+#     if not isinstance(story_bible, dict):
+#         return {}
+#     creative_brief = story_bible.get("creative_brief") if isinstance(story_bible.get("creative_brief"), dict) else {}
+#     raw_input = story_bible.get("raw_input") if isinstance(story_bible.get("raw_input"), dict) else {}
+#     writing_guidance = story_bible.get("writing_guidance") if isinstance(story_bible.get("writing_guidance"), dict) else {}
+#     import_guidance = story_bible.get("import_guidance") if isinstance(story_bible.get("import_guidance"), dict) else {}
+#
+#     compact: dict[str, Any] = {}
+#     for key in (
+#         "project_positioning",
+#         "one_line_premise",
+#         "core_hook",
+#         "protagonist_core",
+#         "main_conflict",
+#         "longline_mystery",
+#         "serial_length_target",
+#         "reveal_strategy",
+#         "pacing_strategy",
+#         "world_setting",
+#         "open_story_notes",
+#     ):
+#         value = str(creative_brief.get(key) or "").strip()
+#         if value:
+#             compact[key] = value
+#
+#     must_keep_rules = creative_brief.get("must_keep_rules")
+#     if isinstance(must_keep_rules, list):
+#         cleaned = [str(item).strip() for item in must_keep_rules if str(item).strip()]
+#         if cleaned:
+#             compact["must_keep_rules"] = cleaned[:8]
+#
+#     for key in (
+#         "opening_strategy",
+#         "chapter_density_strategy",
+#         "midgame_engine",
+#         "late_game_direction",
+#     ):
+#         value = str(writing_guidance.get(key) or "").strip()
+#         if value:
+#             compact[key] = value
+#
+#     for key in ("forbidden_patterns", "preferred_plot_patterns"):
+#         raw = writing_guidance.get(key)
+#         if isinstance(raw, list):
+#             cleaned = [str(item).strip() for item in raw if str(item).strip()]
+#             if cleaned:
+#                 compact[key] = cleaned[:8]
+#
+#     for key in ("raw_idea", "raw_length_goal", "raw_must_keep", "raw_hidden_setting"):
+#         value = str(raw_input.get(key) or "").strip()
+#         if value:
+#             compact[key] = value
+#
+#     for key in (
+#         "import_material_type",
+#         "must_keep",
+#         "author_goal",
+#         "adjustment_scope",
+#         "longline_plan",
+#         "tone_guardrails",
+#     ):
+#         value = str(import_guidance.get(key) or "").strip()
+#         if value:
+#             compact[f"import_{key}"] = value
+#
+#     return compact
 
-    compact: dict[str, Any] = {}
-    for key in (
-        "project_positioning",
-        "one_line_premise",
-        "core_hook",
-        "protagonist_core",
-        "main_conflict",
-        "longline_mystery",
-        "serial_length_target",
-        "reveal_strategy",
-        "pacing_strategy",
-        "world_setting",
-        "open_story_notes",
-    ):
-        value = str(creative_brief.get(key) or "").strip()
-        if value:
-            compact[key] = value
 
-    must_keep_rules = creative_brief.get("must_keep_rules")
-    if isinstance(must_keep_rules, list):
-        cleaned = [str(item).strip() for item in must_keep_rules if str(item).strip()]
-        if cleaned:
-            compact["must_keep_rules"] = cleaned[:8]
-
-    for key in (
-        "opening_strategy",
-        "chapter_density_strategy",
-        "midgame_engine",
-        "late_game_direction",
-    ):
-        value = str(writing_guidance.get(key) or "").strip()
-        if value:
-            compact[key] = value
-
-    for key in ("forbidden_patterns", "preferred_plot_patterns"):
-        raw = writing_guidance.get(key)
-        if isinstance(raw, list):
-            cleaned = [str(item).strip() for item in raw if str(item).strip()]
-            if cleaned:
-                compact[key] = cleaned[:8]
-
-    for key in ("raw_idea", "raw_length_goal", "raw_must_keep", "raw_hidden_setting"):
-        value = str(raw_input.get(key) or "").strip()
-        if value:
-            compact[key] = value
-
-    for key in (
-        "import_material_type",
-        "must_keep",
-        "author_goal",
-        "adjustment_scope",
-        "longline_plan",
-        "tone_guardrails",
-    ):
-        value = str(import_guidance.get(key) or "").strip()
-        if value:
-            compact[f"import_{key}"] = value
-
-    return compact
-
-
-def _build_story_memory_compact(story_memory: dict | None) -> dict[str, Any]:
-    if not isinstance(story_memory, dict):
-        return {}
-    compact: dict[str, Any] = {}
-    for key in ("story_state", "current_arc_focus", "current_tone", "next_payoff_target"):
-        value = str(story_memory.get(key) or "").strip()
-        if value:
-            compact[key] = value
-    for key in ("continuity_facts", "open_loops", "resolved_loops"):
-        raw = story_memory.get(key)
-        if isinstance(raw, list):
-            cleaned = [str(item).strip() for item in raw if str(item).strip()]
-            if cleaned:
-                compact[key] = cleaned[:12]
-    recent_chapter_summaries = story_memory.get("recent_chapter_summaries")
-    if isinstance(recent_chapter_summaries, list):
-        compact["recent_chapter_summaries"] = [
-            item for item in recent_chapter_summaries[-8:]
-            if isinstance(item, dict)
-        ]
-    return compact
+# [已迁移至 services.story_state.build_story_memory_compact，保留此处供 diff 参考]
+# def _build_story_memory_compact(story_memory: dict | None) -> dict[str, Any]:
+#     if not isinstance(story_memory, dict):
+#         return {}
+#     compact: dict[str, Any] = {}
+#     for key in ("story_state", "current_arc_focus", "current_tone", "next_payoff_target"):
+#         value = str(story_memory.get(key) or "").strip()
+#         if value:
+#             compact[key] = value
+#     for key in ("continuity_facts", "open_loops", "resolved_loops"):
+#         raw = story_memory.get(key)
+#         if isinstance(raw, list):
+#             cleaned = [str(item).strip() for item in raw if str(item).strip()]
+#             if cleaned:
+#                 compact[key] = cleaned[:12]
+#     recent_chapter_summaries = story_memory.get("recent_chapter_summaries")
+#     if isinstance(recent_chapter_summaries, list):
+#         compact["recent_chapter_summaries"] = [
+#             item for item in recent_chapter_summaries[-8:]
+#             if isinstance(item, dict)
+#         ]
+#     return compact
 
 
 def _build_framework_ai_context(story: Story, mode: str = "general", user_instruction: str = "") -> dict:
@@ -3237,9 +3240,9 @@ def _build_framework_ai_context(story: Story, mode: str = "general", user_instru
         "characters": story.characters,
         "outline": outline,
         "story_bible": story.story_bible,
-        "story_bible_compact": _build_story_bible_compact(story.story_bible),
+        "story_bible_compact": build_story_bible_compact(story.story_bible),
         "story_memory": story.story_memory,
-        "story_memory_compact": _build_story_memory_compact(story.story_memory),
+        "story_memory_compact": build_story_memory_compact(story.story_memory),
         "outline_compact": _build_outline_compact(outline),
         "framework_stats": {
             "mode": mode,
@@ -3539,6 +3542,25 @@ def _merge_characters_payload(existing, incoming):
                 index_by_name[name] = len(merged) - 1
 
     return merged
+
+
+def _apply_generated_framework_to_story(
+    story,
+    framework: dict,
+    raw_description: str | None,
+    resolved_description: str,
+) -> None:
+    """将 AI 生成的框架数据写入 story 对象（不包含 DB commit 和快照）。
+
+    这是从 generate_framework_endpoint 抽出的纯函数，方便测试。
+    """
+    if raw_description and not _is_generic_framework_instruction(raw_description):
+        story.description = raw_description
+    elif not str(story.description or "").strip():
+        story.description = resolved_description
+    story.tags = _merge_tags(story.tags, framework.get("tags"))
+    story.characters = _normalize_characters_payload(framework.get("characters"))
+    story.outline = _merge_framework_outline(story.outline, framework.get("outline"), framework.get("chapters"))
 
 
 def _story_framework_context(story: Story) -> dict:
@@ -8368,14 +8390,9 @@ async def update_story_bible(story_id: int, request: Request, db: Session = Depe
     story = _require_story_for_user(story_id, user, db)
     body = await request.json()
     bible_update = body.get("story_bible", {})
-    current = dict(story.story_bible or {})
-    for key, value in bible_update.items():
-        if isinstance(value, dict) and isinstance(current.get(key), dict):
-            merged = dict(current[key])
-            merged.update(value)
-            current[key] = merged
-        else:
-            current[key] = value
+    from services.story_state import deep_merge_story_bible
+
+    current = deep_merge_story_bible(story.story_bible, bible_update)
     story.story_bible = current
     creative_brief = current.get("creative_brief") if isinstance(current.get("creative_brief"), dict) else {}
     next_description = str(creative_brief.get("one_line_premise") or "").strip()
@@ -8615,16 +8632,12 @@ async def generate_framework_endpoint(story_id: int, request: Request, db: Sessi
         raise HTTPException(502, f"AI 未能满足至少 {requested_min_chapters} 章的初始框架要求，请换一种更明确的故事描述后重试。")
 
     story = _require_story_for_user(story_id, user, db)
-    if raw_description and not _is_generic_framework_instruction(raw_description):
-        story.description = raw_description
-    elif not str(story.description or "").strip():
-        story.description = description.strip()
-    saved_tags = story.tags
-    saved_characters = story.characters
-    saved_outline = story.outline
-    story.tags = saved_tags
-    story.characters = _normalize_characters_payload(framework.get("characters"))
-    story.outline = _merge_framework_outline(saved_outline, framework.get("outline"), framework.get("chapters"))
+    _apply_generated_framework_to_story(
+        story=story,
+        framework=framework,
+        raw_description=raw_description,
+        resolved_description=description.strip(),
+    )
     db.commit()
 
     # ★ 初始快照：保存首次生成框架后的状态
@@ -9117,6 +9130,42 @@ async def adjust_framework_endpoint(story_id: int, request: Request, db: Session
     template_story_length = get_template_story_length(story_id, db)
     story_length = template_story_length or _infer_story_length_from_story(story, messages=messages)
 
+    # 检查是否仅分析模式
+    is_analyze_only = any(
+        "【仅分析模式" in (msg.get("content") or "")
+        for msg in messages
+    )
+    if is_analyze_only:
+        _check_and_consume_advanced_text_quota(request, user.id, db, deduct=False)
+        _release_db_transaction(db)
+        try:
+            plan = await adjust_framework_with_chat(
+                context_story,
+                messages,
+                api_key=deepseek_api_key,
+                existing_framework=existing_framework,
+                system_prompt=template_edit_prompt or None,
+                story_length=story_length,
+            )
+        except ValueError as exc:
+            raise HTTPException(502, f"AI 框架分析返回格式无效：{exc}") from exc
+        db = SessionLocal()
+        _check_and_consume_advanced_text_quota(request, user.id, db, deduct=True)
+        db.close()
+        return {
+            "reply": plan.get("reply", ""),
+            "story": {
+                "description": story.description,
+                "tags": story.tags,
+                "characters": story.characters,
+                "outline": story.outline,
+            },
+            "chapters": _extract_outline_chapters(story.outline or {}),
+            "applied_operations": [],
+            "warnings": ["仅分析模式：未写入数据库"],
+            "validation_errors": [],
+        }
+
     template_edit_prompt = get_effective_prompt(story_id, "framework_editing", db)
     _check_and_consume_advanced_text_quota(request, user.id, db, deduct=False)
     _release_db_transaction(db)
@@ -9354,7 +9403,7 @@ async def expand_chapter_endpoint(story_id: int, request: Request, db: Session =
         )
         if prev_chapter and prev_chapter.novel_content:
             ending_text = prev_chapter.novel_content[-800:]
-            memory_compact = _build_story_memory_compact(
+            memory_compact = build_story_memory_compact(
                 story.story_memory if isinstance(story.story_memory, dict) else {}
             )
             parts_list = [f"上一章《第{prev_chapter.chapter_number}章：{prev_chapter.title or ''}》结尾：\n{ending_text}"]
