@@ -51,7 +51,7 @@ export default function WorkspaceLayout({
 
   return (
     <div className="flex h-full min-h-0 flex-col gap-3 bg-[linear-gradient(180deg,_#f4f8ff_0%,_#eef4ff_100%)] p-4">
-      {story.story_bible?.creative_brief && (
+      {story.story_bible && Object.keys(story.story_bible).length > 0 && (
         <div className="shrink-0">
           <StoryBibleSummaryCard
             storyId={story.id}

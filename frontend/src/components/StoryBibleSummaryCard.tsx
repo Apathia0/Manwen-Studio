@@ -51,7 +51,7 @@ export default function StoryBibleSummaryCard({ storyId, storyBible, onUpdated }
   const forbiddenPatterns = Array.isArray(guidance?.forbidden_patterns) ? guidance.forbidden_patterns : [];
   const preferredPlotPatterns = Array.isArray(guidance?.preferred_plot_patterns) ? guidance.preferred_plot_patterns : [];
 
-  if (!brief) return null;
+  if (!storyBible || Object.keys(storyBible).length === 0) return null;
 
   const handleChange = (key: keyof StoryBibleFormState, value: string) => {
     setForm((prev) => ({ ...prev, [key]: value }));
@@ -82,15 +82,15 @@ export default function StoryBibleSummaryCard({ storyId, storyBible, onUpdated }
           <div className="flex min-w-0 items-center gap-2">
             <BookOpen size={16} className="shrink-0 text-[#2563eb]" />
             <span className="text-sm font-semibold text-slate-900">作品圣经摘要</span>
-            {brief.one_line_premise ? (
+            {brief?.one_line_premise ? (
               <span className="hidden max-w-[420px] truncate text-sm text-slate-500 md:inline-block">
-                {brief.one_line_premise}
+                {brief?.one_line_premise}
               </span>
             ) : null}
           </div>
           <div className="flex items-center gap-2">
             <span className="text-xs text-slate-400">
-              {brief.genre} / {brief.audience} / {brief.serial_length_target}
+              {brief?.genre} / {brief?.audience} / {brief?.serial_length_target}
             </span>
             {expanded ? <ChevronUp size={14} className="text-slate-400" /> : <ChevronDown size={14} className="text-slate-400" />}
           </div>
@@ -113,19 +113,19 @@ export default function StoryBibleSummaryCard({ storyId, storyBible, onUpdated }
         <div className="mt-3 border-t border-[#d7e3f4] pt-3">
           <div className="max-h-[min(65vh,720px)] overflow-y-auto pr-1">
             <div className="grid gap-2.5 sm:grid-cols-2 lg:grid-cols-3">
-              <InfoItem label="作品定位" value={brief.project_positioning} />
-              <InfoItem label="题材" value={brief.genre} />
-              <InfoItem label="受众" value={brief.audience} />
-              <InfoItem label="风格基调" value={brief.tone} />
-              <InfoItem label="核心卖点" value={brief.core_hook} />
-              <InfoItem label="一句话梗概" value={brief.one_line_premise} />
-              <InfoItem label="主角核心" value={brief.protagonist_core} />
-              <InfoItem label="主线矛盾" value={brief.main_conflict} />
-              <InfoItem label="长线悬念" value={brief.longline_mystery} />
-              <InfoItem label="目标篇幅" value={brief.serial_length_target} />
-              <InfoItem label="揭秘策略" value={brief.reveal_strategy} />
-              <InfoItem label="节奏策略" value={brief.pacing_strategy} />
-              {brief.world_setting ? (
+              {brief?.project_positioning ? <InfoItem label="作品定位" value={brief.project_positioning} /> : null}
+              {brief?.genre ? <InfoItem label="题材" value={brief.genre} /> : null}
+              {brief?.audience ? <InfoItem label="受众" value={brief.audience} /> : null}
+              {brief?.tone ? <InfoItem label="风格基调" value={brief.tone} /> : null}
+              {brief?.core_hook ? <InfoItem label="核心卖点" value={brief.core_hook} /> : null}
+              {brief?.one_line_premise ? <InfoItem label="一句话梗概" value={brief.one_line_premise} /> : null}
+              {brief?.protagonist_core ? <InfoItem label="主角核心" value={brief.protagonist_core} /> : null}
+              {brief?.main_conflict ? <InfoItem label="主线矛盾" value={brief.main_conflict} /> : null}
+              {brief?.longline_mystery ? <InfoItem label="长线悬念" value={brief.longline_mystery} /> : null}
+              {brief?.serial_length_target ? <InfoItem label="目标篇幅" value={brief.serial_length_target} /> : null}
+              {brief?.reveal_strategy ? <InfoItem label="揭秘策略" value={brief.reveal_strategy} /> : null}
+              {brief?.pacing_strategy ? <InfoItem label="节奏策略" value={brief.pacing_strategy} /> : null}
+              {brief?.world_setting ? (
                 typeof brief.world_setting === 'object' ? (
                   <div className="rounded-xl border border-[#d7e3f4] bg-white/90 p-3 sm:col-span-2 lg:col-span-3">
                     <div className="mb-2 text-[11px] font-medium text-[#2563eb]">世界观设定</div>
@@ -141,7 +141,7 @@ export default function StoryBibleSummaryCard({ storyId, storyBible, onUpdated }
                   <InfoItem label="世界观设定" value={brief.world_setting} />
                 )
               ) : null}
-              {brief.open_story_notes ? (
+              {brief?.open_story_notes ? (
                 <InfoItem label="开放故事笔记" value={brief.open_story_notes} />
               ) : null}
               {mustKeepRules.length > 0 ? (
@@ -161,6 +161,7 @@ export default function StoryBibleSummaryCard({ storyId, storyBible, onUpdated }
                   ) : null}
                 </>
               ) : null}
+              <StoryBibleFullView storyBible={storyBible} />
             </div>
           </div>
         </div>
@@ -410,6 +411,70 @@ function WorldSettingNode({ label, value, depth = 0 }: { label: string; value: u
   );
 }
 
+const STORY_BIBLE_SECTION_LABELS: Record<string, string> = {
+  raw_input: '原始输入',
+  creative_brief: '创意摘要',
+  writing_guidance: '写作指导',
+  import_guidance: '导入指导',
+};
+
+function StoryBibleFullView({ storyBible }: { storyBible: StoryBible }) {
+  const entries = Object.entries(storyBible).filter(([, value]) => hasRenderableValue(value));
+  if (!entries.length) return null;
+  return (
+    <div className="mt-3 rounded-xl border border-[#d7e3f4] bg-white/80 p-3 sm:col-span-2 lg:col-span-3">
+      <div className="mb-2 text-[11px] font-medium text-[#2563eb]">完整作品圣经</div>
+      <div className="space-y-2">
+        {entries.map(([key, value]) => (
+          <GenericJsonNode key={key} label={STORY_BIBLE_SECTION_LABELS[key] ?? key} value={value} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function GenericJsonNode({ label, value, depth = 0 }: { label: string; value: unknown; depth?: number }) {
+  if (!hasRenderableValue(value)) return null;
+  if (Array.isArray(value)) {
+    return (
+      <div className={`rounded-lg border border-[#e5edf8] bg-[#fafdff] p-2 ${depth > 0 ? 'ml-2' : ''}`}>
+        <div className="text-[10px] font-medium text-slate-500">{label}</div>
+        <div className="mt-1 space-y-1">
+          {value.map((item, index) => (
+            <GenericJsonNode key={index} label={`#${index + 1}`} value={item} depth={depth + 1} />
+          ))}
+        </div>
+      </div>
+    );
+  }
+  if (typeof value === 'object' && value !== null) {
+    return (
+      <div className={`rounded-lg border border-[#e5edf8] bg-[#fafdff] p-2 ${depth > 0 ? 'ml-2' : ''}`}>
+        <div className="text-[10px] font-medium text-slate-500">{label}</div>
+        <div className="mt-1 space-y-1">
+          {Object.entries(value as Record<string, unknown>).map(([key, child]) => (
+            <GenericJsonNode key={key} label={translateLabel(key)} value={child} depth={depth + 1} />
+          ))}
+        </div>
+      </div>
+    );
+  }
+  return (
+    <div className="rounded-lg border border-[#e5edf8] bg-[#fafdff] p-2">
+      <div className="text-[10px] font-medium text-slate-500">{label}</div>
+      <div className="mt-0.5 whitespace-pre-wrap text-xs leading-5 text-slate-600">{String(value)}</div>
+    </div>
+  );
+}
+
+function hasRenderableValue(value: unknown): boolean {
+  if (value == null) return false;
+  if (typeof value === 'string') return value.trim().length > 0;
+  if (Array.isArray(value)) return value.some(hasRenderableValue);
+  if (typeof value === 'object') return Object.values(value as Record<string, unknown>).some(hasRenderableValue);
+  return true;
+}
+
 function ListItem({
   label,
   items,
@@ -511,6 +576,7 @@ function buildStoryBiblePayload(form: StoryBibleFormState, storyBible: StoryBibl
   return {
     ...storyBible,
     creative_brief: {
+      ...(storyBible.creative_brief ?? {}),
       project_positioning: form.project_positioning.trim(),
       genre: form.genre.trim(),
       audience: form.audience.trim(),
@@ -528,6 +594,7 @@ function buildStoryBiblePayload(form: StoryBibleFormState, storyBible: StoryBibl
       open_story_notes: form.open_story_notes.trim(),
     },
     writing_guidance: {
+      ...(storyBible.writing_guidance ?? {}),
       opening_strategy: form.opening_strategy.trim(),
       chapter_density_strategy: form.chapter_density_strategy.trim(),
       midgame_engine: form.midgame_engine.trim(),
