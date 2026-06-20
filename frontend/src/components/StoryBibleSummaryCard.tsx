@@ -34,7 +34,7 @@ type StoryBibleFormState = {
 };
 
 export default function StoryBibleSummaryCard({ storyId, storyBible, onUpdated }: Props) {
-  const [expanded, setExpanded] = useState(false);
+  const [workbenchOpen, setWorkbenchOpen] = useState(false);
   const [editOpen, setEditOpen] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
@@ -46,10 +46,6 @@ export default function StoryBibleSummaryCard({ storyId, storyBible, onUpdated }
   }, [formInitialState]);
 
   const brief = storyBible.creative_brief;
-  const guidance = storyBible.writing_guidance;
-  const mustKeepRules = Array.isArray(brief?.must_keep_rules) ? brief.must_keep_rules : [];
-  const forbiddenPatterns = Array.isArray(guidance?.forbidden_patterns) ? guidance.forbidden_patterns : [];
-  const preferredPlotPatterns = Array.isArray(guidance?.preferred_plot_patterns) ? guidance.preferred_plot_patterns : [];
 
   if (!storyBible || Object.keys(storyBible).length === 0) return null;
 
@@ -75,139 +71,42 @@ export default function StoryBibleSummaryCard({ storyId, storyBible, onUpdated }
   return (
     <div className="rounded-2xl border border-[#d7e3f4] bg-[linear-gradient(135deg,_#f8fbff_0%,_#eff6ff_100%)] p-4 shadow-[0_8px_20px_rgba(59,130,246,0.06)]">
       <div className="flex items-start justify-between gap-3">
-        <button
-          onClick={() => setExpanded((prev) => !prev)}
-          className="flex min-w-0 flex-1 items-center justify-between gap-3"
-        >
-          <div className="flex min-w-0 items-center gap-2">
-            <BookOpen size={16} className="shrink-0 text-[#2563eb]" />
-            <span className="text-sm font-semibold text-slate-900">作品圣经摘要</span>
-            {brief?.one_line_premise ? (
-              <span className="hidden max-w-[420px] truncate text-sm text-slate-500 md:inline-block">
-                {brief?.one_line_premise}
-              </span>
-            ) : null}
-          </div>
-          <div className="flex items-center gap-2">
-            <span className="text-xs text-slate-400">
-              {brief?.genre} / {brief?.audience} / {brief?.serial_length_target}
+        <div className="flex min-w-0 flex-1 items-center gap-2">
+          <BookOpen size={16} className="shrink-0 text-[#2563eb]" />
+          <span className="text-sm font-semibold text-slate-900">作品圣经摘要</span>
+          {brief?.one_line_premise ? (
+            <span className="hidden max-w-[420px] truncate text-sm text-slate-500 md:inline-block">
+              {brief?.one_line_premise}
             </span>
-            {expanded ? <ChevronUp size={14} className="text-slate-400" /> : <ChevronDown size={14} className="text-slate-400" />}
-          </div>
-        </button>
-
-        <button
-          onClick={() => {
-            setError('');
-            setForm(createFormState(storyBible));
-            setEditOpen(true);
-          }}
-          className="inline-flex shrink-0 items-center gap-1 rounded-xl border border-[#d7e3f4] bg-white px-3 py-1.5 text-xs font-medium text-slate-700 transition hover:bg-[#f8fbff]"
-        >
-          <Pencil size={13} />
-          调整
-        </button>
+          ) : null}
+        </div>
+        <div className="flex shrink-0 items-center gap-2">
+          <span className="text-xs text-slate-400">
+            {brief?.genre} / {brief?.audience} / {brief?.serial_length_target}
+          </span>
+          <button
+            onClick={() => setWorkbenchOpen(true)}
+            className="inline-flex shrink-0 items-center gap-1 rounded-xl border border-[#d7e3f4] bg-white px-3 py-1.5 text-xs font-medium text-slate-700 transition hover:bg-[#f8fbff]"
+          >
+            <BookOpen size={13} />
+            完整圣经
+          </button>
+          <button
+            onClick={() => {
+              setError('');
+              setForm(createFormState(storyBible));
+              setEditOpen(true);
+            }}
+            className="inline-flex shrink-0 items-center gap-1 rounded-xl border border-[#d7e3f4] bg-white px-3 py-1.5 text-xs font-medium text-slate-700 transition hover:bg-[#f8fbff]"
+          >
+            <Pencil size={13} />
+            调整
+          </button>
+        </div>
       </div>
 
-      {expanded ? (
-        <div className="mt-3 border-t border-[#d7e3f4] pt-3">
-          <div className="max-h-[min(65vh,720px)] overflow-y-auto pr-1">
-            <div className="space-y-3">
-              {/* 基础设定 */}
-              <SectionCard title="基础设定">
-                <InfoRow label="作品定位" value={brief?.project_positioning} />
-                <InfoRow label="题材" value={brief?.genre} />
-                <InfoRow label="受众" value={brief?.audience} />
-                <InfoRow label="风格基调" value={brief?.tone} />
-                <InfoRow label="核心卖点" value={brief?.core_hook} />
-                <InfoRow label="一句话梗概" value={brief?.one_line_premise} />
-                <InfoRow label="目标篇幅" value={brief?.serial_length_target} />
-              </SectionCard>
-
-              {/* 故事核心 */}
-              <SectionCard title="故事核心">
-                <InfoRow label="主角核心" value={brief?.protagonist_core} />
-                <InfoRow label="主线矛盾" value={brief?.main_conflict} />
-                <InfoRow label="长线悬念" value={brief?.longline_mystery} />
-                <InfoRow label="揭秘策略" value={brief?.reveal_strategy} />
-                <InfoRow label="节奏策略" value={brief?.pacing_strategy} />
-              </SectionCard>
-
-              {/* 世界观设定 */}
-              {brief?.world_setting ? (
-                typeof brief.world_setting === 'object' ? (
-                  <SectionCard title="世界观设定">
-                    <div className="grid gap-1.5 sm:grid-cols-2">
-                      {Object.entries(brief.world_setting)
-                        .filter(([, v]) => v != null)
-                        .map(([key, val]) => (
-                          <WorldSettingNode key={key} label={key} value={val} />
-                        ))}
-                    </div>
-                  </SectionCard>
-                ) : (
-                  <SectionCard title="世界观设定">
-                    <InfoRow label="" value={brief.world_setting as string} />
-                  </SectionCard>
-                )
-              ) : null}
-
-              {/* 开放故事笔记 */}
-              {brief?.open_story_notes ? (
-                <SectionCard title="开放笔记">
-                  <div className="whitespace-pre-wrap text-xs leading-5 text-slate-700">
-                    {brief.open_story_notes}
-                  </div>
-                </SectionCard>
-              ) : null}
-
-              {/* 必保留设定 */}
-              {mustKeepRules.length > 0 ? (
-                <SectionCard title="必保留设定">
-                  <ul className="list-inside list-disc space-y-0.5 text-xs leading-5 text-[#2563eb]">
-                    {mustKeepRules.map((item, idx) => (
-                      <li key={idx}>{item}</li>
-                    ))}
-                  </ul>
-                </SectionCard>
-              ) : null}
-
-              {/* 写作指导 */}
-              {guidance ? (
-                <SectionCard title="写作指导">
-                  <InfoRow label="开书策略" value={guidance.opening_strategy} />
-                  <InfoRow label="章节密度策略" value={guidance.chapter_density_strategy} />
-                  <InfoRow label="中段驱动力" value={guidance.midgame_engine} />
-                  <InfoRow label="后期方向" value={guidance.late_game_direction} />
-                </SectionCard>
-              ) : null}
-
-              {/* 避免的模式 */}
-              {forbiddenPatterns.length > 0 ? (
-                <SectionCard title="避免的模式">
-                  <ul className="list-inside list-disc space-y-0.5 text-xs leading-5 text-rose-500">
-                    {forbiddenPatterns.map((item, idx) => (
-                      <li key={idx}>{item}</li>
-                    ))}
-                  </ul>
-                </SectionCard>
-              ) : null}
-
-              {/* 推荐情节模式 */}
-              {preferredPlotPatterns.length > 0 ? (
-                <SectionCard title="推荐情节模式">
-                  <ul className="list-inside list-disc space-y-0.5 text-xs leading-5 text-emerald-600">
-                    {preferredPlotPatterns.map((item, idx) => (
-                      <li key={idx}>{item}</li>
-                    ))}
-                  </ul>
-                </SectionCard>
-              ) : null}
-
-              <StoryBibleFullView storyBible={storyBible} />
-            </div>
-          </div>
-        </div>
+      {workbenchOpen ? (
+        <StoryBibleWorkbench storyBible={storyBible} onClose={() => setWorkbenchOpen(false)} />
       ) : null}
 
       {editOpen ? (
@@ -339,26 +238,8 @@ export default function StoryBibleSummaryCard({ storyId, storyBible, onUpdated }
   );
 }
 
-function SectionCard({ title, children }: { title: string; children: React.ReactNode }) {
-  return (
-    <div className="rounded-xl border border-[#e5edf8] bg-white/80 p-3 sm:col-span-2 lg:col-span-3">
-      <div className="mb-2.5 text-[11px] font-semibold tracking-wide text-slate-500">{title}</div>
-      <div className="divide-y divide-[#eef3f9]">{children}</div>
-    </div>
-  );
-}
-
-function InfoRow({ label, value }: { label: string; value: string | undefined | null }) {
-  if (!value) return null;
-  return (
-    <div className="flex items-start gap-3 py-1.5">
-      <span className="w-[76px] shrink-0 text-[10px] font-medium leading-5 text-slate-400">{label}</span>
-      <span className="min-w-0 text-xs leading-5 text-slate-700">{value}</span>
-    </div>
-  );
-}
-
-const WORLD_SETTING_LABEL_MAP: Record<string, string> = {
+const LABEL_MAP: Record<string, string> = {
+  // 世界观设定
   power_system: '力量体系',
   society_structure: '社会结构',
   key_locations: '关键地点',
@@ -381,194 +262,286 @@ const WORLD_SETTING_LABEL_MAP: Record<string, string> = {
   conflicts: '核心冲突',
   natural_laws: '自然法则',
   cosmology: '宇宙观',
+  // 完整圣经 sections
+  story_state: '故事状态',
+  raw_idea: '原始创意',
+  raw_length_goal: '篇幅目标',
+  raw_must_keep: '必保留要素',
+  raw_notes: '原始笔记',
+  continuity_facts: '连续性事实',
+  open_loops: '未闭合线索',
+  recent_chapter_summaries: '近期章节摘要',
+  chapter_number: '章节号',
+  chapters_analysis: '章节分析',
 };
 
 function translateLabel(key: string): string {
-  return WORLD_SETTING_LABEL_MAP[key] ?? key.replace(/_/g, ' ');
+  return LABEL_MAP[key] ?? key.replace(/_/g, ' ');
 }
 
-function WorldSettingNode({ label, value, depth = 0 }: { label: string; value: unknown; depth?: number }) {
-  if (value == null) return null;
-  const displayLabel = translateLabel(label);
-  const bgClass = depth === 0 ? 'bg-[#f8faff]' : depth === 1 ? 'bg-white' : 'bg-[#fafdff]';
+function CollapsibleSection({
+  title,
+  defaultOpen = true,
+  children,
+}: {
+  title: string;
+  defaultOpen?: boolean;
+  children: React.ReactNode;
+}) {
+  const [open, setOpen] = useState(defaultOpen);
+  return (
+    <div className="overflow-hidden rounded-xl border border-[#e5edf8] bg-white/80">
+      <button
+        onClick={() => setOpen((prev) => !prev)}
+        className="flex w-full items-center justify-between px-4 py-2.5 text-left text-sm font-medium text-slate-700 transition hover:bg-[#f8faff]"
+      >
+        <span>{title}</span>
+        {open ? (
+          <ChevronUp size={13} className="shrink-0 text-slate-400" />
+        ) : (
+          <ChevronDown size={13} className="shrink-0 text-slate-400" />
+        )}
+      </button>
+      {open ? (
+        <div className="border-t border-[#eef3f9] px-4 pb-3 pt-2">{children}</div>
+      ) : null}
+    </div>
+  );
+}
 
-  if (typeof value !== 'object') {
-    const text = String(value).trim();
-    if (!text) return null;
-    return (
-      <div className={`rounded-lg ${bgClass} p-2`}>
-        <div className="text-[10px] font-medium text-slate-500">{displayLabel}</div>
-        <div className="mt-0.5 text-xs leading-5 text-slate-600">{text}</div>
+function StoryBibleWorkbench({
+  storyBible,
+  onClose,
+}: {
+  storyBible: StoryBible;
+  onClose: () => void;
+}) {
+  const [activeTab, setActiveTab] = useState('all');
+  const [expandVersion, setExpandVersion] = useState(0);
+  const [defaultOpen, setDefaultOpen] = useState(true);
+
+  const brief = storyBible.creative_brief;
+  const guidance = storyBible.writing_guidance;
+  const rawInput = storyBible.raw_input;
+  const storyState = storyBible.story_state;
+  const worldSetting =
+    typeof brief?.world_setting === 'object' ? brief.world_setting : null;
+
+  const handleExpandAll = () => {
+    setDefaultOpen(true);
+    setExpandVersion((v) => v + 1);
+  };
+  const handleCollapseAll = () => {
+    setDefaultOpen(false);
+    setExpandVersion((v) => v + 1);
+  };
+
+  const tabs = [
+    { key: 'all', label: '全部' },
+    ...(rawInput ? [{ key: 'raw_input', label: '原始输入' }] : []),
+    ...(brief ? [{ key: 'creative_brief', label: '创意摘要' }] : []),
+    ...(guidance ? [{ key: 'writing_guidance', label: '写作指导' }] : []),
+    ...(worldSetting ? [{ key: 'world_setting', label: '世界观' }] : []),
+    ...(storyState ? [{ key: 'story_state', label: '故事状态' }] : []),
+  ];
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/45 p-4">
+      <div className="flex max-h-[85vh] w-full max-w-4xl flex-col overflow-hidden rounded-[28px] border border-[#d7e3f4] bg-white shadow-[0_24px_60px_rgba(15,23,42,0.2)]">
+        {/* 头部 */}
+        <div className="flex items-center justify-between border-b border-[#e5edf8] px-6 py-4">
+          <div className="text-base font-semibold text-slate-900">作品圣经</div>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={handleCollapseAll}
+              className="rounded-lg border border-[#d7e3f4] bg-white px-2.5 py-1 text-xs font-medium text-slate-500 transition hover:bg-[#f8fbff]"
+            >
+              <ChevronUp size={12} className="mr-0.5 inline" />
+              全部收起
+            </button>
+            <button
+              onClick={handleExpandAll}
+              className="rounded-lg border border-[#d7e3f4] bg-white px-2.5 py-1 text-xs font-medium text-slate-500 transition hover:bg-[#f8fbff]"
+            >
+              <ChevronDown size={12} className="mr-0.5 inline" />
+              全部展开
+            </button>
+            <button
+              onClick={onClose}
+              className="rounded-full border border-[#d7e3f4] bg-white p-1.5 text-slate-400 transition hover:bg-[#f8fbff]"
+            >
+              <X size={16} />
+            </button>
+          </div>
+        </div>
+
+        {/* Tab 栏 */}
+        <div className="flex gap-1 border-b border-[#e5edf8] px-6 pt-3">
+          {tabs.map((tab) => (
+            <button
+              key={tab.key}
+              onClick={() => setActiveTab(tab.key)}
+              className={`rounded-t-lg px-4 py-2 text-xs font-medium transition ${
+                activeTab === tab.key
+                  ? 'bg-[#eff6ff] text-[#2563eb]'
+                  : 'text-slate-500 hover:bg-[#f8fbff] hover:text-slate-700'
+              }`}
+            >
+              {tab.label}
+            </button>
+          ))}
+        </div>
+
+        {/* 内容区 */}
+        <div className="min-h-0 flex-1 overflow-y-auto px-6 py-4">
+          <div key={expandVersion} className="space-y-3">
+            {renderTabContent(storyBible, activeTab, defaultOpen)}
+          </div>
+        </div>
       </div>
+    </div>
+  );
+}
+
+function renderTabContent(
+  storyBible: StoryBible,
+  tab: string,
+  defaultOpen: boolean,
+): React.ReactNode {
+  const brief = storyBible.creative_brief;
+  const guidance = storyBible.writing_guidance;
+  const rawInput = storyBible.raw_input;
+  const storyState = storyBible.story_state;
+  const worldSetting =
+    typeof brief?.world_setting === 'object' ? brief.world_setting : null;
+
+  const renderObjectEntries = (data: any) =>
+    data ? renderEntries(Object.entries(data), defaultOpen) : null;
+
+  if (tab === 'all') {
+    return (
+      <>
+        {rawInput ? (
+          <CollapsibleSection title="原始输入" defaultOpen={defaultOpen}>
+            {renderObjectEntries(rawInput)}
+          </CollapsibleSection>
+        ) : null}
+        {brief ? (
+          <CollapsibleSection title="创意摘要" defaultOpen={defaultOpen}>
+            {renderEntries(
+              Object.entries(brief).filter(([k]) => k !== 'world_setting'),
+              defaultOpen,
+            )}
+          </CollapsibleSection>
+        ) : null}
+        {guidance ? (
+          <CollapsibleSection title="写作指导" defaultOpen={defaultOpen}>
+            {renderObjectEntries(guidance)}
+          </CollapsibleSection>
+        ) : null}
+        {worldSetting ? (
+          <CollapsibleSection title="世界观设定" defaultOpen={defaultOpen}>
+            {renderObjectEntries(worldSetting)}
+          </CollapsibleSection>
+        ) : null}
+        {storyBible.import_guidance ? (
+          <CollapsibleSection title="导入指导" defaultOpen={defaultOpen}>
+            {renderObjectEntries(storyBible.import_guidance)}
+          </CollapsibleSection>
+        ) : null}
+        {storyState ? (
+          <CollapsibleSection title="故事状态" defaultOpen={defaultOpen}>
+            {renderObjectEntries(storyState)}
+          </CollapsibleSection>
+        ) : null}
+      </>
     );
   }
 
+  if (tab === 'raw_input') return renderObjectEntries(rawInput);
+  if (tab === 'creative_brief')
+    return brief
+      ? renderEntries(
+          Object.entries(brief).filter(([k]) => k !== 'world_setting'),
+          defaultOpen,
+        )
+      : null;
+  if (tab === 'writing_guidance') return renderObjectEntries(guidance);
+  if (tab === 'world_setting') return renderObjectEntries(worldSetting);
+  if (tab === 'story_state') return renderObjectEntries(storyState);
+  return null;
+}
+
+function renderEntries(
+  entries: [string, unknown][],
+  defaultOpen: boolean,
+): React.ReactNode {
+  return entries
+    .filter(([, value]) => hasRenderableValue(value))
+    .map(([key, value]) => (
+      <CollapsibleSection key={key} title={translateLabel(key)} defaultOpen={defaultOpen}>
+        {renderEntryContent(value, defaultOpen)}
+      </CollapsibleSection>
+    ));
+}
+
+function renderEntryContent(
+  value: unknown,
+  defaultOpen: boolean,
+): React.ReactNode {
+  if (value == null) return null;
+  if (typeof value === 'string') {
+    const text = value.trim();
+    if (!text) return null;
+    return (
+      <div className="whitespace-pre-wrap break-words text-sm leading-6 text-slate-700">
+        {text}
+      </div>
+    );
+  }
   if (Array.isArray(value)) {
     const items = value.filter((v) => v != null);
     if (!items.length) return null;
 
     if (items.every((v) => typeof v !== 'object')) {
       return (
-        <div className={`rounded-lg ${bgClass} p-2`}>
-          <div className="text-[10px] font-medium text-slate-500">{displayLabel}</div>
-          <ul className="mt-1 list-inside list-disc space-y-0.5 text-xs leading-5 text-slate-600">
-            {items.map((item, i) => (
-              <li key={i}>{String(item)}</li>
-            ))}
-          </ul>
-        </div>
+        <ul className="list-inside list-disc space-y-1 text-sm leading-6 text-slate-700">
+          {items.map((item, i) => (
+            <li key={i}>{String(item)}</li>
+          ))}
+        </ul>
       );
     }
-
     return (
-      <div className={`rounded-lg ${bgClass} p-2 ${depth > 0 ? 'ml-2' : ''}`}>
-        <div className="text-[10px] font-medium text-slate-500">{displayLabel}</div>
-        <div className="mt-1 space-y-1.5">
-          {items.map((item, i) => {
-            if (typeof item !== 'object' || item == null) {
-              return (
-                <div key={i} className="text-xs leading-5 text-slate-600">
-                  {String(item)}
-                </div>
-              );
-            }
-            const entries = Object.entries(item as Record<string, unknown>).filter(
-              ([, v]) => v != null && String(v).trim(),
-            );
-            if (!entries.length) return null;
+      <div className="space-y-2">
+        {items.map((item, i) => {
+          if (typeof item !== 'object' || item == null) {
             return (
-              <div className="rounded-md bg-white/80 p-2">
-                {entries.map(([sk, sv]) => (
-                  <WorldSettingNode key={sk} label={sk} value={sv} depth={depth + 1} />
-                ))}
+              <div key={i} className="text-sm leading-6 text-slate-700">
+                {String(item)}
               </div>
             );
-          })}
-        </div>
+          }
+          return (
+            <CollapsibleSection key={i} title={`#${i + 1}`} defaultOpen={defaultOpen}>
+              {renderEntryContent(item, defaultOpen)}
+            </CollapsibleSection>
+          );
+        })}
       </div>
     );
   }
-
-  const entries = Object.entries(value as Record<string, unknown>).filter(([, v]) => v != null && String(v).trim());
-  if (!entries.length) return null;
-
-  return (
-    <div className={`rounded-lg ${bgClass} p-2 ${depth > 0 ? 'ml-2' : ''}`}>
-      <div className="text-[10px] font-medium text-slate-500">{displayLabel}</div>
-      <div className="mt-1 space-y-1">
-        {entries.map(([k, v]) => (
-          <WorldSettingNode key={k} label={k} value={v} depth={depth + 1} />
-        ))}
-      </div>
-    </div>
-  );
-}
-
-const STORY_BIBLE_SECTION_LABELS: Record<string, string> = {
-  raw_input: '原始输入',
-  creative_brief: '创意摘要',
-  writing_guidance: '写作指导',
-  import_guidance: '导入指导',
-  world_setting: '世界观设定',
-  raw_idea: '原始创意',
-  raw_length_goal: '篇幅目标',
-  raw_must_keep: '必保留要素',
-  raw_notes: '原始笔记',
-};
-
-function StoryBibleFullView({ storyBible }: { storyBible: StoryBible }) {
-  const entries = Object.entries(storyBible).filter(([, value]) => hasRenderableValue(value));
-  // 跳过已在摘要卡片展示的 section
-  const filteredEntries = entries.filter(
-    ([key]) => key !== 'creative_brief' && key !== 'writing_guidance' && key !== 'import_guidance',
-  );
-  if (!filteredEntries.length) return null;
-
-  const [openSections, setOpenSections] = useState<Record<string, boolean>>({
-    raw_input: false,
-  });
-
-  const toggle = (key: string) =>
-    setOpenSections((prev) => ({ ...prev, [key]: !prev[key] }));
-
-  return (
-    <div className="sm:col-span-2 lg:col-span-3">
-      <div className="rounded-xl border border-[#e5edf8] bg-white/80 p-3">
-        <div className="mb-2 text-[11px] font-semibold tracking-wide text-slate-500">完整作品圣经</div>
-        <div className="space-y-2">
-          {filteredEntries.map(([key, value]) => {
-            const isOpen = openSections[key] ?? true;
-            return (
-              <div key={key} className="overflow-hidden rounded-lg border border-[#eef3f9]">
-                <button
-                  onClick={() => toggle(key)}
-                  className="flex w-full items-center justify-between px-3 py-2 text-left text-xs font-medium text-slate-600 hover:bg-[#f8faff]"
-                >
-                  <span>{STORY_BIBLE_SECTION_LABELS[key] ?? key}</span>
-                  {isOpen ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
-                </button>
-                {isOpen ? (
-                  <div className="border-t border-[#eef3f9] px-3 py-2">
-                    <GenericJsonNode label="" value={value} depth={0} />
-                  </div>
-                ) : null}
-              </div>
-            );
-          })}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function GenericJsonNode({ label, value, depth = 0 }: {
-  label: string;
-  value: unknown;
-  depth?: number;
-}) {
-  if (!hasRenderableValue(value)) return null;
-
-  const indentStyle = depth > 0 ? 'ml-3 border-l-2 border-[#eef3f9] pl-2' : '';
-
-  if (Array.isArray(value)) {
-    return (
-      <div className={`${indentStyle} ${depth > 0 ? 'py-0.5' : ''}`}>
-        {label ? <div className="mb-0.5 text-[10px] font-medium text-slate-400">{label}</div> : null}
-        <div className="space-y-0.5">
-          {value.map((item, index) => (
-            <GenericJsonNode key={index} label={`#${index + 1}`} value={item} depth={depth + 1} />
-          ))}
-        </div>
-      </div>
-    );
-  }
-
   if (typeof value === 'object' && value !== null) {
-    return (
-      <div className={indentStyle}>
-        {label ? <div className="mb-0.5 text-[10px] font-medium text-slate-400">{label}</div> : null}
-        <div className="space-y-0.5">
-          {Object.entries(value as Record<string, unknown>).map(([key, child]) => (
-            <GenericJsonNode key={key} label={translateLabel(key)} value={child} depth={depth + 1} />
-          ))}
-        </div>
-      </div>
+    const entries = Object.entries(value as Record<string, unknown>).filter(
+      ([, v]) => v != null && String(v).trim(),
     );
+    if (!entries.length) return null;
+    return renderEntries(entries, defaultOpen);
   }
-
-  return (
-    <div className={`flex items-start gap-2 py-0.5 ${indentStyle}`}>
-      {label ? (
-        <span className="min-w-[60px] shrink-0 text-[10px] font-medium leading-5 text-slate-400">
-          {label}
-        </span>
-      ) : null}
-      <span className="whitespace-pre-wrap break-words text-xs leading-5 text-slate-600">
-        {String(value)}
-      </span>
-    </div>
-  );
+  return <div className="text-sm text-slate-700">{String(value)}</div>;
 }
+
+
 
 function hasRenderableValue(value: unknown): boolean {
   if (value == null) return false;
