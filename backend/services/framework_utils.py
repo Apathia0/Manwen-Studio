@@ -412,6 +412,10 @@ SUPPORTED_FRAMEWORK_OPERATIONS = {
     "move_chapter_to_act",
     "update_chapter",
     "delete_chapter",
+    "replace_outline",
+    "replace_tags",
+    "replace_characters",
+    "replace_act_chapters",
 }
 
 SUPPORTED_FRAMEWORK_PATCH_PATHS = {
@@ -652,6 +656,57 @@ def apply_framework_operations(existing_framework: dict, operations: list | None
                         a["act"] = str(i + 1)
                     framework["outline"]["three_acts"] = new_acts
                     applied_operations.append(f"delete_act:{target_act}")
+
+        # ── replace_outline ──────────────────────────────────
+        if op == "replace_outline":
+            next_outline = changes.get("outline") if isinstance(changes, dict) else None
+            if isinstance(next_outline, dict):
+                framework["outline"] = _normalize_framework_outline(next_outline, _extract_outline_chapters(next_outline))
+                applied_operations.append("replace_outline")
+            else:
+                warnings.append("replace_outline 缺少 changes.outline")
+            continue
+
+        # ── replace_tags ─────────────────────────────────────
+        if op == "replace_tags":
+            next_tags = changes.get("tags") if isinstance(changes, dict) else None
+            if isinstance(next_tags, dict):
+                framework["tags"] = next_tags
+                applied_operations.append("replace_tags")
+            else:
+                warnings.append("replace_tags 缺少 changes.tags")
+            continue
+
+        # ── replace_characters ───────────────────────────────
+        if op == "replace_characters":
+            next_chars = changes.get("characters") if isinstance(changes, dict) else None
+            if isinstance(next_chars, list):
+                framework["characters"] = _normalize_characters_payload(next_chars)
+                applied_operations.append("replace_characters")
+            else:
+                warnings.append("replace_characters 缺少 changes.characters")
+            continue
+
+        # ── replace_act_chapters ─────────────────────────────
+        if op == "replace_act_chapters":
+            target_act = (changes.get("target") or {}).get("act") if isinstance(changes, dict) else None
+            next_chapters = changes.get("chapters") if isinstance(changes, dict) else None
+            if target_act and isinstance(next_chapters, list):
+                acts = framework["outline"].get("three_acts") if isinstance(framework["outline"].get("three_acts"), list) else []
+                found = False
+                for act_item in acts:
+                    if isinstance(act_item, dict) and str(act_item.get("act", "")) == str(target_act):
+                        act_item["chapters"] = next_chapters
+                        found = True
+                        break
+                if found:
+                    framework["outline"]["three_acts"] = acts
+                    applied_operations.append(f"replace_act_chapters:{target_act}")
+                else:
+                    warnings.append(f"replace_act_chapters 未找到 act: {target_act}")
+            else:
+                warnings.append("replace_act_chapters 缺少 target.act 或 changes.chapters")
+            continue
 
         # ── add_chapter ──────────────────────────────────────
         if op == "add_chapter":
