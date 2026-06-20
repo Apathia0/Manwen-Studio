@@ -602,6 +602,7 @@ async def update_chapter_content(chapter_id: int, content: str) -> dict:
         if _current_pending_changes():
             _current_pending_changes().update_new_value("chapter", chapter.id, "novel_content", content)
         db.commit()
+        logger.info("Agent tool=update_chapter_content story=%s chapter=%s len=%s", _current_story_id(), chapter_id, len(content or ""))
         return {"ok": True, "chapter_id": chapter_id}
     finally:
         db.close()
@@ -654,6 +655,7 @@ async def batch_update_chapters(chapters: list[dict]) -> dict:
             if _current_pending_changes():
                 _current_pending_changes().update_new_value("chapter", chapter.id, "novel_content", content)
             db.commit()
+            logger.info("Agent tool=batch_update_chapters story=%s chapter=%s len=%s", _current_story_id(), chapter_id, len(content or ""))
             return {"chapter_id": chapter_id, "ok": True}
         except Exception as e:
             return {"chapter_id": chapter_id, "error": str(e)}
@@ -726,6 +728,7 @@ async def adjust_chapter_by_instruction(chapter_id: int, instruction: str) -> di
         if _current_pending_changes():
             _current_pending_changes().update_new_value("chapter", chapter.id, "novel_content", new_content)
         db.commit()
+        logger.info("Agent tool=adjust_chapter_by_instruction (indirect) story=%s chapter=%s new_len=%s", _current_story_id(), chapter_id, len(new_content))
         return {"ok": True, "chapter_id": chapter_id, "content_length": len(new_content)}
     finally:
         db.close()
@@ -762,6 +765,7 @@ async def rewrite_text_segment(chapter_id: int, original: str, rewritten: str) -
         if _current_pending_changes():
             _current_pending_changes().update_new_value("chapter", chapter.id, "novel_content", new_content)
         db.commit()
+        logger.info("Agent tool=rewrite_text_segment story=%s chapter=%s old=%s new=%s", _current_story_id(), chapter_id, len(current), len(new_content))
         return {
             "ok": True,
             "chapter_id": chapter_id,
@@ -819,6 +823,7 @@ async def update_story_info(story_id: int, title: str | None = None, description
             for f in updated_fields:
                 _current_pending_changes().update_new_value("story", story.id, f, getattr(story, f))
         db.commit()
+        logger.info("Agent tool=update_story_info story=%s fields=%s", _current_story_id(), updated_fields)
         return {"ok": True, "updated_fields": updated_fields}
     finally:
         db.close()
@@ -826,7 +831,7 @@ async def update_story_info(story_id: int, title: str | None = None, description
 
 @tool_registry.register(
     name="update_story_bible",
-    description="更新作品圣经（Story Bible），只更新提供的字段，未提供的字段保留原值。用户要求调整世界观、修改核心设定、改创意简报时用此工具。\n\n⚠️ 一次只更新一个模块：creative_brief、writing_guidance、import_guidance、world_setting 每次选一个更新。对于 world_setting 下的大模块（如力量体系、势力分布、等级划分），也建议分多次调用、每次只更新一个子模块。Agent 循环会持续运行，不用担心一次做不完。",
+    description="更新作品圣经（Story Bible），只更新提供的字段，未提供的字段保留原值。用户要求调整世界观、修改核心设定、改创意简报时用此工具。\n\n⚠️ 一次只更新一个模块：creative_brief、writing_guidance、import_guidance 每次选一个更新。world_setting 是 creative_brief 下的嵌套字段，更新 world_setting 请在 creative_brief 中传入 world_setting 字段。",
     is_write=True,
     parameters={
         "type": "object",
@@ -881,6 +886,7 @@ async def update_story_bible(story_id: int, story_bible: dict) -> dict:
             _current_pending_changes().update_new_value("story_bible", story.id, "story_bible", dict(story.story_bible))
 
         db.commit()
+        logger.info("Agent tool=update_story_bible story=%s sections=%s", _current_story_id(), list(story_bible.keys()))
         updated_sections = list(story_bible.keys())
         return {"ok": True, "updated_sections": updated_sections}
     finally:
@@ -917,6 +923,7 @@ async def update_characters(story_id: int, characters: list[dict]) -> dict:
         if _current_pending_changes():
             _current_pending_changes().update_new_value("story", story.id, "characters", characters)
         db.commit()
+        logger.info("Agent tool=update_characters story=%s count=%s", _current_story_id(), len(characters) if characters else 0)
         return {"ok": True, "count": len(characters)}
     finally:
         db.close()
@@ -1012,6 +1019,7 @@ async def adjust_framework(story_id: int, instruction: str) -> dict:
                 _current_pending_changes().update_new_value("story", story.id, f, getattr(story, f))
 
         db.commit()
+        logger.info("Agent tool=adjust_framework story=%s ops=%s", _current_story_id(), len(plan.get("operations", [])) if isinstance(plan.get("operations"), list) else 0)
 
         warnings = [*plan.get("warnings", []), *apply_result.get("warnings", [])]
         return {
@@ -1105,6 +1113,7 @@ async def apply_framework_ops(story_id: int, operations: list, patches: list | N
         )
         _enforce_framework_snapshot_limit(story.id, max_count=20, db=db)
         db.commit()
+        logger.info("Agent tool=apply_framework_ops story=%s ops=%s", _current_story_id(), len(operations) if operations else 0)
 
         return {
             "ok": True,
@@ -1280,6 +1289,7 @@ async def add_chapter_plan(story_id: int, chapter: dict) -> dict:
                 if _current_pending_changes():
                     _current_pending_changes().update_new_value("story", story.id, "outline", outline)
                 db.commit()
+                logger.info("Agent tool=add_chapter_plan story=%s chapter=%s action=updated", _current_story_id(), chapter_number)
                 return {"ok": True, "action": "updated", "chapter_number": chapter_number}
 
         # 新增章节
@@ -1309,6 +1319,7 @@ async def add_chapter_plan(story_id: int, chapter: dict) -> dict:
         if _current_pending_changes():
             _current_pending_changes().update_new_value("story", story.id, "outline", outline)
         db.commit()
+        logger.info("Agent tool=add_chapter_plan story=%s chapter=%s action=added", _current_story_id(), chapter_number)
         return {"ok": True, "action": "added", "chapter_number": chapter_number}
     finally:
         db.close()
@@ -1405,6 +1416,7 @@ async def bulk_add_chapter_plans(story_id: int, chapters: list[dict]) -> dict:
         if _current_pending_changes():
             _current_pending_changes().update_new_value("story", story.id, "outline", outline)
         db.commit()
+        logger.info("Agent tool=bulk_add_chapter_plans story=%s count=%s", _current_story_id(), len(chapters))
         return {"ok": True, "results": results}
     finally:
         db.close()
@@ -1458,6 +1470,7 @@ async def update_scenes(chapter_id: int, scenes: list[str]) -> dict:
             f.write(new_text)
         if _current_pending_changes():
             _current_pending_changes().update_new_value("scenes_file", chapter_id, "scenes_file", new_text)
+        logger.info("Agent tool=update_scenes story=%s chapter=%s scenes=%s", _current_story_id(), chapter_id, len(scenes))
         return {"ok": True, "chapter_id": chapter_id, "scene_count": len(scenes)}
     except OSError as exc:
         logger.warning("写入分镜文件失败 chapter_id=%s: %s", chapter_id, exc)
@@ -1649,16 +1662,17 @@ class AgentService:
 5. **分析/评估模式下，禁止调用任何写入工具**。输出分析建议后等待用户明确指示"好，按这个改"。如果用户接着要求"按你说的改"，再开始执行修改。
 6. **明确修改时，必须先读取确认现状**，再进行修改，避免覆盖已有内容。
 7. **模糊创作需求（无具体修改文本）**，先读数据 → 出方案 → 等确认 → 再执行。不要跳过确认步骤。
-8. **所有修改必须通过工具调用实际写入数据库**。文字回复不能代替工具调用。
-9. **不要暴露工具名和参数等内部细节**，用自然的创作语言说明你做了什么。
-10. **可以并行调用多个读取工具**（如同时获取框架和章节列表），以提高效率。
-11. **工具调用后我会把结果返回给你**，根据返回的数据决定下一步行动。
+    8. **所有修改必须通过工具调用实际写入数据库**。文字回复不能代替工具调用。如果你在回复中说"已更新""已修改""已保存"但没有实际调用写入工具，那么修改并没有被保存——文本只是文字，只有工具调用才会真正写入数据库。请务必在每次声称修改后，检查自己是否真的调用了写入工具。
+    9. **不要暴露工具名和参数等内部细节**，用自然的创作语言说明你做了什么。
+    10. **可以并行调用多个读取工具**（如同时获取框架和章节列表），以提高效率。
+    11. **工具调用后我会把结果返回给你**，根据返回的数据决定下一步行动。
     12. **⚠️ 工具调用失败时**：如果返回结果中包含 `"error"` 字段，说明工具执行出错。此时你应当：
         - 告知用户工具执行遇到了什么问题（用自然语言，不要暴露细节）
         - 询问用户能否提供正确的参数信息
         - 如果是因为缺少参数（如 `story_id`），当前作品 ID 已在上方注明
         - **不要默默忽略错误去用其他数据回答问题**。如果工具没法用，就想办法用已有的上下文知识给用户提供帮助，但要明确说明你目前能做什么、不能做什么
-    13. **📌 分批处理原则**：根据数据类型选择合适的策略——确定性的数据批量处理，需要 AI 创作的内容分批处理。
+    13. **⚠️ 工具返回错误时不代表修改成功**。即使工具返回了 `{"error": "..."}`，也不要声称修改已完成。必须如实告知用户工具执行失败，并请用户提供正确的参数或重试。
+    14. **📌 分批处理原则**：根据数据类型选择合适的策略——确定性的数据批量处理，需要 AI 创作的内容分批处理。
 
         **批量处理（数据确定时）**：
         - 用户给出了完整的具体内容时，使用批量工具一次提交：
@@ -1927,6 +1941,14 @@ class AgentService:
                 logger.info("Agent 写入操作完成，共 %s 次迭代", iteration_count)
             elif iteration_count >= SAFETY_MAX_ITERATIONS:
                 logger.warning("Agent 达到安全熔断上限 %s", SAFETY_MAX_ITERATIONS)
+            else:
+                content_trimmed = (collected_content or "").strip()
+                modification_keywords = ["已修改", "已更新", "已保存", "已调整", "已完成", "已写入", "已添加", "已删除", "已创建"]
+                if content_trimmed and any(kw in content_trimmed for kw in modification_keywords):
+                    logger.warning(
+                        "Agent 声称进行了修改但没有调用任何写入工具 story=%s content_preview=%.120s",
+                        story_id, content_trimmed,
+                    )
 
             if pending_change_key is not None:
                 agent_pending_change_store.set(pending_change_key, pending_changes)
