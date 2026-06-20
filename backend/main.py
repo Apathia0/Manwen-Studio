@@ -5704,13 +5704,18 @@ async def generate_story_cover(story_id: int, request: Request, db: Session = De
     )
     _release_db_transaction(db)
     try:
-        generated_cover_path = await generate_cover_image(
-            prompt,
-            output_path,
-            api_key=image_api_key,
+        generated_cover_path = await asyncio.wait_for(
+            generate_cover_image(
+                prompt,
+                output_path,
+                api_key=image_api_key,
+            ),
+            timeout=300,
         )
     except MangaImageGenerationError as exc:
         raise HTTPException(502, exc.to_payload()) from exc
+    except (asyncio.TimeoutError, TimeoutError) as exc:
+        raise HTTPException(504, {"error": "封面生成超时，请稍后重试或减少描述内容"}) from exc
 
     story = _require_story_for_user(story_id, user, db)
     _store_story_cover_result(story, output_path, generated_cover_path)
