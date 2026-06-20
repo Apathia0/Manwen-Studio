@@ -130,93 +130,11 @@ export default function StoryBibleSummaryCard({ storyId, storyBible, onUpdated }
                   <div className="rounded-xl border border-[#d7e3f4] bg-white/90 p-3 sm:col-span-2 lg:col-span-3">
                     <div className="mb-2 text-[11px] font-medium text-[#2563eb]">世界观设定</div>
                     <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
-                      {brief.world_setting.power_system ? (
-                        <div className="rounded-lg border border-[#e5edf8] bg-[#fafdff] p-2">
-                          <div className="text-[10px] font-medium text-slate-500">力量体系</div>
-                          <div className="mt-0.5 text-xs leading-5 text-slate-600">{brief.world_setting.power_system}</div>
-                        </div>
-                      ) : null}
-                      {brief.world_setting.society_structure ? (
-                        <div className="rounded-lg border border-[#e5edf8] bg-[#fafdff] p-2">
-                          <div className="text-[10px] font-medium text-slate-500">社会结构</div>
-                          <div className="mt-0.5 text-xs leading-5 text-slate-600">{brief.world_setting.society_structure}</div>
-                        </div>
-                      ) : null}
-                      {brief.world_setting.key_locations ? (
-                        <div className="rounded-lg border border-[#e5edf8] bg-[#fafdff] p-2">
-                          <div className="text-[10px] font-medium text-slate-500">关键地点</div>
-                          <div className="mt-0.5 text-xs leading-5 text-slate-600">{brief.world_setting.key_locations}</div>
-                        </div>
-                      ) : null}
-                      {brief.world_setting.world_history ? (
-                        <div className="rounded-lg border border-[#e5edf8] bg-[#fafdff] p-2">
-                          <div className="text-[10px] font-medium text-slate-500">世界历史</div>
-                          <div className="mt-0.5 text-xs leading-5 text-slate-600">{brief.world_setting.world_history}</div>
-                        </div>
-                      ) : null}
-                      {brief.world_setting.hidden_truths ? (
-                        <div className="rounded-lg border border-[#e5edf8] bg-[#fafdff] p-2">
-                          <div className="text-[10px] font-medium text-slate-500">隐藏真相</div>
-                          <div className="mt-0.5 text-xs leading-5 text-slate-600">{brief.world_setting.hidden_truths}</div>
-                        </div>
-                      ) : null}
                       {Object.entries(brief.world_setting)
-                        .filter(([key]) => !['power_system', 'society_structure', 'key_locations', 'world_history', 'hidden_truths'].includes(key))
-                        .map(([key, val]) => {
-                          if (val == null) return null;
-                          // 纯字符串
-                          if (typeof val === 'string' && val.trim()) {
-                            return (
-                              <div key={key} className="rounded-lg border border-[#e5edf8] bg-[#fafdff] p-2">
-                                <div className="text-[10px] font-medium text-slate-500">{key}</div>
-                                <div className="mt-0.5 text-xs leading-5 text-slate-600">{val}</div>
-                              </div>
-                            );
-                          }
-                          // 对象（非数组）→ 遍历子键
-                          if (typeof val === 'object' && !Array.isArray(val)) {
-                            const entries = Object.entries(val).filter(([, v]) => v != null && String(v).trim());
-                            if (!entries.length) return null;
-                            return (
-                              <div key={key} className="rounded-lg border border-[#e5edf8] bg-[#fafdff] p-2 sm:col-span-2 lg:col-span-3">
-                                <div className="text-[10px] font-medium text-slate-500">{key}</div>
-                                <div className="mt-1 space-y-1">
-                                  {entries.map(([sk, sv]) => (
-                                    <div key={sk} className="text-xs leading-5 text-slate-600">
-                                      <span className="font-medium text-slate-500">{sk}：</span>
-                                      {typeof sv === 'object' ? JSON.stringify(sv, null, 1) : String(sv)}
-                                    </div>
-                                  ))}
-                                </div>
-                              </div>
-                            );
-                          }
-                          // 数组 → 逐项渲染
-                          if (Array.isArray(val) && val.length) {
-                            const items = val.filter(v => v != null);
-                            if (!items.length) return null;
-                            return (
-                              <div key={key} className="rounded-lg border border-[#e5edf8] bg-[#fafdff] p-2 sm:col-span-2 lg:col-span-3">
-                                <div className="text-[10px] font-medium text-slate-500">{key}</div>
-                                <ul className="mt-1 list-inside list-disc space-y-0.5 text-xs leading-5 text-slate-600">
-                                  {items.map((item, i) => (
-                                    <li key={i}>{typeof item === 'object' ? JSON.stringify(item) : String(item)}</li>
-                                  ))}
-                                </ul>
-                              </div>
-                            );
-                          }
-                          // 其他原始类型（number/boolean）
-                          const str = String(val);
-                          if (!str.trim()) return null;
-                          return (
-                            <div key={key} className="rounded-lg border border-[#e5edf8] bg-[#fafdff] p-2">
-                              <div className="text-[10px] font-medium text-slate-500">{key}</div>
-                              <div className="mt-0.5 text-xs leading-5 text-slate-600">{str}</div>
-                            </div>
-                          );
-                        })
-                      }
+                        .filter(([, v]) => v != null)
+                        .map(([key, val]) => (
+                          <WorldSettingNode key={key} label={key} value={val} />
+                        ))}
                     </div>
                   </div>
                 ) : (
@@ -383,6 +301,81 @@ function InfoItem({ label, value }: { label: string; value: string }) {
     <div className="rounded-xl border border-[#d7e3f4] bg-white/90 p-3">
       <div className="text-[11px] font-medium text-[#2563eb]">{label}</div>
       <div className="mt-1 text-xs leading-5 text-slate-600">{value}</div>
+    </div>
+  );
+}
+
+function WorldSettingNode({ label, value, depth = 0 }: { label: string; value: unknown; depth?: number }) {
+  if (value == null) return null;
+
+  if (typeof value !== 'object') {
+    const text = String(value).trim();
+    if (!text) return null;
+    return (
+      <div className="rounded-lg border border-[#e5edf8] bg-[#fafdff] p-2">
+        <div className="text-[10px] font-medium text-slate-500">{label}</div>
+        <div className="mt-0.5 text-xs leading-5 text-slate-600">{text}</div>
+      </div>
+    );
+  }
+
+  if (Array.isArray(value)) {
+    const items = value.filter((v) => v != null);
+    if (!items.length) return null;
+
+    if (items.every((v) => typeof v !== 'object')) {
+      return (
+        <div className="rounded-lg border border-[#e5edf8] bg-[#fafdff] p-2">
+          <div className="text-[10px] font-medium text-slate-500">{label}</div>
+          <ul className="mt-1 list-inside list-disc space-y-0.5 text-xs leading-5 text-slate-600">
+            {items.map((item, i) => (
+              <li key={i}>{String(item)}</li>
+            ))}
+          </ul>
+        </div>
+      );
+    }
+
+    return (
+      <div className={`rounded-lg border border-[#e5edf8] bg-[#fafdff] p-2 ${depth > 0 ? 'ml-2' : ''}`}>
+        <div className="text-[10px] font-medium text-slate-500">{label}</div>
+        <div className="mt-1 space-y-1.5">
+          {items.map((item, i) => {
+            if (typeof item !== 'object' || item == null) {
+              return (
+                <div key={i} className="text-xs leading-5 text-slate-600">
+                  {String(item)}
+                </div>
+              );
+            }
+            const entries = Object.entries(item as Record<string, unknown>).filter(
+              ([, v]) => v != null && String(v).trim(),
+            );
+            if (!entries.length) return null;
+            return (
+              <div key={i} className="rounded-md border border-[#d7e3f4] bg-white/80 p-2">
+                {entries.map(([sk, sv]) => (
+                  <WorldSettingNode key={sk} label={sk} value={sv} depth={depth + 1} />
+                ))}
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    );
+  }
+
+  const entries = Object.entries(value as Record<string, unknown>).filter(([, v]) => v != null && String(v).trim());
+  if (!entries.length) return null;
+
+  return (
+    <div className={`rounded-lg border border-[#e5edf8] bg-[#fafdff] p-2 ${depth > 0 ? 'ml-2' : ''}`}>
+      <div className="text-[10px] font-medium text-slate-500">{label}</div>
+      <div className="mt-1 space-y-1">
+        {entries.map(([k, v]) => (
+          <WorldSettingNode key={k} label={k} value={v} depth={depth + 1} />
+        ))}
+      </div>
     </div>
   );
 }

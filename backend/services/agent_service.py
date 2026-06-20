@@ -1751,8 +1751,15 @@ class AgentService:
             SAFETY_MAX_ITERATIONS = 50  # 熔断：防止无限循环
             write_executed = False
 
+            TOOL_EXECUTION_TIMEOUT = 300
+
             while iteration_count < SAFETY_MAX_ITERATIONS:
                 iteration_count += 1
+
+                current_task = asyncio.current_task()
+                if current_task is not None and current_task.cancelled():
+                    logger.info("Agent run_stream 检测到取消，停止循环")
+                    break
 
                 payload = {
                     "model": _deepseek_service.DEEPSEEK_MODEL,
@@ -1841,15 +1848,32 @@ class AgentService:
                     for i in sorted_indices:
                         tc = tool_calls_acc[i]
                         name = tc["function"]["name"]
+                        raw_args_str = tc["function"]["arguments"].strip()
                         try:
-                            args = json.loads(tc["function"]["arguments"]) if tc["function"]["arguments"].strip() else {}
+                            args = json.loads(raw_args_str) if raw_args_str else {}
                         except json.JSONDecodeError:
-                            args = {}
+                            logger.warning("Agent 工具 %s 参数JSON解析失败，通知AI重试", name)
+                            result_str = json.dumps({"error": f"参数JSON格式解析失败，请重新调用 {name} 并确保输出合法的JSON"})
+                            yield {"event": "tool_call", "data": json.dumps({"name": name, "arguments": {}}, ensure_ascii=False)}
+                            yield {"event": "tool_result", "data": json.dumps({"name": name, "result": result_str}, ensure_ascii=False)}
+                            all_messages.append({
+                                "role": "tool",
+                                "tool_call_id": tc["id"],
+                                "content": result_str,
+                            })
+                            continue
 
                         yield {"event": "tool_call", "data": json.dumps({"name": name, "arguments": args}, ensure_ascii=False)}
 
                         try:
-                            result_str = await self.tool_registry.execute(name, args)
+                            result_str = await asyncio.wait_for(
+                                self.tool_registry.execute(name, args),
+                                timeout=TOOL_EXECUTION_TIMEOUT,
+                            )
+                            yield {"event": "tool_result", "data": json.dumps({"name": name, "result": result_str}, ensure_ascii=False)}
+                        except asyncio.TimeoutError:
+                            logger.warning("Agent 工具 %s 执行超时（%ss）", name, TOOL_EXECUTION_TIMEOUT)
+                            result_str = json.dumps({"error": f"工具 {name} 执行超时（{TOOL_EXECUTION_TIMEOUT}s），操作未完成"})
                             yield {"event": "tool_result", "data": json.dumps({"name": name, "result": result_str}, ensure_ascii=False)}
                         except Exception as e:
                             error_msg = json.dumps({"error": str(e)}, ensure_ascii=False)

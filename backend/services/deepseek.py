@@ -2295,7 +2295,7 @@ async def adjust_chapter_content(
             {"role": "user", "content": user_prompt},
         ],
         "stream": False,
-        "max_tokens": 6144,
+        "max_tokens": 16384,
     }
 
     async with httpx.AsyncClient(timeout=600) as client:
