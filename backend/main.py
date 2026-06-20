@@ -8369,7 +8369,13 @@ async def update_story_bible(story_id: int, request: Request, db: Session = Depe
     body = await request.json()
     bible_update = body.get("story_bible", {})
     current = dict(story.story_bible or {})
-    current.update(bible_update)
+    for key, value in bible_update.items():
+        if isinstance(value, dict) and isinstance(current.get(key), dict):
+            merged = dict(current[key])
+            merged.update(value)
+            current[key] = merged
+        else:
+            current[key] = value
     story.story_bible = current
     creative_brief = current.get("creative_brief") if isinstance(current.get("creative_brief"), dict) else {}
     next_description = str(creative_brief.get("one_line_premise") or "").strip()

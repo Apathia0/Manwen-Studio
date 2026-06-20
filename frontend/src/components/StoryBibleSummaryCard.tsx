@@ -305,15 +305,45 @@ function InfoItem({ label, value }: { label: string; value: string }) {
   );
 }
 
+const WORLD_SETTING_LABEL_MAP: Record<string, string> = {
+  power_system: '力量体系',
+  society_structure: '社会结构',
+  key_locations: '关键地点',
+  world_history: '世界历史',
+  hidden_truths: '隐藏真相',
+  world_rules: '世界规则',
+  magic_system: '魔法体系',
+  technology_level: '科技水平',
+  geography: '地理环境',
+  culture: '文化背景',
+  religion: '宗教信仰',
+  economy: '经济体系',
+  politics: '政治格局',
+  factions: '势力分布',
+  races: '种族设定',
+  timeline: '时间线',
+  power_levels: '等级划分',
+  hierarchy: '等级制度',
+  organizations: '组织势力',
+  conflicts: '核心冲突',
+  natural_laws: '自然法则',
+  cosmology: '宇宙观',
+};
+
+function translateLabel(key: string): string {
+  return WORLD_SETTING_LABEL_MAP[key] ?? key.replace(/_/g, ' ');
+}
+
 function WorldSettingNode({ label, value, depth = 0 }: { label: string; value: unknown; depth?: number }) {
   if (value == null) return null;
+  const displayLabel = translateLabel(label);
 
   if (typeof value !== 'object') {
     const text = String(value).trim();
     if (!text) return null;
     return (
       <div className="rounded-lg border border-[#e5edf8] bg-[#fafdff] p-2">
-        <div className="text-[10px] font-medium text-slate-500">{label}</div>
+        <div className="text-[10px] font-medium text-slate-500">{displayLabel}</div>
         <div className="mt-0.5 text-xs leading-5 text-slate-600">{text}</div>
       </div>
     );
@@ -326,7 +356,7 @@ function WorldSettingNode({ label, value, depth = 0 }: { label: string; value: u
     if (items.every((v) => typeof v !== 'object')) {
       return (
         <div className="rounded-lg border border-[#e5edf8] bg-[#fafdff] p-2">
-          <div className="text-[10px] font-medium text-slate-500">{label}</div>
+          <div className="text-[10px] font-medium text-slate-500">{displayLabel}</div>
           <ul className="mt-1 list-inside list-disc space-y-0.5 text-xs leading-5 text-slate-600">
             {items.map((item, i) => (
               <li key={i}>{String(item)}</li>
@@ -338,7 +368,7 @@ function WorldSettingNode({ label, value, depth = 0 }: { label: string; value: u
 
     return (
       <div className={`rounded-lg border border-[#e5edf8] bg-[#fafdff] p-2 ${depth > 0 ? 'ml-2' : ''}`}>
-        <div className="text-[10px] font-medium text-slate-500">{label}</div>
+        <div className="text-[10px] font-medium text-slate-500">{displayLabel}</div>
         <div className="mt-1 space-y-1.5">
           {items.map((item, i) => {
             if (typeof item !== 'object' || item == null) {
@@ -370,7 +400,7 @@ function WorldSettingNode({ label, value, depth = 0 }: { label: string; value: u
 
   return (
     <div className={`rounded-lg border border-[#e5edf8] bg-[#fafdff] p-2 ${depth > 0 ? 'ml-2' : ''}`}>
-      <div className="text-[10px] font-medium text-slate-500">{label}</div>
+      <div className="text-[10px] font-medium text-slate-500">{displayLabel}</div>
       <div className="mt-1 space-y-1">
         {entries.map(([k, v]) => (
           <WorldSettingNode key={k} label={k} value={v} depth={depth + 1} />
