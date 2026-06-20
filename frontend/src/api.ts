@@ -385,7 +385,7 @@ export interface OnboardingMessageOut {
   is_complete: boolean;
 }
 
-export interface CreativeBrief {
+export interface CreativeBrief extends Record<string, any> {
   project_positioning: string;
   genre: string;
   audience: string;
@@ -403,32 +403,11 @@ export interface CreativeBrief {
   open_story_notes?: string;
 }
 
-export interface StoryBible {
-  raw_input?: {
-    raw_idea: string;
-    raw_length_goal: string;
-    raw_must_keep: string;
-    raw_hidden_setting: string;
-    raw_notes: string;
-  };
+export interface StoryBible extends Record<string, any> {
+  raw_input?: Record<string, any>;
   creative_brief?: CreativeBrief;
-  writing_guidance?: {
-    opening_strategy: string;
-    chapter_density_strategy: string;
-    midgame_engine: string;
-    late_game_direction: string;
-    forbidden_patterns: string[];
-    preferred_plot_patterns: string[];
-  };
-  import_guidance?: {
-    context_source?: string;
-    import_material_type?: string;
-    must_keep?: string;
-    author_goal?: string;
-    adjustment_scope?: string;
-    longline_plan?: string;
-    tone_guardrails?: string;
-  };
+  writing_guidance?: Record<string, any>;
+  import_guidance?: Record<string, any>;
 }
 
 export interface OnboardingConfirmResponse {
