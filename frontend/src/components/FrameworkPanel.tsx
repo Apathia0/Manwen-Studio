@@ -46,6 +46,7 @@ export default memo(function FrameworkPanel({ story, chapters, onChapterSelect, 
   const [chatError, setChatError] = useState('');
   const [chatMessages, setChatMessages] = useState<FrameworkChatMessage[]>([]);
   const [showEditor, setShowEditor] = useState(false);
+  const [frameworkEditMode, setFrameworkEditMode] = useState<'incremental' | 'replace' | 'analyze'>('incremental');
   const [expanded, setExpanded] = useState<Record<SectionKey, boolean>>({
     tags: true,
     characters: true,
@@ -102,7 +103,13 @@ export default memo(function FrameworkPanel({ story, chapters, onChapterSelect, 
   const handleFrameworkChat = async () => {
     const instruction = chatInput.trim();
     if (!instruction) return;
-    const nextMessages: FrameworkChatMessage[] = [...chatMessages, { role: 'user', content: instruction }];
+    const modePrefix = frameworkEditMode === 'replace'
+      ? '【替换重构模式：允许替换相关范围，不要只追加】\n'
+      : frameworkEditMode === 'analyze'
+        ? '【仅分析模式：只提出建议，不要修改】\n'
+        : '【增量调整模式：优先保留现有内容，只做必要增量修改】\n';
+    const fullInstruction = modePrefix + instruction;
+    const nextMessages: FrameworkChatMessage[] = [...chatMessages, { role: 'user', content: fullInstruction }];
     setChatMessages(nextMessages);
     setChatInput('');
     setChatLoading(true);
@@ -321,6 +328,21 @@ export default memo(function FrameworkPanel({ story, chapters, onChapterSelect, 
               )}
             </div>
             <div className="border-t border-[#d9dfd7] px-3 py-3 space-y-2">
+              <div className="flex items-center gap-1">
+                {(['incremental', 'replace', 'analyze'] as const).map((mode) => (
+                  <button
+                    key={mode}
+                    onClick={() => setFrameworkEditMode(mode)}
+                    className={`px-2 py-0.5 text-[10px] rounded-md ${
+                      frameworkEditMode === mode
+                        ? 'bg-blue-600 text-white'
+                        : 'bg-slate-100 text-slate-500 hover:bg-slate-200'
+                    }`}
+                  >
+                    {mode === 'incremental' ? '增量' : mode === 'replace' ? '替换' : '分析'}
+                  </button>
+                ))}
+              </div>
               <textarea
                 value={chatInput}
                 onChange={(e) => setChatInput(e.target.value)}
