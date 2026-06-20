@@ -232,6 +232,37 @@ def _migrate(target_engine=None):
     _cleanup_duplicate_manga_images(db_engine)
     _add_unique_constraints(db_engine)
     _migrate_prompt_templates(db_engine)
+    _migrate_agent_pending_changes(db_engine)
+
+
+def _migrate_agent_pending_changes(target_engine=None):
+    """agent_pending_changes 持久化待确认修改表"""
+    from sqlalchemy import inspect, text
+
+    db_engine = target_engine or engine
+    insp = inspect(db_engine)
+
+    if "agent_pending_changes" not in insp.get_table_names():
+        with db_engine.begin() as conn:
+            _prepare_migration_conn(conn)
+            conn.execute(text("""
+                CREATE TABLE agent_pending_changes (
+                    id SERIAL PRIMARY KEY,
+                    user_id INTEGER NOT NULL REFERENCES users(id),
+                    story_id INTEGER NOT NULL REFERENCES stories(id),
+                    conversation_id INTEGER NOT NULL REFERENCES agent_conversations(id),
+                    change_type VARCHAR(40) NOT NULL,
+                    record_id INTEGER NOT NULL,
+                    display_name VARCHAR(255) NOT NULL DEFAULT '',
+                    field VARCHAR(120) NOT NULL,
+                    old_value JSON,
+                    new_value JSON,
+                    created_at TIMESTAMP NOT NULL DEFAULT now()
+                )
+            """))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS agent_pending_changes_user_id_idx ON agent_pending_changes (user_id)"))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS agent_pending_changes_story_id_idx ON agent_pending_changes (story_id)"))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS agent_pending_changes_conversation_id_idx ON agent_pending_changes (conversation_id)"))
 
 
 def _migrate_money_columns(target_engine=None):
