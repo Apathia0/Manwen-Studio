@@ -141,6 +141,22 @@ class AgentConversationMessage(Base):
     conversation: Mapped["AgentConversation"] = relationship("AgentConversation", back_populates="messages")
 
 
+class AgentPendingChange(Base):
+    __tablename__ = "agent_pending_changes"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    story_id: Mapped[int] = mapped_column(Integer, ForeignKey("stories.id"), nullable=False, index=True)
+    conversation_id: Mapped[int] = mapped_column(Integer, ForeignKey("agent_conversations.id"), nullable=False, index=True)
+    change_type: Mapped[str] = mapped_column(String(40), nullable=False)
+    record_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    display_name: Mapped[str] = mapped_column(String(255), nullable=False, default="")
+    field: Mapped[str] = mapped_column(String(120), nullable=False)
+    old_value: Mapped[dict[str, Any] | list[Any] | str | None] = mapped_column(JSON, nullable=True)
+    new_value: Mapped[dict[str, Any] | list[Any] | str | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now())
+
+
 class MangaImage(Base):
     __tablename__ = "manga_images"
     __table_args__ = (UniqueConstraint("chapter_id", "image_number", name="uq_manga_images_chapter_number"),)
