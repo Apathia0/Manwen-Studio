@@ -7,7 +7,6 @@ import {
   getAgentConversation,
   listAgentConversations,
   type AgentConversationSummary,
-  type AgentMode,
 } from '../../api';
 import AgentMessage from './AgentMessage';
 import AgentInput from './AgentInput';
@@ -106,7 +105,6 @@ export default function AgentPanel({
   onContentUpdated,
 }: AgentPanelProps) {
   const [input, setInput] = useState('');
-  const [agentMode, setAgentMode] = useState<AgentMode>('analyze');
   const [messages, setMessages] = useState<AgentMessageData[]>([]);
   const [streaming, setStreaming] = useState(false);
   const [streamContent, setStreamContent] = useState('');
@@ -333,12 +331,6 @@ export default function AgentPanel({
         }
       }
 
-      let effectiveMode: AgentMode = agentMode;
-      const analyzeKeywords = /分析|检查|建议|评估|检查一下|看看|review/i;
-      if (effectiveMode === 'execute' && analyzeKeywords.test(content)) {
-        effectiveMode = 'analyze';
-      }
-
       const userMsg: AgentMessageData = {
         id: generateId(),
         role: 'user',
@@ -360,7 +352,7 @@ export default function AgentPanel({
       let accumulated = '';
       const toolCallMap = new Map<string, ToolCallInfo>();
 
-      abortRef.current = agentChatStream(storyId, conversationId, content, chapterId, effectiveMode, {
+      abortRef.current = agentChatStream(storyId, conversationId, content, chapterId, 'execute', {
         onToken: (token: string) => {
           accumulated += token;
           setStreamContent(accumulated);
@@ -434,7 +426,7 @@ export default function AgentPanel({
         },
       });
     },
-    [activeConversationId, agentMode, chapterId, generateId, input, storyId, streaming, syncAfterStream],
+    [activeConversationId, chapterId, generateId, input, storyId, streaming, syncAfterStream],
   );
 
   const handleAbort = useCallback(() => {
@@ -594,21 +586,7 @@ export default function AgentPanel({
           </div>
           <span className="text-sm font-semibold text-gray-800">AI 助手</span>
           {contextLabel ? <span className="truncate text-xs text-gray-500">{contextLabel}</span> : null}
-          <div className="ml-auto flex items-center gap-1">
-            {(['chat', 'analyze', 'execute'] as const).map((mode) => (
-              <button
-                key={mode}
-                onClick={() => setAgentMode(mode)}
-                className={`rounded-lg px-2 py-1 text-[11px] font-medium transition-colors ${
-                  agentMode === mode
-                    ? 'bg-blue-600 text-white shadow-sm'
-                    : 'bg-slate-100 text-slate-500 hover:bg-slate-200'
-                }`}
-              >
-                {mode === 'chat' ? '聊天' : mode === 'analyze' ? '分析' : '执行'}
-              </button>
-            ))}
-          </div>
+
         </div>
 
         <div ref={scrollContainerRef} className="flex-1 overflow-y-auto px-5 py-4 space-y-4">
