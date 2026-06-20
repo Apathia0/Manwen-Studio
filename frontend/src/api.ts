@@ -1556,23 +1556,40 @@ export async function uploadStoryCover(storyId: number, base64: string): Promise
   return data.cover_image;
 }
 
+async function fetchWithTimeout(url: string, options: RequestInit & { timeout?: number }, fallbackMsg: string): Promise<Response> {
+  const timeout = options.timeout ?? 300_000;
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeout);
+  const { timeout: _timeout, ...fetchOptions } = options;
+  try {
+    const res = await fetch(url, { ...fetchOptions, signal: controller.signal });
+    if (!res.ok) throw new Error(await readErrorMessage(res, fallbackMsg));
+    return res;
+  } catch (err: unknown) {
+    if (err instanceof DOMException && err.name === 'AbortError') {
+      throw new Error(`${fallbackMsg}：请求超时，请重试或减少内容描述`);
+    }
+    throw err;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
 export async function generateStoryCover(storyId: number, instruction: string = ''): Promise<{ cover_image: string; prompt: string }> {
-  const res = await fetch(`${BASE}/api/stories/${storyId}/generate-cover`, {
-    method: 'POST',
-    headers: apiHeaders(true),
-    body: JSON.stringify({ instruction }),
-  });
-  if (!res.ok) throw new Error(await readErrorMessage(res, '生成封面失败'));
+  const res = await fetchWithTimeout(
+    `${BASE}/api/stories/${storyId}/generate-cover`,
+    { method: 'POST', headers: apiHeaders(true), body: JSON.stringify({ instruction }) },
+    '生成封面失败',
+  );
   return res.json();
 }
 
 export async function adjustStoryCover(storyId: number, instruction: string): Promise<{ cover_image: string; prompt: string }> {
-  const res = await fetch(`${BASE}/api/stories/${storyId}/adjust-cover`, {
-    method: 'POST',
-    headers: apiHeaders(true),
-    body: JSON.stringify({ instruction }),
-  });
-  if (!res.ok) throw new Error(await readErrorMessage(res, '调整封面失败'));
+  const res = await fetchWithTimeout(
+    `${BASE}/api/stories/${storyId}/adjust-cover`,
+    { method: 'POST', headers: apiHeaders(true), body: JSON.stringify({ instruction }) },
+    '调整封面失败',
+  );
   return res.json();
 }
 

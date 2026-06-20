@@ -803,7 +803,7 @@ async def generate_reference_image(
                         progress_label, attempt, MAX_RETRIES,
                         len(ref_image_paths) if has_refs else 0,
                         prompt_chars, est_tokens)
-            async with httpx.AsyncClient(timeout=httpx.Timeout(connect=30, read=600, write=120, pool=30)) as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(connect=30, read=300, write=120, pool=30)) as client:
                 if has_refs:
                     # 原图通过 /images/edits multipart 传递（不压缩，保持角色细节）
                     ref_files = []
@@ -956,7 +956,7 @@ async def generate_cover_image(
     for attempt in range(1, MAX_RETRIES + 1):
         try:
             logger.info("[%s] 开始生成小说封面（尝试 %s/%s）", progress_label, attempt, MAX_RETRIES)
-            async with httpx.AsyncClient(timeout=httpx.Timeout(connect=30, read=600, write=120, pool=30)) as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(connect=30, read=300, write=120, pool=30)) as client:
                 resp = await client.post(
                     f"{_runtime_base_url()}/images/generations",
                     json=_generation_payload(current_prompt, size),
@@ -1080,7 +1080,7 @@ async def edit_existing_image(
             if mask_bytes:
                 files.append(("mask", ("mask.png", io.BytesIO(mask_bytes), "image/png")))
 
-            async with httpx.AsyncClient(timeout=httpx.Timeout(connect=30, read=600, write=120, pool=30)) as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(connect=30, read=300, write=120, pool=30)) as client:
                 resp = await client.post(
                     f"{_runtime_base_url()}/images/edits",
                     files=files,
@@ -1276,7 +1276,7 @@ async def generate_manga_image(
                         return
 
                 heartbeat_task = asyncio.create_task(_heartbeat())
-                timeout = httpx.Timeout(connect=30, read=600, write=120, pool=30)
+                timeout = httpx.Timeout(connect=30, read=300, write=120, pool=30)
                 limits = httpx.Limits(max_connections=1, max_keepalive_connections=0)
                 async with httpx.AsyncClient(timeout=timeout, limits=limits) as client:
                     if strategy_blobs:
