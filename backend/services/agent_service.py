@@ -826,7 +826,7 @@ async def update_story_info(story_id: int, title: str | None = None, description
 
 @tool_registry.register(
     name="update_story_bible",
-    description="更新作品圣经（Story Bible），包含世界观设定、创意简报、写作指导。支持部分更新——只更新提供的字段，未提供的字段保留原值。用户要求调整世界观、修改核心设定、改创意简报时用此工具。",
+    description="更新作品圣经（Story Bible），只更新提供的字段，未提供的字段保留原值。用户要求调整世界观、修改核心设定、改创意简报时用此工具。\n\n⚠️ 一次只更新一个模块：creative_brief、writing_guidance、import_guidance、world_setting 每次选一个更新。对于 world_setting 下的大模块（如力量体系、势力分布、等级划分），也建议分多次调用、每次只更新一个子模块。Agent 循环会持续运行，不用担心一次做不完。",
     is_write=True,
     parameters={
         "type": "object",
@@ -924,7 +924,7 @@ async def update_characters(story_id: int, characters: list[dict]) -> dict:
 
 @tool_registry.register(
     name="adjust_framework",
-    description="通过自然语言指令调整故事框架（标签、角色、大纲、章节规划）。调用 AI 理解指令并生成精准的框架编辑操作。此操作会消耗高级文本配额。\n\n⚠️ 批量使用：请将所有要修改的内容汇总到一条 instruction 中（例如：'把主角改成更勇敢，新增一个反派角色，把大纲基调改为悬疑风格，把第 3 章标题改成XXX'），全部放进一条 instruction，不要分多次调用。",
+    description="通过自然语言指令调整故事框架（标签、角色、大纲、章节规划）。调用 AI 理解指令并生成精准的框架编辑操作。此操作会消耗高级文本配额。\n\n💡 分批处理：对于复杂、跨多模块的修改（如同时改角色、大纲、章节规划），建议分多次调用，每次聚焦一个模块。Agent 循环会持续运行直到全部完成，不需要一次塞进全部需求。",
     is_write=True,
     parameters={
         "type": "object",
@@ -1658,14 +1658,24 @@ class AgentService:
         - 询问用户能否提供正确的参数信息
         - 如果是因为缺少参数（如 `story_id`），当前作品 ID 已在上方注明
         - **不要默默忽略错误去用其他数据回答问题**。如果工具没法用，就想办法用已有的上下文知识给用户提供帮助，但要明确说明你目前能做什么、不能做什么
-    13. **⚠️ 强制批处理规则（必须遵守）**：当用户提出的修改涉及多个章节或多个项目时，**必须**将所有项目一次性传入对应的批量工具，禁止逐个调用单章工具。
-        - **多章调整/改写**：必须使用 `batch_adjust_chapters`，将所有待调整章节一次传入。禁止多次调用 `adjust_chapter_by_instruction`。
-        - **多章正文保存**：必须使用 `batch_update_chapters`，将所有章节内容一次提交。禁止多次调用 `update_chapter_content`。
-        - 角色管理：使用 `update_characters` 传入完整列表，不要逐个增删。
-        - 分镜调整：使用 `update_scenes` 一次替换完整列表。
-        - 章节规划：如果用户给出明确的章节列表，使用 `bulk_add_chapter_plans` 批量添加。
-          如果需要 AI 自主生成章节内容（如"帮我规划后续 5 章"），用 `adjust_framework` 更合适。
-        - **违反后果**：每次工具调用触发一次完整的 AI 推理循环。如果逐个调用单章工具，每改完一章会话就会结束，你必须等待用户重新发消息才能继续处理下一章，效率极低且体验差。**一次传入全部章节，是确保多个改动一次性完成的唯一方式。**
+    13. **📌 分批处理原则**：根据数据类型选择合适的策略——确定性的数据批量处理，需要 AI 创作的内容分批处理。
+
+        **批量处理（数据确定时）**：
+        - 用户给出了完整的具体内容时，使用批量工具一次提交：
+          - `batch_update_chapters` — 用户已给出每章完整改写文本时
+          - `bulk_add_chapter_plans` — 用户给出明确的章节列表时
+          - `update_characters` — 传入完整角色列表
+          - `update_scenes` — 一次替换完整分镜列表
+
+        **分批处理（需要 AI 创作时）**：
+        - 涉及 AI 生成的修改（调整世界观、重写多章风格、创作大纲调整），**优先分批处理**：
+          - 每次调用只处理 2-3 个模块或章节，不要试图一次完成全部
+          - 先汇报进度（已完成部分），再继续下一批
+          - 利用 Agent 循环的持续迭代特性，分批完成全部工作
+        - 示例：调整世界观 3 个模块 → 分 3 次调用 `update_story_bible`，每次只更新 1 个模块
+        - 示例：重写 6 章内容 → 分 2-3 批使用 `batch_adjust_chapters`，每批 2-3 章
+
+        **⚠️ 不要在一次调用中塞入过多数据**，特别是 `update_story_bible` 的 world_setting 和 `adjust_framework` 的 instruction。单次数据量过大会导致超时或截断。使用多次迭代，每次做一小批，Agent 循环会持续运行直到全部完成。
 
 ### 框架修改工具选择决策树
 
@@ -1748,7 +1758,7 @@ class AgentService:
 
             collected_content = ""
             iteration_count = 0
-            SAFETY_MAX_ITERATIONS = 50  # 熔断：防止无限循环
+            SAFETY_MAX_ITERATIONS = 200  # 熔断：防止无限循环（200次迭代 = 足够分批完成大型任务）
             write_executed = False
 
             TOOL_EXECUTION_TIMEOUT = 300
@@ -1904,7 +1914,7 @@ class AgentService:
                         write_executed = True
                         all_messages.append({
                             "role": "system",
-                            "content": "写入操作已完成。请检查是否所有需要修改的章节都已处理完毕。如果还有章节未处理，请继续调用批量工具完成剩余章节。如果全部完成，请回复用户总结操作结果。",
+                            "content": "写入完成。请向用户汇报本次写入的进度，然后继续处理剩余模块。如果还有更多内容需要更新，请继续调用工具。如果全部完成，请回复用户总结操作结果。",
                         })
 
                     # 继续循环（把工具结果送回 LLM，让 LLM 判断是否还有未完成的章节需要处理）
