@@ -8393,6 +8393,10 @@ async def update_story_bible(story_id: int, request: Request, db: Session = Depe
     from services.story_state import deep_merge_story_bible
 
     current = deep_merge_story_bible(story.story_bible, bible_update)
+    # world_setting 应完全替换而非递归合并，确保删除的字段被移除
+    if isinstance(bible_update.get("creative_brief"), dict) and "world_setting" in bible_update["creative_brief"]:
+        if isinstance(current.get("creative_brief"), dict):
+            current["creative_brief"]["world_setting"] = bible_update["creative_brief"]["world_setting"]
     story.story_bible = current
     creative_brief = current.get("creative_brief") if isinstance(current.get("creative_brief"), dict) else {}
     next_description = str(creative_brief.get("one_line_premise") or "").strip()
