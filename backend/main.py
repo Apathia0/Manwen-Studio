@@ -8431,7 +8431,7 @@ async def _background_quality_check(
             runtime_context = _build_framework_ai_context(story, mode="repair", user_instruction="后台开书质量修复")
             story_bible = story.story_bible
             story_length = _infer_story_length_from_story(story, description=story_description)
-            fw_prompt = get_system_prompt("prompt.framework_generation", db) or None
+            fw_prompt = get_effective_prompt(story_id, "framework", db) or get_system_prompt("prompt.framework_generation", db) or None
             _release_db_transaction(db)
             fixed_framework = await generate_framework(
                 story_description,
@@ -8584,6 +8584,7 @@ async def generate_framework_endpoint(story_id: int, request: Request, db: Sessi
                 story_context=story_context,
                 launch_ready_required=True,
                 quality_feedback=quality_issues,
+                system_prompt=template_fw_prompt or None,
                 story_length=story_length,
             )
             framework = await _complete_framework_payload(
@@ -8668,7 +8669,7 @@ async def regenerate_tags_endpoint(story_id: int, request: Request, db: Session 
     story_context = _story_framework_context(story)
     deepseek_api_key = _user_deepseek_api_key(request)
     _check_and_consume_advanced_text_quota(request, user.id, db, deduct=False)
-    tag_system_prompt = get_system_prompt("prompt.tag_generation", db)
+    tag_system_prompt = get_effective_prompt(story_id, "tag_generation", db)
     _release_db_transaction(db)
     result = await regenerate_tags(story_context, api_key=deepseek_api_key, system_prompt=tag_system_prompt)
 
@@ -8688,9 +8689,10 @@ async def regenerate_characters_endpoint(story_id: int, request: Request, db: Se
 
     story_context = _story_framework_context(story)
     deepseek_api_key = _user_deepseek_api_key(request)
+    template_fw_prompt = get_effective_prompt(story_id, "framework", db)
     _check_and_consume_advanced_text_quota(request, user.id, db, deduct=False)
     _release_db_transaction(db)
-    result = await regenerate_characters_with_variance(story_context, api_key=deepseek_api_key)
+    result = await regenerate_characters_with_variance(story_context, api_key=deepseek_api_key, system_prompt=template_fw_prompt or None)
 
     characters = _normalize_characters_payload(result if isinstance(result, list) else result)
     story = _require_story_for_user(story_id, user, db)
@@ -8711,8 +8713,9 @@ async def regenerate_outline_endpoint(story_id: int, request: Request, db: Sessi
     template_story_length = get_template_story_length(story_id, db)
     story_length = template_story_length or _infer_story_length_from_story(story)
     _check_and_consume_advanced_text_quota(request, user.id, db, deduct=False)
+    template_fw_prompt = get_effective_prompt(story_id, "framework", db)
     _release_db_transaction(db)
-    result = await regenerate_outline(story_context, api_key=deepseek_api_key, story_length=story_length)
+    result = await regenerate_outline(story_context, api_key=deepseek_api_key, story_length=story_length, system_prompt=template_fw_prompt or None)
 
     outline = result if isinstance(result, dict) and "three_acts" in result else result
     story = _require_story_for_user(story_id, user, db)
@@ -9103,7 +9106,7 @@ async def adjust_framework_endpoint(story_id: int, request: Request, db: Session
     template_story_length = get_template_story_length(story_id, db)
     story_length = template_story_length or _infer_story_length_from_story(story, messages=messages)
 
-    template_fw_prompt = get_effective_prompt(story_id, "framework", db)
+    template_edit_prompt = get_effective_prompt(story_id, "framework_editing", db)
     _check_and_consume_advanced_text_quota(request, user.id, db, deduct=False)
     _release_db_transaction(db)
     try:
@@ -9113,7 +9116,7 @@ async def adjust_framework_endpoint(story_id: int, request: Request, db: Session
             api_key=deepseek_api_key,
             required_min_chapters=requested_min_chapters,
             existing_framework=existing_framework,
-            system_prompt=template_fw_prompt or None,
+            system_prompt=template_edit_prompt or None,
             story_length=story_length,
         )
     except ValueError as exc:
@@ -9228,7 +9231,7 @@ async def continue_framework_endpoint(story_id: int, request: Request, db: Sessi
         }
     ]
 
-    cont_prompt = get_system_prompt("prompt.framework_continuation", db) or None
+    cont_prompt = get_effective_prompt(story_id, "framework", db) or get_system_prompt("prompt.framework_continuation", db) or None
     _release_db_transaction(db)
     try:
         plan = await continue_framework_with_chat(

@@ -963,6 +963,7 @@ async def adjust_framework(story_id: int, instruction: str) -> dict:
         story_context = _build_story_context_dict(story, user_instruction=instruction)
 
         messages = [{"role": "user", "content": instruction}]
+        template_fw_system = get_effective_prompt(story.id, "framework_editing", db)
 
         # 推断篇幅类型，让框架调整遵循正确的篇幅规则
         from .deepseek import _infer_story_length
@@ -975,6 +976,7 @@ async def adjust_framework(story_id: int, instruction: str) -> dict:
                 api_key=api_key,
                 existing_framework=existing_framework,
                 story_length=story_length,
+                system_prompt=template_fw_system or None,
             )
         except ValueError as exc:
             return {"error": f"AI 返回格式无效: {exc}"}

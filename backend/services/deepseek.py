@@ -1149,7 +1149,7 @@ async def regenerate_tags(story_context: dict, api_key: str | None = None, syste
         raise ValueError(f"标签重新生成失败: {e}")
 
 
-async def regenerate_characters_with_variance(story_context: dict, api_key: str | None = None) -> dict:
+async def regenerate_characters_with_variance(story_context: dict, api_key: str | None = None, system_prompt: str | None = None) -> dict:
     """Regenerate characters with explicit personality variance constraints."""
     snapshot = _build_story_snapshot_tiered(story_context, "auto")
     user_prompt = f"""请基于以下故事框架信息，重新生成一组更贴合大纲的人物设定（characters）。
@@ -1170,7 +1170,7 @@ async def regenerate_characters_with_variance(story_context: dict, api_key: str 
         "messages": [
             {
                 "role": "system",
-                "content": (
+                "content": system_prompt or (
                     "你是小说人物设定编辑。你的任务不是平均分配性格数值，而是根据故事大纲和人物功能，"
                     "生成彼此有明显差异、能够支撑剧情的角色设定。只输出包含 characters 的 JSON 对象。"
                 ),
@@ -1631,7 +1631,7 @@ async def generate_framework(
         raise ValueError(f"Framework generation failed: {e}")
 
 
-async def regenerate_outline(story_context: dict, api_key: str | None = None, story_length: str | None = None) -> dict:
+async def regenerate_outline(story_context: dict, api_key: str | None = None, story_length: str | None = None, system_prompt: str | None = None) -> dict:
     """Regenerate outline with length-appropriate pacing and flexible stage count."""
     effective_length = story_length or _infer_story_length(story_context)
     snapshot = _build_story_snapshot_tiered(story_context, "framework_runtime")
@@ -1673,7 +1673,7 @@ async def regenerate_outline(story_context: dict, api_key: str | None = None, st
     payload = {
         "model": DEEPSEEK_MODEL,
         "messages": _framework_messages_with_long_form(
-            "你是小说策划编辑。基于已有故事框架，只输出包含 outline 的 JSON 对象。",
+            system_prompt or "你是小说策划编辑。基于已有故事框架，只输出包含 outline 的 JSON 对象。",
             user_prompt,
             effective_length,
         ),

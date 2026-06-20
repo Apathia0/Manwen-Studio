@@ -52,7 +52,7 @@ def build_prompt_from_params(base_prompt: str, params: dict | None, prompt_type:
 
     parts = [base_prompt]
 
-    if prompt_type == "framework":
+    if prompt_type == "framework" or prompt_type == "framework_editing":
         _build_framework_rules(parts, params)
     elif prompt_type == "chapter":
         _build_chapter_rules(parts, params)
@@ -213,9 +213,11 @@ def get_template_story_length(story_id: int, db) -> str | None:
 # prompt_type → system prompt key 映射
 _PROMPT_TYPE_TO_SYSTEM_KEY = {
     "framework": "prompt.framework_generation",
+    "framework_editing": "prompt.framework_editing",
     "chapter": "prompt.chapter_generation",
     "character": "prompt.reference_character",
     "manga_style": "prompt.reference_manga_style",
+    "tag_generation": "prompt.tag_generation",
 }
 
 
@@ -226,7 +228,7 @@ def get_effective_prompt(story_id: int, prompt_type: str, db) -> str:
 
     Args:
         story_id: 作品 ID
-        prompt_type: framework/chapter/character/manga_style
+        prompt_type: framework/framework_editing/chapter/character/manga_style/tag_generation
         db: SQLAlchemy 数据库会话
 
     Returns:
