@@ -9,6 +9,7 @@ import httpx
 logger = logging.getLogger(__name__)
 
 from services.framework_utils import _extract_outline_chapters, validate_framework_json
+from services.story_state import build_story_bible_compact, build_story_memory_compact
 
 # 默认值会被 router 层从 PlatformSetting 数据库动态覆盖
 DEEPSEEK_API_KEY = ""
@@ -738,22 +739,7 @@ def _build_story_snapshot(story_context: dict) -> str:
     story_memory_compact = story_context.get("story_memory_compact") if isinstance(story_context, dict) else None
     if not isinstance(story_memory_compact, dict) or not story_memory_compact:
         story_memory = story_context.get("story_memory") if isinstance(story_context, dict) else {}
-        if isinstance(story_memory, dict) and story_memory:
-            compact = {}
-            for key in ("story_state", "current_arc_focus", "current_tone", "next_payoff_target"):
-                value = str(story_memory.get(key) or "").strip()
-                if value:
-                    compact[key] = value
-            for key in ("continuity_facts", "open_loops", "resolved_loops"):
-                raw = story_memory.get(key)
-                if isinstance(raw, list):
-                    cleaned = [str(item).strip() for item in raw if str(item).strip()]
-                    if cleaned:
-                        compact[key] = cleaned[:12]
-            recent = story_memory.get("recent_chapter_summaries")
-            if isinstance(recent, list):
-                compact["recent_chapter_summaries"] = [item for item in recent[-8:] if isinstance(item, dict)]
-            story_memory_compact = compact
+        story_memory_compact = build_story_memory_compact(story_memory)
     if isinstance(story_memory_compact, dict) and story_memory_compact:
         parts.append(f"作品连续性记忆: {json.dumps(story_memory_compact, ensure_ascii=False)}")
     return "\n\n".join(parts)
@@ -773,59 +759,7 @@ def _build_framework_runtime_brief(story_context: dict, include_outline_json: bo
     bible_compact = story_context.get("story_bible_compact")
     if not isinstance(bible_compact, dict) or not bible_compact:
         story_bible = story_context.get("story_bible")
-        if isinstance(story_bible, dict):
-            creative_brief = story_bible.get("creative_brief") if isinstance(story_bible.get("creative_brief"), dict) else {}
-            writing_guidance = story_bible.get("writing_guidance") if isinstance(story_bible.get("writing_guidance"), dict) else {}
-            raw_input = story_bible.get("raw_input") if isinstance(story_bible.get("raw_input"), dict) else {}
-            import_guidance = story_bible.get("import_guidance") if isinstance(story_bible.get("import_guidance"), dict) else {}
-            derived_compact: dict[str, object] = {}
-            for key in (
-                "project_positioning",
-                "one_line_premise",
-                "core_hook",
-                "protagonist_core",
-                "main_conflict",
-                "longline_mystery",
-                "serial_length_target",
-                "reveal_strategy",
-                "pacing_strategy",
-                "world_setting",
-                "open_story_notes",
-            ):
-                value = str(creative_brief.get(key) or "").strip()
-                if value:
-                    derived_compact[key] = value
-            for key in (
-                "opening_strategy",
-                "chapter_density_strategy",
-                "midgame_engine",
-                "late_game_direction",
-            ):
-                value = str(writing_guidance.get(key) or "").strip()
-                if value:
-                    derived_compact[key] = value
-            must_keep_rules = creative_brief.get("must_keep_rules")
-            if isinstance(must_keep_rules, list) and must_keep_rules:
-                derived_compact["must_keep_rules"] = [str(item).strip() for item in must_keep_rules if str(item).strip()][:8]
-            for key in ("forbidden_patterns", "preferred_plot_patterns"):
-                raw = writing_guidance.get(key)
-                if isinstance(raw, list) and raw:
-                    derived_compact[key] = [str(item).strip() for item in raw if str(item).strip()][:8]
-            raw_idea = str(raw_input.get("raw_idea") or "").strip()
-            if raw_idea:
-                derived_compact["raw_idea"] = raw_idea
-            for key in (
-                "import_material_type",
-                "must_keep",
-                "author_goal",
-                "adjustment_scope",
-                "longline_plan",
-                "tone_guardrails",
-            ):
-                value = str(import_guidance.get(key) or "").strip()
-                if value:
-                    derived_compact[f"import_{key}"] = value
-            bible_compact = derived_compact
+        bible_compact = build_story_bible_compact(story_bible)
     if isinstance(bible_compact, dict) and bible_compact:
         parts.append(f"作品圣经紧凑摘要: {json.dumps(bible_compact, ensure_ascii=False)}")
 
@@ -1760,6 +1694,8 @@ async def adjust_framework_with_chat(
 - 禁止输出完整 framework JSON。
 
 支持的 operation 类型（每个 operation 是 {{"op": "类型", "changes": {{...}}}}）：
+
+【增量类操作】用于"增加/补充/添加/续写/修改/调整"场景：
 - update_story_description: 修改故事简述，changes 包含 description
 - update_tags: 修改标签，changes 可包含 type/theme/style/audience
 - add_character: 添加角色，changes 包含角色完整信息（name 必填）
@@ -1773,6 +1709,17 @@ async def adjust_framework_with_chat(
 - move_chapter_to_act: 移动章节到另一幕，target.chapter_number 指定章节，target.act 指定目标幕
 - update_chapter: 更新章节内容，target.chapter_number 指定章节，changes 包含更新字段
 - delete_chapter: 删除章节，target.chapter_number 指定要删除的章节
+
+【替换类操作】用于"重写/替换/重新规划/重新设计/改成"场景：
+- replace_outline: 完全替换整个大纲（而非增量追加），在 changes.outline 中传入完整的 new outline JSON
+- replace_tags: 完全替换所有标签，在 changes.tags 中传入完整的新标签对象
+- replace_characters: 完全替换角色列表，在 changes.characters 中传入完整的新角色数组
+- replace_act_chapters: 只替换指定 act 的章节列表，不影响其他 act；changes.target.act 指定目标幕号，changes.chapters 传入新章节数组
+
+何时使用替换 vs 增量：
+- 用户说"重写/替换/重新规划/重新设计/改成/换成" → 使用 replace_* 操作
+- 用户说"增加/补充/添加/续写/修改/调整" → 使用增量操作
+- 返回 reply 时必须明确说明执行的是替换还是增量操作
 
 ⚠️ 大规模结构调整建议（合并幕、压缩幕数、重新划分章节）：使用一个 outline.three_acts patch 直接替换整个三幕数组，而不是用大量 move_chapter_to_act 操作。patch 方式一次完成且不会出错。
 示例：{{"path": "outline.three_acts", "value": [{{"act": "1", "title": "...", "summary": "...", "chapters": [...]}}, ...]}}
@@ -1879,6 +1826,8 @@ async def continue_framework_with_chat(
 请输出结构化编辑计划（reply + operations + patches + warnings）。
 
 支持的 operation 类型（每个 operation 是 {{"op": "类型", "changes": {{...}}}}）：
+
+【增量类操作】用于"增加/补充/添加/续写/修改/调整"场景：
 - update_story_description: 修改故事简述，changes 包含 description
 - update_tags: 修改标签，changes 可包含 type/theme/style/audience
 - add_character: 添加角色，changes 包含角色完整信息（name 必填）
@@ -1892,6 +1841,12 @@ async def continue_framework_with_chat(
 - move_chapter_to_act: 移动章节到另一幕，target.chapter_number 指定章节，target.act 指定目标幕
 - update_chapter: 更新章节内容，target.chapter_number 指定章节，changes 包含更新字段
 - delete_chapter: 删除章节，target.chapter_number 指定要删除的章节
+
+【替换类操作】用于"重写/替换/重新规划/重新设计/改成"场景：
+- replace_outline: 完全替换整个大纲，在 changes.outline 中传入完整的新 outline JSON
+- replace_tags: 完全替换所有标签，在 changes.tags 中传入完整的新标签对象
+- replace_characters: 完全替换角色列表，在 changes.characters 中传入完整的新角色数组
+- replace_act_chapters: 只替换指定 act 的章节列表；changes.target.act 指定目标幕号，changes.chapters 传入新章节数组
 
 ⚠️ 大规模结构调整建议（合并幕、压缩幕数、重新划分章节）：使用一个 outline.three_acts patch 直接替换整个三幕数组，而不是用大量 move_chapter_to_act 操作。
 示例：{{"path": "outline.three_acts", "value": [{{"act": "1", "title": "...", "summary": "...", "chapters": [...]}}, ...]}}

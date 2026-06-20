@@ -10,7 +10,7 @@ from typing import Any, AsyncGenerator
 import httpx
 
 from database import SessionLocal
-from models import Chapter, Story
+from models import AgentPendingChange, Chapter, Story
 from sqlalchemy.orm import Session
 from services import deepseek as _deepseek_service
 from services.deepseek import (
@@ -20,6 +20,7 @@ from services.deepseek import (
     adjust_chapter_content,
 )
 from services.prompt_template import get_effective_prompt
+from services.story_state import build_story_bible_compact, build_story_memory_compact
 from services.framework_utils import (
     _build_current_snapshot_data,
     _build_outline_compact,
@@ -194,6 +195,7 @@ class AgentPendingChangeStore:
         with self._lock:
             if tracker.has_changes():
                 self._items[key] = tracker
+                _persist_pending_changes(key, tracker)
             else:
                 self._items.pop(key, None)
 
@@ -211,6 +213,35 @@ _AGENT_RUN_CONTEXT: contextvars.ContextVar[AgentRunContext | None] = contextvars
     default=None,
 )
 agent_pending_change_store = AgentPendingChangeStore()
+
+
+def _persist_pending_changes(key: AgentPendingChangeKey, tracker: PendingChangesTracker) -> None:
+    db = SessionLocal()
+    try:
+        db.query(AgentPendingChange).filter(
+            AgentPendingChange.user_id == key.user_id,
+            AgentPendingChange.story_id == key.story_id,
+            AgentPendingChange.conversation_id == key.conversation_id,
+        ).delete()
+
+        for change in tracker._changes:
+            if change.new_value is not None:
+                db.add(AgentPendingChange(
+                    user_id=key.user_id,
+                    story_id=key.story_id,
+                    conversation_id=key.conversation_id,
+                    change_type=change.type,
+                    record_id=change.record_id,
+                    display_name=change.display_name,
+                    field=change.field,
+                    old_value=change.old_value,
+                    new_value=change.new_value,
+                ))
+        db.commit()
+    except Exception as e:
+        logger.warning("持久化 pending changes 失败: %s", e)
+    finally:
+        db.close()
 
 
 def normalize_agent_mode(mode: str | None) -> AgentMode:
@@ -237,6 +268,31 @@ def _current_api_key() -> str | None:
 def _current_pending_changes() -> PendingChangesTracker | None:
     context = _current_run_context()
     return context.pending_changes if context else None
+
+
+async def _refresh_agent_memory(chapter, db: Session) -> None:
+    try:
+        story_id = _current_story_id()
+        api_key = _current_api_key()
+        if not api_key:
+            return
+        import sys
+        _main = sys.modules.get("main")
+        if not _main:
+            return
+        from services.story_state import refresh_chapter_memory_for_content
+        from services.deepseek import summarize_chapter_memory
+        refreshed = await refresh_chapter_memory_for_content(
+            chapter=chapter,
+            api_key=api_key,
+            story_context_func=lambda story: _main._build_framework_ai_context(story),
+            summarize_chapter_memory_func=summarize_chapter_memory,
+            merge_story_memory_func=_main._merge_story_memory,
+        )
+        if refreshed:
+            logger.info("Agent 写章节后已刷新连续记忆 story=%s chapter=%s", story_id, chapter.id)
+    except Exception as e:
+        logger.warning("Agent 刷新连续记忆失败 story=%s chapter=%s: %s", _current_story_id(), chapter.id, e)
 
 
 def _serialize_for_diff(value: Any) -> str:
@@ -601,6 +657,7 @@ async def update_chapter_content(chapter_id: int, content: str) -> dict:
         chapter.novel_content = content
         if _current_pending_changes():
             _current_pending_changes().update_new_value("chapter", chapter.id, "novel_content", content)
+        _refresh_agent_memory(chapter, db)
         db.commit()
         logger.info("Agent tool=update_chapter_content story=%s chapter=%s len=%s", _current_story_id(), chapter_id, len(content or ""))
         return {"ok": True, "chapter_id": chapter_id}
@@ -727,6 +784,7 @@ async def adjust_chapter_by_instruction(chapter_id: int, instruction: str) -> di
         chapter.novel_content = new_content
         if _current_pending_changes():
             _current_pending_changes().update_new_value("chapter", chapter.id, "novel_content", new_content)
+        _refresh_agent_memory(chapter, db)
         db.commit()
         logger.info("Agent tool=adjust_chapter_by_instruction (indirect) story=%s chapter=%s new_len=%s", _current_story_id(), chapter_id, len(new_content))
         return {"ok": True, "chapter_id": chapter_id, "content_length": len(new_content)}
@@ -865,14 +923,9 @@ async def update_story_bible(story_id: int, story_bible: dict) -> dict:
                 new_value=None,
             ))
 
-        current = dict(story.story_bible) if isinstance(story.story_bible, dict) else {}
-        for top_key, top_value in story_bible.items():
-            if isinstance(top_value, dict) and isinstance(current.get(top_key), dict):
-                merged_section = dict(current[top_key])
-                merged_section.update(top_value)
-                current[top_key] = merged_section
-            else:
-                current[top_key] = top_value
+        from services.story_state import deep_merge_story_bible
+
+        current = deep_merge_story_bible(story.story_bible, story_bible)
         story.story_bible = current
 
         creative_brief = current.get("creative_brief") if isinstance(current.get("creative_brief"), dict) else {}
@@ -972,9 +1025,27 @@ async def adjust_framework(story_id: int, instruction: str) -> dict:
         messages = [{"role": "user", "content": instruction}]
         template_fw_system = get_effective_prompt(story.id, "framework_editing", db)
 
-        # 推断篇幅类型，让框架调整遵循正确的篇幅规则
         from .deepseek import _infer_story_length
         story_length = _infer_story_length(story_context, description=instruction, messages=messages)
+
+        if "【仅分析模式" in (instruction or ""):
+            try:
+                plan = await adjust_framework_with_chat(
+                    story_context=story_context,
+                    messages=messages,
+                    api_key=api_key,
+                    existing_framework=existing_framework,
+                    story_length=story_length,
+                    system_prompt=template_fw_system or None,
+                )
+            except ValueError as exc:
+                return {"error": f"AI 返回格式无效: {exc}"}
+            return {
+                "ok": True,
+                "reply": plan.get("reply", ""),
+                "applied_operations": [],
+                "warnings": ["仅分析模式：未写入数据库"],
+            }
 
         try:
             plan = await adjust_framework_with_chat(
@@ -1195,6 +1266,7 @@ async def batch_adjust_chapters(chapters: list[dict]) -> dict:
             chapter.novel_content = new_content
             if _current_pending_changes():
                 _current_pending_changes().update_new_value("chapter", chapter.id, "novel_content", new_content)
+            _refresh_agent_memory(chapter, db)
             db.commit()
             return {"chapter_id": chapter_id, "ok": True}
         except Exception as e:
@@ -1491,9 +1563,9 @@ def _build_story_context_dict(story: Story, user_instruction: str = "") -> dict:
         "characters": story.characters,
         "outline": outline,
         "story_bible": story.story_bible,
-        "story_bible_compact": _build_bible_compact(story.story_bible),
+        "story_bible_compact": build_story_bible_compact(story.story_bible),
         "story_memory": story.story_memory,
-        "story_memory_compact": _build_memory_compact(story.story_memory),
+        "story_memory_compact": build_story_memory_compact(story.story_memory),
         "outline_compact": _build_outline_compact(outline),
         "framework_stats": {
             "mode": "agent",
@@ -1505,67 +1577,8 @@ def _build_story_context_dict(story: Story, user_instruction: str = "") -> dict:
     }
 
 
-def _build_bible_compact(story_bible: dict | None) -> dict[str, Any]:
-    """精简版作品圣经，与 main._build_story_bible_compact 对齐。"""
-    if not isinstance(story_bible, dict):
-        return {}
-    creative_brief = story_bible.get("creative_brief") if isinstance(story_bible.get("creative_brief"), dict) else {}
-    writing_guidance = story_bible.get("writing_guidance") if isinstance(story_bible.get("writing_guidance"), dict) else {}
-    import_guidance = story_bible.get("import_guidance") if isinstance(story_bible.get("import_guidance"), dict) else {}
-
-    compact: dict[str, Any] = {}
-    for key in (
-        "project_positioning", "one_line_premise", "core_hook",
-        "protagonist_core", "main_conflict", "longline_mystery",
-        "serial_length_target", "reveal_strategy", "pacing_strategy",
-        "world_setting", "open_story_notes",
-    ):
-        value = str(creative_brief.get(key) or "").strip()
-        if value:
-            compact[key] = value
-
-    must_keep = creative_brief.get("must_keep_rules")
-    if isinstance(must_keep, list):
-        cleaned = [str(item).strip() for item in must_keep if str(item).strip()]
-        if cleaned:
-            compact["must_keep_rules"] = cleaned[:8]
-
-    for key in ("opening_strategy", "chapter_density_strategy", "midgame_engine", "late_game_direction"):
-        value = str(writing_guidance.get(key) or "").strip()
-        if value:
-            compact[key] = value
-
-    for key in ("forbidden_patterns", "preferred_plot_patterns"):
-        raw = writing_guidance.get(key)
-        if isinstance(raw, list):
-            cleaned = [str(item).strip() for item in raw if str(item).strip()]
-            if cleaned:
-                compact[key] = cleaned[:8]
-
-    for key in ("import_material_type", "must_keep", "author_goal", "adjustment_scope", "longline_plan", "tone_guardrails"):
-        value = str(import_guidance.get(key) or "").strip()
-        if value:
-            compact[f"import_{key}"] = value
-
-    return compact
-
-
-def _build_memory_compact(story_memory: dict | None) -> dict[str, Any]:
-    """精简版连续性记忆，与 main._build_story_memory_compact 对齐。"""
-    if not isinstance(story_memory, dict):
-        return {}
-    compact: dict[str, Any] = {}
-    for key in ("story_state", "current_arc_focus", "current_tone", "next_payoff_target"):
-        value = str(story_memory.get(key) or "").strip()
-        if value:
-            compact[key] = value
-    for key in ("continuity_facts", "open_loops", "resolved_loops"):
-        raw = story_memory.get(key)
-        if isinstance(raw, list):
-            cleaned = [str(item).strip() for item in raw if str(item).strip()]
-            if cleaned:
-                compact[key] = cleaned[:8]
-    return compact
+# _build_bible_compact 和 _build_memory_compact 已迁移至 services.story_state
+# 统一使用 build_story_bible_compact / build_story_memory_compact
 
 
 # ── Agent 服务 ─────────────────────────────────────────────
