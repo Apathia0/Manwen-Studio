@@ -207,6 +207,20 @@ export const useMangaStore = defineStore('manga', () => {
     stylePresetName.value = name
   }
 
+  async function loadStylePreset(chapterId: number) {
+    const saved = uni.getStorageSync(`manga_style_${chapterId}`)
+    if (saved) stylePresetName.value = saved
+  }
+
+  function saveStylePreset(chapterId: number, name: string) {
+    stylePresetName.value = name
+    if (name) {
+      uni.setStorageSync(`manga_style_${chapterId}`, name)
+    } else {
+      uni.removeStorageSync(`manga_style_${chapterId}`)
+    }
+  }
+
   function setStyleReferenceImageUrl(url: string | null) {
     styleReferenceImageUrl.value = url ?? ''
   }
@@ -254,6 +268,8 @@ export const useMangaStore = defineStore('manga', () => {
     loadAspectRatio,
     saveAspectRatio,
     setStylePreset,
+    loadStylePreset,
+    saveStylePreset,
     setStyleReferenceImageUrl,
     backendTaskStatus,
     setBackendTaskStatus,

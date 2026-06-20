@@ -149,6 +149,12 @@
           }
         },
         {
+          "path": "character-refs",
+          "style": {
+            "navigationBarTitleText": "角色参考图"
+          }
+        },
+        {
           "path": "character-profiles",
           "style": {
             "navigationBarTitleText": "角色外观"

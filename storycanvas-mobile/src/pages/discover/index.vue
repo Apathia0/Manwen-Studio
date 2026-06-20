@@ -73,7 +73,7 @@ onMounted(async () => {
   await Promise.all([
     billingStore.fetchPlans(),
     billingStore.fetchSubscription(),
-    platformStore.fetchAnnouncement()
+    platformStore.fetchAnnouncement(),
   ]).catch(() => {})
 })
 

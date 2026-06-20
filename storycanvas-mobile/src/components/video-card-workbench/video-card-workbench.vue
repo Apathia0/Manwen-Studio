@@ -1848,7 +1848,6 @@ async function confirmRenderFrame() {
 </script>
 
 <style lang="scss" scoped>
-@use '@/styles/variables' as *;
 
 // ── 工作台全屏弹窗 ──
 .vwb {

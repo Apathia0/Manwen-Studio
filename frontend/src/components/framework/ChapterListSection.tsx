@@ -363,17 +363,35 @@ export default function ChapterListSection({
                 <button
                   onClick={() => void handleExpand(chapter)}
                   disabled={busyId !== null}
-                  className="inline-flex items-center gap-1 rounded-md border border-emerald-200 bg-emerald-50 px-2.5 py-1 text-[11px] font-medium text-emerald-700 hover:bg-emerald-100 disabled:opacity-40"
+                  className="inline-flex items-center gap-1.5 rounded-md border border-emerald-200 bg-emerald-50 px-2.5 py-1 text-[11px] font-medium text-emerald-700 hover:bg-emerald-100 disabled:opacity-40"
                 >
-                  {isBusy && busyAction === 'expand' ? <Loader2 size={12} className="animate-spin" /> : <FileText size={12} />}
-                  生成正文
+                  {isBusy && busyAction === 'expand' ? (
+                    <>
+                      <Loader2 size={12} className="animate-spin" />
+                      <span>生成中...</span>
+                    </>
+                  ) : (
+                    <>
+                      <FileText size={12} />
+                      <span>生成正文</span>
+                    </>
+                  )}
                 </button>
               )}
 
               {chapter.id && (
-                <button onClick={() => void handleAssess(chapter)} disabled={busyId !== null} className="inline-flex items-center gap-1 rounded-md border border-slate-200 bg-slate-900 px-2.5 py-1 text-[11px] font-medium text-white hover:bg-slate-800 disabled:opacity-40">
-                  {isBusy && busyAction === 'assess' ? <Loader2 size={12} className="animate-spin" /> : <BarChart3 size={12} />}
-                  质量评估
+                <button onClick={() => void handleAssess(chapter)} disabled={busyId !== null} className="inline-flex items-center gap-1.5 rounded-md border border-slate-200 bg-slate-900 px-2.5 py-1 text-[11px] font-medium text-white hover:bg-slate-800 disabled:opacity-40">
+                  {isBusy && busyAction === 'assess' ? (
+                    <>
+                      <Loader2 size={12} className="animate-spin" />
+                      <span>评估中...</span>
+                    </>
+                  ) : (
+                    <>
+                      <BarChart3 size={12} />
+                      <span>质量评估</span>
+                    </>
+                  )}
                 </button>
               )}
 

@@ -20,7 +20,7 @@ function getAuthHeaders(): Record<string, string> {
 }
 
 export async function request<T = any>(options: RequestOptions): Promise<T> {
-  const { url, method, data, header = {}, timeout = 30000, json = true } = options
+  const { url, method, data, header = {}, timeout = 300000, json = true } = options
 
   const fullUrl = url.startsWith('http') ? url : `${BASE_URL}${url}`
 
@@ -63,22 +63,22 @@ export async function request<T = any>(options: RequestOptions): Promise<T> {
   })
 }
 
-export function get<T = any>(url: string, data?: any, header?: Record<string, string>): Promise<T> {
-  return request<T>({ url, method: 'GET', data, header })
+export function get<T = any>(url: string, data?: any, header?: Record<string, string>, timeout?: number): Promise<T> {
+  return request<T>({ url, method: 'GET', data, header, timeout })
 }
 
-export function post<T = any>(url: string, data?: any, header?: Record<string, string>): Promise<T> {
-  return request<T>({ url, method: 'POST', data, header })
+export function post<T = any>(url: string, data?: any, header?: Record<string, string>, timeout?: number): Promise<T> {
+  return request<T>({ url, method: 'POST', data, header, timeout })
 }
 
-export function put<T = any>(url: string, data?: any, header?: Record<string, string>): Promise<T> {
-  return request<T>({ url, method: 'PUT', data, header })
+export function put<T = any>(url: string, data?: any, header?: Record<string, string>, timeout?: number): Promise<T> {
+  return request<T>({ url, method: 'PUT', data, header, timeout })
 }
 
-export function del<T = any>(url: string, data?: any, header?: Record<string, string>): Promise<T> {
-  return request<T>({ url, method: 'DELETE', data, header })
+export function del<T = any>(url: string, data?: any, header?: Record<string, string>, timeout?: number): Promise<T> {
+  return request<T>({ url, method: 'DELETE', data, header, timeout })
 }
 
-export function patch<T = any>(url: string, data?: any, header?: Record<string, string>): Promise<T> {
-  return request<T>({ url, method: 'PATCH', data, header })
+export function patch<T = any>(url: string, data?: any, header?: Record<string, string>, timeout?: number): Promise<T> {
+  return request<T>({ url, method: 'PATCH', data, header, timeout })
 }

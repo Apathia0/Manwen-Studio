@@ -174,7 +174,7 @@ function goApiKeys() {
 }
 
 function goTemplates() {
-  uni.navigateTo({ url: '/pages/templates/index' })
+  uni.switchTab({ url: '/pages/templates/index' })
 }
 
 function goModelConfig() {

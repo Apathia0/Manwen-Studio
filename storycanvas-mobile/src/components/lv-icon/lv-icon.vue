@@ -2,13 +2,17 @@
 import {
   PenLine, Sparkles, BookOpen, Palette, Megaphone,
   Star, Gem, Gift, CheckCircle, XCircle,
-  Loader, Pencil, Bot, BarChart3, ImagePlus, Volume2
+  Loader, Pencil, Bot, BarChart3, ImagePlus, Volume2,
+  ChevronDown, ChevronRight, ChevronUp, Plus, X, Save,
+  FileText, Tag, Users, Trash2, Eye, Wand2
 } from '@lucide/vue'
 
 const iconMap: Record<string, any> = {
   PenLine, Sparkles, BookOpen, Palette, Megaphone,
   Star, Gem, Gift, CheckCircle, XCircle,
-  Loader, Pencil, Bot, BarChart3, ImagePlus, Volume2
+  Loader, Pencil, Bot, BarChart3, ImagePlus, Volume2,
+  ChevronDown, ChevronRight, ChevronUp, Plus, X, Save,
+  FileText, Tag, Users, Trash2, Eye, Wand2
 }
 
 const props = withDefaults(defineProps<{

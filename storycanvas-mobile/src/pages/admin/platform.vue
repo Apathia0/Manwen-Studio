@@ -38,6 +38,24 @@
           <lv-input v-model="settings.api.image_output_compression" placeholder="output_compression，0-100" />
           <lv-input v-model="settings.api.image_input_fidelity" placeholder="edits input_fidelity，如 high / low" />
 
+          <text class="admin-platform__section-title">视频模型服务</text>
+          <lv-input v-model="settings.api.video_base_url" placeholder="视频服务 Base URL" />
+          <lv-input v-model="settings.api.video_model" placeholder="视频模型名称" />
+          <lv-input v-model="settings.api.video_api_key" placeholder="视频 API Key" type="password" />
+
+          <text class="admin-platform__section-title">云存储 OSS</text>
+          <view class="admin-platform__checkboxes">
+            <view class="admin-platform__checkbox" @tap="settings.api.oss_enabled = !settings.api.oss_enabled">
+              <lv-icon :name="settings.api.oss_enabled ? 'CheckSquare' : 'Square'" :size="18" :color="settings.api.oss_enabled ? '#2563eb' : '#94a3b8'" />
+              <text>启用 OSS 云存储</text>
+            </view>
+          </view>
+          <lv-input v-model="settings.api.oss_access_key_id" placeholder="Access Key ID" />
+          <lv-input v-model="settings.api.oss_access_key_secret" placeholder="Access Key Secret" type="password" />
+          <lv-input v-model="settings.api.oss_endpoint" placeholder="Endpoint，如 oss-cn-hangzhou.aliyuncs.com" />
+          <lv-input v-model="settings.api.oss_bucket" placeholder="Bucket 名称" />
+          <lv-input v-model="settings.api.oss_public_url_base" placeholder="公网域名（可选），如 https://cdn.yourdomain.com" />
+
           <view class="admin-platform__checkboxes">
             <view class="admin-platform__checkbox" @tap="settings.api.enable_user_override = !settings.api.enable_user_override">
               <lv-icon :name="settings.api.enable_user_override ? 'CheckSquare' : 'Square'" :size="18" :color="settings.api.enable_user_override ? '#2563eb' : '#94a3b8'" />

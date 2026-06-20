@@ -39,6 +39,15 @@
           <lv-button block secondary @tap="goVideoWorkflow">
             <lv-icon name="Video" :size="16" color="#2563eb" style="margin-right: 8rpx;" />视频创作
           </lv-button>
+          <!-- 导入上下文引导（优先级高于创作引导） -->
+          <lv-button
+            v-if="storyStore.activeStory.source_type === 'import' && !storyStore.activeStory.import_context_completed"
+            secondary block
+            @tap="goImportGuidance"
+          >
+            <lv-icon name="FileText" :size="16" color="#2563eb" style="margin-right: 8rpx;" />导入作品引导
+          </lv-button>
+          <!-- 创作引导 -->
           <lv-button v-if="!storyStore.activeStory.onboarding_completed" secondary block @tap="goOnboarding">
             <lv-icon name="Sparkles" :size="16" color="#2563eb" style="margin-right: 8rpx;" />引导创作
           </lv-button>
@@ -70,14 +79,29 @@ function goStoryList() {
 }
 
 function goWorkspace() {
-  if (storyStore.activeStory) {
-    uni.navigateTo({ url: `/pages/workspace/chapter-view?storyId=${storyStore.activeStory.id}` })
+  if (!storyStore.activeStory) return
+  const story = storyStore.activeStory
+  // 先检查是否需要引导（与 Web 端 openWorkspace 逻辑对齐）
+  if (story.source_type === 'import' && !story.import_context_completed) {
+    uni.navigateTo({ url: `/pages/story/import-guidance?storyId=${story.id}` })
+    return
   }
+  if (!story.onboarding_completed) {
+    uni.navigateTo({ url: `/pages/story/onboarding?storyId=${story.id}` })
+    return
+  }
+  uni.navigateTo({ url: `/pages/workspace/chapter-view?storyId=${story.id}` })
 }
 
 function goVideoWorkflow() {
   if (storyStore.activeStory) {
-    uni.navigateTo({ url: `/pages/workspace/video-workflow` })
+    uni.navigateTo({ url: `/pages/workspace/chapter-view?storyId=${storyStore.activeStory.id}&tabIndex=3` })
+  }
+}
+
+function goImportGuidance() {
+  if (storyStore.activeStory) {
+    uni.navigateTo({ url: `/pages/story/import-guidance?storyId=${storyStore.activeStory.id}` })
   }
 }
 

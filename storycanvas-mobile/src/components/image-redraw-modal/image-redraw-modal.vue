@@ -640,7 +640,6 @@ function onMaskTap() {
 </script>
 
 <style lang="scss" scoped>
-@use '@/styles/variables' as *;
 
 .img-redraw-overlay {
   position: fixed;

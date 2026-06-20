@@ -15,18 +15,10 @@
       </view>
 
       <view class="manga-page__ratio-row">
-        <scroll-view scroll-x class="manga-page__ratio-scroll" show-scrollbar="false">
-          <view class="manga-page__ratio-tabs">
-            <view
-              v-for="r in aspectRatioOptions"
-              :key="r.value"
-              :class="['manga-page__ratio-tab', { 'manga-page__ratio-tab--active': mangaStore.aspectRatio === r.value }]"
-              @tap="mangaStore.aspectRatio = r.value"
-            >
-              <text>{{ r.label }}</text>
-            </view>
-          </view>
-        </scroll-view>
+        <text class="manga-page__label">比例:</text>
+        <picker :value="aspectRatioIndex" :range="aspectRatioOptions.map(o => o.label)" @change="handleAspectRatioChange">
+          <text class="manga-page__picker">{{ mangaStore.aspectRatio }}</text>
+        </picker>
       </view>
 
       <view class="manga-page__preset-row" @tap="handleOpenStylePreset">
@@ -35,6 +27,12 @@
           <text>{{ mangaStore.stylePresetName || '未选择' }}</text>
           <lv-icon name="ChevronRight" :size="14" color="#94a3b8" />
         </view>
+      </view>
+
+      <view class="manga-page__tools-row">
+        <lv-button secondary block @tap="goCharacterRefs">角色参考图</lv-button>
+        <lv-button secondary block @tap="goCharacters">角色外观</lv-button>
+        <lv-button secondary block @tap="goRefImages">参考图</lv-button>
       </view>
 
       <lv-button block :loading="mangaStore.isGenerating || isPolling" @tap="handleGenerate">
@@ -98,24 +96,11 @@
         :selected-name="mangaStore.stylePresetName"
         :style-ref-url="mangaStore.styleReferenceImageUrl"
         :chapter-id="chapterId"
-        @update:selected-name="mangaStore.setStylePreset"
+        @update:selected-name="mangaStore.saveStylePreset(chapterId, $event)"
         @update:style-ref-url="mangaStore.setStyleReferenceImageUrl"
         @close="showStylePreset = false"
       />
 
-      <view class="manga-page__tools">
-        <CharacterRefSection
-          v-if="storyId"
-          :story-id="storyId"
-          :chapter-id="chapterId"
-          source-type="story"
-          @change="handleRefChange"
-        />
-        <view class="manga-page__tools-row">
-          <lv-button secondary block @tap="goCharacters">角色外观</lv-button>
-          <lv-button secondary block @tap="goRefImages">参考图</lv-button>
-        </view>
-      </view>
     </view>
   </view>
 </template>
@@ -136,7 +121,6 @@ import LvProgress from '@/components/lv-progress/lv-progress.vue'
 import LvEmpty from '@/components/lv-empty/lv-empty.vue'
 import MangaImageCard from '@/components/manga-image-card/manga-image-card.vue'
 import StyleSelector from '@/components/style-selector/style-selector.vue'
-import CharacterRefSection from '@/components/character-ref-section/character-ref-section.vue'
 
 const mangaStore = useMangaStore()
 const uiStore = useUiStore()
@@ -196,6 +180,7 @@ onLoad(async (options) => {
     if (countIdx !== -1) imageCountIndex.value = countIdx
 
     mangaStore.loadAspectRatio(chapterId.value)
+    mangaStore.loadStylePreset(chapterId.value)
     const res = await adminApi.listStylePresets()
     stylePresets.value = res.presets || []
 
@@ -279,6 +264,15 @@ function handleImageCountChange(e: any) {
   mangaStore.saveImageCount(chapterId.value, count)
 }
 
+const aspectRatioIndex = computed(() =>
+  aspectRatioOptions.findIndex(o => o.value === mangaStore.aspectRatio)
+)
+
+function handleAspectRatioChange(e: any) {
+  const ratio = aspectRatioOptions[e.detail.value].value
+  mangaStore.saveAspectRatio(chapterId.value, ratio)
+}
+
 async function handleOpenStylePreset() {
   if (stylePresets.value.length === 0) {
     try {
@@ -297,8 +291,8 @@ async function handleGenerate() {
   await mangaStore.startMangaGeneration(chapterId.value)
 }
 
-function handleRefChange() {
-  console.log('参考图已更新')
+function goCharacterRefs() {
+  uni.navigateTo({ url: `/pages/workspace/character-refs?storyId=${storyId}&chapterId=${chapterId.value}` })
 }
 
 function goGallery(imageNumber: number) {
@@ -445,31 +439,10 @@ function goRefImages() {
   }
 
   &__ratio-row {
-    margin-bottom: 12rpx;
-  }
-  &__ratio-scroll {
-    white-space: nowrap;
-  }
-  &__ratio-tabs {
-    display: inline-flex;
-    gap: 8rpx;
-  }
-  &__ratio-tab {
-    display: inline-flex;
+    display: flex;
     align-items: center;
-    padding: 8rpx 16rpx;
-    background: $lv-surface-solid;
-    border-radius: $lv-radius-full;
-    font-size: $lv-font-sm;
-    color: $lv-text-secondary;
-    border: 1rpx solid $lv-border-light;
-    transition: all 0.2s;
-
-    &--active {
-      background: $lv-primary;
-      color: #fff;
-      border-color: $lv-primary;
-    }
+    gap: 12rpx;
+    margin-bottom: 12rpx;
   }
   &__preset-row {
     display: flex;
@@ -491,10 +464,6 @@ function goRefImages() {
     font-size: $lv-font-sm;
     color: $lv-text-primary;
   }
-  &__tools {
-    margin-top: 16rpx;
-  }
-
   &__tools-row {
     display: flex;
     gap: 16rpx;
