@@ -3680,6 +3680,7 @@ async def _ensure_generated_chapter_continuity(
     chapter_info: dict[str, Any],
     content: str,
     request: Request,
+    system_prompt: str | None = None,
 ) -> str:
     previous_handoff = story_context.get("previous_chapter_handoff")
     if not isinstance(previous_handoff, dict) or not previous_handoff:
@@ -3710,6 +3711,7 @@ async def _ensure_generated_chapter_continuity(
         content,
         instruction,
         api_key=_user_deepseek_api_key(request),
+        system_prompt=system_prompt,
     )
 
 
@@ -5985,6 +5987,7 @@ async def generate_novel_endpoint(chapter_id: int, request: Request, db: Session
         chapter_info,
         novel_content,
         request,
+        system_prompt=template_ch_prompt or None,
     )
     chapter = _require_chapter(chapter_id, db)
     _apply_chapter_content(chapter, novel_content, status="completed")
@@ -9378,6 +9381,7 @@ async def expand_chapter_endpoint(story_id: int, request: Request, db: Session =
         chapter_info,
         novel_content,
         request,
+        system_prompt=template_ch_prompt or None,
     )
 
     # Determine chapter number
@@ -9442,12 +9446,14 @@ async def rewrite_selection_endpoint(chapter_id: int, request: Request, db: Sess
     )
     deepseek_api_key = _user_deepseek_api_key(request)
     _check_and_consume_advanced_text_quota(request, user.id, db, deduct=False)
+    template_system = get_effective_prompt(chapter.story_id, "chapter", db)
     _release_db_transaction(db)
     rewritten = await rewrite_selection(
         selected_text.strip(),
         chapter_context.strip() or (chapter.novel_content or "")[:4000],
         story_context=chapter_runtime_context,
         api_key=deepseek_api_key,
+        system_prompt=template_system or None,
     )
     _check_and_consume_advanced_text_quota(request, user.id, db, deduct=True)
     return {"rewritten_text": rewritten}
@@ -9479,6 +9485,7 @@ async def adjust_chapter_content_endpoint(chapter_id: int, request: Request, db:
     )
     deepseek_api_key = _user_deepseek_api_key(request)
     _check_and_consume_advanced_text_quota(request, user.id, db, deduct=False)
+    template_system = get_effective_prompt(chapter.story_id, "chapter", db)
     _release_db_transaction(db)
     updated_content = await adjust_chapter_content(
         chapter_runtime_context,
@@ -9486,6 +9493,7 @@ async def adjust_chapter_content_endpoint(chapter_id: int, request: Request, db:
         chapter.novel_content,
         instruction.strip(),
         api_key=deepseek_api_key,
+        system_prompt=template_system or None,
     )
     chapter = _require_chapter_for_user(chapter_id, user, db)
     _apply_chapter_content(chapter, updated_content, status="completed")

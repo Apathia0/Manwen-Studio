@@ -19,6 +19,7 @@ from services.deepseek import (
     adjust_framework_with_chat,
     adjust_chapter_content,
 )
+from services.prompt_template import get_effective_prompt
 from services.framework_utils import (
     _build_current_snapshot_data,
     _build_outline_compact,
@@ -709,12 +710,14 @@ async def adjust_chapter_by_instruction(chapter_id: int, instruction: str) -> di
         if not api_key:
             return {"error": "DeepSeek API Key 未配置"}
 
+        template_system = get_effective_prompt(chapter.story_id, "chapter", db)
         new_content = await adjust_chapter_content(
             story_context=story_context,
             chapter_info=chapter_info,
             chapter_content=chapter_content,
             instruction=instruction,
             api_key=api_key,
+            system_prompt=template_system or None,
         )
         if not new_content or not new_content.strip():
             return {"error": "AI 返回内容为空"}
@@ -1167,12 +1170,14 @@ async def batch_adjust_chapters(chapters: list[dict]) -> dict:
                 "key_events": chapter.key_events or [],
             }
             chapter_content = chapter.novel_content or ""
+            template_system = get_effective_prompt(chapter.story_id, "chapter", db)
             new_content = await adjust_chapter_content(
                 story_context=story_context,
                 chapter_info=chapter_info,
                 chapter_content=chapter_content,
                 instruction=instruction,
                 api_key=api_key,
+                system_prompt=template_system or None,
             )
             if not new_content or not new_content.strip():
                 return {"chapter_id": chapter_id, "error": "AI 返回内容为空"}

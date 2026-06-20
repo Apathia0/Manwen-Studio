@@ -2187,6 +2187,7 @@ async def rewrite_selection(
     chapter_context: str,
     story_context: dict | None = None,
     api_key: str | None = None,
+    system_prompt: str | None = None,
 ) -> str:
     """Rewrite a selected portion of novel text with improved quality."""
     snapshot = _build_story_snapshot_tiered(story_context or {}, "auto") if isinstance(story_context, dict) else ""
@@ -2211,16 +2212,19 @@ async def rewrite_selection(
 - 禁止使用「突然」「忽然」等廉价转折词
 - 直接输出改写后的文本，不要加额外说明"""
 
+    HARDCODED_REWRITE_SYSTEM = (
+        "你是白金级小说编辑，擅长在不改变情节的前提下提升文笔质量。\n"
+        "## 核心约束\n"
+        "1. 逻辑自洽优先：改写后的内容必须有清晰的因果链。\n"
+        "2. 禁止使用破折号（——），用逗号、句号或省略号代替。\n"
+        "3. 禁止使用「突然」「忽然」等廉价转折词。"
+    )
+    effective_system = system_prompt if system_prompt else HARDCODED_REWRITE_SYSTEM
+
     payload = {
         "model": DEEPSEEK_MODEL,
         "messages": [
-            {"role": "system", "content": (
-                "你是白金级小说编辑，擅长在不改变情节的前提下提升文笔质量。\n"
-                "## 核心约束\n"
-                "1. 逻辑自洽优先：改写后的内容必须有清晰的因果链。\n"
-                "2. 禁止使用破折号（——），用逗号、句号或省略号代替。\n"
-                "3. 禁止使用「突然」「忽然」等廉价转折词。"
-            )},
+            {"role": "system", "content": effective_system},
             {"role": "user", "content": user_prompt},
         ],
         "stream": False,
@@ -2244,6 +2248,7 @@ async def adjust_chapter_content(
     chapter_content: str,
     instruction: str,
     api_key: str | None = None,
+    system_prompt: str | None = None,
 ) -> str:
     """Adjust the full chapter content according to a user instruction."""
     snapshot = _build_story_snapshot_tiered(story_context, "auto")
@@ -2272,18 +2277,21 @@ async def adjust_chapter_content(
 - 禁止用「几天后」「过了一段时间」等时间跳跃来跳过关键剧情发展
 - 直接输出修改后的完整正文，不要解释，不要摘要，不要额外说明"""
 
+    HARDCODED_CHAPTER_ADJUST_SYSTEM = (
+        "你是白金级网文编辑，擅长根据编辑意见直接修改整章正文，并保持剧情与设定统一。\n"
+        "字数控制在2000字左右。\n"
+        "## 核心约束\n"
+        "1. 逻辑自洽优先：每个情节转折都必须有因有果。\n"
+        "2. 禁止使用破折号（——），用逗号、句号或省略号代替。\n"
+        "3. 禁止用「突然」「忽然」等词廉价地制造转折。\n"
+        "4. 角色行为必须符合其性格和处境，不能为了推进剧情而强行改变角色。"
+    )
+    effective_system = system_prompt if system_prompt else HARDCODED_CHAPTER_ADJUST_SYSTEM
+
     payload = {
         "model": DEEPSEEK_MODEL,
         "messages": [
-            {"role": "system", "content": (
-                "你是白金级网文编辑，擅长根据编辑意见直接修改整章正文，并保持剧情与设定统一。\n"
-                "字数控制在2000字左右。\n"
-                "## 核心约束\n"
-                "1. 逻辑自洽优先：每个情节转折都必须有因有果。\n"
-                "2. 禁止使用破折号（——），用逗号、句号或省略号代替。\n"
-                "3. 禁止用「突然」「忽然」等词廉价地制造转折。\n"
-                "4. 角色行为必须符合其性格和处境，不能为了推进剧情而强行改变角色。"
-            )},
+            {"role": "system", "content": effective_system},
             {"role": "user", "content": user_prompt},
         ],
         "stream": False,
