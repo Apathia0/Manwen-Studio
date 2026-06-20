@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 from sse_starlette.sse import EventSourceResponse
 
 from database import SessionLocal, get_db
-from models import AgentConversation, AgentConversationMessage, Chapter
+from models import AgentConversation, AgentConversationMessage, AgentPendingChange, Chapter, Story
 from schemas import AgentConversationCreateIn, AgentConversationOut, AgentConversationSummaryOut
 from services.agent_service import (
     AgentPendingChangeKey,
@@ -350,6 +350,12 @@ async def confirm_changes(
         body=body if isinstance(body, dict) else None,
     )
     if key is not None:
+        db.query(AgentPendingChange).filter(
+            AgentPendingChange.user_id == key.user_id,
+            AgentPendingChange.story_id == key.story_id,
+            AgentPendingChange.conversation_id == key.conversation_id,
+        ).delete()
+        db.commit()
         agent_pending_change_store.clear(key)
     return {"ok": True, "message": "修改已确认"}
 
@@ -376,6 +382,42 @@ async def rollback_changes(
     if key is None:
         return {"ok": True, "message": "没有待撤回的修改"}
 
+    db_records = (
+        db.query(AgentPendingChange)
+        .filter(
+            AgentPendingChange.user_id == key.user_id,
+            AgentPendingChange.story_id == key.story_id,
+            AgentPendingChange.conversation_id == key.conversation_id,
+        )
+        .all()
+    )
+    if db_records:
+        results = []
+        for record in reversed(db_records):
+            try:
+                if record.change_type == "chapter":
+                    obj = db.get(Chapter, record.record_id)
+                    if obj:
+                        setattr(obj, record.field, record.old_value)
+                        results.append({"ok": True, "type": "chapter", "id": record.record_id, "field": record.field})
+                elif record.change_type in ("story", "story_bible"):
+                    obj = db.get(Story, record.record_id)
+                    if obj:
+                        setattr(obj, record.field, record.old_value)
+                        results.append({"ok": True, "type": record.change_type, "id": record.record_id, "field": record.field})
+            except Exception as e:
+                results.append({"ok": False, "error": str(e)})
+        if any(r.get("ok") for r in results):
+            db.commit()
+        db.query(AgentPendingChange).filter(
+            AgentPendingChange.user_id == key.user_id,
+            AgentPendingChange.story_id == key.story_id,
+            AgentPendingChange.conversation_id == key.conversation_id,
+        ).delete()
+        db.commit()
+        agent_pending_change_store.clear(key)
+        return {"ok": True, "results": results}
+
     tracker = agent_pending_change_store.get(key)
     if not tracker or not tracker.has_changes():
         return {"ok": True, "message": "没有待撤回的修改"}
@@ -401,7 +443,33 @@ def get_pending_changes(
     )
     if key is None:
         return {"changes": []}
+
+    db_records = (
+        db.query(AgentPendingChange)
+        .filter(
+            AgentPendingChange.user_id == key.user_id,
+            AgentPendingChange.story_id == key.story_id,
+            AgentPendingChange.conversation_id == key.conversation_id,
+        )
+        .all()
+    )
+    if db_records:
+        return {
+            "changes": [
+                {
+                    "type": r.change_type,
+                    "record_id": r.record_id,
+                    "display_name": r.display_name,
+                    "field": r.field,
+                    "old_value": r.old_value,
+                    "new_value": r.new_value,
+                    "source": "db",
+                }
+                for r in db_records
+            ]
+        }
+
     tracker = agent_pending_change_store.get(key)
     if not tracker:
         return {"changes": []}
-    return {"changes": tracker.get_full_data()}
+    return {"changes": tracker.get_full_data(), "source": "memory"}
