@@ -1292,14 +1292,14 @@ async def generate_manga_image(
                         resp = await client.post(
                             f"{_runtime_base_url()}/images/edits",
                             files=files,
-                            data={"model": IMAGE_MODEL, "prompt": full_prompt, "size": effective_size, "negative_prompt": IMAGE_NEGATIVE_PROMPT},
+                            data={"model": IMAGE_MODEL, "prompt": full_prompt, "size": effective_size},
                             headers=_image_auth_headers(api_key),
                         )
                     else:
                         effective_size = size or IMAGE_SIZE
                         resp = await client.post(
                             f"{IMAGE_API_BASE_URL}/images/generations",
-                            json={"model": IMAGE_MODEL, "prompt": full_prompt, "size": effective_size, "negative_prompt": IMAGE_NEGATIVE_PROMPT},
+                            json={"model": IMAGE_MODEL, "prompt": full_prompt, "size": effective_size},
                             headers=_image_auth_headers(api_key, json_content=True),
                         )
 

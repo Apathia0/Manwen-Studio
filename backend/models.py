@@ -393,6 +393,14 @@ class ChapterVideoWorkflow(Base):
     # 结果
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
 
+    # 短剧剧本
+    screenplay_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    screenplay_json: Mapped[Any] = mapped_column(JSON, nullable=True)
+    screenplay_status: Mapped[str] = mapped_column(String(32), default="missing")
+    screenplay_updated_at: Mapped[datetime.datetime | None] = mapped_column(DateTime, nullable=True)
+    screenplay_approved_at: Mapped[datetime.datetime | None] = mapped_column(DateTime, nullable=True)
+    screenplay_version: Mapped[int] = mapped_column(Integer, default=0)
+
     created_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
 
@@ -430,6 +438,14 @@ class ChapterVideoShot(Base):
     motion_plan: Mapped[str | None] = mapped_column(Text, nullable=True)
     emotion_plan: Mapped[str | None] = mapped_column(Text, nullable=True)
     continuity_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # 短剧剧本关联
+    screenplay_scene_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    screenplay_beat_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    narrative_purpose: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    beat_density: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    transition_to_next: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    continuity_json: Mapped[Any] = mapped_column(JSON, nullable=True)
 
     # Prompt
     storyboard_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)

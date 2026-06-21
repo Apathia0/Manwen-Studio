@@ -3318,6 +3318,7 @@ async def generate_shot_storyboard_prompt(
         source_text_span=shot_data.get("source_text_span"),
         shot_context=shot_data.get("shot_context"),
         shot_segments_content=shot_segments_content,
+        screenplay_context=shot_data.get("screenplay_context"),
     )
 
     if additional_sj_reference:
@@ -3419,6 +3420,7 @@ def generate_shot_storyboard_content(
         style_preset=shot_data.get("style_preset"),
         duration_seconds=shot_data.get("duration_seconds", 15),
         source_text_span=shot_data.get("source_text_span"),
+        screenplay_context=shot_data.get("screenplay_context"),
     )
     return user_message
 

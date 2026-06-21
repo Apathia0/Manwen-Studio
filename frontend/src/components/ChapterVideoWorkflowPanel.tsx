@@ -1,12 +1,22 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
+  Braces,
+  BookOpen,
   CheckCircle2,
+  ChevronDown,
+  ChevronRight,
   Clapperboard,
+  Clock,
+  Eye,
   Film,
   Home,
   Image as ImageIcon,
   Loader2,
+  MapPin,
+  MessageSquare,
+  Package,
   Palette,
+  Sun,
   RefreshCcw,
   Sparkles,
   Trash2,
@@ -16,10 +26,17 @@ import {
   StepForward,
   PanelBottomOpen,
   SkipForward,
+  FileText,
+  Save,
+  Send,
+  Tag,
+  ThumbsUp,
+  Zap,
 } from 'lucide-react';
 import type { ChapterVideoWorkflow, StoryVideoCharacter, VideoAsset } from '../api';
-import { saveChapterShotPrompts, replaceVideoAsset, regenerateVideoAsset, uploadShotStoryboard, uploadShotVideo, createVideoAsset, toPublicVideoAssetUrl } from '../api';
+import { saveChapterShotPrompts, replaceVideoAsset, regenerateVideoAsset, uploadShotStoryboard, uploadShotVideo, createVideoAsset, toPublicVideoAssetUrl, generateWorkflowScreenplay, saveWorkflowScreenplay, approveWorkflowScreenplay, regenerateWorkflowScreenplay } from '../api';
 import { canStartChapterWorkflowParse } from './chapterWorkflowUtils';
+import { toast } from '../lib/toast';
 
 import VideoCardWorkbench from './VideoCardWorkbench';
 import { videoGenStore } from '../videoGenStore';
@@ -37,6 +54,7 @@ interface ChapterVideoWorkflowPanelProps {
   workflow: ChapterVideoWorkflow | null;
   workflowLoading: boolean;
   workflowRunning: boolean;
+  chapterNovelContent?: string | null;
   chapterAssets: VideoAsset[];
   selectedReferenceIds: number[];
   selectedStyle: string;
@@ -96,10 +114,33 @@ function toAssetUrl(filePath?: string | null): string {
   return toPublicVideoAssetUrl(filePath) || '';
 }
 
+interface ScreenplayBeat {
+  beat_id: string;
+  type: string;
+  importance: string;
+  action: string;
+  dialogue: any; // 运行时可能是 string | string[] | {character,line}[]
+  emotion_shift: string;
+  transition_to_next: string;
+}
+
+interface ScreenplayScene {
+  scene_id: string;
+  title: string;
+  location: string;
+  time_of_day: string;
+  characters: string[];
+  scene_purpose: string;
+  visual_anchors: string;
+  beats: ScreenplayBeat[];
+  transition_to_next_scene: string;
+}
+
 export default function ChapterVideoWorkflowPanel({
   workflow,
   workflowLoading,
   workflowRunning,
+  chapterNovelContent,
   chapterAssets,
   selectedReferenceIds,
   selectedStyle,
@@ -130,6 +171,104 @@ export default function ChapterVideoWorkflowPanel({
   characterLoading,
 }: ChapterVideoWorkflowPanelProps) {
   const [concatModalOpen, setConcatModalOpen] = useState(false);
+  const [screenplayText, setScreenplayText] = useState('');
+  const [screenplayLoading, setScreenplayLoading] = useState(false);
+
+  const [expandedScenes, setExpandedScenes] = useState<Set<string>>(new Set());
+  const [showRawJson, setShowRawJson] = useState(false);
+  const [rawJsonText, setRawJsonText] = useState('');
+
+  // 可编辑的本地场景数据，从 workflow.screenplay_json 同步初始化
+  const [localScenes, setLocalScenes] = useState<ScreenplayScene[]>([]);
+  useEffect(() => {
+    const json = workflow?.screenplay_json;
+    if (!json || typeof json !== 'object') {
+      setLocalScenes([]);
+      return;
+    }
+    const scenes = (json as Record<string, unknown>).scenes;
+    if (!Array.isArray(scenes)) {
+      setLocalScenes([]);
+      return;
+    }
+    setLocalScenes(scenes as ScreenplayScene[]);
+  }, [workflow?.screenplay_json]);
+
+  // 内联编辑状态："{scene_id}.{field}" 或 "{scene_id}.{beat_id}.{field}"
+  const [editingField, setEditingField] = useState<string | null>(null);
+
+  // 剧本批准后收起场景列表
+  const [screenplayCollapsed, setScreenplayCollapsed] = useState(workflow?.screenplay_status === 'approved');
+  useEffect(() => {
+    if (workflow?.screenplay_status === 'approved') setScreenplayCollapsed(true);
+  }, [workflow?.screenplay_status]);
+
+  // 视觉锚点编辑状态（结构化编辑器）
+  const [editingAnchors, setEditingAnchors] = useState<Array<{type: string; description: string}>>([]);
+  const visualAnchorTypes = [
+    { value: 'set_dressing', label: '装饰' },
+    { value: 'prop', label: '道具' },
+    { value: 'lighting', label: '灯光' },
+    { value: 'costume', label: '服装' },
+  ];
+
+  // 字段中文映射表
+  const beatTypeLabels: Record<string, string> = {
+    action: '动作', dialogue: '对话', narration: '旁白', conflict: '冲突', transition: '转场',
+  };
+  const beatTypeColors: Record<string, string> = {
+    action: 'bg-blue-50 text-blue-600',
+    dialogue: 'bg-emerald-50 text-emerald-600',
+    narration: 'bg-purple-50 text-purple-600',
+    conflict: 'bg-red-50 text-red-600',
+    transition: 'bg-amber-50 text-amber-600',
+  };
+  const importanceLabels: Record<string, string> = {
+    major: '关键', medium: '一般', minor: '次要',
+  };
+  const importanceColors: Record<string, string> = {
+    major: 'bg-rose-50 text-rose-600',
+    medium: 'bg-slate-100 text-slate-500',
+    minor: 'bg-amber-50 text-amber-600',
+  };
+  function parseVisualAnchorsToItems(va: unknown): Array<{type: string; description: string}> {
+    if (typeof va === 'string') {
+      try { const parsed = JSON.parse(va); if (Array.isArray(parsed)) return parsed; } catch { return [{ type: 'text', description: va }]; }
+    }
+    if (Array.isArray(va)) return va as Array<{type: string; description: string}>;
+    if (typeof va === 'object' && va !== null) return [{ type: 'text', description: JSON.stringify(va) }];
+    return [];
+  }
+
+  const handleUpdateScene = useCallback((sceneId: string, updates: Partial<ScreenplayScene>) => {
+    setLocalScenes((prev) => prev.map((s) => (s.scene_id === sceneId ? { ...s, ...updates } : s)));
+    setEditingField(null);
+  }, []);
+
+  const handleUpdateBeat = useCallback((sceneId: string, beatId: string, updates: Partial<ScreenplayBeat>) => {
+    setLocalScenes((prev) =>
+      prev.map((s) => {
+        if (s.scene_id !== sceneId) return s;
+        return {
+          ...s,
+          beats: s.beats.map((b) => (b.beat_id === beatId ? { ...b, ...updates } : b)),
+        };
+      }),
+    );
+    setEditingField(null);
+  }, []);
+
+  const toggleSceneExpand = (sceneId: string) => {
+    setExpandedScenes((prev) => {
+      const next = new Set(prev);
+      if (next.has(sceneId)) {
+        next.delete(sceneId);
+      } else {
+        next.add(sceneId);
+      }
+      return next;
+    });
+  };
 
   const [videoWorkbench, setVideoWorkbench] = useState<{
     shotId: number;
@@ -143,6 +282,9 @@ export default function ChapterVideoWorkflowPanel({
   // 订阅 videoGenStore 以响应式更新视频卡片 loading 状态
   const [, setVideoGenTick] = useState(0);
   useEffect(() => videoGenStore.subscribe(() => setVideoGenTick((t) => t + 1)), []);
+  useEffect(() => {
+    setScreenplayText(workflow?.screenplay_text || '');
+  }, [workflow?.screenplay_text]);
 
   const normalizeAssetText = (value?: string | null) => (value || '').trim().toLowerCase();
 
@@ -217,16 +359,73 @@ export default function ChapterVideoWorkflowPanel({
     ? `自动重试 ${workflow.retry_count}/${workflow.max_retries ?? 0}`
     : '';
 
+  const screenplayApproved = !workflow || workflow.screenplay_status === 'approved';
   const canParse = canStartChapterWorkflowParse({
     workflowExists: Boolean(workflow),
     status,
     hasShots: Boolean(workflow?.shots?.length),
     parsing: Boolean(parsing),
     workflowRunning,
-  });
-  const canStoryboard = ['shots_ready', 'generating_storyboards', 'failed'].includes(status) && !workflowRunning;
-  const canVideo = ['storyboards_ready', 'generating_videos', 'failed'].includes(status) && !workflowRunning;
+  }) && screenplayApproved;
+  const canStoryboard = ['shots_ready', 'generating_storyboards', 'failed'].includes(status) && !workflowRunning && screenplayApproved;
+  const canVideo = ['storyboards_ready', 'generating_videos', 'failed'].includes(status) && !workflowRunning && screenplayApproved;
   const canConcat = ['completed', 'videos_ready', 'storyboards_ready', 'generating_videos', 'shots_ready'].includes(status) && !workflowRunning;
+
+  const handleGenerateScreenplay = async () => {
+    if (!workflow || screenplayLoading) return;
+    setScreenplayLoading(true);
+    try {
+      await generateWorkflowScreenplay(workflow.id);
+      if (onRefreshWorkflow) await onRefreshWorkflow();
+      toast.success('剧本生成完成');
+    } catch (error: any) {
+      toast.error(`剧本生成失败: ${error.message || '未知错误'}`);
+    } finally {
+      setScreenplayLoading(false);
+    }
+  };
+
+  const handleSaveScreenplay = async () => {
+    if (!workflow || screenplayLoading) return;
+    setScreenplayLoading(true);
+    try {
+      await saveWorkflowScreenplay(workflow.id, { screenplay_text: screenplayText, screenplay_json: { scenes: localScenes } } as { screenplay_text: string });
+      if (onRefreshWorkflow) await onRefreshWorkflow();
+      toast.success('剧本已保存');
+    } catch (error: any) {
+      toast.error(`剧本保存失败: ${error.message || '未知错误'}`);
+    } finally {
+      setScreenplayLoading(false);
+    }
+  };
+
+  const handleApproveScreenplay = async () => {
+    if (!workflow || screenplayLoading) return;
+    setScreenplayLoading(true);
+    try {
+      await approveWorkflowScreenplay(workflow.id);
+      if (onRefreshWorkflow) await onRefreshWorkflow();
+      toast.success('剧本已批准，可以开始拆镜');
+    } catch (error: any) {
+      toast.error(`剧本批准失败: ${error.message || '未知错误'}`);
+    } finally {
+      setScreenplayLoading(false);
+    }
+  };
+
+  const handleRegenerateScreenplay = async () => {
+    if (!workflow || screenplayLoading) return;
+    setScreenplayLoading(true);
+    try {
+      await regenerateWorkflowScreenplay(workflow.id);
+      if (onRefreshWorkflow) await onRefreshWorkflow();
+      toast.success('剧本已重新生成');
+    } catch (error: any) {
+      toast.error(`剧本重新生成失败: ${error.message || '未知错误'}`);
+    } finally {
+      setScreenplayLoading(false);
+    }
+  };
 
   const storyboardReadyShots = workflow?.shots?.filter((shot) => shot.status === 'storyboard_ready') ?? [];
   const videoReadyShots = workflow?.shots?.filter((shot) => shot.status === 'video_ready') ?? [];
@@ -256,15 +455,26 @@ export default function ChapterVideoWorkflowPanel({
         </div>
 
         <div className="flex items-center gap-1.5">
-          <button
-            onClick={() => void onParseShots()}
-            disabled={!canParse}
-            title="阶段1：将章节正文拆解为镜头列表"
-            className="inline-flex items-center gap-1 rounded-lg border border-[#d7e3f4] px-2.5 py-1.5 text-xs text-slate-600 hover:bg-slate-50 disabled:opacity-40 disabled:cursor-not-allowed"
-          >
-            {parsing ? <Loader2 size={12} className="animate-spin" /> : <StepForward size={12} />}
-            {parsing ? '拆镜中...' : '拆镜'}
-          </button>
+          {!screenplayApproved ? (
+            <button
+              onClick={handleGenerateScreenplay}
+              disabled={screenplayLoading || workflowRunning}
+              className="inline-flex items-center gap-1 rounded-lg bg-blue-600 px-3 py-1.5 text-xs text-white hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed shadow-sm"
+            >
+              {screenplayLoading ? <Loader2 size={12} className="animate-spin" /> : <Send size={12} />}
+              生成剧本
+            </button>
+          ) : (
+            <button
+              onClick={() => void onParseShots()}
+              disabled={!canParse}
+              title="阶段1：从已批准的剧本拆解为镜头列表"
+              className="inline-flex items-center gap-1 rounded-lg bg-indigo-600 px-3 py-1.5 text-xs text-white hover:bg-indigo-700 disabled:opacity-40 disabled:cursor-not-allowed shadow-sm"
+            >
+              {parsing ? <Loader2 size={12} className="animate-spin" /> : <StepForward size={12} />}
+              {parsing ? '拆镜中...' : '从剧本拆镜'}
+            </button>
+          )}
           <button
             onClick={() => setConcatModalOpen(true)}
             disabled={!canConcat}
@@ -298,14 +508,20 @@ export default function ChapterVideoWorkflowPanel({
         </div>
       </div>
 
-      {/* ── 空状态 ── */}
-      {(!workflow || (!parsing && sortedShots.length === 0)) && (
+      {/* ── 空状态：仅当无 workflow，或剧本已批准但无镜头时显示 ── */}
+      {(!workflow || (screenplayApproved && !parsing && sortedShots.length === 0)) && (
         <div className="flex flex-1 items-center justify-center">
           <div className="max-w-md px-8 text-center text-slate-400">
             <Clapperboard size={46} className="mx-auto mb-3 opacity-40" />
-            <p className="text-sm text-slate-500">
-              选择视频风格和角色参考图后，点击顶部「拆镜」按钮将本章内容拆分为镜头列表。
-            </p>
+            {workflow && screenplayApproved ? (
+              <p className="text-sm text-slate-500">
+                点击顶部「从剧本拆镜」按钮从已批准的剧本拆解为镜头列表。
+              </p>
+            ) : (
+              <p className="text-sm text-slate-500">
+                选择视频风格和角色参考图后，点击顶部「从剧本拆镜」按钮从已批准的剧本拆解为镜头列表。
+              </p>
+            )}
           </div>
         </div>
       )}
@@ -313,6 +529,615 @@ export default function ChapterVideoWorkflowPanel({
       {/* ── 工作流内容 ── */}
       {workflow && (
         <>
+          {/* ── 剧本审核区 ── */}
+          <div className={!screenplayApproved ? "flex flex-1 min-h-0 overflow-hidden px-4 py-4" : "mx-4 mt-3"}>
+            <div className={`flex rounded-2xl border border-[#d7e3f4] bg-white shadow-sm overflow-hidden ${!screenplayApproved ? "flex-1 flex-row" : ""}`}>
+              {/* ── 左侧：原始小说正文（只读） ── */}
+              <div className={`flex flex-col bg-slate-50/60 ${!screenplayApproved ? "w-[40%] min-w-[260px] border-r border-[#d7e3f4]" : "hidden"}`}>
+                <div className="flex items-center gap-2 px-3 py-2 border-b border-[#d7e3f4] bg-white/70">
+                  <BookOpen size={14} className="text-slate-500" />
+                  <span className="text-xs font-medium text-slate-600">章节正文</span>
+                </div>
+                <div className="flex-1 overflow-y-auto p-3">
+                  <div className="text-sm leading-relaxed text-slate-600 whitespace-pre-wrap">
+                    {chapterNovelContent || '（暂无章节正文，请从章节管理页导入或生成正文内容）'}
+                  </div>
+                </div>
+              </div>
+
+              {/* ── 右侧：解析后的剧本 ── */}
+              <div className="flex-1 flex flex-col min-w-0">
+                {/* 顶部操作栏 */}
+                <div className="flex items-center justify-between px-3 py-2 border-b border-[#d7e3f4] bg-white/70 shrink-0">
+                  <div className="flex items-center gap-2">
+                    <FileText size={16} className="text-slate-500" />
+                    <span className="text-sm font-medium text-slate-900">剧本审核</span>
+                    {workflow.screenplay_status === 'approved' ? (
+                      <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2.5 py-0.5 text-xs font-medium text-emerald-600">
+                        <CheckCircle2 size={12} /> 已批准
+                      </span>
+                    ) : workflow.screenplay_text ? (
+                      <span className="inline-flex items-center gap-1 rounded-full bg-amber-50 px-2.5 py-0.5 text-xs font-medium text-amber-600">
+                        待批准
+                      </span>
+                    ) : (
+                      <span className="inline-flex items-center gap-1 rounded-full bg-slate-100 px-2.5 py-0.5 text-xs font-medium text-slate-500">
+                        未生成
+                      </span>
+                    )}
+                    {workflow.screenplay_status === 'approved' && (
+                      <button
+                        onClick={() => setScreenplayCollapsed(!screenplayCollapsed)}
+                        className="inline-flex items-center gap-1 rounded-lg border border-slate-200 px-2 py-1 text-xs text-slate-500 hover:bg-slate-50 ml-1"
+                      >
+                        {screenplayCollapsed ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+                        {screenplayCollapsed ? '展开剧本' : '收起剧本'}
+                      </button>
+                    )}
+                  </div>
+                  <div className="flex items-center gap-1.5">
+                    <button
+                      onClick={handleGenerateScreenplay}
+                      disabled={screenplayLoading || workflowRunning}
+                      className="inline-flex items-center gap-1 rounded-lg border border-blue-200 bg-blue-50 px-2.5 py-1.5 text-xs text-blue-700 hover:bg-blue-100 disabled:opacity-40 disabled:cursor-not-allowed"
+                    >
+                      {screenplayLoading ? <Loader2 size={12} className="animate-spin" /> : <Send size={12} />}
+                      生成剧本
+                    </button>
+                    <button
+                      onClick={handleSaveScreenplay}
+                      disabled={screenplayLoading || !screenplayText.trim()}
+                      className="inline-flex items-center gap-1 rounded-lg border border-[#d7e3f4] px-2.5 py-1.5 text-xs text-slate-600 hover:bg-slate-50 disabled:opacity-40 disabled:cursor-not-allowed"
+                    >
+                      <Save size={12} />
+                      保存
+                    </button>
+                    <button
+                      onClick={handleRegenerateScreenplay}
+                      disabled={screenplayLoading || !workflow.screenplay_text || workflowRunning}
+                      className="inline-flex items-center gap-1 rounded-lg border border-amber-200 px-2.5 py-1.5 text-xs text-amber-700 hover:bg-amber-50 disabled:opacity-40 disabled:cursor-not-allowed"
+                    >
+                      <RefreshCcw size={12} />
+                      重新生成
+                    </button>
+                    {workflow.screenplay_text && workflow.screenplay_status !== 'approved' && (
+                      <button
+                        onClick={handleApproveScreenplay}
+                        disabled={screenplayLoading}
+                        className="inline-flex items-center gap-1 rounded-lg bg-emerald-600 px-2.5 py-1.5 text-xs text-white hover:bg-emerald-700 disabled:opacity-40 disabled:cursor-not-allowed"
+                      >
+                        <ThumbsUp size={12} />
+                        批准剧本
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                {/* 场景卡片列表（批准后可收起） */}
+                <div className={`${!screenplayApproved ? "flex-1 overflow-y-auto p-3" : screenplayCollapsed ? "hidden" : "flex-1 overflow-y-auto p-2"}`}>
+                  {localScenes.length > 0 ? (
+                    <div className="space-y-2.5">
+                      {localScenes.map((scene) => {
+                        const isExpanded = expandedScenes.has(scene.scene_id);
+                        const importanceLabel = scene.beats?.[0]?.importance || '';
+                        return (
+                          <div key={scene.scene_id} className="rounded-xl border border-[#d7e3f4] bg-white shadow-sm overflow-hidden">
+                            {/* 场景卡片头部 */}
+                            <div
+                              onClick={() => toggleSceneExpand(scene.scene_id)}
+                              className="flex items-center justify-between w-full px-3 py-2.5 hover:bg-slate-50/50 transition-colors cursor-pointer"
+                            >
+                              <div className="flex items-center gap-2 min-w-0 flex-1">
+                                <span
+                                  className="shrink-0 inline-flex items-center justify-center w-6 h-6 rounded-lg bg-blue-50 text-xs font-semibold text-blue-600"
+                                >
+                                  {scene.scene_id}
+                                </span>
+                                {/* 标题：可点击编辑 */}
+                                {editingField === `${scene.scene_id}.title` ? (
+                                  <input
+                                    autoFocus
+                                    defaultValue={scene.title}
+                                    onBlur={(e) => handleUpdateScene(scene.scene_id, { title: e.target.value })}
+                                    onKeyDown={(e) => { if (e.key === 'Enter') handleUpdateScene(scene.scene_id, { title: e.currentTarget.value }); if (e.key === 'Escape') setEditingField(null); }}
+                                    className="text-sm font-medium text-slate-800 border border-blue-400 rounded px-1.5 py-0.5 bg-blue-50/50 outline-none min-w-[120px]"
+                                    onClick={(e) => e.stopPropagation()}
+                                  />
+                                ) : (
+                                  <span
+                                    onClick={(e) => { e.stopPropagation(); setEditingField(`${scene.scene_id}.title`); }}
+                                    className="text-sm font-medium text-slate-800 truncate cursor-pointer hover:text-blue-600 hover:bg-blue-50/50 rounded px-1 -mx-1 transition-colors"
+                                    title="点击编辑标题"
+                                  >
+                                    {scene.title || `场景 ${scene.scene_id}`}
+                                  </span>
+                                )}
+                                {/* 地点：可点击编辑 */}
+                                {editingField === `${scene.scene_id}.location` ? (
+                                  <input
+                                    autoFocus
+                                    defaultValue={scene.location || ''}
+                                    onBlur={(e) => handleUpdateScene(scene.scene_id, { location: e.target.value })}
+                                    onKeyDown={(e) => { if (e.key === 'Enter') handleUpdateScene(scene.scene_id, { location: e.currentTarget.value }); if (e.key === 'Escape') setEditingField(null); }}
+                                    className="inline-flex items-center gap-0.5 text-[11px] text-slate-600 border border-blue-400 rounded px-1.5 py-0.5 bg-blue-50/50 outline-none min-w-[80px]"
+                                    onClick={(e) => e.stopPropagation()}
+                                  />
+                                ) : (
+                                  <span
+                                    onClick={(e) => { e.stopPropagation(); setEditingField(`${scene.scene_id}.location`); }}
+                                    className="inline-flex items-center gap-0.5 text-[11px] text-slate-400 shrink-0 cursor-pointer hover:text-blue-600 hover:bg-blue-50/50 rounded px-1 -mx-1 transition-colors"
+                                    title="点击编辑地点"
+                                  >
+                                    <MapPin size={10} />
+                                    {scene.location || '点击设置地点'}
+                                  </span>
+                                )}
+                                {/* 时间：可点击编辑 */}
+                                {editingField === `${scene.scene_id}.time_of_day` ? (
+                                  <input
+                                    autoFocus
+                                    defaultValue={scene.time_of_day || ''}
+                                    onBlur={(e) => handleUpdateScene(scene.scene_id, { time_of_day: e.target.value })}
+                                    onKeyDown={(e) => { if (e.key === 'Enter') handleUpdateScene(scene.scene_id, { time_of_day: e.currentTarget.value }); if (e.key === 'Escape') setEditingField(null); }}
+                                    className="inline-flex items-center gap-0.5 text-[11px] text-slate-600 border border-blue-400 rounded px-1.5 py-0.5 bg-blue-50/50 outline-none min-w-[70px]"
+                                    onClick={(e) => e.stopPropagation()}
+                                  />
+                                ) : (
+                                  <span
+                                    onClick={(e) => { e.stopPropagation(); setEditingField(`${scene.scene_id}.time_of_day`); }}
+                                    className="inline-flex items-center gap-0.5 text-[11px] text-slate-400 shrink-0 cursor-pointer hover:text-blue-600 hover:bg-blue-50/50 rounded px-1 -mx-1 transition-colors"
+                                    title="点击编辑时间"
+                                  >
+                                    <Clock size={10} />
+                                    {scene.time_of_day || '点击设置时间'}
+                                  </span>
+                                )}
+                                {importanceLabel && (
+                                  <span className={`inline-flex items-center gap-0.5 rounded-full px-1.5 py-0.5 text-[10px] font-medium shrink-0 ${importanceColors[importanceLabel] || 'bg-slate-100 text-slate-500'}`}>
+                                    <Tag size={9} />
+                                    {importanceLabels[importanceLabel] || importanceLabel}
+                                  </span>
+                                )}
+                              </div>
+                              <span className="shrink-0 ml-2">
+                                {isExpanded ? <ChevronDown size={16} className="text-slate-400" /> : <ChevronRight size={16} className="text-slate-400" />}
+                              </span>
+                            </div>
+
+                            {/* 场景卡片展开内容 */}
+                            {isExpanded && (
+                              <div className="px-3 pb-3 border-t border-[#d7e3f4]">
+                                {/* 角色标签 — 可点击编辑 */}
+                                <div className="flex flex-wrap items-center gap-1.5 mt-3 mb-2">
+                                  <UserRound size={12} className="text-slate-400 shrink-0" />
+                                  {editingField === `${scene.scene_id}.characters` ? (
+                                    <input
+                                      autoFocus
+                                      defaultValue={Array.isArray(scene.characters) ? scene.characters.join(', ') : ''}
+                                      onBlur={(e) => handleUpdateScene(scene.scene_id, { characters: e.target.value.split(',').map((c) => c.trim()).filter(Boolean) })}
+                                      onKeyDown={(e) => { if (e.key === 'Enter') handleUpdateScene(scene.scene_id, { characters: e.currentTarget.value.split(',').map((c) => c.trim()).filter(Boolean) }); if (e.key === 'Escape') setEditingField(null); }}
+                                      className="text-[11px] text-slate-600 border border-blue-400 rounded px-1.5 py-0.5 bg-blue-50/50 outline-none min-w-[120px]"
+                                      placeholder="角色名, 逗号分隔"
+                                    />
+                                  ) : (
+                                    <>
+                                      {Array.isArray(scene.characters) && scene.characters.length > 0 ? (
+                                        scene.characters.map((char, i) => (
+                                          <span key={i} className="rounded-full bg-blue-50 px-2 py-0.5 text-[11px] text-blue-600">
+                                            {typeof char === 'string' ? char : String((char as Record<string, unknown>).name || (char as Record<string, unknown>).character || char)}
+                                          </span>
+                                        ))
+                                      ) : (
+                                        <span
+                                          onClick={() => setEditingField(`${scene.scene_id}.characters`)}
+                                          className="text-[11px] text-slate-400 cursor-pointer hover:text-blue-600 hover:bg-blue-50/50 rounded px-1.5 py-0.5 transition-colors"
+                                          title="点击编辑角色"
+                                        >
+                                          点击添加角色
+                                        </span>
+                                      )}
+                                      {Array.isArray(scene.characters) && scene.characters.length > 0 && (
+                                        <button
+                                          onClick={() => setEditingField(`${scene.scene_id}.characters`)}
+                                          className="text-[10px] text-slate-400 hover:text-blue-600 hover:bg-blue-50 rounded px-1 py-0.5 transition-colors"
+                                          title="编辑角色列表"
+                                        >
+                                          <SquarePen size={10} />
+                                        </button>
+                                      )}
+                                    </>
+                                  )}
+                                </div>
+
+                                {/* 场景目的 — 可点击编辑 */}
+                                <div className="mt-2 text-xs text-slate-600 leading-relaxed">
+                                  <span className="font-medium text-slate-500 shrink-0">场景目的：</span>
+                                  {editingField === `${scene.scene_id}.scene_purpose` ? (
+                                    <textarea
+                                      autoFocus
+                                      defaultValue={typeof scene.scene_purpose === 'string' ? scene.scene_purpose : ''}
+                                      onBlur={(e) => handleUpdateScene(scene.scene_id, { scene_purpose: e.target.value })}
+                                      onKeyDown={(e) => { if (e.key === 'Escape') { setEditingField(null); e.preventDefault(); } }}
+                                      className="w-full mt-1 text-xs text-slate-600 border border-blue-400 rounded px-2 py-1 bg-blue-50/50 outline-none resize-none"
+                                      rows={2}
+                                      placeholder="场景目的描述..."
+                                    />
+                                  ) : (
+                                    <span
+                                      onClick={() => setEditingField(`${scene.scene_id}.scene_purpose`)}
+                                      className="cursor-pointer hover:text-blue-600 hover:bg-blue-50/50 rounded px-1 -mx-1 transition-colors"
+                                      title="点击编辑场景目的"
+                                    >
+                                      {scene.scene_purpose ? (typeof scene.scene_purpose === 'string' ? scene.scene_purpose : String(scene.scene_purpose)) : '点击设置场景目的'}
+                                    </span>
+                                  )}
+                                </div>
+
+                                {/* 视觉锚点 — 结构化卡片展示 */}
+                                <div className="mt-2">
+                                  <div className="flex items-center gap-1 mb-1.5">
+                                    <Eye size={12} className="text-slate-400 shrink-0" />
+                                    <span className="text-[11px] font-medium text-slate-500">视觉锚点</span>
+                                    {editingField === `${scene.scene_id}.visual_anchors` ? (
+                                      <span className="flex items-center gap-1 ml-auto">
+                                        <button
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            handleUpdateScene(scene.scene_id, { visual_anchors: JSON.stringify(editingAnchors) });
+                                          }}
+                                          className="text-[10px] text-blue-600 hover:text-blue-800 font-medium shrink-0"
+                                        >
+                                          保存
+                                        </button>
+                                        <button
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            setEditingField(null);
+                                          }}
+                                          className="text-[10px] text-slate-400 hover:text-slate-600 shrink-0"
+                                        >
+                                          取消
+                                        </button>
+                                      </span>
+                                    ) : (
+                                      <button
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          setEditingAnchors(parseVisualAnchorsToItems(scene.visual_anchors));
+                                          setEditingField(`${scene.scene_id}.visual_anchors`);
+                                        }}
+                                        className="ml-auto text-[10px] text-blue-500 hover:text-blue-700 hover:underline shrink-0"
+                                      >
+                                        编辑
+                                      </button>
+                                    )}
+                                  </div>
+                                  {editingField === `${scene.scene_id}.visual_anchors` ? (
+                                    <div className="space-y-2">
+                                      {editingAnchors.map((item, i) => (
+                                        <div key={i} className="bg-white rounded-lg border border-blue-200 p-2">
+                                          <div className="flex items-center gap-1.5 mb-1.5">
+                                            <select
+                                              value={item.type}
+                                              onChange={(e) => {
+                                                setEditingAnchors((prev) => {
+                                                  const next = [...prev];
+                                                  next[i] = { ...next[i], type: e.target.value };
+                                                  return next;
+                                                });
+                                              }}
+                                              className="text-[11px] font-medium border border-slate-200 rounded px-1.5 py-0.5 outline-none focus:border-blue-400 bg-white"
+                                              onClick={(e) => e.stopPropagation()}
+                                            >
+                                              {visualAnchorTypes.map((t) => (
+                                                <option key={t.value} value={t.value}>{t.label}</option>
+                                              ))}
+                                            </select>
+                                            <button
+                                              onClick={(e) => {
+                                                e.stopPropagation();
+                                                setEditingAnchors((prev) => prev.filter((_, idx) => idx !== i));
+                                              }}
+                                              className="ml-auto text-red-300 hover:text-red-500 transition-colors"
+                                              title="删除"
+                                            >
+                                              <Trash2 size={12} />
+                                            </button>
+                                          </div>
+                                          <input
+                                            value={item.description}
+                                            onChange={(e) => {
+                                              setEditingAnchors((prev) => {
+                                                const next = [...prev];
+                                                next[i] = { ...next[i], description: e.target.value };
+                                                return next;
+                                              });
+                                            }}
+                                            onClick={(e) => e.stopPropagation()}
+                                            className="w-full text-xs text-slate-700 border border-slate-200 rounded px-2 py-1 outline-none focus:border-blue-400"
+                                            placeholder="描述..."
+                                          />
+                                        </div>
+                                      ))}
+                                      <button
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          setEditingAnchors((prev) => [...prev, { type: 'set_dressing', description: '' }]);
+                                        }}
+                                        className="flex items-center gap-1 text-xs text-blue-500 hover:text-blue-700 transition-colors"
+                                      >
+                                        + 添加锚点
+                                      </button>
+                                    </div>
+                                  ) : (
+                                    <div className="space-y-1">
+                                      {(() => {
+                                        const items = parseVisualAnchorsToItems(scene.visual_anchors);
+                                        if (items.length === 0) {
+                                          return <span className="text-xs text-slate-400">点击编辑添加视觉锚点</span>;
+                                        }
+const typeConfig: Record<string, { label: string; icon: React.ReactNode; color: string }> = {
+  set_dressing: { label: '装饰', icon: <Home size={10} />, color: 'bg-teal-50 text-teal-600' },
+  prop: { label: '道具', icon: <Package size={10} />, color: 'bg-amber-50 text-amber-600' },
+  lighting: { label: '灯光', icon: <Sun size={10} />, color: 'bg-yellow-50 text-yellow-700' },
+  costume: { label: '服装', icon: <UserRound size={10} />, color: 'bg-rose-50 text-rose-600' },
+};
+                                        return items.map((item, i) => {
+                                          const cfg = typeConfig[item.type] || { label: item.type, icon: <Eye size={10} />, color: 'bg-slate-100 text-slate-500' };
+                                          return (
+                                            <div key={i} className="flex items-start gap-1.5 text-xs">
+                                              <span className={`shrink-0 inline-flex items-center gap-0.5 rounded px-1.5 py-0.5 text-[10px] font-medium ${cfg.color}`}>
+                                                {cfg.icon}
+                                                {cfg.label}
+                                              </span>
+                                              <span className="text-slate-600 leading-relaxed">{item.description}</span>
+                                            </div>
+                                          );
+                                        });
+                                      })()}
+                                    </div>
+                                  )}
+                                </div>
+
+                                {/* Beats 列表 */}
+                                {scene.beats && scene.beats.length > 0 && (
+                                  <div className="mt-3 space-y-2">
+                                    {scene.beats.map((beat) => (
+                                      <div key={beat.beat_id} className="rounded-lg border border-[#e5edf8] bg-slate-50/60 p-2.5">
+                                        <div className="flex items-center gap-1.5 mb-1.5 flex-wrap">
+                                          <span className="text-[11px] font-medium text-slate-600">节拍 {beat.beat_id}</span>
+                                          {/* 节拍类型 — 可点击编辑 */}
+                                          {editingField === `${scene.scene_id}.${beat.beat_id}.type` ? (
+                                            <select
+                                              autoFocus
+                                              defaultValue={beat.type || 'action'}
+                                              onBlur={(e) => handleUpdateBeat(scene.scene_id, beat.beat_id, { type: e.target.value })}
+                                              onChange={(e) => handleUpdateBeat(scene.scene_id, beat.beat_id, { type: e.target.value })}
+                                              className="rounded-full px-1.5 py-0.5 text-[10px] font-medium border border-blue-400 bg-blue-50/50 outline-none text-slate-700"
+                                            >
+                                              {Object.entries(beatTypeLabels).map(([val, label]) => (
+                                                <option key={val} value={val}>{label}</option>
+                                              ))}
+                                            </select>
+                                          ) : (
+                                            <span
+                                              onClick={() => setEditingField(`${scene.scene_id}.${beat.beat_id}.type`)}
+                                              className={`rounded-full px-1.5 py-0.5 text-[10px] font-medium cursor-pointer hover:ring-1 hover:ring-blue-300 transition-all ${beatTypeColors[beat.type] || 'bg-slate-100 text-slate-500'}`}
+                                              title="点击编辑类型"
+                                            >
+                                              <Zap size={9} className="inline mr-0.5" />
+                                              {beatTypeLabels[beat.type] || beat.type || '动作'}
+                                            </span>
+                                          )}
+                                          {/* 重要性 — 可点击编辑 */}
+                                          {editingField === `${scene.scene_id}.${beat.beat_id}.importance` ? (
+                                            <select
+                                              autoFocus
+                                              defaultValue={beat.importance || 'medium'}
+                                              onBlur={(e) => handleUpdateBeat(scene.scene_id, beat.beat_id, { importance: e.target.value })}
+                                              onChange={(e) => handleUpdateBeat(scene.scene_id, beat.beat_id, { importance: e.target.value })}
+                                              className="rounded-full px-1.5 py-0.5 text-[10px] font-medium border border-blue-400 bg-blue-50/50 outline-none text-slate-700"
+                                            >
+                                              {Object.entries(importanceLabels).map(([val, label]) => (
+                                                <option key={val} value={val}>{label}</option>
+                                              ))}
+                                            </select>
+                                          ) : (
+                                            <span
+                                              onClick={() => setEditingField(`${scene.scene_id}.${beat.beat_id}.importance`)}
+                                              className={`rounded-full px-1.5 py-0.5 text-[10px] font-medium cursor-pointer hover:ring-1 hover:ring-blue-300 transition-all ${importanceColors[beat.importance] || 'bg-slate-100 text-slate-500'}`}
+                                              title="点击编辑重要性"
+                                            >
+                                              {importanceLabels[beat.importance] || beat.importance || '一般'}
+                                            </span>
+                                          )}
+                                          {/* 情绪变化 — 可点击编辑 */}
+                                          {editingField === `${scene.scene_id}.${beat.beat_id}.emotion_shift` ? (
+                                            <input
+                                              autoFocus
+                                              defaultValue={beat.emotion_shift || ''}
+                                              onBlur={(e) => handleUpdateBeat(scene.scene_id, beat.beat_id, { emotion_shift: e.target.value })}
+                                              onKeyDown={(e) => { if (e.key === 'Enter') handleUpdateBeat(scene.scene_id, beat.beat_id, { emotion_shift: e.currentTarget.value }); if (e.key === 'Escape') setEditingField(null); }}
+                                              className="rounded-full px-1.5 py-0.5 text-[10px] border border-blue-400 bg-violet-50/50 outline-none text-violet-700 min-w-[60px]"
+                                              placeholder="情绪"
+                                            />
+                                          ) : (
+                                            <span
+                                              onClick={() => setEditingField(`${scene.scene_id}.${beat.beat_id}.emotion_shift`)}
+                                              className="rounded-full bg-violet-50 px-1.5 py-0.5 text-[10px] text-violet-600 cursor-pointer hover:ring-1 hover:ring-blue-300 transition-all"
+                                              title="点击编辑情绪"
+                                            >
+                                              {beat.emotion_shift || '情绪'}
+                                            </span>
+                                          )}
+                                        </div>
+
+                                        {/* 动作描述 — 可点击编辑 */}
+                                        {editingField === `${scene.scene_id}.${beat.beat_id}.action` ? (
+                                          <textarea
+                                            autoFocus
+                                            defaultValue={typeof beat.action === 'string' ? beat.action : ''}
+                                            onBlur={(e) => handleUpdateBeat(scene.scene_id, beat.beat_id, { action: e.target.value })}
+                                            onKeyDown={(e) => { if (e.key === 'Escape') { setEditingField(null); e.preventDefault(); } }}
+                                            className="w-full text-xs text-slate-700 border border-blue-400 rounded px-2 py-1 bg-blue-50/50 outline-none resize-none mb-1.5"
+                                            rows={3}
+                                            placeholder="动作描述..."
+                                          />
+                                        ) : (
+                                          <div
+                                            onClick={() => setEditingField(`${scene.scene_id}.${beat.beat_id}.action`)}
+                                            className="text-xs text-slate-700 leading-relaxed mb-1.5 cursor-pointer hover:text-blue-600 hover:bg-blue-50/30 rounded px-1 -mx-1 transition-colors"
+                                            title="点击编辑动作描述"
+                                          >
+                                            {beat.action ? (typeof beat.action === 'string' ? beat.action : String(beat.action)) : '点击编辑动作描述'}
+                                          </div>
+                                        )}
+
+                                        {/* 对话 — 可点击编辑 */}
+                                        {editingField === `${scene.scene_id}.${beat.beat_id}.dialogue` ? (
+                                          <textarea
+                                            autoFocus
+                                            defaultValue={Array.isArray(beat.dialogue) ? beat.dialogue.join('\n') : ''}
+                                            onBlur={(e) => handleUpdateBeat(scene.scene_id, beat.beat_id, { dialogue: e.target.value.split('\n').filter(Boolean) })}
+                                            onKeyDown={(e) => { if (e.key === 'Escape') { setEditingField(null); e.preventDefault(); } }}
+                                            className="w-full text-xs text-slate-600 border border-blue-400 rounded px-2 py-1 bg-blue-50/50 outline-none resize-none mb-1.5"
+                                            rows={3}
+                                            placeholder="每行格式: 角色: 台词"
+                                          />
+                                        ) : (
+                                          <div
+                                            onClick={() => setEditingField(`${scene.scene_id}.${beat.beat_id}.dialogue`)}
+                                            className="space-y-0.5 mb-1.5 cursor-pointer hover:bg-blue-50/30 rounded px-1 -mx-1 transition-colors"
+                                            title="点击编辑对话"
+                                          >
+                                            {(() => {
+                                              // dialogue 可能是字符串、字符串数组、或对象数组
+                                              const dialogue = beat.dialogue;
+                                              if (typeof dialogue === 'string' && dialogue.trim()) {
+                                                return (
+                                                  <div className="flex items-start gap-1 text-xs">
+                                                    <MessageSquare size={11} className="mt-0.5 text-slate-400 shrink-0" />
+                                                    <span className="text-slate-600">{dialogue}</span>
+                                                  </div>
+                                                );
+                                              }
+                                              if (Array.isArray(dialogue) && dialogue.length > 0) {
+                                                return dialogue.map((line: unknown, i: number) => {
+                                                  const lineStr = typeof line === 'string'
+                                                    ? line
+                                                    : typeof line === 'object' && line !== null
+                                                      ? `${(line as Record<string, unknown>).character || ''}: ${(line as Record<string, unknown>).line || ''}`
+                                                      : String(line);
+                                                  return (
+                                                    <div key={i} className="flex items-start gap-1 text-xs">
+                                                      <MessageSquare size={11} className="mt-0.5 text-slate-400 shrink-0" />
+                                                      <span className="text-slate-600">{lineStr}</span>
+                                                    </div>
+                                                  );
+                                                });
+                                              }
+                                              return (
+                                                <div className="flex items-start gap-1 text-xs text-slate-400">
+                                                  <MessageSquare size={11} className="mt-0.5 shrink-0" />
+                                                  <span>点击编辑对话</span>
+                                                </div>
+                                              );
+                                            })()}
+                                          </div>
+                                        )}
+
+                                        {/* 转场 — 可点击编辑 */}
+                                        {editingField === `${scene.scene_id}.${beat.beat_id}.transition_to_next` ? (
+                                          <input
+                                            autoFocus
+                                            defaultValue={beat.transition_to_next || ''}
+                                            onBlur={(e) => handleUpdateBeat(scene.scene_id, beat.beat_id, { transition_to_next: e.target.value })}
+                                            onKeyDown={(e) => { if (e.key === 'Enter') handleUpdateBeat(scene.scene_id, beat.beat_id, { transition_to_next: e.currentTarget.value }); if (e.key === 'Escape') setEditingField(null); }}
+                                            className="w-full text-[10px] text-slate-600 border border-blue-400 rounded px-1.5 py-0.5 bg-blue-50/50 outline-none mt-1"
+                                            placeholder="转场描述..."
+                                          />
+                                        ) : (
+                                          <div
+                                            onClick={() => setEditingField(`${scene.scene_id}.${beat.beat_id}.transition_to_next`)}
+                                            className="text-[10px] text-slate-400 italic mt-1 cursor-pointer hover:text-blue-600 hover:bg-blue-50/30 rounded px-1 -mx-1 transition-colors"
+                                            title="点击编辑转场"
+                                          >
+                                            → {beat.transition_to_next || '点击编辑转场'}
+                                          </div>
+                                        )}
+                                      </div>
+                                    ))}
+                                  </div>
+                                )}
+
+                                {/* 场次转场 */}
+                                {scene.transition_to_next_scene && (
+                                  <div className="mt-3 pt-2 border-t border-dashed border-[#d7e3f4] text-[11px] text-slate-400 italic">
+                                    → 下一场：{scene.transition_to_next_scene}
+                                  </div>
+                                )}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  ) : screenplayText ? (
+                    <div className="rounded-xl border border-[#d7e3f4] bg-slate-50 p-3">
+                      <p className="text-xs text-slate-400 mb-2">（未检测到结构化场景数据，显示纯文本剧本）</p>
+                      <pre className="text-sm text-slate-700 whitespace-pre-wrap font-sans leading-relaxed">{screenplayText}</pre>
+                    </div>
+                  ) : (
+                    <div className="flex items-center justify-center h-full text-center text-slate-400">
+                      <p className="text-sm">点击「生成剧本」按钮，AI 将根据章节内容自动生成短剧剧本</p>
+                    </div>
+                  )}
+
+                  {workflow.screenplay_status !== 'approved' && workflow.screenplay_text && (
+                    <p className="mt-2 text-xs text-amber-600">
+                      请审核并批准剧本后，才能开始拆镜操作
+                    </p>
+                  )}
+                </div>
+
+                {/* JSON 原始数据 toggle */}
+                {localScenes.length > 0 && (
+                  <div className="border-t border-[#d7e3f4] shrink-0">
+                    <button
+                      onClick={() => {
+                        const nextShow = !showRawJson;
+                        setShowRawJson(nextShow);
+                        if (nextShow && !rawJsonText && workflow?.screenplay_json) {
+                          try {
+                            setRawJsonText(JSON.stringify(workflow.screenplay_json, null, 2));
+                          } catch {
+                            setRawJsonText('');
+                          }
+                        }
+                      }}
+                      className="flex items-center gap-1.5 w-full px-3 py-2 text-xs text-slate-500 hover:bg-slate-50 transition-colors"
+                    >
+                      {showRawJson ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+                      <Braces size={12} className="text-slate-400" />
+                      查看/编辑原始 JSON
+                    </button>
+                    {showRawJson && (
+                      <div className="px-3 pb-3">
+                        <textarea
+                          value={rawJsonText}
+                          onChange={(e) => setRawJsonText(e.target.value)}
+                          className="w-full h-40 resize-y rounded-xl border border-[#d7e3f4] bg-slate-50 p-3 text-xs font-mono text-slate-600 focus:border-blue-300 focus:outline-none focus:ring-1 focus:ring-blue-200 leading-relaxed"
+                          placeholder="原始 JSON 数据..."
+                        />
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+
+          {screenplayApproved && (
           <div className="relative flex flex-1 min-h-0 gap-4 overflow-hidden px-4 py-4">
             {/* 拆镜加载遮罩 */}
             {parsing && (
@@ -658,6 +1483,7 @@ export default function ChapterVideoWorkflowPanel({
             </div>
             </div>
           </div>
+          )}
         </>
       )}
 
