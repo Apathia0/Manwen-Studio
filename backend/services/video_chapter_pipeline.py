@@ -331,13 +331,14 @@ def build_screenplay_context_for_shot(workflow: ChapterVideoWorkflow | None, sho
 
     target_scene_ids = _parse_screenplay_id_list(shot.screenplay_scene_id)
     target_beat_ids = _parse_screenplay_id_list(shot.screenplay_beat_id)
+    normalized_scene_ids = {sid.replace("场景", "").strip() for sid in target_scene_ids}
     lines: list[str] = []
 
     for scene in scenes:
         if not isinstance(scene, dict):
             continue
         scene_id = str(scene.get("scene_id") or scene.get("scene_number") or "").strip()
-        if target_scene_ids and scene_id not in target_scene_ids:
+        if target_scene_ids and scene_id not in target_scene_ids and scene_id not in normalized_scene_ids:
             continue
 
         title = str(scene.get("title") or "").strip()
@@ -378,7 +379,13 @@ def build_screenplay_context_for_shot(workflow: ChapterVideoWorkflow | None, sho
                     continue
                 beat_id = str(beat.get("beat_id") or "").strip()
                 if target_beat_ids and beat_id not in target_beat_ids:
-                    continue
+                    beat_suffix_match = False
+                    for tbid in target_beat_ids:
+                        if "-" in tbid and tbid.rsplit("-", 1)[-1] == beat_id:
+                            beat_suffix_match = True
+                            break
+                    if not beat_suffix_match:
+                        continue
                 beat_type = str(beat.get("type") or "").strip()
                 importance = str(beat.get("importance") or "").strip()
                 action = str(beat.get("action") or "").strip()
