@@ -204,8 +204,9 @@ async def create_video_job(
     model = model or _resolved_model()
     if aspect_ratio not in ALLOWED_ASPECT_RATIOS:
         aspect_ratio = "16:9"
+
+    # 模型感知 size 校验
     model_lower = model.lower()
-    # seedance-2.0-fast 的 resolution 参数不接受 720P
     if "seedance" in model_lower and "fast" in model_lower:
         if size not in ("1080P", "1K", "2K", "4K"):
             size = "1080P"
@@ -215,40 +216,38 @@ async def create_video_job(
     headers = _auth_headers(api_key, base_url=base_url, model=model)
     url = _build_api_url("/v1/videos", base_url=base_url)
 
-    # ── 根据模型限制 duration 上限 ──
-    # Seedance 1.0 系列最大 12 秒，Seedance 1.5 系列最大 12 秒
-    # Seedance 2.0 系列最大 15 秒，其他模型默认最大 15 秒
+    # ── 模型感知参数适配 ──
+    model_lower = model.lower()
+    is_seedance = "seedance" in model_lower
+
+    # duration 上限（仅 Seedance 模型有特殊限制）
     max_duration = 15
-    if "seedance" in model_lower:
+    if is_seedance:
         if "1-0" in model_lower or "1.0" in model_lower:
             max_duration = 12
         elif "1-5" in model_lower or "1.5" in model_lower:
             max_duration = 12
-        # seedance 2.0 系列保持 15 秒
-
     clamped_duration = max(4, min(max_duration, duration_seconds))
+
     payload: dict = {
         "model": model,
         "prompt": prompt.strip(),
         "duration": clamped_duration,
-        "seconds": str(clamped_duration),
     }
 
-    # ── 模型感知参数适配 ──
-    # Lingdong API: seedance-2.0-fast 系列使用 ratio+resolution，
-    # sd-2-vip 系列使用 size+orientation
-    model_lower = model.lower()
-    if "seedance" in model_lower and "fast" in model_lower:
-        # seedance-2.0-fast / seedance-2.0-fast-xxx
+    # Seedance 专属字段：seconds（字符串形式 duration）+ orientation
+    if is_seedance:
+        payload["seconds"] = str(clamped_duration)
+
+    # seedance-fast 使用 ratio+resolution，其他模型使用标准 size 格式
+    if is_seedance and "fast" in model_lower:
         payload["ratio"] = aspect_ratio
         payload["resolution"] = size
-        # 可选的 watermark / first_frame 等不由调用方传入，保持默认
     else:
-        # sd-2-vip, sd-2-vip-720 及其他 New API 模型
-        # size 使用 new-api 标准格式 "WxH"（如 "1280x720"），而非上游特定值 "large"
         w, h = _resolution_from(aspect_ratio, size)
         payload["size"] = f"{w}x{h}"
-        payload["orientation"] = _aspect_to_orientation(aspect_ratio)
+        if is_seedance:
+            payload["orientation"] = _aspect_to_orientation(aspect_ratio)
 
     if images:
         # ── 自动将本地图片上传到 OSS，确保第三方 API 可访问 ──
