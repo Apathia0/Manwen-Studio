@@ -144,6 +144,8 @@ from services.video_chapter_pipeline import (
     generate_videos_for_shots,
     generate_shot_details_batch,
     assemble_video_prompt_text,
+    generate_workflow_screenplay,
+    build_shot_source_from_screenplay,
 )
 
 # 模块级标记：init_db 在整个进程生命周期中只调用一次
@@ -6946,6 +6948,146 @@ async def api_check_chapter_consistency(
     return validate_character_consistency(workflow_id)
 
 
+# ── 短剧剧本 API ──────────────────────────────────────────
+
+
+@router.post("/api/video/chapter-workflows/{workflow_id}/screenplay/generate")
+async def api_generate_screenplay(
+    workflow_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """生成短剧剧本：读取章节正文，调用 AI 生成影视剧本和场次列表。"""
+    user = _require_user(request, db)
+    wf = get_chapter_workflow(workflow_id)
+    if not wf:
+        raise HTTPException(404, "工作流不存在")
+    story = db.get(Story, wf.story_id)
+    if not story or story.owner_user_id != user.id:
+        raise HTTPException(403, "无权访问")
+
+    chapter = db.get(Chapter, wf.chapter_id)
+    if not chapter or not (chapter.novel_content or "").strip():
+        raise HTTPException(400, "章节正文为空，请先在工作台中生成章节内容后再生成剧本")
+
+    deepseek_api_key = _user_deepseek_api_key(request, db)
+    if not deepseek_api_key:
+        raise HTTPException(400, "请配置 DeepSeek API Key")
+
+    result = await generate_workflow_screenplay(
+        workflow_id=workflow_id,
+        deepseek_api_key=deepseek_api_key,
+    )
+    return result
+
+
+@router.put("/api/video/chapter-workflows/{workflow_id}/screenplay")
+async def api_save_screenplay(
+    workflow_id: int,
+    body: dict,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """保存/编辑短剧剧本：手动更新 screenplay_text 和 screenplay_json。"""
+    user = _require_user(request, db)
+    wf = get_chapter_workflow(workflow_id)
+    if not wf:
+        raise HTTPException(404, "工作流不存在")
+    story = db.get(Story, wf.story_id)
+    if not story or story.owner_user_id != user.id:
+        raise HTTPException(403, "无权访问")
+
+    screenplay_text = str(body.get("screenplay_text", "") or "").strip()
+    screenplay_json = body.get("screenplay_json")
+
+    if not screenplay_text:
+        raise HTTPException(400, "screenplay_text 不能为空")
+
+    wf_in_db = db.get(ChapterVideoWorkflow, workflow_id)
+    if not wf_in_db:
+        raise HTTPException(404, "工作流不存在")
+
+    wf_in_db.screenplay_text = screenplay_text
+    wf_in_db.screenplay_json = screenplay_json
+    wf_in_db.screenplay_status = "draft"
+    wf_in_db.screenplay_version = (wf_in_db.screenplay_version or 0) + 1
+    wf_in_db.screenplay_updated_at = datetime.datetime.now(datetime.timezone.utc)
+    db.commit()
+    db.refresh(wf_in_db)
+
+    return {
+        "screenplay_text": wf_in_db.screenplay_text,
+        "screenplay_json": wf_in_db.screenplay_json,
+        "screenplay_status": wf_in_db.screenplay_status,
+        "screenplay_version": wf_in_db.screenplay_version,
+        "screenplay_updated_at": wf_in_db.screenplay_updated_at.isoformat() if wf_in_db.screenplay_updated_at else None,
+    }
+
+
+@router.post("/api/video/chapter-workflows/{workflow_id}/screenplay/approve")
+async def api_approve_screenplay(
+    workflow_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """批准短剧剧本：将剧本状态设为 approved，后续拆镜等操作需要批准状态。"""
+    user = _require_user(request, db)
+    wf = get_chapter_workflow(workflow_id)
+    if not wf:
+        raise HTTPException(404, "工作流不存在")
+    story = db.get(Story, wf.story_id)
+    if not story or story.owner_user_id != user.id:
+        raise HTTPException(403, "无权访问")
+
+    if not (wf.screenplay_text or "").strip():
+        raise HTTPException(400, "剧本内容为空，请先生成或编辑剧本后再批准")
+
+    wf_in_db = db.get(ChapterVideoWorkflow, workflow_id)
+    if not wf_in_db:
+        raise HTTPException(404, "工作流不存在")
+
+    wf_in_db.screenplay_status = "approved"
+    wf_in_db.screenplay_approved_at = datetime.datetime.now(datetime.timezone.utc)
+    db.commit()
+    db.refresh(wf_in_db)
+
+    return {
+        "screenplay_status": wf_in_db.screenplay_status,
+        "screenplay_approved_at": wf_in_db.screenplay_approved_at.isoformat() if wf_in_db.screenplay_approved_at else None,
+        "message": "剧本已批准",
+    }
+
+
+@router.post("/api/video/chapter-workflows/{workflow_id}/screenplay/regenerate")
+async def api_regenerate_screenplay(
+    workflow_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """重新生成短剧剧本：重新调用 AI 生成，状态设为 draft（不自动批准）。"""
+    user = _require_user(request, db)
+    wf = get_chapter_workflow(workflow_id)
+    if not wf:
+        raise HTTPException(404, "工作流不存在")
+    story = db.get(Story, wf.story_id)
+    if not story or story.owner_user_id != user.id:
+        raise HTTPException(403, "无权访问")
+
+    chapter = db.get(Chapter, wf.chapter_id)
+    if not chapter or not (chapter.novel_content or "").strip():
+        raise HTTPException(400, "章节正文为空，请先在工作台中生成章节内容后再重新生成剧本")
+
+    deepseek_api_key = _user_deepseek_api_key(request, db)
+    if not deepseek_api_key:
+        raise HTTPException(400, "请配置 DeepSeek API Key")
+
+    result = await generate_workflow_screenplay(
+        workflow_id=workflow_id,
+        deepseek_api_key=deepseek_api_key,
+    )
+    return result
+
+
 # ── 阶段 API ────────────────────────────────────────────
 
 
@@ -6964,6 +7106,9 @@ async def api_parse_chapter_shots(
     if not story or story.owner_user_id != user.id:
         raise HTTPException(403, "无权访问")
 
+    if wf.screenplay_status != "approved":
+        raise HTTPException(409, "请先批准剧本后再执行拆镜操作")
+
     if wf.workflow_status == "parsing_shots":
         raise HTTPException(400, "当前工作流正在拆镜中，请稍候刷新结果")
 
@@ -6977,11 +7122,19 @@ async def api_parse_chapter_shots(
     # 从 DB 读取最新章节内容（替代工作流创建时的快照）
     chapter = db.get(Chapter, wf.chapter_id)
     current_source_text = (chapter.novel_content or "").strip() if chapter else ""
+
+    # 如果剧本已批准，优先使用剧本作为拆镜输入源
+    wf_in_db = db.get(ChapterVideoWorkflow, workflow_id)
+    if wf_in_db and wf_in_db.screenplay_status == "approved":
+        screenplay_source = build_shot_source_from_screenplay(wf_in_db)
+        if screenplay_source.strip():
+            current_source_text = screenplay_source
+            logger.info("拆镜使用已批准剧本作为输入源 workflow=%s", workflow_id)
+
     if not current_source_text:
         raise HTTPException(400, "章节正文为空，请先在工作台中生成章节内容后再拆镜")
 
     # 同步更新工作流 source_text，确保后续阶段（补全提示词等）使用一致内容
-    wf_in_db = db.get(ChapterVideoWorkflow, workflow_id)
     if wf_in_db:
         if wf_in_db.source_text != current_source_text:
             wf_in_db.source_text = current_source_text

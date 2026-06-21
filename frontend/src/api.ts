@@ -2924,6 +2924,12 @@ export interface ChapterVideoShot {
   status: string;
   error_message?: string | null;
   created_at: string;
+  screenplay_scene_id?: string | null;
+  screenplay_beat_id?: string | null;
+  narrative_purpose?: string | null;
+  beat_density?: string | null;
+  transition_to_next?: string | null;
+  continuity_json?: Record<string, unknown> | null;
 }
 
 export interface ChapterVideoWorkflow {
@@ -2947,6 +2953,12 @@ export interface ChapterVideoWorkflow {
   next_retry_at?: string | null;
   created_at: string;
   updated_at: string;
+  screenplay_text?: string | null;
+  screenplay_json?: Record<string, unknown> | null;
+  screenplay_status?: string | null;
+  screenplay_updated_at?: string | null;
+  screenplay_approved_at?: string | null;
+  screenplay_version?: number | null;
   shots: ChapterVideoShot[];
 }
 
@@ -4276,5 +4288,43 @@ export async function updateAdminSystemPrompts(payload: Record<string, string>):
     body: JSON.stringify(payload),
   });
   if (!res.ok) throw new Error(await readErrorMessage(res, '保存系统提示词失败'));
+  return res.json();
+}
+
+
+export async function generateWorkflowScreenplay(workflowId: number): Promise<ChapterVideoWorkflow> {
+  const res = await fetch(`${BASE}/api/video/chapter-workflows/${workflowId}/screenplay/generate`, {
+    method: 'POST',
+    headers: apiHeaders(true),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function saveWorkflowScreenplay(workflowId: number, data: { screenplay_text: string }): Promise<ChapterVideoWorkflow> {
+  const res = await fetch(`${BASE}/api/video/chapter-workflows/${workflowId}/screenplay`, {
+    method: 'PUT',
+    headers: apiHeaders(true),
+    body: JSON.stringify(data),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function approveWorkflowScreenplay(workflowId: number): Promise<ChapterVideoWorkflow> {
+  const res = await fetch(`${BASE}/api/video/chapter-workflows/${workflowId}/screenplay/approve`, {
+    method: 'POST',
+    headers: apiHeaders(true),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function regenerateWorkflowScreenplay(workflowId: number): Promise<ChapterVideoWorkflow> {
+  const res = await fetch(`${BASE}/api/video/chapter-workflows/${workflowId}/screenplay/regenerate`, {
+    method: 'POST',
+    headers: apiHeaders(true),
+  });
+  if (!res.ok) throw new Error(await res.text());
   return res.json();
 }

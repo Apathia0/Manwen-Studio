@@ -21,6 +21,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import selectinload
 from services import deepseek as deepseek_service
 from services import image2 as image_service
+from services import video_chapter_prompts as prompts
 from services import video_generation as video_gen_service
 from services.blocking import run_blocking
 from services.errors import UpstreamServiceError
@@ -126,6 +127,11 @@ def save_shots_from_parse(workflow_id: int, shots_data: list[dict[str, Any]]) ->
                 scene_location=shot_data.get("scene_location"),
                 time_of_day=shot_data.get("time_of_day"),
                 characters=shot_data.get("characters"),
+                screenplay_scene_id=shot_data.get("screenplay_scene_id"),
+                screenplay_beat_id=shot_data.get("screenplay_beat_id"),
+                narrative_purpose=shot_data.get("narrative_purpose"),
+                beat_density=shot_data.get("beat_density"),
+                transition_to_next=shot_data.get("transition_to_next"),
                 story_summary=shot_data.get("story_summary"),
                 dialogue_or_narration=shot_data.get("dialogue_or_narration"),
                 key_props_json=shot_data.get("key_props"),
@@ -217,6 +223,7 @@ def _build_shot_narrative_context(
     if current_idx is None:
         return ""
 
+    current_shot = sorted_shots[current_idx]
     context_parts = []
 
     # 前一个镜头
@@ -241,20 +248,163 @@ def _build_shot_narrative_context(
             f"情节摘要：{nxt.story_summary or '无'}\n"
         )
 
-    if context_parts:
-        result = "### 剧情连续性上下文（前后镜头衔接）\n\n"
-        result += "\n".join(context_parts)
-        result += (
-            "\n\n### 连续性要求\n"
-            "当前镜头在完整剧情序列中不是孤立出现的，在生成故事版时必须确保：\n"
-            "1. 角色情绪必须从前一镜头的终点状态自然发展而来\n"
-            "2. 如果时间或场景发生了变化，画面的叙事逻辑必须体现过渡\n"
-            "3. 角色行为和状态应与前后镜头形成自然的因果关系链条\n"
-            "4. 关键道具（如手机、戒指等）的状态应跨镜头保持一致"
-        )
-        return result
+    # 结构化连续性信息（来自 continuity_json）
+    continuity_parts = []
+    cj = current_shot.continuity_json
+    if isinstance(cj, dict):
+        from_prev = cj.get("from_previous", {})
+        to_next = cj.get("to_next", {})
+        visual_anchor = cj.get("visual_anchor")
 
-    return ""
+        if isinstance(from_prev, dict):
+            lines = []
+            ps = from_prev.get("plot_state")
+            cs = from_prev.get("character_state")
+            vs = from_prev.get("visual_state")
+            if ps:
+                lines.append(f"  承接剧情：{ps}")
+            if cs:
+                lines.append(f"  承接角色状态：{cs}")
+            if vs:
+                lines.append(f"  承接画面状态：{vs}")
+            if lines:
+                continuity_parts.append("【承接前镜】\n" + "\n".join(lines))
+
+        if isinstance(to_next, dict):
+            lines = []
+            ps = to_next.get("plot_setup")
+            cs = to_next.get("character_state")
+            vs = to_next.get("visual_state")
+            if ps:
+                lines.append(f"  铺垫剧情：{ps}")
+            if cs:
+                lines.append(f"  铺垫角色状态：{cs}")
+            if vs:
+                lines.append(f"  铺垫画面状态：{vs}")
+            if lines:
+                continuity_parts.append("【铺垫后镜】\n" + "\n".join(lines))
+
+        if visual_anchor:
+            continuity_parts.append(f"【画面锚点】{visual_anchor}")
+
+    # 组装输出
+    if not context_parts and not continuity_parts:
+        return ""
+
+    result = "### 剧情连续性上下文（前后镜头衔接）\n\n"
+    if context_parts:
+        result += "\n".join(context_parts)
+    if continuity_parts:
+        if context_parts:
+            result += "\n\n"
+        result += "### 结构化连续性信息\n\n"
+        result += "\n\n".join(continuity_parts)
+    result += (
+        "\n\n### 连续性要求\n"
+        "当前镜头在完整剧情序列中不是孤立出现的，在生成故事版时必须确保：\n"
+        "1. 角色情绪必须从前一镜头的终点状态自然发展而来\n"
+        "2. 如果时间或场景发生了变化，画面的叙事逻辑必须体现过渡\n"
+        "3. 角色行为和状态应与前后镜头形成自然的因果关系链条\n"
+        "4. 关键道具（如手机、戒指等）的状态应跨镜头保持一致"
+    )
+    return result
+
+
+def _parse_screenplay_id_list(raw_value: object) -> set[str]:
+    if raw_value is None:
+        return set()
+    if isinstance(raw_value, list):
+        return {str(item).strip() for item in raw_value if str(item).strip()}
+    text = str(raw_value).strip()
+    if not text:
+        return set()
+    normalized = text.replace("，", ",").replace("、", ",").replace(";", ",").replace("；", ",")
+    return {part.strip() for part in normalized.split(",") if part.strip()}
+
+
+def build_screenplay_context_for_shot(workflow: ChapterVideoWorkflow | None, shot: ChapterVideoShot | None) -> str:
+    if not workflow or not shot or not isinstance(workflow.screenplay_json, dict):
+        return ""
+    scenes = workflow.screenplay_json.get("scenes")
+    if not isinstance(scenes, list):
+        return ""
+
+    target_scene_ids = _parse_screenplay_id_list(shot.screenplay_scene_id)
+    target_beat_ids = _parse_screenplay_id_list(shot.screenplay_beat_id)
+    lines: list[str] = []
+
+    for scene in scenes:
+        if not isinstance(scene, dict):
+            continue
+        scene_id = str(scene.get("scene_id") or scene.get("scene_number") or "").strip()
+        if target_scene_ids and scene_id not in target_scene_ids:
+            continue
+
+        title = str(scene.get("title") or "").strip()
+        location = str(scene.get("location") or "").strip()
+        time_of_day = str(scene.get("time_of_day") or "").strip()
+        scene_purpose = str(scene.get("scene_purpose") or "").strip()
+        header = f"场景 {scene_id}"
+        if title:
+            header += f"：{title}"
+        if location:
+            header += f" [{location}]"
+        if time_of_day:
+            header += f" ({time_of_day})"
+        lines.append(header)
+
+        characters = scene.get("characters")
+        if isinstance(characters, list) and characters:
+            lines.append(f"出场角色：{'、'.join(str(c) for c in characters if c)}")
+        if scene_purpose:
+            lines.append(f"场景功能：{scene_purpose}")
+
+        visual_anchors = scene.get("visual_anchors")
+        if isinstance(visual_anchors, list):
+            for anchor in visual_anchors:
+                if not isinstance(anchor, dict):
+                    continue
+                anchor_type = str(anchor.get("type") or "").strip()
+                anchor_desc = str(anchor.get("description") or "").strip()
+                if anchor_type and anchor_desc:
+                    lines.append(f"视觉锚点[{anchor_type}]：{anchor_desc}")
+                elif anchor_desc:
+                    lines.append(f"视觉锚点：{anchor_desc}")
+
+        beats = scene.get("beats")
+        if isinstance(beats, list):
+            for beat in beats:
+                if not isinstance(beat, dict):
+                    continue
+                beat_id = str(beat.get("beat_id") or "").strip()
+                if target_beat_ids and beat_id not in target_beat_ids:
+                    continue
+                beat_type = str(beat.get("type") or "").strip()
+                importance = str(beat.get("importance") or "").strip()
+                action = str(beat.get("action") or "").strip()
+                dialogue = str(beat.get("dialogue") or "").strip()
+                emotion = str(beat.get("emotion_shift") or "").strip()
+                transition = str(beat.get("transition_to_next") or "").strip()
+                beat_header = f"节拍 {beat_id}"
+                if beat_type:
+                    beat_header += f" [{beat_type}]"
+                if importance:
+                    beat_header += f" ({importance})"
+                lines.append(beat_header)
+                if action:
+                    lines.append(f"动作：{action}")
+                if dialogue:
+                    lines.append(f"台词/旁白：{dialogue}")
+                if emotion:
+                    lines.append(f"情绪变化：{emotion}")
+                if transition:
+                    lines.append(f"承接：{transition}")
+
+        next_scene = str(scene.get("transition_to_next_scene") or "").strip()
+        if next_scene:
+            lines.append(f"场次转场：{next_scene}")
+
+    return "\n".join(lines).strip()
 
 
 def _normalize_prompt_entries(entries: list[dict[str, object]] | list[dict[str, str]] | None) -> list[dict[str, str]]:
@@ -704,6 +854,11 @@ async def generate_shot_details_batch(
                 "scene_location": shot.scene_location or "",
                 "time_of_day": shot.time_of_day or "",
                 "characters": shot.characters or [],
+                "screenplay_scene_id": shot.screenplay_scene_id or "",
+                "screenplay_beat_id": shot.screenplay_beat_id or "",
+                "narrative_purpose": shot.narrative_purpose or "",
+                "beat_density": shot.beat_density or "",
+                "transition_to_next": shot.transition_to_next or "",
                 "story_summary": shot.story_summary or "",
                 "dialogue_or_narration": shot.dialogue_or_narration or "",
             })
@@ -1033,6 +1188,11 @@ async def _expand_single_shot_prompts(
         "scene_location": shot.scene_location or "",
         "time_of_day": shot.time_of_day or "",
         "characters": shot.characters or [],
+        "screenplay_scene_id": shot.screenplay_scene_id or "",
+        "screenplay_beat_id": shot.screenplay_beat_id or "",
+        "narrative_purpose": shot.narrative_purpose or "",
+        "beat_density": shot.beat_density or "",
+        "transition_to_next": shot.transition_to_next or "",
         "story_summary": shot.story_summary or "",
         "dialogue_or_narration": shot.dialogue_or_narration or "",
     }]
@@ -1059,6 +1219,11 @@ async def _expand_single_shot_prompts(
         "scene_location": shot.scene_location,
         "time_of_day": shot.time_of_day,
         "characters": shot.characters,
+        "screenplay_scene_id": shot.screenplay_scene_id,
+        "screenplay_beat_id": shot.screenplay_beat_id,
+        "narrative_purpose": shot.narrative_purpose,
+        "beat_density": shot.beat_density,
+        "transition_to_next": shot.transition_to_next,
         "story_summary": shot.story_summary,
         "dialogue_or_narration": shot.dialogue_or_narration,
         "source_text_span": shot.source_text_span,
@@ -1118,6 +1283,7 @@ async def _expand_single_shot_prompts(
 
     shot_context = _build_shot_narrative_context(workflow, shot.shot_index)
     storyboard_payload["shot_context"] = shot_context
+    storyboard_payload["screenplay_context"] = build_screenplay_context_for_shot(workflow, shot)
     try:
         storyboard_prompt = await deepseek_service.generate_shot_storyboard_prompt(storyboard_payload, api_key=deepseek_api_key)
     except Exception as exc:
@@ -1651,6 +1817,11 @@ async def regenerate_shot_storyboard(
             "scene_location": shot.scene_location,
             "time_of_day": shot.time_of_day,
             "characters": shot.characters,
+            "screenplay_scene_id": shot.screenplay_scene_id,
+            "screenplay_beat_id": shot.screenplay_beat_id,
+            "narrative_purpose": shot.narrative_purpose,
+            "beat_density": shot.beat_density,
+            "transition_to_next": shot.transition_to_next,
             "story_summary": shot.story_summary,
             "dialogue_or_narration": shot.dialogue_or_narration,
             "source_text_span": shot.source_text_span,
@@ -1659,6 +1830,7 @@ async def regenerate_shot_storyboard(
             "emotion_plan": shot.emotion_plan,
             "style_preset": style_preset,
             "shot_context": shot_context,
+            "screenplay_context": build_screenplay_context_for_shot(workflow, shot),
             "storyboard_json": shot.storyboard_json,
         })
 
@@ -2223,3 +2395,235 @@ def validate_character_consistency(workflow_id: int) -> dict[str, Any]:
         }
     finally:
         db.close()
+
+
+# ── 短剧剧本生成 ──────────────────────────────────────────
+
+
+async def generate_workflow_screenplay(
+    workflow_id: int,
+    *,
+    deepseek_api_key: str | None = None,
+    task_id: str | None = None,
+) -> dict[str, object]:
+    """为工作流生成短剧剧本。
+
+    从 workflow 关联的 chapter.novel_content 读取小说正文，
+    调用 DeepSeek 将其转换为短剧剧本 JSON 格式，
+    存入 workflow.screenplay_text / screenplay_json。
+
+    Returns:
+        {"screenplay_status": str, "scene_count": int}
+    """
+    logger.info("剧本生成 workflow=%s", workflow_id)
+
+    db = SessionLocal()
+    try:
+        workflow = (
+            db.query(ChapterVideoWorkflow)
+            .options(selectinload(ChapterVideoWorkflow.chapter))
+            .filter(ChapterVideoWorkflow.id == workflow_id)
+            .first()
+        )
+        if not workflow:
+            raise ValueError(f"工作流不存在: {workflow_id}")
+
+        chapter = workflow.chapter
+        if not chapter or not chapter.novel_content:
+            raise ValueError(f"章节 {workflow.chapter_id} 没有小说正文，无法生成剧本")
+
+        novel_content = chapter.novel_content
+
+        if task_id and task_manager.is_cancellation_requested(task_id):
+            return {"screenplay_status": "cancelled", "scene_count": 0}
+
+        # 调用 DeepSeek 生成剧本
+        payload = {
+            "model": deepseek_service.DEEPSEEK_MODEL,
+            "messages": [
+                {"role": "system", "content": prompts.NOVEL_TO_SHORT_DRAMA_SCREENPLAY_SYSTEM_PROMPT},
+                {"role": "user", "content": prompts.NOVEL_TO_SHORT_DRAMA_SCREENPLAY_USER_PROMPT_HEADER + "\n\n" + novel_content},
+            ],
+            "stream": False,
+            "max_tokens": 32768,
+            "response_format": {"type": "json_object"},
+        }
+
+        async with deepseek_service.httpx.AsyncClient(timeout=600) as client:
+            resp = await client.post(
+                f"{deepseek_service.DEEPSEEK_BASE_URL}/chat/completions",
+                json=payload,
+                headers=deepseek_service._deepseek_auth_headers(deepseek_api_key),
+            )
+            resp.raise_for_status()
+            data = deepseek_service._response_json(resp, context="DeepSeek")
+            content = data["choices"][0]["message"]["content"]
+
+        # 解析 JSON
+        try:
+            screenplay_json = deepseek_service._loads_json_lenient(content)
+        except Exception:
+            screenplay_json = deepseek_service.json.loads(content)
+
+        if not isinstance(screenplay_json, dict):
+            raise ValueError(f"剧本生成返回了非预期的格式: {type(screenplay_json).__name__}")
+
+        scene_count = len(screenplay_json.get("scenes", []))
+
+        # 写入 workflow
+        workflow.screenplay_text = content
+        workflow.screenplay_json = screenplay_json
+        workflow.screenplay_status = "draft"
+        workflow.screenplay_version = (workflow.screenplay_version or 0) + 1
+        workflow.screenplay_updated_at = datetime.now(timezone.utc)
+        db.commit()
+
+        logger.info(
+            "剧本生成完成 workflow=%s scenes=%d version=%d",
+            workflow_id,
+            scene_count,
+            workflow.screenplay_version,
+        )
+
+        return {"screenplay_status": "draft", "scene_count": scene_count}
+
+    except Exception as exc:
+        logger.error("剧本生成失败 workflow=%s: %s", workflow_id, exc)
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
+def require_approved_screenplay(workflow: ChapterVideoWorkflow) -> None:
+    """校验工作流的剧本状态是否为 approved。
+
+    如果剧本未批准，抛出 ValueError 阻止后续流程继续。
+    """
+    if workflow.screenplay_status != "approved":
+        raise ValueError("请先生成并批准短剧剧本")
+
+
+def build_shot_source_from_screenplay(workflow: ChapterVideoWorkflow) -> str:
+    """从工作流的剧本数据构造拆镜输入文本。
+
+    优先从 screenplay_json 构造结构化文本，回退到 screenplay_text 原始文本。
+    screenplay_json 格式由 NOVEL_TO_SHORT_DRAMA_SCREENPLAY_SYSTEM_PROMPT 定义，
+    包含 scenes[{scene_id, title, location, time_of_day, characters, scene_purpose,
+    visual_anchors, beats[{type, action, dialogue, emotion_shift}], transition_to_next_scene}]。
+    """
+    screenplay_json = workflow.screenplay_json
+
+    if screenplay_json and isinstance(screenplay_json, dict):
+        scenes = screenplay_json.get("scenes")
+        if scenes and isinstance(scenes, list) and len(scenes) > 0:
+            lines: list[str] = []
+            for scene in scenes:
+                if not isinstance(scene, dict):
+                    continue
+                scene_id = scene.get("scene_id") or scene.get("scene_number", "")
+                title = scene.get("title", "")
+                location = scene.get("location", "")
+                time_of_day = scene.get("time_of_day", "")
+                scene_purpose = scene.get("scene_purpose", "")
+                characters = scene.get("characters", [])
+                transition_next = scene.get("transition_to_next_scene", "")
+
+                header_parts = [f"场景 {scene_id}"]
+                if title:
+                    header_parts.append(f"：{title}")
+                if location:
+                    header_parts.append(f" [{location}]")
+                if time_of_day:
+                    header_parts.append(f" ({time_of_day})")
+                lines.append("".join(header_parts))
+
+                if characters and isinstance(characters, list):
+                    lines.append(f"  出场角色：{'、'.join(str(c) for c in characters if c)}")
+
+                if scene_purpose:
+                    lines.append(f"  场景功能：{scene_purpose}")
+
+                visual_anchors = scene.get("visual_anchors", [])
+                if visual_anchors and isinstance(visual_anchors, list):
+                    for va in visual_anchors:
+                        if isinstance(va, dict):
+                            va_type = va.get("type", "")
+                            va_desc = va.get("description", "")
+                            if va_type and va_desc:
+                                lines.append(f"  视觉锚点 [{va_type}]：{va_desc}")
+                            elif va_desc:
+                                lines.append(f"  视觉锚点：{va_desc}")
+
+                beats = scene.get("beats", [])
+                if beats and isinstance(beats, list):
+                    for beat in beats:
+                        if not isinstance(beat, dict):
+                            continue
+                        beat_id = beat.get("beat_id", "")
+                        beat_type = beat.get("type", "")
+                        importance = beat.get("importance", "")
+                        action = beat.get("action", "")
+                        dialogue = beat.get("dialogue", "")
+                        emotion_shift = beat.get("emotion_shift", "")
+                        transition_to_next = beat.get("transition_to_next", "")
+
+                        beat_parts = [f"  节拍 {beat_id}"]
+                        if beat_type:
+                            beat_parts.append(f"[{beat_type}]")
+                        if importance:
+                            beat_parts.append(f"({importance})")
+                        lines.append(" ".join(beat_parts))
+
+                        if action:
+                            lines.append(f"    动作：{action}")
+                        if dialogue:
+                            lines.append(f"    台词：{dialogue}")
+                        if emotion_shift:
+                            lines.append(f"    情绪变化：{emotion_shift}")
+                        if transition_to_next:
+                            lines.append(f"    承接：{transition_to_next}")
+
+                if transition_next:
+                    lines.append(f"  转场：{transition_next}")
+
+                lines.append("")
+            return "\n".join(lines).strip()
+
+    # 回退到 screenplay_text
+    if workflow.screenplay_text:
+        return workflow.screenplay_text
+
+    return ""
+
+
+def validate_screenplay_structure(screenplay_json: Any) -> list[str]:
+    """校验 screenplay_json 结构是否合法。
+
+    Returns:
+        错误信息列表，空列表表示校验通过。
+    """
+    errors: list[str] = []
+
+    if screenplay_json is None:
+        errors.append("screenplay_json 为空")
+        return errors
+
+    if not isinstance(screenplay_json, dict):
+        errors.append(f"screenplay_json 应为字典类型，实际为 {type(screenplay_json).__name__}")
+        return errors
+
+    scenes = screenplay_json.get("scenes")
+    if scenes is None:
+        errors.append("screenplay_json 缺少 'scenes' 字段")
+        return errors
+
+    if not isinstance(scenes, list):
+        errors.append(f"scenes 应为列表类型，实际为 {type(scenes).__name__}")
+        return errors
+
+    if len(scenes) == 0:
+        errors.append("scenes 列表为空，至少需要一个场景")
+        return errors
+
+    return errors

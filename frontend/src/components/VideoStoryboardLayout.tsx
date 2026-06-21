@@ -275,6 +275,10 @@ export default function VideoStoryboardLayout({
   const handleParseShots = useCallback(async () => {
     if (!resolvedChapter?.id) return;
     if (parsing || workflowRunning) return;
+    if (workflow && workflow.screenplay_status !== 'approved') {
+      toast.error('请先生成并批准剧本后再拆镜');
+      return;
+    }
     try {
       setWorkflowRunning(true);
       setParsing(true);
@@ -654,6 +658,7 @@ export default function VideoStoryboardLayout({
           workflow={workflow}
           workflowLoading={workflowLoading}
           workflowRunning={workflowRunning}
+          chapterNovelContent={resolvedChapter?.novel_content ?? undefined}
           chapterAssets={chapterAssets}
           selectedReferenceIds={selectedReferenceIds}
           selectedStyle={selectedStyle}

@@ -940,6 +940,12 @@ class ChapterVideoShotOut(BaseModel):
     video_url: str | None = None
     status: str = "pending"
     error_message: str | None = None
+    screenplay_scene_id: str | None = None
+    screenplay_beat_id: str | None = None
+    narrative_purpose: str | None = None
+    beat_density: str | None = None
+    transition_to_next: str | None = None
+    continuity_json: dict[str, Any] | None = None
     created_at: datetime.datetime
 
     model_config = {"from_attributes": True}
@@ -980,6 +986,12 @@ class ChapterVideoWorkflowOut(BaseModel):
     completed_shots: int = 0
     failed_shots: int = 0
     error_message: str | None = None
+    screenplay_text: str | None = None
+    screenplay_json: dict[str, Any] | None = None
+    screenplay_status: str = "missing"
+    screenplay_updated_at: datetime.datetime | None = None
+    screenplay_approved_at: datetime.datetime | None = None
+    screenplay_version: int = 0
     created_at: datetime.datetime
     updated_at: datetime.datetime
     shots: list[ChapterVideoShotOut] = []

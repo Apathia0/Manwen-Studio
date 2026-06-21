@@ -575,10 +575,23 @@ def _migrate_video_tables(target_engine=None):
             conn.execute(text("ALTER TABLE video_style_presets ADD COLUMN image_url VARCHAR(500)"))
 
     chapter_video_workflows_cols = {c["name"] for c in insp.get_columns("chapter_video_workflows")} if "chapter_video_workflows" in insp.get_table_names() else set()
-    if chapter_video_workflows_cols and "style_reference_image_url" not in chapter_video_workflows_cols:
+    if chapter_video_workflows_cols:
         with db_engine.begin() as conn:
             _prepare_migration_conn(conn)
-            conn.execute(text("ALTER TABLE chapter_video_workflows ADD COLUMN style_reference_image_url VARCHAR(500)"))
+            if "style_reference_image_url" not in chapter_video_workflows_cols:
+                conn.execute(text("ALTER TABLE chapter_video_workflows ADD COLUMN style_reference_image_url VARCHAR(500)"))
+            if "screenplay_text" not in chapter_video_workflows_cols:
+                conn.execute(text("ALTER TABLE chapter_video_workflows ADD COLUMN screenplay_text TEXT"))
+            if "screenplay_json" not in chapter_video_workflows_cols:
+                conn.execute(text("ALTER TABLE chapter_video_workflows ADD COLUMN screenplay_json JSON"))
+            if "screenplay_status" not in chapter_video_workflows_cols:
+                conn.execute(text("ALTER TABLE chapter_video_workflows ADD COLUMN screenplay_status VARCHAR(32) DEFAULT 'missing'"))
+            if "screenplay_updated_at" not in chapter_video_workflows_cols:
+                conn.execute(text("ALTER TABLE chapter_video_workflows ADD COLUMN screenplay_updated_at TIMESTAMP"))
+            if "screenplay_approved_at" not in chapter_video_workflows_cols:
+                conn.execute(text("ALTER TABLE chapter_video_workflows ADD COLUMN screenplay_approved_at TIMESTAMP"))
+            if "screenplay_version" not in chapter_video_workflows_cols:
+                conn.execute(text("ALTER TABLE chapter_video_workflows ADD COLUMN screenplay_version INTEGER DEFAULT 0"))
 
     script_scenes_cols = {c["name"] for c in insp.get_columns("script_scenes")} if "script_scenes" in insp.get_table_names() else set()
     if "concept_art_asset_id" not in script_scenes_cols:
@@ -629,6 +642,18 @@ def _migrate_video_tables(target_engine=None):
                 conn.execute(text("ALTER TABLE chapter_video_shots ADD COLUMN scene_reference_ids JSON"))
             if "prop_reference_ids" not in chapter_video_shots_cols:
                 conn.execute(text("ALTER TABLE chapter_video_shots ADD COLUMN prop_reference_ids JSON"))
+            if "screenplay_scene_id" not in chapter_video_shots_cols:
+                conn.execute(text("ALTER TABLE chapter_video_shots ADD COLUMN screenplay_scene_id VARCHAR(64)"))
+            if "screenplay_beat_id" not in chapter_video_shots_cols:
+                conn.execute(text("ALTER TABLE chapter_video_shots ADD COLUMN screenplay_beat_id VARCHAR(64)"))
+            if "narrative_purpose" not in chapter_video_shots_cols:
+                conn.execute(text("ALTER TABLE chapter_video_shots ADD COLUMN narrative_purpose VARCHAR(64)"))
+            if "beat_density" not in chapter_video_shots_cols:
+                conn.execute(text("ALTER TABLE chapter_video_shots ADD COLUMN beat_density VARCHAR(16)"))
+            if "transition_to_next" not in chapter_video_shots_cols:
+                conn.execute(text("ALTER TABLE chapter_video_shots ADD COLUMN transition_to_next VARCHAR(32)"))
+            if "continuity_json" not in chapter_video_shots_cols:
+                conn.execute(text("ALTER TABLE chapter_video_shots ADD COLUMN continuity_json JSON"))
 
 
 def _seed_video_style_presets(target_engine=None):
