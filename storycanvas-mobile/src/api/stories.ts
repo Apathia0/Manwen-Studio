@@ -30,7 +30,7 @@ export function generateCover(id: number, instruction?: string): Promise<{ cover
     url: `/api/stories/${id}/generate-cover`,
     method: 'POST',
     data: { instruction: instruction || '' },
-    timeout: 180000
+    timeout: 300000
   })
 }
 

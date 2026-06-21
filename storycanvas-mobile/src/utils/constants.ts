@@ -72,6 +72,8 @@ export const PAYMENT_METHODS = {
 } as const
 
 // 套餐功能中文标签
+// 对齐后端 FEATURE_CATALOG（backend/main.py），用于普通用户页面展示用量
+// 管理后台页面优先使用 getAdminFeatureCatalog() 返回的 catalog 数据，本字典仅作为 fallback
 export interface FeatureMeta {
   label: string
   description: string
@@ -80,34 +82,32 @@ export interface FeatureMeta {
 }
 
 export const FEATURE_LABELS: Record<string, FeatureMeta> = {
+  // ── 小说创作 ──
   'framework.generate.monthly_limit': {
     label: '小说框架生成',
-    description: '用于生成世界观、角色设定和故事大纲。',
+    description: '用户每月可生成世界观、角色与大纲的次数。',
     unit: '次/月',
   },
   'chapter.expand.monthly_limit': {
     label: '章节扩写',
-    description: '将章节规划一键扩写为完整正文。',
+    description: '用户每月可将章节计划扩写成正文的次数。',
     unit: '次/月',
   },
+  // ── 漫画生成 ──
   'scene.generate.monthly_limit': {
     label: '漫画分镜生成',
-    description: '将小说正文转换成分镜脚本。',
+    description: '用户每月可将文本拆分为漫画分镜的次数。',
     unit: '次/月',
   },
-  'manga.image.monthly_limit': {
-    label: '漫画图片生成',
-    description: '每月可生成的漫画图片总张数。',
+  // 注意: 后端实际 key 是 manga.image.generate.monthly_limit（含 .generate）
+  'manga.image.generate.monthly_limit': {
+    label: '生图配额',
+    description: '用户每月可生成的图片总张数（含新生成和重绘）。',
     unit: '张/月',
   },
   'manga.regenerate.monthly_limit': {
     label: '漫画重绘',
     description: '对单张漫画图重新生成和修正。',
-    unit: '次/月',
-  },
-  'ai.text.advanced_calls.monthly_limit': {
-    label: '高级文本 AI',
-    description: '用于框架调整、继续扩展、文本改写、正文调整、质量评估与单项重生成。',
     unit: '次/月',
   },
   'manga.max_image_count_per_chapter': {
@@ -120,6 +120,23 @@ export const FEATURE_LABELS: Record<string, FeatureMeta> = {
     description: '是否支持彩色漫画生成。',
     unit: '',
     kind: 'boolean',
+  },
+  // ── 高级文本能力 ──
+  'ai.text.advanced_calls.monthly_limit': {
+    label: '高级文本 AI',
+    description: '用于框架调整、继续扩展、文本改写、正文调整、质量评估与单项重生成。',
+    unit: '次/月',
+  },
+  // ── 视频创作 ──
+  'video.shot.split.monthly_limit': {
+    label: '拆镜次数',
+    description: '用户每月可拆镜次数，每次点击顶部拆镜按钮消耗 1 次。',
+    unit: '次/月',
+  },
+  'video.generate.count.monthly_limit': {
+    label: '视频生成次数',
+    description: '用户每月可生成视频次数，每次生成一个分镜视频消耗 1 次。',
+    unit: '次/月',
   },
   'video.generate.seconds.monthly_limit': {
     label: '视频生成时长',

@@ -17,13 +17,31 @@
     </view>
 
     <lv-swiper-tabs
-      :tabs="['框架', '编辑', '漫画', '助手']"
+      :tabs="['框架', '编辑', '漫画', '视频', '助手']"
       v-model:current="activeTabIndex"
     >
       <!-- 框架标签 -->
       <template #tab-0>
         <scroll-view scroll-y class="chapter-view__tab-scroll">
           <view class="chapter-view__tab">
+            <!-- 封面 banner -->
+            <view class="fp__cover-banner" @tap="handleCoverEdit">
+              <image
+                v-if="storyStore.activeStory?.cover_image"
+                :src="coverImageUrl(storyStore.activeStory.cover_image) || ''"
+                class="fp__cover-img"
+                mode="aspectFill"
+              />
+              <view v-else class="fp__cover-placeholder">
+                <lv-icon name="ImagePlus" :size="32" color="#94a3b8" />
+                <text class="fp__cover-text">设置封面</text>
+              </view>
+              <view class="fp__cover-info">
+                <text class="fp__cover-title">{{ storyStore.activeStory?.title || '未命名' }}</text>
+                <text class="fp__cover-edit">点击编辑封面</text>
+              </view>
+            </view>
+
             <!-- 模板绑定 -->
             <template-binding
               v-if="storyStore.activeStoryId"
@@ -68,8 +86,9 @@
                   <text class="fp__section-label">框架 AI 对话</text>
                 </view>
                 <view class="fp__header-actions">
-                  <view v-if="hasFramework" class="fp__header-btn" @tap="handleContinueFramework">
-                    <lv-icon name="Sparkles" :size="12" color="#2563eb" style="margin-right: 4rpx;" />一键续写
+                  <view v-if="hasFramework" class="fp__header-btn" :class="{ 'fp__header-btn--disabled': continuingFramework }" @tap="!continuingFramework && handleContinueFramework()">
+                    <lv-icon v-if="continuingFramework" name="Loader" :size="12" color="#2563eb" style="margin-right: 4rpx; animation: spin 1s linear infinite;" />
+                    <lv-icon v-else name="Sparkles" :size="12" color="#2563eb" style="margin-right: 4rpx;" />{{ continuingFramework ? '续写中...' : '一键续写' }}
                   </view>
                   <text class="fp__header-btn" @tap="toggleSnapshots">{{ showSnapshots ? '收起' : '历史版本' }}</text>
                 </view>
@@ -88,7 +107,7 @@
                     <text class="fp__snapshot-num">#{{ i + 1 }}</text>
                     <text class="fp__snapshot-time">{{ snap.created_at }}</text>
                     <text class="fp__snapshot-desc">{{ snap.reply_summary || snap.description || '' }}</text>
-                    <lv-button size="sm" secondary @tap="handleRestoreSnapshot(snap.id)">回滚</lv-button>
+                    <lv-button size="sm" secondary @tap="handleRestoreSnapshot(snap.id)" :loading="restoringSnapshot === snap.id" :disabled="restoringSnapshot > 0">回滚</lv-button>
                   </view>
                 </view>
               </view>
@@ -118,36 +137,49 @@
               <text v-if="chatError" class="fp__error">{{ chatError }}</text>
             </view>
 
-            <!-- 手动编辑框架 -->
+            <!-- 框架编辑器入口 -->
             <view class="fp__section fp__card">
-              <view class="fp__section-header" @tap="toggleManualEdit">
+              <view class="fp__section-header" @tap="openFrameworkEditor">
                 <view class="fp__section-title">
-                  <lv-icon name="Pencil" :size="16" color="#64748b" />
-                  <text class="fp__section-label">手动编辑框架</text>
+                  <lv-icon name="Pencil" :size="16" color="#2563eb" />
+                  <text class="fp__section-label">打开框架编辑器</text>
                 </view>
-                <lv-icon :name="manualEditing ? 'ChevronUp' : 'ChevronDown'" :size="14" color="#94a3b8" />
+                <lv-icon name="ChevronRight" :size="14" color="#94a3b8" />
               </view>
-              <view v-if="manualEditing" class="fp__section-body">
-                <textarea class="fp__textarea fp__textarea--mono" v-model="manualDraft" placeholder="{ ... }" />
-                <view class="fp__actions">
-                  <lv-button size="sm" secondary @tap="cancelManualEdit">取消</lv-button>
-                  <lv-button size="sm" @tap="saveManualEdit" :loading="manualSaving">保存框架</lv-button>
-                </view>
-                <text v-if="manualError" class="fp__error">{{ manualError }}</text>
+              <view class="fp__section-body">
+                <text class="fp__desc-text">打开包含预览区和编辑区的框架编辑器，可视化编辑故事描述、标签、角色和大纲。</text>
               </view>
             </view>
 
             <!-- 标签 -->
             <view class="fp__section fp__card">
-              <view class="fp__section-header">
+              <view class="fp__section-header" @tap="tagsExpanded = !tagsExpanded">
                 <view class="fp__section-title">
                   <lv-icon name="Tag" :size="16" color="#64748b" />
                   <text class="fp__section-label">标签设定</text>
                 </view>
-                <text class="fp__badge" v-if="hasTags">已生成</text>
+                <view class="fp__header-actions">
+                  <text class="fp__header-btn" @tap.stop="handleRegenerateTags" :class="{ 'fp__header-btn--disabled': regeneratingTags }">
+                    <lv-icon v-if="regeneratingTags" name="Loader" :size="12" color="#2563eb" style="margin-right: 4rpx; animation: spin 1s linear infinite;" />
+                    <lv-icon v-else name="Sparkles" :size="12" color="#2563eb" style="margin-right: 4rpx;" />{{ regeneratingTags ? '生成中...' : 'AI 生成' }}
+                  </text>
+                  <text class="fp__badge" v-if="hasTags">已生成</text>
+                  <lv-icon :name="tagsExpanded ? 'ChevronUp' : 'ChevronDown'" :size="14" color="#94a3b8" />
+                </view>
               </view>
-              <view class="fp__section-body">
-                <view class="fp__tags">
+              <view v-if="tagsExpanded" class="fp__section-body">
+                <view v-if="frameworkStory?.tags && typeof frameworkStory.tags === 'object'" class="fp__tag-edit-list">
+                  <view v-for="(val, key) in (frameworkStory.tags as Record<string, any>)" :key="key" class="fp__tag-edit-row">
+                    <text class="fp__tag-edit-label">{{ ({ type: '类型', theme: '主题', style: '风格', audience: '受众' } as Record<string, string>)[key] || key }}</text>
+                    <template v-if="editingTagKey === key">
+                      <input class="fp__tag-edit-input" v-model="editingTagDraft" :placeholder="'输入' + key" />
+                      <lv-button size="sm" @tap="saveTagEdit">保存</lv-button>
+                      <lv-button size="sm" secondary @tap="cancelTagEdit">取消</lv-button>
+                    </template>
+                    <text v-else class="fp__tag-edit-value" @tap="startTagEdit(key, typeof val === 'string' ? val : '')">{{ typeof val === 'string' && val ? val : '未设置' }}</text>
+                  </view>
+                </view>
+                <view v-else class="fp__tags">
                   <lv-tag v-for="tag in tags" :key="tag" :text="tag" size="md" />
                 </view>
               </view>
@@ -161,12 +193,39 @@
                   <text class="fp__section-label">角色设定</text>
                 </view>
                 <view class="fp__header-actions">
+                  <text class="fp__header-btn" @tap.stop="handleRegenerateCharacters" :class="{ 'fp__header-btn--disabled': regeneratingChars }">
+                    <lv-icon v-if="regeneratingChars" name="Loader" :size="12" color="#2563eb" style="margin-right: 4rpx; animation: spin 1s linear infinite;" />
+                    <lv-icon v-else name="Sparkles" :size="12" color="#2563eb" style="margin-right: 4rpx;" />{{ regeneratingChars ? '生成中...' : 'AI 生成' }}
+                  </text>
                   <text class="fp__badge" v-if="hasCharacters">{{ characters.length }} 个</text>
                   <lv-icon :name="charactersExpanded ? 'ChevronUp' : 'ChevronDown'" :size="14" color="#94a3b8" />
                 </view>
               </view>
               <view v-if="charactersExpanded" class="fp__section-body">
-                <character-card v-for="char in characters" :key="char.name" :character="char" />
+                <template v-for="(char, ci) in characters" :key="char.name">
+                  <character-card v-if="editingCharIndex !== ci" :character="char" />
+                  <view v-else class="fp__char-edit-card">
+                    <view class="fp__char-edit-field">
+                      <text class="fp__char-edit-label">名称</text>
+                      <input class="fp__char-edit-input" v-model="editingCharDraft!.name" placeholder="角色名" />
+                    </view>
+                    <view class="fp__char-edit-field">
+                      <text class="fp__char-edit-label">角色</text>
+                      <input class="fp__char-edit-input" v-model="editingCharDraft!.role" placeholder="主角/反派/配角" />
+                    </view>
+                    <view class="fp__char-edit-field">
+                      <text class="fp__char-edit-label">描述</text>
+                      <textarea class="fp__char-edit-textarea" v-model="editingCharDraft!.description" placeholder="角色描述..." />
+                    </view>
+                    <view class="fp__actions">
+                      <lv-button size="sm" secondary @tap="cancelCharEdit">取消</lv-button>
+                      <lv-button size="sm" @tap="saveCharEdit">保存</lv-button>
+                    </view>
+                  </view>
+                  <view class="fp__char-edit-trigger" v-if="editingCharIndex !== ci" @tap="startCharEdit(ci)">
+                    <lv-icon name="Pencil" :size="12" color="#2563eb" /><text class="fp__char-edit-trigger-text">编辑</text>
+                  </view>
+                </template>
               </view>
             </view>
 
@@ -208,8 +267,9 @@
                   <text class="fp__section-label">章节列表</text>
                 </view>
                 <view class="fp__header-actions">
-                  <view class="fp__header-btn" @tap="handleRegenerateChapters" v-if="chapters.length > 0">
-                    <lv-icon name="RefreshCw" :size="12" color="#64748b" style="margin-right: 4rpx;" />AI 生成章节
+                  <view class="fp__header-btn" :class="{ 'fp__header-btn--disabled': regeneratingChapters }" @tap="!regeneratingChapters && handleRegenerateChapters()" v-if="chapters.length > 0">
+                    <lv-icon v-if="regeneratingChapters" name="Loader" :size="12" color="#64748b" style="margin-right: 4rpx; animation: spin 1s linear infinite;" />
+                    <lv-icon v-else name="RefreshCw" :size="12" color="#64748b" style="margin-right: 4rpx;" />{{ regeneratingChapters ? '生成中...' : 'AI 生成章节' }}
                   </view>
                 </view>
               </view>
@@ -230,9 +290,22 @@
                     <view class="fp__chapter-actions">
                       <template v-if="chapterHasContent(ch)">
                         <text class="fp__chapter-btn fp__chapter-btn--primary" @tap="handleOpenChapter(ch)">打开正文</text>
-                        <text class="fp__chapter-btn" @tap="handleAssessQuality(ch)">质量评估</text>
+                        <view
+                          :class="['fp__chapter-btn', { 'fp__chapter-btn--loading': assessingChapterNum === ch.chapter_number }]"
+                          @tap="handleAssessQualityTap(ch)"
+                        >
+                          <view v-if="assessingChapterNum === ch.chapter_number" class="fp__chapter-btn-spinner" />
+                          <text>{{ assessingChapterNum === ch.chapter_number ? '评估中...' : '质量评估' }}</text>
+                        </view>
                       </template>
-                      <text v-else class="fp__chapter-btn fp__chapter-btn--primary" @tap="handleGenerateChapter(ch)">生成正文</text>
+                        <view
+                          v-else
+                          :class="['fp__chapter-btn', 'fp__chapter-btn--primary', { 'fp__chapter-btn--loading': generatingChapterNum === ch.chapter_number }]"
+                          @tap="handleGenerateChapterTap(ch)"
+                        >
+                          <view v-if="generatingChapterNum === ch.chapter_number" class="fp__chapter-btn-spinner" />
+                          <text>{{ generatingChapterNum === ch.chapter_number ? '生成中...' : '生成正文' }}</text>
+                        </view>
                     </view>
                   </view>
                   <view v-if="totalPages > 1" class="fp__pagination">
@@ -294,7 +367,7 @@
               <lv-button size="sm" @tap="goChat">
                 <lv-icon name="Bot" :size="14" style="margin-right: 6rpx;" />AI续写
               </lv-button>
-              <lv-button size="sm" secondary @tap="handleQualityAssess">
+              <lv-button size="sm" secondary @tap="handleQualityAssess" :loading="assessingQuality" :disabled="assessingQuality">
                 <lv-icon name="BarChart3" :size="14" style="margin-right: 6rpx;" />质量
               </lv-button>
               <view class="chapter-view__more" @tap="showEditorMore">
@@ -310,61 +383,155 @@
         <scroll-view scroll-y class="chapter-view__tab-scroll">
           <view class="chapter-view__tab">
             <view class="chapter-view__manga-settings">
-              <text class="chapter-view__manga-label">设置:</text>
-              <picker :value="colorModeIndex" :range="['彩色', '黑白']" @change="handleColorModeChange">
-                <text class="chapter-view__manga-picker">{{ ['彩色', '黑白'][colorModeIndex] }}</text>
-              </picker>
-              <picker :value="imageCountIndex" :range="imageCountOptions.map(o => o.label)" @change="handleImageCountChange">
-                <text class="chapter-view__manga-picker">{{ imageCountOptions[imageCountIndex].label }}</text>
-              </picker>
+              <view class="chapter-view__manga-settings-row">
+                <text class="chapter-view__manga-label">色彩:</text>
+                <picker :value="colorModeIndex" :range="['彩色', '黑白']" @change="handleColorModeChange">
+                  <text class="chapter-view__manga-picker">{{ ['彩色', '黑白'][colorModeIndex] }}</text>
+                </picker>
+                <text class="chapter-view__manga-label">张数:</text>
+                <picker :value="imageCountIndex" :range="imageCountOptions.map(o => o.label)" @change="handleImageCountChange">
+                  <text class="chapter-view__manga-picker">{{ imageCountOptions[imageCountIndex].label }}</text>
+                </picker>
+              </view>
+
+              <!-- 比例选择 -->
+              <scroll-view scroll-x class="chapter-view__manga-ratio-scroll" show-scrollbar="false">
+                <view class="chapter-view__manga-ratio-tabs">
+                  <view v-for="r in aspectRatioOptions" :key="r.value" :class="['chapter-view__manga-ratio-tab', { 'chapter-view__manga-ratio-tab--active': mangaStore.aspectRatio === r.value }]" @tap="mangaStore.aspectRatio = r.value">
+                    <text>{{ r.label }}</text>
+                  </view>
+                </view>
+              </scroll-view>
+
+              <!-- 风格预设 -->
+              <view class="chapter-view__manga-preset-row" @tap="handleOpenStylePresetInManga">
+                <text class="chapter-view__manga-preset-label">风格预设</text>
+                <view class="chapter-view__manga-preset-value">
+                  <text>{{ mangaStore.stylePresetName || '未选择' }}</text>
+                </view>
+              </view>
             </view>
 
-            <lv-button block :loading="mangaStore.isGenerating" @tap="handleGenerateManga">
-              <template v-if="mangaStore.isGenerating">生成中...</template>
+            <lv-button block :loading="mangaStore.isGenerating || isPolling" @tap="handleGenerateManga">
+              <template v-if="mangaStore.isGenerating || isPolling">生成中...</template>
               <template v-else>
                 <lv-icon name="ImagePlus" :size="16" style="margin-right: 8rpx;" />生成漫画
               </template>
             </lv-button>
 
-            <view v-if="mangaStore.isGenerating" class="chapter-view__manga-progress">
+            <view v-if="mangaStore.isGenerating || isPolling" class="chapter-view__manga-progress">
               <lv-progress :percentage="mangaStore.progressPercent" show-info />
               <text class="chapter-view__manga-status">{{ mangaStore.progress.statusMsg }}</text>
             </view>
 
             <view v-if="mangaStore.scenes.length > 0" class="chapter-view__scenes">
               <framework-section title="分镜脚本" icon="icon-film" :count="mangaStore.scenes.length">
+                <view class="chapter-view__scenes-actions">
+                  <lv-button size="sm" secondary @tap="handleMangaSceneAdd">
+                    <lv-icon name="Plus" :size="12" />新增
+                  </lv-button>
+                  <lv-button size="sm" secondary @tap="handleMangaSceneRegenerate" :loading="regeneratingMangaScenes">重生成</lv-button>
+                </view>
                 <view v-for="(scene, i) in mangaStore.scenes" :key="i" class="chapter-view__scene-item">
-                  <text class="chapter-view__scene-num">{{ i + 1 }}.</text>
-                  <text class="chapter-view__scene-text">{{ scene }}</text>
+                  <template v-if="editingMangaSceneIndex === i">
+                    <view class="chapter-view__scene-edit">
+                      <textarea class="chapter-view__scene-textarea" v-model="editingMangaSceneDraft" />
+                      <view class="chapter-view__scene-edit-actions">
+                        <lv-button size="sm" secondary @tap="cancelMangaSceneEdit">取消</lv-button>
+                        <lv-button size="sm" @tap="saveMangaSceneEdit(i)">保存</lv-button>
+                      </view>
+                    </view>
+                  </template>
+                  <template v-else>
+                    <text class="chapter-view__scene-num">{{ i + 1 }}.</text>
+                    <text class="chapter-view__scene-text" @tap="startMangaSceneEdit(i, scene)">{{ scene }}</text>
+                    <view class="chapter-view__scene-row-actions">
+                      <view class="chapter-view__scene-btn" @tap="startMangaSceneEdit(i, scene)"><lv-icon name="Pencil" :size="12" color="#2563eb" /></view>
+                      <view class="chapter-view__scene-btn" @tap="handleMangaSceneDelete(i)"><lv-icon name="Trash2" :size="12" color="#ef4444" /></view>
+                    </view>
+                  </template>
                 </view>
               </framework-section>
             </view>
 
             <view class="chapter-view__manga-grid">
-              <manga-image-card
+              <view
                 v-for="img in mangaStore.images"
                 :key="img.id"
-                :image-path="img.image_path"
-                :image-number="img.image_number"
-                @tap="goGallery(img.image_number)"
-              />
+                class="chapter-view__manga-grid-item"
+              >
+                <manga-image-card
+                  :image-path="img.image_path"
+                  :image-number="img.image_number"
+                  :cache-bust="redrawCacheBust"
+                  @tap="goGallery(img.image_number)"
+                />
+                <view class="chapter-view__manga-redraw-btn" @tap.stop="openRedraw(img)">
+                  <text class="chapter-view__manga-redraw-btn-text">重绘</text>
+                </view>
+              </view>
             </view>
 
-            <lv-empty v-if="!mangaStore.isGenerating && mangaStore.images.length === 0 && mangaStore.scenes.length === 0" title="暂无漫画" description="点击生成漫画开始创作" />
+            <!-- 图片重绘弹窗 -->
+            <image-redraw-modal
+              :visible="showRedrawModal"
+              :image-url="redrawImageUrl"
+              :image-number="redrawImageNumber"
+              :chapter-id="workspaceStore.activeChapterId"
+              ref-type="manga"
+              @close="showRedrawModal = false"
+              @success="onRedrawSuccess"
+            />
 
+            <lv-empty v-if="!mangaStore.isGenerating && !isPolling && mangaStore.images.length === 0 && mangaStore.scenes.length === 0" title="暂无漫画" description="点击生成漫画开始创作" />
+
+            <StyleSelector
+              v-if="showStylePreset"
+              :presets="stylePresets"
+              :selected-name="mangaStore.stylePresetName"
+              :style-ref-url="mangaStore.styleReferenceImageUrl"
+              :chapter-id="workspaceStore.activeChapterId"
+              @update:selected-name="mangaStore.setStylePreset"
+              @update:style-ref-url="mangaStore.setStyleReferenceImageUrl"
+              @close="showStylePreset = false"
+            />
+
+            <CharacterRefSection
+              v-if="storyId"
+              :story-id="storyId"
+              :chapter-id="workspaceStore.activeChapterId"
+              source-type="story"
+              @change="handleMangaRefChange"
+            />
             <view class="chapter-view__manga-links">
-              <lv-button secondary block size="sm" @tap="goCharacterProfiles">角色外观</lv-button>
-              <lv-button secondary block size="sm" @tap="goRefImages">参考图</lv-button>
+              <view class="chapter-view__manga-links-row">
+                <lv-button secondary block size="sm" @tap="goCharacterProfiles">角色外观</lv-button>
+                <lv-button secondary block size="sm" @tap="goRefImages">参考图</lv-button>
+              </view>
             </view>
           </view>
         </scroll-view>
       </template>
 
-      <!-- 助手标签 -->
+      <!-- 视频标签 - 内嵌工作流 -->
       <template #tab-3>
+        <scroll-view scroll-y class="chapter-view__tab-scroll">
+          <view class="chapter-view__tab">
+            <chapter-video-workflow-content
+              v-if="workspaceStore.activeChapterId"
+              :chapter-id="workspaceStore.activeChapterId"
+              :story-id="storyId"
+            />
+            <lv-empty v-else title="请先选择章节" description="在框架标签中选择一个章节" />
+          </view>
+        </scroll-view>
+      </template>
+
+      <!-- 助手标签 -->
+      <template #tab-4>
         <view class="chapter-view__agent-wrapper">
           <view class="chapter-view__agent-header">
-            <lv-button size="sm" @tap="startNewAgentConversation">新对话</lv-button>
+            <lv-button size="sm" @tap="startNewAgentConversation" :loading="creatingAgentConv" :disabled="creatingAgentConv">新对话</lv-button>
             <lv-button size="sm" secondary @tap="goAgentHistory">历史</lv-button>
           </view>
 
@@ -404,6 +571,8 @@
           <changes-banner
             v-if="agentStore.pendingChanges.length > 0"
             :count="agentStore.pendingChanges.length"
+            :confirming="confirmingChanges"
+            :rollbacking="rollbackingChanges"
             @view="handleViewChanges"
             @confirm="handleConfirmChanges"
             @rollback="handleRollbackChanges"
@@ -411,21 +580,24 @@
         </view>
       </template>
     </lv-swiper-tabs>
+
   </view>
 </template>
 
 <script setup lang="ts">
 import { ref, computed, watch, nextTick } from 'vue'
-import { onLoad } from '@dcloudio/uni-app'
+import { onLoad, onShow } from '@dcloudio/uni-app'
 import { ArrowLeft, MoreHorizontal } from '@lucide/vue'
 import { useWorkspaceStore } from '@/stores/workspace'
 import { useEditorStore } from '@/stores/editor'
 import { useMangaStore } from '@/stores/manga'
 import { useAgentStore } from '@/stores/agent'
+import { useMangaGenerationStatus } from '@/composables/useMangaGenerationStatus'
 import { useStoriesStore } from '@/stores/stories'
 import { useUiStore } from '@/stores/ui'
-import { storiesApi, frameworkApi, chaptersApi } from '@/api'
+import { storiesApi, frameworkApi, chaptersApi, adminApi, mangaApi } from '@/api'
 import type { Story, Character, OutlineAct, OutlineChapter, Chapter } from '@/api/types'
+import type { VideoStylePreset } from '@/api/admin'
 import type { FrameworkChatMessage, FrameworkSnapshotItem } from '@/api/types'
 import { useSSE } from '@/composables/useSSE'
 import { getToken } from '@/utils/storage'
@@ -446,6 +618,12 @@ import ChatInput from '@/components/chat-input/chat-input.vue'
 import ChangesBanner from '@/components/changes-banner/changes-banner.vue'
 import TemplateBinding from '@/components/template-binding/template-binding.vue'
 import BibleSummary from '@/components/bible-summary/bible-summary.vue'
+import { coverImageUrl, mangaImageUrl } from '@/utils/url'
+import { useVideoWorkflowStore } from '@/stores/videoWorkflow'
+import ChapterVideoWorkflowContent from '@/components/chapter-video-workflow-content/chapter-video-workflow-content.vue'
+import StyleSelector from '@/components/style-selector/style-selector.vue'
+import CharacterRefSection from '@/components/character-ref-section/character-ref-section.vue'
+import ImageRedrawModal from '@/components/image-redraw-modal/image-redraw-modal.vue'
 
 const workspaceStore = useWorkspaceStore()
 const editorStore = useEditorStore()
@@ -460,10 +638,111 @@ const agentInputText = ref('')
 const localEditing = ref(false)
 const colorModeIndex = ref(0)
 const imageCountIndex = ref(1)
+const showStylePreset = ref(false)
+const stylePresets = ref<VideoStylePreset[]>([])
+const chapterId = computed(() => workspaceStore.activeChapterId)
+
+// ComputedRef 可安全赋值给 Ref（只读读取）
+const { isPolling, checkAndResume: checkMangaStatus } = useMangaGenerationStatus(chapterId)
 
 const agentScrollTarget = ref('')
 const agentInitialized = ref(false)
 const quickActions = ['阅读当前章节', '修改当前章节', '优化故事框架', '质量评估', '优化分镜脚本', '角色设定建议']
+
+// 按钮级 loading 状态(独立于全局 loading,提供按钮即时视觉反馈)
+const generatingChapterNum = ref(0)      // 正在生成正文的章节号(0 = 无)
+const assessingChapterNum = ref(0)       // 正在质量评估的章节号(框架标签)
+const regeneratingChapters = ref(false)  // AI 生成章节
+const continuingFramework = ref(false)   // 一键续写
+const restoringSnapshot = ref(0)         // 回滚快照 ID
+const assessingQuality = ref(false)      // 编辑标签质量评估
+const creatingAgentConv = ref(false)     // 新建 Agent 对话
+const confirmingChanges = ref(false)     // 确认变更
+const rollbackingChanges = ref(false)    // 撤回变更
+
+const editingMangaSceneIndex = ref(-1)
+const editingMangaSceneDraft = ref('')
+const regeneratingMangaScenes = ref(false)
+
+// ── 图片重绘 ──
+const showRedrawModal = ref(false)
+const redrawImageUrl = ref('')
+const redrawImageNumber = ref(0)
+const redrawCacheBust = ref(0)
+
+function openRedraw(img: any) {
+  redrawImageUrl.value = mangaImageUrl(img.image_path)
+  redrawImageNumber.value = img.image_number
+  showRedrawModal.value = true
+}
+
+function onRedrawSuccess() {
+  // 刷新后缓存升级
+  redrawCacheBust.value = Date.now()
+  // 重新加载漫画图片列表
+  if (workspaceStore.activeChapterId) {
+    mangaStore.loadChapterManga(workspaceStore.activeChapterId)
+  }
+}
+
+function startMangaSceneEdit(index: number, text: string) {
+  editingMangaSceneIndex.value = index
+  editingMangaSceneDraft.value = text
+}
+function cancelMangaSceneEdit() {
+  editingMangaSceneIndex.value = -1
+  editingMangaSceneDraft.value = ''
+}
+async function saveMangaSceneEdit(index: number) {
+  if (!workspaceStore.activeChapterId) return
+  const newScenes = [...mangaStore.scenes]
+  newScenes[index] = editingMangaSceneDraft.value
+  try {
+    await mangaApi.updateScenes(workspaceStore.activeChapterId, newScenes)
+    mangaStore.scenes = newScenes
+    editingMangaSceneIndex.value = -1
+    editingMangaSceneDraft.value = ''
+    uiStore.success('已保存')
+  } catch (e: any) {
+    uiStore.error(e.message || '保存失败')
+  }
+}
+function handleMangaSceneAdd() {
+  const newScenes = [...mangaStore.scenes, '']
+  mangaStore.scenes = newScenes
+  editingMangaSceneIndex.value = newScenes.length - 1
+  editingMangaSceneDraft.value = ''
+}
+function handleMangaSceneDelete(index: number) {
+  uni.showModal({
+    title: '确认删除',
+    content: '确定删除此分镜？',
+    success: async (res) => {
+      if (!res.confirm) return
+      if (!workspaceStore.activeChapterId) return
+      const newScenes = mangaStore.scenes.filter((_: any, i: number) => i !== index)
+      try {
+        await mangaApi.updateScenes(workspaceStore.activeChapterId, newScenes)
+        mangaStore.scenes = newScenes
+        uiStore.success('已删除')
+      } catch (e: any) {
+        uiStore.error(e.message || '删除失败')
+      }
+    }
+  })
+}
+async function handleMangaSceneRegenerate() {
+  if (regeneratingMangaScenes.value || !workspaceStore.activeChapterId) return
+  regeneratingMangaScenes.value = true
+  try {
+    await mangaStore.generateScenes(workspaceStore.activeChapterId)
+    uiStore.success('分镜已重新生成')
+  } catch (e: any) {
+    uiStore.error(e.message || '重生成失败')
+  } finally {
+    regeneratingMangaScenes.value = false
+  }
+}
 
 const imageCountOptions = [
   { label: '4张', value: 4 },
@@ -475,6 +754,16 @@ const imageCountOptions = [
   { label: '20张', value: 20 }
 ]
 
+const aspectRatioOptions = [
+  { label: '9:16', value: '9:16' },
+  { label: '3:4', value: '3:4' },
+  { label: '2:3', value: '2:3' },
+  { label: '1:1', value: '1:1' },
+  { label: '3:2', value: '3:2' },
+  { label: '4:3', value: '4:3' },
+  { label: '16:9', value: '16:9' },
+]
+
 const storyId = ref(0)
 
 // =================== 框架标签数据 ===================
@@ -483,6 +772,7 @@ const storyId = ref(0)
 const frameworkStory = ref<Story | null>(null)
 const tags = ref<string[]>([])
 const characters = ref<Character[]>([])
+const tagsExpanded = ref(true)
 const charactersExpanded = ref(true)
 const outlineActs = ref<OutlineAct[]>([])
 const chapters = ref<OutlineChapter[]>([])
@@ -496,6 +786,36 @@ const storyDesc = computed(() => frameworkStory.value?.description || '')
 
 // --- Story Bible ---
 const storyBible = computed(() => frameworkStory.value?.story_bible || {})
+
+// --- 封面编辑 ---
+function handleCoverEdit() {
+  if (storyStore.activeStoryId) {
+    uni.navigateTo({
+      url: `/pages/story/cover-edit?storyId=${storyStore.activeStoryId}`
+    })
+  }
+}
+
+function refreshCoverImage() {
+  const story = storyStore.list.find(s => s.id === storyStore.activeStoryId)
+  if (story && frameworkStory.value) {
+    story.cover_image = frameworkStory.value.cover_image
+  }
+}
+
+onShow(() => {
+  if (storyStore.activeStoryId) {
+    storiesApi.getStory(storyStore.activeStoryId).then(story => {
+      const target = storyStore.list.find(s => s.id === storyStore.activeStoryId)
+      if (target && story.cover_image !== target.cover_image) {
+        target.cover_image = story.cover_image
+      }
+      if (frameworkStory.value) {
+        frameworkStory.value.cover_image = story.cover_image
+      }
+    }).catch(() => {})
+  }
+})
 
 function onTemplateBound() {
   // 模板绑定后可刷新框架相关数据
@@ -535,6 +855,60 @@ const hasCharacters = computed(() => characters.value.length > 0)
 
 // --- Framework AI Chat ---
 const hasFramework = computed(() => outlineActs.value.length >= 2)
+
+function countOutlineChapters(outline: Record<string, any> | null | undefined): number {
+  const acts = Array.isArray(outline?.three_acts) ? outline!.three_acts : []
+  const numbers = new Set<number>()
+  acts.forEach((act: any) => {
+    const actChapters = Array.isArray(act?.chapters) ? act.chapters : []
+    actChapters.forEach((chapter: any) => {
+      const chapterNumber = Number(chapter?.chapter_number)
+      if (Number.isInteger(chapterNumber) && chapterNumber > 0) {
+        numbers.add(chapterNumber)
+      }
+    })
+  })
+  return numbers.size
+}
+
+function formatAppliedOperations(ops: string[] | undefined): string {
+  if (!ops?.length) return ''
+  const opLabels: Record<string, string> = {
+    update_character: '更新角色',
+    add_character: '新增角色',
+    remove_character: '删除角色',
+    update_chapter: '更新章节',
+    add_chapter: '新增章节',
+    insert_chapter_after: '新增章节',
+    delete_chapter: '删除章节',
+    update_story_description: '更新故事描述',
+    update_tags: '更新标签',
+    update_act_summary: '更新阶段概述',
+  }
+  const fieldLabels: Record<string, string> = {
+    'patch:description': '故事描述',
+    'patch:tags.type': '类型标签',
+    'patch:tags.theme': '主题标签',
+    'patch:tags.style': '风格标签',
+    'patch:tags.audience': '受众标签',
+    'patch:outline.themes': '主题列表',
+    'patch:outline.foreshadowing': '伏笔列表',
+    'patch:outline.serial_strategy': '连载策略',
+  }
+  const seen = new Set<string>()
+  const labels: string[] = []
+  for (const op of ops) {
+    const [prefix] = op.split(':')
+    const label = fieldLabels[op] || opLabels[prefix]
+    if (label && !seen.has(label)) {
+      seen.add(label)
+      labels.push(label)
+    }
+    if (labels.length >= 4) break
+  }
+  return labels.length ? `\n\n已修改：${labels.join('、')}。` : ''
+}
+
 const chatInput = ref('')
 const chatMessages = ref<FrameworkChatMessage[]>([])
 const chatLoading = ref(false)
@@ -543,6 +917,112 @@ const showSnapshots = ref(false)
 const snapshots = ref<FrameworkSnapshotItem[]>([])
 const loadingSnapshots = ref(false)
 const outlineExpandedAll = ref(true)
+
+// --- 框架编辑器页面 ---
+function openFrameworkEditor() {
+  uni.navigateTo({ url: `/pages/workspace/framework-editor?storyId=${storyId.value}` })
+}
+
+// --- 标签内联编辑 ---
+const editingTagKey = ref('')
+const editingTagDraft = ref('')
+const regeneratingTags = ref(false)
+function startTagEdit(key: string, value: string) {
+  editingTagKey.value = key
+  editingTagDraft.value = value
+}
+function cancelTagEdit() { editingTagKey.value = ''; editingTagDraft.value = '' }
+async function saveTagEdit() {
+  if (!frameworkStory.value || !editingTagKey.value) return
+  try {
+    const currentTags = { ...(frameworkStory.value.tags || {}) }
+    currentTags[editingTagKey.value] = editingTagDraft.value
+    await storiesApi.updateStory(frameworkStory.value.id, { tags: currentTags } as any)
+    frameworkStory.value.tags = currentTags
+    tags.value = extractTags(currentTags)
+    editingTagKey.value = ''
+    uiStore.success('标签已更新')
+  } catch (e: any) { uiStore.error(e.message || '更新标签失败') }
+}
+async function handleRegenerateTags() {
+  if (!storyId.value || regeneratingTags.value) return
+  regeneratingTags.value = true
+  try {
+    await frameworkApi.regenerateTags(storyId.value)
+    await loadStoryData()
+    uiStore.success('标签已重新生成')
+  } catch (e: any) { uiStore.error(e.message || '重生成标签失败') }
+  finally { regeneratingTags.value = false }
+}
+
+// --- 角色内联编辑 ---
+const editingCharIndex = ref(-1)
+const editingCharDraft = ref<Character | null>(null)
+const regeneratingChars = ref(false)
+function startCharEdit(index: number) {
+  editingCharIndex.value = index
+  editingCharDraft.value = JSON.parse(JSON.stringify(characters.value[index]))
+}
+function cancelCharEdit() { editingCharIndex.value = -1; editingCharDraft.value = null }
+async function saveCharEdit() {
+  if (!frameworkStory.value || editingCharIndex.value < 0 || !editingCharDraft.value) return
+  try {
+    const chars = [...characters.value]
+    chars[editingCharIndex.value] = editingCharDraft.value
+    await storiesApi.updateStory(frameworkStory.value.id, { characters: chars } as any)
+    frameworkStory.value.characters = chars
+    characters.value = chars
+    editingCharIndex.value = -1
+    editingCharDraft.value = null
+    uiStore.success('角色已更新')
+  } catch (e: any) { uiStore.error(e.message || '更新角色失败') }
+}
+async function handleRegenerateCharacters() {
+  if (!storyId.value || regeneratingChars.value) return
+  regeneratingChars.value = true
+  try {
+    await frameworkApi.regenerateCharacters(storyId.value)
+    await loadStoryData()
+    uiStore.success('角色已重新生成')
+  } catch (e: any) { uiStore.error(e.message || '重生成角色失败') }
+  finally { regeneratingChars.value = false }
+}
+
+// --- 大纲内联编辑 ---
+const editingOutlineActIndex = ref(-1)
+const editingOutlineChapterIndex = ref(-1)
+const editingOutlineField = ref('')
+const editingOutlineDraft = ref('')
+function startOutlineEdit(actIndex: number, field: string, value: string, chIndex = -1) {
+  editingOutlineActIndex.value = actIndex
+  editingOutlineChapterIndex.value = chIndex
+  editingOutlineField.value = field
+  editingOutlineDraft.value = value
+}
+function cancelOutlineEdit() {
+  editingOutlineActIndex.value = -1
+  editingOutlineChapterIndex.value = -1
+  editingOutlineField.value = ''
+  editingOutlineDraft.value = ''
+}
+async function saveOutlineEdit() {
+  if (!frameworkStory.value || editingOutlineActIndex.value < 0 || !editingOutlineField.value) return
+  try {
+    const outline = JSON.parse(JSON.stringify(frameworkStory.value.outline || { three_acts: [] }))
+    const acts = outline.three_acts || []
+    if (editingOutlineChapterIndex.value >= 0) {
+      const ch = acts[editingOutlineActIndex.value]?.chapters?.[editingOutlineChapterIndex.value]
+      if (ch) ch[editingOutlineField.value] = editingOutlineDraft.value
+    } else {
+      if (acts[editingOutlineActIndex.value]) acts[editingOutlineActIndex.value][editingOutlineField.value] = editingOutlineDraft.value
+    }
+    await storiesApi.updateStory(frameworkStory.value.id, { outline } as any)
+    frameworkStory.value.outline = outline
+    outlineActs.value = (outline.three_acts || []) as OutlineAct[]
+    cancelOutlineEdit()
+    uiStore.success('大纲已更新')
+  } catch (e: any) { uiStore.error(e.message || '更新大纲失败') }
+}
 
 // --- 章节列表分页 ---
 const pageSize = 20
@@ -588,18 +1068,21 @@ async function loadSnapshots() {
 }
 
 async function handleRestoreSnapshot(snapshotId: number) {
-  if (!storyId.value) return
+  if (!storyId.value || restoringSnapshot.value) return
   uni.showModal({
     title: '确认回滚',
     content: '回滚将先保存当前状态再恢复所选版本，确认继续？',
     success: async (res) => {
       if (!res.confirm) return
+      restoringSnapshot.value = snapshotId
       try {
         await frameworkApi.restoreSnapshot(storyId.value, snapshotId)
         uiStore.success('已回滚')
         await loadStoryData()
       } catch (e: any) {
         uiStore.error(e.message || '回滚失败')
+      } finally {
+        restoringSnapshot.value = 0
       }
     }
   })
@@ -668,18 +1151,39 @@ async function handleFrameworkChat() {
 }
 
 async function handleContinueFramework() {
-  if (!hasFramework.value || chatLoading.value) return
+  if (!hasFramework.value || chatLoading.value || continuingFramework.value) return
+  continuingFramework.value = true
   chatLoading.value = true
   chatError.value = ''
   try {
+    const beforeCount = countOutlineChapters(frameworkStory.value?.outline)
     const res = await frameworkApi.continueFramework(storyId.value)
-    chatMessages.value.push({ role: 'assistant', content: res.reply || '已续写完成' })
+    const afterCount = countOutlineChapters(res.story?.outline)
+    const delta = Math.max(0, afterCount - beforeCount)
+    const visibilityHint = afterCount > beforeCount
+      ? `\n\n已从 ${beforeCount} 章扩展到 ${afterCount} 章，新增 ${delta} 章。请在下方"故事大纲/章节列表"里查看新增规划。`
+      : '\n\n已完成续写请求，但章节数量没有增加；建议查看"故事大纲"是否更新了阶段内容，或输入更明确的扩展章数再试。'
+    const operationHint = formatAppliedOperations(res.applied_operations)
+    const appliedHint = res.applied_operations?.length
+      ? `\n\n实际已应用改动：\n- ${res.applied_operations.join('\n- ')}`
+      : ''
+    const warningHint = res.warnings?.length
+      ? `\n\n未执行或需注意：\n- ${res.warnings.join('\n- ')}`
+      : ''
+    const validationHint = res.validation_errors?.length
+      ? `\n\n校验提示：\n- ${res.validation_errors.join('\n- ')}`
+      : ''
+    chatMessages.value.push({
+      role: 'assistant',
+      content: `${res.reply || '已续写后续大纲、章节与可能出现的新角色。'}${visibilityHint}${operationHint}${appliedHint}${warningHint}${validationHint}`
+    })
     await loadStoryData()
     await loadChapters()
   } catch (e: any) {
-    chatError.value = e.message || '续写失败'
+    chatError.value = e.message || '续写框架失败，请稍后重试。'
   } finally {
     chatLoading.value = false
+    continuingFramework.value = false
   }
 }
 
@@ -724,7 +1228,15 @@ async function saveManualEdit() {
   } finally { manualSaving.value = false }
 }
 
-// --- Chapters ---
+function handleGenerateChapterTap(ch: OutlineChapter) {
+  if (generatingChapterNum.value === ch.chapter_number) return
+  handleGenerateChapter(ch)
+}
+
+function handleAssessQualityTap(ch: OutlineChapter) {
+  if (assessingChapterNum.value === ch.chapter_number) return
+  handleAssessQuality(ch)
+}
 function chapterHasContent(ch: OutlineChapter): boolean {
   const actual = chapterMap.value.get(ch.chapter_number)
   return !!(actual?.novel_content?.trim()) || !!(actual?.messages?.length)
@@ -756,12 +1268,13 @@ function handleChapterSelect(ch: OutlineChapter) {
 }
 
 async function handleGenerateChapter(ch: OutlineChapter) {
+  if (generatingChapterNum.value) return
   const act = outlineActs.value.find(a => a.chapters.some(c => c.chapter_number === ch.chapter_number))
   if (!act) {
     uiStore.error('找不到所属幕')
     return
   }
-  uiStore.setLoading(true)
+  generatingChapterNum.value = ch.chapter_number
   try {
     await frameworkApi.expandChapter(storyId.value, {
       act: String(act.act),
@@ -769,47 +1282,48 @@ async function handleGenerateChapter(ch: OutlineChapter) {
       chapter_title: ch.title,
       summary: ch.summary || undefined,
     })
-    uiStore.setLoading(false)
     uiStore.success('正文已生成')
     await loadStoryData()
     await loadChapters()
     handleChapterSelect(ch)
   } catch (e: any) {
-    uiStore.setLoading(false)
     uiStore.error(e.message || '生成正文失败')
+  } finally {
+    generatingChapterNum.value = 0
   }
 }
 
 async function handleAssessQuality(ch: OutlineChapter) {
+  if (assessingChapterNum.value) return
   const actual = chapterMap.value.get(ch.chapter_number)
   if (!actual?.id) {
     uiStore.error('该章节尚未生成，无法评估')
     return
   }
-  uiStore.setLoading(true)
+  assessingChapterNum.value = ch.chapter_number
   try {
     const result = await chaptersApi.qualityAssess(actual.id)
-    uiStore.setLoading(false)
     const scores = result.scores || {}
     const lines = Object.entries(scores).map(([k, v]) => `${k}: ${v}/10`).join('\n')
     uni.showModal({ title: '质量评估', content: lines, showCancel: false })
   } catch (e: any) {
-    uiStore.setLoading(false)
     uiStore.error(e.message || '评估失败')
+  } finally {
+    assessingChapterNum.value = 0
   }
 }
 
 async function handleRegenerateChapters() {
-  if (!storyId.value) return
-  uiStore.setLoading(true)
+  if (!storyId.value || regeneratingChapters.value) return
+  regeneratingChapters.value = true
   try {
     await frameworkApi.regenerateOutline(storyId.value)
-    uiStore.setLoading(false)
     uiStore.success('章节已更新')
     await loadStoryData()
   } catch (e: any) {
-    uiStore.setLoading(false)
     uiStore.error(e.message || '生成失败')
+  } finally {
+    regeneratingChapters.value = false
   }
 }
 
@@ -908,7 +1422,7 @@ watch(() => workspaceStore.activeChapterId, async (newId) => {
 
 // 首次切换到助手tab时，自动加载最近会话
 watch(() => activeTabIndex.value, async (tabIndex) => {
-  if (tabIndex !== 3 || agentInitialized.value) return
+  if (tabIndex !== 4 || agentInitialized.value) return
   agentInitialized.value = true
   if (!storyId.value) return
   try {
@@ -949,6 +1463,9 @@ onLoad(async (options) => {
   // 支持从框架页跳转到指定章节
   const targetChapterNumber = options?.chapterNumber ? parseInt(options.chapterNumber) : null
 
+  // 支持预选 tab（workspace 视频创作入口跳转到视频标签）
+  const targetTabIndex = options?.tabIndex ? parseInt(options.tabIndex) : null
+
   // 如果有目标章节号，先设置避免 loadWorkspace 覆盖
   if (targetChapterNumber) {
     const chapterList = await chaptersApi.getChapters(id)
@@ -970,13 +1487,22 @@ onLoad(async (options) => {
       await Promise.all([
         mangaStore.loadColorMode(workspaceStore.activeChapterId),
         mangaStore.loadImageCount(workspaceStore.activeChapterId),
-        mangaStore.loadChapterManga(workspaceStore.activeChapterId)
+        mangaStore.loadChapterManga(workspaceStore.activeChapterId),
+        mangaStore.loadAspectRatio(workspaceStore.activeChapterId)
       ])
     }
 
     colorModeIndex.value = mangaStore.colorMode === 'bw' ? 1 : 0
     const countIdx = imageCountOptions.findIndex(o => o.value === mangaStore.imageCount)
     if (countIdx !== -1) imageCountIndex.value = countIdx
+
+    // 检查是否有后台运行中的漫画任务（断点续传）
+    checkMangaStatus()
+
+    // 如果指定了 tabIndex，数据加载完成后切换
+    if (targetTabIndex !== null && targetTabIndex >= 0 && targetTabIndex <= 4) {
+      activeTabIndex.value = targetTabIndex
+    }
   } catch (e) {
     console.error('加载工作台失败:', e)
     uiStore.error('加载工作台失败')
@@ -994,6 +1520,10 @@ function goChat() {
   if (chapter) {
     uni.navigateTo({ url: `/pages/workspace/chat?chapterId=${chapter.id}` })
   }
+}
+
+function handleMangaRefChange() {
+  // 参考图变化时刷新
 }
 
 function goCharacterProfiles() {
@@ -1049,7 +1579,8 @@ async function saveLocalEdit() {
 
 async function handleQualityAssess() {
   const chapter = workspaceStore.activeChapter
-  if (!chapter) return
+  if (!chapter || assessingQuality.value) return
+  assessingQuality.value = true
   try {
     const result = await chaptersApi.qualityAssess(chapter.id)
     const scores = result.scores || {}
@@ -1061,6 +1592,8 @@ async function handleQualityAssess() {
     })
   } catch (e: any) {
     uiStore.error(e.message || '评估失败')
+  } finally {
+    assessingQuality.value = false
   }
 }
 
@@ -1093,15 +1626,31 @@ async function handleGenerateManga() {
   await mangaStore.startMangaGeneration(chapter.id)
 }
 
+async function handleOpenStylePresetInManga() {
+  if (stylePresets.value.length === 0) {
+    try {
+      const res = await adminApi.listStylePresets()
+      stylePresets.value = res.presets || []
+    } catch (e: any) {
+      uiStore.error(e.message || '加载风格预设失败')
+      return
+    }
+  }
+  showStylePreset.value = true
+}
+
 // =================== 助手标签 ===================
 
 async function startNewAgentConversation() {
-  if (!storyId.value) return
+  if (!storyId.value || creatingAgentConv.value) return
+  creatingAgentConv.value = true
   try {
     await agentStore.createConversation(storyId.value)
     agentStore.messages = [{ id: 'welcome', role: 'assistant', content: '我是你的AI写作助手，有什么可以帮到你的？' }]
   } catch (e: any) {
     uiStore.error(e.message || '创建失败')
+  } finally {
+    creatingAgentConv.value = false
   }
 }
 
@@ -1126,20 +1675,28 @@ function handleViewChanges() {
 }
 
 async function handleConfirmChanges() {
+  if (confirmingChanges.value) return
+  confirmingChanges.value = true
   try {
     await agentStore.confirmChanges(storyId.value)
     uiStore.success('变更已确认')
   } catch (e: any) {
     uiStore.error(e.message || '确认失败')
+  } finally {
+    confirmingChanges.value = false
   }
 }
 
 async function handleRollbackChanges() {
+  if (rollbackingChanges.value) return
+  rollbackingChanges.value = true
   try {
     await agentStore.rollbackChanges(storyId.value)
     uiStore.success('变更已撤回')
   } catch (e: any) {
     uiStore.error(e.message || '撤回失败')
+  } finally {
+    rollbackingChanges.value = false
   }
 }
 
@@ -1151,7 +1708,7 @@ function sendQuickAction(action: string) {
 
 function showMore() {
   uni.showActionSheet({
-    itemList: ['角色外观', '连贯性记忆', '质量评估', '参考图'],
+    itemList: ['角色外观', '连贯性记忆', '质量评估', '参考图', '资产管理'],
     success: (res) => {
       switch (res.tapIndex) {
         case 0: goCharacterProfiles(); break
@@ -1164,6 +1721,13 @@ function showMore() {
         }
         case 2: handleQualityAssess(); break
         case 3: goRefImages(); break
+        case 4: {
+          const chapter = workspaceStore.activeChapter
+          if (chapter) {
+            uni.navigateTo({ url: `/pages/workspace/video-assets?chapterId=${chapter.id}` })
+          }
+          break
+        }
       }
     }
   })
@@ -1182,6 +1746,60 @@ function showEditorMore() {
 </script>
 
 <style lang="scss" scoped>
+.fp__cover-banner {
+  display: flex;
+  align-items: center;
+  gap: 24rpx;
+  background: #fff;
+  border-radius: $lv-radius-md;
+  padding: 20rpx;
+  margin-bottom: $lv-section-gap;
+  box-shadow: $lv-shadow-sm;
+}
+
+.fp__cover-img {
+  width: 120rpx;
+  height: 160rpx;
+  border-radius: $lv-radius-sm;
+  flex-shrink: 0;
+}
+
+.fp__cover-placeholder {
+  width: 120rpx;
+  height: 160rpx;
+  background: $lv-primary-lighter;
+  border-radius: $lv-radius-sm;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8rpx;
+  flex-shrink: 0;
+}
+
+.fp__cover-text {
+  font-size: $lv-font-xs;
+  color: $lv-text-muted;
+}
+
+.fp__cover-info {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 8rpx;
+}
+
+.fp__cover-title {
+  font-size: $lv-font-base;
+  font-weight: 600;
+  color: $lv-text-primary;
+}
+
+.fp__cover-edit {
+  font-size: $lv-font-sm;
+  color: $lv-primary;
+}
+
 .chapter-view {
   height: 100vh;
   display: flex;
@@ -1363,6 +1981,42 @@ function showEditorMore() {
     font-size: $lv-font-sm;
     color: $lv-text-primary;
     line-height: 1.6;
+    flex: 1;
+  }
+
+  &__scenes-actions {
+    display: flex;
+    gap: 8rpx;
+    margin-bottom: 12rpx;
+  }
+  &__scene-edit {
+    width: 100%;
+  }
+  &__scene-textarea {
+    width: 100%;
+    min-height: 120rpx;
+    padding: 16rpx;
+    background: $lv-bg-start;
+    border-radius: $lv-radius-sm;
+    font-size: $lv-font-sm;
+    color: $lv-text-primary;
+    line-height: 1.6;
+  }
+  &__scene-edit-actions {
+    display: flex;
+    gap: 8rpx;
+    justify-content: flex-end;
+    margin-top: 8rpx;
+  }
+  &__scene-row-actions {
+    display: flex;
+    gap: 8rpx;
+    flex-shrink: 0;
+    margin-left: auto;
+    align-items: center;
+  }
+  &__scene-btn {
+    padding: 4rpx 8rpx;
   }
 
   &__manga-grid {
@@ -1372,10 +2026,98 @@ function showEditorMore() {
     margin: 16rpx 0;
   }
 
+  &__manga-grid-item {
+    position: relative;
+  }
+
+  &__manga-redraw-btn {
+    position: absolute;
+    top: 8rpx;
+    right: 8rpx;
+    padding: 6rpx 14rpx;
+    background: rgba(0, 0, 0, 0.6);
+    border-radius: $lv-radius-sm;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 2;
+
+    &:active {
+      opacity: 0.7;
+    }
+  }
+
+  &__manga-redraw-btn-text {
+    font-size: 20rpx;
+    color: #ffffff;
+    font-weight: 500;
+  }
+
   &__manga-links {
+    margin-top: 16rpx;
+  }
+
+  &__manga-links-row {
     display: flex;
     gap: 16rpx;
-    margin-top: 16rpx;
+  }
+
+  &__manga-settings-row {
+    display: flex;
+    align-items: center;
+    gap: 12rpx;
+    margin-bottom: 12rpx;
+  }
+
+  &__manga-ratio-scroll {
+    white-space: nowrap;
+    margin-bottom: 12rpx;
+  }
+
+  &__manga-ratio-tabs {
+    display: inline-flex;
+    gap: 8rpx;
+  }
+
+  &__manga-ratio-tab {
+    display: inline-flex;
+    align-items: center;
+    padding: 8rpx 16rpx;
+    background: $lv-surface-solid;
+    border-radius: $lv-radius-full;
+    font-size: $lv-font-sm;
+    color: $lv-text-secondary;
+    border: 1rpx solid $lv-border-light;
+    transition: all 0.2s;
+
+    &--active {
+      background: $lv-primary;
+      color: #fff;
+      border-color: $lv-primary;
+    }
+  }
+
+  &__manga-preset-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 16rpx;
+    background: $lv-surface-solid;
+    border-radius: $lv-radius-md;
+    margin-bottom: 16rpx;
+  }
+
+  &__manga-preset-label {
+    font-size: $lv-font-sm;
+    color: $lv-text-secondary;
+  }
+
+  &__manga-preset-value {
+    display: flex;
+    align-items: center;
+    gap: 8rpx;
+    font-size: $lv-font-sm;
+    color: $lv-text-primary;
   }
 
   &__agent-wrapper {
@@ -1423,6 +2165,27 @@ function showEditorMore() {
     padding: 0 $lv-page-padding;
     overflow: hidden;
   }
+
+  &__video-entry-card {
+    display: flex;
+    align-items: center;
+    gap: 16rpx;
+    padding: 24rpx;
+    background: $lv-surface-solid;
+    border-radius: $lv-radius-lg;
+    margin-bottom: 20rpx;
+    &:active { opacity: 0.8; }
+  }
+  &__video-entry-icon {
+    width: 80rpx; height: 80rpx;
+    border-radius: $lv-radius-md;
+    background: $lv-primary-light;
+    display: flex; align-items: center; justify-content: center;
+    flex-shrink: 0;
+  }
+  &__video-entry-body { flex: 1; }
+  &__video-entry-title { font-size: $lv-font-base; font-weight: 600; color: $lv-text-primary; display: block; margin-bottom: 4rpx; }
+  &__video-entry-desc { font-size: $lv-font-sm; color: $lv-text-muted; }
 }
 
 // =================== Framework 卡片样式 ===================
@@ -1678,11 +2441,28 @@ function showEditorMore() {
     padding: 4rpx 16rpx;
     background: #eff6ff;
     border-radius: 12rpx;
+    display: inline-flex;
+    align-items: center;
+    gap: 8rpx;
     &:active { opacity: 0.6; }
     &--primary {
       background: $lv-primary;
       color: #fff;
     }
+    &--loading {
+      opacity: 0.6;
+      pointer-events: none;
+    }
+  }
+
+  &__chapter-btn-spinner {
+    width: 20rpx;
+    height: 20rpx;
+    border: 3rpx solid rgba(128,128,128,0.2);
+    border-top-color: currentColor;
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+    flex-shrink: 0;
   }
 
   // --- Common ---
@@ -1691,6 +2471,93 @@ function showEditorMore() {
   &__loading-row { padding: 24rpx 0; @include flex-center; }
   &__error { display: block; padding: 0 24rpx 16rpx; font-size: $lv-font-sm; color: #dc2626; }
   &__bottom-spacer { height: 80rpx; }
+
+  // --- Tag Inline Edit ---
+  &__tag-edit-list {
+    display: flex;
+    flex-direction: column;
+    gap: 12rpx;
+  }
+  &__tag-edit-row {
+    display: flex;
+    align-items: center;
+    gap: 12rpx;
+  }
+  &__tag-edit-label {
+    font-size: $lv-font-sm;
+    color: $lv-text-secondary;
+    min-width: 80rpx;
+    font-weight: 500;
+  }
+  &__tag-edit-value {
+    flex: 1;
+    font-size: $lv-font-sm;
+    color: $lv-primary;
+    padding: 8rpx 12rpx;
+    background: $lv-primary-lighter;
+    border-radius: $lv-radius-sm;
+  }
+  &__tag-edit-input {
+    flex: 1;
+    height: 56rpx;
+    padding: 0 12rpx;
+    font-size: $lv-font-sm;
+    color: $lv-text-primary;
+    background: #fff;
+    border: 2rpx solid $lv-primary;
+    border-radius: $lv-radius-sm;
+    box-sizing: border-box;
+  }
+
+  // --- Character Inline Edit ---
+  &__char-edit-card {
+    background: $lv-surface-solid;
+    border: 1rpx solid $lv-border;
+    border-radius: $lv-radius-md;
+    padding: $lv-card-padding;
+    margin-bottom: 12rpx;
+  }
+  &__char-edit-field {
+    margin-bottom: 12rpx;
+  }
+  &__char-edit-label {
+    display: block;
+    font-size: $lv-font-xs;
+    color: $lv-text-muted;
+    margin-bottom: 4rpx;
+  }
+  &__char-edit-input {
+    width: 100%;
+    height: 56rpx;
+    padding: 0 12rpx;
+    font-size: $lv-font-sm;
+    color: $lv-text-primary;
+    background: #fff;
+    border: 2rpx solid $lv-border;
+    border-radius: $lv-radius-sm;
+    box-sizing: border-box;
+  }
+  &__char-edit-textarea {
+    width: 100%;
+    padding: 12rpx;
+    font-size: $lv-font-sm;
+    color: $lv-text-primary;
+    background: #fff;
+    border: 2rpx solid $lv-border;
+    border-radius: $lv-radius-sm;
+    min-height: 120rpx;
+    box-sizing: border-box;
+  }
+  &__char-edit-trigger {
+    display: inline-flex;
+    align-items: center;
+    gap: 4rpx;
+    padding: 8rpx 0 16rpx 24rpx;
+  }
+  &__char-edit-trigger-text {
+    font-size: $lv-font-sm;
+    color: $lv-primary;
+  }
 
   // --- Jump bar ---
   &__jump-bar {
@@ -1743,5 +2610,15 @@ function showEditorMore() {
   0% { opacity: 1; }
   50% { opacity: 0.3; }
   100% { opacity: 1; }
+}
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+.fp__header-btn--disabled {
+  opacity: 0.5;
+  pointer-events: none;
 }
 </style>

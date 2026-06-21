@@ -1,6 +1,6 @@
 <template>
   <view class="template-page">
-    <lv-navbar title="提示词模板" />
+    <lv-navbar title="模板广场" />
 
     <view class="template-page__content">
       <!-- Tab 切换 -->

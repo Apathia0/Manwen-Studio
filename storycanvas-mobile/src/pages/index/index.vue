@@ -30,6 +30,7 @@
             @select="handleStoryTap"
             @longpress="handleStoryLongPress"
             @cover-click="handleCoverClick"
+            @delete="handleStoryDelete"
           />
         </view>
       </lv-pull-refresh>
@@ -97,12 +98,17 @@ async function handleRefresh() {
 
 function handleStoryTap(story: Story) {
   storyStore.setActiveStory(story.id)
-  // 引导流程：如果未完成引导则跳转引导页（与 web 端行为对齐）
+  // 引导流程判定（与 Web 端 openWorkspace 逻辑对齐）
+  // 优先级: import guidance > onboarding > 工作台
+  if (story.source_type === 'import' && !story.import_context_completed) {
+    uni.navigateTo({ url: `/pages/story/import-guidance?storyId=${story.id}` })
+    return
+  }
   if (!story.onboarding_completed) {
     uni.navigateTo({ url: `/pages/story/onboarding?storyId=${story.id}` })
     return
   }
-  // 已完成引导，直接进入工作台
+  // 已完成所有引导，直接进入工作台
   uni.navigateTo({ url: `/pages/workspace/chapter-view?storyId=${story.id}` })
 }
 
@@ -158,18 +164,29 @@ async function handleExport() {
   }
 }
 
-function confirmDelete() {
+async function confirmDelete() {
+  if (!selectedStory.value) return
+  const storyId = selectedStory.value.id
+  const storyTitle = selectedStory.value.title
   uni.showModal({
     title: '确认删除',
-    content: `确定要删除故事「${selectedStory.value?.title}」吗？此操作不可撤销。`,
+    content: `确定要删除故事「${storyTitle}」吗？此操作不可撤销。`,
     confirmColor: '#be123c',
-    success: (res) => {
-      if (res.confirm && selectedStory.value) {
-        storyStore.deleteStory(selectedStory.value.id)
+    success: async (res) => {
+      if (!res.confirm) return
+      try {
+        await storyStore.deleteStory(storyId)
         uni.showToast({ title: '已删除', icon: 'success' })
+      } catch (e: any) {
+        uni.showToast({ title: e.message || '删除失败', icon: 'none' })
       }
     }
   })
+}
+
+function handleStoryDelete(story: Story) {
+  selectedStory.value = story
+  confirmDelete()
 }
 
 function goCreate() {

@@ -1,5 +1,8 @@
 <template>
-  <view :class="['plan-card', { 'plan-card--active': isActive }]">
+  <view :class="['plan-card', { 'plan-card--active': isActive, 'plan-card--recommended': plan.is_recommended }]">
+    <view v-if="plan.is_recommended && !isActive" class="plan-card__recommend-badge">
+      <text class="plan-card__recommend-badge-text">推荐</text>
+    </view>
     <view v-if="isActive" class="plan-card__badge">
       <text class="plan-card__badge-text">当前套餐</text>
     </view>
@@ -9,15 +12,20 @@
       </view>
       <text class="plan-card__name">{{ plan.name }}</text>
       <view class="plan-card__price">
-        <text class="plan-card__currency">¥</text>
-        <text class="plan-card__amount">{{ displayPrice }}</text>
-        <text class="plan-card__period">/{{ cycle === 'monthly' ? '月' : '年' }}</text>
+        <template v-if="isFree">
+          <text class="plan-card__amount">免费</text>
+        </template>
+        <template v-else>
+          <text class="plan-card__currency">¥</text>
+          <text class="plan-card__amount">{{ displayPrice }}</text>
+          <text class="plan-card__period">/{{ cycle === 'monthly' ? '月' : '年' }}</text>
+        </template>
       </view>
     </view>
 
     <view v-if="plan.description" class="plan-card__desc">{{ plan.description }}</view>
 
-    <view class="plan-card__highlights">
+    <view v-if="highlightFeatures.length > 0" class="plan-card__highlights">
       <view v-for="item in highlightFeatures" :key="item.key" class="plan-card__highlight">
         <text class="plan-card__highlight-label">{{ item.label }}</text>
         <text class="plan-card__highlight-value">{{ item.value }}</text>
@@ -25,7 +33,7 @@
     </view>
 
     <view class="plan-card__extra">
-      支持{{ plan.features?.['manga.allow_color_mode'] ? '彩漫+黑白' : '黑白' }}漫画模式
+      {{ plan.features?.['manga.allow_color_mode'] ? '支持彩漫模式' : '支持黑白漫画模式' }}
       ，单章节最多生成 {{ plan.features?.['manga.max_image_count_per_chapter'] ?? 0 }} 张图片。
     </view>
 
@@ -37,7 +45,7 @@
       >
         立即订阅
       </button>
-      <text v-else class="plan-card__current">当前套餐</text>
+      <text v-else class="plan-card__current">已生效</text>
     </view>
   </view>
 </template>
@@ -66,8 +74,12 @@ interface PlanCardProps {
 
 const HIGHLIGHT_KEYS = [
   'framework.generate.monthly_limit',
+  'chapter.expand.monthly_limit',
   'scene.generate.monthly_limit',
-  'manga.image.monthly_limit',
+  'manga.image.generate.monthly_limit',
+  'ai.text.advanced_calls.monthly_limit',
+  'video.shot.split.monthly_limit',
+  'video.generate.count.monthly_limit',
 ] as const
 
 const highlightFeatures = computed(() => {
@@ -78,15 +90,30 @@ const highlightFeatures = computed(() => {
     return {
       key,
       label: meta?.label || key,
-      value: meta?.kind === 'boolean' ? (value ? '支持' : '不支持') : `${value} ${meta?.unit || ''}`.trim()
+      value: meta?.kind === 'boolean'
+        ? (value ? '已开启' : '未开启')
+        : `${value}${meta?.unit || ''}`,
     }
+  }).filter(item => {
+    // 过滤掉值为 0 且无 unit 的项(避免展示无意义的功能)
+    const meta = FEATURE_LABELS[item.key]
+    if (meta?.kind === 'boolean') return true
+    return item.value !== '0' && item.value !== `0${meta?.unit || ''}`
   })
 })
 
 const displayPrice = computed(() => {
-  return props.cycle === 'monthly'
+  const price = props.cycle === 'monthly'
     ? props.plan.monthly_price
     : (props.plan.yearly_price ?? props.plan.monthly_price * 12)
+  // 格式化:去掉末尾 .00
+  return Number(price).toFixed(2).replace(/\.00$/, '').replace(/(\.\d)0$/, '$1')
+})
+
+const isFree = computed(() => {
+  return props.cycle === 'monthly'
+    ? Number(props.plan.monthly_price) === 0
+    : Number(props.plan.yearly_price ?? props.plan.monthly_price * 12) === 0
 })
 
 function handleSubscribe() {
@@ -108,6 +135,11 @@ function handleSubscribe() {
     box-shadow: 0 0 0 4rpx rgba(37, 99, 235, 0.1);
   }
 
+  &--recommended {
+    border-color: $lv-primary;
+    box-shadow: 0 8rpx 32rpx rgba(37, 99, 235, 0.15);
+  }
+
   &__badge {
     position: absolute;
     top: 0;
@@ -119,6 +151,21 @@ function handleSubscribe() {
   }
 
   &__badge-text {
+    font-size: $lv-font-xs;
+    font-weight: 600;
+  }
+
+  &__recommend-badge {
+    position: absolute;
+    top: -2rpx;
+    left: 24rpx;
+    background: linear-gradient(135deg, #f59e0b 0%, #f97316 100%);
+    color: #fff;
+    padding: 6rpx 20rpx;
+    border-radius: 0 0 $lv-radius-sm $lv-radius-sm;
+  }
+
+  &__recommend-badge-text {
     font-size: $lv-font-xs;
     font-weight: 600;
   }

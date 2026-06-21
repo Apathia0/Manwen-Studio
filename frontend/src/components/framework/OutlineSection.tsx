@@ -218,10 +218,19 @@ function ActCard({
                   <button
                     onClick={() => (canOpen ? onChapterSelect(chapter.chapter_number) : void handleExpand(chapter))}
                     disabled={busyChapter !== null}
-                    className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-[10px] font-medium bg-blue-50 text-blue-700 border border-blue-200 hover:bg-blue-100 disabled:bg-slate-100 disabled:text-slate-400 disabled:border-slate-200 disabled:cursor-not-allowed transition-colors shrink-0"
+                    className="inline-flex items-center gap-1.5 rounded-md px-2.5 py-1 text-[10px] font-medium bg-blue-50 text-blue-700 border border-blue-200 hover:bg-blue-100 disabled:bg-slate-100 disabled:text-slate-400 disabled:border-slate-200 disabled:cursor-not-allowed transition-colors shrink-0"
                   >
-                    {isBusy ? <Loader2 size={11} className="animate-spin" /> : <FileText size={11} />}
-                    {canOpen ? '打开' : '生成正文'}
+                    {isBusy ? (
+                      <>
+                        <Loader2 size={11} className="animate-spin" />
+                        <span>生成中...</span>
+                      </>
+                    ) : (
+                      <>
+                        <FileText size={11} />
+                        <span>{canOpen ? '打开' : '生成正文'}</span>
+                      </>
+                    )}
                   </button>
                 </div>
                 {chapter.summary && (

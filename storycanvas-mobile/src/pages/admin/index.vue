@@ -61,6 +61,43 @@
           <text class="admin-hub__menu-text">模板审核</text>
           <ChevronRight :size="14" color="#94a3b8" />
         </view>
+        <view class="admin-hub__divider" />
+        <view class="admin-hub__section-label">扩展管理</view>
+        <view class="admin-hub__menu-item" @tap="goTo('/pages/admin/style-presets')">
+          <view class="admin-hub__menu-icon">
+            <Palette :size="18" color="#2563eb" />
+          </view>
+          <text class="admin-hub__menu-text">风格预设</text>
+          <ChevronRight :size="14" color="#94a3b8" />
+        </view>
+        <view class="admin-hub__menu-item" @tap="goTo('/pages/admin/video-assets')">
+          <view class="admin-hub__menu-icon">
+            <Image :size="18" color="#2563eb" />
+          </view>
+          <text class="admin-hub__menu-text">资产管理</text>
+          <ChevronRight :size="14" color="#94a3b8" />
+        </view>
+        <view class="admin-hub__menu-item" @tap="goTo('/pages/admin/system-prompts')">
+          <view class="admin-hub__menu-icon">
+            <MessageSquare :size="18" color="#2563eb" />
+          </view>
+          <text class="admin-hub__menu-text">系统提示词</text>
+          <ChevronRight :size="14" color="#94a3b8" />
+        </view>
+        <view class="admin-hub__menu-item" @tap="goTo('/pages/admin/system-update')">
+          <view class="admin-hub__menu-icon">
+            <RefreshCw :size="18" color="#2563eb" />
+          </view>
+          <text class="admin-hub__menu-text">系统更新</text>
+          <ChevronRight :size="14" color="#94a3b8" />
+        </view>
+        <view class="admin-hub__menu-item" @tap="goTo('/pages/admin/revenue')">
+          <view class="admin-hub__menu-icon">
+            <BarChart3 :size="18" color="#2563eb" />
+          </view>
+          <text class="admin-hub__menu-text">收入看板</text>
+          <ChevronRight :size="14" color="#94a3b8" />
+        </view>
       </view>
     </view>
   </view>
@@ -68,7 +105,7 @@
 
 <script setup lang="ts">
 import LvNavbar from '@/components/lv-navbar/lv-navbar.vue'
-import { Shield, CreditCard, Users, Settings2, ScrollText, FileSearch, Megaphone, Library, ChevronRight } from '@lucide/vue'
+import { Shield, CreditCard, Users, Settings2, ScrollText, FileSearch, Megaphone, Library, ChevronRight, Palette, MessageSquare, RefreshCw, BarChart3, Image } from '@lucide/vue'
 
 function goTo(url: string) {
   uni.navigateTo({ url })
@@ -147,6 +184,21 @@ function goTo(url: string) {
     flex: 1;
     font-size: $lv-font-base;
     color: $lv-text-primary;
+  }
+
+  &__divider {
+    height: 1rpx;
+    background: $lv-border-light;
+    margin: 0 32rpx;
+  }
+
+  &__section-label {
+    display: block;
+    padding: 24rpx 32rpx 12rpx;
+    font-size: $lv-font-xs;
+    color: $lv-text-muted;
+    text-transform: uppercase;
+    letter-spacing: 2rpx;
   }
 }
 </style>

@@ -3,7 +3,7 @@ import { ref, computed } from 'vue'
 import { mangaApi, chaptersApi } from '@/api'
 import { useSSE } from '@/composables/useSSE'
 import { getToken } from '@/utils/storage'
-import type { MangaImage } from '@/api/types'
+import type { MangaImage, MangaGenerationStatus } from '@/api/types'
 
 interface RefImage {
   filename: string
@@ -26,6 +26,10 @@ export const useMangaStore = defineStore('manga', () => {
   const characterProfiles = ref('')
   const refImages = ref<RefImage[]>([])
   const loading = ref(false)
+  const aspectRatio = ref('9:16')
+  const stylePresetName = ref('')
+  const styleReferenceImageUrl = ref('')
+  const backendTaskStatus = ref<MangaGenerationStatus | null>(null)
 
   const isGenerating = computed(() => phase.value !== 'idle')
 
@@ -93,9 +97,18 @@ export const useMangaStore = defineStore('manga', () => {
 
     const sse = useSSE()
 
+    const body: Record<string, any> = {}
+    if (aspectRatio.value && aspectRatio.value !== '9:16') {
+      body.size = ({ '9:16': '1024x1792', '3:4': '1024x1365', '2:3': '1024x1536', '1:1': '1024x1024', '3:2': '1536x1024', '4:3': '1365x1024', '16:9': '1792x1024' })[aspectRatio.value]
+    }
+    if (stylePresetName.value) body.style_preset_name = stylePresetName.value
+    if (styleReferenceImageUrl.value) body.style_ref_url = styleReferenceImageUrl.value
+
     sse.start({
       url: mangaApi.mangaStreamUrl(chapterId),
+      method: 'POST',
       headers,
+      body: Object.keys(body).length > 0 ? body : undefined,
       onEvent: (event) => {
         switch (event.type) {
           case 'scenes':
@@ -180,6 +193,46 @@ export const useMangaStore = defineStore('manga', () => {
     refImages.value = result.images || []
   }
 
+  async function loadAspectRatio(chapterId: number) {
+    const saved = uni.getStorageSync(`manga_aspect_${chapterId}`)
+    if (saved) aspectRatio.value = saved
+  }
+
+  async function saveAspectRatio(chapterId: number, ratio: string) {
+    aspectRatio.value = ratio
+    uni.setStorageSync(`manga_aspect_${chapterId}`, ratio)
+  }
+
+  function setStylePreset(name: string) {
+    stylePresetName.value = name
+  }
+
+  async function loadStylePreset(chapterId: number) {
+    const saved = uni.getStorageSync(`manga_style_${chapterId}`)
+    if (saved) stylePresetName.value = saved
+  }
+
+  function saveStylePreset(chapterId: number, name: string) {
+    stylePresetName.value = name
+    if (name) {
+      uni.setStorageSync(`manga_style_${chapterId}`, name)
+    } else {
+      uni.removeStorageSync(`manga_style_${chapterId}`)
+    }
+  }
+
+  function setStyleReferenceImageUrl(url: string | null) {
+    styleReferenceImageUrl.value = url ?? ''
+  }
+
+  function setBackendTaskStatus(status: MangaGenerationStatus) {
+    backendTaskStatus.value = status
+  }
+
+  function clearBackendTaskStatus() {
+    backendTaskStatus.value = null
+  }
+
   return {
     scenes,
     sanitizedIndices,
@@ -208,6 +261,18 @@ export const useMangaStore = defineStore('manga', () => {
     loadCharacterProfiles,
     loadRefImages,
     uploadRefImage,
-    deleteRefImage
+    deleteRefImage,
+    aspectRatio,
+    stylePresetName,
+    styleReferenceImageUrl,
+    loadAspectRatio,
+    saveAspectRatio,
+    setStylePreset,
+    loadStylePreset,
+    saveStylePreset,
+    setStyleReferenceImageUrl,
+    backendTaskStatus,
+    setBackendTaskStatus,
+    clearBackendTaskStatus
   }
 })

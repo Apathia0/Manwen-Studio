@@ -52,7 +52,7 @@ export function adjustContent(chapterId: number, instruction: string): Promise<C
 }
 
 /** 更新连贯性记忆 */
-export function updateContinuity(chapterId: number, data: { chapter_summary?: string; chapter_handoff?: string }): Promise<Chapter> {
+export function updateContinuity(chapterId: number, data: { chapter_summary?: Record<string, any>; chapter_handoff?: Record<string, any> }): Promise<Chapter> {
   return put<Chapter>(`/api/chapters/${chapterId}/continuity-memory`, data)
 }
 

@@ -7,11 +7,11 @@
       <button class="changes-banner__btn changes-banner__btn--view" @tap="handleView">
         查看对比
       </button>
-      <button class="changes-banner__btn changes-banner__btn--confirm" @tap="handleConfirm">
-        确认
+      <button class="changes-banner__btn changes-banner__btn--confirm" :disabled="confirming || rollbacking" @tap="handleConfirm">
+        {{ confirming ? '确认中...' : '确认' }}
       </button>
-      <button class="changes-banner__btn changes-banner__btn--rollback" @tap="handleRollback">
-        撤回
+      <button class="changes-banner__btn changes-banner__btn--rollback" :disabled="confirming || rollbacking" @tap="handleRollback">
+        {{ rollbacking ? '撤回中...' : '撤回' }}
       </button>
     </view>
   </view>
@@ -20,9 +20,14 @@
 <script setup lang="ts">
 interface ChangesBannerProps {
   count: number
+  confirming?: boolean
+  rollbacking?: boolean
 }
 
-defineProps<ChangesBannerProps>()
+withDefaults(defineProps<ChangesBannerProps>(), {
+  confirming: false,
+  rollbacking: false
+})
 
 const emit = defineEmits<{
   (e: 'view'): void
@@ -83,12 +88,20 @@ function handleRollback() {
     &--confirm {
       background: $lv-success;
       color: $lv-text-on-primary;
+
+      &:disabled {
+        opacity: 0.5;
+      }
     }
 
     &--rollback {
       background: transparent;
       color: $lv-error;
       border: 1rpx solid $lv-error;
+
+      &:disabled {
+        opacity: 0.5;
+      }
     }
   }
 }

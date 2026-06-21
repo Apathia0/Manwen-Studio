@@ -40,23 +40,38 @@
         <RefreshCw :size="22" color="#ffffff" />
         <text class="manga-gallery__btn-text">重新生成</text>
       </view>
+      <view class="manga-gallery__btn" @tap="handleRedraw">
+        <Paintbrush :size="22" color="#ffffff" />
+        <text class="manga-gallery__btn-text">重绘</text>
+      </view>
       <view class="manga-gallery__btn" @tap="handleSave">
         <Download :size="22" color="#ffffff" />
         <text class="manga-gallery__btn-text">保存到相册</text>
       </view>
     </view>
+    <!-- 重绘弹窗 -->
+    <image-redraw-modal
+      :visible="showRedrawModal"
+      :image-url="currentImageUrl"
+      :image-number="currentImageNumber"
+      :chapter-id="chapterId"
+      ref-type="manga"
+      @close="showRedrawModal = false"
+      @success="handleRedrawSuccess"
+    />
   </view>
 </template>
 
 <script setup lang="ts">
-import { ref } from 'vue'
-import { X, RefreshCw, Download } from '@lucide/vue'
+import { ref, computed } from 'vue'
+import { X, RefreshCw, Download, Paintbrush } from '@lucide/vue'
 import { onLoad } from '@dcloudio/uni-app'
 import { mangaApi } from '@/api'
 import { mangaImageUrl } from '@/utils/url'
 import { useUiStore } from '@/stores/ui'
 import type { MangaImage } from '@/api/types'
 import LvLoading from '@/components/lv-loading/lv-loading.vue'
+import ImageRedrawModal from '@/components/image-redraw-modal/image-redraw-modal.vue'
 
 const uiStore = useUiStore()
 
@@ -65,6 +80,21 @@ const currentIndex = ref(0)
 const loading = ref(true)
 const imageLoading = ref(true)
 let chapterId = 0
+
+/** 重绘弹窗状态 */
+const showRedrawModal = ref(false)
+
+/** 当前图片 URL */
+const currentImageUrl = computed(() => {
+  const img = images.value[currentIndex.value]
+  return img ? getImageUrl(img) : ''
+})
+
+/** 当前图片编号 */
+const currentImageNumber = computed(() => {
+  const img = images.value[currentIndex.value]
+  return img ? img.image_number : 0
+})
 
 onLoad(async (options) => {
   chapterId = parseInt(options?.chapterId || '0')
@@ -176,6 +206,35 @@ function handleSave() {
       uiStore.error('下载失败')
     }
   })
+}
+
+/** 打开重绘弹窗 */
+function handleRedraw() {
+  const img = images.value[currentIndex.value]
+  if (!img) return
+  showRedrawModal.value = true
+}
+
+/** 重绘成功后刷新图片列表 */
+async function handleRedrawSuccess(result: any) {
+  // 用结果更新当前图片
+  if (result && result.image_path) {
+    images.value[currentIndex.value] = {
+      ...images.value[currentIndex.value],
+      image_path: result.image_path,
+      prompt: result.prompt ?? images.value[currentIndex.value].prompt,
+    }
+  } else {
+    // 如果结果不含图片信息，重新加载章节数据
+    try {
+      const { chaptersApi } = await import('@/api')
+      const chapter = await chaptersApi.getChapter(chapterId)
+      images.value = (chapter as any).images || []
+    } catch {
+      // 静默忽略刷新失败
+    }
+  }
+  uiStore.success('重绘完成')
 }
 </script>
 
