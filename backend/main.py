@@ -7936,7 +7936,12 @@ async def regenerate_single_image(chapter_id: int, image_number: int, body: dict
         MangaImage.chapter_id == chapter_id,
         MangaImage.image_number == image_number,
     ).first()
-    old_path = Path(__file__).resolve().parent / old_img.image_path if old_img else None
+    old_path = None
+    if old_img and old_img.image_path:
+        # 支持 OSS URL 和本地路径：ensure_local_media_path 会自动下载 OSS 文件到 .media_cache/
+        local = ensure_local_media_path(old_img.image_path, "manga")
+        if local:
+            old_path = Path(local)
     character_profiles = await _load_characters_async(chapter_id, request, db)
     color_mode = _effective_color_mode(chapter_id, user.id, db)
     image_api_key = _user_image_api_key(request)
@@ -8027,10 +8032,14 @@ async def regenerate_single_image(chapter_id: int, image_number: int, body: dict
     db.refresh(manga)
 
     if old_image_path and old_path and old_path.exists() and old_path != Path(__file__).resolve().parent / image_result.image_path:
-        try:
-            old_path.unlink()
-        except OSError as exc:
-            logger.warning("Failed to delete old regenerated image %s: %s", old_path, exc)
+        # 不删除 .media_cache 中的缓存文件（OSS URL 下载的临时文件）
+        if '.media_cache' in str(old_path):
+            logger.debug("跳过删除 .media_cache 缓存: %s", old_path)
+        else:
+            try:
+                old_path.unlink()
+            except OSError as exc:
+                logger.warning("Failed to delete old regenerated image %s: %s", old_path, exc)
 
     return {
         "id": manga.id,
