@@ -3346,19 +3346,7 @@ export async function renderStoryboardFrame(shotId: number, payload: {
   };
 }
 
-export interface VideoModel {
-  id: string;
-  name: string;
-  provider: string;
-}
 
-export async function getVideoModels(): Promise<{ models: VideoModel[] }> {
-  const res = await fetch(`${BASE}/api/video/models`, {
-    headers: apiHeaders(),
-  });
-  if (!res.ok) throw new Error(await res.text());
-  return res.json();
-}
 
 export async function renderShotVideo(shotId: number, payload: {
   provider?: string;

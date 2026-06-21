@@ -53,25 +53,7 @@ RETRY_DELAY = 5
 DOWNLOAD_RETRIES = 3
 DOWNLOAD_RETRY_DELAY = 3
 
-SUPPORTED_MODELS: dict[str, dict] = {
-    "veo2": {"name": "Google Veo 2", "supports_image": False},
-    "veo2-fast": {"name": "Google Veo 2 Fast", "supports_image": False},
-    "veo2-fast-frames": {"name": "Google Veo 2 Fast (首尾帧)", "supports_image": True},
-    "veo3": {"name": "Google Veo 3", "supports_image": False},
-    "veo3-fast": {"name": "Google Veo 3 Fast", "supports_image": False},
-    "veo3.1": {"name": "Google Veo 3.1", "supports_image": True},
-    "veo3.1-fast": {"name": "Google Veo 3.1 Fast", "supports_image": True},
-    "veo3.1-4k": {"name": "Google Veo 3.1 4K", "supports_image": False},
-    "grok-video-3": {"name": "Grok Video 3", "supports_image": True},
-    "jimeng-video-3.0": {"name": "即梦视频 3.0", "supports_image": False},
-    "jimeng-video-3.0-fast": {"name": "即梦视频 3.0 Fast", "supports_image": False},
-    "jimeng-video-3.5-pro": {"name": "即梦视频 3.5 Pro", "supports_image": False},
-    "dance2-fast": {"name": "Dance2 Fast", "supports_image": False},
-    # ── Lingdong API (灵动中转站) 模型 ──
-    "sd-2-vip": {"name": "Seedance 2.0 VIP (九参素材版)", "supports_image": True},
-    "sd-2-vip-720": {"name": "Seedance 2.0 VIP 720", "supports_image": True},
-    "seedance-2.0-fast": {"name": "Seedance 2.0 Fast", "supports_image": True},
-}
+
 
 ALLOWED_ASPECT_RATIOS = ["16:9", "9:16", "1:1", "4:3", "3:4", "3:2", "2:3"]
 ALLOWED_SIZES = ["720P", "1080P", "1K", "2K", "4K"]
@@ -152,35 +134,52 @@ def _aspect_to_orientation(aspect_ratio: str) -> str:
     return "landscape"
 
 
+def _is_valid_url(s: str) -> bool:
+    return s.startswith("http://") or s.startswith("https://")
+
+
 def extract_video_url(payload: dict) -> str:
     """从 New API 查询响应中提取视频下载 URL。
 
     New API 标准响应格式:
       {"task_id":"...", "status":"completed", "url":"https://...", "format":"mp4", ...}
-    同时兼容旧的嵌套格式。
+    同时兼容 Volcengine Seedance（result_url 顶层）、LingDong（data.result_url）等格式。
+    注意：FAILURE 状态下 result_url 可能包含错误消息而非有效 URL，需做 http 前缀校验。
     """
-    # New API 标准: 顶层 url 字段
-    if isinstance(payload.get("url"), str) and payload["url"].strip():
-        return payload["url"].strip()
-    # 旧格式兼容
-    if isinstance(payload.get("video_url"), str) and payload["video_url"].strip():
-        return payload["video_url"].strip()
+    def _try(v: str) -> str | None:
+        s = v.strip()
+        return s if _is_valid_url(s) else None
+
+    def _lookup(d: dict, *keys: str) -> str | None:
+        for k in keys:
+            val = d.get(k)
+            if isinstance(val, str) and val.strip():
+                return _try(val)
+        return None
+
+    # 顶层字段
+    found = _lookup(payload, "url", "video_url", "result_url")
+    if found:
+        return found
+
     data = payload.get("data") or payload.get("video") or {}
     if isinstance(data, dict):
-        # LingDong API: data.result_url
-        if isinstance(data.get("result_url"), str) and data["result_url"].strip():
-            return data["result_url"].strip()
-        if isinstance(data.get("url"), str) and data["url"].strip():
-            return data["url"].strip()
-        if isinstance(data.get("video_url"), str) and data["video_url"].strip():
-            return data["video_url"].strip()
+        found = _lookup(data, "result_url", "url", "video_url")
+        if found:
+            return found
+
+        content = data.get("content") or {}
+        if isinstance(content, dict):
+            found = _lookup(content, "video_url", "url")
+            if found:
+                return found
+
         nested = data.get("data") or {}
         if isinstance(nested, dict):
-            if isinstance(nested.get("url"), str) and nested["url"].strip():
-                return nested["url"].strip()
-            if isinstance(nested.get("video_url"), str) and nested["video_url"].strip():
-                return nested["video_url"].strip()
-    # New API 失败时的 error 对象
+            found = _lookup(nested, "url", "video_url")
+            if found:
+                return found
+
     error = payload.get("error") or {}
     if isinstance(error, dict) and error.get("message"):
         return ""
@@ -216,10 +215,23 @@ async def create_video_job(
     headers = _auth_headers(api_key, base_url=base_url, model=model)
     url = _build_api_url("/v1/videos", base_url=base_url)
 
+    # ── 根据模型限制 duration 上限 ──
+    # Seedance 1.0 系列最大 12 秒，Seedance 1.5 系列最大 12 秒
+    # Seedance 2.0 系列最大 15 秒，其他模型默认最大 15 秒
+    max_duration = 15
+    if "seedance" in model_lower:
+        if "1-0" in model_lower or "1.0" in model_lower:
+            max_duration = 12
+        elif "1-5" in model_lower or "1.5" in model_lower:
+            max_duration = 12
+        # seedance 2.0 系列保持 15 秒
+
+    clamped_duration = max(4, min(max_duration, duration_seconds))
     payload: dict = {
         "model": model,
         "prompt": prompt.strip(),
-        "duration": max(4, min(15, duration_seconds)),
+        "duration": clamped_duration,
+        "seconds": str(clamped_duration),
     }
 
     # ── 模型感知参数适配 ──
@@ -233,7 +245,9 @@ async def create_video_job(
         # 可选的 watermark / first_frame 等不由调用方传入，保持默认
     else:
         # sd-2-vip, sd-2-vip-720 及其他 New API 模型
-        payload["size"] = "large"
+        # size 使用 new-api 标准格式 "WxH"（如 "1280x720"），而非上游特定值 "large"
+        w, h = _resolution_from(aspect_ratio, size)
+        payload["size"] = f"{w}x{h}"
         payload["orientation"] = _aspect_to_orientation(aspect_ratio)
 
     if images:
@@ -398,9 +412,15 @@ async def download_video(
     shot_id: int,
     job_id: str,
     api_key: str | None = None,
+    base_url: str | None = None,
     output_dir: Path | None = None,
 ) -> str:
-    """从 video_url 下载视频文件到本地."""
+    """从 video_url 下载视频文件到本地。
+
+    当 video_url 是第三方直链（如火山引擎 TOS 签名 URL）时，
+    优先通过 new-api 内容端点 (GET /v1/videos/{job_id}/content) 代理下载，
+    避免签名过期或跨域访问问题。
+    """
     if not video_url.strip():
         raise ValueError("video_url 不能为空")
 
@@ -422,35 +442,48 @@ async def download_video(
     if oss_direct_url:
         return oss_direct_url
 
-    last_err: Exception | None = None
-    for attempt in range(1, DOWNLOAD_RETRIES + 1):
-        try:
-            async with httpx.AsyncClient(
-                timeout=_timeout(connect=30, read=600, write=30),
-                follow_redirects=True,
-            ) as client:
-                response = await client.get(video_url)
-            if response.is_success:
-                await run_blocking(output_path.write_bytes, response.content)
-                logger.info("[video] 下载完成: %s -> %s", job_id, output_path)
-                # OSS 上传（如已配置，上传成功后删除本地文件）
-                oss_url = await run_blocking(_upload_to_oss_if_enabled, str(output_path))
-                if oss_url:
-                    try:
-                        output_path.unlink(missing_ok=True)
-                        logger.info("[video] OSS 上传成功，已删除本地文件: %s", output_path)
-                    except Exception:
-                        pass
-                    return oss_url
-                return str(output_path)
-            if attempt < DOWNLOAD_RETRIES:
-                await asyncio.sleep(DOWNLOAD_RETRY_DELAY)
-        except (httpx.TimeoutException, httpx.TransportError) as exc:
-            last_err = exc
-            if attempt < DOWNLOAD_RETRIES:
-                await asyncio.sleep(DOWNLOAD_RETRY_DELAY)
+    # 构建下载 URL 列表：优先 new-api 内容端点，原始 URL 为回退
+    download_urls: list[tuple[str, dict[str, str] | None]] = []
+    if base_url and api_key:
+        base = base_url.rstrip("/")
+        content_url = f"{base}/v1/videos/{job_id}/content"
+        download_urls.append((content_url, {"Authorization": f"Bearer {api_key}"}))
+    download_urls.append((video_url, None))
 
-    raise RuntimeError(f"视频下载失败，已重试 {DOWNLOAD_RETRIES} 次") from last_err
+    last_err: Exception | None = None
+    for url, extra_headers in download_urls:
+        for attempt in range(1, DOWNLOAD_RETRIES + 1):
+            try:
+                headers: dict[str, str] = dict(extra_headers) if extra_headers else {}
+                if not extra_headers and api_key and ("/v1/videos/" in url and "/content" in url):
+                    headers["Authorization"] = f"Bearer {api_key}"
+                async with httpx.AsyncClient(
+                    timeout=_timeout(connect=30, read=600, write=30),
+                    follow_redirects=True,
+                    headers=headers if headers else None,
+                ) as client:
+                    response = await client.get(url)
+                if response.is_success:
+                    await run_blocking(output_path.write_bytes, response.content)
+                    logger.info("[video] 下载完成: %s -> %s", job_id, output_path)
+                    oss_url = await run_blocking(_upload_to_oss_if_enabled, str(output_path))
+                    if oss_url:
+                        try:
+                            output_path.unlink(missing_ok=True)
+                            logger.info("[video] OSS 上传成功，已删除本地文件: %s", output_path)
+                        except Exception:
+                            pass
+                        return oss_url
+                    return str(output_path)
+                if attempt < DOWNLOAD_RETRIES:
+                    await asyncio.sleep(DOWNLOAD_RETRY_DELAY)
+            except (httpx.TimeoutException, httpx.TransportError) as exc:
+                last_err = exc
+                if attempt < DOWNLOAD_RETRIES:
+                    await asyncio.sleep(DOWNLOAD_RETRY_DELAY)
+        logger.warning("[video] 下载来源失败: %s...", url[:80])
+
+    raise RuntimeError(f"视频下载失败，已重试所有来源") from last_err
 
 
 def _upload_video_url_to_oss(source_url: str, remote_key: str) -> str | None:
@@ -515,8 +548,4 @@ def _auto_configure_oss() -> None:
         logger.warning("OSS 自动配置加载失败: %s", exc)
 
 
-def get_supported_models() -> list[dict]:
-    return [
-        {"key": key, "name": value["name"], "supports_image": value["supports_image"]}
-        for key, value in SUPPORTED_MODELS.items()
-    ]
+

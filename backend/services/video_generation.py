@@ -139,6 +139,12 @@ async def query_job_status(
                 base_url=base_url,
                 model=model,
             )
+            if str(result.get("status", "")).upper() in ("SUCCESS", "COMPLETED", "SUCCEEDED"):
+                logger.info("[video] 完整响应 keys=%s url_raw=%s video_raw=%s data_raw=%s",
+                            list(result.keys()),
+                            repr(result.get("url", "")),
+                            repr(result.get("video_url", "")),
+                            repr(result.get("data", ""))[:200])
             result["video_url"] = video_api.extract_video_url(result)
 
         provider_status = result.get("status", "unknown")
@@ -223,6 +229,7 @@ async def fetch_job_result(
                 shot_id=shot_id,
                 job_id=provider_job_id,
                 api_key=api_key,
+                base_url=base_url,
             )
 
         logger.info(
