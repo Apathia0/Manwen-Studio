@@ -600,6 +600,51 @@ def _merge_style_prompt(base_prompt: str, style_template: str | None, style_name
     return f"{style_text}. {base}"
 
 
+def _build_shot_asset_context(shot: VideoShot, asset_type: str, target_name: str = "") -> str:
+    """从 shot 已提取的关键元素构建资产生成上下文，确保形象与时代背景一致。
+
+    asset_type: "character" | "prop" | "scene"
+    target_name: 角色名或道具名，用于精准匹配 character_prompts_json / key_props_json
+    """
+    parts: list[str] = []
+
+    if asset_type == "character" and target_name:
+        char_prompts = shot.character_prompts_json or []
+        for cp in char_prompts:
+            if isinstance(cp, dict) and cp.get("name") == target_name:
+                parts.append(f"角色形象：{cp.get('prompt', '')}")
+                break
+
+    if asset_type == "prop" and target_name:
+        key_props = shot.key_props_json or []
+        for kp in key_props:
+            kp_str = str(kp)
+            if target_name in kp_str:
+                parts.append(f"道具描述：{kp_str}")
+                break
+
+    if asset_type == "scene":
+        scene_candidates = shot.scene_asset_candidates_json or []
+        if scene_candidates:
+            parts.append(f"场景元素：{'；'.join(str(s) for s in scene_candidates)}")
+
+    if shot.story_summary:
+        parts.append(f"情节背景：{shot.story_summary}")
+    if shot.scene_location:
+        loc = shot.scene_location
+        if shot.time_of_day:
+            loc = f"{loc}，{shot.time_of_day}"
+        parts.append(f"场景时空：{loc}")
+    if shot.key_props_json and asset_type != "prop":
+        parts.append(f"关键道具：{'；'.join(str(p) for p in shot.key_props_json)}")
+    if shot.source_text_span:
+        parts.append(f"原文段落：{shot.source_text_span[:500]}")
+
+    if not parts:
+        return ""
+    return "\n".join(parts)
+
+
 def _extract_character_notes(character_profiles: str | None, character_names: list[str]) -> dict[str, str]:
     text = (character_profiles or "").strip()
     if not text or not character_names:
@@ -1934,6 +1979,12 @@ async def generate_scene_concept_art(
                 id_set.add(a.id)
     ref_block = _build_reference_constraints_block(ref_assets)
     ref_paths = _resolve_asset_file_paths(ref_assets)
+    # 追加风格预设参考图，确保场景概念图风格统一
+    style_ref_path = _resolve_workflow_style_ref_path(scene.chapter_id, db)
+    if style_ref_path:
+        ref_paths = list(ref_paths) if ref_paths else []
+        if style_ref_path not in ref_paths:
+            ref_paths.append(style_ref_path)
     prompt = _merge_style_prompt(f"{prompt_base} {ref_block}".strip(), style_ctx["prompt_template"], style_name)
 
     scene_dir = _VIDEO_OUTPUTS_DIR / f"scene_{scene_id}"
@@ -3327,11 +3378,20 @@ async def regenerate_video_asset(
                     api_key=api_key or None,
                 )
             else:
-                saved_path = await image2_service.edit_existing_image(
+                # 有源图全量重绘：将源图作为参考图，同时追加风格预设参考图确保风格统一
+                style_ref_path = _resolve_workflow_style_ref_path(asset.chapter_id, db) if asset.chapter_id else None
+                ref_paths = []
+                if source_path and Path(source_path).exists():
+                    ref_paths.append(source_path)
+                if style_ref_path and style_ref_path not in ref_paths:
+                    ref_paths.append(style_ref_path)
+                saved_path = await image2_service.generate_reference_image(
                     prompt=prompt,
-                    source_image_path=Path(source_path),
                     output_path=output_path,
                     api_key=api_key or None,
+                    size="1792x1024",
+                    ref_image_paths=ref_paths if ref_paths else None,
+                    ref_type="style",
                 )
         else:
             # 无源图片（首次生成占位资产）：用风格参考图示图生图保证画风一致
@@ -4037,6 +4097,7 @@ async def generate_character_ref_image(
 
     style_name = str(body.get("style_preset") or "").strip()
     style_ctx: dict = {}
+    style_preset_ref_path: str | None = None
     if style_name:
         preset = db.query(VideoStylePreset).filter(VideoStylePreset.name == style_name).first()
         if not preset:
@@ -4047,6 +4108,8 @@ async def generate_character_ref_image(
                 "prompt_template": str(preset.image_style_params.get("prompt_template", "") if isinstance(preset.image_style_params, dict) else ""),
                 "image_style_params": preset.image_style_params if isinstance(preset.image_style_params, dict) else {},
             }
+            if preset.image_url:
+                style_preset_ref_path = ensure_local_media_path(preset.image_url, "manga")
     if not style_ctx:
         style_ctx = {"name": "", "prompt_template": "", "image_style_params": {}}
 
@@ -4078,12 +4141,15 @@ async def generate_character_ref_image(
     # 配额预检
     _check_and_consume_quota_wrapper(user.id, "manga.image.generate.monthly_limit", 1, db, deduct=False)
 
+    ref_paths = [style_preset_ref_path] if style_preset_ref_path else None
     try:
         await image2_service.generate_reference_image(
             prompt=final_prompt,
             output_path=full_path,
             api_key=api_key or None,
             size=img_size,
+            ref_image_paths=ref_paths,
+            ref_type="style",
         )
     except Exception as e:
         logger.warning("Character ref generation failed for %s/%s: %s", character_name, version.version_label, e)
@@ -4190,6 +4256,15 @@ async def redraw_character_ref_image(
 
     api_key = _user_image_api_key(request)
 
+    # 解析风格预设参考图用于重绘
+    style_preset_name = (body.get("style_preset") or old_asset.style_preset or "").strip()
+    style_preset_ref_path: str | None = None
+    if style_preset_name:
+        preset = db.query(VideoStylePreset).filter(VideoStylePreset.name == style_preset_name).first()
+        if preset and preset.image_url:
+            style_preset_ref_path = ensure_local_media_path(preset.image_url, "manga")
+    ref_paths = [style_preset_ref_path] if style_preset_ref_path else None
+
     _check_and_consume_quota_wrapper(user.id, "manga.image.generate.monthly_limit", 1, db, deduct=False)
 
     try:
@@ -4208,6 +4283,8 @@ async def redraw_character_ref_image(
                 prompt=redraw_prompt,
                 output_path=full_path,
                 api_key=api_key or None,
+                ref_image_paths=ref_paths,
+                ref_type="style",
             )
     except Exception as e:
         logger.warning("Character ref redraw failed for %s/%s: %s", character_name, version.version_label, e)
@@ -4969,6 +5046,12 @@ async def generate_shot_frames(
     ref_assets = db.query(VideoAsset).filter(VideoAsset.id.in_(ref_asset_ids)).all() if ref_asset_ids else []
     ref_block = _build_reference_constraints_block(ref_assets)
     ref_paths = _resolve_asset_file_paths(ref_assets)
+    # 追加风格预设参考图，确保首尾帧风格统一
+    style_ref_path = _resolve_workflow_style_ref_path(shot.scene.chapter_id, db)
+    if style_ref_path:
+        ref_paths = list(ref_paths) if ref_paths else []
+        if style_ref_path not in ref_paths:
+            ref_paths.append(style_ref_path)
 
     api_key, _base_url, _model = _user_video_api_key(request)
     frames_dir = _VIDEO_OUTPUTS_DIR / "frames"
@@ -5102,6 +5185,12 @@ async def regenerate_shot_frame(
     ref_assets = db.query(VideoAsset).filter(VideoAsset.id.in_(ref_asset_ids)).all() if ref_asset_ids else []
     ref_block = _build_reference_constraints_block(ref_assets)
     ref_paths = _resolve_asset_file_paths(ref_assets)
+    # 追加风格预设参考图，确保帧重绘风格统一
+    style_ref_path = _resolve_workflow_style_ref_path(shot.scene.chapter_id, db)
+    if style_ref_path:
+        ref_paths = list(ref_paths) if ref_paths else []
+        if style_ref_path not in ref_paths:
+            ref_paths.append(style_ref_path)
     prompt = _merge_style_prompt(f"{prompt} {ref_block}".strip(), style_ctx.get("prompt_template"), style_ctx.get("name"))
     _check_and_consume_quota_wrapper(user.id, "manga.image.generate.monthly_limit", 1, db, deduct=False)
     try:
@@ -5657,6 +5746,9 @@ async def generate_shot_character_asset(
     full_path = char_dir / file_name
 
     final_prompt = _merge_style_prompt(prompt, style_ctx.get("prompt_template"), style_name)
+    context = _build_shot_asset_context(shot, "character", character_name)
+    if context:
+        final_prompt = f"{final_prompt}\n\n---\n上下文参考（确保形象与时代背景一致）：\n{context}"
     api_key = _user_image_api_key(request)
     _configure_image_service_from_db(request, db)
 
@@ -5752,6 +5844,9 @@ async def generate_shot_prop_asset(
     full_path = prop_dir / file_name
 
     final_prompt = _merge_style_prompt(prompt, style_ctx.get("prompt_template"), style_name)
+    context = _build_shot_asset_context(shot, "prop", prop_name)
+    if context:
+        final_prompt = f"{final_prompt}\n\n---\n上下文参考（确保形象与时代背景一致）：\n{context}"
     api_key = _user_image_api_key(request)
     _configure_image_service_from_db(request, db)
 
@@ -5843,6 +5938,9 @@ async def generate_shot_scene_asset(
     full_path = scene_dir / file_name
 
     final_prompt = _merge_style_prompt(prompt, style_ctx.get("prompt_template"), style_name)
+    context = _build_shot_asset_context(shot, "scene", "")
+    if context:
+        final_prompt = f"{final_prompt}\n\n---\n上下文参考（确保形象与时代背景一致）：\n{context}"
     api_key = _user_image_api_key(request)
     _configure_image_service_from_db(request, db)
 
