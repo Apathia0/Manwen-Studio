@@ -146,6 +146,7 @@ from services.video_chapter_pipeline import (
     assemble_video_prompt_text,
     generate_workflow_screenplay,
     build_shot_source_from_screenplay,
+    _build_chapter_storyboard_asset,
 )
 
 # 模块级标记：init_db 在整个进程生命周期中只调用一次
@@ -156,6 +157,76 @@ logger = logging.getLogger("video_router")
 router = APIRouter()
 
 SHOT_DURATION_SECONDS = 15
+
+
+def _same_story_video_asset_types(asset_type: str | None) -> list[str]:
+    story_types = [
+        "story_character_reference",
+        "character_reference",
+        "scene_reference",
+        "prop_reference",
+        "storyboard_frame",
+    ]
+    if asset_type:
+        return [asset_type] if asset_type in story_types else []
+    return story_types
+
+
+def _backfill_storyboard_assets_for_story(db: Session, story_id: int) -> int:
+    rows = (
+        db.query(ChapterVideoShot, ChapterVideoWorkflow)
+        .join(ChapterVideoWorkflow, ChapterVideoShot.workflow_id == ChapterVideoWorkflow.id)
+        .filter(
+            ChapterVideoWorkflow.story_id == story_id,
+            ChapterVideoShot.storyboard_image_url.isnot(None),
+            ChapterVideoShot.storyboard_image_url != "",
+        )
+        .all()
+    )
+    if not rows:
+        return 0
+
+    existing_shot_ids: set[int] = set()
+    existing_paths: set[str] = set()
+    existing_assets = (
+        db.query(VideoAsset)
+        .filter(
+            VideoAsset.story_id == story_id,
+            VideoAsset.asset_type == "storyboard_frame",
+            VideoAsset.status == "active",
+        )
+        .all()
+    )
+    for asset in existing_assets:
+        meta = asset.meta_json or {}
+        chapter_shot_id = meta.get("chapter_video_shot_id")
+        if chapter_shot_id is not None:
+            try:
+                existing_shot_ids.add(int(chapter_shot_id))
+            except (TypeError, ValueError):
+                pass
+        if asset.file_path:
+            existing_paths.add(asset.file_path)
+
+    created = 0
+    for shot, workflow in rows:
+        file_path = shot.storyboard_image_url or ""
+        if shot.id in existing_shot_ids or file_path in existing_paths:
+            continue
+        asset = _build_chapter_storyboard_asset(
+            workflow=workflow,
+            shot=shot,
+            file_path=file_path,
+            prompt=shot.storyboard_prompt,
+            provider="backfill",
+            source_asset_ids=None,
+            source_type="ai_generated",
+        )
+        db.add(asset)
+        created += 1
+    if created:
+        db.commit()
+    return created
 
 
 def _flatten_task_status(task_status: dict | None) -> dict:
@@ -2916,6 +2987,9 @@ async def list_chapter_video_assets(
     user = _require_user(request, db)
     chapter = _require_chapter_for_user(chapter_id, user, db)
 
+    if chapter.story_id:
+        _backfill_storyboard_assets_for_story(db, chapter.story_id)
+
     query = db.query(VideoAsset).filter(VideoAsset.chapter_id == chapter_id, VideoAsset.status == "active")
     if asset_type:
         query = query.filter(VideoAsset.asset_type == asset_type)
@@ -2923,9 +2997,7 @@ async def list_chapter_video_assets(
     assets = list(query.order_by(VideoAsset.created_at.desc()).all())
 
     if chapter.story_id:
-        same_story_types = ["story_character_reference", "character_reference", "scene_reference", "prop_reference"]
-        if asset_type:
-            same_story_types = [asset_type] if asset_type in same_story_types else []
+        same_story_types = _same_story_video_asset_types(asset_type)
         if same_story_types:
             same_story_assets = (
                 db.query(VideoAsset)
@@ -3110,6 +3182,35 @@ async def delete_video_asset(
     db.commit()
 
     return {"ok": True, "asset_id": asset_id}
+
+
+@router.put("/api/video-assets/{asset_id}")
+async def update_video_asset(asset_id: int, request: Request, db: Session = Depends(get_db)):
+    """更新视频资产的基本信息（名称等）"""
+    user = _require_user(request, db)
+    asset = db.get(VideoAsset, asset_id)
+    if not asset:
+        raise HTTPException(404, "视频素材未找到")
+
+    if asset.chapter_id:
+        _require_chapter_for_user(asset.chapter_id, user, db)
+    elif asset.story_id:
+        _require_story_for_user(asset.story_id, user, db)
+    else:
+        raise HTTPException(403, "无法确定素材所有权")
+
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="请求体必须是 JSON")
+
+    if "name" in body and body["name"]:
+        asset.name = str(body["name"]).strip()
+
+    db.commit()
+    db.refresh(asset)
+
+    return {"id": asset.id, "name": asset.name, "message": "资产已更新"}
 
 
 @router.post("/api/video-assets/{asset_id}/replace")
@@ -6681,7 +6782,7 @@ async def api_preview_video_prompt(
     shot_id: int,
     reference_asset_ids: str = Query(default="", description="逗号分隔的参考资产 ID"),
     prompt_override: str | None = Query(default=None, description="用户编辑的 prompt 覆写"),
-    request: Request = None,  # type: ignore[assignment]
+    request: Request = None,
     db: Session = Depends(get_db),
 ):
     """预览组装后的视频提示词（不提交生成）。"""
@@ -6778,6 +6879,16 @@ async def api_upload_shot_storyboard(
     if oss_url:
         shot.storyboard_image_url = oss_url
 
+    asset = _build_chapter_storyboard_asset(
+        workflow=wf,
+        shot=shot,
+        file_path=shot.storyboard_image_url or "",
+        prompt=shot.storyboard_prompt,
+        provider="manual_upload",
+        source_asset_ids=None,
+        source_type="manual_upload",
+    )
+    db.add(asset)
     shot.status = "storyboard_ready"
     db.commit()
     db.refresh(shot)

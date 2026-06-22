@@ -34,6 +34,7 @@ import { findCharacterPromptByName } from './videoWorkbenchUtils';
 import ChapterListPanel from './ChapterListPanel';
 import ChapterVideoWorkflowPanel from './ChapterVideoWorkflowPanel';
 import StyleSelectorModal from './StyleSelectorModal';
+import AssetManagementModal from './AssetManagementModal';
 import { toast } from '../lib/toast';
 import { videoGenStore } from '../videoGenStore';
 
@@ -71,6 +72,7 @@ export default function VideoStoryboardLayout({
   const [videoCharacters, setVideoCharacters] = useState<StoryVideoCharacter[]>([]);
   const [characterLoading, setCharacterLoading] = useState(false);
   const [parsing, setParsing] = useState(false);
+  const [assetManagementOpen, setAssetManagementOpen] = useState(false);
   const pollTimerRef = useRef<number | null>(null);
 
   const resolvedChapter = currentChapter;
@@ -693,8 +695,17 @@ export default function VideoStoryboardLayout({
           onResetWorkflow={handleResetWorkflow}
           videoAspectRatio={videoAspectRatio}
           onVideoAspectRatioChange={setVideoAspectRatio}
+          onOpenAssetManagement={() => setAssetManagementOpen(true)}
         />
       </div>
+
+      {resolvedChapter?.id && assetManagementOpen && (
+        <AssetManagementModal
+          chapterId={resolvedChapter.id}
+          onClose={() => setAssetManagementOpen(false)}
+          onAssetsChanged={() => void loadChapterAssets(resolvedChapter.id)}
+        />
+      )}
 
       {/* 风格选择弹窗 */}
       <StyleSelectorModal

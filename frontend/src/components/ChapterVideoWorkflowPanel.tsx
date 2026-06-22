@@ -89,6 +89,7 @@ interface ChapterVideoWorkflowPanelProps {
   parsing?: boolean;
   videoAspectRatio?: '16:9' | '9:16';
   onVideoAspectRatioChange?: (value: '16:9' | '9:16') => void;
+  onOpenAssetManagement?: () => void;
 }
 
 function shotStatusLabel(status: string): string {
@@ -168,6 +169,7 @@ export default function ChapterVideoWorkflowPanel({
   parsing,
   videoAspectRatio = '16:9',
   onVideoAspectRatioChange,
+  onOpenAssetManagement,
   characterLoading,
 }: ChapterVideoWorkflowPanelProps) {
   const [concatModalOpen, setConcatModalOpen] = useState(false);
@@ -452,6 +454,14 @@ export default function ChapterVideoWorkflowPanel({
             <Palette size={14} /> {selectedStyle || '选择风格'}
             {styleReferenceImageUrl && <span className="text-blue-500">(自定义)</span>}
           </button>
+          {onOpenAssetManagement && (
+            <button
+              onClick={onOpenAssetManagement}
+              className="inline-flex items-center gap-1.5 rounded-lg border border-indigo-200 bg-indigo-50 px-2.5 py-1.5 text-xs font-medium text-indigo-700 hover:bg-indigo-100"
+            >
+              <Package size={14} /> 资产管理
+            </button>
+          )}
         </div>
 
         <div className="flex items-center gap-1.5">
@@ -508,30 +518,12 @@ export default function ChapterVideoWorkflowPanel({
         </div>
       </div>
 
-      {/* ── 空状态：仅当无 workflow，或剧本已批准但无镜头时显示 ── */}
-      {(!workflow || (screenplayApproved && !parsing && sortedShots.length === 0)) && (
-        <div className="flex flex-1 items-center justify-center">
-          <div className="max-w-md px-8 text-center text-slate-400">
-            <Clapperboard size={46} className="mx-auto mb-3 opacity-40" />
-            {workflow && screenplayApproved ? (
-              <p className="text-sm text-slate-500">
-                点击顶部「从剧本拆镜」按钮从已批准的剧本拆解为镜头列表。
-              </p>
-            ) : (
-              <p className="text-sm text-slate-500">
-                选择视频风格和角色参考图后，点击顶部「从剧本拆镜」按钮从已批准的剧本拆解为镜头列表。
-              </p>
-            )}
-          </div>
-        </div>
-      )}
-
       {/* ── 工作流内容 ── */}
       {workflow && (
         <>
           {/* ── 剧本审核区 ── */}
           <div className={!screenplayApproved ? "flex flex-1 min-h-0 overflow-hidden px-4 py-4" : "mx-4 mt-3"}>
-            <div className={`flex rounded-2xl border border-[#d7e3f4] bg-white shadow-sm overflow-hidden ${!screenplayApproved ? "flex-1 flex-row" : ""}`}>
+            <div className={`flex rounded-2xl border border-[#d7e3f4] bg-white shadow-sm overflow-hidden ${!screenplayApproved ? "flex-1 flex-row" : ""} ${!screenplayApproved || screenplayCollapsed ? '' : 'max-h-[45vh]'}`}>
               {/* ── 左侧：原始小说正文（只读） ── */}
               <div className={`flex flex-col bg-slate-50/60 ${!screenplayApproved ? "w-[40%] min-w-[260px] border-r border-[#d7e3f4]" : "hidden"}`}>
                 <div className="flex items-center gap-2 px-3 py-2 border-b border-[#d7e3f4] bg-white/70">
@@ -1136,6 +1128,18 @@ const typeConfig: Record<string, { label: string; icon: React.ReactNode; color: 
               </div>
             </div>
           </div>
+
+          {/* ── 空状态：剧本已批准但无镜头时显示 ── */}
+          {screenplayApproved && !parsing && sortedShots.length === 0 && (
+            <div className="flex flex-1 items-center justify-center">
+              <div className="max-w-md px-8 text-center text-slate-400">
+                <Clapperboard size={46} className="mx-auto mb-3 opacity-40" />
+                <p className="text-sm text-slate-500">
+                  点击顶部「从剧本拆镜」按钮从已批准的剧本拆解为镜头列表。
+                </p>
+              </div>
+            </div>
+          )}
 
           {screenplayApproved && (
           <div className="relative flex flex-1 min-h-0 gap-4 overflow-hidden px-4 py-4">

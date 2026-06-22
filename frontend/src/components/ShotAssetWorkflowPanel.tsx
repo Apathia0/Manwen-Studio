@@ -498,18 +498,20 @@ export default function ShotAssetWorkflowPanel({
         {activeSection === 'style' ? (
           <div className="space-y-3">
             <div className="text-xs text-slate-500">风格来源：{styleSource}</div>
-            <select
-              value={shot.style_preset ? stylePresets.find((s: any) => s.name === shot.style_preset)?.id ?? '' : chapterStylePreset?.style_preset_id ?? ''}
-              onChange={(e) => {
-                if (!e.target.value) return;
-                const preset = stylePresets.find((s: any) => s.id === Number(e.target.value));
-                onShotStylePresetChange?.(preset?.name || null);
-              }}
-              className="w-full rounded-lg border border-[#d7e3f4] px-2 py-2 text-sm"
-            >
-              <option value="">选择风格预设</option>
-              {stylePresets.map((preset: any) => <option key={preset.id} value={preset.id}>{formatStyleName(preset.name)}</option>)}
-            </select>
+            <div className="flex items-center gap-2">
+              <select
+                value={shot.style_preset ? stylePresets.find((s: any) => s.name === shot.style_preset)?.id ?? '' : chapterStylePreset?.style_preset_id ?? ''}
+                onChange={(e) => {
+                  if (!e.target.value) return;
+                  const preset = stylePresets.find((s: any) => s.id === Number(e.target.value));
+                  onShotStylePresetChange?.(preset?.name || null);
+                }}
+                className="flex-1 rounded-lg border border-[#d7e3f4] px-2 py-2 text-sm"
+              >
+                <option value="">选择风格预设</option>
+                {stylePresets.map((preset: any) => <option key={preset.id} value={preset.id}>{formatStyleName(preset.name)}</option>)}
+              </select>
+            </div>
             <button onClick={parseAssetPrompts} disabled={parsingPrompts} className="w-full rounded-lg border border-[#2563eb] px-3 py-2 text-xs text-[#1d4ed8]">{parsingPrompts ? '解析中...' : 'AI 解析资产提示词'}</button>
           </div>
         ) : null}

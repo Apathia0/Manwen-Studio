@@ -632,6 +632,65 @@ def update_shot(shot_id: int, **kwargs) -> ChapterVideoShot | None:
         db.close()
 
 
+def _build_chapter_storyboard_asset(
+    *,
+    workflow: ChapterVideoWorkflow,
+    shot: ChapterVideoShot,
+    file_path: str,
+    prompt: str | None,
+    provider: str,
+    source_asset_ids: list[int] | None = None,
+    source_type: str = "ai_generated",
+) -> VideoAsset:
+    return VideoAsset(
+        story_id=workflow.story_id,
+        chapter_id=workflow.chapter_id,
+        shot_id=None,
+        asset_type="storyboard_frame",
+        name=f"故事版 - 镜头 {shot.shot_index}",
+        file_path=file_path,
+        provider=provider,
+        prompt=prompt or "",
+        source_asset_ids_json=source_asset_ids or None,
+        style_preset=getattr(workflow, "video_style", None),
+        source_type=source_type,
+        meta_json={
+            "chapter_video_workflow_id": workflow.id,
+            "chapter_video_shot_id": shot.id,
+            "shot_index": shot.shot_index,
+        },
+    )
+
+
+def _persist_chapter_storyboard_asset(
+    *,
+    workflow: ChapterVideoWorkflow,
+    shot: ChapterVideoShot,
+    file_path: str,
+    prompt: str | None,
+    provider: str,
+    source_asset_ids: list[int] | None = None,
+    source_type: str = "ai_generated",
+) -> VideoAsset:
+    db = SessionLocal()
+    try:
+        asset = _build_chapter_storyboard_asset(
+            workflow=workflow,
+            shot=shot,
+            file_path=file_path,
+            prompt=prompt,
+            provider=provider,
+            source_asset_ids=source_asset_ids,
+            source_type=source_type,
+        )
+        db.add(asset)
+        db.commit()
+        db.refresh(asset)
+        return asset
+    finally:
+        db.close()
+
+
 def clear_shot_storyboard(shot_id: int) -> ChapterVideoShot | None:
     """清除 shot 的故事版图片 URL，重置状态为 pending。"""
     return update_shot(shot_id, storyboard_image_url=None, status="pending")
@@ -1050,6 +1109,11 @@ async def reanalyze_storyboard_prompts(
                 "scene_location": shot.scene_location,
                 "time_of_day": shot.time_of_day,
                 "characters": shot.characters,
+                "screenplay_scene_id": shot.screenplay_scene_id,
+                "screenplay_beat_id": shot.screenplay_beat_id,
+                "narrative_purpose": shot.narrative_purpose,
+                "beat_density": shot.beat_density,
+                "transition_to_next": shot.transition_to_next,
                 "story_summary": shot.story_summary,
                 "dialogue_or_narration": shot.dialogue_or_narration,
                 "source_text_span": shot.source_text_span,
@@ -1058,6 +1122,7 @@ async def reanalyze_storyboard_prompts(
                 "emotion_plan": shot.emotion_plan,
                 "style_preset": style_preset,
                 "shot_context": shot_context,
+                "screenplay_context": build_screenplay_context_for_shot(wf, shot),
                 "storyboard_json": shot.storyboard_json,
             }, api_key=deepseek_api_key)
 
@@ -1324,8 +1389,8 @@ async def _expand_single_shot_prompts(
             for entry in ai_character_prompts:
                 _ensure_character_version(story.id, entry.get("name", ""), entry.get("prompt", ""))
 
-    # 视频提示词：直接使用故事版分镜脚本作为视频生成依据，不再调用 AI 分析
-    video_prompt = storyboard_prompt or shot.video_prompt or ""
+    # 视频提示词：只使用已保存的 shot.video_prompt，不自动回退到故事版提示词
+    video_prompt = shot.video_prompt or ""
 
     update_shot(
         shot_id,
@@ -1532,9 +1597,8 @@ def assemble_video_prompt_text(
     workflow = get_workflow(shot.workflow_id)
     effective_ref_ids = ref_asset_ids or (shot.character_reference_ids or [])
 
-    # ── 按照 ref_asset_ids 的实际顺序确定每张图的类型和 @image 编号 ──
     from models import VideoAsset
-    ref_details: list[tuple[int, str]] = []  # (asset_id, type_label)
+    ref_details: list[tuple[int, str]] = []
     asset_type_map: dict[int, str] = {}
 
     real_asset_ids = [rid for rid in effective_ref_ids if rid != -1]
@@ -1560,7 +1624,6 @@ def assemble_video_prompt_text(
 
     has_storyboard_ref = any(rt == "storyboard" for _, rt in ref_details)
 
-    # ── Part 1: 按实际顺序生成参考图说明 ──
     system_prompt_parts: list[str] = []
     image_index = 1
     for _rid, ref_type in ref_details:
@@ -1590,7 +1653,6 @@ def assemble_video_prompt_text(
             )
             image_index += 1
 
-    # 风格参考图（来自工作流/章节预设，不在 ref_asset_ids 中）
     has_style_ref = False
     style_ref_source = workflow.style_reference_image_url if workflow else None
     if style_ref_source:
@@ -1615,12 +1677,11 @@ def assemble_video_prompt_text(
         system_prompt_parts.append("本次生成未使用参考图片。")
     part1 = "\n".join(system_prompt_parts)
 
-    # ── Part 2: 视频生成指令 ──
     video_prompt = prompt_override or shot.video_prompt
     if video_prompt and "===" in video_prompt:
         video_prompt = video_prompt.split("===")[0].strip()
     if not video_prompt:
-        video_prompt = shot.storyboard_prompt or ""
+        video_prompt = ""
 
     if prompt_override:
         part2 = prompt_override
@@ -1633,14 +1694,12 @@ def assemble_video_prompt_text(
     else:
         part2 = video_prompt or "生成15秒视频，保持画面流畅自然。"
 
-    # ── Part 3: 风格约束（可选） ──
     part3 = None
     if has_style_ref:
         part3 = "本视频的画风、色彩、光影以风格参考图为准，保持画面风格稳定统一。"
         if has_storyboard_ref:
             part3 += "\n故事版仅提供构图和动作参考，视频色彩、光影、渲染质感不受故事版影响，完全以风格参考图为准。"
 
-    # ── 组装 ──
     sections = [part1, part2]
     if part3:
         sections.append(part3)
@@ -1902,6 +1961,16 @@ async def regenerate_shot_storyboard(
 
         storyboard_url = _to_storyboard_static_url(image_result.image_path)
         update_shot(shot_id, status="storyboard_ready", storyboard_image_url=storyboard_url)
+        if workflow:
+            _persist_chapter_storyboard_asset(
+                workflow=workflow,
+                shot=shot,
+                file_path=storyboard_url,
+                prompt=director_prompt,
+                provider="image2",
+                source_asset_ids=effective_ref_ids,
+                source_type="ai_generated",
+            )
     except Exception as exc:
         update_shot(shot_id, status="failed", error_message=str(exc))
         raise
@@ -1936,11 +2005,11 @@ async def regenerate_shot_video(
     # 清理：去除 shot.video_prompt 中残留的旧 enrichments（以 === 开头的内容）
     if video_prompt and "===" in video_prompt:
         video_prompt = video_prompt.split("===")[0].strip()
-    # 如果 prompt 为空或残留旧模板，直接用故事版分镜脚本
+    # 如果 prompt 为空或残留旧模板，清空（不自动回退到故事版提示词）
     import re
     is_stale_template = bool(video_prompt) and bool(re.search(r"\d+(?:\.\d+)?-\d+(?:\.\d+)?\s*秒", video_prompt))
     if not video_prompt or is_stale_template:
-        video_prompt = shot.storyboard_prompt or ""
+        video_prompt = ""
 
     workflow = get_workflow(shot.workflow_id)
     story_id = workflow.story_id if workflow else 0

@@ -6,7 +6,7 @@ deploy/docker/data/
 deploy/docker/update-state.json
 deploy/docker/update.log
 deploy/docker/update.lock
-
+infinite-canvas-main
 # ─── Python ───
 __pycache__/
 *.py[cod]

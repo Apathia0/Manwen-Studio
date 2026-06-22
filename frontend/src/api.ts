@@ -3544,6 +3544,18 @@ export async function deleteVideoAsset(assetId: number): Promise<{ ok: boolean; 
   return res.json();
 }
 
+export async function updateVideoAsset(assetId: number, payload: { name: string }): Promise<void> {
+  const res = await fetch(`${BASE}/api/video-assets/${assetId}`, {
+    method: 'PUT',
+    headers: apiHeaders(true),
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || '更新资产失败');
+  }
+}
+
 export interface ReanalyzeShotPromptsResponse {
   shot_id: number;
   storyboard_prompt: string;
