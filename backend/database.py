@@ -2,6 +2,7 @@ import os
 import logging
 import shutil
 from pathlib import Path
+from typing import Any, Mapping
 
 from dotenv import load_dotenv
 from fastapi import Request
@@ -81,6 +82,40 @@ def _prepare_migration_conn(conn) -> None:
         conn.execute(text("SET statement_timeout = '120s'"))
     except Exception as exc:
         logger.warning("Failed to configure migration timeouts: %s", exc)
+
+
+def _ensure_varchar_column(
+    conn: Any,
+    table_name: str,
+    column_name: str,
+    cols_by_name: Mapping[str, Mapping[str, Any]],
+    length: int = 64,
+) -> None:
+    """确保历史库中的列类型为 VARCHAR，兼容多 ID 字符串。"""
+    from sqlalchemy import String, Text, text
+
+    column = cols_by_name.get(column_name)
+    if not column:
+        conn.execute(text(f"ALTER TABLE {table_name} ADD COLUMN {column_name} VARCHAR({length})"))
+        return
+
+    column_type = column.get("type")
+    if isinstance(column_type, (String, Text)):
+        return
+
+    if getattr(conn.dialect, "name", "") == "postgresql":
+        alter_sql = (
+            f"ALTER TABLE {table_name} ALTER COLUMN {column_name} "
+            + f"TYPE VARCHAR({length}) USING {column_name}::text"
+        )
+        conn.execute(text(alter_sql))
+    else:
+        logger.warning(
+            "跳过 %s.%s 类型迁移：当前数据库方言 %s 不支持自动 ALTER TYPE",
+            table_name,
+            column_name,
+            getattr(conn.dialect, "name", "unknown"),
+        )
 
 
 def _migrate(target_engine=None):
@@ -342,7 +377,7 @@ def _cleanup_duplicate_manga_images(target_engine=None):
                 )
 
 
-def _chapter_score(chapter: dict, has_dir: bool) -> tuple[int, int, int, int]:
+def _chapter_score(chapter: Mapping[str, Any], has_dir: bool) -> tuple[int, int, int, int]:
     novel_score = 1 if chapter["novel_content"] else 0
     return (
         novel_score,
@@ -626,7 +661,9 @@ def _migrate_video_tables(target_engine=None):
             conn.execute(text("ALTER TABLE video_shots ADD COLUMN scene_mood VARCHAR(50)"))
 
     # chapter_video_shots 表迁移
-    chapter_video_shots_cols = {c["name"] for c in insp.get_columns("chapter_video_shots")} if "chapter_video_shots" in insp.get_table_names() else set()
+    chapter_video_shots_columns = insp.get_columns("chapter_video_shots") if "chapter_video_shots" in insp.get_table_names() else []
+    chapter_video_shots_cols_by_name = {c["name"]: c for c in chapter_video_shots_columns}
+    chapter_video_shots_cols = set(chapter_video_shots_cols_by_name)
     if chapter_video_shots_cols:
         with db_engine.begin() as conn:
             _prepare_migration_conn(conn)
@@ -642,10 +679,8 @@ def _migrate_video_tables(target_engine=None):
                 conn.execute(text("ALTER TABLE chapter_video_shots ADD COLUMN scene_reference_ids JSON"))
             if "prop_reference_ids" not in chapter_video_shots_cols:
                 conn.execute(text("ALTER TABLE chapter_video_shots ADD COLUMN prop_reference_ids JSON"))
-            if "screenplay_scene_id" not in chapter_video_shots_cols:
-                conn.execute(text("ALTER TABLE chapter_video_shots ADD COLUMN screenplay_scene_id VARCHAR(64)"))
-            if "screenplay_beat_id" not in chapter_video_shots_cols:
-                conn.execute(text("ALTER TABLE chapter_video_shots ADD COLUMN screenplay_beat_id VARCHAR(64)"))
+            _ensure_varchar_column(conn, "chapter_video_shots", "screenplay_scene_id", chapter_video_shots_cols_by_name)
+            _ensure_varchar_column(conn, "chapter_video_shots", "screenplay_beat_id", chapter_video_shots_cols_by_name)
             if "narrative_purpose" not in chapter_video_shots_cols:
                 conn.execute(text("ALTER TABLE chapter_video_shots ADD COLUMN narrative_purpose VARCHAR(64)"))
             if "beat_density" not in chapter_video_shots_cols:

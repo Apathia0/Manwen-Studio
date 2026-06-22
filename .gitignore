@@ -7,6 +7,7 @@ deploy/docker/update-state.json
 deploy/docker/update.log
 deploy/docker/update.lock
 infinite-canvas-main
+.media_cache
 # ─── Python ───
 __pycache__/
 *.py[cod]
