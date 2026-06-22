@@ -14,7 +14,7 @@ function 渲染消息内容(content: string) {
       return (
         <pre
           key={index}
-          className="my-2 p-3 bg-gray-900 rounded-lg overflow-x-auto text-xs leading-relaxed text-gray-200 font-mono"
+          className="my-2 p-3 bg-gray-900 rounded-lg overflow-auto max-h-60 text-xs leading-relaxed text-gray-200 font-mono"
         >
           <code>{codeContent}</code>
         </pre>
@@ -58,7 +58,7 @@ export default function AgentMessage({ message }: AgentMessageProps) {
 
       <div className="flex flex-col max-w-[80%] min-w-0">
         <div
-          className={`px-4 py-2.5 text-sm leading-relaxed whitespace-pre-wrap break-words ${
+          className={`px-4 py-2.5 text-sm leading-relaxed whitespace-pre-wrap break-words max-h-[50vh] overflow-y-auto ${
             isUser
               ? 'bg-blue-600 text-white rounded-2xl rounded-br-md'
               : 'bg-[#f4f8ff] text-gray-700 rounded-2xl rounded-bl-md border border-[#d7e3f4]'

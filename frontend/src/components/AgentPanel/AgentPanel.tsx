@@ -7,6 +7,7 @@ import {
   getAgentConversation,
   listAgentConversations,
   type AgentConversationSummary,
+  type AgentWorkflowType,
 } from '../../api';
 import AgentMessage from './AgentMessage';
 import AgentInput from './AgentInput';
@@ -36,6 +37,9 @@ export interface AgentPanelProps {
   storyTitle?: string;
   chapterTitle?: string;
   onContentUpdated?: () => void;
+  workflowType?: AgentWorkflowType;
+  workflowId?: number;
+  shotId?: number;
 }
 
 function mapConversationMessage(message: {
@@ -72,11 +76,13 @@ function WelcomeScreen({
   chapterTitle,
   onAction,
   disabled,
+  workflowType,
 }: {
   storyTitle?: string;
   chapterTitle?: string;
   onAction: (prompt: string) => void;
   disabled: boolean;
+  workflowType?: AgentWorkflowType;
 }) {
   return (
     <div className="flex h-full flex-col items-center justify-center px-6 text-center">
@@ -90,7 +96,7 @@ function WelcomeScreen({
           : '选择一部小说后，AI 助手会在这里保留历史对话，并持续协助创作。'}
       </p>
       <div className="w-full max-w-md">
-        <QuickActions onAction={onAction} disabled={disabled} />
+        <QuickActions onAction={onAction} disabled={disabled} workflowType={workflowType} />
       </div>
     </div>
   );
@@ -103,6 +109,9 @@ export default function AgentPanel({
   storyTitle,
   chapterTitle,
   onContentUpdated,
+  workflowType,
+  workflowId,
+  shotId,
 }: AgentPanelProps) {
   const [input, setInput] = useState('');
   const [messages, setMessages] = useState<AgentMessageData[]>([]);
@@ -352,7 +361,7 @@ export default function AgentPanel({
       let accumulated = '';
       const toolCallMap = new Map<string, ToolCallInfo>();
 
-      abortRef.current = agentChatStream(storyId, conversationId, content, chapterId, 'execute', {
+      abortRef.current = agentChatStream(storyId, conversationId, content, chapterId, 'execute', workflowType, workflowId, shotId, {
         onToken: (token: string) => {
           accumulated += token;
           setStreamContent(accumulated);
@@ -426,7 +435,7 @@ export default function AgentPanel({
         },
       });
     },
-    [activeConversationId, chapterId, generateId, input, storyId, streaming, syncAfterStream],
+    [activeConversationId, chapterId, generateId, input, storyId, streaming, syncAfterStream, workflowType, workflowId, shotId],
   );
 
   const handleAbort = useCallback(() => {
@@ -598,6 +607,7 @@ export default function AgentPanel({
               chapterTitle={chapterTitle}
               onAction={(prompt) => void handleSend(prompt)}
               disabled={streaming}
+              workflowType={workflowType}
             />
           ) : (
             <>

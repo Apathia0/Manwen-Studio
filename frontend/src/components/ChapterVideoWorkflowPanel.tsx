@@ -86,10 +86,12 @@ interface ChapterVideoWorkflowPanelProps {
   characterLoading: boolean;
   onGenerateCharacters: () => Promise<void> | void;
   onResetWorkflow?: () => Promise<void> | void;
+  renderAiAssistantButton?: React.ReactNode;
   parsing?: boolean;
   videoAspectRatio?: '16:9' | '9:16';
   onVideoAspectRatioChange?: (value: '16:9' | '9:16') => void;
-  onOpenAssetManagement?: () => void;
+onOpenAssetManagement?: () => void;
+  onAgentShotChange?: (shotId: number | undefined) => void;
 }
 
 function shotStatusLabel(status: string): string {
@@ -166,10 +168,12 @@ export default function ChapterVideoWorkflowPanel({
   onDeleteStoryboard,
   onDeleteVideo,
   onResetWorkflow,
+renderAiAssistantButton,
   parsing,
   videoAspectRatio = '16:9',
   onVideoAspectRatioChange,
-  onOpenAssetManagement,
+onOpenAssetManagement,
+  onAgentShotChange,
   characterLoading,
 }: ChapterVideoWorkflowPanelProps) {
   const [concatModalOpen, setConcatModalOpen] = useState(false);
@@ -465,6 +469,7 @@ export default function ChapterVideoWorkflowPanel({
         </div>
 
         <div className="flex items-center gap-1.5">
+          {renderAiAssistantButton}
           {!screenplayApproved ? (
             <button
               onClick={handleGenerateScreenplay}
@@ -1207,7 +1212,7 @@ const typeConfig: Record<string, { label: string; icon: React.ReactNode; color: 
                   >
                     <div className="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
                       {/* 左侧：镜头信息 + 勾选 */}
-                      <div className="min-w-0 flex-1">
+                      <div className="min-w-0 flex-1 xl:w-[400px]">
                         <div className="flex items-center gap-2">
                           <input
                             type="checkbox"
@@ -1246,16 +1251,12 @@ const typeConfig: Record<string, { label: string; icon: React.ReactNode; color: 
                             </span>
                           )}
                         </div>
-                        <p className="mt-2 text-sm text-slate-700">{shot.story_summary || '暂无情节摘要'}</p>
-                        <div className="mt-3 grid grid-cols-1 gap-2 text-xs text-slate-500 md:grid-cols-2">
-                          <div>场景：{shot.scene_location || '未明确'} / {shot.time_of_day || '未明确'}</div>
-                          <div>运镜：{shot.camera_plan || '未明确'}</div>
-                          <div>动作：{shot.motion_plan || '未明确'}</div>
-                          <div>情绪：{shot.emotion_plan || '未明确'}</div>
+                        <div className="mt-2 grid grid-cols-2 gap-x-4 gap-y-1">
+                          <p className="text-sm text-slate-700">情节：{shot.story_summary || '暂无'}</p>
+                          {shot.continuity_notes && (
+                            <p className="text-xs text-slate-500">连续性：{shot.continuity_notes}</p>
+                          )}
                         </div>
-                        {shot.continuity_notes && (
-                          <div className="mt-2 text-xs text-slate-500">连续性：{shot.continuity_notes}</div>
-                        )}
 
                         {/* 失败错误信息 */}
                         {shot.error_message && (
@@ -1267,16 +1268,16 @@ const typeConfig: Record<string, { label: string; icon: React.ReactNode; color: 
                         </div>
 
                       {/* 右侧：故事版/视频预览 */}
-                      <div className="grid shrink-0 grid-cols-2 gap-3 sm:grid-cols-4 xl:w-[880px]">
+                      <div className="grid shrink grid-cols-4 gap-3">
                         <button
                           type="button"
-                          onClick={() => setVideoWorkbench({ shotId: shot.id, type: 'character', assetId: undefined })}
-                          className="rounded-xl border border-[#e5edf8] bg-slate-50 p-2 text-left transition hover:border-blue-300 hover:bg-white"
+                          onClick={() => { setVideoWorkbench({ shotId: shot.id, type: 'character', assetId: undefined }); onAgentShotChange?.(shot.id); }}
+                          className="w-[160px] rounded-xl border border-[#e5edf8] bg-slate-50 p-2 text-left transition hover:border-blue-300 hover:bg-white"
                         >
                           <div className="mb-2 flex items-center gap-1 text-xs font-medium text-slate-600">
                             <UserRound size={12} /> 角色资产
                           </div>
-                          <div className="flex h-32 flex-col items-center justify-center rounded-lg border border-dashed border-[#d7e3f4] bg-white text-xs text-slate-400">
+                          <div className="flex h-24 flex-col items-center justify-center rounded-lg border border-dashed border-[#d7e3f4] bg-white text-xs text-slate-400">
                             {(() => {
                               if (characterLoading && shot.characters?.length) {
                                 return (
@@ -1286,43 +1287,43 @@ const typeConfig: Record<string, { label: string; icon: React.ReactNode; color: 
                                   </div>
                                 );
                               }
-                              const thumbnails = getCharacterThumbnails(shot.characters);
-                              if (thumbnails.length === 0) {
-                                return <div>暂无角色</div>;
-                              }
-                              return (
-                                <div className="flex flex-wrap gap-1 p-1">
-                                  {thumbnails.slice(0, 4).map((thumb) => (
-                                    <div key={thumb.name} className="flex flex-col items-center">
-                                      {thumb.thumbnailUrl ? (
-                                        <img
-                                          src={toAssetUrl(thumb.thumbnailUrl)}
-                                          alt={thumb.name}
-                                          className="h-12 w-12 rounded-lg object-cover"
-                                        />
-                                      ) : (
-                                        <div className="flex h-12 w-12 items-center justify-center rounded-lg bg-slate-100 text-[10px] text-slate-400">
-                                          <UserRound size={16} />
-                                        </div>
-                                      )}
-                                      <span className="mt-0.5 max-w-[48px] truncate text-[10px] text-slate-500">{thumb.name}</span>
-                                    </div>
-                                  ))}
-                                  {thumbnails.length > 4 && (
-                                    <div className="flex h-12 w-12 items-center justify-center rounded-lg bg-slate-100 text-[10px] text-slate-400">
-                                      +{thumbnails.length - 4}
-                                    </div>
-                                  )}
-                                </div>
-                              );
+                                const thumbnails = getCharacterThumbnails(shot.characters);
+                                if (thumbnails.length === 0) {
+                                  return <div>暂无角色</div>;
+                                }
+                                return (
+                                  <div className="flex flex-wrap gap-1 p-1">
+                                    {thumbnails.slice(0, 2).map((thumb) => (
+                                      <div key={thumb.name} className="flex flex-col items-center">
+                                        {thumb.thumbnailUrl ? (
+                                          <img
+                                            src={toAssetUrl(thumb.thumbnailUrl)}
+                                            alt={thumb.name}
+                                            className="h-10 w-10 rounded object-cover"
+                                          />
+                                        ) : (
+                                          <div className="flex h-10 w-10 items-center justify-center rounded bg-slate-100 text-[10px] text-slate-400">
+                                            <UserRound size={14} />
+                                          </div>
+                                        )}
+                                        <span className="mt-0.5 max-w-[40px] truncate text-[9px] text-slate-500">{thumb.name}</span>
+                                      </div>
+                                    ))}
+                                    {thumbnails.length > 2 && (
+                                      <span className="flex h-10 w-10 items-center justify-center text-[11px] text-slate-400">
+                                        +{thumbnails.length - 2}
+                                      </span>
+                                    )}
+                                  </div>
+                                );
                             })()}
                           </div>
                         </button>
 
                         <button
                           type="button"
-                          onClick={() => setVideoWorkbench({ shotId: shot.id, type: 'scene' })}
-                          className="rounded-xl border border-[#e5edf8] bg-slate-50 p-2 text-left transition hover:border-blue-300 hover:bg-white"
+                          onClick={() => { setVideoWorkbench({ shotId: shot.id, type: 'scene' }); onAgentShotChange?.(shot.id); }}
+                          className="w-[160px] rounded-xl border border-[#e5edf8] bg-slate-50 p-2 text-left transition hover:border-blue-300 hover:bg-white"
                         >
                           <div className="mb-2 flex items-center gap-1 text-xs font-medium text-slate-600">
                             <Home size={14} /> 场景 & 道具
@@ -1331,7 +1332,7 @@ const typeConfig: Record<string, { label: string; icon: React.ReactNode; color: 
                             const sceneState = videoGenStore.get(shot.id, 'scene');
                             if (sceneState?.active) {
                               return (
-                                <div className="flex h-32 flex-col items-center justify-center rounded-lg border-2 border-dashed border-blue-200 bg-blue-50">
+                                <div className="flex h-24 flex-col items-center justify-center rounded-lg border-2 border-dashed border-blue-200 bg-blue-50">
                                   <Loader2 className="h-8 w-8 animate-spin text-blue-500" />
                                   <span className="mt-2 text-sm text-blue-600">场景生成中...</span>
                                   {sceneState.statusMsg && (
@@ -1341,7 +1342,7 @@ const typeConfig: Record<string, { label: string; icon: React.ReactNode; color: 
                               );
                             }
                             return (
-                              <div className="flex h-32 items-center justify-center rounded-lg border border-dashed border-[#d7e3f4] bg-white text-xs text-slate-400">
+                              <div className="flex h-24 items-center justify-center rounded-lg border border-dashed border-[#d7e3f4] bg-white text-xs text-slate-400">
                                 待生成
                               </div>
                             );
@@ -1350,8 +1351,8 @@ const typeConfig: Record<string, { label: string; icon: React.ReactNode; color: 
 
                         <button
                           type="button"
-                          onClick={() => setVideoWorkbench({ shotId: shot.id, type: 'storyboard' })}
-                          className="rounded-xl border border-[#e5edf8] bg-slate-50 p-2 text-left transition hover:border-blue-300 hover:bg-white"
+                          onClick={() => { setVideoWorkbench({ shotId: shot.id, type: 'storyboard' }); onAgentShotChange?.(shot.id); }}
+                          className="w-[160px] rounded-xl border border-[#e5edf8] bg-slate-50 p-2 text-left transition hover:border-blue-300 hover:bg-white"
                         >
                           <div className="mb-2 flex items-center gap-1 text-xs font-medium text-slate-600">
                             <ImageIcon size={12} /> 故事版
@@ -1360,7 +1361,7 @@ const typeConfig: Record<string, { label: string; icon: React.ReactNode; color: 
                             const sbState = videoGenStore.get(shot.id, 'storyboard');
                             if (sbState?.active) {
                               return (
-                                <div className="flex h-32 flex-col items-center justify-center rounded-lg border-2 border-dashed border-blue-200 bg-blue-50">
+                                <div className="flex h-24 flex-col items-center justify-center rounded-lg border-2 border-dashed border-blue-200 bg-blue-50">
                                   <Loader2 className="h-8 w-8 animate-spin text-blue-500" />
                                   <span className="mt-2 text-sm text-blue-600">故事版生成中...</span>
                                   {sbState.statusMsg && (
@@ -1374,12 +1375,12 @@ const typeConfig: Record<string, { label: string; icon: React.ReactNode; color: 
                                 <img
                                   src={toAssetUrl(shot.storyboard_image_url)}
                                   alt={`镜头 ${shot.shot_index} 故事版`}
-                                  className="h-32 w-full rounded-lg object-cover"
+                                  className="h-24 w-full rounded-lg object-cover"
                                 />
                               );
                             }
                             return (
-                              <div className="flex h-32 items-center justify-center rounded-lg border border-dashed border-[#d7e3f4] bg-white text-xs text-slate-400">
+                              <div className="flex h-24 items-center justify-center rounded-lg border border-dashed border-[#d7e3f4] bg-white text-xs text-slate-400">
                                 暂无故事版
                               </div>
                             );
@@ -1388,8 +1389,8 @@ const typeConfig: Record<string, { label: string; icon: React.ReactNode; color: 
 
                         <button
                           type="button"
-                          onClick={() => setVideoWorkbench({ shotId: shot.id, type: 'video' })}
-                          className="rounded-xl border border-[#e5edf8] bg-slate-50 p-2 text-left transition hover:border-blue-300 hover:bg-white"
+                          onClick={() => { setVideoWorkbench({ shotId: shot.id, type: 'video' }); onAgentShotChange?.(shot.id); }}
+                          className="w-[160px] rounded-xl border border-[#e5edf8] bg-slate-50 p-2 text-left transition hover:border-blue-300 hover:bg-white"
                         >
                           <div className="mb-2 flex items-center gap-1 text-xs font-medium text-slate-600">
                             <Film size={12} /> 视频
@@ -1403,12 +1404,12 @@ const typeConfig: Record<string, { label: string; icon: React.ReactNode; color: 
                                 <video
                                   src={toAssetUrl(shot.video_url)}
                                   controls
-                                  className="h-32 w-full rounded-lg bg-slate-950 object-contain"
+                                  className="h-24 w-full rounded-lg bg-slate-950 object-contain"
                                 />
                               );
                             } else if (isGenerating) {
                               return (
-                                <div className="flex h-32 flex-col items-center justify-center rounded-lg border-2 border-dashed border-blue-200 bg-blue-50">
+                                <div className="flex h-24 flex-col items-center justify-center rounded-lg border-2 border-dashed border-blue-200 bg-blue-50">
                                   <Loader2 className="h-8 w-8 animate-spin text-blue-500" />
                                   <span className="mt-2 text-sm text-blue-600">视频生成中...</span>
                                   {videoState.statusMsg && (
@@ -1418,7 +1419,7 @@ const typeConfig: Record<string, { label: string; icon: React.ReactNode; color: 
                               );
                             } else {
                               return (
-                                <div className="flex h-32 items-center justify-center rounded-lg border border-dashed border-[#d7e3f4] bg-white text-xs text-slate-400">
+                                <div className="flex h-24 items-center justify-center rounded-lg border border-dashed border-[#d7e3f4] bg-white text-xs text-slate-400">
                                   暂无视频
                                 </div>
                               );
@@ -1877,7 +1878,7 @@ const typeConfig: Record<string, { label: string; icon: React.ReactNode; color: 
             onRedraw={onRedraw}
             onPromptSave={onPromptSave}
             onReanalyzePrompt={onWorkbenchReanalyze}
-            onClose={() => setVideoWorkbench(null)}
+            onClose={() => { onAgentShotChange?.(undefined); setVideoWorkbench(null); }}
           storyboardRefAssets={(videoWorkbench.type === 'storyboard' || videoWorkbench.type === 'video') ? [...workbenchStoryboardAssets, ...shotStoryboardAssets] : undefined}
           selectedRefAssetIds={workbenchRefAssetIds}
           onSelectedRefAssetsChange={setWorkbenchRefAssetIds}

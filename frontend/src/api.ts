@@ -508,6 +508,14 @@ export interface AgentConversation {
 
 export type AgentMode = 'chat' | 'analyze' | 'execute';
 
+export type AgentWorkflowType = 'novel' | 'manga' | 'video';
+
+export interface AgentWorkflowContext {
+  workflow_type?: AgentWorkflowType | null;
+  workflow_id?: number | null;
+  shot_id?: number | null;
+}
+
 export interface MangaImage {
   id: number;
   chapter_id: number;
@@ -2564,6 +2572,9 @@ export function agentChatStream(
   content: string,
   chapterId?: number,
   mode: AgentMode = 'execute',
+  workflowType?: string,
+  workflowId?: number,
+  shotId?: number,
   callbacks?: {
     onToken?: (token: string) => void;
     onToolCall?: (toolCall: { id: string; name: string; args: any; status: 'running' }) => void;
@@ -2578,7 +2589,7 @@ export function agentChatStream(
   fetch(`${BASE}/api/stories/${storyId}/agent/chat`, {
     method: 'POST',
     headers: apiHeaders(true),
-    body: JSON.stringify({ conversation_id: conversationId, content, chapter_id: chapterId, mode }),
+    body: JSON.stringify({ conversation_id: conversationId, message: content, chapter_id: chapterId, mode, workflow_type: workflowType, workflow_id: workflowId, shot_id: shotId }),
     signal: controller.signal,
   })
     .then(async (res) => {

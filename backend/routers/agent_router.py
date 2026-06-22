@@ -10,8 +10,8 @@ from sqlalchemy.orm import Session
 from sse_starlette.sse import EventSourceResponse
 
 from database import SessionLocal, get_db
-from models import AgentConversation, AgentConversationMessage, AgentPendingChange, Chapter, Story
-from schemas import AgentConversationCreateIn, AgentConversationOut, AgentConversationSummaryOut
+from models import AgentConversation, AgentConversationMessage, AgentPendingChange, Chapter, ChapterVideoShot, ChapterVideoWorkflow, Story
+from schemas import AgentChatIn, AgentConversationCreateIn, AgentConversationOut, AgentConversationSummaryOut
 from services.agent_service import (
     AgentPendingChangeKey,
     agent_pending_change_store,
@@ -84,6 +84,87 @@ def _pending_change_key_from_request(
         return None
     _require_conversation(db, conversation_id=conversation_id, story_id=story_id, user_id=user_id)
     return AgentPendingChangeKey(user_id=user_id, story_id=story_id, conversation_id=conversation_id)
+
+
+def _safe_short_text(value: str | None, max_len: int = 5000) -> str:
+    """安全截断文本（默认 5000 字符，适配 DeepSeek V4 100 万 tokens 上下文）。"""
+    if not value:
+        return "（无）"
+    text = " ".join(str(value).split())
+    return text[:max_len] + "…" if len(text) > max_len else text
+
+
+def _build_video_agent_context(
+    workflow: Any,
+    shots: list[Any],
+    current_shot_id: int | None = None,
+) -> str:
+    """构建视频工作流的 Agent 上下文字符串（完整版，充分利用 DeepSeek V4 大上下文）。"""
+    lines = [
+        "\n\n## 视频工作流上下文",
+        "",
+        "### 工作流概览",
+        f"- 工作流 ID: {workflow.id}",
+        f"- 状态: {workflow.workflow_status or '未知'}",
+        f"- 视频风格: {workflow.video_style or '未指定'}",
+        f"- 每镜头时长: {workflow.duration_per_shot}s",
+        f"- 总镜头数: {workflow.total_shots}",
+        f"- 已完成镜头: {workflow.completed_shots}",
+        f"- 失败镜头: {workflow.failed_shots}",
+    ]
+
+    # 剧本全文（不再截断，5000字上限已足够）
+    if workflow.screenplay_text:
+        lines.append("")
+        lines.append("### 剧本全文")
+        lines.append(f"```\n{_safe_short_text(workflow.screenplay_text, 5000)}\n```")
+
+    if shots:
+        lines.append("")
+        lines.append("### 镜头列表（完整信息）")
+        for shot in shots:
+            marker = " ← 当前镜头" if current_shot_id and shot.id == current_shot_id else ""
+            lines.append(f"\n#### 镜头 {shot.shot_index} [{shot.status or 'pending'}]{marker}")
+            lines.append(f"- 场景: {shot.scene_location or '未指定'} / {shot.time_of_day or '未指定'}")
+            chars = shot.characters
+            if isinstance(chars, list):
+                lines.append(f"- 角色: {', '.join(str(c) for c in chars)}")
+            lines.append(f"- 故事概要: {shot.story_summary or '无'}")
+            if shot.dialogue_or_narration:
+                lines.append(f"- 对话/旁白: {_safe_short_text(shot.dialogue_or_narration, 500)}")
+            lines.append(f"- 镜头计划: {shot.camera_plan or '无'}")
+            lines.append(f"- 运动计划: {shot.motion_plan or '无'}")
+            lines.append(f"- 情绪计划: {shot.emotion_plan or '无'}")
+            if shot.narrative_purpose:
+                lines.append(f"- 叙事目的: {shot.narrative_purpose}")
+            if shot.beat_density:
+                lines.append(f"- 节拍密度: {shot.beat_density}")
+            if shot.transition_to_next:
+                lines.append(f"- 过渡到下一镜: {shot.transition_to_next}")
+            if shot.continuity_notes:
+                lines.append(f"- 连续性: {shot.continuity_notes}")
+            if shot.storyboard_prompt:
+                lines.append(f"- 故事版提示词: {_safe_short_text(shot.storyboard_prompt, 2000)}")
+            if shot.video_prompt:
+                lines.append(f"- 视频提示词: {_safe_short_text(shot.video_prompt, 2000)}")
+            if shot.scene_prompt:
+                lines.append(f"- 场景提示词: {_safe_short_text(shot.scene_prompt, 1000)}")
+            if shot.character_prompts_json:
+                lines.append(f"- 角色提示词: {_safe_short_text(str(shot.character_prompts_json), 1000)}")
+            if shot.prop_prompts_json:
+                lines.append(f"- 道具提示词: {_safe_short_text(str(shot.prop_prompts_json), 1000)}")
+            if shot.character_reference_ids:
+                lines.append(f"- 角色引用 ID: {shot.character_reference_ids}")
+            if shot.scene_reference_ids:
+                lines.append(f"- 场景引用 ID: {shot.scene_reference_ids}")
+            if shot.prop_reference_ids:
+                lines.append(f"- 道具引用 ID: {shot.prop_reference_ids}")
+            if shot.storyboard_image_url:
+                lines.append(f"- 故事版图片: {shot.storyboard_image_url}")
+            if shot.video_url:
+                lines.append(f"- 视频 URL: {shot.video_url}")
+
+    return "\n".join(lines)
 
 
 def _build_conversation_summary(conversation: AgentConversation) -> AgentConversationSummaryOut:
@@ -180,7 +261,7 @@ def delete_conversation(
 @router.post("/chat")
 async def agent_chat(
     story_id: int,
-    body: dict[str, Any],
+    body: AgentChatIn,
     request: Request,
     db: Session = Depends(get_db),
 ):
@@ -188,9 +269,9 @@ async def agent_chat(
     story = _require_story_for_user(story_id, user, db)
     _check_and_consume_advanced_text_quota(request, user.id, db, deduct=True)
 
-    conversation_id = int(body.get("conversation_id") or 0)
-    content = str(body.get("content") or "").strip()
-    agent_mode = normalize_agent_mode(body.get("mode"))
+    conversation_id = int(body.conversation_id or 0)
+    content = str(body.message or "").strip()
+    agent_mode = normalize_agent_mode(body.mode)
     if not conversation_id:
         raise HTTPException(400, "对话 ID 必填")
     if not content:
@@ -211,7 +292,7 @@ async def agent_chat(
     )
 
     current_chapter = None
-    current_chapter_id = body.get("chapter_id")
+    current_chapter_id = body.chapter_id
     if current_chapter_id:
         current_chapter = db.get(Chapter, int(current_chapter_id))
         if current_chapter and current_chapter.story_id != story_id:
@@ -231,6 +312,23 @@ async def agent_chat(
             f"字数: {current_chapter.word_count or 0}\n"
             f"注意：如需读取本章正文内容，请调用 get_chapter_full(chapter_id={current_chapter.id}) 工具。"
         )
+
+    workflow_type = body.workflow_type
+    workflow_id = body.workflow_id
+    shot_id = body.shot_id
+
+    if workflow_type == "video" and workflow_id:
+        video_workflow = db.get(ChapterVideoWorkflow, workflow_id)
+        if video_workflow and video_workflow.story_id == story_id:
+            video_shots = (
+                db.query(ChapterVideoShot)
+                .filter(ChapterVideoShot.workflow_id == workflow_id)
+                .order_by(ChapterVideoShot.shot_index)
+                .all()
+            )
+            story_context += _build_video_agent_context(video_workflow, video_shots, current_shot_id=shot_id)
+        else:
+            raise HTTPException(403, "视频工作流不属于当前故事")
 
     if len(conversation.messages) == 0 or (conversation.title or "").strip() in {"", "新对话"}:
         conversation.title = _conversation_title_from_text(content)
@@ -287,6 +385,9 @@ async def agent_chat(
                 story_id=story_id,
                 mode=agent_mode,
                 pending_change_key=pending_change_key,
+                workflow_type=workflow_type,
+                workflow_id=workflow_id,
+                shot_id=shot_id,
             ):
                 event_type = str(event.get("event") or "")
                 if event_type == "token":

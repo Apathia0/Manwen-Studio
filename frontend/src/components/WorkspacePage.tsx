@@ -31,7 +31,7 @@ export function WorkspacePage({
     );
   }
   return (
-    <div className="h-[calc(100vh-120px)] overflow-y-auto rounded-md border border-[#d9dfd7] bg-white">
+    <div className="flex h-[calc(100vh-120px)] flex-col overflow-hidden rounded-md border border-[#d9dfd7] bg-white">
       <div className="flex items-center justify-between border-b border-[#e8edf2] px-4 py-2">
         <div className="flex items-center gap-1 rounded-xl bg-slate-100 p-0.5">
           <button

@@ -28,6 +28,21 @@ const 字段图标: Record<string, React.ReactNode> = {
   characters: <Users size={14} />,
   outline: <BookOpen size={14} />,
   scenes_file: <Film size={14} />,
+  screenplay_text: <FileText size={14} />,
+  screenplay_json: <FileText size={14} />,
+  storyboard_prompt: <Film size={14} />,
+  video_prompt: <Film size={14} />,
+  scene_prompt: <Film size={14} />,
+  character_prompts_json: <Users size={14} />,
+  prop_prompts_json: <Tags size={14} />,
+  camera_plan: <Film size={14} />,
+  motion_plan: <Film size={14} />,
+  emotion_plan: <Film size={14} />,
+  story_summary: <FileText size={14} />,
+  scene_location: <FileText size={14} />,
+  character_reference_ids: <Users size={14} />,
+  creative_brief: <BookOpen size={14} />,
+  writing_guidance: <FileText size={14} />,
 };
 
 const 字段中文: Record<string, string> = {
@@ -38,12 +53,33 @@ const 字段中文: Record<string, string> = {
   characters: '角色设定',
   outline: '大纲',
   scenes_file: '分镜',
+  screenplay_text: '剧本文本',
+  screenplay_json: '剧本结构',
+  storyboard_prompt: '故事版提示词',
+  video_prompt: '视频提示词',
+  scene_prompt: '场景提示词',
+  character_prompts_json: '角色提示词',
+  prop_prompts_json: '道具提示词',
+  camera_plan: '镜头规划',
+  motion_plan: '动作规划',
+  emotion_plan: '情绪规划',
+  story_summary: '剧情摘要',
+  scene_location: '场景地点',
+  time_of_day: '时间',
+  character_reference_ids: '角色引用',
+  scene_reference_ids: '场景引用',
+  prop_reference_ids: '道具引用',
+  creative_brief: '创意简报',
+  writing_guidance: '写作指导',
 };
 
 const 类型色: Record<string, string> = {
   chapter: 'border-l-blue-400',
   story: 'border-l-emerald-400',
   scenes_file: 'border-l-amber-400',
+  story_bible: 'border-l-purple-400',
+  video_shot: 'border-l-violet-400',
+  video_workflow: 'border-l-indigo-400',
 };
 
 function DiffBlock({ lines }: { lines: DiffLine[] }) {
@@ -57,24 +93,26 @@ function DiffBlock({ lines }: { lines: DiffLine[] }) {
 
   return (
     <div className="overflow-hidden rounded-lg border border-gray-200 text-xs font-mono leading-5">
-      {lines.map((line, i) => (
-        <div
-          key={i}
-          className={
-            line.type === 'add'
-              ? 'bg-emerald-50 text-emerald-700 px-3'
-              : line.type === 'remove'
-              ? 'bg-red-50 text-red-600 px-3'
-              : 'bg-transparent text-gray-500 px-3'
-          }
-        >
-          <span className="inline-block w-4 shrink-0 select-none opacity-50">
-            {line.type === 'add' ? '+' : line.type === 'remove' ? '−' : ' '}
-          </span>
-          <span className="whitespace-pre-wrap">{line.text || ' '}</span>
-        </div>
-      ))}
-      <div className="px-3 py-1 text-xs border-t border-gray-200 text-gray-400 bg-gray-50">
+      <div className="max-h-[40vh] overflow-y-auto">
+        {lines.map((line, i) => (
+          <div
+            key={i}
+            className={
+              line.type === 'add'
+                ? 'bg-emerald-50 text-emerald-700 px-3'
+                : line.type === 'remove'
+                ? 'bg-red-50 text-red-600 px-3'
+                : 'bg-transparent text-gray-500 px-3'
+            }
+          >
+            <span className="inline-block w-4 shrink-0 select-none opacity-50">
+              {line.type === 'add' ? '+' : line.type === 'remove' ? '−' : ' '}
+            </span>
+            <span className="whitespace-pre-wrap">{line.text || ' '}</span>
+          </div>
+        ))}
+      </div>
+      <div className="px-3 py-1 text-xs border-t border-gray-200 text-gray-400 bg-gray-50 shrink-0">
         <span className="text-emerald-600">+{added}</span>
         {' '}
         <span className="text-red-500">−{removed}</span>

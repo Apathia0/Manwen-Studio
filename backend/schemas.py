@@ -116,9 +116,24 @@ class ChatMessageOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class AgentChatIn(BaseModel):
+    conversation_id: int
+    message: str
+    chapter_id: Optional[int] = 0
+    chapter_number: Optional[int] = 0
+    mode: Optional[str] = "execute"
+    workflow_type: Optional[str] = None
+    workflow_id: Optional[int] = None
+    shot_id: Optional[int] = None
+    session_id: Optional[str] = None
+
+
 class AgentConversationCreateIn(BaseModel):
     title: Optional[str] = None
     chapter_id: Optional[int] = None
+    workflow_type: Optional[str] = None
+    workflow_id: Optional[int] = None
+    shot_id: Optional[int] = None
 
 
 class AgentConversationMessageCreateIn(BaseModel):

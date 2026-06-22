@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   type Story,
   type Chapter,
@@ -38,6 +38,8 @@ import AssetManagementModal from './AssetManagementModal';
 import { toast } from '../lib/toast';
 import { videoGenStore } from '../videoGenStore';
 
+const AgentPanel = lazy(() => import('./AgentPanel/AgentPanel'));
+
 interface Props {
   story: Story;
   chapters: Chapter[];
@@ -56,6 +58,20 @@ export default function VideoStoryboardLayout({
   onContentUpdated: _onContentUpdated,
 }: Props) {
   const [leftCollapsed, setLeftCollapsed] = useState(false);
+
+  /** 切换 Agent 面板：打开时自动折叠左侧章节列表 */
+  function handleToggleAgentPanel() {
+    setVideoAgentOpen((prev) => {
+      const next = !prev;
+      if (next) setLeftCollapsed(true);
+      return next;
+    });
+  }
+
+  function handleCloseAgentPanel() {
+    setVideoAgentOpen(false);
+    setLeftCollapsed(false);
+  }
   const [chapterAssets, setChapterAssets] = useState<VideoAsset[]>([]);
   const [workflow, setWorkflow] = useState<ChapterVideoWorkflow | null>(null);
   const [workflowLoading, setWorkflowLoading] = useState(false);
@@ -73,6 +89,8 @@ export default function VideoStoryboardLayout({
   const [characterLoading, setCharacterLoading] = useState(false);
   const [parsing, setParsing] = useState(false);
   const [assetManagementOpen, setAssetManagementOpen] = useState(false);
+  const [videoAgentOpen, setVideoAgentOpen] = useState(false);
+  const [agentShotId, setAgentShotId] = useState<number | undefined>(undefined);
   const pollTimerRef = useRef<number | null>(null);
 
   const resolvedChapter = currentChapter;
@@ -655,8 +673,9 @@ export default function VideoStoryboardLayout({
         onToggleCollapse={() => setLeftCollapsed((value) => !value)}
       />
 
-      <div className="flex-1 min-w-0 overflow-hidden rounded-[24px] border border-[#d7e3f4] bg-[rgba(255,255,255,0.92)] shadow-[0_18px_42px_rgba(59,130,246,0.12)] backdrop-blur-xl">
-        <ChapterVideoWorkflowPanel
+      <div className="flex-1 flex min-w-0 gap-4">
+        <div className={`flex-1 min-w-0 overflow-hidden rounded-[24px] border border-[#d7e3f4] bg-[rgba(255,255,255,0.92)] shadow-[0_18px_42px_rgba(59,130,246,0.12)] backdrop-blur-xl`}>
+          <ChapterVideoWorkflowPanel
           workflow={workflow}
           workflowLoading={workflowLoading}
           workflowRunning={workflowRunning}
@@ -696,29 +715,64 @@ export default function VideoStoryboardLayout({
           videoAspectRatio={videoAspectRatio}
           onVideoAspectRatioChange={setVideoAspectRatio}
           onOpenAssetManagement={() => setAssetManagementOpen(true)}
+          onAgentShotChange={setAgentShotId}
+          renderAiAssistantButton={
+            <button
+              type="button"
+              onClick={handleToggleAgentPanel}
+              className="inline-flex items-center gap-1.5 rounded-lg border border-indigo-200 bg-indigo-50 px-2.5 py-1.5 text-xs font-medium text-indigo-700 hover:bg-indigo-100 transition-colors"
+            >
+              {videoAgentOpen ? '关闭 AI 助手' : 'AI 助手'}
+            </button>
+          }
         />
       </div>
 
-      {resolvedChapter?.id && assetManagementOpen && (
-        <AssetManagementModal
-          chapterId={resolvedChapter.id}
-          onClose={() => setAssetManagementOpen(false)}
-          onAssetsChanged={() => void loadChapterAssets(resolvedChapter.id)}
-        />
+      {/* AI 视频工作流助手 — 内嵌面板 */}
+      {videoAgentOpen && workflow && (
+        <div className="w-[400px] shrink-0 overflow-hidden rounded-[24px] border border-[#d7e3f4] bg-[rgba(255,255,255,0.92)] shadow-[0_18px_42px_rgba(59,130,246,0.12)] backdrop-blur-xl flex flex-col">
+          <div className="flex items-center justify-between px-4 py-3 border-b border-[#d7e3f4] shrink-0">
+            <span className="text-sm font-semibold text-slate-700">AI 视频工作流助手</span>
+            <button onClick={handleCloseAgentPanel} className="text-slate-400 hover:text-slate-600 text-lg leading-none">&times;</button>
+          </div>
+          <div className="flex-1 min-h-0 overflow-hidden">
+            <Suspense fallback={<div className="p-4 text-sm text-slate-500">正在加载 AI 助手...</div>}>
+              <AgentPanel
+                storyId={story.id}
+                chapterId={resolvedChapter?.id}
+                storyTitle={story.title}
+                chapterTitle={resolvedChapter?.title || undefined}
+                workflowType="video"
+                workflowId={workflow.id}
+                shotId={agentShotId}
+                onContentUpdated={handleRefreshWorkflow}
+              />
+            </Suspense>
+          </div>
+        </div>
       )}
-
-      {/* 风格选择弹窗 */}
-      <StyleSelectorModal
-        isOpen={styleSelectorOpen}
-        onClose={() => setStyleSelectorOpen(false)}
-        presets={stylePresets}
-        selectedStyleName={selectedStyle}
-        styleReferenceImageUrl={styleReferenceImageUrl}
-        workflowId={workflow?.id ?? null}
-        onStyleSelect={(styleName, refUrl) => {
-          handleStyleChange(styleName, refUrl);
-        }}
-      />
     </div>
+
+    {resolvedChapter?.id && assetManagementOpen && (
+      <AssetManagementModal
+        chapterId={resolvedChapter.id}
+        onClose={() => setAssetManagementOpen(false)}
+        onAssetsChanged={() => void loadChapterAssets(resolvedChapter.id)}
+      />
+    )}
+
+    {/* 风格选择弹窗 */}
+    <StyleSelectorModal
+      isOpen={styleSelectorOpen}
+      onClose={() => setStyleSelectorOpen(false)}
+      presets={stylePresets}
+      selectedStyleName={selectedStyle}
+      styleReferenceImageUrl={styleReferenceImageUrl}
+      workflowId={workflow?.id ?? null}
+      onStyleSelect={(styleName, refUrl) => {
+        handleStyleChange(styleName, refUrl);
+      }}
+    />
+  </div>
   );
 }

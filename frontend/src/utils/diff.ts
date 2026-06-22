@@ -12,8 +12,10 @@ export interface DiffLine {
  * 返回新旧文本的行差异列表，每行标记为 add / remove / same。
  */
 export function lineDiff(oldStr: string, newStr: string): DiffLine[] {
-  const oldLines = oldStr.split('\n');
-  const newLines = newStr.split('\n');
+  const oldText = typeof oldStr === 'string' ? oldStr : JSON.stringify(oldStr, null, 2);
+  const newText = typeof newStr === 'string' ? newStr : JSON.stringify(newStr, null, 2);
+  const oldLines = oldText.split('\n');
+  const newLines = newText.split('\n');
   const o = oldLines.length;
   const n = newLines.length;
 

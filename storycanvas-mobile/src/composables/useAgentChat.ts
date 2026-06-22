@@ -15,7 +15,7 @@ export function useAgentChat(storyId: () => number) {
     messages.value.push({ id: `user-${Date.now()}`, role: 'user', content })
     streamingContent.value = ''
 
-    const body: any = { content }
+    const body: any = { message: content }
     if (activeConversationId.value) {
       body.conversation_id = activeConversationId.value
     }

@@ -10,7 +10,7 @@ from typing import Any, AsyncGenerator
 import httpx
 
 from database import SessionLocal
-from models import AgentPendingChange, Chapter, Story
+from models import AgentPendingChange, Chapter, ChapterVideoShot, ChapterVideoWorkflow, Story, VideoAsset
 from sqlalchemy.orm import Session
 from services import deepseek as _deepseek_service
 from services.deepseek import (
@@ -40,7 +40,7 @@ from services.framework_utils import (
 @dataclass
 class PendingChange:
     """单次修改的快照记录，用于确认或撤回。"""
-    type: str  # "chapter" | "story" | "scenes_file" | "story_bible"
+    type: str  # "chapter" | "story" | "scenes_file" | "story_bible" | "video_shot" | "video_workflow"
     record_id: int
     display_name: str  # 用户可读的名称，如"第1章"
     field: str  # 修改的字段名，如"novel_content"
@@ -143,6 +143,16 @@ class PendingChangesTracker:
                     if obj:
                         setattr(obj, change.field, change.old_value)
                         results.append({"ok": True, "type": "story_bible", "id": change.record_id, "field": change.field})
+                elif change.type == "video_shot":
+                    obj = db.get(ChapterVideoShot, change.record_id)
+                    if obj:
+                        setattr(obj, change.field, change.old_value)
+                        results.append({"ok": True, "type": "video_shot", "id": change.record_id, "field": change.field})
+                elif change.type == "video_workflow":
+                    obj = db.get(ChapterVideoWorkflow, change.record_id)
+                    if obj:
+                        setattr(obj, change.field, change.old_value)
+                        results.append({"ok": True, "type": "video_workflow", "id": change.record_id, "field": change.field})
                 elif change.type == "scenes_file":
                     scenes_path = _scenes_path(change.record_id)
                     if change.old_value:
@@ -182,6 +192,9 @@ class AgentRunContext:
     mode: AgentMode
     pending_changes: PendingChangesTracker
     pending_change_key: AgentPendingChangeKey | None = None
+    workflow_type: str | None = None
+    workflow_id: int | None = None
+    shot_id: int | None = None
 
 
 class AgentPendingChangeStore:
@@ -343,9 +356,13 @@ class ToolRegistry:
     def __init__(self):
         self._tools: dict[str, dict[str, Any]] = {}
         self._write_tool_names: set[str] = set()
+        self._workflow_types: dict[str, set[str]] = {}
 
-    def register(self, name: str, description: str, parameters: dict, is_write: bool = False):
-        """装饰器：注册一个工具处理函数。"""
+    def register(self, name: str, description: str, parameters: dict, is_write: bool = False, workflow_types: list[str] | None = None):
+        """装饰器：注册一个工具处理函数。
+
+        workflow_types: 工具所属的工作流类型列表。None 表示所有类型都可用。
+        """
         def decorator(func):
             self._tools[name] = {
                 "handler": func,
@@ -360,21 +377,42 @@ class ToolRegistry:
             }
             if is_write:
                 self._write_tool_names.add(name)
+            if workflow_types is not None:
+                self._workflow_types[name] = set(workflow_types)
             return func
         return decorator
 
     def is_write_tool(self, name: str) -> bool:
         return name in self._write_tool_names
 
-    def get_tool_specs(self, mode: AgentMode = "execute") -> list[dict]:
-        """返回 DeepSeek/OpenAI function calling 格式的工具清单。"""
+    def get_tool_specs(self, mode: AgentMode = "execute", workflow_type: str | None = None) -> list[dict]:
+        """返回 DeepSeek/OpenAI function calling 格式的工具清单。
+
+        workflow_type: 如果指定，只返回与该工作流类型匹配的工具（含未指定类型的通用工具）。
+        """
         if normalize_agent_mode(mode) in READ_ONLY_AGENT_MODES:
-            return [
-                info["spec"]
+            candidates = [
+                (name, info["spec"])
                 for name, info in self._tools.items()
                 if name not in self._write_tool_names
             ]
-        return [info["spec"] for info in self._tools.values()]
+        else:
+            candidates = [(name, info["spec"]) for name, info in self._tools.items()]
+
+        if workflow_type is not None:
+            candidates = [
+                (name, spec)
+                for name, spec in candidates
+                if name not in self._workflow_types or workflow_type in self._workflow_types[name]
+            ]
+        else:
+            candidates = [
+                (name, spec)
+                for name, spec in candidates
+                if name not in self._workflow_types
+            ]
+
+        return [spec for _, spec in candidates]
 
     async def execute(self, name: str, args: dict) -> str:
         """按名称执行工具，返回 JSON 字符串。"""
@@ -421,6 +459,29 @@ def _validate_story_ownership(db: Session, story_id: int, expected_story_id: int
     if story.id != expected_story_id:
         return None
     return story
+
+
+def _require_current_video_workflow(db: Session, workflow_id: int) -> ChapterVideoWorkflow | None:
+    """校验视频工作流是否属于当前上下文。返回工作流对象，失败返回 None。"""
+    context = _current_run_context()
+    if not context or not context.workflow_id:
+        return None
+    if workflow_id != context.workflow_id:
+        return None
+    return db.get(ChapterVideoWorkflow, workflow_id)
+
+
+def _require_current_video_shot(db: Session, shot_id: int) -> ChapterVideoShot | None:
+    """校验视频镜头是否属于当前上下文的工作流。返回镜头对象，失败返回 None。"""
+    context = _current_run_context()
+    if not context or not context.workflow_id:
+        return None
+    shot = db.get(ChapterVideoShot, shot_id)
+    if not shot:
+        return None
+    if shot.workflow_id != context.workflow_id:
+        return None
+    return shot
 
 
 # ── 全局注册器 ──────────────────────────────────────────
@@ -1549,6 +1610,591 @@ async def update_scenes(chapter_id: int, scenes: list[str]) -> dict:
         return {"error": f"写入分镜文件失败: {exc}"}
 
 
+# ────────────────────────────────────────────────────────────
+# 视频工作流工具 - 读取
+# ────────────────────────────────────────────────────────────
+
+
+@tool_registry.register(
+    name="get_video_workflow",
+    description="获取视频工作流状态概览：工作流状态、风格、分镜数量、进度等。",
+    parameters={
+        "type": "object",
+        "properties": {
+            "workflow_id": {"type": "integer", "description": "工作流 ID"},
+        },
+        "required": ["workflow_id"],
+    },
+    workflow_types=["video"],
+)
+async def get_video_workflow(workflow_id: int) -> dict:
+    db = SessionLocal()
+    try:
+        workflow = _require_current_video_workflow(db, workflow_id)
+        if not workflow:
+            return {"error": "视频工作流不存在或无权访问"}
+        return {
+            "id": workflow.id,
+            "chapter_id": workflow.chapter_id,
+            "story_id": workflow.story_id,
+            "workflow_status": workflow.workflow_status,
+            "screenplay_status": workflow.screenplay_status,
+            "video_style": workflow.video_style,
+            "style_reference_image_url": workflow.style_reference_image_url,
+            "duration_per_shot": workflow.duration_per_shot,
+            "character_reference_ids": workflow.character_reference_ids,
+            "total_shots": workflow.total_shots,
+            "completed_shots": workflow.completed_shots,
+            "failed_shots": workflow.failed_shots,
+        }
+    finally:
+        db.close()
+
+
+@tool_registry.register(
+    name="get_workflow_shots",
+    description="获取视频工作流的所有镜头摘要列表，包含镜头编号、场景、角色、状态、是否有故事版/视频。",
+    parameters={
+        "type": "object",
+        "properties": {
+            "workflow_id": {"type": "integer", "description": "工作流 ID"},
+        },
+        "required": ["workflow_id"],
+    },
+    workflow_types=["video"],
+)
+async def get_workflow_shots(workflow_id: int) -> dict:
+    db = SessionLocal()
+    try:
+        workflow = _require_current_video_workflow(db, workflow_id)
+        if not workflow:
+            return {"error": "视频工作流不存在或无权访问"}
+        shots = (
+            db.query(ChapterVideoShot)
+            .filter(ChapterVideoShot.workflow_id == workflow_id)
+            .order_by(ChapterVideoShot.shot_index)
+            .all()
+        )
+        return {
+            "shots": [
+                {
+                    "id": s.id,
+                    "shot_index": s.shot_index,
+                    "scene_location": s.scene_location,
+                    "time_of_day": s.time_of_day,
+                    "characters": s.characters,
+                    "status": s.status,
+                    "has_storyboard": bool(s.storyboard_image_url),
+                    "has_video": bool(s.video_url),
+                }
+                for s in shots
+            ],
+            "total": len(shots),
+        }
+    finally:
+        db.close()
+
+
+@tool_registry.register(
+    name="get_shot_detail",
+    description="获取指定镜头的完整详情，包含所有可编辑字段（prompt、镜头规划、引用等）。",
+    parameters={
+        "type": "object",
+        "properties": {
+            "shot_id": {"type": "integer", "description": "镜头 ID"},
+        },
+        "required": ["shot_id"],
+    },
+    workflow_types=["video"],
+)
+async def get_shot_detail(shot_id: int) -> dict:
+    db = SessionLocal()
+    try:
+        shot = _require_current_video_shot(db, shot_id)
+        if not shot:
+            return {"error": "镜头不存在或无权访问"}
+        return {
+            "id": shot.id,
+            "workflow_id": shot.workflow_id,
+            "shot_index": shot.shot_index,
+            "scene_location": shot.scene_location,
+            "time_of_day": shot.time_of_day,
+            "characters": shot.characters,
+            "story_summary": shot.story_summary,
+            "dialogue_or_narration": shot.dialogue_or_narration,
+            "camera_plan": shot.camera_plan,
+            "motion_plan": shot.motion_plan,
+            "emotion_plan": shot.emotion_plan,
+            "continuity_notes": shot.continuity_notes,
+            "storyboard_prompt": shot.storyboard_prompt,
+            "video_prompt": shot.video_prompt,
+            "scene_prompt": shot.scene_prompt,
+            "character_prompts_json": shot.character_prompts_json,
+            "prop_prompts_json": shot.prop_prompts_json,
+            "character_reference_ids": shot.character_reference_ids,
+            "scene_reference_ids": shot.scene_reference_ids,
+            "prop_reference_ids": shot.prop_reference_ids,
+            "storyboard_image_url": shot.storyboard_image_url,
+            "video_url": shot.video_url,
+            "status": shot.status,
+            "narrative_purpose": shot.narrative_purpose,
+            "beat_density": shot.beat_density,
+            "transition_to_next": shot.transition_to_next,
+        }
+    finally:
+        db.close()
+
+
+@tool_registry.register(
+    name="get_video_assets",
+    description="获取指定章节的视频资产列表（角色图、场景图、故事版等）。",
+    parameters={
+        "type": "object",
+        "properties": {
+            "chapter_id": {"type": "integer", "description": "章节 ID"},
+        },
+        "required": ["chapter_id"],
+    },
+    workflow_types=["video"],
+)
+async def get_video_assets(chapter_id: int) -> dict:
+    """获取视频资产列表。"""
+    db = SessionLocal()
+    try:
+        assets = (
+            db.query(VideoAsset)
+            .filter(VideoAsset.chapter_id == chapter_id)
+            .order_by(VideoAsset.asset_type, VideoAsset.name)
+            .all()
+        )
+        return {
+            "assets": [
+                {
+                    "id": a.id,
+                    "asset_type": a.asset_type,
+                    "name": a.name,
+                    "file_path": a.file_path,
+                    "provider": a.provider,
+                    "prompt": a.prompt,
+                    "meta_json": a.meta_json,
+                    "status": a.status,
+                    "locked": a.locked,
+                    "usage_scope": a.usage_scope,
+                }
+                for a in assets
+            ],
+            "total": len(assets),
+        }
+    finally:
+        db.close()
+
+
+@tool_registry.register(
+    name="get_screenplay",
+    description="获取视频工作流的剧本内容（文本版和结构化 JSON）。",
+    parameters={
+        "type": "object",
+        "properties": {
+            "workflow_id": {"type": "integer", "description": "工作流 ID"},
+        },
+        "required": ["workflow_id"],
+    },
+    workflow_types=["video"],
+)
+async def get_screenplay(workflow_id: int) -> dict:
+    db = SessionLocal()
+    try:
+        workflow = _require_current_video_workflow(db, workflow_id)
+        if not workflow:
+            return {"error": "视频工作流不存在或无权访问"}
+        return {
+            "workflow_id": workflow.id,
+            "screenplay_text": workflow.screenplay_text,
+            "screenplay_json": workflow.screenplay_json,
+            "screenplay_status": workflow.screenplay_status,
+            "screenplay_version": workflow.screenplay_version,
+        }
+    finally:
+        db.close()
+
+
+# ────────────────────────────────────────────────────────────
+# 视频工作流工具 - 写入
+# ────────────────────────────────────────────────────────────
+
+
+@tool_registry.register(
+    name="update_shot_prompts",
+    description="更新指定镜头的 prompt 字段（storyboard_prompt, video_prompt, scene_prompt, character_prompts_json, prop_prompts_json）。只更新提供的字段。",
+    is_write=True,
+    parameters={
+        "type": "object",
+        "properties": {
+            "shot_id": {"type": "integer", "description": "镜头 ID"},
+            "storyboard_prompt": {"type": "string", "description": "故事版生成提示词（可选）"},
+            "video_prompt": {"type": "string", "description": "视频生成提示词（可选）"},
+            "scene_prompt": {"type": "string", "description": "场景提示词（可选）"},
+            "character_prompts_json": {"type": "object", "description": "角色提示词 JSON（可选）"},
+            "prop_prompts_json": {"type": "object", "description": "道具提示词 JSON（可选）"},
+        },
+        "required": ["shot_id"],
+    },
+    workflow_types=["video"],
+)
+async def update_shot_prompts(shot_id: int, storyboard_prompt: str | None = None, video_prompt: str | None = None,
+                               scene_prompt: str | None = None, character_prompts_json: dict | None = None,
+                               prop_prompts_json: dict | None = None) -> dict:
+    db = SessionLocal()
+    try:
+        shot = _require_current_video_shot(db, shot_id)
+        if not shot:
+            return {"error": "镜头不存在或无权访问"}
+        field_map = {
+            "storyboard_prompt": storyboard_prompt,
+            "video_prompt": video_prompt,
+            "scene_prompt": scene_prompt,
+            "character_prompts_json": character_prompts_json,
+            "prop_prompts_json": prop_prompts_json,
+        }
+        updated = []
+        for field, value in field_map.items():
+            if value is not None:
+                if _current_pending_changes():
+                    _current_pending_changes().record(PendingChange(
+                        type="video_shot",
+                        record_id=shot.id,
+                        display_name=f"镜头 {shot.shot_index}",
+                        field=field,
+                        old_value=getattr(shot, field, None),
+                        new_value=None,
+                    ))
+                setattr(shot, field, value)
+                if _current_pending_changes():
+                    _current_pending_changes().update_new_value("video_shot", shot.id, field, value)
+                updated.append(field)
+        if not updated:
+            return {"ok": True, "message": "没有提供任何需要更新的字段"}
+        db.commit()
+        return {"ok": True, "shot_id": shot_id, "updated_fields": updated}
+    finally:
+        db.close()
+
+
+@tool_registry.register(
+    name="update_shot_fields",
+    description="更新指定镜头的非 prompt 字段（场景、时间、角色、镜头规划、引用 ID 等）。只允许白名单字段。",
+    is_write=True,
+    parameters={
+        "type": "object",
+        "properties": {
+            "shot_id": {"type": "integer", "description": "镜头 ID"},
+            "scene_location": {"type": "string", "description": "场景地点（可选）"},
+            "time_of_day": {"type": "string", "description": "时间（可选）"},
+            "characters": {"type": "array", "description": "角色列表（可选）", "items": {"type": "string"}},
+            "story_summary": {"type": "string", "description": "故事摘要（可选）"},
+            "camera_plan": {"type": "string", "description": "镜头规划（可选）"},
+            "motion_plan": {"type": "string", "description": "运动规划（可选）"},
+            "emotion_plan": {"type": "string", "description": "情感规划（可选）"},
+            "character_reference_ids": {"type": "array", "description": "角色参考资产 ID 列表（可选）", "items": {"type": "integer"}},
+            "scene_reference_ids": {"type": "array", "description": "场景参考资产 ID 列表（可选）", "items": {"type": "integer"}},
+            "prop_reference_ids": {"type": "array", "description": "道具参考资产 ID 列表（可选）", "items": {"type": "integer"}},
+        },
+        "required": ["shot_id"],
+    },
+    workflow_types=["video"],
+)
+async def update_shot_fields(shot_id: int, scene_location: str | None = None, time_of_day: str | None = None,
+                              characters: list | None = None, story_summary: str | None = None,
+                              camera_plan: str | None = None, motion_plan: str | None = None,
+                              emotion_plan: str | None = None, character_reference_ids: list | None = None,
+                              scene_reference_ids: list | None = None, prop_reference_ids: list | None = None) -> dict:
+    db = SessionLocal()
+    try:
+        shot = _require_current_video_shot(db, shot_id)
+        if not shot:
+            return {"error": "镜头不存在或无权访问"}
+        field_map = {
+            "scene_location": scene_location,
+            "time_of_day": time_of_day,
+            "characters": characters,
+            "story_summary": story_summary,
+            "camera_plan": camera_plan,
+            "motion_plan": motion_plan,
+            "emotion_plan": emotion_plan,
+            "character_reference_ids": character_reference_ids,
+            "scene_reference_ids": scene_reference_ids,
+            "prop_reference_ids": prop_reference_ids,
+        }
+        updated = []
+        for field, value in field_map.items():
+            if value is not None:
+                if _current_pending_changes():
+                    _current_pending_changes().record(PendingChange(
+                        type="video_shot",
+                        record_id=shot.id,
+                        display_name=f"镜头 {shot.shot_index}",
+                        field=field,
+                        old_value=getattr(shot, field, None),
+                        new_value=None,
+                    ))
+                setattr(shot, field, value)
+                if _current_pending_changes():
+                    _current_pending_changes().update_new_value("video_shot", shot.id, field, value)
+                updated.append(field)
+        if not updated:
+            return {"ok": True, "message": "没有提供任何需要更新的字段"}
+        db.commit()
+        return {"ok": True, "shot_id": shot_id, "updated_fields": updated}
+    finally:
+        db.close()
+
+
+@tool_registry.register(
+    name="update_screenplay",
+    description="更新视频工作流的剧本内容（文本版和结构化 JSON）。",
+    is_write=True,
+    parameters={
+        "type": "object",
+        "properties": {
+            "workflow_id": {"type": "integer", "description": "工作流 ID"},
+            "screenplay_text": {"type": "string", "description": "剧本文本（可选）"},
+            "screenplay_json": {"type": "object", "description": "剧本结构化 JSON（可选）"},
+        },
+        "required": ["workflow_id"],
+    },
+    workflow_types=["video"],
+)
+async def update_screenplay(workflow_id: int, screenplay_text: str | None = None,
+                             screenplay_json: dict | None = None) -> dict:
+    db = SessionLocal()
+    try:
+        workflow = _require_current_video_workflow(db, workflow_id)
+        if not workflow:
+            return {"error": "视频工作流不存在或无权访问"}
+        updated = []
+        if screenplay_text is not None:
+            if _current_pending_changes():
+                _current_pending_changes().record(PendingChange(
+                    type="video_workflow",
+                    record_id=workflow.id,
+                    display_name=f"工作流 {workflow.id}",
+                    field="screenplay_text",
+                    old_value=workflow.screenplay_text,
+                    new_value=None,
+                ))
+            workflow.screenplay_text = screenplay_text
+            if _current_pending_changes():
+                _current_pending_changes().update_new_value("video_workflow", workflow.id, "screenplay_text", screenplay_text)
+            updated.append("screenplay_text")
+        if screenplay_json is not None:
+            if _current_pending_changes():
+                _current_pending_changes().record(PendingChange(
+                    type="video_workflow",
+                    record_id=workflow.id,
+                    display_name=f"工作流 {workflow.id}",
+                    field="screenplay_json",
+                    old_value=workflow.screenplay_json,
+                    new_value=None,
+                ))
+            workflow.screenplay_json = screenplay_json
+            if _current_pending_changes():
+                _current_pending_changes().update_new_value("video_workflow", workflow.id, "screenplay_json", screenplay_json)
+            updated.append("screenplay_json")
+        if not updated:
+            return {"ok": True, "message": "没有提供任何需要更新的字段"}
+        db.commit()
+        return {"ok": True, "workflow_id": workflow_id, "updated_fields": updated}
+    finally:
+        db.close()
+
+
+# ────────────────────────────────────────────────────────────
+# 视频工作流工具 - 批量操作
+# ────────────────────────────────────────────────────────────
+
+
+@tool_registry.register(
+    name="batch_update_shot_prompts",
+    description="批量更新多个镜头的 prompt 字段（storyboard_prompt, video_prompt, scene_prompt, character_prompts_json, prop_prompts_json）。一次最多 10 个镜头，比逐个调用 update_shot_prompts 更高效。",
+    is_write=True,
+    parameters={
+        "type": "object",
+        "properties": {
+            "shots": {
+                "type": "array",
+                "description": "要更新的镜头列表",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "shot_id": {"type": "integer", "description": "镜头 ID"},
+                        "storyboard_prompt": {"type": "string", "description": "故事版生成提示词（可选）"},
+                        "video_prompt": {"type": "string", "description": "视频生成提示词（可选）"},
+                        "scene_prompt": {"type": "string", "description": "场景提示词（可选）"},
+                        "character_prompts_json": {"type": "object", "description": "角色提示词 JSON（可选）"},
+                        "prop_prompts_json": {"type": "object", "description": "道具提示词 JSON（可选）"},
+                    },
+                    "required": ["shot_id"],
+                },
+            },
+        },
+        "required": ["shots"],
+    },
+    workflow_types=["video"],
+)
+async def batch_update_shot_prompts(shots: list[dict]) -> dict:
+    MAX_BATCH_SIZE = 10
+    if not isinstance(shots, list):
+        return {"error": "shots 必须是一个数组"}
+    if len(shots) > MAX_BATCH_SIZE:
+        return {"error": f"一次最多更新 {MAX_BATCH_SIZE} 个镜头"}
+
+    async def _update_one(item: dict) -> dict:
+        shot_id = item.get("shot_id")
+        if not shot_id:
+            return {"shot_id": shot_id, "error": "缺少 shot_id"}
+        db = SessionLocal()
+        try:
+            shot = _require_current_video_shot(db, shot_id)
+            if not shot:
+                return {"shot_id": shot_id, "error": "镜头不存在或无权访问"}
+            field_map = {
+                "storyboard_prompt": item.get("storyboard_prompt"),
+                "video_prompt": item.get("video_prompt"),
+                "scene_prompt": item.get("scene_prompt"),
+                "character_prompts_json": item.get("character_prompts_json"),
+                "prop_prompts_json": item.get("prop_prompts_json"),
+            }
+            updated = []
+            for field, value in field_map.items():
+                if value is not None:
+                    if _current_pending_changes():
+                        _current_pending_changes().record(PendingChange(
+                            type="video_shot",
+                            record_id=shot.id,
+                            display_name=f"镜头 {shot.shot_index}",
+                            field=field,
+                            old_value=getattr(shot, field, None),
+                            new_value=None,
+                        ))
+                    setattr(shot, field, value)
+                    if _current_pending_changes():
+                        _current_pending_changes().update_new_value("video_shot", shot.id, field, value)
+                    updated.append(field)
+            if not updated:
+                return {"shot_id": shot_id, "ok": True, "message": "没有提供任何需要更新的字段"}
+            db.commit()
+            return {"shot_id": shot_id, "ok": True, "updated_fields": updated}
+        except Exception as e:
+            return {"shot_id": shot_id, "error": str(e)}
+        finally:
+            db.close()
+
+    semaphore = asyncio.Semaphore(BATCH_CONCURRENCY_LIMIT)
+
+    async def _update_one_with_limit(item: dict) -> dict:
+        async with semaphore:
+            return await _update_one(item)
+
+    results = await asyncio.gather(*[_update_one_with_limit(item) for item in shots])
+    return {"ok": True, "results": results}
+
+
+@tool_registry.register(
+    name="batch_update_shot_fields",
+    description="批量更新多个镜头的非 prompt 字段（场景、时间、角色、镜头规划、引用 ID 等）。一次最多 10 个镜头，比逐个调用 update_shot_fields 更高效。",
+    is_write=True,
+    parameters={
+        "type": "object",
+        "properties": {
+            "shots": {
+                "type": "array",
+                "description": "要更新的镜头列表",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "shot_id": {"type": "integer", "description": "镜头 ID"},
+                        "scene_location": {"type": "string", "description": "场景地点（可选）"},
+                        "time_of_day": {"type": "string", "description": "时间（可选）"},
+                        "characters": {"type": "array", "description": "角色列表（可选）", "items": {"type": "string"}},
+                        "story_summary": {"type": "string", "description": "故事摘要（可选）"},
+                        "camera_plan": {"type": "string", "description": "镜头规划（可选）"},
+                        "motion_plan": {"type": "string", "description": "运动规划（可选）"},
+                        "emotion_plan": {"type": "string", "description": "情感规划（可选）"},
+                        "character_reference_ids": {"type": "array", "description": "角色参考资产 ID 列表（可选）", "items": {"type": "integer"}},
+                        "scene_reference_ids": {"type": "array", "description": "场景参考资产 ID 列表（可选）", "items": {"type": "integer"}},
+                        "prop_reference_ids": {"type": "array", "description": "道具参考资产 ID 列表（可选）", "items": {"type": "integer"}},
+                    },
+                    "required": ["shot_id"],
+                },
+            },
+        },
+        "required": ["shots"],
+    },
+    workflow_types=["video"],
+)
+async def batch_update_shot_fields(shots: list[dict]) -> dict:
+    MAX_BATCH_SIZE = 10
+    if not isinstance(shots, list):
+        return {"error": "shots 必须是一个数组"}
+    if len(shots) > MAX_BATCH_SIZE:
+        return {"error": f"一次最多更新 {MAX_BATCH_SIZE} 个镜头"}
+
+    async def _update_one(item: dict) -> dict:
+        shot_id = item.get("shot_id")
+        if not shot_id:
+            return {"shot_id": shot_id, "error": "缺少 shot_id"}
+        db = SessionLocal()
+        try:
+            shot = _require_current_video_shot(db, shot_id)
+            if not shot:
+                return {"shot_id": shot_id, "error": "镜头不存在或无权访问"}
+            field_map = {
+                "scene_location": item.get("scene_location"),
+                "time_of_day": item.get("time_of_day"),
+                "characters": item.get("characters"),
+                "story_summary": item.get("story_summary"),
+                "camera_plan": item.get("camera_plan"),
+                "motion_plan": item.get("motion_plan"),
+                "emotion_plan": item.get("emotion_plan"),
+                "character_reference_ids": item.get("character_reference_ids"),
+                "scene_reference_ids": item.get("scene_reference_ids"),
+                "prop_reference_ids": item.get("prop_reference_ids"),
+            }
+            updated = []
+            for field, value in field_map.items():
+                if value is not None:
+                    if _current_pending_changes():
+                        _current_pending_changes().record(PendingChange(
+                            type="video_shot",
+                            record_id=shot.id,
+                            display_name=f"镜头 {shot.shot_index}",
+                            field=field,
+                            old_value=getattr(shot, field, None),
+                            new_value=None,
+                        ))
+                    setattr(shot, field, value)
+                    if _current_pending_changes():
+                        _current_pending_changes().update_new_value("video_shot", shot.id, field, value)
+                    updated.append(field)
+            if not updated:
+                return {"shot_id": shot_id, "ok": True, "message": "没有提供任何需要更新的字段"}
+            db.commit()
+            return {"shot_id": shot_id, "ok": True, "updated_fields": updated}
+        except Exception as e:
+            return {"shot_id": shot_id, "error": str(e)}
+        finally:
+            db.close()
+
+    semaphore = asyncio.Semaphore(BATCH_CONCURRENCY_LIMIT)
+
+    async def _update_one_with_limit(item: dict) -> dict:
+        async with semaphore:
+            return await _update_one(item)
+
+    results = await asyncio.gather(*[_update_one_with_limit(item) for item in shots])
+    return {"ok": True, "results": results}
+
+
 # ── 内部辅助 ──────────────────────────────────────────────
 
 
@@ -1590,10 +2236,44 @@ class AgentService:
     def __init__(self):
         self.tool_registry = tool_registry
 
-    def _build_system_prompt(self, story_context: str, story_id: int = 0) -> str:
+    def _build_system_prompt(self, story_context: str, story_id: int = 0, workflow_type: str | None = None) -> str:
         """构建包含故事上下文的系统提示。"""
         story_id_line = f"\n当前作品 ID: {story_id}" if story_id else ""
-        return f"""你是 Manwen-Studio 的 AI 创作助手，拥有直接读写故事数据库的工具权限。{story_id_line}
+        video_section = ""
+        if workflow_type == "video":
+            video_section = """
+
+---
+
+## 🎬 视频工作流助手模式
+
+你正在视频工作流上下文中运行。除了常规的小说创作工具外，你还可以使用以下**视频专属工具**：
+
+### 读取工具
+- `get_video_workflow` — 查看工作流状态（进度、风格、分镜数量）
+- `get_workflow_shots` — 列出所有分镜摘要（场景、角色、状态）
+- `get_shot_detail` — 查看单个分镜的完整详情（所有 prompt、规划、引用）
+- `get_video_assets` — 查看章节的视频资产列表（角色图、场景图等）
+- `get_screenplay` — 查看剧本内容（文本版和结构化 JSON）
+
+### 写入工具（仅 execute 模式）
+- `update_shot_prompts` — 更新单个分镜 prompt（故事版、视频、场景、角色、道具）
+- `batch_update_shot_prompts` — 批量更新多个分镜 prompt（一次最多 10 个，比逐个调用更高效）
+- `update_shot_fields` — 更新单个分镜字段（场景、时间、角色、镜头/运动/情感规划、引用 ID）
+- `batch_update_shot_fields` — 批量更新多个分镜字段（一次最多 10 个，比逐个调用更高效）
+- `update_screenplay` — 更新剧本内容（文本和结构化 JSON）
+
+### 批量操作建议
+- 当需要修改多个镜头时，**优先使用批量工具**（`batch_update_shot_prompts` / `batch_update_shot_fields`），一次调用即可完成
+- 批量和单个工具使用相同的字段名，只需将参数包装在 `shots` 数组中
+- 每个镜头只需提供要修改的字段，未提供的字段保持不变
+
+### 禁止操作
+- **禁止调用小说创作相关的写入工具**（如 `update_chapter_content`、`adjust_chapter_by_instruction` 等），这些工具在视频工作流模式下不可用
+- **禁止修改故事框架、角色设定、章节内容**，你只能操作视频工作流相关的数据
+- 如果需要修改小说内容，请退出视频工作流模式后再操作
+"""
+        return f"""你是 Manwen-Studio 的 AI 创作助手，拥有直接读写故事数据库的工具权限。{story_id_line}{video_section}
 
 **你的工作方式**：每次收到用户输入，先理解用户真正想要什么，再决定怎么做。不是每次都需要调用工具——用户可以只是想聊聊天。
 
@@ -1781,6 +2461,9 @@ class AgentService:
         story_id: int = 0,
         mode: AgentMode = "execute",
         pending_change_key: AgentPendingChangeKey | None = None,
+        workflow_type: str | None = None,
+        workflow_id: int | None = None,
+        shot_id: int | None = None,
     ) -> AsyncGenerator[dict[str, str], None]:
         """运行 agent 聊天循环，生成 SSE 事件。"""
         mode = normalize_agent_mode(mode)
@@ -1791,12 +2474,15 @@ class AgentService:
             mode=mode,
             pending_changes=pending_changes,
             pending_change_key=pending_change_key,
+            workflow_type=workflow_type,
+            workflow_id=workflow_id,
+            shot_id=shot_id,
         )
         context_token = _AGENT_RUN_CONTEXT.set(run_context)
         pending_changes_stored = False
 
         try:
-            system_prompt = self._build_system_prompt(story_context, story_id=story_id)
+            system_prompt = self._build_system_prompt(story_context, story_id=story_id, workflow_type=workflow_type)
             all_messages: list[dict] = [{"role": "system", "content": system_prompt}] + list(messages)
 
             collected_content = ""
@@ -1818,8 +2504,8 @@ class AgentService:
                     "model": _deepseek_service.DEEPSEEK_MODEL,
                     "messages": all_messages,
                     "stream": True,
-                    "tools": self.tool_registry.get_tool_specs(mode=mode),
-                    "max_tokens": 32768,
+                    "tools": self.tool_registry.get_tool_specs(mode=mode, workflow_type=workflow_type),
+                    "max_tokens": 131072,
                 }
 
                 collected_content = ""

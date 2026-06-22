@@ -1,20 +1,37 @@
 import type { ToolCallInfo } from './AgentPanel';
 
 const 工具标签映射: Record<string, string> = {
+  // ── 小说读取工具 ──
   get_chapter_full: '正在读取章节全文…',
   get_all_chapters_summary: '正在获取章节概览…',
   get_framework_detail: '正在读取故事框架…',
+  get_story_bible: '正在读取创作圣经…',
+  get_scenes: '正在读取分镜脚本…',
+  get_character_profiles: '正在读取角色外貌卡…',
+  // ── 小说写入工具 ──
   update_chapter_content: '正在保存章节内容…',
+  batch_update_chapters: '正在批量更新章节…',
   adjust_chapter_by_instruction: '正在按指令调整章节…',
   rewrite_text_segment: '正在替换指定段落…',
   update_story_info: '正在更新故事信息…',
+  update_story_bible: '正在更新创作圣经…',
   update_characters: '正在更新角色设定…',
   adjust_framework: '正在调整故事框架…',
+  apply_framework_ops: '正在执行框架编辑…',
   add_chapter_plan: '正在添加章节规划…',
+  bulk_add_chapter_plans: '正在批量添加章节规划…',
+  batch_adjust_chapters: '正在批量调整章节…',
   update_scenes: '正在更新分镜脚本…',
-  get_scenes: '正在读取分镜脚本…',
-  get_character_profiles: '正在读取角色外貌卡…',
-  get_story_bible: '正在读取创作圣经…',
+  // ── 视频读取工具 ──
+  get_video_workflow: '正在读取视频工作流…',
+  get_workflow_shots: '正在读取镜头列表…',
+  get_shot_detail: '正在读取镜头详情…',
+  get_video_assets: '正在读取视频资产…',
+  get_screenplay: '正在读取剧本内容…',
+  // ── 视频写入工具 ──
+  update_shot_prompts: '正在更新镜头提示词…',
+  update_shot_fields: '正在更新镜头字段…',
+  update_screenplay: '正在更新剧本内容…',
 };
 
 interface 工具状态属性 {

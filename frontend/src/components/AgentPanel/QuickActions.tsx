@@ -1,5 +1,6 @@
-import { BookOpen, PenLine, ClipboardList, BarChart3, Palette, User } from 'lucide-react';
+import { BookOpen, PenLine, ClipboardList, BarChart3, Palette, User, Search, Film, GitBranch, Clock, UserCheck } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
+import type { AgentWorkflowType } from '../../api';
 
 interface 快捷动作 {
   图标: LucideIcon;
@@ -47,15 +48,57 @@ const 动作列表: 快捷动作[] = [
   },
 ];
 
+const 视频动作列表: 快捷动作[] = [
+  {
+    图标: Search,
+    标题: '分析提示词一致性',
+    描述: '检查故事版与视频提示词',
+    提示词: '分析当前镜头的故事版提示词和视频提示词是否一致',
+  },
+  {
+    图标: Film,
+    标题: '优化视频提示词',
+    描述: '强化运镜和动作连续性',
+    提示词: '帮我优化当前镜头的视频提示词，强化运镜和动作连续性',
+  },
+  {
+    图标: GitBranch,
+    标题: '检查镜头连续性',
+    描述: '角色、场景、情绪是否连贯',
+    提示词: '检查本章视频镜头是否存在角色、场景或情绪不连续',
+  },
+  {
+    图标: BookOpen,
+    标题: '优化剧本镜头',
+    描述: '指出最需要调整的镜头',
+    提示词: '读取剧本并指出最需要调整的镜头',
+  },
+  {
+    图标: Clock,
+    标题: '适配15秒视频',
+    描述: '优化当前镜头时长',
+    提示词: '帮我把当前镜头改得更适合 15 秒视频生成',
+  },
+  {
+    图标: UserCheck,
+    标题: '检查角色素材',
+    描述: '验证引用素材合理性',
+    提示词: '检查当前镜头引用的角色素材是否合理',
+  },
+];
+
 interface 快捷动作属性 {
   onAction: (prompt: string) => void;
   disabled?: boolean;
+  workflowType?: AgentWorkflowType;
 }
 
-export default function QuickActions({ onAction, disabled }: 快捷动作属性) {
+export default function QuickActions({ onAction, disabled, workflowType }: 快捷动作属性) {
+  const 当前列表 = workflowType === 'video' ? 视频动作列表 : 动作列表;
+
   return (
     <div className="grid grid-cols-2 gap-3">
-      {动作列表.map((动作) => {
+      {当前列表.map((动作) => {
         const IconComp = 动作.图标;
         return (
           <button
