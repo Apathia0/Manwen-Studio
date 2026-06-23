@@ -2585,11 +2585,32 @@ async def generate_workflow_screenplay(
             data = deepseek_service._response_json(resp, context="DeepSeek")
             content = data["choices"][0]["message"]["content"]
 
-        # 解析 JSON
+        # 解析 JSON（复用轻量拆镜的修复链路）
+        screenplay_json = None
         try:
             screenplay_json = deepseek_service._loads_json_lenient(content)
+            if not isinstance(screenplay_json, dict):
+                raise ValueError(f"剧本返回了非 JSON 对象: {type(screenplay_json).__name__}")
         except Exception:
-            screenplay_json = deepseek_service.json.loads(content)
+            from services.deepseek import _extract_json_object, _repair_broken_json_fields, _repair_truncated_json
+            try:
+                screenplay_json = _extract_json_object(content)
+            except ValueError:
+                repaired = _repair_broken_json_fields(content)
+                if repaired != content:
+                    try:
+                        screenplay_json = _extract_json_object(repaired)
+                    except ValueError as e:
+                        raise ValueError(f"剧本 JSON 修复失败: {e}") from e
+                else:
+                    truncated_repaired = _repair_truncated_json(content)
+                    if truncated_repaired != content:
+                        try:
+                            screenplay_json = _extract_json_object(truncated_repaired)
+                        except ValueError as e:
+                            raise ValueError(f"剧本 JSON 截断修复后仍无法解析: {e}") from e
+                    else:
+                        raise ValueError(f"剧本 JSON 解析错误，且未发现可修复的损坏字段")
 
         if not isinstance(screenplay_json, dict):
             raise ValueError(f"剧本生成返回了非预期的格式: {type(screenplay_json).__name__}")

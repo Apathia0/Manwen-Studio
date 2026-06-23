@@ -17,6 +17,7 @@ import {
   generateChapterWorkflowShotDetails,
   generateChapterWorkflowStoryboards,
   generateChapterWorkflowVideos,
+  generateWorkflowScreenplay,
   generateStoryVideoCharacters,
   listStoryVideoCharacters,
   reanalyzeChapterShotPrompts,
@@ -325,6 +326,31 @@ export default function VideoStoryboardLayout({
       toast.error(`拆镜失败: ${error.message || '未知错误'}`);
     }
   }, [parsing, pollWorkflowUntilSettled, workflow, workflowRunning, resolvedChapter?.id, selectedReferenceIds, selectedStyle, styleReferenceImageUrl]);
+
+  const handleCreateAndGenerateScreenplay = useCallback(async () => {
+    if (!resolvedChapter?.id) return;
+    if (workflowRunning) return;
+    try {
+      setWorkflowRunning(true);
+      let wf = workflow;
+      if (!wf) {
+        wf = await createChapterVideoWorkflow({
+          chapter_id: resolvedChapter.id,
+          character_reference_ids: selectedReferenceIds,
+          video_style: selectedStyle,
+          style_reference_image_url: styleReferenceImageUrl,
+        });
+        setWorkflow(wf);
+      }
+      const updated = await generateWorkflowScreenplay(wf.id);
+      setWorkflow(updated);
+      toast.success('剧本生成完成');
+    } catch (error: any) {
+      toast.error(`剧本生成失败: ${error.message || '未知错误'}`);
+    } finally {
+      setWorkflowRunning(false);
+    }
+  }, [workflowRunning, workflow, resolvedChapter?.id, selectedReferenceIds, selectedStyle, styleReferenceImageUrl]);
 
   const handleGenerateShotDetails = useCallback(async (shotIds: number[]) => {
     if (!workflow || shotIds.length === 0) return;
@@ -695,6 +721,7 @@ export default function VideoStoryboardLayout({
           onStyleChange={handleStyleChange}
           onOpenStyleSelector={() => setStyleSelectorOpen(true)}
           onParseShots={handleParseShots}
+          onCreateAndGenerateScreenplay={handleCreateAndGenerateScreenplay}
           parsing={parsing}
           onGenerateShotDetails={handleGenerateShotDetails}
           onGenerateStoryboards={handleGenerateStoryboards}
