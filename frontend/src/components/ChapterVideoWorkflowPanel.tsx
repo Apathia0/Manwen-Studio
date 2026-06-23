@@ -70,6 +70,7 @@ interface ChapterVideoWorkflowPanelProps {
   onStyleChange: (style: string, referenceImageUrl?: string | null) => void;
   onOpenStyleSelector?: () => void;
   onParseShots: () => Promise<void> | void;
+  onCreateAndGenerateScreenplay: () => Promise<void> | void;
   onGenerateShotDetails: (shotIds: number[]) => Promise<void> | void;
   onGenerateStoryboards: (shotIds: number[]) => Promise<void> | void;
   onGenerateVideos: (shotIds: number[]) => Promise<void> | void;
@@ -157,6 +158,7 @@ export default function ChapterVideoWorkflowPanel({
   onRegenerateVideo,
   onOpenStyleSelector,
   onParseShots,
+  onCreateAndGenerateScreenplay,
   onGenerateStoryboards,
   onGenerateVideos,
   onToggleShotSelection,
@@ -365,7 +367,7 @@ onOpenAssetManagement,
     ? `自动重试 ${workflow.retry_count}/${workflow.max_retries ?? 0}`
     : '';
 
-  const screenplayApproved = !workflow || workflow.screenplay_status === 'approved';
+  const screenplayApproved = !!workflow && workflow.screenplay_status === 'approved';
   const canParse = canStartChapterWorkflowParse({
     workflowExists: Boolean(workflow),
     status,
@@ -470,7 +472,16 @@ onOpenAssetManagement,
 
         <div className="flex items-center gap-1.5">
           {renderAiAssistantButton}
-          {!screenplayApproved ? (
+          {!workflow ? (
+            <button
+              onClick={() => void onCreateAndGenerateScreenplay()}
+              disabled={workflowRunning}
+              className="inline-flex items-center gap-1 rounded-lg bg-blue-600 px-3 py-1.5 text-xs text-white hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed shadow-sm"
+            >
+              <Send size={12} />
+              创建并生成剧本
+            </button>
+          ) : !screenplayApproved ? (
             <button
               onClick={handleGenerateScreenplay}
               disabled={screenplayLoading || workflowRunning}
@@ -573,14 +584,6 @@ onOpenAssetManagement,
                     )}
                   </div>
                   <div className="flex items-center gap-1.5">
-                    <button
-                      onClick={handleGenerateScreenplay}
-                      disabled={screenplayLoading || workflowRunning}
-                      className="inline-flex items-center gap-1 rounded-lg border border-blue-200 bg-blue-50 px-2.5 py-1.5 text-xs text-blue-700 hover:bg-blue-100 disabled:opacity-40 disabled:cursor-not-allowed"
-                    >
-                      {screenplayLoading ? <Loader2 size={12} className="animate-spin" /> : <Send size={12} />}
-                      生成剧本
-                    </button>
                     <button
                       onClick={handleSaveScreenplay}
                       disabled={screenplayLoading || !screenplayText.trim()}
@@ -1490,6 +1493,32 @@ const typeConfig: Record<string, { label: string; icon: React.ReactNode; color: 
           </div>
           )}
         </>
+      )}
+
+      {!workflow && (
+        <div className="flex flex-1 items-center justify-center">
+          <div className="text-center max-w-sm">
+            <Clapperboard size={56} className="mx-auto text-slate-300" />
+            <h3 className="mt-4 text-lg font-semibold text-slate-600">开始视频工作流</h3>
+            <p className="mt-2 text-sm text-slate-400 leading-relaxed">
+              点击上方「创建并生成剧本」按钮，AI 将自动分析章节内容，生成专业影视剧本。
+            </p>
+            <div className="mt-4 flex flex-col gap-1 text-xs text-slate-400">
+              <div className="flex items-center gap-2 justify-center">
+                <span className="flex h-5 w-5 items-center justify-center rounded-full bg-indigo-100 text-[10px] font-bold text-indigo-600">1</span>
+                生成剧本 → 审批
+              </div>
+              <div className="flex items-center gap-2 justify-center">
+                <span className="flex h-5 w-5 items-center justify-center rounded-full bg-indigo-100 text-[10px] font-bold text-indigo-600">2</span>
+                从剧本拆镜 → 补全提示词
+              </div>
+              <div className="flex items-center gap-2 justify-center">
+                <span className="flex h-5 w-5 items-center justify-center rounded-full bg-indigo-100 text-[10px] font-bold text-indigo-600">3</span>
+                生成故事版 → 生成视频 → 拼接
+              </div>
+            </div>
+          </div>
+        </div>
       )}
 
       {concatModalOpen && (
