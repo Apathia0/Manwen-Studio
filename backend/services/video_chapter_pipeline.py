@@ -558,21 +558,17 @@ def _apply_story_reuse_cache_to_shots(shots_data: list[dict[str, Any]], story_ca
     hydrated: list[dict[str, Any]] = []
     for shot_data in shots_data:
         current = dict(shot_data)
-        character_prompts: list[dict[str, str]] = []
+        # 仅注入参考图 asset_id，不注入任何提示词
+        # 所有提示词（角色/场景/道具）必须由 _expand_single_shot_prompts 重新生成，避免跨工作流缓存污染
         character_reference_ids: list[int] = []
         for raw_name in current.get("characters") or []:
             name = str(raw_name or "").strip()
             entry = characters_cache.get(name)
             if not name or not entry:
                 continue
-            prompt = str(entry.get("prompt") or "").strip()
-            if prompt:
-                character_prompts.append({"name": name, "prompt": prompt})
             for asset_id in entry.get("asset_ids") or []:
                 if asset_id not in character_reference_ids:
                     character_reference_ids.append(asset_id)
-        if character_prompts:
-            current["character_prompts_json"] = character_prompts
         if character_reference_ids:
             current["character_reference_ids"] = character_reference_ids
 
@@ -580,27 +576,18 @@ def _apply_story_reuse_cache_to_shots(shots_data: list[dict[str, Any]], story_ca
         time_of_day = str(current.get("time_of_day") or "").strip()
         scene_entry = scenes_cache.get((scene_location, time_of_day))
         if scene_entry:
-            scene_prompt = str(scene_entry.get("prompt") or "").strip()
-            if scene_prompt:
-                current["scene_prompt"] = scene_prompt
             scene_reference_ids = [asset_id for asset_id in (scene_entry.get("asset_ids") or []) if asset_id]
             if scene_reference_ids:
                 current["scene_reference_ids"] = scene_reference_ids
 
-        prop_prompts_json: list[dict[str, str]] = []
         prop_reference_ids: list[int | None] = []
         for raw_name in current.get("key_props") or []:
             prop_name = str(raw_name or "").strip()
             entry = props_cache.get(prop_name)
             if not prop_name or not entry:
                 continue
-            prompt = str(entry.get("prompt") or "").strip()
-            if prompt:
-                prop_prompts_json.append({"name": prop_name, "prompt": prompt})
             asset_ids = [asset_id for asset_id in (entry.get("asset_ids") or []) if asset_id]
             prop_reference_ids.append(asset_ids[0] if asset_ids else None)
-        if prop_prompts_json:
-            current["prop_prompts_json"] = prop_prompts_json
         if any(asset_id is not None for asset_id in prop_reference_ids):
             current["prop_reference_ids"] = prop_reference_ids
         hydrated.append(current)
@@ -1141,7 +1128,33 @@ async def reanalyze_storyboard_prompts(
     }
 
 
-def _build_chapter_shot_character_prompts(shot: ChapterVideoShot, story: Story | None) -> list[dict[str, str]]:
+def _append_screenplay_context_to_character_prompt(prompt: str, screenplay_context: str) -> str:
+    context = (screenplay_context or "").strip()
+    if not context or "剧本视觉锚点约束" in prompt:
+        return prompt
+    return (
+        f"{prompt}\n\n"
+        "剧本视觉锚点约束（必须优先遵守）：\n"
+        f"{context[:1600]}"
+    )
+
+
+def _enrich_character_prompts_with_screenplay_context(
+    prompts: list[dict[str, str]],
+    screenplay_context: str,
+) -> list[dict[str, str]]:
+    if not screenplay_context:
+        return prompts
+    enriched: list[dict[str, str]] = []
+    for entry in prompts:
+        enriched.append({
+            "name": entry.get("name", ""),
+            "prompt": _append_screenplay_context_to_character_prompt(entry.get("prompt", ""), screenplay_context),
+        })
+    return enriched
+
+
+def _build_chapter_shot_character_prompts(shot: ChapterVideoShot, story: Story | None, screenplay_context: str = "") -> list[dict[str, str]]:
     prompts: list[dict[str, str]] = []
     db = SessionLocal()
     try:
@@ -1166,12 +1179,13 @@ def _build_chapter_shot_character_prompts(shot: ChapterVideoShot, story: Story |
             continue
         version_prompt = version_map.get(normalized_name)
         if version_prompt and not _is_placeholder_character_prompt(normalized_name, version_prompt):
-            prompts.append({"name": normalized_name, "prompt": version_prompt})
+            prompts.append({"name": normalized_name, "prompt": _append_screenplay_context_to_character_prompt(version_prompt, screenplay_context)})
             continue
         fallback_parts = [f"角色设定：{normalized_name}"]
         if profile_text and normalized_name in profile_text:
             fallback_parts.append(f"参考角色档案：{profile_text[:280]}")
-            prompts.append({"name": normalized_name, "prompt": '；'.join(fallback_parts)})
+            prompt = _append_screenplay_context_to_character_prompt('；'.join(fallback_parts), screenplay_context)
+            prompts.append({"name": normalized_name, "prompt": prompt})
     return prompts
 
 
@@ -1320,9 +1334,39 @@ async def _expand_single_shot_prompts(
         "style_preset": style_preset,
     }
 
+    shot_context = _build_shot_narrative_context(workflow, shot.shot_index)
+    screenplay_context = build_screenplay_context_for_shot(workflow, shot)
+    logger.info(
+        "screenplay_context shot=%s len=%s has_visual_anchors=%s",
+        shot_id,
+        len(screenplay_context or ""),
+        "视觉锚点" in (screenplay_context or ""),
+    )
+
     character_prompts = _normalize_prompt_entries(shot.character_prompts_json)
-    if not character_prompts:
-        character_prompts = _normalize_prompt_entries(_build_chapter_shot_character_prompts(shot, story))
+    character_prompts = _enrich_character_prompts_with_screenplay_context(character_prompts, screenplay_context)
+
+    # 工作流有剧本时，强制 AI 重生成角色 prompt，确保角色外观与场景一致
+    # 用 workflow.screenplay_json（原始数据）而非 screenplay_context（派生文本），
+    # 避免因 scene_id 不匹配导致 screenplay_context 为空而漏触发
+    workflow_has_screenplay = (
+        workflow is not None
+        and isinstance(workflow.screenplay_json, dict)
+        and bool(workflow.screenplay_json)
+    )
+    has_screenplay_context = bool((screenplay_context or "").strip())
+
+    # 任一条件满足即触发强制重生成
+    should_force_regenerate = (workflow_has_screenplay or has_screenplay_context) and character_prompts
+    if should_force_regenerate:
+        logger.info(
+            "character prompts force ai regenerate shot=%s workflow_screenplay=%s context_len=%s",
+            shot_id, workflow_has_screenplay, len(screenplay_context or ""),
+        )
+        character_prompts = []
+
+    if not character_prompts and not workflow_has_screenplay:
+        character_prompts = _normalize_prompt_entries(_build_chapter_shot_character_prompts(shot, story, screenplay_context))
     if character_prompts:
         logger.info("character prompts reused shot=%s count=%s", shot_id, len(character_prompts))
     reused_names = {entry.get("name", "") for entry in character_prompts}
@@ -1353,9 +1397,8 @@ async def _expand_single_shot_prompts(
             scene_prompt = shot.scene_prompt or ""
             prop_prompts = _normalize_prompt_entries(shot.prop_prompts_json) or []
 
-    shot_context = _build_shot_narrative_context(workflow, shot.shot_index)
     storyboard_payload["shot_context"] = shot_context
-    storyboard_payload["screenplay_context"] = build_screenplay_context_for_shot(workflow, shot)
+    storyboard_payload["screenplay_context"] = screenplay_context
     try:
         storyboard_prompt = await deepseek_service.generate_shot_storyboard_prompt(storyboard_payload, api_key=deepseek_api_key)
     except Exception as exc:
@@ -1373,6 +1416,13 @@ async def _expand_single_shot_prompts(
                     "time_of_day": shot.time_of_day,
                     "characters": missing_characters,
                     "story_summary": shot.story_summary,
+                    "source_text_span": shot.source_text_span or "",
+                    "chapter_text": chapter_text or "",
+                    "shot_context": shot_context,
+                    "screenplay_context": storyboard_payload.get("screenplay_context") or "",
+                    "key_props": shot.key_props_json or [],
+                    "scene_asset_candidates": shot.scene_asset_candidates_json or [],
+                    "dialogue_or_narration": shot.dialogue_or_narration or "",
                     "camera_plan": camera_plan,
                     "motion_plan": motion_plan,
                     "emotion_plan": emotion_plan,

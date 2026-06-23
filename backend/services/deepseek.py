@@ -907,7 +907,7 @@ def _build_story_snapshot_tiered(story_context: dict, tier: str = "auto") -> str
         writing_guidance = story_bible.get("writing_guidance")
         if creative_brief:
             cb_raw = json.dumps(creative_brief, ensure_ascii=False)
-            if len(cb_raw.encode("utf-8")) < 65536:
+            if len(cb_raw.encode("utf-8")) < 95536:
                 parts.append(f"作品圣经-创意理解: {cb_raw}")
             else:
                 core = {k: v for k, v in creative_brief.items()
@@ -918,7 +918,7 @@ def _build_story_snapshot_tiered(story_context: dict, tier: str = "auto") -> str
                 parts.append(f"作品圣经-创意理解(核心摘要): {json.dumps(core, ensure_ascii=False)}")
         if writing_guidance:
             wg_raw = json.dumps(writing_guidance, ensure_ascii=False)
-            if len(wg_raw.encode("utf-8")) < 65536:
+            if len(wg_raw.encode("utf-8")) < 95536:
                 parts.append(f"作品圣经-写作指导: {wg_raw}")
             else:
                 core_wg = {k: v for k, v in writing_guidance.items()
@@ -1742,7 +1742,7 @@ async def adjust_framework_with_chat(
             "model": DEEPSEEK_MODEL,
             "messages": _framework_messages_with_long_form(system_prompt or "", user_prompt, effective_length) + safe_messages,
             "stream": False,
-            "max_tokens": 65536,
+            "max_tokens": 95536,
             "response_format": {"type": "json_object"},
         }
 
@@ -1868,7 +1868,7 @@ async def continue_framework_with_chat(
             "model": DEEPSEEK_MODEL,
             "messages": _framework_messages_with_long_form(system_prompt or "", user_prompt, effective_length) + safe_messages,
             "stream": False,
-            "max_tokens": 65536,
+            "max_tokens": 95536,
             "response_format": {"type": "json_object"},
         }
 
@@ -3084,7 +3084,7 @@ async def _parse_lite_chunk(
             {"role": "user", "content": user_prompt},
         ],
         "stream": False,
-        "max_tokens": 32768,
+        "max_tokens": 95536,
         "response_format": {"type": "json_object"},
     }
 
@@ -3562,6 +3562,13 @@ async def generate_shot_character_prompts_ai(
         scene_location=shot_data.get("scene_location"),
         time_of_day=shot_data.get("time_of_day"),
         story_summary=shot_data.get("story_summary"),
+        source_text_span=shot_data.get("source_text_span"),
+        chapter_text=shot_data.get("chapter_text"),
+        shot_context=shot_data.get("shot_context"),
+        screenplay_context=shot_data.get("screenplay_context"),
+        key_props=shot_data.get("key_props"),
+        scene_asset_candidates=shot_data.get("scene_asset_candidates"),
+        dialogue_or_narration=shot_data.get("dialogue_or_narration"),
         camera_plan=shot_data.get("camera_plan"),
         motion_plan=shot_data.get("motion_plan"),
         emotion_plan=shot_data.get("emotion_plan"),

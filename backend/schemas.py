@@ -654,6 +654,7 @@ class CreateVideoAssetRequest(BaseModel):
     file_path: str
     provider: Optional[str] = None
     prompt: Optional[str] = None
+    style_preset: Optional[str] = None
     meta: Optional[dict[str, Any]] = None
 
 

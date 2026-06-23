@@ -593,9 +593,9 @@ def _merge_style_prompt(base_prompt: str, style_template: str | None, style_name
         return base
     if not base:
         return style_text
-    # 视频/故事版提示词：将风格自然融入末尾作为视觉质量要求
+    # 风格指令放在开头作为最高优先级约束，确保不被后续内容覆盖
     if len(base) > 300:
-        return f"{base}\n\nVisual style: {style_text}."
+        return f"STYLE DIRECTIVE (highest priority): {style_text}. ALL content below must follow this style. Do NOT apply any other art style.\n\n{base}"
     # 短提示词：前缀方式
     return f"{style_text}. {base}"
 
@@ -705,7 +705,7 @@ def _build_character_sheet_prompt(
         f"Personality profile (Big Five): {traits}. "
         f"Appearance details: {note_from_profiles or 'detailed facial features, hairstyle, eye shape, body type, signature colors required'}. "
         f"Reference anchor: {inherited_prompt or 'consistent identity markers across all frames'}. "
-        f"Style requirement: apply selected anime/illustration style, cel-shaded rendering, clean line art, vibrant color palette. "
+        f"Style requirement: strictly follow the visual style of the attached style reference image. " f"No other art style, rendering technique, or aesthetic direction applies. "
         "Mandatory consistency: lock face shape, eye distance, nose bridge contour, lip shape, jawline angle, hair parting, and 3 signature color swatches across ALL generated frames. "
         "This is a master reference sheet for video animation consistency. Every subsequent frame MUST match these identity markers exactly."
     )
@@ -1401,6 +1401,7 @@ def _resolve_effective_style_for_scene(
 def _resolve_workflow_style_ref_path(
     chapter_id: int,
     db: Session,
+    style_preset_name: str | None = None,
 ) -> str | None:
     """解析工作流的风格参考图文件绝对路径。
 
@@ -1410,20 +1411,36 @@ def _resolve_workflow_style_ref_path(
     wf = db.query(ChapterVideoWorkflow).filter(
         ChapterVideoWorkflow.chapter_id == chapter_id
     ).order_by(ChapterVideoWorkflow.created_at.desc()).first()
-    if not wf:
-        return None
 
     ref_url = None
-    if wf.style_reference_image_url:
+    if wf and wf.style_reference_image_url:
         ref_url = wf.style_reference_image_url.strip()
 
-    # 回退：使用章节绑定的风格预设的 image_url
+    if not ref_url and wf and wf.video_style:
+        preset = db.query(VideoStylePreset).filter(VideoStylePreset.name == wf.video_style.strip()).first()
+        if preset and preset.image_url:
+            ref_url = preset.image_url.strip()
+
+    if not ref_url and style_preset_name:
+        preset_name = style_preset_name.strip()
+        preset = db.query(VideoStylePreset).filter(VideoStylePreset.name == preset_name).first()
+        if not preset and preset_name.isdigit():
+            preset = db.get(VideoStylePreset, int(preset_name))
+        if preset and preset.image_url:
+            ref_url = preset.image_url.strip()
+
     if not ref_url:
         chapter = db.query(Chapter).filter(Chapter.id == chapter_id).first()
         if chapter and chapter.video_style_preset_id:
             preset = db.get(VideoStylePreset, chapter.video_style_preset_id)
             if preset and preset.image_url:
                 ref_url = preset.image_url.strip()
+        if not ref_url and chapter and chapter.story_id:
+            story = db.get(Story, chapter.story_id)
+            if story and getattr(story, "video_style_preset_id", None):
+                preset = db.get(VideoStylePreset, story.video_style_preset_id)
+                if preset and preset.image_url:
+                    ref_url = preset.image_url.strip()
 
     if not ref_url:
         return None
@@ -2003,7 +2020,7 @@ async def generate_scene_concept_art(
             prompt=prompt,
             output_path=full_path,
             api_key=api_key or None,
-            size=image_style_params.get("size", "1792x1024"),
+            size=image_style_params.get("size", "1920x1080"),
             ref_image_paths=ref_paths if ref_paths else None,
         )
     except Exception as e:
@@ -3134,6 +3151,7 @@ async def create_video_asset(
         file_path=body.file_path or "",
         provider=body.provider or "",
         prompt=body.prompt or "",
+        style_preset=body.style_preset or None,
         meta_json=body.meta or {},
     )
     db.add(asset)
@@ -3353,7 +3371,19 @@ async def regenerate_video_asset(
     mask = body.get("mask")
 
     source_path = ensure_local_media_path(asset.file_path, "video")
-    has_source = source_path and Path(source_path).exists()
+    source_path_obj = Path(source_path) if source_path else None
+    has_source = source_path_obj is not None and source_path_obj.exists()
+    logger.info(
+        "[regen_asset] asset_id=%s chapter_id=%s story_id=%s file_path=%r source_path=%s has_source=%s style_preset=%s mode=%s",
+        asset_id,
+        asset.chapter_id,
+        asset.story_id,
+        asset.file_path,
+        source_path,
+        bool(has_source),
+        asset.style_preset,
+        mode,
+    )
 
     api_key = _user_image_api_key(request)
     _configure_image_service_from_db(request, db)
@@ -3372,36 +3402,38 @@ async def regenerate_video_asset(
                 mask_bytes = base64.b64decode(str(mask))
                 saved_path = await image2_service.edit_existing_image(
                     prompt=prompt,
-                    source_image_path=Path(source_path),
+                    source_image_path=source_path_obj,
                     output_path=output_path,
                     mask_bytes=mask_bytes,
                     api_key=api_key or None,
                 )
             else:
                 # 有源图全量重绘：将源图作为参考图，同时追加风格预设参考图确保风格统一
-                style_ref_path = _resolve_workflow_style_ref_path(asset.chapter_id, db) if asset.chapter_id else None
+                style_ref_path = _resolve_workflow_style_ref_path(asset.chapter_id, db, asset.style_preset) if asset.chapter_id else None
                 ref_paths = []
-                if source_path and Path(source_path).exists():
-                    ref_paths.append(source_path)
+                if source_path_obj is not None and source_path_obj.exists():
+                    ref_paths.append(str(source_path_obj))
                 if style_ref_path and style_ref_path not in ref_paths:
                     ref_paths.append(style_ref_path)
+                logger.info("[regen_asset] full refs asset_id=%s style_ref=%s ref_count=%s", asset_id, style_ref_path, len(ref_paths))
                 saved_path = await image2_service.generate_reference_image(
                     prompt=prompt,
                     output_path=output_path,
                     api_key=api_key or None,
-                    size="1792x1024",
+                    size="1920x1080",
                     ref_image_paths=ref_paths if ref_paths else None,
                     ref_type="style",
                 )
         else:
             # 无源图片（首次生成占位资产）：用风格参考图示图生图保证画风一致
-            style_ref_path = _resolve_workflow_style_ref_path(asset.chapter_id, db) if asset.chapter_id else None
+            style_ref_path = _resolve_workflow_style_ref_path(asset.chapter_id, db, asset.style_preset) if asset.chapter_id else None
             ref_paths = [style_ref_path] if style_ref_path else None
+            logger.info("[regen_asset] no-source refs asset_id=%s style_ref=%s ref_count=%s", asset_id, style_ref_path, len(ref_paths or []))
             saved_path = await image2_service.generate_reference_image(
                 prompt=prompt,
                 output_path=output_path,
                 api_key=api_key or None,
-                size="1792x1024",
+                size="1920x1080",
                 ref_image_paths=ref_paths,
                 ref_type="style",
             )
@@ -4105,7 +4137,7 @@ async def generate_character_ref_image(
         if preset:
             style_ctx = {
                 "name": preset.name,
-                "prompt_template": str(preset.image_style_params.get("prompt_template", "") if isinstance(preset.image_style_params, dict) else ""),
+                "prompt_template": preset.prompt_template or "",
                 "image_style_params": preset.image_style_params if isinstance(preset.image_style_params, dict) else {},
             }
             if preset.image_url:
@@ -4129,7 +4161,7 @@ async def generate_character_ref_image(
         "hair parting, and 3 signature color swatches across ALL frames. "
         "Master reference sheet for video animation consistency."
     )
-    img_size = style_ctx.get("image_style_params", {}).get("size", "1024x1024")
+    img_size = style_ctx.get("image_style_params", {}).get("size", "1920x1080")
 
     char_dir = _VIDEO_OUTPUTS_DIR / f"story_{story_id}" / "characters"
     char_dir.mkdir(parents=True, exist_ok=True)
@@ -4832,7 +4864,7 @@ async def render_shot_storyboard(
             prompt=prompt,
             output_path=full_path,
             api_key=api_key,
-            size=image_style_params.get("size", "1792x1024"),
+            size=image_style_params.get("size", "1920x1080"),
             ref_image_paths=ref_paths if ref_paths else None,
         )
     except Exception as e:
@@ -5080,7 +5112,7 @@ async def generate_shot_frames(
                 prompt=prompt,
                 output_path=full_path,
                 api_key=api_key or None,
-                size=image_style_params.get("size", "1792x1024"),
+                size=image_style_params.get("size", "1920x1080"),
                 ref_image_paths=ref_paths if ref_paths else None,
             )
         except Exception as e:
@@ -5198,7 +5230,7 @@ async def regenerate_shot_frame(
             prompt=prompt,
             output_path=full_path,
             api_key=api_key or None,
-            size=(style_ctx.get("image_style_params") or {}).get("size", "1792x1024"),
+            size=(style_ctx.get("image_style_params") or {}).get("size", "1920x1080"),
             ref_image_paths=ref_paths if ref_paths else None,
         )
     except Exception as e:
@@ -5764,7 +5796,7 @@ async def generate_shot_character_asset(
             prompt=final_prompt,
             output_path=full_path,
             api_key=api_key or None,
-            size=image_style_params.get("size", "1792x1024"),
+            size=image_style_params.get("size", "1920x1080"),
             ref_image_paths=ref_paths,
             ref_type="style",
         )
@@ -5861,7 +5893,7 @@ async def generate_shot_prop_asset(
             prompt=final_prompt,
             output_path=full_path,
             api_key=api_key or None,
-            size=image_style_params.get("size", "1792x1024"),
+            size=image_style_params.get("size", "1920x1080"),
             ref_image_paths=ref_paths,
             ref_type="style",
         )
@@ -5955,7 +5987,7 @@ async def generate_shot_scene_asset(
             prompt=final_prompt,
             output_path=full_path,
             api_key=api_key or None,
-            size=image_style_params.get("size", "1792x1024"),
+            size=image_style_params.get("size", "1920x1080"),
             ref_image_paths=ref_paths,
             ref_type="style",
         )

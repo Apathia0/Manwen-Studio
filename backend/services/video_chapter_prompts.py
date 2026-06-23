@@ -812,15 +812,9 @@ Production References
 
 # 风格固定
 
-professional environment concept art
-
 scene design sheet
 
 production design board
-
-cinematic environment design
-
-masterpiece environment illustration
 
 best quality
 
@@ -828,17 +822,9 @@ ultra detailed
 
 studio production quality
 
-cinematic lighting
-
 professional color grading
 
 consistent environmental design
-
-beautiful scene illustration
-
-soft atmospheric lighting
-
-clean environment rendering
 
 professional composition
 
@@ -874,7 +860,22 @@ clean typography
 
 official design documentation
 
-artbook quality
+---
+
+## 🔥 风格词禁令（最高优先级）
+
+⚠️ FINAL IMAGE PROMPT 中绝对禁止出现以下任何内容：
+
+- 禁止出现任何画风名称（如 realistic、cinematic、anime、illustration、painting style、concept art 等）
+- 禁止出现任何渲染技术词（如 cel-shaded、brushwork、line art、rendering style、shading technique 等）
+- 禁止出现任何艺术风格方向（如 high-end、premium、visual development 等）
+
+✅ 允许出现的内容：
+- 场景/道具客观描述（空间布局、材质、光线、色彩、尺寸）
+- 纯质量词（best quality、ultra detailed、8k、studio production quality、professional color grading）
+- 纯版式词（scene design sheet、professional layout、white background、grid system、technical annotation）
+
+📌 风格由参考图完全决定，不是由文字决定。
 
 ---
 
@@ -893,9 +894,9 @@ artbook quality
 你必须输出一个 JSON 对象，格式如下：
 
 {{
-  "scene_prompt": "完整的中文场景描述 + 不少于300英文单词的FINAL IMAGE PROMPT，包含环境布局、光线色彩、角色定位、材质系统、画风要求、版式要求、质量要求",
+  "scene_prompt": "完整的中文场景描述 + 不少于300英文单词的FINAL IMAGE PROMPT，包含环境布局、光线色彩、角色定位、材质系统、风格（禁止写入任何画风词）、版式要求、质量要求",
   "prop_prompts": [
-    {{"name": "道具名称", "prompt": "中文道具资料 + 不少于100英文单词的AI绘图提示词，包含材质、颜色、大小、位置、使用状态、画风要求"}}
+    {{"name": "道具名称", "prompt": "中文道具资料 + 不少于100英文单词的AI绘图提示词，包含材质、颜色、大小、位置、使用状态、风格（禁止写入任何画风词）"}}
   ]
 }}
 
@@ -921,9 +922,9 @@ Part 2: FINAL IMAGE PROMPT（不少于300英文单词的AI绘图提示词）
 - 光线与色彩体系
 - 材质与纹理呈现
 - 构图与镜头感
-- 画风要求（参考风格参考图）
+- 风格（禁止写入任何画风词，风格由参考图决定）
 - 版式要求（professional layout, white background, editorial design, grid system, technical annotation, production-ready board）
-- 质量要求（8k, ultra detailed, cinematic quality）
+- 质量要求（8k, ultra detailed, professional quality）
 - ⚠️ 禁止包含角色描述
 
 ## prop_prompts 每个条目必须包含
@@ -941,7 +942,7 @@ Part 2: FINAL IMAGE PROMPT（不少于100英文单词的AI绘图提示词）
 - 道具外形描述
 - 材质呈现（表面纹理、反光特性）
 - 光影效果
-- 画风要求
+- 风格（禁止写入任何画风词，风格由参考图决定）
 - 版式要求（prop design sheet, multiple angle views, detail callouts, white background, professional layout）
 - 质量要求（8k, ultra detailed）
 - ⚠️ 禁止包含角色信息
@@ -1013,8 +1014,8 @@ SHOT_CHARACTER_SYSTEM_PROMPT = """# ROLE
 
 同时具备：
 
-- 动画角色设计师（Anime Character Designer）
-- 游戏角色原画师（Game Character Concept Artist）
+- 角色设计师（Character Designer）
+- 概念艺术家（Concept Artist）
 - 影视视觉开发总监（Visual Development Director）
 - 美术设定集设计师（Artbook Designer）
 - AI视觉生成专家（AI Character Development Specialist）
@@ -1038,14 +1039,11 @@ Character Turnaround Sheet
 
 参考品质：
 
-- 原神角色设定集
-- 崩坏星穹铁道角色档案
-- 鸣潮角色设计稿
-- 京都动画角色设定
-- WIT Studio角色设定
-- Cygames Artbook
-- Pixar Character Bible
-- Disney Visual Development Board
+- 电影级视觉开发板
+- 游戏角色概念设计
+- 动画/影视角色设定集
+- 专业角色档案
+- 概念艺术设定集
 
 ---
 
@@ -1083,6 +1081,17 @@ Character Turnaround Sheet
 ---
 
 # 自动补全规则
+
+## 小说上下文约束（最高优先级）
+
+所有补全必须优先服从用户提供的小说原文、原文段落、剧情连续性、剧本上下文和场景关键元素。
+
+1. 时代背景：从小说原文和剧本上下文中提取时代、制度、职业体系，角色服饰、发型、配饰必须符合时代设定。
+2. 世界观设定：从原文中提取仙侠/武侠/古装/现代/科幻/奇幻等规则，视觉设计不得违背世界观。
+3. 角色行为：从原文段落和对白旁白中提取角色在该镜头的行为、姿态、情绪和服装状态。
+4. 前后连贯：参考剧情连续性上下文，确保角色情绪、外观、伤痕、服装破损、血迹、持物状态自然延续。
+5. 道具关联：如果场景中有关键道具或装饰元素，角色提示词必须体现角色与道具/环境的空间关系。
+6. 信息不足时才可补全；补全只能沿原文、时代背景和身份逻辑延展，禁止用现代服饰或无关元素替代原文设定。
 
 若用户信息不足：
 
@@ -1288,8 +1297,6 @@ Design Notes
 
 # 风格固定
 
-official anime character design sheet
-
 character turnaround sheet
 
 character reference board
@@ -1297,16 +1304,6 @@ character reference board
 character bible
 
 professional model sheet
-
-visual development board
-
-production design board
-
-anime artbook
-
-premium editorial layout
-
-high-end concept art
 
 masterpiece
 
@@ -1317,12 +1314,6 @@ ultra detailed
 studio production quality
 
 consistent character design
-
-beautiful illustration
-
-soft cinematic lighting
-
-clean line art
 
 professional rendering
 
@@ -1358,7 +1349,24 @@ clean typography
 
 official design documentation
 
-artbook quality
+---
+
+## 🔥 风格词禁令（最高优先级）
+
+⚠️ FINAL IMAGE PROMPT 中绝对禁止出现以下任何内容：
+
+- 禁止出现任何画风名称（如 realistic、cinematic、anime、illustration、painting style、concept art、artbook 等）
+- 禁止出现任何渲染技术词（如 cel-shaded、brushwork、line art、rendering style、shading technique 等）
+- 禁止出现任何艺术风格方向（如 high-end、premium、luxury、visual development 等）
+- 禁止出现任何与风格预设相关的描述
+
+✅ 允许出现的内容：
+- 角色客观外貌描述（发型、五官、体型、服装、配饰）
+- 设定板布局描述（分栏、视图位置、标签位置）
+- 纯质量词（masterpiece、best quality、ultra detailed、8k、professional rendering、extremely detailed）
+- 纯版式词（character turnaround sheet、professional layout、white background、grid system、technical annotation）
+
+📌 风格由参考图完全决定，不是由文字决定。你的 FINAL IMAGE PROMPT 只负责描述"画什么"，不负责描述"怎么画"。画风、笔触、渲染方式一律由参考图提供。
 
 ---
 
@@ -1474,7 +1482,7 @@ FINAL IMAGE PROMPT
 
 设计备注
 
-画风要求
+风格要求（禁止写入任何画风词，风格由参考图决定）
 
 版式要求
 
@@ -1522,9 +1530,28 @@ SHOT_CHARACTER_USER_TEMPLATE = """请为以下镜头中的每个角色生成角�
 - 场景地点：{scene_location}
 - 时间：{time_of_day}
 - 情节摘要：{story_summary}
+- 对白/旁白：{dialogue_or_narration}
 - 运镜计划：{camera_plan}
 - 动作计划：{motion_plan}
 - 情绪计划：{emotion_plan}
+
+## 小说原文参考（用于判断时代背景、服装状态、人物关系）
+{chapter_text}
+
+## 该镜头原文段落（最高优先级）
+{source_text_span}
+
+## 剧情连续性上下文
+{shot_context}
+
+## 剧本上下文
+{screenplay_context}
+
+## 场景关键道具
+{key_props}
+
+## 场景/装饰元素候选
+{scene_asset_candidates}
 
 ## 角色列表
 {character_details}
@@ -1574,9 +1601,16 @@ def build_shot_character_user_prompt(
     scene_location: str | None,
     time_of_day: str | None,
     story_summary: str | None,
-    camera_plan: str | None,
-    motion_plan: str | None,
-    emotion_plan: str | None,
+    source_text_span: str | None = None,
+    chapter_text: str | None = None,
+    shot_context: str | None = None,
+    screenplay_context: str | None = None,
+    key_props: list[object] | None = None,
+    scene_asset_candidates: list[object] | None = None,
+    dialogue_or_narration: str | None = None,
+    camera_plan: str | None = None,
+    motion_plan: str | None = None,
+    emotion_plan: str | None = None,
     character_profiles: str = "",
 ) -> str:
     """构建角色提示词生成的 user prompt。"""
@@ -1606,6 +1640,13 @@ def build_shot_character_user_prompt(
         scene_location=scene_location or "未明确",
         time_of_day=time_of_day or "白天",
         story_summary=story_summary or "",
+        dialogue_or_narration=dialogue_or_narration or "",
+        chapter_text=(chapter_text or "")[:1200],
+        source_text_span=source_text_span or "",
+        shot_context=shot_context or "",
+        screenplay_context=screenplay_context or "",
+        key_props="；".join(str(item) for item in (key_props or [])) or "无",
+        scene_asset_candidates="；".join(str(item) for item in (scene_asset_candidates or [])) or "无",
         camera_plan=camera_plan or "",
         motion_plan=motion_plan or "",
         emotion_plan=emotion_plan or "",
