@@ -659,6 +659,14 @@ def _migrate_video_tables(target_engine=None):
         with db_engine.begin() as conn:
             _prepare_migration_conn(conn)
             conn.execute(text("ALTER TABLE video_shots ADD COLUMN scene_mood VARCHAR(50)"))
+    if "scene_prompt" not in video_shots_cols:
+        with db_engine.begin() as conn:
+            _prepare_migration_conn(conn)
+            conn.execute(text("ALTER TABLE video_shots ADD COLUMN scene_prompt TEXT"))
+    if "prop_prompts_json" not in video_shots_cols:
+        with db_engine.begin() as conn:
+            _prepare_migration_conn(conn)
+            conn.execute(text("ALTER TABLE video_shots ADD COLUMN prop_prompts_json JSON"))
 
     # chapter_video_shots 表迁移
     chapter_video_shots_columns = insp.get_columns("chapter_video_shots") if "chapter_video_shots" in insp.get_table_names() else []
