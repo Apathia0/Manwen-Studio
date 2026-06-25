@@ -53,6 +53,7 @@ from sse_starlette.sse import EventSourceResponse
 
 from database import SessionLocal, get_db, init_db, engine as database_engine
 from models import (
+    AgentPendingChange,
     AuditLog,
     BackgroundTask,
     BillingOrder,
@@ -5674,6 +5675,8 @@ def delete_story(story_id: int, request: Request, db: Session = Depends(get_db))
             logger.warning("Story cover remained after story deletion: %s", cover_path)
     story_dir = Path(__file__).resolve().parent / "manga_outputs" / f"story_{story_id}"
     _rmtree_best_effort(story_dir, "story asset directory")
+    # 删除待处理的 AI Agent 变更记录（外键约束：agent_pending_changes → agent_conversations）
+    db.query(AgentPendingChange).filter(AgentPendingChange.story_id == story_id).delete()
     db.delete(story)
     db.commit()
     return {"ok": True}
