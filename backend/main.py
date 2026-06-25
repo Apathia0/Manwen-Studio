@@ -58,6 +58,8 @@ from models import (
     BackgroundTask,
     BillingOrder,
     Chapter,
+    ChapterVideoShot,
+    ChapterVideoWorkflow,
     EmailVerificationCode,
     ChatMessage,
     FrameworkSnapshot,
@@ -77,6 +79,7 @@ from models import (
     UserUsageMonthly,
     VideoAsset,
     VideoGenerationJob,
+    VideoProject,
     VideoStylePreset,
 )
 from schemas import (
@@ -5656,7 +5659,15 @@ def update_story(story_id: int, body: StoryUpdate, request: Request, db: Session
 def delete_story(story_id: int, request: Request, db: Session = Depends(get_db)):
     user = _require_user(request, db)
     story = _require_story_for_user(story_id, user, db)
-    # Delete all chapters and their data
+    # 删除所有引用 chapters 的非 cascade 子表（必须在删除 chapter 之前）
+    chapter_ids = [c.id for c in story.chapters]
+    if chapter_ids:
+        db.query(ChapterVideoShot).filter(ChapterVideoShot.workflow_id.in_(
+            db.query(ChapterVideoWorkflow.id).filter(ChapterVideoWorkflow.chapter_id.in_(chapter_ids)).subquery()
+        )).delete(synchronize_session=False)
+        db.query(ChapterVideoWorkflow).filter(ChapterVideoWorkflow.chapter_id.in_(chapter_ids)).delete(synchronize_session=False)
+        db.query(VideoProject).filter(VideoProject.chapter_id.in_(chapter_ids)).delete(synchronize_session=False)
+    # 删除章节及其 cascade 数据
     for chapter in story.chapters:
         chapter_dir = Path(__file__).resolve().parent / "manga_outputs" / f"chapter_{chapter.id}"
         _rmtree_best_effort(chapter_dir, "chapter directory")
@@ -5675,8 +5686,12 @@ def delete_story(story_id: int, request: Request, db: Session = Depends(get_db))
             logger.warning("Story cover remained after story deletion: %s", cover_path)
     story_dir = Path(__file__).resolve().parent / "manga_outputs" / f"story_{story_id}"
     _rmtree_best_effort(story_dir, "story asset directory")
-    # 删除待处理的 AI Agent 变更记录（外键约束：agent_pending_changes → agent_conversations）
-    db.query(AgentPendingChange).filter(AgentPendingChange.story_id == story_id).delete()
+    # 删除所有引用 stories 的非 cascade 子表（必须在删除 story 之前）
+    db.query(AgentPendingChange).filter(AgentPendingChange.story_id == story_id).delete(synchronize_session=False)
+    db.query(ChapterVideoWorkflow).filter(ChapterVideoWorkflow.story_id == story_id).delete(synchronize_session=False)
+    db.query(VideoProject).filter(VideoProject.story_id == story_id).delete(synchronize_session=False)
+    db.query(StoryTemplateBinding).filter(StoryTemplateBinding.story_id == story_id).delete(synchronize_session=False)
+    db.query(VideoAsset).filter(VideoAsset.story_id == story_id).delete(synchronize_session=False)
     db.delete(story)
     db.commit()
     return {"ok": True}
