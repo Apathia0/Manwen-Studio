@@ -17,6 +17,7 @@ from email.message import EmailMessage
 from pathlib import Path
 from typing import Any
 
+from services.writing_utils import build_chapter_generation_prompt
 from services.framework_utils import (
     _build_current_snapshot_data,
     _build_outline_compact,
@@ -155,6 +156,7 @@ from services import license_checker
 from services.payment import init_gateways, get_gateway, get_gateway_by_provider, get_method_options
 from services.story_state import build_story_bible_compact, build_story_memory_compact
 from routers.video import router as video_router
+from routers.deconstruction import router as deconstruction_router
 
 load_dotenv()
 
@@ -1368,6 +1370,7 @@ def _seed_platform_settings(db: Session, *, commit: bool = True) -> None:
         db.add(PlatformSetting(setting_key=key, value_json={"value": value}))
 
     _seed_system_prompts(db, commit=commit)
+    _seed_methodology(db, commit=commit)
 
 
 # ── 系统提示词种子数据 ──────────────────────────
@@ -1388,7 +1391,7 @@ def _ensure_framework_prompt_synced(db) -> None:
         db.add(PlatformSetting(setting_key=key, value_json={"value": FRAMEWORK_PROMPT_SEED}))
 
 
-NOVEL_PROMPT_SEED = """你是白金级网文作家，作品长期位居各平台畅销榜首。你的小说以逻辑严密、节奏精准、人物鲜活著称。
+_BASE_NOVEL_PROMPT = """你是白金级网文作家，作品长期位居各平台畅销榜首。你的小说以逻辑严密、节奏精准、人物鲜活著称。
 
 ## 核心创作铁律
 1. **逻辑自洽优先**：每一个情节点都必须有因有果。角色做出的每个决定，都必须有足够的情感动机和信息支撑。
@@ -1410,26 +1413,17 @@ NOVEL_PROMPT_SEED = """你是白金级网文作家，作品长期位居各平台
 3. 对话要有潜台词，不能直白地表达所有情感。
 4. 禁止用对话直接解释剧情——要通过行动和细节来展现。
 
-## 禁止的写作手法
-1. **禁止使用破折号（——）**：用逗号、句号或省略号代替。破折号会让句子显得生硬和不专业。
-2. **禁止使用「突然」「忽然」「就在这时」「就在此时」**：这些词会让转折显得廉价和突兀。
-3. **禁止使用「深深地」「无比地」「极其」「非常」「十分」等程度副词堆砌**：用具体的动作和细节来传达强度。
-4. **禁止使用「心中涌起一股暖流」「感到一阵心酸」等空洞的情感描写**：用具体的生理反应、动作、对话来传达情感。
-5. **禁止使用「他不知道的是」「而这一切，才刚刚开始」等上帝视角的旁白**：保持叙事视角的一致性。
-6. **禁止用无关的环境描写来凑字数**：每个环境描写都必须服务于情绪、氛围或剧情。
-
-## 节奏控制
-1. 紧张场景：短句、快节奏、具体动作。
-2. 日常场景：舒缓长句、细节描写、人物互动。
-3. 情感场景：克制描写、潜台词、留白。
-4. 每个场景都要有明确的叙事功能——推进剧情、揭示角色、制造冲突、埋下伏笔。
-
 ## 逻辑自检清单（在写完每个场景后检查）
 - 这个角色为什么会做出这个决定？有足够的情感铺垫吗？
 - 这个事件的发生合理吗？有前因后果吗？
 - 这段对话符合角色的性格和处境吗？
 - 这个情节能让读者信服吗？有没有逻辑漏洞？
-- 如果我是读者，我会觉得这个发展牵强吗？"""
+- 如果我是读者，我会觉得这个发展牵强吗？
+
+（关于写作技法、禁用词、节奏控制、去AI味规则，见下方方法论兜底。）"""
+
+# 注入写作方法论（从 references/writing/ 参考文件读取，修改 .md 文件即可同步）
+NOVEL_PROMPT_SEED = build_chapter_generation_prompt(_BASE_NOVEL_PROMPT)
 
 FRAMEWORK_PROMPT_SEED = """你是资深小说策划编辑，擅长设计能被直接写成畅销网文的故事框架。
 
@@ -1735,6 +1729,26 @@ def _seed_system_prompts(db: Session, *, commit: bool = True) -> None:
         db.add(PlatformSetting(setting_key=key, value_json={"value": value}))
     if commit:
         db.commit()
+
+
+def _seed_methodology(db: Session, *, commit: bool = True) -> None:
+    """将全部四个写作方法论组件种子数据写入 PlatformSetting 表。
+
+    仅在 key 不存在时写入，避免覆盖管理员已编辑的内容。
+    """
+    from services.writing_utils import (
+        _METHODOLOGY_KEYS, _METHODOLOGY_FILE_FALLBACK, save_methodology_to_db,
+    )
+
+    for key in _METHODOLOGY_KEYS:
+        existing = db.query(PlatformSetting).filter_by(
+            setting_key=_METHODOLOGY_KEYS[key]
+        ).first()
+        if existing:
+            continue
+        content = _METHODOLOGY_FILE_FALLBACK[key]()
+        if content:
+            save_methodology_to_db(db, key, content)
 
 
 def _require_user(request: Request, db: Session) -> User:
@@ -9469,6 +9483,7 @@ async def expand_chapter_endpoint(story_id: int, request: Request, db: Session =
         api_key=deepseek_api_key,
         previous_chapter_summary=previous_chapter_summary,
         system_prompt=template_ch_prompt or None,
+        db=db,
     )
     novel_content = await _ensure_generated_chapter_continuity(
         chapter_runtime_context,
@@ -10181,6 +10196,35 @@ def admin_update_system_prompts(body: dict, request: Request, db: Session = Depe
     }
 
 
+# ── 写作方法论管理 ──────────────────────────────────────
+
+@app.get("/api/admin/methodology")
+def admin_get_methodology(request: Request, db: Session = Depends(get_db)):
+    """管理员查看全部四个写作方法论组件。"""
+    _require_admin(request, db)
+    from services.writing_utils import get_all_methodology_from_db
+    methodology = get_all_methodology_from_db(db)
+    return {
+        key: {"content": methodology.get(key, ""), "length": len(methodology.get(key, ""))}
+        for key in ["writing_craft", "anti_ai_writing", "quality_checklist", "banned_words"]
+    }
+
+
+@app.put("/api/admin/methodology")
+def admin_update_methodology(body: dict, request: Request, db: Session = Depends(get_db)):
+    """管理员更新单个写作方法论组件。"""
+    _require_admin(request, db)
+    from services.writing_utils import save_methodology_to_db
+    key = body.get("key", "")
+    content = body.get("content", "")
+    if not isinstance(key, str) or key not in ("writing_craft", "anti_ai_writing", "quality_checklist", "banned_words"):
+        raise HTTPException(400, f"无效的组件 key: {key}")
+    if not isinstance(content, str) or not content.strip():
+        raise HTTPException(400, "方法论内容不能为空")
+    save_methodology_to_db(db, key, content.strip())
+    return {"ok": True, "key": key, "length": len(content.strip())}
+
+
 # ── 模板 CRUD ──────────────────────────────────────────
 
 @app.post("/api/prompt-templates")
@@ -10574,6 +10618,7 @@ from routers.agent_router import router as agent_router
 
 app.include_router(video_router)
 app.include_router(agent_router)
+app.include_router(deconstruction_router)
 
 
 if __name__ == "__main__":

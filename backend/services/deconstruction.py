@@ -87,6 +87,7 @@ async def run_deconstruction_pipeline(
     api_key: str,
     task_id: str | None = None,
     start_stage: int = 0,
+    **kwargs,
 ) -> dict:
     """运行完整拆书管道 Stage 0-6。
 

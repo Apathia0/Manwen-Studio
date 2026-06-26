@@ -191,6 +191,7 @@ async def crawl_qidian_novel(
     story_id: int,
     max_chapters: int = 100,
     task_id: str | None = None,
+    **kwargs,
 ) -> dict:
     """爬取起点小说完整内容并存入数据库"""
     db = next(SessionLocal())
