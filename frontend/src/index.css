@@ -1,10 +1,199 @@
 @import "tailwindcss";
 
+:root,
+[data-ui-theme="default"] {
+  --sc-font-sans: "IBM Plex Sans", "Source Han Sans SC", "PingFang SC", "Noto Sans CJK SC", "Segoe UI", sans-serif;
+  --sc-page-bg: radial-gradient(circle at top left, rgba(96, 165, 250, 0.18), transparent 22%), linear-gradient(180deg, #f4f8ff 0%, #eef4ff 46%, #f8fbff 100%);
+  --sc-workspace-bg: linear-gradient(180deg, #f4f8ff 0%, #eef4ff 100%);
+  --sc-shell-bg: rgba(248, 251, 255, 0.82);
+  --sc-sidebar-bg: linear-gradient(180deg, rgba(248, 251, 255, 0.94) 0%, rgba(238, 244, 255, 0.92) 100%);
+  --sc-panel-bg: rgba(255, 255, 255, 0.92);
+  --sc-panel-solid: #ffffff;
+  --sc-panel-muted: #f8fbff;
+  --sc-input-bg: #ffffff;
+  --sc-input-muted: #fcfcfa;
+  --sc-border: #d7e3f4;
+  --sc-border-soft: #e5edf8;
+  --sc-text: #0f172a;
+  --sc-text-muted: #64748b;
+  --sc-text-subtle: #94a3b8;
+  --sc-accent: #1d4ed8;
+  --sc-accent-hover: #1e40af;
+  --sc-accent-soft: #eff6ff;
+  --sc-accent-contrast: #ffffff;
+  --sc-radius-sm: 8px;
+  --sc-radius-md: 16px;
+  --sc-radius-lg: 24px;
+  --sc-shadow-sm: 0 6px 18px rgba(59, 130, 246, 0.08);
+  --sc-shadow-md: 0 14px 34px rgba(59, 130, 246, 0.08);
+  --sc-shadow-lg: 0 18px 42px rgba(59, 130, 246, 0.12);
+  --sc-focus: #bfdbfe;
+  --sc-scroll-track: #edf3ff;
+  --sc-scroll-thumb: #bfd0ea;
+  --sc-scroll-thumb-hover: #9fb6da;
+}
+
+[data-ui-theme="ink"] {
+  --sc-page-bg: radial-gradient(circle at top left, rgba(180, 152, 100, 0.16), transparent 24%), linear-gradient(180deg, #181713 0%, #242119 48%, #171511 100%);
+  --sc-workspace-bg: linear-gradient(180deg, #1d1b16 0%, #252116 100%);
+  --sc-shell-bg: rgba(27, 25, 20, 0.9);
+  --sc-sidebar-bg: linear-gradient(180deg, rgba(34, 31, 24, 0.96) 0%, rgba(24, 22, 18, 0.94) 100%);
+  --sc-panel-bg: rgba(38, 34, 26, 0.92);
+  --sc-panel-solid: #29251d;
+  --sc-panel-muted: #211f19;
+  --sc-input-bg: #302b22;
+  --sc-input-muted: #252219;
+  --sc-border: #4d4330;
+  --sc-border-soft: #3f3829;
+  --sc-text: #f4ead7;
+  --sc-text-muted: #c7b89f;
+  --sc-text-subtle: #94866f;
+  --sc-accent: #d6a84f;
+  --sc-accent-hover: #e7bd68;
+  --sc-accent-soft: rgba(214, 168, 79, 0.14);
+  --sc-accent-contrast: #19150f;
+  --sc-shadow-sm: 0 6px 18px rgba(0, 0, 0, 0.22);
+  --sc-shadow-md: 0 14px 34px rgba(0, 0, 0, 0.24);
+  --sc-shadow-lg: 0 18px 42px rgba(0, 0, 0, 0.28);
+  --sc-focus: rgba(214, 168, 79, 0.35);
+  --sc-scroll-track: #211f19;
+  --sc-scroll-thumb: #5e5039;
+  --sc-scroll-thumb-hover: #806b49;
+}
+
+[data-ui-theme="studio"] {
+  --sc-page-bg: radial-gradient(circle at top left, rgba(20, 184, 166, 0.12), transparent 24%), linear-gradient(180deg, #f4f5f3 0%, #e9ece8 48%, #f8f8f5 100%);
+  --sc-workspace-bg: linear-gradient(180deg, #f1f3f0 0%, #e7ebe8 100%);
+  --sc-shell-bg: rgba(248, 249, 247, 0.9);
+  --sc-sidebar-bg: linear-gradient(180deg, rgba(250, 251, 249, 0.95) 0%, rgba(235, 239, 235, 0.94) 100%);
+  --sc-panel-bg: rgba(255, 255, 252, 0.92);
+  --sc-panel-solid: #fffffc;
+  --sc-panel-muted: #f4f6f3;
+  --sc-input-bg: #fffffc;
+  --sc-input-muted: #f7f8f5;
+  --sc-border: #d8ded5;
+  --sc-border-soft: #e4e8e0;
+  --sc-text: #17211c;
+  --sc-text-muted: #66736c;
+  --sc-text-subtle: #96a09a;
+  --sc-accent: #0f766e;
+  --sc-accent-hover: #115e59;
+  --sc-accent-soft: #e6f4f1;
+  --sc-accent-contrast: #ffffff;
+  --sc-shadow-sm: 0 6px 18px rgba(15, 23, 42, 0.07);
+  --sc-shadow-md: 0 14px 34px rgba(15, 23, 42, 0.08);
+  --sc-shadow-lg: 0 18px 42px rgba(15, 23, 42, 0.1);
+  --sc-focus: rgba(20, 184, 166, 0.25);
+  --sc-scroll-track: #eef1ed;
+  --sc-scroll-thumb: #c3ccc3;
+  --sc-scroll-thumb-hover: #9faaa0;
+}
+
 body {
   margin: 0;
-  font-family: "IBM Plex Sans", "Source Han Sans SC", "PingFang SC", "Noto Sans CJK SC", "Segoe UI", sans-serif;
-  background: linear-gradient(180deg, #f4f8ff 0%, #eef4ff 42%, #f8fbff 100%);
-  color: #0f172a;
+  font-family: var(--sc-font-sans);
+  background: var(--sc-page-bg);
+  color: var(--sc-text);
+}
+
+.sc-app-shell {
+  background: var(--sc-page-bg);
+  color: var(--sc-text);
+}
+
+.sc-header {
+  border-color: var(--sc-border);
+  background: var(--sc-shell-bg);
+}
+
+.sc-sidebar {
+  border-color: var(--sc-border);
+  background: var(--sc-sidebar-bg);
+}
+
+.sc-panel {
+  border-color: var(--sc-border);
+  background: var(--sc-panel-bg);
+  box-shadow: var(--sc-shadow-lg);
+}
+
+.sc-card {
+  border-color: var(--sc-border);
+  background: var(--sc-panel-solid);
+  box-shadow: var(--sc-shadow-md);
+}
+
+.sc-muted-surface {
+  background: var(--sc-panel-muted);
+}
+
+.sc-workspace-surface {
+  background: var(--sc-workspace-bg);
+}
+
+.sc-button-primary {
+  background: var(--sc-accent);
+  color: var(--sc-accent-contrast);
+}
+
+.sc-button-primary:hover:not(:disabled) {
+  background: var(--sc-accent-hover);
+}
+
+.sc-button-secondary {
+  border-color: var(--sc-border);
+  background: var(--sc-panel-solid);
+  color: var(--sc-text);
+}
+
+.sc-button-secondary:hover:not(:disabled) {
+  background: var(--sc-accent-soft);
+}
+
+.sc-nav-active {
+  background: var(--sc-accent-soft);
+  color: var(--sc-accent);
+  box-shadow: var(--sc-shadow-sm);
+}
+
+.sc-nav-idle {
+  color: var(--sc-text-muted);
+}
+
+.sc-nav-idle:hover {
+  background: var(--sc-panel-bg);
+  color: var(--sc-text);
+}
+
+.sc-input {
+  border-color: var(--sc-border);
+  background: var(--sc-input-bg);
+  color: var(--sc-text);
+}
+
+.sc-input::placeholder {
+  color: var(--sc-text-subtle);
+}
+
+.sc-input:focus {
+  border-color: var(--sc-accent);
+  box-shadow: 0 0 0 2px var(--sc-focus);
+}
+
+.sc-text-muted {
+  color: var(--sc-text-muted);
+}
+
+.sc-text-subtle {
+  color: var(--sc-text-subtle);
+}
+
+.sc-accent-text {
+  color: var(--sc-accent);
+}
+
+.sc-book-initial {
+  color: color-mix(in srgb, var(--sc-accent) 28%, transparent);
 }
 
 /* Custom scrollbar */
@@ -13,19 +202,19 @@ body {
   height: 8px;
 }
 ::-webkit-scrollbar-track {
-  background: #edf3ff;
+  background: var(--sc-scroll-track);
 }
 ::-webkit-scrollbar-thumb {
-  background: #bfd0ea;
+  background: var(--sc-scroll-thumb);
   border-radius: 4px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: #9fb6da;
+  background: var(--sc-scroll-thumb-hover);
 }
 /* Firefox */
 * {
   scrollbar-width: thin;
-  scrollbar-color: #bfd0ea #edf3ff;
+  scrollbar-color: var(--sc-scroll-thumb) var(--sc-scroll-track);
 }
 
 @keyframes barbershop {

@@ -50,7 +50,7 @@ export default function WorkspaceLayout({
   );
 
   return (
-    <div className="flex h-full min-h-0 flex-col gap-3 bg-[linear-gradient(180deg,_#f4f8ff_0%,_#eef4ff_100%)] p-4">
+    <div className="sc-workspace-surface flex h-full min-h-0 flex-col gap-3 p-4">
       {story.story_bible && Object.keys(story.story_bible).length > 0 && (
         <div className="shrink-0">
           <StoryBibleSummaryCard
@@ -62,7 +62,7 @@ export default function WorkspaceLayout({
       )}
       <div className="flex min-h-0 flex-1 gap-4">
         {!mangaPreviewMode && (
-        <div className="w-[320px] shrink-0 overflow-y-auto rounded-[24px] border border-[#d7e3f4] bg-[rgba(255,255,255,0.92)] shadow-[0_18px_42px_rgba(59,130,246,0.12)] backdrop-blur-xl">
+        <div className="sc-panel w-[320px] shrink-0 overflow-y-auto rounded-[var(--sc-radius-lg)] border backdrop-blur-xl">
           <Suspense fallback={<RouteLoadingFallback />}>
             <FrameworkPanel
               story={story}
@@ -75,7 +75,7 @@ export default function WorkspaceLayout({
         )}
 
         {!mangaPreviewMode && (
-        <div className="flex-1 min-w-0 overflow-hidden rounded-[24px] border border-[#d7e3f4] bg-[rgba(255,255,255,0.92)] shadow-[0_18px_42px_rgba(59,130,246,0.12)] backdrop-blur-xl">
+        <div className="sc-panel flex-1 min-w-0 overflow-hidden rounded-[var(--sc-radius-lg)] border backdrop-blur-xl">
           <Suspense fallback={<RouteLoadingFallback />}>
             <EditorPanel
               story={story}
@@ -92,33 +92,33 @@ export default function WorkspaceLayout({
         </div>
         )}
 
-        <div className={`${mangaPreviewMode ? 'flex-1' : 'w-[400px] shrink-0'} min-w-0 overflow-hidden rounded-[24px] border border-[#d7e3f4] bg-[rgba(255,255,255,0.92)] shadow-[0_18px_42px_rgba(59,130,246,0.12)] backdrop-blur-xl`}>
+        <div className={`sc-panel ${mangaPreviewMode ? 'flex-1' : 'w-[400px] shrink-0'} min-w-0 overflow-hidden rounded-[var(--sc-radius-lg)] border backdrop-blur-xl`}>
           <div className="flex flex-col h-full">
-            <div className="shrink-0 flex border-b border-[#d7e3f4] px-3">
+            <div className="shrink-0 flex border-b border-[var(--sc-border)] px-3">
               <button
                 onClick={() => { setRightPanelTab('manga'); localStorage.setItem('rightPanelTab', 'manga'); }}
                 className={`flex items-center gap-1.5 px-4 py-2.5 text-sm font-medium transition-colors relative ${
                   rightPanelTab === 'manga'
-                    ? 'text-blue-600'
-                    : 'text-gray-500 hover:text-gray-700'
+                    ? 'sc-accent-text'
+                    : 'sc-text-muted hover:text-[var(--sc-text)]'
                 }`}
               >
                 <Image size={16} /> 漫画操作区
                 {rightPanelTab === 'manga' && (
-                  <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-blue-600 rounded-full" />
+                  <div className="absolute bottom-0 left-0 right-0 h-0.5 rounded-full bg-[var(--sc-accent)]" />
                 )}
               </button>
               <button
                 onClick={() => { setRightPanelTab('agent'); localStorage.setItem('rightPanelTab', 'agent'); }}
                 className={`flex items-center gap-1.5 px-4 py-2.5 text-sm font-medium transition-colors relative ${
                   rightPanelTab === 'agent'
-                    ? 'text-blue-600'
-                    : 'text-gray-500 hover:text-gray-700'
+                    ? 'sc-accent-text'
+                    : 'sc-text-muted hover:text-[var(--sc-text)]'
                 }`}
               >
                 <Bot size={16} /> AI 助手
                 {rightPanelTab === 'agent' && (
-                  <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-blue-600 rounded-full" />
+                  <div className="absolute bottom-0 left-0 right-0 h-0.5 rounded-full bg-[var(--sc-accent)]" />
                 )}
               </button>
             </div>

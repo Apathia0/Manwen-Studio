@@ -2,7 +2,7 @@ import type { InputHTMLAttributes, TextareaHTMLAttributes, SelectHTMLAttributes 
 import { cn } from '../../lib/cn';
 
 const baseClass =
-  'w-full rounded-2xl border border-[#d7e3f4] px-3 py-2 text-sm outline-none transition focus:border-[#60a5fa] focus:ring-2 focus:ring-[#bfdbfe]';
+  'sc-input w-full rounded-2xl border px-3 py-2 text-sm outline-none transition';
 
 /** 统一文本输入框 */
 export function Input(props: InputHTMLAttributes<HTMLInputElement>) {

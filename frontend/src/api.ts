@@ -823,6 +823,7 @@ export interface PlatformSettings {
     copyright: string;
     notice: string;
     icon_url: string;
+    ui_theme?: string;
     icon_data?: string;
     icon_mime?: string;
     clear_icon?: boolean;
@@ -891,6 +892,7 @@ export interface PublicPlatformSettings {
   copyright: string;
   notice: string;
   icon_url: string;
+  ui_theme?: string;
   api?: {
     deepseek_base_url?: string;
     deepseek_model?: string;

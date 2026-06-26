@@ -618,6 +618,11 @@ def _set_platform_setting(key: str, value, db: Session) -> None:
         db.add(PlatformSetting(setting_key=key, value_json={"value": value}))
 
 
+def _normalize_ui_theme(value) -> str:
+    value = str(value or "default").strip().lower()
+    return value if value in {"default", "ink", "studio"} else "default"
+
+
 def _platform_settings_snapshot(db: Session) -> dict:
     return {
         "basic": {
@@ -628,6 +633,7 @@ def _platform_settings_snapshot(db: Session) -> dict:
             "copyright": _get_platform_setting("platform.copyright", db, ""),
             "notice": _get_platform_setting("platform.notice", db, ""),
             "icon_url": _platform_icon_url(db),
+            "ui_theme": _normalize_ui_theme(_get_platform_setting("platform.ui_theme", db, "default")),
         },
         "api": {
             "deepseek_base_url": _get_platform_setting("api.deepseek.base_url", db, deepseek_service.DEEPSEEK_BASE_URL),
@@ -756,6 +762,7 @@ def _public_platform_settings_snapshot(db: Session) -> dict:
         "copyright": basic.get("copyright") or "",
         "notice": basic.get("notice") or "",
         "icon_url": _platform_icon_url(db),
+        "ui_theme": _normalize_ui_theme(basic.get("ui_theme") or "default"),
         "api": {
             "deepseek_base_url": api.get("deepseek_base_url") or "",
             "deepseek_model": api.get("deepseek_model") or "",
@@ -5231,6 +5238,7 @@ def admin_save_platform_settings(body: dict, request: Request, db: Session = Dep
         "platform.icp": basic.get("icp", ""),
         "platform.copyright": basic.get("copyright", ""),
         "platform.notice": basic.get("notice", ""),
+        "platform.ui_theme": _normalize_ui_theme(basic.get("ui_theme", "default")),
         "api.deepseek.base_url": api.get("deepseek_base_url", deepseek_service.DEEPSEEK_BASE_URL),
         "api.deepseek.model": api.get("deepseek_model", deepseek_service.DEEPSEEK_MODEL),
         "api.deepseek.api_key": api.get("deepseek_api_key", ""),

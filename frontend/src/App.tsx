@@ -42,6 +42,7 @@ import { WorkspacePage } from './components/WorkspacePage';
 import { PaymentCheckoutDialog } from './components/PaymentCheckoutDialog';
 import { UserPricingPage } from './components/UserPricingPage';
 import { UserAccountUsagePage } from './components/UserAccountUsagePage';
+import { DEFAULT_UI_THEME, normalizeUiTheme } from './lib/uiTheme';
 import {
   cancelMyOrder,
   clearAuthToken,
@@ -173,6 +174,7 @@ function App() {
     copyright: '',
     notice: '',
     icon_url: DEFAULT_ICON_URL,
+    ui_theme: DEFAULT_UI_THEME,
     auth: {
       require_email_code_for_register: false,
       require_email_code_for_login: false,
@@ -199,6 +201,7 @@ function App() {
     [chapters, activeChapterId],
   );
   const isWorkspaceRoute = route === 'workspace';
+  const uiTheme = normalizeUiTheme(platform.ui_theme);
 
   useEffect(() => {
     void bootstrapApp();
@@ -549,7 +552,7 @@ function App() {
   async function refreshPlatformSettings() {
     try {
       const data = await getPublicPlatformSettings();
-      setPlatform(data);
+      setPlatform({ ...data, ui_theme: normalizeUiTheme(data.ui_theme) });
     } catch {
       setPlatform((prev) => prev);
     }
@@ -622,6 +625,7 @@ function App() {
 
   if (!session && route === 'login') {
     return (
+      <div data-ui-theme={uiTheme}>
         <LoginPage
           title={platform.site_name}
           subtitle={platform.site_slogan}
@@ -634,22 +638,26 @@ function App() {
           toForgotPassword={() => setRoute('forgot-password')}
           error={null}
         />
+      </div>
     );
   }
   if (!session && route === 'forgot-password') {
     return (
-      <ForgotPasswordPage
-        title={platform.site_name}
-        subtitle={platform.site_slogan}
-        onBack={() => setRoute('login')}
-        onSendCode={doSendResetEmailCode}
-        onResetPassword={doResetPassword}
-        error={null}
-      />
+      <div data-ui-theme={uiTheme}>
+        <ForgotPasswordPage
+          title={platform.site_name}
+          subtitle={platform.site_slogan}
+          onBack={() => setRoute('login')}
+          onSendCode={doSendResetEmailCode}
+          onResetPassword={doResetPassword}
+          error={null}
+        />
+      </div>
     );
   }
   if (!session && route === 'register') {
     return (
+      <div data-ui-theme={uiTheme}>
         <RegisterPage
           title={platform.site_name}
           subtitle={platform.site_slogan}
@@ -661,26 +669,33 @@ function App() {
           toLogin={() => setRoute('login')}
           error={null}
         />
+      </div>
     );
   }
   if (!session && route === 'pricing') {
-    return <PricingPublicPage onBack={() => setRoute('landing')} plans={plans} onRegister={() => setRoute('register')} />;
+    return (
+      <div data-ui-theme={uiTheme}>
+        <PricingPublicPage onBack={() => setRoute('landing')} plans={plans} onRegister={() => setRoute('register')} />
+      </div>
+    );
   }
   if (!session) {
     return (
-      <PublicSite
-        platform={platform}
-        onLogin={() => setRoute('login')}
-        onRegister={() => setRoute('register')}
-        onPricing={() => setRoute('pricing')}
-      />
+      <div data-ui-theme={uiTheme}>
+        <PublicSite
+          platform={platform}
+          onLogin={() => setRoute('login')}
+          onRegister={() => setRoute('register')}
+          onPricing={() => setRoute('pricing')}
+        />
+      </div>
     );
   }
 
   return (
-    <div className="min-h-screen bg-[radial-gradient(circle_at_top_left,_rgba(96,165,250,0.18),_transparent_22%),linear-gradient(180deg,_#f4f8ff_0%,_#eef4ff_46%,_#f8fbff_100%)] text-slate-900">
+    <div data-ui-theme={uiTheme} className="sc-app-shell min-h-screen">
       <LoadingOverlay visible={bootstrapping} message="正在加载..." />
-      <header className="sticky top-0 z-20 border-b border-[#d7e3f4] bg-[rgba(248,251,255,0.82)] backdrop-blur-xl">
+      <header className="sc-header sticky top-0 z-20 border-b backdrop-blur-xl">
         <div className="flex h-14 items-center justify-between px-5 lg:px-8">
           <button
             type="button"
@@ -690,7 +705,7 @@ function App() {
             <img
               src={platform.icon_url || DEFAULT_ICON_URL}
               alt={`${platform.site_name || DEFAULT_SITE_NAME} logo`}
-              className="h-9 w-9 rounded-2xl shadow-[0_10px_24px_rgba(59,130,246,0.14)]"
+              className="h-9 w-9 rounded-2xl shadow-[var(--sc-shadow-sm)]"
             />
             <div>
               <div className="text-sm font-semibold tracking-wide">{platform.site_name || DEFAULT_SITE_NAME}</div>
@@ -698,13 +713,13 @@ function App() {
             </div>
           </button>
           <div className="flex items-center gap-3 text-sm">
-            <span className="rounded-full border border-[#d7e3f4] bg-white/90 px-3 py-1 text-xs font-medium text-slate-600 shadow-[0_6px_18px_rgba(59,130,246,0.08)]">
+            <span className="sc-card rounded-full border px-3 py-1 text-xs font-medium sc-text-muted shadow-[var(--sc-shadow-sm)]">
               {session.role === 'admin' ? '管理员' : '用户'}
             </span>
             <span>{session.name}</span>
             <button
               onClick={() => void doLogout()}
-              className="inline-flex items-center gap-1 rounded-full border border-[#d7e3f4] bg-white/90 px-3 py-1.5 text-xs text-slate-700 shadow-[0_6px_18px_rgba(59,130,246,0.08)] transition hover:bg-[#eef5ff]"
+              className="sc-button-secondary inline-flex items-center gap-1 rounded-full border px-3 py-1.5 text-xs shadow-[var(--sc-shadow-sm)] transition"
             >
               <LogOut size={14} />
               退出
@@ -714,7 +729,7 @@ function App() {
       </header>
 
       <div className="grid min-h-[calc(100vh-56px)] grid-cols-1 lg:grid-cols-[220px_minmax(0,1fr)]">
-        <aside className="border-r border-[#d7e3f4] bg-[linear-gradient(180deg,_rgba(248,251,255,0.94)_0%,_rgba(238,244,255,0.92)_100%)] px-4 py-5 backdrop-blur-xl">
+        <aside className="sc-sidebar border-r px-4 py-5 backdrop-blur-xl">
           <div className="mb-4 px-2 text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">应用菜单</div>
           <nav className="space-y-1.5">
             {USER_NAV.map((item) => {
@@ -726,8 +741,8 @@ function App() {
                   onClick={() => setRoute(item.key)}
                   className={`flex w-full items-center gap-2 rounded-2xl px-3 py-2.5 text-left text-sm transition ${
                     active
-                      ? 'bg-[linear-gradient(180deg,_#fafdff_0%,_#e8f1ff_100%)] text-[#1d4ed8] shadow-[0_10px_24px_rgba(59,130,246,0.14)]'
-                      : 'text-slate-700 hover:bg-white/80'
+                      ? 'sc-nav-active'
+                      : 'sc-nav-idle'
                   }`}
                 >
                   <Icon size={16} />
@@ -750,8 +765,8 @@ function App() {
                       onClick={() => setRoute(item.key)}
                       className={`flex w-full items-center gap-2 rounded-2xl px-3 py-2.5 text-left text-sm transition ${
                         active
-                          ? 'bg-[linear-gradient(180deg,_#fafdff_0%,_#e8f1ff_100%)] text-[#1d4ed8] shadow-[0_10px_24px_rgba(59,130,246,0.14)]'
-                          : 'text-slate-700 hover:bg-white/80'
+                          ? 'sc-nav-active'
+                          : 'sc-nav-idle'
                       }`}
                     >
                       <Icon size={16} />
@@ -872,7 +887,7 @@ function App() {
       </div>
       {announcement && !announcementDismissed && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/40 p-4">
-          <div className="relative max-h-[80vh] w-full max-w-lg overflow-y-auto rounded-3xl bg-white p-6 shadow-2xl">
+          <div className="sc-card relative max-h-[80vh] w-full max-w-lg overflow-y-auto rounded-3xl border p-6 shadow-2xl">
             <button
               onClick={() => setAnnouncementDismissed(true)}
               className="absolute right-4 top-4 rounded-full p-1 text-slate-400 transition hover:bg-slate-100 hover:text-slate-600"
@@ -880,16 +895,16 @@ function App() {
               <X size={20} />
             </button>
             {announcement.title && (
-              <h2 className="pr-8 text-lg font-bold text-slate-900">{announcement.title}</h2>
+              <h2 className="pr-8 text-lg font-bold text-[var(--sc-text)]">{announcement.title}</h2>
             )}
             <div
-              className="mt-4 text-sm text-slate-700 leading-relaxed"
+              className="mt-4 text-sm leading-relaxed text-[var(--sc-text)]"
               dangerouslySetInnerHTML={{ __html: announcement.content }}
             />
             <div className="mt-6 flex justify-end">
               <button
                 onClick={() => setAnnouncementDismissed(true)}
-                className="rounded-2xl bg-[#2563eb] px-5 py-2 text-sm font-medium text-white transition hover:bg-[#1d4ed8]"
+                className="sc-button-primary rounded-2xl px-5 py-2 text-sm font-medium transition"
               >
                 我知道了
               </button>
@@ -930,7 +945,7 @@ function App() {
       {/* 支付方式选择弹窗 */}
       {channelPicker && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-[rgba(15,23,42,0.48)] px-4">
-          <div className="w-full max-w-sm rounded-[28px] border border-[#d7e3f4] bg-white p-6 shadow-[0_24px_60px_rgba(15,23,42,0.2)]">
+          <div className="sc-card w-full max-w-sm rounded-[28px] border p-6 shadow-[0_24px_60px_rgba(15,23,42,0.2)]">
             <div className="text-base font-semibold text-slate-900">选择支付方式</div>
             <div className="mt-1 text-sm text-slate-500">请选择要使用的支付方式</div>
             <div className="mt-4 space-y-2">
@@ -946,7 +961,7 @@ function App() {
                       if (ok) setChannelPicker(null);
                       setChannelLoading(null);
                     }}
-                    className="w-full rounded-2xl border border-[#d7e3f4] bg-[#f8fbff] px-4 py-3 text-left text-sm font-medium text-slate-900 transition hover:border-[#1d4ed8] hover:bg-[#eff6ff] disabled:cursor-not-allowed disabled:opacity-60"
+                    className="sc-button-secondary w-full rounded-2xl border px-4 py-3 text-left text-sm font-medium transition hover:border-[var(--sc-accent)] disabled:cursor-not-allowed disabled:opacity-60"
                   >
                     {loading ? `${opt.label} ...` : opt.label}
                   </button>
@@ -955,7 +970,7 @@ function App() {
             </div>
             <button
               onClick={() => { setChannelPicker(null); setChannelLoading(null); }}
-              className="mt-4 w-full rounded-2xl border border-[#d7e3f4] px-4 py-2 text-sm text-slate-500 transition hover:bg-[#f8fbff]"
+              className="sc-button-secondary mt-4 w-full rounded-2xl border px-4 py-2 text-sm transition"
             >
               取消
             </button>

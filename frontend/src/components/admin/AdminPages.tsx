@@ -45,6 +45,7 @@ import {
 } from '../../api';
 import { confirm } from '../../lib/confirm';
 import { toast } from '../../lib/toast';
+import { normalizeUiTheme, UI_THEME_OPTIONS } from '../../lib/uiTheme';
 
 type AsyncAction = () => Promise<void>;
 
@@ -83,7 +84,7 @@ function SectionCard({
   children: React.ReactNode;
 }) {
   return (
-    <section className="rounded-3xl border border-[#d7e3f4] bg-white/90 p-5 shadow-[0_14px_34px_rgba(59,130,246,0.08)]">
+    <section className="sc-card rounded-3xl border p-5">
       <div className="mb-4">
         <h2 className="text-lg font-semibold text-slate-900">{title}</h2>
         {description ? <p className="mt-1 text-sm text-slate-500">{description}</p> : null}
@@ -109,7 +110,7 @@ function PrimaryButton({
       onClick={onClick}
       disabled={disabled}
       className={cn(
-        'rounded-2xl bg-[#1d4ed8] px-4 py-2 text-sm font-medium text-white transition hover:bg-[#1e40af] disabled:cursor-not-allowed disabled:opacity-50',
+        'sc-button-primary rounded-2xl px-4 py-2 text-sm font-medium transition disabled:cursor-not-allowed disabled:opacity-50',
         className,
       )}
     >
@@ -134,7 +135,7 @@ function SecondaryButton({
       onClick={onClick}
       disabled={disabled}
       className={cn(
-        'rounded-2xl border border-[#d7e3f4] bg-white px-4 py-2 text-sm font-medium text-slate-700 transition hover:bg-[#eff6ff] disabled:cursor-not-allowed disabled:opacity-50',
+        'sc-button-secondary rounded-2xl border px-4 py-2 text-sm font-medium transition disabled:cursor-not-allowed disabled:opacity-50',
         className,
       )}
     >
@@ -148,7 +149,7 @@ function TextInput(props: React.InputHTMLAttributes<HTMLInputElement>) {
     <input
       {...props}
       className={cn(
-        'w-full rounded-2xl border border-[#d7e3f4] px-3 py-2 text-sm outline-none transition focus:border-[#60a5fa] focus:ring-2 focus:ring-[#bfdbfe]',
+        'sc-input w-full rounded-2xl border px-3 py-2 text-sm outline-none transition',
         props.className,
       )}
     />
@@ -160,7 +161,7 @@ function TextArea(props: React.TextareaHTMLAttributes<HTMLTextAreaElement>) {
     <textarea
       {...props}
       className={cn(
-        'w-full rounded-2xl border border-[#d7e3f4] px-3 py-2 text-sm outline-none transition focus:border-[#60a5fa] focus:ring-2 focus:ring-[#bfdbfe]',
+        'sc-input w-full rounded-2xl border px-3 py-2 text-sm outline-none transition',
         props.className,
       )}
     />
@@ -172,7 +173,7 @@ function Select(props: React.SelectHTMLAttributes<HTMLSelectElement>) {
     <select
       {...props}
       className={cn(
-        'w-full rounded-2xl border border-[#d7e3f4] px-3 py-2 text-sm outline-none transition focus:border-[#60a5fa] focus:ring-2 focus:ring-[#bfdbfe]',
+        'sc-input w-full rounded-2xl border px-3 py-2 text-sm outline-none transition',
         props.className,
       )}
     />
@@ -1215,6 +1216,34 @@ export function AdminPlatformSettingsPage({
                   恢复默认
                 </SecondaryButton>
               </div>
+            </div>
+          </div>
+          <div className="mt-3 rounded-2xl border border-[var(--sc-border)] bg-[var(--sc-panel-muted)] p-4">
+            <div className="text-sm font-semibold text-[var(--sc-text)]">界面模板</div>
+            <div className="mt-1 text-xs sc-text-muted">选择平台全局 UI 样式，保存后会应用到导航、作品页、工作台外框和通用控件。</div>
+            <div className="mt-4 grid gap-3 md:grid-cols-3">
+              {UI_THEME_OPTIONS.map((theme) => {
+                const selected = normalizeUiTheme(settings.basic.ui_theme) === theme.id;
+                return (
+                  <button
+                    key={theme.id}
+                    type="button"
+                    onClick={() => setSettings((prev) => prev ? { ...prev, basic: { ...prev.basic, ui_theme: theme.id } } : prev)}
+                    className={cn(
+                      'rounded-2xl border p-4 text-left transition',
+                      selected
+                        ? 'border-[var(--sc-accent)] bg-[var(--sc-accent-soft)] text-[var(--sc-text)] shadow-[var(--sc-shadow-sm)]'
+                        : 'border-[var(--sc-border)] bg-[var(--sc-panel-solid)] text-[var(--sc-text)] hover:bg-[var(--sc-accent-soft)]',
+                    )}
+                  >
+                    <div className="flex items-center justify-between gap-3">
+                      <span className="text-sm font-semibold">{theme.name}</span>
+                      <span className={cn('h-2.5 w-2.5 rounded-full', selected ? 'bg-[var(--sc-accent)]' : 'bg-[var(--sc-border)]')} />
+                    </div>
+                    <p className="mt-2 text-xs leading-relaxed sc-text-muted">{theme.description}</p>
+                  </button>
+                );
+              })}
             </div>
           </div>
           <div className="mt-3 grid gap-3">

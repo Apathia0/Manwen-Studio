@@ -118,7 +118,7 @@ export default function StoryLibraryPage({
         <div className="flex gap-2">
           <button
             onClick={() => void onRefresh()}
-            className="rounded-md border border-[#d9dfd7] bg-white px-3 py-2 text-sm"
+            className="sc-button-secondary rounded-[var(--sc-radius-sm)] border px-3 py-2 text-sm"
           >
             刷新
           </button>
@@ -127,7 +127,7 @@ export default function StoryLibraryPage({
               setShowCreateForm((prev) => !prev);
               if (showCreateForm) resetCreateForm();
             }}
-            className="inline-flex items-center gap-1 rounded-md bg-[#1f5f58] px-3 py-2 text-sm text-white"
+            className="sc-button-primary inline-flex items-center gap-1 rounded-[var(--sc-radius-sm)] px-3 py-2 text-sm"
           >
             <Plus size={14} />
             新建作品
@@ -136,41 +136,41 @@ export default function StoryLibraryPage({
       </div>
 
       {showCreateForm && (
-        <div className="mb-4 rounded-md border border-[#d9dfd7] bg-white p-4">
+        <div className="sc-card mb-4 rounded-[var(--sc-radius-sm)] border p-4">
           <div className="text-sm font-semibold text-slate-800">创建作品</div>
           <div className="mt-3 grid gap-3">
             <input
               value={draftTitle}
               onChange={(e) => setDraftTitle(e.target.value)}
               placeholder="输入作品名称"
-              className="rounded-md border border-[#d9dfd7] bg-[#fcfcfa] px-3 py-2 text-sm text-slate-800 outline-none focus:border-[#1f5f58]"
+              className="sc-input rounded-[var(--sc-radius-sm)] border px-3 py-2 text-sm outline-none"
             />
             <textarea
               value={draftDescription}
               onChange={(e) => setDraftDescription(e.target.value)}
               rows={3}
               placeholder="输入作品简介，可留空"
-              className="rounded-md border border-[#d9dfd7] bg-[#fcfcfa] px-3 py-2 text-sm text-slate-800 outline-none focus:border-[#1f5f58] resize-y"
+              className="sc-input resize-y rounded-[var(--sc-radius-sm)] border px-3 py-2 text-sm outline-none"
             />
             <div className="flex flex-wrap justify-end gap-2">
               <button
                 onClick={() => void onCreate()}
                 disabled={savingId !== null}
-                className="rounded-md border border-[#d9dfd7] bg-white px-3 py-2 text-sm text-slate-700 disabled:cursor-not-allowed disabled:opacity-60"
+                className="sc-button-secondary rounded-[var(--sc-radius-sm)] border px-3 py-2 text-sm disabled:cursor-not-allowed disabled:opacity-60"
               >
                 快速创建并进入
               </button>
               <button
                 onClick={resetCreateForm}
                 disabled={savingId !== null}
-                className="rounded-md border border-[#d9dfd7] bg-white px-3 py-2 text-sm text-slate-700 disabled:cursor-not-allowed disabled:opacity-60"
+                className="sc-button-secondary rounded-[var(--sc-radius-sm)] border px-3 py-2 text-sm disabled:cursor-not-allowed disabled:opacity-60"
               >
                 取消
               </button>
               <button
                 onClick={() => void handleCreateDraft()}
                 disabled={savingId !== null}
-                className="rounded-md bg-[#1f5f58] px-3 py-2 text-sm text-white disabled:cursor-not-allowed disabled:opacity-60"
+                className="sc-button-primary rounded-[var(--sc-radius-sm)] px-3 py-2 text-sm disabled:cursor-not-allowed disabled:opacity-60"
               >
                 {savingId === -1 ? '创建中...' : '保存作品'}
               </button>
@@ -193,18 +193,18 @@ export default function StoryLibraryPage({
                 className="group relative flex flex-col"
               >
                 {isEditing ? (
-                  <div className="space-y-3 rounded-lg border border-[#d9dfd7] bg-white p-3">
+                  <div className="sc-card space-y-3 rounded-[var(--sc-radius-md)] border p-3">
                     <input
                       autoFocus
                       value={editTitle}
                       onChange={(e) => setEditTitle(e.target.value)}
-                      className="w-full rounded-md border border-[#d9dfd7] bg-[#fcfcfa] px-3 py-2 text-sm text-slate-800 outline-none focus:border-[#1f5f58]"
+                      className="sc-input w-full rounded-[var(--sc-radius-sm)] border px-3 py-2 text-sm outline-none"
                     />
                     <textarea
                       value={editDescription}
                       onChange={(e) => setEditDescription(e.target.value)}
                       rows={3}
-                      className="w-full rounded-md border border-[#d9dfd7] bg-[#fcfcfa] px-3 py-2 text-sm text-slate-800 outline-none focus:border-[#1f5f58] resize-y"
+                      className="sc-input w-full resize-y rounded-[var(--sc-radius-sm)] border px-3 py-2 text-sm outline-none"
                       placeholder="输入作品简介，可留空"
                     />
                     <div className="flex items-center justify-between gap-2">
@@ -215,14 +215,14 @@ export default function StoryLibraryPage({
                         <button
                           onClick={cancelEdit}
                           disabled={isSaving}
-                          className="rounded-md border border-[#d9dfd7] bg-white px-2 py-1 text-xs text-slate-700 disabled:cursor-not-allowed disabled:opacity-60"
+                          className="sc-button-secondary rounded-[var(--sc-radius-sm)] border px-2 py-1 text-xs disabled:cursor-not-allowed disabled:opacity-60"
                         >
                           <X size={12} />
                         </button>
                         <button
                           onClick={() => void handleSaveEdit()}
                           disabled={isSaving}
-                          className="rounded-md bg-[#1f5f58] px-2 py-1 text-xs text-white disabled:cursor-not-allowed disabled:opacity-60"
+                          className="sc-button-primary rounded-[var(--sc-radius-sm)] px-2 py-1 text-xs disabled:cursor-not-allowed disabled:opacity-60"
                         >
                           <Check size={12} />
                         </button>
@@ -233,7 +233,7 @@ export default function StoryLibraryPage({
                   <>
                     <button
                       onClick={() => void onOpen(story)}
-                      className="group/book relative block w-full overflow-hidden rounded-lg border border-[#e2e8f0] bg-gradient-to-br from-slate-50 to-slate-100 shadow-sm transition-all hover:shadow-md"
+                      className="group/book relative block w-full overflow-hidden rounded-[var(--sc-radius-md)] border border-[var(--sc-border-soft)] bg-[var(--sc-panel-muted)] shadow-sm transition-all hover:shadow-md"
                     >
                       {story.cover_image ? (
                         <div className="aspect-[2/3] w-full">
@@ -246,8 +246,8 @@ export default function StoryLibraryPage({
                           />
                         </div>
                       ) : (
-                        <div className="flex aspect-[2/3] w-full items-center justify-center bg-gradient-to-br from-blue-50 to-indigo-50 p-4">
-                          <span className="text-4xl font-bold text-blue-200/80 select-none">
+                        <div className="flex aspect-[2/3] w-full items-center justify-center bg-[var(--sc-accent-soft)] p-4">
+                          <span className="sc-book-initial select-none text-4xl font-bold">
                             {story.title.charAt(0)}
                           </span>
                         </div>
@@ -304,10 +304,10 @@ export default function StoryLibraryPage({
                     </button>
                     
                     <div className="mt-2 px-0.5">
-                      <div className="truncate text-sm font-medium text-slate-800" title={story.title}>
+                      <div className="truncate text-sm font-medium text-[var(--sc-text)]" title={story.title}>
                         {story.title}
                       </div>
-                      <div className="mt-0.5 text-xs text-slate-400">
+                      <div className="sc-text-subtle mt-0.5 text-xs">
                         {new Date(story.created_at).toLocaleDateString('zh-CN')}
                       </div>
                     </div>
@@ -317,7 +317,7 @@ export default function StoryLibraryPage({
             );
           })}
           {stories.length === 0 && (
-            <div className="col-span-full flex aspect-[2/3] w-full max-w-[200px] items-center justify-center rounded-lg border border-dashed border-slate-300 bg-slate-50 p-5 text-center text-sm text-slate-500">
+            <div className="sc-muted-surface sc-text-muted col-span-full flex aspect-[2/3] w-full max-w-[200px] items-center justify-center rounded-[var(--sc-radius-md)] border border-dashed border-[var(--sc-border)] p-5 text-center text-sm">
               还没有作品。点击「新建作品」开始创作。
             </div>
           )}

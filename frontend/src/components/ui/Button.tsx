@@ -14,9 +14,9 @@ interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
 
 const variantClasses: Record<Variant, string> = {
   primary:
-    'bg-[#1d4ed8] text-white hover:bg-[#1e40af] disabled:hover:bg-[#1d4ed8]',
+    'sc-button-primary disabled:hover:bg-[var(--sc-accent)]',
   secondary:
-    'border border-[#d7e3f4] bg-white text-slate-700 hover:bg-[#eff6ff] disabled:hover:bg-white',
+    'sc-button-secondary border disabled:hover:bg-[var(--sc-panel-solid)]',
   danger:
     'bg-red-100 text-red-600 hover:bg-red-200 disabled:hover:bg-red-100',
 };
