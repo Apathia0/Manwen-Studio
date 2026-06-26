@@ -10,9 +10,14 @@ from typing import Any, AsyncGenerator
 import httpx
 
 from database import SessionLocal
-from models import AgentPendingChange, Chapter, ChapterVideoShot, ChapterVideoWorkflow, Story, VideoAsset
+from models import AgentPendingChange, Chapter, ChapterVideoShot, ChapterVideoWorkflow, DeconstructionResult, Story, VideoAsset
 from sqlalchemy.orm import Session
 from services import deepseek as _deepseek_service
+from services.writing_utils import (
+    get_banned_words,
+    get_banned_patterns,
+    get_quality_checklist,
+)
 from services.deepseek import (
     _deepseek_auth_headers,
     _build_story_snapshot_tiered,
@@ -176,6 +181,241 @@ class PendingChangesTracker:
 AgentMode = str
 AGENT_MODES: set[AgentMode] = {"chat", "analyze", "execute"}
 READ_ONLY_AGENT_MODES: set[AgentMode] = {"chat", "analyze"}
+
+
+# ── Skills 技能系统 ──────────────────────────────────────
+
+
+@dataclass
+class SkillDef:
+    """Agent 技能定义：一组工具 + System Prompt 片段 + 元数据。"""
+    name: str              # 技能标识名，如 "chapter_writer"
+    display_name: str      # 中文显示名，如 "章节写作"
+    description: str       # 技能描述
+    icon: str              # 图标（emoji）
+    tool_names: list[str]  # 关联的工具名列表
+    system_prompt_fragment: str  # 注入到 System Prompt 的片段
+
+
+class SkillRegistry:
+    """管理所有 Agent Skills 的注册和查询。"""
+
+    def __init__(self):
+        self._skills: dict[str, SkillDef] = {}
+
+    def register(self, skill: SkillDef) -> None:
+        self._skills[skill.name] = skill
+
+    def get(self, name: str) -> SkillDef | None:
+        return self._skills.get(name)
+
+    def list_all(self) -> list[SkillDef]:
+        return list(self._skills.values())
+
+    def get_tool_set(self, skill_names: list[str]) -> set[str]:
+        """获取指定 Skills 涵盖的所有工具名集合。"""
+        tools: set[str] = set()
+        for name in skill_names:
+            skill = self._skills.get(name)
+            if skill:
+                tools.update(skill.tool_names)
+        return tools
+
+    def build_fragment(self, skill_names: list[str], db=None) -> str:
+        """构建指定 Skills 的 System Prompt 注入片段。
+
+        chapter_writer 的方法论从 DB 动态读取（管理员后台修改后即时生效）。
+        """
+        if not skill_names:
+            return ""
+        fragments = []
+        for name in skill_names:
+            skill = self._skills.get(name)
+            if not skill:
+                continue
+            fragment = skill.system_prompt_fragment
+            if name == "chapter_writer":
+                from services.writing_utils import get_methodology_from_db
+                methodology = get_methodology_from_db(db) if db else ""
+                if methodology:
+                    fragment = fragment + "\n\n" + methodology
+            if fragment.strip():
+                fragments.append(f"## 🎯 {skill.icon} {skill.display_name}\n\n{fragment.strip()}")
+        return "\n\n" + "\n\n".join(fragments) if fragments else ""
+
+
+# ── 内置 Skills 定义 ──────────────────────────────────────
+
+skill_registry = SkillRegistry()
+
+# Skill 1: 章节写作（方法论由 build_fragment 从 DB 动态注入，无需写在 system_prompt_fragment 中）
+skill_registry.register(SkillDef(
+    name="chapter_writer",
+    display_name="章节写作",
+    description="提供章节的读取、修改、重写、批量调整能力，遵循网文写作方法论",
+    icon="✍️",
+    tool_names=[
+        "get_chapter_full", "get_all_chapters_summary",
+        "update_chapter_content", "batch_update_chapters",
+        "adjust_chapter_by_instruction", "rewrite_text_segment",
+        "add_chapter_plan", "bulk_add_chapter_plans",
+        "batch_adjust_chapters",
+    ],
+    system_prompt_fragment="你是一位专业的小说章节写手。使用提供的工具完成章节的读取、修改、重写和批量调整操作。遵循用户指示，严格按照下方写作方法论输出高质量内容。",
+))
+
+# Skill 2: 框架设计
+skill_registry.register(SkillDef(
+    name="framework_designer",
+    display_name="框架设计",
+    description="提供故事框架、角色、世界观的读取和调整能力",
+    icon="🏗️",
+    tool_names=[
+        "get_framework_detail", "get_story_bible",
+        "get_character_profiles", "get_scenes",
+        "update_story_info", "update_story_bible",
+        "update_characters", "adjust_framework",
+        "apply_framework_ops", "update_scenes",
+    ],
+    system_prompt_fragment="""你是一位专业的故事框架设计师。调整框架时遵循以下原则：
+
+**框架设计原则**：
+1. **三幕结构**：第一卷（铺垫，建立世界观和核心冲突），第二卷（发展，升级冲突和角色成长），第三卷（高潮，收束所有线索）
+2. **角色驱动力**：每个角色必须有明确的核心动机，动机驱动行为，行为引发冲突
+3. **世界观一致性**：设定一旦建立，不可随意修改。新设定必须与已有设定兼容
+
+**操作指南**：
+- 明确修改（改名/删角色/加章节）→ 用 `apply_framework_ops` 直接执行
+- 需要 AI 创作（重设计第二幕/让故事更悬疑）→ 用 `adjust_framework`
+- 能用 `apply_framework_ops` 解决的，不要用 `adjust_framework`（节省配额）
+
+**角色设计**：
+- 主角必须有核心特质（2-3 个关键词）+ 金手指/核心能力 + 弱点/缺陷 + 核心动机
+- 反派必须有明确动机和阶梯式作恶（小恶→中恶→大恶）
+- 配角的出场必须服务于主线或角色弧光，不冗余
+
+**情节设计**：
+- 每章必须有明确的核心事件，推动主线或辅线
+- 爽点密度：每 3000-5000 字必须有一个让读者"爽"的情绪节点
+- 伏笔埋设：铺垫→揭露→回收，三阶段完整""",
+))
+
+# Skill 3: 质量审查
+skill_registry.register(SkillDef(
+    name="quality_reviewer",
+    display_name="质量审查",
+    description="提供全文质量检查，包括结构分析、一致性检查、AI味检测、节奏评估",
+    icon="🔍",
+    tool_names=[
+        "get_chapter_full", "get_all_chapters_summary",
+        "get_framework_detail", "get_story_bible",
+        "get_scenes", "get_character_profiles",
+        "check_ai_flavor",
+    ],
+    system_prompt_fragment="""你是一位专业的网文质量审查员。审查时遵循以下标准：
+
+**审查维度**：
+1. **结构完整性**：三幕结构是否清晰，每章是否有明确的核心事件
+2. **角色一致性**：角色行为是否符合其动机和性格，前后是否一致
+3. **节奏评估**：情绪曲线是否合理（铺垫→升温→释放→反转），是否连续 2 节以上无情绪变化
+4. **AI味检测**：使用 `check_ai_flavor` 工具检测 AI 写作指纹，包括：
+   - 禁用词命中（"眼中闪过一丝""深吸一口气""嘴角勾起一抹"等）
+   - 句式套路（"……，带着……""声音不大，却带着……"）
+   - 心理描写外化（"他很紧张"→ 应改为动作展示）
+   - 段落匀称度（AI 倾向每段 4-6 句整齐排列）
+   - 结尾升华（"他知道……""这一刻……"→ 应删）
+   - 解释腔/上帝感（"她不知道的是……""殊不知……"→ 应删）
+5. **钩子质量**：章首是否有钩子，章尾是否有悬念
+
+**审查流程**：
+- 先读取所有相关数据（章节内容、框架、角色设定）
+- 输出系统性分析，逐项标注问题等级（S1=致命/S2=明显/S3=局部/S4=建议）
+- 每个问题必须附带原文证据和具体修改建议
+- 等待用户确认后再执行修改
+
+**输出格式**：
+```
+## 审查报告
+### 整体评估
+- 结构：{评分}
+- 角色：{评分}
+- 节奏：{评分}
+- AI味等级：{轻度/中度/重度}
+### 问题清单
+| 严重度 | 类别 | 位置 | 原文证据 | 问题描述 | 修改建议 |
+```""" + "\n\n" + get_quality_checklist(),
+))
+
+# Skill 4: 视频工作流
+skill_registry.register(SkillDef(
+    name="video_workflow",
+    display_name="视频工作流",
+    description="提供视频工作流的查看、修改、优化能力",
+    icon="🎬",
+    tool_names=[
+        "get_video_workflow", "get_workflow_shots",
+        "get_shot_detail", "get_video_assets",
+        "get_screenplay", "update_shot_prompts",
+        "update_shot_fields", "update_screenplay",
+        "batch_update_shot_prompts", "batch_update_shot_fields",
+    ],
+    system_prompt_fragment="""你是一位专业的视频工作流制作人。操作视频工作流时遵循以下原则：
+
+**视频工作流概念**：
+- 每个镜头（shot）包含：故事版 prompt（描述画面内容）、视频 prompt（描述运镜和动作）、场景 prompt、角色 prompt
+- 15 秒视频容量：一个镜头通常对应 15 秒视频，需要动态决定分镜段落数量
+
+**操作指南**：
+- 批量操作优先：修改多个镜头时用 `batch_update_shot_prompts` / `batch_update_shot_fields`
+- 故事版 prompt 和视频 prompt 必须描述同一场景，不能出现内容不一致
+- 角色素材引用必须合理，检查角色在当前镜头中是否应该出现
+
+**镜头连续性检查**：
+- 角色、场景、情绪是否连贯
+- 相邻镜头之间的时间和空间逻辑是否合理
+- 运镜方向是否保持一致（避免跳轴）""",
+))
+
+# Skill 5: 拆书学习
+skill_registry.register(SkillDef(
+    name="deconstruction_reader",
+    display_name="拆书学习",
+    description="读取拆书分析结果，学习爆款小说的写作手法，辅助用户创作",
+    icon="📚",
+    tool_names=[
+        "get_deconstruction_data", "get_deconstruction_techniques",
+        "get_deconstruction_plots", "get_deconstruction_rhythm",
+        "get_framework_detail", "get_story_bible",
+        "get_all_chapters_summary", "get_chapter_full",
+    ],
+    system_prompt_fragment="""你是一位专业的网文写作学习顾问。你可以读取拆书分析数据，帮助用户学习爆款小说的写作手法。
+
+**拆书数据包含**：
+- 黄金三章深度拆解（开篇钩子、主角塑造、爽点设计、世界观铺设、章尾悬念）
+- 逐章摘要（每章的情节点、关键信息、扩写技法）
+- 剧情线分析（主线/支线/爱情线/成长线等）
+- 节奏分析（关键信息推进、情绪触动点、爽点循环）
+- 情绪模块（读者需求、情绪引擎、可复现模块）
+- 角色档案（主角/反派/核心配角/功能角色）
+- 角色关系（关系本质、演变轨迹）
+- 世界观设定（力量体系、地理、势力、金手指）
+- 文风分析（句长、标点、对话潜台词、情绪交替周期）
+- 写作手法清单（可复用的技法，含使用条件和风险）
+
+**你可以帮用户做什么**：
+
+1. **学习写作手法**：用户问"这本小说的开篇钩子怎么设计的？"→ 读取黄金三章数据，分析钩子类型、铺垫手法、效果
+2. **参考调整大纲**：用户说"参考遮天的节奏，调整我的大纲"→ 读取拆书节奏数据，对比用户当前大纲，给出调整建议
+3. **学习扩写技法**：用户问"这段怎么扩写才能有爽感？"→ 读取拆书的关键信息与扩写技法，给出具体建议
+4. **对比分析**：用户说"我的小说和这本比，哪里不足？"→ 读取拆书数据，与用户当前作品对比分析
+5. **生成写作指导**：用户说"根据拆书结果，给我写一份写作指导"→ 汇总拆书数据，生成定制化写作指导
+
+**使用指南**：
+- 先用 `get_deconstruction_data` 获取拆书概览，了解有哪些数据可用
+- 根据用户具体问题，用对应工具获取详细数据
+- 拆书数据是"参考"而非"照搬"——抽象出可复用的模式和逻辑，而不是直接复制具体桥段
+- 对比分析时，注重"为什么这个写法有效"而非"这里写得好"的主观评价""",
+))
 
 
 @dataclass(frozen=True)
@@ -385,10 +625,11 @@ class ToolRegistry:
     def is_write_tool(self, name: str) -> bool:
         return name in self._write_tool_names
 
-    def get_tool_specs(self, mode: AgentMode = "execute", workflow_type: str | None = None) -> list[dict]:
+    def get_tool_specs(self, mode: AgentMode = "execute", workflow_type: str | None = None, enabled_skills: list[str] | None = None) -> list[dict]:
         """返回 DeepSeek/OpenAI function calling 格式的工具清单。
 
         workflow_type: 如果指定，只返回与该工作流类型匹配的工具（含未指定类型的通用工具）。
+        enabled_skills: 如果指定，只返回这些 Skills 涵盖的工具。为空列表时返回全部工具。
         """
         if normalize_agent_mode(mode) in READ_ONLY_AGENT_MODES:
             candidates = [
@@ -411,6 +652,16 @@ class ToolRegistry:
                 for name, spec in candidates
                 if name not in self._workflow_types
             ]
+
+        # Skills 过滤：如果指定了 enabled_skills，只保留这些技能涵盖的工具
+        if enabled_skills:
+            allowed_tools = skill_registry.get_tool_set(enabled_skills)
+            if allowed_tools:
+                candidates = [
+                    (name, spec)
+                    for name, spec in candidates
+                    if name in allowed_tools
+                ]
 
         return [spec for _, spec in candidates]
 
@@ -684,6 +935,137 @@ async def get_character_profiles(chapter_id: int) -> dict:
             if text:
                 return {"source": "story", "content": text}
         return {"source": "none", "content": ""}
+    finally:
+        db.close()
+
+
+# 拆书数据读取工具
+@tool_registry.register(
+    name="get_deconstruction_data",
+    description="获取作品的拆书分析概览（摘要、黄金三章评分、角色列表、剧情线概览、技法数量）",
+    parameters={
+        "type": "object",
+        "properties": {},
+        "required": [],
+    },
+)
+async def get_deconstruction_data() -> dict:
+    """获取拆书分析概览。"""
+    db = SessionLocal()
+    try:
+        story_id = _current_story_id()
+        decon = db.query(DeconstructionResult).filter(
+            DeconstructionResult.story_id == story_id,
+            DeconstructionResult.status == "completed",
+        ).order_by(DeconstructionResult.created_at.desc()).first()
+
+        if not decon:
+            return {"error": "该作品尚未完成拆书分析"}
+
+        golden_rating = None
+        if decon.golden_chapters and isinstance(decon.golden_chapters, dict):
+            golden_rating = decon.golden_chapters.get("golden_three_rating")
+
+        return {
+            "summary": decon.summary,
+            "golden_chapters_rating": golden_rating,
+            "character_count": len(decon.characters or []),
+            "character_names": [c.get("name") for c in (decon.characters or [])],
+            "plot_line_count": len(decon.plot_lines or []),
+            "plot_line_titles": [p.get("title") for p in (decon.plot_lines or [])],
+            "technique_count": len(decon.writing_techniques or []),
+            "has_report": bool(decon.report_markdown),
+        }
+    finally:
+        db.close()
+
+
+@tool_registry.register(
+    name="get_deconstruction_techniques",
+    description="获取拆书提取的写作手法清单（可复用的技法，含使用条件和风险）",
+    parameters={
+        "type": "object",
+        "properties": {
+            "category": {
+                "type": "string",
+                "description": "手法类别筛选：开篇钩子/角色塑造/爽点设计/章节结尾/对话手法/信息控制/节奏控制/反转设计/伏笔/情绪操控",
+            },
+        },
+        "required": [],
+    },
+)
+async def get_deconstruction_techniques(category: str | None = None) -> dict:
+    """获取写作手法清单。"""
+    db = SessionLocal()
+    try:
+        story_id = _current_story_id()
+        decon = db.query(DeconstructionResult).filter(
+            DeconstructionResult.story_id == story_id,
+            DeconstructionResult.status == "completed",
+        ).order_by(DeconstructionResult.created_at.desc()).first()
+
+        if not decon or not decon.writing_techniques:
+            return {"techniques": []}
+
+        techniques = decon.writing_techniques
+        if category:
+            techniques = [t for t in techniques if t.get("category") == category]
+
+        return {"techniques": techniques[:20]}
+    finally:
+        db.close()
+
+
+@tool_registry.register(
+    name="get_deconstruction_plots",
+    description="获取拆书提取的剧情线详情（主线和支线的因果链、核心冲突、章节范围）",
+    parameters={
+        "type": "object",
+        "properties": {},
+        "required": [],
+    },
+)
+async def get_deconstruction_plots() -> dict:
+    """获取剧情线详情。"""
+    db = SessionLocal()
+    try:
+        story_id = _current_story_id()
+        decon = db.query(DeconstructionResult).filter(
+            DeconstructionResult.story_id == story_id,
+            DeconstructionResult.status == "completed",
+        ).order_by(DeconstructionResult.created_at.desc()).first()
+
+        if not decon:
+            return {"plot_lines": []}
+
+        return {"plot_lines": decon.plot_lines or []}
+    finally:
+        db.close()
+
+
+@tool_registry.register(
+    name="get_deconstruction_rhythm",
+    description="获取拆书提取的节奏分析（关键信息推进、情绪触动点、爽点循环模式）",
+    parameters={
+        "type": "object",
+        "properties": {},
+        "required": [],
+    },
+)
+async def get_deconstruction_rhythm() -> dict:
+    """获取节奏分析。"""
+    db = SessionLocal()
+    try:
+        story_id = _current_story_id()
+        decon = db.query(DeconstructionResult).filter(
+            DeconstructionResult.story_id == story_id,
+            DeconstructionResult.status == "completed",
+        ).order_by(DeconstructionResult.created_at.desc()).first()
+
+        if not decon:
+            return {"rhythm": {}}
+
+        return {"rhythm": decon.rhythm or {}}
     finally:
         db.close()
 
@@ -2195,6 +2577,109 @@ async def batch_update_shot_fields(shots: list[dict]) -> dict:
     return {"ok": True, "results": results}
 
 
+# ── AI 味检测工具 ────────────────────────────────────────
+
+
+@tool_registry.register(
+    name="check_ai_flavor",
+    description="检测指定章节正文中的 AI 写作痕迹，包括禁用词、句式套路、心理描写外化、节奏均匀度、结尾升华、解释腔等。返回检测报告和修改建议。",
+    is_write=False,
+    parameters={
+        "type": "object",
+        "properties": {
+            "chapter_id": {"type": "integer", "description": "要检测的章节 ID"},
+        },
+        "required": ["chapter_id"],
+    },
+)
+async def check_ai_flavor(chapter_id: int) -> dict:
+    db = SessionLocal()
+    try:
+        chapter = _validate_chapter_ownership(db, chapter_id, _current_story_id())
+        if not chapter:
+            return {"error": "章节不存在或无权访问"}
+        content = chapter.novel_content or ""
+        if not content.strip():
+            return {"error": "章节内容为空，无法检测"}
+
+        # 从 banned-words.md 读取禁用词表（单一数据源，修改 .md 文件即可同步）
+        banned_words = get_banned_words()
+        # 从 banned-words.md 读取禁用句式模式
+        raw_patterns = get_banned_patterns()
+        pattern_checks: dict[str, list[str]] = {}
+        for p in raw_patterns:
+            pattern_checks[p["name"]] = p.get("patterns", [])
+        # 程序检测项（不依赖词表）
+        pattern_checks.setdefault("连续排比句（3+）", [])
+        pattern_checks.setdefault("结尾总结升华", [])
+
+        lines = content.split("\n")
+        non_empty_lines = [l for l in lines if l.strip()]
+        total_chars = len(content)
+
+        # 禁用词扫描
+        banned_hits = []
+        for word in banned_words:
+            count = content.count(word)
+            if count > 0:
+                banned_hits.append({"词": word, "命中次数": count})
+
+        # 句式模式扫描
+        pattern_hits = []
+        for pattern_name, patterns in pattern_checks.items():
+            for p in patterns:
+                if p in content:
+                    pattern_hits.append({"模式": pattern_name, "匹配": p})
+
+        # 段落均匀度检测
+        paragraph_lengths = [len(l) for l in non_empty_lines]
+        if paragraph_lengths:
+            avg_len = sum(paragraph_lengths) / len(paragraph_lengths)
+            too_uniform = all(abs(l - avg_len) < avg_len * 0.3 for l in paragraph_lengths) if len(paragraph_lengths) >= 3 else False
+        else:
+            too_uniform = False
+
+        # 结尾检测
+        last_lines = non_empty_lines[-3:] if len(non_empty_lines) >= 3 else non_empty_lines
+        ending_issues = []
+        for line in last_lines:
+            if any(kw in line for kw in ["他知道", "她明白", "这一刻", "这一切", "终于", "新的"]):
+                ending_issues.append(line.strip()[:50])
+
+        # 心理描写外化检测
+        psych_hits = content.count("他感到") + content.count("她感觉") + content.count("他觉得很") + content.count("她觉得")
+
+        # 评分
+        total_hits = len(banned_hits) + len(pattern_hits) + psych_hits
+        density = total_hits / max(total_chars / 1000, 1)
+        if density <= 5:
+            level = "轻度"
+        elif density <= 15:
+            level = "中度"
+        else:
+            level = "重度"
+
+        return {
+            "ok": True,
+            "chapter_id": chapter_id,
+            "chapter_title": chapter.title or "未命名",
+            "total_chars": total_chars,
+            "ai_flavor_level": level,
+            "banned_word_hits": banned_hits,
+            "pattern_hits": pattern_hits,
+            "psych_tell_count": psych_hits,
+            "paragraphs_too_uniform": too_uniform,
+            "ending_issues": ending_issues,
+            "total_hits": total_hits,
+            "density_per_1000_chars": round(density, 1),
+            "suggestion": "请参考检测结果，对命中项逐一修改。重点关注：禁用词替换为具体动作、心理描写外化为行为展示、打破段落均匀度、结尾去升华。",
+        }
+    except Exception as e:
+        return {"error": str(e)}
+    finally:
+        db.close()
+
+
 # ── 内部辅助 ──────────────────────────────────────────────
 
 
@@ -2236,7 +2721,7 @@ class AgentService:
     def __init__(self):
         self.tool_registry = tool_registry
 
-    def _build_system_prompt(self, story_context: str, story_id: int = 0, workflow_type: str | None = None) -> str:
+    def _build_system_prompt(self, story_context: str, story_id: int = 0, workflow_type: str | None = None, enabled_skills: list[str] | None = None, db=None) -> str:
         """构建包含故事上下文的系统提示。"""
         story_id_line = f"\n当前作品 ID: {story_id}" if story_id else ""
         video_section = ""
@@ -2272,6 +2757,23 @@ class AgentService:
 - **禁止调用小说创作相关的写入工具**（如 `update_chapter_content`、`adjust_chapter_by_instruction` 等），这些工具在视频工作流模式下不可用
 - **禁止修改故事框架、角色设定、章节内容**，你只能操作视频工作流相关的数据
 - 如果需要修改小说内容，请退出视频工作流模式后再操作
+"""
+        skills_section = ""
+        if enabled_skills:
+            skills_fragment = skill_registry.build_fragment(enabled_skills, db=db)
+            if skills_fragment:
+                active_skill_names = []
+                for sn in enabled_skills:
+                    sk = skill_registry.get(sn)
+                    if sk:
+                        active_skill_names.append(f"{sk.icon} {sk.display_name}")
+                skills_section = f"""
+---
+## 🔧 当前激活的技能
+
+{', '.join(active_skill_names)}
+
+{skills_fragment}
 """
         return f"""你是 Manwen-Studio 的 AI 创作助手，拥有直接读写故事数据库的工具权限。{story_id_line}{video_section}
 
@@ -2464,6 +2966,8 @@ class AgentService:
         workflow_type: str | None = None,
         workflow_id: int | None = None,
         shot_id: int | None = None,
+        enabled_skills: list[str] | None = None,
+        db=None,
     ) -> AsyncGenerator[dict[str, str], None]:
         """运行 agent 聊天循环，生成 SSE 事件。"""
         mode = normalize_agent_mode(mode)
@@ -2482,7 +2986,7 @@ class AgentService:
         pending_changes_stored = False
 
         try:
-            system_prompt = self._build_system_prompt(story_context, story_id=story_id, workflow_type=workflow_type)
+            system_prompt = self._build_system_prompt(story_context, story_id=story_id, workflow_type=workflow_type, enabled_skills=enabled_skills, db=db)
             all_messages: list[dict] = [{"role": "system", "content": system_prompt}] + list(messages)
 
             collected_content = ""
@@ -2504,7 +3008,7 @@ class AgentService:
                     "model": _deepseek_service.DEEPSEEK_MODEL,
                     "messages": all_messages,
                     "stream": True,
-                    "tools": self.tool_registry.get_tool_specs(mode=mode, workflow_type=workflow_type),
+                    "tools": self.tool_registry.get_tool_specs(mode=mode, workflow_type=workflow_type, enabled_skills=enabled_skills),
                     "max_tokens": 131072,
                 }
 
