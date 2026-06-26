@@ -2575,6 +2575,7 @@ export function agentChatStream(
   workflowType?: string,
   workflowId?: number,
   shotId?: number,
+  enabledSkills?: string[],
   callbacks?: {
     onToken?: (token: string) => void;
     onToolCall?: (toolCall: { id: string; name: string; args: any; status: 'running' }) => void;
@@ -2589,7 +2590,7 @@ export function agentChatStream(
   fetch(`${BASE}/api/stories/${storyId}/agent/chat`, {
     method: 'POST',
     headers: apiHeaders(true),
-    body: JSON.stringify({ conversation_id: conversationId, message: content, chapter_id: chapterId, mode, workflow_type: workflowType, workflow_id: workflowId, shot_id: shotId }),
+    body: JSON.stringify({ conversation_id: conversationId, message: content, chapter_id: chapterId, mode, workflow_type: workflowType, workflow_id: workflowId, shot_id: shotId, enabled_skills: enabledSkills }),
     signal: controller.signal,
   })
     .then(async (res) => {
@@ -3963,6 +3964,64 @@ export async function deleteStylePreset(presetId: number): Promise<void> {
   if (!res.ok) throw new Error(await res.text());
 }
 
+// ── 搜书 ──────────────────────────────────────────
+
+export interface NovelSearchResult {
+  book_id: string;
+  title: string;
+  author: string;
+  genre: string;
+  desc: string;
+  status: string;
+  platform: string;
+  url: string;
+}
+
+export interface NovelSearchResponse {
+  results: NovelSearchResult[];
+  total: number;
+}
+
+// ── 爬取 ──────────────────────────────────────────
+
+export interface CrawlStatus {
+  status: 'not_started' | 'crawling' | 'completed' | 'failed';
+  platform: string;
+  total_chapters: number | null;
+  crawled_chapters: number;
+  word_count: number | null;
+  source_url: string | null;
+}
+
+// ── 拆书 ──────────────────────────────────────────
+
+export interface DeconstructionStatus {
+  status: 'not_started' | 'pending' | 'running' | 'completed' | 'failed';
+  current_stage: number | null;
+  stages_completed: number[];
+  progress: string | null;
+  result_id: number | null;
+}
+
+export interface DeconstructionResult {
+  id: number;
+  status: string;
+  summary: Record<string, any> | null;
+  golden_chapters: Record<string, any> | null;
+  chapter_summaries: Record<string, any>[] | null;
+  characters: Record<string, any>[] | null;
+  character_relations: Record<string, any>[] | null;
+  plot_lines: Record<string, any>[] | null;
+  rhythm: Record<string, any> | null;
+  emotion_modules: Record<string, any> | null;
+  worldbuilding: Record<string, any> | null;
+  report_markdown: string | null;
+  writing_style: Record<string, any> | null;
+  writing_techniques: Record<string, any>[] | null;
+  created_at: string | null;
+  updated_at: string | null;
+}
+
 export interface CharacterVersion {
   id: number;
   version: string;
@@ -4311,6 +4370,29 @@ export async function updateAdminSystemPrompts(payload: Record<string, string>):
     body: JSON.stringify(payload),
   });
   if (!res.ok) throw new Error(await readErrorMessage(res, '保存系统提示词失败'));
+
+  return res.json();
+}
+
+// ── 写作方法论管理 ──
+
+export interface AdminMethodologyResponse {
+  [key: string]: { content: string; length: number };
+}
+
+export async function getAdminMethodology(): Promise<AdminMethodologyResponse> {
+  const res = await fetch(`${BASE}/api/admin/methodology`, { headers: apiHeaders() });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '获取写作方法论失败'));
+  return res.json();
+}
+
+export async function updateAdminMethodology(key: string, content: string): Promise<{ ok: boolean; key: string; length: number }> {
+  const res = await fetch(`${BASE}/api/admin/methodology`, {
+    method: 'PUT',
+    headers: apiHeaders(true),
+    body: JSON.stringify({ key, content }),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '保存写作方法论失败'));
   return res.json();
 }
 
@@ -4349,5 +4431,90 @@ export async function regenerateWorkflowScreenplay(workflowId: number): Promise<
     headers: apiHeaders(true),
   });
   if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+// ── 搜书 API ──────────────────────────────────────
+
+export async function searchNovels(keyword: string, platform: string = 'qidian', limit: number = 10): Promise<NovelSearchResponse> {
+  const params = new URLSearchParams({ keyword, platform, limit: String(limit) });
+  const res = await fetch(`${BASE}/api/novels/search?${params}`, {
+    headers: apiHeaders(),
+  });
+  if (!res.ok) throw new Error('搜索失败');
+  return res.json();
+}
+
+// ── 爬取 API ──────────────────────────────────────
+
+export async function startCrawl(storyId: number, bookId: string, platform: string = 'qidian', maxChapters: number = 100): Promise<{ task_id: string; message: string }> {
+  const res = await fetch(`${BASE}/api/stories/${storyId}/crawl`, {
+    method: 'POST',
+    headers: apiHeaders(true),
+    body: JSON.stringify({ book_id: bookId, platform, max_chapters: maxChapters }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: '爬取失败' }));
+    throw new Error(err.detail || '爬取失败');
+  }
+  return res.json();
+}
+
+export async function getCrawlStatus(storyId: number): Promise<CrawlStatus> {
+  const res = await fetch(`${BASE}/api/stories/${storyId}/crawl/status`, {
+    headers: apiHeaders(),
+  });
+  if (!res.ok) throw new Error('获取状态失败');
+  return res.json();
+}
+
+// ── 拆书 API ──────────────────────────────────────
+
+export async function startDeconstruction(storyId: number): Promise<{ task_id: string; message: string }> {
+  const res = await fetch(`${BASE}/api/stories/${storyId}/deconstruct/start`, {
+    method: 'POST',
+    headers: apiHeaders(),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: '启动失败' }));
+    throw new Error(err.detail || '启动失败');
+  }
+  return res.json();
+}
+
+export async function getDeconstructionStatus(storyId: number): Promise<DeconstructionStatus> {
+  const res = await fetch(`${BASE}/api/stories/${storyId}/deconstruct/status`, {
+    headers: apiHeaders(),
+  });
+  if (!res.ok) throw new Error('获取状态失败');
+  return res.json();
+}
+
+export async function getDeconstructionResult(storyId: number): Promise<DeconstructionResult> {
+  const res = await fetch(`${BASE}/api/stories/${storyId}/deconstruct/result`, {
+    headers: apiHeaders(),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: '获取结果失败' }));
+    throw new Error(err.detail || '获取结果失败');
+  }
+  return res.json();
+}
+
+export async function cancelDeconstruction(storyId: number): Promise<{ message: string }> {
+  const res = await fetch(`${BASE}/api/stories/${storyId}/deconstruct/cancel`, {
+    method: 'POST',
+    headers: apiHeaders(),
+  });
+  if (!res.ok) throw new Error('取消失败');
+  return res.json();
+}
+
+export async function applyDeconstructionToBible(storyId: number): Promise<{ message: string }> {
+  const res = await fetch(`${BASE}/api/stories/${storyId}/deconstruct/apply-to-bible`, {
+    method: 'POST',
+    headers: apiHeaders(),
+  });
+  if (!res.ok) throw new Error('注入失败');
   return res.json();
 }
