@@ -11,7 +11,7 @@ import json
 import logging
 import re
 from typing import Any
-from urllib.parse import urljoin
+from urllib.parse import quote, urljoin
 
 import httpx
 from bs4 import BeautifulSoup
@@ -32,7 +32,7 @@ MOBILE_HEADERS = {
     "Accept-Language": "zh-CN,zh;q=0.9",
 }
 
-QIDIAN_SEARCH_URL = "https://m.qidian.com/search"
+QIDIAN_SEARCH_URL = "https://m.qidian.com/soushu/{keyword}.html"
 QIDIAN_BOOK_URL = "https://m.qidian.com/book/{book_id}/"
 QIDIAN_CATALOG_URL = "https://m.qidian.com/book/{book_id}/catalog/"
 QIDIAN_CHAPTER_URL = "https://m.qidian.com/book/{book_id}/{chapter_id}/"
@@ -40,10 +40,9 @@ QIDIAN_CHAPTER_URL = "https://m.qidian.com/book/{book_id}/{chapter_id}/"
 
 async def search_qidian(keyword: str, limit: int = 10) -> list[dict]:
     """搜索起点小说"""
-    async with httpx.AsyncClient(timeout=15, headers=MOBILE_HEADERS) as client:
+    async with httpx.AsyncClient(timeout=15, headers=MOBILE_HEADERS, follow_redirects=True) as client:
         resp = await client.get(
-            QIDIAN_SEARCH_URL,
-            params={"kw": keyword},
+            QIDIAN_SEARCH_URL.format(keyword=quote(keyword)),
         )
         resp.raise_for_status()
         html = resp.text
@@ -106,7 +105,7 @@ async def search_qidian(keyword: str, limit: int = 10) -> list[dict]:
 
 async def get_qidian_catalog(book_id: str) -> list[dict]:
     """获取起点小说章节目录"""
-    async with httpx.AsyncClient(timeout=15, headers=MOBILE_HEADERS) as client:
+    async with httpx.AsyncClient(timeout=15, headers=MOBILE_HEADERS, follow_redirects=True) as client:
         resp = await client.get(QIDIAN_CATALOG_URL.format(book_id=book_id))
         resp.raise_for_status()
         html = resp.text
@@ -155,7 +154,7 @@ async def get_qidian_catalog(book_id: str) -> list[dict]:
 
 async def get_qidian_chapter(book_id: str, chapter_id: str) -> str | None:
     """获取单章内容"""
-    async with httpx.AsyncClient(timeout=15, headers=MOBILE_HEADERS) as client:
+    async with httpx.AsyncClient(timeout=15, headers=MOBILE_HEADERS, follow_redirects=True) as client:
         resp = await client.get(
             QIDIAN_CHAPTER_URL.format(book_id=book_id, chapter_id=chapter_id)
         )
