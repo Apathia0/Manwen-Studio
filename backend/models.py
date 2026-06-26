@@ -777,3 +777,63 @@ class TemplateLike(Base):
     template_id: Mapped[int] = mapped_column(Integer, ForeignKey("prompt_templates.id"), nullable=False)
     user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False)
     created_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+# ── 小说来源（爬取的小说） ──────────────────────────────
+
+class NovelSource(Base):
+    """外部爬取的小说来源"""
+    __tablename__ = "novel_sources"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    story_id: Mapped[int] = mapped_column(Integer, ForeignKey("stories.id"), nullable=False, index=True)
+    platform: Mapped[str] = mapped_column(String(20), nullable=False)
+    source_url: Mapped[str] = mapped_column(String(500), nullable=False)
+    source_book_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    author: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    genre: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    status: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    total_chapters: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    crawled_chapters: Mapped[int] = mapped_column(Integer, default=0)
+    crawl_status: Mapped[str] = mapped_column(String(20), default="pending")
+    word_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    metadata_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+    story: Mapped["Story"] = relationship("Story")
+
+
+# ── 拆书分析结果 ──────────────────────────────────────
+
+class DeconstructionResult(Base):
+    """拆书分析结果持久化"""
+    __tablename__ = "deconstruction_results"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    story_id: Mapped[int] = mapped_column(Integer, ForeignKey("stories.id"), nullable=False, index=True)
+
+    status: Mapped[str] = mapped_column(String(20), default="pending")
+    current_stage: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    stages_completed: Mapped[list[int] | None] = mapped_column(JSON, nullable=True)
+
+    summary: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    golden_chapters: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    chapter_summaries: Mapped[list[dict[str, Any]] | None] = mapped_column(JSON, nullable=True)
+    characters: Mapped[list[dict[str, Any]] | None] = mapped_column(JSON, nullable=True)
+    character_relations: Mapped[list[dict[str, Any]] | None] = mapped_column(JSON, nullable=True)
+    plot_lines: Mapped[list[dict[str, Any]] | None] = mapped_column(JSON, nullable=True)
+    rhythm: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    emotion_modules: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    worldbuilding: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    report_markdown: Mapped[str | None] = mapped_column(Text, nullable=True)
+    writing_style: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    writing_techniques: Mapped[list[dict[str, Any]] | None] = mapped_column(JSON, nullable=True)
+
+    progress_markdown: Mapped[str | None] = mapped_column(Text, nullable=True)
+    task_id: Mapped[str | None] = mapped_column(String(50), nullable=True, index=True)
+
+    created_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+    story: Mapped["Story"] = relationship("Story")

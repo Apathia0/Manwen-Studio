@@ -268,6 +268,7 @@ def _migrate(target_engine=None):
     _add_unique_constraints(db_engine)
     _migrate_prompt_templates(db_engine)
     _migrate_agent_pending_changes(db_engine)
+    _migrate_deconstruction_tables(db_engine)
 
 
 def _migrate_agent_pending_changes(target_engine=None):
@@ -911,3 +912,67 @@ def _migrate_prompt_templates(target_engine=None):
             """))
             conn.execute(text("CREATE INDEX IF NOT EXISTS idx_template_likes_template_id ON template_likes(template_id)"))
             conn.execute(text("CREATE INDEX IF NOT EXISTS idx_template_likes_user_id ON template_likes(user_id)"))
+
+
+def _migrate_deconstruction_tables(target_engine=None):
+    """创建拆书相关表（novel_sources, deconstruction_results）"""
+    from sqlalchemy import inspect, text
+
+    db_engine = target_engine or engine
+    insp = inspect(db_engine)
+
+    if "novel_sources" not in insp.get_table_names():
+        with db_engine.begin() as conn:
+            _prepare_migration_conn(conn)
+            conn.execute(text("""
+                CREATE TABLE novel_sources (
+                    id SERIAL PRIMARY KEY,
+                    story_id INTEGER NOT NULL REFERENCES stories(id),
+                    platform VARCHAR(20) NOT NULL,
+                    source_url VARCHAR(500) NOT NULL,
+                    source_book_id VARCHAR(100) NOT NULL,
+                    author VARCHAR(100),
+                    genre VARCHAR(100),
+                    status VARCHAR(20),
+                    total_chapters INTEGER,
+                    crawled_chapters INTEGER DEFAULT 0,
+                    crawl_status VARCHAR(20) DEFAULT 'pending',
+                    word_count INTEGER,
+                    metadata_json JSON,
+                    created_at TIMESTAMP DEFAULT NOW(),
+                    updated_at TIMESTAMP DEFAULT NOW()
+                )
+            """))
+            conn.execute(text("CREATE INDEX ix_novel_sources_story_id ON novel_sources(story_id)"))
+            conn.execute(text("CREATE INDEX ix_novel_sources_platform_book ON novel_sources(platform, source_book_id)"))
+
+    if "deconstruction_results" not in insp.get_table_names():
+        with db_engine.begin() as conn:
+            _prepare_migration_conn(conn)
+            conn.execute(text("""
+                CREATE TABLE deconstruction_results (
+                    id SERIAL PRIMARY KEY,
+                    story_id INTEGER NOT NULL REFERENCES stories(id),
+                    status VARCHAR(20) DEFAULT 'pending',
+                    current_stage INTEGER,
+                    stages_completed JSON,
+                    summary JSON,
+                    golden_chapters JSON,
+                    chapter_summaries JSON,
+                    characters JSON,
+                    character_relations JSON,
+                    plot_lines JSON,
+                    rhythm JSON,
+                    emotion_modules JSON,
+                    worldbuilding JSON,
+                    report_markdown TEXT,
+                    writing_style JSON,
+                    writing_techniques JSON,
+                    progress_markdown TEXT,
+                    task_id VARCHAR(50),
+                    created_at TIMESTAMP DEFAULT NOW(),
+                    updated_at TIMESTAMP DEFAULT NOW()
+                )
+            """))
+            conn.execute(text("CREATE INDEX ix_deconstruction_story_id ON deconstruction_results(story_id)"))
+            conn.execute(text("CREATE INDEX ix_deconstruction_task_id ON deconstruction_results(task_id)"))
