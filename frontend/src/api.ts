@@ -3997,7 +3997,7 @@ export interface CrawlStatus {
 // ── 拆书 ──────────────────────────────────────────
 
 export interface DeconstructionStatus {
-  status: 'not_started' | 'pending' | 'running' | 'completed' | 'failed' | 'paused_after_stage1';
+  status: string;
   current_stage: number | null;
   stages_completed: number[];
   progress: string | null;
@@ -4485,7 +4485,7 @@ export async function startDeconstruction(storyId: number, maxChapters?: number)
   return res.json();
 }
 
-export async function resumeDeconstruction(storyId: number, mode: 'full' | 'partial' = 'full'): Promise<{ task_id: string; message: string }> {
+export async function resumeDeconstruction(storyId: number, mode: 'full' | 'partial' | 'quick_report' = 'full'): Promise<{ task_id: string; message: string }> {
   const res = await fetch(`${BASE}/api/stories/${storyId}/deconstruct/resume`, {
     method: 'POST',
     headers: apiHeaders(),
@@ -4703,7 +4703,7 @@ export async function getDeconstructWorkStatus(workId: number): Promise<Deconstr
 }
 
 // 拆书结果
-export async function resumeDeconstructWork(workId: number, mode: 'full' | 'partial' = 'full'): Promise<{ task_id: string; message: string }> {
+export async function resumeDeconstructWork(workId: number, mode: 'full' | 'partial' | 'quick_report' = 'full'): Promise<{ task_id: string; message: string }> {
   const res = await fetch(`${BASE}/api/deconstruct/works/${workId}/resume`, {
     method: 'POST',
     headers: apiHeaders(),
