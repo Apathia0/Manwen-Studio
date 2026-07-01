@@ -1,6 +1,7 @@
 import { Suspense, useCallback, useEffect, useMemo, useState } from 'react';
 import {
   BarChart3,
+  BookOpen,
   Brush,
   CreditCard,
   Gauge,
@@ -39,6 +40,8 @@ import { RegisterPage } from './components/RegisterPage';
 import { InstallWizardPage } from './components/InstallWizardPage';
 import { PricingPublicPage } from './components/PricingPublicPage';
 import { WorkspacePage } from './components/WorkspacePage';
+import DeconstructionLibraryPage from './components/DeconstructionLibraryPage';
+import DeconstructionWorkPage from './components/DeconstructionWorkPage';
 import { PaymentCheckoutDialog } from './components/PaymentCheckoutDialog';
 import { UserPricingPage } from './components/UserPricingPage';
 import { UserAccountUsagePage } from './components/UserAccountUsagePage';
@@ -108,7 +111,8 @@ type RouteKey =
   | 'announcement'
   | 'system-update'
   | 'system-prompts'
-  | 'style-presets';
+  | 'style-presets'
+  | 'deconstruction-library';
 
 type NavItem = {
   key: RouteKey;
@@ -123,6 +127,7 @@ const DEFAULT_ICON_URL = '/brand-mark.svg';
 const USER_NAV: NavItem[] = [
   { key: 'stories', label: '作品', icon: Home },
   { key: 'workspace', label: '创作工作台', icon: Brush },
+  { key: 'deconstruction-library', label: '拆书库', icon: BookOpen },
   { key: 'account', label: '账户与用量', icon: UserCircle2 },
   { key: 'templates', label: '提示词模板', icon: Library },
   { key: 'pricing', label: '套餐订阅', icon: CreditCard },
@@ -193,6 +198,7 @@ function App() {
   const [channelPicker, setChannelPicker] = useState<{ planId: number; billingCycle: 'monthly' | 'yearly'; options: PaymentMethodOption[] } | null>(null);
   const [channelLoading, setChannelLoading] = useState<string | null>(null);
   const [workspaceMode, setWorkspaceMode] = useState<'manga' | 'video'>('manga');
+  const [deconWorkId, setDeconWorkId] = useState<number>(0);
 
   const activeChapter = useMemo(
     () => chapters.find((chapter) => chapter.id === activeChapterId) ?? null,
@@ -779,6 +785,25 @@ function App() {
               loadingWorkspace={loadingWorkspace}
             />
           )}
+          {route === 'deconstruction-library' && deconWorkId !== 0 ? (
+            <DeconstructionWorkPage
+              workId={deconWorkId}
+              onBack={() => { setDeconWorkId(0); }}
+            />
+          ) : route === 'deconstruction-library' ? (
+            <DeconstructionLibraryPage
+              onNavigate={(r, workId) => {
+                if (r === 'deconstruction-work' && workId) {
+                  setDeconWorkId(workId);
+                } else if (r === 'deconstruction-work' && !workId) {
+                  setDeconWorkId(-1);
+                } else if (r === 'stories') {
+                  setRoute('stories');
+                  setDeconWorkId(0);
+                }
+              }}
+            />
+          ) : null}
           {route === 'onboarding' && onboardingStory && (
             <OnboardingPage
               story={onboardingStory}

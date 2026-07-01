@@ -1064,6 +1064,10 @@ const [aspectRatio, setAspectRatio] = useState<string>('9:16');
   const startMangaGeneration = async (mode: 'continue' | 'restart' = 'continue') => {
     if (!chapter) return;
     if (genStore.get(chapter.id)?.active) return;
+    if (scenes.length !== imageCount) {
+      setErrorMsg('当前分镜数与生成张数不一致，请先重新生成分镜。');
+      return;
+    }
 
     try {
       await updateScenes(chapter.id, scenes);
@@ -1262,11 +1266,12 @@ const [aspectRatio, setAspectRatio] = useState<string>('9:16');
   const liveStatusMsg = isLiveGenerating ? liveGen!.statusMsg : statusMsg;
   const liveErrorMsg = liveGen?.errorMsg || errorMsg;
   const hasImages = displayImages.length > 0;
-  const canChangeImageCount = !generating && scenes.length === 0 && !hasImages;
+  const canChangeImageCount = !generating && (phase === 'idle' || phase === 'editing-scenes');
   const activeImageCount = liveProgress.total || imageCount;
   const completedImageCount = displayImages.length;
   const hasPartialImages = completedImageCount > 0 && completedImageCount < imageCount;
   const canContinueGeneration = !generating && phase === 'editing-scenes' && scenes.length > 0;
+  const sceneCountMatchesImageCount = scenes.length === imageCount;
   const canRestartGeneration = canContinueGeneration && hasImages;
   const activeSceneIdx = scenes.length > 0
     ? Math.min(
@@ -1358,7 +1363,7 @@ const [aspectRatio, setAspectRatio] = useState<string>('9:16');
                 }}
                 disabled={!canChangeImageCount}
                 className="px-2 py-1.5 text-xs font-medium rounded-md bg-[#f3f5f0] text-slate-700 border border-[#d9dfd7] outline-none focus:border-[#1f5f58] transition-colors disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
-                title={canChangeImageCount ? '生成张数' : '已有分镜或图片时不能修改生成张数'}
+                title={canChangeImageCount ? '生成张数，下次生成分镜时生效' : '生成中暂不能修改生成张数'}
               >
                 {selectableImageCounts.map((n) => (
                   <option key={n} value={n}>{n}张</option>
@@ -1469,8 +1474,10 @@ const [aspectRatio, setAspectRatio] = useState<string>('9:16');
             {/* Generate button */}
             <button
               onClick={handleGenerateImages}
+              disabled={!sceneCountMatchesImageCount}
               className="flex items-center gap-1.5 px-4 py-1.5 text-xs font-medium rounded-md
-                         bg-amber-500 hover:bg-amber-400 text-slate-900 transition-colors"
+                         bg-amber-500 hover:bg-amber-400 text-slate-900 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+              title={sceneCountMatchesImageCount ? undefined : '当前分镜数与生成张数不一致，请先重新生成分镜'}
             >
               <Sparkles size={13} />
               {hasPartialImages ? '继续生成漫画' : '生成漫画'}
@@ -1478,8 +1485,9 @@ const [aspectRatio, setAspectRatio] = useState<string>('9:16');
             {canRestartGeneration && (
               <button
                 onClick={handleRestartManga}
+                disabled={!sceneCountMatchesImageCount}
                 className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md
-                           bg-[#f3f5f0] hover:bg-[#e8ece6] text-slate-800 border border-[#d9dfd7] transition-colors"
+                           bg-[#f3f5f0] hover:bg-[#e8ece6] text-slate-800 border border-[#d9dfd7] transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
                 title="清空已生成图片，从第 1 张重新开始"
               >
                 <RefreshCw size={13} />

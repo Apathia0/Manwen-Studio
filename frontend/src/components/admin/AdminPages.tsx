@@ -1084,6 +1084,7 @@ export function AdminAnnouncementPage({ onError }: { onError: (message: string) 
 }
 
 const PRICING_ITEMS = [
+  { key: 'quota_deconstruction_run', label: '拆书次数', desc: '用户每月可启动拆书分析的次数', defaultPrice: 3.0 },
   { key: 'quota_framework_generate', label: '小说框架生成次数', desc: '用户每月可生成世界观、角色与大纲的次数', defaultPrice: 1.0 },
   { key: 'quota_chapter_expand', label: '章节扩写次数', desc: '用户每月可将章节计划扩写成正文的次数', defaultPrice: 0.5 },
   { key: 'quota_scene_generate', label: '分镜生成次数', desc: '用户每月可将文本拆分为漫画分镜的次数', defaultPrice: 0.3 },
@@ -1938,12 +1939,34 @@ export function AdminSystemPromptsPage({ onError }: { onError: (message: string)
   const [saving, setSaving] = useState<Record<string, boolean>>({});
   const { busy, run } = useBusyAction(onError);
 
+  // 方法论
+  const [methodology, setMethodology] = useState<Record<string, string>>({});
+  const [methodologyEdit, setMethodologyEdit] = useState<Record<string, string>>({});
+  const [methodologySaving, setMethodologySaving] = useState<Record<string, boolean>>({});
+  const [activeTab, setActiveTab] = useState<'prompts' | 'methodology'>('prompts');
+  const [methodologySubTab, setMethodologySubTab] = useState<string>('writing_craft');
+
   useEffect(() => {
     void run(async () => {
       const data = await getAdminSystemPrompts();
       setPrompts(Object.values(data));
     });
   }, []);
+
+  useEffect(() => {
+    if (activeTab === 'methodology') {
+      void run(async () => {
+        const { getAdminMethodology } = await import('../../api');
+        const data = await getAdminMethodology();
+        const m: Record<string, string> = {};
+        for (const key of ['writing_craft', 'anti_ai_writing', 'quality_checklist', 'banned_words']) {
+          m[key] = data[key]?.content ?? '';
+        }
+        setMethodology(m);
+        setMethodologyEdit(m);
+      });
+    }
+  }, [activeTab]);
 
   async function handleSave(fullKey: string) {
     setSaving((prev) => ({ ...prev, [fullKey]: true }));
@@ -1957,40 +1980,121 @@ export function AdminSystemPromptsPage({ onError }: { onError: (message: string)
     }
   }
 
+  async function handleMethodologySave(key: string) {
+    setMethodologySaving((prev) => ({ ...prev, [key]: true }));
+    try {
+      const { updateAdminMethodology } = await import('../../api');
+      await updateAdminMethodology(key, methodologyEdit[key] ?? '');
+      setMethodology((prev) => ({ ...prev, [key]: methodologyEdit[key] ?? '' }));
+    } catch (err: any) {
+      onError(err?.message || '保存失败');
+    } finally {
+      setMethodologySaving((prev) => ({ ...prev, [key]: false }));
+    }
+  }
+
+  const METHODOLOGY_TABS = [
+    { key: 'writing_craft', label: '写作技法' },
+    { key: 'anti_ai_writing', label: '去AI味规则' },
+    { key: 'quality_checklist', label: '质量审查清单' },
+    { key: 'banned_words', label: '禁用词表' },
+  ];
+
   return (
     <div className="space-y-5">
-      <SectionCard title="系统默认提示词" description="管理全局生效的系统提示词模板。所有用户未自定义时的默认值，修改后即时生效。">
-        <div className="space-y-6">
-          {prompts.map((prompt) => {
-            const fullKey = prompt.key;
-            const value = editMap[fullKey] ?? prompt.content ?? '';
-            return (
-              <div key={fullKey}>
-                <div className="mb-2 flex items-center justify-between">
-                  <label className="text-sm font-medium text-slate-800">{prompt.name}</label>
-                  <span className="text-xs text-slate-400">{fullKey}</span>
+      {/* Tab 切换 */}
+      <div className="flex gap-1 border-b border-slate-200">
+        <button
+          onClick={() => setActiveTab('prompts')}
+          className={`px-4 py-2 text-sm font-medium border-b-2 -mb-px transition-colors ${activeTab === 'prompts' ? 'border-blue-600 text-blue-600' : 'border-transparent text-slate-500 hover:text-slate-700'}`}
+        >
+          系统提示词
+        </button>
+        <button
+          onClick={() => setActiveTab('methodology')}
+          className={`px-4 py-2 text-sm font-medium border-b-2 -mb-px transition-colors ${activeTab === 'methodology' ? 'border-blue-600 text-blue-600' : 'border-transparent text-slate-500 hover:text-slate-700'}`}
+        >
+          写作方法论
+        </button>
+      </div>
+
+      {activeTab === 'prompts' && (
+        <SectionCard title="系统默认提示词" description="管理全局生效的系统提示词模板。所有用户未自定义时的默认值，修改后即时生效。">
+          <div className="space-y-6">
+            {prompts.map((prompt) => {
+              const fullKey = prompt.key;
+              const value = editMap[fullKey] ?? prompt.content ?? '';
+              return (
+                <div key={fullKey}>
+                  <div className="mb-2 flex items-center justify-between">
+                    <label className="text-sm font-medium text-slate-800">{prompt.name}</label>
+                    <span className="text-xs text-slate-400">{fullKey}</span>
+                  </div>
+                  <TextArea
+                    rows={6}
+                    value={value}
+                    onChange={(e) => setEditMap((prev) => ({ ...prev, [fullKey]: e.target.value }))}
+                    placeholder="暂无提示词内容..."
+                  />
+                  <div className="mt-2 flex justify-end">
+                    <PrimaryButton
+                      disabled={busy || saving[fullKey] || value === (prompts.find((p) => p.key === fullKey)?.content ?? '')}
+                      onClick={() => void handleSave(fullKey)}
+                    >
+                      {saving[fullKey] ? '保存中…' : '保存'}
+                    </PrimaryButton>
+                  </div>
                 </div>
-                <TextArea
-                  rows={6}
-                  value={value}
-                  onChange={(e) => setEditMap((prev) => ({ ...prev, [fullKey]: e.target.value }))}
-                  placeholder="暂无提示词内容..."
-                />
-                <div className="mt-2 flex justify-end">
-                  <PrimaryButton
-                    disabled={busy || saving[fullKey] || value === (prompts.find((p) => p.key === fullKey)?.content ?? '')}
-                    onClick={() => void handleSave(fullKey)}
-                  >
-                    {saving[fullKey] ? '保存中…' : '保存'}
-                  </PrimaryButton>
-                </div>
-              </div>
-            );
-          })}
-        </div>
-      </SectionCard>
+              );
+            })}
+          </div>
+        </SectionCard>
+      )}
+
+      {activeTab === 'methodology' && (
+        <SectionCard title="写作方法论" description="管理章节写作的系统方法论（兜底规则）。修改后重启服务生效。">
+          <div className="flex gap-1 border-b border-slate-200 mb-4">
+            {METHODOLOGY_TABS.map((tab) => (
+              <button
+                key={tab.key}
+                onClick={() => setMethodologySubTab(tab.key)}
+                className={`px-3 py-1.5 text-xs font-medium border-b-2 -mb-px transition-colors ${methodologySubTab === tab.key ? 'border-blue-600 text-blue-600' : 'border-transparent text-slate-500 hover:text-slate-700'}`}
+              >
+                {tab.label}
+              </button>
+            ))}
+          </div>
+          <div className="space-y-4">
+            <div className="flex items-center justify-between">
+              <label className="text-sm font-medium text-slate-800">
+                {METHODOLOGY_TABS.find((t) => t.key === methodologySubTab)?.label}
+              </label>
+              <span className="text-xs text-slate-400">
+                {methodologyEdit[methodologySubTab]?.length ?? 0} 字符
+              </span>
+            </div>
+            <TextArea
+              rows={16}
+              value={methodologyEdit[methodologySubTab] ?? ''}
+              onChange={(e) => setMethodologyEdit((prev) => ({ ...prev, [methodologySubTab]: e.target.value }))}
+              placeholder="暂无方法论内容..."
+              className="font-mono text-sm"
+            />
+            <div className="flex justify-end">
+              <PrimaryButton
+                disabled={busy || methodologySaving[methodologySubTab] || (methodologyEdit[methodologySubTab] ?? '') === (methodology[methodologySubTab] ?? '')}
+                onClick={() => void handleMethodologySave(methodologySubTab)}
+              >
+                {methodologySaving[methodologySubTab] ? '保存中…' : '保存'}
+              </PrimaryButton>
+            </div>
+          </div>
+        </SectionCard>
+      )}
     </div>
   );
 }
+
+// ── 写作方法论管理（已合并到 AdminSystemPromptsPage）──────
 
 export { AdminRevenueDashboardPage } from './RevenueDashboard';
