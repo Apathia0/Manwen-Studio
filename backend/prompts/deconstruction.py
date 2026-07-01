@@ -90,6 +90,74 @@ STAGE_1_GOLDEN_CHAPTERS_USER = """请对以下小说的前三章进行深度拆�
 
 仅返回 JSON，不要包含任何解释。"""
 
+
+
+# --- Stage 0.5: 故事框架识别 ---
+
+STAGE_0_5_FRAMEWORK_SYSTEM = """你是网络小说结构分析师。你的任务是从章节标题和概要中识别小说的故事框架类型。
+
+框架类型定义：
+- 升级流：等级体系清晰，按境界阶段分段，每个境界有对应的冲突和目标
+- 复仇线：核心矛盾是复仇，目标明确，按仇家/复仇阶段推进
+- 日常单元：每卷独立故事，弱连续性，按卷/单元划分
+- 多线交织：多视角/多时间线，按线索划分，交叉点单独标记
+- 蜕变成长：主角内在变化为主线，按成长阶段划分
+
+输出要求：严格返回 JSON 格式。
+{
+  "framework_type": "升级流/复仇线/日常单元/多线交织/蜕变成长",
+  "confidence": 0.0-1.0,
+  "reasoning": "识别依据（100字内）",
+  "stage_boundaries": [
+    {"stage": "阶段名称", "chapters": "第1-15章", "description": "阶段描述"}
+  ],
+  "suggested_chunk_size": "建议的分块章节数（默认60，长篇幅可适当增大）"
+}
+"""
+
+STAGE_0_5_FRAMEWORK_USER = """请分析以下小说的章节信息，识别故事框架类型。
+
+章节概要：{thin_summary}
+
+章节列表（前80章+后40章）：
+{chapter_titles}
+
+仅返回 JSON，不要包含任何解释。"""
+
+
+
+# --- Stage 1: 快速预览报告 ---
+
+STAGE_1_PREVIEW_REPORT_SYSTEM = """你是小说分析报告撰写专家。基于黄金三章深度拆解数据，撰写一份快速预览报告。
+
+输出要求：返回 Markdown 格式的快速预览报告，不要包含 JSON 包装。
+
+报告结构：
+# 快速预览：{书名}
+
+## 基本信息
+- 书名 | 题材 | 预估总章节 | 预估总字数
+
+## 框架识别
+- 故事框架类型 | 置信度 | 识别依据
+
+## 黄金三章评分
+
+| 维度 | 评分 | 说明 |
+|------|------|------|
+| 开篇钩子 | X/5 | ... |
+| 主角塑造 | X/5 | ... |
+| 爽点设计 | X/5 | ... |
+| 世界观铺设 | X/5 | ... |
+| 章尾悬念 | X/5 | ... |
+
+## 可借鉴要素
+（3-5条，从黄金三章中提取的写作技巧）
+
+## 预估耗时
+全量拆解（Stage 2-6）预计耗时：{estimated_time}
+"""
+
 # ── Stage 2: 逐章摘要 ──────────────────────────────────
 
 STAGE_2_CHAPTER_SUMMARY_SYSTEM = """你是小说章节分析专家。你需要对单章小说内容进行结构化摘要提取。
@@ -137,6 +205,52 @@ STAGE_2_CHAPTER_SUMMARY_USER = """请分析以下小说章节，提取结构化�
 
 章节编号：第{chapter_number}章 {chapter_title}
 章节字数：{word_count}
+
+{chapter_text}
+
+仅返回 JSON，不要包含任何解释。"""
+
+
+
+# --- Stage 2: 增强版逐章摘要（含关键信息与扩写技法）---
+
+STAGE_2_ENHANCED_SUMMARY_SYSTEM = """你是网络小说章节深度分析专家。对每一章进行三层提取：
+
+1. 章节摘要（100-200字因果链）
+2. 情节点提取（按字数密度：150-200字/个情节点，每章10-40个）
+3. 关键信息与扩写技法
+
+输出要求：严格返回 JSON 格式。
+{
+  "chapter_number": "章号",
+  "summary": "100-200字因果链摘要",
+  "key_events": ["事件1", "事件2", "事件3"],
+  "characters_appeared": ["角色名"],
+  "theme_tags": ["标签"],
+  "chapter_tone": "基调",
+  "plot_progression": "大转折/日常过渡/铺垫伏笔",
+  "key_info": [
+    {
+      "info": "关键信息/剧情走向",
+      "expansion": "原文如何扩写",
+      "technique": "铺垫后置/反应层放大/信息差/对比锚点/延迟揭示/身体反应/小目标嵌套/其他",
+      "emotion_effect": "好奇/期待/压抑/爽/心疼/紧张/甜/热血"
+    }
+  ],
+  "characters_detail": [
+    {
+      "name": "角色名",
+      "importance": "major/supporting/minor",
+      "new_info": "本章新信息",
+      "aliases": ["别名"]
+    }
+  ]
+}
+"""
+
+STAGE_2_ENHANCED_SUMMARY_USER = """分析以下章节：
+
+第{chapter_number}章 {chapter_title}（{word_count}字）
 
 {chapter_text}
 
@@ -402,6 +516,19 @@ STAGE_6_STYLE_SYSTEM = """你是小说文风分析专家。你需要分析小说
       "purpose": "范例用途",
       "quote": "原文范例片段（≤500字）",
       "analysis": "文风分析"
+    }
+  ],
+  "techniques": [
+    {
+      "technique": "手法名称",
+      "category": "开篇钩子/角色塑造/爽点设计/章节结尾/对话手法/信息控制/节奏控制/反转设计/伏笔/情绪操控",
+      "description": "手法描述",
+      "examples": [
+        {"chapter": 1, "context": "使用场景", "effect": "效果"}
+      ],
+      "reusable": true,
+      "reuse_condition": "可复用的条件",
+      "reuse_risk": "复用风险"
     }
   ],
   "generation_note": "生成记录"
