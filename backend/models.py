@@ -697,6 +697,7 @@ class BackgroundTask(Base):
     quota_user_id: Mapped[int | None] = mapped_column(Integer, nullable=True, default=None)
     quota_feature_key: Mapped[str | None] = mapped_column(String(128), nullable=True, default=None)
     quota_amount: Mapped[int | None] = mapped_column(Integer, nullable=True, default=0)
+    quota_period_key: Mapped[str | None] = mapped_column(String(32), nullable=True, default=None)
 
 
 # ── 提示词模板系统 ──────────────────────────────────────
@@ -813,9 +814,11 @@ class DeconstructionResult(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     story_id: Mapped[int] = mapped_column(Integer, ForeignKey("stories.id"), nullable=False, index=True)
 
-    status: Mapped[str] = mapped_column(String(20), default="pending")
+    status: Mapped[str] = mapped_column(String(30), default="pending")
     current_stage: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    framework_type: Mapped[str | None] = mapped_column(String(50), nullable=True)
     stages_completed: Mapped[list[int] | None] = mapped_column(JSON, nullable=True)
+    decon_range: Mapped[int | None] = mapped_column(Integer, nullable=True)  # 试读模式下的章节数上限（如 100 = 仅前100章）
 
     summary: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     golden_chapters: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
@@ -837,3 +840,78 @@ class DeconstructionResult(Base):
     updated_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
 
     story: Mapped["Story"] = relationship("Story")
+
+
+# ── 独立拆书库（不绑定作品）──────────────────────────
+
+class DeconstructionWork(Base):
+    """独立拆书工作记录，不绑定 Story"""
+    __tablename__ = "deconstruction_works"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    owner_user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    author: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    platform: Mapped[str] = mapped_column(String(20), nullable=False, default="qidian")
+    source_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    source_book_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    genre: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    status_label: Mapped[str | None] = mapped_column(String(20), nullable=True)
+
+    crawl_status: Mapped[str] = mapped_column(String(20), default="pending")
+    total_chapters: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    crawled_chapters: Mapped[int] = mapped_column(Integer, default=0)
+    word_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    decon_status: Mapped[str] = mapped_column(String(30), default="not_started")
+    current_stage: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    framework_type: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    stages_completed: Mapped[list[int] | None] = mapped_column(JSON, nullable=True)
+    decon_range: Mapped[int | None] = mapped_column(Integer, nullable=True)  # 试读模式的章节上限
+
+    summary: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    golden_chapters: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    chapter_summaries: Mapped[list[dict[str, Any]] | None] = mapped_column(JSON, nullable=True)
+    characters: Mapped[list[dict[str, Any]] | None] = mapped_column(JSON, nullable=True)
+    character_relations: Mapped[list[dict[str, Any]] | None] = mapped_column(JSON, nullable=True)
+    plot_lines: Mapped[list[dict[str, Any]] | None] = mapped_column(JSON, nullable=True)
+    rhythm: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    emotion_modules: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    worldbuilding: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    report_markdown: Mapped[str | None] = mapped_column(Text, nullable=True)
+    writing_style: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    writing_techniques: Mapped[list[dict[str, Any]] | None] = mapped_column(JSON, nullable=True)
+
+    progress_markdown: Mapped[str | None] = mapped_column(Text, nullable=True)
+    task_id: Mapped[str | None] = mapped_column(String(50), nullable=True, index=True)
+
+    created_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
+class DeconstructionChapter(Base):
+    """拆书库章节内容（独立存储，不污染作品 chapters 表）"""
+    __tablename__ = "deconstruction_chapters"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    work_id: Mapped[int] = mapped_column(Integer, ForeignKey("deconstruction_works.id", ondelete="CASCADE"), nullable=False, index=True)
+    chapter_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    title: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    content: Mapped[str | None] = mapped_column(Text, nullable=True)
+    word_count: Mapped[int] = mapped_column(Integer, default=0)
+    source_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+
+    created_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class StoryDeconstructionRef(Base):
+    """作品引用拆书结果（多对多关联）"""
+    __tablename__ = "story_deconstruction_refs"
+    __table_args__ = (UniqueConstraint("story_id", "work_id", name="uq_story_decon_ref"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    story_id: Mapped[int] = mapped_column(Integer, ForeignKey("stories.id", ondelete="CASCADE"), nullable=False, index=True)
+    work_id: Mapped[int] = mapped_column(Integer, ForeignKey("deconstruction_works.id", ondelete="CASCADE"), nullable=False)
+    applied_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now())
+
+    work: Mapped["DeconstructionWork"] = relationship("DeconstructionWork")
