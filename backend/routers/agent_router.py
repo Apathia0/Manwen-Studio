@@ -388,6 +388,8 @@ async def agent_chat(
                 workflow_type=workflow_type,
                 workflow_id=workflow_id,
                 shot_id=shot_id,
+                enabled_skills=body.enabled_skills,
+                db=db,
             ):
                 event_type = str(event.get("event") or "")
                 if event_type == "token":

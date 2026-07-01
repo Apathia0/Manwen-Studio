@@ -157,6 +157,7 @@ from services.payment import init_gateways, get_gateway, get_gateway_by_provider
 from services.story_state import build_story_bible_compact, build_story_memory_compact
 from routers.video import router as video_router
 from routers.deconstruction import router as deconstruction_router
+from routers.deconstruct_library import router as deconstruct_library_router
 
 load_dotenv()
 
@@ -225,6 +226,16 @@ FEATURE_CATALOG: list[dict] = [
         "default_rule": {"reset_period": "monthly", "deduct_mode": "on_success"},
     },
     {
+        "key": "deconstruction.run.monthly_limit",
+        "name": "拆书次数",
+        "description": "用户每月可启动拆书分析的次数，提交任务时预先扣除，任务失败时自动返还。",
+        "category": "高级文本能力",
+        "value_type": "number",
+        "purchasable": True,
+        "price_per_unit": 3.0,
+        "default_rule": {"reset_period": "monthly", "deduct_mode": "on_submit_refund_on_failure"},
+    },
+    {
         "key": "manga.max_image_count_per_chapter",
         "name": "单章节最大出图数",
         "description": "单个章节允许生成的最大漫画页数。",
@@ -274,6 +285,7 @@ PLAN_SEED_DEFAULTS: dict[str, dict[str, int | bool]] = {
         "scene.generate.monthly_limit": 15,
         "manga.image.generate.monthly_limit": 100,
         "ai.text.advanced_calls.monthly_limit": 20,
+        "deconstruction.run.monthly_limit": 1,
         "manga.max_image_count_per_chapter": 6,
         "manga.allow_color_mode": False,
         "video.shot.split.monthly_limit": 0,
@@ -285,6 +297,7 @@ PLAN_SEED_DEFAULTS: dict[str, dict[str, int | bool]] = {
         "scene.generate.monthly_limit": 120,
         "manga.image.generate.monthly_limit": 1100,
         "ai.text.advanced_calls.monthly_limit": 180,
+        "deconstruction.run.monthly_limit": 20,
         "manga.max_image_count_per_chapter": 12,
         "manga.allow_color_mode": True,
         "video.shot.split.monthly_limit": 5,
@@ -296,6 +309,7 @@ PLAN_SEED_DEFAULTS: dict[str, dict[str, int | bool]] = {
         "scene.generate.monthly_limit": 500,
         "manga.image.generate.monthly_limit": 5500,
         "ai.text.advanced_calls.monthly_limit": 600,
+        "deconstruction.run.monthly_limit": 80,
         "manga.max_image_count_per_chapter": 20,
         "manga.allow_color_mode": True,
         "video.shot.split.monthly_limit": 10,
@@ -686,6 +700,7 @@ def _platform_settings_snapshot(db: Session) -> dict:
             "quota_scene_generate": float(_get_platform_setting("pricing.quota.scene.generate.monthly_limit", db, 0.3) or 0.3),
             "quota_manga_image_generate": float(_get_platform_setting("pricing.quota.manga.image.generate.monthly_limit", db, 0.2) or 0.2),
             "quota_ai_text_advanced": float(_get_platform_setting("pricing.quota.ai.text.advanced_calls.monthly_limit", db, 0.3) or 0.3),
+            "quota_deconstruction_run": float(_get_platform_setting("pricing.quota.deconstruction.run.monthly_limit", db, 3.0) or 3.0),
             "quota_video_shot_split": float(_get_platform_setting("pricing.quota.video.shot.split.monthly_limit", db, 1.0) or 1.0),
             "quota_video_generate": float(_get_platform_setting("pricing.quota.video.generate.count.monthly_limit", db, 2.0) or 2.0),
         },
@@ -1348,6 +1363,7 @@ def _seed_platform_settings(db: Session, *, commit: bool = True) -> None:
         "pricing.quota.scene.generate.monthly_limit": "0.3",
         "pricing.quota.manga.image.generate.monthly_limit": "0.2",
         "pricing.quota.ai.text.advanced_calls.monthly_limit": "0.3",
+        "pricing.quota.deconstruction.run.monthly_limit": "3.0",
         "pricing.quota.video.shot.split.monthly_limit": "1.0",
         "pricing.quota.video.generate.count.monthly_limit": "2.0",
         "payment.epay_gateway": "",
@@ -2163,6 +2179,13 @@ def _check_and_consume_quota(
     plan = _active_plan_for_user(user_id, db)
     limits = _plan_feature_map(plan.id, db)
     period_key = _subscription_period_key(user_id, db)
+    if deduct and db.bind and db.bind.dialect.name == "postgresql":
+        lock_key = int.from_bytes(
+            hashlib.sha256(f"quota:{user_id}:{feature_key}:{period_key}".encode("utf-8")).digest()[:8],
+            "big",
+            signed=True,
+        )
+        db.execute(text("SELECT pg_advisory_xact_lock(:lock_key)"), {"lock_key": lock_key})
     base_limit = _coerce_int(limits.get(feature_key), default=0)
     granted = _extra_grant_amount(user_id, feature_key, period_key, db)
     limit = base_limit + granted
@@ -2191,9 +2214,9 @@ def _check_and_consume_quota(
     return {"feature_key": feature_key, "used": used, "base_limit": base_limit, "granted": granted, "limit": limit, "period_key": period_key}
 
 
-def _refund_quota(user_id: int, feature_key: str, amount: int, db: Session) -> None:
+def _refund_quota(user_id: int, feature_key: str, amount: int, db: Session, period_key: str | None = None) -> None:
     """退还已扣除的配额（AI 调用失败时回退）。"""
-    task_manager.refund_quota(user_id, feature_key, amount, db)
+    task_manager.refund_quota(user_id, feature_key, amount, db, period_key)
 
 
 def _serialize_order(order: BillingOrder) -> dict:
@@ -2379,6 +2402,7 @@ def _usage_entries_for_user(user_id: int, db: Session) -> list[dict]:
         "scene.generate.monthly_limit",
         "manga.image.generate.monthly_limit",
         "ai.text.advanced_calls.monthly_limit",
+        "deconstruction.run.monthly_limit",
         "video.shot.split.monthly_limit",
         "video.generate.count.monthly_limit",
     ]
@@ -5322,6 +5346,7 @@ def admin_save_platform_settings(body: dict, request: Request, db: Session = Dep
         "pricing.quota.scene.generate.monthly_limit": pricing.get("quota_scene_generate", 0.3),
         "pricing.quota.manga.image.generate.monthly_limit": pricing.get("quota_manga_image_generate", 0.2),
         "pricing.quota.ai.text.advanced_calls.monthly_limit": pricing.get("quota_ai_text_advanced", 0.3),
+        "pricing.quota.deconstruction.run.monthly_limit": pricing.get("quota_deconstruction_run", 3.0),
         "pricing.quota.video.shot.split.monthly_limit": pricing.get("quota_video_shot_split", 1.0),
         "pricing.quota.video.generate.count.monthly_limit": pricing.get("quota_video_generate", 2.0),
     }
@@ -10619,6 +10644,7 @@ from routers.agent_router import router as agent_router
 app.include_router(video_router)
 app.include_router(agent_router)
 app.include_router(deconstruction_router)
+app.include_router(deconstruct_library_router)
 
 
 if __name__ == "__main__":
