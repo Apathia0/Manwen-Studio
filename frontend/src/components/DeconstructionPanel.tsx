@@ -1,11 +1,12 @@
 import { useState, useEffect, useCallback } from 'react';
-import { BookOpen, Play, Square, RefreshCw, Loader2, CheckCircle2, XCircle, Clock, ExternalLink } from 'lucide-react';
+import { BookOpen, Search, Play, Square, RefreshCw, Loader2, CheckCircle2, XCircle, Clock, ExternalLink, ClipboardList, FileText, Puzzle, Landmark, BarChart3, Palette } from 'lucide-react';
 import type { Story, DeconstructionStatus, DeconstructionResult } from '../api';
 import {
   startDeconstruction,
   getDeconstructionStatus,
   getDeconstructionResult,
   cancelDeconstruction,
+  resumeDeconstruction,
   applyDeconstructionToBible,
   getCrawlStatus,
 } from '../api';
@@ -17,6 +18,7 @@ interface Props {
 
 const STAGE_NAMES: Record<number, string> = {
   0: '概要提取',
+  0.5: '故事框架识别',
   1: '黄金三章深度拆解',
   2: '逐章摘要',
   3: '聚合分析',
@@ -25,15 +27,19 @@ const STAGE_NAMES: Record<number, string> = {
   6: '文风分析',
 };
 
-const STAGE_ICONS: Record<number, string> = {
-  0: '📋',
-  1: '🔍',
-  2: '📝',
-  3: '🧩',
-  4: '🏰',
-  5: '📊',
-  6: '🎨',
-};
+function getStageIcon(stage: number): React.ReactNode {
+  const cls = 'h-5 w-5';
+  switch (stage) {
+    case 0: return <ClipboardList className={cls} />;
+    case 1: return <Search className={cls} />;
+    case 2: return <FileText className={cls} />;
+    case 3: return <Puzzle className={cls} />;
+    case 4: return <Landmark className={cls} />;
+    case 5: return <BarChart3 className={cls} />;
+    case 6: return <Palette className={cls} />;
+    default: return <FileText className={cls} />;
+  }
+}
 
 export default function DeconstructionPanel({ story }: Props) {
   const [status, setStatus] = useState<DeconstructionStatus | null>(null);
@@ -43,30 +49,35 @@ export default function DeconstructionPanel({ story }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [showSearch, setShowSearch] = useState(false);
   const [crawlStatus, setCrawlStatus] = useState<string | null>(null);
+  const [partialCount, setPartialCount] = useState(50);
+  const [showPartialInput, setShowPartialInput] = useState(false);
 
   // 轮询拆书状态
   useEffect(() => {
     let timer: ReturnType<typeof setInterval>;
     loadStatus();
 
-    if (status?.status === 'running' || status?.status === 'pending') {
+    if (status?.status === 'running' || status?.status === 'pending' || status?.status === 'paused_after_stage1' || (status?.status && status.status.startsWith('paused_after_partial'))) {
       timer = setInterval(loadStatus, 3000);
     }
 
     return () => { if (timer) clearInterval(timer); };
   }, [status?.status]);
 
-  // 轮询爬取状态
+  // 轮询爬取状态，完成后自动拆书
   useEffect(() => {
     if (!showSearch) return;
+    let autoStarted = false;
     const timer = setInterval(async () => {
       try {
         const s = await getCrawlStatus(story.id);
         setCrawlStatus(s.status);
-        if (s.status === 'completed') {
+        if (s.status === 'completed' && !autoStarted) {
+          autoStarted = true;
           setShowSearch(false);
           setCrawlStatus(null);
-          loadStatus();
+          await startDeconstruction(story.id);
+          setStatus({ status: 'running', current_stage: 0, stages_completed: [], progress: null, result_id: null });
         }
       } catch {}
     }, 3000);
@@ -76,8 +87,21 @@ export default function DeconstructionPanel({ story }: Props) {
   const loadStatus = useCallback(async () => {
     try {
       const s = await getDeconstructionStatus(story.id);
-      setStatus(s);
-      if (s.status === 'completed') {
+      setStatus(prev => {
+        if (prev?.status === 'running' && s.status === 'not_started') return prev;
+        return s;
+      });
+      if (s.status === 'paused_after_stage1' || (s.status && s.status.startsWith('paused_after_partial'))) {
+        // 停靠状态：取结果（试读报告或三章快速报告）
+        setStatus(s);
+        try {
+          const r = await getDeconstructionResult(story.id);
+          if (r && r.report_markdown) {
+            setResult(r);
+            setActiveTab('report');
+          }
+        } catch {}
+      } else if (s.status === 'completed') {
         const r = await getDeconstructionResult(story.id);
         setResult(r);
         setActiveTab('report');
@@ -93,6 +117,45 @@ export default function DeconstructionPanel({ story }: Props) {
       setStatus({ status: 'running', current_stage: 0, stages_completed: [], progress: null, result_id: null });
     } catch (e: any) {
       setError(e.message || '启动失败');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleResume = async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      await resumeDeconstruction(story.id, 'full');
+      setStatus({ status: 'running', current_stage: 2, stages_completed: [0, 0.5, 1], progress: null, result_id: null });
+    } catch (e: any) {
+      setError(e.message || '续跑失败');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handlePartialResume = async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      await resumeDeconstruction(story.id, 'partial');
+      setStatus({ status: 'running', current_stage: 2, stages_completed: [0, 0.5, 1], progress: null, result_id: null });
+    } catch (e: any) {
+      setError(e.message || '试读启动失败');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleQuickReport = async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      await resumeDeconstruction(story.id, 'quick_report');
+      setStatus(prev => prev ? { ...prev, status: 'running' } : null);
+    } catch (e: any) {
+      setError(e.message || '报告生成失败');
     } finally {
       setLoading(false);
     }
@@ -117,7 +180,7 @@ export default function DeconstructionPanel({ story }: Props) {
     }
   };
 
-  const handleCrawlStarted = (taskId: string) => {
+  const handleCrawlStarted = (_taskId: string) => {
     setCrawlStatus('crawling');
   };
 
@@ -181,6 +244,137 @@ export default function DeconstructionPanel({ story }: Props) {
     );
   }
 
+  // 停靠中（黄金三章后）
+  if (status.status === 'paused_after_stage1') {
+    return (
+      <div className="flex h-full flex-col p-4">
+        <div className="flex items-center justify-between mb-4">
+          <h3 className="text-lg font-semibold text-amber-700">黄金三章拆解完成</h3>
+          {!showPartialInput ? (
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                onClick={handleResume}
+                disabled={loading}
+                className="flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50"
+              >
+                {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
+                继续全量拆解
+              </button>
+              <button
+                onClick={() => setShowPartialInput(true)}
+                disabled={loading}
+                className="flex items-center gap-2 rounded-lg border border-amber-400 bg-amber-50 px-4 py-2 text-sm font-medium text-amber-700 hover:bg-amber-100 disabled:opacity-50"
+              >
+                <BookOpen className="h-4 w-4" />
+                试读前 {partialCount} 章
+              </button>
+              <button
+                onClick={handleQuickReport}
+                disabled={loading}
+                className="flex items-center gap-2 rounded-lg border border-green-400 bg-green-50 px-4 py-2 text-sm font-medium text-green-700 hover:bg-green-100 disabled:opacity-50"
+              >
+                {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <FileText className="h-4 w-4" />}
+                生成三章报告
+              </button>
+            </div>
+          ) : (
+            <div className="flex items-center gap-2">
+              <input
+                type="number"
+                min={10}
+                value={partialCount}
+                onChange={(e) => setPartialCount(Math.max(10, parseInt(e.target.value) || 10))}
+                placeholder="章节数"
+                className="w-20 rounded-lg border border-amber-300 bg-white px-2.5 py-2 text-sm text-slate-700 text-center focus:border-amber-500 focus:outline-none focus:ring-1 focus:ring-amber-500 [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
+              />
+              <button
+                onClick={handlePartialResume}
+                disabled={loading}
+                className="flex items-center gap-2 rounded-lg bg-amber-600 px-4 py-2 text-sm font-medium text-white hover:bg-amber-700 disabled:opacity-50"
+              >
+                {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
+                开始试读
+              </button>
+              <button
+                onClick={() => setShowPartialInput(false)}
+                disabled={loading}
+                className="text-sm text-slate-400 hover:text-slate-600 disabled:opacity-50"
+              >
+                取消
+              </button>
+            </div>
+          )}
+        </div>
+
+        <div className="space-y-2 mb-4">
+          {[0, 0.5, 1].map((stage) => (
+            <div
+              key={stage}
+              className="flex items-center gap-3 rounded-lg p-2.5 text-sm bg-green-50 text-green-700"
+            >
+              {getStageIcon(Math.floor(stage))}
+              <span className="flex-1">{STAGE_NAMES[stage] || '未知阶段'}</span>
+              <CheckCircle2 className="h-4 w-4 text-green-500" />
+            </div>
+          ))}
+          {[2, 3, 4, 5, 6].map((stage) => (
+            <div
+              key={stage}
+              className="flex items-center gap-3 rounded-lg p-2.5 text-sm bg-slate-50 text-slate-400"
+            >
+              {getStageIcon(stage)}
+              <span className="flex-1">{STAGE_NAMES[stage]}</span>
+              <Clock className="h-4 w-4 text-slate-300" />
+            </div>
+          ))}
+        </div>
+
+        {status.progress && (
+          <div className="flex-1 overflow-auto rounded-lg bg-slate-50 p-4">
+            <div className="prose prose-sm max-w-none text-sm leading-relaxed whitespace-pre-wrap text-slate-700">
+              {status.progress.split('\n').slice(-50).join('\n')}
+            </div>
+          </div>
+        )}
+
+        {error && <p className="text-sm text-red-500 mt-2">{error}</p>}
+      </div>
+    );
+  }
+
+  // 试读完成 / 三章快速报告完成
+  if (status.status && status.status.startsWith('paused_after_partial')) {
+    const rangeNum = status.status.split(':')[1] || '?';
+    if (result?.report_markdown) {
+      return (
+        <div className="flex h-full flex-col">
+          <div className="flex items-center gap-1 border-b border-slate-200 px-4 py-2">
+            <span className="text-sm font-semibold text-green-700">试读报告（前{rangeNum}章）</span>
+            <div className="flex-1" />
+            <button
+              onClick={handleResume}
+              className="flex items-center gap-1 rounded-lg bg-blue-600 px-3 py-1 text-xs font-medium text-white hover:bg-blue-700"
+            >
+              <Play className="h-3 w-3" />
+              继续全量拆解
+            </button>
+          </div>
+          <div className="flex-1 overflow-auto p-4">
+            <div className="prose prose-sm max-w-none text-sm leading-relaxed whitespace-pre-wrap text-slate-700">
+              {result.report_markdown}
+            </div>
+          </div>
+        </div>
+      );
+    }
+    return (
+      <div className="flex h-full flex-col items-center justify-center gap-4 p-4">
+        <CheckCircle2 className="h-12 w-12 text-green-400" />
+        <p className="text-sm text-slate-500">试读已完成，报告生成中...</p>
+      </div>
+    );
+  }
+
   // 进行中
   if (status.status === 'running' || status.status === 'pending') {
     const currentStage = status.current_stage ?? 0;
@@ -198,7 +392,7 @@ export default function DeconstructionPanel({ story }: Props) {
         </div>
 
         <div className="space-y-2 mb-4">
-          {[0, 1, 2, 3, 4, 5, 6].map((stage) => (
+          {[0, 0.5, 1, 2, 3, 4, 5, 6].map((stage) => (
             <div
               key={stage}
               className={`flex items-center gap-3 rounded-lg p-2.5 text-sm ${
@@ -209,7 +403,7 @@ export default function DeconstructionPanel({ story }: Props) {
                   : 'bg-slate-50 text-slate-400'
               }`}
             >
-              <span className="text-lg">{STAGE_ICONS[stage]}</span>
+              {getStageIcon(stage)}
               <span className="flex-1">{STAGE_NAMES[stage]}</span>
               {stage < currentStage && <CheckCircle2 className="h-4 w-4 text-green-500" />}
               {stage === currentStage && <Loader2 className="h-4 w-4 animate-spin text-blue-500" />}
