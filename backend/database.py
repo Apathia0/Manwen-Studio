@@ -258,6 +258,8 @@ def _migrate(target_engine=None):
                 conn.execute(text("ALTER TABLE background_tasks ADD COLUMN quota_feature_key VARCHAR(128)"))
             if "quota_amount" not in cols:
                 conn.execute(text("ALTER TABLE background_tasks ADD COLUMN quota_amount INTEGER DEFAULT 0"))
+            if "quota_period_key" not in cols:
+                conn.execute(text("ALTER TABLE background_tasks ADD COLUMN quota_period_key VARCHAR(32)"))
     _migrate_video_tables(db_engine)
     _migrate_video_character_tables(db_engine)
     _seed_video_style_presets(db_engine)
@@ -268,7 +270,34 @@ def _migrate(target_engine=None):
     _add_unique_constraints(db_engine)
     _migrate_prompt_templates(db_engine)
     _migrate_agent_pending_changes(db_engine)
+    if "deconstruction_results" in insp.get_table_names():
+        res_cols = {c["name"] for c in insp.get_columns("deconstruction_results")}
+        with db_engine.begin() as conn:
+            _prepare_migration_conn(conn)
+            if "framework_type" not in res_cols:
+                conn.execute(text("ALTER TABLE deconstruction_results ADD COLUMN framework_type VARCHAR(50)"))
+            if "decon_range" not in res_cols:
+                conn.execute(text("ALTER TABLE deconstruction_results ADD COLUMN decon_range INTEGER"))
+            # 扩大 status 字段以容纳 paused_after_partial:N 格式
+            res_status_col = next((c for c in insp.get_columns("deconstruction_results") if c["name"] == "status"), None)
+            if res_status_col and isinstance(res_status_col.get("type"), str) and "20" in res_status_col["type"]:
+                conn.execute(text("ALTER TABLE deconstruction_results ALTER COLUMN status TYPE VARCHAR(30)"))
+
+    if "deconstruction_works" in insp.get_table_names():
+        works_cols = {c["name"] for c in insp.get_columns("deconstruction_works")}
+        with db_engine.begin() as conn:
+            _prepare_migration_conn(conn)
+            if "framework_type" not in works_cols:
+                conn.execute(text("ALTER TABLE deconstruction_works ADD COLUMN framework_type VARCHAR(50)"))
+            if "decon_range" not in works_cols:
+                conn.execute(text("ALTER TABLE deconstruction_works ADD COLUMN decon_range INTEGER"))
+            # 扩大 status 字段
+            works_status_col = next((c for c in insp.get_columns("deconstruction_works") if c["name"] == "decon_status"), None)
+            if works_status_col and isinstance(works_status_col.get("type"), str) and "20" in works_status_col["type"]:
+                conn.execute(text("ALTER TABLE deconstruction_works ALTER COLUMN decon_status TYPE VARCHAR(30)"))
+
     _migrate_deconstruction_tables(db_engine)
+    _migrate_deconstruction_library_tables(db_engine)
 
 
 def _migrate_agent_pending_changes(target_engine=None):
@@ -955,6 +984,7 @@ def _migrate_deconstruction_tables(target_engine=None):
                     story_id INTEGER NOT NULL REFERENCES stories(id),
                     status VARCHAR(20) DEFAULT 'pending',
                     current_stage INTEGER,
+                    framework_type VARCHAR(50),
                     stages_completed JSON,
                     summary JSON,
                     golden_chapters JSON,
@@ -976,3 +1006,85 @@ def _migrate_deconstruction_tables(target_engine=None):
             """))
             conn.execute(text("CREATE INDEX ix_deconstruction_story_id ON deconstruction_results(story_id)"))
             conn.execute(text("CREATE INDEX ix_deconstruction_task_id ON deconstruction_results(task_id)"))
+
+
+def _migrate_deconstruction_library_tables(target_engine=None):
+    """创建独立拆书库表（deconstruction_works, deconstruction_chapters, story_deconstruction_refs）"""
+    from sqlalchemy import inspect, text
+
+    db_engine = target_engine or engine
+    insp = inspect(db_engine)
+
+    if "deconstruction_works" not in insp.get_table_names():
+        with db_engine.begin() as conn:
+            _prepare_migration_conn(conn)
+            conn.execute(text("""
+                CREATE TABLE deconstruction_works (
+                    id SERIAL PRIMARY KEY,
+                    owner_user_id INTEGER NOT NULL REFERENCES users(id),
+                    title VARCHAR(255) NOT NULL,
+                    author VARCHAR(100),
+                    platform VARCHAR(20) NOT NULL DEFAULT 'qidian',
+                    source_url VARCHAR(500),
+                    source_book_id VARCHAR(100),
+                    genre VARCHAR(100),
+                    status_label VARCHAR(20),
+                    crawl_status VARCHAR(20) DEFAULT 'pending',
+                    total_chapters INTEGER,
+                    crawled_chapters INTEGER DEFAULT 0,
+                    word_count INTEGER,
+                    decon_status VARCHAR(20) DEFAULT 'not_started',
+                    current_stage INTEGER,
+                    framework_type VARCHAR(50),
+                    stages_completed JSON,
+                    summary JSON,
+                    golden_chapters JSON,
+                    chapter_summaries JSON,
+                    characters JSON,
+                    character_relations JSON,
+                    plot_lines JSON,
+                    rhythm JSON,
+                    emotion_modules JSON,
+                    worldbuilding JSON,
+                    report_markdown TEXT,
+                    writing_style JSON,
+                    writing_techniques JSON,
+                    progress_markdown TEXT,
+                    task_id VARCHAR(50),
+                    created_at TIMESTAMP DEFAULT NOW(),
+                    updated_at TIMESTAMP DEFAULT NOW()
+                )
+            """))
+            conn.execute(text("CREATE INDEX ix_decon_works_owner ON deconstruction_works(owner_user_id)"))
+            conn.execute(text("CREATE INDEX ix_decon_works_task_id ON deconstruction_works(task_id)"))
+
+    if "deconstruction_chapters" not in insp.get_table_names():
+        with db_engine.begin() as conn:
+            _prepare_migration_conn(conn)
+            conn.execute(text("""
+                CREATE TABLE deconstruction_chapters (
+                    id SERIAL PRIMARY KEY,
+                    work_id INTEGER NOT NULL REFERENCES deconstruction_works(id) ON DELETE CASCADE,
+                    chapter_number INTEGER NOT NULL,
+                    title VARCHAR(500),
+                    content TEXT,
+                    word_count INTEGER DEFAULT 0,
+                    source_url VARCHAR(500),
+                    created_at TIMESTAMP DEFAULT NOW()
+                )
+            """))
+            conn.execute(text("CREATE INDEX ix_decon_chapters_work ON deconstruction_chapters(work_id)"))
+
+    if "story_deconstruction_refs" not in insp.get_table_names():
+        with db_engine.begin() as conn:
+            _prepare_migration_conn(conn)
+            conn.execute(text("""
+                CREATE TABLE story_deconstruction_refs (
+                    id SERIAL PRIMARY KEY,
+                    story_id INTEGER NOT NULL REFERENCES stories(id) ON DELETE CASCADE,
+                    work_id INTEGER NOT NULL REFERENCES deconstruction_works(id) ON DELETE CASCADE,
+                    applied_at TIMESTAMP DEFAULT NOW(),
+                    CONSTRAINT uq_story_decon_ref UNIQUE (story_id, work_id)
+                )
+            """))
+            conn.execute(text("CREATE INDEX ix_story_decon_refs_story ON story_deconstruction_refs(story_id)"))
