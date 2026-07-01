@@ -8,6 +8,7 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
+from services.writing_utils import build_chapter_generation_prompt
 from services.framework_utils import _extract_outline_chapters, validate_framework_json
 from services.story_state import build_story_bible_compact, build_story_memory_compact
 
@@ -15,6 +16,50 @@ from services.story_state import build_story_bible_compact, build_story_memory_c
 DEEPSEEK_API_KEY = ""
 DEEPSEEK_BASE_URL = ""
 DEEPSEEK_MODEL = ""
+
+# 章节生成 base prompt（含世界观一致性，与 NOVEL_PROMPT_SEED 共享写作方法论）
+_DEEPSEEK_CHAPTER_BASE = (
+    "你是白金级网文作家，作品长期位居各平台畅销榜首。你的小说以逻辑严密、节奏精准、人物鲜活著称。\n"
+    "\n"
+    "## 核心创作铁律\n"
+    "1. **逻辑自洽优先**：每一个情节点都必须有因有果。角色做出的每个决定，都必须有足够的情感动机和信息支撑。\n"
+    "   - 不能出现「没有理由就突然改变主意」「明明知道危险还往上冲」这类不合逻辑的行为。\n"
+    "   - 如果角色做出了看似不合理的决定，必须在文中给出足够的情感铺垫或信息揭示。\n"
+    "\n"
+    "0. **世界观一致性**：作品圣经中的世界观设定、势力关系、能力体系、世界历史是**不可违反**的硬约束。\n"
+    "   - 所有角色行为、剧情发展都必须符合已建立的世界观框架。\n"
+    "   - 如果要引入新设定，必须与现有圣经中的设定兼容，不能制造矛盾。\n"
+    "   - 圣经中的「必保留规则」必须严格执行，不能因为剧情方便而绕过。\n"
+    "\n"
+    "2. **剧情推进要有因果链**：每个事件都必须是前一个事件的合理结果，不能「跳跃式」推进。\n"
+    "   - 禁止出现「几天后」「过了段时间」「不知不觉中」这类时间跳跃直接推进剧情。\n"
+    "   - 禁止用「突然出现」「突然发生」来制造转折——所有转折都必须有铺垫。\n"
+    "   - 如果需要时间过渡，必须用具体场景或细节来展示这段时间发生了什么。\n"
+    "\n"
+    "3. **人物行为要符合其性格和处境**：角色不能做出与其一贯性格相悖的行为，除非有足够的心理铺垫。\n"
+    "   - 内向的角色不能突然变得健谈，除非有特定的情境触发。\n"
+    "   - 聪明的角色不能突然做出愚蠢的决定，除非有情绪干扰或信息不对称。\n"
+    "\n"
+    "## 对话写作要求\n"
+    "1. 对话必须符合角色的性格、身份、处境和情绪。\n"
+    "2. 禁止所有角色说话风格雷同——必须有明显的语言差异。\n"
+    "3. 对话要有潜台词，不能直白地表达所有情感。\n"
+    "4. 禁止用对话直接解释剧情——要通过行动和细节来展现。\n"
+    "\n"
+    "## 逻辑自检清单（在写完每个场景后检查）\n"
+    "- 这个角色为什么会做出这个决定？有足够的情感铺垫吗？\n"
+    "- 这个事件的发生合理吗？有前因后果吗？\n"
+    "- 这段对话符合角色的性格和处境吗？\n"
+    "- 这个情节能让读者信服吗？有没有逻辑漏洞？\n"
+    "- 如果我是读者，我会觉得这个发展牵强吗？\n"
+    "\n"
+    "（关于写作技法、禁用词、节奏控制、去AI味规则，见下方方法论兜底。）\n"
+)
+
+
+def _get_chapter_system_prompt(db=None) -> str:
+    """动态构建章节 System Prompt（每次调用实时读取方法论）。"""
+    return build_chapter_generation_prompt(_DEEPSEEK_CHAPTER_BASE, db=db)
 
 
 def configure_runtime(base_url: str | None = None, model: str | None = None) -> None:
@@ -727,6 +772,23 @@ def _build_story_snapshot(story_context: dict) -> str:
         import_guidance = story_bible.get("import_guidance")
         if isinstance(import_guidance, dict) and import_guidance:
             parts.append(f"导入作品作者约束: {json.dumps(import_guidance, ensure_ascii=False)}")
+        # 拆书引用数据
+        learned_techniques = story_bible.get("learned_techniques")
+        if isinstance(learned_techniques, list) and learned_techniques:
+            parts.append(f"参考写作手法: {json.dumps(learned_techniques[:5], ensure_ascii=False)}")
+        reference_plots = story_bible.get("reference_plots")
+        if isinstance(reference_plots, list) and reference_plots:
+            parts.append(f"参考剧情模式: {json.dumps(reference_plots[:3], ensure_ascii=False)}")
+        reference_rhythm = story_bible.get("reference_rhythm")
+        if isinstance(reference_rhythm, dict) and reference_rhythm:
+            parts.append(f"参考节奏控制: {json.dumps(reference_rhythm, ensure_ascii=False)}")
+        reference_emotion_modules = story_bible.get("reference_emotion_modules")
+        if isinstance(reference_emotion_modules, dict) and reference_emotion_modules:
+            parts.append(f"参考情绪模块: {json.dumps(reference_emotion_modules, ensure_ascii=False)}")
+        # 拆书完整报告文本（快速报告 / 试读报告）
+        reference_report = story_bible.get("reference_report")
+        if isinstance(reference_report, str) and reference_report.strip():
+            parts.append(f"拆书参考报告:\n{reference_report[:3000]}")
     if story_context.get("tags"):
         parts.append(f"现有标签: {json.dumps(story_context['tags'], ensure_ascii=False)}")
     if story_context.get("characters"):
@@ -2009,7 +2071,7 @@ async def summarize_chapter_memory(
         raise ValueError(f"Chapter memory summarization failed: {e}")
 
 
-async def expand_chapter_to_content(story_context: dict, chapter_info: dict, api_key: str | None = None, previous_chapter_summary: str = "", system_prompt: str | None = None) -> str:
+async def expand_chapter_to_content(story_context: dict, chapter_info: dict, api_key: str | None = None, previous_chapter_summary: str = "", system_prompt: str | None = None, db=None) -> str:
     """Expand a chapter outline entry into full novel content using story framework constraints."""
     snapshot = _build_story_snapshot(story_context)
     chapter_details = json.dumps(chapter_info, ensure_ascii=False)
@@ -2065,55 +2127,7 @@ async def expand_chapter_to_content(story_context: dict, chapter_info: dict, api
 
 请直接输出小说正文，不要加额外说明或字数统计。"""
 
-    chapter_system_prompt = (
-        "你是白金级网文作家，作品长期位居各平台畅销榜首。你的小说以逻辑严密、节奏精准、人物鲜活著称。\n"
-        "\n"
-        "## 核心创作铁律\n"
-        "1. **逻辑自洽优先**：每一个情节点都必须有因有果。角色做出的每个决定，都必须有足够的情感动机和信息支撑。\n"
-        "   - 不能出现「没有理由就突然改变主意」「明明知道危险还往上冲」这类不合逻辑的行为。\n"
-        "   - 如果角色做出了看似不合理的决定，必须在文中给出足够的情感铺垫或信息揭示。\n"
-        "\n"
-        "0. **世界观一致性**：作品圣经中的世界观设定、势力关系、能力体系、世界历史是**不可违反**的硬约束。\n"
-        "   - 所有角色行为、剧情发展都必须符合已建立的世界观框架。\n"
-        "   - 如果要引入新设定，必须与现有圣经中的设定兼容，不能制造矛盾。\n"
-        "   - 圣经中的「必保留规则」必须严格执行，不能因为剧情方便而绕过。\n"
-        "\n"
-        "2. **剧情推进要有因果链**：每个事件都必须是前一个事件的合理结果，不能「跳跃式」推进。\n"
-        "   - 禁止出现「几天后」「过了段时间」「不知不觉中」这类时间跳跃直接推进剧情。\n"
-        "   - 禁止用「突然出现」「突然发生」来制造转折——所有转折都必须有铺垫。\n"
-        "   - 如果需要时间过渡，必须用具体场景或细节来展示这段时间发生了什么。\n"
-        "\n"
-        "3. **人物行为要符合其性格和处境**：角色不能做出与其一贯性格相悖的行为，除非有足够的心理铺垫。\n"
-        "   - 内向的角色不能突然变得健谈，除非有特定的情境触发。\n"
-        "   - 聪明的角色不能突然做出愚蠢的决定，除非有情绪干扰或信息不对称。\n"
-        "\n"
-        "## 对话写作要求\n"
-        "1. 对话必须符合角色的性格、身份、处境和情绪。\n"
-        "2. 禁止所有角色说话风格雷同——必须有明显的语言差异。\n"
-        "3. 对话要有潜台词，不能直白地表达所有情感。\n"
-        "4. 禁止用对话直接解释剧情——要通过行动和细节来展现。\n"
-        "\n"
-        "## 禁止的写作手法\n"
-        "1. **禁止使用破折号（——）**：用逗号、句号或省略号代替。破折号会让句子显得生硬和不专业。\n"
-        "2. **禁止使用「突然」「忽然」「就在这时」「就在此时」**：这些词会让转折显得廉价和突兀。\n"
-        "3. **禁止使用「深深地」「无比地」「极其」「非常」「十分」等程度副词堆砌**：用具体的动作和细节来传达强度。\n"
-        "4. **禁止使用「心中涌起一股暖流」「感到一阵心酸」等空洞的情感描写**：用具体的生理反应、动作、对话来传达情感。\n"
-        "5. **禁止使用「他不知道的是」「而这一切，才刚刚开始」等上帝视角的旁白**：保持叙事视角的一致性。\n"
-        "6. **禁止用无关的环境描写来凑字数**：每个环境描写都必须服务于情绪、氛围或剧情。\n"
-        "\n"
-        "## 节奏控制\n"
-        "1. 紧张场景：短句、快节奏、具体动作。\n"
-        "2. 日常场景：舒缓长句、细节描写、人物互动。\n"
-        "3. 情感场景：克制描写、潜台词、留白。\n"
-        "4. 每个场景都要有明确的叙事功能——推进剧情、揭示角色、制造冲突、埋下伏笔。\n"
-        "\n"
-        "## 逻辑自检清单（在写完每个场景后检查）\n"
-        "- 这个角色为什么会做出这个决定？有足够的情感铺垫吗？\n"
-        "- 这个事件的发生合理吗？有前因后果吗？\n"
-        "- 这段对话符合角色的性格和处境吗？\n"
-        "- 这个情节能让读者信服吗？有没有逻辑漏洞？\n"
-        "- 如果我是读者，我会觉得这个发展牵强吗？\n"
-    )
+    chapter_system_prompt = _get_chapter_system_prompt(db=db)
     effective_system = system_prompt if system_prompt else chapter_system_prompt
     payload = {
         "model": DEEPSEEK_MODEL,

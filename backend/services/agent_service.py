@@ -12,6 +12,7 @@ import httpx
 from database import SessionLocal
 from models import AgentPendingChange, Chapter, ChapterVideoShot, ChapterVideoWorkflow, DeconstructionResult, Story, VideoAsset
 from sqlalchemy.orm import Session
+from sqlalchemy.orm.attributes import flag_modified
 from services import deepseek as _deepseek_service
 from services.writing_utils import (
     get_banned_words,
@@ -1100,7 +1101,7 @@ async def update_chapter_content(chapter_id: int, content: str) -> dict:
         chapter.novel_content = content
         if _current_pending_changes():
             _current_pending_changes().update_new_value("chapter", chapter.id, "novel_content", content)
-        _refresh_agent_memory(chapter, db)
+        await _refresh_agent_memory(chapter, db)
         db.commit()
         logger.info("Agent tool=update_chapter_content story=%s chapter=%s len=%s", _current_story_id(), chapter_id, len(content or ""))
         return {"ok": True, "chapter_id": chapter_id}
@@ -1227,7 +1228,7 @@ async def adjust_chapter_by_instruction(chapter_id: int, instruction: str) -> di
         chapter.novel_content = new_content
         if _current_pending_changes():
             _current_pending_changes().update_new_value("chapter", chapter.id, "novel_content", new_content)
-        _refresh_agent_memory(chapter, db)
+        await _refresh_agent_memory(chapter, db)
         db.commit()
         logger.info("Agent tool=adjust_chapter_by_instruction (indirect) story=%s chapter=%s new_len=%s", _current_story_id(), chapter_id, len(new_content))
         return {"ok": True, "chapter_id": chapter_id, "content_length": len(new_content)}
@@ -1709,7 +1710,7 @@ async def batch_adjust_chapters(chapters: list[dict]) -> dict:
             chapter.novel_content = new_content
             if _current_pending_changes():
                 _current_pending_changes().update_new_value("chapter", chapter.id, "novel_content", new_content)
-            _refresh_agent_memory(chapter, db)
+            await _refresh_agent_memory(chapter, db)
             db.commit()
             return {"chapter_id": chapter_id, "ok": True}
         except Exception as e:
@@ -1801,6 +1802,7 @@ async def add_chapter_plan(story_id: int, chapter: dict) -> dict:
                 # 更新已有章节
                 existing.update(chapter)
                 story.outline = outline
+                flag_modified(story, "outline")
                 if _current_pending_changes():
                     _current_pending_changes().update_new_value("story", story.id, "outline", outline)
                 db.commit()
@@ -1831,6 +1833,7 @@ async def add_chapter_plan(story_id: int, chapter: dict) -> dict:
         act_chapters.sort(key=lambda x: x.get("chapter_number", 0) if isinstance(x, dict) else 0)
 
         story.outline = outline
+        flag_modified(story, "outline")
         if _current_pending_changes():
             _current_pending_changes().update_new_value("story", story.id, "outline", outline)
         db.commit()
@@ -1928,6 +1931,7 @@ async def bulk_add_chapter_plans(story_id: int, chapters: list[dict]) -> dict:
                 results.append({"chapter_number": chapter_number, "ok": True, "action": "added"})
             act_chapters.sort(key=lambda x: x.get("chapter_number", 0) if isinstance(x, dict) else 0)
         story.outline = outline
+        flag_modified(story, "outline")
         if _current_pending_changes():
             _current_pending_changes().update_new_value("story", story.id, "outline", outline)
         db.commit()
