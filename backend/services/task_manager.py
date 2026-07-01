@@ -195,7 +195,7 @@ class TaskManager:
                 # 自动回退配额（异步任务失败时回退已扣除的次数）
                 if task.quota_user_id and task.quota_feature_key and (task.quota_amount or 0) > 0:
                     refund_amount = task.quota_amount or 0
-                    self.refund_quota(task.quota_user_id, task.quota_feature_key, refund_amount, db)
+                    self.refund_quota(task.quota_user_id, task.quota_feature_key, refund_amount, db, task.quota_period_key)
                 self._merge_task_metadata(
                     task,
                     {
@@ -247,6 +247,7 @@ class TaskManager:
         quota_user_id: Optional[int] = None,
         quota_feature_key: Optional[str] = None,
         quota_amount: int = 0,
+        quota_period_key: Optional[str] = None,
     ) -> None:
         """Create a persisted task record."""
         db = SessionLocal()
@@ -263,6 +264,7 @@ class TaskManager:
                 quota_user_id=quota_user_id,
                 quota_feature_key=quota_feature_key,
                 quota_amount=quota_amount,
+                quota_period_key=quota_period_key,
             )
             db.add(task)
             db.commit()
@@ -280,11 +282,11 @@ class TaskManager:
         else:
             self._mark_task_succeeded(task_id, task.result())
 
-    def refund_quota(self, user_id: int, feature_key: str, amount: int, db) -> None:
+    def refund_quota(self, user_id: int, feature_key: str, amount: int, db, period_key: Optional[str] = None) -> None:
         """当异步任务失败时回退已扣除的配额。"""
         if amount <= 0:
             return
-        period_key = datetime.utcnow().strftime("%Y%m")
+        period_key = period_key or datetime.utcnow().strftime("%Y%m")
         usage = db.query(UserUsageMonthly).filter(
             UserUsageMonthly.user_id == user_id,
             UserUsageMonthly.feature_key == feature_key,
@@ -310,6 +312,7 @@ class TaskManager:
         quota_user_id: Optional[int] = None,
         quota_feature_key: Optional[str] = None,
         quota_amount: int = 0,
+        quota_period_key: Optional[str] = None,
         **kwargs
     ) -> str:
         """Submit a coroutine to run in the background."""
@@ -318,7 +321,7 @@ class TaskManager:
             initial_metadata.update(metadata)
         self._create_task_record(
             task_id, task_type, max_retries, story_id, chapter_id, shot_id,
-            initial_metadata, quota_user_id, quota_feature_key, quota_amount,
+            initial_metadata, quota_user_id, quota_feature_key, quota_amount, quota_period_key,
         )
 
         @self.with_retry(max_retries=max_retries, task_id=task_id)
