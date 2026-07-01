@@ -838,9 +838,9 @@ def _custom_text_provider_active(request: Request) -> bool:
         return False
     user = getattr(request.state, "current_user", None)
     capabilities = _user_api_override_capabilities(user, db)
-    if not capabilities["can_override_api_url"]:
-        return False
-    return bool((request.headers.get("x-deepseek-base-url") or "").strip())
+    has_custom_key = capabilities["can_override_api_key"] and bool((request.headers.get("x-deepseek-api-key") or "").strip())
+    has_custom_url = capabilities["can_override_api_url"] and bool((request.headers.get("x-deepseek-base-url") or "").strip())
+    return has_custom_key or has_custom_url
 
 
 def _custom_image_provider_active(request: Request) -> bool:
@@ -849,9 +849,9 @@ def _custom_image_provider_active(request: Request) -> bool:
         return False
     user = getattr(request.state, "current_user", None)
     capabilities = _user_api_override_capabilities(user, db)
-    if not capabilities["can_override_api_url"]:
-        return False
-    return bool((request.headers.get("x-image-base-url") or "").strip())
+    has_custom_key = capabilities["can_override_api_key"] and bool((request.headers.get("x-image-api-key") or "").strip())
+    has_custom_url = capabilities["can_override_api_url"] and bool((request.headers.get("x-image-base-url") or "").strip())
+    return has_custom_key or has_custom_url
 
 
 def _check_and_consume_feature_quota(
