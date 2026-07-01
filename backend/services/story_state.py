@@ -140,6 +140,33 @@ def build_story_bible_compact(story_bible: dict | None) -> dict[str, Any]:
         if value:
             compact[f"import_{key}"] = value
 
+    # 拆书引用数据：让 AI 可以参考已拆书作品的写作手法和剧情模式
+    learned_techniques = story_bible.get("learned_techniques")
+    if isinstance(learned_techniques, list) and learned_techniques:
+        compact["learned_techniques"] = learned_techniques[:10]
+
+    reference_plots = story_bible.get("reference_plots")
+    if isinstance(reference_plots, list) and reference_plots:
+        compact["reference_plots"] = reference_plots[:5]
+
+    reference_rhythm = story_bible.get("reference_rhythm")
+    if isinstance(reference_rhythm, dict) and reference_rhythm:
+        compact["reference_rhythm"] = reference_rhythm
+
+    reference_emotion_modules = story_bible.get("reference_emotion_modules")
+    if isinstance(reference_emotion_modules, dict) and reference_emotion_modules:
+        compact["reference_emotion_modules"] = reference_emotion_modules
+
+    # 拆书作品概要（多个引用时合并）
+    decon_titles = []
+    for key, value in story_bible.items():
+        if key.startswith("deconstruction_") and isinstance(value, dict):
+            title = value.get("title")
+            if title:
+                decon_titles.append(title)
+    if decon_titles:
+        compact["referenced_deconstruction_works"] = decon_titles
+
     return compact
 
 

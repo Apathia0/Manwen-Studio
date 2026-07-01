@@ -225,6 +225,7 @@ def get_effective_prompt(story_id: int, prompt_type: str, db) -> str:
     """获取作品实际使用的 prompt。
 
     优先级：模板完整 prompt > 模板参数生成 > 系统默认（数据库）
+    章节类型（chapter）自动追加写作方法论作为兜底。
 
     Args:
         story_id: 作品 ID
@@ -238,22 +239,30 @@ def get_effective_prompt(story_id: int, prompt_type: str, db) -> str:
 
     binding = db.query(StoryTemplateBinding).filter_by(story_id=story_id).first()
 
+    prompt: str = ""
     if binding and binding.template:
         template = binding.template
 
-        # 优先使用模板完整 prompt
         full_prompt = getattr(template, f"{prompt_type}_prompt", None)
         if full_prompt and full_prompt.strip():
-            return full_prompt
+            prompt = full_prompt
+        else:
+            system_default = _get_db_default(prompt_type, db)
+            params = getattr(template, f"{prompt_type}_params", None)
+            if params and isinstance(params, dict):
+                prompt = build_prompt_from_params(system_default, params, prompt_type)
+            else:
+                prompt = system_default
+    else:
+        prompt = _get_db_default(prompt_type, db)
 
-        # 从参数生成，以系统默认 prompt 为基底
-        system_default = _get_db_default(prompt_type, db)
-        params = getattr(template, f"{prompt_type}_params", None)
-        if params and isinstance(params, dict):
-            return build_prompt_from_params(system_default, params, prompt_type)
+    if prompt_type == "chapter" and prompt:
+        from services.writing_utils import get_methodology_from_db
+        methodology = get_methodology_from_db(db)
+        if methodology and methodology not in prompt:
+            prompt = prompt + "\n\n" + methodology
 
-    # 回退到系统默认（数据库）
-    return _get_db_default(prompt_type, db)
+    return prompt
 
 
 def _get_db_default(prompt_type: str, db) -> str:
