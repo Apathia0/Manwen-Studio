@@ -28,6 +28,11 @@ export const USER_FEATURE_META: Record<string, { label: string; description: str
     description: '用于框架调整、继续扩展、文本改写、正文调整、质量评估与单项重生成。',
     unit: '次/月',
   },
+  'deconstruction.run.monthly_limit': {
+    label: '拆书次数',
+    description: '用于启动拆书分析任务，提交任务时扣除，任务失败后自动返还。',
+    unit: '次/月',
+  },
   'manga.max_image_count_per_chapter': {
     label: '单章节最大出图',
     description: '单个章节允许生成的最大图片数量。',

@@ -878,6 +878,7 @@ export interface PlatformSettings {
     quota_scene_generate: number;
     quota_manga_image_generate: number;
     quota_ai_text_advanced: number;
+    quota_deconstruction_run: number;
     quota_video_shot_split: number;
     quota_video_generate: number;
   };
@@ -3996,7 +3997,7 @@ export interface CrawlStatus {
 // ── 拆书 ──────────────────────────────────────────
 
 export interface DeconstructionStatus {
-  status: 'not_started' | 'pending' | 'running' | 'completed' | 'failed';
+  status: 'not_started' | 'pending' | 'running' | 'completed' | 'failed' | 'paused_after_stage1';
   current_stage: number | null;
   stages_completed: number[];
   progress: string | null;
@@ -4020,6 +4021,7 @@ export interface DeconstructionResult {
   writing_techniques: Record<string, any>[] | null;
   created_at: string | null;
   updated_at: string | null;
+  progress_markdown: string | null;
 }
 
 export interface CharacterVersion {
@@ -4470,14 +4472,28 @@ export async function getCrawlStatus(storyId: number): Promise<CrawlStatus> {
 
 // ── 拆书 API ──────────────────────────────────────
 
-export async function startDeconstruction(storyId: number): Promise<{ task_id: string; message: string }> {
+export async function startDeconstruction(storyId: number, maxChapters?: number): Promise<{ task_id: string; message: string }> {
   const res = await fetch(`${BASE}/api/stories/${storyId}/deconstruct/start`, {
     method: 'POST',
     headers: apiHeaders(),
+    body: JSON.stringify(maxChapters ? { max_chapters: maxChapters } : {}),
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: '启动失败' }));
     throw new Error(err.detail || '启动失败');
+  }
+  return res.json();
+}
+
+export async function resumeDeconstruction(storyId: number, mode: 'full' | 'partial' = 'full'): Promise<{ task_id: string; message: string }> {
+  const res = await fetch(`${BASE}/api/stories/${storyId}/deconstruct/resume`, {
+    method: 'POST',
+    headers: apiHeaders(),
+    body: JSON.stringify({ mode }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: '续跑失败' }));
+    throw new Error(err.detail || '续跑失败');
   }
   return res.json();
 }
@@ -4516,5 +4532,250 @@ export async function applyDeconstructionToBible(storyId: number): Promise<{ mes
     headers: apiHeaders(),
   });
   if (!res.ok) throw new Error('注入失败');
+  return res.json();
+}
+
+// ── 独立拆书库 API ─────────────────────────────────
+
+export interface DeconstructionWorkItem {
+  id: number;
+  title: string;
+  author: string | null;
+  platform: string;
+  genre: string | null;
+  status_label: string | null;
+  crawl_status: string;
+  decon_status: string;
+  total_chapters: number | null;
+  crawled_chapters: number;
+  word_count: number | null;
+  task_id: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+  progress_markdown: string | null;
+}
+
+export interface DeconstructionWorkResult {
+  id: number;
+  title: string;
+  author: string | null;
+  status: string;
+  summary: Record<string, any> | null;
+  golden_chapters: Record<string, any> | null;
+  chapter_summaries: Record<string, any>[] | null;
+  characters: Record<string, any>[] | null;
+  character_relations: Record<string, any>[] | null;
+  plot_lines: Record<string, any>[] | null;
+  rhythm: Record<string, any> | null;
+  emotion_modules: Record<string, any> | null;
+  worldbuilding: Record<string, any> | null;
+  report_markdown: string | null;
+  writing_style: Record<string, any> | null;
+  writing_techniques: Record<string, any>[] | null;
+  created_at: string | null;
+  updated_at: string | null;
+  progress_markdown: string | null;
+}
+
+export interface DeconstructionRefItem {
+  id: number;
+  work_id: number;
+  title: string;
+  author: string | null;
+  genre: string | null;
+  applied_at: string | null;
+}
+
+// 通过文件上传创建拆书工作
+export async function importDeconstructionFile(file: File, title?: string, author?: string): Promise<{ work_id: number; task_id: string; message: string }> {
+  const formData = new FormData();
+  formData.append('file', file);
+  if (title) formData.append('title', title);
+  if (author) formData.append('author', author);
+
+  const keys = getApiKeySettings();
+  const token = getAuthToken();
+  const headers: Record<string, string> = {};
+  if (API_TOKEN) headers['X-API-Token'] = API_TOKEN;
+  if (token) headers['Authorization'] = `Bearer ${token}`;
+  if (keys.deepseekApiKey) headers['X-DeepSeek-API-Key'] = keys.deepseekApiKey;
+  if (keys.deepseekBaseUrl) headers['X-DeepSeek-Base-URL'] = keys.deepseekBaseUrl;
+  if (keys.deepseekModel) headers['X-DeepSeek-Model'] = keys.deepseekModel;
+  if (keys.imageApiKey) headers['X-Image-API-Key'] = keys.imageApiKey;
+  if (keys.imageBaseUrl) headers['X-Image-Base-URL'] = keys.imageBaseUrl;
+  if (keys.imageModel) headers['X-Image-Model'] = keys.imageModel;
+
+  const res = await fetch(`${BASE}/api/deconstruct/works/import-file`, {
+    method: 'POST',
+    headers,
+    body: formData,
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: '上传失败' }));
+    throw new Error(err.detail || '上传失败');
+  }
+  return res.json();
+}
+
+// 搜书（独立拆书库）
+export async function searchDeconstructNovels(keyword: string, platform: string = 'qidian', limit: number = 10): Promise<NovelSearchResponse> {
+  const params = new URLSearchParams({ keyword, platform, limit: String(limit) });
+  const res = await fetch(`${BASE}/api/deconstruct/search?${params}`, {
+    headers: apiHeaders(),
+  });
+  if (!res.ok) throw new Error('搜索失败');
+  return res.json();
+}
+
+// 拆书库列表
+export async function listDeconstructionWorks(): Promise<DeconstructionWorkItem[]> {
+  const res = await fetch(`${BASE}/api/deconstruct/works`, {
+    headers: apiHeaders(),
+  });
+  if (!res.ok) throw new Error('获取拆书库失败');
+  return res.json();
+}
+
+// 通过上传原文创建拆书工作
+export async function importDeconstructionText(data: {
+  title: string;
+  text: string;
+  author?: string;
+  platform?: string;
+  genre?: string;
+}): Promise<{ work_id: number; message: string }> {
+  const res = await fetch(`${BASE}/api/deconstruct/works/import-text`, {
+    method: 'POST',
+    headers: apiHeaders(true),
+    body: JSON.stringify(data),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: '导入失败' }));
+    throw new Error(err.detail || '导入失败');
+  }
+  return res.json();
+}
+
+// 创建拆书工作 + 爬取
+export async function createDeconstructionWork(data: { title: string; book_id: string; platform?: string; author?: string; genre?: string; status_label?: string; max_chapters?: number }): Promise<{ work_id: number; task_id: string; message: string }> {
+  const res = await fetch(`${BASE}/api/deconstruct/works`, {
+    method: 'POST',
+    headers: apiHeaders(true),
+    body: JSON.stringify(data),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: '创建失败' }));
+    throw new Error(err.detail || '创建失败');
+  }
+  return res.json();
+}
+
+// 爬取状态
+export async function getDeconstructWorkCrawlStatus(workId: number): Promise<CrawlStatus> {
+  const res = await fetch(`${BASE}/api/deconstruct/works/${workId}/crawl/status`, {
+    headers: apiHeaders(),
+  });
+  if (!res.ok) throw new Error('获取状态失败');
+  return res.json();
+}
+
+// 启动拆书
+export async function startDeconstructWork(workId: number, maxChapters?: number): Promise<{ task_id: string; message: string }> {
+  const res = await fetch(`${BASE}/api/deconstruct/works/${workId}/start`, {
+    method: 'POST',
+    headers: apiHeaders(),
+    body: JSON.stringify(maxChapters ? { max_chapters: maxChapters } : {}),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: '启动失败' }));
+    throw new Error(err.detail || '启动失败');
+  }
+  return res.json();
+}
+
+// 拆书状态
+export async function getDeconstructWorkStatus(workId: number): Promise<DeconstructionStatus & { work_id: number }> {
+  const res = await fetch(`${BASE}/api/deconstruct/works/${workId}/status`, {
+    headers: apiHeaders(),
+  });
+  if (!res.ok) throw new Error('获取状态失败');
+  return res.json();
+}
+
+// 拆书结果
+export async function resumeDeconstructWork(workId: number, mode: 'full' | 'partial' = 'full'): Promise<{ task_id: string; message: string }> {
+  const res = await fetch(`${BASE}/api/deconstruct/works/${workId}/resume`, {
+    method: 'POST',
+    headers: apiHeaders(),
+    body: JSON.stringify({ mode }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: '续跑失败' }));
+    throw new Error(err.detail || '续跑失败');
+  }
+  return res.json();
+}
+
+export async function getDeconstructWorkResult(workId: number): Promise<DeconstructionWorkResult> {
+  const res = await fetch(`${BASE}/api/deconstruct/works/${workId}/result`, {
+    headers: apiHeaders(),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: '获取结果失败' }));
+    throw new Error(err.detail || '获取结果失败');
+  }
+  return res.json();
+}
+
+// 取消拆书
+export async function cancelDeconstructWork(workId: number): Promise<{ message: string }> {
+  const res = await fetch(`${BASE}/api/deconstruct/works/${workId}/cancel`, {
+    method: 'POST',
+    headers: apiHeaders(),
+  });
+  if (!res.ok) throw new Error('取消失败');
+  return res.json();
+}
+
+// 删除拆书工作
+export async function deleteDeconstructionWork(workId: number): Promise<{ message: string }> {
+  const res = await fetch(`${BASE}/api/deconstruct/works/${workId}`, {
+    method: 'DELETE',
+    headers: apiHeaders(),
+  });
+  if (!res.ok) throw new Error('删除失败');
+  return res.json();
+}
+
+// 引用拆书结果到作品
+export async function addDeconstructionRef(storyId: number, workId: number): Promise<{ message: string }> {
+  const res = await fetch(`${BASE}/api/stories/${storyId}/deconstruct/refs`, {
+    method: 'POST',
+    headers: apiHeaders(true),
+    body: JSON.stringify({ work_id: workId }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: '引用失败' }));
+    throw new Error(err.detail || '引用失败');
+  }
+  return res.json();
+}
+
+// 查看作品引用的拆书结果
+export async function listDeconstructionRefs(storyId: number): Promise<DeconstructionRefItem[]> {
+  const res = await fetch(`${BASE}/api/stories/${storyId}/deconstruct/refs`, {
+    headers: apiHeaders(),
+  });
+  if (!res.ok) throw new Error('获取引用列表失败');
+  return res.json();
+}
+
+// 取消引用
+export async function removeDeconstructionRef(storyId: number, refId: number): Promise<{ message: string }> {
+  const res = await fetch(`${BASE}/api/stories/${storyId}/deconstruct/refs/${refId}`, {
+    method: 'DELETE',
+    headers: apiHeaders(),
+  });
+  if (!res.ok) throw new Error('取消引用失败');
   return res.json();
 }
