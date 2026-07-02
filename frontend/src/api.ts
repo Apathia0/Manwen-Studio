@@ -4703,11 +4703,11 @@ export async function getDeconstructWorkStatus(workId: number): Promise<Deconstr
 }
 
 // 拆书结果
-export async function resumeDeconstructWork(workId: number, mode: 'full' | 'partial' | 'quick_report' = 'full'): Promise<{ task_id: string; message: string }> {
+export async function resumeDeconstructWork(workId: number, mode: 'full' | 'partial' | 'quick_report' = 'full', maxChapters?: number): Promise<{ task_id: string; message: string }> {
   const res = await fetch(`${BASE}/api/deconstruct/works/${workId}/resume`, {
     method: 'POST',
     headers: apiHeaders(),
-    body: JSON.stringify({ mode }),
+    body: JSON.stringify({ mode, max_chapters: maxChapters }),
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: '续跑失败' }));

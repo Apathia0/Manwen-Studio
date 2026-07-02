@@ -42,6 +42,7 @@ export default function DeconstructionLibraryPage({ onNavigate }: Props) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [deleting, setDeleting] = useState<number | null>(null);
+  const [navigatingId, setNavigatingId] = useState<number | null>(null);
 
   const loadWorks = useCallback(async () => {
     try {
@@ -269,10 +270,18 @@ export default function DeconstructionLibraryPage({ onNavigate }: Props) {
 
               {/* 点击进入详情 */}
               <button
-                onClick={() => onNavigate('deconstruction-work', work.id)}
-                className="mt-3 w-full rounded-lg border border-blue-200 bg-blue-50 px-3 py-1.5 text-xs font-medium text-blue-700 hover:bg-blue-100"
+                onClick={() => {
+                  setNavigatingId(work.id);
+                  onNavigate('deconstruction-work', work.id);
+                }}
+                disabled={navigatingId === work.id}
+                className={`mt-3 w-full rounded-lg border px-3 py-1.5 text-xs font-medium transition ${
+                  navigatingId === work.id
+                    ? 'border-slate-200 bg-slate-100 text-slate-400'
+                    : 'border-blue-200 bg-blue-50 text-blue-700 hover:bg-blue-100'
+                }`}
               >
-                查看详情
+                {navigatingId === work.id ? '加载中...' : '查看详情'}
               </button>
             </div>
           ))}

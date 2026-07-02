@@ -78,12 +78,12 @@
               </view>
             </view>
 
-            <!-- 框架 AI 对话 -->
+            <!-- 框架  -->
             <view class="fp__section fp__card">
               <view class="fp__section-header">
                 <view class="fp__section-title">
                   <lv-icon name="MessageSquare" :size="16" color="#2563eb" />
-                  <text class="fp__section-label">框架 AI 对话</text>
+                  <text class="fp__section-label">框架版本查看</text>
                 </view>
                 <view class="fp__header-actions">
                   <view v-if="hasFramework" class="fp__header-btn" :class="{ 'fp__header-btn--disabled': continuingFramework }" @tap="!continuingFramework && handleContinueFramework()">

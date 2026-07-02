@@ -729,7 +729,10 @@ function App() {
               return (
                 <button
                   key={item.key}
-                  onClick={() => setRoute(item.key)}
+                  onClick={() => {
+                    if (item.key === 'deconstruction-library') setDeconWorkId(0);
+                    setRoute(item.key);
+                  }}
                   className={`flex w-full items-center gap-2 rounded-2xl px-3 py-2.5 text-left text-sm transition ${
                     active
                       ? 'bg-[linear-gradient(180deg,_#fafdff_0%,_#e8f1ff_100%)] text-[#1d4ed8] shadow-[0_10px_24px_rgba(59,130,246,0.14)]'

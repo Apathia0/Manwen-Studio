@@ -127,6 +127,9 @@ export default function EditorToolbar({
     return activeAction === action;
   };
 
+  // UI 入口屏蔽：隐藏工具栏按钮（功能代码保留）
+  return null;
+
   const generateLabel = isLoading('generate')
     ? '生成中...'
     : hasExistingChat

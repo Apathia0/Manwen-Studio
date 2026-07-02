@@ -102,6 +102,7 @@ export default function DeconstructionWorkPage({ workId, onBack }: Props) {
   const [deconStatus, setDeconStatus] = useState<DeconstructionStatus | null>(null);
   const [result, setResult] = useState<DeconstructionWorkResult | null>(null);
   const [activeTab, setActiveTab] = useState<'report' | 'characters' | 'plots' | 'style'>('report');
+  const [resuming, setResuming] = useState(false);
 
   // 初始加载：根据 workId 判断是新创建还是已有
   useEffect(() => {
@@ -128,9 +129,7 @@ export default function DeconstructionWorkPage({ workId, onBack }: Props) {
       if (found.decon_status === 'paused_after_stage1' || (found.decon_status && found.decon_status.startsWith('paused_after_partial'))) {
         setPageState('deconstructing');
         setDeconStatus({ status: found.decon_status, current_stage: 1, stages_completed: [0, 0.5, 1], progress: found.progress_markdown || null, result_id: null });
-        if (found.decon_status && found.decon_status.startsWith('paused_after_partial')) {
-          fetchResult();
-        }
+        fetchResult();
       } else if (found.decon_status === 'completed') {
         setPageState('completed');
         fetchResult();
@@ -207,8 +206,10 @@ export default function DeconstructionWorkPage({ workId, onBack }: Props) {
           return s;
         });
         if (s.status === 'paused_after_stage1' || (s.status && s.status.startsWith('paused_after_partial'))) {
-          // 停靠状态：若为试读完成则拉取结果，停止轮询
           if (s.status && s.status.startsWith('paused_after_partial')) {
+            fetchResult();
+          }
+          if (s.status === 'paused_after_stage1') {
             fetchResult();
           }
           return s;
@@ -361,6 +362,7 @@ export default function DeconstructionWorkPage({ workId, onBack }: Props) {
   // 启动拆书
   const handleStartDecon = async () => {
     setError(null);
+    setResuming(true);
     const targetId = work?.id || workId;
     try {
       await startDeconstructWork(targetId);
@@ -369,6 +371,8 @@ export default function DeconstructionWorkPage({ workId, onBack }: Props) {
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : '启动失败';
       setError(msg);
+    } finally {
+      setResuming(false);
     }
   };
 
@@ -377,6 +381,7 @@ export default function DeconstructionWorkPage({ workId, onBack }: Props) {
   // 续跑拆书
   const handleResume = async () => {
     setError(null);
+    setResuming(true);
     const targetId = work?.id || workId;
     try {
       await resumeDeconstructWork(targetId, 'full');
@@ -385,24 +390,31 @@ export default function DeconstructionWorkPage({ workId, onBack }: Props) {
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : '续跑失败';
       setError(msg);
+    } finally {
+      setResuming(false);
     }
   };
 
   const handlePartialResume = async () => {
     setError(null);
+    setResuming(true);
     const targetId = work?.id || workId;
     try {
-      await resumeDeconstructWork(targetId, 'partial');
+      const count = parseInt(String(partialCount), 10);
+      await resumeDeconstructWork(targetId, 'partial', count);
       setPageState('deconstructing');
       setDeconStatus({ status: 'running', current_stage: 2, stages_completed: [0, 0.5, 1], progress: null, result_id: null });
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : '试读启动失败';
       setError(msg);
+    } finally {
+      setResuming(false);
     }
   };
 
   const handleQuickReport = async () => {
     setError(null);
+    setResuming(true);
     const targetId = work?.id || workId;
     try {
       await resumeDeconstructWork(targetId, 'quick_report');
@@ -411,6 +423,8 @@ export default function DeconstructionWorkPage({ workId, onBack }: Props) {
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : '报告生成失败';
       setError(msg);
+    } finally {
+      setResuming(false);
     }
   };
 
@@ -823,6 +837,31 @@ export default function DeconstructionWorkPage({ workId, onBack }: Props) {
   if (pageState === 'deconstructing') {
     // 停靠中（黄金三章后）
     if (deconStatus?.status === 'paused_after_stage1') {
+      if (result?.report_markdown) {
+        return (
+          <div className="flex h-full flex-col">
+            {header}
+            <div className="flex flex-1 flex-col p-4">
+              <div className="flex items-center justify-between mb-4">
+                <h3 className="text-lg font-semibold text-amber-700">黄金三章报告</h3>
+                <button
+                  onClick={handleResume}
+                  disabled={resuming}
+                  className={`flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-medium text-white transition ${resuming ? 'cursor-not-allowed bg-blue-400' : 'bg-blue-600 hover:bg-blue-700'}`}
+                >
+                  {resuming ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
+                  继续全量拆解
+                </button>
+              </div>
+              <div className="flex-1 overflow-auto rounded-lg bg-white p-4">
+                <div className="prose prose-sm max-w-none text-sm leading-relaxed whitespace-pre-wrap text-slate-700">
+                  {result.report_markdown}
+                </div>
+              </div>
+            </div>
+          </div>
+        );
+      }
       return (
         <div className="flex flex-1 flex-col items-center justify-center p-8">
           <CheckCircle2 className="h-16 w-16 text-amber-400" />
@@ -835,9 +874,10 @@ export default function DeconstructionWorkPage({ workId, onBack }: Props) {
           <div className="mt-4 flex items-center gap-3">
             <button
               onClick={handleResume}
-              className="flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700"
+              disabled={resuming}
+              className={`flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-medium text-white transition ${resuming ? 'cursor-not-allowed bg-blue-400' : 'bg-blue-600 hover:bg-blue-700'}`}
             >
-              <Play className="h-4 w-4" />
+              {resuming ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
               继续全量拆解
             </button>
             <button
@@ -845,9 +885,10 @@ export default function DeconstructionWorkPage({ workId, onBack }: Props) {
                 const count = parseInt(String(partialCount), 10);
                 if (count >= 10) { handlePartialResume(); }
               }}
-              className="flex items-center gap-2 rounded-lg bg-amber-500 px-4 py-2 text-sm font-medium text-white hover:bg-amber-600"
+              disabled={resuming}
+              className={`flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-medium text-white transition ${resuming ? 'cursor-not-allowed bg-amber-300' : 'bg-amber-500 hover:bg-amber-600'}`}
             >
-              <Play className="h-4 w-4" />
+              {resuming ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
               试读 前
               <input
                 type="number"
@@ -855,15 +896,17 @@ export default function DeconstructionWorkPage({ workId, onBack }: Props) {
                 value={partialCount}
                 onChange={(e) => setPartialCount(parseInt(e.target.value, 10) || 50)}
                 onClick={(e) => e.stopPropagation()}
+                disabled={resuming}
                 className="w-16 rounded border border-amber-300 bg-amber-50 px-1 py-0.5 text-center text-sm font-bold text-amber-800"
               />
               章
             </button>
             <button
               onClick={handleQuickReport}
-              className="flex items-center gap-2 rounded-lg border border-green-400 bg-green-50 px-4 py-2 text-sm font-medium text-green-700 hover:bg-green-100"
+              disabled={resuming}
+              className={`flex items-center gap-2 rounded-lg border px-4 py-2 text-sm font-medium transition ${resuming ? 'cursor-not-allowed border-slate-200 bg-slate-50 text-slate-400' : 'border-green-400 bg-green-50 text-green-700 hover:bg-green-100'}`}
             >
-              <FileText className="h-4 w-4" />
+              {resuming ? <Loader2 className="h-4 w-4 animate-spin" /> : <FileText className="h-4 w-4" />}
               生成三章报告
             </button>
           </div>
@@ -888,9 +931,10 @@ export default function DeconstructionWorkPage({ workId, onBack }: Props) {
               <h3 className="text-lg font-semibold text-green-700">试读报告（前{rangeNum}章）</h3>
               <button
                 onClick={handleResume}
-                className="flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700"
+                disabled={resuming}
+                className={`flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-medium text-white transition ${resuming ? 'cursor-not-allowed bg-blue-400' : 'bg-blue-600 hover:bg-blue-700'}`}
               >
-                <Play className="h-4 w-4" />
+                {resuming ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
                 继续全量拆解
               </button>
             </div>
@@ -929,9 +973,10 @@ export default function DeconstructionWorkPage({ workId, onBack }: Props) {
             </div>
             <button
               onClick={handleStartDecon}
-              className="flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700"
+              disabled={resuming}
+              className={`flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-medium text-white transition ${resuming ? 'cursor-not-allowed bg-blue-400' : 'bg-blue-600 hover:bg-blue-700'}`}
             >
-              <Play className="h-4 w-4" />
+              {resuming ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
               开始拆书
             </button>
             {error && <p className="text-sm text-red-500">{error}</p>}
@@ -1119,9 +1164,10 @@ export default function DeconstructionWorkPage({ workId, onBack }: Props) {
         </div>
         <button
           onClick={handleStartDecon}
-          className="flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700"
+          disabled={resuming}
+          className={`flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-medium text-white transition ${resuming ? 'cursor-not-allowed bg-blue-400' : 'bg-blue-600 hover:bg-blue-700'}`}
         >
-          <Play className="h-4 w-4" />
+          {resuming ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
           重新开始
         </button>
         {deconStatus?.progress && (

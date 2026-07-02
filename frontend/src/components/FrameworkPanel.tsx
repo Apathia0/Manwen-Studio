@@ -201,10 +201,10 @@ export default memo(function FrameworkPanel({ story, chapters, onChapterSelect, 
             <div className="flex items-center justify-between px-3 py-2 border-b border-[#d9dfd7]">
               <div className="flex items-center gap-2">
                 <MessageSquare size={13} className="text-[#2563eb]" />
-                <span className="text-xs font-semibold text-slate-700 uppercase tracking-wide">框架 AI 对话</span>
+                <span className="text-xs font-semibold text-slate-700 uppercase tracking-wide">框架 </span>
               </div>
               <div className="flex items-center gap-2">
-                {hasFrameworkContent(story) && (
+                {false && hasFrameworkContent(story) && (
                   <button
                     onClick={handleContinueFramework}
                     disabled={continueLoading || chatLoading}
@@ -225,7 +225,7 @@ export default memo(function FrameworkPanel({ story, chapters, onChapterSelect, 
                 <button
                   onClick={() => setChatMessages([])}
                   disabled={chatLoading || continueLoading || chatMessages.length === 0}
-                  className="text-[11px] text-slate-500 hover:text-slate-700 disabled:opacity-40 transition-colors"
+                  className="text-[11px] text-slate-500 hover:text-slate-700 disabled:opacity-40 transition-colors hidden"
                 >
                   清空对话
                 </button>
@@ -286,7 +286,7 @@ export default memo(function FrameworkPanel({ story, chapters, onChapterSelect, 
               </div>
             )}
 
-            <div className="max-h-64 overflow-y-auto px-3 py-3 space-y-2">
+            <div className="max-h-64 overflow-y-auto px-3 py-3 space-y-2 hidden">
               {chatMessages.length === 0 ? (
                 <p className="text-xs text-slate-500 leading-relaxed">
                   {hasFrameworkContent(story)
@@ -327,7 +327,7 @@ export default memo(function FrameworkPanel({ story, chapters, onChapterSelect, 
                 </div>
               )}
             </div>
-            <div className="border-t border-[#d9dfd7] px-3 py-3 space-y-2">
+            <div className="border-t border-[#d9dfd7] px-3 py-3 space-y-2 hidden">
               <div className="flex items-center gap-1">
                 {(['incremental', 'replace', 'analyze'] as const).map((mode) => (
                   <button

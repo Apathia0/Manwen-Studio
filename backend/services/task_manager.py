@@ -36,7 +36,7 @@ class TaskManager:
         msg = str(exc).lower()
         non_retry_terms = (
             "api key", "auth", "unauthorized", "forbidden", "quota",
-            "content policy", "invalid request", "401", "403", "400",
+            "content policy", "invalid request", "401", "400",
             "鉴权", "认证", "未配置", "不能为空", "额度", "风控",
         )
         if any(term in msg for term in non_retry_terms):
@@ -45,7 +45,7 @@ class TaskManager:
         retry_terms = (
             "timeout", "timed out", "rate limit", "too many requests",
             "temporar", "service unavailable", "network", "transport",
-            "connection", "429", "500", "502", "503", "504",
+            "connection", "403", "429", "500", "502", "503", "504",
             "超时", "网络", "限流", "暂时", "稍后",
         )
         return any(term in msg for term in retry_terms)
