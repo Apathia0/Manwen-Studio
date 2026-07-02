@@ -212,11 +212,11 @@ export default function EditorToolbar({
               </button>
             </div>
             <div className="p-5 space-y-3">
-              {renderScore('整体', qualityScore.overall)}
-              {renderScore('内容', qualityScore.content)}
-              {renderScore('文笔', qualityScore.writing)}
-              {renderScore('情节', qualityScore.plot)}
-              {renderScore('角色', qualityScore.character)}
+              {renderScore('整体', qualityScore?.overall)}
+              {renderScore('内容', qualityScore?.content)}
+              {renderScore('文笔', qualityScore?.writing)}
+              {renderScore('情节', qualityScore?.plot)}
+              {renderScore('角色', qualityScore?.character)}
             </div>
             <div className="px-5 py-3 border-t border-[#d9dfd7] flex justify-end">
               <button
