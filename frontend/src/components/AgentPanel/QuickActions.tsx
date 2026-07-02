@@ -1,4 +1,4 @@
-import { BookOpen, PenLine, ClipboardList, BarChart3, Palette, User, Search, Film, GitBranch, Clock, UserCheck } from 'lucide-react';
+import { BookOpen, PenLine, ClipboardList, BarChart3, User, Search, Film, GitBranch, Clock, UserCheck, Sparkles } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import type { AgentWorkflowType } from '../../api';
 
@@ -35,10 +35,10 @@ const 动作列表: 快捷动作[] = [
     提示词: '请评估已完成章节的整体质量，从内容、文笔、角色塑造、情节设计等维度给出评分和改进建议。',
   },
   {
-    图标: Palette,
-    标题: '优化分镜脚本',
-    描述: '改进本章分镜设计',
-    提示词: '请分析当前章节的分镜脚本，提出改进建议以增强画面表现力和叙事节奏。',
+    图标: Sparkles,
+    标题: '去AI味',
+    描述: '检测并清除AI写作痕迹',
+    提示词: '请对当前章节进行去AI味处理，检测并清除AI写作痕迹，包括禁用词、句式套路、心理描写外化、结尾升华、解释腔等，让文字回归自然、非模板化。',
   },
   {
     图标: User,

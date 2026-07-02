@@ -16,7 +16,6 @@ from models import (
     StoryDeconstructionRef, Story,
 )
 from services.novel_crawler import search_novels, crawl_novel_raw
-from services.deconstruction import run_deconstruction_pipeline
 from services.deconstruction_v2 import run_deconstruction_pipeline_v2
 from services.task_manager import task_manager
 
@@ -454,6 +453,7 @@ async def resume_deconstruction_work(
 
     body = await request.json()
     mode = body.get("mode", "full")
+    max_chapters = body.get("max_chapters") or work.decon_range
 
     if mode == "partial":
         valid = ["paused_after_stage1"]
@@ -462,7 +462,13 @@ async def resume_deconstruction_work(
     else:
         valid = ["paused_after_stage1"]
 
-    if work.decon_status not in valid:
+    # paused_after_partial:N 也允许 partial 和 quick_report 续跑
+    status_valid = work.decon_status in valid or (
+        mode in ("partial", "quick_report")
+        and work.decon_status
+        and work.decon_status.startswith("paused_after_partial:")
+    )
+    if not status_valid:
         raise HTTPException(400, "当前状态不支持续跑（需要已完成黄金三章拆解并停靠）")
 
     work.decon_status = "running"
@@ -484,7 +490,7 @@ async def resume_deconstruction_work(
             pause_after_stage1=False,
             quick_report_mode=True,
             timeout=600,
-            max_retries=0,
+            max_retries=2,
         )
         return {
             "task_id": task_id_str,
@@ -492,17 +498,22 @@ async def resume_deconstruction_work(
         }
 
     is_partial = mode == "partial"
-    await task_manager.submit_task(
-        task_id=task_id_str,
-        task_type="deconstruction",
-        coro_func=_run_deconstruction_for_work,
+    kwargs = dict(
         work_id=work_id,
         api_key=api_key,
         start_stage=2,
         pause_after_stage1=False,
         partial_mode=is_partial,
         timeout=7200,
-        max_retries=0,
+        max_retries=2,
+    )
+    if is_partial and max_chapters:
+        kwargs["max_chapters_for_partial"] = max_chapters
+    await task_manager.submit_task(
+        task_id=task_id_str,
+        task_type="deconstruction",
+        coro_func=_run_deconstruction_for_work,
+        **kwargs,
     )
 
     msg = "试读模式已启动（Stage 2'-5'）" if is_partial else "拆书续跑任务已启动（Stage 2-6）"
@@ -657,7 +668,11 @@ async def _run_deconstruction_for_work(work_id: int, api_key: str, task_id: str 
         if max_chapters_for_partial and max_chapters_for_partial < len(chapters):
             chapters = chapters[:max_chapters_for_partial]
 
-        if quick_report_mode and work.current_stage <= 5:
+        if quick_report_mode:
+            logger.info(f"quick_report mode entered for work_id={work_id}, current_stage={work.current_stage}, has_golden_chapters={work.golden_chapters is not None}")
+            if work.golden_chapters is None:
+                logger.error(f"quick_report aborted: golden_chapters is None for work_id={work_id}")
+                raise ValueError("黄金三章数据缺失，无法生成快速报告")
             _update_work_progress(work, db, "quick_report: 基于黄金三章数据生成报告...")
             summary = work.summary or {}
             response = await _call_deepseek_text(
@@ -753,11 +768,29 @@ async def _run_deconstruction_for_work(work_id: int, api_key: str, task_id: str 
 
         # Stage 2: 逐章摘要（并发）
         if work.current_stage <= 2:
+            # 断点续跑：检查已有摘要，跳过已成功完成的章节
+            existing_ok = {}
+            if work.chapter_summaries:
+                for s in work.chapter_summaries:
+                    cn = s.get("chapter_number")
+                    if cn and "error" not in s:
+                        existing_ok[cn] = s
+            chapters_to_process = [ch for ch in chapters if ch.chapter_number not in existing_ok]
+            already_done = len(chapters) - len(chapters_to_process)
+            if already_done:
+                logger.info(f"Stage 2 断点续跑: {len(chapters)} 章中已有 {already_done} 章完成，跳过")
+
             semaphore = asyncio.Semaphore(STAGE2_CHAPTER_CONCURRENCY)
             db_lock = asyncio.Lock()
-            completed = [0]
+            completed = [already_done]
             total = len(chapters)
             fatal_error_seen = asyncio.Event()
+
+            def _save_one_summary(chapter_number, summary):
+                if work.chapter_summaries is None:
+                    work.chapter_summaries = []
+                work.chapter_summaries = [s for s in work.chapter_summaries if s.get("chapter_number") != chapter_number]
+                work.chapter_summaries.append(summary)
 
             async def _summarize_one(ch, index: int):
                 async with semaphore:
@@ -776,6 +809,7 @@ async def _run_deconstruction_for_work(work_id: int, api_key: str, task_id: str 
                         )
                         async with db_lock:
                             completed[0] += 1
+                            _save_one_summary(ch.chapter_number, response)
                             if should_flush_stage2_progress(completed[0], total):
                                 _update_work_progress(work, db, f"Stage 2: 逐章摘要 ({completed[0]}/{total})...")
                         return (index, response)
@@ -784,15 +818,29 @@ async def _run_deconstruction_for_work(work_id: int, api_key: str, task_id: str 
                         raise
                     except Exception as e:
                         logger.error(f"第{ch.chapter_number}章摘要失败: {e}")
+                        err_entry = {"chapter_number": ch.chapter_number, "error": str(e)}
                         async with db_lock:
                             completed[0] += 1
+                            _save_one_summary(ch.chapter_number, err_entry)
                             if should_flush_stage2_progress(completed[0], total):
                                 _update_work_progress(work, db, f"Stage 2: 逐章摘要 ({completed[0]}/{total}) - 第{ch.chapter_number}章失败")
-                        return (index, {"chapter_number": ch.chapter_number, "error": str(e)})
+                        return (index, err_entry)
 
-            results = await asyncio.gather(*[_summarize_one(ch, i) for i, ch in enumerate(chapters)])
-            results.sort(key=lambda x: x[0])
-            work.chapter_summaries = [r[1] for r in results]
+            if chapters_to_process:
+                new_results = await asyncio.gather(*[_summarize_one(ch, i) for i, ch in enumerate(chapters_to_process)])
+                new_results.sort(key=lambda x: x[0])
+                # 合并增量已保存的与 gather 新结果（防止重复或遗漏未刷新条目）
+                by_cn = {}
+                if work.chapter_summaries:
+                    for s in work.chapter_summaries:
+                        cn = s.get("chapter_number")
+                        if cn:
+                            by_cn[cn] = s
+                for idx, result in new_results:
+                    cn = result.get("chapter_number")
+                    if cn:
+                        by_cn[cn] = result
+                work.chapter_summaries = [by_cn[cn] for cn in sorted(by_cn.keys())]
             work.current_stage = 3
             db.commit()
 
@@ -995,8 +1043,14 @@ async def get_deconstruction_result(
     ).first()
     if not work:
         raise HTTPException(404, "拆书工作不存在")
-    # 允许 completed 和 paused_after_partial:* 两种状态返回结果
-    if work.decon_status != "completed" and not (work.decon_status or "").startswith("paused_after_partial"):
+    # 允许 completed、paused_after_partial:* 和 paused_after_stage1（含快速报告）返回结果
+    status = work.decon_status or ""
+    status_allows_result = (
+        work.decon_status == "completed"
+        or status.startswith("paused_after_partial")
+        or work.decon_status == "paused_after_stage1"
+    )
+    if not status_allows_result:
         raise HTTPException(400, "拆书尚未完成")
 
     return {

@@ -7010,8 +7010,8 @@ async def get_image_count(chapter_id: int, request: Request, db: Session = Depen
 async def set_image_count(chapter_id: int, body: dict, request: Request, db: Session = Depends(get_db)):
     user = _require_user(request, db)
     chapter = _require_chapter_for_user(chapter_id, user, db)
-    if chapter.images or _chapter_has_scene_file(chapter_id):
-        raise HTTPException(409, "创建场景或图片后无法更改图片数量")
+    if chapter.images:
+        raise HTTPException(409, "创建图片后无法更改图片数量")
     count = body.get("image_count", DEFAULT_IMAGE_COUNT)
     if count not in ALLOWED_IMAGE_COUNTS:
         raise HTTPException(400, f"image_count must be one of {ALLOWED_IMAGE_COUNTS}")
@@ -7072,10 +7072,6 @@ async def generate_scenes_endpoint(chapter_id: int, request: Request, db: Sessio
                 await split_task
     sanitized_scenes, sanitized_indices = sanitize_scene_list(scenes)
     _write_scenes_file(chapter_id, sanitized_scenes, sanitized_indices)
-    # 以 AI 实际返回的分镜数量为准，同步更新 image_count
-    count_path = _image_count_path(chapter_id)
-    count_path.parent.mkdir(parents=True, exist_ok=True)
-    count_path.write_text(str(len(sanitized_scenes)), encoding="utf-8")
     _check_and_consume_feature_quota(request, user.id, "scene.generate.monthly_limit", 1, db, deduct=True, provider_kind="text")
     return {"scenes": sanitized_scenes, "sanitized_indices": sanitized_indices}
 

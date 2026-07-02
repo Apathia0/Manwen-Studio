@@ -64,6 +64,13 @@ export default function DeconstructionPanel({ story }: Props) {
     return () => { if (timer) clearInterval(timer); };
   }, [status?.status]);
 
+  // 后台任务状态离开 running 时自动清除 loading
+  useEffect(() => {
+    if (status && status.status !== 'running' && status.status !== 'pending') {
+      setLoading(false);
+    }
+  }, [status?.status]);
+
   // 轮询爬取状态，完成后自动拆书
   useEffect(() => {
     if (!showSearch) return;
@@ -117,7 +124,6 @@ export default function DeconstructionPanel({ story }: Props) {
       setStatus({ status: 'running', current_stage: 0, stages_completed: [], progress: null, result_id: null });
     } catch (e: any) {
       setError(e.message || '启动失败');
-    } finally {
       setLoading(false);
     }
   };
@@ -130,7 +136,6 @@ export default function DeconstructionPanel({ story }: Props) {
       setStatus({ status: 'running', current_stage: 2, stages_completed: [0, 0.5, 1], progress: null, result_id: null });
     } catch (e: any) {
       setError(e.message || '续跑失败');
-    } finally {
       setLoading(false);
     }
   };
@@ -143,7 +148,6 @@ export default function DeconstructionPanel({ story }: Props) {
       setStatus({ status: 'running', current_stage: 2, stages_completed: [0, 0.5, 1], progress: null, result_id: null });
     } catch (e: any) {
       setError(e.message || '试读启动失败');
-    } finally {
       setLoading(false);
     }
   };
@@ -156,7 +160,6 @@ export default function DeconstructionPanel({ story }: Props) {
       setStatus(prev => prev ? { ...prev, status: 'running' } : null);
     } catch (e: any) {
       setError(e.message || '报告生成失败');
-    } finally {
       setLoading(false);
     }
   };

@@ -6,12 +6,12 @@ import datetime
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from sqlalchemy import or_, and_
 from sqlalchemy.orm import Session
 
 from database import get_db
 from models import BackgroundTask, DeconstructionResult, NovelSource, Chapter
 from services.novel_crawler import search_novels, crawl_qidian_novel
-from services.deconstruction import run_deconstruction_pipeline
 from services.deconstruction_v2 import run_deconstruction_pipeline_v2
 from services.task_manager import task_manager
 
@@ -236,13 +236,19 @@ async def resume_deconstruction(
     mode = body.get("mode", "full")
 
     valid_statuses = ["paused_after_stage1"]
-    if mode == "partial":
-        # 试读模式：从 paused_after_stage1 或 paused_after_partial:N 状态均可续跑
+    if mode in ("partial", "quick_report"):
+        # 试读/快速报告模式：从 paused_after_stage1 或 paused_after_partial:N 状态均可续跑
         valid_statuses = ["paused_after_stage1"]
 
+    status_filter = DeconstructionResult.status.in_(valid_statuses)
+    if mode in ("partial", "quick_report"):
+        status_filter = or_(
+            status_filter,
+            DeconstructionResult.status.like("paused_after_partial:%"),
+        )
     existing = db.query(DeconstructionResult).filter(
         DeconstructionResult.story_id == story_id,
-        DeconstructionResult.status.in_(valid_statuses),
+        status_filter,
     ).order_by(DeconstructionResult.created_at.desc()).first()
 
     if not existing:
