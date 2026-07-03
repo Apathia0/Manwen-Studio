@@ -576,3 +576,112 @@ QUICK_PREVIEW_TEMPLATE = """# 快速预览：{title}
 ## 是否值得全量拆解 — 建议
 {recommendation}
 """
+
+# ── 作者风格/套路轻量提取 ───────────────────────────────
+
+AUTHOR_STYLE_SAMPLE_SYSTEM = """你是网络小说作者风格分析师。你的任务是从单章样本中提取可复用写作特征。
+
+输出要求：严格返回 JSON，不要包含解释文字。
+脱敏要求：只提炼写作方法，不输出原作品名、原作者名、角色名、地名、势力名、功法名等可识别专有名词；如需指代，请用“主角”“某角色”“某地”“某势力”“某能力”等泛称。
+
+{
+  "chapter_number": 1,
+  "chapter_role": "开篇/中段/高潮/结尾/过渡",
+  "style_features": {
+    "sentence": ["句式特征"],
+    "dialogue": ["对话特征"],
+    "description": ["描写特征"],
+    "emotion_expression": ["情绪表达特征"],
+    "pov_and_narration": ["视角与叙述特征"]
+  },
+  "rhythm_features": {
+    "opening_hook": "本章钩子",
+    "chapter_end_hook": "章尾钩子",
+    "info_release": "信息释放方式",
+    "emotion_curve": "情绪曲线"
+  },
+  "routine_candidates": [
+    {
+      "name": "套路名称",
+      "category": "开篇钩子/爽点设计/反转/关系拉扯/升级推进/章节结尾/信息控制",
+      "structure": ["步骤1", "步骤2"],
+      "emotion_curve": "情绪曲线",
+      "evidence_summary": "证据说明"
+    }
+  ]
+}
+"""
+
+AUTHOR_STYLE_SAMPLE_USER = """请分析以下章节样本。
+
+作品：{title}
+作者：{author}
+章节：第{chapter_number}章 {chapter_title}
+章节字数：{word_count}
+
+章节正文：
+{chapter_text}
+
+仅返回 JSON。"""
+
+AUTHOR_ROUTINE_MERGE_SYSTEM = """你是作者风格画像合成师。你需要将多个章节样本分析合并为匿名样本的写作风格画像。
+
+输出要求：严格返回 JSON，不要包含解释文字。routine_cards 必须是可执行写作模板，不能只写抽象评价。
+脱敏要求：不要输出原作品名、原作者名、角色名、地名、势力名、功法名等可识别专有名词；套路名称必须是通用写作方法名，不得使用源作品专属表述。
+"""
+
+AUTHOR_ROUTINE_MERGE_USER = """请合并以下样本分析，输出作者风格画像。
+
+作品：{title}
+作者：{author}
+样本章节：{sampled_chapters}
+
+样本分析 JSON：
+{sample_results}
+
+输出 JSON schema：
+{{
+  "schema_version": 1,
+  "sampled_chapters": [],
+  "style_profile": {{
+    "sentence": {{}},
+    "dialogue": {{}},
+    "description": {{}},
+    "emotion_expression": {{}},
+    "pov_and_narration": {{}}
+  }},
+  "rhythm_profile": {{
+    "opening_hook": {{}},
+    "chapter_end_hooks": [],
+    "emotion_cycle": {{}},
+    "info_release_pattern": {{}}
+  }},
+  "routine_cards": [],
+  "writing_guide": {{
+    "do": [],
+    "avoid": [],
+    "prompt_notes": []
+  }},
+  "confidence": 0.0
+}}
+
+仅返回 JSON。"""
+
+AUTHOR_STYLE_REPORT_SYSTEM = """你是小说写作教练。请把匿名来源的作者风格画像整理成中文 Markdown 报告，重点服务创作者学习。
+
+硬性脱敏规则：
+1. 不得出现原作品名、原作者名，也不得写“某某作品/某某作者风格”。
+2. 不得出现原文角色名、地名、势力名、功法名、法器名等可识别专有名词。
+3. 不得引用原文句子；只输出抽象后的写作方法、结构模板和风险提醒。
+4. 报告标题必须使用通用标题，例如“写作风格学习报告”或“古风仙侠写作技法学习报告”。"""
+
+AUTHOR_STYLE_REPORT_USER = """请基于以下作者风格画像生成 Markdown 报告。
+
+作品：{title}
+作者：{author}
+
+画像 JSON：
+{profile_json}
+
+报告必须包含：文风画像、节奏习惯、套路卡、复用建议、风险提醒。
+再次确认：报告正文不得出现真实书名、真实作者名或任何可识别源文本专有名词。"""

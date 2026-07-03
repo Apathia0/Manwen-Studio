@@ -1088,3 +1088,18 @@ def _migrate_deconstruction_library_tables(target_engine=None):
                 )
             """))
             conn.execute(text("CREATE INDEX ix_story_decon_refs_story ON story_deconstruction_refs(story_id)"))
+
+    if "deconstruction_works" in insp.get_table_names():
+        works_cols = {c["name"] for c in insp.get_columns("deconstruction_works")}
+        with db_engine.begin() as conn:
+            _prepare_migration_conn(conn)
+            if "author_style_status" not in works_cols:
+                conn.execute(text("ALTER TABLE deconstruction_works ADD COLUMN author_style_status VARCHAR(30) DEFAULT 'not_started'"))
+            if "author_style_task_id" not in works_cols:
+                conn.execute(text("ALTER TABLE deconstruction_works ADD COLUMN author_style_task_id VARCHAR(80)"))
+            if "author_style_profile" not in works_cols:
+                conn.execute(text("ALTER TABLE deconstruction_works ADD COLUMN author_style_profile JSON"))
+            if "author_style_report_markdown" not in works_cols:
+                conn.execute(text("ALTER TABLE deconstruction_works ADD COLUMN author_style_report_markdown TEXT"))
+            if "author_style_progress_markdown" not in works_cols:
+                conn.execute(text("ALTER TABLE deconstruction_works ADD COLUMN author_style_progress_markdown TEXT"))

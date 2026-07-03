@@ -882,6 +882,13 @@ class DeconstructionWork(Base):
     writing_style: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     writing_techniques: Mapped[list[dict[str, Any]] | None] = mapped_column(JSON, nullable=True)
 
+    # 轻量作者风格画像
+    author_style_status: Mapped[str] = mapped_column(String(30), default="not_started")
+    author_style_task_id: Mapped[str | None] = mapped_column(String(80), nullable=True, index=True)
+    author_style_profile: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    author_style_report_markdown: Mapped[str | None] = mapped_column(Text, nullable=True)
+    author_style_progress_markdown: Mapped[str | None] = mapped_column(Text, nullable=True)
+
     progress_markdown: Mapped[str | None] = mapped_column(Text, nullable=True)
     task_id: Mapped[str | None] = mapped_column(String(50), nullable=True, index=True)
 
