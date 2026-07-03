@@ -640,7 +640,7 @@ Expected: PASS with no TypeScript error related to `FrameworkAdjustResponse`
 - [ ] **Step 4: 手动验证交互文案**
 
 Run: `npm --prefix frontend run dev`
-Expected: 在框架 AI 对话中发送“删除第2章并改主题”后，回复中能看到“实际已应用改动”列表，而不是只显示 AI 口头说明
+Expected: 在框架 中发送“删除第2章并改主题”后，回复中能看到“实际已应用改动”列表，而不是只显示 AI 口头说明
 
 - [ ] **Step 5: Commit**
 

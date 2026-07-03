@@ -26,7 +26,7 @@
 Navbar: 「← 故事框架」 + [全部展开/收起]
 │
 ├── 故事描述（新增，可编辑）
-├── 框架 AI 对话（新增，约 250px 高对话区）
+├── 框架 （新增，约 250px 高对话区）
 ├── 标签设定（增强，可编辑）
 ├── 角色设定（增强，可展开详情）
 ├── 故事大纲（核心改造）
@@ -39,7 +39,7 @@ Navbar: 「← 故事框架」 + [全部展开/收起]
 - 文本展示 + 编辑按钮
 - 点击进入编辑模式
 
-#### 2. 框架 AI 对话
+#### 2. 框架 
 - 对话气泡列表（用户/AI 角色）
 - 底部输入框 + 发送按钮
 - 「一键续写」按钮 → `continueFramework()`
@@ -90,7 +90,7 @@ uni.navigateTo(`/pages/workspace/chapter-view?storyId=${id}&chapterNumber=${n}`)
 await expandChapter(story.id, {...})
 uni.navigateTo(`/pages/workspace/chapter-view?storyId=${id}&chapterNumber=${n}`)
 
-// 框架 AI 对话（一键续写）
+// 框架 （一键续写）
 await continueFramework(story.id)
 // 刷新页面数据
 
