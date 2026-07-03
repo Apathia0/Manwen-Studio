@@ -4727,6 +4727,77 @@ export async function getDeconstructWorkResult(workId: number): Promise<Deconstr
   return res.json();
 }
 
+// ── 作者风格/套路提取 ─────────────────────────────
+
+export interface AuthorStyleStatus {
+  status: 'not_started' | 'pending' | 'running' | 'completed' | 'failed';
+  progress?: string | null;
+  task_id?: string | null;
+  work_id: number;
+}
+
+export interface AuthorStyleResult {
+  work_id: number;
+  title: string;
+  author?: string | null;
+  status: string;
+  profile?: Record<string, unknown> | null;
+  report_markdown?: string | null;
+  progress?: string | null;
+}
+
+export async function startAuthorStyleAnalysis(workId: number): Promise<{ task_id: string; message: string }> {
+  const res = await fetch(`${BASE}/api/deconstruct/works/${workId}/author-style/start`, {
+    method: 'POST',
+    headers: apiHeaders(true),
+    body: JSON.stringify({}),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '启动作者画像失败'));
+  return res.json();
+}
+
+export async function getAuthorStyleStatus(workId: number): Promise<AuthorStyleStatus> {
+  const res = await fetch(`${BASE}/api/deconstruct/works/${workId}/author-style/status`, {
+    headers: apiHeaders(),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '获取作者画像状态失败'));
+  return res.json();
+}
+
+export async function getAuthorStyleResult(workId: number): Promise<AuthorStyleResult> {
+  const res = await fetch(`${BASE}/api/deconstruct/works/${workId}/author-style/result`, {
+    headers: apiHeaders(),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '获取作者画像结果失败'));
+  return res.json();
+}
+
+export async function updateDeconstructionReport(
+  workId: number,
+  data: { report_markdown: string }
+): Promise<{ ok: boolean; report_markdown: string }> {
+  const res = await fetch(`${BASE}/api/deconstruct/works/${workId}/report`, {
+    method: 'PATCH',
+    headers: apiHeaders(true),
+    body: JSON.stringify(data),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '保存报告失败'));
+  return res.json();
+}
+
+export async function updateAuthorStyleReport(
+  workId: number,
+  data: { report_markdown: string }
+): Promise<{ ok: boolean; report_markdown: string }> {
+  const res = await fetch(`${BASE}/api/deconstruct/works/${workId}/author-style/report`, {
+    method: 'PATCH',
+    headers: apiHeaders(true),
+    body: JSON.stringify(data),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '保存作者画像报告失败'));
+  return res.json();
+}
+
 // 取消拆书
 export async function cancelDeconstructWork(workId: number): Promise<{ message: string }> {
   const res = await fetch(`${BASE}/api/deconstruct/works/${workId}/cancel`, {

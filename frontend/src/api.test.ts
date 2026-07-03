@@ -1,6 +1,7 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi, beforeEach } from 'vitest';
 
-import { coverImageUrl, toPublicMangaAssetUrl, toPublicVideoAssetUrl } from './api';
+import { coverImageUrl, getAuthorStyleResult, getAuthorStyleStatus, startAuthorStyleAnalysis, toPublicMangaAssetUrl, toPublicVideoAssetUrl, updateAuthorStyleReport, updateDeconstructionReport } from './api';
+import { shouldShowAuthorStyleEntry } from './components/DeconstructionWorkPage';
 
 describe('coverImageUrl', () => {
   it('保留完整 OSS URL', () => {
@@ -35,3 +36,79 @@ describe('toPublicVideoAssetUrl', () => {
     expect(toPublicVideoAssetUrl('/static/video/shot_12/test.mp4')).toBe('/static/video/shot_12/test.mp4');
   });
 });
+
+describe('author style API', () => {
+  beforeEach(() => {
+    vi.stubGlobal('localStorage', {
+      getItem: vi.fn(() => null),
+      setItem: vi.fn(),
+      removeItem: vi.fn(),
+    });
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ task_id: 't1', message: 'ok', status: 'completed', work_id: 7 }), { status: 200 })));
+  });
+
+  it('starts author style analysis with the expected endpoint', async () => {
+    await startAuthorStyleAnalysis(7);
+
+    expect(fetch).toHaveBeenCalledWith('/api/deconstruct/works/7/author-style/start', expect.objectContaining({ method: 'POST' }));
+  });
+
+  it('loads author style status with the expected endpoint', async () => {
+    await getAuthorStyleStatus(7);
+
+    expect(fetch).toHaveBeenCalledWith('/api/deconstruct/works/7/author-style/status', expect.any(Object));
+  });
+
+  it('loads author style result with the expected endpoint', async () => {
+    await getAuthorStyleResult(7);
+
+    expect(fetch).toHaveBeenCalledWith('/api/deconstruct/works/7/author-style/result', expect.any(Object));
+  });
+});
+
+describe('deconstruction report API', () => {
+  beforeEach(() => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ ok: true, report_markdown: 'edited' }), { status: 200 })));
+  });
+
+  it('sends PATCH to report endpoint with correct body', async () => {
+    await updateDeconstructionReport(7, { report_markdown: 'hello' });
+
+    expect(fetch).toHaveBeenCalledWith(
+      '/api/deconstruct/works/7/report',
+      expect.objectContaining({
+        method: 'PATCH',
+        body: JSON.stringify({ report_markdown: 'hello' }),
+      }),
+    );
+  });
+
+  it('sends PATCH to author-style/report endpoint with correct body', async () => {
+    await updateAuthorStyleReport(7, { report_markdown: 'world' });
+
+    expect(fetch).toHaveBeenCalledWith(
+      '/api/deconstruct/works/7/author-style/report',
+      expect.objectContaining({
+        method: 'PATCH',
+        body: JSON.stringify({ report_markdown: 'world' }),
+      }),
+    );
+  });
+});
+
+describe('author style entry visibility', () => {
+  it('在可操作的拆书状态显示作者画像入口', () => {
+    expect(shouldShowAuthorStyleEntry('not_started')).toBe(true);
+    expect(shouldShowAuthorStyleEntry('paused_after_stage1')).toBe(true);
+    expect(shouldShowAuthorStyleEntry('paused_after_partial:50')).toBe(true);
+    expect(shouldShowAuthorStyleEntry('completed')).toBe(true);
+    expect(shouldShowAuthorStyleEntry('failed')).toBe(true);
+  });
+
+  it('在拆书任务运行中隐藏作者画像入口', () => {
+    expect(shouldShowAuthorStyleEntry('pending')).toBe(false);
+    expect(shouldShowAuthorStyleEntry('running')).toBe(false);
+  });
+});
+
+
