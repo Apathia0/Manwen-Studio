@@ -17,6 +17,7 @@ from models import (
 )
 from services.novel_crawler import search_novels, crawl_novel_raw
 from services.deconstruction_v2 import run_deconstruction_pipeline_v2
+from services.author_style import run_author_style_pipeline
 from services.task_manager import task_manager
 
 router = APIRouter(tags=["deconstruction-library"])
@@ -93,6 +94,19 @@ def split_imported_novel_text(text: str) -> list[dict[str, str | int]]:
             "content": content,
         })
     return chapters
+
+
+def _safe_int_cn(cn) -> int:
+    """安全的 chapter_number 转 int。
+
+    兼容旧数据格式（'第1章'、'第 1 章'、'1'、1 等）。
+    """
+    if cn is None:
+        return 0
+    if isinstance(cn, int):
+        return cn
+    match = re.search(r"\d+", str(cn))
+    return int(match.group()) if match else 0
 
 
 def _require_user(request: Request, db: Session):
@@ -773,8 +787,8 @@ async def _run_deconstruction_for_work(work_id: int, api_key: str, task_id: str 
             if work.chapter_summaries:
                 for s in work.chapter_summaries:
                     cn = s.get("chapter_number")
-                    if cn and "error" not in s:
-                        existing_ok[cn] = s
+                    if cn is not None and "error" not in s:
+                        existing_ok[_safe_int_cn(cn)] = s
             chapters_to_process = [ch for ch in chapters if ch.chapter_number not in existing_ok]
             already_done = len(chapters) - len(chapters_to_process)
             if already_done:
@@ -789,7 +803,7 @@ async def _run_deconstruction_for_work(work_id: int, api_key: str, task_id: str 
             def _save_one_summary(chapter_number, summary):
                 if work.chapter_summaries is None:
                     work.chapter_summaries = []
-                work.chapter_summaries = [s for s in work.chapter_summaries if s.get("chapter_number") != chapter_number]
+                work.chapter_summaries = [s for s in work.chapter_summaries if _safe_int_cn(s.get("chapter_number")) != _safe_int_cn(chapter_number)]
                 work.chapter_summaries.append(summary)
 
             async def _summarize_one(ch, index: int):
@@ -834,13 +848,13 @@ async def _run_deconstruction_for_work(work_id: int, api_key: str, task_id: str 
                 if work.chapter_summaries:
                     for s in work.chapter_summaries:
                         cn = s.get("chapter_number")
-                        if cn:
-                            by_cn[cn] = s
+                        if cn is not None:
+                            by_cn[_safe_int_cn(cn)] = s
                 for idx, result in new_results:
                     cn = result.get("chapter_number")
-                    if cn:
-                        by_cn[cn] = result
-                work.chapter_summaries = [by_cn[cn] for cn in sorted(by_cn.keys())]
+                    if cn is not None:
+                        by_cn[_safe_int_cn(cn)] = result
+                work.chapter_summaries = [by_cn[cn] for cn in sorted(by_cn)]
             work.current_stage = 3
             db.commit()
 
@@ -1001,6 +1015,175 @@ async def _run_deconstruction_for_work(work_id: int, api_key: str, task_id: str 
 def _update_work_progress(work: DeconstructionWork, db: Session, message: str):
     work.progress_markdown = (work.progress_markdown or "") + f"\n- {message}"
     db.commit()
+
+
+# ── 5.5 作者风格/套路轻量提取 ──────────────────────────
+
+@router.post("/api/deconstruct/works/{work_id}/author-style/start")
+async def start_author_style_analysis(
+    work_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    user = _require_user(request, db)
+    work = db.query(DeconstructionWork).filter(
+        DeconstructionWork.id == work_id,
+        DeconstructionWork.owner_user_id == user.id,
+    ).first()
+    if not work:
+        raise HTTPException(404, "拆书工作不存在")
+    if work.author_style_status in ("pending", "running"):
+        raise HTTPException(400, "已有进行中的作者画像分析任务")
+
+    chapter_count = db.query(DeconstructionChapter).filter(
+        DeconstructionChapter.work_id == work_id,
+        DeconstructionChapter.content.isnot(None),
+        DeconstructionChapter.content != "",
+    ).count()
+    if chapter_count < 3:
+        raise HTTPException(400, f"至少需要 3 章有内容的章节才能提取作者风格（当前 {chapter_count} 章）")
+
+    from main import _check_and_consume_feature_quota, _refund_quota, _user_deepseek_api_key
+
+    api_key = _user_deepseek_api_key(request)
+    task_id_str = f"author_style_{work_id}_{int(datetime.datetime.now(datetime.timezone.utc).timestamp() * 1_000_000)}_{uuid.uuid4().hex[:6]}"
+
+    quota_result = _check_and_consume_feature_quota(
+        request,
+        user.id,
+        "deconstruction.run.monthly_limit",
+        1,
+        db,
+        deduct=True,
+        provider_kind="text",
+    )
+    quota_period_key = quota_result.get("period_key")
+    quota_amount = 0 if quota_result.get("skipped") else 1
+
+    work.author_style_status = "pending"
+    work.author_style_task_id = task_id_str
+    work.author_style_progress_markdown = "- 作者画像分析已提交"
+    db.commit()
+
+    try:
+        await task_manager.submit_task(
+            task_id=task_id_str,
+            task_type="author_style",
+            coro_func=run_author_style_pipeline,
+            work_id=work_id,
+            api_key=api_key,
+            timeout=1800,
+            max_retries=0,
+            quota_user_id=user.id,
+            quota_feature_key="deconstruction.run.monthly_limit",
+            quota_amount=quota_amount,
+            quota_period_key=quota_period_key,
+        )
+    except Exception:
+        if quota_amount > 0:
+            _refund_quota(user.id, "deconstruction.run.monthly_limit", quota_amount, db, quota_period_key)
+        work.author_style_status = "failed"
+        db.commit()
+        raise
+
+    return {"task_id": task_id_str, "message": "作者画像分析已启动"}
+
+
+@router.get("/api/deconstruct/works/{work_id}/author-style/status")
+async def get_author_style_status(
+    work_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    user = _require_user(request, db)
+    work = db.query(DeconstructionWork).filter(
+        DeconstructionWork.id == work_id,
+        DeconstructionWork.owner_user_id == user.id,
+    ).first()
+    if not work:
+        raise HTTPException(404, "拆书工作不存在")
+    return {
+        "status": work.author_style_status or "not_started",
+        "progress": work.author_style_progress_markdown,
+        "task_id": work.author_style_task_id,
+        "work_id": work.id,
+    }
+
+
+@router.get("/api/deconstruct/works/{work_id}/author-style/result")
+async def get_author_style_result(
+    work_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    user = _require_user(request, db)
+    work = db.query(DeconstructionWork).filter(
+        DeconstructionWork.id == work_id,
+        DeconstructionWork.owner_user_id == user.id,
+    ).first()
+    if not work:
+        raise HTTPException(404, "拆书工作不存在")
+    if work.author_style_status != "completed":
+        raise HTTPException(400, "作者画像分析尚未完成")
+    return {
+        "work_id": work.id,
+        "title": work.title,
+        "author": work.author,
+        "status": work.author_style_status,
+        "profile": work.author_style_profile,
+        "report_markdown": work.author_style_report_markdown,
+        "progress": work.author_style_progress_markdown,
+    }
+
+
+# ── 5.6 报告手动编辑与保存 ──────────────────────────
+
+@router.patch("/api/deconstruct/works/{work_id}/report")
+async def update_deconstruction_report(
+    work_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """保存用户手动编辑后的拆文报告"""
+    user = _require_user(request, db)
+    work = db.query(DeconstructionWork).filter(
+        DeconstructionWork.id == work_id,
+        DeconstructionWork.owner_user_id == user.id,
+    ).first()
+    if not work:
+        raise HTTPException(404, "拆书工作不存在")
+
+    body = await request.json()
+    if "report_markdown" in body and body["report_markdown"] is not None:
+        work.report_markdown = body["report_markdown"]
+        db.commit()
+        db.refresh(work)
+
+    return {"ok": True, "report_markdown": work.report_markdown}
+
+
+@router.patch("/api/deconstruct/works/{work_id}/author-style/report")
+async def update_author_style_report(
+    work_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """保存用户手动编辑后的作者风格画像报告"""
+    user = _require_user(request, db)
+    work = db.query(DeconstructionWork).filter(
+        DeconstructionWork.id == work_id,
+        DeconstructionWork.owner_user_id == user.id,
+    ).first()
+    if not work:
+        raise HTTPException(404, "拆书工作不存在")
+
+    body = await request.json()
+    if "report_markdown" in body and body["report_markdown"] is not None:
+        work.author_style_report_markdown = body["report_markdown"]
+        db.commit()
+        db.refresh(work)
+
+    return {"ok": True, "report_markdown": work.author_style_report_markdown}
 
 
 # ── 6. 拆书状态 ─────────────────────────────────────
@@ -1167,7 +1350,23 @@ async def add_deconstruction_ref(
     ref = StoryDeconstructionRef(story_id=story_id, work_id=work_id)
     db.add(ref)
 
-    # 注入拆书结果到 story_bible
+    author_style_report = (work.author_style_report_markdown or "").strip()
+
+    profile = work.author_style_profile if isinstance(work.author_style_profile, dict) else {}
+    sampled_chapter_nums = profile.get("sampled_chapters") or []
+    style_samples = []
+    if sampled_chapter_nums:
+        sample_chapters = db.query(DeconstructionChapter).filter(
+            DeconstructionChapter.work_id == work_id,
+            DeconstructionChapter.chapter_number.in_(sampled_chapter_nums[:3]),
+            DeconstructionChapter.content.isnot(None),
+            DeconstructionChapter.content != "",
+        ).order_by(DeconstructionChapter.chapter_number).all()
+        for ch in sample_chapters:
+            snippet = (ch.content or "")[:300].strip()
+            if snippet:
+                style_samples.append({"chapter": ch.chapter_number, "snippet": snippet})
+
     decon_bible = {
         f"deconstruction_{work_id}": {
             "title": work.title,
@@ -1176,12 +1375,12 @@ async def add_deconstruction_ref(
             "summary": work.summary,
             "applied_at": str(datetime.datetime.now(datetime.timezone.utc)),
         },
-        "learned_techniques": work.writing_techniques or [],
-        "reference_plots": work.plot_lines or [],
-        "reference_rhythm": work.rhythm,
-        "reference_emotion_modules": work.emotion_modules,
-        "reference_report": work.report_markdown,
+        "reference_author_profile": work.author_style_profile,
+        "reference_author_report": author_style_report or None,
     }
+    if style_samples:
+        decon_bible["reference_style_samples"] = style_samples
+
     current_bible = story.story_bible or {}
     current_bible.update(decon_bible)
     story.story_bible = current_bible
@@ -1224,9 +1423,9 @@ async def remove_deconstruction_ref(
     request: Request,
     db: Session = Depends(get_db),
 ):
-    """取消引用拆书结果"""
+    """取消引用拆书结果，同时清理 story_bible 中的残留画像数据"""
     user = _require_user(request, db)
-    _require_story_for_user(story_id, user, db)
+    story = _require_story_for_user(story_id, user, db)
 
     ref = db.query(StoryDeconstructionRef).filter(
         StoryDeconstructionRef.id == ref_id,
@@ -1235,7 +1434,25 @@ async def remove_deconstruction_ref(
     if not ref:
         raise HTTPException(404, "引用不存在")
 
+    work_id = ref.work_id
     db.delete(ref)
+
+    current_bible = story.story_bible if isinstance(story.story_bible, dict) else {}
+    current_bible.pop(f"deconstruction_{work_id}", None)
+
+    remaining_refs = db.query(StoryDeconstructionRef).filter(
+        StoryDeconstructionRef.story_id == story_id,
+    ).count()
+    if remaining_refs == 0:
+        current_bible.pop("reference_author_profile", None)
+        current_bible.pop("reference_author_report", None)
+        current_bible.pop("reference_style_samples", None)
+        current_bible.pop("learned_techniques", None)
+        current_bible.pop("reference_plots", None)
+        current_bible.pop("reference_rhythm", None)
+        current_bible.pop("reference_emotion_modules", None)
+
+    story.story_bible = current_bible
     db.commit()
 
     return {"message": "已取消引用"}
