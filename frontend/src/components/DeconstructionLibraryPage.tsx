@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { BookOpen, Loader2, Trash2, Plus, ExternalLink, Clock } from 'lucide-react';
 import type { DeconstructionWorkItem } from '../api';
 import {
@@ -22,18 +22,18 @@ const CRAWL_LABELS: Record<string, string> = {
 
 /** 拆书状态中文映射 */
 const DECON_LABELS: Record<string, string> = {
-  not_started: '未拆书',
+  not_started: '待分析',
   pending: '等待中',
-  running: '拆书中',
+  running: '分析中',
   completed: '已完成',
-  failed: '拆书失败',
+  failed: '分析失败',
 };
 
 /** 状态对应的颜色类 */
 function statusColor(status: string): string {
   if (status === 'completed' || status === '已爬取' || status === '已完成') return 'text-green-600 bg-green-50';
-  if (status === 'running' || status === 'crawling' || status === 'pending' || status === '爬取中' || status === '拆书中' || status === '等待中') return 'text-blue-600 bg-blue-50';
-  if (status === 'failed' || status === '爬取失败' || status === '拆书失败') return 'text-red-600 bg-red-50';
+  if (status === 'running' || status === 'crawling' || status === 'pending' || status === '爬取中' || status === '分析中' || status === '等待中') return 'text-blue-600 bg-blue-50';
+  if (status === 'failed' || status === '爬取失败' || status === '分析失败') return 'text-red-600 bg-red-50';
   return 'text-slate-500 bg-slate-50';
 }
 
@@ -62,18 +62,23 @@ export default function DeconstructionLibraryPage({ onNavigate }: Props) {
     loadWorks();
   }, [loadWorks]);
 
+  const worksRef = useRef(works);
+  worksRef.current = works;
+
+  const hasActiveWorks = works.some(
+    (w) =>
+      w.crawl_status === 'crawling' ||
+      w.decon_status === 'running' ||
+      w.decon_status === 'pending'
+  );
+
   useEffect(() => {
-    const hasActive = works.some(
-      (w) =>
-        w.crawl_status === 'crawling' ||
-        w.decon_status === 'running' ||
-        w.decon_status === 'pending'
-    );
-    if (!hasActive) return;
+    if (!hasActiveWorks) return;
 
     const timer = setInterval(async () => {
+      const current = worksRef.current;
       const updated = await Promise.all(
-        works.map(async (w) => {
+        current.map(async (w) => {
           if (w.crawl_status === 'crawling') {
             try {
               const cs = await getDeconstructWorkCrawlStatus(w.id);
@@ -97,7 +102,7 @@ export default function DeconstructionLibraryPage({ onNavigate }: Props) {
     }, 5000);
 
     return () => clearInterval(timer);
-  }, [works]);
+  }, [hasActiveWorks]);
 
   const handleDelete = async (workId: number) => {
     setDeleting(workId);

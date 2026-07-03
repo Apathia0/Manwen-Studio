@@ -684,7 +684,7 @@ function App() {
   }
 
   return (
-    <div className="min-h-screen bg-[radial-gradient(circle_at_top_left,_rgba(96,165,250,0.18),_transparent_22%),linear-gradient(180deg,_#f4f8ff_0%,_#eef4ff_46%,_#f8fbff_100%)] text-slate-900">
+    <div className="h-screen overflow-hidden bg-[radial-gradient(circle_at_top_left,_rgba(96,165,250,0.18),_transparent_22%),linear-gradient(180deg,_#f4f8ff_0%,_#eef4ff_46%,_#f8fbff_100%)] text-slate-900">
       <LoadingOverlay visible={bootstrapping} message="正在加载..." />
       <header className="sticky top-0 z-20 border-b border-[#d7e3f4] bg-[rgba(248,251,255,0.82)] backdrop-blur-xl">
         <div className="flex h-14 items-center justify-between px-5 lg:px-8">
@@ -719,8 +719,8 @@ function App() {
         </div>
       </header>
 
-      <div className="grid min-h-[calc(100vh-56px)] grid-cols-1 lg:grid-cols-[220px_minmax(0,1fr)]">
-        <aside className="border-r border-[#d7e3f4] bg-[linear-gradient(180deg,_rgba(248,251,255,0.94)_0%,_rgba(238,244,255,0.92)_100%)] px-4 py-5 backdrop-blur-xl">
+      <div className="grid h-[calc(100vh-56px)] overflow-hidden grid-cols-1 lg:grid-cols-[220px_minmax(0,1fr)]">
+        <aside className="overflow-y-auto border-r border-[#d7e3f4] bg-[linear-gradient(180deg,_rgba(248,251,255,0.94)_0%,_rgba(238,244,255,0.92)_100%)] px-4 py-5 backdrop-blur-xl">
           <div className="mb-4 px-2 text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">应用菜单</div>
           <nav className="space-y-1.5">
             {USER_NAV.map((item) => {
@@ -773,7 +773,7 @@ function App() {
           )}
         </aside>
 
-        <main className={`min-h-[calc(100vh-56px)] bg-transparent ${isWorkspaceRoute ? 'p-2 lg:p-3' : 'p-5 lg:p-7'}`}>
+        <main className={`min-h-0 overflow-y-auto bg-transparent ${isWorkspaceRoute ? 'p-2 lg:p-3' : 'p-5 lg:p-7'}`}>
           <Suspense fallback={<RouteLoadingFallback />}>
           {route === 'stories' && (
             <StoryLibraryPage
