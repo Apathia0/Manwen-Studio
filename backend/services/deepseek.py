@@ -10,7 +10,7 @@ logger = logging.getLogger(__name__)
 
 from services.writing_utils import build_chapter_generation_prompt
 from services.framework_utils import _extract_outline_chapters, validate_framework_json
-from services.story_state import build_story_bible_compact, build_story_memory_compact
+from services.story_state import build_story_bible_compact, build_story_memory_compact, extract_author_profile_sections, extract_report_highlights
 
 # 默认值会被 router 层从 PlatformSetting 数据库动态覆盖
 DEEPSEEK_API_KEY = ""
@@ -785,10 +785,17 @@ def _build_story_snapshot(story_context: dict) -> str:
         reference_emotion_modules = story_bible.get("reference_emotion_modules")
         if isinstance(reference_emotion_modules, dict) and reference_emotion_modules:
             parts.append(f"参考情绪模块: {json.dumps(reference_emotion_modules, ensure_ascii=False)}")
-        # 拆书完整报告文本（快速报告 / 试读报告）
-        reference_report = story_bible.get("reference_report")
-        if isinstance(reference_report, str) and reference_report.strip():
-            parts.append(f"拆书参考报告:\n{reference_report[:3000]}")
+        reference_author_profile = story_bible.get("reference_author_profile")
+        if isinstance(reference_author_profile, dict) and reference_author_profile:
+            profile_parts = extract_author_profile_sections(reference_author_profile)
+            parts.extend(profile_parts)
+        reference_author_report = story_bible.get("reference_author_report")
+        if isinstance(reference_author_report, str) and reference_author_report.strip():
+            highlights = extract_report_highlights(reference_author_report)
+            parts.append(f"作者画像参考报告（核心要点）:\n{highlights}")
+        reference_style_samples = story_bible.get("reference_style_samples")
+        if isinstance(reference_style_samples, list) and reference_style_samples:
+            parts.append(f"作者原文风格示例: {json.dumps(reference_style_samples, ensure_ascii=False)}")
     if story_context.get("tags"):
         parts.append(f"现有标签: {json.dumps(story_context['tags'], ensure_ascii=False)}")
     if story_context.get("characters"):
@@ -987,6 +994,17 @@ def _build_story_snapshot_tiered(story_context: dict, tier: str = "auto") -> str
                           if k in ("opening_strategy", "midgame_engine", "late_game_direction",
                                   "forbidden_patterns", "preferred_plot_patterns")}
                 parts.append(f"作品圣经-写作指导(核心摘要): {json.dumps(core_wg, ensure_ascii=False)}")
+        reference_author_profile = story_bible.get("reference_author_profile")
+        if isinstance(reference_author_profile, dict) and reference_author_profile:
+            profile_parts = extract_author_profile_sections(reference_author_profile)
+            parts.extend(profile_parts)
+        reference_author_report = story_bible.get("reference_author_report")
+        if isinstance(reference_author_report, str) and reference_author_report.strip():
+            highlights = extract_report_highlights(reference_author_report)
+            parts.append(f"作者画像参考报告（核心要点）:\n{highlights}")
+        reference_style_samples = story_bible.get("reference_style_samples")
+        if isinstance(reference_style_samples, list) and reference_style_samples:
+            parts.append(f"作者原文风格示例: {json.dumps(reference_style_samples, ensure_ascii=False)}")
 
     tags = story_context.get("tags")
     if tags:
@@ -2098,6 +2116,7 @@ async def expand_chapter_to_content(story_context: dict, chapter_info: dict, api
 {snapshot}
 
 以上「作品圣经」中的创意理解、写作指导和导入约束是**不可违反的核心设定**，所有创作必须严格遵守，不得与圣经中的设定冲突。
+如已引用作者画像参考报告，则当作品圣经、写作要求与作者画像在句式节奏、语言风格、描写密度上冲突时，一律以作者画像为准。
 
 ## 本章任务卡
 {chapter_details}
@@ -2172,6 +2191,7 @@ async def rewrite_selection(
 
 ## 改写要求
 - 保持原有情节、人物对话和关键信息不变
+- 如已引用作者画像参考报告，改写时必须保持作者画像中记录的句式节奏和语言特征，即使这与"提升文笔"的通用标准冲突，以作者画像为准
 - 如作品圣经、角色设定、故事大纲与片段细节存在冲突，优先遵守最新的作品圣经和故事约束
 - 提升描写的细腻度和画面感
 - 增强人物微表情、小动作、心理活动的描写
@@ -2239,6 +2259,7 @@ async def adjust_chapter_content(
 
 ## 改写要求
 - 保留当前章节已经成立的主要剧情信息，除非用户明确要求重做
+- 如已引用作者画像参考报告，调整后的正文必须符合作者画像中的写作风格，冲突时以作者画像为准
 - 优先根据用户要求调整节奏、情绪、冲突、人物互动、伏笔、描写重点
 - 保持人物设定、世界观和大纲约束一致
 - 逻辑自洽：每一个情节转折都必须有因有果，角色行为要符合其性格和处境

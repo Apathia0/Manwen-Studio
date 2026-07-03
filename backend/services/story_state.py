@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from copy import deepcopy
 from typing import Any
 
@@ -157,6 +158,18 @@ def build_story_bible_compact(story_bible: dict | None) -> dict[str, Any]:
     if isinstance(reference_emotion_modules, dict) and reference_emotion_modules:
         compact["reference_emotion_modules"] = reference_emotion_modules
 
+    reference_author_profile = story_bible.get("reference_author_profile")
+    if isinstance(reference_author_profile, dict) and reference_author_profile:
+        compact["reference_author_profile"] = reference_author_profile
+
+    reference_author_report = story_bible.get("reference_author_report")
+    if isinstance(reference_author_report, str) and reference_author_report.strip():
+        compact["reference_author_report"] = extract_report_highlights(reference_author_report)
+
+    reference_style_samples = story_bible.get("reference_style_samples")
+    if isinstance(reference_style_samples, list) and reference_style_samples:
+        compact["reference_style_samples"] = reference_style_samples
+
     # 拆书作品概要（多个引用时合并）
     decon_titles = []
     for key, value in story_bible.items():
@@ -192,3 +205,43 @@ def build_story_memory_compact(story_memory: dict | None) -> dict[str, Any]:
             if isinstance(item, dict)
         ]
     return compact
+
+
+def extract_author_profile_sections(profile: dict) -> list[str]:
+    import json
+    parts: list[str] = []
+    routine_cards = profile.get("routine_cards")
+    if isinstance(routine_cards, list) and routine_cards:
+        parts.append(f"可复用写作套路: {json.dumps(routine_cards[:3], ensure_ascii=False)}")
+    writing_guide = profile.get("writing_guide")
+    if isinstance(writing_guide, dict) and writing_guide:
+        parts.append(f"作者写作指南: {json.dumps(writing_guide, ensure_ascii=False)}")
+    rhythm_profile = profile.get("rhythm_profile")
+    if isinstance(rhythm_profile, dict) and rhythm_profile:
+        rhythm_summary = {
+            k: v for k, v in rhythm_profile.items()
+            if v and k in ("opening_hook", "chapter_end_hooks", "emotion_cycle", "info_release_pattern")
+        }
+        if rhythm_summary:
+            parts.append(f"参考节奏控制: {json.dumps(rhythm_summary, ensure_ascii=False)}")
+    style_profile = profile.get("style_profile")
+    if isinstance(style_profile, dict) and style_profile:
+        parts.append(f"作者风格画像: {json.dumps(style_profile, ensure_ascii=False)}")
+    return parts
+
+
+def extract_report_highlights(report: str) -> str:
+    sections = re.split(r'^(#{1,3}\s.+)$', report, flags=re.MULTILINE)
+    chunks: list[str] = []
+    for i in range(1, len(sections), 2):
+        heading = sections[i].strip()
+        body = sections[i + 1].strip() if i + 1 < len(sections) else ""
+        bullets = [line.strip() for line in body.split('\n') if line.strip().startswith('*') or line.strip().startswith('-')]
+        if bullets:
+            chunks.append(f"{heading}\n" + "\n".join(bullets[:3]))
+        elif body:
+            chunks.append(f"{heading}\n{body[:200]}")
+        if sum(len(c) for c in chunks) > 1500:
+            break
+    result = "\n\n".join(chunks)
+    return result[:1500] if result else report[:1500]

@@ -154,7 +154,7 @@ from services import deepseek as deepseek_service
 from services import image2 as image_service
 from services import license_checker
 from services.payment import init_gateways, get_gateway, get_gateway_by_provider, get_method_options
-from services.story_state import build_story_bible_compact, build_story_memory_compact
+from services.story_state import build_story_bible_compact, build_story_memory_compact, extract_author_profile_sections, extract_report_highlights
 from routers.video import router as video_router
 from routers.deconstruction import router as deconstruction_router
 from routers.deconstruct_library import router as deconstruct_library_router
@@ -2724,6 +2724,17 @@ def _build_framework_context(story: Story | None, chapter: Chapter | None = None
             + json.dumps(import_summary, ensure_ascii=False)
             + "。如与自由发挥冲突，优先遵守这些导入作品约束。"
         )
+    reference_author_profile = story_bible.get("reference_author_profile")
+    if isinstance(reference_author_profile, dict) and reference_author_profile:
+        profile_parts = extract_author_profile_sections(reference_author_profile)
+        parts.extend(profile_parts)
+    reference_author_report = story_bible.get("reference_author_report")
+    if isinstance(reference_author_report, str) and reference_author_report.strip():
+        highlights = extract_report_highlights(reference_author_report)
+        parts.append(f"作者画像参考报告（核心要点）:\n{highlights}")
+    reference_style_samples = story_bible.get("reference_style_samples")
+    if isinstance(reference_style_samples, list) and reference_style_samples:
+        parts.append(f"作者原文风格示例: {json.dumps(reference_style_samples, ensure_ascii=False)}")
     story_memory = story.story_memory if isinstance(story.story_memory, dict) else {}
     if story_memory:
         memory_summary = build_story_memory_compact(story_memory)
