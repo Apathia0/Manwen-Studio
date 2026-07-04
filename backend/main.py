@@ -54,6 +54,7 @@ from sse_starlette.sse import EventSourceResponse
 
 from database import SessionLocal, get_db, init_db, engine as database_engine
 from models import (
+    AgentConversation,
     AgentPendingChange,
     AuditLog,
     BackgroundTask,
@@ -63,6 +64,7 @@ from models import (
     ChapterVideoWorkflow,
     EmailVerificationCode,
     ChatMessage,
+    DeconstructionResult,
     FrameworkSnapshot,
     MangaImage,
     Plan,
@@ -5745,6 +5747,9 @@ def delete_story(story_id: int, request: Request, db: Session = Depends(get_db))
     db.query(VideoProject).filter(VideoProject.story_id == story_id).delete(synchronize_session=False)
     db.query(StoryTemplateBinding).filter(StoryTemplateBinding.story_id == story_id).delete(synchronize_session=False)
     db.query(VideoAsset).filter(VideoAsset.story_id == story_id).delete(synchronize_session=False)
+    db.query(AgentConversation).filter(AgentConversation.story_id == story_id).delete(synchronize_session=False)
+    db.query(DeconstructionResult).filter(DeconstructionResult.story_id == story_id).delete(synchronize_session=False)
+    db.query(FrameworkSnapshot).filter(FrameworkSnapshot.story_id == story_id).delete(synchronize_session=False)
     db.delete(story)
     db.commit()
     return {"ok": True}
