@@ -636,6 +636,24 @@ def _set_platform_setting(key: str, value, db: Session) -> None:
         db.add(PlatformSetting(setting_key=key, value_json={"value": value}))
 
 
+def _configure_oss_from_db(db: Session) -> None:
+    from services import oss as oss_service
+    enabled = bool(_get_platform_setting("oss.enabled", db, False))
+    access_key_id = str(_get_platform_setting("oss.access_key_id", db, "") or "").strip()
+    access_key_secret = str(_get_platform_setting("oss.access_key_secret", db, "") or "").strip()
+    endpoint = str(_get_platform_setting("oss.endpoint", db, "") or "").strip()
+    bucket = str(_get_platform_setting("oss.bucket", db, "") or "").strip()
+    public_url_base = str(_get_platform_setting("oss.public_url_base", db, "") or "").strip()
+    oss_service.configure(
+        enabled=enabled,
+        access_key_id=access_key_id,
+        access_key_secret=access_key_secret,
+        endpoint=endpoint,
+        bucket=bucket,
+        public_url_base=public_url_base,
+    )
+
+
 def _platform_settings_snapshot(db: Session) -> dict:
     return {
         "basic": {
