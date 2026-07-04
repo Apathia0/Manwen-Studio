@@ -1220,7 +1220,13 @@ async def generate_manga_image(
         elif len(ref_blobs) == 1:
             label = valid_labels[0] if valid_labels else ""
             desc = ""
-            if label:
+            if label == "【画面风格参考锚点】":
+                desc = (
+                    f"REFERENCE IMAGE: art style reference. "
+                    f"Match the ART STYLE of this reference EXACTLY: line weight, shading, color palette, composition. "
+                    f"Do NOT copy characters, props, or scene content from this image.\n"
+                )
+            elif label:
                 desc = (
                     f"REFERENCE IMAGE: character {label}. "
                     f"Match this character's appearance EXACTLY from the reference image. "
