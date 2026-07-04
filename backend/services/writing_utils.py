@@ -217,6 +217,15 @@ def get_chapter_writing_methodology() -> str:
     add_section(anti_ai, "## 系统性去AI三遍法", "## 去AI味补充技法", "系统性去AI三遍法")
 
     _methodology_cache = "\n\n".join(parts) if parts else ""
+
+    punctuation_rule = (
+        "\n\n## 标点规范（硬性规则）\n"
+        "1. 【禁止破折号】全文禁止使用破折号（——），用逗号、句号或冒号代替。"
+        "破折号是 AI 生成的典型痕迹，必须消除。\n"
+        "2. 补充说明用逗号或冒号引出，禁止用破折号连接。"
+    )
+    _methodology_cache += punctuation_rule
+
     return _methodology_cache
 
 
