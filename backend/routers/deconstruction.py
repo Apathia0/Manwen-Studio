@@ -8,6 +8,7 @@ import uuid
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy import or_, and_
 from sqlalchemy.orm import Session
+from sqlalchemy.orm.attributes import flag_modified
 
 from database import get_db
 from models import BackgroundTask, DeconstructionResult, NovelSource, Chapter
@@ -458,6 +459,7 @@ async def apply_deconstruction_to_bible(
     current_bible = story.story_bible or {}
     current_bible.update(decon_bible)
     story.story_bible = current_bible
+    flag_modified(story, "story_bible")
     db.commit()
 
     return {"message": "拆书结果已注入作品圣经，Agent 可在写作中参考"}

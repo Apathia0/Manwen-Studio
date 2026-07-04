@@ -1371,6 +1371,7 @@ async def update_story_bible(story_id: int, story_bible: dict) -> dict:
 
         current = deep_merge_story_bible(story.story_bible, story_bible)
         story.story_bible = current
+        flag_modified(story, "story_bible")
 
         creative_brief = current.get("creative_brief") if isinstance(current.get("creative_brief"), dict) else {}
         next_description = str(creative_brief.get("one_line_premise") or "").strip()

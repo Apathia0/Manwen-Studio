@@ -9,6 +9,7 @@ import uuid
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
 from sqlalchemy.orm import Session
+from sqlalchemy.orm.attributes import flag_modified
 
 from database import get_db
 from models import (
@@ -1384,6 +1385,7 @@ async def add_deconstruction_ref(
     current_bible = story.story_bible or {}
     current_bible.update(decon_bible)
     story.story_bible = current_bible
+    flag_modified(story, "story_bible")
     db.commit()
 
     return {"message": f"已引用《{work.title}》的拆书报告到作品"}
@@ -1453,6 +1455,7 @@ async def remove_deconstruction_ref(
         current_bible.pop("reference_emotion_modules", None)
 
     story.story_bible = current_bible
+    flag_modified(story, "story_bible")
     db.commit()
 
     return {"message": "已取消引用"}
