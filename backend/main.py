@@ -67,6 +67,7 @@ from models import (
     DeconstructionResult,
     FrameworkSnapshot,
     MangaImage,
+    NovelSource,
     Plan,
     PlanFeature,
     PlanQuotaRule,
@@ -5768,6 +5769,7 @@ def delete_story(story_id: int, request: Request, db: Session = Depends(get_db))
     db.query(AgentConversation).filter(AgentConversation.story_id == story_id).delete(synchronize_session=False)
     db.query(DeconstructionResult).filter(DeconstructionResult.story_id == story_id).delete(synchronize_session=False)
     db.query(FrameworkSnapshot).filter(FrameworkSnapshot.story_id == story_id).delete(synchronize_session=False)
+    db.query(NovelSource).filter(NovelSource.story_id == story_id).delete(synchronize_session=False)
     db.delete(story)
     db.commit()
     return {"ok": True}
