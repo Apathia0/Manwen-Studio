@@ -327,7 +327,14 @@ def get_methodology_from_db(db) -> str:
 
         combined = "\n\n".join(parts) if parts else ""
         if combined:
-            return combined
+            # 对标 get_chapter_writing_methodology()，追加标点规范硬性规则
+            punctuation_rule = (
+                "\n\n## 标点规范（硬性规则）\n"
+                "1. 【禁止破折号】全文禁止使用破折号（——），用逗号、句号或冒号代替。"
+                "破折号是 AI 生成的典型痕迹，必须消除。\n"
+                "2. 补充说明用逗号或冒号引出，禁止用破折号连接。"
+            )
+            return combined + punctuation_rule
     except Exception:
         pass
 

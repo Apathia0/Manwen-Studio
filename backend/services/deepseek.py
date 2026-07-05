@@ -65,6 +65,16 @@ def _get_chapter_system_prompt(db=None) -> str:
     return build_chapter_generation_prompt(_DEEPSEEK_CHAPTER_BASE, db=db)
 
 
+def build_agent_chapter_system_prompt(db=None) -> str:
+    """构建 Agent 助手专用的章节写作 System Prompt。
+
+    对标框架直出的 _DEEPSEEK_CHAPTER_BASE + build_chapter_generation_prompt，
+    供 Agent 的 System Prompt 注入和 adjust_chapter_by_instruction 的 fallback 使用。
+    包含：核心创作铁律 + 标点规范 + 写作技法 + 去AI味规则。
+    """
+    return build_chapter_generation_prompt(_DEEPSEEK_CHAPTER_BASE, db=db)
+
+
 def configure_runtime(base_url: str | None = None, model: str | None = None) -> None:
     global DEEPSEEK_BASE_URL, DEEPSEEK_MODEL
     if isinstance(base_url, str) and base_url.strip():
@@ -424,14 +434,14 @@ async def generate_novel(messages: list[dict], api_key: str | None = None, frame
     full_messages = [{"role": "system", "content": system_content}] + messages
     full_messages.append({
         "role": "user",
-        "content": "请根据我们的讨论，创作这一话的完整小说内容。注意字数严格控制在2000字左右，请直接输出小说正文。",
+        "content": "请根据我们的讨论，创作这一话的完整小说正文。字数必须在2000-2500字之间，绝对不超过2800字。场景经济、对话有信息量、章末必须有钩子。直接输出正文，不要标题和说明。",
     })
 
     payload = {
         "model": DEEPSEEK_MODEL,
         "messages": full_messages,
         "stream": False,
-        "max_tokens": 6144,
+        "max_tokens": 2800,
     }
 
     async with httpx.AsyncClient(timeout=600) as client:
@@ -1370,7 +1380,7 @@ async def generate_character_profiles_from_content(chapter_content: str, api_key
 
 def _long_form_framework_rules() -> str:
     return """
-1. 初始大纲只规划前 10 章详细章节，后续章节只以幕/卷级大纲给出核心冲突线和关键里程碑，不要求输出每章明细。
+1. 任何大纲生成/调整都只规划前 10 章详细章节，后续章节只以幕/卷级大纲给出核心冲突线和关键里程碑，不要求输出每章明细。绝对禁止一次性输出所有卷的章节规划。
 2. 默认按长篇节奏规划（100章以上潜力），不要在前 10 章内写完主要矛盾。
 3. 核心冲突至少预留三次升级空间，每次升级改变角色处境和故事格局，但后续升级只需在幕级描述中标明方向。
 4. 终局方向可以标注，但不要强制写出结局——保留开放扩展空间，让作者后续逐步完善。
@@ -1385,7 +1395,7 @@ def _long_form_framework_rules() -> str:
 
 def _medium_form_framework_rules() -> str:
     return """
-1. 初始大纲只规划前 10 章详细章节，后续章节只以幕/卷级大纲给出核心冲突线和方向，不要求输出每章明细。
+1. 任何大纲生成/调整都只规划前 10 章详细章节，后续章节只以幕/卷级大纲给出核心冲突线和方向，不要求输出每章明细。绝对禁止一次性输出所有卷的章节规划。
 2. 核心冲突升级 2-3 次，每次升级改变角色处境和故事格局，后续升级在幕级描述中标明方向即可。
 3. 阶段结构 3-5 个，每个阶段标注核心冲突方向和关键情节点。
 4. 阶段间要有明确的转折点，不能平铺直叙地过渡。
@@ -1585,7 +1595,7 @@ async def generate_framework(
 1. `outline` 覆盖完整主线，阶段结构 2-3 个：建立冲突 → 升级/反转 → 高潮/解决。
 2. `chapters` 总数控制在 10-30 章，每章都要有明确的叙事功能，不要有纯过渡章。
 3. 节奏紧凑——第二章前进入核心冲突，中段有关键反转，结尾回收所有主要伏笔。
-4. 每个 `chapters` 条目除 `chapter_number`、`title`、`act` 外，还应包含 `summary`、`goal`、`conflict`、`hook`、`payoff`、`highlight`、`key_events`。{min_chapter_requirement}
+4. 每个 `chapters` 条目除 `chapter_number`、`title`、`act` 外，**必须**包含 `summary`、`goal`、`conflict`、`hook`、`payoff`、`highlight`（缺一不可），`key_events` 可选。这些字段是后续 AI 生成章节正文时的唯一叙事指南。{min_chapter_requirement}
 5. `outline` 中必须额外包含 `serial_strategy` 对象，至少给出 `positioning`、`opening_hook`、`first_3_chapter_hook`。
 6. 只输出 JSON，包含 `tags`、`characters`、`outline`、`chapters` 四个字段。
 {launch_ready_hint}
@@ -1600,7 +1610,7 @@ async def generate_framework(
 1. `outline` 覆盖开书阶段和后续发展，阶段结构 3-5 个，核心冲突升级 2-3 次。
 2. 初始大纲只规划前 10 章详细章节，后续章节只以幕/卷级大纲给出核心冲突线和方向，不要求输出每章明细。
 3. 后续阶段不需要输出终局章节明细，用 `serial_strategy` 的 `midgame_engine` 和 `late_game_direction` 标注发展方向。
-4. 前 10 章的每个 `chapters` 条目除 `chapter_number`、`title`、`act` 外，还应尽量包含 `summary`、`goal`、`conflict`、`hook`、`payoff`、`highlight`、`key_events`。{min_chapter_requirement}
+4. 前 10 章的每个 `chapters` 条目除 `chapter_number`、`title`、`act` 外，**必须**包含 `summary`、`goal`、`conflict`、`hook`、`payoff`、`highlight`（缺一不可），`key_events` 可选。这些字段是后续 AI 生成章节正文时的唯一叙事指南。{min_chapter_requirement}
 5. `outline` 中必须额外包含 `serial_strategy` 对象，至少给出 `positioning`、`opening_hook`、`first_3_chapter_hook`、`chapter_10_climax`。
 6. 只输出 JSON，包含 `tags`、`characters`、`outline`、`chapters` 四个字段。
 {launch_ready_hint}
@@ -1614,11 +1624,11 @@ async def generate_framework(
 额外要求：
 1. 初始大纲只规划前 10 章详细章节，后续章节只以幕/卷级大纲给出核心冲突线和关键里程碑，不要求输出每章明细。
 2. 阶段数量不固定，可以是 3 幕、4 幕、5 个篇章或其他更适合题材的结构，不要为了形式强行写成三幕。
-3. 前 10 章尽量细化到"能直接写"的粒度，每章标注 goal, conflict, hook。
+3. 前 10 章必须细化到"能直接写"的粒度，每章**必须**标注 goal, conflict, hook, payoff, highlight（缺一不可）。
 4. 后续阶段（第二幕及以后）的 `chapters` 可以为空数组或只包含 3-5 个里程碑章节——这些阶段的核心冲突方向和关键情节点只需在 `act.summary` 中描述清楚即可。
 5. 不要强制写出终局结局，保留开放扩展空间。如果规划到后期，用 `serial_strategy.late_game_direction` 标注大致故事发展方向，不需要在 chapters 中产出终结性章节。
 6. `outline` 中必须额外包含 `serial_strategy` 对象，至少给出 `positioning`、`opening_hook`、`first_3_chapter_hook`、`chapter_10_climax`、`midgame_engine`，`late_game_direction` 可选。
-7. 前 10 章的 `chapters` 条目除 `chapter_number`、`title`、`act` 外，还应尽量包含 `summary`、`goal`、`conflict`、`hook`、`payoff`、`highlight`、`key_events`，让它更像章节任务卡而不是纯标题目录。{min_chapter_requirement}
+7. 前 10 章的 `chapters` 条目除 `chapter_number`、`title`、`act` 外，**必须**包含 `summary`、`goal`、`conflict`、`hook`、`payoff`、`highlight`（缺一不可），`key_events` 可选。这些字段是后续 AI 生成章节正文时的唯一叙事指南，让它更像章节任务卡而不是纯标题目录。{min_chapter_requirement}
 8. 后期阶段的 `chapters` 如有则标注核心里程碑（如"主角失去力量"、"真相揭示"等大事件），无需细节执行信息。
 9. 只输出 JSON，包含 `tags`、`characters`、`outline`、`chapters` 四个字段。
 {launch_ready_hint}
@@ -1775,6 +1785,7 @@ async def adjust_framework_with_chat(
 - 输出 reply + operations + patches + warnings。
 - reply 只说明实际执行范围，不要说"我会"。
 - 禁止输出完整 framework JSON。
+- **章节数量限制（强制）**：绝对禁止一次性输出所有卷的章节规划。开书阶段只规划前 10 章详细章节（每章必须含 goal/conflict/hook/payoff/highlight），后续卷只规划幕级大纲（act/title/summary，chapters 设为空数组）。单次调整最多添加 15 章 add_chapter 操作。
 
 支持的 operation 类型（每个 operation 是 {{"op": "类型", "changes": {{...}}}}）：
 
@@ -2125,29 +2136,50 @@ async def expand_chapter_to_content(story_context: dict, chapter_info: dict, api
 {chapter_details}
 {hook_info}
 {previous_block}
-## 字数要求
-- 控制在 2000 字左右（1700-2500 字范围），不能因为字数限制就写得单薄。
+## 字数铁律（起点签约级硬性约束）
+- **绝对上限 2800 字**：超过 2800 字的正文在起点会被编辑直接打回。这不是建议，是红线。
+- 目标范围 2000-2500 字。低于 1700 字说明信息密度不够。
+- 每 100 字必须推进剧情或建立人设，不允许任何纯描写段落超过 80 字。
 
-## 写作要求
-1. 【开篇衔接】本章开头必须基于「前情提要」自然过渡。如果前情提要有 opening_must_continue 或 active_conflict，直接从这里切入。
-2. 【执行钩子】如果本章任务卡给出了 hook/goal/conflict/payoff，必须切实执行，不能忽略。
-3. 【遵守圣经】「作品圣经-创意理解」中的世界观设定、主线冲突、长线悬念、必保留规则是**硬约束**，任何剧情发展都不能违反。如果本章任务卡与圣经冲突，优先遵守圣经。
-4. 【因果推进】本章的结果必须为下一章制造新的问题或悬念——不能写成独立单元剧。
-4. 【场景组织】每个场景要有明确的叙事功能，过渡处从简，关键处深化。
-5. 【逻辑自洽】每一个情节转折都必须有因有果。角色行为要符合其性格和处境，不能强行推进剧情。
-6. 【禁止破折号】全文禁止使用破折号（——），用逗号、句号或省略号代替。
-7. 【避免强行推进】禁止用「几天后」「过了一段时间」「不知不觉」这类时间跳跃来跳过关键剧情发展。
+## 起点金牌编辑写作规范
 
-## 严禁的 AI 写作习惯
-- 禁止使用「突然」「忽然」「就在这时」超过 2 次
-- 禁止使用「深深地」「无比地」「极其」等副词堆砌
-- 禁止结尾写「他不知道的是……」「这一切才刚刚开始……」等模板化悬念
+### 场景经济性
+- 一个场景只完成一个叙事功能。功能完成，立刻切走。
+- 禁止同一场景写超过 400 字而不发生任何剧情变化。
+- 场景切换用空行分隔，不要写过渡句。
+
+### 对话铁律
+- 每句对话必须满足以下至少一项：①推进剧情 ②展示角色性格 ③埋设伏笔/制造悬念。
+- 禁止"嗯""啊""好的"等无信息量对话单独成段。
+- 对话与叙述交替，禁止连续 5 句以上纯对话。
+
+### 环境描写克制
+- 新场景首次出现：最多 3 句建立氛围，立刻转入剧情。
+- 禁止静态景物描写（"窗外是一棵梧桐树，树叶在风中摇曳"类）。
+- 环境必须通过角色感知来呈现，而非作者旁白。
+
+### 章末钩子（强制）
+- 最后 100 字内必须制造"点击下一章"的欲望。
+- 有效钩子类型：信息差揭示、冲突升级、角色面临抉择、意外出现。
+- 禁止类型：总结升华（"他终于明白……"）、空泛预告（"他不知道的是……"）、哲理收尾（"人生就是这样……"）。
+
+### 逻辑自洽
+- 每一个情节转折必须有前文铺垫，不能凭空出现。
+- 角色行为必须符合其性格、处境和已有信息量，不能"突然改变主意"。
+
+## 严禁的 AI 写作习惯（出现即废稿）
+- 「突然」「忽然」「就在这时」全文不超过 2 次
+- 禁止「深深地」「无比地」「极其」等副词堆砌
+- 禁止「他不知道的是……」「这一切才刚刚开始……」等模板化悬念
 - 禁止所有角色说话风格雷同
-- 禁止用「心中涌起一股暖流」等空洞套话描写情感
-- 禁止写无关的环境描写凑字数
-- 禁止使用破折号（——）
+- 禁止「心中涌起一股暖流」「眼中闪过一丝XX」「嘴角勾起一抹XX」
+- 禁止章末总结升华（"他终于明白了……""这一夜，注定无人入眠"）
+- 禁止「不是A，而是B」的否定-肯定句式
+- 禁止「，带着……」「声音不大，却……」等万能状语
+- 禁止破折号（——）
+- 禁止无关环境描写凑字数
 
-请直接输出小说正文，不要加额外说明或字数统计。"""
+直接输出小说正文。不要标题、不要章节号、不要字数统计、不要额外说明。"""
 
     chapter_system_prompt = _get_chapter_system_prompt(db=db)
     effective_system = system_prompt if system_prompt else chapter_system_prompt
@@ -2158,7 +2190,7 @@ async def expand_chapter_to_content(story_context: dict, chapter_info: dict, api
             {"role": "user", "content": user_prompt},
         ],
         "stream": False,
-        "max_tokens": 6144,
+        "max_tokens": 2800,
     }
 
     async with httpx.AsyncClient(timeout=600) as client:
@@ -2246,38 +2278,104 @@ async def adjust_chapter_content(
     snapshot = _build_story_snapshot_tiered(story_context, "auto")
     chapter_details = json.dumps(chapter_info, ensure_ascii=False)
 
-    user_prompt = f"""请根据以下故事框架、章节信息、当前正文和修改要求，直接改写整章正文。
+    # 提取章节任务卡结构（对标 expand_chapter_to_content）
+    hook_info = ""
+    if isinstance(chapter_info, dict):
+        parts = []
+        for key, label in [("goal", "本章叙事目标"), ("conflict", "核心冲突"),
+                           ("hook", "开篇钩子"), ("payoff", "本章回报/高潮"),
+                           ("highlight", "本章最大亮点")]:
+            val = str(chapter_info.get(key) or "").strip()
+            if val:
+                parts.append(f"- {label}：{val}")
+        if parts:
+            hook_info = "## 本章任务卡（必须执行）\n" + "\n".join(parts) + "\n\n⚠️ 以上任务卡是本章的叙事指南。生成正文时，必须让读者感受到 goal 所描述的核心卖点、conflict 所描述的对抗张力、payoff 所描述的阅读满足感。不得偏离任务卡自由发挥。\n"
+
+    user_prompt = f"""请根据以下故事框架、章节任务卡和修改要求，创作完整的一话小说正文。
 
 ## 故事框架
 {snapshot}
 
+以上「作品圣经」中的创意理解、写作指导和导入约束是**不可违反的核心设定**，所有创作必须严格遵守，不得与圣经中的设定冲突。
+如已引用作者画像参考报告，则当作品圣经、写作要求与作者画像在句式节奏、语言风格、描写密度上冲突时，一律以作者画像为准。
+
 ## 本章信息
 {chapter_details}
-
-## 当前正文
+{hook_info}
+## 当前正文（参考，除非用户要求保留否则可全部重写）
 {chapter_content}
 
 ## 用户修改要求
 {instruction}
 
-## 改写要求
-- 保留当前章节已经成立的主要剧情信息，除非用户明确要求重做
-- 如已引用作者画像参考报告，调整后的正文必须符合作者画像中的写作风格，冲突时以作者画像为准
-- 优先根据用户要求调整节奏、情绪、冲突、人物互动、伏笔、描写重点
-- 保持人物设定、世界观和大纲约束一致
-- 逻辑自洽：每一个情节转折都必须有因有果，角色行为要符合其性格和处境
-- 禁止使用破折号（——），用逗号、句号或省略号代替
-- 禁止用「几天后」「过了一段时间」等时间跳跃来跳过关键剧情发展
-- 直接输出修改后的完整正文，不要解释，不要摘要，不要额外说明"""
+## 字数铁律（起点签约级硬性约束）
+- **绝对上限 2800 字**：超过 2800 字的正文在起点会被编辑直接打回。这不是建议，是红线。
+- 目标范围 2000-2500 字。低于 1700 字说明信息密度不够。
+- 每 100 字必须推进剧情或建立人设，不允许任何纯描写段落超过 80 字。
+
+## 起点金牌编辑写作规范
+
+### 场景经济性
+- 一个场景只完成一个叙事功能。功能完成，立刻切走。
+- 禁止同一场景写超过 400 字而不发生任何剧情变化。
+- 场景切换用空行分隔，不要写过渡句。
+
+### 对话铁律
+- 每句对话必须满足以下至少一项：①推进剧情 ②展示角色性格 ③埋设伏笔/制造悬念。
+- 禁止"嗯""啊""好的"等无信息量对话单独成段。
+- 对话与叙述交替，禁止连续 5 句以上纯对话。
+
+### 环境描写克制
+- 新场景首次出现：最多 3 句建立氛围，立刻转入剧情。
+- 禁止静态景物描写（"窗外是一棵梧桐树，树叶在风中摇曳"类）。
+- 环境必须通过角色感知来呈现，而非作者旁白。
+
+### 章末钩子（强制）
+- 最后 100 字内必须制造"点击下一章"的欲望。
+- 有效钩子类型：信息差揭示、冲突升级、角色面临抉择、意外出现。
+- 禁止类型：总结升华、空泛预告、哲理收尾。
+
+### 逻辑自洽
+- 每一个情节转折必须有前文铺垫。
+- 角色行为必须符合其性格、处境和已有信息量。
+
+## 严禁的 AI 写作习惯（出现即废稿）
+- 「突然」「忽然」「就在这时」全文不超过 2 次
+- 禁止「深深地」「无比地」「极其」等副词堆砌
+- 禁止「他不知道的是……」「这一切才刚刚开始……」等模板化悬念
+- 禁止所有角色说话风格雷同
+- 禁止「心中涌起一股暖流」「眼中闪过一丝XX」「嘴角勾起一抹XX」
+- 禁止章末总结升华（"他终于明白了……""这一夜，注定无人入眠"）
+- 禁止「不是A，而是B」的否定-肯定句式
+- 禁止「，带着……」「声音不大，却……」等万能状语
+- 禁止破折号（——）
+- 禁止无关环境描写凑字数
+
+直接输出小说正文。不要标题、不要章节号、不要字数统计、不要额外说明。"""
 
     HARDCODED_CHAPTER_ADJUST_SYSTEM = (
-        "你是白金级网文编辑，擅长根据编辑意见直接修改整章正文，并保持剧情与设定统一。\n"
-        "字数控制在2000字左右。\n"
-        "## 核心约束\n"
-        "1. 逻辑自洽优先：每个情节转折都必须有因有果。\n"
-        "2. 禁止使用破折号（——），用逗号、句号或省略号代替。\n"
-        "3. 禁止用「突然」「忽然」等词廉价地制造转折。\n"
-        "4. 角色行为必须符合其性格和处境，不能为了推进剧情而强行改变角色。"
+        "你是起点白金级网文编辑，审稿标准对齐起点精品签约审核。\n"
+        "## 字数铁律\n"
+        "正文字数必须控制在 2000-2500 字之间，绝对不超过 2800 字。\n"
+        "超过 2800 字在起点会被编辑直接打回。这是红线，不是建议。\n"
+        "## 场景经济性\n"
+        "一个场景只完成一个叙事功能，完成立刻切走。禁止同一场景超过 400 字而无剧情变化。\n"
+        "## 对话铁律\n"
+        "每句对话必须推进剧情、展示性格或埋设伏笔。禁止无信息量对话。\n"
+        "## 环境描写克制\n"
+        "新场景最多 3 句建立氛围。环境通过角色感知呈现，禁止静态景物描写。\n"
+        "## 章末钩子（强制）\n"
+        "最后 100 字内必须制造点击欲望：信息差揭示、冲突升级、角色抉择、意外出现。\n"
+        "禁止总结升华（他终于明白了）、空泛预告（他不知道的是）、哲理收尾。\n"
+        "## 严禁 AI 痕迹\n"
+        "1. 「突然」「忽然」全文不超过 2 次。\n"
+        "2. 禁止「深深地」「无比地」「极其」等副词堆砌。\n"
+        "3. 禁止「心中涌起一股暖流」「眼中闪过一丝XX」「嘴角勾起一抹XX」。\n"
+        "4. 禁止「不是A，而是B」句式。\n"
+        "5. 禁止「，带着……」「声音不大，却……」万能状语。\n"
+        "6. 禁止破折号（——）。\n"
+        "7. 所有角色说话风格必须有区分度。\n"
+        "8. 逻辑自洽：每个转折必须有前文铺垫。"
     )
     effective_system = system_prompt if system_prompt else HARDCODED_CHAPTER_ADJUST_SYSTEM
 
@@ -2288,7 +2386,7 @@ async def adjust_chapter_content(
             {"role": "user", "content": user_prompt},
         ],
         "stream": False,
-        "max_tokens": 16384,
+        "max_tokens": 2800,
     }
 
     async with httpx.AsyncClient(timeout=600) as client:

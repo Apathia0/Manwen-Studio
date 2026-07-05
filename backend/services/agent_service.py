@@ -24,6 +24,7 @@ from services.deepseek import (
     _build_story_snapshot_tiered,
     adjust_framework_with_chat,
     adjust_chapter_content,
+    build_agent_chapter_system_prompt,
 )
 from services.prompt_template import get_effective_prompt
 from services.story_state import build_story_bible_compact, build_story_memory_compact
@@ -1214,13 +1215,15 @@ async def adjust_chapter_by_instruction(chapter_id: int, instruction: str) -> di
             return {"error": "DeepSeek API Key 未配置"}
 
         template_system = get_effective_prompt(chapter.story_id, "chapter", db)
+        # 当 DB 模板为空时，使用框架直出的完整写作规范（对标 _DEEPSEEK_CHAPTER_BASE + methodology）
+        fallback_prompt = build_agent_chapter_system_prompt(db=db)
         new_content = await adjust_chapter_content(
             story_context=story_context,
             chapter_info=chapter_info,
             chapter_content=chapter_content,
             instruction=instruction,
             api_key=api_key,
-            system_prompt=template_system or None,
+            system_prompt=template_system or fallback_prompt or None,
         )
         if not new_content or not new_content.strip():
             return {"error": "AI 返回内容为空"}
@@ -1698,13 +1701,14 @@ async def batch_adjust_chapters(chapters: list[dict]) -> dict:
             }
             chapter_content = chapter.novel_content or ""
             template_system = get_effective_prompt(chapter.story_id, "chapter", db)
+            fallback_prompt = build_agent_chapter_system_prompt(db=db)
             new_content = await adjust_chapter_content(
                 story_context=story_context,
                 chapter_info=chapter_info,
                 chapter_content=chapter_content,
                 instruction=instruction,
                 api_key=api_key,
-                system_prompt=template_system or None,
+                system_prompt=template_system or fallback_prompt or None,
             )
             if not new_content or not new_content.strip():
                 return {"chapter_id": chapter_id, "error": "AI 返回内容为空"}
@@ -1731,7 +1735,7 @@ async def batch_adjust_chapters(chapters: list[dict]) -> dict:
 
 @tool_registry.register(
     name="add_chapter_plan",
-    description="在故事大纲中添加一个新的章节计划。",
+    description="在大纲中添加一个新的章节计划。\n\n⚠️ 章节规划规则：\n- 开书阶段（前10章）：每章必须包含 goal/conflict/hook/payoff/highlight（缺一不可），这些是AI生成正文时的唯一叙事指南\n- 第11章及以后：只需 chapter_number/title/summary/act，任务卡字段可选\n- 不要一次性规划所有卷的章节——后续卷只需幕级大纲",
     is_write=True,
     parameters={
         "type": "object",
@@ -1739,12 +1743,17 @@ async def batch_adjust_chapters(chapters: list[dict]) -> dict:
             "story_id": {"type": "integer", "description": "故事 ID"},
             "chapter": {
                 "type": "object",
-                "description": "章节计划对象，包含 chapter_number、title、summary、act 等",
+                "description": "章节计划对象",
                 "properties": {
                     "chapter_number": {"type": "integer", "description": "章节号"},
                     "title": {"type": "string", "description": "章节标题"},
                     "summary": {"type": "string", "description": "章节概要"},
                     "act": {"type": "string", "description": "所属幕/阶段标识"},
+                    "goal": {"type": "string", "description": "【前10章必填】本章叙事目标"},
+                    "conflict": {"type": "string", "description": "【前10章必填】本章核心冲突"},
+                    "hook": {"type": "string", "description": "【前10章必填】开篇钩子"},
+                    "payoff": {"type": "string", "description": "【前10章必填】本章回报/高潮"},
+                    "highlight": {"type": "string", "description": "【前10章必填】本章最大亮点"},
                     "key_events": {
                         "type": "array",
                         "items": {"type": "string"},
@@ -1846,7 +1855,7 @@ async def add_chapter_plan(story_id: int, chapter: dict) -> dict:
 
 @tool_registry.register(
     name="bulk_add_chapter_plans",
-    description="批量添加多个章节计划到故事大纲中。如果用户给出了明确的章节列表，用此工具一次添加多章。如果用户只说帮我规划后续章节，用 adjust_framework 更合适。比分别调用 add_chapter_plan 更高效。",
+    description="批量添加多个章节计划到故事大纲中。如果用户给出了明确的章节列表，用此工具一次添加多章。如果用户只说帮我规划后续章节，用 adjust_framework 更合适。比分别调用 add_chapter_plan 更高效。\n\n⚠️ 章节规划规则：\n- 开书阶段（前10章）：每章必须包含 goal/conflict/hook/payoff/highlight（缺一不可），这些是AI生成正文时的唯一叙事指南\n- 第11章及以后：只需 chapter_number/title/summary/act，任务卡字段可选\n- 不要一次性规划所有卷的章节——后续卷只需幕级大纲，等前卷写完后用 adjust_framework 续写",
     is_write=True,
     parameters={
         "type": "object",
@@ -1862,6 +1871,11 @@ async def add_chapter_plan(story_id: int, chapter: dict) -> dict:
                         "title": {"type": "string", "description": "章节标题"},
                         "summary": {"type": "string", "description": "章节概要"},
                         "act": {"type": "string", "description": "所属幕（如 1, 2, 3）"},
+                        "goal": {"type": "string", "description": "【前10章必填】本章叙事目标——推进什么情节、展示什么核心卖点"},
+                        "conflict": {"type": "string", "description": "【前10章必填】本章核心冲突——谁和谁在什么层面产生对抗"},
+                        "hook": {"type": "string", "description": "【前10章必填】开篇钩子——本章第一段如何抓住读者"},
+                        "payoff": {"type": "string", "description": "【前10章必填】本章回报/高潮——读者读完本章能获得什么满足感"},
+                        "highlight": {"type": "string", "description": "【前10章必填】本章最大亮点——区别于其他章节的独特记忆点"},
                     },
                     "required": ["chapter_number", "title"],
                 },
@@ -2726,6 +2740,24 @@ class AgentService:
     def __init__(self):
         self.tool_registry = tool_registry
 
+    def _build_writing_quality_section(self, db=None) -> str:
+        """构建正文写作质量规范章节（对标框架直出效果）。
+
+        注入到 Agent System Prompt 中，Agent 在输出章节正文时主动遵循。
+        聊天/查询/分析场景下 Agent 看到但不影响行为。
+        """
+        full_prompt = build_agent_chapter_system_prompt(db=db)
+        if not full_prompt:
+            return ""
+        return (
+            "\n\n---\n\n"
+            "## ✍️ 正文写作规范\n\n"
+            "**当你准备输出或修改章节正文时（调用 update_chapter_content、adjust_chapter_by_instruction、"
+            "batch_update_chapters、batch_adjust_chapters、rewrite_text_segment 等工具），"
+            "你输出或生成的内容必须严格遵循以下规范。日常聊天、查询、分析时忽略本节。**\n\n"
+            + full_prompt
+        )
+
     def _build_system_prompt(self, story_context: str, story_id: int = 0, workflow_type: str | None = None, enabled_skills: list[str] | None = None, db=None) -> str:
         """构建包含故事上下文的系统提示。"""
         story_id_line = f"\n当前作品 ID: {story_id}" if story_id else ""
@@ -2780,6 +2812,7 @@ class AgentService:
 
 {skills_fragment}
 """
+        writing_quality = self._build_writing_quality_section(db=db)
         return f"""你是 Manwen-Studio 的 AI 创作助手，拥有直接读写故事数据库的工具权限。{story_id_line}{video_section}
 
 **你的工作方式**：每次收到用户输入，先理解用户真正想要什么，再决定怎么做。不是每次都需要调用工具——用户可以只是想聊聊天。
@@ -2891,6 +2924,26 @@ class AgentService:
 
         **⚠️ 不要在一次调用中塞入过多数据**，特别是 `update_story_bible` 的 world_setting 和 `adjust_framework` 的 instruction。单次数据量过大会导致超时或截断。使用多次迭代，每次做一小批，Agent 循环会持续运行直到全部完成。
 
+### 📖 章节规划数量控制（强制规则）
+
+**不要一次性输出所有卷的章节规划。** 长篇小说的框架应该分阶段构建：
+
+| 阶段 | 规划内容 | 详细程度 |
+|------|---------|---------|
+| **开书阶段** | 前 10 章（通常对应第一卷） | **每章必须有完整任务卡**：goal/conflict/hook/payoff/highlight 缺一不可 |
+| **后续卷** | 第 2-6 卷 | **只规划幕级大纲**：每幕只需 act/title/summary，chapters 可以为空数组 |
+| **续写时** | 当前卷的章节 | 等前卷写完后，用 `adjust_framework` 为下一卷生成详细章节 |
+
+**为什么不能一次性输出全部章节？**
+1. 一次性输出 60+ 章的详细规划会导致 AI 偷懒，跳过后续章节的任务卡字段
+2. 后续卷的剧情应该根据前卷的实际写作情况动态调整
+3. 任务卡字段是 AI 生成正文的**唯一叙事指南**，缺少任何字段都会导致正文偏离大纲
+
+**正确的操作流程**：
+- 用户说"补充第2-6卷的章节规划" → 先创建第2-6卷的**幕级大纲**（act/title/summary），chapters 留空
+- 用户说"生成第二卷的章节" → 用 `adjust_framework` 为第二卷生成前 10 章详细规划（含完整任务卡）
+- 不要用 `bulk_add_chapter_plans` 一次性添加 50+ 章
+
 ### 框架修改工具选择决策树
 
 框架修改时，按以下优先级选择工具：
@@ -2943,6 +2996,7 @@ class AgentService:
 
 ## 📖 故事上下文（以下是当前作品的完整信息，供你参与讨论时参考）
 {story_context}
+{writing_quality}
         15. **📌 圣经字段名中文化**：在与用户讨论作品圣经（story bible）内容时，**所有字段名必须使用中文**，不要直接输出英文键名。以下是字段名对照表：
 
         **创意摘要（creative_brief）**：作品定位、题材、受众、风格基调、核心卖点、一句话梗概、主角核心、主线矛盾、长线悬念、目标篇幅、必保留设定、揭秘策略、节奏策略、开放故事笔记、世界观设定(world_setting)
