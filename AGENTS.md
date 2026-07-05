@@ -973,6 +973,48 @@ DeepSeek 返回的 JSON 可能被 `max_tokens` 截断，触发 `_repair_truncate
 | ✅ 同时覆盖两条链路 | `_parse_lite_chunk`（轻量拆镜）和 `_parse_full_chunk`（完整拆镜）共用 `_repair_truncated_json` |
 | ✅ 新增修复后自测 | 至少覆盖 8 个场景：值截断、键名截断、嵌套键名截断、数组内截断、多字段截断、有效JSON不变、空内容、仅空白 |
 
+### 18. ⚠️ Agent 助手正文输出质量必须对标框架直出（反复出问题，必须遵守）
+
+Agent 助手（右侧面板）生成的章节正文质量差、AI 味重（破折号泛滥、禁用词频出），而框架直出（左侧）质量好。
+**根因是两条路径使用的 System Prompt 完全不同。**
+
+**两条路径对比**：
+
+| 路径 | System Prompt | 写作质量规则 |
+|------|--------------|-------------|
+| 框架直出 | `_DEEPSEEK_CHAPTER_BASE` + `build_chapter_generation_prompt(db)` | ✅ 含禁止破折号、去AI味规则、写作技法、标点规范 |
+| Agent 助手 | `_build_system_prompt()`（纯工具说明书） | ❌ 零写作质量约束 |
+
+**架构要求（硬性规则）**：
+
+```
+Agent 任何输出正文的路径 → 必须注入与框架直出同源的写作规范
+                           ↓
+              build_agent_chapter_system_prompt(db)
+                           ↓
+              build_chapter_generation_prompt(_DEEPSEEK_CHAPTER_BASE, db)
+                           ↓
+              get_methodology_from_db(db)  ← 含标点规范 + 去AI味规则 + 写作技法
+```
+
+**修改 Agent 相关代码时必须检查的清单**：
+
+| 检查项 | 说明 |
+|--------|------|
+| ✅ Agent System Prompt 含写作规范 | `_build_system_prompt()` 通过 `_build_writing_quality_section(db)` 注入，不可移除 |
+| ✅ `get_methodology_from_db()` 含标点规范 | 对标 `get_chapter_writing_methodology()` 末尾的破折号禁令，不可遗漏 |
+| ✅ `adjust_chapter_by_instruction` 的 fallback 完整 | 当 DB 模板为空时，必须使用 `build_agent_chapter_system_prompt(db)`，不能回退到简陋的 `HARDCODED_CHAPTER_ADJUST_SYSTEM` |
+| ✅ `batch_adjust_chapters` 的 fallback 完整 | 同上 |
+| ✅ 方法论从 DB 读取时也含标点规则 | `writing_utils.py:get_methodology_from_db()` 返回前必须追加标点规范 |
+| ✅ 新增 AI 生成端点必须注入 | 任何新增的通过 Agent 生成正文的端点，都必须经过 `build_agent_chapter_system_prompt(db)` |
+
+**涉及文件**：
+- `backend/services/agent_service.py` — `_build_system_prompt()`、`_build_writing_quality_section()`、`adjust_chapter_by_instruction`、`batch_adjust_chapters`
+- `backend/services/deepseek.py` — `build_agent_chapter_system_prompt()`、`_DEEPSEEK_CHAPTER_BASE`
+- `backend/services/writing_utils.py` — `get_methodology_from_db()`、`build_chapter_generation_prompt()`
+
+**验证方法**：在 Agent 对话中说"帮我写第X章"或"重写第X章"，检查生成正文中是否出现破折号（——）。如出现则说明规范未生效。
+
 ---
 
 
@@ -1072,6 +1114,24 @@ DeepSeek 返回的 JSON 可能被 `max_tokens` 截断，触发 `_repair_truncate
   - 同时覆盖 `_parse_lite_chunk` 和 `_parse_full_chunk` 两条链路（共用同一修复函数）
 
 ---
+
+## ⚠️ 已修复 Bug 记录（2026-07-05 批次）
+
+### Bug 10: Agent 助手正文输出质量远差于框架直出
+
+- **症状**：Agent 助手（右侧面板）生成的章节正文 AI 味重、破折号泛滥、禁用词频出；框架直出（左侧）正文质量好、无破折号
+- **根因**：两条路径的 System Prompt 完全不同——
+  1. 框架直出使用 `_DEEPSEEK_CHAPTER_BASE` + `build_chapter_generation_prompt(db)`（含禁止破折号、去AI味规则、写作技法、标点规范）
+  2. Agent 助手使用 `_build_system_prompt()`（纯工具说明书，零写作质量约束）
+  3. `get_methodology_from_db()` 缺少标点规范追加（破折号禁令），与 `get_chapter_writing_methodology()` 不一致
+  4. `adjust_chapter_by_instruction` 和 `batch_adjust_chapters` 的 fallback system_prompt 使用简陋的 `HARDCODED_CHAPTER_ADJUST_SYSTEM`（仅6行），而非完整写作规范
+- **修复**：
+  1. `deepseek.py` — 新增 `build_agent_chapter_system_prompt(db)` 公共函数，统一 `_DEEPSEEK_CHAPTER_BASE` + methodology 构建逻辑
+  2. `writing_utils.py` — `get_methodology_from_db()` 末尾追加标点规范硬性规则（禁止破折号）
+  3. `agent_service.py` — 新增 `_build_writing_quality_section(db)` 方法，注入到 `_build_system_prompt()` 的写作规范章节（条件触发：正文场景遵循，聊天场景忽略）
+  4. `agent_service.py` — `adjust_chapter_by_instruction` 和 `batch_adjust_chapters` 的 fallback 改为 `build_agent_chapter_system_prompt(db)`
+- **文件**：`backend/services/deepseek.py`、`backend/services/writing_utils.py`、`backend/services/agent_service.py`
+- **规范文档**：见上方「常见陷阱 18」---
 
 ## Sisyphus Agent 工作文件
 

@@ -345,6 +345,9 @@ async def lifespan(app: FastAPI):
 
     db = SessionLocal()
     try:
+        # 同步框架 Prompt 到数据库（每次启动自动同步代码中的最新版本）
+        _ensure_framework_prompt_synced(db)
+
         for s in db.query(Story).filter(Story.title.in_(["我的第一个故事", "未命名故事"])).all():
             if s.chapters and any(ch.messages for ch in s.chapters):
                 s.title = "转生成为暗恋公主的女仆故事"
@@ -1417,18 +1420,25 @@ def _seed_platform_settings(db: Session, *, commit: bool = True) -> None:
 
 
 def _ensure_framework_prompt_synced(db) -> None:
-    """启动时同步框架生成默认提示词到数据库。
+    """启动时同步所有框架提示词到数据库。
 
-    修复重构导致的规则缩写：确保 DB 记录与 FRAMEWORK_PROMPT_SEED 一致。
+    确保 DB 记录与 FRAMEWORK_PROMPT_SEED / EDITING_PROMPT_SEED / CONTINUATION_PROMPT_SEED 一致。
+    修改 Python 源码中的这些常量后，重启即可自动同步到数据库。
     """
     from models import PlatformSetting
 
-    key = "prompt.framework_generation"
-    setting = db.query(PlatformSetting).filter(PlatformSetting.setting_key == key).first()
-    if setting:
-        setting.value_json = {"value": FRAMEWORK_PROMPT_SEED}
-    else:
-        db.add(PlatformSetting(setting_key=key, value_json={"value": FRAMEWORK_PROMPT_SEED}))
+    prompt_map = {
+        "prompt.framework_generation": FRAMEWORK_PROMPT_SEED,
+        "prompt.framework_editing": EDITING_PROMPT_SEED,
+        "prompt.framework_continuation": CONTINUATION_PROMPT_SEED,
+    }
+    for key, seed in prompt_map.items():
+        setting = db.query(PlatformSetting).filter(PlatformSetting.setting_key == key).first()
+        if setting:
+            setting.value_json = {"value": seed}
+        else:
+            db.add(PlatformSetting(setting_key=key, value_json={"value": seed}))
+    db.commit()
 
 
 _BASE_NOVEL_PROMPT = """你是白金级网文作家，作品长期位居各平台畅销榜首。你的小说以逻辑严密、节奏精准、人物鲜活著称。
@@ -1550,8 +1560,16 @@ FRAMEWORK_PROMPT_SEED = """你是资深小说策划编辑，擅长设计能被�
 4. `outline.three_acts`: 至少 2 幕，每幕必须有 act/title/summary 非空。
 5. 每章 `chapter_number`: 从 1 开始的正整数，全书唯一不重复。
 6. 每章 `title`: 必须有意义，不能为空。
-7. 开书阶段（前 1-3 幕）的 chapters 尽量填充 `summary`/`goal`/`conflict`/`hook`/`payoff`——越详细越好。后续扩展阶段的 chapters 可以为空或只含里程碑章节。
-8. `serial_strategy`: 根据篇幅类型填充对应字段。
+7. **前 10 章的每章必须填充以下任务卡字段（缺一不可）**：
+   - `summary`: 本章内容概要
+   - `goal`: 本章叙事目标——推进什么情节、展示什么核心卖点
+   - `conflict`: 本章核心冲突——谁和谁在什么层面产生对抗
+   - `hook`: 开篇钩子——本章第一段如何抓住读者
+   - `payoff`: 本章回报/高潮——读者读完本章能获得什么满足感
+   - `highlight`: 本章最大亮点——区别于其他章节的独特记忆点
+   这些字段是 AI 生成章节正文时的**唯一叙事指南**，缺了任何一个，AI 都会因为不知道本章要做什么而自由发挥、偏离大纲。
+8. 第 11 章及以后的章节，可以只填充 `summary`，其余任务卡字段可选。后续扩展阶段的 chapters 可以为空或只含里程碑章节。
+9. `serial_strategy`: 根据篇幅类型填充对应字段。
 
 ## 篇幅适配（根据用户描述的篇幅要求选择应用）
 
@@ -1565,7 +1583,7 @@ FRAMEWORK_PROMPT_SEED = """你是资深小说策划编辑，擅长设计能被�
 7. 第二章前必须进入核心冲突，不要用太多篇幅铺垫。
 8. 中段要有一个关键反转或真相揭示，推动故事走向高潮。
 9. 结局要紧凑有力，回收所有主要伏笔，不要拖尾。
-10. 每章必须标注 goal, conflict, hook，确保全书节奏紧凑。
+10. 每章必须标注 goal, conflict, hook, payoff, highlight，确保全书节奏紧凑、每章有明确叙事功能。
 
 ### 中篇（~50-100 章）
 1. 初始大纲只规划前 10 章详细章节，后续章节只以幕/卷级大纲给出核心冲突线和方向，不要求输出每章明细。
@@ -1576,7 +1594,7 @@ FRAMEWORK_PROMPT_SEED = """你是资深小说策划编辑，擅长设计能被�
 6. 世界观分 2-3 层揭秘，不要一次性交代完毕。
 7. 中段要保留升级空间和悬念递进，不能让故事在中段塌陷。
 8. 感情线、友情线、敌对线都要有独立的发展曲线。
-9. 前 10 章的每章必须标注 goal, conflict, hook，确保开篇有足够抓力。
+9. 前 10 章的每章必须标注 goal, conflict, hook, payoff, highlight，确保开篇有足够抓力、每章有明确叙事功能。
 10. 不要强制写出终局结局——用 serial_strategy 标注故事发展方向即可。
 
 ### 长篇（100+ 章，默认）
@@ -1588,7 +1606,7 @@ FRAMEWORK_PROMPT_SEED = """你是资深小说策划编辑，擅长设计能被�
 6. 角色成长渐进，不要把人物弧光一夜完成。
 7. 世界观揭秘分层递进，每次只给读者部分真相。
 8. 感情线、友情线、敌对线都要有独立的发展曲线。
-9. 前 10 章的每章必须标注 goal, conflict, hook，确保开篇有足够抓力。
+9. 前 10 章的每章必须标注 goal, conflict, hook, payoff, highlight，确保开篇有足够抓力、每章有明确叙事功能。
 10. 后续阶段不要强制写出终局结局——用 serial_strategy 标注故事发展方向即可。"""
 
 EDITING_PROMPT_SEED = """你是故事框架编辑规划器。你的任务不是输出完整 framework JSON，而是输出结构化编辑计划。
@@ -1619,6 +1637,19 @@ EDITING_PROMPT_SEED = """你是故事框架编辑规划器。你的任务不是�
 - outline.serial_strategy, outline.themes, outline.foreshadowing
 - outline.three_acts（用于整体压缩/重组幕结构，value 为新 three_acts 数组）
 
+## 章节规划数量限制（强制规则）
+
+**绝对禁止一次性输出所有卷的章节规划。** 长篇小说的框架应分阶段构建：
+
+1. **开书阶段**：只规划前 10 章详细章节。每章必须包含 title/summary/goal/conflict/hook/payoff/highlight（缺一不可）。
+2. **后续卷**：只规划幕级大纲（act/title/summary），chapters 设为空数组 `[]`。等前卷写完后，再用续写模式逐步生成后续章节。
+3. **单次调整上限**：一次 `add_chapter` 操作最多添加 15 章。如果用户要求设计 60 章，先创建幕级大纲，再分批生成每卷的前 10 章。
+
+**为什么不能一次性输出全部章节？**
+- 一次性输出 60+ 章会导致 AI 省略任务卡字段，正文质量崩盘
+- 后续卷的剧情应该根据前卷实际写作情况动态调整
+- 任务卡字段是 AI 生成正文的**唯一叙事指南**，缺少任何一个都会导致正文偏离大纲
+
 要求：
 1. operations 优先，只有 description/tags.* / outline.serial_strategy / outline.themes / outline.foreshadowing 允许走 patches。
 2. 禁止返回完整 framework。
@@ -1633,7 +1664,7 @@ EDITING_PROMPT_SEED = """你是故事框架编辑规划器。你的任务不是�
      绝对不能在用户未要求的情况下丢失任何已有章节。
      重要：用户明确要求的幕数必须严格遵守。如用户要求压缩/扩展到特定幕数（如 5 幕、7 幕），
      即使某些幕暂时没有章节，也必须创建该数量的幕（空幕设 chapters: []），不能擅自减少或增加幕数。
-7. 每个 add_chapter 的 changes 尽量包含 title、summary、goal、conflict、hook、payoff、highlight、key_events。"""
+7. 每个 add_chapter 的 changes **必须**包含 title、summary、goal、conflict、hook、payoff、highlight（缺一不可）。这些字段是后续 AI 生成章节正文时的唯一叙事指南，缺少任何一个都会导致 AI 自由发挥、偏离大纲。key_events 可选。"""
 
 CONTINUATION_PROMPT_SEED = """你是故事框架续写规划器。你的任务是基于现有框架，向后扩展后续阶段和章节规划。
 
@@ -1664,7 +1695,7 @@ CONTINUATION_PROMPT_SEED = """你是故事框架续写规划器。你的任务�
     绝对不能在用户未要求的情况下丢失任何已有章节。
     重要：用户明确要求的幕数必须严格遵守。如用户要求压缩/扩展到特定幕数（如 5 幕、7 幕），
     即使某些幕暂时没有章节，也必须创建该数量的幕（空幕设 chapters: []），不能擅自减少或增加幕数。
-3. 每个 add_chapter 的 changes 尽量包含 title、summary、goal、conflict、hook、payoff、highlight、key_events。
+3. 每个 add_chapter 的 changes **必须**包含 title、summary、goal、conflict、hook、payoff、highlight（缺一不可）。这些字段是后续 AI 生成章节正文时的唯一叙事指南，缺少任何一个都会导致 AI 自由发挥、偏离大纲。key_events 可选。
 4. 章节编号严格延续现有主线，不要跳跃或重复。
 5. 不要把长篇故事压缩成短篇结局，保持后续升级、扩盘、反转空间。
 6. reply 只说明实际续写的章节范围，不要说"我会"。"""
