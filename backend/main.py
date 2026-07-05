@@ -73,6 +73,9 @@ from models import (
     PlanQuotaRule,
     PlatformSetting,
     PromptTemplate,
+    RenderedClip,
+    ScriptScene,
+    ShotAssetBinding,
     Story,
     StoryTemplateBinding,
     TemplateLike,
@@ -5736,22 +5739,43 @@ def delete_story(story_id: int, request: Request, db: Session = Depends(get_db))
     # 删除所有引用 chapters 的非 cascade 子表（必须在删除 chapter 之前）
     chapter_ids = [c.id for c in story.chapters]
     if chapter_ids:
+        scene_ids_subq = db.query(ScriptScene.id).filter(
+            ScriptScene.chapter_id.in_(chapter_ids)
+        ).subquery()
+        shot_ids_subq = db.query(VideoShot.id).filter(
+            VideoShot.scene_id.in_(scene_ids_subq)
+        ).subquery()
+
+        db.query(ShotAssetBinding).filter(
+            ShotAssetBinding.shot_id.in_(shot_ids_subq)
+        ).delete(synchronize_session=False)
+        db.query(RenderedClip).filter(
+            RenderedClip.shot_id.in_(shot_ids_subq)
+        ).delete(synchronize_session=False)
+        db.query(VideoGenerationJob).filter(
+            VideoGenerationJob.shot_id.in_(shot_ids_subq)
+        ).delete(synchronize_session=False)
+        db.query(VideoShot).filter(
+            VideoShot.scene_id.in_(scene_ids_subq)
+        ).delete(synchronize_session=False)
+        db.query(ScriptScene).filter(
+            ScriptScene.chapter_id.in_(chapter_ids)
+        ).delete(synchronize_session=False)
+
         db.query(ChapterVideoShot).filter(ChapterVideoShot.workflow_id.in_(
             db.query(ChapterVideoWorkflow.id).filter(ChapterVideoWorkflow.chapter_id.in_(chapter_ids)).subquery()
         )).delete(synchronize_session=False)
         db.query(ChapterVideoWorkflow).filter(ChapterVideoWorkflow.chapter_id.in_(chapter_ids)).delete(synchronize_session=False)
         db.query(VideoProject).filter(VideoProject.chapter_id.in_(chapter_ids)).delete(synchronize_session=False)
+        db.query(VideoAsset).filter(VideoAsset.chapter_id.in_(chapter_ids)).delete(synchronize_session=False)
     # 删除章节及其 cascade 数据
     for chapter in story.chapters:
         chapter_dir = Path(__file__).resolve().parent / "manga_outputs" / f"chapter_{chapter.id}"
         _rmtree_best_effort(chapter_dir, "chapter directory")
-        for img in chapter.images:
-            db.delete(img)
-        for msg in chapter.messages:
-            db.delete(msg)
-        for asset in db.query(VideoAsset).filter(VideoAsset.chapter_id == chapter.id):
-            db.delete(asset)
-        db.delete(chapter)
+    if chapter_ids:
+        db.query(MangaImage).filter(MangaImage.chapter_id.in_(chapter_ids)).delete(synchronize_session=False)
+        db.query(ChatMessage).filter(ChatMessage.chapter_id.in_(chapter_ids)).delete(synchronize_session=False)
+        db.query(Chapter).filter(Chapter.id.in_(chapter_ids)).delete(synchronize_session=False)
     if story.cover_image:
         cover_path = Path(__file__).resolve().parent / story.cover_image
         try:
