@@ -2930,9 +2930,9 @@ class AgentService:
 
 | 阶段 | 规划内容 | 详细程度 |
 |------|---------|---------|
-| **当前卷** | 当前要写的卷的所有章节 | **每章必须有完整任务卡**：summary/goal/conflict/hook/payoff/highlight 缺一不可 |
+| **当前卷** | 如果用户有要求多少章则严格根据用户要求进行生成规划，如果没有硬性要求则生成十章即可 | **每章必须有完整任务卡**：summary/goal/conflict/hook/payoff/highlight 缺一不可 |
 | **后续卷** | 第 2-6 卷 | **只规划幕级大纲**：每幕只需 act/title/summary，chapters 设为空数组 |
-| **续写时** | 下一卷的章节 | 等前卷写完后，用 `adjust_framework` 为下一卷生成详细章节（含完整任务卡） |
+| **续写时** | 查看当前最新的末尾章节内容，然后在这个基础上进行续写规划章节| 等前卷写完后，用 `adjust_framework` 为下一卷生成详细章节（含完整任务卡） |
 
 **为什么不能一次性输出全部章节？**
 1. 一次性输出 60+ 章的详细规划会导致 AI 偷懒，跳过后续章节的任务卡字段
@@ -3213,7 +3213,36 @@ class AgentService:
                     # 继续循环（把工具结果送回 LLM，让 LLM 判断是否还有未完成的章节需要处理）
                     continue
 
-                # 这里说明没有工具调用了，正常结束
+                # 没有工具调用。检查Agent是否声称修改但未实际调用写入工具
+                content_trimmed = (collected_content or "").strip()
+                modification_keywords = [
+                    "已修改", "已更新", "已保存", "已调整", "已完成", "已写入",
+                    "已添加", "已删除", "已创建", "更新完成", "全部更新",
+                    "全部调整", "全部完成", "写入数据库", "已全部",
+                ]
+                if (
+                    not write_executed
+                    and content_trimmed
+                    and any(kw in content_trimmed for kw in modification_keywords)
+                    and iteration_count < SAFETY_MAX_ITERATIONS
+                ):
+                    logger.warning(
+                        "Agent 声称修改但未调用写入工具，强制重试 story=%s iter=%s preview=%.80s",
+                        story_id, iteration_count, content_trimmed,
+                    )
+                    all_messages.append({
+                        "role": "system",
+                        "content": (
+                            "你在回复中声称已经完成了修改/更新/写入，但上一轮没有实际调用任何写入工具。"
+                            "文字回复不能代替工具调用，只有工具调用才会真正写入数据库。"
+                            "请立即调用相应的写入工具（adjust_framework / bulk_add_chapter_plans / "
+                            "apply_framework_ops / update_story_bible / update_chapter_content 等）来实际执行修改。"
+                            "不要描述你要做什么，直接调用工具去做。"
+                        ),
+                    })
+                    yield {"event": "token", "data": json.dumps({"content": "\n\n[系统提示：检测到未实际写入，正在重新执行...]\n"}, ensure_ascii=False)}
+                    continue
+
                 break
 
             if write_executed:
