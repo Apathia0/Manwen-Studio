@@ -1388,7 +1388,7 @@ def _long_form_framework_rules() -> str:
 6. 角色成长渐进，不要把人物弧光一夜完成。
 7. 世界观揭秘分层递进，每次只给读者部分真相。
 8. 感情线、友情线、敌对线都要有独立的发展曲线。
-9. 前 10 章的每章必须标注 goal, conflict, hook，确保开篇有足够抓力。
+9. 前 10 章的每章必须标注 summary, goal, conflict, hook, payoff, highlight（缺一不可），这些是 AI 生成正文时的唯一叙事指南。缺少任何一个字段都会导致正文偏离大纲。
 10. 后续阶段不要强制写出终局结局——用 serial_strategy 标注故事发展方向即可。
 """.strip()
 
@@ -1403,7 +1403,7 @@ def _medium_form_framework_rules() -> str:
 6. 世界观分 2-3 层揭秘，不要一次性交代完毕。
 7. 中段要保留升级空间和悬念递进，不能让故事在中段塌陷。
 8. 感情线、友情线、敌对线都要有独立的发展曲线。
-9. 前 10 章的每章必须标注 goal, conflict, hook，确保开篇有足够抓力。
+9. 前 10 章的每章必须标注 summary, goal, conflict, hook, payoff, highlight（缺一不可），这些是 AI 生成正文时的唯一叙事指南。缺少任何一个字段都会导致正文偏离大纲。
 10. 不要强制写出终局结局——用 serial_strategy 标注故事发展方向即可。
 """.strip()
 
@@ -1419,7 +1419,7 @@ def _short_form_framework_rules() -> str:
 7. 第二章前必须进入核心冲突，不要用太多篇幅铺垫。
 8. 中段要有一个关键反转或真相揭示，推动故事走向高潮。
 9. 结局要紧凑有力，回收所有主要伏笔，不要拖尾。
-10. 每章必须标注 goal, conflict, hook，确保全书节奏紧凑。
+10. 每章必须标注 summary, goal, conflict, hook, payoff, highlight（缺一不可），确保全书节奏紧凑、每章有明确叙事功能。
 """.strip()
 
 
