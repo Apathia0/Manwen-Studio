@@ -3145,9 +3145,17 @@ class AgentService:
                     ]
                 all_messages.append(assistant_msg)
 
+                # 章节正文写入工具名称集合
+                _CONTENT_TOOLS = {
+                    "update_chapter_content", "batch_update_chapters",
+                    "adjust_chapter_by_instruction", "rewrite_text_segment",
+                    "batch_adjust_chapters",
+                }
+
                 # 处理工具调用
                 any_write_succeeded = False
                 write_tool_attempted = False
+                content_tool_succeeded = False
                 if finish_reason == "tool_calls" and tool_calls_acc:
                     sorted_indices = sorted(tool_calls_acc.keys())
                     for i in sorted_indices:
@@ -3201,8 +3209,11 @@ class AgentService:
                             for msg in all_messages:
                                 if msg.get("role") == "tool" and msg.get("tool_call_id") == tool_call_id:
                                     content_str = str(msg.get("content", ""))
-                                    if '"error"' not in content_str:
+                                    succeeded = '"error"' not in content_str
+                                    if succeeded:
                                         any_write_succeeded = True
+                                        if tool_name in _CONTENT_TOOLS:
+                                            content_tool_succeeded = True
                                     break
 
                     if any_write_succeeded:
@@ -3244,6 +3255,31 @@ class AgentService:
                         ),
                     })
                     yield {"event": "token", "data": json.dumps({"content": "\n\n[系统提示：检测到未实际写入，正在重新执行...]\n"}, ensure_ascii=False)}
+                    continue
+
+                # 检查2：只调了框架工具但没有调章节正文工具
+                if (
+                    write_executed
+                    and not content_tool_succeeded
+                    and content_trimmed
+                    and any(kw in content_trimmed for kw in modification_keywords)
+                    and iteration_count < SAFETY_MAX_ITERATIONS
+                ):
+                    logger.warning(
+                        "Agent 仅写入框架但未写入正文，强制重试 story=%s iter=%s preview=%.80s",
+                        story_id, iteration_count, content_trimmed,
+                    )
+                    all_messages.append({
+                        "role": "system",
+                        "content": (
+                            "你只调用了框架调整工具（adjust_framework / apply_framework_ops / "
+                            "bulk_add_chapter_plans 等），但没有调用章节正文写入工具。"
+                            "如果用户要求生成或修改章节正文，请调用 update_chapter_content / "
+                            "batch_update_chapters / adjust_chapter_by_instruction 来实际写入章节正文。"
+                            "不要只调整框架而不写正文。"
+                        ),
+                    })
+                    yield {"event": "token", "data": json.dumps({"content": "\n\n[系统提示：检测到正文未写入，正在重新执行...]\n"}, ensure_ascii=False)}
                     continue
 
                 break
