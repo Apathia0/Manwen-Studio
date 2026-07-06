@@ -1111,6 +1111,63 @@ async def update_chapter_content(chapter_id: int, content: str) -> dict:
 
 
 @tool_registry.register(
+    name="create_chapter",
+    description="在数据库中创建一个新的章节记录并返回其ID。创建后可以用 update_chapter_content 写入正文。"
+               "通常先通过 get_framework_detail 查看现有章节的最大编号，确认下一章编号后再调用此工具。"
+               "注意：此工具只创建章节行，不写入正文。创建后需要手动调用 update_chapter_content 写入正文。",
+    is_write=True,
+    parameters={
+        "type": "object",
+        "properties": {
+            "story_id": {"type": "integer", "description": "故事 ID"},
+            "title": {"type": "string", "description": "章节标题（可选，默认自动生成）"},
+        },
+        "required": ["story_id"],
+    },
+)
+async def create_chapter(story_id: int, title: str | None = None) -> dict:
+    """创建新的章节行并返回章节 ID。"""
+    db = SessionLocal()
+    try:
+        story = _validate_story_ownership(db, story_id, _current_story_id())
+        if not story:
+            return {"error": "故事不存在或无权访问"}
+
+        max_num = (
+            db.query(Chapter.chapter_number)
+            .filter(Chapter.story_id == story_id)
+            .order_by(Chapter.chapter_number.desc())
+            .first()
+        )
+        next_num = (max_num[0] + 1) if max_num else 1
+        chapter = Chapter(
+            story_id=story_id,
+            chapter_number=next_num,
+            title=title or f"第{next_num}话",
+            status="pending",
+        )
+        db.add(chapter)
+        db.flush()
+        db.commit()
+        db.refresh(chapter)
+        logger.info(
+            "Agent tool=create_chapter story=%s chapter=%s num=%s",
+            _current_story_id(), chapter.id, next_num,
+        )
+        return {
+            "ok": True,
+            "chapter_id": chapter.id,
+            "chapter_number": next_num,
+            "title": chapter.title,
+        }
+    except Exception as e:
+        logger.error("Agent tool=create_chapter failed story=%s: %s", _current_story_id(), e)
+        return {"error": f"创建章节失败: {e}"}
+    finally:
+        db.close()
+
+
+@tool_registry.register(
     name="batch_update_chapters",
     description="批量更新多个章节的正文内容。适用于用户给出多个章节的具体改写内容时，一次保存多章。比分别调用 update_chapter_content 更高效。",
     is_write=True,
