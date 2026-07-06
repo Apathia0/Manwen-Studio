@@ -231,9 +231,9 @@ export default function StoryLibraryPage({
                   </div>
                 ) : (
                   <>
-                    <button
+                    <div
                       onClick={() => void onOpen(story)}
-                      className="group/book relative block w-full overflow-hidden rounded-lg border border-[#e2e8f0] bg-gradient-to-br from-slate-50 to-slate-100 shadow-sm transition-all hover:shadow-md"
+                      className="group/book relative block w-full cursor-pointer overflow-hidden rounded-lg border border-[#e2e8f0] bg-gradient-to-br from-slate-50 to-slate-100 shadow-sm transition-all hover:shadow-md"
                     >
                       {story.cover_image ? (
                         <div className="aspect-[2/3] w-full">
@@ -301,7 +301,7 @@ export default function StoryLibraryPage({
                           </span>
                         </div>
                       </div>
-                    </button>
+                    </div>
                     
                     <div className="mt-2 px-0.5">
                       <div className="truncate text-sm font-medium text-slate-800" title={story.title}>
