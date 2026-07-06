@@ -3146,6 +3146,8 @@ class AgentService:
                 all_messages.append(assistant_msg)
 
                 # 处理工具调用
+                any_write_succeeded = False
+                write_tool_attempted = False
                 if finish_reason == "tool_calls" and tool_calls_acc:
                     sorted_indices = sorted(tool_calls_acc.keys())
                     for i in sorted_indices:
@@ -3190,11 +3192,11 @@ class AgentService:
                         })
 
                     # 检查是否有写工具成功执行（不含 error）
-                    any_write_succeeded = False
                     for i in sorted_indices:
                         tc = tool_calls_acc[i]
                         tool_name = tc["function"]["name"]
                         if self.tool_registry.is_write_tool(tool_name):
+                            write_tool_attempted = True
                             tool_call_id = tc["id"]
                             for msg in all_messages:
                                 if msg.get("role") == "tool" and msg.get("tool_call_id") == tool_call_id:
@@ -3222,6 +3224,7 @@ class AgentService:
                 ]
                 if (
                     not write_executed
+                    and not write_tool_attempted
                     and content_trimmed
                     and any(kw in content_trimmed for kw in modification_keywords)
                     and iteration_count < SAFETY_MAX_ITERATIONS

@@ -374,6 +374,8 @@ async def agent_chat(
                 )
                 write_db.commit()
                 assistant_saved = True
+            except Exception as e:
+                logger.warning("persist_assistant_message 写入失败（DB异常或对话未找到）: %s", e)
             finally:
                 write_db.close()
 
