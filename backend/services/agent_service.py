@@ -3251,6 +3251,15 @@ class AgentService:
             SAFETY_MAX_ITERATIONS = 200  # 熔断：防止无限循环（200次迭代 = 足够分批完成大型任务）
             write_executed = False
 
+            # 提取用户最后一条消息，判断是否涉及正文写入请求
+            _last_user_msg = ""
+            for m in reversed(messages):
+                if isinstance(m, dict) and m.get("role") == "user":
+                    _last_user_msg = (m.get("content") or "").strip()
+                    break
+            _CONTENT_WRITE_KEYWORDS = {"写", "正文", "生成", "创作", "续写", "重写"}
+            _has_content_intent = any(kw in _last_user_msg for kw in _CONTENT_WRITE_KEYWORDS)
+
             TOOL_EXECUTION_TIMEOUT = 300
 
             while iteration_count < SAFETY_MAX_ITERATIONS:
@@ -3455,9 +3464,10 @@ class AgentService:
                     yield {"event": "token", "data": json.dumps({"content": "\n\n[系统提示：检测到未实际写入，正在重新执行...]\n"}, ensure_ascii=False)}
                     continue
 
-                # 检查2：只调了框架工具但没有调章节正文工具
+                # 检查2：只调了框架工具但没有调章节正文工具（仅当用户要求写正文时触发）
                 if (
-                    write_executed
+                    _has_content_intent
+                    and write_executed
                     and not content_tool_succeeded
                     and content_trimmed
                     and any(kw in content_trimmed for kw in modification_keywords)
