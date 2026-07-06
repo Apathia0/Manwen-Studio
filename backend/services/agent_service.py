@@ -1735,7 +1735,7 @@ async def batch_adjust_chapters(chapters: list[dict]) -> dict:
 
 @tool_registry.register(
     name="add_chapter_plan",
-    description="在大纲中添加一个新的章节计划。\n\n⚠️ 章节规划规则：\n- 开书阶段（前10章）：每章必须包含 goal/conflict/hook/payoff/highlight（缺一不可），这些是AI生成正文时的唯一叙事指南\n- 第11章及以后：只需 chapter_number/title/summary/act，任务卡字段可选\n- 不要一次性规划所有卷的章节——后续卷只需幕级大纲",
+    description="在大纲中添加一个新的章节计划。\n\n⚠️ 章节规划规则：\n- 每章必须包含 summary/goal/conflict/hook/payoff/highlight（缺一不可），这些是AI生成正文时的唯一叙事指南\n- 不要一次性规划所有卷的章节——后续卷只需幕级大纲",
     is_write=True,
     parameters={
         "type": "object",
@@ -1855,7 +1855,7 @@ async def add_chapter_plan(story_id: int, chapter: dict) -> dict:
 
 @tool_registry.register(
     name="bulk_add_chapter_plans",
-    description="批量添加多个章节计划到故事大纲中。如果用户给出了明确的章节列表，用此工具一次添加多章。如果用户只说帮我规划后续章节，用 adjust_framework 更合适。比分别调用 add_chapter_plan 更高效。\n\n⚠️ 章节规划规则：\n- 开书阶段（前10章）：每章必须包含 goal/conflict/hook/payoff/highlight（缺一不可），这些是AI生成正文时的唯一叙事指南\n- 第11章及以后：只需 chapter_number/title/summary/act，任务卡字段可选\n- 不要一次性规划所有卷的章节——后续卷只需幕级大纲，等前卷写完后用 adjust_framework 续写",
+    description="批量添加多个章节计划到故事大纲中。如果用户给出了明确的章节列表，用此工具一次添加多章。如果用户只说帮我规划后续章节，用 adjust_framework 更合适。比分别调用 add_chapter_plan 更高效。\n\n⚠️ 章节规划规则：\n- 每章必须包含 summary/goal/conflict/hook/payoff/highlight（缺一不可），这些是AI生成正文时的唯一叙事指南\n- 不要一次性规划所有卷的章节——后续卷只需幕级大纲，等前卷写完后用 adjust_framework 续写",
     is_write=True,
     parameters={
         "type": "object",
@@ -2930,9 +2930,9 @@ class AgentService:
 
 | 阶段 | 规划内容 | 详细程度 |
 |------|---------|---------|
-| **开书阶段** | 前 10 章（通常对应第一卷） | **每章必须有完整任务卡**：goal/conflict/hook/payoff/highlight 缺一不可 |
-| **后续卷** | 第 2-6 卷 | **只规划幕级大纲**：每幕只需 act/title/summary，chapters 可以为空数组 |
-| **续写时** | 当前卷的章节 | 等前卷写完后，用 `adjust_framework` 为下一卷生成详细章节 |
+| **当前卷** | 当前要写的卷的所有章节 | **每章必须有完整任务卡**：summary/goal/conflict/hook/payoff/highlight 缺一不可 |
+| **后续卷** | 第 2-6 卷 | **只规划幕级大纲**：每幕只需 act/title/summary，chapters 设为空数组 |
+| **续写时** | 下一卷的章节 | 等前卷写完后，用 `adjust_framework` 为下一卷生成详细章节（含完整任务卡） |
 
 **为什么不能一次性输出全部章节？**
 1. 一次性输出 60+ 章的详细规划会导致 AI 偷懒，跳过后续章节的任务卡字段
@@ -2943,7 +2943,7 @@ class AgentService:
 - 用户说"补充第2-6卷的章节规划" → 先创建第2-6卷的**幕级大纲**（act/title/summary），chapters 留空
 - 用户说"生成第二卷的章节" → 用 `adjust_framework` 为第二卷生成前 10 章详细规划（含完整任务卡）
 - 不要用 `bulk_add_chapter_plans` 一次性添加 50+ 章
-- **⚠️ 使用 `bulk_add_chapter_plans` 或 `add_chapter_plan` 添加前10章时，即使 schema 不强制，也必须传入 goal/conflict/hook/payoff/highlight 全部 5 个字段，缺一不可。这些是 AI 生成正文的唯一叙事指南。**
+- **⚠️ 使用 `bulk_add_chapter_plans` 或 `add_chapter_plan` 添加任何章节时，即使 schema 不强制，也必须传入 summary/goal/conflict/hook/payoff/highlight 全部 6 个字段，缺一不可。这些是 AI 生成正文的唯一叙事指南。**
 
 ### 框架修改工具选择决策树
 

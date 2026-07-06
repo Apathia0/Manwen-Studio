@@ -1388,7 +1388,7 @@ def _long_form_framework_rules() -> str:
 6. 角色成长渐进，不要把人物弧光一夜完成。
 7. 世界观揭秘分层递进，每次只给读者部分真相。
 8. 感情线、友情线、敌对线都要有独立的发展曲线。
-9. 前 10 章的每章必须标注 summary, goal, conflict, hook, payoff, highlight（缺一不可），这些是 AI 生成正文时的唯一叙事指南。缺少任何一个字段都会导致正文偏离大纲。
+9. 每章必须标注 summary, goal, conflict, hook, payoff, highlight（缺一不可），这些是 AI 生成正文时的唯一叙事指南。缺少任何一个字段都会导致正文偏离大纲。
 10. 后续阶段不要强制写出终局结局——用 serial_strategy 标注故事发展方向即可。
 """.strip()
 
@@ -1403,7 +1403,7 @@ def _medium_form_framework_rules() -> str:
 6. 世界观分 2-3 层揭秘，不要一次性交代完毕。
 7. 中段要保留升级空间和悬念递进，不能让故事在中段塌陷。
 8. 感情线、友情线、敌对线都要有独立的发展曲线。
-9. 前 10 章的每章必须标注 summary, goal, conflict, hook, payoff, highlight（缺一不可），这些是 AI 生成正文时的唯一叙事指南。缺少任何一个字段都会导致正文偏离大纲。
+9. 每章必须标注 summary, goal, conflict, hook, payoff, highlight（缺一不可），这些是 AI 生成正文时的唯一叙事指南。缺少任何一个字段都会导致正文偏离大纲。
 10. 不要强制写出终局结局——用 serial_strategy 标注故事发展方向即可。
 """.strip()
 
@@ -1574,7 +1574,7 @@ async def generate_framework(
             launch_ready_hint = """
 9. 这次是"平台可发布级开书框架"生成，必须达到开书可用标准，而不是只给概念草稿。
 10. 初始大纲只规划前 10 章详细章节，后续章节只以幕/卷级大纲给出核心冲突线和方向，不要求输出每章明细。
-11. 前 10 章的章节必须尽量细到能直接写，每章要补齐 `summary`，并给出 `goal`、`conflict`、`hook`、`payoff`、`highlight`。
+11. 章节必须尽量细到能直接写，每章要补齐 `summary`，并给出 `goal`、`conflict`、`hook`、`payoff`、`highlight`。
 12. `outline` 至少要有 2 个以上主要阶段，明确开书阶段和后续扩展阶段；如果能拆到 3 个以上更好。
 13. `outline.serial_strategy` 至少完整给出 `positioning`、`opening_hook`、`first_3_chapter_hook`、`chapter_10_climax`，其余字段尽量补充。
 14. 第 1 章必须有强钩子，第 3 章前要建立明确追读动力，第 10 章要有小高潮。
@@ -1610,7 +1610,7 @@ async def generate_framework(
 1. `outline` 覆盖开书阶段和后续发展，阶段结构 3-5 个，核心冲突升级 2-3 次。
 2. 初始大纲只规划前 10 章详细章节，后续章节只以幕/卷级大纲给出核心冲突线和方向，不要求输出每章明细。
 3. 后续阶段不需要输出终局章节明细，用 `serial_strategy` 的 `midgame_engine` 和 `late_game_direction` 标注发展方向。
-4. 前 10 章的每个 `chapters` 条目除 `chapter_number`、`title`、`act` 外，**必须**包含 `summary`、`goal`、`conflict`、`hook`、`payoff`、`highlight`（缺一不可），`key_events` 可选。这些字段是后续 AI 生成章节正文时的唯一叙事指南。{min_chapter_requirement}
+4. 每个 `chapters` 条目除 `chapter_number`、`title`、`act` 外，**必须**包含 `summary`、`goal`、`conflict`、`hook`、`payoff`、`highlight`（缺一不可），`key_events` 可选。这些字段是后续 AI 生成章节正文时的唯一叙事指南。{min_chapter_requirement}
 5. `outline` 中必须额外包含 `serial_strategy` 对象，至少给出 `positioning`、`opening_hook`、`first_3_chapter_hook`、`chapter_10_climax`。
 6. 只输出 JSON，包含 `tags`、`characters`、`outline`、`chapters` 四个字段。
 {launch_ready_hint}
@@ -1624,11 +1624,11 @@ async def generate_framework(
 额外要求：
 1. 初始大纲只规划前 10 章详细章节，后续章节只以幕/卷级大纲给出核心冲突线和关键里程碑，不要求输出每章明细。
 2. 阶段数量不固定，可以是 3 幕、4 幕、5 个篇章或其他更适合题材的结构，不要为了形式强行写成三幕。
-3. 前 10 章必须细化到"能直接写"的粒度，每章**必须**标注 goal, conflict, hook, payoff, highlight（缺一不可）。
+3. 章节必须细化到"能直接写"的粒度，每章**必须**标注 summary, goal, conflict, hook, payoff, highlight（缺一不可）。
 4. 后续阶段（第二幕及以后）的 `chapters` 可以为空数组或只包含 3-5 个里程碑章节——这些阶段的核心冲突方向和关键情节点只需在 `act.summary` 中描述清楚即可。
 5. 不要强制写出终局结局，保留开放扩展空间。如果规划到后期，用 `serial_strategy.late_game_direction` 标注大致故事发展方向，不需要在 chapters 中产出终结性章节。
 6. `outline` 中必须额外包含 `serial_strategy` 对象，至少给出 `positioning`、`opening_hook`、`first_3_chapter_hook`、`chapter_10_climax`、`midgame_engine`，`late_game_direction` 可选。
-7. 前 10 章的 `chapters` 条目除 `chapter_number`、`title`、`act` 外，**必须**包含 `summary`、`goal`、`conflict`、`hook`、`payoff`、`highlight`（缺一不可），`key_events` 可选。这些字段是后续 AI 生成章节正文时的唯一叙事指南，让它更像章节任务卡而不是纯标题目录。{min_chapter_requirement}
+7. 所有 `chapters` 条目除 `chapter_number`、`title`、`act` 外，**必须**包含 `summary`、`goal`、`conflict`、`hook`、`payoff`、`highlight`（缺一不可），`key_events` 可选。这些字段是后续 AI 生成章节正文时的唯一叙事指南，让它更像章节任务卡而不是纯标题目录。{min_chapter_requirement}
 8. 后期阶段的 `chapters` 如有则标注核心里程碑（如"主角失去力量"、"真相揭示"等大事件），无需细节执行信息。
 9. 只输出 JSON，包含 `tags`、`characters`、`outline`、`chapters` 四个字段。
 {launch_ready_hint}
@@ -1785,7 +1785,7 @@ async def adjust_framework_with_chat(
 - 输出 reply + operations + patches + warnings。
 - reply 只说明实际执行范围，不要说"我会"。
 - 禁止输出完整 framework JSON。
-- **章节数量限制（强制）**：绝对禁止一次性输出所有卷的章节规划。开书阶段只规划前 10 章详细章节（每章必须含 goal/conflict/hook/payoff/highlight），后续卷只规划幕级大纲（act/title/summary，chapters 设为空数组）。单次调整最多添加 15 章 add_chapter 操作。
+- **章节数量限制（强制）**：绝对禁止一次性输出所有卷的章节规划。每次只规划一卷的章节（每章必须含 summary/goal/conflict/hook/payoff/highlight），后续卷只规划幕级大纲（act/title/summary，chapters 设为空数组）。单次调整最多添加 15 章 add_chapter 操作。
 
 支持的 operation 类型（每个 operation 是 {{"op": "类型", "changes": {{...}}}}）：
 
