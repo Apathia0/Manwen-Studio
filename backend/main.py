@@ -55,6 +55,7 @@ from sse_starlette.sse import EventSourceResponse
 from database import SessionLocal, get_db, init_db, engine as database_engine
 from models import (
     AgentConversation,
+    AgentConversationMessage,
     AgentPendingChange,
     AuditLog,
     BackgroundTask,
@@ -77,6 +78,7 @@ from models import (
     ScriptScene,
     ShotAssetBinding,
     Story,
+    StoryCharacterVersion,
     StoryTemplateBinding,
     TemplateLike,
     User,
@@ -87,6 +89,7 @@ from models import (
     VideoAsset,
     VideoGenerationJob,
     VideoProject,
+    VideoShot,
     VideoStylePreset,
 )
 from schemas import (
@@ -5806,6 +5809,13 @@ def delete_story(story_id: int, request: Request, db: Session = Depends(get_db))
     if chapter_ids:
         db.query(MangaImage).filter(MangaImage.chapter_id.in_(chapter_ids)).delete(synchronize_session=False)
         db.query(ChatMessage).filter(ChatMessage.chapter_id.in_(chapter_ids)).delete(synchronize_session=False)
+    # AgentConversation 及其子表必须在 Chapter 之前删除（chapter_id FK 引用 chapters.id，默认 RESTRICT）
+    db.query(AgentPendingChange).filter(AgentPendingChange.story_id == story_id).delete(synchronize_session=False)
+    db.query(AgentConversationMessage).filter(AgentConversationMessage.conversation_id.in_(
+        db.query(AgentConversation.id).filter(AgentConversation.story_id == story_id)
+    )).delete(synchronize_session=False)
+    db.query(AgentConversation).filter(AgentConversation.story_id == story_id).delete(synchronize_session=False)
+    if chapter_ids:
         db.query(Chapter).filter(Chapter.id.in_(chapter_ids)).delete(synchronize_session=False)
     if story.cover_image:
         cover_path = Path(__file__).resolve().parent / story.cover_image
@@ -5816,15 +5826,16 @@ def delete_story(story_id: int, request: Request, db: Session = Depends(get_db))
     story_dir = Path(__file__).resolve().parent / "manga_outputs" / f"story_{story_id}"
     _rmtree_best_effort(story_dir, "story asset directory")
     # 删除所有引用 stories 的非 cascade 子表（必须在删除 story 之前）
-    db.query(AgentPendingChange).filter(AgentPendingChange.story_id == story_id).delete(synchronize_session=False)
+    # StoryCharacterVersion 必须在 VideoAsset 之前删除（ref_asset_id 外键约束，默认 RESTRICT）
+    db.query(StoryCharacterVersion).filter(StoryCharacterVersion.story_id == story_id).delete(synchronize_session=False)
     db.query(ChapterVideoWorkflow).filter(ChapterVideoWorkflow.story_id == story_id).delete(synchronize_session=False)
     db.query(VideoProject).filter(VideoProject.story_id == story_id).delete(synchronize_session=False)
     db.query(StoryTemplateBinding).filter(StoryTemplateBinding.story_id == story_id).delete(synchronize_session=False)
     db.query(VideoAsset).filter(VideoAsset.story_id == story_id).delete(synchronize_session=False)
-    db.query(AgentConversation).filter(AgentConversation.story_id == story_id).delete(synchronize_session=False)
     db.query(DeconstructionResult).filter(DeconstructionResult.story_id == story_id).delete(synchronize_session=False)
     db.query(FrameworkSnapshot).filter(FrameworkSnapshot.story_id == story_id).delete(synchronize_session=False)
     db.query(NovelSource).filter(NovelSource.story_id == story_id).delete(synchronize_session=False)
+    db.query(BackgroundTask).filter(BackgroundTask.story_id == story_id).delete(synchronize_session=False)
     db.delete(story)
     db.commit()
     return {"ok": True}
