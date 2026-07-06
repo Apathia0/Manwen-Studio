@@ -2943,6 +2943,7 @@ class AgentService:
 - 用户说"补充第2-6卷的章节规划" → 先创建第2-6卷的**幕级大纲**（act/title/summary），chapters 留空
 - 用户说"生成第二卷的章节" → 用 `adjust_framework` 为第二卷生成前 10 章详细规划（含完整任务卡）
 - 不要用 `bulk_add_chapter_plans` 一次性添加 50+ 章
+- **⚠️ 使用 `bulk_add_chapter_plans` 或 `add_chapter_plan` 添加前10章时，即使 schema 不强制，也必须传入 goal/conflict/hook/payoff/highlight 全部 5 个字段，缺一不可。这些是 AI 生成正文的唯一叙事指南。**
 
 ### 框架修改工具选择决策树
 
