@@ -25,6 +25,7 @@ from services.deepseek import (
     adjust_framework_with_chat,
     adjust_chapter_content,
     build_agent_chapter_system_prompt,
+    expand_chapter_to_content,
 )
 from services.prompt_template import get_effective_prompt
 from services.story_state import build_story_bible_compact, build_story_memory_compact
@@ -1079,7 +1080,7 @@ async def get_deconstruction_rhythm() -> dict:
 
 @tool_registry.register(
     name="update_chapter_content",
-    description="直接保存/更新章节的正文内容。用户给出改写建议后，必须用此工具保存修改。",
+    description="保存/更新章节正文。仅当用户已给出完整改写文本时使用。如果用户要求AI「写出」「生成」「创作」正文，请使用 generate_chapter_content 委托框架引擎生成。",
     is_write=True,
     parameters={
         "type": "object",
@@ -1112,9 +1113,9 @@ async def update_chapter_content(chapter_id: int, content: str) -> dict:
 
 @tool_registry.register(
     name="create_chapter",
-    description="在数据库中创建一个新的章节记录并返回其ID。创建后可以用 update_chapter_content 写入正文。"
+    description="在数据库中创建一个新的章节记录并返回其ID。创建后可以用 generate_chapter_content 委托框架引擎生成正文。"
                "通常先通过 get_framework_detail 查看现有章节的最大编号，确认下一章编号后再调用此工具。"
-               "注意：此工具只创建章节行，不写入正文。创建后需要手动调用 update_chapter_content 写入正文。",
+               "注意：此工具只创建章节行，不写入正文。创建后调用 generate_chapter_content 委托框架引擎生成正文。",
     is_write=True,
     parameters={
         "type": "object",
@@ -1163,6 +1164,143 @@ async def create_chapter(story_id: int, title: str | None = None) -> dict:
     except Exception as e:
         logger.error("Agent tool=create_chapter failed story=%s: %s", _current_story_id(), e)
         return {"error": f"创建章节失败: {e}"}
+    finally:
+        db.close()
+
+
+@tool_registry.register(
+    name="generate_chapter_content",
+    description="委托框架创作引擎生成章节正文。适用于用户要求「写出」「生成」「创作」「写」某章正文时。"
+               "内部使用与框架直出完全相同的 DeepSeek 创作管道（含字数铁律/场景经济性/对话铁律/章末钩子/AI写作禁令），"
+               "生成质量与框架直出完全一致。\n\n"
+               "前置条件：该章节必须在 story.outline 中有章节规划（含完整的 goal/conflict/hook/payoff/highlight 任务卡）。"
+               "如果任务卡不完整，请先用 adjust_framework 或 add_chapter_plan 补充。\n\n"
+               "推荐使用流程：\n"
+               "1. 先调 get_framework_detail 确认章节规划完整\n"
+               "2. 如果章节行尚未创建，调 create_chapter 创建章节记录\n"
+               "3. 调此工具委托框架引擎生成正文\n"
+               "4. 完成后告知用户章节已生成（含字数）\n\n"
+               "注意：此工具生成质量高但速度较慢（约10-30秒），请告知用户稍候。",
+    is_write=True,
+    parameters={
+        "type": "object",
+        "properties": {
+            "story_id": {"type": "integer", "description": "故事 ID"},
+            "chapter_number": {"type": "integer", "description": "章节号（必须是 outline 中已规划的章节号）"},
+            "instruction": {
+                "type": "string",
+                "description": "用户对本章正文的额外写作要求，如「节奏快一点」「多写擂台打斗细节」「氛围要阴郁」「增加主角和配角的对话」等。"
+                               "可选，不传时按大纲任务卡默认生成。",
+            },
+        },
+        "required": ["story_id", "chapter_number"],
+    },
+)
+async def generate_chapter_content(story_id: int, chapter_number: int, instruction: str | None = None) -> dict:
+    """委托框架创作引擎生成章节正文（与框架直出质量完全一致）。"""
+    db = SessionLocal()
+    try:
+        story = _validate_story_ownership(db, story_id, _current_story_id())
+        if not story:
+            return {"error": "故事不存在或无权访问"}
+
+        story_context = _build_story_context_dict(story, user_instruction=instruction or "")
+
+        outline = story.outline if isinstance(story.outline, dict) else {}
+        chapters = _extract_outline_chapters(outline)
+        chapter_info = None
+        for ch in chapters:
+            if ch.get("chapter_number") == chapter_number:
+                chapter_info = dict(ch)
+                break
+
+        if not chapter_info:
+            return {"error": f"大纲中未找到第 {chapter_number} 章的规划。请先用 adjust_framework 或 add_chapter_plan 添加章节规划（含完整的 goal/conflict/hook/payoff/highlight 任务卡字段）"}
+
+        missing_fields = [f for f in ["goal", "conflict", "hook", "payoff", "highlight"] if not str(chapter_info.get(f) or "").strip()]
+        if missing_fields:
+            return {"error": f"第 {chapter_number} 章的任务卡字段 {', '.join(missing_fields)} 为空。请先用 adjust_framework 补充章节任务卡，确保 goal/conflict/hook/payoff/highlight 全部完整"}
+
+        if instruction and instruction.strip():
+            chapter_info["user_instruction"] = instruction.strip()
+
+        api_key = _current_api_key()
+        if not api_key:
+            return {"error": "DeepSeek API Key 未配置，请在设置中填写"}
+
+        previous_chapter_summary = ""
+        if isinstance(chapter_number, int) and chapter_number > 1:
+            prev_chapter = (
+                db.query(Chapter)
+                .filter(
+                    Chapter.story_id == story_id,
+                    Chapter.chapter_number < chapter_number,
+                    Chapter.novel_content.isnot(None),
+                    Chapter.status.in_(["completed", "draft"]),
+                )
+                .order_by(Chapter.chapter_number.desc())
+                .first()
+            )
+            if prev_chapter and prev_chapter.novel_content:
+                ending_text = prev_chapter.novel_content[-800:]
+                prev_title = prev_chapter.title or f"第{prev_chapter.chapter_number}章"
+                previous_chapter_summary = f"上一章《第{prev_chapter.chapter_number}章：{prev_title}》结尾：\n{ending_text}"
+
+        system_prompt = get_effective_prompt(story_id, "chapter", db)
+
+        novel_content = await expand_chapter_to_content(
+            story_context=story_context,
+            chapter_info=chapter_info,
+            api_key=api_key,
+            previous_chapter_summary=previous_chapter_summary,
+            system_prompt=system_prompt or None,
+            db=db,
+        )
+
+        if not novel_content or not novel_content.strip():
+            return {"error": "生成内容为空，请重试"}
+
+        chapter = (
+            db.query(Chapter)
+            .filter(Chapter.story_id == story_id, Chapter.chapter_number == chapter_number)
+            .first()
+        )
+        if chapter is None:
+            chapter = Chapter(
+                story_id=story_id,
+                chapter_number=chapter_number,
+                title=chapter_info.get("title") or f"第{chapter_number}章",
+                status="completed",
+            )
+            db.add(chapter)
+            db.flush()
+
+        if _current_pending_changes():
+            _current_pending_changes().record_chapter_field(chapter, "novel_content")
+        chapter.novel_content = novel_content
+        chapter.content_source = "framework_generation"
+        if _current_pending_changes():
+            _current_pending_changes().update_new_value("chapter", chapter.id, "novel_content", novel_content)
+
+        db.commit()
+        await _refresh_agent_memory(chapter, db)
+
+        logger.info(
+            "Agent tool=generate_chapter_content story=%s chapter=%s len=%s instruction=%s",
+            story_id, chapter_number, len(novel_content), instruction or "(无)",
+        )
+
+        preview = novel_content[:200] + "..." if len(novel_content) > 200 else novel_content
+        return {
+            "ok": True,
+            "chapter_id": chapter.id,
+            "chapter_number": chapter_number,
+            "content_length": len(novel_content),
+            "preview": preview,
+        }
+    except Exception as e:
+        logger.error("Agent tool=generate_chapter_content failed story=%s chapter=%s: %s", story_id, chapter_number, e)
+        return {"error": f"生成失败: {e}"}
     finally:
         db.close()
 
@@ -2798,20 +2936,20 @@ class AgentService:
         self.tool_registry = tool_registry
 
     def _build_writing_quality_section(self, db=None) -> str:
-        """构建正文写作质量规范章节（对标框架直出效果）。
+        """构建正文写作参考规范（供 Agent 分析和评估时参考）。
 
-        注入到 Agent System Prompt 中，Agent 在输出章节正文时主动遵循。
-        聊天/查询/分析场景下 Agent 看到但不影响行为。
+        正文生成已委托给框架管道（generate_chapter_content），其中内置了字数铁律/场景经济性/
+        对话铁律/章末钩子/AI禁令等完整约束。此段落仅供 Agent 做分析/评估/优化建议时参考。
         """
         full_prompt = build_agent_chapter_system_prompt(db=db)
         if not full_prompt:
             return ""
         return (
             "\n\n---\n\n"
-            "## ✍️ 正文写作规范\n\n"
-            "**当你准备输出或修改章节正文时（调用 update_chapter_content、adjust_chapter_by_instruction、"
-            "batch_update_chapters、batch_adjust_chapters、rewrite_text_segment 等工具），"
-            "你输出或生成的内容必须严格遵循以下规范。日常聊天、查询、分析时忽略本节。**\n\n"
+            "## ✍️ 正文写作参考规范\n\n"
+            "**正文生成已委托给框架创作引擎（generate_chapter_content 工具），引擎内置了字数铁律（2800上限）、"
+            "场景经济性（400字无变化即切）、对话铁律、章末钩子强制等起点签约级质量约束。**\n\n"
+            "以下规范供你在分析/评估/优化建议时参考：\n\n"
             + full_prompt
         )
 
@@ -2909,9 +3047,10 @@ class AgentService:
 - `get_character_profiles` — 读取角色外貌设定
 
 ### 写入工具（用于执行修改）
-- `update_chapter_content` — 直接保存整章正文（用户给出了完整改写内容时用）
+- `generate_chapter_content` — **🎯 生成章节正文的首选工具**。委托框架创作引擎生成（与框架直出质量完全一致，含字数铁律/场景经济性/对话铁律/章末钩子/AI禁令）。适用于用户要求「写出」「生成」「创作」「写」某章正文时。需先确保章节规划完整（含任务卡）。
+- `update_chapter_content` — 直接保存整章正文（仅当用户已给出完整改写文本时用。如果需要 AI 生成正文，请使用 `generate_chapter_content`）
 - `rewrite_text_segment` — 查找并替换章节中的特定段落（精确匹配替换）
-- `adjust_chapter_by_instruction` — 根据用户指令让 AI 重写整章（消耗高级配额）
+- `adjust_chapter_by_instruction` — 根据用户指令让 AI 重写整章（消耗高级配额，仅用于已有正文章节的重写/调整风格，不用于初版生成。初版生成请用 `generate_chapter_content`）
 - `update_story_info` — 修改标题/描述/标签
 - `update_story_bible` — 更新作品圣经（世界观设定/创意简报/写作指导），支持部分更新。用户要求调整世界观、修改核心设定时用此工具
 - `update_characters` — 替换角色设定列表
@@ -2938,6 +3077,7 @@ class AgentService:
 | **用户在对话中详细描述了世界观设定**（如力量体系、势力分布、等级划分、世界历史等具体内容） | **主动调用 `update_story_bible`** 将讨论确认的内容保存到 world_setting 中。不要等用户说出"改作品圣经"才保存。world_setting 是 `creative_brief` 下的嵌套 JSON，建议包含 power_system（力量体系）、society_structure（社会结构）、key_locations（关键地点）、world_history（世界历史）、hidden_truths（隐藏真相）等子字段，也接受任意其他键名。保存后说明存入了哪些设定模块 |
 | "帮我调整大纲/结构" | 调 `get_framework_detail` 查看当前大纲 → 给出调整方案 → 待确认后调 `apply_framework_ops`（明确改动）或 `adjust_framework`（需要 AI 创作） |
 | "添加一个新章节" | 调 `get_framework_detail` 查看现有章节 → 给出新章节建议位置 → 待确认后调 `add_chapter_plan` |
+| "写/生成/创作第X章正文" | ① 调 `get_framework_detail` 确认大纲中有该章规划且任务卡完整 → ② 调 `create_chapter` 创建章节行（如果尚未创建）→ ③ 调 `generate_chapter_content` 委托框架引擎生成正文 ★ **不要用 `update_chapter_content` 代替 `generate_chapter_content`，前者用于保存用户提供的现成文本，后者才调用 AI 生成** |
 | "看看这一章写了什么" | 调 `get_chapter_full` → 总结/展示内容 |
 | "有哪些章节，进展如何" | 调 `get_all_chapters_summary` → 呈现概览 |
 
@@ -3202,11 +3342,12 @@ class AgentService:
                     ]
                 all_messages.append(assistant_msg)
 
-                # 章节正文写入工具名称集合
+                # 章节正文写入工具名称集合（含框架委托生成工具）
                 _CONTENT_TOOLS = {
                     "update_chapter_content", "batch_update_chapters",
                     "adjust_chapter_by_instruction", "rewrite_text_segment",
                     "batch_adjust_chapters",
+                    "generate_chapter_content",
                 }
 
                 # 处理工具调用
