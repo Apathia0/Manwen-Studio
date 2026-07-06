@@ -1818,6 +1818,12 @@ async def apply_framework_ops(story_id: int, operations: list, patches: list | N
         story.characters = _normalize_characters_payload(framework.get("characters"))
         story.outline = framework.get("outline") if isinstance(framework.get("outline"), dict) else existing_framework["outline"]
 
+        if _current_pending_changes():
+            _current_pending_changes().update_new_value("story", story.id, "description", story.description)
+            _current_pending_changes().update_new_value("story", story.id, "tags", story.tags)
+            _current_pending_changes().update_new_value("story", story.id, "characters", story.characters)
+            _current_pending_changes().update_new_value("story", story.id, "outline", story.outline)
+
         _save_framework_snapshot(
             story_id=story.id,
             snapshot_data=_build_current_snapshot_data(story),
