@@ -3,6 +3,26 @@
 from typing import Any
 
 
+# 自定义模板通常承载作者最重要的写作约束，不能用 2000 字硬切。
+CUSTOM_RULES_MAX_CHARS = 12000
+CHAPTER_CUSTOM_STYLE_MAX_CHARS = 16000
+
+
+def _normalize_custom_prompt(value: Any, *, max_chars: int = CUSTOM_RULES_MAX_CHARS) -> str:
+    """整理用户自定义提示词，常规长度完整保留，极端超长时保留首尾关键约束。"""
+    custom = str(value or "").strip()
+    if len(custom) <= max_chars:
+        return custom
+
+    head_len = max_chars // 2
+    tail_len = max_chars - head_len
+    return (
+        custom[:head_len]
+        + "\n\n（自定义要求过长，已保留开头和结尾关键约束，中段仅为保护上下文窗口而压缩。）\n\n"
+        + custom[-tail_len:]
+    )
+
+
 # ── 映射表 ─────────────────────────────────────────────
 
 ART_STYLE_MAP = {
@@ -86,9 +106,7 @@ def _build_framework_rules(parts: list, params: dict):
     if tone and tone in TONE_MAP:
         rules.append(TONE_MAP[tone])
 
-    _custom = str(params.get("custom_rules") or "")
-    if len(_custom) > 2000:
-        _custom = _custom[:2000] + "（已截断，超过2000字符限制）"
+    _custom = _normalize_custom_prompt(params.get("custom_rules"))
     if _custom:
         rules.append(f"用户自定义要求：{_custom}")
 
@@ -119,9 +137,10 @@ def _build_chapter_rules(parts: list, params: dict):
     elif params.get("vocabulary_level") == "simple":
         rules.append("使用通俗易懂的语言，避免生僻词汇")
 
-    _custom = str(params.get("custom_style_notes") or "")
-    if len(_custom) > 2000:
-        _custom = _custom[:2000] + "（已截断，超过2000字符限制）"
+    _custom = _normalize_custom_prompt(
+        params.get("custom_style_notes"),
+        max_chars=CHAPTER_CUSTOM_STYLE_MAX_CHARS,
+    )
     if _custom:
         rules.append(f"风格要求：{_custom}")
 
@@ -143,9 +162,7 @@ def _build_character_rules(parts: list, params: dict):
     if params.get("arc_planning") == "complete":
         rules.append("明确角色的成长弧光：起始状态 → 触发事件 → 变化过程 → 最终状态")
 
-    _custom = str(params.get("custom_requirements") or "")
-    if len(_custom) > 2000:
-        _custom = _custom[:2000] + "（已截断，超过2000字符限制）"
+    _custom = _normalize_custom_prompt(params.get("custom_requirements"))
     if _custom:
         rules.append(f"自定义要求：{_custom}")
 
@@ -178,9 +195,7 @@ def _build_manga_style_rules(parts: list, params: dict):
     elif params.get("lighting") == "natural":
         rules.append("使用自然柔和的光线")
 
-    _custom = str(params.get("custom_style_prompt") or "")
-    if len(_custom) > 2000:
-        _custom = _custom[:2000] + "（已截断，超过2000字符限制）"
+    _custom = _normalize_custom_prompt(params.get("custom_style_prompt"))
     if _custom:
         rules.append(f"风格补充：{_custom}")
 

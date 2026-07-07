@@ -18,6 +18,13 @@ DEEPSEEK_API_KEY = ""
 DEEPSEEK_BASE_URL = ""
 DEEPSEEK_MODEL = ""
 
+CHAPTER_TARGET_MIN_CHARS = 2200
+CHAPTER_TARGET_MAX_CHARS = 2800
+CHAPTER_TARGET_IDEAL_CHARS = 2500
+CHAPTER_FIRST_PASS_MIN_CHARS = 2350
+CHAPTER_FIRST_PASS_MAX_CHARS = 2650
+CHAPTER_COMPLETION_MAX_TOKENS = 3328
+
 _RUNTIME_TEMPERATURE: float | None = None
 _RUNTIME_TOP_P: float | None = None
 
@@ -508,21 +515,29 @@ async def chat_stream(messages: list[dict], api_key: str | None = None, framewor
 
 
 async def generate_novel(messages: list[dict], api_key: str | None = None, framework_context: str = "", system_prompt: str | None = None) -> str:
-    """Generate a full novel chapter (non-streaming)."""
+    """非流式生成一章完整小说正文。"""
     system_content = system_prompt or ""
     if framework_context:
         system_content += "\n\n## 故事框架约束\n" + framework_context
     full_messages = [{"role": "system", "content": system_content}] + messages
     full_messages.append({
         "role": "user",
-        "content": "请根据我们的讨论，创作这一话的完整小说正文。字数必须在2000-2500字之间，绝对不超过2800字。场景经济、对话有信息量、章末必须有钩子。直接输出正文，不要标题和说明。",
+        "content": (
+            f"请根据我们的讨论，创作这一话的完整小说正文。正文字数目标约 {CHAPTER_TARGET_IDEAL_CHARS} 字，"
+            f"建议 {CHAPTER_TARGET_MIN_CHARS}-{CHAPTER_TARGET_MAX_CHARS} 字；低于 {CHAPTER_TARGET_MIN_CHARS} 字视为展开不足，"
+            f"超过 {CHAPTER_TARGET_MAX_CHARS} 字视为超出标准，必须删去无效铺垫并自行收束。"
+            f"首轮请优先写到 {CHAPTER_FIRST_PASS_MIN_CHARS}-{CHAPTER_FIRST_PASS_MAX_CHARS} 字，按 10-12 个自然段组织，"
+            "每段约 180-240 字，章末钩子完成后立刻停笔，不追加尾声、总结或下一章预告。"
+            "场景经济、对话有信息量、章末必须有钩子。"
+            "直接输出正文，不要标题和说明。"
+        ),
     })
 
     payload = {
         "model": DEEPSEEK_MODEL,
         "messages": full_messages,
         "stream": False,
-        "max_tokens": 2800,
+        "max_tokens": CHAPTER_COMPLETION_MAX_TOKENS,
     }
     payload = _apply_runtime_params(payload)
 
@@ -2142,13 +2157,16 @@ async def expand_chapter_to_content(
     system_prompt: str | None = None,
     db=None,
     _retry_count: int = 0,
+    _retry_reason: str | None = None,
+    _previous_content: str = "",
+    _best_content: str | None = None,
+    _best_distance: int | None = None,
 ) -> str:
-    """Expand a chapter outline entry into full novel content using story framework constraints.
-    
-    字数超限（>3000字）会自动重试，最多重试 MAX_RETRIES 次。
+    """按故事框架约束把章节大纲扩写成完整正文。
+
+    目标约 2500 字。低于下限时补足重试，超过上限时保留情节做收束重写。
     """
     MAX_RETRIES = 2
-    CHAR_RETRY_LIMIT = 3000  # 超过此字数触发重试
     snapshot = _build_story_snapshot(story_context)
     chapter_details = json.dumps(chapter_info, ensure_ascii=False)
 
@@ -2196,11 +2214,18 @@ async def expand_chapter_to_content(
 {chapter_details}
 {hook_info}
 {previous_block}
-## ⚠️ 字数铁律（最优先，违反即废稿）
-- **正文字数必须在 2000-3000 字之间**，绝对不超过 3500 字。你的目标是 2300-2800 字。
-- **写完必须自行统计字数**。如果不足 2000 字必须补充内容，超过 3500 字必须压缩。
-- 这不是可协商的建议——起点精品频道每章 2000-3000 字是最基本的要求。
+## ⚠️ 字数要求（最优先）
+- **正文字数目标约 {CHAPTER_TARGET_IDEAL_CHARS} 字**，建议 {CHAPTER_TARGET_MIN_CHARS}-{CHAPTER_TARGET_MAX_CHARS} 字。
+- 低于 {CHAPTER_TARGET_MIN_CHARS} 字视为展开不足，必须补足关键场面、对话和因果推进；超过 {CHAPTER_TARGET_MAX_CHARS} 字视为超出标准，必须自行删去无效铺垫并收束。
+- 不要为了凑篇幅重复心理活动、环境描写、路程转场或设定解释；也不要为了压篇幅砍掉关键因果、有效对话和章末钩子。
+- 这不是梗概扩写，必须写成完整网文章节：有开篇钩子、过程冲突、情绪推进和章末钩子。
 - 每句话都必须推进剧情或建立人设。删除所有对推进剧情无贡献的句子。
+
+## 首轮篇幅结构（用于一次命中）
+- 首轮优先写到 {CHAPTER_FIRST_PASS_MIN_CHARS}-{CHAPTER_FIRST_PASS_MAX_CHARS} 字，给校验留余量，不要贴着 2800 字上限写。
+- 全章控制在 10-12 个自然段，每段约 180-240 字，最长段落不要超过 280 字。
+- 段落功能建议：开篇危机 1 段，冲突铺垫 2-3 段，行动推进 4-6 段，爽点或转折 1-2 段，章末钩子 1 段。
+- 章末钩子完成后立刻停笔，禁止追加尾声、总结、感悟、下一章预告或重复解释。
 
 ## 起点白金级写作规范
 
@@ -2254,17 +2279,31 @@ async def expand_chapter_to_content(
 
 直接输出正文。不要标题、不要章节号、不要章节名、不要字数统计、不要任何额外说明。只输出正文本身。"""
 
-    # 重试时追加严格字数指令
-    if _retry_count > 0:
+    if _retry_reason == "short":
         user_prompt += (
-            "\n\n## 🚫 上一版本被驳回：字数超限\n"
-            "上一版本正文超过 %d 字，已被驳回。\n"
-            "本次**必须**将正文压缩到 2000-2800 字以内。\n"
-            "- 核心情节、人物、关键对话 **不变**\n"
-            "- 删除冗余描写、过渡段落、重复修辞\n"
-            "- 每句话必须推进剧情或建立人设\n"
-            "- 目标 2300 字，绝对不超过 2800 字\n"
-            "再次超限将视为生成失败。" % CHAR_RETRY_LIMIT
+            "\n\n## ⚠️ 上一版本被驳回：正文展开不足\n"
+            f"上一版低于 {CHAPTER_TARGET_MIN_CHARS} 字，像梗概或半章内容。\n"
+            f"本次必须补足到 {CHAPTER_TARGET_MIN_CHARS}-{CHAPTER_TARGET_MAX_CHARS} 字，理想约 {CHAPTER_TARGET_IDEAL_CHARS} 字。\n"
+            "- 核心情节、人物、关键对话保持不偏题\n"
+            "- 优先补足冲突铺垫、角色反应、关键对话、爽点兑现和章末钩子\n"
+            "- 按 11-12 个自然段输出，每段约 180-240 字\n"
+            "- 不要用总结、设定说明或水段落凑字数\n"
+        )
+    elif _retry_reason == "long":
+        previous_excerpt = _previous_content[:12000]
+        if len(_previous_content) > 12000:
+            previous_excerpt += "\n\n[中间内容略去，收束重写时仍以本章任务卡为准保留完整因果链。]"
+        user_prompt += (
+            "\n\n## ⚠️ 上一版本被驳回：正文超过标准\n"
+            f"上一版超过 {CHAPTER_TARGET_MAX_CHARS} 字，节奏偏散。请基于上一版做完整重写，"
+            f"收束到 {CHAPTER_TARGET_MIN_CHARS}-{CHAPTER_TARGET_MAX_CHARS} 字，理想约 {CHAPTER_TARGET_IDEAL_CHARS} 字。\n"
+            "- 禁止直接截断，必须保留开篇钩子、核心冲突、关键因果、必要对话、爽点兑现和章末钩子\n"
+            "- 删除重复心理活动、解释性设定、路程转场、无变化的观察和无信息寒暄\n"
+            "- 合并功能重复的场景，让每 200 字都有新行动、新信息或关系变化\n"
+            "- 改成 10-11 个自然段，每段约 180-230 字，最长段落不超过 260 字\n"
+            "- 只输出收束后的完整正文，不要说明删改过程\n"
+            "\n## 上一版正文（用于保留情节并收束重写）\n"
+            f"{previous_excerpt}\n"
         )
 
     chapter_system_prompt = _get_chapter_system_prompt(db=db)
@@ -2279,7 +2318,7 @@ async def expand_chapter_to_content(
             {"role": "user", "content": user_prompt},
         ],
         "stream": False,
-        "max_tokens": 3328,
+        "max_tokens": CHAPTER_COMPLETION_MAX_TOKENS,
     }
 
     async with httpx.AsyncClient(timeout=600) as client:
@@ -2290,12 +2329,19 @@ async def expand_chapter_to_content(
         )
         resp.raise_for_status()
         data = _response_json(resp, context="DeepSeek")
-        content = data["choices"][0]["message"]["content"]
+        choice = data["choices"][0]
+        finish_reason = choice.get("finish_reason")
+        content = choice["message"]["content"]
         content = _sanitize_novel_content(content)
-        # 字数校验：超过 3000 字则打回重试，附带严格说明
         _char_count = len(content.replace(" ", "").replace("\n", "").replace("\r", ""))
-        if _char_count > CHAR_RETRY_LIMIT and _retry_count < MAX_RETRIES:
-            logging.warning("章节正文 %d 字，超过 %d 字限制，重试第 %d 次", _char_count, CHAR_RETRY_LIMIT, _retry_count + 1)
+        _distance = abs(_char_count - CHAPTER_TARGET_IDEAL_CHARS)
+        if _best_content is None or _best_distance is None or _distance < _best_distance:
+            _best_content = content
+            _best_distance = _distance
+        if finish_reason == "length":
+            logging.warning("章节正文生成触发 length 截断风险，当前正文约 %d 字", _char_count)
+        if _char_count < CHAPTER_TARGET_MIN_CHARS and _retry_count < MAX_RETRIES:
+            logging.warning("章节正文 %d 字，不足 %d 字，补足重试第 %d 次", _char_count, CHAPTER_TARGET_MIN_CHARS, _retry_count + 1)
             return await expand_chapter_to_content(
                 story_context=story_context,
                 chapter_info=chapter_info,
@@ -2304,12 +2350,43 @@ async def expand_chapter_to_content(
                 system_prompt=system_prompt,
                 db=db,
                 _retry_count=_retry_count + 1,
+                _retry_reason="short",
+                _previous_content=content,
+                _best_content=_best_content,
+                _best_distance=_best_distance,
             )
-        # 重试耗尽或字数合格后做最终检查
-        if _char_count > 3500:
-            logging.warning("章节正文 %d 字，超过 3500 字上限（重试%d次后）", _char_count, _retry_count)
-        elif _char_count < 2000:
-            logging.warning("章节正文 %d 字，不足 2000 字", _char_count)
+        if _char_count > CHAPTER_TARGET_MAX_CHARS and _retry_count < MAX_RETRIES:
+            logging.warning("章节正文 %d 字，超过 %d 字标准上限，收束重写第 %d 次", _char_count, CHAPTER_TARGET_MAX_CHARS, _retry_count + 1)
+            return await expand_chapter_to_content(
+                story_context=story_context,
+                chapter_info=chapter_info,
+                api_key=api_key,
+                previous_chapter_summary=previous_chapter_summary,
+                system_prompt=system_prompt,
+                db=db,
+                _retry_count=_retry_count + 1,
+                _retry_reason="long",
+                _previous_content=content,
+                _best_content=_best_content,
+                _best_distance=_best_distance,
+            )
+        if _char_count > CHAPTER_TARGET_MAX_CHARS:
+            logging.warning("章节正文 %d 字，仍超过 %d 字标准上限（重试%d次后）", _char_count, CHAPTER_TARGET_MAX_CHARS, _retry_count)
+        elif _char_count < CHAPTER_TARGET_MIN_CHARS:
+            logging.warning("章节正文 %d 字，仍不足 %d 字（重试%d次后）", _char_count, CHAPTER_TARGET_MIN_CHARS, _retry_count)
+        if (
+            (_char_count < CHAPTER_TARGET_MIN_CHARS or _char_count > CHAPTER_TARGET_MAX_CHARS)
+            and _best_content
+            and _best_content != content
+            and _best_distance is not None
+            and _best_distance < _distance
+        ):
+            logging.warning(
+                "章节多次重试后仍未完全命中目标，返回最接近 %d 字的版本（偏差 %d 字）",
+                CHAPTER_TARGET_IDEAL_CHARS,
+                _best_distance,
+            )
+            content = _best_content
         setting_check = _check_setting_ratio(content, chapter_number if isinstance(chapter_number, int) else 0)
         if setting_check.get("exceed"):
             logging.warning("章节设定占比超标: %s", setting_check.get("message", ""))
@@ -2346,7 +2423,7 @@ async def rewrite_selection(
     api_key: str | None = None,
     system_prompt: str | None = None,
 ) -> str:
-    """Rewrite a selected portion of novel text with improved quality."""
+    """在不改变情节的前提下改写选中的小说片段。"""
     snapshot = _build_story_snapshot_tiered(story_context or {}, "auto") if isinstance(story_context, dict) else ""
     story_snapshot_block = f"\n## 故事约束\n{snapshot}\n" if snapshot else ""
     user_prompt = f"""请改写以下小说片段，保持原有情节和人物不变，但提升文笔质量：
@@ -2386,7 +2463,7 @@ async def rewrite_selection(
             {"role": "user", "content": user_prompt},
         ],
         "stream": False,
-        "max_tokens": 3328,
+        "max_tokens": CHAPTER_COMPLETION_MAX_TOKENS,
     }
 
     async with httpx.AsyncClient(timeout=600) as client:
@@ -2442,10 +2519,13 @@ async def adjust_chapter_content(
 ## 用户修改要求
 {instruction}
 
-## ⚠️ 字数铁律（最优先，违反即废稿）
-- **正文字数必须在 2000-3000 字之间**，绝对不超过 3500 字。目标 2300-2800 字。
-- 写完必须自行统计字数，不足 2000 字补充，超出 3500 字压缩后再输出。
+## ⚠️ 字数要求（最优先）
+- **正文字数目标约 {CHAPTER_TARGET_IDEAL_CHARS} 字**，建议 {CHAPTER_TARGET_MIN_CHARS}-{CHAPTER_TARGET_MAX_CHARS} 字。
+- 低于 {CHAPTER_TARGET_MIN_CHARS} 字视为展开不足，必须补足关键场面、对话和因果推进；超过 {CHAPTER_TARGET_MAX_CHARS} 字视为超出标准，必须删去无效铺垫并自行收束。
+- 不要为了凑篇幅重复心理活动、环境描写、路程转场或设定解释；也不要为了压篇幅砍掉关键因果、有效对话和章末钩子。
+- 这不是梗概扩写，必须写成完整网文章节：有开篇钩子、过程冲突、情绪推进和章末钩子。
 - 每句话都必须推进剧情或建立人设。删除所有对推进剧情无贡献的句子。
+- 优先写到 {CHAPTER_FIRST_PASS_MIN_CHARS}-{CHAPTER_FIRST_PASS_MAX_CHARS} 字，按 10-12 个自然段组织，每段约 180-240 字；章末钩子完成后立刻停笔。
 
 ## 起点白金级写作规范
 
@@ -2499,8 +2579,10 @@ async def adjust_chapter_content(
 
     HARDCODED_CHAPTER_ADJUST_SYSTEM = (
         "你是起点白金级网文编辑，审稿标准对齐起点铂金签约审核。\n"
-        "## 字数铁律（最优先）\n"
-        "正文字数必须在 2000-3000 字之间，绝对不超过 3500 字。目标 2300-2800 字。每句话必须推进剧情或建立人设。\n"
+        "## 字数要求（最优先）\n"
+        f"正文字数目标约 {CHAPTER_TARGET_IDEAL_CHARS} 字，建议 {CHAPTER_TARGET_MIN_CHARS}-{CHAPTER_TARGET_MAX_CHARS} 字；"
+        f"低于 {CHAPTER_TARGET_MIN_CHARS} 字视为展开不足，超过 {CHAPTER_TARGET_MAX_CHARS} 字视为超出标准，必须删去无效铺垫并自行收束。"
+        f"优先写到 {CHAPTER_FIRST_PASS_MIN_CHARS}-{CHAPTER_FIRST_PASS_MAX_CHARS} 字，按 10-12 个自然段组织，每段约 180-240 字。每句话必须推进剧情或建立人设。\n"
         "## 开篇铁律\n"
         "【禁止】以时间、天气、景色开头。第一句必须是事件/对话/冲突/异常。主角第1段出场。\n"
         "## 叙事密度\n"
@@ -2535,7 +2617,7 @@ async def adjust_chapter_content(
             {"role": "user", "content": user_prompt},
         ],
         "stream": False,
-        "max_tokens": 3328,
+        "max_tokens": CHAPTER_COMPLETION_MAX_TOKENS,
     }
 
     async with httpx.AsyncClient(timeout=600) as client:
