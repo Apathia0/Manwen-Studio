@@ -348,7 +348,7 @@ async def lifespan(app: FastAPI):
 
     db = SessionLocal()
     try:
-        # 同步框架 Prompt 到数据库（每次启动自动同步代码中的最新版本）
+        # 同步写作 Prompt 到数据库（每次启动自动同步代码中的最新版本）
         _ensure_framework_prompt_synced(db)
 
         for s in db.query(Story).filter(Story.title.in_(["我的第一个故事", "未命名故事"])).all():
@@ -1423,9 +1423,9 @@ def _seed_platform_settings(db: Session, *, commit: bool = True) -> None:
 
 
 def _ensure_framework_prompt_synced(db) -> None:
-    """启动时同步所有框架提示词到数据库。
+    """启动时同步核心写作提示词到数据库。
 
-    确保 DB 记录与 FRAMEWORK_PROMPT_SEED / EDITING_PROMPT_SEED / CONTINUATION_PROMPT_SEED 一致。
+    确保 DB 记录与框架、正文扩写、参考章节的源码种子一致。
     修改 Python 源码中的这些常量后，重启即可自动同步到数据库。
     """
     from models import PlatformSetting
@@ -1434,6 +1434,8 @@ def _ensure_framework_prompt_synced(db) -> None:
         "prompt.framework_generation": FRAMEWORK_PROMPT_SEED,
         "prompt.framework_editing": EDITING_PROMPT_SEED,
         "prompt.framework_continuation": CONTINUATION_PROMPT_SEED,
+        "prompt.chapter_generation": NOVEL_PROMPT_SEED,
+        "prompt.reference_chapter": REFERENCE_CHAPTER_PROMPT_SEED,
     }
     for key, seed in prompt_map.items():
         setting = db.query(PlatformSetting).filter(PlatformSetting.setting_key == key).first()
@@ -1480,6 +1482,32 @@ _BASE_NOVEL_PROMPT = """你是白金级网文作家，作品长期位居各平�
 
 # 注入写作方法论（从 references/writing/ 参考文件读取，修改 .md 文件即可同步）
 NOVEL_PROMPT_SEED = build_chapter_generation_prompt(_BASE_NOVEL_PROMPT)
+
+REFERENCE_CHAPTER_PROMPT_SEED = """你是出版级网文作家。你写的章节节奏紧凑、人物鲜活，能直接发表到起点/番茄等平台。
+
+## 篇幅与输出格式
+1. 标准章节必须控制在 2200-2800 字，理想约 2500 字；低于 2200 字视为展开不足，高于 2800 字视为超出标准。
+2. 只输出正文，不要标题、章节号、字数统计、写作说明或总结。
+3. 不要把正文写成梗概、剧情提要、分镜说明或创作计划。
+4. 首轮优先写到 2350-2650 字，按 10-12 个自然段组织，每段约 180-240 字，不要贴着 2800 字上限写。
+5. 篇幅收束靠合并重复场景、删除无效转场和解释性设定完成，禁止硬截断关键情节。
+6. 章末必须留有自然钩子，但不能用「他不知道的是」「这一切才刚刚开始」等模板化预告；钩子完成后立刻停笔。
+
+## 核心写作准则
+1. 场景即故事：每个场景必须有明确的戏剧功能。
+2. 角色驱动：情节由角色的欲望、恐惧、缺陷推动，不是作者在背后操纵。
+3. 对话有区分度：不同角色的说话方式必须不同，对话要推进剧情或暴露关系。
+4. 克制抒情：用动作、对话、细节来传达情绪，不要直接告诉读者「他很愤怒」。
+5. 节奏变化：紧张处用短句、快切；日常处用舒缓长句，但不能水环境描写。
+6. 上下文承接：延续前文人物状态、伏笔、因果链，不擅自改设定、不跳过关键结果。
+
+## 严禁的 AI 写作习惯
+- 禁止「突然」「忽然」「就在这时」频繁出现
+- 禁止「深深地」「无比地」「极其」等程度副词堆砌
+- 禁止「他不知道的是……」「而这一切，才刚刚开始……」等模板化悬念
+- 禁止所有角色说话风格雷同
+- 禁止「心中涌起一股暖流」等空洞套话
+- 禁止凑字数的环境描写和无意义细节"""
 
 FRAMEWORK_PROMPT_SEED = """你是资深小说策划编辑，擅长设计能被直接写成畅销网文的故事框架。
 
@@ -1791,7 +1819,7 @@ _SYSTEM_PROMPT_SEEDS: dict[str, str] = {
     "prompt.import_context": IMPORT_CONTEXT_PROMPT_SEED,
     "prompt.tag_generation": "你是小说策划编辑。基于已有的故事框架，从 type（类型）、theme（主题）、style（风格）、audience（受众）四个维度输出标签（tags）的 JSON 对象。",
     "prompt.reference_framework": FRAMEWORK_PROMPT_SEED,
-    "prompt.reference_chapter": "你是出版级网文作家。你写的章节节奏紧凑、人物鲜活，能直接发表到起点/番茄等平台。\n\n## 核心写作准则\n1. 场景即故事：每个场景必须有明确的戏剧功能。\n2. 角色驱动：情节由角色的欲望、恐惧、缺陷推动，不是作者在背后操纵。\n3. 对话有区分度：不同角色的说话方式必须不同。\n4. 克制抒情：用动作、对话、细节来传达情绪，而非直接告诉读者「他很愤怒」。\n5. 节奏变化：紧张处用短句、快切；日常处用舒缓的长句。\n\n## 严禁的 AI 写作习惯\n- 禁止「突然」「忽然」「就在这时」频繁出现\n- 禁止「深深地」「无比地」「极其」等程度副词堆砌\n- 禁止「他不知道的是……」「而这一切，才刚刚开始……」等模板化悬念\n- 禁止所有角色说话风格雷同\n- 禁止「心中涌起一股暖流」等空洞套话\n- 禁止凑字数的环境描写和无意义细节",
+    "prompt.reference_chapter": REFERENCE_CHAPTER_PROMPT_SEED,
     "prompt.reference_character": "你是专业漫画角色设定师，擅长把角色设定转化为具体可视化的外貌卡。\n\n要求：\n1. 每个角色必须有2-3个标志性特征（特定发型、疤痕、配饰等）\n2. 性格映射为外貌——冷静的人克制端正、张扬的人有攻击性视觉符号\n3. 禁止千篇一律的「俊美」「帅气」——具体到可画的特征\n4. 每个角色需包含：角色名、身份、外貌、发型发色、眼型、体型、服装、配饰、标志性表情（常态/高兴/愤怒）、动作习惯、神态气质",
     "prompt.reference_manga_style": "黑白模式(bw)：黑白漫画风格，高对比度，清晰线条，网点/排线阴影，电影级分镜构图。\n彩色模式(color)：日式动漫风格，cel-shaded，鲜艳色彩，电影级分镜构图。\n\n用户可在增量修改中添加自己的风格偏好，如：\n- 禁止Q版/简笔画风格\n- 场景必须使用电影级构图\n- 角色服装必须符合故事时代背景\n- 画面整体偏暗色调/暖色调",
 }

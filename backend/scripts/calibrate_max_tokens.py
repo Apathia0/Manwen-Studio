@@ -5,7 +5,7 @@ max_tokens 校准脚本
   2. python scripts/calibrate_max_tokens.py
 
 原理：用不同的 max_tokens 值多次调用 expand_chapter_to_content，
-统计输出字数与 max_tokens 的比例，找到产生 2000-3000 字的最佳值。
+统计输出字数与 max_tokens 的比例，找到稳定产生 2200-2800 字、理想约 2500 字的安全值。
 """
 import asyncio
 import json
@@ -18,8 +18,10 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from dotenv import load_dotenv
 load_dotenv()
 
-TEST_VALUES = [2048, 2560, 3072, 3328, 3584, 3840, 4096]
-TARGET_CHARS = (2000, 3000)  # 目标字数范围
+TEST_VALUES = [2560, 2816, 3072, 3328, 3584, 3840, 4096]
+TARGET_CHARS = (2200, 2800)  # 目标字数范围
+IDEAL_CHARS = 2500
+RECOMMENDED_MAX_TOKENS = 3328
 
 # 一个简化的测试章节信息
 TEST_CHAPTER = {
@@ -53,6 +55,7 @@ async def test_single_value(max_tokens: int, api_key: str) -> dict:
     import services.deepseek as ds
     ds.DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
     ds.DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
+    ds.CHAPTER_COMPLETION_MAX_TOKENS = max_tokens
 
     content = await expand_chapter_to_content(
         story_context=TEST_STORY_CONTEXT,
@@ -86,28 +89,25 @@ async def main():
         print("=" * 60)
         print()
         print("【理论推算】基于用户提供的经验数据点：")
-        print(f"  max_tokens=4096 → 输出 ~3800 字")
-        print(f"  估算比例 ≈ 3800/4096 = {3800/4096:.4f} 字/token")
+        print("  max_tokens=3328 用于给 2500 字正文留出安全输出空间，同时避免 4096 预算诱导模型写长")
+        print("  实际字数由 prompt 的 10-12 段结构和 2200-2800 字约束共同控制")
         print()
         print(f"  目标字数范围: {TARGET_CHARS[0]}-{TARGET_CHARS[1]} 字")
-        print(f"  绝对上限: 3500 字")
+        print(f"  理想字数: {IDEAL_CHARS} 字")
+        print(f"  超出 {TARGET_CHARS[1]} 字会触发收束重写，不做硬截断")
         print()
         print("  【推荐值计算】")
         for mt in TEST_VALUES:
-            estimated_chars = int(mt * 3800 / 4096)
-            safety = "✅" if estimated_chars <= 3500 else "⚠️ 可能超限"
+            estimated_chars = int(mt * IDEAL_CHARS / RECOMMENDED_MAX_TOKENS)
+            safety = "✅ 输出空间充足" if mt >= RECOMMENDED_MAX_TOKENS else "⚠️ 可能中途截断"
             in_range = "🎯" if TARGET_CHARS[0] <= estimated_chars <= TARGET_CHARS[1] else ""
-            print(f"    max_tokens={mt:5d} → 约 {estimated_chars:4d} 字  {safety} {in_range}")
+            print(f"    max_tokens={mt:5d} → 约束目标 {estimated_chars:4d} 字  {safety} {in_range}")
         print()
         print(f"  ╔══════════════════════════════════════════╗")
-        print(f"  ║ 推荐: max_tokens = 3328                 ║")
-        print(f"  ║ 预期输出: ~3095 字（在 3000 上限内）    ║")
-        print(f"  ║ 既避免截断，又防止篇幅超标              ║")
+        print(f"  ║ 推荐: max_tokens = {RECOMMENDED_MAX_TOKENS:<20d}║")
+        print(f"  ║ 预期输出: 约 {IDEAL_CHARS} 字，由 prompt 约束控制    ║")
+        print(f"  ║ 目标: 避免 2500 字正文被 length 截断      ║")
         print(f"  ╚══════════════════════════════════════════╝")
-        print()
-        print(f"  【回退方案】若 AI 仍超出字数限制：")
-        print(f"    在 prompt 中将上限改为 2500 字 + max_tokens=3072")
-        print(f"    （预期输出 ~2857 字，稳稳在 3000 以内）")
         return
 
     print(f"使用 API Key: {api_key[:8]}...")
@@ -126,7 +126,7 @@ async def main():
     in_range_results = [r for r in results if r["in_range"]]
     print(f"\n符合 {TARGET_CHARS[0]}-{TARGET_CHARS[1]} 字范围的值: {len(in_range_results)} 个")
     if in_range_results:
-        best = min(in_range_results, key=lambda r: abs(r["char_count"] - sum(TARGET_CHARS)//2))
+        best = min(in_range_results, key=lambda r: abs(r["char_count"] - IDEAL_CHARS))
         print(f"最佳值: max_tokens={best['max_tokens']} → {best['char_count']} 字")
 
 
