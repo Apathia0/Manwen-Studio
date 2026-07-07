@@ -1236,15 +1236,57 @@ async def generate_chapter_content(story_id: int, chapter_number: int, instructi
                     Chapter.story_id == story_id,
                     Chapter.chapter_number < chapter_number,
                     Chapter.novel_content.isnot(None),
-                    Chapter.status.in_(["completed", "draft"]),
+                    Chapter.status.in_(["completed", "draft", "reviewed"]),
                 )
                 .order_by(Chapter.chapter_number.desc())
                 .first()
             )
-            if prev_chapter and prev_chapter.novel_content:
-                ending_text = prev_chapter.novel_content[-800:]
+            if prev_chapter:
                 prev_title = prev_chapter.title or f"第{prev_chapter.chapter_number}章"
-                previous_chapter_summary = f"上一章《第{prev_chapter.chapter_number}章：{prev_title}》结尾：\n{ending_text}"
+                memory_summary = prev_chapter.memory_summary if isinstance(prev_chapter.memory_summary, dict) else {}
+                chapter_summary = memory_summary.get("chapter_summary") if isinstance(memory_summary.get("chapter_summary"), dict) else {}
+                handoff = memory_summary.get("chapter_handoff") if isinstance(memory_summary.get("chapter_handoff"), dict) else {}
+                ending_scene = str(chapter_summary.get("ending_scene") or memory_summary.get("ending_scene") or "").strip()
+                summary_text = str(chapter_summary.get("summary") or memory_summary.get("summary") or "").strip()
+                fallback_tail = (prev_chapter.novel_content or "")[-800:].strip()
+
+                bridge_parts = [f"上一章《第{prev_chapter.chapter_number}章：{prev_title}》"]
+                if summary_text:
+                    bridge_parts.append(f"章节摘要：{summary_text}")
+                if ending_scene:
+                    bridge_parts.append(f"结尾场景：{ending_scene}")
+                if fallback_tail and not ending_scene:
+                    bridge_parts.append(f"正文结尾片段：\n{fallback_tail}")
+                if handoff.get("opening_must_continue"):
+                    bridge_parts.append(f"下一章必须承接：{handoff['opening_must_continue']}")
+                if handoff.get("active_conflict"):
+                    bridge_parts.append(f"即时冲突：{handoff['active_conflict']}")
+                previous_chapter_summary = "\n".join(bridge_parts)[:2400]
+
+        recent_chapter_memories_text = ""
+        if isinstance(chapter_number, int) and chapter_number > 1:
+            recent_candidates = (
+                db.query(Chapter)
+                .filter(
+                    Chapter.story_id == story_id,
+                    Chapter.chapter_number < chapter_number,
+                )
+                .order_by(Chapter.chapter_number.desc())
+                .limit(3)
+                .all()
+            )
+            recent_compact = []
+            for item in reversed(recent_candidates):
+                item_ms = item.memory_summary if isinstance(item.memory_summary, dict) else {}
+                item_cs = item_ms.get("chapter_summary") if isinstance(item_ms.get("chapter_summary"), dict) else {}
+                item_summary = str(item_cs.get("summary") or item_ms.get("summary") or "").strip()
+                if item_summary:
+                    recent_compact.append(f"第{item.chapter_number}章：{item_summary}")
+            if recent_compact:
+                recent_chapter_memories_text = "近期章节摘要：\n" + "\n".join(recent_compact)
+
+        if recent_chapter_memories_text:
+            previous_chapter_summary = (previous_chapter_summary + "\n\n" + recent_chapter_memories_text).strip()
 
         system_prompt = get_effective_prompt(story_id, "chapter", db)
 
@@ -1727,6 +1769,17 @@ async def adjust_framework(story_id: int, instruction: str) -> dict:
         story.tags = framework.get("tags") if isinstance(framework.get("tags"), dict) else existing_framework["tags"]
         story.characters = _normalize_characters_payload(framework.get("characters"))
         story.outline = framework.get("outline") if isinstance(framework.get("outline"), dict) else existing_framework["outline"]
+
+        # ★ 任务卡完整性验证：检查保存后的章节规划是否包含 goal/conflict/hook/payoff/highlight
+        saved_chapters = _extract_outline_chapters(story.outline)
+        _REQUIRED_TASKCARD_FIELDS = ("goal", "conflict", "hook", "payoff", "highlight")
+        for ch in saved_chapters:
+            cn = ch.get("chapter_number", "?")
+            missing = [f for f in _REQUIRED_TASKCARD_FIELDS if not str(ch.get(f) or "").strip()]
+            if missing:
+                msg = "第%s章（%s）缺少任务卡字段: %s" % (cn, (ch.get("title") or "?"), ", ".join(missing))
+                warnings.append(msg)
+                logger.warning("Agent tool=adjust_framework story=%s %s", _current_story_id(), msg)
 
         if _current_pending_changes():
             for f in ("description", "tags", "characters", "outline"):
@@ -2869,8 +2922,49 @@ async def check_ai_flavor(chapter_id: int) -> dict:
         # 心理描写外化检测
         psych_hits = content.count("他感到") + content.count("她感觉") + content.count("他觉得很") + content.count("她觉得")
 
+        # 叙事结构检测（对抗 AI 叙事 5 大缺陷）
+        narrative_issues = []
+
+        passive_patterns = ["被动", "被迫", "不得不", "只好", "只能", "身不由己"]
+        passive_count = sum(content.count(p) for p in passive_patterns)
+        if passive_count > 5:
+            narrative_issues.append({
+                "type": "passive_protagonist",
+                "severity": "high" if passive_count > 10 else "medium",
+                "count": passive_count,
+                "message": f"主角被动反应词出现 {passive_count} 次，建议增加主动决策",
+            })
+
+        moral_absolutes = ["天生邪恶", "骨子里坏", "纯粹的恶", "生来就是", "天性残忍"]
+        moral_count = sum(content.count(m) for m in moral_absolutes)
+        if moral_count > 0:
+            narrative_issues.append({
+                "type": "moral_simplification",
+                "severity": "medium",
+                "count": moral_count,
+                "message": "检测到道德二元化描述，反派应有合理动机",
+            })
+
+        theme_statements = ["我终于明白", "这就是成长", "原来真正的", "成长的意义", "真正的力量"]
+        theme_count = sum(content.count(t) for t in theme_statements)
+        if theme_count > 0:
+            narrative_issues.append({
+                "type": "theme_overexplanation",
+                "severity": "high",
+                "count": theme_count,
+                "message": f"检测到 {theme_count} 处主题直白点破，应用事件体现主题",
+            })
+
+        scene_breaks = content.count("\n\n")
+        if scene_breaks < 3 and total_chars > 1000:
+            narrative_issues.append({
+                "type": "single_track_narrative",
+                "severity": "low",
+                "message": f"场景切换仅 {scene_breaks} 次，疑似单线叙事",
+            })
+
         # 评分
-        total_hits = len(banned_hits) + len(pattern_hits) + psych_hits
+        total_hits = len(banned_hits) + len(pattern_hits) + psych_hits + sum(n.get("count", 1) for n in narrative_issues)
         density = total_hits / max(total_chars / 1000, 1)
         if density <= 5:
             level = "轻度"
@@ -2888,11 +2982,12 @@ async def check_ai_flavor(chapter_id: int) -> dict:
             "banned_word_hits": banned_hits,
             "pattern_hits": pattern_hits,
             "psych_tell_count": psych_hits,
+            "narrative_issues": narrative_issues,
             "paragraphs_too_uniform": too_uniform,
             "ending_issues": ending_issues,
             "total_hits": total_hits,
             "density_per_1000_chars": round(density, 1),
-            "suggestion": "请参考检测结果，对命中项逐一修改。重点关注：禁用词替换为具体动作、心理描写外化为行为展示、打破段落均匀度、结尾去升华。",
+            "suggestion": "请参考检测结果，对命中项逐一修改。重点关注：禁用词替换为具体动作、心理描写外化为行为展示、打破段落均匀度、结尾去升华。叙事结构问题（主角被动/道德简化/主题点破/单线叙事）需通过重构情节解决。",
         }
     except Exception as e:
         return {"error": str(e)}
@@ -2958,6 +3053,35 @@ class AgentService:
             "以下规范供你在分析/评估/优化建议时参考：\n\n"
             + full_prompt
         )
+
+    async def _compress_history_with_ai(self, old_messages: list[dict], api_key: str) -> str:
+        """用 AI 调用压缩旧对话历史为结构化摘要，确保记忆不丢失。"""
+        import httpx
+        from services.deepseek import _deepseek_auth_headers, DEEPSEEK_BASE_URL, DEEPSEEK_MODEL
+        from services.token_utils import build_history_summary_prompt, build_history_summary_system_prompt
+
+        user_prompt = build_history_summary_prompt(old_messages)
+        system_prompt = build_history_summary_system_prompt()
+
+        payload = {
+            "model": DEEPSEEK_MODEL,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            "max_tokens": 4096,
+            "stream": False,
+        }
+
+        async with httpx.AsyncClient(timeout=120) as client:
+            resp = await client.post(
+                f"{DEEPSEEK_BASE_URL}/chat/completions",
+                json=payload,
+                headers=_deepseek_auth_headers(api_key),
+            )
+        resp.raise_for_status()
+        data = resp.json()
+        return data["choices"][0]["message"]["content"].strip()
 
     def _build_system_prompt(self, story_context: str, story_id: int = 0, workflow_type: str | None = None, enabled_skills: list[str] | None = None, db=None) -> str:
         """构建包含故事上下文的系统提示。"""
@@ -3127,6 +3251,12 @@ class AgentService:
 
         **⚠️ 不要在一次调用中塞入过多数据**，特别是 `update_story_bible` 的 world_setting 和 `adjust_framework` 的 instruction。单次数据量过大会导致超时或截断。使用多次迭代，每次做一小批，Agent 循环会持续运行直到全部完成。
 
+    15. **⚠️ 框架完成后禁止自动生成正文**。只有当用户明确说"生成第X章""写第X章""写正文""创作正文""续写第X章"等指令时，才调用 `generate_chapter_content` 生成章节正文。
+        - 完成框架/大纲/角色设定后，应当告知用户"框架已就绪，您可以让我生成第1章正文"，然后**等待用户确认**。
+        - **禁止**在用户只要求"生成框架""创建大纲""设定角色""补充章节规划"时自动生成章节正文。
+        - **禁止**在框架调整、大纲续写、角色更新等操作后主动追加"顺便生成第1章"。
+        - 正文生成是用户的主动决策，不是框架完成后的自动步骤。
+
 ### 📖 章节规划数量控制（强制规则）
 
 **不要一次性输出所有卷的章节规划。** 长篇小说的框架应该分阶段构建：
@@ -3252,6 +3382,30 @@ class AgentService:
             system_prompt = self._build_system_prompt(story_context, story_id=story_id, workflow_type=workflow_type, enabled_skills=enabled_skills, db=db)
             all_messages: list[dict] = [{"role": "system", "content": system_prompt}] + list(messages)
 
+            from services.token_utils import (
+                should_compress_messages,
+                split_messages_for_compression,
+            )
+
+            async def _maybe_compress_history():
+                nonlocal all_messages
+                if not should_compress_messages(all_messages):
+                    return
+                system_msg = all_messages[0] if all_messages and all_messages[0].get("role") == "system" else None
+                conversation_messages = all_messages[1:] if system_msg else all_messages
+                old_messages, recent_messages = split_messages_for_compression(conversation_messages, keep_recent=20)
+                if not old_messages:
+                    return
+                try:
+                    summary = await self._compress_history_with_ai(old_messages, api_key)
+                    compressed_msg = {"role": "system", "content": f"## 对话历史摘要\n\n以下是之前对话的关键信息摘要：\n\n{summary}"}
+                    all_messages = ([system_msg] if system_msg else []) + [compressed_msg] + recent_messages
+                    logger.info("Agent 对话历史已压缩: %d 条旧消息 → 摘要", len(old_messages))
+                except Exception as exc:
+                    logger.warning("Agent 对话历史压缩失败: %s", exc)
+
+            await _maybe_compress_history()
+
             collected_content = ""
             iteration_count = 0
             SAFETY_MAX_ITERATIONS = 200  # 熔断：防止无限循环（200次迭代 = 足够分批完成大型任务）
@@ -3263,7 +3417,14 @@ class AgentService:
                 if isinstance(m, dict) and m.get("role") == "user":
                     _last_user_msg = (m.get("content") or "").strip()
                     break
-            _CONTENT_WRITE_KEYWORDS = {"写", "正文", "生成", "创作", "续写", "重写"}
+            _CONTENT_WRITE_KEYWORDS = {
+                "写正文", "写第", "写章", "写小说",
+                "生成正文", "生成第", "生成章", "生成小说",
+                "创作正文", "创作第", "创作章", "创作小说",
+                "续写正文", "续写第", "续写章",
+                "重写正文", "重写第", "重写章",
+                "出正文", "出章节",
+            }
             _has_content_intent = any(kw in _last_user_msg for kw in _CONTENT_WRITE_KEYWORDS)
 
             TOOL_EXECUTION_TIMEOUT = 300
@@ -3275,6 +3436,8 @@ class AgentService:
                 if current_task is not None and current_task.cancelled():
                     logger.info("Agent run_stream 检测到取消，停止循环")
                     break
+
+                await _maybe_compress_history()
 
                 payload = {
                     "model": _deepseek_service.DEEPSEEK_MODEL,
@@ -3487,10 +3650,10 @@ class AgentService:
                         "role": "system",
                         "content": (
                             "你只调用了框架调整工具（adjust_framework / apply_framework_ops / "
-                            "bulk_add_chapter_plans 等），但没有调用章节正文写入工具。"
-                            "如果用户要求生成或修改章节正文，请调用 update_chapter_content / "
-                            "batch_update_chapters / adjust_chapter_by_instruction 来实际写入章节正文。"
-                            "不要只调整框架而不写正文。"
+                            "bulk_add_chapter_plans 等），但没有调用章节正文生成工具。"
+                            "用户明确要求了生成或写入章节正文，请调用 generate_chapter_content "
+                            "（委托框架引擎生成正文）或 update_chapter_content（保存用户提供的文本）"
+                            "来实际写入章节正文。不要只调整框架而不写正文。"
                         ),
                     })
                     yield {"event": "token", "data": json.dumps({"content": "\n\n[系统提示：检测到正文未写入，正在重新执行...]\n"}, ensure_ascii=False)}

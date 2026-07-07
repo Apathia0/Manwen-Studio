@@ -11,11 +11,53 @@ logger = logging.getLogger(__name__)
 from services.writing_utils import build_chapter_generation_prompt
 from services.framework_utils import _extract_outline_chapters, validate_framework_json
 from services.story_state import build_story_bible_compact, build_story_memory_compact, extract_author_profile_sections, extract_report_highlights
+from services.token_utils import estimate_tokens, TOKEN_COMPRESS_THRESHOLD, compress_context_parts_if_needed
 
 # 默认值会被 router 层从 PlatformSetting 数据库动态覆盖
 DEEPSEEK_API_KEY = ""
 DEEPSEEK_BASE_URL = ""
 DEEPSEEK_MODEL = ""
+
+_RUNTIME_TEMPERATURE: float | None = None
+_RUNTIME_TOP_P: float | None = None
+
+
+def configure_temperature_top_p(temperature: float | None = None, top_p: float | None = None):
+    global _RUNTIME_TEMPERATURE, _RUNTIME_TOP_P
+    _RUNTIME_TEMPERATURE = temperature
+    _RUNTIME_TOP_P = top_p
+
+
+def _maybe_configure_temperature_top_p_from_db(db=None):
+    global _RUNTIME_TEMPERATURE, _RUNTIME_TOP_P
+    if db is None:
+        return
+    try:
+        from models import PlatformSetting
+        temp_setting = db.query(PlatformSetting).filter_by(setting_key="deepseek_temperature").first()
+        if temp_setting and temp_setting.value_json:
+            val = temp_setting.value_json
+            if isinstance(val, dict):
+                val = val.get("value")
+            if val is not None:
+                _RUNTIME_TEMPERATURE = float(val)
+        top_p_setting = db.query(PlatformSetting).filter_by(setting_key="deepseek_top_p").first()
+        if top_p_setting and top_p_setting.value_json:
+            val = top_p_setting.value_json
+            if isinstance(val, dict):
+                val = val.get("value")
+            if val is not None:
+                _RUNTIME_TOP_P = float(val)
+    except Exception:
+        pass
+
+
+def _apply_runtime_params(payload: dict) -> dict:
+    if _RUNTIME_TEMPERATURE is not None:
+        payload["temperature"] = _RUNTIME_TEMPERATURE
+    if _RUNTIME_TOP_P is not None:
+        payload["top_p"] = _RUNTIME_TOP_P
+    return payload
 
 # 章节生成 base prompt（含世界观一致性，与 NOVEL_PROMPT_SEED 共享写作方法论）
 _DEEPSEEK_CHAPTER_BASE = (
@@ -46,6 +88,9 @@ _DEEPSEEK_CHAPTER_BASE = (
     "3. 对话要有潜台词，不能直白地表达所有情感。\n"
     "4. 禁止用对话直接解释剧情——要通过行动和细节来展现。\n"
     "5. 整章至少包含 3 句有效对话，无对话的章节在起点会被认定为「叙述文」而非小说。\n"
+    "6. 对话必须包含至少 1 个口语化语气词（行/得了/那啥/嗯/哦/啊/哎/咦/嘿/哈/哼/啧），禁止全部对话用书面语。\n"
+    "7. 不同身份角色使用不同口语风格：江湖人用「阁下/在下/道友」、学生用「哥们/姐们/老师」、市井用「大哥/大姐/师傅」、文人用「先生/后学/贤弟」。\n"
+    "8. 对话占比建议 30-50%，禁止整章无对话或整章纯对话。对话必须推进剧情或展现性格，禁止「嗯」「好的」等无信息对话单独成段。\n"
      "\n"
      "## 情绪展示要求\n"
      "1. 【禁止】直接写情绪词（愤怒/悲伤/紧张/害怕/委屈/绝望）——用身体反应和行为展现。\n"
@@ -65,6 +110,33 @@ _DEEPSEEK_CHAPTER_BASE = (
     "- 如果我是读者，我会觉得这个发展牵强吗？\n"
     "\n"
     "（关于写作技法、叙事密度、去AI味规则等完整方法论，见下方补充规则。）\n"
+    "\n"
+    "## 叙事结构对抗规则（对抗 AI 默认倾向，必须遵守）\n"
+    "AI 生成小说有 5 大叙事缺陷，以下规则用于对抗这些倾向：\n"
+    "\n"
+    "### 1. 禁止单线叙事\n"
+    "- 每 5 章至少 1 次视角切换或支线穿插，禁止整章只讲一条故事线。\n"
+    "- 支线必须与主线有交集点，不能完全平行。\n"
+    "\n"
+    "### 2. 禁止道德简化\n"
+    "- 反派必须有合理动机（复仇/信仰/生存/爱/恐惧），禁止纯粹恶役（为恶而恶）。\n"
+    "- 善恶之间必须有灰度地带，配角可以立场摇摆。\n"
+    "- 禁止「天生邪恶」「骨子里坏」等先天定性描写。\n"
+    "\n"
+    "### 3. 禁止主题直白点破\n"
+    "- 主题通过事件和人物行为体现，禁止角色说出主题。\n"
+    "- 禁止「我终于明白了，这就是成长」「原来真正的力量是……」等点破式台词。\n"
+    "- 禁止 narrator 总结升华（「这一刻他明白了……」「故事告诉他……」）。\n"
+    "\n"
+    "### 4. 禁止时间线性化\n"
+    "- 每 20 章至少 1 次时间跳跃或回忆插入，禁止全程线性推进。\n"
+    "- 允许倒叙（先写结果再写过程）、插叙（中途闪回）。\n"
+    "- 禁止「不知不觉中」「几天后」「过了段时间」等模糊时间跳跃推进剧情。\n"
+    "\n"
+    "### 5. 主角必须主动\n"
+    "- 每章至少 1 个主角主动决策（非被动反应）。\n"
+    "- 主角不能只被事件推着走，必须有主动目标和行动。\n"
+    "- 禁止「主角莫名其妙卷入」超过 3 次/卷——卷入必须有因果。\n"
 )
 
 
@@ -409,6 +481,7 @@ async def chat_stream(messages: list[dict], api_key: str | None = None, framewor
         "stream": True,
         "max_tokens": 6144,
     }
+    payload = _apply_runtime_params(payload)
 
     async with httpx.AsyncClient(timeout=600) as client:
         async with client.stream(
@@ -451,6 +524,7 @@ async def generate_novel(messages: list[dict], api_key: str | None = None, frame
         "stream": False,
         "max_tokens": 2800,
     }
+    payload = _apply_runtime_params(payload)
 
     async with httpx.AsyncClient(timeout=600) as client:
         resp = await client.post(
@@ -754,6 +828,7 @@ async def _repair_onboarding_response(
         "stream": False,
         "max_tokens": 4096,
     }
+    payload = _apply_runtime_params(payload)
 
     async with httpx.AsyncClient(timeout=120) as client:
         resp = await client.post(
@@ -793,13 +868,13 @@ def _build_story_snapshot(story_context: dict) -> str:
         import_guidance = story_bible.get("import_guidance")
         if isinstance(import_guidance, dict) and import_guidance:
             parts.append(f"导入作品作者约束: {json.dumps(import_guidance, ensure_ascii=False)}")
-        # 拆书引用数据
+        # 拆书引用数据（模型支持 1M token，不再截断）
         learned_techniques = story_bible.get("learned_techniques")
         if isinstance(learned_techniques, list) and learned_techniques:
-            parts.append(f"参考写作手法: {json.dumps(learned_techniques[:5], ensure_ascii=False)}")
+            parts.append(f"参考写作手法: {json.dumps(learned_techniques, ensure_ascii=False)}")
         reference_plots = story_bible.get("reference_plots")
         if isinstance(reference_plots, list) and reference_plots:
-            parts.append(f"参考剧情模式: {json.dumps(reference_plots[:3], ensure_ascii=False)}")
+            parts.append(f"参考剧情模式: {json.dumps(reference_plots, ensure_ascii=False)}")
         reference_rhythm = story_bible.get("reference_rhythm")
         if isinstance(reference_rhythm, dict) and reference_rhythm:
             parts.append(f"参考节奏控制: {json.dumps(reference_rhythm, ensure_ascii=False)}")
@@ -832,7 +907,11 @@ def _build_story_snapshot(story_context: dict) -> str:
         story_memory_compact = build_story_memory_compact(story_memory)
     if isinstance(story_memory_compact, dict) and story_memory_compact:
         parts.append(f"作品连续性记忆: {json.dumps(story_memory_compact, ensure_ascii=False)}")
-    return "\n\n".join(parts)
+    result = "\n\n".join(parts)
+    if estimate_tokens(result) > TOKEN_COMPRESS_THRESHOLD:
+        parts = compress_context_parts_if_needed(parts, full_context=story_context, current_chapter_number=None)
+        result = "\n\n".join(parts)
+    return result
 
 
 def _build_framework_runtime_brief(story_context: dict, include_outline_json: bool = True) -> str:
@@ -864,7 +943,7 @@ def _build_framework_runtime_brief(story_context: dict, include_outline_json: bo
     characters = story_context.get("characters")
     if isinstance(characters, list) and characters:
         compact_characters = []
-        for item in characters[:12]:
+        for item in characters:
             if not isinstance(item, dict):
                 continue
             record = {
@@ -912,7 +991,7 @@ def _build_framework_runtime_brief(story_context: dict, include_outline_json: bo
                     "title": str(act.get("title") or act.get("name") or "").strip(),
                     "summary": str(act.get("summary") or "").strip(),
                 }
-                for index, act in enumerate(acts[-6:])
+                for index, act in enumerate(acts)
                 if isinstance(act, dict)
             ],
             "recent_chapter_cards": [
@@ -922,7 +1001,7 @@ def _build_framework_runtime_brief(story_context: dict, include_outline_json: bo
                     "act": item.get("act"),
                     "summary": str(item.get("summary") or "").strip(),
                 }
-                for item in extracted[-12:]
+                for item in extracted
             ],
         }
     if isinstance(outline_compact, dict) and outline_compact:
@@ -931,214 +1010,22 @@ def _build_framework_runtime_brief(story_context: dict, include_outline_json: bo
     outline = story_context.get("outline")
     if include_outline_json and isinstance(outline, dict) and outline:
         serialized_outline = json.dumps(outline, ensure_ascii=False)
-        size = len(serialized_outline.encode("utf-8"))
-        if size <= 12000:
-            parts.append(f"当前大纲JSON: {serialized_outline}")
-        else:
-            focus_outline = {}
-            for key in ("serial_strategy", "themes", "foreshadowing"):
-                value = outline.get(key)
-                if value not in (None, "", [], {}):
-                    focus_outline[key] = value
-            acts = outline.get("three_acts") if isinstance(outline.get("three_acts"), list) else []
-            if acts:
-                condensed_acts = []
-                for act in acts:
-                    if not isinstance(act, dict):
-                        continue
-                    condensed = {
-                        k: v for k, v in act.items() if k != "chapters"
-                    }
-                    ch_list = act.get("chapters")
-                    if isinstance(ch_list, list) and ch_list:
-                        condensed["chapters"] = [
-                            {
-                                "chapter_number": ch.get("chapter_number"),
-                                "title": ch.get("title", ""),
-                                "act": ch.get("act", ""),
-                                "summary": str(ch.get("summary") or "")[:80],
-                            }
-                            for ch in ch_list
-                            if isinstance(ch, dict)
-                        ]
-                    else:
-                        condensed["chapters"] = []
-                    condensed_acts.append(condensed)
-                focus_outline["three_acts"] = condensed_acts
-            parts.append(f"当前大纲JSON(精简版): {json.dumps(focus_outline, ensure_ascii=False)}")
+        parts.append(f"当前大纲JSON: {serialized_outline}")
 
     description = str(story_context.get("description") or "").strip()
     if description:
         parts.append(f"故事描述: {description}")
 
-    return "\n\n".join(parts)
+    result = "\n\n".join(parts)
+    if estimate_tokens(result) > TOKEN_COMPRESS_THRESHOLD:
+        parts = compress_context_parts_if_needed(parts, full_context=story_context, current_chapter_number=None)
+        result = "\n\n".join(parts)
+    return result
 
 
 def _build_story_snapshot_tiered(story_context: dict, tier: str = "auto") -> str:
-    """Build a tiered textual snapshot of story context, reducing large payloads.
-
-    Tier levels:
-    - "full": 保留所有字段的完整 JSON（同 _build_story_snapshot）
-    - "auto": 按每个字段的 JSON 大小逐字段决策：
-        <8KB     → 全量嵌入
-        8-32KB   → 摘要（保留结构骨架）
-        >32KB    → 核心摘要（保留关键叙事骨架，不丢失世界观/角色/大纲核心）
-        >64KB    → 仅提取世界观核心字段（仅 creative_brief 和 writing_guidance）
-    """
-    if tier == "full":
-        return _build_story_snapshot(story_context)
-    if tier == "framework_runtime":
-        return _build_framework_runtime_brief(story_context, include_outline_json=True)
-
-    parts = []
-    story_bible = story_context.get("story_bible")
-    if isinstance(story_bible, dict) and story_bible:
-        creative_brief = story_bible.get("creative_brief")
-        writing_guidance = story_bible.get("writing_guidance")
-        if creative_brief:
-            cb_raw = json.dumps(creative_brief, ensure_ascii=False)
-            if len(cb_raw.encode("utf-8")) < 95536:
-                parts.append(f"作品圣经-创意理解: {cb_raw}")
-            else:
-                core = {k: v for k, v in creative_brief.items()
-                        if k in ("world_setting", "main_conflict", "longline_mystery",
-                                "protagonist_core", "must_keep_rules", "open_story_notes",
-                                "project_positioning", "core_hook", "tone",
-                                "reveal_strategy", "pacing_strategy")}
-                parts.append(f"作品圣经-创意理解(核心摘要): {json.dumps(core, ensure_ascii=False)}")
-        if writing_guidance:
-            wg_raw = json.dumps(writing_guidance, ensure_ascii=False)
-            if len(wg_raw.encode("utf-8")) < 95536:
-                parts.append(f"作品圣经-写作指导: {wg_raw}")
-            else:
-                core_wg = {k: v for k, v in writing_guidance.items()
-                          if k in ("opening_strategy", "midgame_engine", "late_game_direction",
-                                  "forbidden_patterns", "preferred_plot_patterns")}
-                parts.append(f"作品圣经-写作指导(核心摘要): {json.dumps(core_wg, ensure_ascii=False)}")
-        reference_author_profile = story_bible.get("reference_author_profile")
-        if isinstance(reference_author_profile, dict) and reference_author_profile:
-            profile_parts = extract_author_profile_sections(reference_author_profile)
-            parts.extend(profile_parts)
-        reference_author_report = story_bible.get("reference_author_report")
-        if isinstance(reference_author_report, str) and reference_author_report.strip():
-            highlights = extract_report_highlights(reference_author_report)
-            parts.append(f"作者画像参考报告（核心要点）:\n{highlights}")
-        reference_style_samples = story_bible.get("reference_style_samples")
-        if isinstance(reference_style_samples, list) and reference_style_samples:
-            parts.append(f"作者原文风格示例: {json.dumps(reference_style_samples, ensure_ascii=False)}")
-
-    tags = story_context.get("tags")
-    if tags:
-        serialized = json.dumps(tags, ensure_ascii=False)
-        parts.append(f"现有标签: {serialized}")
-
-    characters = story_context.get("characters")
-    if characters:
-        serialized = json.dumps(characters, ensure_ascii=False)
-        size = len(serialized.encode("utf-8"))
-        if size < 8192:
-            parts.append(f"现有角色: {serialized}")
-        elif size < 32768:
-            summary = [
-                {
-                    "name": c.get("name", "?"),
-                    "role": c.get("role", "?"),
-                }
-                for c in characters if isinstance(c, dict)
-            ]
-            parts.append(f"现有角色(摘要共{len(characters)}个): {json.dumps(summary, ensure_ascii=False)}")
-        else:
-            # 超大时保留名称、角色类型、弧线方向，不丢失核心人物关系骨架
-            enhanced_summary = []
-            for c in (characters or []):
-                if not isinstance(c, dict):
-                    continue
-                entry: dict = {"name": c.get("name", "?"), "role": c.get("role", "?")}
-                if isinstance(c.get("arc"), dict):
-                    arc = c["arc"]
-                    arc_part = {k: arc[k] for k in ("direction", "type") if k in arc}
-                    if arc_part:
-                        entry["arc"] = arc_part
-                archetype = c.get("species") or c.get("archetype") or ""
-                if archetype:
-                    entry["archetype"] = archetype
-                enhanced_summary.append(entry)
-            parts.append(f"现有角色(核心摘要共{len(characters)}个): {json.dumps(enhanced_summary, ensure_ascii=False)}")
-
-    outline = story_context.get("outline")
-    if outline:
-        serialized = json.dumps(outline, ensure_ascii=False)
-        size = len(serialized.encode("utf-8"))
-        if size < 8192:
-            parts.append(f"现有大纲: {serialized}")
-        elif size < 32768:
-            if isinstance(outline, dict):
-                summary_outline = {}
-                for key, value in outline.items():
-                    if key in ("three_acts",):
-                        acts = []
-                        for act in (value or []):
-                            if isinstance(act, dict):
-                                acts.append({
-                                    "act": act.get("act"),
-                                    "title": act.get("title", ""),
-                                    "summary": act.get("summary", ""),
-                                })
-                        summary_outline[key] = acts
-                    elif key in ("serial_strategy",):
-                        summary_outline[key] = value
-                    else:
-                        summary_outline[key] = value
-                parts.append(f"现有大纲(摘要): {json.dumps(summary_outline, ensure_ascii=False)}")
-            else:
-                parts.append(f"现有大纲: {serialized[:3000]}...(截断)")
-        else:
-            # 超大时保留 act 标题和摘要+连载策略，不丢失核心叙事框架
-            if isinstance(outline, dict):
-                acts = outline.get("three_acts") or []
-                act_summaries = []
-                for act in acts:
-                    if isinstance(act, dict):
-                        entry = {"act": act.get("act"), "title": act.get("title", "")}
-                        summary_text = str(act.get("summary") or "").strip()
-                        if summary_text:
-                            entry["summary"] = summary_text
-                        act_summaries.append(entry)
-                enhanced_outline = {"three_acts": act_summaries}
-                if outline.get("serial_strategy"):
-                    enhanced_outline["serial_strategy"] = outline["serial_strategy"]
-                parts.append(f"现有大纲(阶段摘要): {json.dumps(enhanced_outline, ensure_ascii=False)}")
-            else:
-                parts.append(f"现有大纲: (已省略详细大纲)")
-
-    description = story_context.get("description")
-    if description:
-        parts.append(f"故事描述: {description}")
-
-    # Inject story_memory_compact (continuity memory)
-    story_memory_compact = story_context.get("story_memory_compact") if isinstance(story_context, dict) else None
-    if not isinstance(story_memory_compact, dict) or not story_memory_compact:
-        story_memory = story_context.get("story_memory") if isinstance(story_context, dict) else {}
-        if isinstance(story_memory, dict) and story_memory:
-            compact = {}
-            for key in ("story_state", "current_arc_focus", "current_tone", "next_payoff_target"):
-                value = str(story_memory.get(key) or "").strip()
-                if value:
-                    compact[key] = value
-            for key in ("continuity_facts", "open_loops", "resolved_loops"):
-                raw = story_memory.get(key)
-                if isinstance(raw, list):
-                    cleaned = [str(item).strip() for item in raw if str(item).strip()]
-                    if cleaned:
-                        compact[key] = cleaned[:12]
-            recent = story_memory.get("recent_chapter_summaries")
-            if isinstance(recent, list):
-                compact["recent_chapter_summaries"] = [item for item in recent[-8:] if isinstance(item, dict)]
-            story_memory_compact = compact
-    if isinstance(story_memory_compact, dict) and story_memory_compact:
-        parts.append(f"作品连续性记忆: {json.dumps(story_memory_compact, ensure_ascii=False)}")
-
-    return "\n\n".join(parts)
+    """构建故事快照文本。当前模型支持 1M token，不再需要分层截断。"""
+    return _build_story_snapshot(story_context)
 
 
 async def regenerate_tags(story_context: dict, api_key: str | None = None, system_prompt: str | None = None) -> dict:
@@ -1166,6 +1053,7 @@ async def regenerate_tags(story_context: dict, api_key: str | None = None, syste
         "max_tokens": 4096,
         "response_format": {"type": "json_object"},
     }
+    payload = _apply_runtime_params(payload)
 
     async with httpx.AsyncClient(timeout=300) as client:
         resp = await client.post(
@@ -1794,6 +1682,7 @@ async def adjust_framework_with_chat(
 - reply 只说明实际执行范围，不要说"我会"。
 - 禁止输出完整 framework JSON。
 - **章节数量限制（强制）**：绝对禁止一次性输出所有卷的章节规划。每次只规划一卷的章节（每章必须含 summary/goal/conflict/hook/payoff/highlight），后续卷只规划幕级大纲（act/title/summary，chapters 设为空数组）。单次调整最多添加 15 章 add_chapter 操作。
+- **⚠️ 任务卡字段强制要求（非协商，不可省略）**：每章 changes 中必须有 summary/goal/conflict/hook/payoff/highlight 全部 6 个字段，值不能为空字符串或 null。这些字段是 AI 生成章节正文时的唯一叙事指南，缺少任一字段将导致生成质量下降和系统告警。如果原始需求中某章缺少任务卡信息，**必须根据上下文合理推断补充，不允许留空或省略**。
 
 支持的 operation 类型（每个 operation 是 {{"op": "类型", "changes": {{...}}}}）：
 
@@ -2111,8 +2000,155 @@ async def summarize_chapter_memory(
         raise ValueError(f"Chapter memory summarization failed: {e}")
 
 
-async def expand_chapter_to_content(story_context: dict, chapter_info: dict, api_key: str | None = None, previous_chapter_summary: str = "", system_prompt: str | None = None, db=None) -> str:
-    """Expand a chapter outline entry into full novel content using story framework constraints."""
+_SETTING_KEYWORDS = (
+    "力量体系", "境界", "修炼", "灵力", "真气", "斗气", "灵根", "丹田",
+    "势力", "门派", "家族", "组织", "联盟", "宗门", "商会",
+    "大陆", "帝国", "王国", "城邦", "星域", "位面",
+    "历史", "传说", "古籍", "神话", "纪元",
+    "规则", "法则", "天赋", "血脉", "命格", "因果",
+)
+
+
+def _estimate_setting_ratio(content: str) -> float:
+    if not content:
+        return 0.0
+    total = len(content)
+    setting_chars = 0
+    for kw in _SETTING_KEYWORDS:
+        idx = 0
+        while True:
+            idx = content.find(kw, idx)
+            if idx == -1:
+                break
+            start = max(0, idx - 10)
+            end = min(total, idx + len(kw) + 10)
+            setting_chars += (end - start)
+            idx += len(kw)
+    return min(setting_chars / total, 1.0) if total else 0.0
+
+
+def _check_setting_ratio(content: str, chapter_number: int) -> dict:
+    ratio = _estimate_setting_ratio(content)
+    if chapter_number <= 3 and ratio > 0.15:
+        return {"exceed": True, "ratio": ratio, "threshold": 0.15,
+                "message": f"设定占比 {ratio:.1%} 超过前 3 章 15% 红线"}
+    if chapter_number <= 10 and ratio > 0.20:
+        return {"exceed": True, "ratio": ratio, "threshold": 0.20,
+                "message": f"设定占比 {ratio:.1%} 超过前 10 章 20% 警戒线"}
+    if ratio > 0.30:
+        return {"exceed": True, "ratio": ratio, "threshold": 0.30,
+                "message": f"设定占比 {ratio:.1%} 超过 30% 警戒线"}
+    return {"exceed": False, "ratio": ratio}
+
+
+def _get_genre_prompt_addon(story_context: dict) -> str:
+    """根据题材类型返回题材特定的写作要求。"""
+    tags = story_context.get("tags") if isinstance(story_context, dict) else None
+    if not isinstance(tags, dict):
+        return ""
+    genre = str(tags.get("type") or "").strip()
+    genre_lower = genre.lower()
+
+    if any(k in genre for k in ("玄幻", "仙侠", "修真")):
+        return (
+            "\n\n## 玄幻/仙侠题材要求\n"
+            "- 升级节奏：前 10 章必须有至少 2 次境界提升或能力突破\n"
+            "- 金手指展示：每 5 章至少 1 次金手指新用法展示\n"
+            "- 战斗描写：每 10 章至少 1 场完整战斗，侧重策略而非纯力量碾压\n"
+            "- 世界观揭秘：分 3 层（凡人界→修真界→更高层次），不要一次性交代\n"
+        )
+    elif any(k in genre for k in ("都市", "现代")):
+        return (
+            "\n\n## 都市题材要求\n"
+            "- 打脸节奏：前 10 章至少 3 次打脸/装逼名场面\n"
+            "- 金手指应用：每 3 章至少 1 次金手指在日常生活中发挥作用\n"
+            "- 社交场景：每 5 章至少 1 个新社交场景（宴会/职场/校园/商场）\n"
+            "- 信息差设计：主角必须掌握其他人不知道的关键信息\n"
+        )
+    elif any(k in genre for k in ("科幻", "末世", "星际")):
+        return (
+            "\n\n## 科幻题材要求\n"
+            "- 设定融合：科技设定必须影响社会结构和人物关系，不是装饰\n"
+            "- 揭秘节奏：每 10 章揭示 1 个科技背后的真相或阴谋\n"
+            "- 硬核与情感平衡：每章技术描写不超过 20%，必须有情感主线\n"
+            "- 反转设计：每 20 章至少 1 个重大科幻反转\n"
+        )
+    elif any(k in genre for k in ("历史", "穿越", "古代")):
+        return (
+            "\n\n## 历史/穿越题材要求\n"
+            "- 历史细节：每章至少 1 个符合时代背景的细节（服饰/饮食/礼仪/称谓）\n"
+            "- 改变历史：主角的每个决策必须有历史因果链，不能随意改变\n"
+            "- 权谋节奏：每 10 章至少 1 次政治博弈或权力洗牌\n"
+            "- 文化冲突：穿越者与现代思维的碰撞每 5 章至少 1 次\n"
+        )
+    elif any(k in genre for k in ("悬疑", "推理", "侦探")):
+        return (
+            "\n\n## 悬疑/推理题材要求\n"
+            "- 线索投放：每章至少 1 条有效线索（真线索或红鲱鱼）\n"
+            "- 反转节奏：每 10 章至少 1 次推理反转\n"
+            "- 信息控制：读者获取的信息量必须少于主角，制造悬念\n"
+            "- 逻辑严密：所有推理必须有前文铺垫，禁止突然揭秘\n"
+        )
+    return ""
+
+
+def _build_chapter_prompt_by_position(chapter_number: int | None, base_prompt: str) -> str:
+    """按章节位置注入特殊规则（黄金三章强化）。"""
+    if not isinstance(chapter_number, int) or chapter_number < 1:
+        return base_prompt
+
+    if chapter_number == 1:        return base_prompt + (
+            "\n\n## 第一章开篇铁律（签约生死线，必须遵守）\n"
+            "1. 主角必须在第一段出现，第一句包含主角名或主角视角。\n"
+            "2. 第一段必须扔出冲突或危机，禁止平淡叙述开篇。\n"
+            "3. 前 300 字必须包含至少 3 个事件单元（动作/对话/信息投放）。\n"
+            "4. 设定信息占比 ≤15%（力量体系/势力/地理名词总字数 ≤300 字），设定通过事件自然展现。\n"
+            "5. 第一章必须有至少 1 个剧情反转或意外事件。\n"
+            "6. 第一章必须暗示金手指存在（异常感知/特殊物品/神秘梦境/天赋觉醒征兆）。\n"
+            "7. 章末必须有强度 ≥4 的钩子（悬念/冲突升级/爽点预告）。\n"
+            "8. 禁止大段世界观介绍——读者第一眼要看到的是「谁在经历什么」而非「这个世界是怎样的」。\n"
+            "\n### 前 100 字事件密度要求\n"
+            "前 100 字必须包含至少 3 个事件单元：\n"
+            "- 事件 = 动作 + 对象 + 结果（如「林墨推开门，看见师父倒在血泊中」）\n"
+            "- 禁止纯环境描写开头\n"
+            "- 禁止纯心理活动开头\n"
+            "- 禁止纯设定介绍开头\n"
+        )
+    elif chapter_number == 2:
+        return base_prompt + (
+            "\n\n## 第二章立人设铁律\n"
+            "1. 主角必须有至少 1 个「反差标签」（如杀手怕毛茸茸、学霸怕社交、废柴有隐藏天赋）。\n"
+            "2. 金手指必须有进一步展示（但不能完全揭示，保留悬念）。\n"
+            "3. 出场角色不超过 4 个，每个配角必须有明确功能定位。\n"
+            "4. 必须推进核心冲突，禁止纯日常过渡章。\n"
+            "5. 章末钩子强度 ≥3。\n"
+        )
+    elif chapter_number == 3:
+        return base_prompt + (
+            "\n\n## 第三章钩子铁律\n"
+            "1. 金手指必须正式亮相（不再是暗示，读者明确知道主角的特殊能力）。\n"
+            "2. 核心危机必须明确化（主角面对的最大威胁清晰可感）。\n"
+            "3. 必须建立「追读理由」——读者为什么看第 4 章（未解悬念/即将到来的冲突/爽点预告）。\n"
+            "4. 章末钩子强度 ≥4。\n"
+            "5. 出场角色不超过 5 个。\n"
+        )
+    return base_prompt
+
+
+async def expand_chapter_to_content(
+    story_context: dict, chapter_info: dict,
+    api_key: str | None = None,
+    previous_chapter_summary: str = "",
+    system_prompt: str | None = None,
+    db=None,
+    _retry_count: int = 0,
+) -> str:
+    """Expand a chapter outline entry into full novel content using story framework constraints.
+    
+    字数超限（>3000字）会自动重试，最多重试 MAX_RETRIES 次。
+    """
+    MAX_RETRIES = 2
+    CHAR_RETRY_LIMIT = 3000  # 超过此字数触发重试
     snapshot = _build_story_snapshot(story_context)
     chapter_details = json.dumps(chapter_info, ensure_ascii=False)
 
@@ -2132,6 +2168,22 @@ async def expand_chapter_to_content(story_context: dict, chapter_info: dict, api
         if parts:
             hook_info = "## 本章结构要求（必须执行）\n" + "\n".join(parts)
 
+        payoff_type = str(chapter_info.get("payoff_type") or "").strip()
+        payoff_intensity = chapter_info.get("payoff_intensity")
+        micro_payoffs = chapter_info.get("micro_payoffs")
+        hook_intensity = chapter_info.get("hook_intensity")
+        payoff_hint_parts = []
+        if payoff_type:
+            payoff_hint_parts.append(f"- 本章爽点类型：{payoff_type}")
+        if isinstance(payoff_intensity, (int, float)) and payoff_intensity > 0:
+            payoff_hint_parts.append(f"- 本章爽点强度：{int(payoff_intensity)}/5")
+        if isinstance(micro_payoffs, list) and micro_payoffs:
+            payoff_hint_parts.append(f"- 本章必须包含的微爽点：{micro_payoffs}")
+        if isinstance(hook_intensity, (int, float)) and hook_intensity > 0:
+            payoff_hint_parts.append(f"- 章末钩子强度目标：{int(hook_intensity)}/5")
+        if payoff_hint_parts:
+            hook_info += "\n## 爽点节奏提示\n" + "\n".join(payoff_hint_parts) + "\n- 提醒：爽点是网文追读率的核心，本章必须让读者感受到明确的满足感或期待感。"
+
     user_prompt = f"""请根据以下故事框架和章节任务卡，创作本章正文。
 
 ## 故事框架
@@ -2145,9 +2197,9 @@ async def expand_chapter_to_content(story_context: dict, chapter_info: dict, api
 {hook_info}
 {previous_block}
 ## ⚠️ 字数铁律（最优先，违反即废稿）
-- **绝对上限 2000 字**：超过 2000 字即视为废稿。你的目标是 1500-1800 字。
-- **写完必须自行统计字数**。如果超过 2000 字，必须压缩到 2000 字以内再输出。
-- 这不是可协商的建议——起点白金作家每章控制在 2000 字内是最基本的要求。
+- **正文字数必须在 2000-3000 字之间**，绝对不超过 3500 字。你的目标是 2300-2800 字。
+- **写完必须自行统计字数**。如果不足 2000 字必须补充内容，超过 3500 字必须压缩。
+- 这不是可协商的建议——起点精品频道每章 2000-3000 字是最基本的要求。
 - 每句话都必须推进剧情或建立人设。删除所有对推进剧情无贡献的句子。
 
 ## 起点白金级写作规范
@@ -2202,8 +2254,24 @@ async def expand_chapter_to_content(story_context: dict, chapter_info: dict, api
 
 直接输出正文。不要标题、不要章节号、不要章节名、不要字数统计、不要任何额外说明。只输出正文本身。"""
 
+    # 重试时追加严格字数指令
+    if _retry_count > 0:
+        user_prompt += (
+            "\n\n## 🚫 上一版本被驳回：字数超限\n"
+            "上一版本正文超过 %d 字，已被驳回。\n"
+            "本次**必须**将正文压缩到 2000-2800 字以内。\n"
+            "- 核心情节、人物、关键对话 **不变**\n"
+            "- 删除冗余描写、过渡段落、重复修辞\n"
+            "- 每句话必须推进剧情或建立人设\n"
+            "- 目标 2300 字，绝对不超过 2800 字\n"
+            "再次超限将视为生成失败。" % CHAR_RETRY_LIMIT
+        )
+
     chapter_system_prompt = _get_chapter_system_prompt(db=db)
     effective_system = system_prompt if system_prompt else chapter_system_prompt
+    chapter_number = chapter_info.get("chapter_number") if isinstance(chapter_info, dict) else None
+    effective_system = _build_chapter_prompt_by_position(chapter_number, effective_system)
+    effective_system = effective_system + _get_genre_prompt_addon(story_context)
     payload = {
         "model": DEEPSEEK_MODEL,
         "messages": [
@@ -2211,7 +2279,7 @@ async def expand_chapter_to_content(story_context: dict, chapter_info: dict, api
             {"role": "user", "content": user_prompt},
         ],
         "stream": False,
-        "max_tokens": 1800,
+        "max_tokens": 3328,
     }
 
     async with httpx.AsyncClient(timeout=600) as client:
@@ -2223,7 +2291,52 @@ async def expand_chapter_to_content(story_context: dict, chapter_info: dict, api
         resp.raise_for_status()
         data = _response_json(resp, context="DeepSeek")
         content = data["choices"][0]["message"]["content"]
-        return _sanitize_novel_content(content)
+        content = _sanitize_novel_content(content)
+        # 字数校验：超过 3000 字则打回重试，附带严格说明
+        _char_count = len(content.replace(" ", "").replace("\n", "").replace("\r", ""))
+        if _char_count > CHAR_RETRY_LIMIT and _retry_count < MAX_RETRIES:
+            logging.warning("章节正文 %d 字，超过 %d 字限制，重试第 %d 次", _char_count, CHAR_RETRY_LIMIT, _retry_count + 1)
+            return await expand_chapter_to_content(
+                story_context=story_context,
+                chapter_info=chapter_info,
+                api_key=api_key,
+                previous_chapter_summary=previous_chapter_summary,
+                system_prompt=system_prompt,
+                db=db,
+                _retry_count=_retry_count + 1,
+            )
+        # 重试耗尽或字数合格后做最终检查
+        if _char_count > 3500:
+            logging.warning("章节正文 %d 字，超过 3500 字上限（重试%d次后）", _char_count, _retry_count)
+        elif _char_count < 2000:
+            logging.warning("章节正文 %d 字，不足 2000 字", _char_count)
+        setting_check = _check_setting_ratio(content, chapter_number if isinstance(chapter_number, int) else 0)
+        if setting_check.get("exceed"):
+            logging.warning("章节设定占比超标: %s", setting_check.get("message", ""))
+        ai_quick_issues = _quick_ai_flavor_check(content)
+        if ai_quick_issues:
+            logging.warning("章节 AI 味快速检测发现问题: %s", ai_quick_issues)
+        return content
+
+
+def _quick_ai_flavor_check(content: str) -> list[str]:
+    """生成后轻量级 AI 味检测（不调用 API，仅本地模式匹配）。"""
+    issues = []
+    if not content:
+        return issues
+    if "——" in content:
+        count = content.count("——")
+        issues.append(f"破折号残留 {count} 处")
+    sudden_count = content.count("突然") + content.count("忽然") + content.count("猛地")
+    if sudden_count > 3:
+        issues.append(f"突然/忽然/猛地 共 {sudden_count} 次（建议 ≤3）")
+    tell_count = sum(content.count(w) for w in ["他感到", "她感觉", "他意识到", "他明白", "他知道"])
+    if tell_count > 5:
+        issues.append(f"告知式心理描写 {tell_count} 处")
+    simile_count = sum(content.count(w) for w in ["仿佛", "犹如", "宛若"])
+    if simile_count > 0:
+        issues.append(f"明喻词 {simile_count} 处（禁止使用）")
+    return issues
 
 
 async def rewrite_selection(
@@ -2273,7 +2386,7 @@ async def rewrite_selection(
             {"role": "user", "content": user_prompt},
         ],
         "stream": False,
-        "max_tokens": 1800,
+        "max_tokens": 3328,
     }
 
     async with httpx.AsyncClient(timeout=600) as client:
@@ -2330,8 +2443,8 @@ async def adjust_chapter_content(
 {instruction}
 
 ## ⚠️ 字数铁律（最优先，违反即废稿）
-- **绝对上限 2000 字**：超过 2000 字即视为废稿。目标 1500-1800 字。
-- 写完必须自行统计字数，超出则压缩后再输出。
+- **正文字数必须在 2000-3000 字之间**，绝对不超过 3500 字。目标 2300-2800 字。
+- 写完必须自行统计字数，不足 2000 字补充，超出 3500 字压缩后再输出。
 - 每句话都必须推进剧情或建立人设。删除所有对推进剧情无贡献的句子。
 
 ## 起点白金级写作规范
@@ -2366,27 +2479,28 @@ async def adjust_chapter_content(
 - 【禁止】"心中涌起/心头一震/心底泛起"等模板化情绪描写。
 - 【禁止】大段纯心理描写（整章累计不超过 2 段）。
 
-## 🚫 零容忍清单（出现任何一项即视为废稿）
-1. 【破折号】全文禁止任何破折号（——）
-2. 【时间/天气/景色】禁止以时间、天气、景色描写开篇
-3. 【突然/忽然/瞬间/猛地】全文完全禁止
-4. 【不是A而是B】禁止否定-肯定句式
-5. 【让X感到Y】禁止告知式情绪
-6. 【仿佛/犹如/宛若】全文禁止
-7. 【眼中闪过一丝/嘴角勾起一抹/深吸一口气】禁止模板化短语
+## 🚫 零容忍清单（出现任何一项即视为 AI 写作，全章作废）
+1. 【破折号】全文禁止任何破折号（——），用逗号/句号/冒号代替
+2. 【时间/天气/景色】禁止以任何形式的时间、天气、景色描写开篇
+3. 【突然/忽然/瞬间/猛地】全文完全禁止使用——不设"不超过N次"的例外
+4. 【不是A而是B】禁止否定-肯定句式（"他不是冷漠，而是绝望"→直接写B）
+5. 【让X感到Y】禁止（"让他感到一阵寒意"→用动作代替）
+6. 【仿佛/犹如/宛若】全文禁止使用，用白描代替
+7. 【眼中闪过一丝/嘴角勾起一抹/深吸一口气】禁止任何模板化表情/动作短语
 8. 【他不知道的是/这一切才刚刚开始】禁止模板化悬念
-9. 【不禁/不由自主/不由得】全文禁止
-10. 【他知道/他明白/他意识到】禁止告知式写法
-11. 【叠加强调】禁止三连排比
-12. 【大段描写】禁止连续 3 句以上纯景物描写
-13. 【总结式结尾】禁止以概括性感悟收束章节
+9. 【深深地/无比地/极其//缓缓/微微/淡淡/轻轻】禁止，或全文不超过 1 次
+10. 【他知道/他明白/他意识到】禁止告知式写法，用行为展示认知变化
+11. 【不禁/不由自主/不由得】全文禁止
+12. 【叠加强调】禁止"三连排比"式写法——事情说一遍就够了，不说三遍
+13. 【大段描写】禁止连续 3 句以上的对外部景物/环境的纯描写
+14. 【总结式结尾】禁止以总结性感悟、哲理升华收束章节
 
 直接输出正文。不要标题、不要章节号、不要章节名、不要字数统计、不要任何额外说明。只输出正文本身。"""
 
     HARDCODED_CHAPTER_ADJUST_SYSTEM = (
         "你是起点白金级网文编辑，审稿标准对齐起点铂金签约审核。\n"
         "## 字数铁律（最优先）\n"
-        "正文字数绝对不超过 2000 字。目标 1500-1800 字。每句话必须推进剧情或建立人设。\n"
+        "正文字数必须在 2000-3000 字之间，绝对不超过 3500 字。目标 2300-2800 字。每句话必须推进剧情或建立人设。\n"
         "## 开篇铁律\n"
         "【禁止】以时间、天气、景色开头。第一句必须是事件/对话/冲突/异常。主角第1段出场。\n"
         "## 叙事密度\n"
@@ -2421,7 +2535,7 @@ async def adjust_chapter_content(
             {"role": "user", "content": user_prompt},
         ],
         "stream": False,
-        "max_tokens": 2800,
+        "max_tokens": 3328,
     }
 
     async with httpx.AsyncClient(timeout=600) as client:
