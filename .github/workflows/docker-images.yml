@@ -1,0 +1,164 @@
+name: Docker Images
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  test-and-build:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: manga_novel
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        env:
+          FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+        with:
+          python-version: "3.11"
+
+      - name: Install backend dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r backend/requirements.txt pytest pytest-asyncio
+
+      - name: Initialize database tables
+        working-directory: backend
+        run: python -c "import models; from database import init_db; init_db(run_migrations=False); print('Database tables initialized')"
+
+      - name: Backend syntax check
+        working-directory: backend
+        run: python -m py_compile database.py main.py services/install.py
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Build frontend
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run build
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute image metadata
+        id: meta
+        shell: bash
+        run: |
+          image_prefix="$(echo "${GITHUB_REPOSITORY}" | tr '[:upper:]' '[:lower:]')"
+          sha_tag="sha-${GITHUB_SHA::12}"
+
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            release_tag="${GITHUB_REF_NAME}"
+            app_version="${GITHUB_REF_NAME}"
+          else
+            release_tag="stable"
+            app_version="${sha_tag}"
+          fi
+
+          echo "image_prefix=${image_prefix}" >> "$GITHUB_OUTPUT"
+          echo "sha_tag=${sha_tag}" >> "$GITHUB_OUTPUT"
+          echo "release_tag=${release_tag}" >> "$GITHUB_OUTPUT"
+          echo "app_version=${app_version}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push backend
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.backend
+          push: true
+          build-args: |
+            APP_VERSION=${{ steps.meta.outputs.app_version }}
+          tags: |
+            ${{ env.REGISTRY }}/${{ steps.meta.outputs.image_prefix }}/backend:${{ steps.meta.outputs.sha_tag }}
+            ${{ env.REGISTRY }}/${{ steps.meta.outputs.image_prefix }}/backend:${{ steps.meta.outputs.release_tag }}
+
+      - name: Build and push web
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.web
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ steps.meta.outputs.image_prefix }}/web:${{ steps.meta.outputs.sha_tag }}
+            ${{ env.REGISTRY }}/${{ steps.meta.outputs.image_prefix }}/web:${{ steps.meta.outputs.release_tag }}
+
+      - name: Build and push updater
+        uses: docker/build-push-action@v6
+        with:
+          provenance: false
+          sbom: false
+          context: .
+          file: Dockerfile.updater
+          push: true
+          build-args: |
+            GITHUB_REPOSITORY=${{ github.repository }}
+          tags: |
+            ${{ env.REGISTRY }}/${{ steps.meta.outputs.image_prefix }}/updater:${{ steps.meta.outputs.sha_tag }}
+            ${{ env.REGISTRY }}/${{ steps.meta.outputs.image_prefix }}/updater:${{ steps.meta.outputs.release_tag }}
+
+      - name: Update version manifest on pro (tag only)
+        if: github.ref_type == 'tag'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git fetch origin pro
+          git checkout -B pro origin/pro
+
+          PUBLISHED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          cat > update-manifest.json << EOF
+          {
+            "channel": "stable",
+            "latest_version": "${{ steps.meta.outputs.app_version }}",
+            "min_supported_version": "v1.0.0",
+            "release_notes": "",
+            "published_at": "${PUBLISHED_AT}"
+          }
+          EOF
+
+          git add update-manifest.json
+          if git diff --cached --quiet; then
+            echo "No manifest changes to commit"
+          else
+            git commit -m "chore: update version manifest to ${{ steps.meta.outputs.app_version }} [skip ci]"
+            git pull --rebase origin pro || echo "Rebase skipped, attempting push..."
+            git push origin pro
+          fi
