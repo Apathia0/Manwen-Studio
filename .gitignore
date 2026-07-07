@@ -65,6 +65,9 @@ test/
 releases/
 test_*.py
 backend/tests/
+!backend/tests/
+backend/tests/*
+!backend/tests/test_chapter_generation_length_policy.py
 test_*.png
 test_*.txt
 generate_image.py
