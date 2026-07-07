@@ -1,12 +1,11 @@
 /**
- * InkAI chapter writing knowledge base.
- * Extracted from InkAI-main/inkai/agents/chapter_writer.py
+ * InkAI 章节写作知识库。
+ * 提取自 InkAI-main/inkai/agents/chapter_writer.py。
  *
- * Writing technique library (5 categories), 4 style templates,
- * word count guidelines.
+ * 包含写作技巧库（5 类）、4 种风格模板和字数要求。
  */
 
-// ── Types ──────────────────────────────────────────────────────────────
+// 类型定义
 
 export type TechniqueCategory =
   | '开头技巧'
@@ -34,7 +33,7 @@ export interface WordRange {
   ideal: number;
 }
 
-// ── Data ───────────────────────────────────────────────────────────────
+// 写作资料
 
 export const WRITING_TECHNIQUES: Record<TechniqueCategory, string[]> = {
   '开头技巧': [
@@ -74,9 +73,9 @@ export const WRITING_STYLES: Record<WritingStyleName, WritingStyle> = {
 };
 
 export const WORD_COUNT_GUIDELINES: Record<string, WordRange> = {
-  '短章节': { min: 1500, max: 2500, ideal: 2000 },
-  '标准章节': { min: 2500, max: 4000, ideal: 3000 },
-  '长章节': { min: 4000, max: 6000, ideal: 5000 },
+  '短章节': { min: 1800, max: 2300, ideal: 2000 },
+  '标准章节': { min: 2200, max: 2800, ideal: 2500 },
+  '长章节': { min: 2800, max: 3500, ideal: 3200 },
 };
 
 export const EMOTIONAL_WORDS: Record<string, string[]> = {
@@ -85,9 +84,9 @@ export const EMOTIONAL_WORDS: Record<string, string[]> = {
   '低': ['平静', '淡然', '轻松', '舒适', '满足'],
 };
 
-// ── Helpers ────────────────────────────────────────────────────────────
+// 辅助函数
 
-/** Analyze which writing style to use based on the story tone description. */
+/** 根据故事语气描述判断适合的写作风格。 */
 export function analyzeWritingStyle(tone: string): WritingStyleName {
   if (tone.includes('轻松') || tone.includes('愉快')) return '轻松愉快';
   if (tone.includes('严肃') || tone.includes('深刻')) return '严肃深刻';
@@ -96,14 +95,14 @@ export function analyzeWritingStyle(tone: string): WritingStyleName {
   return '轻松愉快';
 }
 
-/** Get word count requirements for a chapter type. */
+/** 根据章节类型获取字数要求。 */
 export function getWordRequirements(chapterType: ChapterType): WordRange {
   if (chapterType === '短章节') return WORD_COUNT_GUIDELINES['短章节'];
   if (chapterType === '长章节') return WORD_COUNT_GUIDELINES['长章节'];
   return WORD_COUNT_GUIDELINES['标准章节'];
 }
 
-/** Recommend writing techniques based on chapter type. */
+/** 根据章节类型推荐写作技巧。 */
 export function recommendTechniques(chapterType: ChapterType): string[] {
   switch (chapterType) {
     case '对话':
@@ -117,7 +116,7 @@ export function recommendTechniques(chapterType: ChapterType): string[] {
   }
 }
 
-/** Calculate dialogue ratio in content (percentage). */
+/** 计算正文中的对话占比（百分比）。 */
 export function calculateDialogueRatio(content: string): number {
   if (!content) return 0;
   const dialogueMatches = content.match(/[""][^""]*[""]|„[^„]*“/g);
@@ -126,7 +125,7 @@ export function calculateDialogueRatio(content: string): number {
   return (dialogueLength / content.length) * 100;
 }
 
-/** Assess emotional intensity of content. */
+/** 评估正文的情绪强度。 */
 export function assessEmotionalIntensity(content: string): string {
   if (!content) return '低';
 
@@ -141,7 +140,7 @@ export function assessEmotionalIntensity(content: string): string {
   return scores[maxIntensity] > 0 ? maxIntensity : '低';
 }
 
-/** Analyze pacing based on punctuation distribution. */
+/** 根据标点分布分析叙事节奏。 */
 export function analyzePacing(content: string): '快节奏' | '慢节奏' | '中等节奏' {
   if (!content) return '中等节奏';
 
@@ -156,11 +155,11 @@ export function analyzePacing(content: string): '快节奏' | '慢节奏' | '中
   return '中等节奏';
 }
 
-// ── Builder ────────────────────────────────────────────────────────────
+// 构建器
 
 /**
- * Build the chapter writing section of a system prompt.
- * Injects writing techniques, style templates, and word count guidelines.
+ * 构建章节写作系统提示词片段。
+ * 注入写作技巧、风格模板和字数要求。
  */
 export function buildChapterPromptSegment(): string {
   let segment = '【章节写作】\n\n';
