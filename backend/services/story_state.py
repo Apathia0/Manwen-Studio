@@ -105,7 +105,7 @@ def build_story_bible_compact(story_bible: dict | None) -> dict[str, Any]:
     if isinstance(must_keep_rules, list):
         cleaned = [str(item).strip() for item in must_keep_rules if str(item).strip()]
         if cleaned:
-            compact["must_keep_rules"] = cleaned[:8]
+            compact["must_keep_rules"] = cleaned
 
     for key in (
         "opening_strategy",
@@ -122,7 +122,7 @@ def build_story_bible_compact(story_bible: dict | None) -> dict[str, Any]:
         if isinstance(raw, list):
             cleaned = [str(item).strip() for item in raw if str(item).strip()]
             if cleaned:
-                compact[key] = cleaned[:8]
+                compact[key] = cleaned
 
     for key in ("raw_idea", "raw_length_goal", "raw_must_keep", "raw_hidden_setting"):
         value = str(raw_input.get(key) or "").strip()
@@ -144,11 +144,11 @@ def build_story_bible_compact(story_bible: dict | None) -> dict[str, Any]:
     # 拆书引用数据：让 AI 可以参考已拆书作品的写作手法和剧情模式
     learned_techniques = story_bible.get("learned_techniques")
     if isinstance(learned_techniques, list) and learned_techniques:
-        compact["learned_techniques"] = learned_techniques[:10]
+        compact["learned_techniques"] = learned_techniques
 
     reference_plots = story_bible.get("reference_plots")
     if isinstance(reference_plots, list) and reference_plots:
-        compact["reference_plots"] = reference_plots[:5]
+        compact["reference_plots"] = reference_plots
 
     reference_rhythm = story_bible.get("reference_rhythm")
     if isinstance(reference_rhythm, dict) and reference_rhythm:
@@ -197,13 +197,22 @@ def build_story_memory_compact(story_memory: dict | None) -> dict[str, Any]:
         if isinstance(raw, list):
             cleaned = [str(item).strip() for item in raw if str(item).strip()]
             if cleaned:
-                compact[key] = cleaned[:12]
+                compact[key] = cleaned
     recent_chapter_summaries = story_memory.get("recent_chapter_summaries")
     if isinstance(recent_chapter_summaries, list):
         compact["recent_chapter_summaries"] = [
-            item for item in recent_chapter_summaries[-8:]
+            item for item in recent_chapter_summaries
             if isinstance(item, dict)
         ]
+    long_term = story_memory.get("long_term_foreshadowing")
+    if isinstance(long_term, list) and long_term:
+        compact["long_term_foreshadowing"] = long_term
+    volume_summaries = story_memory.get("volume_summaries")
+    if isinstance(volume_summaries, list) and volume_summaries:
+        compact["volume_summaries"] = volume_summaries
+    snapshots = story_memory.get("character_state_snapshots")
+    if isinstance(snapshots, list) and snapshots:
+        compact["character_state_snapshots"] = snapshots
     return compact
 
 
@@ -212,7 +221,7 @@ def extract_author_profile_sections(profile: dict) -> list[str]:
     parts: list[str] = []
     routine_cards = profile.get("routine_cards")
     if isinstance(routine_cards, list) and routine_cards:
-        parts.append(f"可复用写作套路: {json.dumps(routine_cards[:3], ensure_ascii=False)}")
+        parts.append(f"可复用写作套路: {json.dumps(routine_cards, ensure_ascii=False)}")
     writing_guide = profile.get("writing_guide")
     if isinstance(writing_guide, dict) and writing_guide:
         parts.append(f"作者写作指南: {json.dumps(writing_guide, ensure_ascii=False)}")
@@ -241,7 +250,5 @@ def extract_report_highlights(report: str) -> str:
             chunks.append(f"{heading}\n" + "\n".join(bullets[:3]))
         elif body:
             chunks.append(f"{heading}\n{body[:200]}")
-        if sum(len(c) for c in chunks) > 1500:
-            break
     result = "\n\n".join(chunks)
-    return result[:1500] if result else report[:1500]
+    return result if result else report

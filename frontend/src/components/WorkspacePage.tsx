@@ -33,10 +33,10 @@ export function WorkspacePage({
   const [refLoading, setRefLoading] = useState(false);
 
   useEffect(() => {
-    if (story && showRefPicker) {
+    if (story) {
       loadRefData();
     }
-  }, [story, showRefPicker]);
+  }, [story]);
 
   async function loadRefData() {
     if (!story) return;

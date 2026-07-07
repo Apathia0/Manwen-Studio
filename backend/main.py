@@ -1533,7 +1533,11 @@ FRAMEWORK_PROMPT_SEED = """你是资深小说策划编辑，擅长设计能被�
             "goal": "（强烈建议）本章叙事目标——推进什么情节",
             "conflict": "（强烈建议）本章核心冲突",
             "hook": "（强烈建议）章节钩子——让读者想继续读的悬念",
+            "hook_intensity": "（建议）钩子强度 1-5 分，5=极强悬念/爽点预告，1=平淡过渡",
             "payoff": "（强烈建议）本章回报/高潮",
+            "payoff_type": "（建议）爽点类型：打脸/升级/获宝/揭秘/情感/装逼/无",
+            "payoff_intensity": "（建议）爽点强度 1-5 分，5=大爽点（每30章1个），3=小爽点（每3-5章1个），1=微爽点",
+            "micro_payoffs": "（建议）本章微爽点描述列表，至少 2 个，如 [\"信息碾压打脸配角\", \"金手指小试牛锋\"]",
             "highlight": "（可选）本章最大亮点",
             "key_events": "（可选）关键事件列表，如 [\"主角发现遗物\", \"力量意外觉醒\"]"
           }
@@ -1541,7 +1545,7 @@ FRAMEWORK_PROMPT_SEED = """你是资深小说策划编辑，擅长设计能被�
       }
     ],
     "themes": "（可选）主题线索数组，如 [\"成长\", \"牺牲\"]",
-    "foreshadowing": "（可选）伏笔数组，如 [\"古代遗物隐藏着更大的秘密\"]",
+    "foreshadowing": "（可选）伏笔数组，每个元素为对象 {id, text, type(short/mid/long), planted_chapter, expected_payoff_chapter, priority(high/medium/low)}，如 [{\"id\":\"fb_001\",\"text\":\"古代遗物隐藏着更大秘密\",\"type\":\"long\",\"planted_chapter\":3,\"expected_payoff_chapter\":50,\"priority\":\"high\"}]",
     "serial_strategy": {
       "positioning": "（必填）作品定位与市场卖点",
       "opening_hook": "（必填）开篇钩子——第一章如何抓住读者",
@@ -1559,7 +1563,7 @@ FRAMEWORK_PROMPT_SEED = """你是资深小说策划编辑，擅长设计能被�
 
 1. `description`: 必须存在且非空。
 2. `tags`: 必须包含 type/theme/style/audience 四个非空字段。
-3. `characters`: 至少 1 个角色，每个必须有 name/role/big_five。big_five 五个维度值必须在 0-100 之间，角色之间的人格要有明显区分度。
+3. `characters`: 至少 1 个角色，每个必须有 name/role/big_five。big_five 五个维度值必须在 0-100 之间，角色之间的人格要有明显区分度。`arc` 字段为结构化对象 {type(growth/fall/flat), summary, stages:[{chapter, trait, evidence, trigger}], current_stage, next_milestone_chapter}，至少包含起点和终点两个 stage。
 4. `outline.three_acts`: 至少 2 幕，每幕必须有 act/title/summary 非空。
 5. 每章 `chapter_number`: 从 1 开始的正整数，全书唯一不重复。
 6. 每章 `title`: 必须有意义，不能为空。
@@ -1573,6 +1577,7 @@ FRAMEWORK_PROMPT_SEED = """你是资深小说策划编辑，擅长设计能被�
    这些字段是 AI 生成章节正文时的**唯一叙事指南**，缺了任何一个，AI 都会因为不知道本章要做什么而自由发挥、偏离大纲。
 8. 后续扩展阶段的 chapters 不可为空数组——每章都必须有完整任务卡。如果某卷暂不规划详细章节，整个 chapters 数组留空 `[]`，但不能有只填了 title 而缺任务卡的半成品章节。
 9. `serial_strategy`: 根据篇幅类型填充对应字段。
+10. **爽点节奏规划（必须遵守）**：每章建议标注 `payoff_type`（打脸/升级/获宝/揭秘/情感/装逼/无）、`payoff_intensity`（1-5 分）、`micro_payoffs`（至少 2 个微爽点描述）、`hook_intensity`（1-5 分）。爽点密度硬约束：前 30 章 sum(payoff_intensity)/30 ≥ 1.5；每 3-5 章至少 1 个 intensity ≥ 3 的小爽点；每 10 章至少 1 个 intensity ≥ 4 的中爽点；每 30 章至少 1 个 intensity = 5 的大爽点；禁止连续 5 章 intensity < 2。前 30 章至少覆盖 3 种不同 payoff_type。
 
 ## 篇幅适配（根据用户描述的篇幅要求选择应用）
 
@@ -2816,6 +2821,17 @@ def _build_framework_context(story: Story | None, chapter: Chapter | None = None
         goal_card = raw_goal_card if isinstance(raw_goal_card, dict) else {}
         if goal_card:
             parts.append(f"本章目标卡: {json.dumps(goal_card, ensure_ascii=False)}")
+
+    from services.token_utils import compress_context_parts_if_needed
+    full_context = {
+        "outline": story.outline if isinstance(story.outline, dict) else {},
+        "characters": story.characters if isinstance(story.characters, list) else [],
+        "story_bible": story.story_bible if isinstance(story.story_bible, dict) else {},
+    }
+    current_chapter_number = chapter.chapter_number if chapter else None
+    parts = compress_context_parts_if_needed(
+        parts, full_context=full_context, current_chapter_number=current_chapter_number
+    )
     return "\n".join(parts)
 
 
@@ -3057,6 +3073,22 @@ def _framework_launch_quality_issues(framework: dict | None, expected_min_chapte
                 issues.append("第 1 章缺少明确章节目标")
             if not str(first_chapter.get("summary") or "").strip():
                 issues.append("第 1 章缺少明确章节摘要")
+            characters = framework.get("characters")
+            if isinstance(characters, list):
+                protagonist = next(
+                    (c for c in characters
+                     if isinstance(c, dict) and str(c.get("role") or "") in ("主角", "protagonist", "男主", "女主")),
+                    None,
+                )
+                if protagonist and protagonist.get("name"):
+                    proto_name = str(protagonist["name"]).strip()
+                    chapter_text = " ".join([
+                        str(first_chapter.get("hook") or ""),
+                        str(first_chapter.get("goal") or ""),
+                        str(first_chapter.get("summary") or ""),
+                    ])
+                    if proto_name and proto_name not in chapter_text:
+                        issues.append(f"第 1 章任务卡未包含主角名「{proto_name}」")
 
     return issues
 
@@ -3569,6 +3601,10 @@ def _merge_story_memory(existing: dict | None, update: dict | None, chapter: Cha
         recent_entries.append(entry)
         recent_entries = sorted(recent_entries, key=lambda item: int(item.get("chapter_number") or 0))[-12:]
         memory["recent_chapter_summaries"] = recent_entries
+
+    memory.setdefault("long_term_foreshadowing", [])
+    memory.setdefault("volume_summaries", [])
+    memory.setdefault("character_state_snapshots", [])
 
     return memory
 
@@ -6058,17 +6094,30 @@ async def chat(chapter_id: int, body: ChatMessageIn, request: Request, db: Sessi
     db.add(user_msg)
     db.commit()
 
-    # Build message history including all previous chapters in same story
-    all_chapters = (
+    # 读取当前章节的全部消息 + 之前章节最近 50 条消息，确保上下文连贯
+    current_messages = [
+        {"role": m.role, "content": m.content}
+        for m in chapter.messages
+    ]
+
+    previous_chapters = (
         db.query(Chapter)
-        .filter(Chapter.story_id == chapter.story_id, Chapter.chapter_number <= chapter.chapter_number)
+        .filter(
+            Chapter.story_id == chapter.story_id,
+            Chapter.chapter_number < chapter.chapter_number,
+        )
         .order_by(Chapter.chapter_number)
         .all()
     )
-    history = []
-    for ch in all_chapters:
+    previous_messages: list[dict] = []
+    for ch in previous_chapters:
         for m in ch.messages:
-            history.append({"role": m.role, "content": m.content})
+            previous_messages.append({"role": m.role, "content": m.content})
+
+    if len(previous_messages) > 50:
+        previous_messages = previous_messages[-50:]
+
+    history = previous_messages + current_messages
 
     framework_context = _build_framework_context(chapter.story, chapter)
     deepseek_api_key = _user_deepseek_api_key(request)

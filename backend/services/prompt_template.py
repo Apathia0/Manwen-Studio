@@ -86,8 +86,11 @@ def _build_framework_rules(parts: list, params: dict):
     if tone and tone in TONE_MAP:
         rules.append(TONE_MAP[tone])
 
-    if params.get("custom_rules"):
-        rules.append(f"用户自定义要求：{params['custom_rules']}")
+    _custom = str(params.get("custom_rules") or "")
+    if len(_custom) > 2000:
+        _custom = _custom[:2000] + "（已截断，超过2000字符限制）"
+    if _custom:
+        rules.append(f"用户自定义要求：{_custom}")
 
     if rules:
         parts.append("## 额外要求\n" + "\n".join(f"- {r}" for r in rules))
@@ -116,8 +119,11 @@ def _build_chapter_rules(parts: list, params: dict):
     elif params.get("vocabulary_level") == "simple":
         rules.append("使用通俗易懂的语言，避免生僻词汇")
 
-    if params.get("custom_style_notes"):
-        rules.append(f"风格要求：{params['custom_style_notes']}")
+    _custom = str(params.get("custom_style_notes") or "")
+    if len(_custom) > 2000:
+        _custom = _custom[:2000] + "（已截断，超过2000字符限制）"
+    if _custom:
+        rules.append(f"风格要求：{_custom}")
 
     if rules:
         parts.append("## 写作风格\n" + "\n".join(f"- {r}" for r in rules))
@@ -137,8 +143,11 @@ def _build_character_rules(parts: list, params: dict):
     if params.get("arc_planning") == "complete":
         rules.append("明确角色的成长弧光：起始状态 → 触发事件 → 变化过程 → 最终状态")
 
-    if params.get("custom_requirements"):
-        rules.append(f"自定义要求：{params['custom_requirements']}")
+    _custom = str(params.get("custom_requirements") or "")
+    if len(_custom) > 2000:
+        _custom = _custom[:2000] + "（已截断，超过2000字符限制）"
+    if _custom:
+        rules.append(f"自定义要求：{_custom}")
 
     if rules:
         parts.append("## 角色塑造要求\n" + "\n".join(f"- {r}" for r in rules))
@@ -169,8 +178,11 @@ def _build_manga_style_rules(parts: list, params: dict):
     elif params.get("lighting") == "natural":
         rules.append("使用自然柔和的光线")
 
-    if params.get("custom_style_prompt"):
-        rules.append(f"风格补充：{params['custom_style_prompt']}")
+    _custom = str(params.get("custom_style_prompt") or "")
+    if len(_custom) > 2000:
+        _custom = _custom[:2000] + "（已截断，超过2000字符限制）"
+    if _custom:
+        rules.append(f"风格补充：{_custom}")
 
     if rules:
         parts.append("## 画面风格指令\n" + "\n".join(f"- {r}" for r in rules))
