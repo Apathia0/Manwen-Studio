@@ -2,6 +2,8 @@ name: Docker Images
 
 on:
   push:
+    branches:
+      - pro
     tags:
       - "v*"
   workflow_dispatch:
