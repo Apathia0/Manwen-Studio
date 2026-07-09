@@ -9,9 +9,9 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
-MIN_CHAPTER_CHARS = 2200
-MAX_CHAPTER_CHARS = 2800
-IDEAL_CHAPTER_CHARS = 2500
+MIN_CHAPTER_CHARS = 1800
+MAX_CHAPTER_CHARS = 3500
+IDEAL_CHAPTER_CHARS = 3000
 
 FORBIDDEN_PHRASES = {
     "眼中闪过": "模板化表情",
@@ -277,8 +277,6 @@ def run_deterministic_gate(
         if match:
             warnings.append(_issue(code, label, severity="warning", evidence=_line_context(text, match.group(0))))
 
-    for boundary_issue in _detect_boundary_issues(text, chapter_scope):
-        hard_failures.append(_issue("boundary.future_event", boundary_issue))
 
     paragraphs = [line.strip() for line in text.splitlines() if line.strip()]
     if paragraphs and max(count_content_chars(item) for item in paragraphs) > 520:

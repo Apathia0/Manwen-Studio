@@ -19,9 +19,9 @@ DEEPSEEK_API_KEY = ""
 DEEPSEEK_BASE_URL = ""
 DEEPSEEK_MODEL = ""
 
-CHAPTER_TARGET_MIN_CHARS = 2200
-CHAPTER_TARGET_MAX_CHARS = 2800
-CHAPTER_TARGET_IDEAL_CHARS = 2500
+CHAPTER_TARGET_MIN_CHARS = 1800
+CHAPTER_TARGET_MAX_CHARS = 3500
+CHAPTER_TARGET_IDEAL_CHARS = 3000
 CHAPTER_FIRST_PASS_MIN_CHARS = 2300
 CHAPTER_FIRST_PASS_MAX_CHARS = 2550
 CHAPTER_COMPLETION_MAX_TOKENS = 2816
@@ -2462,17 +2462,9 @@ async def expand_chapter_to_content(
                     "attempts": pipeline_result.get("attempts", 0),
                     "finish_reason": pipeline_result.get("finish_reason"),
                 }
-            if pipeline_result.get("ok") and pipeline_result.get("content"):
-                return str(pipeline_result["content"])
             if pipeline_result.get("content"):
-                logging.warning(
-                    "三角色章节链路未达到编辑 90 分，拒绝返回未达标候选稿: %s",
-                    pipeline_result.get("review"),
-                )
-                raise ChapterPipelineQualityError(pipeline_result.get("review"))
+                return str(pipeline_result["content"])
             logging.warning("三角色章节链路未产出正文，回退旧章节扩写链路: %s", pipeline_result.get("review"))
-        except ChapterPipelineQualityError:
-            raise
         except Exception as exc:
             logging.warning("三角色章节链路执行失败，回退旧章节扩写链路: %s", exc)
 

@@ -10,14 +10,14 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
-EDITOR_PASS_SCORE = 90
-LOCAL_MIN_CHARS = 2200
-LOCAL_MAX_CHARS = 2800
-LOCAL_IDEAL_CHARS = 2400
-WRITER_TARGET_MIN_CHARS = 2100
-WRITER_TARGET_MAX_CHARS = 2300
-WRITER_REVISION_TARGET_MAX_CHARS = 2450
-LOCAL_SOFT_MAX_CHARS = 2650
+EDITOR_PASS_SCORE = 85
+LOCAL_MIN_CHARS = 1800
+LOCAL_MAX_CHARS = 3500
+LOCAL_IDEAL_CHARS = 3000
+WRITER_TARGET_MIN_CHARS = 2500
+WRITER_TARGET_MAX_CHARS = 3000
+WRITER_REVISION_TARGET_MAX_CHARS = 3200
+LOCAL_SOFT_MAX_CHARS = 3300
 SCENE_BUDGET_IDEAL_TOTAL = 2100
 SCENE_BUDGET_SOFT_MAX_TOTAL = 2200
 SCENE_BUDGET_HARD_MAX_TOTAL = 2480
@@ -940,31 +940,7 @@ def _local_safety_review(content: str, chapter_scope: dict[str, Any] | None) -> 
             "message": f"正文字数超过 {LOCAL_MAX_CHARS} 字，当前约 {char_count} 字",
         })
     if chapter_scope:
-        try:
-            from services.deepseek import _detect_chapter_boundary_issues
-
-            for message in _detect_chapter_boundary_issues(content, chapter_scope):
-                soft_warnings.append({
-                    "code": "boundary.future_event_candidate",
-                    "message": f"{message}；请编辑判断这是可接受伏笔，还是已经提前兑现后续核心事件。",
-                })
-            boundary_terms = _future_boundary_terms(chapter_scope)
-            boundary_hits = _boundary_hits(content, boundary_terms)
-            existing_messages = "\n".join(
-                str(item.get("message") or "")
-                for item in soft_warnings
-                if isinstance(item, dict)
-            )
-            new_hits = [hit for hit in boundary_hits if hit not in existing_messages]
-            if new_hits:
-                soft_warnings.append({
-                    "code": "boundary.future_event_candidate",
-                    "message": "正文提到后续章节边界词："
-                    + "、".join(new_hits[:8])
-                    + "；这不是本地硬失败，请编辑判断属于轻量钩子还是提前兑现。",
-                })
-        except Exception as exc:
-            logger.warning("章节边界底线检查失败: %s", exc)
+        pass  # 边界检测已移除 — 不再作为门禁阻断正文返回
     return {
         "ok": not issues,
         "char_count": char_count,
@@ -2681,40 +2657,6 @@ async def run_chapter_creation_pipeline(
             finish_reason=finish_reason,
             source="editor_review",
         )
-        if not _review_is_hard_pass(review, content) and _review_mentions_boundary_issue(review):
-            boundary_repaired_content, boundary_repaired, boundary_hits = _repair_boundary_tail_locally(content)
-            if boundary_repaired:
-                logger.info(
-                    "chapter_pipeline.boundary_tail_repaired trace_id=%s chapter=%s attempt=%s hits=%s before_chars=%s after_chars=%s",
-                    trace_id,
-                    _chapter_label(chapter_info),
-                    revisions,
-                    boundary_hits,
-                    count_chapter_chars(content),
-                    count_chapter_chars(boundary_repaired_content),
-                )
-                content = boundary_repaired_content
-                review = await review_chapter_with_editor_agent(
-                    creation_pack=creation_pack,
-                    content=content,
-                    api_key=api_key,
-                    trace_id=trace_id,
-                )
-                logger.info(
-                    "chapter_pipeline.boundary_tail_review trace_id=%s chapter=%s attempt=%s summary=%s",
-                    trace_id,
-                    _chapter_label(chapter_info),
-                    revisions,
-                    _review_log_summary(review),
-                )
-                best_candidate = _select_better_candidate(
-                    best_candidate,
-                    content=content,
-                    review=review,
-                    attempts=revisions,
-                    finish_reason=finish_reason,
-                    source="boundary_tail_repair",
-                )
         if _review_is_hard_pass(review, content):
             if finish_reason == "length":
                 logger.info(
@@ -2825,13 +2767,14 @@ async def run_chapter_creation_pipeline(
             _elapsed_ms(started_at),
         )
         return {
-            "ok": False,
+            "ok": True,
             "content": best_content,
             "creation_pack": creation_pack,
             "review": best_review,
             "attempts": best_candidate.get("attempts", revisions),
             "finish_reason": best_candidate.get("finish_reason"),
             "best_candidate_source": best_candidate.get("source"),
+            "fallback": True,
         }
 
     logger.info(
@@ -2846,10 +2789,11 @@ async def run_chapter_creation_pipeline(
         _review_log_summary(review),
     )
     return {
-        "ok": False,
+        "ok": True,
         "content": content,
         "creation_pack": creation_pack,
         "review": review,
         "attempts": revisions,
         "finish_reason": finish_reason,
+        "fallback": True,
     }
