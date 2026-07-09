@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import json
 import logging
 import re
@@ -21,12 +22,20 @@ DEEPSEEK_MODEL = ""
 CHAPTER_TARGET_MIN_CHARS = 2200
 CHAPTER_TARGET_MAX_CHARS = 2800
 CHAPTER_TARGET_IDEAL_CHARS = 2500
-CHAPTER_FIRST_PASS_MIN_CHARS = 2350
-CHAPTER_FIRST_PASS_MAX_CHARS = 2650
-CHAPTER_COMPLETION_MAX_TOKENS = 3328
+CHAPTER_FIRST_PASS_MIN_CHARS = 2300
+CHAPTER_FIRST_PASS_MAX_CHARS = 2550
+CHAPTER_COMPLETION_MAX_TOKENS = 2816
 
 _RUNTIME_TEMPERATURE: float | None = None
 _RUNTIME_TOP_P: float | None = None
+
+
+class ChapterPipelineQualityError(RuntimeError):
+    """三角色章节链路产出正文但未通过编辑质量门禁。"""
+
+    def __init__(self, review: Any | None = None):
+        super().__init__("三角色章节链路未达到编辑 90 分，已拒绝返回未达标候选稿")
+        self.review = review
 
 
 def configure_temperature_top_p(temperature: float | None = None, top_p: float | None = None):
@@ -526,30 +535,84 @@ async def generate_novel(messages: list[dict], api_key: str | None = None, frame
             f"请根据我们的讨论，创作这一话的完整小说正文。正文字数目标约 {CHAPTER_TARGET_IDEAL_CHARS} 字，"
             f"建议 {CHAPTER_TARGET_MIN_CHARS}-{CHAPTER_TARGET_MAX_CHARS} 字；低于 {CHAPTER_TARGET_MIN_CHARS} 字视为展开不足，"
             f"超过 {CHAPTER_TARGET_MAX_CHARS} 字视为超出标准，必须删去无效铺垫并自行收束。"
-            f"首轮请优先写到 {CHAPTER_FIRST_PASS_MIN_CHARS}-{CHAPTER_FIRST_PASS_MAX_CHARS} 字，按 10-12 个自然段组织，"
-            "每段约 180-240 字，章末钩子完成后立刻停笔，不追加尾声、总结或下一章预告。"
+            f"首轮请优先写到 {CHAPTER_FIRST_PASS_MIN_CHARS}-{CHAPTER_FIRST_PASS_MAX_CHARS} 字，按 9-10 个自然段组织，"
+            "每段约 200-240 字，章末钩子完成后立刻停笔，不追加尾声、总结或下一章预告。"
+            "叙事边界硬闸：只能完成当前章节目标，不能提前完成后续章节的核心行动、资源收获、冲突解决或爽点兑现；"
+            "后续章节信息只能作为设定边界，最多用一句未解线索承接，不能写成完整场面。"
             "场景经济、对话有信息量、章末必须有钩子。"
             "直接输出正文，不要标题和说明。"
         ),
     })
 
-    payload = {
-        "model": DEEPSEEK_MODEL,
-        "messages": full_messages,
-        "stream": False,
-        "max_tokens": CHAPTER_COMPLETION_MAX_TOKENS,
-    }
-    payload = _apply_runtime_params(payload)
+    async def _complete_once(messages_for_call: list[dict]) -> str:
+        payload = {
+            "model": DEEPSEEK_MODEL,
+            "messages": messages_for_call,
+            "stream": False,
+            "max_tokens": CHAPTER_COMPLETION_MAX_TOKENS,
+        }
+        payload = _apply_runtime_params(payload)
 
-    async with httpx.AsyncClient(timeout=600) as client:
-        resp = await client.post(
-            f"{DEEPSEEK_BASE_URL}/chat/completions",
-            json=payload,
-            headers=_deepseek_auth_headers(api_key),
-        )
-        resp.raise_for_status()
-        data = _response_json(resp, context="DeepSeek")
-        return data["choices"][0]["message"]["content"]
+        async with httpx.AsyncClient(timeout=600) as client:
+            resp = await client.post(
+                f"{DEEPSEEK_BASE_URL}/chat/completions",
+                json=payload,
+                headers=_deepseek_auth_headers(api_key),
+            )
+            resp.raise_for_status()
+            data = _response_json(resp, context="DeepSeek")
+            return _sanitize_novel_content(data["choices"][0]["message"]["content"])
+
+    boundary_scope = _extract_chapter_scope_from_text(framework_context)
+    content = await _complete_once(full_messages)
+    boundary_issues = _detect_chapter_boundary_issues(content, boundary_scope)
+    if boundary_issues:
+        retry_messages = full_messages + [
+            {"role": "assistant", "content": content},
+            {
+                "role": "user",
+                "content": (
+                    "上一版疑似提前写完后续章节事件，必须完整重写。\n"
+                    "越界点：\n- " + "\n- ".join(boundary_issues) + "\n"
+                    "重写要求：只完成当前章节任务卡；后续章节只能保留一句以内未解线索，"
+                    f"不得写成完整场面；正文字数控制在 {CHAPTER_TARGET_MIN_CHARS}-{CHAPTER_TARGET_MAX_CHARS} 字。"
+                    "只输出重写后的正文，不要解释。"
+                ),
+            },
+        ]
+        retry_content = await _complete_once(retry_messages)
+        retry_issues = _detect_chapter_boundary_issues(retry_content, boundary_scope)
+        if len(retry_issues) <= len(boundary_issues):
+            content = retry_content
+            boundary_issues = retry_issues
+        if boundary_issues:
+            logging.warning("聊天正文生成仍疑似预支后续章节: %s", boundary_issues)
+
+    char_count = len(content.replace(" ", "").replace("\n", "").replace("\r", ""))
+    if CHAPTER_TARGET_MIN_CHARS <= char_count <= CHAPTER_TARGET_MAX_CHARS:
+        return content
+
+    retry_reason = (
+        f"上一版约 {char_count} 字，低于 {CHAPTER_TARGET_MIN_CHARS} 字，展开不足。"
+        if char_count < CHAPTER_TARGET_MIN_CHARS
+        else f"上一版约 {char_count} 字，超过 {CHAPTER_TARGET_MAX_CHARS} 字，节奏偏散。"
+    )
+    retry_messages = full_messages + [
+        {"role": "assistant", "content": content},
+        {
+            "role": "user",
+            "content": (
+                f"{retry_reason}请完整重写为 {CHAPTER_TARGET_MIN_CHARS}-{CHAPTER_TARGET_MAX_CHARS} 字。"
+                "必须保留当前章节核心因果链，但删除跨章预支、重复心理活动、无效环境描写和总结升华。"
+                "只能输出修订后的完整正文，不要解释。"
+            ),
+        },
+    ]
+    retry_content = await _complete_once(retry_messages)
+    retry_count = len(retry_content.replace(" ", "").replace("\n", "").replace("\r", ""))
+    if abs(retry_count - CHAPTER_TARGET_IDEAL_CHARS) <= abs(char_count - CHAPTER_TARGET_IDEAL_CHARS):
+        return retry_content
+    return content
 
 
 async def split_scenes(chat_messages: list[dict], character_profiles: str = "", page_count: int = 10, api_key: str | None = None) -> list[str]:
@@ -869,6 +932,206 @@ async def _repair_onboarding_response(
 # ─── Framework service functions ───────────────────────────
 
 
+def _as_positive_int(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int) and value > 0:
+        return value
+    if isinstance(value, str) and value.strip().isdigit():
+        parsed = int(value.strip())
+        return parsed if parsed > 0 else None
+    return None
+
+
+def _build_chapter_outline_scope(outline: dict, current_chapter_number: int) -> dict[str, Any]:
+    """为正文生成提取当前章节边界，避免模型偷用后续章节事件。"""
+    if not isinstance(outline, dict) or current_chapter_number <= 0:
+        return {}
+
+    acts = outline.get("three_acts") if isinstance(outline.get("three_acts"), list) else []
+    chapter_cards: list[dict[str, Any]] = []
+    for act_index, act in enumerate(acts, start=1):
+        if not isinstance(act, dict):
+            continue
+        act_label = act.get("act", act_index)
+        chapters = act.get("chapters") if isinstance(act.get("chapters"), list) else []
+        for item in chapters:
+            if not isinstance(item, dict):
+                continue
+            chapter_number = _as_positive_int(item.get("chapter_number"))
+            if chapter_number is None:
+                continue
+            chapter_cards.append(
+                {
+                    "chapter_number": chapter_number,
+                    "title": str(item.get("title") or "").strip(),
+                    "act": item.get("act", act_label),
+                    "summary": str(item.get("summary") or "").strip(),
+                    "goal": str(item.get("goal") or "").strip(),
+                    "conflict": str(item.get("conflict") or "").strip(),
+                    "hook": str(item.get("hook") or "").strip(),
+                    "payoff": str(item.get("payoff") or "").strip(),
+                    "highlight": str(item.get("highlight") or "").strip(),
+                }
+            )
+
+    if not chapter_cards:
+        return {}
+
+    chapter_cards.sort(key=lambda item: item["chapter_number"])
+    current = next((item for item in chapter_cards if item["chapter_number"] == current_chapter_number), None)
+    previous = [
+        {
+            "chapter_number": item["chapter_number"],
+            "title": item.get("title"),
+            "summary": item.get("summary"),
+        }
+        for item in chapter_cards
+        if item["chapter_number"] < current_chapter_number
+    ][-2:]
+    upcoming = [
+        {
+            "chapter_number": item["chapter_number"],
+            "title": item.get("title"),
+            "summary": item.get("summary"),
+        }
+        for item in chapter_cards
+        if item["chapter_number"] > current_chapter_number
+    ][:6]
+
+    scope: dict[str, Any] = {
+        "current_chapter_number": current_chapter_number,
+        "current_chapter_card": current or {},
+        "previous_chapters_for_continuity": previous,
+        "future_chapters_for_boundary_only": upcoming,
+        "boundary_rule": "只能写 current_chapter_card 内的本章事件；future_chapters_for_boundary_only 仅用于防止预支后文，禁止提前完成其中任何事件。",
+    }
+    return scope
+
+
+_BOUNDARY_TERM_STOPWORDS = {
+    "本章", "主角", "故事", "剧情", "世界", "发现", "面对", "开始", "通过", "进行", "获得",
+    "关键", "核心", "冲突", "目标", "线索", "行动", "危机", "选择", "能力", "资源", "身份",
+    "人物", "关系", "铺垫", "推进", "进入", "解决", "完成", "引出", "展现", "揭示", "明确",
+    "活动范围", "官方开放", "方开放的", "开放的", "范围", "地方", "东西", "里面",
+}
+
+_BOUNDARY_STRONG_SHORT_TERMS = {
+    "擂台", "秘境", "荒域", "异兽", "灵草", "灵药", "奖金", "赌斗", "试炼", "遗迹",
+}
+
+
+def _is_strong_boundary_term(term: str) -> bool:
+    """判断词项是否足以代表后续章节核心事件，而非普通动作短语。"""
+    if term in _BOUNDARY_STRONG_SHORT_TERMS:
+        return True
+    if len(term) < 4:
+        return False
+    return any(core in term for core in _BOUNDARY_STRONG_SHORT_TERMS)
+
+
+def _compact_boundary_text(value: Any) -> str:
+    if isinstance(value, dict):
+        return " ".join(_compact_boundary_text(item) for item in value.values())
+    if isinstance(value, list):
+        return " ".join(_compact_boundary_text(item) for item in value)
+    return str(value or "")
+
+
+def _boundary_terms_from_text(text: str) -> set[str]:
+    cleaned = re.sub(r"[^\u4e00-\u9fffA-Za-z0-9]+", " ", text or "")
+    terms: set[str] = set()
+    for raw in cleaned.split():
+        token = raw.strip()
+        if not token:
+            continue
+        if re.fullmatch(r"[A-Za-z0-9]+", token):
+            if len(token) >= 4:
+                terms.add(token)
+            continue
+        if len(token) >= 3 and token not in _BOUNDARY_TERM_STOPWORDS:
+            terms.add(token[:16])
+        if len(token) >= 4 and re.fullmatch(r"[\u4e00-\u9fff]+", token):
+            for size in (4, 3, 2):
+                for index in range(0, len(token) - size + 1):
+                    term = token[index:index + size]
+                    if term not in _BOUNDARY_TERM_STOPWORDS:
+                        terms.add(term)
+    return terms
+
+
+def _extract_chapter_scope_from_text(text: str) -> dict[str, Any]:
+    marker = "章节大纲边界:"
+    if not text or marker not in text:
+        return {}
+    start = text.find(marker) + len(marker)
+    fragment = text[start:].lstrip()
+    try:
+        scope, _ = json.JSONDecoder().raw_decode(fragment)
+    except Exception:
+        return {}
+    return scope if isinstance(scope, dict) else {}
+
+
+def _chapter_scope_from_context(story_context: dict) -> dict[str, Any]:
+    if not isinstance(story_context, dict):
+        return {}
+    outline = story_context.get("outline")
+    current_chapter = story_context.get("current_chapter") if isinstance(story_context.get("current_chapter"), dict) else {}
+    chapter_number = _as_positive_int(current_chapter.get("chapter_number") if current_chapter else None)
+    if isinstance(outline, dict) and chapter_number:
+        return _build_chapter_outline_scope(outline, chapter_number)
+    return {}
+
+
+def _detect_chapter_boundary_issues(content: str, chapter_scope: dict[str, Any]) -> list[str]:
+    """检测正文是否疑似提前写完后续章节卡中的核心事件。"""
+    if not content or not isinstance(chapter_scope, dict):
+        return []
+    future_cards = chapter_scope.get("future_chapters_for_boundary_only")
+    if not isinstance(future_cards, list) or not future_cards:
+        return []
+
+    allowed_text = _compact_boundary_text(chapter_scope.get("current_chapter_card"))
+    allowed_text += " " + _compact_boundary_text(chapter_scope.get("previous_chapters_for_continuity"))
+    allowed_terms = _boundary_terms_from_text(allowed_text)
+    future_term_counts: dict[str, int] = {}
+    card_terms_cache: list[tuple[dict, set[str]]] = []
+    for card in future_cards[:6]:
+        if not isinstance(card, dict):
+            continue
+        source_text = _compact_boundary_text({
+            "title": card.get("title"),
+            "summary": card.get("summary"),
+            "goal": card.get("goal"),
+            "conflict": card.get("conflict"),
+            "payoff": card.get("payoff"),
+            "highlight": card.get("highlight"),
+        })
+        terms = _boundary_terms_from_text(source_text) - allowed_terms
+        card_terms_cache.append((card, terms))
+        for term in terms:
+            future_term_counts[term] = future_term_counts.get(term, 0) + 1
+
+    issues: list[str] = []
+    for card, raw_terms in card_terms_cache:
+        terms = sorted(
+            [term for term in raw_terms if future_term_counts.get(term, 0) < 3],
+            key=len,
+            reverse=True,
+        )
+        matched = [term for term in terms if term and term in content]
+        strong_matches = [term for term in matched if _is_strong_boundary_term(term)]
+        if strong_matches:
+            chapter_label = card.get("chapter_number") or "后续"
+            title = str(card.get("title") or "").strip()
+            shown = "、".join(strong_matches[:4])
+            issues.append(f"疑似预支第{chapter_label}章《{title}》：{shown}")
+        if len(issues) >= 5:
+            break
+    return issues
+
+
 def _build_story_snapshot(story_context: dict) -> str:
     """Build a textual snapshot of the current story context for regeneration prompts."""
     parts = []
@@ -911,8 +1174,16 @@ def _build_story_snapshot(story_context: dict) -> str:
         parts.append(f"现有标签: {json.dumps(story_context['tags'], ensure_ascii=False)}")
     if story_context.get("characters"):
         parts.append(f"现有角色: {json.dumps(story_context['characters'], ensure_ascii=False)}")
-    if story_context.get("outline"):
-        parts.append(f"现有大纲: {json.dumps(story_context['outline'], ensure_ascii=False)}")
+    outline = story_context.get("outline")
+    current_chapter = story_context.get("current_chapter") if isinstance(story_context.get("current_chapter"), dict) else {}
+    current_chapter_number = _as_positive_int(current_chapter.get("chapter_number") if current_chapter else None)
+    if isinstance(outline, dict) and outline:
+        if current_chapter_number:
+            outline_scope = _build_chapter_outline_scope(outline, current_chapter_number)
+            if outline_scope:
+                parts.append(f"章节大纲边界: {json.dumps(outline_scope, ensure_ascii=False)}")
+        else:
+            parts.append(f"现有大纲: {json.dumps(outline, ensure_ascii=False)}")
     if story_context.get("description"):
         parts.append(f"故事描述: {story_context['description']}")
     # Inject story_memory_compact (continuity memory)
@@ -2166,13 +2437,72 @@ async def expand_chapter_to_content(
 
     目标约 2500 字。低于下限时补足重试，超过上限时保留情节做收束重写。
     """
+    if _retry_count == 0 and not _retry_reason:
+        try:
+            from services.chapter_agents import run_chapter_creation_pipeline
+
+            pipeline_result = await run_chapter_creation_pipeline(
+                story_context=story_context,
+                chapter_info=chapter_info,
+                api_key=api_key,
+                previous_chapter_summary=previous_chapter_summary,
+                system_rules=_get_chapter_system_prompt(db=db) if not system_prompt else system_prompt,
+                max_revisions=3,
+            )
+            if isinstance(story_context, dict) and isinstance(pipeline_result.get("creation_pack"), dict):
+                story_context["_last_creation_pack"] = pipeline_result["creation_pack"]
+            if isinstance(story_context, dict) and pipeline_result.get("content"):
+                pipeline_content = str(pipeline_result.get("content") or "")
+                story_context["_last_chapter_pipeline_result"] = {
+                    "ok": bool(pipeline_result.get("ok")),
+                    "content_sha256": hashlib.sha256(pipeline_content.encode("utf-8")).hexdigest(),
+                    "char_count": len(pipeline_content.replace(" ", "").replace("\n", "").replace("\r", "")),
+                    "review": pipeline_result.get("review") if isinstance(pipeline_result.get("review"), dict) else {},
+                    "creation_pack": pipeline_result.get("creation_pack") if isinstance(pipeline_result.get("creation_pack"), dict) else None,
+                    "attempts": pipeline_result.get("attempts", 0),
+                    "finish_reason": pipeline_result.get("finish_reason"),
+                }
+            if pipeline_result.get("ok") and pipeline_result.get("content"):
+                return str(pipeline_result["content"])
+            if pipeline_result.get("content"):
+                logging.warning(
+                    "三角色章节链路未达到编辑 90 分，拒绝返回未达标候选稿: %s",
+                    pipeline_result.get("review"),
+                )
+                raise ChapterPipelineQualityError(pipeline_result.get("review"))
+            logging.warning("三角色章节链路未产出正文，回退旧章节扩写链路: %s", pipeline_result.get("review"))
+        except ChapterPipelineQualityError:
+            raise
+        except Exception as exc:
+            logging.warning("三角色章节链路执行失败，回退旧章节扩写链路: %s", exc)
+
     MAX_RETRIES = 2
+
+    def _is_valid_fallback_candidate(text: str, scope: dict[str, Any]) -> bool:
+        """只把长度合格、未越界的正文纳入最终回退候选。"""
+        count = len((text or "").replace(" ", "").replace("\n", "").replace("\r", ""))
+        if count < CHAPTER_TARGET_MIN_CHARS or count > CHAPTER_TARGET_MAX_CHARS:
+            return False
+        return not _detect_chapter_boundary_issues(text, scope)
+
     snapshot = _build_story_snapshot(story_context)
+    boundary_scope = _chapter_scope_from_context(story_context)
     chapter_details = json.dumps(chapter_info, ensure_ascii=False)
 
     previous_block = ""
     if previous_chapter_summary and previous_chapter_summary.strip():
         previous_block = f"\n## 上集回顾\n{previous_chapter_summary}\n"
+
+    boundary_detail = ""
+    if boundary_scope:
+        boundary_detail = (
+            "\n## 当前章节边界卡（必须遵守）\n"
+            f"{json.dumps(boundary_scope, ensure_ascii=False)}\n"
+            "- 只能写 current_chapter_card 里的本章事件。\n"
+            "- future_chapters_for_boundary_only 只用于避雷，不是素材库。\n"
+            "- 正文不得提前出现后续章节的完整行动、地点推进、资源收获、战斗兑现、秘境/擂台/捡漏等核心场面。\n"
+            "- 如果某个名词只存在于后续章节摘要里，除非当前任务卡明确要求，否则不要写入正文。\n"
+        )
 
     # Parse chapter task card hook structure
     hook_info = ""
@@ -2213,7 +2543,15 @@ async def expand_chapter_to_content(
 ## 本章任务卡
 {chapter_details}
 {hook_info}
+{boundary_detail}
 {previous_block}
+## 叙事边界硬闸（起点编辑审稿标准）
+- 本章只能完成「本章任务卡」中明示的目标、冲突、回收和亮点。
+- 作品圣经、全书大纲、后续章节摘要只能作为设定背景和连续性边界，禁止把后续章节的关键事件提前写完。
+- 禁止为了制造爽点跨章透支：不能提前完成下一章的核心行动、不能提前兑现后续章节的资源收获、不能提前解决后续章节的主要冲突。
+- 如果需要提到后续线索，只能作为一句以内的未解悬念或行动方向，不能写成完整场面。
+- 本章结尾必须停在「当前章节自然形成的下一步选择/风险/发现」上，不得把下一章剧情直接演完。
+
 ## ⚠️ 字数要求（最优先）
 - **正文字数目标约 {CHAPTER_TARGET_IDEAL_CHARS} 字**，建议 {CHAPTER_TARGET_MIN_CHARS}-{CHAPTER_TARGET_MAX_CHARS} 字。
 - 低于 {CHAPTER_TARGET_MIN_CHARS} 字视为展开不足，必须补足关键场面、对话和因果推进；超过 {CHAPTER_TARGET_MAX_CHARS} 字视为超出标准，必须自行删去无效铺垫并收束。
@@ -2223,8 +2561,8 @@ async def expand_chapter_to_content(
 
 ## 首轮篇幅结构（用于一次命中）
 - 首轮优先写到 {CHAPTER_FIRST_PASS_MIN_CHARS}-{CHAPTER_FIRST_PASS_MAX_CHARS} 字，给校验留余量，不要贴着 2800 字上限写。
-- 全章控制在 10-12 个自然段，每段约 180-240 字，最长段落不要超过 280 字。
-- 段落功能建议：开篇危机 1 段，冲突铺垫 2-3 段，行动推进 4-6 段，爽点或转折 1-2 段，章末钩子 1 段。
+- 全章控制在 9-10 个自然段，每段约 200-240 字，最长段落不要超过 280 字。
+- 段落功能建议：开篇危机 1 段，冲突铺垫 2 段，行动推进 4-5 段，爽点或转折 1 段，章末钩子 1 段。
 - 章末钩子完成后立刻停笔，禁止追加尾声、总结、感悟、下一章预告或重复解释。
 
 ## 起点白金级写作规范
@@ -2286,7 +2624,7 @@ async def expand_chapter_to_content(
             f"本次必须补足到 {CHAPTER_TARGET_MIN_CHARS}-{CHAPTER_TARGET_MAX_CHARS} 字，理想约 {CHAPTER_TARGET_IDEAL_CHARS} 字。\n"
             "- 核心情节、人物、关键对话保持不偏题\n"
             "- 优先补足冲突铺垫、角色反应、关键对话、爽点兑现和章末钩子\n"
-            "- 按 11-12 个自然段输出，每段约 180-240 字\n"
+            "- 按 10 个自然段输出，每段约 210-240 字\n"
             "- 不要用总结、设定说明或水段落凑字数\n"
         )
     elif _retry_reason == "long":
@@ -2300,9 +2638,26 @@ async def expand_chapter_to_content(
             "- 禁止直接截断，必须保留开篇钩子、核心冲突、关键因果、必要对话、爽点兑现和章末钩子\n"
             "- 删除重复心理活动、解释性设定、路程转场、无变化的观察和无信息寒暄\n"
             "- 合并功能重复的场景，让每 200 字都有新行动、新信息或关系变化\n"
-            "- 改成 10-11 个自然段，每段约 180-230 字，最长段落不超过 260 字\n"
+            "- 改成 9-10 个自然段，每段约 200-230 字，最长段落不超过 260 字\n"
             "- 只输出收束后的完整正文，不要说明删改过程\n"
             "\n## 上一版正文（用于保留情节并收束重写）\n"
+            f"{previous_excerpt}\n"
+        )
+    elif _retry_reason == "boundary":
+        previous_excerpt = _previous_content[:12000]
+        if len(_previous_content) > 12000:
+            previous_excerpt += "\n\n[中间内容略去，边界重写时仍以本章任务卡为唯一剧情范围。]"
+        previous_boundary_issues = _detect_chapter_boundary_issues(_previous_content, boundary_scope)
+        issue_block = "\n- ".join(previous_boundary_issues) if previous_boundary_issues else "上一版疑似提前写完后续章节事件"
+        user_prompt += (
+            "\n\n## ⚠️ 上一版本被驳回：章节边界越界\n"
+            "上一版把后续章节的核心事件、资源收获、冲突解决或爽点兑现提前写进了本章。\n"
+            f"越界点：\n- {issue_block}\n"
+            "- 本次必须完整重写，不是局部修补。\n"
+            "- 只能完成本章任务卡，不能提前演完后续章节。\n"
+            "- 后续线索最多作为一句以内的未解悬念或行动方向，不能写成完整场面。\n"
+            "- 章末停在本章自然形成的下一步选择/风险/发现上。\n"
+            "\n## 上一版正文（仅用于识别并删除越界内容）\n"
             f"{previous_excerpt}\n"
         )
 
@@ -2335,11 +2690,43 @@ async def expand_chapter_to_content(
         content = _sanitize_novel_content(content)
         _char_count = len(content.replace(" ", "").replace("\n", "").replace("\r", ""))
         _distance = abs(_char_count - CHAPTER_TARGET_IDEAL_CHARS)
-        if _best_content is None or _best_distance is None or _distance < _best_distance:
+        boundary_issues = _detect_chapter_boundary_issues(content, boundary_scope)
+        if _is_valid_fallback_candidate(content, boundary_scope) and (
+            _best_content is None or _best_distance is None or _distance < _best_distance
+        ):
             _best_content = content
             _best_distance = _distance
         if finish_reason == "length":
             logging.warning("章节正文生成触发 length 截断风险，当前正文约 %d 字", _char_count)
+            if _retry_count < MAX_RETRIES:
+                return await expand_chapter_to_content(
+                    story_context=story_context,
+                    chapter_info=chapter_info,
+                    api_key=api_key,
+                    previous_chapter_summary=previous_chapter_summary,
+                    system_prompt=system_prompt,
+                    db=db,
+                    _retry_count=_retry_count + 1,
+                    _retry_reason="long",
+                    _previous_content=content,
+                    _best_content=_best_content,
+                    _best_distance=_best_distance,
+                )
+        if boundary_issues and _retry_count < MAX_RETRIES:
+            logging.warning("章节正文疑似预支后续章节，边界重写第 %d 次: %s", _retry_count + 1, boundary_issues)
+            return await expand_chapter_to_content(
+                story_context=story_context,
+                chapter_info=chapter_info,
+                api_key=api_key,
+                previous_chapter_summary=previous_chapter_summary,
+                system_prompt=system_prompt,
+                db=db,
+                _retry_count=_retry_count + 1,
+                _retry_reason="boundary",
+                _previous_content=content,
+                _best_content=_best_content,
+                _best_distance=_best_distance,
+            )
         if _char_count < CHAPTER_TARGET_MIN_CHARS and _retry_count < MAX_RETRIES:
             logging.warning("章节正文 %d 字，不足 %d 字，补足重试第 %d 次", _char_count, CHAPTER_TARGET_MIN_CHARS, _retry_count + 1)
             return await expand_chapter_to_content(
@@ -2382,7 +2769,7 @@ async def expand_chapter_to_content(
             and _best_distance < _distance
         ):
             logging.warning(
-                "章节多次重试后仍未完全命中目标，返回最接近 %d 字的版本（偏差 %d 字）",
+                "章节多次重试后仍未完全命中目标，返回已通过长度与边界的候选版本（接近 %d 字，偏差 %d 字）",
                 CHAPTER_TARGET_IDEAL_CHARS,
                 _best_distance,
             )
@@ -2393,6 +2780,9 @@ async def expand_chapter_to_content(
         ai_quick_issues = _quick_ai_flavor_check(content)
         if ai_quick_issues:
             logging.warning("章节 AI 味快速检测发现问题: %s", ai_quick_issues)
+        boundary_issues = _detect_chapter_boundary_issues(content, boundary_scope)
+        if boundary_issues:
+            logging.warning("章节正文多次重试后仍疑似预支后续章节: %s", boundary_issues)
         return content
 
 
@@ -2487,6 +2877,7 @@ async def adjust_chapter_content(
 ) -> str:
     """Adjust the full chapter content according to a user instruction."""
     snapshot = _build_story_snapshot_tiered(story_context, "auto")
+    boundary_scope = _chapter_scope_from_context(story_context)
     chapter_details = json.dumps(chapter_info, ensure_ascii=False)
 
     # 提取章节任务卡结构（对标 expand_chapter_to_content）
@@ -2502,6 +2893,17 @@ async def adjust_chapter_content(
         if parts:
             hook_info = "## 本章任务卡（必须执行）\n" + "\n".join(parts) + "\n\n⚠️ 以上任务卡是本章的叙事指南。生成正文时，必须让读者感受到 goal 所描述的核心卖点、conflict 所描述的对抗张力、payoff 所描述的阅读满足感。不得偏离任务卡自由发挥。\n"
 
+    boundary_detail = ""
+    if boundary_scope:
+        boundary_detail = (
+            "\n## 当前章节边界卡（必须遵守）\n"
+            f"{json.dumps(boundary_scope, ensure_ascii=False)}\n"
+            "- 只能写 current_chapter_card 里的本章事件。\n"
+            "- future_chapters_for_boundary_only 只用于避雷，不是素材库。\n"
+            "- 正文不得提前出现后续章节的完整行动、地点推进、资源收获、战斗兑现、秘境/擂台/捡漏等核心场面。\n"
+            "- 如果某个名词只存在于后续章节摘要里，除非当前任务卡明确要求，否则不要写入正文。\n"
+        )
+
     user_prompt = f"""请根据以下故事框架、章节任务卡和修改要求，创作本章正文。
 
 ## 故事框架
@@ -2513,6 +2915,7 @@ async def adjust_chapter_content(
 ## 本章信息
 {chapter_details}
 {hook_info}
+{boundary_detail}
 ## 当前正文（参考，除非用户要求保留否则可全部重写）
 {chapter_content}
 
@@ -2525,7 +2928,7 @@ async def adjust_chapter_content(
 - 不要为了凑篇幅重复心理活动、环境描写、路程转场或设定解释；也不要为了压篇幅砍掉关键因果、有效对话和章末钩子。
 - 这不是梗概扩写，必须写成完整网文章节：有开篇钩子、过程冲突、情绪推进和章末钩子。
 - 每句话都必须推进剧情或建立人设。删除所有对推进剧情无贡献的句子。
-- 优先写到 {CHAPTER_FIRST_PASS_MIN_CHARS}-{CHAPTER_FIRST_PASS_MAX_CHARS} 字，按 10-12 个自然段组织，每段约 180-240 字；章末钩子完成后立刻停笔。
+- 优先写到 2300-2450 字，按 9-10 个自然段组织，每段约 200-240 字；章末钩子完成后立刻停笔。
 
 ## 起点白金级写作规范
 
@@ -2582,7 +2985,7 @@ async def adjust_chapter_content(
         "## 字数要求（最优先）\n"
         f"正文字数目标约 {CHAPTER_TARGET_IDEAL_CHARS} 字，建议 {CHAPTER_TARGET_MIN_CHARS}-{CHAPTER_TARGET_MAX_CHARS} 字；"
         f"低于 {CHAPTER_TARGET_MIN_CHARS} 字视为展开不足，超过 {CHAPTER_TARGET_MAX_CHARS} 字视为超出标准，必须删去无效铺垫并自行收束。"
-        f"优先写到 {CHAPTER_FIRST_PASS_MIN_CHARS}-{CHAPTER_FIRST_PASS_MAX_CHARS} 字，按 10-12 个自然段组织，每段约 180-240 字。每句话必须推进剧情或建立人设。\n"
+        "优先写到 2300-2450 字，按 9-10 个自然段组织，每段约 200-240 字。每句话必须推进剧情或建立人设。\n"
         "## 开篇铁律\n"
         "【禁止】以时间、天气、景色开头。第一句必须是事件/对话/冲突/异常。主角第1段出场。\n"
         "## 叙事密度\n"

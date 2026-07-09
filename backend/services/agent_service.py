@@ -27,6 +27,7 @@ from services.deepseek import (
     build_agent_chapter_system_prompt,
     expand_chapter_to_content,
 )
+from services.chapter_quality import finalize_generated_chapter_content, format_quality_gate_detail
 from services.prompt_template import get_effective_prompt
 from services.story_state import build_story_bible_compact, build_story_memory_compact
 from services.framework_utils import (
@@ -1302,6 +1303,20 @@ async def generate_chapter_content(story_id: int, chapter_number: int, instructi
         if not novel_content or not novel_content.strip():
             return {"error": "生成内容为空，请重试"}
 
+        story_context["current_chapter"] = {key: value for key, value in chapter_info.items() if value not in (None, "", [], {})}
+        quality_gate = await finalize_generated_chapter_content(
+            content=novel_content,
+            story_context=story_context,
+            chapter_info=chapter_info,
+            api_key=api_key,
+            system_prompt=system_prompt or None,
+            source="agent_generate_chapter_content",
+            allow_pipeline_rerun=False,
+        )
+        if not quality_gate.get("ok"):
+            return {"error": "生成正文未通过质量门禁", "detail": format_quality_gate_detail(quality_gate)}
+        novel_content = quality_gate["content"]
+
         chapter = (
             db.query(Chapter)
             .filter(Chapter.story_id == story_id, Chapter.chapter_number == chapter_number)
@@ -1320,6 +1335,7 @@ async def generate_chapter_content(story_id: int, chapter_number: int, instructi
         if _current_pending_changes():
             _current_pending_changes().record_chapter_field(chapter, "novel_content")
         chapter.novel_content = novel_content
+        chapter.quality_score = quality_gate.get("report")
         chapter.content_source = "framework_generation"
         if _current_pending_changes():
             _current_pending_changes().update_new_value("chapter", chapter.id, "novel_content", novel_content)
@@ -1465,7 +1481,26 @@ async def adjust_chapter_by_instruction(chapter_id: int, instruction: str) -> di
         if not new_content or not new_content.strip():
             return {"error": "AI 返回内容为空"}
 
+        story_context["current_chapter"] = {key: value for key, value in chapter_info.items() if value not in (None, "", [], {})}
+        quality_gate = await finalize_generated_chapter_content(
+            content=new_content,
+            story_context=story_context,
+            chapter_info=chapter_info,
+            api_key=api_key,
+            system_prompt=template_system or fallback_prompt or None,
+            source="agent_adjust_chapter",
+            existing_creation_pack=(
+                chapter.quality_score.get("creation_pack")
+                if isinstance(chapter.quality_score, dict) and isinstance(chapter.quality_score.get("creation_pack"), dict)
+                else None
+            ),
+        )
+        if not quality_gate.get("ok"):
+            return {"error": "调整后正文未通过质量门禁", "detail": format_quality_gate_detail(quality_gate)}
+        new_content = quality_gate["content"]
+
         chapter.novel_content = new_content
+        chapter.quality_score = quality_gate.get("report")
         if _current_pending_changes():
             _current_pending_changes().update_new_value("chapter", chapter.id, "novel_content", new_content)
         await _refresh_agent_memory(chapter, db)
@@ -1966,7 +2001,25 @@ async def batch_adjust_chapters(chapters: list[dict]) -> dict:
             )
             if not new_content or not new_content.strip():
                 return {"chapter_id": chapter_id, "error": "AI 返回内容为空"}
+            story_context["current_chapter"] = {key: value for key, value in chapter_info.items() if value not in (None, "", [], {})}
+            quality_gate = await finalize_generated_chapter_content(
+                content=new_content,
+                story_context=story_context,
+                chapter_info=chapter_info,
+                api_key=api_key,
+                system_prompt=template_system or fallback_prompt or None,
+                source="agent_batch_adjust_chapter",
+                existing_creation_pack=(
+                    chapter.quality_score.get("creation_pack")
+                    if isinstance(chapter.quality_score, dict) and isinstance(chapter.quality_score.get("creation_pack"), dict)
+                    else None
+                ),
+            )
+            if not quality_gate.get("ok"):
+                return {"chapter_id": chapter_id, "error": "调整后正文未通过质量门禁", "detail": format_quality_gate_detail(quality_gate)}
+            new_content = quality_gate["content"]
             chapter.novel_content = new_content
+            chapter.quality_score = quality_gate.get("report")
             if _current_pending_changes():
                 _current_pending_changes().update_new_value("chapter", chapter.id, "novel_content", new_content)
             await _refresh_agent_memory(chapter, db)
@@ -3444,7 +3497,7 @@ class AgentService:
                     "messages": all_messages,
                     "stream": True,
                     "tools": self.tool_registry.get_tool_specs(mode=mode, workflow_type=workflow_type, enabled_skills=enabled_skills),
-                    "max_tokens": 131072,
+                    "max_tokens": 32768,
                 }
 
                 collected_content = ""

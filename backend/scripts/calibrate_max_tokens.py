@@ -18,10 +18,10 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from dotenv import load_dotenv
 load_dotenv()
 
-TEST_VALUES = [2560, 2816, 3072, 3328, 3584, 3840, 4096]
+TEST_VALUES = [2304, 2560, 2816, 3072, 3328]
 TARGET_CHARS = (2200, 2800)  # 目标字数范围
 IDEAL_CHARS = 2500
-RECOMMENDED_MAX_TOKENS = 3328
+RECOMMENDED_MAX_TOKENS = 2816
 
 # 一个简化的测试章节信息
 TEST_CHAPTER = {
@@ -89,8 +89,8 @@ async def main():
         print("=" * 60)
         print()
         print("【理论推算】基于用户提供的经验数据点：")
-        print("  max_tokens=3328 用于给 2500 字正文留出安全输出空间，同时避免 4096 预算诱导模型写长")
-        print("  实际字数由 prompt 的 10-12 段结构和 2200-2800 字约束共同控制")
+        print("  max_tokens=2816 用于给 2500 字正文留出安全输出空间，同时减少模型写到 3000 字以上的惯性")
+        print("  实际字数由 prompt 的 9-10 段结构和 2200-2800 字约束共同控制")
         print()
         print(f"  目标字数范围: {TARGET_CHARS[0]}-{TARGET_CHARS[1]} 字")
         print(f"  理想字数: {IDEAL_CHARS} 字")

@@ -138,6 +138,7 @@ from services.deepseek import (
     chat_stream,
     continue_framework,
     continue_framework_with_chat,
+    ChapterPipelineQualityError,
     expand_chapter_to_content,
     generate_character_profiles_from_framework,
     generate_character_profiles_from_content,
@@ -156,6 +157,7 @@ from services.deepseek import (
 )
 from services.errors import MangaImageGenerationError, MissingApiKeyError
 from services.prompt_template import get_effective_prompt, get_system_prompt, set_system_prompt, get_template_story_length, SYSTEM_PROMPT_KEYS
+from services.chapter_quality import finalize_generated_chapter_content, format_quality_gate_detail
 from services.image2 import edit_existing_image, generate_cover_image, generate_manga_image, generate_reference_image
 from services.media_locator import ensure_local_media_path
 from services.scene_safety import sanitize_scene_list
@@ -1489,7 +1491,7 @@ REFERENCE_CHAPTER_PROMPT_SEED = """你是出版级网文作家。你写的章节
 1. 标准章节必须控制在 2200-2800 字，理想约 2500 字；低于 2200 字视为展开不足，高于 2800 字视为超出标准。
 2. 只输出正文，不要标题、章节号、字数统计、写作说明或总结。
 3. 不要把正文写成梗概、剧情提要、分镜说明或创作计划。
-4. 首轮优先写到 2350-2650 字，按 10-12 个自然段组织，每段约 180-240 字，不要贴着 2800 字上限写。
+4. 首轮优先写到 2300-2550 字，按 9-10 个自然段组织，每段约 200-240 字，不要贴着 2800 字上限写。
 5. 篇幅收束靠合并重复场景、删除无效转场和解释性设定完成，禁止硬截断关键情节。
 6. 章末必须留有自然钩子，但不能用「他不知道的是」「这一切才刚刚开始」等模板化预告；钩子完成后立刻停笔。
 
@@ -2767,6 +2769,69 @@ def _parse_character_profile_cards(text: str) -> list[dict]:
     return cards
 
 
+def _outline_chapter_scope_for_generation(outline: dict | None, chapter_number: int | None) -> dict[str, Any]:
+    """为正文生成提取章节边界，避免聊天生成路径预支后续剧情。"""
+    if not isinstance(outline, dict) or not isinstance(chapter_number, int) or chapter_number <= 0:
+        return {}
+    acts = outline.get("three_acts") if isinstance(outline.get("three_acts"), list) else []
+    chapter_cards: list[dict[str, Any]] = []
+    for act_index, act in enumerate(acts, start=1):
+        if not isinstance(act, dict):
+            continue
+        act_label = act.get("act", act_index)
+        chapters = act.get("chapters") if isinstance(act.get("chapters"), list) else []
+        for item in chapters:
+            if not isinstance(item, dict):
+                continue
+            raw_number = item.get("chapter_number")
+            if isinstance(raw_number, bool):
+                continue
+            if isinstance(raw_number, str) and raw_number.strip().isdigit():
+                raw_number = int(raw_number.strip())
+            if not isinstance(raw_number, int) or raw_number <= 0:
+                continue
+            chapter_cards.append({
+                "chapter_number": raw_number,
+                "title": str(item.get("title") or "").strip(),
+                "act": item.get("act", act_label),
+                "summary": str(item.get("summary") or "").strip(),
+                "goal": str(item.get("goal") or "").strip(),
+                "conflict": str(item.get("conflict") or "").strip(),
+                "hook": str(item.get("hook") or "").strip(),
+                "payoff": str(item.get("payoff") or "").strip(),
+                "highlight": str(item.get("highlight") or "").strip(),
+            })
+    if not chapter_cards:
+        return {}
+    chapter_cards.sort(key=lambda item: item["chapter_number"])
+    current = next((item for item in chapter_cards if item["chapter_number"] == chapter_number), None)
+    previous = [
+        {
+            "chapter_number": item["chapter_number"],
+            "title": item.get("title"),
+            "summary": item.get("summary"),
+        }
+        for item in chapter_cards
+        if item["chapter_number"] < chapter_number
+    ][-2:]
+    future = [
+        {
+            "chapter_number": item["chapter_number"],
+            "title": item.get("title"),
+            "summary": item.get("summary"),
+        }
+        for item in chapter_cards
+        if item["chapter_number"] > chapter_number
+    ][:6]
+    return {
+        "current_chapter_number": chapter_number,
+        "current_chapter_card": current or {},
+        "previous_chapters_for_continuity": previous,
+        "future_chapters_for_boundary_only": future,
+        "boundary_rule": "正文只能完成 current_chapter_card 内的本章事件；future_chapters_for_boundary_only 只用于防止预支后文，禁止提前写完。",
+    }
+
+
 def _build_framework_context(story: Story | None, chapter: Chapter | None = None) -> str:
     """Assemble framework constraints from story tags, characters, outline and chapter metadata."""
     if not story:
@@ -2839,7 +2904,14 @@ def _build_framework_context(story: Story | None, chapter: Chapter | None = None
     if story.characters:
         parts.append(f"角色设定: {json.dumps(story.characters, ensure_ascii=False)}")
     if story.outline:
-        parts.append(f"故事大纲: {json.dumps(story.outline, ensure_ascii=False)}")
+        chapter_scope = _outline_chapter_scope_for_generation(
+            story.outline if isinstance(story.outline, dict) else {},
+            chapter.chapter_number if chapter else None,
+        )
+        if chapter_scope:
+            parts.append(f"章节大纲边界: {json.dumps(chapter_scope, ensure_ascii=False)}")
+        else:
+            parts.append(f"故事大纲: {json.dumps(story.outline, ensure_ascii=False)}")
     if chapter:
         if chapter.act:
             parts.append(f"当前章节所属幕: {chapter.act}")
@@ -3567,6 +3639,98 @@ def _apply_chapter_content(chapter: Chapter, content: str, *, status: str | None
         chapter.status = status
 
 
+_MOTHER_FEE_PAID_TERMS = ("已支付", "已付", "暂时支付", "暂时续上", "暂时解决", "付清", "缴清", "交上")
+_MOTHER_FEE_UNPAID_TERMS = ("未付", "没着落", "无着落", "付不起", "欠费", "还缺", "还差")
+
+
+def _memory_text_contains_any(text: str, terms: tuple[str, ...]) -> bool:
+    return any(term in text for term in terms)
+
+
+def _is_mother_medical_fee_text(text: str) -> bool:
+    return "母亲" in text and any(term in text for term in ("药费", "医药费", "治疗费", "医疗费"))
+
+
+def _normalize_story_memory_consistency(memory: dict) -> dict:
+    """保守修正连续性记忆中的母亲药费状态冲突。"""
+    fields = ("story_state", "current_arc_focus", "next_payoff_target")
+    list_fields = ("continuity_facts", "open_loops")
+    fragments: list[str] = []
+    for field in fields:
+        value = memory.get(field)
+        if isinstance(value, str):
+            fragments.append(value)
+    for field in list_fields:
+        value = memory.get(field)
+        if isinstance(value, list):
+            fragments.extend(str(item) for item in value if isinstance(item, str))
+
+    combined = "\n".join(fragments)
+    if not _is_mother_medical_fee_text(combined):
+        return memory
+    has_paid = _memory_text_contains_any(combined, _MOTHER_FEE_PAID_TERMS)
+    has_unpaid = _memory_text_contains_any(combined, _MOTHER_FEE_UNPAID_TERMS)
+    if not (has_paid and has_unpaid):
+        return memory
+
+    cash_match = re.search(r"(?:口袋|手头)[^。！？；;，,\n]{0,20}\d+\s*元", combined)
+    cash_note = f"{cash_match.group(0)}，" if cash_match else "主角手头现金仍紧张，"
+    canonical = f"{cash_note}母亲短期药费已暂时续上，但后续治疗费用和债务压力仍在。"
+
+    def normalize_text(value: str) -> str:
+        if not _is_mother_medical_fee_text(value):
+            return value
+        parts = re.split(r"(?<=[。！？；;])\s*", value)
+        kept = [
+            part.strip()
+            for part in parts
+            if part.strip()
+            and not (
+                _is_mother_medical_fee_text(part)
+                and (
+                    _memory_text_contains_any(part, _MOTHER_FEE_PAID_TERMS)
+                    or _memory_text_contains_any(part, _MOTHER_FEE_UNPAID_TERMS)
+                )
+            )
+        ]
+        if canonical not in kept:
+            kept.append(canonical)
+        return "".join(kept)
+
+    for field in fields:
+        value = memory.get(field)
+        if isinstance(value, str):
+            memory[field] = normalize_text(value)
+
+    for field in list_fields:
+        value = memory.get(field)
+        if not isinstance(value, list):
+            continue
+        normalized_items: list[str] = []
+        seen: set[str] = set()
+        replaced = False
+        for item in value:
+            text = str(item).strip()
+            if not text:
+                continue
+            if _is_mother_medical_fee_text(text) and (
+                _memory_text_contains_any(text, _MOTHER_FEE_PAID_TERMS)
+                or _memory_text_contains_any(text, _MOTHER_FEE_UNPAID_TERMS)
+            ):
+                replaced = True
+                continue
+            key = text.casefold()
+            if key not in seen:
+                seen.add(key)
+                normalized_items.append(text)
+        if replaced and canonical.casefold() not in seen:
+            normalized_items.append(canonical)
+        memory[field] = normalized_items
+
+    logger.info("已归一化 story_memory 中的母亲药费状态冲突")
+    return memory
+
+
 def _merge_story_memory(existing: dict | None, update: dict | None, chapter: Chapter, chapter_summary: dict | None) -> dict:
     memory = dict(existing or {})
     update = update if isinstance(update, dict) else {}
@@ -3634,7 +3798,7 @@ def _merge_story_memory(existing: dict | None, update: dict | None, chapter: Cha
     memory.setdefault("volume_summaries", [])
     memory.setdefault("character_state_snapshots", [])
 
-    return memory
+    return _normalize_story_memory_consistency(memory)
 
 
 async def _refresh_chapter_memory(chapter: Chapter, request: Request, db: Session) -> None:
@@ -3675,6 +3839,59 @@ async def _refresh_chapter_memory(chapter: Chapter, request: Request, db: Sessio
         "ending_scene": chapter_summary.get("ending_scene"),
     } if (chapter_summary or chapter_handoff) else None
     chapter.story.story_memory = _merge_story_memory(chapter.story.story_memory, story_memory_update, chapter, chapter_summary)
+
+
+async def _background_refresh_chapter_memory(chapter_id: int, api_key: str) -> None:
+    """后台异步刷新章节记忆，不阻塞主请求响应。"""
+    db = SessionLocal()
+    try:
+        chapter = db.get(Chapter, chapter_id)
+        if not chapter or not chapter.novel_content or not chapter.novel_content.strip():
+            return
+
+        chapter_info = {
+            "chapter_number": chapter.chapter_number,
+            "title": chapter.title or f"第{chapter.chapter_number}话",
+            "act": chapter.act or "",
+            "key_events": chapter.key_events or [],
+        }
+        story_context = _story_framework_context(chapter.story)
+        novel_content = chapter.novel_content
+
+        _release_db_transaction(db)
+        try:
+            memory_payload = await summarize_chapter_memory(
+                story_context,
+                chapter_info,
+                novel_content,
+                api_key=api_key,
+            )
+        except Exception as exc:
+            logger.warning("后台刷新章节记忆失败 chapter=%s: %s", chapter_id, exc)
+            return
+
+        chapter = db.get(Chapter, chapter_id)
+        if not chapter:
+            return
+        chapter_summary = memory_payload.get("chapter_summary") if isinstance(memory_payload.get("chapter_summary"), dict) else {}
+        chapter_handoff = memory_payload.get("chapter_handoff") if isinstance(memory_payload.get("chapter_handoff"), dict) else {}
+        story_memory_update = memory_payload.get("story_memory_update") if isinstance(memory_payload.get("story_memory_update"), dict) else {}
+        chapter.memory_summary = {
+            "chapter_summary": chapter_summary,
+            "chapter_handoff": chapter_handoff,
+            "summary": chapter_summary.get("summary"),
+            "ending_scene": chapter_summary.get("ending_scene"),
+        } if (chapter_summary or chapter_handoff) else None
+        chapter.story.story_memory = _merge_story_memory(chapter.story.story_memory, story_memory_update, chapter, chapter_summary)
+        db.commit()
+    except Exception as exc:
+        logger.warning("后台刷新章节记忆异常 chapter=%s: %s", chapter_id, exc, exc_info=True)
+        try:
+            db.rollback()
+        except Exception:
+            pass
+    finally:
+        db.close()
 
 
 def _merge_tags(existing, incoming):
@@ -6241,6 +6458,11 @@ async def generate_novel_endpoint(chapter_id: int, request: Request, db: Session
         framework_context = framework_context + "\n" + continuity_context if framework_context else continuity_context
     deepseek_api_key = _user_deepseek_api_key(request)
     template_ch_prompt = get_effective_prompt(chapter.story_id, "chapter", db)
+    existing_creation_pack = (
+        chapter.quality_score.get("creation_pack")
+        if isinstance(chapter.quality_score, dict) and isinstance(chapter.quality_score.get("creation_pack"), dict)
+        else None
+    )
     _release_db_transaction(db)
     novel_content = await generate_novel(
         history,
@@ -6248,15 +6470,28 @@ async def generate_novel_endpoint(chapter_id: int, request: Request, db: Session
         framework_context=framework_context,
         system_prompt=template_ch_prompt or None,
     )
-    novel_content = await _ensure_generated_chapter_continuity(
-        chapter_runtime_context,
-        chapter_info,
-        novel_content,
-        request,
-        system_prompt=template_ch_prompt or None,
+    logger.info(
+        "generate_novel 跳过生成后连续性二次改写 chapter_id=%s chapter=%s reason=%s",
+        chapter_id,
+        chapter_info.get("chapter_number"),
+        "continuity_in_generation_context",
     )
+    quality_gate = await finalize_generated_chapter_content(
+        content=novel_content,
+        story_context=chapter_runtime_context,
+        chapter_info=chapter_info,
+        api_key=deepseek_api_key,
+        system_prompt=template_ch_prompt or None,
+        source="generate_novel",
+        existing_creation_pack=existing_creation_pack,
+        allow_pipeline_rerun=False,
+    )
+    if not quality_gate.get("ok"):
+        raise HTTPException(status_code=422, detail=format_quality_gate_detail(quality_gate))
+    novel_content = quality_gate["content"]
     chapter = _require_chapter(chapter_id, db)
     _apply_chapter_content(chapter, novel_content, status="completed")
+    chapter.quality_score = quality_gate.get("report")
     chapter.content_source = "chat"
     await _refresh_chapter_memory(chapter, request, db)
 
@@ -9680,21 +9915,39 @@ async def expand_chapter_endpoint(story_id: int, request: Request, db: Session =
 
     _release_db_transaction(db)
     template_ch_prompt = get_effective_prompt(story_id, "chapter", db)
-    novel_content = await expand_chapter_to_content(
-        chapter_runtime_context,
-        chapter_info,
-        api_key=deepseek_api_key,
-        previous_chapter_summary=previous_chapter_summary,
-        system_prompt=template_ch_prompt or None,
-        db=db,
-    )
-    novel_content = await _ensure_generated_chapter_continuity(
-        chapter_runtime_context,
-        chapter_info,
-        novel_content,
-        request,
-        system_prompt=template_ch_prompt or None,
-    )
+    try:
+        novel_content = await expand_chapter_to_content(
+            chapter_runtime_context,
+            chapter_info,
+            api_key=deepseek_api_key,
+            previous_chapter_summary=previous_chapter_summary,
+            system_prompt=template_ch_prompt or None,
+            db=db,
+        )
+    except ChapterPipelineQualityError as exc:
+        quality_gate = {
+            "ok": False,
+            "content": "",
+            "attempts": 0,
+            "report": {
+                "deterministic": {},
+                "review": exc.review if isinstance(exc.review, dict) else {"reason": str(exc)},
+                "pipeline_quality_error": True,
+            },
+            "source": "expand_chapter",
+        }
+        raise HTTPException(status_code=422, detail=format_quality_gate_detail(quality_gate)) from exc
+    pipeline_result = chapter_runtime_context.get("_last_chapter_pipeline_result") if isinstance(chapter_runtime_context, dict) else {}
+    review = pipeline_result.get("review") if isinstance(pipeline_result, dict) else {}
+    quality_gate = {
+        "ok": True,
+        "content": novel_content,
+        "report": {
+            "deterministic": {"ok": True, "skipped": True, "reason": "pipeline_already_approved"},
+            "review": review if isinstance(review, dict) else {},
+            "pipeline_approved": True,
+        },
+    }
 
     # Determine chapter number
     if isinstance(chapter_number_val, int) and chapter_number_val > 0:
@@ -9719,16 +9972,16 @@ async def expand_chapter_endpoint(story_id: int, request: Request, db: Session =
     chapter.act = act if isinstance(act, str) else None
     chapter.key_events = _normalize_key_events(body.get("key_events"))
     _apply_chapter_content(chapter, novel_content, status="completed")
+    chapter.quality_score = quality_gate.get("report")
     if existing is None:
         db.add(chapter)
         db.flush()
         _initialize_empty_chapter_workspace(chapter.id)
-    db.commit()
-    await _refresh_chapter_memory(chapter, request, db)
     db.add(ChatMessage(chapter_id=chapter.id, role="assistant", content=novel_content))
     db.commit()
     _check_and_consume_feature_quota(request, user.id, "chapter.expand.monthly_limit", 1, db, deduct=True, provider_kind="text")
     db.refresh(chapter)
+    asyncio.create_task(_background_refresh_chapter_memory(chapter.id, deepseek_api_key))
     return chapter
 
 
@@ -9798,6 +10051,11 @@ async def adjust_chapter_content_endpoint(chapter_id: int, request: Request, db:
     deepseek_api_key = _user_deepseek_api_key(request)
     _check_and_consume_advanced_text_quota(request, user.id, db, deduct=False)
     template_system = get_effective_prompt(chapter.story_id, "chapter", db)
+    existing_creation_pack = (
+        chapter.quality_score.get("creation_pack")
+        if isinstance(chapter.quality_score, dict) and isinstance(chapter.quality_score.get("creation_pack"), dict)
+        else None
+    )
     _release_db_transaction(db)
     updated_content = await adjust_chapter_content(
         chapter_runtime_context,
@@ -9807,8 +10065,22 @@ async def adjust_chapter_content_endpoint(chapter_id: int, request: Request, db:
         api_key=deepseek_api_key,
         system_prompt=template_system or None,
     )
+    quality_gate = await finalize_generated_chapter_content(
+        content=updated_content,
+        story_context=chapter_runtime_context,
+        chapter_info=chapter_info,
+        api_key=deepseek_api_key,
+        system_prompt=template_system or None,
+        source="adjust_chapter_content",
+        existing_creation_pack=existing_creation_pack,
+        allow_pipeline_rerun=False,
+    )
+    if not quality_gate.get("ok"):
+        raise HTTPException(status_code=422, detail=format_quality_gate_detail(quality_gate))
+    updated_content = quality_gate["content"]
     chapter = _require_chapter_for_user(chapter_id, user, db)
     _apply_chapter_content(chapter, updated_content, status="completed")
+    chapter.quality_score = quality_gate.get("report")
     await _refresh_chapter_memory(chapter, request, db)
     db.commit()
     _check_and_consume_advanced_text_quota(request, user.id, db, deduct=True)

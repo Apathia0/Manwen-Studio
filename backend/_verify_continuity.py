@@ -174,7 +174,7 @@ print(f"\n{BOLD}--- 测试 6：previous_chapter_summary 构建 ---{RESET}")
 
 # 模拟 expand_chapter_endpoint 中的构建逻辑
 ending_text = ch1_content[-800:]
-    memory_compact = build_story_memory_compact(merged)
+memory_compact = build_story_memory_compact(merged)
 parts_list = [f"上一章《第1章：铁匠铺的觉醒》结尾：\n{ending_text}"]
 if memory_compact.get("story_state"):
     parts_list.append(f"当前故事状态：{memory_compact['story_state']}")
@@ -305,7 +305,7 @@ big_memory = {
     "recent_chapter_summaries": [{"chapter_number": i, "title": f"Ch{i}", "summary": "x"}
                                   for i in range(50)],
 }
-    big_compact = build_story_memory_compact(big_memory)
+big_compact = build_story_memory_compact(big_memory)
 check("open_loops 上限 12 项", len(big_compact.get("open_loops", [])) <= 12)
 check("continuity_facts 上限 12 项", len(big_compact.get("continuity_facts", [])) <= 12)
 check("resolved_loops 上限 12 项", len(big_compact.get("resolved_loops", [])) <= 12)
