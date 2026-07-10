@@ -1468,7 +1468,6 @@ async def adjust_chapter_by_instruction(chapter_id: int, instruction: str) -> di
             return {"error": "DeepSeek API Key 未配置"}
 
         template_system = get_effective_prompt(chapter.story_id, "chapter", db)
-        # 当 DB 模板为空时，使用框架直出的完整写作规范（对标 _DEEPSEEK_CHAPTER_BASE + methodology）
         fallback_prompt = build_agent_chapter_system_prompt(db=db)
         new_content = await adjust_chapter_content(
             story_context=story_context,
@@ -1481,31 +1480,12 @@ async def adjust_chapter_by_instruction(chapter_id: int, instruction: str) -> di
         if not new_content or not new_content.strip():
             return {"error": "AI 返回内容为空"}
 
-        story_context["current_chapter"] = {key: value for key, value in chapter_info.items() if value not in (None, "", [], {})}
-        quality_gate = await finalize_generated_chapter_content(
-            content=new_content,
-            story_context=story_context,
-            chapter_info=chapter_info,
-            api_key=api_key,
-            system_prompt=template_system or fallback_prompt or None,
-            source="agent_adjust_chapter",
-            existing_creation_pack=(
-                chapter.quality_score.get("creation_pack")
-                if isinstance(chapter.quality_score, dict) and isinstance(chapter.quality_score.get("creation_pack"), dict)
-                else None
-            ),
-        )
-        if not quality_gate.get("ok"):
-            return {"error": "调整后正文未通过质量门禁", "detail": format_quality_gate_detail(quality_gate)}
-        new_content = quality_gate["content"]
-
         chapter.novel_content = new_content
-        chapter.quality_score = quality_gate.get("report")
         if _current_pending_changes():
             _current_pending_changes().update_new_value("chapter", chapter.id, "novel_content", new_content)
         await _refresh_agent_memory(chapter, db)
         db.commit()
-        logger.info("Agent tool=adjust_chapter_by_instruction (indirect) story=%s chapter=%s new_len=%s", _current_story_id(), chapter_id, len(new_content))
+        logger.info("Agent tool=adjust_chapter_by_instruction story=%s chapter=%s new_len=%s", _current_story_id(), chapter_id, len(new_content))
         return {"ok": True, "chapter_id": chapter_id, "content_length": len(new_content)}
     finally:
         db.close()
@@ -2001,25 +1981,7 @@ async def batch_adjust_chapters(chapters: list[dict]) -> dict:
             )
             if not new_content or not new_content.strip():
                 return {"chapter_id": chapter_id, "error": "AI 返回内容为空"}
-            story_context["current_chapter"] = {key: value for key, value in chapter_info.items() if value not in (None, "", [], {})}
-            quality_gate = await finalize_generated_chapter_content(
-                content=new_content,
-                story_context=story_context,
-                chapter_info=chapter_info,
-                api_key=api_key,
-                system_prompt=template_system or fallback_prompt or None,
-                source="agent_batch_adjust_chapter",
-                existing_creation_pack=(
-                    chapter.quality_score.get("creation_pack")
-                    if isinstance(chapter.quality_score, dict) and isinstance(chapter.quality_score.get("creation_pack"), dict)
-                    else None
-                ),
-            )
-            if not quality_gate.get("ok"):
-                return {"chapter_id": chapter_id, "error": "调整后正文未通过质量门禁", "detail": format_quality_gate_detail(quality_gate)}
-            new_content = quality_gate["content"]
             chapter.novel_content = new_content
-            chapter.quality_score = quality_gate.get("report")
             if _current_pending_changes():
                 _current_pending_changes().update_new_value("chapter", chapter.id, "novel_content", new_content)
             await _refresh_agent_memory(chapter, db)

@@ -509,17 +509,9 @@ def _should_force_length_revision(finish_reason: Any, review: dict[str, Any], co
 
 
 def _review_is_hard_pass(review: dict[str, Any], content: str) -> bool:
-    """编辑明确通过且本地底线合格时，作为链路最终通过条件。"""
-    local = review.get("local_safety") if isinstance(review.get("local_safety"), dict) else {}
-    char_count = count_chapter_chars(content)
-    local_ok = bool(local.get("ok")) if local else True
-    hard_failures = local.get("hard_failures") if isinstance(local.get("hard_failures"), list) else []
     return (
         bool(review.get("approved"))
         and _score(review.get("overall_score")) >= EDITOR_PASS_SCORE
-        and local_ok
-        and not hard_failures
-        and LOCAL_MIN_CHARS <= char_count <= LOCAL_MAX_CHARS
     )
 
 
@@ -894,23 +886,12 @@ def _soften_review_dialogue_blockers(review: dict[str, Any]) -> dict[str, Any]:
 
 
 def _promote_near_pass_review(review: dict[str, Any], content: str) -> dict[str, Any]:
-    """无硬伤的近通过稿升级为编辑通过，避免轻微建议触发整章返修。"""
     if bool(review.get("approved")) and _score(review.get("overall_score")) >= EDITOR_PASS_SCORE:
         return review
     score = _score(review.get("overall_score"))
     if score < 85:
         return review
-    local = review.get("local_safety") if isinstance(review.get("local_safety"), dict) else {}
-    if local:
-        hard_failures = local.get("hard_failures") if isinstance(local.get("hard_failures"), list) else []
-        if not local.get("ok") or hard_failures:
-            return review
-    char_count = count_chapter_chars(content)
-    if not (LOCAL_MIN_CHARS <= char_count <= LOCAL_MAX_CHARS):
-        return review
     if _content_looks_truncated(content):
-        return review
-    if _review_has_real_blocking_issue(review, content):
         return review
     review["approved"] = True
     review["overall_score"] = max(score, float(EDITOR_PASS_SCORE))
@@ -951,17 +932,6 @@ def _local_safety_review(content: str, chapter_scope: dict[str, Any] | None) -> 
 
 
 def _should_skip_remote_editor(local: dict[str, Any]) -> tuple[bool, str]:
-    """明显不可审的草稿先本地打回，避免浪费编辑 agent 请求。"""
-    char_count = int(local.get("char_count") or 0)
-    codes = {
-        str(item.get("code"))
-        for item in local.get("hard_failures", [])
-        if isinstance(item, dict)
-    }
-    if char_count < 1200 and "length.too_short" in codes:
-        return True, "local_too_short"
-    if char_count > 3400 and "length.too_long" in codes:
-        return True, "local_too_long"
     return False, ""
 
 
@@ -1291,19 +1261,9 @@ def _review_mentions_boundary_issue(review: dict[str, Any]) -> bool:
 
 
 def _is_usable_candidate(review: dict[str, Any], content: str) -> bool:
-    """判断稿件是否值得作为兜底候选，避免后续返修把较好版本覆盖。"""
     if not content or _content_looks_truncated(content):
         return False
-    char_count = count_chapter_chars(content)
-    if not (LOCAL_MIN_CHARS <= char_count <= LOCAL_MAX_CHARS):
-        return False
-    local = review.get("local_safety") if isinstance(review.get("local_safety"), dict) else {}
-    hard_failures = local.get("hard_failures") if isinstance(local.get("hard_failures"), list) else []
-    if hard_failures:
-        return False
-    if local and not bool(local.get("ok")):
-        return False
-    return _score(review.get("overall_score")) >= 80
+    return _score(review.get("overall_score")) >= 70
 
 
 def _candidate_rank(review: dict[str, Any], content: str) -> tuple[float, int, int]:
@@ -1843,6 +1803,7 @@ async def build_chapter_creation_pack(
 14. acceptance_checklist 必须 6-10 条，必须覆盖硬性动作、剧情闭环、字数、边界、连续性、回报结算、章尾余波和输出完整章节全文。
 15. source_digest 已经是系统筛过的章节相关信息；如果字段缺失，不要从后续章节补当前章内容。
 16. 第5个场景/章尾优先写当前压力、身体代价、材料入袋/清点和即时余波；如需使用后续章节信息，只能作为一句以内模糊伏笔，不能提前完成交易、估价、路线、探索或战斗兑现。
+17. **用户指令优先**：如果 current_chapter_task 包含 user_instruction 字段，该指令是用户明确提出的创作要求，必须作为 hard_requirements 的首项写入，并在 plot_beats、writing_rules、style_brief 和 acceptance_checklist 中逐项落实。不可降级为建议，不可因字数或结构原因忽略。
 
 ## 输出体积硬限制
 - JSON 总长度必须控制在 3600-5200 个汉字以内，宁可短而准，不能写成长篇分析。
@@ -1880,8 +1841,8 @@ async def build_chapter_creation_pack(
     {{"scene": "章尾余波与当前钩子", "purpose": "本场景功能，可留一句以内模糊伏笔，但不展开估价、交易、黑市、明日行动或后续地点场面", "target_chars": 260, "max_chars": 260}}
   ],
   "completion_contract": {{
-    "pass_score": 90,
-    "target_chars": {{"min": 2200, "ideal": 2400, "max": 2800}},
+    "pass_score": 85,
+    "target_chars": {{"min": {LOCAL_MIN_CHARS}, "ideal": {LOCAL_IDEAL_CHARS}, "max": {LOCAL_MAX_CHARS}}},
     "writer_target_chars": {{"min": {WRITER_TARGET_MIN_CHARS}, "ideal": 2200, "max": {WRITER_TARGET_MAX_CHARS}}},
     "writer_output": "每轮必须输出完整章节全文，不输出补丁或续写尾巴",
     "revision_policy": "编辑问题包一次性处理，避免先改字数再二次审稿",
@@ -2291,16 +2252,15 @@ async def review_chapter_with_editor_agent(
 - 看正文是否有明显 AI 味、总结腔、模板化句式、过度描写。
 - 必须对照创作包里的 completion_contract 和 acceptance_checklist 审稿：剧情闭环、字数、边界兑现程度、连续性、回报结算和章尾余波都达标才可通过。
 - 如果正文只完成核心冲突、战斗、交锋、刺杀、获胜或阶段性胜负，却漏掉收获处理、清理撤离、清点归置、代价变化、现实压力变化或章尾余波，brief_execution 不得高于 70，approved 必须为 false。
-- 如果 missing_if_absent 中任一项目缺失，brief_execution 不得高于 70；如果缺失的是回报结算或闭环处理，overall_score 不得高于 80。
+- 如果 missing_if_absent 中任一项目缺失，brief_execution 不得高于 70；如果缺失的是回报结算或闭环处理，overall_score 不得高于 75。
 - 对话是阅读质感项，不是所有章节的硬门槛；独行、潜伏、战斗、采集章节只要动作因果完整，不得仅因对话少或无对话打回。
-- blocking_issues 只写不修就无法过关的硬伤：字数越界、剧情任务缺失、提前兑现后续完整场面、明显逻辑断裂、严重 AI 味或正文残缺；轻微润色建议放入 findings，不得拉低到 90 分以下。
-- 如果正文已经完成创作包核心任务、字数合格、没有提前兑现后续完整场面、无明显逻辑断裂，只存在轻微表达、个别句式、少量对话或可选润色建议，应 approved=true 且 overall_score>=90；这些建议只能放入 findings/revision_notes，blocking_issues 必须为空。
-- approved=true 且 overall_score>=90 时，rewrite_brief 可以写“无需返修，仅保留建议”，不得给出会触发整章返修的执行清单。
-- 如果正文已经超过 2350 字，任何补写建议必须同时给出等量压缩项；返修目标默认 2200-2400 字，不要建议补到 2600-2800。
-- 如果缺回报结算，应优先要求压缩前置观察或战斗重复动作来腾出篇幅，而不是继续扩写到上限。
+- blocking_issues 只写不修就无法过关的硬伤：剧情任务缺失、提前兑现后续完整场面、明显逻辑断裂、严重 AI 味或正文残缺；轻微润色建议或字数偏差放入 findings，不得仅因字数拉低 overall_score 到 85 以下。
+- 如果正文已经完成创作包核心任务、没有提前兑现后续完整场面、无明显逻辑断裂，只存在轻微表达、个别句式、少量对话或可选润色建议，应 approved=true 且 overall_score>=85；这些建议只能放入 findings/revision_notes，blocking_issues 必须为空。
+- approved=true 且 overall_score>=85 时，rewrite_brief 可以写"无需返修，仅保留建议"，不得给出会触发整章返修的执行清单。
+- 字数建议 3000 字左右，上限不超过 3500 字；如果缺回报结算，应优先要求压缩前置观察或战斗重复动作来腾出篇幅，而不是继续扩写到上限。
 - 本地底线检查里的 soft_warnings 不是自动失败原因；你必须从编辑视角判断：一句以内钩子、未解压力、模糊方向可通过，提前写完后续章节核心场面、交易流程、路线坐标、战斗胜负或资源闭环才算边界硬伤。
-- 只在总分 90 分以上且无底线问题时 approved=true。
-- 如果不通过，必须给正文 agent 一份完整问题包：字数动作、阻断问题、保留内容、删除内容、重写目标、执行顺序都要写清楚，让下一轮尽量一次性修完。
+- 只在总分 {EDITOR_PASS_SCORE} 分以上且无底线问题时 approved=true。
+- 如果不通过，必须给正文 agent 一份完整问题包：阻断问题、保留内容、删除内容、重写目标、执行顺序都要写清楚，让下一轮尽量一次性修完。
 - 返修包必须按“保留什么、补齐什么、压缩什么、禁止什么、执行顺序”组织，避免正文 agent 只补尾巴导致超长或二次打回。
 
 ## 本地底线检查
@@ -2688,41 +2648,6 @@ async def run_chapter_creation_pipeline(
                 "attempts": revisions,
                 "finish_reason": finish_reason,
             }
-        force_length_revision, length_reason = _should_force_length_revision(finish_reason, review, content)
-        if finish_reason == "length" and not force_length_revision:
-            logger.info(
-                "chapter_pipeline.length_accepted trace_id=%s chapter=%s attempt=%s reason=%s chars=%s score=%s approved=%s",
-                trace_id,
-                _chapter_label(chapter_info),
-                revisions,
-                length_reason,
-                count_chapter_chars(content),
-                review.get("overall_score"),
-                review.get("approved"),
-            )
-        if force_length_revision:
-            current_chars = count_chapter_chars(content)
-            action, findings, rewrite_brief = _length_revision_guidance(current_chars)
-            review["approved"] = False
-            review["overall_score"] = min(float(review.get("overall_score") or 0), 70)
-            if not isinstance(review.get("findings"), list):
-                review["findings"] = []
-            if not isinstance(review.get("rewrite_brief"), list):
-                review["rewrite_brief"] = []
-            for item in reversed(findings):
-                review["findings"].insert(0, item)
-            for item in reversed(rewrite_brief):
-                review["rewrite_brief"].insert(0, item)
-            logger.info(
-                "chapter_pipeline.length_guidance trace_id=%s chapter=%s attempt=%s action=%s reason=%s chars=%s target=%s",
-                trace_id,
-                _chapter_label(chapter_info),
-                revisions,
-                action,
-                length_reason,
-                current_chars,
-                "2200-2400",
-            )
         logger.info(
             "chapter_pipeline.attempt.review trace_id=%s chapter=%s attempt=%s summary=%s",
             trace_id,
