@@ -1469,23 +1469,36 @@ async def adjust_chapter_by_instruction(chapter_id: int, instruction: str) -> di
 
         template_system = get_effective_prompt(chapter.story_id, "chapter", db)
         fallback_prompt = build_agent_chapter_system_prompt(db=db)
-        new_content = await adjust_chapter_content(
+        system_rules = template_system or fallback_prompt or ""
+
+        from services.chapter_agents import run_chapter_creation_pipeline
+
+        chapter_info["user_instruction"] = instruction
+        pipeline_result = await run_chapter_creation_pipeline(
             story_context=story_context,
             chapter_info=chapter_info,
-            chapter_content=chapter_content,
-            instruction=instruction,
             api_key=api_key,
-            system_prompt=template_system or fallback_prompt or None,
+            previous_chapter_summary="",
+            system_rules=system_rules,
+            max_revisions=3,
+            initial_content=chapter_content,
         )
+        new_content = pipeline_result.get("content") or ""
         if not new_content or not new_content.strip():
             return {"error": "AI 返回内容为空"}
 
         chapter.novel_content = new_content
+        chapter.quality_score = {
+            "review": pipeline_result.get("review"),
+            "creation_pack": pipeline_result.get("creation_pack"),
+            "attempts": pipeline_result.get("attempts"),
+            "pipeline_approved": True,
+        }
         if _current_pending_changes():
             _current_pending_changes().update_new_value("chapter", chapter.id, "novel_content", new_content)
         await _refresh_agent_memory(chapter, db)
         db.commit()
-        logger.info("Agent tool=adjust_chapter_by_instruction story=%s chapter=%s new_len=%s", _current_story_id(), chapter_id, len(new_content))
+        logger.info("Agent tool=adjust_chapter_by_instruction (pipeline) story=%s chapter=%s new_len=%s", _current_story_id(), chapter_id, len(new_content))
         return {"ok": True, "chapter_id": chapter_id, "content_length": len(new_content)}
     finally:
         db.close()
@@ -1971,17 +1984,30 @@ async def batch_adjust_chapters(chapters: list[dict]) -> dict:
             chapter_content = chapter.novel_content or ""
             template_system = get_effective_prompt(chapter.story_id, "chapter", db)
             fallback_prompt = build_agent_chapter_system_prompt(db=db)
-            new_content = await adjust_chapter_content(
+            system_rules = template_system or fallback_prompt or ""
+
+            from services.chapter_agents import run_chapter_creation_pipeline
+
+            chapter_info["user_instruction"] = instruction
+            pipeline_result = await run_chapter_creation_pipeline(
                 story_context=story_context,
                 chapter_info=chapter_info,
-                chapter_content=chapter_content,
-                instruction=instruction,
                 api_key=api_key,
-                system_prompt=template_system or fallback_prompt or None,
+                previous_chapter_summary="",
+                system_rules=system_rules,
+                max_revisions=3,
+                initial_content=chapter_content,
             )
+            new_content = pipeline_result.get("content") or ""
             if not new_content or not new_content.strip():
                 return {"chapter_id": chapter_id, "error": "AI 返回内容为空"}
             chapter.novel_content = new_content
+            chapter.quality_score = {
+                "review": pipeline_result.get("review"),
+                "creation_pack": pipeline_result.get("creation_pack"),
+                "attempts": pipeline_result.get("attempts"),
+                "pipeline_approved": True,
+            }
             if _current_pending_changes():
                 _current_pending_changes().update_new_value("chapter", chapter.id, "novel_content", new_content)
             await _refresh_agent_memory(chapter, db)
