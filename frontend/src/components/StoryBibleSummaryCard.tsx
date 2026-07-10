@@ -876,6 +876,18 @@ function WorldSettingEditButton({ value, onChange }: { value: string; onChange: 
   );
 }
 
+// 辅助函数：从对象中获取值，同时支持中英文键名
+function getField(obj: any, ...keys: string[]): string {
+  if (!obj || typeof obj !== 'object') return '';
+  for (const key of keys) {
+    const val = obj[key];
+    if (val !== undefined && val !== null) {
+      return Array.isArray(val) ? val.join('\n') : String(val);
+    }
+  }
+  return '';
+}
+
 function createFormState(storyBible: StoryBible): StoryBibleFormState {
   const brief = storyBible.creative_brief;
   const guidance = storyBible.writing_guidance;
@@ -884,41 +896,41 @@ function createFormState(storyBible: StoryBible): StoryBibleFormState {
   const state = storyBible.story_state;
 
   return {
-    project_positioning: brief?.project_positioning ?? '',
-    genre: brief?.genre ?? '',
-    audience: brief?.audience ?? '',
-    tone: brief?.tone ?? '',
-    core_hook: brief?.core_hook ?? '',
-    one_line_premise: brief?.one_line_premise ?? '',
-    protagonist_core: brief?.protagonist_core ?? '',
-    main_conflict: brief?.main_conflict ?? '',
-    longline_mystery: brief?.longline_mystery ?? '',
-    serial_length_target: brief?.serial_length_target ?? '',
-    must_keep_rules: (brief?.must_keep_rules ?? []).join('\n'),
-    reveal_strategy: brief?.reveal_strategy ?? '',
-    pacing_strategy: brief?.pacing_strategy ?? '',
-    opening_strategy: guidance?.opening_strategy ?? '',
-    chapter_density_strategy: guidance?.chapter_density_strategy ?? '',
-    midgame_engine: guidance?.midgame_engine ?? '',
-    late_game_direction: guidance?.late_game_direction ?? '',
-    forbidden_patterns: (guidance?.forbidden_patterns ?? []).join('\n'),
-    preferred_plot_patterns: (guidance?.preferred_plot_patterns ?? []).join('\n'),
-    world_setting: formatWorldSettingForForm(brief?.world_setting),
-    open_story_notes: brief?.open_story_notes ?? '',
-    raw_idea: raw?.raw_idea ?? '',
-    raw_length_goal: raw?.raw_length_goal ?? '',
-    raw_must_keep: raw?.raw_must_keep ?? '',
-    raw_notes: raw?.raw_notes ?? '',
-    raw_hidden_setting: raw?.raw_hidden_setting ?? '',
-    import_material_type: imp?.import_material_type ?? '',
-    must_keep: imp?.must_keep ?? '',
-    author_goal: imp?.author_goal ?? '',
-    adjustment_scope: imp?.adjustment_scope ?? '',
-    longline_plan: imp?.longline_plan ?? '',
-    tone_guardrails: imp?.tone_guardrails ?? '',
-    story_state_text: state?.story_state ?? '',
-    continuity_facts: (state?.continuity_facts ?? []).join('\n'),
-    open_loops: (state?.open_loops ?? []).join('\n'),
+    project_positioning: getField(brief, 'project_positioning', '作品定位'),
+    genre: getField(brief, 'genre', '题材'),
+    audience: getField(brief, 'audience', '受众'),
+    tone: getField(brief, 'tone', '风格基调'),
+    core_hook: getField(brief, 'core_hook', '核心卖点'),
+    one_line_premise: getField(brief, 'one_line_premise', '一句话梗概'),
+    protagonist_core: getField(brief, 'protagonist_core', '主角核心'),
+    main_conflict: getField(brief, 'main_conflict', '主线矛盾'),
+    longline_mystery: getField(brief, 'longline_mystery', '长线悬念'),
+    serial_length_target: getField(brief, 'serial_length_target', '目标篇幅'),
+    must_keep_rules: getField(brief, 'must_keep_rules', '必保留设定'),
+    reveal_strategy: getField(brief, 'reveal_strategy', '揭秘策略'),
+    pacing_strategy: getField(brief, 'pacing_strategy', '节奏策略'),
+    opening_strategy: getField(guidance, 'opening_strategy', '开书策略'),
+    chapter_density_strategy: getField(guidance, 'chapter_density_strategy', '章节密度策略'),
+    midgame_engine: getField(guidance, 'midgame_engine', '中段驱动力'),
+    late_game_direction: getField(guidance, 'late_game_direction', '后期方向'),
+    forbidden_patterns: getField(guidance, 'forbidden_patterns', '避免的模式'),
+    preferred_plot_patterns: getField(guidance, 'preferred_plot_patterns', '推荐情节模式'),
+    world_setting: formatWorldSettingForForm(brief?.world_setting ?? brief?.['世界观设定']),
+    open_story_notes: getField(brief, 'open_story_notes', '开放故事笔记'),
+    raw_idea: getField(raw, 'raw_idea', '原始创意'),
+    raw_length_goal: getField(raw, 'raw_length_goal', '篇幅目标'),
+    raw_must_keep: getField(raw, 'raw_must_keep', '必保留要素'),
+    raw_notes: getField(raw, 'raw_notes', '原始笔记'),
+    raw_hidden_setting: getField(raw, 'raw_hidden_setting', '隐藏设定'),
+    import_material_type: getField(imp, 'import_material_type', '导入素材类型'),
+    must_keep: getField(imp, 'must_keep', '必须保留'),
+    author_goal: getField(imp, 'author_goal', '作者目标'),
+    adjustment_scope: getField(imp, 'adjustment_scope', '调整范围'),
+    longline_plan: getField(imp, 'longline_plan', '长线预案'),
+    tone_guardrails: getField(imp, 'tone_guardrails', '风格护栏'),
+    story_state_text: getField(state, 'story_state', '故事状态'),
+    continuity_facts: getField(state, 'continuity_facts', '连续性事实'),
+    open_loops: getField(state, 'open_loops', '未闭合线索'),
   };
 }
 
