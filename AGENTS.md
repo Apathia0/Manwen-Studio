@@ -1015,6 +1015,38 @@ Agent 任何输出正文的路径 → 必须注入与框架直出同源的写作
 
 **验证方法**：在 Agent 对话中说"帮我写第X章"或"重写第X章"，检查生成正文中是否出现破折号（——）。如出现则说明规范未生效。
 
+### 19. ⚠️ 方法论两条独立函数必须保持硬编码规则一致（反复出问题，必须遵守）
+
+`get_methodology_from_db(db)`（线上 DB 路径）和 `get_chapter_writing_methodology()`（本地文件路径）是**两条独立函数**，各自有独立的硬编码规则追加逻辑。
+
+**两条函数调用关系**：
+```
+get_effective_prompt("chapter")           ← 线上主路径
+  └─ get_methodology_from_db(db)          ← 从 DB 读 + 硬编码规则
+
+build_chapter_generation_prompt(base, db)
+  ├─ db 传入 → get_methodology_from_db(db)  ← 同上
+  └─ db 为空 → get_chapter_writing_methodology()  ← 从文件读 + 硬编码规则
+
+NOVEL_PROMPT_SEED（模块常量）
+  └─ build_chapter_generation_prompt(_BASE_NOVEL_PROMPT)  ← db 为空
+       └─ get_chapter_writing_methodology()
+```
+
+**修改硬编码规则时必须检查的清单**：
+
+| 检查项 | 说明 |
+|--------|------|
+| ✅ `get_methodology_from_db()` 含标点规范 | 破折号禁令 + 省略号禁令 |
+| ✅ `get_methodology_from_db()` 含对话口语化 | 口语化语气词、称呼风格、对话占比 |
+| ✅ `get_methodology_from_db()` 含情绪展示 | 禁止情绪词、禁止告知式、禁止模板化 |
+| ✅ `get_methodology_from_db()` 含零容忍清单 | 14 项 AI 写作指纹 |
+| ✅ `get_methodology_from_db()` 含叙事节拍/质量门禁 | 5 项叙事 beat 规则 |
+| ✅ `get_chapter_writing_methodology()` 同上五项 | 两函数必须一一对齐 |
+| ✅ 新增规则 → 两个函数**同时**追加 | 不可只加一个 |
+
+**涉及文件**：`backend/services/writing_utils.py`
+
 ---
 
 
@@ -1132,6 +1164,38 @@ Agent 任何输出正文的路径 → 必须注入与框架直出同源的写作
   4. `agent_service.py` — `adjust_chapter_by_instruction` 和 `batch_adjust_chapters` 的 fallback 改为 `build_agent_chapter_system_prompt(db)`
 - **文件**：`backend/services/deepseek.py`、`backend/services/writing_utils.py`、`backend/services/agent_service.py`
 - **规范文档**：见上方「常见陷阱 18」---
+
+## ⚠️ 已修复 Bug 记录（2026-07-09 批次）
+
+### Bug 11: get_methodology_from_db 缺失对话口语化+情绪展示规则
+
+- **症状**：线上部署后 Agent 助手生成的正文仍然破折号泛滥、AI 味重，本地调试却正常
+- **根因**：`get_methodology_from_db()`（线上 DB 路径）和 `get_chapter_writing_methodology()`（本地文件路径）是**两条独立函数**。对话口语化规则和情绪展示规则只加到了后者，漏掉了前者。`get_effective_prompt("chapter")` → `get_methodology_from_db(db)` → 缺少关键去 AI 味约束
+- **修复**：`writing_utils.py` — `get_methodology_from_db()` 补齐 `dialogue_rule` + `emotion_rule`，与 `get_chapter_writing_methodology()` 对齐
+- **文件**：`backend/services/writing_utils.py`
+- **⚠️ 修改方法论规则时必须检查**：两个函数 `get_methodology_from_db(db)` 和 `get_chapter_writing_methodology()` 必须保持硬编码规则部分一致
+
+### Bug 12: CI 每次 pro 推送都触发镜像构建
+
+- **症状**：每次 `git push origin-ssh pro` 都触发 GitHub Actions 构建 Docker 镜像
+- **修复**：`.github/workflows/docker-images.yml` — 触发器从 `push: branches: [pro] + tags: [v*]` 改为仅 `push: tags: [v*]`，保留 `workflow_dispatch` 手动触发
+- **文件**：`.github/workflows/docker-images.yml`
+
+### 重构记录：章节生成流水线全面重写
+
+- 三角色创建 pipeline（创建包 agent → 写手 agent → 编辑 agent）独立为 `chapter_agents.py` 模块
+- 确定性质量门禁独立为 `chapter_quality.py` 模块
+- 移除所有代码级门禁：`_review_is_hard_pass` 仅检查 `approved + score ≥ 85`
+- 移除 `force_length_revision`、`_should_skip_remote_editor`、边界尾部修复等阻断逻辑
+- 移除物理消毒，规则全部由创建包 + 编辑 agent 强制执行
+- 创建包 prompt 新增规则 #17：用户指令优先，必须作为 `hard_requirements` 首项
+- Agent 正文调整统一走 pipeline（`adjust_chapter_by_instruction` / `batch_adjust_chapters` → `run_chapter_creation_pipeline`）
+- 放宽标准：评分线 90→85，字数 1800-3500，理想 3000
+- `expand_chapter_to_content` 有内容即返回，不再抛 `ChapterPipelineQualityError`
+- `_refresh_chapter_memory` 改为后台异步 `asyncio.create_task`
+- 方法论补齐对话口语化 + 情绪展示规则，DB 路径已同步
+
+---
 
 ## Sisyphus Agent 工作文件
 

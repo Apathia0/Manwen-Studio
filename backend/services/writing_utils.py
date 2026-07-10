@@ -398,6 +398,14 @@ def get_methodology_from_db(db) -> str:
                 "3. 【禁止】「心中涌起一股XX」「心头一震」「心底泛起XX」等模板化情绪描写。\n"
                 "4. 整章心理活动累计不超过 2 段。心理活动要短、碎、自然，不形成「内心独白」。"
             )
+            gate_rule = (
+                "\n\n## 叙事节拍与质量门禁（合格才保存）\n"
+                "1. 每章必须有清晰叙事 beat：开篇钩子、即时目标、过程阻力、角色选择、结果代价、章末钩子。\n"
+                "2. 正文字数建议 3000 字左右，上限不超过 3500 字，低于 1800 字视为展开不足。\n"
+                "3. 生成后必须通过质量门禁才允许保存：字数、逻辑因果、上下文连续性、章节边界、AI味禁令均合格。\n"
+                "4. 本章只能兑现当前章节任务卡，禁止提前写完后续章节的核心行动、资源收获、冲突解决或爽点。\n"
+                "5. 不合格时必须完整重写，不允许用局部补丁掩盖逻辑断裂或跨章预支。"
+            )
             zero_tolerance = (
                 "\n\n## 🚫 零容忍清单（出现即废稿，无例外）\n"
                 "1. 【破折号】全文禁止任何破折号（——）\n"
@@ -413,7 +421,7 @@ def get_methodology_from_db(db) -> str:
                 "11. 【大段描写】禁止连续 3 句以上纯景物描写\n"
                 "12. 【总结升华】禁止以总结性感悟收束章节"
             )
-            return combined + punctuation_rule + dialogue_rule + emotion_rule + zero_tolerance
+            return combined + punctuation_rule + dialogue_rule + emotion_rule + gate_rule + zero_tolerance
     except Exception:
         pass
 
