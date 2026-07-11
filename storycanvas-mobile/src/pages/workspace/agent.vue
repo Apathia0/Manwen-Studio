@@ -268,9 +268,19 @@ async function newConversation() {
 }
 
 async function handleSend(text: string) {
-  if (!text.trim() || agentStore.streaming) return
+  const content = text.trim()
+  if (!content || agentStore.streaming) return
+  if (!storyId) {
+    uiStore.error('作品信息无效，请返回后重新进入')
+    return
+  }
+
   inputText.value = ''
-  await agentStore.sendMessage(storyId, text, chapterId || undefined)
+  try {
+    await agentStore.sendMessage(storyId, content, chapterId || undefined)
+  } catch (e: any) {
+    uiStore.error(e.message || '发送消息失败，请稍后重试')
+  }
 }
 
 function stopStreaming() {
@@ -473,6 +483,7 @@ function goBack() {
   }
 
   &__quick-btn {
+    flex: 0 0 auto;
     height: 54rpx;
     box-sizing: border-box;
     padding: 0 18rpx;
@@ -484,7 +495,12 @@ function goBack() {
     background: #ffffff;
     font-size: 22rpx;
     color: #334155;
+    white-space: nowrap;
     &:active { background: #eff6ff; border-color: #93c5fd; }
+  }
+
+  &__quick-btn text {
+    white-space: nowrap;
   }
 
   &__quick-btn--disabled {

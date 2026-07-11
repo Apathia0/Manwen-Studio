@@ -185,6 +185,9 @@ function handleBlur() {
 
     .chat-input__field {
       box-sizing: border-box;
+      width: auto;
+      min-width: 0;
+      flex-shrink: 1;
       height: 84rpx;
       min-height: 84rpx;
       max-height: 160rpx;
@@ -201,6 +204,9 @@ function handleBlur() {
     }
 
     .chat-input__btn {
+      position: relative;
+      z-index: 1;
+      flex-shrink: 0;
       width: 124rpx;
       height: 84rpx;
       border-radius: 12rpx;

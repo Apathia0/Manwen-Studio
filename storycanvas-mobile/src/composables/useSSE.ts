@@ -111,6 +111,7 @@ function createFetchSSE(options: SSEOptions): SSEHandle {
 function createWxSSE(options: SSEOptions): SSEHandle {
   let buffer = ''
   let currentEvent = 'message'
+  let requestFailed = false
 
   const task = uni.request({
     url: options.url.startsWith('http') ? options.url : `${BASE_URL}${options.url}`,
@@ -119,11 +120,34 @@ function createWxSSE(options: SSEOptions): SSEHandle {
     data: options.body,
     enableChunkedTransfer: true,
     responseType: 'arraybuffer',
-    success: () => options.onComplete?.(),
+    success: (res) => {
+      if (res.statusCode < 200 || res.statusCode >= 300) {
+        requestFailed = true
+        let data: any = res.data
+        if (data instanceof ArrayBuffer) {
+          const text = arrayBufferToString(data)
+          try {
+            data = JSON.parse(text)
+          } catch {
+            data = text
+          }
+        }
+        const detail = data?.detail || data?.message
+        const message = typeof detail === 'string'
+          ? detail
+          : detail
+            ? JSON.stringify(detail)
+            : `请求失败 (${res.statusCode})`
+        options.onError?.(new Error(message))
+        return
+      }
+      options.onComplete?.()
+    },
     fail: (err: any) => options.onError?.(new Error(err.errMsg))
   })
 
   ;(task as any).onChunkReceived((res: { data: ArrayBuffer }) => {
+    if (requestFailed) return
     const chunk = arrayBufferToString(res.data)
     buffer += chunk
     const lines = buffer.split('\n')

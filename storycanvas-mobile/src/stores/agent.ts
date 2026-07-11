@@ -2,7 +2,8 @@ import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import { agentApi } from '@/api'
 import { useSSE } from '@/composables/useSSE'
-import { getToken } from '@/utils/storage'
+import { STORAGE_KEYS } from '@/utils/constants'
+import { getStorage, getToken } from '@/utils/storage'
 import {
   getToolResultStatus,
   sanitizeAgentMessages,
@@ -83,11 +84,18 @@ export const useAgentStore = defineStore('agent', () => {
     const token = getToken()
     const headers: Record<string, string> = {}
     if (token) headers['Authorization'] = `Bearer ${token}`
+    const deepseekApiKey = getStorage(STORAGE_KEYS.DEEPSEEK_API_KEY)?.trim()
+    const deepseekBaseUrl = getStorage(STORAGE_KEYS.DEEPSEEK_BASE_URL)?.trim()
+    const deepseekModel = getStorage(STORAGE_KEYS.DEEPSEEK_MODEL)?.trim()
+    if (deepseekApiKey) headers['X-DeepSeek-API-Key'] = deepseekApiKey
+    if (deepseekBaseUrl) headers['X-DeepSeek-Base-URL'] = deepseekBaseUrl
+    if (deepseekModel) headers['X-DeepSeek-Model'] = deepseekModel
 
     return new Promise<void>((resolve, reject) => {
       _sseResolve = resolve
       const sse = useSSE()
       sseHandle = sse
+      let completed = false
 
       sse.start({
         url: agentApi.chatUrl(storyId),
@@ -129,6 +137,7 @@ export const useAgentStore = defineStore('agent', () => {
               break
             }
             case 'done': {
+              completed = true
               const assistantMsg: AgentMessage = {
                 id: `assistant-${Date.now()}`,
                 role: 'assistant',
@@ -165,7 +174,11 @@ export const useAgentStore = defineStore('agent', () => {
         onComplete: () => {
           streaming.value = false
           _sseResolve = null
-          resolve()
+          if (completed) {
+            resolve()
+          } else {
+            reject(new Error('对话连接提前结束，请稍后重试'))
+          }
         }
       })
     })
