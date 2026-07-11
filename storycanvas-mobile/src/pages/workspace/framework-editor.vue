@@ -38,10 +38,12 @@
             <view class="framework-editor__preview-card-body">
               <template v-if="hasTags">
                 <view class="framework-editor__preview-tags">
-                  <view v-for="(value, key) in tags" :key="key" v-if="value" :class="['framework-editor__preview-tag']" :style="tagBadgeStyle(key)">
-                    <text class="framework-editor__preview-tag-label">{{ tagLabel(key) }}</text>
-                    <text class="framework-editor__preview-tag-value">{{ value }}</text>
-                  </view>
+                  <template v-for="(value, key) in tags" :key="key">
+                    <view v-if="value" class="framework-editor__preview-tag" :style="tagBadgeStyle(key)">
+                      <text class="framework-editor__preview-tag-label">{{ tagLabel(key) }}</text>
+                      <text class="framework-editor__preview-tag-value">{{ value }}</text>
+                    </view>
+                  </template>
                 </view>
               </template>
               <text v-else class="framework-editor__preview-empty">暂无标签</text>
@@ -168,7 +170,7 @@
                   </view>
                   <text class="framework-editor__char-index">#{{ i + 1 }}</text>
                   <input v-model="char.name" placeholder="角色名称" class="framework-editor__char-name-input" />
-                  <picker :value="roleOptions.indexOf(char.role || '')" :range="roleOptions" @change="(e) => { char.role = roleOptions[e.detail.value] || ''; triggerCharUpdate(i) }">
+                  <picker :value="roleOptions.indexOf(char.role || '')" :range="roleOptions" @change="(e: any) => { char.role = roleOptions[e.detail.value] || ''; triggerCharUpdate(i) }">
                     <text class="framework-editor__char-role-select" :style="roleStyle(char.role)">{{ char.role || '选择角色' }}</text>
                   </picker>
                   <view class="framework-editor__char-remove" @tap="removeCharacter(i)">
@@ -190,7 +192,7 @@
                         <view class="framework-editor__bf-bar-wrap">
                           <view class="framework-editor__bf-bar" :style="{ height: getBFValue(char, bf.key) + '%', backgroundColor: bf.hue }" />
                         </view>
-                        <slider :value="getBFValue(char, bf.key)" min="0" max="100" activeColor="#2563eb" blockSize="12" @change="(e) => setBigFive(i, bf.key, e.detail.value)" />
+                        <slider :value="getBFValue(char, bf.key)" min="0" max="100" activeColor="#2563eb" blockSize="12" @change="(e: any) => setBigFive(i, bf.key, e.detail.value)" />
                         <text class="framework-editor__bf-val">{{ getBFValue(char, bf.key) }}</text>
                       </view>
                     </view>
@@ -287,7 +289,20 @@
 
                       <view v-if="chapterEditorExpanded[i]?.[ci]" class="framework-editor__chapter-editor-body">
                         <textarea v-model="ch.summary" placeholder="本章摘要..." class="framework-editor__chapter-summary-input" rows="2" />
-                        <input v-model="ch.key_events" placeholder="关键事件（逗号分隔）..." class="framework-editor__chapter-field-input" />
+                        <textarea
+                          :value="keyEventsText(ch)"
+                          placeholder="关键事件（每行一条）"
+                          class="framework-editor__chapter-summary-input"
+                          rows="3"
+                          @input="updateKeyEvents(ch, $event)"
+                        />
+                        <view class="framework-editor__chapter-meta-grid">
+                          <input v-model="ch.goal" placeholder="本章目标" class="framework-editor__chapter-field-input" />
+                          <input v-model="ch.conflict" placeholder="本章冲突" class="framework-editor__chapter-field-input" />
+                          <input v-model="ch.hook" placeholder="章末钩子" class="framework-editor__chapter-field-input" />
+                          <input v-model="ch.payoff" placeholder="本章回报" class="framework-editor__chapter-field-input" />
+                        </view>
+                        <input v-model="ch.highlight" placeholder="爽点 / 情绪点 / 记忆点" class="framework-editor__chapter-field-input" />
                       </view>
                     </view>
                   </view>
@@ -313,7 +328,11 @@ import LvIcon from '@/components/lv-icon/lv-icon.vue'
 import LvButton from '@/components/lv-button/lv-button.vue'
 import { storiesApi } from '@/api'
 import { useUiStore } from '@/stores/ui'
-import type { Story, Character, OutlineAct } from '@/api/types'
+import type { Story, Character, OutlineAct, OutlineChapter } from '@/api/types'
+
+type EditableOutlineAct = OutlineAct & {
+  summary?: string
+}
 
 // ─── 常量 ───
 const TAB_CONFIG = [
@@ -368,7 +387,8 @@ const loading = ref(true)
 const description = ref('')
 const tags = ref<Record<string, string>>({})
 const characters = ref<Character[]>([])
-const outlineActs = ref<OutlineAct[]>([])
+const outlineActs = ref<EditableOutlineAct[]>([])
+const originalOutline = ref<Record<string, any>>({})
 
 const previewCharExpanded = ref<Record<number, boolean>>({})
 const previewActExpanded = ref<Record<number, boolean>>({})
@@ -418,7 +438,7 @@ function getRelationships(char: Character): Record<string, string>[] {
   return Array.isArray((char as any).relationships) ? (char as any).relationships : []
 }
 
-function getActChapters(act: OutlineAct): any[] {
+function getActChapters(act: EditableOutlineAct): any[] {
   return Array.isArray(act.chapters) ? act.chapters : []
 }
 
@@ -478,8 +498,30 @@ function addChapter(actIndex: number) {
   const allChapters = outlineActs.value.flatMap(a => a.chapters || [])
   const globalMax = allChapters.length > 0 ? Math.max(...allChapters.map(ch => Number(ch.chapter_number) || 0)) : 0
   const nextNum = globalMax + 1
-  chapters.push({ chapter_number: nextNum, title: `第 ${nextNum} 章`, summary: '', is_current: false })
+  chapters.push({
+    chapter_number: nextNum,
+    title: `第 ${nextNum} 章`,
+    summary: '',
+    is_current: false,
+    key_events: [],
+    goal: '',
+    conflict: '',
+    hook: '',
+    payoff: '',
+    highlight: '',
+  })
   outlineActs.value[actIndex] = { ...act, chapters: [...chapters] }
+}
+
+function keyEventsText(chapter: OutlineChapter): string {
+  return Array.isArray(chapter.key_events) ? chapter.key_events.join('\n') : String(chapter.key_events || '')
+}
+
+function updateKeyEvents(chapter: OutlineChapter, event: any) {
+  chapter.key_events = String(event?.detail?.value || '')
+    .split(/\r?\n|[;,，]/)
+    .map(item => item.trim())
+    .filter(Boolean)
 }
 
 function removeChapter(actIndex: number, chIndex: number) {
@@ -503,7 +545,16 @@ async function loadData() {
     }
     characters.value = (s.characters || []) as Character[]
     const raw = s.outline as any
-    outlineActs.value = (raw?.three_acts || []) as OutlineAct[]
+    originalOutline.value = raw && typeof raw === 'object' ? raw : {}
+    outlineActs.value = (raw?.three_acts || []).map((act: EditableOutlineAct) => ({
+      ...act,
+      chapters: (act.chapters || []).map(chapter => ({
+        ...chapter,
+        key_events: Array.isArray(chapter.key_events)
+          ? chapter.key_events.map(item => String(item)).filter(Boolean)
+          : [],
+      })),
+    }))
   } catch (e: any) {
     uiStore.error(e.message || '加载框架数据失败')
   } finally {
@@ -526,18 +577,24 @@ async function handleSave() {
     }
 
     const outlinePayload: Record<string, any> = {
+      ...originalOutline.value,
       three_acts: outlineActs.value.map(act => ({
+        ...act,
         act: act.act,
         title: act.title,
         summary: (act as any).summary || '',
         chapters: (act.chapters || []).map(ch => ({
+          ...ch,
           chapter_number: ch.chapter_number,
           title: ch.title,
           summary: ch.summary || '',
           is_current: ch.is_current || false,
-          key_events: typeof (ch as any).key_events === 'string'
-            ? (ch as any).key_events.split(',').map((s: string) => s.trim()).filter(Boolean)
-            : (ch as any).key_events || [],
+          key_events: Array.isArray(ch.key_events) ? ch.key_events.map(item => String(item).trim()).filter(Boolean) : [],
+          goal: ch.goal?.trim() || undefined,
+          conflict: ch.conflict?.trim() || undefined,
+          hook: ch.hook?.trim() || undefined,
+          payoff: ch.payoff?.trim() || undefined,
+          highlight: ch.highlight?.trim() || undefined,
         })),
       })),
     }
@@ -1196,6 +1253,13 @@ async function handleSave() {
     border-radius: 8rpx;
     outline: none;
     box-sizing: border-box;
+    margin-bottom: 8rpx;
+  }
+
+  &__chapter-meta-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8rpx;
   }
 
   &__bottom-spacer { height: 80rpx; }

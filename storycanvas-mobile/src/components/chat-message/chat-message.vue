@@ -1,6 +1,6 @@
 <template>
   <view :class="messageClasses">
-    <view class="chat-message__avatar">
+    <view v-if="!compact" class="chat-message__avatar">
       <User v-if="role === 'user'" :size="18" />
       <Bot v-else :size="18" />
     </view>
@@ -16,8 +16,7 @@
           :class="['chat-message__tool', `chat-message__tool--${tool.status}`]"
         >
           <component :is="toolIconMap[tool.status] || Circle" :size="14" />
-          <text class="chat-message__tool-name">{{ tool.name }}</text>
-          <text v-if="tool.summary" class="chat-message__tool-summary">{{ tool.summary }}</text>
+          <text class="chat-message__tool-name">{{ getToolStatusLabel(tool.name, tool.status) }}</text>
         </view>
       </view>
     </view>
@@ -27,6 +26,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import type { ToolCallInfo } from '@/api/types'
+import { getToolStatusLabel } from '@/utils/agent-tool-display'
 import { User, Bot, Loader, CircleCheck, CircleX, Circle } from '@lucide/vue'
 
 interface MessageProps {
@@ -34,16 +34,19 @@ interface MessageProps {
   content: string
   streaming?: boolean
   toolCalls?: ToolCallInfo[]
+  compact?: boolean
 }
 
 const props = withDefaults(defineProps<MessageProps>(), {
   streaming: false,
-  toolCalls: () => []
+  toolCalls: () => [],
+  compact: false
 })
 
 const messageClasses = computed(() => [
   'chat-message',
-  `chat-message--${props.role}`
+  `chat-message--${props.role}`,
+  { 'chat-message--compact': props.compact }
 ])
 
 const toolIconMap: Record<string, any> = {
@@ -156,9 +159,45 @@ const toolIconMap: Record<string, any> = {
     font-weight: 500;
   }
 
-  &__tool-summary {
-    margin-left: 8rpx;
-    color: $lv-text-secondary;
+  &--compact {
+    margin-bottom: 22rpx;
+
+    &.chat-message--user {
+      justify-content: flex-start;
+
+      .chat-message__content {
+        margin-left: auto;
+      }
+
+      .chat-message__bubble {
+        margin-right: 0;
+        border-radius: 14rpx;
+      }
+    }
+
+    &.chat-message--assistant {
+      .chat-message__bubble {
+        margin-left: 0;
+        border: 0;
+        border-radius: 14rpx;
+        background: #eef4ff;
+        color: #2b3e61;
+      }
+    }
+
+    .chat-message__content {
+      max-width: 88%;
+    }
+
+    .chat-message__bubble {
+      padding: 18rpx 22rpx;
+    }
+
+    .chat-message__text {
+      font-size: 26rpx;
+      line-height: 1.55;
+      word-break: break-word;
+    }
   }
 }
 

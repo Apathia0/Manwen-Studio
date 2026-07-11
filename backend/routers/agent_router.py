@@ -14,6 +14,7 @@ from models import AgentConversation, AgentConversationMessage, AgentPendingChan
 from schemas import AgentChatIn, AgentConversationCreateIn, AgentConversationOut, AgentConversationSummaryOut
 from services.agent_service import (
     AgentPendingChangeKey,
+    _scenes_path,
     agent_pending_change_store,
     agent_service,
     normalize_agent_mode,
@@ -510,6 +511,24 @@ async def rollback_changes(
                     if obj:
                         setattr(obj, record.field, record.old_value)
                         results.append({"ok": True, "type": record.change_type, "id": record.record_id, "field": record.field})
+                elif record.change_type == "video_shot":
+                    obj = db.get(ChapterVideoShot, record.record_id)
+                    if obj:
+                        setattr(obj, record.field, record.old_value)
+                        results.append({"ok": True, "type": "video_shot", "id": record.record_id, "field": record.field})
+                elif record.change_type == "video_workflow":
+                    obj = db.get(ChapterVideoWorkflow, record.record_id)
+                    if obj:
+                        setattr(obj, record.field, record.old_value)
+                        results.append({"ok": True, "type": "video_workflow", "id": record.record_id, "field": record.field})
+                elif record.change_type == "scenes_file":
+                    scenes_path = _scenes_path(record.record_id)
+                    if record.old_value:
+                        scenes_path.parent.mkdir(parents=True, exist_ok=True)
+                        scenes_path.write_text(str(record.old_value), encoding="utf-8")
+                    elif scenes_path.exists():
+                        scenes_path.unlink()
+                    results.append({"ok": True, "type": "scenes_file", "id": record.record_id, "field": record.field})
             except Exception as e:
                 results.append({"ok": False, "error": str(e)})
         if any(r.get("ok") for r in results):

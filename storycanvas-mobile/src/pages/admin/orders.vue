@@ -56,7 +56,7 @@ function statusLabel(status: string): string {
   return statusLabels[status] || status
 }
 
-function statusType(status: string): string {
+function statusType(status: string): 'success' | 'warning' | 'default' {
   if (status === 'paid') return 'success'
   if (status === 'pending') return 'warning'
   if (status === 'cancelled' || status === 'expired') return 'default'

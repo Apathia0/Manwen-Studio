@@ -34,7 +34,7 @@
           >
             <image
               v-if="preset.image_url"
-              :src="preset.image_url"
+              :src="mangaImageUrl(preset.image_url)"
               class="ss-grid__image"
               mode="aspectFill"
             />
@@ -53,7 +53,7 @@
           <text class="ss-ref__label">自定义风格参考图</text>
           <template v-if="localRefUrl">
             <view class="ss-ref__preview">
-              <image :src="localRefUrl" class="ss-ref__image" mode="aspectFill" />
+              <image :src="mangaImageUrl(localRefUrl)" class="ss-ref__image" mode="aspectFill" />
               <view class="ss-ref__actions">
                 <lv-button size="sm" secondary @tap="handleClearRef">清除</lv-button>
                 <lv-button size="sm" :loading="uploading" @tap="handleUploadRef">替换</lv-button>
@@ -81,6 +81,7 @@
 import { ref, computed } from 'vue'
 import { mangaApi } from '@/api'
 import { useImagePicker } from '@/composables/useImagePicker'
+import { mangaImageUrl } from '@/utils/url'
 import LvButton from '@/components/lv-button/lv-button.vue'
 import LvIcon from '@/components/lv-icon/lv-icon.vue'
 import { X } from '@lucide/vue'

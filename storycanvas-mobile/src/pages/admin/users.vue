@@ -47,7 +47,7 @@
             <text class="admin-users__item-email">{{ user.email }}</text>
             <view class="admin-users__item-tags">
               <lv-tag :type="user.role === 'admin' ? 'primary' : 'default'" :text="user.role === 'admin' ? '管理员' : '用户'" size="sm" />
-              <lv-tag :type="user.status === 'active' ? 'success' : 'danger'" :text="user.status === 'active' ? '启用' : '停用'" size="sm" />
+              <lv-tag :type="user.status === 'active' ? 'success' : 'error'" :text="user.status === 'active' ? '启用' : '停用'" size="sm" />
               <lv-tag v-if="user.plan_name" type="default" :text="user.plan_name" size="sm" />
             </view>
           </view>

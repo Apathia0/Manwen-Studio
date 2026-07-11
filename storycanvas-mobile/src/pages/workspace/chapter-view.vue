@@ -17,18 +17,188 @@
     </view>
 
     <lv-swiper-tabs
-      :tabs="['框架', '编辑', '漫画', '视频', '助手']"
+      :tabs="['创作', '正文']"
       v-model:current="activeTabIndex"
     >
-      <!-- 框架标签 -->
+      <!-- 创作首页 -->
       <template #tab-0>
         <scroll-view scroll-y class="chapter-view__tab-scroll">
           <view class="chapter-view__tab">
+            <view class="creation-home__chapter">
+              <view>
+                <text class="creation-home__eyebrow">正在创作</text>
+                <text class="creation-home__title">{{ workspaceStore.activeChapterTitle || '选择一个章节开始创作' }}</text>
+                <text class="creation-home__meta">共 {{ editorStore.wordCount }} 字 · {{ editorStore.content ? '正文已生成' : '等待生成正文' }}</text>
+              </view>
+              <lv-button size="sm" @tap="openCurrentEditor">继续编辑</lv-button>
+            </view>
+
+            <view class="creation-home__agent" @tap="openAgentTask('自由对话')">
+              <view class="creation-home__agent-icon">
+                <lv-icon name="Bot" :size="22" color="#ffffff" />
+              </view>
+              <view class="creation-home__agent-copy">
+                <text class="creation-home__section-title">AI 创作助手</text>
+                <text class="creation-home__section-desc">生成章节、调整大纲设定，或讨论创作问题</text>
+              </view>
+              <view class="creation-home__agent-open">
+                <lv-icon name="ChevronRight" :size="18" color="#2563eb" />
+              </view>
+            </view>
+
+            <view class="creation-home__section-head">
+              <text class="creation-home__section-title">创作资料</text>
+            </view>
+            <view class="creation-home__shortcut-grid">
+              <view class="creation-home__shortcut" @tap="openFrameworkEditor">
+                <view class="creation-home__shortcut-icon creation-home__shortcut-icon--outline">
+                  <lv-icon name="ListTree" :size="20" color="#2563eb" />
+                </view>
+                <text class="creation-home__shortcut-title">大纲与框架</text>
+                <text class="creation-home__shortcut-desc">章节安排、角色与标签</text>
+              </view>
+              <view class="creation-home__shortcut" @tap="handleEditBible">
+                <view class="creation-home__shortcut-icon creation-home__shortcut-icon--bible">
+                  <lv-icon name="BookOpen" :size="20" color="#7c3aed" />
+                </view>
+                <text class="creation-home__shortcut-title">作品圣经</text>
+                <text class="creation-home__shortcut-desc">查看和编辑模块化摘要</text>
+              </view>
+              <view class="creation-home__shortcut" @tap="toggleMaterialPanel('cover')">
+                <view class="creation-home__shortcut-icon creation-home__shortcut-icon--cover">
+                  <lv-icon name="ImagePlus" :size="20" color="#be123c" />
+                </view>
+                <text class="creation-home__shortcut-title">封面与模板</text>
+                <text class="creation-home__shortcut-desc">设置作品封面和创作模板</text>
+              </view>
+              <view class="creation-home__shortcut" @tap="toggleMaterialPanel('deconstruction')">
+                <view class="creation-home__shortcut-icon creation-home__shortcut-icon--reference">
+                  <lv-icon name="Library" :size="20" color="#b45309" />
+                </view>
+                <text class="creation-home__shortcut-title">拆书引用</text>
+                <text class="creation-home__shortcut-desc">管理引用的拆书分析报告</text>
+              </view>
+              <view class="creation-home__shortcut" @tap="toggleMaterialPanel('history')">
+                <view class="creation-home__shortcut-icon creation-home__shortcut-icon--history">
+                  <lv-icon name="History" :size="20" color="#047857" />
+                </view>
+                <text class="creation-home__shortcut-title">版本记录</text>
+                <text class="creation-home__shortcut-desc">查看并回滚框架历史版本</text>
+              </view>
+              <view class="creation-home__shortcut" @tap="activeTabIndex = 1">
+                <view class="creation-home__shortcut-icon creation-home__shortcut-icon--chapter">
+                  <lv-icon name="BookOpenText" :size="20" color="#475569" />
+                </view>
+                <text class="creation-home__shortcut-title">章节正文</text>
+                <text class="creation-home__shortcut-desc">切换章节、阅读和编辑正文</text>
+              </view>
+            </view>
+
+            <view v-if="activeMaterialPanel === 'cover'" class="creation-home__material-panel">
+              <view class="creation-home__panel-head">
+                <view>
+                  <text class="creation-home__section-title">封面与创作模板</text>
+                  <text class="creation-home__section-desc">这些设置会应用到当前作品</text>
+                </view>
+                <view class="creation-home__panel-close" @tap="activeMaterialPanel = ''">
+                  <lv-icon name="X" :size="18" color="#64748b" />
+                </view>
+              </view>
+              <view class="fp__cover-banner" @tap="handleCoverEdit">
+                <image
+                  v-if="storyStore.activeStory?.cover_image"
+                  :src="coverImageUrl(storyStore.activeStory.cover_image) || ''"
+                  class="fp__cover-img"
+                  mode="aspectFill"
+                />
+                <view v-else class="fp__cover-placeholder">
+                  <lv-icon name="ImagePlus" :size="28" color="#94a3b8" />
+                  <text class="fp__cover-text">设置封面</text>
+                </view>
+                <view class="fp__cover-info">
+                  <text class="fp__cover-title">{{ storyStore.activeStory?.title || '未命名' }}</text>
+                  <text class="fp__cover-edit">点击编辑封面</text>
+                </view>
+              </view>
+              <template-binding
+                v-if="storyStore.activeStoryId"
+                :story-id="storyStore.activeStoryId"
+                @bound="onTemplateBound"
+              />
+            </view>
+
+            <view v-if="activeMaterialPanel === 'deconstruction'" class="creation-home__material-panel">
+              <view class="creation-home__panel-head">
+                <view>
+                  <text class="creation-home__section-title">拆书报告引用</text>
+                  <text class="creation-home__section-desc">选择可供 Agent 和正文生成参考的报告</text>
+                </view>
+                <view class="creation-home__panel-close" @tap="activeMaterialPanel = ''">
+                  <lv-icon name="X" :size="18" color="#64748b" />
+                </view>
+              </view>
+              <deconstruction-refs v-if="storyId" :story-id="storyId" @changed="loadStoryData" />
+            </view>
+
+            <view v-if="activeMaterialPanel === 'history'" class="creation-home__material-panel">
+              <view class="creation-home__panel-head">
+                <view>
+                  <text class="creation-home__section-title">框架历史版本</text>
+                  <text class="creation-home__section-desc">回滚会恢复当时的故事框架内容</text>
+                </view>
+                <view class="creation-home__panel-close" @tap="activeMaterialPanel = ''">
+                  <lv-icon name="X" :size="18" color="#64748b" />
+                </view>
+              </view>
+              <view v-if="loadingSnapshots" class="fp__loading-row">
+                <lv-loading />
+              </view>
+              <view v-else-if="snapshots.length === 0" class="fp__empty-row">
+                <text class="fp__empty-text">暂无历史版本</text>
+              </view>
+              <view v-else class="fp__snapshot-list">
+                <view v-for="(snap, i) in snapshots" :key="snap.id" class="fp__snapshot-item">
+                  <text class="fp__snapshot-num">#{{ i + 1 }}</text>
+                  <text class="fp__snapshot-time">{{ snap.created_at }}</text>
+                  <text class="fp__snapshot-desc">{{ snap.reply_summary || snap.description || '' }}</text>
+                  <lv-button size="sm" secondary @tap="handleRestoreSnapshot(snap.id)" :loading="restoringSnapshot === snap.id" :disabled="restoringSnapshot > 0">回滚</lv-button>
+                </view>
+              </view>
+            </view>
+
+            <view class="creation-home__section-head">
+              <text class="creation-home__section-title">拓展创作</text>
+              <text class="creation-home__section-desc">按需使用，不影响小说创作</text>
+            </view>
+            <view class="creation-home__extension-list">
+              <view class="creation-home__extension" @tap="openMangaWorkspace">
+                <view class="creation-home__extension-icon creation-home__extension-icon--manga">
+                  <lv-icon name="Images" :size="20" color="#be123c" />
+                </view>
+                <view class="creation-home__extension-copy">
+                  <text class="creation-home__shortcut-title">漫画创作</text>
+                  <text class="creation-home__shortcut-desc">分镜、风格、角色参考与出图</text>
+                </view>
+                <lv-icon name="ChevronRight" :size="18" color="#94a3b8" />
+              </view>
+              <view class="creation-home__extension" @tap="openVideoWorkspace">
+                <view class="creation-home__extension-icon creation-home__extension-icon--video">
+                  <lv-icon name="Clapperboard" :size="20" color="#047857" />
+                </view>
+                <view class="creation-home__extension-copy">
+                  <text class="creation-home__shortcut-title">视频创作</text>
+                  <text class="creation-home__shortcut-desc">剧本、镜头、素材与视频生成</text>
+                </view>
+                <lv-icon name="ChevronRight" :size="18" color="#94a3b8" />
+              </view>
+            </view>
+
+            <view v-if="false">
             <!-- 封面 banner -->
             <view class="fp__cover-banner" @tap="handleCoverEdit">
               <image
                 v-if="storyStore.activeStory?.cover_image"
-                :src="coverImageUrl(storyStore.activeStory.cover_image) || ''"
+                :src="coverImageUrl(storyStore.activeStory?.cover_image ?? null) || ''"
                 class="fp__cover-img"
                 mode="aspectFill"
               />
@@ -45,7 +215,7 @@
             <!-- 模板绑定 -->
             <template-binding
               v-if="storyStore.activeStoryId"
-              :story-id="storyStore.activeStoryId"
+              :story-id="storyStore.activeStoryId!"
               @bound="onTemplateBound"
             />
 
@@ -56,6 +226,7 @@
               :editable="true"
               @edit="handleEditBible"
             />
+            <deconstruction-refs v-if="storyId" :story-id="storyId" @changed="loadStoryData" />
 
             <!-- 故事描述 -->
             <view class="fp__section fp__card">
@@ -78,18 +249,14 @@
               </view>
             </view>
 
-            <!-- 框架  -->
+            <!-- 框架历史版本 -->
             <view class="fp__section fp__card">
               <view class="fp__section-header">
                 <view class="fp__section-title">
-                  <lv-icon name="MessageSquare" :size="16" color="#2563eb" />
-                  <text class="fp__section-label">框架版本查看</text>
+                  <lv-icon name="History" :size="16" color="#2563eb" />
+                  <text class="fp__section-label">框架历史版本</text>
                 </view>
                 <view class="fp__header-actions">
-                  <view v-if="hasFramework" class="fp__header-btn" :class="{ 'fp__header-btn--disabled': continuingFramework }" @tap="!continuingFramework && handleContinueFramework()">
-                    <lv-icon v-if="continuingFramework" name="Loader" :size="12" color="#2563eb" style="margin-right: 4rpx; animation: spin 1s linear infinite;" />
-                    <lv-icon v-else name="Sparkles" :size="12" color="#2563eb" style="margin-right: 4rpx;" />{{ continuingFramework ? '续写中...' : '一键续写' }}
-                  </view>
                   <text class="fp__header-btn" @tap="toggleSnapshots">{{ showSnapshots ? '收起' : '历史版本' }}</text>
                 </view>
               </view>
@@ -111,30 +278,6 @@
                   </view>
                 </view>
               </view>
-
-              <!-- 对话记录 -->
-              <view class="fp__chat-area" v-if="chatMessages.length > 0">
-                <view v-for="(msg, i) in chatMessages" :key="i" :class="['fp__chat-msg', `fp__chat-msg--${msg.role}`]">
-                  <view class="fp__chat-bubble">
-                    <text class="fp__chat-text">{{ msg.content }}</text>
-                    <view v-if="i === chatMessages.length - 1 && chatLoading" class="fp__chat-cursor" />
-                  </view>
-                </view>
-              </view>
-              <view v-else class="fp__chat-area">
-                <text class="fp__chat-hint">
-                  {{ hasFramework ? '告诉 AI 你想如何修改故事框架。' : '输入故事描述，AI 会先生成初始框架。' }}
-                </text>
-              </view>
-
-              <!-- 输入 -->
-              <view class="fp__chat-input-row">
-                <input class="fp__chat-input" v-model="chatInput" :placeholder="chatPlaceholder" :disabled="chatLoading" />
-                <lv-button size="sm" @tap="handleFrameworkChat" :loading="chatLoading" :disabled="!chatInput.trim()">
-                  <lv-icon name="Wand2" :size="13" color="#fff" style="margin-right: 4rpx;" />{{ chatBtnLabel }}
-                </lv-button>
-              </view>
-              <text v-if="chatError" class="fp__error">{{ chatError }}</text>
             </view>
 
             <!-- 框架编辑器入口 -->
@@ -168,8 +311,8 @@
                 </view>
               </view>
               <view v-if="tagsExpanded" class="fp__section-body">
-                <view v-if="frameworkStory?.tags && typeof frameworkStory.tags === 'object'" class="fp__tag-edit-list">
-                  <view v-for="(val, key) in (frameworkStory.tags as Record<string, any>)" :key="key" class="fp__tag-edit-row">
+                <view v-if="frameworkStory?.tags && typeof frameworkStory?.tags === 'object'" class="fp__tag-edit-list">
+                  <view v-for="(val, key) in (frameworkStory?.tags as Record<string, any>)" :key="key" class="fp__tag-edit-row">
                     <text class="fp__tag-edit-label">{{ ({ type: '类型', theme: '主题', style: '风格', audience: '受众' } as Record<string, string>)[key] || key }}</text>
                     <template v-if="editingTagKey === key">
                       <input class="fp__tag-edit-input" v-model="editingTagDraft" :placeholder="'输入' + key" />
@@ -254,7 +397,7 @@
                   />
                 </template>
                 <view v-else class="fp__empty-row">
-                  <text class="fp__empty-text">暂无大纲，请通过 AI 对话先生成框架。</text>
+                  <text class="fp__empty-text">暂无大纲，请打开框架编辑器补充，或使用 AI 创作助手生成内容。</text>
                 </view>
               </view>
             </view>
@@ -290,13 +433,6 @@
                     <view class="fp__chapter-actions">
                       <template v-if="chapterHasContent(ch)">
                         <text class="fp__chapter-btn fp__chapter-btn--primary" @tap="handleOpenChapter(ch)">打开正文</text>
-                        <view
-                          :class="['fp__chapter-btn', { 'fp__chapter-btn--loading': assessingChapterNum === ch.chapter_number }]"
-                          @tap="handleAssessQualityTap(ch)"
-                        >
-                          <view v-if="assessingChapterNum === ch.chapter_number" class="fp__chapter-btn-spinner" />
-                          <text>{{ assessingChapterNum === ch.chapter_number ? '评估中...' : '质量评估' }}</text>
-                        </view>
                       </template>
                         <view
                           v-else
@@ -315,12 +451,13 @@
                   </view>
                 </template>
                 <view v-else class="fp__empty-row">
-                  <text class="fp__empty-text">暂无章节，请通过 AI 对话生成框架。</text>
+                  <text class="fp__empty-text">暂无章节，请打开框架编辑器补充大纲，或使用 AI 创作助手生成章节规划。</text>
                 </view>
               </view>
             </view>
 
             <view class="fp__bottom-spacer" />
+            </view>
           </view>
         </scroll-view>
       </template>
@@ -330,7 +467,31 @@
         <view class="chapter-view__edit-panel">
           <scroll-view scroll-y class="chapter-view__tab-scroll">
             <view class="chapter-view__tab">
-              <continuity-card v-if="continuitySummary" :summary="continuitySummary" />
+              <view class="chapter-view__chapter-switcher">
+                <view class="chapter-view__chapter-nav-btn" @tap="switchToPreviousChapter">
+                  <lv-icon name="ChevronLeft" :size="16" />
+                </view>
+                <scroll-view scroll-x class="chapter-view__chapter-tabs" show-scrollbar="false">
+                  <view class="chapter-view__chapter-tabs-inner">
+                    <view
+                      v-for="chapter in workspaceStore.sortedChapters"
+                      :key="chapter.id"
+                      :class="['chapter-view__chapter-tab', { 'chapter-view__chapter-tab--active': chapter.id === workspaceStore.activeChapterId }]"
+                      @tap="workspaceStore.setActiveChapter(chapter.id)"
+                    >
+                      <text>第{{ chapter.chapter_number }}章</text>
+                    </view>
+                  </view>
+                </scroll-view>
+                <view class="chapter-view__chapter-nav-btn" @tap="switchToNextChapter">
+                  <lv-icon name="ChevronRight" :size="16" />
+                </view>
+                <view class="chapter-view__chapter-nav-btn" @tap="createNewChapter">
+                  <lv-icon name="Plus" :size="16" />
+                </view>
+              </view>
+
+              <continuity-card v-if="continuitySummary" :summary="continuitySummary" editable @edit="goContinuityEditor" />
 
               <text class="chapter-view__chapter-title">{{ workspaceStore.activeChapterTitle }}</text>
               <view class="chapter-view__divider" />
@@ -343,9 +504,11 @@
                   class="chapter-view__editor-textarea"
                   :value="editorStore.draftContent"
                   @input="handleEditorInput"
+                  @select="handleEditorSelect"
                   placeholder="开始写作..."
                   auto-height
                 />
+                <text v-if="selectedText" class="chapter-view__selection-hint">已选择 {{ selectedText.length }} 字，可进行 AI 改写或转为漫画分镜</text>
                 <view class="chapter-view__word-count">字数: {{ editorStore.wordCount }}</view>
               </template>
               <template v-else>
@@ -358,17 +521,15 @@
           <view class="chapter-view__editor-toolbar">
             <template v-if="localEditing">
               <lv-button size="sm" @tap="saveLocalEdit" :loading="editorStore.saving">保存</lv-button>
+              <lv-button size="sm" secondary @tap="showSelectionActions" :disabled="!selectedText">选段工具</lv-button>
               <lv-button size="sm" secondary @tap="cancelLocalEdit">取消</lv-button>
             </template>
             <template v-else>
               <lv-button size="sm" @tap="startLocalEdit">
                 <lv-icon name="Pencil" :size="14" style="margin-right: 6rpx;" />编辑
               </lv-button>
-              <lv-button size="sm" @tap="goChat">
-                <lv-icon name="Bot" :size="14" style="margin-right: 6rpx;" />AI续写
-              </lv-button>
-              <lv-button size="sm" secondary @tap="handleQualityAssess" :loading="assessingQuality" :disabled="assessingQuality">
-                <lv-icon name="BarChart3" :size="14" style="margin-right: 6rpx;" />质量
+              <lv-button v-if="!editorStore.content" size="sm" secondary @tap="generateCurrentChapter" :loading="generatingCurrentChapter">
+                <lv-icon name="Sparkles" :size="14" style="margin-right: 6rpx;" />生成正文
               </lv-button>
               <view class="chapter-view__more" @tap="showEditorMore">
                 <MoreHorizontal :size="20" color="#475569" />
@@ -397,7 +558,7 @@
               <!-- 比例选择 -->
               <scroll-view scroll-x class="chapter-view__manga-ratio-scroll" show-scrollbar="false">
                 <view class="chapter-view__manga-ratio-tabs">
-                  <view v-for="r in aspectRatioOptions" :key="r.value" :class="['chapter-view__manga-ratio-tab', { 'chapter-view__manga-ratio-tab--active': mangaStore.aspectRatio === r.value }]" @tap="mangaStore.aspectRatio = r.value">
+                  <view v-for="r in aspectRatioOptions" :key="r.value" :class="['chapter-view__manga-ratio-tab', { 'chapter-view__manga-ratio-tab--active': mangaStore.aspectRatio === r.value }]" @tap="handleAspectRatioChange(r.value)">
                     <text>{{ r.label }}</text>
                   </view>
                 </view>
@@ -412,12 +573,24 @@
               </view>
             </view>
 
-            <lv-button block :loading="mangaStore.isGenerating || isPolling" @tap="handleGenerateManga">
+            <lv-button v-if="mangaStore.scenes.length === 0" block :loading="regeneratingMangaScenes" @tap="handleMangaSceneRegenerate">
+              <lv-icon name="Clapperboard" :size="16" style="margin-right: 8rpx;" />生成分镜
+            </lv-button>
+            <lv-button v-else block :loading="mangaStore.isGenerating || isPolling" @tap="handleGenerateManga">
               <template v-if="mangaStore.isGenerating || isPolling">生成中...</template>
               <template v-else>
-                <lv-icon name="ImagePlus" :size="16" style="margin-right: 8rpx;" />生成漫画
+                <lv-icon name="ImagePlus" :size="16" style="margin-right: 8rpx;" />{{ mangaStore.images.length > 0 ? '继续生成缺失图片' : `生成 ${mangaStore.imageCount} 张漫画` }}
               </template>
             </lv-button>
+            <lv-button v-if="mangaStore.images.length > 0 && !mangaStore.isGenerating && !isPolling" block secondary @tap="resetAndGenerateManga">
+              清空并重新生成全部
+            </lv-button>
+            <lv-button v-if="mangaStore.isGenerating || isPolling" block secondary @tap="handleCancelManga">
+              取消生成
+            </lv-button>
+            <text v-if="mangaStore.scenes.length > 0 && mangaStore.scenes.length !== mangaStore.imageCount" class="chapter-view__manga-warning">
+              当前分镜 {{ mangaStore.scenes.length }} 条，需与生成张数 {{ mangaStore.imageCount }} 张一致后才能出图。
+            </text>
 
             <view v-if="mangaStore.isGenerating || isPolling" class="chapter-view__manga-progress">
               <lv-progress :percentage="mangaStore.progressPercent" show-info />
@@ -454,20 +627,28 @@
               </framework-section>
             </view>
 
-            <view class="chapter-view__manga-grid">
+            <view v-if="mangaStore.scenes.length > 0" class="chapter-view__manga-grid">
               <view
-                v-for="img in mangaStore.images"
-                :key="img.id"
+                v-for="(scene, index) in mangaStore.scenes"
+                :key="index"
                 class="chapter-view__manga-grid-item"
               >
-                <manga-image-card
-                  :image-path="img.image_path"
-                  :image-number="img.image_number"
-                  :cache-bust="redrawCacheBust"
-                  @tap="goGallery(img.image_number)"
-                />
-                <view class="chapter-view__manga-redraw-btn" @tap.stop="openRedraw(img)">
-                  <text class="chapter-view__manga-redraw-btn-text">重绘</text>
+                <template v-if="getMangaImage(index + 1)">
+                  <manga-image-card
+                    :image-path="getMangaImage(index + 1)!.image_path"
+                    :image-number="index + 1"
+                    :cache-bust="redrawCacheBust"
+                    :aspect-ratio="mangaStore.aspectRatio"
+                    @tap="goGallery(index + 1)"
+                  />
+                  <view class="chapter-view__manga-redraw-btn" @tap.stop="openRedraw(getMangaImage(index + 1)!)">
+                    <text class="chapter-view__manga-redraw-btn-text">重绘</text>
+                  </view>
+                </template>
+                <view v-else class="chapter-view__manga-placeholder">
+                  <text class="chapter-view__manga-placeholder-num">第 {{ index + 1 }} 格</text>
+                  <text class="chapter-view__manga-placeholder-text">{{ scene }}</text>
+                  <lv-button size="sm" :loading="generatingSingleImage === index + 1" @tap="generateSingleMangaImage(index + 1, scene)">生成此格</lv-button>
                 </view>
               </view>
             </view>
@@ -485,26 +666,9 @@
 
             <lv-empty v-if="!mangaStore.isGenerating && !isPolling && mangaStore.images.length === 0 && mangaStore.scenes.length === 0" title="暂无漫画" description="点击生成漫画开始创作" />
 
-            <StyleSelector
-              v-if="showStylePreset"
-              :presets="stylePresets"
-              :selected-name="mangaStore.stylePresetName"
-              :style-ref-url="mangaStore.styleReferenceImageUrl"
-              :chapter-id="workspaceStore.activeChapterId"
-              @update:selected-name="mangaStore.setStylePreset"
-              @update:style-ref-url="mangaStore.setStyleReferenceImageUrl"
-              @close="showStylePreset = false"
-            />
-
-            <CharacterRefSection
-              v-if="storyId"
-              :story-id="storyId"
-              :chapter-id="workspaceStore.activeChapterId"
-              source-type="story"
-              @change="handleMangaRefChange"
-            />
             <view class="chapter-view__manga-links">
               <view class="chapter-view__manga-links-row">
+                <lv-button secondary block size="sm" @tap="goCharacterRefs">角色参考</lv-button>
                 <lv-button secondary block size="sm" @tap="goCharacterProfiles">角色外观</lv-button>
                 <lv-button secondary block size="sm" @tap="goRefImages">参考图</lv-button>
               </view>
@@ -547,6 +711,7 @@
               v-if="agentStore.streamingContent"
               role="assistant"
               :content="agentStore.streamingContent"
+              :tool-calls="agentStore.streamingToolCalls"
               :streaming="true"
             />
             <lv-loading v-if="agentStore.streaming && !agentStore.streamingContent" />
@@ -580,12 +745,47 @@
         </view>
       </template>
     </lv-swiper-tabs>
-
+    <change-diff-sheet
+      :visible="showAgentChangeDiff"
+      :changes="agentStore.pendingChanges"
+      :confirming="confirmingChanges"
+      :rollbacking="rollbackingChanges"
+      @close="showAgentChangeDiff = false"
+      @confirm="handleConfirmChanges"
+      @rollback="handleRollbackChanges"
+    />
+    <view v-if="rewritePreview.visible" class="chapter-view__rewrite-mask" @tap.self="closeRewritePreview">
+      <view class="chapter-view__rewrite-sheet">
+        <view class="chapter-view__rewrite-header">
+          <view>
+            <text class="chapter-view__rewrite-title">确认改写</text>
+            <text class="chapter-view__rewrite-subtitle">应用前请核对原文与 AI 改写结果</text>
+          </view>
+          <view class="chapter-view__rewrite-close" @tap="closeRewritePreview">
+            <lv-icon name="X" :size="18" color="#64748b" />
+          </view>
+        </view>
+        <scroll-view scroll-y class="chapter-view__rewrite-content">
+          <view class="chapter-view__rewrite-block chapter-view__rewrite-block--original">
+            <text class="chapter-view__rewrite-label">原文选段</text>
+            <text class="chapter-view__rewrite-text">{{ rewritePreview.original }}</text>
+          </view>
+          <view class="chapter-view__rewrite-block chapter-view__rewrite-block--result">
+            <text class="chapter-view__rewrite-label chapter-view__rewrite-label--result">AI 改写</text>
+            <text class="chapter-view__rewrite-text">{{ rewritePreview.rewritten }}</text>
+          </view>
+        </scroll-view>
+        <view class="chapter-view__rewrite-actions">
+          <lv-button secondary block @tap="closeRewritePreview">保留原文</lv-button>
+          <lv-button block @tap="applyRewritePreview">替换到正文</lv-button>
+        </view>
+      </view>
+    </view>
   </view>
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch, nextTick } from 'vue'
+import { ref, computed, watch, nextTick, onUnmounted } from 'vue'
 import { onLoad, onShow } from '@dcloudio/uni-app'
 import { ArrowLeft, MoreHorizontal } from '@lucide/vue'
 import { useWorkspaceStore } from '@/stores/workspace'
@@ -595,9 +795,8 @@ import { useAgentStore } from '@/stores/agent'
 import { useMangaGenerationStatus } from '@/composables/useMangaGenerationStatus'
 import { useStoriesStore } from '@/stores/stories'
 import { useUiStore } from '@/stores/ui'
-import { storiesApi, frameworkApi, chaptersApi, adminApi, mangaApi } from '@/api'
+import { storiesApi, frameworkApi, chaptersApi, mangaApi } from '@/api'
 import type { Story, Character, OutlineAct, OutlineChapter, Chapter } from '@/api/types'
-import type { VideoStylePreset } from '@/api/admin'
 import type { FrameworkChatMessage, FrameworkSnapshotItem } from '@/api/types'
 import { useSSE } from '@/composables/useSSE'
 import { getToken } from '@/utils/storage'
@@ -616,14 +815,14 @@ import MangaImageCard from '@/components/manga-image-card/manga-image-card.vue'
 import ChatMessage from '@/components/chat-message/chat-message.vue'
 import ChatInput from '@/components/chat-input/chat-input.vue'
 import ChangesBanner from '@/components/changes-banner/changes-banner.vue'
+import ChangeDiffSheet from '@/components/change-diff-sheet/change-diff-sheet.vue'
 import TemplateBinding from '@/components/template-binding/template-binding.vue'
 import BibleSummary from '@/components/bible-summary/bible-summary.vue'
 import { coverImageUrl, mangaImageUrl } from '@/utils/url'
 import { useVideoWorkflowStore } from '@/stores/videoWorkflow'
 import ChapterVideoWorkflowContent from '@/components/chapter-video-workflow-content/chapter-video-workflow-content.vue'
-import StyleSelector from '@/components/style-selector/style-selector.vue'
-import CharacterRefSection from '@/components/character-ref-section/character-ref-section.vue'
 import ImageRedrawModal from '@/components/image-redraw-modal/image-redraw-modal.vue'
+import DeconstructionRefs from '@/components/deconstruction-refs/deconstruction-refs.vue'
 
 const workspaceStore = useWorkspaceStore()
 const editorStore = useEditorStore()
@@ -633,21 +832,25 @@ const storyStore = useStoriesStore()
 const uiStore = useUiStore()
 
 const activeTabIndex = ref(0)
-const continuitySummary = ref('')
+const activeMaterialPanel = ref<'' | 'cover' | 'deconstruction' | 'history'>('')
+const continuitySummary = ref<Record<string, any> | null>(null)
 const agentInputText = ref('')
 const localEditing = ref(false)
 const colorModeIndex = ref(0)
 const imageCountIndex = ref(1)
-const showStylePreset = ref(false)
-const stylePresets = ref<VideoStylePreset[]>([])
 const chapterId = computed(() => workspaceStore.activeChapterId)
 
 // ComputedRef 可安全赋值给 Ref（只读读取）
-const { isPolling, checkAndResume: checkMangaStatus } = useMangaGenerationStatus(chapterId)
+const {
+  isPolling,
+  stopPolling: stopMangaPolling,
+  checkAndResume: checkMangaStatus
+} = useMangaGenerationStatus(chapterId)
+let chapterLoadSequence = 0
 
 const agentScrollTarget = ref('')
 const agentInitialized = ref(false)
-const quickActions = ['阅读当前章节', '修改当前章节', '优化故事框架', '质量评估', '优化分镜脚本', '角色设定建议']
+const quickActions = ['阅读当前章节', '修改当前章节', '优化故事框架', '质量评估', '去AI味', '角色设定建议']
 
 // 按钮级 loading 状态(独立于全局 loading,提供按钮即时视觉反馈)
 const generatingChapterNum = ref(0)      // 正在生成正文的章节号(0 = 无)
@@ -656,9 +859,22 @@ const regeneratingChapters = ref(false)  // AI 生成章节
 const continuingFramework = ref(false)   // 一键续写
 const restoringSnapshot = ref(0)         // 回滚快照 ID
 const assessingQuality = ref(false)      // 编辑标签质量评估
+const generatingCurrentChapter = ref(false)
+const generatingSingleImage = ref(0)
+const selectedText = ref('')
+const selectionStart = ref(0)
+const selectionEnd = ref(0)
 const creatingAgentConv = ref(false)     // 新建 Agent 对话
 const confirmingChanges = ref(false)     // 确认变更
 const rollbackingChanges = ref(false)    // 撤回变更
+const showAgentChangeDiff = ref(false)   // 修改对比全屏页
+const rewritePreview = ref({
+  visible: false,
+  original: '',
+  rewritten: '',
+  start: 0,
+  end: 0,
+})
 
 const editingMangaSceneIndex = ref(-1)
 const editingMangaSceneDraft = ref('')
@@ -822,9 +1038,63 @@ function onTemplateBound() {
 }
 
 function handleEditBible() {
-  // 跳转到引导页面编辑创意简报
   if (storyStore.activeStoryId) {
-    uni.navigateTo({ url: `/pages/story/onboarding?storyId=${storyStore.activeStoryId}` })
+    uni.navigateTo({ url: `/pages/story/story-bible?storyId=${storyStore.activeStoryId}` })
+  }
+}
+
+function goContinuityEditor() {
+  const chapterId = workspaceStore.activeChapterId
+  if (chapterId) uni.navigateTo({ url: `/pages/workspace/continuity?chapterId=${chapterId}` })
+}
+
+function openAgentTask(task: string) {
+  if (!storyId.value) {
+    uiStore.error('请先选择作品')
+    return
+  }
+  uni.navigateTo({
+    url: `/pages/workspace/agent?storyId=${storyId.value}&chapterId=${workspaceStore.activeChapterId || ''}&task=${encodeURIComponent(task)}`
+  })
+}
+
+function openCurrentEditor() {
+  const chapter = workspaceStore.activeChapter
+  if (!chapter) {
+    uiStore.error('请先选择章节')
+    return
+  }
+  uni.navigateTo({
+    url: `/pages/workspace/editor?storyId=${storyId.value}&chapterId=${chapter.id}`
+  })
+}
+
+function openMangaWorkspace() {
+  const chapter = workspaceStore.activeChapter
+  if (!chapter) {
+    uiStore.error('请先选择章节')
+    return
+  }
+  uni.navigateTo({
+    url: `/pages/workspace/manga?storyId=${storyId.value}&chapterId=${chapter.id}`
+  })
+}
+
+function openVideoWorkspace() {
+  const chapter = workspaceStore.activeChapter
+  if (!chapter) {
+    uiStore.error('请先选择章节')
+    return
+  }
+  uni.navigateTo({
+    url: `/pages/workspace/video-workflow?storyId=${storyId.value}&chapterId=${chapter.id}`
+  })
+}
+
+function toggleMaterialPanel(panel: 'cover' | 'deconstruction' | 'history') {
+  activeMaterialPanel.value = activeMaterialPanel.value === panel ? '' : panel
+  if (panel === 'history' && activeMaterialPanel.value === 'history' && snapshots.value.length === 0) {
+    loadSnapshots()
   }
 }
 
@@ -1280,7 +1550,13 @@ async function handleGenerateChapter(ch: OutlineChapter) {
       act: String(act.act),
       chapter_number: ch.chapter_number,
       chapter_title: ch.title,
+      key_events: ch.key_events,
       summary: ch.summary || undefined,
+      goal: ch.goal || undefined,
+      conflict: ch.conflict || undefined,
+      hook: ch.hook || undefined,
+      payoff: ch.payoff || undefined,
+      highlight: ch.highlight || undefined,
     })
     uiStore.success('正文已生成')
     await loadStoryData()
@@ -1303,9 +1579,7 @@ async function handleAssessQuality(ch: OutlineChapter) {
   assessingChapterNum.value = ch.chapter_number
   try {
     const result = await chaptersApi.qualityAssess(actual.id)
-    const scores = result.scores || {}
-    const lines = Object.entries(scores).map(([k, v]) => `${k}: ${v}/10`).join('\n')
-    uni.showModal({ title: '质量评估', content: lines, showCancel: false })
+    showQualityResult(result)
   } catch (e: any) {
     uiStore.error(e.message || '评估失败')
   } finally {
@@ -1416,8 +1690,45 @@ function buildChapterList(acts: OutlineAct[], actualList: Chapter[]): OutlineCha
 // 监听章节切换，重新加载编辑器内容
 watch(() => workspaceStore.activeChapterId, async (newId) => {
   if (newId) {
-    await editorStore.loadContent(newId)
+    const loadSequence = ++chapterLoadSequence
+    stopMangaPolling()
+    mangaStore.detachActiveStream()
+    mangaStore.setActiveChapterContext(newId)
+    editorStore.setActiveChapterContext(newId)
+    localEditing.value = false
+    clearSelection()
+    continuitySummary.value = workspaceStore.activeChapter?.memory_summary || null
+    editingMangaSceneIndex.value = -1
+    mangaStore.phase = 'idle'
+    await Promise.all([
+      editorStore.loadContent(newId),
+      mangaStore.loadColorMode(newId),
+      mangaStore.loadImageCount(newId),
+      mangaStore.loadChapterManga(newId),
+      mangaStore.loadAspectRatio(newId),
+      mangaStore.loadStylePreset(newId)
+    ])
+    if (loadSequence !== chapterLoadSequence || workspaceStore.activeChapterId !== newId) {
+      return
+    }
+    colorModeIndex.value = mangaStore.colorMode === 'bw' ? 1 : 0
+    const countIndex = imageCountOptions.findIndex(option => option.value === mangaStore.imageCount)
+    if (countIndex >= 0) imageCountIndex.value = countIndex
+    checkMangaStatus()
   }
+})
+
+async function refreshAgentUpdatedContent(payload?: { storyId?: number; chapterId?: number }) {
+  if (payload?.storyId && payload.storyId !== storyId.value) return
+  await Promise.all([loadStoryData(), loadChapters()])
+  if (workspaceStore.activeChapterId) {
+    await editorStore.loadContent(workspaceStore.activeChapterId)
+  }
+}
+
+uni.$on('agent-content-updated', refreshAgentUpdatedContent)
+onUnmounted(() => {
+  uni.$off('agent-content-updated', refreshAgentUpdatedContent)
 })
 
 // 首次切换到助手tab时，自动加载最近会话
@@ -1459,12 +1770,13 @@ onLoad(async (options) => {
   }
   storyId.value = id
   storyStore.setActiveStory(id)
+  const material = options?.material
+  if (material === 'cover' || material === 'deconstruction' || material === 'history') {
+    activeMaterialPanel.value = material
+  }
 
   // 支持从框架页跳转到指定章节
   const targetChapterNumber = options?.chapterNumber ? parseInt(options.chapterNumber) : null
-
-  // 支持预选 tab（workspace 视频创作入口跳转到视频标签）
-  const targetTabIndex = options?.tabIndex ? parseInt(options.tabIndex) : null
 
   // 如果有目标章节号，先设置避免 loadWorkspace 覆盖
   if (targetChapterNumber) {
@@ -1478,30 +1790,13 @@ onLoad(async (options) => {
   try {
     await Promise.all([
       workspaceStore.loadWorkspace(id),
-      loadStoryData(),
+      loadStoryData()
     ])
     await loadChapters()
 
     if (workspaceStore.activeChapterId) {
+      continuitySummary.value = workspaceStore.activeChapter?.memory_summary || null
       await editorStore.loadContent(workspaceStore.activeChapterId)
-      await Promise.all([
-        mangaStore.loadColorMode(workspaceStore.activeChapterId),
-        mangaStore.loadImageCount(workspaceStore.activeChapterId),
-        mangaStore.loadChapterManga(workspaceStore.activeChapterId),
-        mangaStore.loadAspectRatio(workspaceStore.activeChapterId)
-      ])
-    }
-
-    colorModeIndex.value = mangaStore.colorMode === 'bw' ? 1 : 0
-    const countIdx = imageCountOptions.findIndex(o => o.value === mangaStore.imageCount)
-    if (countIdx !== -1) imageCountIndex.value = countIdx
-
-    // 检查是否有后台运行中的漫画任务（断点续传）
-    checkMangaStatus()
-
-    // 如果指定了 tabIndex，数据加载完成后切换
-    if (targetTabIndex !== null && targetTabIndex >= 0 && targetTabIndex <= 4) {
-      activeTabIndex.value = targetTabIndex
     }
   } catch (e) {
     console.error('加载工作台失败:', e)
@@ -1564,9 +1859,19 @@ function handleEditorInput(e: any) {
   editorStore.updateDraft(e.detail.value)
 }
 
+function handleEditorSelect(e: any) {
+  const target = e?.target || e?.detail || {}
+  const start = Number(target.selectionStart ?? target.start ?? 0)
+  const end = Number(target.selectionEnd ?? target.end ?? start)
+  selectionStart.value = Math.min(start, end)
+  selectionEnd.value = Math.max(start, end)
+  selectedText.value = editorStore.draftContent.slice(selectionStart.value, selectionEnd.value)
+}
+
 function cancelLocalEdit() {
   editorStore.cancelEditing()
   localEditing.value = false
+  clearSelection()
 }
 
 async function saveLocalEdit() {
@@ -1574,7 +1879,163 @@ async function saveLocalEdit() {
   if (!chapter) return
   await editorStore.saveContent(chapter.id)
   localEditing.value = false
+  clearSelection()
   uni.showToast({ title: '已保存', icon: 'success' })
+}
+
+function clearSelection() {
+  selectedText.value = ''
+  selectionStart.value = 0
+  selectionEnd.value = 0
+}
+
+function showSelectionActions() {
+  if (!selectedText.value) {
+    uiStore.info('请先在正文中选择一段文字')
+    return
+  }
+  uni.showActionSheet({
+    itemList: ['AI 改写选段', '选段生成漫画分镜'],
+    success: (res) => {
+      if (res.tapIndex === 0) rewriteSelectedContent()
+      if (res.tapIndex === 1) createScenesFromSelectedContent()
+    }
+  })
+}
+
+async function rewriteSelectedContent() {
+  const chapter = workspaceStore.activeChapter
+  const original = selectedText.value
+  if (!chapter || !original) return
+  try {
+    uni.showLoading({ title: 'AI 改写中' })
+    const result = await chaptersApi.rewriteSelection(chapter.id, original, buildRewriteContext(chapter))
+    uni.hideLoading()
+    rewritePreview.value = {
+      visible: true,
+      original,
+      rewritten: result.rewritten_text,
+      start: selectionStart.value,
+      end: selectionEnd.value,
+    }
+  } catch (e: any) {
+    uni.hideLoading()
+    uiStore.error(e.message || '改写失败')
+  }
+}
+
+function buildRewriteContext(chapter: Chapter): string {
+  const parts: string[] = []
+  if (chapter.act) parts.push(`幕：${chapter.act}`)
+  if (chapter.key_events?.length) {
+    const events = chapter.key_events
+      .slice(0, 5)
+      .map((event: any) => typeof event === 'string' ? event : event?.title || event?.event || '')
+      .filter(Boolean)
+      .join('、')
+    if (events) parts.push(`关键事件：${events}`)
+  }
+  const names = (frameworkStory.value?.characters || [])
+    .map(character => character.name)
+    .filter(Boolean)
+    .slice(0, 6)
+    .join('、')
+  if (names) parts.push(`角色：${names}`)
+  return parts.join(' | ')
+}
+
+function closeRewritePreview() {
+  rewritePreview.value.visible = false
+}
+
+function applyRewritePreview() {
+  const preview = rewritePreview.value
+  if (!preview.rewritten.trim()) return
+  const draft = editorStore.draftContent
+  editorStore.updateDraft(draft.slice(0, preview.start) + preview.rewritten + draft.slice(preview.end))
+  rewritePreview.value.visible = false
+  clearSelection()
+  uiStore.success('已替换选段，请保存正文')
+}
+
+async function createScenesFromSelectedContent() {
+  const chapter = workspaceStore.activeChapter
+  if (!chapter || !selectedText.value) return
+  try {
+    uni.showLoading({ title: '生成分镜中' })
+    const result = await mangaApi.scenesFromSelection(
+      chapter.id,
+      selectedText.value,
+      mangaStore.characterProfiles || undefined,
+      mangaStore.imageCount
+    )
+    if (workspaceStore.activeChapterId !== chapter.id) return
+    mangaStore.scenes = result.scenes || []
+    uni.hideLoading()
+    uiStore.success(`已生成 ${mangaStore.scenes.length} 条分镜`)
+    openMangaWorkspace()
+  } catch (e: any) {
+    uni.hideLoading()
+    uiStore.error(e.message || '生成分镜失败')
+  }
+}
+
+async function generateCurrentChapter() {
+  const chapter = workspaceStore.activeChapter
+  if (!chapter || generatingCurrentChapter.value) return
+  generatingCurrentChapter.value = true
+  try {
+    const planned = findOutlineChapter(chapter.chapter_number)
+    const hasExistingChat = Array.isArray(chapter.messages) && chapter.messages.length > 0
+    let result: Chapter
+    if (!hasExistingChat && planned && (planned.chapter.act || planned.chapter.key_events?.length)) {
+      result = await frameworkApi.expandChapter(storyId.value, {
+        act: String(planned.chapter.act || planned.act.act),
+        chapter_number: planned.chapter.chapter_number,
+        chapter_title: planned.chapter.title || chapter.title || `第 ${chapter.chapter_number} 章`,
+        key_events: planned.chapter.key_events,
+        summary: planned.chapter.summary || undefined,
+        goal: planned.chapter.goal || undefined,
+        conflict: planned.chapter.conflict || undefined,
+        hook: planned.chapter.hook || undefined,
+        payoff: planned.chapter.payoff || undefined,
+        highlight: planned.chapter.highlight || undefined,
+      }) as Chapter
+    } else {
+      result = await chaptersApi.generateNovel(chapter.id)
+    }
+    if (workspaceStore.activeChapterId !== chapter.id) return
+    workspaceStore.updateChapterInList(result)
+    await editorStore.loadContent(chapter.id)
+    uiStore.success('正文已生成')
+  } catch (e: any) {
+    uiStore.error(e.message || '生成正文失败')
+  } finally {
+    generatingCurrentChapter.value = false
+  }
+}
+
+function findOutlineChapter(chapterNumber: number): { act: OutlineAct; chapter: OutlineChapter } | null {
+  for (const act of outlineActs.value) {
+    const chapter = (act.chapters || []).find(item => item.chapter_number === chapterNumber)
+    if (chapter) return { act, chapter }
+  }
+  return null
+}
+
+function showQualityResult(scores: import('@/api/chapters').QualityScore) {
+  const labels: Record<string, string> = {
+    overall: '综合评分',
+    content: '内容完整度',
+    writing: '文笔表现',
+    plot: '情节推进',
+    character: '角色塑造'
+  }
+  const lines = ['overall', 'content', 'writing', 'plot', 'character']
+    .filter(key => typeof scores[key as keyof typeof scores] === 'number')
+    .map(key => `${labels[key]}：${scores[key as keyof typeof scores]}/10`)
+    .join('\n')
+  uni.showModal({ title: '质量评估', content: lines || '暂无评分结果', showCancel: false })
 }
 
 async function handleQualityAssess() {
@@ -1583,13 +2044,7 @@ async function handleQualityAssess() {
   assessingQuality.value = true
   try {
     const result = await chaptersApi.qualityAssess(chapter.id)
-    const scores = result.scores || {}
-    const lines = Object.entries(scores).map(([k, v]) => `${k}: ${v}/10`).join('\n')
-    uni.showModal({
-      title: '质量评估',
-      content: lines || `综合评分: ${scores.overall || 'N/A'}`,
-      showCancel: false
-    })
+    showQualityResult(result)
   } catch (e: any) {
     uiStore.error(e.message || '评估失败')
   } finally {
@@ -1617,26 +2072,95 @@ function handleImageCountChange(e: any) {
   }
 }
 
+function handleAspectRatioChange(ratio: string) {
+  const chapter = workspaceStore.activeChapter
+  if (chapter) {
+    mangaStore.saveAspectRatio(chapter.id, ratio)
+  }
+}
+
 async function handleGenerateManga() {
   const chapter = workspaceStore.activeChapter
   if (!chapter) {
     uiStore.error('请先选择章节')
     return
   }
-  await mangaStore.startMangaGeneration(chapter.id)
+  try {
+    await mangaStore.startMangaGeneration(chapter.id)
+  } catch (e: any) {
+    uiStore.error(e.message || '启动漫画生成失败')
+  }
 }
 
-async function handleOpenStylePresetInManga() {
-  if (stylePresets.value.length === 0) {
-    try {
-      const res = await adminApi.listStylePresets()
-      stylePresets.value = res.presets || []
-    } catch (e: any) {
-      uiStore.error(e.message || '加载风格预设失败')
-      return
-    }
+function getMangaImage(imageNumber: number) {
+  return mangaStore.images.find(image => image.image_number === imageNumber)
+}
+
+async function generateSingleMangaImage(imageNumber: number, scene: string) {
+  const chapter = workspaceStore.activeChapter
+  if (!chapter || generatingSingleImage.value) return
+  generatingSingleImage.value = imageNumber
+  try {
+    const image = await mangaApi.regenerateImage(chapter.id, imageNumber, scene, 'regenerate', {
+      stylePresetName: mangaStore.stylePresetName || undefined,
+      styleRefUrl: mangaStore.styleReferenceImageUrl || undefined
+    })
+    if (workspaceStore.activeChapterId !== chapter.id) return
+    const existingIndex = mangaStore.images.findIndex(item => item.image_number === imageNumber)
+    if (existingIndex >= 0) mangaStore.images[existingIndex] = image
+    else mangaStore.images.push(image)
+    mangaStore.images.sort((a, b) => a.image_number - b.image_number)
+    uiStore.success(`第 ${imageNumber} 格已生成`)
+  } catch (e: any) {
+    uiStore.error(e.message || '单格生成失败')
+  } finally {
+    generatingSingleImage.value = 0
   }
-  showStylePreset.value = true
+}
+
+function resetAndGenerateManga() {
+  const chapter = workspaceStore.activeChapter
+  if (!chapter) return
+  uni.showModal({
+    title: '重新生成全部',
+    content: '将清空本章现有漫画图片，并从第 1 格重新生成。分镜脚本会保留。',
+    confirmText: '清空并生成',
+    success: async (res) => {
+      if (!res.confirm) return
+      try {
+        await mangaApi.clearMangaImages(chapter.id)
+        mangaStore.images = []
+        await mangaStore.startMangaGeneration(chapter.id)
+      } catch (e: any) {
+        uiStore.error(e.message || '重新生成失败')
+      }
+    }
+  })
+}
+
+async function handleCancelManga() {
+  const chapter = workspaceStore.activeChapter
+  if (!chapter) return
+  stopMangaPolling()
+  try {
+    await mangaStore.stopGeneration(chapter.id)
+    uiStore.info('已取消生成')
+  } catch (e: any) {
+    uiStore.error(e.message || '取消生成失败，请稍后重试')
+    checkMangaStatus()
+  }
+}
+
+function handleOpenStylePresetInManga() {
+  const chapterId = workspaceStore.activeChapterId
+  if (chapterId) uni.navigateTo({ url: `/pages/workspace/manga-style?chapterId=${chapterId}` })
+}
+
+function goCharacterRefs() {
+  const chapterId = workspaceStore.activeChapterId
+  if (storyId.value && chapterId) {
+    uni.navigateTo({ url: `/pages/workspace/character-refs?storyId=${storyId.value}&chapterId=${chapterId}` })
+  }
 }
 
 // =================== 助手标签 ===================
@@ -1645,7 +2169,7 @@ async function startNewAgentConversation() {
   if (!storyId.value || creatingAgentConv.value) return
   creatingAgentConv.value = true
   try {
-    await agentStore.createConversation(storyId.value)
+    await agentStore.createConversation(storyId.value, undefined, workspaceStore.activeChapterId || undefined)
     agentStore.messages = [{ id: 'welcome', role: 'assistant', content: '我是你的AI写作助手，有什么可以帮到你的？' }]
   } catch (e: any) {
     uiStore.error(e.message || '创建失败')
@@ -1665,20 +2189,26 @@ async function handleAgentSend(text: string) {
   }
 }
 
-function handleViewChanges() {
-  const changes = agentStore.pendingChanges
-  if (changes.length === 0) return
-  const text = changes.map((c, i) =>
-    `${i + 1}. ${c.description}\n${c.diff}`
-  ).join('\n\n')
-  uni.showModal({ title: '待确认的修改', content: text })
+async function handleViewChanges() {
+  if (!storyId.value) return
+  try {
+    await agentStore.loadPendingChanges(storyId.value)
+    showAgentChangeDiff.value = true
+  } catch (e: any) {
+    uiStore.error(e.message || '加载修改对比失败')
+  }
 }
 
 async function handleConfirmChanges() {
-  if (confirmingChanges.value) return
+  if (confirmingChanges.value || rollbackingChanges.value) return
   confirmingChanges.value = true
   try {
     await agentStore.confirmChanges(storyId.value)
+    showAgentChangeDiff.value = false
+    await Promise.all([loadStoryData(), loadChapters()])
+    if (workspaceStore.activeChapterId) {
+      await editorStore.loadContent(workspaceStore.activeChapterId)
+    }
     uiStore.success('变更已确认')
   } catch (e: any) {
     uiStore.error(e.message || '确认失败')
@@ -1688,10 +2218,15 @@ async function handleConfirmChanges() {
 }
 
 async function handleRollbackChanges() {
-  if (rollbackingChanges.value) return
+  if (confirmingChanges.value || rollbackingChanges.value) return
   rollbackingChanges.value = true
   try {
     await agentStore.rollbackChanges(storyId.value)
+    showAgentChangeDiff.value = false
+    await Promise.all([loadStoryData(), loadChapters()])
+    if (workspaceStore.activeChapterId) {
+      await editorStore.loadContent(workspaceStore.activeChapterId)
+    }
     uiStore.success('变更已撤回')
   } catch (e: any) {
     uiStore.error(e.message || '撤回失败')
@@ -1701,14 +2236,22 @@ async function handleRollbackChanges() {
 }
 
 function sendQuickAction(action: string) {
-  handleAgentSend(action)
+  const prompts: Record<string, string> = {
+    阅读当前章节: '请阅读当前章节，概括核心情节、人物状态、冲突和伏笔，并指出需要延续的上下文。',
+    修改当前章节: '请检查当前章节并提出可执行的修改方案，重点改善节奏、逻辑、人物动机和语言表现。',
+    优化故事框架: '请结合当前章节审视故事框架，指出结构问题并给出具体优化建议。',
+    质量评估: '请从内容完整度、文笔、情节推进、角色塑造和去 AI 味五个方面评估当前章节。',
+    去AI味: '请对当前章节进行去AI味处理，检测并清除禁用词、句式套路、解释腔、结尾升华和模板化表达，让文字更自然。',
+    角色设定建议: '请结合当前故事与章节，检查角色设定的一致性并给出补充建议。'
+  }
+  handleAgentSend(prompts[action] || action)
 }
 
 // =================== 更多菜单 ===================
 
 function showMore() {
   uni.showActionSheet({
-    itemList: ['角色外观', '连贯性记忆', '质量评估', '参考图', '资产管理'],
+    itemList: ['角色外观', '连贯性记忆', '参考图', '资产管理'],
     success: (res) => {
       switch (res.tapIndex) {
         case 0: goCharacterProfiles(); break
@@ -1719,9 +2262,8 @@ function showMore() {
           }
           break
         }
-        case 2: handleQualityAssess(); break
-        case 3: goRefImages(); break
-        case 4: {
+        case 2: goRefImages(); break
+        case 3: {
           const chapter = workspaceStore.activeChapter
           if (chapter) {
             uni.navigateTo({ url: `/pages/workspace/video-assets?chapterId=${chapter.id}` })
@@ -1735,10 +2277,97 @@ function showMore() {
 
 function showEditorMore() {
   uni.showActionSheet({
-    itemList: ['重写选段', '调整内容', '扩写章节'],
+    itemList: ['选段工具', '调整全文', '重新生成正文', '删除本章'],
     success: (res) => {
-      if (res.tapIndex === 0 || res.tapIndex === 1 || res.tapIndex === 2) {
-        goChat()
+      if (res.tapIndex === 0) startLocalEdit()
+      if (res.tapIndex === 1) promptAdjustContent()
+      if (res.tapIndex === 2) confirmRegenerateChapter()
+      if (res.tapIndex === 3) deleteCurrentChapter()
+    }
+  })
+}
+
+function confirmRegenerateChapter() {
+  const hasContent = Boolean(editorStore.content)
+  if (!hasContent) {
+    generateCurrentChapter()
+    return
+  }
+  uni.showModal({
+    title: '重新生成正文',
+    content: '此操作会用 AI 新生成的正文覆盖当前整章内容，建议先确认现有内容已保存或备份。',
+    confirmText: '确认重生成',
+    confirmColor: '#dc2626',
+    success: (res) => {
+      if (res.confirm) generateCurrentChapter()
+    }
+  })
+}
+
+function promptAdjustContent() {
+  const chapter = workspaceStore.activeChapter
+  if (!chapter) return
+  uni.showModal({
+    title: '调整全文',
+    editable: true,
+    placeholderText: '例如：加快节奏、增强冲突、减少解释性文字',
+    success: async (res) => {
+      const instruction = String(res.content || '').trim()
+      if (!res.confirm || !instruction) return
+      try {
+        uni.showLoading({ title: '调整中' })
+        const result = await chaptersApi.adjustContent(chapter.id, instruction)
+        if (workspaceStore.activeChapterId !== chapter.id) {
+          uni.hideLoading()
+          return
+        }
+        workspaceStore.updateChapterInList(result)
+        await editorStore.loadContent(chapter.id)
+        uni.hideLoading()
+        uiStore.success('正文已调整')
+      } catch (e: any) {
+        uni.hideLoading()
+        uiStore.error(e.message || '调整失败')
+      }
+    }
+  })
+}
+
+function switchToPreviousChapter() {
+  workspaceStore.prevChapter()
+}
+
+function switchToNextChapter() {
+  workspaceStore.nextChapter()
+}
+
+async function createNewChapter() {
+  if (!storyId.value) return
+  try {
+    const chapter = await workspaceStore.createChapter(storyId.value)
+    await loadChapters()
+    workspaceStore.setActiveChapter(chapter.id)
+    uiStore.success('新章节已创建')
+  } catch (e: any) {
+    uiStore.error(e.message || '创建章节失败')
+  }
+}
+
+function deleteCurrentChapter() {
+  const chapter = workspaceStore.activeChapter
+  if (!chapter) return
+  uni.showModal({
+    title: '删除章节',
+    content: `确定删除“${workspaceStore.activeChapterTitle}”？正文、分镜和生成结果将一并移除。`,
+    confirmColor: '#dc2626',
+    success: async (res) => {
+      if (!res.confirm) return
+      try {
+        await workspaceStore.deleteChapter(chapter.id)
+        await loadChapters()
+        uiStore.success('章节已删除')
+      } catch (e: any) {
+        uiStore.error(e.message || '删除章节失败')
       }
     }
   })
@@ -1846,6 +2475,50 @@ function showEditorMore() {
     height: 100%;
   }
 
+  &__chapter-switcher {
+    display: flex;
+    align-items: center;
+    gap: 10rpx;
+    margin-bottom: 20rpx;
+  }
+
+  &__chapter-tabs {
+    flex: 1;
+    min-width: 0;
+    white-space: nowrap;
+  }
+
+  &__chapter-tabs-inner {
+    display: inline-flex;
+    gap: 10rpx;
+  }
+
+  &__chapter-tab {
+    flex-shrink: 0;
+    padding: 10rpx 18rpx;
+    border-radius: $lv-radius-sm;
+    background: #fff;
+    color: $lv-text-secondary;
+    font-size: $lv-font-sm;
+    border: 1rpx solid $lv-border;
+  }
+
+  &__chapter-tab--active {
+    color: #fff;
+    background: $lv-primary;
+    border-color: $lv-primary;
+  }
+
+  &__chapter-nav-btn {
+    width: 56rpx;
+    height: 56rpx;
+    flex-shrink: 0;
+    border-radius: $lv-radius-sm;
+    background: #fff;
+    border: 1rpx solid $lv-border;
+    @include flex-center;
+  }
+
   &__tab-scroll {
     flex: 1;
     overflow: hidden;
@@ -1902,6 +2575,16 @@ function showEditorMore() {
     margin-top: 24rpx;
   }
 
+  &__selection-hint {
+    display: block;
+    margin-top: 12rpx;
+    padding: 12rpx 16rpx;
+    border-radius: $lv-radius-sm;
+    background: $lv-primary-lighter;
+    color: $lv-primary;
+    font-size: $lv-font-xs;
+  }
+
   &__loading {
     display: flex;
     justify-content: center;
@@ -1927,9 +2610,21 @@ function showEditorMore() {
 
   &__manga-settings {
     display: flex;
-    align-items: center;
+    flex-direction: column;
+    align-items: stretch;
     gap: 16rpx;
     margin-bottom: 16rpx;
+    padding: 20rpx;
+    background: $lv-surface-solid;
+    border: 1rpx solid $lv-border-light;
+    border-radius: $lv-radius-md;
+  }
+
+  &__manga-settings-row {
+    display: grid;
+    grid-template-columns: auto 1fr auto 1fr;
+    align-items: center;
+    gap: 12rpx;
   }
 
   &__manga-label {
@@ -1957,6 +2652,14 @@ function showEditorMore() {
     font-size: $lv-font-sm;
     color: $lv-text-secondary;
     margin-top: 12rpx;
+  }
+
+  &__manga-warning {
+    display: block;
+    margin: 12rpx 0 16rpx;
+    font-size: $lv-font-sm;
+    line-height: 1.5;
+    color: #b45309;
   }
 
   &__scenes {
@@ -2021,13 +2724,44 @@ function showEditorMore() {
 
   &__manga-grid {
     display: grid;
-    grid-template-columns: 1fr 1fr;
+    grid-template-columns: minmax(0, 1fr);
     gap: 16rpx;
     margin: 16rpx 0;
   }
 
   &__manga-grid-item {
     position: relative;
+    width: 100%;
+    max-width: 760rpx;
+    margin: 0 auto;
+  }
+
+  &__manga-placeholder {
+    min-height: 360rpx;
+    padding: 24rpx;
+    border: 1rpx dashed $lv-border;
+    border-radius: $lv-radius-md;
+    background: #fff;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    gap: 16rpx;
+  }
+
+  &__manga-placeholder-num {
+    color: $lv-primary;
+    font-size: $lv-font-sm;
+    font-weight: 600;
+  }
+
+  &__manga-placeholder-text {
+    color: $lv-text-secondary;
+    font-size: $lv-font-xs;
+    line-height: 1.6;
+    display: -webkit-box;
+    -webkit-line-clamp: 4;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
   }
 
   &__manga-redraw-btn {
@@ -2620,5 +3354,315 @@ function showEditorMore() {
 .fp__header-btn--disabled {
   opacity: 0.5;
   pointer-events: none;
+}
+
+.creation-home {
+  &__chapter {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 20rpx;
+    padding: 24rpx;
+    margin-bottom: 20rpx;
+    background: #ffffff;
+    border: 1rpx solid #e2e8f0;
+    border-radius: 8rpx;
+  }
+
+  &__eyebrow {
+    display: block;
+    margin-bottom: 6rpx;
+    font-size: 21rpx;
+    color: #64748b;
+  }
+
+  &__title {
+    display: block;
+    font-size: 30rpx;
+    line-height: 1.35;
+    font-weight: 700;
+    color: #0f172a;
+  }
+
+  &__meta {
+    display: block;
+    margin-top: 8rpx;
+    font-size: 22rpx;
+    color: #64748b;
+  }
+
+  &__agent {
+    min-height: 104rpx;
+    display: flex;
+    align-items: center;
+    padding: 18rpx 20rpx;
+    margin-bottom: 28rpx;
+    background: #eff6ff;
+    border: 1rpx solid #bfdbfe;
+    border-radius: 8rpx;
+    &:active { background: #dbeafe; }
+  }
+
+  &__agent-icon {
+    width: 64rpx;
+    height: 64rpx;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    border-radius: 14rpx;
+    background: #2563eb;
+  }
+
+  &__agent-copy,
+  &__extension-copy {
+    flex: 1;
+    min-width: 0;
+    margin-left: 16rpx;
+  }
+
+  &__agent-open {
+    width: 56rpx;
+    height: 56rpx;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+  }
+
+  &__section-title {
+    display: block;
+    font-size: 28rpx;
+    font-weight: 700;
+    color: #0f172a;
+  }
+
+  &__section-desc {
+    display: block;
+    margin-top: 4rpx;
+    font-size: 21rpx;
+    color: #64748b;
+  }
+
+  &__shortcut-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 12rpx;
+  }
+
+  &__shortcut {
+    min-width: 0;
+    padding: 20rpx;
+    border: 1rpx solid #e2e8f0;
+    border-radius: 8rpx;
+    background: #ffffff;
+    &:active { background: #f8fafc; }
+  }
+
+  &__shortcut-title {
+    display: block;
+    margin-top: 10rpx;
+    font-size: 25rpx;
+    font-weight: 600;
+    color: #0f172a;
+  }
+
+  &__shortcut-desc {
+    display: block;
+    margin-top: 6rpx;
+    font-size: 21rpx;
+    line-height: 1.45;
+    color: #64748b;
+  }
+
+  &__shortcut-icon {
+    width: 58rpx;
+    height: 58rpx;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 10rpx;
+    &--outline { background: #eff6ff; }
+    &--bible { background: #f5f3ff; }
+    &--cover { background: #fff1f2; }
+    &--reference { background: #fffbeb; }
+    &--history { background: #ecfdf5; }
+    &--chapter { background: #f1f5f9; }
+  }
+
+  &__section-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    margin: 0 0 14rpx;
+    &--framework { margin-top: 32rpx; }
+  }
+
+  &__shortcut-grid {
+    margin-bottom: 28rpx;
+  }
+
+  &__material-panel {
+    margin: -8rpx 0 28rpx;
+    padding: 22rpx;
+    border: 1rpx solid #dbe3ee;
+    border-radius: 8rpx;
+    background: #ffffff;
+  }
+
+  &__panel-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 16rpx;
+    margin-bottom: 20rpx;
+  }
+
+  &__panel-close {
+    width: 52rpx;
+    height: 52rpx;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    border-radius: 8rpx;
+    background: #f1f5f9;
+  }
+
+  &__extension-list {
+    overflow: hidden;
+    margin-bottom: 8rpx;
+    border: 1rpx solid #e2e8f0;
+    border-radius: 8rpx;
+    background: #ffffff;
+  }
+
+  &__extension {
+    min-height: 104rpx;
+    display: flex;
+    align-items: center;
+    padding: 18rpx 20rpx;
+    border-bottom: 1rpx solid #e2e8f0;
+    &:last-child { border-bottom: 0; }
+    &:active { background: #f8fafc; }
+  }
+
+  &__extension-icon {
+    width: 60rpx;
+    height: 60rpx;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    border-radius: 12rpx;
+    &--manga { background: #fff1f2; }
+    &--video { background: #ecfdf5; }
+  }
+
+  &__extension-copy &__shortcut-title {
+    margin-top: 0;
+  }
+
+  &__rewrite-mask {
+    position: fixed;
+    inset: 0;
+    z-index: 120;
+    display: flex;
+    align-items: flex-end;
+    background: rgba(15, 23, 42, 0.48);
+  }
+
+  &__rewrite-sheet {
+    width: 100%;
+    max-height: 88vh;
+    display: flex;
+    flex-direction: column;
+    padding-bottom: env(safe-area-inset-bottom);
+    border-radius: 20rpx 20rpx 0 0;
+    background: #ffffff;
+  }
+
+  &__rewrite-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 20rpx;
+    padding: 28rpx 28rpx 22rpx;
+    border-bottom: 1rpx solid #e2e8f0;
+  }
+
+  &__rewrite-title,
+  &__rewrite-subtitle,
+  &__rewrite-label,
+  &__rewrite-text {
+    display: block;
+  }
+
+  &__rewrite-title {
+    color: #0f172a;
+    font-size: 30rpx;
+    font-weight: 700;
+  }
+
+  &__rewrite-subtitle {
+    margin-top: 6rpx;
+    color: #64748b;
+    font-size: 22rpx;
+  }
+
+  &__rewrite-close {
+    width: 56rpx;
+    height: 56rpx;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    border-radius: 8rpx;
+    background: #f1f5f9;
+  }
+
+  &__rewrite-content {
+    flex: 1;
+    min-height: 0;
+    padding: 24rpx 28rpx;
+    box-sizing: border-box;
+  }
+
+  &__rewrite-block {
+    margin-bottom: 20rpx;
+    padding: 22rpx;
+    border: 1rpx solid #dbe3ee;
+    border-radius: 8rpx;
+    background: #f8fafc;
+
+    &--result {
+      border-color: #bfdbfe;
+      background: #eff6ff;
+    }
+  }
+
+  &__rewrite-label {
+    margin-bottom: 12rpx;
+    color: #64748b;
+    font-size: 22rpx;
+    font-weight: 600;
+
+    &--result { color: #1d4ed8; }
+  }
+
+  &__rewrite-text {
+    color: #1e293b;
+    font-size: 26rpx;
+    line-height: 1.75;
+    white-space: pre-wrap;
+  }
+
+  &__rewrite-actions {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 16rpx;
+    padding: 20rpx 28rpx 24rpx;
+    border-top: 1rpx solid #e2e8f0;
+  }
 }
 </style>

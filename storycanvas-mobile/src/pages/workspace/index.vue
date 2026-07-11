@@ -95,7 +95,7 @@ function goWorkspace() {
 
 function goVideoWorkflow() {
   if (storyStore.activeStory) {
-    uni.navigateTo({ url: `/pages/workspace/chapter-view?storyId=${storyStore.activeStory.id}&tabIndex=3` })
+    uni.navigateTo({ url: `/pages/workspace/chapter-view?storyId=${storyStore.activeStory.id}` })
   }
 }
 

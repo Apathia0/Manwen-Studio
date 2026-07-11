@@ -34,7 +34,7 @@
       >
         <image
           v-if="preset.image_url"
-          :src="preset.image_url"
+          :src="mangaImageUrl(preset.image_url)"
           class="admin-style-presets__card-image"
           mode="aspectFill"
         />
@@ -64,7 +64,7 @@
         <view class="admin-style-presets__form-section">
           <text class="admin-style-presets__form-label">预设图片</text>
           <view v-if="form.image_url" class="admin-style-presets__image-preview" @tap="chooseImage">
-            <image :src="form.image_url" mode="aspectFill" class="admin-style-presets__image-preview-img" />
+            <image :src="mangaImageUrl(form.image_url)" mode="aspectFill" class="admin-style-presets__image-preview-img" />
             <view class="admin-style-presets__image-overlay">
               <lv-icon name="ImagePlus" :size="18" color="#fff" />
               <text class="admin-style-presets__image-overlay-text">替换图片</text>
@@ -99,6 +99,7 @@ import { ref, computed, onMounted } from 'vue'
 import { adminApi } from '@/api'
 import type { VideoStylePreset } from '@/api/admin'
 import { uploadAsset } from '@/utils/upload'
+import { mangaImageUrl } from '@/utils/url'
 import LvButton from '@/components/lv-button/lv-button.vue'
 import LvInput from '@/components/lv-input/lv-input.vue'
 import LvLoading from '@/components/lv-loading/lv-loading.vue'

@@ -1,9 +1,9 @@
 <template>
-  <view class="manga-image-card" @tap="handleTap">
+  <view class="manga-image-card" :style="{ aspectRatio: cssAspectRatio }" @tap="handleTap">
     <image
       :src="imageUrl"
       class="manga-image-card__image"
-      mode="aspectFill"
+      mode="aspectFit"
       lazy-load
     />
     <view v-if="showNumber" class="manga-image-card__number">
@@ -21,12 +21,14 @@ interface MangaImageCardProps {
   imageNumber?: number
   showNumber?: boolean
   cacheBust?: number
+  aspectRatio?: string
 }
 
 const props = withDefaults(defineProps<MangaImageCardProps>(), {
   imageNumber: 0,
   showNumber: true,
-  cacheBust: 0
+  cacheBust: 0,
+  aspectRatio: '3:4'
 })
 
 const emit = defineEmits<{
@@ -36,6 +38,7 @@ const emit = defineEmits<{
 const imageUrl = computed(() => {
   return mangaImageUrl(props.imagePath, props.cacheBust)
 })
+const cssAspectRatio = computed(() => props.aspectRatio.replace(':', ' / '))
 
 function handleTap() {
   emit('tap')
@@ -47,7 +50,6 @@ function handleTap() {
   position: relative;
   border-radius: $lv-radius-md;
   overflow: hidden;
-  aspect-ratio: 3/4;
   background: $lv-primary-lighter;
 
   &:active {

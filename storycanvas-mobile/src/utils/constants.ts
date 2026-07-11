@@ -2,14 +2,16 @@
 // 全局常量定义
 
 // API 基础地址
-// #ifdef H5
-// H5 使用相对路径（同源），由 nginx 代理 /api → 后端
-export const BASE_URL = ''
-// #endif
+let apiBaseUrl = ''
 // #ifndef H5
 // 小程序/App 使用完整后端地址
-export const BASE_URL = 'http://localhost:8000'
+const buildEnv = (import.meta as ImportMeta & {
+  env?: Record<string, string | undefined>
+}).env
+apiBaseUrl = (buildEnv?.VITE_API_BASE_URL || 'http://localhost:8000').replace(/\/+$/, '')
 // #endif
+// H5 使用相对路径（同源），由 nginx 代理 /api → 后端
+export const BASE_URL = apiBaseUrl
 
 // 存储键名
 let KEYS: Record<string, string>

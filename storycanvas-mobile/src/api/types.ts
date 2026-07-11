@@ -99,14 +99,24 @@ export interface Character {
 export interface OutlineAct {
   act: number | string
   title: string
+  summary?: string
   chapters: OutlineChapter[]
+  [key: string]: any
 }
 
 export interface OutlineChapter {
   chapter_number: number
   title: string
-  summary: string
-  is_current: boolean
+  summary?: string
+  is_current?: boolean
+  act?: string
+  key_events?: string[]
+  goal?: string
+  conflict?: string
+  hook?: string
+  payoff?: string
+  highlight?: string
+  [key: string]: any
 }
 
 export interface MangaImage {
@@ -164,10 +174,15 @@ export interface ToolCallInfo {
 }
 
 export interface PendingChange {
-  id: string
   type: string
-  description: string
-  diff: string
+  record_id?: number
+  display_name?: string
+  field?: string
+  old_value?: unknown
+  new_value?: unknown
+  id?: string
+  description?: string
+  diff?: string
 }
 
 export interface PublicPlan {

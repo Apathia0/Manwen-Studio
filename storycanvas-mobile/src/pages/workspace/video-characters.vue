@@ -219,7 +219,7 @@ function formatTime(isoStr: string): string {
   }
 
   &__thumbnail {
-    width: 80rpx; height: 80rpx; border-radius: 12rpx; flex-shrink: 0; background: $lv-bg-muted;
+    width: 80rpx; height: 80rpx; border-radius: 12rpx; flex-shrink: 0; background: $lv-bg-mid;
   }
 
   &__version-body {
@@ -246,7 +246,7 @@ function formatTime(isoStr: string): string {
     font-size: 22rpx; color: $lv-primary; padding: 4rpx 8rpx;
 
     &--danger {
-      color: $lv-danger;
+      color: $lv-error;
     }
   }
 

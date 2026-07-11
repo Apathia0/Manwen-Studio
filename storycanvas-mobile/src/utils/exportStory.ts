@@ -81,7 +81,7 @@ export async function exportStory(storyId: number): Promise<string> {
   // 小程序/App 环境：保存文件
   return new Promise((resolve, reject) => {
     const fs = uni.getFileSystemManager()
-    const filePath = `${uni.env.USER_DATA_PATH}/${fileName}`
+    const filePath = `${(uni as any).env.USER_DATA_PATH}/${fileName}`
     fs.writeFile({
       filePath,
       data: jsonStr,

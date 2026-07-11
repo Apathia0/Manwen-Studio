@@ -153,10 +153,10 @@ function statusLabel(status: string): string {
   return statusLabels[status] || status
 }
 
-function statusTagType(status: string): string {
+function statusTagType(status: string): 'success' | 'warning' | 'error' | 'default' {
   if (status === 'approved') return 'success'
   if (status === 'pending') return 'warning'
-  if (status === 'rejected') return 'danger'
+  if (status === 'rejected') return 'error'
   return 'default'
 }
 

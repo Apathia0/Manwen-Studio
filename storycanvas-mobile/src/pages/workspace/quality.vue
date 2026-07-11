@@ -2,15 +2,15 @@
   <view class="quality-page">
     <lv-navbar title="质量评估" show-back />
     <view class="quality-page__content">
-      <lv-button block @tap="runAssessment">开始评估</lv-button>
+      <lv-button block :loading="assessing" :disabled="assessing" @tap="runAssessment">开始评估</lv-button>
       <view v-if="result" class="quality-page__result">
         <view class="quality-page__score">
-          <text class="quality-page__score-num">{{ result.score }}</text>
+          <text class="quality-page__score-num">{{ formatScore(result.overall) }}</text>
           <text class="quality-page__score-label">综合评分</text>
         </view>
-        <view v-for="(item,i) in result.items" :key="i" class="quality-page__item">
+        <view v-for="item in scoreItems" :key="item.key" class="quality-page__item">
           <text class="quality-page__item-name">{{ item.name }}</text>
-          <lv-progress :percentage="item.score" :color="item.score > 70 ? '#15803d' : item.score > 40 ? '#d97706' : '#be123c'" />
+          <lv-progress :percentage="toPercentage(item.score)" :color="scoreColor(item.score)" show-info />
         </view>
       </view>
     </view>
@@ -18,24 +18,47 @@
 </template>
 
 <script setup lang="ts">
-import { ref } from 'vue'
-import { post } from '@/utils/request'
+import { computed, ref } from 'vue'
+import { chaptersApi } from '@/api'
+import type { QualityScore } from '@/api/chapters'
 import LvNavbar from '@/components/lv-navbar/lv-navbar.vue'
 import LvButton from '@/components/lv-button/lv-button.vue'
 import LvProgress from '@/components/lv-progress/lv-progress.vue'
 
-interface QualityItem { name: string; score: number }
-interface QualityResult { score: number; items: QualityItem[] }
-const result = ref<QualityResult | null>(null)
+const result = ref<QualityScore | null>(null)
+const assessing = ref(false)
+const scoreItems = computed(() => [
+  { key: 'content', name: '内容完整度', score: result.value?.content },
+  { key: 'writing', name: '文笔表现', score: result.value?.writing },
+  { key: 'plot', name: '情节推进', score: result.value?.plot },
+  { key: 'character', name: '角色塑造', score: result.value?.character }
+])
+
+function formatScore(score?: number) {
+  return typeof score === 'number' ? score.toFixed(1) : '--'
+}
+
+function toPercentage(score?: number) {
+  if (typeof score !== 'number') return 0
+  return score <= 10 ? Math.round(score * 10) : Math.round(score)
+}
+
+function scoreColor(score?: number) {
+  const percentage = toPercentage(score)
+  return percentage >= 70 ? '#15803d' : percentage >= 40 ? '#d97706' : '#be123c'
+}
 
 async function runAssessment() {
+  if (assessing.value) return
   const pages = getCurrentPages(); const page = pages[pages.length - 1] as any
   const chapterId = page.options?.chapterId || 0
+  assessing.value = true
   try {
-    const res = await post(`/api/chapters/${chapterId}/quality-assess`) as any
-    result.value = res
+    result.value = await chaptersApi.qualityAssess(Number(chapterId))
   } catch (e: any) {
     uni.showToast({ title: e.message || '评估失败', icon: 'none' })
+  } finally {
+    assessing.value = false
   }
 }
 </script>

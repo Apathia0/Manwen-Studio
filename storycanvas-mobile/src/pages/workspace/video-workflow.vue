@@ -51,7 +51,7 @@
             <view v-for="preset in store.stylePresets" :key="preset.id"
               :class="['video-workflow__style-item', { 'video-workflow__style-item--active': selectedStylePresetId === preset.id }]"
               @tap="selectedStylePresetId = preset.id; store.selectedStyle = preset.name">
-              <image v-if="preset.image_url" :src="preset.image_url" class="video-workflow__style-image" mode="aspectFill" />
+              <image v-if="preset.image_url" :src="mangaImageUrl(preset.image_url)" class="video-workflow__style-image" mode="aspectFill" />
               <view v-else class="video-workflow__style-placeholder"><lv-icon name="Palette" :size="20" color="#94a3b8" /></view>
               <text class="video-workflow__style-name">{{ preset.name }}</text>
             </view>
@@ -73,6 +73,7 @@
 import { ref, computed, onMounted } from 'vue'
 import { useVideoWorkflowStore } from '@/stores/videoWorkflow'
 import { useWorkspaceStore } from '@/stores/workspace'
+import { mangaImageUrl } from '@/utils/url'
 import LvNavbar from '@/components/lv-navbar/lv-navbar.vue'
 import LvButton from '@/components/lv-button/lv-button.vue'
 import LvLoading from '@/components/lv-loading/lv-loading.vue'

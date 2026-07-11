@@ -1,5 +1,13 @@
-import { get, post, put, del } from '@/utils/request'
+import { get, post, put, patch, del } from '@/utils/request'
 import type { Chapter } from './types'
+
+export interface QualityScore {
+  content?: number
+  writing?: number
+  character?: number
+  plot?: number
+  overall?: number
+}
 
 /** 获取章节列表 */
 export function getChapters(storyId: number): Promise<Chapter[]> {
@@ -53,10 +61,11 @@ export function adjustContent(chapterId: number, instruction: string): Promise<C
 
 /** 更新连贯性记忆 */
 export function updateContinuity(chapterId: number, data: { chapter_summary?: Record<string, any>; chapter_handoff?: Record<string, any> }): Promise<Chapter> {
-  return put<Chapter>(`/api/chapters/${chapterId}/continuity-memory`, data)
+  return patch<Chapter>(`/api/chapters/${chapterId}/continuity-memory`, data)
 }
 
 /** 质量评估 */
-export function qualityAssess(chapterId: number): Promise<{ scores: Record<string, number> }> {
-  return post(`/api/chapters/${chapterId}/quality-assess`)
+export async function qualityAssess(chapterId: number): Promise<QualityScore> {
+  const result = await post<QualityScore & { scores?: QualityScore }>(`/api/chapters/${chapterId}/quality-assess`)
+  return result.scores || result
 }

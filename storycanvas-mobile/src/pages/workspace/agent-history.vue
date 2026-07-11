@@ -20,12 +20,14 @@
 import { ref, onMounted } from 'vue'
 import { get } from '@/utils/request'
 import { agentApi } from '@/api'
+import { useAgentStore } from '@/stores/agent'
 import { Trash2 } from '@lucide/vue'
 import LvNavbar from '@/components/lv-navbar/lv-navbar.vue'
 import LvEmpty from '@/components/lv-empty/lv-empty.vue'
 
-interface Conv { id: number; title: string; updated_at: string }
+interface Conv { id: number; title: string; updated_at: string; chapter_id?: number | null }
 const conversations = ref<Conv[]>([])
+const agentStore = useAgentStore()
 
 let storyId = ''
 
@@ -39,7 +41,9 @@ onMounted(async () => {
 })
 
 function openConversation(id: number) {
-  uni.navigateTo({ url: `/pages/workspace/agent?convId=${id}&storyId=${storyId}` })
+  const conversation = conversations.value.find(item => item.id === id)
+  const chapterId = conversation?.chapter_id || ''
+  uni.navigateTo({ url: `/pages/workspace/agent?convId=${id}&storyId=${storyId}&chapterId=${chapterId}` })
 }
 
 function deleteConversation(id: number) {
@@ -49,7 +53,7 @@ function deleteConversation(id: number) {
     success: async (res) => {
       if (!res.confirm) return
       try {
-        await agentApi.deleteConversation(Number(storyId), id)
+        await agentStore.deleteConversation(Number(storyId), id)
         conversations.value = conversations.value.filter(c => c.id !== id)
         uni.showToast({ title: '已删除', icon: 'success' })
       } catch (e: any) {

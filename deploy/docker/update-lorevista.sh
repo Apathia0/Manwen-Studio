@@ -9,6 +9,7 @@ LOG_FILE="${LOG_FILE:-/var/log/lorevista-update.log}"
 HEALTH_URL="${HEALTH_URL:-http://127.0.0.1:${WEB_PORT:-8080}/api/health}"
 BACKEND_HEALTH_URL="${BACKEND_HEALTH_URL:-$HEALTH_URL}"
 WEB_HEALTH_URL="${WEB_HEALTH_URL:-$HEALTH_URL}"
+H5_HEALTH_URL="${H5_HEALTH_URL:-http://127.0.0.1:${WEB_PORT:-8080}/h5/}"
 BACKEND_SERVICE="${BACKEND_SERVICE:-backend}"
 WEB_SERVICE="${WEB_SERVICE:-web}"
 MIGRATION_TIMEOUT_SECONDS="${MIGRATION_TIMEOUT_SECONDS:-180}"
@@ -169,6 +170,11 @@ main() {
   compose up -d --no-deps "$WEB_SERVICE"
   if ! wait_for_health "$WEB_HEALTH_URL"; then
     log "web health check failed"
+    rollback
+    exit 1
+  fi
+  if ! wait_for_health "$H5_HEALTH_URL"; then
+    log "mobile H5 health check failed"
     rollback
     exit 1
   fi

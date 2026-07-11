@@ -1,12 +1,14 @@
 import { ref } from 'vue'
 import { useSSE } from './useSSE'
 import { getToken } from '@/utils/storage'
+import { getToolResultStatus, sanitizeToolSummary } from '@/utils/agent-tool-display'
 import type { AgentMessage, ToolCallInfo, PendingChange } from '@/api/types'
 
 export function useAgentChat(storyId: () => number) {
   const { streaming, start, stop } = useSSE()
   const messages = ref<AgentMessage[]>([])
   const streamingContent = ref('')
+  const streamingToolCalls = ref<ToolCallInfo[]>([])
   const pendingChanges = ref<PendingChange[]>([])
   const activeConversationId = ref<number | null>(null)
 
@@ -14,6 +16,7 @@ export function useAgentChat(storyId: () => number) {
     activeConversationId.value = conversationId ?? activeConversationId.value
     messages.value.push({ id: `user-${Date.now()}`, role: 'user', content })
     streamingContent.value = ''
+    streamingToolCalls.value = []
 
     const body: any = { message: content }
     if (activeConversationId.value) {
@@ -45,9 +48,11 @@ export function useAgentChat(storyId: () => number) {
             messages.value.push({
               id: `assistant-${Date.now()}`,
               role: 'assistant',
-              content: event.data.content
+              content: event.data.content,
+              toolCalls: streamingToolCalls.value.length > 0 ? [...streamingToolCalls.value] : undefined
             })
             streamingContent.value = ''
+            streamingToolCalls.value = []
             break
           case 'error':
             uni.showToast({ title: event.data.error, icon: 'none' })
@@ -58,28 +63,24 @@ export function useAgentChat(storyId: () => number) {
   }
 
   function handleToolCall(data: { id: string; name: string; arguments: Record<string, any> }) {
-    const lastAssistant = messages.value[messages.value.length - 1]
-    if (lastAssistant && lastAssistant.role === 'assistant') {
-      if (!lastAssistant.toolCalls) {
-        lastAssistant.toolCalls = []
-      }
-      lastAssistant.toolCalls.push({
-        id: data.id,
-        name: data.name,
-        args: data.arguments,
-        status: 'running'
-      })
-    }
+    streamingToolCalls.value.push({
+      id: String(data.id || `${data.name}-${streamingToolCalls.value.length}`),
+      name: data.name,
+      args: data.arguments,
+      status: 'running'
+    })
   }
 
-  function handleToolResult(data: { id: string; name: string; result: string }) {
-    const lastAssistant = messages.value[messages.value.length - 1]
-    if (lastAssistant && lastAssistant.role === 'assistant' && lastAssistant.toolCalls) {
-      const tool = lastAssistant.toolCalls.find(t => t.id === data.id)
-      if (tool) {
-        tool.status = 'success'
-        tool.summary = data.result
-      }
+  function handleToolResult(data: { id: string; name: string; result?: unknown; summary?: unknown; error?: unknown }) {
+    const tool = [...streamingToolCalls.value].reverse().find(item =>
+      item.status === 'running' && (
+        (data.id && item.id === String(data.id))
+        || item.name === data.name
+      )
+    )
+    if (tool) {
+      tool.status = getToolResultStatus(data.result, data.error)
+      tool.summary = sanitizeToolSummary(tool.name, data.summary ?? data.result, data.error)
     }
   }
 
@@ -118,6 +119,7 @@ export function useAgentChat(storyId: () => number) {
   function clearMessages() {
     messages.value = []
     streamingContent.value = ''
+    streamingToolCalls.value = []
     pendingChanges.value = []
   }
 

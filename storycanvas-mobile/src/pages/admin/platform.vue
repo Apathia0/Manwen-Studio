@@ -50,11 +50,11 @@
               <text>启用 OSS 云存储</text>
             </view>
           </view>
-          <lv-input v-model="settings.api.oss_access_key_id" placeholder="Access Key ID" />
-          <lv-input v-model="settings.api.oss_access_key_secret" placeholder="Access Key Secret" type="password" />
-          <lv-input v-model="settings.api.oss_endpoint" placeholder="Endpoint，如 oss-cn-hangzhou.aliyuncs.com" />
-          <lv-input v-model="settings.api.oss_bucket" placeholder="Bucket 名称" />
-          <lv-input v-model="settings.api.oss_public_url_base" placeholder="公网域名（可选），如 https://cdn.yourdomain.com" />
+          <lv-input :model-value="settings.api.oss_access_key_id || ''" placeholder="Access Key ID" @update:model-value="settings.api.oss_access_key_id = $event" />
+          <lv-input :model-value="settings.api.oss_access_key_secret || ''" placeholder="Access Key Secret" type="password" @update:model-value="settings.api.oss_access_key_secret = $event" />
+          <lv-input :model-value="settings.api.oss_endpoint || ''" placeholder="Endpoint，如 oss-cn-hangzhou.aliyuncs.com" @update:model-value="settings.api.oss_endpoint = $event" />
+          <lv-input :model-value="settings.api.oss_bucket || ''" placeholder="Bucket 名称" @update:model-value="settings.api.oss_bucket = $event" />
+          <lv-input :model-value="settings.api.oss_public_url_base || ''" placeholder="公网域名（可选），如 https://cdn.yourdomain.com" @update:model-value="settings.api.oss_public_url_base = $event" />
 
           <view class="admin-platform__checkboxes">
             <view class="admin-platform__checkbox" @tap="settings.api.enable_user_override = !settings.api.enable_user_override">
@@ -81,8 +81,8 @@
               <text>登录必须验证邮箱</text>
             </view>
           </view>
-          <lv-input v-model="settings.auth.email_code_expire_minutes" placeholder="验证码有效期（分钟）" type="number" />
-          <lv-input v-model="settings.auth.email_code_length" placeholder="验证码位数" type="number" />
+          <lv-input :model-value="String(settings.auth.email_code_expire_minutes)" placeholder="验证码有效期（分钟）" type="number" @update:model-value="settings.auth.email_code_expire_minutes = Number($event)" />
+          <lv-input :model-value="String(settings.auth.email_code_length)" placeholder="验证码位数" type="number" @update:model-value="settings.auth.email_code_length = Number($event)" />
 
           <text class="admin-platform__section-title">SMTP 配置</text>
           <view class="admin-platform__checkbox" @tap="settings.email.smtp_enabled = !settings.email.smtp_enabled">
@@ -90,7 +90,7 @@
             <text>启用 SMTP</text>
           </view>
           <lv-input v-model="settings.email.smtp_host" placeholder="SMTP Host" />
-          <lv-input v-model="settings.email.smtp_port" placeholder="SMTP Port" type="number" />
+          <lv-input :model-value="String(settings.email.smtp_port)" placeholder="SMTP Port" type="number" @update:model-value="settings.email.smtp_port = Number($event)" />
           <lv-input v-model="settings.email.smtp_username" placeholder="SMTP 用户名" />
           <lv-input v-model="settings.email.smtp_password" placeholder="SMTP 密码" type="password" />
           <lv-input v-model="settings.email.smtp_from_email" placeholder="发件邮箱" />

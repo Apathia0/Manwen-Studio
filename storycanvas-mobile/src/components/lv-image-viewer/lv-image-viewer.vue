@@ -95,9 +95,9 @@ watch(() => props.initialIndex, (val) => {
 
 function getImageUrl(img: ImageItem | string): string {
   if (typeof img === 'string') {
-    return img.startsWith('http') ? img : mangaImageUrl(img)
+    return mangaImageUrl(img)
   }
-  if (img.url) return img.url
+  if (img.url) return mangaImageUrl(img.url)
   if (img.image_path) return mangaImageUrl(img.image_path)
   return ''
 }

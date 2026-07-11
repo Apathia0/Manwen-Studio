@@ -1,10 +1,12 @@
 <template>
-  <view class="chat-input">
+  <view :class="['chat-input', { 'chat-input--embedded': embedded }]">
     <view class="chat-input__wrapper">
       <textarea
         v-model="inputValue"
         :placeholder="placeholder"
         :disabled="disabled"
+        :cursor-spacing="cursorSpacing"
+        :adjust-position="true"
         class="chat-input__field"
         @input="handleInput"
         @focus="handleFocus"
@@ -23,7 +25,8 @@
           :class="['chat-input__btn', { 'chat-input__btn--disabled': !canSend }]"
           @tap="handleSend"
         >
-          <component :is="SendIcon" :size="28" color="#fff" :stroke-width="2.5" />
+          <text v-if="embedded" class="chat-input__send-label">发送</text>
+          <component v-else :is="SendIcon" :size="28" color="#fff" :stroke-width="2.5" />
         </view>
       </view>
     </view>
@@ -31,7 +34,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref, computed, watch } from 'vue'
 import { Send as SendIcon, Square as SquareIcon } from '@lucide/vue'
 
 interface ChatInputProps {
@@ -39,13 +42,17 @@ interface ChatInputProps {
   placeholder?: string
   disabled?: boolean
   streaming?: boolean
+  embedded?: boolean
+  cursorSpacing?: number
 }
 
 const props = withDefaults(defineProps<ChatInputProps>(), {
   modelValue: '',
-  placeholder: '输入指令...',
+  placeholder: '输入创作要求...',
   disabled: false,
-  streaming: false
+  streaming: false,
+  embedded: false,
+  cursorSpacing: 120
 })
 
 const emit = defineEmits<{
@@ -61,6 +68,10 @@ const focused = ref(false)
 
 const canSend = computed(() => {
   return inputValue.value.trim().length > 0 && !props.disabled && !props.streaming
+})
+
+watch(() => props.modelValue, (value) => {
+  if (value !== inputValue.value) inputValue.value = value
 })
 
 function handleInput() {
@@ -149,6 +160,50 @@ function handleBlur() {
 
     &:active:not(&--disabled) {
       opacity: 0.8;
+    }
+  }
+
+  &__send-label {
+    font-size: 28rpx;
+    font-weight: 600;
+    color: #ffffff;
+  }
+
+  &--embedded {
+    position: static;
+    padding: 0 20rpx 16rpx;
+    border-top: 0;
+    background: transparent;
+
+    .chat-input__wrapper {
+      gap: 14rpx;
+      padding: 0;
+      background: transparent;
+      border: 0;
+      border-radius: 0;
+    }
+
+    .chat-input__field {
+      box-sizing: border-box;
+      height: 84rpx;
+      min-height: 84rpx;
+      max-height: 160rpx;
+      padding: 20rpx;
+      border: 1rpx solid #cbd5e1;
+      border-radius: 12rpx;
+      background: #ffffff;
+      font-size: 27rpx;
+      line-height: 42rpx;
+    }
+
+    .chat-input__actions {
+      margin-left: 0;
+    }
+
+    .chat-input__btn {
+      width: 124rpx;
+      height: 84rpx;
+      border-radius: 12rpx;
     }
   }
 }

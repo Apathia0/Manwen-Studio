@@ -240,7 +240,7 @@ async function handleSave() {
   error.value = null
 
   try {
-    const payload: Record<string, any> = {
+    const payload: Parameters<typeof templatesApi.createPromptTemplate>[0] = {
       name: name.value.trim(),
       description: description.value.trim(),
       category: category.value.trim(),

@@ -1,5 +1,5 @@
 <template>
-  <view v-if="count > 0" class="changes-banner">
+  <view v-if="count > 0" :class="['changes-banner', { 'changes-banner--compact': compact }]">
     <view class="changes-banner__info">
       <text class="changes-banner__count">{{ count }} 项修改待确认</text>
     </view>
@@ -22,11 +22,13 @@ interface ChangesBannerProps {
   count: number
   confirming?: boolean
   rollbacking?: boolean
+  compact?: boolean
 }
 
 withDefaults(defineProps<ChangesBannerProps>(), {
   confirming: false,
-  rollbacking: false
+  rollbacking: false,
+  compact: false
 })
 
 const emit = defineEmits<{
@@ -102,6 +104,44 @@ function handleRollback() {
       &:disabled {
         opacity: 0.5;
       }
+    }
+  }
+
+  &--compact {
+    display: flex;
+    align-items: center;
+    gap: 16rpx;
+    margin: 0;
+    padding: 14rpx 20rpx;
+    border-width: 1rpx 0 0;
+    border-radius: 0;
+    background: #fffbeb;
+
+    .changes-banner__info {
+      flex: 1;
+      min-width: 0;
+      margin-bottom: 0;
+    }
+
+    .changes-banner__count {
+      font-size: 23rpx;
+    }
+
+    .changes-banner__actions {
+      flex-shrink: 0;
+    }
+
+    .changes-banner__btn {
+      display: none;
+      width: auto;
+      height: 52rpx;
+      padding: 0 18rpx;
+      line-height: 50rpx;
+    }
+
+    .changes-banner__btn--view {
+      display: block;
+      background: #ffffff;
     }
   }
 }

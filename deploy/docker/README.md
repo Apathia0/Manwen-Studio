@@ -172,6 +172,26 @@ location / {
 }
 ```
 
+### Web 与移动端 H5 共用域名
+
+`web` 镜像同时包含桌面 Web 和 uni-app H5 构建产物：
+
+- 桌面浏览器访问域名根路径时继续使用 Web 页面。
+- 手机和平板访问域名根路径时，由容器 Nginx 自动跳转到 `/h5/`。
+- `/api/` 和 `/static/` 始终转发到后端，不参与设备识别。
+- 宿主机 Nginx 继续把整个域名代理到 `127.0.0.1:8080`，无需单独绑定 H5 域名。
+- H5 和 Web 使用同一个 `web:<APP_VERSION>` 镜像，在线更新、健康检查和失败回滚会同时覆盖两个页面。
+
+可使用不同 User-Agent 验证分流：
+
+```bash
+curl -I -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" https://your-domain.example/
+curl -I -A "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) Mobile" https://your-domain.example/
+curl -I -A "Mozilla/5.0 (iPhone) Mobile" https://your-domain.example/api/health
+```
+
+桌面请求应返回 Web 页面；移动端根路径请求应返回 `302` 和 `Location: /h5/`；移动端 API 请求仍应直接返回后端响应。
+
 PostgreSQL and Redis are not published to the public network by default.
 
 ## Update Behavior

@@ -88,7 +88,21 @@
           "style": {
             "navigationBarTitleText": "导入小说"
           }
+        },
+        {
+          "path": "story-bible",
+          "style": {
+            "navigationStyle": "custom"
+          }
         }
+      ]
+    },
+    {
+      "root": "pages/deconstruction",
+      "pages": [
+        { "path": "index", "style": { "navigationStyle": "custom" } },
+        { "path": "work", "style": { "navigationStyle": "custom" } },
+        { "path": "detail", "style": { "navigationStyle": "custom" } }
       ]
     },
     {
@@ -131,6 +145,12 @@
           }
         },
         {
+          "path": "manga-style",
+          "style": {
+            "navigationStyle": "custom"
+          }
+        },
+        {
           "path": "manga-gallery",
           "style": {
             "navigationStyle": "custom"
@@ -139,7 +159,7 @@
         {
           "path": "agent",
           "style": {
-            "navigationBarTitleText": "AI 助手"
+            "navigationStyle": "custom"
           }
         },
         {

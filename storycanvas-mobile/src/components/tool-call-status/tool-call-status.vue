@@ -7,13 +7,14 @@
       <Circle v-else :size="16" />
     </view>
     <view class="tool-call-status__info">
-      <text class="tool-call-status__name">{{ name }}</text>
-      <text v-if="summary" class="tool-call-status__summary">{{ summary }}</text>
+      <text class="tool-call-status__name">{{ displayLabel }}</text>
     </view>
   </view>
 </template>
 
 <script setup lang="ts">
+import { computed } from 'vue'
+import { getToolStatusLabel } from '@/utils/agent-tool-display'
 import { Loader, CheckCircle, XCircle, Circle } from '@lucide/vue'
 
 interface ToolCallStatusProps {
@@ -22,9 +23,10 @@ interface ToolCallStatusProps {
   summary?: string
 }
 
-withDefaults(defineProps<ToolCallStatusProps>(), {
+const props = withDefaults(defineProps<ToolCallStatusProps>(), {
   summary: ''
 })
+const displayLabel = computed(() => getToolStatusLabel(props.name, props.status))
 </script>
 
 <style lang="scss" scoped>
@@ -67,12 +69,6 @@ withDefaults(defineProps<ToolCallStatusProps>(), {
     display: block;
   }
 
-  &__summary {
-    font-size: $lv-font-xs;
-    color: $lv-text-secondary;
-    margin-top: 4rpx;
-    display: block;
-  }
 }
 
 .animate-spin {

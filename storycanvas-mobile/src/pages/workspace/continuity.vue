@@ -1,253 +1,351 @@
 <template>
   <view class="continuity-page">
     <lv-navbar title="连贯性记忆" show-back />
-    <view class="continuity-page__content">
-      <!-- 章节摘要 -->
-      <view class="continuity-page__section">
-        <view class="continuity-page__section-header">
-          <text class="continuity-page__section-title">章节摘要</text>
-          <view class="continuity-page__edit-btn" @tap="toggleEditSummary">
-            <lv-icon :name="editingSummary ? 'Check' : 'Pencil'" :size="14" color="#2563eb" />
-            <text class="continuity-page__edit-text">{{ editingSummary ? '保存' : '编辑' }}</text>
-          </view>
-        </view>
-        <view v-if="editingSummary" class="continuity-page__edit-area">
-          <textarea
-            v-model="summaryDraft"
-            class="continuity-page__textarea"
-            placeholder="章节摘要..."
-            :disabled="saving"
-          />
-        </view>
-        <view v-else class="continuity-page__display">
-          <text class="continuity-page__text">{{ formatDict(summary) || '暂无章节摘要' }}</text>
-        </view>
-      </view>
-
-      <!-- 章节交接 -->
-      <view class="continuity-page__section">
-        <view class="continuity-page__section-header">
-          <text class="continuity-page__section-title">章节交接</text>
-          <view class="continuity-page__edit-btn" @tap="toggleEditHandoff">
-            <lv-icon :name="editingHandoff ? 'Check' : 'Pencil'" :size="14" color="#2563eb" />
-            <text class="continuity-page__edit-text">{{ editingHandoff ? '保存' : '编辑' }}</text>
-          </view>
-        </view>
-        <view v-if="editingHandoff" class="continuity-page__edit-area">
-          <textarea
-            v-model="handoffDraft"
-            class="continuity-page__textarea"
-            placeholder="章节交接信息..."
-            :disabled="saving"
-          />
-        </view>
-        <view v-else class="continuity-page__display">
-          <text class="continuity-page__text">{{ formatDict(handoff) || '暂无章节交接' }}</text>
-        </view>
-      </view>
-
-      <lv-empty
-        v-if="!loading && Object.keys(summary).length === 0 && Object.keys(handoff).length === 0"
-        title="暂无连贯性记忆"
-        description="AI 生成章节后会自动产生连贯性记忆"
-      />
-
+    <scroll-view scroll-y class="continuity-page__scroll">
       <lv-loading v-if="loading" />
-    </view>
+
+      <template v-else>
+        <view v-if="previousOpening" class="continuity-page__notice">
+          <text class="continuity-page__notice-label">上一章必须承接</text>
+          <text class="continuity-page__notice-text">{{ previousOpening }}</text>
+        </view>
+
+        <view class="continuity-page__section">
+          <view class="continuity-page__section-header">
+            <view>
+              <text class="continuity-page__section-title">本章连续性</text>
+              <text class="continuity-page__section-hint">这些信息会进入后续章节生成上下文</text>
+            </view>
+            <view class="continuity-page__edit-btn" @tap="editing ? saveMemory() : startEditing()">
+              <lv-icon :name="editing ? 'Check' : 'Pencil'" :size="14" color="#2563eb" />
+              <text class="continuity-page__edit-text">{{ editing ? '保存' : '编辑' }}</text>
+            </view>
+          </view>
+
+          <template v-if="editing">
+            <continuity-field v-model="draft.summary" label="当前章摘要" placeholder="概括本章已经发生的核心事件" multiline />
+            <continuity-field v-model="draft.endingLocation" label="当前场景" placeholder="本章结束时所在位置" />
+            <continuity-field v-model="draft.activeConflict" label="即时冲突" placeholder="下一章开场仍需处理的冲突" multiline />
+            <continuity-field v-model="draft.activeCharacters" label="在场角色" placeholder="每行一个角色" multiline />
+            <continuity-field v-model="draft.characterStates" label="角色当前状态" placeholder="每行一条状态" multiline />
+            <continuity-field v-model="draft.immediateLoops" label="下一章应继续推进" placeholder="每行一条伏笔或待办事件" multiline />
+          </template>
+
+          <template v-else>
+            <memory-row label="当前章摘要" :value="summaryText" />
+            <memory-row label="当前场景" :value="textValue(handoff.ending_location)" />
+            <memory-row label="即时冲突" :value="textValue(handoff.active_conflict)" />
+            <memory-row label="在场角色" :value="listText(handoff.active_characters)" />
+            <memory-row label="角色当前状态" :value="listText(handoff.character_states)" />
+            <memory-row label="下一章应继续推进" :value="listText(handoff.immediate_open_loops)" />
+          </template>
+        </view>
+
+        <view class="continuity-page__section">
+          <view class="continuity-page__section-header">
+            <view>
+              <text class="continuity-page__section-title">作品长期记忆</text>
+              <text class="continuity-page__section-hint">由系统持续维护，生成正文和 Agent 操作时自动引用</text>
+            </view>
+          </view>
+          <memory-row label="当前故事状态" :value="textValue(storyMemory.story_state)" />
+          <memory-row label="当前剧情弧" :value="textValue(storyMemory.current_arc_focus)" />
+          <memory-row label="必须记住的事实" :value="listText(storyMemory.continuity_facts)" />
+          <memory-row label="全局未回收伏笔" :value="listText(storyMemory.open_loops)" />
+        </view>
+      </template>
+    </scroll-view>
   </view>
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
-import { chaptersApi } from '@/api'
+import { defineComponent, h, reactive, ref } from 'vue'
+import { onLoad } from '@dcloudio/uni-app'
+import { chaptersApi, storiesApi } from '@/api'
 import LvNavbar from '@/components/lv-navbar/lv-navbar.vue'
 import LvIcon from '@/components/lv-icon/lv-icon.vue'
-import LvEmpty from '@/components/lv-empty/lv-empty.vue'
 import LvLoading from '@/components/lv-loading/lv-loading.vue'
 
-const loading = ref(false)
+const ContinuityField = defineComponent({
+  props: {
+    modelValue: { type: String, default: '' },
+    label: { type: String, required: true },
+    placeholder: { type: String, default: '' },
+    multiline: { type: Boolean, default: false },
+  },
+  emits: ['update:modelValue'],
+  setup(props, { emit }) {
+    return () => h('view', { class: 'continuity-page__field' }, [
+      h('text', { class: 'continuity-page__field-label' }, props.label),
+      h(props.multiline ? 'textarea' : 'input', {
+        class: ['continuity-page__input', props.multiline ? 'continuity-page__input--textarea' : ''],
+        value: props.modelValue,
+        placeholder: props.placeholder,
+        onInput: (event: any) => emit('update:modelValue', event?.detail?.value || ''),
+      }),
+    ])
+  },
+})
+
+const MemoryRow = defineComponent({
+  props: {
+    label: { type: String, required: true },
+    value: { type: String, default: '' },
+  },
+  setup(props) {
+    return () => h('view', { class: 'continuity-page__row' }, [
+      h('text', { class: 'continuity-page__row-label' }, props.label),
+      h('text', { class: ['continuity-page__row-value', !props.value ? 'continuity-page__row-value--empty' : ''] }, props.value || '未记录'),
+    ])
+  },
+})
+
+const chapterId = ref(0)
+const loading = ref(true)
 const saving = ref(false)
-const editingSummary = ref(false)
-const editingHandoff = ref(false)
+const editing = ref(false)
 const summary = ref<Record<string, any>>({})
 const handoff = ref<Record<string, any>>({})
-const summaryDraft = ref('')
-const handoffDraft = ref('')
-const chapterId = ref(0)
+const storyMemory = ref<Record<string, any>>({})
+const previousOpening = ref('')
+const draft = reactive({
+  summary: '',
+  endingLocation: '',
+  activeConflict: '',
+  activeCharacters: '',
+  characterStates: '',
+  immediateLoops: '',
+})
 
-onMounted(async () => {
-  const pages = getCurrentPages()
-  const page = pages[pages.length - 1] as any
-  chapterId.value = Number(page.options?.chapterId || 0)
+const summaryText = ref('')
+
+onLoad(options => {
+  chapterId.value = Number(options?.chapterId || 0)
   if (!chapterId.value) {
+    loading.value = false
     uni.showToast({ title: '缺少章节 ID', icon: 'none' })
     return
   }
-  await loadMemory()
+  loadMemory()
 })
 
 async function loadMemory() {
   loading.value = true
   try {
-    // 从 chapter 详情获取 memory_summary 字段(后端无单独 GET 端点)
     const chapter = await chaptersApi.getChapter(chapterId.value)
-    const mem = chapter.memory_summary
-    if (mem && typeof mem === 'object') {
-      summary.value = mem.chapter_summary || {}
-      handoff.value = mem.chapter_handoff || {}
-    }
-  } catch (e: any) {
-    uni.showToast({ title: e.message || '加载失败', icon: 'none' })
+    const memory = chapter.memory_summary && typeof chapter.memory_summary === 'object' ? chapter.memory_summary : {}
+    summary.value = recordValue(memory.chapter_summary)
+    handoff.value = recordValue(memory.chapter_handoff)
+    summaryText.value = textValue(summary.value.summary) || textValue(summary.value.content)
+
+    const [story, chapters] = await Promise.all([
+      storiesApi.getStory(chapter.story_id),
+      chaptersApi.getChapters(chapter.story_id),
+    ])
+    storyMemory.value = recordValue(story.story_memory)
+    const previous = chapters
+      .filter(item => item.chapter_number < chapter.chapter_number)
+      .sort((a, b) => b.chapter_number - a.chapter_number)[0]
+    const previousHandoff = recordValue(previous?.memory_summary?.chapter_handoff)
+    previousOpening.value = textValue(previousHandoff.opening_must_continue)
+  } catch (error: any) {
+    uni.showToast({ title: error.message || '加载失败', icon: 'none' })
   } finally {
     loading.value = false
   }
 }
 
-function toggleEditSummary() {
-  if (editingSummary.value) {
-    saveSummary()
-  } else {
-    summaryDraft.value = dictToText(summary.value)
-    editingSummary.value = true
-  }
+function startEditing() {
+  draft.summary = summaryText.value
+  draft.endingLocation = textValue(handoff.value.ending_location)
+  draft.activeConflict = textValue(handoff.value.active_conflict)
+  draft.activeCharacters = listText(handoff.value.active_characters, '\n')
+  draft.characterStates = listText(handoff.value.character_states, '\n')
+  draft.immediateLoops = listText(handoff.value.immediate_open_loops, '\n')
+  editing.value = true
 }
 
-function toggleEditHandoff() {
-  if (editingHandoff.value) {
-    saveHandoff()
-  } else {
-    handoffDraft.value = dictToText(handoff.value)
-    editingHandoff.value = true
-  }
-}
-
-async function saveSummary() {
+async function saveMemory() {
+  if (saving.value) return
   saving.value = true
   try {
-    const parsed = textToDict(summaryDraft.value)
-    await chaptersApi.updateContinuity(chapterId.value, { chapter_summary: parsed })
-    summary.value = parsed
-    editingSummary.value = false
-    uni.showToast({ title: '已保存', icon: 'success' })
-  } catch (e: any) {
-    uni.showToast({ title: e.message || '保存失败', icon: 'none' })
-  } finally {
-    saving.value = false
-  }
-}
-
-async function saveHandoff() {
-  saving.value = true
-  try {
-    const parsed = textToDict(handoffDraft.value)
-    await chaptersApi.updateContinuity(chapterId.value, { chapter_handoff: parsed })
-    handoff.value = parsed
-    editingHandoff.value = false
-    uni.showToast({ title: '已保存', icon: 'success' })
-  } catch (e: any) {
-    uni.showToast({ title: e.message || '保存失败', icon: 'none' })
-  } finally {
-    saving.value = false
-  }
-}
-
-// 将 dict 格式化为可读文本
-function formatDict(dict: Record<string, any>): string {
-  if (!dict || Object.keys(dict).length === 0) return ''
-  return Object.entries(dict)
-    .map(([key, value]) => `${key}: ${typeof value === 'object' ? JSON.stringify(value) : value}`)
-    .join('\n')
-}
-
-// 将 dict 转为文本(编辑模式)
-function dictToText(dict: Record<string, any>): string {
-  if (!dict || Object.keys(dict).length === 0) return ''
-  return Object.entries(dict)
-    .map(([key, value]) => `${key}: ${typeof value === 'object' ? JSON.stringify(value) : value}`)
-    .join('\n')
-}
-
-// 将文本解析为 dict
-function textToDict(text: string): Record<string, any> {
-  const result: Record<string, any> = {}
-  if (!text.trim()) return result
-  for (const line of text.split('\n')) {
-    const trimmed = line.trim()
-    if (!trimmed) continue
-    const match = trimmed.match(/^([^:：]{1,50})[:：]\s*(.*)$/)
-    if (match) {
-      const [, key, value] = match
-      result[key.trim()] = value.trim()
+    const chapterSummary = {
+      ...summary.value,
+      summary: draft.summary.trim(),
     }
+    const chapterHandoff = {
+      ...handoff.value,
+      ending_location: draft.endingLocation.trim(),
+      active_conflict: draft.activeConflict.trim(),
+      active_characters: toLines(draft.activeCharacters),
+      character_states: toLines(draft.characterStates),
+      immediate_open_loops: toLines(draft.immediateLoops),
+    }
+    await chaptersApi.updateContinuity(chapterId.value, {
+      chapter_summary: chapterSummary,
+      chapter_handoff: chapterHandoff,
+    })
+    summary.value = chapterSummary
+    handoff.value = chapterHandoff
+    summaryText.value = chapterSummary.summary
+    editing.value = false
+    uni.showToast({ title: '已保存', icon: 'success' })
+  } catch (error: any) {
+    uni.showToast({ title: error.message || '保存失败', icon: 'none' })
+  } finally {
+    saving.value = false
   }
-  return result
+}
+
+function recordValue(value: any): Record<string, any> {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value : {}
+}
+
+function textValue(value: any): string {
+  if (value == null) return ''
+  if (typeof value === 'string') return value
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value)
+  return ''
+}
+
+function listText(value: any, separator = '；'): string {
+  if (Array.isArray(value)) return value.map(item => textValue(item)).filter(Boolean).join(separator)
+  return textValue(value)
+}
+
+function toLines(value: string): string[] {
+  return value.split(/\r?\n/).map(item => item.trim()).filter(Boolean)
 }
 </script>
 
 <style lang="scss" scoped>
 .continuity-page {
-  min-height: 100vh;
-  background: $lv-bg-start;
+  height: 100vh;
+  background: #f4f7fb;
 
-  &__content {
-    padding: calc(var(--status-bar-height) + 88rpx + $lv-page-padding) $lv-page-padding;
+  &__scroll {
+    height: 100%;
+    box-sizing: border-box;
+    padding: calc(var(--status-bar-height) + 108rpx) 24rpx 80rpx;
   }
 
+  &__notice,
   &__section {
-    background: #fff;
-    border-radius: $lv-radius-md;
-    padding: 28rpx;
-    margin-bottom: 16rpx;
-    box-shadow: $lv-shadow-sm;
+    max-width: 960rpx;
+    margin: 0 auto 16rpx;
+    padding: 24rpx;
+    border: 1rpx solid #e2e8f0;
+    border-radius: 8rpx;
+    background: #ffffff;
+  }
+
+  &__notice {
+    border-color: #bfdbfe;
+    background: #eff6ff;
+  }
+
+  &__notice-label,
+  &__notice-text,
+  &__section-title,
+  &__section-hint,
+  &__field-label,
+  &__row-label,
+  &__row-value {
+    display: block;
+  }
+
+  &__notice-label {
+    margin-bottom: 8rpx;
+    color: #1d4ed8;
+    font-size: 22rpx;
+    font-weight: 700;
+  }
+
+  &__notice-text {
+    color: #334155;
+    font-size: 25rpx;
+    line-height: 1.6;
   }
 
   &__section-header {
     display: flex;
+    align-items: flex-start;
     justify-content: space-between;
-    align-items: center;
-    margin-bottom: 16rpx;
+    gap: 20rpx;
+    margin-bottom: 20rpx;
   }
 
   &__section-title {
-    font-size: $lv-font-base;
-    font-weight: 600;
-    color: $lv-text-primary;
+    color: #0f172a;
+    font-size: 28rpx;
+    font-weight: 700;
+  }
+
+  &__section-hint {
+    margin-top: 6rpx;
+    color: #94a3b8;
+    font-size: 21rpx;
+    line-height: 1.5;
   }
 
   &__edit-btn {
     display: flex;
     align-items: center;
-    gap: 4rpx;
+    gap: 6rpx;
+    flex-shrink: 0;
+    padding: 10rpx 14rpx;
+    border-radius: 8rpx;
+    background: #eff6ff;
   }
 
   &__edit-text {
-    font-size: $lv-font-sm;
-    color: $lv-primary;
+    color: #2563eb;
+    font-size: 22rpx;
+    font-weight: 600;
   }
 
-  &__edit-area {
-    background: $lv-primary-lighter;
-    border-radius: $lv-radius-sm;
-    padding: 16rpx;
+  &__field,
+  &__row {
+    margin-top: 18rpx;
   }
 
-  &__textarea {
+  &__field-label,
+  &__row-label {
+    margin-bottom: 8rpx;
+    color: #475569;
+    font-size: 23rpx;
+    font-weight: 600;
+  }
+
+  &__input {
+    box-sizing: border-box;
     width: 100%;
-    min-height: 200rpx;
-    font-size: $lv-font-sm;
-    line-height: 1.6;
-    color: $lv-text-primary;
+    height: 72rpx;
+    padding: 14rpx 16rpx;
+    border: 1rpx solid #cbd5e1;
+    border-radius: 8rpx;
+    background: #f8fafc;
+    color: #1e293b;
+    font-size: 24rpx;
+
+    &--textarea {
+      min-height: 128rpx;
+      line-height: 1.6;
+    }
   }
 
-  &__display {
-    min-height: 80rpx;
+  &__row {
+    padding-top: 18rpx;
+    border-top: 1rpx solid #f1f5f9;
   }
 
-  &__text {
-    font-size: $lv-font-sm;
-    color: $lv-text-secondary;
+  &__row-value {
+    color: #334155;
+    font-size: 25rpx;
+    line-height: 1.65;
     white-space: pre-wrap;
-    line-height: 1.6;
+
+    &--empty { color: #94a3b8; }
   }
 }
 </style>

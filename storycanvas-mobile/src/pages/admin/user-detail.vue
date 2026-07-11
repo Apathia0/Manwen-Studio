@@ -32,7 +32,7 @@
             <text class="user-detail__row-label">状态：</text>
             <view class="user-detail__tag-group">
               <lv-tag
-                :type="editUser.status === 'active' ? 'success' : 'danger'"
+                :type="editUser.status === 'active' ? 'success' : 'error'"
                 :text="editUser.status === 'active' ? '启用' : '停用'"
                 size="sm"
                 @tap="editUser.status = editUser.status === 'active' ? 'disabled' : 'active'"

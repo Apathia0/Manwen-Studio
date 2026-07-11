@@ -62,7 +62,8 @@ services:
       LOG_FILE: /opt/lorevista/deploy/docker/update.log
       LOCK_FILE: /opt/lorevista/deploy/docker/update.lock
       BACKEND_HEALTH_URL: http://backend:8000/api/health
-      WEB_HEALTH_URL: http://web/api/health
+      WEB_HEALTH_URL: http://web/
+      H5_HEALTH_URL: http://web/h5/
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ${LOREVISTA_APP_DIR:-.}:/opt/lorevista

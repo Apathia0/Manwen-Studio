@@ -9,6 +9,8 @@ export const useEditorStore = defineStore('editor', () => {
   const saving = ref(false)
   const loading = ref(false)
   const lastSavedAt = ref<string | null>(null)
+  const activeChapterContext = ref<number | null>(null)
+  let loadSequence = 0
 
   const wordCount = computed(() => {
     const text = editing.value ? draftContent.value : content.value
@@ -20,16 +22,24 @@ export const useEditorStore = defineStore('editor', () => {
   })
 
   async function loadContent(chapterId: number) {
+    const currentSequence = ++loadSequence
+    activeChapterContext.value = chapterId
     loading.value = true
     try {
       const chapter = await chaptersApi.getChapter(chapterId)
+      if (currentSequence !== loadSequence || activeChapterContext.value !== chapterId) return chapter
       content.value = chapter.novel_content || ''
       draftContent.value = content.value
       editing.value = false
       return chapter
     } finally {
-      loading.value = false
+      if (currentSequence === loadSequence) loading.value = false
     }
+  }
+
+  function setActiveChapterContext(chapterId: number) {
+    activeChapterContext.value = chapterId
+    loadSequence++
   }
 
   function startEditing() {
@@ -77,6 +87,7 @@ export const useEditorStore = defineStore('editor', () => {
     cancelEditing,
     saveContent,
     updateDraft,
-    setContentDirectly
+    setContentDirectly,
+    setActiveChapterContext
   }
 })

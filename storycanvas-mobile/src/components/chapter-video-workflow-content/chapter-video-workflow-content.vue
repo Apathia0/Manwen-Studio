@@ -188,7 +188,7 @@
                 :class="['wf__style-item', { 'wf__style-item--active': selectedStylePresetId === preset.id }]"
                 @tap="selectedStylePresetId = preset.id; store.selectedStyle = preset.name"
               >
-                <image v-if="preset.image_url" :src="preset.image_url" class="wf__style-image" mode="aspectFill" />
+                <image v-if="preset.image_url" :src="mangaImageUrl(preset.image_url)" class="wf__style-image" mode="aspectFill" />
                 <view v-else class="wf__style-placeholder"><lv-icon name="Palette" :size="20" color="#94a3b8" /></view>
                 <text class="wf__style-name">{{ preset.name }}</text>
               </view>
@@ -238,7 +238,7 @@ import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import { useVideoWorkflowStore } from '@/stores/videoWorkflow'
 import { useVideoGenStore } from '@/stores/videoGen'
 import { useWorkflowPolling } from '@/composables/useWorkflowPolling'
-import { BASE_URL } from '@/utils/constants'
+import { mangaImageUrl, videoAssetUrl } from '@/utils/url'
 import LvButton from '@/components/lv-button/lv-button.vue'
 import LvLoading from '@/components/lv-loading/lv-loading.vue'
 import LvEmpty from '@/components/lv-empty/lv-empty.vue'
@@ -362,9 +362,7 @@ function toolbarBtnClass(disabled: boolean): Record<string, boolean> {
 }
 
 function assetUrl(path?: string | null): string {
-  if (!path) return ''
-  if (path.startsWith('http://') || path.startsWith('https://') || path.startsWith('/static/')) return path
-  return `${BASE_URL}/static/video/${path.replace(/^video_outputs[/\\]/, '')}`
+  return videoAssetUrl(path || null) || ''
 }
 
 // 初始化
