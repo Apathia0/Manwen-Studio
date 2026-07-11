@@ -8,7 +8,7 @@ import {
   Star, Gem, Gift, CheckCircle, XCircle,
   Loader, Pencil, Bot, BarChart3, ImagePlus, Volume2,
   ChevronDown, ChevronRight, ChevronUp, Plus, X, Save,
-  FileText, Tag, Users, Trash2, Eye, Wand2, CircleHelp
+  FileText, Tag, User, Users, ClipboardList, Trash2, Eye, Wand2, CircleHelp
 } from '@lucide/vue'
 
 const iconMap: Record<string, any> = {
@@ -19,7 +19,7 @@ const iconMap: Record<string, any> = {
   Star, Gem, Gift, CheckCircle, XCircle,
   Loader, Pencil, Bot, BarChart3, ImagePlus, Volume2,
   ChevronDown, ChevronRight, ChevronUp, Plus, X, Save,
-  FileText, Tag, Users, Trash2, Eye, Wand2
+  FileText, Tag, User, Users, ClipboardList, Trash2, Eye, Wand2
 }
 
 const props = withDefaults(defineProps<{

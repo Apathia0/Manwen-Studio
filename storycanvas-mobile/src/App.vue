@@ -1,8 +1,29 @@
 <script setup lang="ts">
-import { onLaunch } from '@dcloudio/uni-app'
+import { onLaunch, onShow } from '@dcloudio/uni-app'
 import { useAuthStore } from '@/stores/auth'
+import { usePlatformStore } from '@/stores/platform'
 
-onLaunch(() => {
+const DEFAULT_SITE_NAME = 'StoryCanvas'
+const DEFAULT_SITE_SLOGAN = 'AI 小说与漫画创作平台'
+
+function syncWebsiteTitle() {
+  // #ifdef H5
+  const platformStore = usePlatformStore()
+  const siteName = platformStore.settings?.site_name?.trim() || DEFAULT_SITE_NAME
+  const siteSlogan = platformStore.settings
+    ? platformStore.settings.site_slogan?.trim()
+    : DEFAULT_SITE_SLOGAN
+  document.title = siteSlogan ? `${siteName} - ${siteSlogan}` : siteName
+  // #endif
+}
+
+async function fetchPlatformSettingsAndSyncTitle() {
+  const platformStore = usePlatformStore()
+  await platformStore.fetchSettings()
+  syncWebsiteTitle()
+}
+
+onLaunch(async () => {
   // 注入状态栏高度 CSS 变量，供所有页面 padding-top 计算使用
   try {
     const { statusBarHeight } = uni.getSystemInfoSync()
@@ -34,6 +55,11 @@ onLaunch(() => {
 
   const authStore = useAuthStore()
   authStore.checkSession()
+  await fetchPlatformSettingsAndSyncTitle()
+})
+
+onShow(() => {
+  syncWebsiteTitle()
 })
 </script>
 

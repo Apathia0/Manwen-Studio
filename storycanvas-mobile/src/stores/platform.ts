@@ -4,6 +4,7 @@ import { platformApi } from '@/api'
 
 interface PublicPlatformSettings {
   site_name: string
+  site_slogan: string
   site_description: string
   [key: string]: any
 }

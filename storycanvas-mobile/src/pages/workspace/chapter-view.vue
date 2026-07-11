@@ -47,89 +47,6 @@
             </view>
 
             <view class="creation-home__section-head">
-              <view>
-                <text class="creation-home__section-title">按大纲创作正文</text>
-                <text class="creation-home__section-desc">选择已有章节规划，直接生成对应正文</text>
-              </view>
-              <view class="creation-home__section-link" @tap="openFrameworkEditor">
-                <text>管理大纲</text>
-                <lv-icon name="ChevronRight" :size="14" color="#2563eb" />
-              </view>
-            </view>
-            <view class="creation-home__chapter-plan">
-              <template v-if="plannedChapters.length > 0">
-                <view class="creation-home__chapter-plan-summary">
-                  <text>{{ plannedChapterRangeText }}</text>
-                  <text>{{ plannedChapters.filter(chapterHasContent).length }} 章已有正文</text>
-                </view>
-                <view
-                  v-for="ch in paginatedPlannedChapters"
-                  :key="`creation-${ch.chapter_number}`"
-                  class="creation-home__chapter-plan-item"
-                >
-                  <view class="creation-home__chapter-plan-copy">
-                    <view class="creation-home__chapter-plan-title-row">
-                      <text class="creation-home__chapter-plan-num">第 {{ ch.chapter_number }} 章</text>
-                      <text class="creation-home__chapter-plan-title">{{ ch.title }}</text>
-                    </view>
-                    <text v-if="ch.summary" class="creation-home__chapter-plan-desc">{{ ch.summary }}</text>
-                    <text v-else-if="ch.key_events?.length" class="creation-home__chapter-plan-desc">{{ ch.key_events.join('、') }}</text>
-                  </view>
-                  <view
-                    v-if="chapterHasContent(ch)"
-                    class="creation-home__chapter-plan-action creation-home__chapter-plan-action--open"
-                    @tap="handleOpenChapter(ch)"
-                  >
-                    <lv-icon name="BookOpen" :size="13" color="#2563eb" />
-                    <text>打开</text>
-                  </view>
-                  <view
-                    v-else
-                    :class="[
-                      'creation-home__chapter-plan-action',
-                      {
-                        'creation-home__chapter-plan-action--loading': generatingChapterNum === ch.chapter_number,
-                        'creation-home__chapter-plan-action--disabled': generatingChapterNum !== 0 && generatingChapterNum !== ch.chapter_number,
-                      },
-                    ]"
-                    @tap="handleGenerateChapterTap(ch)"
-                  >
-                    <view v-if="generatingChapterNum === ch.chapter_number" class="fp__chapter-btn-spinner" />
-                    <lv-icon v-else name="Sparkles" :size="13" color="#ffffff" />
-                    <text>{{ generatingChapterNum === ch.chapter_number ? '生成中' : '生成正文' }}</text>
-                  </view>
-                </view>
-                <view v-if="plannedTotalPages > 1" class="creation-home__chapter-plan-pagination">
-                  <view
-                    :class="['creation-home__chapter-plan-page', { 'creation-home__chapter-plan-page--disabled': plannedCurrentPage <= 1 }]"
-                    @tap="prevPlannedPage"
-                  >
-                    <lv-icon name="ChevronLeft" :size="14" />
-                    <text>上一页</text>
-                  </view>
-                  <text class="creation-home__chapter-plan-page-info">{{ plannedCurrentPage }} / {{ plannedTotalPages }}</text>
-                  <view
-                    :class="['creation-home__chapter-plan-page', { 'creation-home__chapter-plan-page--disabled': plannedCurrentPage >= plannedTotalPages }]"
-                    @tap="nextPlannedPage"
-                  >
-                    <text>下一页</text>
-                    <lv-icon name="ChevronRight" :size="14" />
-                  </view>
-                </view>
-              </template>
-              <view v-else class="creation-home__chapter-plan-empty">
-                <lv-icon name="ListTree" :size="24" color="#94a3b8" />
-                <view class="creation-home__chapter-plan-empty-copy">
-                  <text class="creation-home__shortcut-title">暂无章节规划</text>
-                  <text class="creation-home__shortcut-desc">先在大纲与框架中规划章节，再按章生成正文</text>
-                </view>
-                <view class="creation-home__section-link" @tap="openFrameworkEditor">
-                  <text>去规划</text>
-                </view>
-              </view>
-            </view>
-
-            <view class="creation-home__section-head">
               <text class="creation-home__section-title">创作资料</text>
             </view>
             <view class="creation-home__shortcut-grid">
@@ -273,6 +190,89 @@
                   <text class="creation-home__shortcut-desc">剧本、镜头、素材与视频生成</text>
                 </view>
                 <lv-icon name="ChevronRight" :size="18" color="#94a3b8" />
+              </view>
+            </view>
+
+            <view class="creation-home__section-head">
+              <view>
+                <text class="creation-home__section-title">按大纲创作正文</text>
+                <text class="creation-home__section-desc">选择已有章节规划，直接生成对应正文</text>
+              </view>
+              <view class="creation-home__section-link" @tap="openFrameworkEditor">
+                <text>管理大纲</text>
+                <lv-icon name="ChevronRight" :size="14" color="#2563eb" />
+              </view>
+            </view>
+            <view class="creation-home__chapter-plan">
+              <template v-if="plannedChapters.length > 0">
+                <view class="creation-home__chapter-plan-summary">
+                  <text>{{ plannedChapterRangeText }}</text>
+                  <text>{{ plannedChapters.filter(chapterHasContent).length }} 章已有正文</text>
+                </view>
+                <view
+                  v-for="ch in paginatedPlannedChapters"
+                  :key="`creation-${ch.chapter_number}`"
+                  class="creation-home__chapter-plan-item"
+                >
+                  <view class="creation-home__chapter-plan-copy">
+                    <view class="creation-home__chapter-plan-title-row">
+                      <text class="creation-home__chapter-plan-num">第 {{ ch.chapter_number }} 章</text>
+                      <text class="creation-home__chapter-plan-title">{{ ch.title }}</text>
+                    </view>
+                    <text v-if="ch.summary" class="creation-home__chapter-plan-desc">{{ ch.summary }}</text>
+                    <text v-else-if="ch.key_events?.length" class="creation-home__chapter-plan-desc">{{ ch.key_events.join('、') }}</text>
+                  </view>
+                  <view
+                    v-if="chapterHasContent(ch)"
+                    class="creation-home__chapter-plan-action creation-home__chapter-plan-action--open"
+                    @tap="handleOpenChapter(ch)"
+                  >
+                    <lv-icon name="BookOpen" :size="13" color="#2563eb" />
+                    <text>打开</text>
+                  </view>
+                  <view
+                    v-else
+                    :class="[
+                      'creation-home__chapter-plan-action',
+                      {
+                        'creation-home__chapter-plan-action--loading': generatingChapterNum === ch.chapter_number,
+                        'creation-home__chapter-plan-action--disabled': generatingChapterNum !== 0 && generatingChapterNum !== ch.chapter_number,
+                      },
+                    ]"
+                    @tap="handleGenerateChapterTap(ch)"
+                  >
+                    <view v-if="generatingChapterNum === ch.chapter_number" class="fp__chapter-btn-spinner" />
+                    <lv-icon v-else name="Sparkles" :size="13" color="#ffffff" />
+                    <text>{{ generatingChapterNum === ch.chapter_number ? '生成中' : '生成正文' }}</text>
+                  </view>
+                </view>
+                <view v-if="plannedTotalPages > 1" class="creation-home__chapter-plan-pagination">
+                  <view
+                    :class="['creation-home__chapter-plan-page', { 'creation-home__chapter-plan-page--disabled': plannedCurrentPage <= 1 }]"
+                    @tap="prevPlannedPage"
+                  >
+                    <lv-icon name="ChevronLeft" :size="14" />
+                    <text>上一页</text>
+                  </view>
+                  <text class="creation-home__chapter-plan-page-info">{{ plannedCurrentPage }} / {{ plannedTotalPages }}</text>
+                  <view
+                    :class="['creation-home__chapter-plan-page', { 'creation-home__chapter-plan-page--disabled': plannedCurrentPage >= plannedTotalPages }]"
+                    @tap="nextPlannedPage"
+                  >
+                    <text>下一页</text>
+                    <lv-icon name="ChevronRight" :size="14" />
+                  </view>
+                </view>
+              </template>
+              <view v-else class="creation-home__chapter-plan-empty">
+                <lv-icon name="ListTree" :size="24" color="#94a3b8" />
+                <view class="creation-home__chapter-plan-empty-copy">
+                  <text class="creation-home__shortcut-title">暂无章节规划</text>
+                  <text class="creation-home__shortcut-desc">先在大纲与框架中规划章节，再按章生成正文</text>
+                </view>
+                <view class="creation-home__section-link" @tap="openFrameworkEditor">
+                  <text>去规划</text>
+                </view>
               </view>
             </view>
 

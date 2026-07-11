@@ -69,7 +69,13 @@
     <view class="agent-page__composer">
       <scroll-view scroll-x class="agent-page__quick" show-scrollbar="false">
         <view class="agent-page__quick-inner">
-          <view v-for="action in quickActions" :key="action.label" class="agent-page__quick-btn" @tap="selectQuick(action)">
+          <view
+            v-for="action in quickActions"
+            :key="action.label"
+            :class="['agent-page__quick-btn', { 'agent-page__quick-btn--disabled': streaming }]"
+            @tap="selectQuick(action)"
+          >
+            <lv-icon :name="action.icon" :size="14" color="#2563eb" />
             <text>{{ action.label }}</text>
           </view>
         </view>
@@ -101,6 +107,8 @@ import ChangeDiffSheet from '@/components/change-diff-sheet/change-diff-sheet.vu
 
 interface QuickAction {
   label: string
+  description: string
+  icon: string
   prompt: string
 }
 
@@ -115,11 +123,54 @@ const showChangeDiff = ref(false)
 const confirmingChanges = ref(false)
 const rollbackingChanges = ref(false)
 const quickActions: QuickAction[] = [
-  { label: '生成章节', prompt: '请结合章节大纲、上文衔接和人物状态，先给出下一章的生成方案，等我确认后再写入正文。' },
-  { label: '调整大纲', prompt: '我想调整故事大纲。请先结合现有框架说明可能影响的章节，再和我确认具体修改。' },
-  { label: '调整设定', prompt: '我想调整角色、世界观或故事规则。请结合现有作品圣经检查冲突，并在修改前向我确认。' },
-  { label: '润色正文', prompt: '请阅读当前章节，先指出节奏、对白和文字表达的问题，再给出润色方案，确认后再修改。' }
+  {
+    label: '阅读当前章节',
+    description: '分析本章写作质量',
+    icon: 'BookOpen',
+    prompt: '请阅读当前章节全文，分析本章的写作质量，包括结构、文笔、节奏和逻辑连贯性，给出具体的改进建议。'
+  },
+  {
+    label: '修改当前章节',
+    description: '按需求调整本章内容',
+    icon: 'PenLine',
+    prompt: '请根据我的要求修改当前章节的内容，保持整体风格一致。'
+  },
+  {
+    label: '优化故事框架',
+    description: '检查并改进故事结构',
+    icon: 'ClipboardList',
+    prompt: '请检查当前故事的框架结构（三幕结构、伏笔、节奏等），提出优化建议并允许我确认后进行调整。'
+  },
+  {
+    label: '质量评估',
+    description: '对已完成的章节评分',
+    icon: 'BarChart3',
+    prompt: '请评估已完成章节的整体质量，从内容、文笔、角色塑造、情节设计等维度给出评分和改进建议。'
+  },
+  {
+    label: '去AI味',
+    description: '检测并清除AI写作痕迹',
+    icon: 'Sparkles',
+    prompt: '请对当前章节进行去AI味处理，检测并清除AI写作痕迹，包括禁用词、句式套路、心理描写外化、结尾升华、解释腔等，让文字回归自然、非模板化。'
+  },
+  {
+    label: '角色设定建议',
+    description: '分析角色弧光',
+    icon: 'User',
+    prompt: '请分析当前故事中的角色弧光发展，给出角色设定方面的优化建议。'
+  }
 ]
+const legacyTaskActions: Record<string, QuickAction> = {
+  生成下一章: {
+    label: '生成下一章',
+    description: '结合大纲生成正文',
+    icon: 'Sparkles',
+    prompt: '请结合章节大纲、上文衔接和人物状态，先给出下一章的生成方案，等我确认后再写入正文。'
+  },
+  调整大纲: quickActions[2],
+  调整设定: quickActions[5],
+  润色当前章节: quickActions[1]
+}
 
 let storyId = 0
 let chapterId = 0
@@ -190,13 +241,7 @@ watch([streamingContent, () => messages.value.length], () => {
 })
 
 function getTaskAction(task: string) {
-  const map: Record<string, QuickAction> = {
-    生成下一章: quickActions[0],
-    调整大纲: quickActions[1],
-    调整设定: quickActions[2],
-    润色当前章节: quickActions[3]
-  }
-  return map[task]
+  return legacyTaskActions[task]
 }
 
 function getIntroMessage(task: string) {
@@ -210,7 +255,8 @@ function getIntroMessage(task: string) {
 }
 
 function selectQuick(action: QuickAction) {
-  inputText.value = action.prompt
+  if (streaming.value) return
+  void handleSend(action.prompt)
 }
 
 async function newConversation() {
@@ -432,12 +478,18 @@ function goBack() {
     padding: 0 18rpx;
     display: inline-flex;
     align-items: center;
+    gap: 8rpx;
     border: 1rpx solid #cbd5e1;
     border-radius: 8rpx;
     background: #ffffff;
     font-size: 22rpx;
     color: #334155;
     &:active { background: #eff6ff; border-color: #93c5fd; }
+  }
+
+  &__quick-btn--disabled {
+    opacity: 0.45;
+    pointer-events: none;
   }
 }
 </style>
