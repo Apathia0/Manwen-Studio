@@ -2,9 +2,11 @@
   <view class="story-library">
     <lv-navbar :title="siteName">
       <template #right>
-        <lv-badge :value="storyStore.list.length">
-          <Bell :size="20" color="#0f172a" />
-        </lv-badge>
+        <view class="story-library__announcement-button" @tap="openAnnouncement">
+          <lv-badge :value="platformStore.announcement ? '!' : ''">
+            <Bell :size="20" color="#0f172a" />
+          </lv-badge>
+        </view>
       </template>
     </lv-navbar>
 
@@ -49,6 +51,22 @@
       :actions="storyActions"
       @select="handleStoryActionSelect"
     />
+
+    <lv-modal
+      :visible="showAnnouncement"
+      :title="platformStore.announcement?.title || '平台公告'"
+      :show-cancel="false"
+      confirm-text="我知道了"
+      @update:visible="handleAnnouncementVisibility"
+    >
+      <scroll-view scroll-y class="story-library__announcement-content">
+        <rich-text
+          v-if="platformStore.announcement"
+          :nodes="platformStore.announcement.content"
+        />
+        <text v-else class="story-library__announcement-empty">暂无公告</text>
+      </scroll-view>
+    </lv-modal>
   </view>
 </template>
 
@@ -66,6 +84,7 @@ import LvEmpty from '@/components/lv-empty/lv-empty.vue'
 import LvButton from '@/components/lv-button/lv-button.vue'
 import LvFab from '@/components/lv-fab/lv-fab.vue'
 import LvActionSheet from '@/components/lv-action-sheet/lv-action-sheet.vue'
+import LvModal from '@/components/lv-modal/lv-modal.vue'
 import StoryCard from '@/components/story-card/story-card.vue'
 import { Bell } from '@lucide/vue'
 
@@ -76,6 +95,7 @@ const siteName = computed(() => platformStore.settings?.site_name?.trim() || 'St
 const refreshing = ref(false)
 const showActionSheet = ref(false)
 const showStoryMenu = ref(false)
+const showAnnouncement = ref(false)
 const selectedStory = ref<Story | null>(null)
 
 const fabActions = [
@@ -90,13 +110,47 @@ const storyActions = [
   { text: '删除', danger: true }
 ]
 
-onMounted(() => {
-  storyStore.fetchStories()
+onMounted(async () => {
+  void storyStore.fetchStories().catch(() => {})
+  await platformStore.fetchAnnouncement()
+  showAnnouncement.value = !!platformStore.announcement && !platformStore.announcementDismissed
 })
 
 async function handleRefresh() {
-  await storyStore.fetchStories()
-  refreshing.value = false
+  try {
+    await Promise.allSettled([
+      storyStore.fetchStories(),
+      platformStore.fetchAnnouncement()
+    ])
+  } finally {
+    refreshing.value = false
+  }
+}
+
+async function openAnnouncement() {
+  if (platformStore.announcement) {
+    showAnnouncement.value = true
+    return
+  }
+
+  uni.showLoading({ title: '加载公告...' })
+  try {
+    await platformStore.fetchAnnouncement()
+    if (platformStore.announcement) {
+      showAnnouncement.value = true
+    } else {
+      uni.showToast({ title: '暂无公告', icon: 'none' })
+    }
+  } finally {
+    uni.hideLoading()
+  }
+}
+
+function handleAnnouncementVisibility(visible: boolean) {
+  showAnnouncement.value = visible
+  if (!visible) {
+    platformStore.dismissAnnouncement()
+  }
 }
 
 function handleStoryTap(story: Story) {
@@ -221,6 +275,28 @@ function goImport() {
     display: flex;
     flex-direction: column;
     gap: $lv-item-gap;
+  }
+
+  &__announcement-button {
+    width: 64rpx;
+    height: 64rpx;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  &__announcement-content {
+    height: 50vh;
+    font-size: $lv-font-sm;
+    line-height: 1.7;
+    color: $lv-text-primary;
+  }
+
+  &__announcement-empty {
+    display: block;
+    padding: 32rpx 0;
+    text-align: center;
+    color: $lv-text-muted;
   }
 }
 </style>

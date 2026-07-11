@@ -4,13 +4,15 @@ interface PublicPlatformSettings {
   site_name: string
   site_slogan: string
   site_description: string
+  announcement?: PlatformAnnouncement
   [key: string]: any
 }
 
 interface PlatformAnnouncement {
+  enabled: boolean
   title: string
   content: string
-  updated_at: string
+  updated_at?: string
 }
 
 /** 获取公开平台设置 */
@@ -20,7 +22,7 @@ export function getPublicSettings(): Promise<PublicPlatformSettings> {
 
 /** 获取平台公告 */
 export function getAnnouncement(): Promise<PlatformAnnouncement> {
-  return get<PlatformAnnouncement>('/api/platform/announcement')
+  return get<PlatformAnnouncement>('/api/platform/announcement', undefined, undefined, 15000)
 }
 
 /** 获取站点图标 URL */

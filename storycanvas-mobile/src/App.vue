@@ -6,7 +6,7 @@ import { usePlatformStore } from '@/stores/platform'
 const DEFAULT_SITE_NAME = 'StoryCanvas'
 const DEFAULT_SITE_SLOGAN = 'AI 小说与漫画创作平台'
 
-function syncWebsiteTitle() {
+function syncWebsiteBrand() {
   // #ifdef H5
   const platformStore = usePlatformStore()
   const siteName = platformStore.settings?.site_name?.trim() || DEFAULT_SITE_NAME
@@ -14,13 +14,27 @@ function syncWebsiteTitle() {
     ? platformStore.settings.site_slogan?.trim()
     : DEFAULT_SITE_SLOGAN
   document.title = siteSlogan ? `${siteName} - ${siteSlogan}` : siteName
+
+  const configuredIcon = platformStore.settings?.icon_url?.trim() || '/brand-mark.svg'
+  const iconUrl = new URL(configuredIcon, window.location.origin)
+  if (window.location.protocol === 'https:' && iconUrl.protocol === 'http:') {
+    iconUrl.protocol = 'https:'
+  }
+
+  let favicon = document.querySelector<HTMLLinkElement>("link[rel='icon']")
+  if (!favicon) {
+    favicon = document.createElement('link')
+    favicon.rel = 'icon'
+    document.head.appendChild(favicon)
+  }
+  favicon.href = iconUrl.href
   // #endif
 }
 
 async function fetchPlatformSettingsAndSyncTitle() {
   const platformStore = usePlatformStore()
   await platformStore.fetchSettings()
-  syncWebsiteTitle()
+  syncWebsiteBrand()
 }
 
 onLaunch(async () => {
@@ -59,7 +73,7 @@ onLaunch(async () => {
 })
 
 onShow(() => {
-  syncWebsiteTitle()
+  syncWebsiteBrand()
 })
 </script>
 

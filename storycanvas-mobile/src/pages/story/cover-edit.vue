@@ -109,7 +109,7 @@ async function handleGenerate() {
   loading.value = 'generating'
   error.value = ''
   try {
-    const res = await storiesApi.generateCover(storyId)
+    const res = await storiesApi.generateCover(storyId, prompt.value.trim())
     coverUrl.value = coverImageUrl(res.cover_image) || ''
   } catch (e: any) {
     error.value = e.message || '生成失败'
