@@ -85,6 +85,7 @@ lorevista-mobile/dist/
 !deploy/docker/RELEASE_AND_UPDATE.md
 !deploy/docker/FAQ.md
 !docs/superpowers/**/*.md
+!backend/references/writing/*.md
 
 # ─── Superpowers brainstorming files ───
 .superpowers/
