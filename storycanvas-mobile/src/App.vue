@@ -6,7 +6,12 @@ onLaunch(() => {
   // 注入状态栏高度 CSS 变量，供所有页面 padding-top 计算使用
   try {
     const { statusBarHeight } = uni.getSystemInfoSync()
-    const sbh = (statusBarHeight || 0) + 'px'
+    let effectiveStatusBarHeight = statusBarHeight || 0
+    // H5 浏览器工具栏不属于页面视口，不能重复计入应用顶部间距
+    // #ifdef H5
+    effectiveStatusBarHeight = 0
+    // #endif
+    const sbh = effectiveStatusBarHeight + 'px'
     // #ifdef H5
     document.documentElement.style.setProperty('--status-bar-height', sbh)
     // #endif
@@ -20,7 +25,7 @@ onLaunch(() => {
     const app = getApp()
     if (app) {
       app.globalData = app.globalData || {}
-      app.globalData.statusBarHeight = statusBarHeight || 0
+      app.globalData.statusBarHeight = effectiveStatusBarHeight
     }
     // #endif
   } catch {
