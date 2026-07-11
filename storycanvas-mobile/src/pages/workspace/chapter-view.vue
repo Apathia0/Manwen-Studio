@@ -47,6 +47,89 @@
             </view>
 
             <view class="creation-home__section-head">
+              <view>
+                <text class="creation-home__section-title">按大纲创作正文</text>
+                <text class="creation-home__section-desc">选择已有章节规划，直接生成对应正文</text>
+              </view>
+              <view class="creation-home__section-link" @tap="openFrameworkEditor">
+                <text>管理大纲</text>
+                <lv-icon name="ChevronRight" :size="14" color="#2563eb" />
+              </view>
+            </view>
+            <view class="creation-home__chapter-plan">
+              <template v-if="plannedChapters.length > 0">
+                <view class="creation-home__chapter-plan-summary">
+                  <text>{{ plannedChapterRangeText }}</text>
+                  <text>{{ plannedChapters.filter(chapterHasContent).length }} 章已有正文</text>
+                </view>
+                <view
+                  v-for="ch in paginatedPlannedChapters"
+                  :key="`creation-${ch.chapter_number}`"
+                  class="creation-home__chapter-plan-item"
+                >
+                  <view class="creation-home__chapter-plan-copy">
+                    <view class="creation-home__chapter-plan-title-row">
+                      <text class="creation-home__chapter-plan-num">第 {{ ch.chapter_number }} 章</text>
+                      <text class="creation-home__chapter-plan-title">{{ ch.title }}</text>
+                    </view>
+                    <text v-if="ch.summary" class="creation-home__chapter-plan-desc">{{ ch.summary }}</text>
+                    <text v-else-if="ch.key_events?.length" class="creation-home__chapter-plan-desc">{{ ch.key_events.join('、') }}</text>
+                  </view>
+                  <view
+                    v-if="chapterHasContent(ch)"
+                    class="creation-home__chapter-plan-action creation-home__chapter-plan-action--open"
+                    @tap="handleOpenChapter(ch)"
+                  >
+                    <lv-icon name="BookOpen" :size="13" color="#2563eb" />
+                    <text>打开</text>
+                  </view>
+                  <view
+                    v-else
+                    :class="[
+                      'creation-home__chapter-plan-action',
+                      {
+                        'creation-home__chapter-plan-action--loading': generatingChapterNum === ch.chapter_number,
+                        'creation-home__chapter-plan-action--disabled': generatingChapterNum !== 0 && generatingChapterNum !== ch.chapter_number,
+                      },
+                    ]"
+                    @tap="handleGenerateChapterTap(ch)"
+                  >
+                    <view v-if="generatingChapterNum === ch.chapter_number" class="fp__chapter-btn-spinner" />
+                    <lv-icon v-else name="Sparkles" :size="13" color="#ffffff" />
+                    <text>{{ generatingChapterNum === ch.chapter_number ? '生成中' : '生成正文' }}</text>
+                  </view>
+                </view>
+                <view v-if="plannedTotalPages > 1" class="creation-home__chapter-plan-pagination">
+                  <view
+                    :class="['creation-home__chapter-plan-page', { 'creation-home__chapter-plan-page--disabled': plannedCurrentPage <= 1 }]"
+                    @tap="prevPlannedPage"
+                  >
+                    <lv-icon name="ChevronLeft" :size="14" />
+                    <text>上一页</text>
+                  </view>
+                  <text class="creation-home__chapter-plan-page-info">{{ plannedCurrentPage }} / {{ plannedTotalPages }}</text>
+                  <view
+                    :class="['creation-home__chapter-plan-page', { 'creation-home__chapter-plan-page--disabled': plannedCurrentPage >= plannedTotalPages }]"
+                    @tap="nextPlannedPage"
+                  >
+                    <text>下一页</text>
+                    <lv-icon name="ChevronRight" :size="14" />
+                  </view>
+                </view>
+              </template>
+              <view v-else class="creation-home__chapter-plan-empty">
+                <lv-icon name="ListTree" :size="24" color="#94a3b8" />
+                <view class="creation-home__chapter-plan-empty-copy">
+                  <text class="creation-home__shortcut-title">暂无章节规划</text>
+                  <text class="creation-home__shortcut-desc">先在大纲与框架中规划章节，再按章生成正文</text>
+                </view>
+                <view class="creation-home__section-link" @tap="openFrameworkEditor">
+                  <text>去规划</text>
+                </view>
+              </view>
+            </view>
+
+            <view class="creation-home__section-head">
               <text class="creation-home__section-title">创作资料</text>
             </view>
             <view class="creation-home__shortcut-grid">
@@ -1298,6 +1381,28 @@ async function saveOutlineEdit() {
 const pageSize = 20
 const currentPage = ref(1)
 const chapterJumpNum = ref('')
+const plannedPageSize = 8
+const plannedCurrentPage = ref(1)
+
+const plannedChapters = computed(() =>
+  outlineActs.value.flatMap(act => act.chapters || [])
+)
+
+const plannedTotalPages = computed(() =>
+  Math.max(1, Math.ceil(plannedChapters.value.length / plannedPageSize))
+)
+
+const paginatedPlannedChapters = computed(() => {
+  const start = (plannedCurrentPage.value - 1) * plannedPageSize
+  return plannedChapters.value.slice(start, start + plannedPageSize)
+})
+
+const plannedChapterRangeText = computed(() => {
+  if (plannedChapters.value.length === 0) return '0 章'
+  const start = (plannedCurrentPage.value - 1) * plannedPageSize + 1
+  const end = Math.min(plannedCurrentPage.value * plannedPageSize, plannedChapters.value.length)
+  return `第 ${start}-${end} 章 / 共 ${plannedChapters.value.length} 章`
+})
 
 const totalPages = computed(() => Math.max(1, Math.ceil(chapters.value.length / pageSize)))
 
@@ -1515,7 +1620,7 @@ function chapterHasContent(ch: OutlineChapter): boolean {
 function getChapterStatus(ch: OutlineChapter): string {
   const actual = chapterMap.value.get(ch.chapter_number)
   if (!actual) return 'pending'
-  if (actual.status === 'completed' || actual.novel_content) return 'completed'
+  if (actual.status === 'completed') return 'completed'
   if (actual.novel_content) return 'draft'
   return 'pending'
 }
@@ -1608,6 +1713,14 @@ function prevPage() {
 
 function nextPage() {
   if (currentPage.value < totalPages.value) currentPage.value++
+}
+
+function prevPlannedPage() {
+  if (plannedCurrentPage.value > 1) plannedCurrentPage.value--
+}
+
+function nextPlannedPage() {
+  if (plannedCurrentPage.value < plannedTotalPages.value) plannedCurrentPage.value++
 }
 
 function handleChapterJump() {
@@ -3496,6 +3609,159 @@ function deleteCurrentChapter() {
     justify-content: space-between;
     margin: 0 0 14rpx;
     &--framework { margin-top: 32rpx; }
+  }
+
+  &__section-link {
+    display: flex;
+    align-items: center;
+    gap: 2rpx;
+    flex-shrink: 0;
+    font-size: 22rpx;
+    font-weight: 600;
+    color: #2563eb;
+    &:active { opacity: 0.65; }
+  }
+
+  &__chapter-plan {
+    overflow: hidden;
+    margin-bottom: 28rpx;
+    border: 1rpx solid #e2e8f0;
+    border-radius: 8rpx;
+    background: #ffffff;
+  }
+
+  &__chapter-plan-summary {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 14rpx 18rpx;
+    border-bottom: 1rpx solid #e2e8f0;
+    background: #f8fafc;
+    font-size: 20rpx;
+    color: #64748b;
+  }
+
+  &__chapter-plan-item {
+    display: flex;
+    align-items: center;
+    gap: 16rpx;
+    min-height: 112rpx;
+    padding: 16rpx 18rpx;
+    border-bottom: 1rpx solid #e2e8f0;
+  }
+
+  &__chapter-plan-copy {
+    flex: 1;
+    min-width: 0;
+  }
+
+  &__chapter-plan-title-row {
+    display: flex;
+    align-items: center;
+    gap: 10rpx;
+    min-width: 0;
+  }
+
+  &__chapter-plan-num {
+    flex-shrink: 0;
+    font-size: 20rpx;
+    color: #64748b;
+  }
+
+  &__chapter-plan-title {
+    overflow: hidden;
+    flex: 1;
+    font-size: 24rpx;
+    font-weight: 600;
+    color: #0f172a;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  &__chapter-plan-desc {
+    display: -webkit-box;
+    overflow: hidden;
+    margin-top: 8rpx;
+    font-size: 20rpx;
+    line-height: 1.45;
+    color: #64748b;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+  }
+
+  &__chapter-plan-action {
+    min-width: 132rpx;
+    height: 58rpx;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6rpx;
+    flex-shrink: 0;
+    padding: 0 14rpx;
+    border-radius: 8rpx;
+    background: #2563eb;
+    font-size: 21rpx;
+    font-weight: 600;
+    color: #ffffff;
+    &:active { background: #1d4ed8; }
+    &--open {
+      border: 1rpx solid #bfdbfe;
+      background: #eff6ff;
+      color: #2563eb;
+      &:active { background: #dbeafe; }
+    }
+    &--loading {
+      pointer-events: none;
+      opacity: 0.7;
+    }
+    &--disabled {
+      pointer-events: none;
+      opacity: 0.4;
+    }
+  }
+
+  &__chapter-plan-pagination {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 14rpx 18rpx;
+    background: #f8fafc;
+  }
+
+  &__chapter-plan-page {
+    min-width: 112rpx;
+    height: 48rpx;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 2rpx;
+    font-size: 21rpx;
+    color: #334155;
+    &--disabled {
+      pointer-events: none;
+      opacity: 0.35;
+    }
+  }
+
+  &__chapter-plan-page-info {
+    font-size: 20rpx;
+    color: #64748b;
+  }
+
+  &__chapter-plan-empty {
+    display: flex;
+    align-items: center;
+    gap: 16rpx;
+    padding: 22rpx 18rpx;
+  }
+
+  &__chapter-plan-empty-copy {
+    flex: 1;
+    min-width: 0;
+  }
+
+  &__chapter-plan-empty-copy &__shortcut-title {
+    margin-top: 0;
   }
 
   &__shortcut-grid {
