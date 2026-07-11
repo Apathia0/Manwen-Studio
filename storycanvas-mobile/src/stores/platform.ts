@@ -23,8 +23,19 @@ export const usePlatformStore = defineStore('platform', () => {
   const announcementDismissed = ref(false)
   const loading = ref(false)
 
+  function sanitizeAnnouncementContent(content: string): string {
+    return content
+      .replace(/<(script|style|iframe)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, '')
+      .replace(/\s+on[a-z]+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, '')
+      .replace(/\s+style\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, '')
+      .replace(/\s+(?:href|src)\s*=\s*(["'])\s*javascript:[\s\S]*?\1/gi, '')
+  }
+
   function normalizeAnnouncement(data?: PlatformAnnouncement | null): PlatformAnnouncement | null {
-    return data?.enabled && data.content?.trim() ? data : null
+    if (!data?.enabled || !data.content?.trim()) return null
+
+    const content = sanitizeAnnouncementContent(data.content).trim()
+    return content ? { ...data, content } : null
   }
 
   async function fetchSettings() {

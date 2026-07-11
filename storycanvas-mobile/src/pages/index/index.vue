@@ -56,6 +56,7 @@
       :visible="showAnnouncement"
       :title="platformStore.announcement?.title || '平台公告'"
       :show-cancel="false"
+      show-close
       confirm-text="我知道了"
       @update:visible="handleAnnouncementVisibility"
     >
@@ -112,8 +113,7 @@ const storyActions = [
 
 onMounted(async () => {
   void storyStore.fetchStories().catch(() => {})
-  await platformStore.fetchAnnouncement()
-  showAnnouncement.value = !!platformStore.announcement && !platformStore.announcementDismissed
+  void platformStore.fetchAnnouncement()
 })
 
 async function handleRefresh() {
@@ -287,6 +287,7 @@ function goImport() {
 
   &__announcement-content {
     height: 50vh;
+    max-height: 720rpx;
     font-size: $lv-font-sm;
     line-height: 1.7;
     color: $lv-text-primary;

@@ -4,6 +4,7 @@
     <view class="lv-modal__container" @tap.stop>
       <view v-if="title" class="lv-modal__header">
         <text class="lv-modal__title">{{ title }}</text>
+        <button v-if="showClose" class="lv-modal__close" aria-label="关闭" @tap="handleCancel">×</button>
       </view>
       <view class="lv-modal__body">
         <slot />
@@ -26,6 +27,7 @@ interface ModalProps {
   title?: string
   showFooter?: boolean
   showCancel?: boolean
+  showClose?: boolean
   confirmText?: string
   cancelText?: string
   maskClosable?: boolean
@@ -36,6 +38,7 @@ const props = withDefaults(defineProps<ModalProps>(), {
   title: '',
   showFooter: true,
   showCancel: true,
+  showClose: false,
   confirmText: '确定',
   cancelText: '取消',
   maskClosable: true
@@ -76,13 +79,18 @@ function handleCancel() {
 
   &__mask {
     @include absolute-fill;
+    z-index: 0;
     background: rgba(0, 0, 0, 0.5);
   }
 
   &__container {
     position: relative;
+    z-index: 1;
     width: 640rpx;
     max-height: 80vh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
     background: $lv-surface-solid;
     border-radius: $lv-radius-lg;
     box-shadow: $lv-shadow-xl;
@@ -90,6 +98,8 @@ function handleCancel() {
   }
 
   &__header {
+    position: relative;
+    flex-shrink: 0;
     padding: 32rpx 32rpx 0;
     text-align: center;
   }
@@ -100,11 +110,32 @@ function handleCancel() {
     color: $lv-text-primary;
   }
 
+  &__close {
+    position: absolute;
+    top: 12rpx;
+    right: 12rpx;
+    width: 64rpx;
+    height: 64rpx;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: $lv-text-secondary;
+    font-size: 48rpx;
+    line-height: 64rpx;
+
+    &::after {
+      border: 0;
+    }
+  }
+
   &__body {
+    min-height: 0;
+    overflow: hidden;
     padding: 32rpx;
   }
 
   &__footer {
+    flex-shrink: 0;
     display: flex;
     border-top: 1rpx solid $lv-border-light;
   }
