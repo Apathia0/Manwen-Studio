@@ -1079,6 +1079,11 @@ async def get_deconstruction_rhythm() -> dict:
 # ────────────────────────────────────────────────────────────
 
 
+def _sanitize_agent_generated_content(content: str) -> str:
+    """在 Agent 正文写入边界复用统一的小说正文清洗规则。"""
+    return _deepseek_service._sanitize_novel_content(content)
+
+
 @tool_registry.register(
     name="update_chapter_content",
     description="保存/更新章节正文。仅当用户已给出完整改写文本时使用。如果用户要求AI「写出」「生成」「创作」正文，请使用 generate_chapter_content 委托框架引擎生成。",
@@ -1101,12 +1106,21 @@ async def update_chapter_content(chapter_id: int, content: str) -> dict:
             return {"error": "章节不存在或无权访问"}
         if _current_pending_changes():
             _current_pending_changes().record_chapter_field(chapter, "novel_content")
-        chapter.novel_content = content
+        sanitized_content = _sanitize_agent_generated_content(content)
+        chapter.novel_content = sanitized_content
         if _current_pending_changes():
-            _current_pending_changes().update_new_value("chapter", chapter.id, "novel_content", content)
+            _current_pending_changes().update_new_value(
+                "chapter", chapter.id, "novel_content", sanitized_content
+            )
         await _refresh_agent_memory(chapter, db)
         db.commit()
-        logger.info("Agent tool=update_chapter_content story=%s chapter=%s len=%s", _current_story_id(), chapter_id, len(content or ""))
+        logger.info(
+            "Agent tool=update_chapter_content story=%s chapter=%s len=%s sanitized=%s",
+            _current_story_id(),
+            chapter_id,
+            len(sanitized_content or ""),
+            sanitized_content != content,
+        )
         return {"ok": True, "chapter_id": chapter_id}
     finally:
         db.close()
@@ -1406,11 +1420,20 @@ async def batch_update_chapters(chapters: list[dict]) -> dict:
                 return {"chapter_id": chapter_id, "error": "章节不存在或无权访问"}
             if _current_pending_changes():
                 _current_pending_changes().record_chapter_field(chapter, "novel_content")
-            chapter.novel_content = content
+            sanitized_content = _sanitize_agent_generated_content(content)
+            chapter.novel_content = sanitized_content
             if _current_pending_changes():
-                _current_pending_changes().update_new_value("chapter", chapter.id, "novel_content", content)
+                _current_pending_changes().update_new_value(
+                    "chapter", chapter.id, "novel_content", sanitized_content
+                )
             db.commit()
-            logger.info("Agent tool=batch_update_chapters story=%s chapter=%s len=%s", _current_story_id(), chapter_id, len(content or ""))
+            logger.info(
+                "Agent tool=batch_update_chapters story=%s chapter=%s len=%s sanitized=%s",
+                _current_story_id(),
+                chapter_id,
+                len(sanitized_content or ""),
+                sanitized_content != content,
+            )
             return {"chapter_id": chapter_id, "ok": True}
         except Exception as e:
             return {"chapter_id": chapter_id, "error": str(e)}
@@ -1530,12 +1553,20 @@ async def rewrite_text_segment(chapter_id: int, original: str, rewritten: str) -
             return {"error": "未在正文中找到完全匹配的原文，请确认文本是否一致", "found": False}
         if _current_pending_changes():
             _current_pending_changes().record_chapter_field(chapter, "novel_content")
-        new_content = current.replace(original, rewritten, 1)
+        sanitized_rewritten = _sanitize_agent_generated_content(rewritten)
+        new_content = current.replace(original, sanitized_rewritten, 1)
         chapter.novel_content = new_content
         if _current_pending_changes():
             _current_pending_changes().update_new_value("chapter", chapter.id, "novel_content", new_content)
         db.commit()
-        logger.info("Agent tool=rewrite_text_segment story=%s chapter=%s old=%s new=%s", _current_story_id(), chapter_id, len(current), len(new_content))
+        logger.info(
+            "Agent tool=rewrite_text_segment story=%s chapter=%s old=%s new=%s sanitized=%s",
+            _current_story_id(),
+            chapter_id,
+            len(current),
+            len(new_content),
+            sanitized_rewritten != rewritten,
+        )
         return {
             "ok": True,
             "chapter_id": chapter_id,

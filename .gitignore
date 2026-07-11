@@ -68,6 +68,7 @@ backend/tests/
 !backend/tests/
 backend/tests/*
 !backend/tests/test_chapter_generation_length_policy.py
+!backend/tests/test_agent_content_sanitization.py
 test_*.png
 test_*.txt
 generate_image.py
