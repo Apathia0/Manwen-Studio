@@ -2,7 +2,7 @@
   <view class="login-page">
     <view class="login-page__header">
       <lv-icon name="PenLine" :size="48" />
-      <text class="login-page__title">漫文工坊</text>
+      <text class="login-page__title">{{ siteName }}</text>
       <text class="login-page__subtitle">AI 创作 · 漫画生成</text>
     </view>
 
@@ -56,13 +56,16 @@
 </template>
 
 <script setup lang="ts">
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
 import { useAuthStore } from '@/stores/auth'
+import { usePlatformStore } from '@/stores/platform'
 import LvInput from '@/components/lv-input/lv-input.vue'
 import LvButton from '@/components/lv-button/lv-button.vue'
 import LvIcon from '@/components/lv-icon/lv-icon.vue'
 
 const authStore = useAuthStore()
+const platformStore = usePlatformStore()
+const siteName = computed(() => platformStore.settings?.site_name?.trim() || 'StoryCanvas')
 
 const email = ref('')
 const password = ref('')

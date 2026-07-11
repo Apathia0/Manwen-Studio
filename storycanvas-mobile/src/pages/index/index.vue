@@ -1,6 +1,6 @@
 <template>
   <view class="story-library">
-    <lv-navbar title="漫文工坊">
+    <lv-navbar :title="siteName">
       <template #right>
         <lv-badge :value="storyStore.list.length">
           <Bell :size="20" color="#0f172a" />
@@ -53,8 +53,9 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { computed, ref, onMounted } from 'vue'
 import { useStoriesStore } from '@/stores/stories'
+import { usePlatformStore } from '@/stores/platform'
 import type { Story } from '@/api/types'
 import { exportStory } from '@/utils/exportStory'
 import LvNavbar from '@/components/lv-navbar/lv-navbar.vue'
@@ -69,6 +70,8 @@ import StoryCard from '@/components/story-card/story-card.vue'
 import { Bell } from '@lucide/vue'
 
 const storyStore = useStoriesStore()
+const platformStore = usePlatformStore()
+const siteName = computed(() => platformStore.settings?.site_name?.trim() || 'StoryCanvas')
 
 const refreshing = ref(false)
 const showActionSheet = ref(false)
