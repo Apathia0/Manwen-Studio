@@ -79,6 +79,9 @@ def _validate_video_asset_storage_path(value: str | None) -> str:
         return validate_remote_media_url(raw)
 
     normalized = raw.replace("\\", "/")
+    # 跨平台拒绝 Windows 驱动器路径（CI 在 Linux 上运行，Path.is_absolute 不识别 C:/）
+    if re.match(r'^[A-Za-z]:/', normalized):
+        raise HTTPException(422, "视频素材路径不在受控媒体目录内")
     if normalized.startswith("/static/video/"):
         candidate = (_VIDEO_OUTPUTS_DIR / normalized[len("/static/video/"):]).resolve()
         root = _VIDEO_OUTPUTS_DIR.resolve()
