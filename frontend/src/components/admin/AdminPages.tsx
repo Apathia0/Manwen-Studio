@@ -1,39 +1,24 @@
 import type * as React from 'react';
 import { useEffect, useMemo, useState } from 'react';
 import {
-  adminGrantUserQuota,
   getAdminStoryChapters,
-  adminUpdateUserSubscription,
   checkAdminSystemUpdate,
-  createAdminPlan,
   createAdminUser,
-  deleteAdminPlan,
   deleteAdminUser,
   getAdminAnnouncement,
   getAdminAuditLogs,
-  getAdminFeatureCatalog,
-  getAdminPlanFeatures,
-  getAdminPlans,
   getAdminPlatformSettings,
-  getAdminQuotaRules,
   getAdminSystemUpdateStatus,
   getAdminSystemPrompts,
-  getAdminUserEntitlements,
   getAdminUserStories,
   getAdminUsers,
-  saveAdminPlanFeatures,
-  saveAdminQuotaRules,
+  grantAdminUserPoints,
   startAdminSystemUpdate,
   updateAdminAnnouncement,
-  updateAdminPlan,
   updateAdminPlatformSettings,
   updateAdminSystemPrompts,
   updateAdminUser,
   type AdminAuditLogItem,
-  type AdminFeatureCatalogItem,
-  type AdminFeatureItem,
-  type AdminPlan,
-  type AdminQuotaRule,
   type AdminReviewChapter,
   type AdminReviewStory,
   type AdminSystemPrompt,
@@ -196,347 +181,19 @@ function useBusyAction(onError: (message: string) => void) {
   return { busy, run };
 }
 
-function featureName(catalogMap: Record<string, AdminFeatureCatalogItem>, key: string) {
-  return catalogMap[key]?.name || key;
-}
-
-function featureDescription(catalogMap: Record<string, AdminFeatureCatalogItem>, key: string) {
-  return catalogMap[key]?.description || '';
-}
-
-function featureCategory(catalogMap: Record<string, AdminFeatureCatalogItem>, key: string) {
-  return catalogMap[key]?.category || '其他';
-}
-
-function usagePercent(used: number, limit: number) {
-  if (limit <= 0) return 0;
-  return Math.min(100, Math.max(0, Math.round((used / limit) * 100)));
-}
-
-export function AdminPlanManagementPage({ onError }: { onError: (message: string) => void }) {
-  const [plans, setPlans] = useState<AdminPlan[]>([]);
-  const [selectedPlanId, setSelectedPlanId] = useState<number | null>(null);
-  const [features, setFeatures] = useState<AdminFeatureItem[]>([]);
-  const [rules, setRules] = useState<AdminQuotaRule[]>([]);
-  const [catalog, setCatalog] = useState<AdminFeatureCatalogItem[]>([]);
-  const [draftPlan, setDraftPlan] = useState({
-    code: '',
-    name: '',
-    description: '',
-    monthly_price: '0',
-    yearly_price: '0',
-  });
-  const [planMeta, setPlanMeta] = useState({
-    name: '',
-    description: '',
-    monthly_price: '0',
-    yearly_price: '0',
-    is_visible: true,
-    is_recommended: false,
-  });
-  const { busy, run } = useBusyAction(onError);
-
-  const selectedPlan = useMemo(
-    () => plans.find((item) => item.id === selectedPlanId) || null,
-    [plans, selectedPlanId],
-  );
-  const catalogMap = useMemo(
-    () => Object.fromEntries(catalog.map((item) => [item.key, item])),
-    [catalog],
-  );
-  const groupedFeatures = useMemo(() => {
-    const groups = new Map<string, AdminFeatureItem[]>();
-    for (const item of features) {
-      const category = featureCategory(catalogMap, item.feature_key);
-      groups.set(category, [...(groups.get(category) || []), item]);
-    }
-    return [...groups.entries()];
-  }, [catalogMap, features]);
-
-  async function loadPlans(preferredPlanId?: number) {
-    const [planList, featureCatalog] = await Promise.all([getAdminPlans(), getAdminFeatureCatalog()]);
-    setPlans(planList);
-    setCatalog(featureCatalog);
-    const nextPlanId = preferredPlanId || selectedPlanId || planList[0]?.id || null;
-    setSelectedPlanId(nextPlanId);
-    if (!nextPlanId) return;
-    const [nextFeatures, nextRules] = await Promise.all([
-      getAdminPlanFeatures(nextPlanId),
-      getAdminQuotaRules(nextPlanId),
-    ]);
-    setFeatures(nextFeatures);
-    setRules(nextRules);
-    const currentPlan = planList.find((item) => item.id === nextPlanId);
-    if (currentPlan) {
-      setPlanMeta({
-        name: currentPlan.name,
-        description: currentPlan.description || '',
-        monthly_price: String(currentPlan.monthly_price ?? 0),
-        yearly_price: String(currentPlan.yearly_price ?? 0),
-        is_visible: currentPlan.is_visible,
-        is_recommended: currentPlan.is_recommended,
-      });
-    }
-  }
-
-  useEffect(() => {
-    void run(async () => {
-      await loadPlans();
-    });
-  }, []);
-
-  useEffect(() => {
-    if (!selectedPlan) return;
-    setPlanMeta({
-      name: selectedPlan.name,
-      description: selectedPlan.description || '',
-      monthly_price: String(selectedPlan.monthly_price ?? 0),
-      yearly_price: String(selectedPlan.yearly_price ?? 0),
-      is_visible: selectedPlan.is_visible,
-      is_recommended: selectedPlan.is_recommended,
-    });
-  }, [selectedPlan]);
-
-  return (
-    <div className="space-y-5">
-      <SectionCard title="套餐管理" description="维护套餐基础信息、功能额度和扣减规则。">
-        <div className="grid gap-4 xl:grid-cols-[280px_minmax(0,1fr)]">
-          <div className="space-y-3 rounded-3xl border border-[#d7e3f4] bg-[#f8fbff] p-4">
-            <div className="text-sm font-semibold text-slate-900">套餐列表</div>
-            <div className="space-y-2">
-              {plans.map((plan) => (
-                <button
-                  key={plan.id}
-                  onClick={() =>
-                    void run(async () => {
-                      await loadPlans(plan.id);
-                    })
-                  }
-                  className={cn(
-                    'w-full rounded-2xl border px-3 py-3 text-left transition',
-                    selectedPlanId === plan.id ? 'border-[#60a5fa] bg-white shadow-sm' : 'border-[#d7e3f4] bg-white/70 hover:bg-white',
-                  )}
-                >
-                  <div className="flex items-center justify-between gap-2">
-                    <div className="font-medium text-slate-900">{plan.name}</div>
-                    <span className="text-xs text-slate-500">¥{formatMoney(plan.monthly_price)}/月</span>
-                  </div>
-                  <div className="mt-1 text-xs text-slate-500">{plan.description || '暂无描述'}</div>
-                </button>
-              ))}
-            </div>
-
-            <div className="border-t border-[#d7e3f4] pt-3">
-              <div className="mb-2 text-sm font-semibold text-slate-900">新建套餐</div>
-              <div className="space-y-2">
-                <TextInput placeholder="套餐编码，例如 enterprise" value={draftPlan.code} onChange={(e) => setDraftPlan((prev) => ({ ...prev, code: e.target.value }))} />
-                <TextInput placeholder="套餐名称" value={draftPlan.name} onChange={(e) => setDraftPlan((prev) => ({ ...prev, name: e.target.value }))} />
-                <TextArea placeholder="套餐描述" rows={3} value={draftPlan.description} onChange={(e) => setDraftPlan((prev) => ({ ...prev, description: e.target.value }))} />
-                <div className="grid gap-2 sm:grid-cols-2">
-                  <TextInput type="number" step="0.01" min="0" placeholder="月费" value={draftPlan.monthly_price} onChange={(e) => setDraftPlan((prev) => ({ ...prev, monthly_price: e.target.value }))} />
-                  <TextInput type="number" step="0.01" min="0" placeholder="年费" value={draftPlan.yearly_price} onChange={(e) => setDraftPlan((prev) => ({ ...prev, yearly_price: e.target.value }))} />
-                </div>
-                <PrimaryButton
-                  disabled={busy}
-                  onClick={() =>
-                    void run(async () => {
-                      await createAdminPlan({
-                        code: draftPlan.code.trim(),
-                        name: draftPlan.name.trim(),
-                        description: draftPlan.description.trim(),
-                        monthly_price: Number(draftPlan.monthly_price || 0),
-                        yearly_price: Number(draftPlan.yearly_price || 0),
-                      });
-                      setDraftPlan({ code: '', name: '', description: '', monthly_price: '0', yearly_price: '0' });
-                      await loadPlans();
-                      toast.success('套餐创建成功');
-                    })
-                  }
-                >
-                  创建套餐
-                </PrimaryButton>
-              </div>
-            </div>
-          </div>
-
-          <div className="space-y-4">
-            <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-              <TextInput value={planMeta.name} onChange={(e) => setPlanMeta((prev) => ({ ...prev, name: e.target.value }))} placeholder="套餐名称" />
-              <TextInput type="number" step="0.01" min="0" value={planMeta.monthly_price} onChange={(e) => setPlanMeta((prev) => ({ ...prev, monthly_price: e.target.value }))} placeholder="月费" />
-              <TextInput type="number" step="0.01" min="0" value={planMeta.yearly_price} onChange={(e) => setPlanMeta((prev) => ({ ...prev, yearly_price: e.target.value }))} placeholder="年费" />
-              <div className="flex items-center gap-3 rounded-2xl border border-[#d7e3f4] bg-white px-3 py-2 text-sm text-slate-700">
-                <label className="flex items-center gap-2">
-                  <input type="checkbox" checked={planMeta.is_visible} onChange={(e) => setPlanMeta((prev) => ({ ...prev, is_visible: e.target.checked }))} />
-                  前台展示
-                </label>
-                <label className="flex items-center gap-2">
-                  <input type="checkbox" checked={planMeta.is_recommended} onChange={(e) => setPlanMeta((prev) => ({ ...prev, is_recommended: e.target.checked }))} />
-                  推荐套餐
-                </label>
-              </div>
-            </div>
-            <TextArea rows={3} value={planMeta.description} onChange={(e) => setPlanMeta((prev) => ({ ...prev, description: e.target.value }))} placeholder="套餐描述" />
-            <div className="flex flex-wrap gap-2">
-              <PrimaryButton
-                disabled={!selectedPlanId || busy}
-                onClick={() =>
-                  void run(async () => {
-                    if (!selectedPlanId) return;
-                    await updateAdminPlan(selectedPlanId, {
-                      name: planMeta.name,
-                      description: planMeta.description,
-                      monthly_price: Number(planMeta.monthly_price || 0),
-                      yearly_price: Number(planMeta.yearly_price || 0),
-                      is_visible: planMeta.is_visible,
-                      is_recommended: planMeta.is_recommended,
-                    });
-                    await loadPlans(selectedPlanId);
-                    toast.success('套餐信息已保存');
-                  })
-                }
-              >
-                保存套餐信息
-              </PrimaryButton>
-              <SecondaryButton
-                disabled={!selectedPlanId || busy}
-                onClick={() =>
-                  void run(async () => {
-                    if (!selectedPlanId) return;
-                    await deleteAdminPlan(selectedPlanId);
-                    await loadPlans();
-                    toast.success('套餐已删除');
-                  })
-                }
-              >
-                删除套餐
-              </SecondaryButton>
-            </div>
-
-            {groupedFeatures.map(([groupName, items]) => (
-              <SectionCard key={groupName} title={`${groupName}配置`} description="支持调整套餐功能值与扣减规则。">
-                <div className="overflow-hidden rounded-2xl border border-[#e5edf8]">
-                  <table className="w-full text-left text-sm">
-                    <thead className="bg-[#f8fbff] text-slate-500">
-                      <tr>
-                        <th className="px-3 py-3 font-medium">功能项</th>
-                        <th className="px-3 py-3 font-medium">套餐值</th>
-                        <th className="px-3 py-3 font-medium">重置周期</th>
-                        <th className="px-3 py-3 font-medium">扣减时机</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {items.map((item) => {
-                        const rule = rules.find((entry) => entry.feature_key === item.feature_key);
-                        return (
-                          <tr key={item.feature_key} className="border-t border-[#e5edf8] align-top">
-                            <td className="px-3 py-3">
-                              <div className="font-medium text-slate-900">{featureName(catalogMap, item.feature_key)}</div>
-                              <div className="mt-1 text-xs text-slate-500">{featureDescription(catalogMap, item.feature_key)}</div>
-                            </td>
-                            <td className="px-3 py-3">
-                              {catalogMap[item.feature_key]?.value_type === 'boolean' ? (
-                                <Select
-                                  value={String(Boolean(item.value))}
-                                  onChange={(e) =>
-                                    setFeatures((prev) => prev.map((entry) => (
-                                      entry.feature_key === item.feature_key ? { ...entry, value: e.target.value === 'true' } : entry
-                                    )))
-                                  }
-                                >
-                                  <option value="true">开启</option>
-                                  <option value="false">关闭</option>
-                                </Select>
-                              ) : (
-                                <TextInput
-                                  value={String(item.value ?? '')}
-                                  onChange={(e) =>
-                                    setFeatures((prev) => prev.map((entry) => (
-                                      entry.feature_key === item.feature_key ? { ...entry, value: Number.isNaN(Number(e.target.value)) ? e.target.value : Number(e.target.value) } : entry
-                                    )))
-                                  }
-                                />
-                              )}
-                            </td>
-                            <td className="px-3 py-3">
-                              <Select
-                                value={rule?.reset_period || 'monthly'}
-                                onChange={(e) =>
-                                  setRules((prev) => prev.map((entry) => (
-                                    entry.feature_key === item.feature_key ? { ...entry, reset_period: e.target.value } : entry
-                                  )))
-                                }
-                              >
-                                <option value="monthly">按月重置</option>
-                                <option value="yearly">按年重置</option>
-                                <option value="never">不重置</option>
-                              </Select>
-                            </td>
-                            <td className="px-3 py-3">
-                              <Select
-                                value={rule?.deduct_mode || 'on_success'}
-                                onChange={(e) =>
-                                  setRules((prev) => prev.map((entry) => (
-                                    entry.feature_key === item.feature_key ? { ...entry, deduct_mode: e.target.value } : entry
-                                  )))
-                                }
-                              >
-                                <option value="on_success">成功后扣减</option>
-                                <option value="on_submit">提交即扣减</option>
-                                <option value="manual">手动扣减</option>
-                              </Select>
-                            </td>
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
-                </div>
-              </SectionCard>
-            ))}
-
-            <div className="flex gap-2">
-              <PrimaryButton
-                disabled={!selectedPlanId || busy}
-                onClick={() =>
-                  void run(async () => {
-                    if (!selectedPlanId) return;
-                    await saveAdminPlanFeatures(selectedPlanId, features);
-                    await saveAdminQuotaRules(selectedPlanId, rules);
-                    await loadPlans(selectedPlanId);
-                    toast.success('套餐能力已保存');
-                  })
-                }
-              >
-                保存套餐能力
-              </PrimaryButton>
-            </div>
-          </div>
-        </div>
-      </SectionCard>
-    </div>
-  );
+export function AdminPlanManagementPage() {
+  return <div className="p-6 text-sm text-slate-500">套餐管理功能已下线</div>;
 }
 
 export function AdminUserManagementPage({ onError }: { onError: (message: string) => void }) {
   const [users, setUsers] = useState<AdminUserItem[]>([]);
-  const [plans, setPlans] = useState<AdminPlan[]>([]);
-  const [catalog, setCatalog] = useState<AdminFeatureCatalogItem[]>([]);
   const [query, setQuery] = useState('');
   const [selectedUserId, setSelectedUserId] = useState<number | null>(null);
-  const [entitlementPreview, setEntitlementPreview] = useState<any>(null);
-  const [grantFeatureKey, setGrantFeatureKey] = useState('manga.image.generate.monthly_limit');
-  const [grantAmount, setGrantAmount] = useState('10');
-  const [selectedPlanId, setSelectedPlanId] = useState<number | null>(null);
   const [reviewStories, setReviewStories] = useState<AdminReviewStory[]>([]);
   const [selectedReviewStoryId, setSelectedReviewStoryId] = useState<number | null>(null);
   const [reviewChapters, setReviewChapters] = useState<AdminReviewChapter[]>([]);
   const [selectedReviewChapterId, setSelectedReviewChapterId] = useState<number | null>(null);
-  const [grantFeedback, setGrantFeedback] = useState<null | {
-    feature_key: string;
-    granted_amount: number;
-    before_granted: number;
-    after_granted: number;
-  }>(null);
+  const [pointsGrant, setPointsGrant] = useState({ amount: '', note: '', requestId: '' });
   const [newUser, setNewUser] = useState({
     name: '',
     email: '',
@@ -547,22 +204,17 @@ export function AdminUserManagementPage({ onError }: { onError: (message: string
   });
   const { busy, run } = useBusyAction(onError);
 
-  const catalogMap = useMemo(
-    () => Object.fromEntries(catalog.map((item) => [item.key, item])),
-    [catalog],
-  );
   const filteredUsers = useMemo(() => {
     const keyword = query.trim().toLowerCase();
     if (!keyword) return users;
     return users.filter((item) =>
-      [item.name, item.email, item.plan_name, item.role, item.status].some((value) => value.toLowerCase().includes(keyword)),
+      [item.name, item.email, item.role, item.status, String(item.points_available)].some((value) => value.toLowerCase().includes(keyword)),
     );
   }, [query, users]);
   const selectedUser = useMemo(
     () => users.find((item) => item.id === selectedUserId) || null,
     [selectedUserId, users],
   );
-  const usageItems = useMemo(() => (entitlementPreview?.usage || []) as Array<any>, [entitlementPreview]);
   const selectedReviewStory = useMemo(
     () => reviewStories.find((item) => item.id === selectedReviewStoryId) || null,
     [reviewStories, selectedReviewStoryId],
@@ -573,22 +225,9 @@ export function AdminUserManagementPage({ onError }: { onError: (message: string
   );
 
   async function loadData() {
-    const [userList, planList, featureCatalog] = await Promise.all([
-      getAdminUsers(),
-      getAdminPlans(),
-      getAdminFeatureCatalog(),
-    ]);
+    const userList = await getAdminUsers();
     setUsers(userList);
-    setPlans(planList);
-    setCatalog(featureCatalog);
-    if (!selectedPlanId && planList[0]) setSelectedPlanId(planList[0].id);
     if (!selectedUserId && userList[0]) setSelectedUserId(userList[0].id);
-  }
-
-  async function loadEntitlements(userId: number) {
-    const data = await getAdminUserEntitlements(userId);
-    setEntitlementPreview(data);
-    setSelectedPlanId(data.plan?.id || null);
   }
 
   async function loadReviewStories(userId: number) {
@@ -621,24 +260,22 @@ export function AdminUserManagementPage({ onError }: { onError: (message: string
   useEffect(() => {
     if (!selectedUserId) return;
     void run(async () => {
-      await loadEntitlements(selectedUserId);
       await loadReviewStories(selectedUserId);
     });
   }, [selectedUserId]);
 
   return (
     <div className="space-y-5">
-      <SectionCard title="用户管理" description="支持用户增删改查、套餐切换、额度补发与账号状态控制。">
+      <SectionCard title="用户管理" description="支持用户增删改查与账号状态控制。">
         <div className="grid gap-4 xl:grid-cols-[340px_minmax(0,1fr)]">
           <div className="space-y-3 rounded-3xl border border-[#d7e3f4] bg-[#f8fbff] p-4">
-            <TextInput placeholder="搜索姓名、邮箱、套餐或状态" value={query} onChange={(e) => setQuery(e.target.value)} />
+            <TextInput placeholder="搜索姓名、邮箱、积分或状态" value={query} onChange={(e) => setQuery(e.target.value)} />
             <div className="max-h-[460px] space-y-2 overflow-y-auto pr-1">
               {filteredUsers.map((user) => (
                 <button
                   key={user.id}
                   onClick={() => {
                     setSelectedUserId(user.id);
-                    setGrantFeedback(null);
                   }}
                   className={cn(
                     'w-full rounded-2xl border px-3 py-3 text-left transition',
@@ -651,7 +288,7 @@ export function AdminUserManagementPage({ onError }: { onError: (message: string
                   </div>
                   <div className="mt-1 text-xs text-slate-500">{user.email}</div>
                   <div className="mt-2 flex flex-wrap gap-2 text-xs">
-                    <span className="rounded-full bg-[#eff6ff] px-2 py-1 text-[#1d4ed8]">{user.plan_name}</span>
+                    <span className="rounded-full bg-[#eff6ff] px-2 py-1 text-[#1d4ed8]">{user.points_available} 积分</span>
                     <span className="rounded-full bg-[#f8fafc] px-2 py-1 text-slate-600">{user.role === 'admin' ? '管理员' : '用户'}</span>
                     <span className={cn('rounded-full px-2 py-1', user.status === 'active' ? 'bg-emerald-50 text-emerald-700' : 'bg-slate-100 text-slate-600')}>
                       {user.status === 'active' ? '启用中' : '已停用'}
@@ -688,7 +325,7 @@ export function AdminUserManagementPage({ onError }: { onError: (message: string
                     checked={newUser.allow_api_url_override}
                     onChange={(e) => setNewUser((prev) => ({ ...prev, allow_api_url_override: e.target.checked }))}
                   />
-                  允许自定义 URL/模型
+                  允许自定义 URL/模型（受平台总开关控制）
                 </label>
               </div>
               <div className="mt-3">
@@ -745,7 +382,7 @@ export function AdminUserManagementPage({ onError }: { onError: (message: string
                         checked={Boolean(selectedUser.allow_api_url_override)}
                         onChange={(e) => setUsers((prev) => prev.map((item) => item.id === selectedUser.id ? { ...item, allow_api_url_override: e.target.checked } : item))}
                       />
-                      允许自定义 URL/模型
+                      允许自定义 URL/模型（受平台总开关控制）
                     </label>
                   </div>
                   <div className="mt-3 flex flex-wrap gap-2">
@@ -764,7 +401,6 @@ export function AdminUserManagementPage({ onError }: { onError: (message: string
                             allow_api_url_override: Boolean(current.allow_api_url_override),
                           });
                           await loadData();
-                          await loadEntitlements(selectedUser.id);
                           toast.success('账号信息已保存');
                         })
                       }
@@ -776,9 +412,7 @@ export function AdminUserManagementPage({ onError }: { onError: (message: string
                       onClick={() =>
                         void run(async () => {
                           await deleteAdminUser(selectedUser.id);
-                          setEntitlementPreview(null);
                           setSelectedUserId(null);
-                          setGrantFeedback(null);
                           await loadData();
                           toast.success('账号已停用');
                         })
@@ -789,110 +423,56 @@ export function AdminUserManagementPage({ onError }: { onError: (message: string
                   </div>
                 </SectionCard>
 
-                <div className="grid gap-4 xl:grid-cols-2">
-                  <SectionCard title="套餐调整" description="立即切换用户当前套餐，适合运营补单、人工升降级和测试场景。">
-                    <div className="flex flex-wrap gap-2">
-                      {plans.map((plan) => (
-                        <button
-                          key={plan.id}
-                          onClick={() => setSelectedPlanId(plan.id)}
-                          className={cn(
-                            'rounded-2xl border px-3 py-2 text-sm',
-                            selectedPlanId === plan.id ? 'border-[#60a5fa] bg-[#eff6ff] text-[#1d4ed8]' : 'border-[#d7e3f4] bg-white text-slate-700',
-                          )}
-                        >
-                          {plan.name}
-                        </button>
-                      ))}
+                <SectionCard title="积分管理" description="添加操作会写入积分流水和管理员审计日志。">
+                  <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+                    <div className="rounded-2xl border border-[#d7e3f4] bg-[#f8fbff] px-4 py-3">
+                      <div className="text-xs text-slate-500">可用积分</div>
+                      <div className="mt-1 text-xl font-semibold text-slate-900">{selectedUser.points_available}</div>
                     </div>
-                    <div className="mt-3">
-                      <PrimaryButton
-                        disabled={!selectedPlanId || busy}
-                        onClick={() =>
-                          void run(async () => {
-                            if (!selectedPlanId) return;
-                            await adminUpdateUserSubscription(selectedUser.id, selectedPlanId);
-                            await loadData();
-                            await loadEntitlements(selectedUser.id);
-                            toast.success('套餐已切换');
-                          })
-                        }
-                      >
-                        应用选中套餐
-                      </PrimaryButton>
+                    <div className="rounded-2xl border border-[#d7e3f4] bg-[#f8fbff] px-4 py-3">
+                      <div className="text-xs text-slate-500">预扣积分</div>
+                      <div className="mt-1 text-xl font-semibold text-slate-900">{selectedUser.points_reserved}</div>
                     </div>
-                  </SectionCard>
-
-                  <SectionCard title="额度补发" description="按本月补发额度累计值管理，可直接看到补发前后变化。">
-                    <div className="grid gap-3 md:grid-cols-[1fr_120px_auto]">
-                      <Select value={grantFeatureKey} onChange={(e) => setGrantFeatureKey(e.target.value)}>
-                        {catalog.map((item) => (
-                          <option key={item.key} value={item.key}>
-                            {item.name}
-                          </option>
-                        ))}
-                      </Select>
-                      <TextInput value={grantAmount} onChange={(e) => setGrantAmount(e.target.value)} placeholder="补发数量" />
-                      <PrimaryButton
-                        disabled={busy}
-                        onClick={() =>
-                          void run(async () => {
-                            const result = await adminGrantUserQuota(selectedUser.id, grantFeatureKey, Number(grantAmount || 0));
-                            setGrantFeedback(result);
-                            setEntitlementPreview((prev: any) => prev ? { ...prev, usage: result.usage } : prev);
-                            await loadEntitlements(selectedUser.id);
-                            toast.success('额度已补发');
-                          })
-                        }
-                      >
-                        发放额度
-                      </PrimaryButton>
-                    </div>
-                    <div className="mt-2 text-xs text-slate-500">{featureDescription(catalogMap, grantFeatureKey)}</div>
-                    {grantFeedback ? (
-                      <div className="mt-3 rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800">
-                        已为当前用户补发 {grantFeedback.granted_amount}，累计补发从 {grantFeedback.before_granted} 提升到 {grantFeedback.after_granted}。
-                      </div>
-                    ) : null}
-                  </SectionCard>
-                </div>
-
-                <SectionCard title="额度进度" description="展示当前套餐总量、已用量、补发量与剩余额度，便于客服快速定位。">
-                  <div className="grid gap-4 xl:grid-cols-[1.35fr_1fr]">
-                    <div className="space-y-3">
-                      {usageItems.map((item) => {
-                        const percent = usagePercent(Number(item.used || 0), Number(item.limit || 0));
-                        return (
-                          <div key={item.feature_key} className="rounded-2xl border border-[#e5edf8] bg-white p-4">
-                            <div className="flex flex-wrap items-start justify-between gap-3">
-                              <div>
-                                <div className="font-medium text-slate-900">{featureName(catalogMap, item.feature_key)}</div>
-                                <div className="mt-1 text-xs text-slate-500">{item.feature_key}</div>
-                              </div>
-                              <div className="text-right text-sm text-slate-600">
-                                <div>剩余 {item.remaining}</div>
-                                <div className="text-xs text-slate-500">已用 {item.used} / 总量 {item.limit}</div>
-                              </div>
-                            </div>
-                            <div className="mt-3 h-2 overflow-hidden rounded-full bg-[#e8eef8]">
-                              <div className="h-full rounded-full bg-[linear-gradient(90deg,_#2563eb_0%,_#60a5fa_100%)]" style={{ width: `${percent}%` }} />
-                            </div>
-                            <div className="mt-3 grid gap-2 text-xs text-slate-600 sm:grid-cols-4">
-                              <div className="rounded-xl bg-[#f8fbff] px-3 py-2">套餐基础量：{item.base_limit ?? item.limit}</div>
-                              <div className="rounded-xl bg-[#f8fbff] px-3 py-2">已补发：{item.granted ?? 0}</div>
-                              <div className="rounded-xl bg-[#f8fbff] px-3 py-2">本月已用：{item.used}</div>
-                              <div className="rounded-xl bg-[#f8fbff] px-3 py-2">剩余额度：{item.remaining}</div>
-                            </div>
-                          </div>
-                        );
-                      })}
-                    </div>
-                    <div className="rounded-2xl border border-[#e5edf8] bg-[#f8fbff] p-4">
-                      <div className="text-sm font-semibold text-slate-900">用户权益快照</div>
-                      <pre className="mt-3 max-h-[420px] overflow-auto rounded-2xl bg-white p-3 text-xs text-slate-700">
-                        {JSON.stringify(entitlementPreview?.entitlements || {}, null, 2)}
-                      </pre>
-                    </div>
+                    <TextInput
+                      type="number"
+                      min="0.0001"
+                      step="0.0001"
+                      placeholder="添加积分数量"
+                      value={pointsGrant.amount}
+                      onChange={(event) => setPointsGrant((current) => ({ ...current, amount: event.target.value }))}
+                    />
+                    <TextInput
+                      placeholder="添加原因"
+                      value={pointsGrant.note}
+                      onChange={(event) => setPointsGrant((current) => ({ ...current, note: event.target.value }))}
+                    />
+                  </div>
+                  <div className="mt-3">
+                    <PrimaryButton
+                      disabled={busy || !(Number(pointsGrant.amount) > 0)}
+                      onClick={() =>
+                        void run(async () => {
+                          const amount = Number(pointsGrant.amount);
+                          if (!Number.isFinite(amount) || amount <= 0) {
+                            throw new Error('积分数量必须大于 0');
+                          }
+                          const requestId = pointsGrant.requestId || crypto.randomUUID();
+                          if (!pointsGrant.requestId) {
+                            setPointsGrant((current) => ({ ...current, requestId }));
+                          }
+                          await grantAdminUserPoints(selectedUser.id, {
+                            amount,
+                            note: pointsGrant.note.trim(),
+                            request_id: requestId,
+                          });
+                          setPointsGrant({ amount: '', note: '', requestId: '' });
+                          await loadData();
+                          toast.success(`已为 ${selectedUser.name} 添加 ${amount} 积分`);
+                        })
+                      }
+                    >
+                      添加积分
+                    </PrimaryButton>
                   </div>
                 </SectionCard>
 
@@ -1096,10 +676,9 @@ const PRICING_ITEMS = [
 
 const PLATFORM_SETTINGS_TABS = [
   { key: 'basic', label: '基础信息' },
-  { key: 'api', label: 'AI API 配置' },
+  { key: 'storage', label: '存储配置' },
   { key: 'auth-email', label: '认证与邮箱' },
   { key: 'payment', label: '支付配置' },
-  { key: 'pricing', label: '配额定价' },
 ] as const;
 
 export function AdminPlatformSettingsPage({
@@ -1131,7 +710,7 @@ export function AdminPlatformSettingsPage({
 
   return (
     <div className="space-y-5">
-      <div className="flex gap-1 rounded-2xl border border-[#e5edf8] bg-[#f8fbff] p-1">
+      <div className="flex flex-wrap gap-1 rounded-2xl border border-[#e5edf8] bg-[#f8fbff] p-1">
         {PLATFORM_SETTINGS_TABS.map((tab) => (
           <button
             key={tab.key}
@@ -1225,82 +804,66 @@ export function AdminPlatformSettingsPage({
         </SectionCard>
       )}
 
-      {activeTab === 'api' && (
-        <SectionCard title="AI API 配置" description="平台保存的配置会在用户实际生成内容时自动生效。">
-          <div className="grid gap-4 xl:grid-cols-2">
-            <div className="rounded-2xl border border-[#e5edf8] bg-[#f8fbff] p-4">
-              <div className="mb-3 text-sm font-semibold text-slate-900">文本模型服务</div>
-              <div className="space-y-3">
-                <TextInput value={settings.api.deepseek_base_url} onChange={(e) => setSettings((prev) => prev ? { ...prev, api: { ...prev.api, deepseek_base_url: e.target.value } } : prev)} placeholder="DeepSeek Base URL" />
-                <TextInput value={settings.api.deepseek_model} onChange={(e) => setSettings((prev) => prev ? { ...prev, api: { ...prev.api, deepseek_model: e.target.value } } : prev)} placeholder="DeepSeek 模型名称" />
-                <TextInput type="password" value={settings.api.deepseek_api_key} onChange={(e) => setSettings((prev) => prev ? { ...prev, api: { ...prev.api, deepseek_api_key: e.target.value } } : prev)} placeholder="DeepSeek API Key" />
-              </div>
-            </div>
-            <div className="rounded-2xl border border-[#e5edf8] bg-[#f8fbff] p-4">
-              <div className="mb-3 text-sm font-semibold text-slate-900">图片模型服务</div>
-              <div className="space-y-3">
-                <TextInput value={settings.api.image_base_url} onChange={(e) => setSettings((prev) => prev ? { ...prev, api: { ...prev.api, image_base_url: e.target.value } } : prev)} placeholder="图片服务 Base URL" />
-                <TextInput value={settings.api.image_model} onChange={(e) => setSettings((prev) => prev ? { ...prev, api: { ...prev.api, image_model: e.target.value } } : prev)} placeholder="图片模型名称" />
-                <TextInput type="password" value={settings.api.image_api_key} onChange={(e) => setSettings((prev) => prev ? { ...prev, api: { ...prev.api, image_api_key: e.target.value } } : prev)} placeholder="图片 API Key" />
-                <div className="grid gap-3 md:grid-cols-2">
-                  <TextInput value={settings.api.image_size || ''} onChange={(e) => setSettings((prev) => prev ? { ...prev, api: { ...prev.api, image_size: e.target.value } } : prev)} placeholder="默认尺寸，如 1024x1024；留空不覆盖" />
-                  <TextInput value={settings.api.image_quality || ''} onChange={(e) => setSettings((prev) => prev ? { ...prev, api: { ...prev.api, image_quality: e.target.value } } : prev)} placeholder="quality，如 auto / high / medium / low" />
-                  <TextInput value={settings.api.image_background || ''} onChange={(e) => setSettings((prev) => prev ? { ...prev, api: { ...prev.api, image_background: e.target.value } } : prev)} placeholder="background，如 auto / transparent / opaque" />
-                  <TextInput value={settings.api.image_moderation || ''} onChange={(e) => setSettings((prev) => prev ? { ...prev, api: { ...prev.api, image_moderation: e.target.value } } : prev)} placeholder="moderation，如 auto / low" />
-                  <TextInput value={settings.api.image_output_format || ''} onChange={(e) => setSettings((prev) => prev ? { ...prev, api: { ...prev.api, image_output_format: e.target.value } } : prev)} placeholder="output_format，如 png / jpeg / webp" />
-                  <TextInput value={settings.api.image_output_compression || ''} onChange={(e) => setSettings((prev) => prev ? { ...prev, api: { ...prev.api, image_output_compression: e.target.value } } : prev)} placeholder="output_compression，0-100" />
-                  <TextInput value={settings.api.image_input_fidelity || ''} onChange={(e) => setSettings((prev) => prev ? { ...prev, api: { ...prev.api, image_input_fidelity: e.target.value } } : prev)} placeholder="edits input_fidelity，如 high / low" />
-                </div>
-              </div>
-            </div>
-            <div className="rounded-2xl border border-[#e5edf8] bg-[#f8fbff] p-4">
-              <div className="mb-3 text-sm font-semibold text-slate-900">视频模型服务</div>
-              <div className="space-y-3">
-                <TextInput value={settings.api.video_base_url} onChange={(e) => setSettings((prev) => prev ? { ...prev, api: { ...prev.api, video_base_url: e.target.value } } : prev)} placeholder="视频服务 Base URL" />
-                <TextInput value={settings.api.video_model} onChange={(e) => setSettings((prev) => prev ? { ...prev, api: { ...prev.api, video_model: e.target.value } } : prev)} placeholder="视频模型名称" />
-                <TextInput type="password" value={settings.api.video_api_key} onChange={(e) => setSettings((prev) => prev ? { ...prev, api: { ...prev.api, video_api_key: e.target.value } } : prev)} placeholder="视频 API Key" />
-              </div>
-            </div>
-            <div className="rounded-2xl border border-[#e5edf8] bg-[#f8fbff] p-4">
-              <div className="mb-3 text-sm font-semibold text-slate-900">云存储 OSS</div>
-              <div className="space-y-3">
-                <label className="flex items-center gap-2 text-sm text-slate-700">
-                  <input
-                    type="checkbox"
-                    checked={settings.api.oss_enabled ?? false}
-                    onChange={(e) => setSettings((prev) => prev ? { ...prev, api: { ...prev.api, oss_enabled: e.target.checked } } : prev)}
-                  />
-                  启用 OSS 云存储
-                </label>
-                <TextInput value={settings.api.oss_access_key_id ?? ''} onChange={(e) => setSettings((prev) => prev ? { ...prev, api: { ...prev.api, oss_access_key_id: e.target.value } } : prev)} placeholder="Access Key ID" />
-                <TextInput type="password" value={settings.api.oss_access_key_secret ?? ''} onChange={(e) => setSettings((prev) => prev ? { ...prev, api: { ...prev.api, oss_access_key_secret: e.target.value } } : prev)} placeholder="Access Key Secret" />
-                <TextInput value={settings.api.oss_endpoint ?? ''} onChange={(e) => setSettings((prev) => prev ? { ...prev, api: { ...prev.api, oss_endpoint: e.target.value } } : prev)} placeholder="Endpoint (如 oss-cn-hangzhou.aliyuncs.com)" />
-                <TextInput value={settings.api.oss_bucket ?? ''} onChange={(e) => setSettings((prev) => prev ? { ...prev, api: { ...prev.api, oss_bucket: e.target.value } } : prev)} placeholder="Bucket 名称" />
-                <TextInput value={settings.api.oss_public_url_base ?? ''} onChange={(e) => setSettings((prev) => prev ? { ...prev, api: { ...prev.api, oss_public_url_base: e.target.value } } : prev)} placeholder="公网域名 (可选，如 https://cdn.yourdomain.com)" />
-              </div>
-            </div>
-          </div>
-
-          <div className="mt-4 flex flex-wrap items-center gap-3 rounded-2xl border border-[#d7e3f4] bg-white px-4 py-3 text-sm text-slate-700">
-            <label className="flex items-center gap-2">
+      {activeTab === 'storage' && (
+        <SectionCard title="存储配置" description="配置用户生成图片与视频的 OSS 云存储。">
+          <div className="space-y-4">
+            <label className="flex items-center gap-2 text-sm text-slate-700">
               <input
                 type="checkbox"
-                checked={settings.api.enable_user_override}
-                onChange={(e) => setSettings((prev) => prev ? { ...prev, api: { ...prev.api, enable_user_override: e.target.checked } } : prev)}
+                checked={settings.api.oss_enabled ?? false}
+                onChange={(e) => setSettings((prev) => prev ? { ...prev, api: { ...prev.api, oss_enabled: e.target.checked } } : prev)}
               />
-              允许用户临时覆盖自己的 API Key
+              启用 OSS 云存储
             </label>
-          </div>
-
-          <div className="mt-3 rounded-2xl border border-[#d7e3f4] bg-white px-4 py-3 text-sm text-slate-700">
-            <label className="flex items-center gap-2">
-              <input
-                type="checkbox"
-                checked={settings.api.enable_user_url_override ?? false}
-                onChange={(e) => setSettings((prev) => prev ? { ...prev, api: { ...prev.api, enable_user_url_override: e.target.checked } } : prev)}
+            <div className="grid gap-3 md:grid-cols-2">
+              <div>
+                <TextInput
+                  type="password"
+                  value={settings.api.oss_access_key_id ?? ''}
+                  onChange={(e) => setSettings((prev) => prev ? { ...prev, api: { ...prev.api, oss_access_key_id: e.target.value } } : prev)}
+                  placeholder={settings.api.oss_access_key_id_configured
+                    ? `已配置（尾号 ${settings.api.oss_access_key_id_last_four || '未知'}），留空保持不变`
+                    : 'Access Key ID'}
+                />
+                {settings.api.oss_access_key_id_configured ? (
+                  <p className="mt-1 text-xs text-slate-500">
+                    已配置（尾号 {settings.api.oss_access_key_id_last_four || '未知'}），留空保持不变
+                  </p>
+                ) : null}
+              </div>
+              <div>
+                <TextInput
+                  type="password"
+                  value={settings.api.oss_access_key_secret ?? ''}
+                  onChange={(e) => setSettings((prev) => prev ? { ...prev, api: { ...prev.api, oss_access_key_secret: e.target.value } } : prev)}
+                  placeholder={settings.api.oss_access_key_secret_configured
+                    ? `已配置（尾号 ${settings.api.oss_access_key_secret_last_four || '未知'}），留空保持不变`
+                    : 'Access Key Secret'}
+                />
+                {settings.api.oss_access_key_secret_configured ? (
+                  <p className="mt-1 text-xs text-slate-500">
+                    已配置（尾号 {settings.api.oss_access_key_secret_last_four || '未知'}），留空保持不变
+                  </p>
+                ) : null}
+              </div>
+              <TextInput
+                value={settings.api.oss_endpoint ?? ''}
+                onChange={(e) => setSettings((prev) => prev ? { ...prev, api: { ...prev.api, oss_endpoint: e.target.value } } : prev)}
+                placeholder="Endpoint，如 oss-cn-hangzhou.aliyuncs.com"
               />
-              允许用户覆盖自己的 URL/模型
-            </label>
+              <TextInput
+                value={settings.api.oss_bucket ?? ''}
+                onChange={(e) => setSettings((prev) => prev ? { ...prev, api: { ...prev.api, oss_bucket: e.target.value } } : prev)}
+                placeholder="Bucket 名称"
+              />
+              <div className="md:col-span-2">
+                <TextInput
+                  value={settings.api.oss_public_url_base ?? ''}
+                  onChange={(e) => setSettings((prev) => prev ? { ...prev, api: { ...prev.api, oss_public_url_base: e.target.value } } : prev)}
+                  placeholder="公网域名（可选），如 https://cdn.example.com"
+                />
+              </div>
+            </div>
           </div>
         </SectionCard>
       )}
@@ -1508,11 +1071,23 @@ export function AdminPlatformSettingsPage({
                 <div className="mb-3 text-sm font-semibold text-slate-900">支付宝参数</div>
                 <div className="space-y-3">
                   <TextInput value={pm.alipay_app_id || ''} onChange={(e) => setSettings((prev) => prev ? { ...prev, payment: { ...prev.payment, alipay_app_id: e.target.value } } : prev)} placeholder="App ID" />
-                  <TextInput value={pm.alipay_pid || ''} onChange={(e) => setSettings((prev) => prev ? { ...prev, payment: { ...prev.payment, alipay_pid: e.target.value } } : prev)} placeholder="卖家 ID / PID（可选）" />
+                  <TextInput value={pm.alipay_pid || ''} onChange={(e) => setSettings((prev) => prev ? { ...prev, payment: { ...prev.payment, alipay_pid: e.target.value } } : prev)} placeholder="卖家 ID / PID（选填）" />
                   <TextInput value={pm.alipay_gateway || ''} onChange={(e) => setSettings((prev) => prev ? { ...prev, payment: { ...prev.payment, alipay_gateway: e.target.value } } : prev)} placeholder="网关地址" />
                   <TextInput value={pm.alipay_sign_type || 'RSA2'} onChange={(e) => setSettings((prev) => prev ? { ...prev, payment: { ...prev.payment, alipay_sign_type: e.target.value } } : prev)} placeholder="签名类型" />
                   <TextInput value={pm.alipay_notify_url || ''} onChange={(e) => setSettings((prev) => prev ? { ...prev, payment: { ...prev.payment, alipay_notify_url: e.target.value } } : prev)} placeholder="异步回调地址" />
-                  <TextArea rows={5} value={pm.alipay_app_private_key || ''} onChange={(e) => setSettings((prev) => prev ? { ...prev, payment: { ...prev.payment, alipay_app_private_key: e.target.value } } : prev)} placeholder="应用私钥（PKCS8）" />
+                  <div>
+                    <TextArea
+                      rows={5}
+                      value={pm.alipay_app_private_key || ''}
+                      onChange={(e) => setSettings((prev) => prev ? { ...prev, payment: { ...prev.payment, alipay_app_private_key: e.target.value } } : prev)}
+                      placeholder={pm.alipay_app_private_key_configured
+                        ? `应用私钥已配置（尾号 ${pm.alipay_app_private_key_last_four || '未知'}），留空保持不变`
+                        : '应用私钥（PKCS8）'}
+                    />
+                    {pm.alipay_app_private_key_configured ? (
+                      <p className="mt-1 text-xs text-slate-500">应用私钥已安全保存，留空不会覆盖现有配置。</p>
+                    ) : null}
+                  </div>
                   <TextArea rows={5} value={pm.alipay_public_key || ''} onChange={(e) => setSettings((prev) => prev ? { ...prev, payment: { ...prev.payment, alipay_public_key: e.target.value } } : prev)} placeholder="支付宝公钥" />
                 </div>
               </div>

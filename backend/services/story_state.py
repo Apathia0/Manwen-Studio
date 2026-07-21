@@ -218,7 +218,7 @@ def build_story_memory_compact(story_memory: dict | None) -> dict[str, Any]:
 
 def extract_author_profile_sections(profile: dict) -> list[str]:
     import json
-    parts: list[str] = []
+    parts: list[str] = ["作者风格画像（匿名化参考）:"]
     routine_cards = profile.get("routine_cards")
     if isinstance(routine_cards, list) and routine_cards:
         parts.append(f"可复用写作套路: {json.dumps(routine_cards, ensure_ascii=False)}")

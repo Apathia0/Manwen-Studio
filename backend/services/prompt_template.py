@@ -25,13 +25,6 @@ def _normalize_custom_prompt(value: Any, *, max_chars: int = CUSTOM_RULES_MAX_CH
 
 # ── 映射表 ─────────────────────────────────────────────
 
-ART_STYLE_MAP = {
-    "anime": "日式动漫风格，cel-shaded，鲜艳色彩，清晰线条",
-    "realistic": "写实风格，电影级光影，自然色彩，高细节",
-    "cartoon": "卡通风格，夸张造型，明亮配色，简洁线条",
-    "ink": "中国水墨风格，笔触纹理，留白构图，墨色为主调",
-}
-
 COLOR_MAP = {
     "monochrome": "黑白单色调",
     "muted": "柔和淡雅配色",
@@ -173,9 +166,8 @@ def _build_character_rules(parts: list, params: dict):
 def _build_manga_style_rules(parts: list, params: dict):
     rules = []
 
-    art = params.get("art_style", "")
-    if art and art in ART_STYLE_MAP:
-        rules.append(f"画风：{ART_STYLE_MAP[art]}")
+    if params.get("art_style"):
+        rules.append("具体画风、渲染媒介和笔触质感必须完全以用户上传的风格参考图为准")
 
     color = params.get("color_scheme", "")
     if color and color in COLOR_MAP:
@@ -194,10 +186,6 @@ def _build_manga_style_rules(parts: list, params: dict):
         rules.append("使用戏剧化光影，强对比明暗")
     elif params.get("lighting") == "natural":
         rules.append("使用自然柔和的光线")
-
-    _custom = _normalize_custom_prompt(params.get("custom_style_prompt"))
-    if _custom:
-        rules.append(f"风格补充：{_custom}")
 
     if rules:
         parts.append("## 画面风格指令\n" + "\n".join(f"- {r}" for r in rules))

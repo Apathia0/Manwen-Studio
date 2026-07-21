@@ -20,13 +20,12 @@ import {
   type VideoAsset,
   type VideoGenerationJob,
   type VideoShot,
-  type EntitlementResponse,
   toPublicVideoAssetUrl,
 } from '../api';
 import ShotFrameRegenerationModal from './ShotFrameRegenerationModal';
 import { confirm } from '../lib/confirm';
 
-function entitlementNumber(entitlements: EntitlementResponse | null | undefined, key: string, fallback: number): number {
+function entitlementNumber(entitlements: Record<string, any> | null | undefined, key: string, fallback: number): number {
   const raw = entitlements?.entitlements?.[key];
   if (typeof raw === 'number' && Number.isFinite(raw)) return raw;
   if (typeof raw === 'string') {
@@ -46,7 +45,7 @@ export interface ShotAssetWorkflowPanelProps {
   stylePresets: any[];
   chapterStylePreset: any;
   storyStylePreset: any;
-  entitlements?: EntitlementResponse | null;
+  entitlements?: Record<string, any> | null;
   onShotStylePresetChange?: (preset: string | null) => void;
   loading: boolean;
 }
@@ -448,14 +447,50 @@ export default function ShotAssetWorkflowPanel({
     setTimeout(tick, 3000);
   }, [onJobsChange, onClipsChange]);
 
+  const [videoDuration, setVideoDuration] = useState<number>(() =>
+    Math.max(1, Math.min(60, Number(shot?.duration_seconds) || 15)),
+  );
+  const [estimatedVideoPoints, setEstimatedVideoPoints] = useState<number | null>(null);
+
+  useEffect(() => {
+    setVideoDuration(Math.max(1, Math.min(60, Number(shot?.duration_seconds) || 15)));
+  }, [shot?.id, shot?.duration_seconds]);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const { getAiModels, estimateAiPoints, getLocalCredentialMode } = await import('../api');
+        if (getLocalCredentialMode() === 'user_key') {
+          if (!cancelled) setEstimatedVideoPoints(null);
+          return;
+        }
+        const { models } = await getAiModels('video');
+        const model = models[0];
+        if (!model) {
+          if (!cancelled) setEstimatedVideoPoints(null);
+          return;
+        }
+        const est = await estimateAiPoints({ model_id: model.id, video_seconds: videoDuration });
+        if (!cancelled) setEstimatedVideoPoints(est.estimated_points);
+      } catch {
+        if (!cancelled) setEstimatedVideoPoints(null);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [videoDuration, shot?.id]);
+
   const submitVideo = async () => {
     if (!shot?.id) return;
     setSubmittingVideo(true);
     setError(null);
     try {
+      const duration = Math.max(1, Math.min(60, Number(videoDuration) || 15));
       const result = await renderShotVideo(shot.id, {
         provider: '',
-        duration_seconds: shot.duration_seconds || 5,
+        duration_seconds: duration,
         aspect_ratio: '16:9',
         fps: 24,
         reference_asset_ids: selectedReferenceAssetIds,
@@ -482,7 +517,7 @@ export default function ShotAssetWorkflowPanel({
     <aside className="w-[360px] shrink-0 overflow-hidden rounded-[20px] border border-[#d7e3f4] bg-white xl:w-[380px]">
       <div className="border-b border-[#d7e3f4] p-3">
         <div className="text-sm font-semibold text-slate-800">镜头 {shot.shot_number}: {shot.title}</div>
-        <div className="mt-1 text-xs text-slate-500">{shot.duration_seconds || 5}s · {shot.shot_type || 'medium'} · {currentStyleName || '默认风格'}</div>
+        <div className="mt-1 text-xs text-slate-500">{videoDuration}s · {shot.shot_type || 'medium'} · {currentStyleName || '默认风格'}</div>
         <div className="mt-3 flex flex-wrap gap-2">
           {(['style', 'characters', 'scenes', 'storyboard', 'frames', 'bundle', 'result'] as SectionKey[]).map((k) => (
             <button key={k} className={`rounded-full border px-2.5 py-1 text-xs ${activeSection === k ? 'border-[#2563eb] bg-[#2563eb] text-white' : 'border-[#d7e3f4] bg-white text-slate-600 hover:border-[#93c5fd] hover:text-[#1d4ed8]'}`} onClick={() => setActiveSection(k)}>
@@ -622,12 +657,57 @@ export default function ShotAssetWorkflowPanel({
                 ))}
               </div>
             </div>
+            <div className="rounded-lg border border-[#d7e3f4] p-3 space-y-2">
+              <div className="flex items-center justify-between text-xs">
+                <span className="font-semibold text-slate-700">视频时长（秒）</span>
+                <span className="text-slate-500">1–60，按秒计费</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <input
+                  type="range"
+                  min={1}
+                  max={60}
+                  value={videoDuration}
+                  onChange={(e) => setVideoDuration(Number(e.target.value))}
+                  className="flex-1"
+                />
+                <input
+                  type="number"
+                  min={1}
+                  max={60}
+                  value={videoDuration}
+                  onChange={(e) => setVideoDuration(Math.max(1, Math.min(60, Number(e.target.value) || 1)))}
+                  className="w-16 rounded-lg border border-[#d7e3f4] px-2 py-1 text-xs"
+                />
+              </div>
+              <div className="flex flex-wrap gap-1.5">
+                {[5, 10, 15, 20, 30, 45, 60].map((s) => (
+                  <button
+                    key={s}
+                    type="button"
+                    onClick={() => setVideoDuration(s)}
+                    className={`rounded-full border px-2 py-0.5 text-[11px] ${
+                      videoDuration === s
+                        ? 'border-[#2563eb] bg-[#eff6ff] text-[#1d4ed8]'
+                        : 'border-[#d7e3f4] text-slate-600'
+                    }`}
+                  >
+                    {s}s
+                  </button>
+                ))}
+              </div>
+              <div className="text-xs text-slate-500">
+                {estimatedVideoPoints != null
+                  ? `预计消耗约 ${estimatedVideoPoints} 积分（${videoDuration} 秒）`
+                  : `将生成 ${videoDuration} 秒视频（我的 Key 模式不扣本站积分）`}
+              </div>
+            </div>
             <div className="flex items-center justify-between gap-3">
               {videoSecondsLimit > 0 && (
-                <span className="text-xs text-slate-400">本月视频时长配额 {videoSecondsLimit}s</span>
+                <span className="text-xs text-slate-400">旧配额参考 {videoSecondsLimit}s</span>
               )}
               <button onClick={submitVideo} disabled={submittingVideo} className="flex-1 rounded-lg bg-gradient-to-r from-[#1d4ed8] to-[#1e40af] px-4 py-2 text-xs font-semibold text-white">
-                {submittingVideo ? '提交中...' : '生成视频'}
+                {submittingVideo ? '提交中...' : `生成视频 ${videoDuration}s`}
               </button>
             </div>
           </div>

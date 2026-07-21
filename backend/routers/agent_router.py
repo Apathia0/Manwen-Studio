@@ -8,6 +8,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 from sse_starlette.sse import EventSourceResponse
+from starlette.background import BackgroundTask as ResponseBackgroundTask
 
 from database import SessionLocal, get_db
 from models import AgentConversation, AgentConversationMessage, AgentPendingChange, Chapter, ChapterVideoShot, ChapterVideoWorkflow, Story
@@ -19,6 +20,7 @@ from services.agent_service import (
     agent_service,
     normalize_agent_mode,
 )
+from services.errors import public_error_message
 
 logger = logging.getLogger("agent_router")
 
@@ -33,7 +35,8 @@ _require_story_for_user = _main._require_story_for_user
 _user_deepseek_api_key = _main._user_deepseek_api_key
 _release_db_transaction = _main._release_db_transaction
 _check_and_consume_advanced_text_quota = _main._check_and_consume_advanced_text_quota
-_refund_quota = _main._refund_quota
+_detach_pending_platform_points = _main._detach_pending_platform_points
+_finish_streaming_platform_points = _main._finish_streaming_platform_points
 _build_framework_context = _main._build_framework_context
 
 
@@ -268,7 +271,6 @@ async def agent_chat(
 ):
     user = _require_user(request, db)
     story = _require_story_for_user(story_id, user, db)
-    _check_and_consume_advanced_text_quota(request, user.id, db, deduct=True)
 
     conversation_id = int(body.conversation_id or 0)
     content = str(body.message or "").strip()
@@ -331,6 +333,8 @@ async def agent_chat(
         else:
             raise HTTPException(403, "视频工作流不属于当前故事")
 
+    quota_result = _check_and_consume_advanced_text_quota(request, user.id, db, deduct=False)
+
     if len(conversation.messages) == 0 or (conversation.title or "").strip() in {"", "新对话"}:
         conversation.title = _conversation_title_from_text(content)
 
@@ -346,11 +350,29 @@ async def agent_chat(
     db.refresh(conversation, ["messages"])
     history = [{"role": item.role, "content": item.content} for item in conversation.messages]
     deepseek_api_key = _user_deepseek_api_key(request)
+    streaming_billing_ctx = _detach_pending_platform_points(
+        request,
+        quota_result.get("usage_event_id"),
+    )
     _release_db_transaction(db)
+    billing_state = {"finished": False}
 
     async def event_generator():
         collected: list[str] = []
         assistant_saved = False
+        stream_failed = False
+
+        def settle_billing(*, success: bool, error_code: str | None = None) -> None:
+            if billing_state["finished"]:
+                return
+            _finish_streaming_platform_points(
+                streaming_billing_ctx,
+                success=success,
+                input_text=json.dumps(history, ensure_ascii=False),
+                output_text="".join(collected),
+                error_code=error_code,
+            )
+            billing_state["finished"] = True
 
         def persist_assistant_message(content_text: str) -> None:
             nonlocal assistant_saved
@@ -409,8 +431,13 @@ async def agent_chat(
                         final_content = str(payload.get("content") or "").strip()
                     except Exception:
                         final_content = ""
-                    persist_assistant_message(final_content or "".join(collected))
+                    settled_content = final_content or "".join(collected)
+                    if final_content and not collected:
+                        collected.append(final_content)
+                    settle_billing(success=True)
+                    persist_assistant_message(settled_content)
                 elif event_type == "error":
+                    stream_failed = True
                     try:
                         payload = json.loads(event.get("data", "{}"))
                         error_text = str(payload.get("error") or "").strip()
@@ -422,18 +449,43 @@ async def agent_chat(
 
             if not assistant_saved:
                 persist_assistant_message("".join(collected))
+            if not stream_failed:
+                settle_billing(success=True)
+            elif not billing_state["finished"]:
+                settle_billing(success=bool(collected), error_code=None if collected else "stream_failed")
         except asyncio.CancelledError:
+            settle_billing(success=bool(collected), error_code=None if collected else "stream_cancelled")
             if not assistant_saved:
                 persist_assistant_message("".join(collected) + "\n\n[已中止]")
             raise
         except Exception as exc:
             logger.exception("Agent stream failed")
-            _refund_quota(persisted_user_id, "ai.text.advanced_calls.monthly_limit", 1, db)
+            public_message = public_error_message(exc, "AI 助手执行失败，请稍后重试")
+            settle_billing(success=bool(collected), error_code=None if collected else "stream_failed")
             if not assistant_saved:
-                persist_assistant_message(f"错误: {exc}")
-            yield {"event": "error", "data": json.dumps({"error": str(exc)}, ensure_ascii=False)}
+                persist_assistant_message(f"执行失败：{public_message}")
+            yield {"event": "error", "data": json.dumps({"error": public_message, "code": "agent_stream_failed"}, ensure_ascii=False)}
 
-    return EventSourceResponse(event_generator())
+    def release_unfinished_billing() -> None:
+        if billing_state["finished"]:
+            return
+        try:
+            _finish_streaming_platform_points(
+                streaming_billing_ctx,
+                success=False,
+                error_code="stream_not_started_or_unfinished",
+            )
+            billing_state["finished"] = True
+        except Exception:
+            logger.exception(
+                "Agent 流清理预留积分失败 conversation_id=%s",
+                persisted_conversation_id,
+            )
+
+    return EventSourceResponse(
+        event_generator(),
+        background=ResponseBackgroundTask(release_unfinished_billing),
+    )
 
 
 @router.post("/confirm")
@@ -530,7 +582,7 @@ async def rollback_changes(
                         scenes_path.unlink()
                     results.append({"ok": True, "type": "scenes_file", "id": record.record_id, "field": record.field})
             except Exception as e:
-                results.append({"ok": False, "error": str(e)})
+                results.append({"ok": False, "error": public_error_message(e, "撤回修改失败，请稍后重试")})
         if any(r.get("ok") for r in results):
             db.commit()
         db.query(AgentPendingChange).filter(

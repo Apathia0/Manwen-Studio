@@ -1,83 +1,167 @@
-import type { PublicPlan, MySubscriptionResponse } from '../api';
-import { formatMoney, featureLabel, formatFeatureValue } from '../lib/format';
+import { useEffect, useState } from 'react';
+import {
+  type BillingCheckout,
+  type PointsAccount,
+  type PointsProduct,
+  confirmMyOrderMock,
+  getPaymentConfig,
+  getPointsAccount,
+  getPointsProducts,
+  purchasePoints,
+} from '../api';
+import { toast } from '../lib/toast';
 
-/** 已登录用户套餐订阅页面 */
 export function UserPricingPage({
-  plans,
   onPrimary,
-  subscription,
-  onSubscribe,
-  subscribingPlanId,
+  onCheckout,
 }: {
-  plans: PublicPlan[];
+  plans?: unknown[];
   onPrimary?: () => void;
-  subscription?: MySubscriptionResponse | null;
-  onSubscribe?: (planId: number, billingCycle: 'monthly' | 'yearly') => void;
-  subscribingPlanId?: number | null;
+  subscription?: unknown;
+  onSubscribe?: unknown;
+  subscribingPlanId?: unknown;
+  onCheckout?: (checkout: BillingCheckout & { orderNo: string }) => void;
 }) {
-  const fallback = [
-    { id: 0, name: 'Free', monthly_price: 0, description: '适合体验和轻量创作', features: { 'framework.generate.monthly_limit': 5, 'chapter.expand.monthly_limit': 20, 'scene.generate.monthly_limit': 15, 'manga.image.generate.monthly_limit': 100, 'ai.text.advanced_calls.monthly_limit': 20, 'deconstruction.run.monthly_limit': 1, 'manga.max_image_count_per_chapter': 6, 'manga.allow_color_mode': false, 'video.shot.split.monthly_limit': 0, 'video.generate.count.monthly_limit': 0 } },
-    { id: 1, name: 'Pro', monthly_price: 59, description: '适合稳定更新的个人创作者', features: { 'framework.generate.monthly_limit': 50, 'chapter.expand.monthly_limit': 200, 'scene.generate.monthly_limit': 120, 'manga.image.generate.monthly_limit': 1100, 'ai.text.advanced_calls.monthly_limit': 180, 'deconstruction.run.monthly_limit': 20, 'manga.max_image_count_per_chapter': 12, 'manga.allow_color_mode': true, 'video.shot.split.monthly_limit': 5, 'video.generate.count.monthly_limit': 5 } },
-    { id: 2, name: 'Premium', monthly_price: 199, description: '适合高频产出的团队和工作室', features: { 'framework.generate.monthly_limit': 200, 'chapter.expand.monthly_limit': 1000, 'scene.generate.monthly_limit': 500, 'manga.image.generate.monthly_limit': 5500, 'ai.text.advanced_calls.monthly_limit': 600, 'deconstruction.run.monthly_limit': 80, 'manga.max_image_count_per_chapter': 20, 'manga.allow_color_mode': true, 'video.shot.split.monthly_limit': 10, 'video.generate.count.monthly_limit': 15 } },
-  ];
-  const data = plans.length > 0 ? plans : (fallback as any[]);
+  const [account, setAccount] = useState<PointsAccount | null>(null);
+  const [products, setProducts] = useState<PointsProduct[]>([]);
+  const [busyId, setBusyId] = useState<number | null>(null);
+  const [paymentMethods, setPaymentMethods] = useState<Array<{ key: string; label: string }>>([]);
+  const [paymentMethod, setPaymentMethod] = useState('');
+
+  const reload = async () => {
+    try {
+      const [a, p, payment] = await Promise.all([
+        getPointsAccount().catch(() => null),
+        getPointsProducts().catch(() => ({ products: [] as PointsProduct[] })),
+        getPaymentConfig().catch(() => null),
+      ]);
+      if (a) setAccount(a);
+      setProducts(p.products || []);
+      if (payment) {
+        const methods = payment.methods || [];
+        setPaymentMethods(methods);
+        setPaymentMethod((current) => {
+          if (current && methods.some((method) => method.key === current)) return current;
+          if (methods.some((method) => method.key === payment.default_method)) return payment.default_method;
+          return methods[0]?.key || payment.default_method || '';
+        });
+      }
+    } catch {
+      setProducts([]);
+    }
+  };
+
+  useEffect(() => {
+    void reload();
+  }, []);
+
+  const onBuy = async (productId: number) => {
+    if (onPrimary) {
+      onPrimary();
+      return;
+    }
+    setBusyId(productId);
+    try {
+      const order = await purchasePoints(productId, paymentMethod || undefined);
+      if (order.checkout.can_mock_confirm) {
+        await confirmMyOrderMock(order.order_no);
+        toast.success(`充值成功，到账 ${order.points} 积分`);
+        await reload();
+      } else if (onCheckout) {
+        onCheckout({ ...order.checkout, orderNo: order.order_no });
+      } else {
+        toast.success(`订单 ${order.order_no} 已创建，请完成支付`);
+      }
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : '购买失败');
+    } finally {
+      setBusyId(null);
+    }
+  };
 
   return (
     <div>
-      <h2 className="text-xl font-semibold">套餐订阅</h2>
-      <p className="mt-1 text-sm text-slate-600">所有小说创作、分镜生成和漫画出图能力都由平台套餐统一控制。你可以在这里直观看到不同套餐的额度差异和适用场景。</p>
-      <div className="mt-4 grid gap-4 md:grid-cols-3">
-        {data.map((plan: any) => {
-          const isCurrent = subscription?.subscription.plan.id === plan.id;
-          const highlights = [
-            ['framework.generate.monthly_limit', plan.features?.['framework.generate.monthly_limit'] ?? 0],
-            ['chapter.expand.monthly_limit', plan.features?.['chapter.expand.monthly_limit'] ?? 0],
-            ['scene.generate.monthly_limit', plan.features?.['scene.generate.monthly_limit'] ?? 0],
-            ['manga.image.generate.monthly_limit', plan.features?.['manga.image.generate.monthly_limit'] ?? 0],
-            ['ai.text.advanced_calls.monthly_limit', plan.features?.['ai.text.advanced_calls.monthly_limit'] ?? 0],
-            ['deconstruction.run.monthly_limit', plan.features?.['deconstruction.run.monthly_limit'] ?? 0],
-            ['video.shot.split.monthly_limit', plan.features?.['video.shot.split.monthly_limit'] ?? 0],
-            ['video.generate.count.monthly_limit', plan.features?.['video.generate.count.monthly_limit'] ?? 0],
-          ] as const;
+      <h2 className="text-xl font-semibold">积分套餐</h2>
+      <p className="mt-1 text-sm text-slate-600">
+        使用平台模型消耗积分；文本/图片按模型定价，视频按秒计费。你也可以在账户页配置「我的 Key」走上游额度，不扣本站积分。
+      </p>
 
-          return (
-            <div key={plan.id ?? plan.name} className="rounded-3xl border border-[#d7e3f4] bg-white/95 p-5 shadow-[0_14px_34px_rgba(59,130,246,0.08)]">
-              <div className="flex items-center justify-between">
-                <div className="text-base font-semibold text-slate-900">{plan.name}</div>
-                {isCurrent ? <span className="rounded-full bg-[#eff6ff] px-3 py-1 text-xs text-[#1d4ed8]">当前套餐</span> : null}
+      {!onPrimary && paymentMethods.length > 0 ? (
+        <div className="mt-4 flex items-center gap-3 text-sm text-slate-700">
+          <span>支付方式</span>
+          <select
+            value={paymentMethod}
+            onChange={(event) => setPaymentMethod(event.target.value)}
+            className="rounded-lg border border-[#d7e3f4] bg-white px-3 py-2"
+          >
+            {paymentMethods.map((method) => (
+              <option key={method.key} value={method.key}>{method.label}</option>
+            ))}
+          </select>
+        </div>
+      ) : null}
+
+      <div className="mt-4 grid gap-4 md:grid-cols-3">
+        <div className="rounded-3xl border border-[#d7e3f4] bg-white/95 p-5 shadow-[0_14px_34px_rgba(59,130,246,0.08)] md:col-span-1">
+          <div className="text-xs font-medium text-slate-500">当前可用积分</div>
+          <div className="mt-2 text-3xl font-semibold text-slate-900">
+            {account ? account.available_points : onPrimary ? '登录后查看' : '-'}
+          </div>
+          <div className="mt-2 text-sm text-slate-600">
+            预扣中 {account?.reserved_points ?? 0}
+          </div>
+          <ul className="mt-4 space-y-2 text-sm text-slate-600">
+            <li>· 平台账户：按模型积分价扣费</li>
+            <li>· 视频：按秒计费，可自选时长</li>
+            <li>· 我的 Key：不扣本站积分</li>
+          </ul>
+        </div>
+
+        <div className="md:col-span-2 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+          {(products.length > 0
+            ? products
+            : [
+                { id: -1, code: 'demo_10', name: '体验包', description: '适合体验平台模型', price_cny: 10, points: 100, bonus_points: 0, is_visible: true, is_recommended: false, sort_order: 0 },
+                { id: -2, code: 'demo_50', name: '创作包', description: '适合持续进行小说和漫画创作', price_cny: 50, points: 550, bonus_points: 50, is_visible: true, is_recommended: true, sort_order: 1 },
+                { id: -3, code: 'demo_100', name: '专业包', description: '适合长篇与视频创作', price_cny: 100, points: 1200, bonus_points: 200, is_visible: true, is_recommended: false, sort_order: 2 },
+              ]
+          ).map((p) => (
+            <div
+              key={p.id}
+              className="rounded-3xl border border-[#d7e3f4] bg-white/95 p-5 shadow-[0_14px_34px_rgba(59,130,246,0.08)]"
+            >
+              <div className="flex items-center justify-between gap-2">
+                <div className="text-base font-semibold text-slate-900">{p.name}</div>
+                {p.is_recommended ? <span className="rounded-full bg-blue-50 px-2 py-1 text-xs text-blue-700">推荐</span> : null}
               </div>
               <div className="mt-3 text-3xl font-semibold text-slate-900">
-                ¥{formatMoney(plan.monthly_price)}
-                <span className="ml-1 text-sm font-normal text-slate-500">/月</span>
+                ¥{p.price_cny}
               </div>
-              <div className="mt-2 text-sm leading-6 text-slate-500">{plan.description || '暂无套餐说明'}</div>
-              <div className="mt-4 space-y-2 rounded-2xl bg-[#f8fbff] p-3">
-                {highlights.map(([key, value]) => (
-                  <div key={key} className="flex items-center justify-between text-sm">
-                    <span className="text-slate-600">{featureLabel(key)}</span>
-                    <span className="font-medium text-slate-900">{formatFeatureValue(key, value)}</span>
-                  </div>
-                ))}
+              <div className="mt-2 text-sm text-slate-600">
+                {p.points}
+                {p.bonus_points > 0 ? ` + 赠 ${p.bonus_points}` : ''} 积分
               </div>
-              <div className="mt-4 rounded-2xl border border-dashed border-[#d7e3f4] px-3 py-3 text-xs leading-6 text-slate-500">
-                {plan.features?.['manga.allow_color_mode'] ? '支持彩漫模式' : '支持黑白漫画模式'}
-                ，单章节最多生成 {plan.features?.['manga.max_image_count_per_chapter'] ?? 0} 张图片。
+              <div className="mt-3 rounded-2xl bg-[#f8fbff] px-3 py-2 text-xs leading-6 text-slate-500">
+                {p.description || '到账后即可用于平台模型调用；视频按秒从积分中扣减。'}
               </div>
-              {onSubscribe ? (
-                <button
-                  onClick={() => onSubscribe(plan.id, 'monthly')}
-                  disabled={isCurrent || subscribingPlanId === plan.id}
-                  className="mt-5 w-full rounded-2xl bg-[#1d4ed8] py-2.5 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-60"
-                >
-                  {isCurrent ? '已生效' : subscribingPlanId === plan.id ? '处理中...' : '立即订阅'}
-                </button>
-              ) : null}
-              {!onSubscribe && onPrimary ? (
-                <button onClick={onPrimary} className="mt-5 w-full rounded-2xl bg-[#1d4ed8] py-2.5 text-sm font-medium text-white">开始使用</button>
-              ) : null}
+              <button
+                type="button"
+                disabled={busyId === p.id || p.id < 0}
+                onClick={() => {
+                  if (p.id < 0) {
+                    if (onPrimary) onPrimary();
+                    else toast.info('请先登录后购买');
+                    return;
+                  }
+                  void onBuy(p.id);
+                }}
+                className="mt-5 w-full rounded-2xl bg-[#1d4ed8] py-2.5 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {onPrimary ? '注册后购买' : busyId === p.id ? '处理中...' : '购买积分套餐'}
+              </button>
             </div>
-          );
-        })}
+          ))}
+        </div>
       </div>
     </div>
   );

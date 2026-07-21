@@ -1,10 +1,11 @@
 import { memo, useCallback, useEffect, useRef, useState } from 'react';
-import { ChevronUp, ChevronDown, Download, ImageIcon, Loader2, Sparkles, Pencil, RefreshCw, Check, X, ImagePlus, Trash2, Square, Upload, MousePointer, Palette } from 'lucide-react';
+import { BookOpen, ChevronUp, ChevronDown, Download, ImageIcon, Loader2, Sparkles, Pencil, RefreshCw, Check, X, ImagePlus, Trash2, Square, Upload, MousePointer, Palette, Settings2, UserRound, MapPinned, Package } from 'lucide-react';
 import { useMemo as useMemoValue } from 'react';
 import { createPortal } from 'react-dom';
 import { ImageRedrawModal } from './shared/ImageRedrawModal';
 import ImageZoomView from './shared/ImageZoomView';
 import StyleSelectorModal from './StyleSelectorModal';
+import MangaAssetManagementModal from './MangaAssetManagementModal';
 import {
   generateMangaStream,
   generateScenes, scenesFromSelection,
@@ -34,29 +35,33 @@ import {
   cancelMangaGeneration,
   uploadCharacterRefImage,
   deleteCharacterRefImage,
+  saveMangaAssetBindings,
   listStylePresets,
   uploadMangaStyleReference,
   type ImageRedrawMode,
   type Chapter,
   type MangaProgress,
   type ColorMode,
-  type EntitlementResponse,
   type RefSource,
   type RefImage,
   type VideoStylePreset,
+  type MangaAsset,
+  type MangaAssetBinding,
 } from '../api';
 import { genStore } from '../genStore';
 import { toast } from '../lib/toast';
+import { normalizeErrorMessage } from '../lib/errors';
 
 interface Props {
   chapter: Chapter | null;
-  entitlements?: EntitlementResponse | null;
+  entitlements?: Record<string, any> | null;
   onChapterRefresh?: (chapterId: number) => void;
   selectedText?: string;
   chapterContext?: { characters?: any[] };
   isWorkspacePreviewMode?: boolean;
   onWorkspacePreviewModeChange?: (expanded: boolean) => void;
   onClearSelection?: () => void;
+  onOpenSourceViewer?: () => void;
 }
 
 interface ImageItem {
@@ -198,6 +203,13 @@ function closeRefWorkspacePreview(
 }
 
 type Phase = 'idle' | 'generating-scenes' | 'editing-scenes' | 'generating-images';
+type MangaAssetExtractionType = 'character' | 'scene' | 'prop';
+
+const MANGA_ASSET_EXTRACTION_OPTIONS: Array<{ key: MangaAssetExtractionType; label: string }> = [
+  { key: 'character', label: '角色' },
+  { key: 'scene', label: '场景' },
+  { key: 'prop', label: '道具' },
+];
 const DEFAULT_IMAGE_COUNT = 10;
 
 const ASPECT_RATIO_OPTIONS = [
@@ -210,25 +222,13 @@ const ASPECT_RATIO_OPTIONS = [
   { label: '16:9', size: '1792x1024' },
 ] as const;
 
-function entitlementNumber(entitlements: EntitlementResponse | null | undefined, key: string, fallback: number): number {
+function entitlementNumber(entitlements: Record<string, any> | null | undefined, key: string, fallback: number): number {
   const raw = entitlements?.entitlements?.[key];
   if (typeof raw === 'number' && Number.isFinite(raw)) return raw;
   if (typeof raw === 'string') {
     const parsed = Number(raw);
     if (Number.isFinite(parsed)) return parsed;
   }
-  return fallback;
-}
-
-function entitlementBool(entitlements: EntitlementResponse | null | undefined, key: string, fallback = false): boolean {
-  const raw = entitlements?.entitlements?.[key];
-  if (typeof raw === 'boolean') return raw;
-  if (typeof raw === 'string') {
-    const normalized = raw.trim().toLowerCase();
-    if (normalized === 'true') return true;
-    if (normalized === 'false') return false;
-  }
-  if (typeof raw === 'number') return raw !== 0;
   return fallback;
 }
 
@@ -241,6 +241,7 @@ export default memo(function MangaPanel({
   isWorkspacePreviewMode = false,
   onWorkspacePreviewModeChange,
   onClearSelection,
+  onOpenSourceViewer,
 }: Props) {
   const [phase, setPhase] = useState<Phase>('idle');
   const [progress, setProgress] = useState({ current: 0, total: DEFAULT_IMAGE_COUNT });
@@ -269,7 +270,13 @@ export default memo(function MangaPanel({
   const [refSource, setRefSource] = useState<RefSource>('none');
   const [refMax, setRefMax] = useState(4);
   const [refUploading, setRefUploading] = useState(false);
+  const [assetModalOpen, setAssetModalOpen] = useState(false);
+  // 仅保留历史引用图的兼容状态，旧垫图界面不再对用户开放。
   const [refModalOpen, setRefModalOpen] = useState(false);
+  const [legacyReferenceUiEnabled] = useState(false);
+  const mangaAssets: MangaAsset[] = [];
+  const [assetBindings, setAssetBindings] = useState<MangaAssetBinding[]>([]);
+  const assetsLoading = false;
   const [colorMode, setColorModeState] = useState<ColorMode>('bw');
   const [imageCount, setImageCountState] = useState(DEFAULT_IMAGE_COUNT);
 const [aspectRatio, setAspectRatio] = useState<string>('9:16');
@@ -277,8 +284,14 @@ const [aspectRatio, setAspectRatio] = useState<string>('9:16');
   const [selectedStylePresetName, setSelectedStylePresetName] = useState<string>('');
   const [styleReferenceImageUrl, setStyleReferenceImageUrl] = useState<string | null>(null);
   const [styleSelectorOpen, setStyleSelectorOpen] = useState(false);
+  const styleSelectionTouchedRef = useRef(false);
   const [showColorMenu, setShowColorMenu] = useState(false);
+  const [assetConfigOpen, setAssetConfigOpen] = useState(false);
+  const [autoAssetExtractionEnabled, setAutoAssetExtractionEnabled] = useState(true);
+  const [autoAssetExtractionTypes, setAutoAssetExtractionTypes] = useState<MangaAssetExtractionType[]>(['character', 'scene', 'prop']);
+
   const colorMenuRef = useRef<HTMLDivElement>(null);
+  const assetConfigRef = useRef<HTMLDivElement>(null);
   const refFileRef = useRef<HTMLInputElement>(null);
   const lightboxRef = useRef<HTMLDivElement>(null);
   const sceneDetailRefs = useRef<Record<number, HTMLDivElement | null>>({});
@@ -311,10 +324,6 @@ const [aspectRatio, setAspectRatio] = useState<string>('9:16');
     const allowedCounts = ALLOWED_IMAGE_COUNTS.filter((count) => count <= configured);
     return allowedCounts.length > 0 ? allowedCounts[allowedCounts.length - 1] : ALLOWED_IMAGE_COUNTS[0];
   }, [entitlements]);
-  const allowColorMode = useMemoValue(
-    () => entitlementBool(entitlements, 'manga.allow_color_mode', false),
-    [entitlements],
-  );
   const selectableImageCounts = useMemoValue(
     () => ALLOWED_IMAGE_COUNTS.filter((count) => count <= maxImagesPerChapter),
     [maxImagesPerChapter],
@@ -378,9 +387,23 @@ const [aspectRatio, setAspectRatio] = useState<string>('9:16');
     setExpandedAppearanceCards({});
     setRefImages([]);
     setRefSource('none');
-    setRefModalOpen(false);
+    setAssetModalOpen(false);
+    setAutoAssetExtractionEnabled(true);
+    setAutoAssetExtractionTypes(['character', 'scene', 'prop']);
     setColorModeState('bw');
     setImageCountState(DEFAULT_IMAGE_COUNT);
+    let persistedStyle: { presetName?: string; referenceUrl?: string | null } | null = null;
+    if (chapter?.id) {
+      try {
+        const rawStyle = localStorage.getItem(`storycanvas.mangaStyle.${chapter.id}`);
+        persistedStyle = rawStyle ? JSON.parse(rawStyle) : null;
+      } catch {
+        persistedStyle = null;
+      }
+    }
+    setSelectedStylePresetName(typeof persistedStyle?.presetName === 'string' ? persistedStyle.presetName : '');
+    setStyleReferenceImageUrl(typeof persistedStyle?.referenceUrl === 'string' ? persistedStyle.referenceUrl : null);
+    styleSelectionTouchedRef.current = persistedStyle !== null;
     setShowColorMenu(false);
     setIgnorePersistedImages(false);
     setImageLoadStates({});
@@ -430,13 +453,26 @@ const [aspectRatio, setAspectRatio] = useState<string>('9:16');
             clearInterval(backendTaskPollRef.current);
             backendTaskPollRef.current = null;
           }
-          setErrorMsg(`后台漫画生成失败：${status.error_message || '未知错误'}`);
-          genStore.finish(chapterId, status.error_message || '未知错误');
-        } else if (status.status === 'running' || status.status === 'pending' || status.status === 'retrying') {
+          const baseMessage = normalizeErrorMessage(status.error_message, '后台漫画生成失败，请重试');
+          const message = status.suggestion ? `${baseMessage}。${status.suggestion}` : baseMessage;
+          setErrorMsg(message);
+          genStore.finish(chapterId, message);
+        } else if (status.status === 'cancelled') {
+          if (backendTaskPollRef.current) {
+            clearInterval(backendTaskPollRef.current);
+            backendTaskPollRef.current = null;
+          }
+          setErrorMsg('');
+          setStatusMsg('漫画生成任务已取消');
+          genStore.finish(chapterId);
+          setTimeout(() => genStore.clear(chapterId), 800);
+        } else if (status.status === 'running' || status.status === 'pending' || status.status === 'retrying' || status.status === 'cancel_requested') {
           // 后台任务仍在进行，更新进度
           const message = status.message || (
-            status.status === 'retrying'
-              ? `上游较慢，正在自动重试 ${status.retry_count ?? 0}/${status.max_retries ?? 0}`
+            status.status === 'cancel_requested'
+              ? '正在取消漫画生成任务...'
+              : status.status === 'retrying'
+                ? `上游较慢，正在自动重试 ${status.retry_count ?? 0}/${status.max_retries ?? 0}`
               : `后台正在生成漫画 (${status.progress}/${status.total})`
           );
           setProgress({ current: status.progress, total: status.total });
@@ -445,6 +481,7 @@ const [aspectRatio, setAspectRatio] = useState<string>('9:16');
         }
       } catch (err) {
         console.error('后端任务轮询错误:', err);
+        setErrorMsg(normalizeErrorMessage(err, '无法获取漫画任务状态，请检查网络后重试'));
       }
     }, 3000);
   }, [syncChapterImagesFromServer, onChapterRefresh]);
@@ -454,11 +491,13 @@ const [aspectRatio, setAspectRatio] = useState<string>('9:16');
   const checkBackendMangaStatus = useCallback(async (chapterId: number) => {
     try {
       const status = await getMangaGenerationStatus(chapterId);
-      if (status.status === 'running' || status.status === 'pending' || status.status === 'retrying') {
+      if (status.status === 'running' || status.status === 'pending' || status.status === 'retrying' || status.status === 'cancel_requested') {
         // 后台有正在运行的任务，恢复进度显示并开始轮询
         const message = status.message || (
-          status.status === 'retrying'
-            ? `上游较慢，正在自动重试 ${status.retry_count ?? 0}/${status.max_retries ?? 0}`
+          status.status === 'cancel_requested'
+            ? '正在取消漫画生成任务...'
+            : status.status === 'retrying'
+              ? `上游较慢，正在自动重试 ${status.retry_count ?? 0}/${status.max_retries ?? 0}`
             : `后台正在生成漫画 (${status.progress}/${status.total})`
         );
         setProgress({ current: status.progress, total: status.total });
@@ -472,13 +511,21 @@ const [aspectRatio, setAspectRatio] = useState<string>('9:16');
         onChapterRefresh?.(chapterId);
       } else if (status.status === 'failed') {
         // 后台任务失败，显示错误信息
-        setErrorMsg(`后台漫画生成任务失败：${status.error_message || '未知错误'}`);
+        const baseMessage = normalizeErrorMessage(status.error_message, '后台漫画生成失败，请重试');
+        setErrorMsg(status.suggestion ? `${baseMessage}。${status.suggestion}` : baseMessage);
+      } else if (status.status === 'cancelled') {
+        setErrorMsg('');
+        setStatusMsg('漫画生成任务已取消');
+        genStore.clear(chapterId);
       }
     } catch (err) {
       console.error('检查后端漫画状态失败:', err);
+      setErrorMsg(normalizeErrorMessage(err, '无法检查漫画任务状态，请刷新页面重试'));
     }
   }, [syncChapterImagesFromServer, onChapterRefresh, startBackendTaskPolling]);
-  checkBackendMangaStatusRef.current = checkBackendMangaStatus;
+  useEffect(() => {
+    checkBackendMangaStatusRef.current = checkBackendMangaStatus;
+  }, [checkBackendMangaStatus]);
 
   // Load existing scenes and characters if available
   useEffect(() => {
@@ -499,11 +546,28 @@ const [aspectRatio, setAspectRatio] = useState<string>('9:16');
       listStylePresets().then((result) => {
         if (chapterLoadRequestRef.current === requestId) {
           setStylePresets(result.presets);
-          // 默认选中"日式动漫风"
-          if (result.presets.length > 0) {
-            const animePreset = result.presets.find(p => p.name === '日式动漫风')
-              || result.presets.find(p => p.category === 'anime')
-              || result.presets[0];
+          const availablePresets = result.presets.filter((preset) => Boolean(preset.image_url));
+          let persistedPresetName = '';
+          try {
+            const rawStyle = localStorage.getItem(`storycanvas.mangaStyle.${chapter.id}`);
+            const parsedStyle = rawStyle ? JSON.parse(rawStyle) as { presetName?: unknown } : null;
+            persistedPresetName = typeof parsedStyle?.presetName === 'string' ? parsedStyle.presetName : '';
+          } catch {
+            persistedPresetName = '';
+          }
+          const persistedPreset = persistedPresetName
+            ? result.presets.find((preset) => preset.name === persistedPresetName)
+            : null;
+          if (persistedPresetName && !persistedPreset?.image_url) {
+            setSelectedStylePresetName('');
+            localStorage.removeItem(`storycanvas.mangaStyle.${chapter.id}`);
+            styleSelectionTouchedRef.current = false;
+          }
+          // 默认只选中已配置参考图的预设
+          if (availablePresets.length > 0 && !styleSelectionTouchedRef.current) {
+            const animePreset = availablePresets.find(p => p.name === '日式动漫风')
+              || availablePresets.find(p => p.category === 'anime')
+              || availablePresets[0];
             setSelectedStylePresetName(animePreset.name);
           }
         }
@@ -670,9 +734,24 @@ const [aspectRatio, setAspectRatio] = useState<string>('9:16');
     sceneAbortRef.current = controller;
     const requestId = chapterLoadRequestRef.current;
     const hadScenes = scenes.length > 0;
+    const hadImages = existingImages.length > 0 || images.length > 0;
+    const previousScenes = scenes;
+    const previousSanitizedIndices = sanitizedSceneIdxs;
+    // 重新生成期间先移除旧分镜，避免新旧内容叠加造成“没有刷新”的错觉。
+    setScenes([]);
+    setSanitizedSceneIdxs([]);
+    setFailedSceneIdx(-1);
     try {
       const result = await generateScenes(chapter.id, controller.signal);
       if (chapterLoadRequestRef.current !== requestId) return;
+      if (hadImages) {
+        // 分镜重生成后，旧图片已不再对应新脚本，必须从数据库和本地状态中一并清除。
+        await resetMangaImages(chapter.id);
+        setImages([]);
+        setIgnorePersistedImages(true);
+        genStore.clear(chapter.id);
+        onChapterRefresh?.(chapter.id);
+      }
       setScenes(result.scenes);
       setSanitizedSceneIdxs(result.sanitized_indices ?? []);
       setFailedSceneIdx(-1);
@@ -680,8 +759,12 @@ const [aspectRatio, setAspectRatio] = useState<string>('9:16');
     } catch (err: any) {
       if (chapterLoadRequestRef.current !== requestId) return;
       if (err.name === 'AbortError') {
+        setScenes(previousScenes);
+        setSanitizedSceneIdxs(previousSanitizedIndices);
         setPhase(hadScenes ? 'editing-scenes' : 'idle');
       } else {
+        setScenes(previousScenes);
+        setSanitizedSceneIdxs(previousSanitizedIndices);
         setErrorMsg(err.message);
         setPhase(hadScenes ? 'editing-scenes' : 'idle');
       }
@@ -1005,15 +1088,20 @@ const [aspectRatio, setAspectRatio] = useState<string>('9:16');
     return () => document.removeEventListener('mousedown', handler);
   }, [showColorMenu]);
 
+  useEffect(() => {
+    if (!assetConfigOpen) return;
+    const handler = (event: MouseEvent) => {
+      if (assetConfigRef.current && !assetConfigRef.current.contains(event.target as Node)) {
+        setAssetConfigOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [assetConfigOpen]);
+
   // 鈹€鈹€ Color mode selection 鈹€鈹€
   const handleSelectColorMode = async (mode: ColorMode) => {
     if (!chapter) return;
-    if (mode === 'color' && !allowColorMode) {
-      setShowColorMenu(false);
-      setColorModeState('bw');
-      setErrorMsg('当前套餐不支持彩色漫画');
-      return;
-    }
     setShowColorMenu(false);
     await setColorMode(chapter.id, mode);
     setColorModeState(mode);
@@ -1024,13 +1112,6 @@ const [aspectRatio, setAspectRatio] = useState<string>('9:16');
       setImageCountState(maxImagesPerChapter);
     }
   }, [imageCount, maxImagesPerChapter]);
-
-  useEffect(() => {
-    if (colorMode === 'color' && !allowColorMode) {
-      setColorModeState('bw');
-      setShowColorMenu(false);
-    }
-  }, [allowColorMode, colorMode]);
 
   const reconcileGenerationAfterStreamIssue = useCallback(
     async (chapterId: number, targetTotal: number, fallbackImages: ImageItem[], fallbackError: string) => {
@@ -1080,7 +1161,7 @@ const [aspectRatio, setAspectRatio] = useState<string>('9:16');
     setFailedSceneIdx(-1);
     const targetId = chapter.id;
     const targetTotal = imageCount;
-    let seedImages = mergeImages(existingImages, images);
+    let seedImages = ignorePersistedImages ? [...images] : mergeImages(existingImages, images);
 
     if (mode === 'restart' && seedImages.length > 0) {
       try {
@@ -1104,6 +1185,10 @@ const [aspectRatio, setAspectRatio] = useState<string>('9:16');
     const currentSize = ASPECT_RATIO_OPTIONS.find(o => o.label === aspectRatio)?.size;
     const currentStylePresetName = selectedStylePresetName || undefined;
     const currentStyleRefUrl = styleReferenceImageUrl || undefined;
+    const currentAssetExtraction = {
+      enabled: autoAssetExtractionEnabled && autoAssetExtractionTypes.length > 0,
+      types: autoAssetExtractionTypes,
+    };
     const controller = generateMangaStream(targetId, (event: MangaProgress) => {
       switch (event.type) {
         case 'status':
@@ -1176,7 +1261,7 @@ const [aspectRatio, setAspectRatio] = useState<string>('9:16');
           break;
         }
       }
-    }, currentSize, currentStylePresetName, currentStyleRefUrl);
+    }, currentSize, currentStylePresetName, currentStyleRefUrl, currentAssetExtraction);
     mangaAbortRef.current.set(targetId, controller);
   };
 
@@ -1239,6 +1324,19 @@ const [aspectRatio, setAspectRatio] = useState<string>('9:16');
     return () => window.removeEventListener('keydown', handler);
   }, [refPreviewImage, onWorkspacePreviewModeChange]);
 
+  // 错误信息改为 toast 弹窗显示（替代常驻 banner）
+  const prevErrorMsgRef = useRef('');
+  useEffect(() => {
+    const msg = liveGen?.errorMsg || errorMsg;
+    if (msg && msg !== prevErrorMsgRef.current) {
+      toast.error(msg);
+      prevErrorMsgRef.current = msg;
+    }
+    if (!msg) {
+      prevErrorMsgRef.current = '';
+    }
+  }, [errorMsg, liveGen?.errorMsg]);
+
   const scrollToSceneDetail = useCallback((sceneIdx: number) => {
     const target = sceneDetailRefs.current[sceneIdx];
     if (!target) return;
@@ -1248,15 +1346,17 @@ const [aspectRatio, setAspectRatio] = useState<string>('9:16');
   const generating = isLiveGenerating || phase === 'generating-images';
 
   // Tick every 1s while generating so the stall indicator re-renders.
-  const [, setNowTick] = useState(0);
+  const [nowTick, setNowTick] = useState(0);
   useEffect(() => {
     if (!generating) return;
-    const id = window.setInterval(() => setNowTick((n) => n + 1), 1000);
+    const updateNow = () => setNowTick(Date.now());
+    updateNow();
+    const id = window.setInterval(updateNow, 1000);
     return () => window.clearInterval(id);
   }, [generating]);
 
   const stallSeconds = isLiveGenerating && liveGen
-    ? Math.max(0, Math.floor((Date.now() - liveGen.lastEventAt) / 1000))
+    ? Math.max(0, Math.floor((nowTick - liveGen.lastEventAt) / 1000))
     : 0;
   const isStalled = isLiveGenerating && stallSeconds >= 30;
 
@@ -1264,7 +1364,6 @@ const [aspectRatio, setAspectRatio] = useState<string>('9:16');
     ? { current: liveGen!.current, total: liveGen!.total }
     : progress;
   const liveStatusMsg = isLiveGenerating ? liveGen!.statusMsg : statusMsg;
-  const liveErrorMsg = liveGen?.errorMsg || errorMsg;
   const hasImages = displayImages.length > 0;
   const canChangeImageCount = !generating && (phase === 'idle' || phase === 'editing-scenes');
   const activeImageCount = liveProgress.total || imageCount;
@@ -1284,13 +1383,26 @@ const [aspectRatio, setAspectRatio] = useState<string>('9:16');
     <>
     <div className="flex flex-col h-full bg-[#fcfcfa]">
       {/* Header */}
-      <div className="px-3 md:px-5 py-3 border-b border-[#d9dfd7]">
+      <div className="space-y-3 px-4 py-3 md:px-5 border-b border-[#d9dfd7] bg-white">
         {/* 第一行：标题 + 垫图 + 张数 + 下载 */}
-        <div className="flex items-center justify-between gap-2 mb-2">
-          <h2 className="text-sm font-semibold text-slate-800 tracking-wide uppercase shrink-0 hidden md:block">
-            第 {chapter?.chapter_number ?? '-'} 话 · 漫画
-          </h2>
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="min-w-0">
+            <h2 className="text-sm font-semibold text-slate-900">
+              第 {chapter?.chapter_number ?? '-'} 话 · 漫画生成
+            </h2>
+            <p className="mt-0.5 text-xs text-slate-500">分镜、画面与角色参考在同一画布内完成</p>
+          </div>
           <div className="flex items-center gap-1.5 md:gap-2 flex-wrap justify-end">
+            {onOpenSourceViewer ? (
+              <button
+                type="button"
+                onClick={onOpenSourceViewer}
+                className="flex items-center gap-1.5 rounded-md border border-blue-200 bg-blue-50 px-3 py-1.5 text-xs font-medium text-blue-700 transition-colors hover:bg-blue-100"
+              >
+                <BookOpen size={13} />
+                查看正文与分镜脚本
+              </button>
+            ) : null}
             {/* Reference images */}
             <div className="flex items-center gap-1">
               <input
@@ -1321,27 +1433,17 @@ const [aspectRatio, setAspectRatio] = useState<string>('9:16');
                 }}
               />
               <button
-                onClick={() => setRefModalOpen(true)}
+                onClick={() => setAssetModalOpen(true)}
                 disabled={!chapter}
                 className={`flex items-center gap-1 px-3 py-1.5 text-xs font-medium rounded-md transition-colors
                   ${refImages.length > 0
                     ? 'bg-emerald-900/50 hover:bg-emerald-800 text-emerald-300 border border-emerald-700'
                     : 'bg-[#f3f5f0] hover:bg-[#e8ece6] text-slate-700'
                   } disabled:opacity-40`}
-                title={
-                  refImages.length > 0
-                    ? refSource === 'story'
-                      ? `全局垫图 ${refImages.length} 张，点击查看/管理`
-                      : `已设置 ${refImages.length} 张垫图，点击查看/管理`
-                    : '点击上传垫图参考'
-                }
+                title="管理角色、场景、道具和风格资产"
               >
                 <ImagePlus size={13} />
-                {refImages.length > 0
-                  ? refSource === 'story'
-                    ? `全局垫图 ${refImages.length}`
-                    : `已垫图 ${refImages.length}`
-                  : '垫图'}
+                资产管理
               </button>
             </div>
             {/* Image count selector */}
@@ -1354,7 +1456,8 @@ const [aspectRatio, setAspectRatio] = useState<string>('9:16');
                   setImageCountState(count);
                   if (chapter) {
                     try {
-                      await setImageCount(chapter.id, count);
+                      const savedCount = await setImageCount(chapter.id, count);
+                      setImageCountState(savedCount);
                     } catch (err: any) {
                       setImageCountState(previous);
                       setErrorMsg(`保存生成张数失败: ${err.message}`);
@@ -1403,7 +1506,9 @@ const [aspectRatio, setAspectRatio] = useState<string>('9:16');
         </div>
         {/* 第二行：风格/比例/彩色/生成按钮 */}
         {canContinueGeneration && (
-          <div className="flex items-center gap-1.5 md:gap-2 flex-wrap justify-end">
+          <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-[#e5edf8] bg-[#f8fbff] px-3 py-2.5">
+            <div className="flex min-w-0 flex-wrap items-center gap-2">
+              <span className="mr-1 text-xs font-semibold text-slate-600">生成配置</span>
             {/* Color mode selector */}
             <div className="relative" ref={colorMenuRef}>
               <button
@@ -1432,17 +1537,15 @@ const [aspectRatio, setAspectRatio] = useState<string>('9:16');
                     黑白漫画
                     {colorMode === 'bw' && <Check size={12} className="ml-auto text-amber-400" />}
                   </button>
-                  {allowColorMode && (
-                    <button
-                      onClick={() => handleSelectColorMode('color')}
-                      className={`w-full flex items-center gap-2 px-3 py-2.5 text-xs transition-colors hover:bg-[#f3f5f0]
-                        ${colorMode === 'color' ? 'text-amber-400 font-semibold' : 'text-slate-700'}`}
-                    >
-                      <span className="w-4 h-4 rounded border-2 border-gray-500 bg-gradient-to-br from-pink-400 via-blue-400 to-green-400 shrink-0" />
-                      彩色漫画
-                      {colorMode === 'color' && <Check size={12} className="ml-auto text-amber-400" />}
-                    </button>
-                  )}
+                  <button
+                    onClick={() => handleSelectColorMode('color')}
+                    className={`w-full flex items-center gap-2 px-3 py-2.5 text-xs transition-colors hover:bg-[#f3f5f0]
+                      ${colorMode === 'color' ? 'text-amber-400 font-semibold' : 'text-slate-700'}`}
+                  >
+                    <span className="w-4 h-4 rounded border-2 border-gray-500 bg-gradient-to-br from-pink-400 via-blue-400 to-green-400 shrink-0" />
+                    彩色漫画
+                    {colorMode === 'color' && <Check size={12} className="ml-auto text-amber-400" />}
+                  </button>
                 </div>
               )}
             </div>
@@ -1471,6 +1574,67 @@ const [aspectRatio, setAspectRatio] = useState<string>('9:16');
                 <span className="text-[10px] text-blue-500">(已选)</span>
               )}
             </button>
+            {/* 自动资产提取配置 */}
+            <div className="relative" ref={assetConfigRef}>
+              <button
+                type="button"
+                onClick={() => setAssetConfigOpen((value) => !value)}
+                className={`flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-xs font-medium transition-colors ${autoAssetExtractionEnabled ? 'border-blue-200 bg-blue-50 text-blue-700' : 'border-[#d9dfd7] bg-white text-slate-500'}`}
+                aria-expanded={assetConfigOpen}
+              >
+                <Settings2 size={13} />
+                <span>
+                  {autoAssetExtractionEnabled
+                    ? `自动资产 · ${autoAssetExtractionTypes.length === 3 ? '全部' : autoAssetExtractionTypes.map((key) => MANGA_ASSET_EXTRACTION_OPTIONS.find((item) => item.key === key)?.label).filter(Boolean).join('、') || '未选择'}`
+                    : '不提取资产'}
+                </span>
+                <ChevronDown size={11} className={`transition-transform ${assetConfigOpen ? 'rotate-180' : ''}`} />
+              </button>
+              {assetConfigOpen && (
+                <div className="absolute right-0 top-full z-50 mt-1 w-56 rounded-lg border border-slate-200 bg-white p-3 shadow-xl">
+                  <label className="flex cursor-pointer items-center gap-2 border-b border-slate-100 pb-2 text-xs font-semibold text-slate-700">
+                    <input
+                      type="checkbox"
+                      className="h-4 w-4 accent-blue-600"
+                      checked={autoAssetExtractionEnabled}
+                      onChange={(event) => {
+                        const enabled = event.target.checked;
+                        setAutoAssetExtractionEnabled(enabled);
+                        if (enabled && autoAssetExtractionTypes.length === 0) setAutoAssetExtractionTypes(['character', 'scene', 'prop']);
+                      }}
+                    />
+                    自动提取资产图
+                  </label>
+                  <div className="mt-2 space-y-1">
+                    {MANGA_ASSET_EXTRACTION_OPTIONS.map((option) => {
+                      const checked = autoAssetExtractionTypes.includes(option.key);
+                      const Icon = option.key === 'character' ? UserRound : option.key === 'scene' ? MapPinned : Package;
+                      return (
+                        <label key={option.key} className={`flex cursor-pointer items-center gap-2 rounded-md px-1.5 py-1.5 text-xs ${autoAssetExtractionEnabled ? 'text-slate-700 hover:bg-slate-50' : 'text-slate-400'}`}>
+                          <input
+                            type="checkbox"
+                            className="h-4 w-4 accent-blue-600"
+                            checked={checked}
+                            disabled={!autoAssetExtractionEnabled}
+                            onChange={() => {
+                              const next = checked
+                                ? autoAssetExtractionTypes.filter((key) => key !== option.key)
+                                : [...autoAssetExtractionTypes, option.key];
+                              setAutoAssetExtractionTypes(next);
+                              setAutoAssetExtractionEnabled(next.length > 0);
+                            }}
+                          />
+                          <Icon size={13} />
+                          {option.label}
+                        </label>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+            </div>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
             {/* Generate button */}
             <button
               onClick={handleGenerateImages}
@@ -1494,6 +1658,7 @@ const [aspectRatio, setAspectRatio] = useState<string>('9:16');
                 重新生成全部
               </button>
             )}
+            </div>
           </div>
         )}
           {phase === 'generating-scenes' && (
@@ -1575,35 +1740,6 @@ const [aspectRatio, setAspectRatio] = useState<string>('9:16');
         </div>
       )}
 
-      {/* Error banner */}
-      {liveErrorMsg && (
-        <div className="mx-5 mt-3 px-4 py-3 rounded-lg bg-red-900/30 border border-red-800 text-red-300 text-sm flex items-start gap-2">
-          <span className="shrink-0 mt-0.5">⚠</span>
-          <div className="flex-1 min-w-0">
-            <div className="font-medium mb-0.5">生成出错</div>
-            <div className="text-xs text-red-400">{liveErrorMsg}</div>
-            {phase === 'editing-scenes' && scenes.length > 0 && (
-              <div className="mt-3 flex flex-wrap gap-2">
-                <button
-                  onClick={handleGenerateImages}
-                  className="px-3 py-1.5 rounded-md bg-amber-500 hover:bg-amber-400 text-slate-900 text-xs font-medium transition-colors"
-                >
-                  {hasPartialImages ? '继续生成剩余图片' : '再试一次'}
-                </button>
-                {hasImages && (
-                  <button
-                    onClick={handleRestartManga}
-                    className="px-3 py-1.5 rounded-md bg-[#f3f5f0] hover:bg-[#e8ece6] text-slate-800 text-xs font-medium border border-[#d9dfd7] transition-colors"
-                  >
-                    重新生成全部
-                  </button>
-                )}
-              </div>
-            )}
-          </div>
-        </div>
-      )}
-
       {/* Main content area */}
       <div className="flex-1 overflow-y-auto px-3 md:px-5 py-4">
         {/* Selection-based scene generation banner */}
@@ -1634,7 +1770,7 @@ const [aspectRatio, setAspectRatio] = useState<string>('9:16');
 
         {/* Character profiles card */}
         {(phase === 'idle' || phase === 'editing-scenes') && (
-          <div className="mb-4 rounded-lg border border-[#d9dfd7] bg-white overflow-hidden">
+          <div className="hidden mb-4 rounded-lg border border-[#d9dfd7] bg-white overflow-hidden">
             <button
               onClick={() => setCharExpanded((v) => !v)}
               className="w-full flex items-center justify-between px-3 py-2 text-xs font-semibold text-slate-600 uppercase tracking-wide hover:bg-[#f3f5f0]/40 transition-colors"
@@ -1723,7 +1859,9 @@ const [aspectRatio, setAspectRatio] = useState<string>('9:16');
                                                 setCharText(newText);
                                                 setCharDraft(newText);
                                                 if (chapter) {
-                                                  saveCharacters(chapter.id, newText).catch(() => {});
+                                                  saveCharacters(chapter.id, newText).catch((error) => {
+                                                    toast.error(normalizeErrorMessage(error, '保存角色名称失败，请重试'));
+                                                  });
                                                 }
                                               }
                                               setEditingCardIdx(null);
@@ -1741,7 +1879,9 @@ const [aspectRatio, setAspectRatio] = useState<string>('9:16');
                                               setCharText(newText);
                                               setCharDraft(newText);
                                               if (chapter) {
-                                                saveCharacters(chapter.id, newText).catch(() => {});
+                                                saveCharacters(chapter.id, newText).catch((error) => {
+                                                  toast.error(normalizeErrorMessage(error, '保存角色名称失败，请重试'));
+                                                });
                                               }
                                             }
                                             setEditingCardIdx(null);
@@ -1863,7 +2003,7 @@ const [aspectRatio, setAspectRatio] = useState<string>('9:16');
                                       </button>
                                       {refImage && (
                                         <button
-                                          onClick={() => setRefModalOpen(true)}
+                                          onClick={() => setAssetModalOpen(true)}
                                           className="flex items-center gap-1 text-xs text-emerald-400 hover:text-emerald-300 transition-colors"
                                         >
                                           <ImagePlus size={11} />
@@ -1995,7 +2135,24 @@ const [aspectRatio, setAspectRatio] = useState<string>('9:16');
 
         {/* Scene-only editor (when no images yet) */}
         {scenes.length > 0 && displayImages.length === 0 && !generating && (
-          <div className="mb-6">
+          <>
+          <div className="mb-4 flex items-center justify-between gap-3 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2.5 text-xs text-emerald-800">
+            <div className="min-w-0">
+              <p className="font-semibold">分镜已生成</p>
+              <p className="mt-0.5 truncate text-emerald-700">共 {scenes.length} 格，可点击顶部“查看正文与分镜脚本”查看或编辑完整内容。</p>
+            </div>
+            {onOpenSourceViewer ? (
+              <button
+                type="button"
+                onClick={onOpenSourceViewer}
+                className="inline-flex shrink-0 items-center gap-1 rounded-md border border-emerald-300 bg-white px-2.5 py-1.5 font-medium text-emerald-700 transition hover:bg-emerald-100"
+              >
+                <BookOpen size={13} />
+                打开查看器
+              </button>
+            ) : null}
+          </div>
+          <div className="hidden">
             <div className="flex items-center justify-between mb-3">
               <h3 className="text-xs font-semibold text-slate-600 uppercase tracking-wide flex items-center gap-2">
                 分镜脚本（可编辑）
@@ -2037,7 +2194,10 @@ const [aspectRatio, setAspectRatio] = useState<string>('9:16');
                         autoFocus
                       />
                     ) : (
-                      <p className="flex-1 text-xs text-slate-600 leading-relaxed line-clamp-2 hover:line-clamp-none cursor-default">
+                      <p
+                        className="min-w-0 flex-1 cursor-default text-xs leading-relaxed text-slate-600 line-clamp-2 overflow-hidden"
+                        title={scene}
+                      >
                         {scene}
                       </p>
                     )}
@@ -2073,10 +2233,11 @@ const [aspectRatio, setAspectRatio] = useState<string>('9:16');
               ))}
             </div>
           </div>
+          </>
         )}
 
         {scenes.length > 0 && (
-          <div className="mb-6 rounded-xl border border-[#d7e3f4] bg-[rgba(255,255,255,0.9)] overflow-hidden shadow-[0_12px_30px_rgba(59,130,246,0.08)]">
+          <div className="mb-4 overflow-hidden rounded-lg border border-[#d7e3f4] bg-[rgba(255,255,255,0.9)]">
             <div className="flex items-center justify-between px-3 py-2 border-b border-[#d9dfd7]">
               <h3 className="text-xs font-semibold text-slate-600 uppercase tracking-wide">
                 分镜总览
@@ -2085,8 +2246,8 @@ const [aspectRatio, setAspectRatio] = useState<string>('9:16');
                 {generating ? '生成中也可查看全部分镜' : '全部分镜始终可见'}
               </span>
             </div>
-            <div className="p-3">
-              <div className="flex flex-wrap gap-2">
+            <div className="p-2">
+              <div className="flex flex-wrap gap-1.5">
               {scenes.map((_scene, idx) => {
                 const isCurrent = idx === activeSceneIdx;
                 const isDone = idx < completedImageCount;
@@ -2096,7 +2257,7 @@ const [aspectRatio, setAspectRatio] = useState<string>('9:16');
                     key={`generating-scene-${idx}`}
                     type="button"
                     onClick={() => scrollToSceneDetail(idx)}
-                    className={`min-w-[82px] flex-[0_0_auto] rounded-xl border px-2.5 py-2 text-left transition-colors ${
+                    className={`min-w-[68px] flex-[0_0_auto] rounded-lg border px-2 py-1.5 text-left transition-colors ${
                       failedSceneIdx === idx
                         ? 'border-red-200 bg-red-50'
                         : isCurrent
@@ -2120,7 +2281,7 @@ const [aspectRatio, setAspectRatio] = useState<string>('9:16');
                         {idx + 1}
                       </span>
                       <div className="min-w-0 flex-1">
-                        <div className="text-[11px] font-medium text-slate-800">
+                        <div className="text-[10px] font-medium text-slate-800">
                           第 {idx + 1} 格
                         </div>
                         <div className="mt-1 flex items-center gap-1 flex-wrap">
@@ -2151,12 +2312,12 @@ const [aspectRatio, setAspectRatio] = useState<string>('9:16');
         {displayImages.length === 0 && !generating && scenes.length === 0 && (
           <div className="flex flex-col items-center justify-center h-full text-slate-500 gap-3">
             <ImageIcon size={48} strokeWidth={1} />
-            <span className="text-sm">对话后点击上方按钮生成分镜</span>
+            <span className="text-sm">点击右上方按钮生成分镜</span>
           </div>
         )}
 
         {/* Images gallery with inline scene editor */}
-        <div className="space-y-6">
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-6">
           {gallerySlots.map(({ image_number, scene, img }) => {
             const sceneIdx = image_number - 1;
             const isEditing = editingIdx === sceneIdx;
@@ -2168,21 +2329,21 @@ const [aspectRatio, setAspectRatio] = useState<string>('9:16');
             return (
               <div
                 key={image_number}
-                className="group scroll-mt-4"
+                className="group scroll-mt-4 min-w-0"
                 ref={(node) => {
                   sceneDetailRefs.current[sceneIdx] = node;
                 }}
               >
                 {img && imgReady ? (
                 <div
-                  className="relative rounded-xl overflow-hidden border border-[#d9dfd7] bg-white cursor-pointer
+                  className="relative aspect-[9/16] rounded-xl overflow-hidden border border-[#d9dfd7] bg-white cursor-pointer
                              hover:border-[#d9dfd7] transition-colors"
                   onClick={() => openMangaRedraw(image_number)}
                 >
                   <img
                     src={resolvedImgSrc}
                     alt={`Panel ${image_number}`}
-                    className={`w-full object-contain ${isRegenerating ? 'opacity-30' : ''}`}
+                    className={`h-full w-full object-cover ${isRegenerating ? 'opacity-30' : ''}`}
                     loading="lazy"
                     decoding="async"
                   />
@@ -2204,7 +2365,7 @@ const [aspectRatio, setAspectRatio] = useState<string>('9:16');
                   )}
                 </div>
                 ) : (
-                <div className="relative rounded-xl overflow-hidden border border-dashed border-[#d9dfd7] bg-[#f7f8f5] h-64 flex items-center justify-center">
+                <div className="relative aspect-[9/16] rounded-xl overflow-hidden border border-dashed border-[#d9dfd7] bg-[#f7f8f5] flex items-center justify-center">
                   <div className="absolute top-3 left-3 px-2 py-0.5 bg-black/50 rounded text-[10px] text-slate-600 font-mono">
                     {image_number}/{imageCount}
                   </div>
@@ -2256,7 +2417,10 @@ const [aspectRatio, setAspectRatio] = useState<string>('9:16');
                           onClick={(e) => e.stopPropagation()}
                         />
                       ) : (
-                        <p className="flex-1 text-xs text-slate-500 leading-relaxed line-clamp-2 group-hover:line-clamp-none">
+                        <p
+                          className="min-w-0 flex-1 overflow-hidden text-xs leading-relaxed text-slate-500 line-clamp-2"
+                          title={scene}
+                        >
                           {scene}
                         </p>
                       )}
@@ -2389,8 +2553,8 @@ const [aspectRatio, setAspectRatio] = useState<string>('9:16');
         </div>
       )}
 
-      {/* Reference images management modal */}
-      {refModalOpen && (
+      {/* 历史垫图弹窗已下线，仅保留兼容代码以避免旧任务中的引用预览失效。 */}
+      {legacyReferenceUiEnabled && refModalOpen && (
         <div
           className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4"
           onClick={() => setRefModalOpen(false)}
@@ -2402,7 +2566,7 @@ const [aspectRatio, setAspectRatio] = useState<string>('9:16');
             <div className="flex items-center justify-between px-5 py-3 border-b border-[#d9dfd7]">
               <div className="flex items-center gap-2">
                 <ImagePlus size={16} className="text-emerald-400" />
-                <h3 className="text-sm font-semibold text-slate-800">垫图管理</h3>
+                <h3 className="text-sm font-semibold text-slate-800">漫画资产管理</h3>
                 <span className="text-xs text-slate-500">
                   {refImages.length}/{refMax} 张
                   {refSource === 'story' && refImages.length > 0 && (
@@ -2419,11 +2583,20 @@ const [aspectRatio, setAspectRatio] = useState<string>('9:16');
             </div>
             <div className="flex-1 overflow-y-auto p-5">
               <p className="text-xs text-slate-500 mb-4 leading-relaxed">
-                上传角色参考图，AI 生成漫画时会保持人物外貌一致性。
+                为本章绑定角色、场景、道具与风格资产；生成时会按分镜文本标签匹配并作为参考图输入。
                 {refSource === 'story' && refImages.length > 0 && (
                   <> 当前显示首页设置的全局垫图；上传新图将创建本话专属垫图覆盖全局。</>
                 )}
               </p>
+              <div className="mb-5 rounded-xl border border-[#d7e3f4] bg-[#f8fbff] p-3">
+                <div className="mb-2 flex items-center justify-between text-xs font-semibold text-slate-700"><span>故事资产与本章绑定</span><span className="text-slate-400">角色 / 场景 / 道具 / 风格</span></div>
+                {assetsLoading ? <div className="py-4 text-center text-xs text-slate-400">正在加载资产...</div> : mangaAssets.length === 0 ? <div className="py-3 text-xs text-slate-500">暂无已迁移资产。下方上传的参考图仍会兼容参与本章生成。</div> : <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+                  {mangaAssets.map((asset) => {
+                    const bound = assetBindings.some((binding) => binding.asset_id === asset.id);
+                    return <label key={asset.id} className={`flex cursor-pointer items-center gap-2 rounded-lg border p-2 text-xs ${bound ? 'border-blue-300 bg-blue-50' : 'border-slate-200 bg-white'}`}><input type="checkbox" checked={bound} onChange={async () => { if (!chapter) return; const next = bound ? assetBindings.filter((binding) => binding.asset_id !== asset.id) : [...assetBindings, { id: 0, asset_id: asset.id, binding_role: asset.asset_type.replace('_reference', ''), label: asset.name, priority: 0, is_required: false }]; try { const saved = await saveMangaAssetBindings(chapter.id, next.map(({ asset_id, binding_role, label, priority, is_required }) => ({ asset_id, binding_role, label, priority, is_required }))); setAssetBindings(saved.bindings); } catch (error: any) { setErrorMsg(`保存资产绑定失败: ${error.message}`); } }} /><span className="min-w-0 truncate"><b>{asset.name}</b><span className="ml-1 text-slate-400">{asset.asset_type.replace('_reference', '')}</span></span></label>;
+                  })}
+                </div>}
+              </div>
               {refImages.length === 0 ? (
                 <div className="flex flex-col items-center justify-center py-12 text-slate-500 text-sm gap-2 border border-dashed border-[#d9dfd7] rounded-lg">
                   <ImagePlus size={32} className="opacity-50" />
@@ -2533,6 +2706,15 @@ const [aspectRatio, setAspectRatio] = useState<string>('9:16');
             </div>
           </div>
         </div>
+      )}
+
+      {assetModalOpen && chapter && (
+        <MangaAssetManagementModal
+          storyId={chapter.story_id}
+          chapterId={chapter.id}
+          onClose={() => setAssetModalOpen(false)}
+          onAssetsChanged={() => onChapterRefresh?.(chapter.id)}
+        />
       )}
 
       {refPreviewImage && (
@@ -2692,10 +2874,15 @@ const [aspectRatio, setAspectRatio] = useState<string>('9:16');
         presets={stylePresets}
         selectedStyleName={selectedStylePresetName}
         styleReferenceImageUrl={styleReferenceImageUrl}
+        requireReferenceImage
         onFileUpload={chapter ? (file) => uploadMangaStyleReference(chapter.id, file).then(r => r.style_reference_image_url) : undefined}
         onStyleSelect={(styleName, refUrl) => {
+          styleSelectionTouchedRef.current = true;
           setSelectedStylePresetName(styleName);
           setStyleReferenceImageUrl(refUrl);
+          if (chapter) {
+            localStorage.setItem(`storycanvas.mangaStyle.${chapter.id}`, JSON.stringify({ presetName: styleName, referenceUrl: refUrl }));
+          }
         }}
       />,
       document.body

@@ -6,7 +6,6 @@ import {
   type VideoShot,
   type VideoGenerationJob,
   type RenderedClip,
-  type EntitlementResponse,
   apiHeaders,
   listScreenplayScenes,
   listSceneShots,
@@ -23,7 +22,7 @@ interface Props {
   story: Story;
   chapters: Chapter[];
   currentChapter: Chapter | null;
-  entitlements?: EntitlementResponse | null;
+  entitlements?: Record<string, any> | null;
   onChapterChange: (chapter: Chapter) => void;
   onContentUpdated: () => void | Promise<void>;
 }

@@ -115,7 +115,7 @@ def call_api(
     response.raise_for_status()
     try:
         payload = response.json()
-    except UnicodeDecodeError:
+    except (UnicodeDecodeError, json.JSONDecodeError):
         content = response.content
         for enc in ("gbk", "gb2312", "utf-8"):
             try:
@@ -124,14 +124,24 @@ def call_api(
             except (UnicodeDecodeError, json.JSONDecodeError):
                 continue
         else:
-            raise AlipayApiError(f"Failed to decode Alipay response: {content[:200]}")
+            raise AlipayApiError("支付宝返回了无法解析的响应")
+    if not isinstance(payload, dict):
+        raise AlipayApiError("支付宝响应格式无效")
     response_key = f"{method.replace('.', '_')}_response"
     if response_key not in payload:
-        raise AlipayApiError(json.dumps(payload, ensure_ascii=False)[:1000])
+        error = payload.get("error_response") if isinstance(payload, dict) else None
+        if isinstance(error, dict):
+            message = error.get("sub_msg") or error.get("msg") or "支付宝请求失败"
+            error_code = str(error.get("sub_code") or error.get("code") or "").strip()
+            raise AlipayApiError(f"{error_code}: {message}" if error_code else message)
+        raise AlipayApiError(f"支付宝响应缺少字段 {response_key}")
     result = payload[response_key]
+    if not isinstance(result, dict):
+        raise AlipayApiError(f"支付宝响应字段 {response_key} 格式无效")
     if result.get("code") != "10000":
         message = result.get("sub_msg") or result.get("msg") or "Unknown Alipay error"
-        raise AlipayApiError(message)
+        sub_code = str(result.get("sub_code") or "").strip()
+        raise AlipayApiError(f"{sub_code}: {message}" if sub_code else message)
     return {"request": params, "response": payload, "result": result}
 
 

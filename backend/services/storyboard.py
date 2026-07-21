@@ -112,6 +112,7 @@ async def generate_shots(
     api_key: str | None = None,
     character_profiles: str | None = None,
     scene_characters: list[str] | None = None,
+    strict_ai: bool = False,
 ) -> list[dict[str, Any]]:
     """Break down a scene into individual shots."""
     cleaned_summary = _clean_text(scene_summary)
@@ -155,7 +156,7 @@ async def generate_shots(
 对白：{scene_dialogue}
 {character_context}"""
         payload = {
-            "model": deepseek_service.DEEPSEEK_MODEL,
+            "model": deepseek_service.runtime_model(),
             "messages": [
                 {"role": "system", "content": "你是一名影视分镜导演与提示词工程师，只输出严格 JSON。"},
                 {"role": "user", "content": prompt},
@@ -167,12 +168,12 @@ async def generate_shots(
         try:
             async with httpx.AsyncClient(timeout=300) as client:
                 response = await client.post(
-                    f"{deepseek_service.DEEPSEEK_BASE_URL}/chat/completions",
+                    f"{deepseek_service.runtime_base_url()}/chat/completions",
                     json=payload,
                     headers=deepseek_service._deepseek_auth_headers(api_key),
                 )
                 response.raise_for_status()
-                data = response.json()
+                data = deepseek_service._response_json(response, context="DeepSeek 分镜生成")
                 content = str(data["choices"][0]["message"]["content"] or "").strip()
             result = deepseek_service._extract_json_object(content)
             raw_shots = result.get("shots")
@@ -184,7 +185,10 @@ async def generate_shots(
                     if isinstance(shot, dict)
                 ]
         except Exception:
-            pass
+            if strict_ai:
+                raise
+    elif strict_ai:
+        raise ValueError("DeepSeek API Key 未配置")
 
     return _fallback_shot_templates(cleaned_summary, scene_dialogue, shot_count_hint, duration_budget_seconds)
 
@@ -195,6 +199,7 @@ async def generate_shot_prompts(
     provider: str,
     continuity_notes: str,
     api_key: str | None = None,
+    strict_ai: bool = False,
 ) -> dict[str, str]:
     """Generate storyboard and video prompts for a single shot."""
     shot_type = _clean_text(shot_info.get("shot_type")) or "medium"
@@ -280,7 +285,7 @@ async def generate_shot_prompts(
 }}
 """
         payload = {
-            "model": deepseek_service.DEEPSEEK_MODEL,
+            "model": deepseek_service.runtime_model(),
             "messages": [
                 {"role": "system", "content": "你是一名影视提示词工程师，只输出严格 JSON。"},
                 {"role": "user", "content": prompt},
@@ -292,12 +297,12 @@ async def generate_shot_prompts(
         try:
             async with httpx.AsyncClient(timeout=300) as client:
                 response = await client.post(
-                    f"{deepseek_service.DEEPSEEK_BASE_URL}/chat/completions",
+                    f"{deepseek_service.runtime_base_url()}/chat/completions",
                     json=payload,
                     headers=deepseek_service._deepseek_auth_headers(api_key),
                 )
                 response.raise_for_status()
-                data = response.json()
+                data = deepseek_service._response_json(response, context="DeepSeek 镜头提示词生成")
                 content = str(data["choices"][0]["message"]["content"] or "").strip()
             result = deepseek_service._extract_json_object(content)
             storyboard_prompt = _clean_text(result.get("storyboard_prompt"))
@@ -310,7 +315,10 @@ async def generate_shot_prompts(
                     "negative_prompt": negative_prompt or "blurry, distorted, deformed, low detail, broken anatomy, extra limbs, extra hands, extra feet, six fingers, asymmetric face, merged characters",
                 }
         except Exception:
-            pass
+            if strict_ai:
+                raise
+    elif strict_ai:
+        raise ValueError("DeepSeek API Key 未配置")
 
     focal_length = _clean_text(shot_info.get("focal_length")) or "standard"
     lighting = _clean_text(shot_info.get("lighting")) or "natural"

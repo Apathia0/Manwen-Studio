@@ -198,7 +198,7 @@ async def _generate_screenplay_with_llm(
 """
 
     payload = {
-        "model": deepseek_service.DEEPSEEK_MODEL,
+        "model": deepseek_service.runtime_model(),
         "messages": [
             {
                 "role": "system",
@@ -216,12 +216,12 @@ async def _generate_screenplay_with_llm(
 
     async with httpx.AsyncClient(timeout=300) as client:
         response = await client.post(
-            f"{deepseek_service.DEEPSEEK_BASE_URL}/chat/completions",
+            f"{deepseek_service.runtime_base_url()}/chat/completions",
             json=payload,
             headers=deepseek_service._deepseek_auth_headers(api_key),
         )
         response.raise_for_status()
-        data = response.json()
+        data = deepseek_service._response_json(response, context="DeepSeek 剧本生成")
         content = str(data["choices"][0]["message"]["content"] or "").strip()
 
     result = deepseek_service._extract_json_object(content)
@@ -253,6 +253,7 @@ async def generate_screenplay(
     story_memory: dict | None = None,
     chapter_memory_summary: dict | None = None,
     story_outline: dict | None = None,
+    strict_ai: bool = False,
 ) -> dict[str, Any]:
     """Generate screenplay and scenes from chapter content."""
     cleaned_content = str(chapter_content or "").strip()
@@ -273,8 +274,12 @@ async def generate_screenplay(
             )
         raise MissingApiKeyError("DeepSeek")
     except MissingApiKeyError:
+        if strict_ai:
+            raise
         return _build_fallback_screenplay(cleaned_content, scene_count_hint, target_duration_seconds)
     except Exception:
+        if strict_ai:
+            raise
         return _build_fallback_screenplay(cleaned_content, scene_count_hint, target_duration_seconds)
 
 
@@ -283,6 +288,7 @@ async def regenerate_scenes(
     instruction: str,
     scene_count_hint: int = 4,
     api_key: str | None = None,
+    strict_ai: bool = False,
 ) -> list[dict[str, Any]]:
     """Regenerate scenes based on screenplay and user instruction."""
     base_text = str(existing_screenplay or "").strip()
@@ -305,7 +311,7 @@ async def regenerate_scenes(
 {base_text}
 """
         payload = {
-            "model": deepseek_service.DEEPSEEK_MODEL,
+            "model": deepseek_service.runtime_model(),
             "messages": [
                 {"role": "system", "content": "你是一名影视分场编辑，只输出严格 JSON。"},
                 {"role": "user", "content": prompt},
@@ -317,12 +323,12 @@ async def regenerate_scenes(
         try:
             async with httpx.AsyncClient(timeout=300) as client:
                 response = await client.post(
-                    f"{deepseek_service.DEEPSEEK_BASE_URL}/chat/completions",
+                    f"{deepseek_service.runtime_base_url()}/chat/completions",
                     json=payload,
                     headers=deepseek_service._deepseek_auth_headers(api_key),
                 )
                 response.raise_for_status()
-                data = response.json()
+                data = deepseek_service._response_json(response, context="DeepSeek 场景重生")
                 content = str(data["choices"][0]["message"]["content"] or "").strip()
             result = deepseek_service._extract_json_object(content)
             raw_scenes = result.get("scenes")
@@ -334,7 +340,10 @@ async def regenerate_scenes(
                     if isinstance(scene, dict)
                 ]
         except Exception:
-            pass
+            if strict_ai:
+                raise
+    elif strict_ai:
+        raise MissingApiKeyError("DeepSeek")
 
     fallback = _build_fallback_screenplay(base_text, scene_count_hint, scene_count_hint * 15)
     return fallback["scenes"]

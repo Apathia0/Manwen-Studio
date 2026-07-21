@@ -5,6 +5,7 @@
 2. STORYBOARD_DIRECTOR_SYSTEM_PROMPT — 故事版导演角色，用于 AI 生成完整可用的故事版提示词
 """
 
+import re
 
 
 STORYBOARD_DIRECTOR_SYSTEM_PROMPT = """# ROLE
@@ -66,31 +67,6 @@ STORYBOARD_DIRECTOR_SYSTEM_PROMPT = """# ROLE
 4. **禁止飘逸元素**：禁止在故事版中出现参考图未描述的新角色、新道具、新场景
 5. **风格统一**：故事版的整体风格、线条、质感必须与所有参考图保持一致
 6. **构图协调**：角色在故事版中的位置和姿态必须与参考图中的角色协调
-
-## 风格参考图强约束（最高优先级）
-
-📌 如果本请求附带了风格参考图（style_reference_image），必须严格遵守：
-- **画风强制一致**：整个故事版的画风、线条风格、笔触质感必须与风格参考图完全一致
-- **色调强制一致**：整体色调、色彩饱和度、明暗对比必须与风格参考图完全一致
-- **构图风格一致**：构图方式、画面布局、空间感必须与风格参考图保持一致
-- **禁止风格漂移**：禁止在任何分镜格中出现与风格参考图不同的画风
-- **跨镜头一致性**：所有分镜格必须保持相同的风格，确保视频制作时风格统一
-
-# 风格预设约束
-
-本请求将附带一个整体视觉风格预设（style_preset），请严格根据预设名称执行对应的风格方向：
-
-- 「写实电影感」→ 电影级真实光影，线稿风格，高细节，胶片质感
-- 「日式动漫风」→ 日式赛璐璐动画风格，清晰线条，角色大眼睛表现力强
-- 「3A游戏渲染」→ 虚幻引擎5级画质，线稿风格，高多边形细节
-- 「水墨国风」→ 中国水墨画风格，笔触纹理，极简构图，线稿为主
-- 「水彩手绘风」→ 水彩插画风格，柔边，纸张纹理，线稿为主
-- 「暗黑哥特风」→ 暗黑哥特风格，戏剧性阴影，高对比，线稿风格
-- 「复古胶片感」→ 70年代电影美学，暖色调，胶片颗粒，线稿风格
-- 「科技赛博风」→ 赛博朋克科幻风格，霓虹灯，暗黑都市环境，线稿风格
-- 如果未指定风格或名称不匹配，默认采用「线稿电影感」
-
-将风格预设贯穿到画面的每个元素：光影、构图、线条、角色服装风格。
 
 # 15秒镜头容量建模约束
 
@@ -205,11 +181,11 @@ STORYBOARD_DIRECTOR_SYSTEM_PROMPT = """# ROLE
 
 横向版面，16:9比例，4K超高清分辨率（3840×2160），线稿风格，超细节，大师级设计，真实影视行业故事板线稿风格。
 
-# 强制风格约束尾部（每条输出必须以本段结尾，不可省略）
+# 强制一致性约束尾部（每条输出必须以本段结尾，不可省略）
 
-每条输出的最末尾必须包含以下固定格式的风格约束文字，不得修改措辞、不得省略、不得缩写。此段文字必须紧接在灯光/镜头/剪辑/声音设计区之后：
+每条输出的最末尾必须包含以下固定格式的一致性约束文字，不得修改措辞、不得省略、不得缩写。此段文字必须紧接在灯光/镜头/剪辑/声音设计区之后：
 
-**整体画风约束**：{style_preset}线稿，角色脸型、五官比例、发型、服装细节、体型必须与角色参考图完全一致，线条清晰统一，无任何彩色填充。图中所有文字必须为简体中文，真实可读，禁止任何英文或乱码。
+**视觉资产一致性约束**：角色脸型、五官比例、发型、服装细节、体型必须与角色参考图完全一致；场景空间关系和道具造型必须与各自参考图一致。图中所有文字必须为简体中文，真实可读，禁止任何英文或乱码。
 
 # 输出完整性要求
 
@@ -252,10 +228,6 @@ STORYBOARD_DIRECTOR_USER_MESSAGE_TEMPLATE = """请根据以下剧情，生成一
 ## 剧情连续性上下文（前后镜头衔接）
 
 {shot_context}
-
-## 视觉风格预设
-
-{style_preset}
 
 请输出一段完整的、纯中文的AI绘图提示词，用于生成一张专业电影故事板展示图。
 
@@ -322,7 +294,7 @@ def build_storyboard_director_messages(
     参数 shot_segments_content：传入拆镜导演分解的分段时间、剧情任务、
     对白和内心独白，让故事版导演能直接使用原文内容填充故事版细节。
     """
-    style_desc = style_preset or "电影级写实"
+    del style_preset
 
     formatted_segments = shot_segments_content or "（无分段细节）"
 
@@ -335,14 +307,13 @@ def build_storyboard_director_messages(
         camera_plan=camera_plan or "",
         motion_plan=motion_plan or "",
         emotion_plan=emotion_plan or "",
-        style_preset=style_desc,
         duration_seconds=duration_seconds,
         source_text_span=source_text_span or "（无原文片段）",
         screenplay_context=screenplay_context or "（无完整剧本节拍上下文）",
         shot_segments_content=formatted_segments,
         shot_context=shot_context or "（当前镜头为独立镜头，无前后衔接要求）",
     )
-    system_prompt = STORYBOARD_DIRECTOR_SYSTEM_PROMPT.format(duration_seconds=duration_seconds, style_preset=style_desc)
+    system_prompt = STORYBOARD_DIRECTOR_SYSTEM_PROMPT.format(duration_seconds=duration_seconds)
     return system_prompt, user_message
 
 
@@ -444,6 +415,12 @@ importance 表示该 beat 在剧情中的分量，不表示必须独立成视频
 - 禁止输出超过 25 个视频（对于 7 场景约 36 beat 的输入）"""
 
 SHOT_PARSE_LITE_USER_PROMPT_HEADER = """请根据以下剧本内容，将每个场景的节拍（Beats）合理拆分为多个 15 秒视频单元。
+
+你的职责不是拆镜头，而是先把故事变成事件，再把完整事件分配到视频单元。
+禁止根据字数决定分镜数量，只能根据剧情关键事件、因果闭环与情绪转折拆分。
+如果一个分镜无法在15秒内完成事件开始、发展、结果与情绪变化，必须继续拆分。
+如果分镜数量明显超过剧情关键事件数量，必须回退并合并。
+同一场景内连续反应、连续动作、连续信息揭示优先并入前一分镜。
 
 ## 拆分流程
 

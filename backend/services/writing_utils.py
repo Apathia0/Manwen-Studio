@@ -327,7 +327,7 @@ def get_all_methodology_from_db(db) -> dict[str, str]:
     return {key: _read_single_methodology(db, key) for key in _METHODOLOGY_KEYS}
 
 
-def save_methodology_to_db(db, key: str, content: str) -> None:
+def save_methodology_to_db(db, key: str, content: str, *, commit: bool = True) -> None:
     """保存单个方法论组件到数据库。
 
     Args:
@@ -344,7 +344,8 @@ def save_methodology_to_db(db, key: str, content: str) -> None:
         setting.value_json = {"value": content}
     else:
         db.add(PlatformSetting(setting_key=setting_key, value_json={"value": content}))
-    db.commit()
+    if commit:
+        db.commit()
 
 
 def get_methodology_from_db(db) -> str:

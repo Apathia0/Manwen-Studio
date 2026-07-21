@@ -19,6 +19,8 @@ export interface ImageRedrawModalProps {
   onClose: () => void;
   /** 提交重绘，payload 含 mode 和可选 mask(base64 png) */
   onSubmit: (payload: { prompt: string; mode: ImageRedrawMode; mask?: string }) => Promise<void>;
+  /** 覆盖层级，供嵌套弹窗中的二级工作台使用 */
+  zIndexClassName?: string;
 }
 
 /**
@@ -37,6 +39,7 @@ export function ImageRedrawModal({
   busy,
   onClose,
   onSubmit,
+  zIndexClassName = 'z-[70]',
 }: ImageRedrawModalProps) {
   const [mode, setMode] = useState<ImageRedrawMode>('full');
   const [prompt, setPrompt] = useState(initialPrompt);
@@ -205,7 +208,7 @@ export function ImageRedrawModal({
   // 渲染
 
   const modal = (
-    <div className="fixed inset-0 z-[70] flex items-center justify-center bg-[rgba(15,23,42,0.62)] p-4 backdrop-blur-sm" onClick={onClose}>
+    <div className={`fixed inset-0 ${zIndexClassName} flex items-center justify-center bg-[rgba(15,23,42,0.62)] p-4 backdrop-blur-sm`} onClick={onClose}>
       <div
         className="flex h-[88vh] w-[min(1400px,94vw)] flex-col overflow-hidden rounded-[30px] border border-[#d7e3f4] bg-white shadow-[0_30px_90px_rgba(15,23,42,0.28)]"
         onClick={(e) => e.stopPropagation()}

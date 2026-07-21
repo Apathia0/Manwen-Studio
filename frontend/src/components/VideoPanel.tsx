@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect, type Dispatch, type SetStateAction } from 'react';
 import { Film } from 'lucide-react';
 import { apiHeaders, renderShotVideo, getVideoJob, type VideoShot, type VideoGenerationJob, type RenderedClip } from '../api';
+import { normalizeErrorMessage, readResponseError } from '../lib/errors';
 
 interface Props {
   shot: VideoShot | null;
@@ -95,8 +96,9 @@ export default function VideoPanel({
 
   const submitViaSSE = async () => {
     if (!shot) return;
-    
-    const response = await fetch(`/api/shots/${shot.id}/video/render-stream`, {
+    setError(null);
+    try {
+      const response = await fetch(`/api/shots/${shot.id}/video/render-stream`, {
       method: 'POST',
       headers: apiHeaders(true),
       body: JSON.stringify({
@@ -105,20 +107,25 @@ export default function VideoPanel({
         aspect_ratio: '16:9',
         prompt: shot.video_prompt || '',
       }),
-    });
+      });
     
-    if (!response.ok) {
-      console.error('SSE 连接失败');
-      return;
-    }
+      if (!response.ok) {
+        setError(await readResponseError(response, '视频任务启动失败，请稍后重试'));
+        return;
+      }
     
     setSseConnected(true);
     
-    const reader = response.body?.getReader();
-    if (!reader) return;
+      const reader = response.body?.getReader();
+      if (!reader) {
+        setSseConnected(false);
+        setError('视频任务连接未返回可读取内容，请稍后重试');
+        return;
+      }
     
     const decoder = new TextDecoder();
-    let buffer = '';
+      let buffer = '';
+      let terminalEventReceived = false;
     
     while (true) {
       const { done, value } = await reader.read();
@@ -149,6 +156,7 @@ export default function VideoPanel({
                 next_retry_at: parsed.next_retry_at ?? null,
               });
             } else if (currentEvent === 'done') {
+              terminalEventReceived = true;
               setSseProgress({ progress: 100, stage: 'done', message: '生成完成！' });
               if (parsed.job_id) {
                 getVideoJob(parsed.job_id).then(更新任务 => {
@@ -162,26 +170,40 @@ export default function VideoPanel({
                       return 已存在 ? prev : [...prev, 更新任务.clip!];
                     });
                   }
-                }).catch(() => {});
+                }).catch((error) => {
+                  setError(normalizeErrorMessage(error, '视频已生成，但刷新任务结果失败，请稍后刷新页面'));
+                });
               }
               setTimeout(() => {
                 setSseConnected(false);
                 setSseProgress(null);
               }, 3000);
             } else if (currentEvent === 'error') {
-              setSseProgress({ progress: 0, stage: 'error', message: parsed.error || '生成失败' });
+              terminalEventReceived = true;
+              const message = normalizeErrorMessage(parsed.error, '视频生成失败，请稍后重试');
+              setError(message);
+              setSseProgress({ progress: 0, stage: 'error', message });
               setTimeout(() => {
                 setSseConnected(false);
                 setSseProgress(null);
               }, 5000);
             }
           } catch {
+            terminalEventReceived = true;
+            setError('视频任务返回了无法解析的数据，请刷新后重试');
           }
         }
       }
     }
     
-    setSseConnected(false);
+      setSseConnected(false);
+      if (!terminalEventReceived) {
+        setError('视频任务连接意外中断，请刷新任务状态后重试');
+      }
+    } catch (error) {
+      setSseConnected(false);
+      setError(normalizeErrorMessage(error, '视频任务连接失败，请稍后重试'));
+    }
   };
 
   function pollJobStatus(jobId: number) {
@@ -196,6 +218,7 @@ export default function VideoPanel({
       attemptCount++;
       if (attemptCount > maxRetries) {
         console.error(`视频任务 ${jobId} 轮询已达最大次数 ${maxRetries}，停止轮询`);
+        setError('视频任务状态查询超时，请刷新页面查看最新结果');
         return;
       }
 
@@ -221,7 +244,10 @@ export default function VideoPanel({
         }
       } catch (err) {
         console.error(`视频任务 ${jobId} 轮询出错:`, err);
-        if (attemptCount >= maxRetries) return;
+        if (attemptCount >= maxRetries) {
+          setError(normalizeErrorMessage(err, '无法获取视频任务状态，请刷新页面重试'));
+          return;
+        }
         pollingRef.current.timeoutId = setTimeout(poll, delay);
       }
     };

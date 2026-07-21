@@ -29,6 +29,7 @@ from services.deepseek import (
 )
 from services.chapter_quality import finalize_generated_chapter_content, format_quality_gate_detail
 from services.prompt_template import get_effective_prompt
+from services.errors import public_error_message
 from services.story_state import build_story_bible_compact, build_story_memory_compact
 from services.framework_utils import (
     _build_current_snapshot_data,
@@ -171,7 +172,7 @@ class PendingChangesTracker:
                         scenes_path.unlink()
                     results.append({"ok": True, "type": "scenes_file", "id": change.record_id})
             except Exception as e:
-                results.append({"ok": False, "error": str(e)})
+                results.append({"ok": False, "error": public_error_message(e, "助手工具执行失败，请稍后重试")})
         if any(r.get("ok") for r in results):
             db.commit()
         self.clear()
@@ -908,7 +909,7 @@ async def get_scenes(chapter_id: int) -> dict:
         return {"scenes": scenes}
     except Exception as exc:
         logger.warning("读取分镜文件失败 chapter_id=%s: %s", chapter_id, exc)
-        return {"scenes": [], "error": str(exc)}
+        return {"scenes": [], "error": public_error_message(exc, "读取分镜失败，请稍后重试")}
 
 
 @tool_registry.register(
@@ -1436,7 +1437,7 @@ async def batch_update_chapters(chapters: list[dict]) -> dict:
             )
             return {"chapter_id": chapter_id, "ok": True}
         except Exception as e:
-            return {"chapter_id": chapter_id, "error": str(e)}
+            return {"chapter_id": chapter_id, "error": public_error_message(e, "章节处理失败，请稍后重试")}
         finally:
             db.close()
 
@@ -1830,6 +1831,7 @@ async def adjust_framework(story_id: int, instruction: str) -> dict:
         story.outline = framework.get("outline") if isinstance(framework.get("outline"), dict) else existing_framework["outline"]
 
         # ★ 任务卡完整性验证：检查保存后的章节规划是否包含 goal/conflict/hook/payoff/highlight
+        warnings = [*plan.get("warnings", []), *apply_result.get("warnings", [])]
         saved_chapters = _extract_outline_chapters(story.outline)
         _REQUIRED_TASKCARD_FIELDS = ("goal", "conflict", "hook", "payoff", "highlight")
         for ch in saved_chapters:
@@ -1847,7 +1849,6 @@ async def adjust_framework(story_id: int, instruction: str) -> dict:
         db.commit()
         logger.info("Agent tool=adjust_framework story=%s ops=%s", _current_story_id(), len(plan.get("operations", [])) if isinstance(plan.get("operations"), list) else 0)
 
-        warnings = [*plan.get("warnings", []), *apply_result.get("warnings", [])]
         return {
             "ok": True,
             "reply": plan.get("reply", ""),
@@ -2045,7 +2046,7 @@ async def batch_adjust_chapters(chapters: list[dict]) -> dict:
             db.commit()
             return {"chapter_id": chapter_id, "ok": True}
         except Exception as e:
-            return {"chapter_id": chapter_id, "error": str(e)}
+            return {"chapter_id": chapter_id, "error": public_error_message(e, "章节处理失败，请稍后重试")}
         finally:
             db.close()
 
@@ -2812,7 +2813,7 @@ async def batch_update_shot_prompts(shots: list[dict]) -> dict:
             db.commit()
             return {"shot_id": shot_id, "ok": True, "updated_fields": updated}
         except Exception as e:
-            return {"shot_id": shot_id, "error": str(e)}
+            return {"shot_id": shot_id, "error": public_error_message(e, "镜头处理失败，请稍后重试")}
         finally:
             db.close()
 
@@ -2908,7 +2909,7 @@ async def batch_update_shot_fields(shots: list[dict]) -> dict:
             db.commit()
             return {"shot_id": shot_id, "ok": True, "updated_fields": updated}
         except Exception as e:
-            return {"shot_id": shot_id, "error": str(e)}
+            return {"shot_id": shot_id, "error": public_error_message(e, "镜头处理失败，请稍后重试")}
         finally:
             db.close()
 
@@ -3062,7 +3063,7 @@ async def check_ai_flavor(chapter_id: int) -> dict:
             "suggestion": "请参考检测结果，对命中项逐一修改。重点关注：禁用词替换为具体动作、心理描写外化为行为展示、打破段落均匀度、结尾去升华。叙事结构问题（主角被动/道德简化/主题点破/单线叙事）需通过重构情节解决。",
         }
     except Exception as e:
-        return {"error": str(e)}
+        return {"error": public_error_message(e, "助手操作失败，请稍后重试")}
     finally:
         db.close()
 
@@ -3129,14 +3130,14 @@ class AgentService:
     async def _compress_history_with_ai(self, old_messages: list[dict], api_key: str) -> str:
         """用 AI 调用压缩旧对话历史为结构化摘要，确保记忆不丢失。"""
         import httpx
-        from services.deepseek import _deepseek_auth_headers, DEEPSEEK_BASE_URL, DEEPSEEK_MODEL
+        from services.deepseek import _deepseek_auth_headers, runtime_base_url, runtime_model
         from services.token_utils import build_history_summary_prompt, build_history_summary_system_prompt
 
         user_prompt = build_history_summary_prompt(old_messages)
         system_prompt = build_history_summary_system_prompt()
 
         payload = {
-            "model": DEEPSEEK_MODEL,
+            "model": runtime_model(),
             "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
@@ -3147,12 +3148,13 @@ class AgentService:
 
         async with httpx.AsyncClient(timeout=120) as client:
             resp = await client.post(
-                f"{DEEPSEEK_BASE_URL}/chat/completions",
+                f"{runtime_base_url()}/chat/completions",
                 json=payload,
                 headers=_deepseek_auth_headers(api_key),
             )
         resp.raise_for_status()
         data = resp.json()
+        _deepseek_service._record_response_usage(data)
         return data["choices"][0]["message"]["content"].strip()
 
     def _build_system_prompt(self, story_context: str, story_id: int = 0, workflow_type: str | None = None, enabled_skills: list[str] | None = None, db=None) -> str:
@@ -3512,9 +3514,10 @@ class AgentService:
                 await _maybe_compress_history()
 
                 payload = {
-                    "model": _deepseek_service.DEEPSEEK_MODEL,
+                    "model": _deepseek_service.runtime_model(),
                     "messages": all_messages,
                     "stream": True,
+                    "stream_options": {"include_usage": True},
                     "tools": self.tool_registry.get_tool_specs(mode=mode, workflow_type=workflow_type, enabled_skills=enabled_skills),
                     "max_tokens": 32768,
                 }
@@ -3526,7 +3529,7 @@ class AgentService:
                 async with httpx.AsyncClient(timeout=600) as client:
                     async with client.stream(
                         "POST",
-                        f"{_deepseek_service.DEEPSEEK_BASE_URL}/chat/completions",
+                        f"{_deepseek_service.runtime_base_url()}/chat/completions",
                         json=payload,
                         headers=_deepseek_auth_headers(api_key),
                     ) as response:
@@ -3539,6 +3542,7 @@ class AgentService:
                                 break
                             try:
                                 data = json.loads(data_str)
+                                _deepseek_service._record_response_usage(data)
                                 choices = data.get("choices", [])
                                 if not choices:
                                     continue
@@ -3637,7 +3641,10 @@ class AgentService:
                             result_str = json.dumps({"error": f"工具 {name} 执行超时（{TOOL_EXECUTION_TIMEOUT}s），操作未完成"})
                             yield {"event": "tool_result", "data": json.dumps({"name": name, "result": result_str}, ensure_ascii=False)}
                         except Exception as e:
-                            error_msg = json.dumps({"error": str(e)}, ensure_ascii=False)
+                            error_msg = json.dumps(
+                                {"error": public_error_message(e, "助手工具执行失败，请稍后重试")},
+                                ensure_ascii=False,
+                            )
                             yield {"event": "tool_result", "data": json.dumps({"name": name, "result": error_msg}, ensure_ascii=False)}
                             result_str = error_msg
 

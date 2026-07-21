@@ -65,7 +65,7 @@ export default function TextEditor({
             <div key={i} className="flex gap-4">
               <div
                 className="h-4 bg-[#edf1ec] rounded animate-pulse"
-                style={{ width: `${60 + Math.random() * 40}%` }}
+                style={{ width: `${[72, 88, 64, 93, 79, 68, 85, 75][i]}%` }}
               />
             </div>
           ))}

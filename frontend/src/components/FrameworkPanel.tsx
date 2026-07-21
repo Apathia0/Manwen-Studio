@@ -204,7 +204,7 @@ export default memo(function FrameworkPanel({ story, chapters, onChapterSelect, 
                 <span className="text-xs font-semibold text-slate-700 uppercase tracking-wide">框架 </span>
               </div>
               <div className="flex items-center gap-2">
-                {false && hasFrameworkContent(story) && (
+                {hasFrameworkContent(story) && (
                   <button
                     onClick={handleContinueFramework}
                     disabled={continueLoading || chatLoading}

@@ -4,7 +4,7 @@ import datetime
 from pathlib import Path
 from typing import Any, Optional
 
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, Field, model_validator
 
 
 # --- Story ---
@@ -556,7 +556,7 @@ class VideoRenderRequest(BaseModel):
     aspect_ratio: Optional[str] = "16:9"
     fps: Optional[int] = 24
     use_reference_assets: bool = True
-    reference_asset_ids: list[int] = []
+    reference_asset_ids: list[int] = Field(default_factory=list, max_length=9)
     seed: Optional[int] = None
     overwrite_active_clip: bool = False
     prompt: Optional[str] = None
@@ -923,6 +923,20 @@ class ChapterVideoWorkflowCreate(BaseModel):
     style_reference_image_url: str | None = None
 
 
+class ChapterVideoShotCreate(BaseModel):
+    """手动创建章节视频分镜。"""
+    story_summary: str
+    source_text_span: str | None = None
+    scene_location: str | None = None
+    time_of_day: str | None = None
+    characters: list[str] = Field(default_factory=list)
+    dialogue_or_narration: str | None = None
+    camera_plan: str | None = None
+    motion_plan: str | None = None
+    emotion_plan: str | None = None
+    continuity_notes: str | None = None
+
+
 class ChapterVideoShotOut(BaseModel):
     """15 秒分镜输出"""
     id: int
@@ -998,7 +1012,7 @@ class ChapterVideoWorkflowOut(BaseModel):
     character_reference_ids: list[Any] | None = None
     video_style: str | None = None
     style_reference_image_url: str | None = None
-    duration_per_shot: int = 10
+    duration_per_shot: int = 15
     total_shots: int = 0
     completed_shots: int = 0
     failed_shots: int = 0
@@ -1011,7 +1025,7 @@ class ChapterVideoWorkflowOut(BaseModel):
     screenplay_version: int = 0
     created_at: datetime.datetime
     updated_at: datetime.datetime
-    shots: list[ChapterVideoShotOut] = []
+    shots: list[ChapterVideoShotOut] = Field(default_factory=list)
 
     model_config = {"from_attributes": True}
 
@@ -1040,22 +1054,23 @@ class ChapterVideoWorkflowStatusOut(BaseModel):
 
 class ChapterWorkflowStageActionRequest(BaseModel):
     """分阶段操作请求——用于手动触发拆镜/故事版/视频阶段"""
-    shot_ids: list[int] = []
+    shot_ids: list[int] = Field(default_factory=list)
     run_all: bool = False
     auto_continue: bool = False
 
 
 class ChapterWorkflowPromptReanalyzeRequest(BaseModel):
     """重新分析故事版提示词请求"""
-    shot_ids: list[int] = []
+    shot_ids: list[int] = Field(default_factory=list)
 
 
 class RegenerateShotRequest(BaseModel):
     """重新生成单镜头的故事版或视频"""
     target: str = "storyboard"  # "storyboard" | "video"
     prompt_override: str | None = None
-    reference_asset_ids: list[int] = []
+    reference_asset_ids: list[int] = Field(default_factory=list)
     aspect_ratio: str | None = "16:9"
+    duration_seconds: int | None = None
 
 
 # Resolve forward references

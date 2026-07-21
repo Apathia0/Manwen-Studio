@@ -11,6 +11,8 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from .errors import public_error_message
+
 logger = logging.getLogger(__name__)
 
 
@@ -226,12 +228,13 @@ async def compile_project(
 
     except Exception as e:
         logger.error("Compilation error: %s", e, exc_info=True)
-        with open(output_path, "w") as f:
-            f.write(f"# Error during compilation\n# Error: {e}\n")
+        error_message = public_error_message(e, "视频合成失败，请稍后重试")
+        with open(output_path, "w", encoding="utf-8") as f:
+            f.write(f"# 视频合成失败\n# 错误：{error_message}\n")
         return {
             "output_path": output_path,
             "status": "error",
-            "error": str(e),
+            "error": error_message,
             "duration_seconds": sum(c.get("duration_seconds", 0) for c in clips),
         }
 

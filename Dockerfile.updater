@@ -10,7 +10,7 @@ ENV PYTHONUNBUFFERED=1 \
     DEFAULT_MANIFEST_URL=https://raw.githubusercontent.com/${GITHUB_REPOSITORY:-dream619/Manwen-Studio}/pro/update-manifest.json \
     GITHUB_REPOSITORY=${GITHUB_REPOSITORY:-dream619/Manwen-Studio}
 
-RUN apk add --no-cache bash curl docker-cli docker-cli-compose util-linux
+RUN apk add --no-cache bash curl docker-cli docker-cli-buildx docker-cli-compose util-linux
 
 WORKDIR /updater
 RUN pip install --no-cache-dir fastapi==0.115.0 uvicorn[standard]==0.30.6 pydantic==2.9.2

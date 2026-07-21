@@ -102,10 +102,10 @@ def _get_api_key_from_db(db: Session) -> str | None:
 
 async def _call_deepseek_json(system: str, user: str, api_key: str | None = None) -> dict:
     """调用 DeepSeek，返回 JSON 解析结果。"""
-    if not _deepseek.DEEPSEEK_BASE_URL:
+    if not _deepseek.runtime_base_url():
         raise ValueError("DeepSeek API 地址未配置，请先调用 _configure_deepseek_from_db")
     payload = {
-        "model": _deepseek.DEEPSEEK_MODEL,
+        "model": _deepseek.runtime_model(),
         "messages": [
             {"role": "system", "content": system},
             {"role": "user", "content": user},
@@ -118,12 +118,13 @@ async def _call_deepseek_json(system: str, user: str, api_key: str | None = None
         try:
             async with httpx.AsyncClient(timeout=300) as client:
                 resp = await client.post(
-                    f"{_deepseek.DEEPSEEK_BASE_URL}/chat/completions",
+                    f"{_deepseek.runtime_base_url()}/chat/completions",
                     json=payload,
                     headers=_deepseek_auth_headers(api_key),
                 )
                 resp.raise_for_status()
                 data = resp.json()
+                _deepseek._record_response_usage(data)
                 content = data["choices"][0]["message"]["content"]
                 return _loads_json_lenient(content)
         except httpx.HTTPStatusError as exc:
@@ -145,10 +146,10 @@ async def _call_deepseek_json(system: str, user: str, api_key: str | None = None
 
 async def _call_deepseek_text(system: str, user: str, api_key: str | None = None) -> str:
     """调用 DeepSeek，返回纯文本。"""
-    if not _deepseek.DEEPSEEK_BASE_URL:
+    if not _deepseek.runtime_base_url():
         raise ValueError("DeepSeek API 地址未配置，请先调用 _configure_deepseek_from_db")
     payload = {
-        "model": _deepseek.DEEPSEEK_MODEL,
+        "model": _deepseek.runtime_model(),
         "messages": [
             {"role": "system", "content": system},
             {"role": "user", "content": user},
@@ -160,12 +161,13 @@ async def _call_deepseek_text(system: str, user: str, api_key: str | None = None
         try:
             async with httpx.AsyncClient(timeout=300) as client:
                 resp = await client.post(
-                    f"{_deepseek.DEEPSEEK_BASE_URL}/chat/completions",
+                    f"{_deepseek.runtime_base_url()}/chat/completions",
                     json=payload,
                     headers=_deepseek_auth_headers(api_key),
                 )
                 resp.raise_for_status()
                 data = resp.json()
+                _deepseek._record_response_usage(data)
                 return data["choices"][0]["message"]["content"]
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code in (403, 524) and attempt < 2:

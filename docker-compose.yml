@@ -7,18 +7,18 @@ services:
       context: .
       dockerfile: Dockerfile.backend
     env_file:
-      - ${BACKEND_ENV_FILE:-./deploy/docker/runtime/backend.env.example}
+      - ${BACKEND_ENV_FILE:-./deploy/docker/runtime/backend.env}
     environment:
       HOST: 0.0.0.0
       PORT: 8000
-      DATABASE_URL: ${DATABASE_URL:-postgresql://postgres:postgres@postgres:5432/manga_novel}
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       REDIS_ENABLED: ${REDIS_ENABLED:-true}
       SYSTEM_INSTALLED: ${SYSTEM_INSTALLED:-false}
       RUN_STARTUP_MIGRATIONS: ${RUN_STARTUP_MIGRATIONS:-false}
       APP_VERSION: ${APP_VERSION:-v1.0.0}
       UPDATER_URL: ${UPDATER_URL:-http://updater:8090}
-      UPDATER_TOKEN: ${UPDATER_TOKEN:-}
+      UPDATER_TOKEN: ${UPDATER_TOKEN:?UPDATER_TOKEN is required}
       UPDATE_MANIFEST_URL: ${UPDATE_MANIFEST_URL:-}
       INSTALL_RESTART_COMMAND: ${INSTALL_RESTART_COMMAND:-}
       INSTALL_PM2_PROCESS_NAME: ${INSTALL_PM2_PROCESS_NAME:-}
@@ -55,7 +55,7 @@ services:
       APP_DIR: /opt/lorevista
       ENV_FILE: /opt/lorevista/.env
       COMPOSE_FILE: /opt/lorevista/docker-compose.yml
-      UPDATER_TOKEN: ${UPDATER_TOKEN:-}
+      UPDATER_TOKEN: ${UPDATER_TOKEN:?UPDATER_TOKEN is required}
       UPDATE_MANIFEST_URL: ${UPDATE_MANIFEST_URL:-}
       UPDATE_MANIFEST_TOKEN: ${UPDATE_MANIFEST_TOKEN:-}
       UPDATER_STATE_FILE: /opt/lorevista/deploy/docker/update-state.json
@@ -75,7 +75,7 @@ services:
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-manga_novel}
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:

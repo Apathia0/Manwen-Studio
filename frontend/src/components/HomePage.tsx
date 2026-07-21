@@ -89,8 +89,9 @@ export default function HomePage({ onSelectStory }: Props) {
       if (charModalRequestRef.current !== requestId) return;
       setCharModalText('');
     } finally {
-      if (charModalRequestRef.current !== requestId) return;
-      setCharModalLoading(false);
+      if (charModalRequestRef.current === requestId) {
+        setCharModalLoading(false);
+      }
     }
   };
 
@@ -123,8 +124,9 @@ export default function HomePage({ onSelectStory }: Props) {
       if (refModalRequestRef.current !== requestId) return;
       setRefModalImages([]);
     } finally {
-      if (refModalRequestRef.current !== requestId) return;
-      setRefModalLoading(false);
+      if (refModalRequestRef.current === requestId) {
+        setRefModalLoading(false);
+      }
     }
   };
 
@@ -653,7 +655,7 @@ export default function HomePage({ onSelectStory }: Props) {
                       className="relative group aspect-square rounded-lg overflow-hidden border border-gray-700 bg-gray-950"
                     >
                       <img
-                        src={`${refImageUrl(img.image_path)}?t=${Date.now()}`}
+                        src={refImageUrl(img.image_path)}
                         alt={img.filename}
                         className="w-full h-full object-cover"
                         loading="lazy"

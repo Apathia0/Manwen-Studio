@@ -10,12 +10,12 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
-EDITOR_PASS_SCORE = 85
-LOCAL_MIN_CHARS = 1800
-LOCAL_MAX_CHARS = 3500
-LOCAL_IDEAL_CHARS = 3000
-WRITER_TARGET_MIN_CHARS = 2500
-WRITER_TARGET_MAX_CHARS = 3000
+EDITOR_PASS_SCORE = 90
+LOCAL_MIN_CHARS = 2200
+LOCAL_MAX_CHARS = 2800
+LOCAL_IDEAL_CHARS = 2400
+WRITER_TARGET_MIN_CHARS = 2200
+WRITER_TARGET_MAX_CHARS = 2600
 WRITER_REVISION_TARGET_MAX_CHARS = 3200
 LOCAL_SOFT_MAX_CHARS = 3300
 SCENE_BUDGET_IDEAL_TOTAL = 2100
@@ -512,6 +512,7 @@ def _review_is_hard_pass(review: dict[str, Any], content: str) -> bool:
     return (
         bool(review.get("approved"))
         and _score(review.get("overall_score")) >= EDITOR_PASS_SCORE
+        and not _review_has_real_blocking_issue(review, content)
     )
 
 
@@ -843,7 +844,7 @@ def _normalize_review(raw: dict[str, Any] | None) -> dict[str, Any]:
             structured_brief.append(f"{field}: {value.strip()}")
         else:
             structured_brief.extend(f"{field}: {item}" for item in _coerce_string_list(value, limit=8))
-    return {
+    normalized = {
         "approved": approved,
         "overall_score": overall,
         "scores": normalized_scores or {"overall": overall},
@@ -851,6 +852,9 @@ def _normalize_review(raw: dict[str, Any] | None) -> dict[str, Any]:
         "rewrite_brief": (structured_brief + _coerce_string_list(rewrite_brief, limit=10))[:16],
         "raw": data,
     }
+    if _review_has_real_blocking_issue(normalized):
+        normalized["approved"] = False
+    return normalized
 
 
 def _soften_review_dialogue_blockers(review: dict[str, Any]) -> dict[str, Any]:
@@ -876,9 +880,8 @@ def _soften_review_dialogue_blockers(review: dict[str, Any]) -> dict[str, Any]:
     if isinstance(review["findings"], list) and _DIALOGUE_SOFT_RULE not in review["findings"]:
         review["findings"].append(_DIALOGUE_SOFT_RULE)
     local = review.get("local_safety") if isinstance(review.get("local_safety"), dict) else {}
-    if not remaining and local.get("ok") and _score(review.get("overall_score")) >= 85:
+    if not remaining and local.get("ok") and _score(review.get("overall_score")) >= EDITOR_PASS_SCORE:
         review["approved"] = True
-        review["overall_score"] = max(_score(review.get("overall_score")), float(EDITOR_PASS_SCORE))
         scores = dict(review.get("scores")) if isinstance(review.get("scores"), dict) else {}
         scores["overall"] = review["overall_score"]
         review["scores"] = scores
@@ -886,22 +889,9 @@ def _soften_review_dialogue_blockers(review: dict[str, Any]) -> dict[str, Any]:
 
 
 def _promote_near_pass_review(review: dict[str, Any], content: str) -> dict[str, Any]:
-    if bool(review.get("approved")) and _score(review.get("overall_score")) >= EDITOR_PASS_SCORE:
-        return review
-    score = _score(review.get("overall_score"))
-    if score < 85:
-        return review
-    if _content_looks_truncated(content):
-        return review
-    review["approved"] = True
-    review["overall_score"] = max(score, float(EDITOR_PASS_SCORE))
-    scores = dict(review.get("scores")) if isinstance(review.get("scores"), dict) else {}
-    scores["overall"] = review["overall_score"]
-    review["scores"] = scores
-    review["near_pass_promoted"] = True
-    review.setdefault("findings", [])
-    if isinstance(review["findings"], list):
-        review["findings"].append("本稿无字数、边界、剧情闭环或逻辑硬伤，轻微润色建议不触发返修。")
+    """保留原始审稿分数，低于 90 分不得自动提升为通过。"""
+    if _score(review.get("overall_score")) < EDITOR_PASS_SCORE:
+        review["approved"] = False
     return review
 
 
@@ -921,7 +911,12 @@ def _local_safety_review(content: str, chapter_scope: dict[str, Any] | None) -> 
             "message": f"正文字数超过 {LOCAL_MAX_CHARS} 字，当前约 {char_count} 字",
         })
     if chapter_scope:
-        pass  # 边界检测已移除 — 不再作为门禁阻断正文返回
+        boundary_hits = _tail_boundary_hits(content)
+        if boundary_hits:
+            soft_warnings.append({
+                "code": "boundary.future_event_candidate",
+                "message": f"章尾包含后续事件候选词：{', '.join(boundary_hits)}",
+            })
     return {
         "ok": not issues,
         "char_count": char_count,
@@ -1071,7 +1066,7 @@ async def _chat_completion(
     from services import deepseek as deepseek_service
 
     payload: dict[str, Any] = {
-        "model": deepseek_service.DEEPSEEK_MODEL,
+        "model": deepseek_service.runtime_model(),
         "messages": messages,
         "stream": False,
         "max_tokens": max_tokens,
@@ -1082,7 +1077,7 @@ async def _chat_completion(
 
     async with httpx.AsyncClient(timeout=600) as client:
         resp = await client.post(
-            f"{deepseek_service.DEEPSEEK_BASE_URL}/chat/completions",
+            f"{deepseek_service.runtime_base_url()}/chat/completions",
             json=payload,
             headers=deepseek_service._deepseek_auth_headers(api_key),
         )
@@ -1670,7 +1665,7 @@ def _revision_feedback_for_writer(
 
     has_real_blocking = _review_has_real_blocking_issue(review, content)
 
-    if not has_real_blocking and score >= 85 and LOCAL_MIN_CHARS <= char_count <= LOCAL_MAX_CHARS:
+    if not has_real_blocking and score >= EDITOR_PASS_SCORE and LOCAL_MIN_CHARS <= char_count <= LOCAL_MAX_CHARS:
         return []
 
     if _content_looks_truncated(content) and char_count > LOCAL_MAX_CHARS:
@@ -1842,9 +1837,9 @@ async def build_chapter_creation_pack(
     {{"scene": "章尾余波与当前钩子", "purpose": "本场景功能，可留一句以内模糊伏笔，但不展开估价、交易、黑市、明日行动或后续地点场面", "target_chars": 260, "max_chars": 260}}
   ],
   "completion_contract": {{
-    "pass_score": 85,
+    "pass_score": {EDITOR_PASS_SCORE},
     "target_chars": {{"min": {LOCAL_MIN_CHARS}, "ideal": {LOCAL_IDEAL_CHARS}, "max": {LOCAL_MAX_CHARS}}},
-    "writer_target_chars": {{"min": {WRITER_TARGET_MIN_CHARS}, "ideal": 2200, "max": {WRITER_TARGET_MAX_CHARS}}},
+    "writer_target_chars": {{"min": {WRITER_TARGET_MIN_CHARS}, "ideal": 2400, "max": {WRITER_TARGET_MAX_CHARS}}},
     "writer_output": "每轮必须输出完整章节全文，不输出补丁或续写尾巴",
     "revision_policy": "编辑问题包一次性处理，避免先改字数再二次审稿",
     "boundary_policy": "当前章节必须闭环；后续章节可作一句以内模糊伏笔，不提前兑现完整场面",
@@ -2266,8 +2261,8 @@ async def review_chapter_with_editor_agent(
 - 如果 missing_if_absent 中任一项目缺失，brief_execution 不得高于 70；如果缺失的是回报结算或闭环处理，overall_score 不得高于 75。
 - 对话是阅读质感项，不是所有章节的硬门槛；独行、潜伏、战斗、采集章节只要动作因果完整，不得仅因对话少或无对话打回。
 - blocking_issues 只写不修就无法过关的硬伤：剧情任务缺失、提前兑现后续完整场面、明显逻辑断裂、严重 AI 味或正文残缺；轻微润色建议或字数偏差放入 findings，不得仅因字数拉低 overall_score 到 85 以下。
-- 如果正文已经完成创作包核心任务、没有提前兑现后续完整场面、无明显逻辑断裂，只存在轻微表达、个别句式、少量对话或可选润色建议，应 approved=true 且 overall_score>=85；这些建议只能放入 findings/revision_notes，blocking_issues 必须为空。
-- approved=true 且 overall_score>=85 时，rewrite_brief 可以写"无需返修，仅保留建议"，不得给出会触发整章返修的执行清单。
+- 如果正文已经完成创作包核心任务、没有提前兑现后续完整场面、无明显逻辑断裂，只存在轻微表达、个别句式、少量对话或可选润色建议，应在 overall_score>=90 时 approved=true；这些建议只能放入 findings/revision_notes，blocking_issues 必须为空。
+- approved=true 且 overall_score>=90 时，rewrite_brief 可以写"无需返修，仅保留建议"，不得给出会触发整章返修的执行清单。
 - 字数建议 3000 字左右，上限不超过 3500 字；如果缺回报结算，应优先要求压缩前置观察或战斗重复动作来腾出篇幅，而不是继续扩写到上限。
 - 本地底线检查里的 soft_warnings 不是自动失败原因；你必须从编辑视角判断：一句以内钩子、未解压力、模糊方向可通过，提前写完后续章节核心场面、交易流程、路线坐标、战斗胜负或资源闭环才算边界硬伤。
 - 只在总分 {EDITOR_PASS_SCORE} 分以上且无底线问题时 approved=true。
@@ -2703,7 +2698,7 @@ async def run_chapter_creation_pipeline(
             _elapsed_ms(started_at),
         )
         return {
-            "ok": True,
+            "ok": False,
             "content": best_content,
             "creation_pack": creation_pack,
             "review": best_review,
@@ -2725,7 +2720,7 @@ async def run_chapter_creation_pipeline(
         _review_log_summary(review),
     )
     return {
-        "ok": True,
+        "ok": False,
         "content": content,
         "creation_pack": creation_pack,
         "review": review,

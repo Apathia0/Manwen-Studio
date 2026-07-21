@@ -3,6 +3,7 @@ import calendar
 import contextlib
 import datetime
 import hashlib
+import io
 import json
 import logging
 import os
@@ -48,9 +49,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from PIL import Image
-from sqlalchemy import case, func, and_, text
+from sqlalchemy import case, func, and_, or_, text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 from sse_starlette.sse import EventSourceResponse
+from starlette.background import BackgroundTask as ResponseBackgroundTask
 
 from database import SessionLocal, get_db, init_db, engine as database_engine
 from models import (
@@ -67,12 +70,13 @@ from models import (
     ChatMessage,
     DeconstructionResult,
     FrameworkSnapshot,
+    MangaAsset,
+    MangaAssetBinding,
     MangaImage,
     NovelSource,
     Plan,
-    PlanFeature,
-    PlanQuotaRule,
     PlatformSetting,
+    PointsAccount,
     PromptTemplate,
     RenderedClip,
     ScriptScene,
@@ -82,10 +86,7 @@ from models import (
     StoryTemplateBinding,
     TemplateLike,
     User,
-    UserQuotaGrantMonthly,
     UserSession,
-    UserSubscription,
-    UserUsageMonthly,
     VideoAsset,
     VideoGenerationJob,
     VideoProject,
@@ -114,6 +115,7 @@ from schemas import (
     StoryUpdate,
 )
 from services.task_manager import task_manager
+from services.blocking import run_blocking
 from services.install import (
     build_database_url,
     build_redis_url,
@@ -155,12 +157,19 @@ from services.deepseek import (
     split_scenes,
     summarize_chapter_memory,
 )
-from services.errors import MangaImageGenerationError, MissingApiKeyError
+from services.errors import MangaImageGenerationError, MissingApiKeyError, public_error_message, sanitize_public_error_detail
 from services.prompt_template import get_effective_prompt, get_system_prompt, set_system_prompt, get_template_story_length, SYSTEM_PROMPT_KEYS
 from services.chapter_quality import finalize_generated_chapter_content, format_quality_gate_detail
-from services.image2 import edit_existing_image, generate_cover_image, generate_manga_image, generate_reference_image
+from services.image2 import edit_existing_image, generate_cover_image, generate_manga_image
 from services.media_locator import ensure_local_media_path
 from services.scene_safety import sanitize_scene_list
+from services.visual_asset_generation import (
+    generate_visual_asset_image,
+    label_matches_visual_context,
+    normalize_visual_role,
+    select_visual_references,
+)
+from services.visual_asset_prompts import analyze_visual_assets
 from services import deepseek as deepseek_service
 from services import image2 as image_service
 from services import license_checker
@@ -177,6 +186,12 @@ logging.getLogger("watchfiles.main").setLevel(logging.WARNING)
 logging.getLogger("watchfiles.watcher").setLevel(logging.WARNING)
 ACTIVE_MANGA_GENERATIONS: set[int] = set()
 MONEY_QUANT = Decimal("0.01")
+AUTO_MANGA_ASSET_ANALYSIS_VERSION = 2
+AUTO_MANGA_ASSET_CONCURRENCY = max(1, min(4, int(os.getenv("AUTO_MANGA_ASSET_CONCURRENCY", "2") or "2")))
+AUTO_MANGA_ASSET_START_INTERVAL_SECONDS = max(
+    0,
+    min(30, int(os.getenv("AUTO_MANGA_ASSET_START_INTERVAL_SECONDS", "3") or "3")),
+)
 
 
 def _default_reload_enabled() -> bool:
@@ -185,148 +200,8 @@ def _default_reload_enabled() -> bool:
         return env_value.lower() == "true"
     return os.name != "nt"
 
-FEATURE_CATALOG: list[dict] = [
-    {
-        "key": "framework.generate.monthly_limit",
-        "name": "小说框架生成次数",
-        "description": "用户每月可生成世界观、角色与大纲的次数。",
-        "category": "小说创作",
-        "value_type": "number",
-        "purchasable": True,
-        "price_per_unit": 1.0,
-        "default_rule": {"reset_period": "monthly", "deduct_mode": "on_success"},
-    },
-    {
-        "key": "chapter.expand.monthly_limit",
-        "name": "章节扩写次数",
-        "description": "用户每月可将章节计划扩写成正文的次数。",
-        "category": "小说创作",
-        "value_type": "number",
-        "purchasable": True,
-        "price_per_unit": 0.5,
-        "default_rule": {"reset_period": "monthly", "deduct_mode": "on_success"},
-    },
-    {
-        "key": "scene.generate.monthly_limit",
-        "name": "分镜生成次数",
-        "description": "用户每月可将文本拆分为漫画分镜的次数。",
-        "category": "漫画生成",
-        "value_type": "number",
-        "purchasable": True,
-        "price_per_unit": 0.3,
-        "default_rule": {"reset_period": "monthly", "deduct_mode": "on_success"},
-    },
-    {
-        "key": "manga.image.generate.monthly_limit",
-        "name": "生图配额",
-        "description": "用户每月可生成的图片总张数（含新生成和重绘）。",
-        "category": "漫画生成",
-        "value_type": "number",
-        "purchasable": True,
-        "price_per_unit": 0.2,
-        "default_rule": {"reset_period": "monthly", "deduct_mode": "on_success"},
-    },
-    {
-        "key": "ai.text.advanced_calls.monthly_limit",
-        "name": "高级文本 AI 调用次数",
-        "description": "用于框架调整、继续扩展、文本改写、正文调整、质量评估与单项重生成等高级文本能力。",
-        "category": "高级文本能力",
-        "value_type": "number",
-        "purchasable": True,
-        "price_per_unit": 0.3,
-        "default_rule": {"reset_period": "monthly", "deduct_mode": "on_success"},
-    },
-    {
-        "key": "deconstruction.run.monthly_limit",
-        "name": "拆书次数",
-        "description": "用户每月可启动拆书分析的次数，提交任务时预先扣除，任务失败时自动返还。",
-        "category": "高级文本能力",
-        "value_type": "number",
-        "purchasable": True,
-        "price_per_unit": 3.0,
-        "default_rule": {"reset_period": "monthly", "deduct_mode": "on_submit_refund_on_failure"},
-    },
-    {
-        "key": "manga.max_image_count_per_chapter",
-        "name": "单章节最大出图数",
-        "description": "单个章节允许生成的最大漫画页数。",
-        "category": "漫画生成",
-        "value_type": "number",
-        "default_rule": {"reset_period": "monthly", "deduct_mode": "on_success"},
-    },
-    {
-        "key": "manga.allow_color_mode",
-        "name": "允许彩漫模式",
-        "description": "控制该套餐用户是否可切换彩色漫画输出。",
-        "category": "漫画生成",
-        "value_type": "boolean",
-        "default_rule": {"reset_period": "monthly", "deduct_mode": "on_success"},
-    },
-    {
-        "key": "video.shot.split.monthly_limit",
-        "name": "拆镜次数",
-        "description": "用户每月可拆镜次数，每次点击顶部拆镜按钮消耗 1 次。",
-        "category": "视频创作",
-        "value_type": "number",
-        "purchasable": True,
-        "price_per_unit": 1.0,
-        "default_rule": {"reset_period": "monthly", "deduct_mode": "on_success"},
-    },
-    {
-        "key": "video.generate.count.monthly_limit",
-        "name": "视频生成次数",
-        "description": "用户每月可生成视频次数，每次生成一个分镜视频消耗 1 次。",
-        "category": "视频创作",
-        "value_type": "number",
-        "purchasable": True,
-        "price_per_unit": 2.0,
-        "default_rule": {"reset_period": "monthly", "deduct_mode": "on_success"},
-    },
-]
+# 旧套餐配额系统已移除 — 改用积分双轨（platform / user_key）
 
-FEATURE_CATALOG_MAP = {item["key"]: item for item in FEATURE_CATALOG}
-
-# 可购买的配额功能集合
-PURCHASABLE_FEATURE_KEYS = {f["key"] for f in FEATURE_CATALOG if f.get("purchasable")}
-
-PLAN_SEED_DEFAULTS: dict[str, dict[str, int | bool]] = {
-    "free": {
-        "framework.generate.monthly_limit": 5,
-        "chapter.expand.monthly_limit": 20,
-        "scene.generate.monthly_limit": 15,
-        "manga.image.generate.monthly_limit": 100,
-        "ai.text.advanced_calls.monthly_limit": 20,
-        "deconstruction.run.monthly_limit": 1,
-        "manga.max_image_count_per_chapter": 6,
-        "manga.allow_color_mode": False,
-        "video.shot.split.monthly_limit": 0,
-        "video.generate.count.monthly_limit": 0,
-    },
-    "pro": {
-        "framework.generate.monthly_limit": 50,
-        "chapter.expand.monthly_limit": 200,
-        "scene.generate.monthly_limit": 120,
-        "manga.image.generate.monthly_limit": 1100,
-        "ai.text.advanced_calls.monthly_limit": 180,
-        "deconstruction.run.monthly_limit": 20,
-        "manga.max_image_count_per_chapter": 12,
-        "manga.allow_color_mode": True,
-        "video.shot.split.monthly_limit": 5,
-        "video.generate.count.monthly_limit": 5,
-    },
-    "premium": {
-        "framework.generate.monthly_limit": 200,
-        "chapter.expand.monthly_limit": 1000,
-        "scene.generate.monthly_limit": 500,
-        "manga.image.generate.monthly_limit": 5500,
-        "ai.text.advanced_calls.monthly_limit": 600,
-        "deconstruction.run.monthly_limit": 80,
-        "manga.max_image_count_per_chapter": 20,
-        "manga.allow_color_mode": True,
-        "video.shot.split.monthly_limit": 10,
-        "video.generate.count.monthly_limit": 15,
-    },
-}
 
 @contextlib.asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -340,6 +215,11 @@ async def lifespan(app: FastAPI):
         yield
         return
 
+    if str(os.getenv("APP_ENV") or "").strip().lower() in {"production", "prod"}:
+        from services.ai.crypto_secrets import get_secret_key_material
+
+        get_secret_key_material()
+
     try:
         init_db(raise_errors=True)
     except Exception as exc:
@@ -350,6 +230,9 @@ async def lifespan(app: FastAPI):
 
     db = SessionLocal()
     try:
+        _hash_legacy_session_tokens(db)
+        _encrypt_legacy_platform_secrets(db)
+        db.commit()
         # 同步写作 Prompt 到数据库（每次启动自动同步代码中的最新版本）
         _ensure_framework_prompt_synced(db)
 
@@ -358,6 +241,17 @@ async def lifespan(app: FastAPI):
                 s.title = "转生成为暗恋公主的女仆故事"
                 s.description = "百合女仆与公主的奇幻冒险"
         db.commit()
+        try:
+            from services.creation_studio import fail_interrupted_creation_studio_jobs
+
+            interrupted_count = fail_interrupted_creation_studio_jobs(db)
+            if interrupted_count:
+                logger.warning("已终止 %s 个因服务重启中断的创作台任务", interrupted_count)
+        except Exception as exc:
+            logger.warning("创作台中断任务清理失败: %s", exc)
+        interrupted_task_count = task_manager.fail_interrupted_tasks()
+        if interrupted_task_count:
+            logger.warning("已终止 %s 个因服务重启中断的后台任务", interrupted_task_count)
         SYSTEM_READY = True
         try:
             init_gateways()
@@ -581,21 +475,57 @@ async def license_check_middleware(request: Request, call_next):
 
 @app.exception_handler(MissingApiKeyError)
 async def _missing_api_key_handler(request: Request, exc: MissingApiKeyError):
-    return JSONResponse(status_code=400, content={"detail": str(exc), "provider": exc.provider})
+    return JSONResponse(
+        status_code=400,
+        content={"detail": public_error_message(exc, "AI 服务配置缺失，请联系管理员"), "provider": exc.provider},
+    )
+
+
+@app.exception_handler(HTTPException)
+async def _http_exception_handler(request: Request, exc: HTTPException):
+    """统一清洗路由错误，避免向前端暴露英文上游异常和内部信息。"""
+    detail = exc.detail
+    if isinstance(detail, str):
+        source = detail if any("\u4e00" <= char <= "\u9fff" for char in detail) else f"HTTP {exc.status_code}: {detail}"
+        detail = public_error_message(
+            source,
+            "请求处理失败，请稍后重试",
+        )
+    else:
+        detail = sanitize_public_error_detail(detail)
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"detail": detail},
+        headers=exc.headers,
+    )
+
+
+class GeneratedMediaStaticFiles(StaticFiles):
+    """公开旧媒体目录，但强制隔离创作台的鉴权素材。"""
+
+    async def get_response(self, path: str, scope):
+        normalized = os.path.normpath(f"/{path}").replace("\\", "/").lstrip("/")
+        if normalized == "creative_studio" or normalized.startswith("creative_studio/"):
+            return Response(status_code=404)
+        return await super().get_response(path, scope)
+
 
 # Serve generated manga images as static files
 manga_dir = Path(__file__).resolve().parent / "manga_outputs"
 manga_dir.mkdir(parents=True, exist_ok=True)
-app.mount("/static/manga", StaticFiles(directory=str(manga_dir)), name="manga")
+app.mount("/static/manga", GeneratedMediaStaticFiles(directory=str(manga_dir)), name="manga")
 
 # Serve downloaded videos as static files
 video_dir = Path(__file__).resolve().parent / "video_outputs"
 video_dir.mkdir(parents=True, exist_ok=True)
-app.mount("/static/video", StaticFiles(directory=str(video_dir)), name="video")
+app.mount("/static/video", GeneratedMediaStaticFiles(directory=str(video_dir)), name="video")
 
 
 @app.middleware("http")
 async def require_api_token(request: Request, call_next):
+    normalized_path = "/" + "/".join(part for part in request.url.path.split("/") if part)
+    if normalized_path.startswith(("/static/manga/creative_studio/", "/static/video/creative_studio/")):
+        return JSONResponse({"detail": "Not found"}, status_code=404)
     if API_TOKEN and request.url.path.startswith("/api") and not _is_public_runtime_api_path(request.url.path) and request.method != "OPTIONS":
         supplied = request.headers.get("x-api-token", "").strip()
         if not supplied:
@@ -616,12 +546,24 @@ async def bind_request_db(request: Request, call_next):
     if request.url.path.startswith("/api") and not _system_installed():
         return JSONResponse({"detail": "System is not installed", "installed": False}, status_code=503)
     db = SessionLocal()
+    db.info["request"] = request
     request.state.db = db
+    response = None
     try:
-        return await call_next(request)
+        response = await call_next(request)
+        if response.status_code >= 400:
+            _refund_request_points_charges(request, db, error_code=f"http_{response.status_code}")
+        return response
+    except Exception:
+        with contextlib.suppress(Exception):
+            db.rollback()
+        _refund_request_points_charges(request, db, error_code="request_failed")
+        raise
     finally:
         with contextlib.suppress(Exception):
             db.rollback()
+        _release_request_points_reservations(request, db)
+        db.info.pop("request", None)
         db.close()
 
 
@@ -637,15 +579,87 @@ def _get_platform_setting(key: str, db: Session, default=None):
     if not setting:
         return default
     payload = setting.value_json or {}
+    if key in SENSITIVE_PLATFORM_SETTING_KEYS and payload.get("ciphertext"):
+        from services.ai.crypto_secrets import decrypt_secret
+
+        return decrypt_secret(str(payload["ciphertext"]))
     return payload.get("value", default)
 
 
-def _set_platform_setting(key: str, value, db: Session) -> None:
+SENSITIVE_PLATFORM_SETTING_KEYS = {
+    "api.deepseek.api_key",
+    "api.image.api_key",
+    "api.video.api_key",
+    "oss.access_key_id",
+    "oss.access_key_secret",
+    "email.smtp_password",
+    "payment.alipay_app_private_key",
+    "payment.epay_key",
+    "payment.mapay_key",
+}
+
+
+def _set_platform_setting(key: str, value, db: Session, *, clear_secret: bool = False) -> None:
     setting = db.query(PlatformSetting).filter(PlatformSetting.setting_key == key).first()
+    if key in SENSITIVE_PLATFORM_SETTING_KEYS:
+        plain = str(value or "").strip()
+        if not plain and setting and not clear_secret:
+            return
+        if plain:
+            from services.ai.crypto_secrets import encrypt_secret, last_four
+
+            payload = {
+                "ciphertext": encrypt_secret(plain),
+                "encrypted": True,
+                "last_four": last_four(plain),
+            }
+        else:
+            payload = {"ciphertext": "", "encrypted": True, "last_four": ""}
+        if setting:
+            setting.value_json = payload
+        else:
+            db.add(PlatformSetting(setting_key=key, value_json=payload))
+        return
     if setting:
         setting.value_json = {"value": value}
     else:
         db.add(PlatformSetting(setting_key=key, value_json={"value": value}))
+
+
+def _encrypt_legacy_platform_secrets(db: Session) -> None:
+    for key in SENSITIVE_PLATFORM_SETTING_KEYS:
+        setting = db.query(PlatformSetting).filter(PlatformSetting.setting_key == key).first()
+        if not setting:
+            continue
+        payload = setting.value_json or {}
+        if payload.get("ciphertext"):
+            continue
+        legacy_value = str(payload.get("value") or "").strip()
+        if legacy_value:
+            _set_platform_setting(key, legacy_value, db)
+
+
+def _admin_platform_settings_snapshot(db: Session) -> dict:
+    snapshot = _platform_settings_snapshot(db)
+    field_map = {
+        "api.deepseek.api_key": ("api", "deepseek_api_key"),
+        "api.image.api_key": ("api", "image_api_key"),
+        "api.video.api_key": ("api", "video_api_key"),
+        "oss.access_key_id": ("api", "oss_access_key_id"),
+        "oss.access_key_secret": ("api", "oss_access_key_secret"),
+        "email.smtp_password": ("email", "smtp_password"),
+        "payment.alipay_app_private_key": ("payment", "alipay_app_private_key"),
+        "payment.epay_key": ("payment", "epay_key"),
+        "payment.mapay_key": ("payment", "mapay_key"),
+    }
+    for setting_key, (section, field) in field_map.items():
+        row = db.query(PlatformSetting).filter(PlatformSetting.setting_key == setting_key).first()
+        payload = row.value_json if row and isinstance(row.value_json, dict) else {}
+        current = str(snapshot.get(section, {}).get(field) or "")
+        snapshot[section][field] = ""
+        snapshot[section][f"{field}_configured"] = bool(payload.get("ciphertext") or current)
+        snapshot[section][f"{field}_last_four"] = str(payload.get("last_four") or current[-4:] or "")
+    return snapshot
 
 
 def _configure_oss_from_db(db: Session) -> None:
@@ -776,6 +790,11 @@ def _payment_settings_snapshot(db: Session) -> dict:
     return _platform_settings_snapshot(db)["payment"]
 
 
+def _mock_payments_enabled() -> bool:
+    """模拟支付必须由部署环境显式开启。"""
+    return str(os.getenv("ALLOW_MOCK_PAYMENTS") or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _auth_settings_snapshot(db: Session) -> dict:
     return _platform_settings_snapshot(db)["auth"]
 
@@ -852,6 +871,49 @@ def _user_api_override_capabilities(user: User | None, db: Session) -> dict[str,
     }
 
 
+def _resolve_user_upstream_override(
+    request: Request,
+    db: Session,
+    *,
+    user: User,
+    modality: str,
+    mode: str,
+    api_key_override: str | None = None,
+) -> dict | None:
+    header_names = {
+        "text": ("x-deepseek-base-url", "x-deepseek-model"),
+        "image": ("x-image-base-url", "x-image-model"),
+        "video": ("x-video-base-url", "x-video-model"),
+    }
+    names = header_names.get(modality)
+    if not names:
+        return None
+    raw_base_url = (request.headers.get(names[0]) or "").strip()
+    raw_model = (request.headers.get(names[1]) or "").strip()
+    if not raw_base_url and not raw_model:
+        return None
+
+    capabilities = _user_api_override_capabilities(user, db)
+    if not capabilities["can_override_api_url"]:
+        return None
+    if mode != "user_key":
+        raise HTTPException(400, "自定义 URL/模型仅能在「我的 Key」模式使用")
+    if len(raw_model) > 200 or any(char in raw_model for char in "\r\n\0"):
+        raise HTTPException(400, "自定义模型名称不合法")
+
+    from services.ai.channels import validate_user_base_url
+    from services.ai.credentials import load_user_api_key_plain
+
+    api_key = (api_key_override or "").strip() or load_user_api_key_plain(db, user.id)
+    if not api_key:
+        raise HTTPException(403, "请先在用户中心配置 API Key，再使用自定义上游")
+    return {
+        "base_url": validate_user_base_url(raw_base_url) if raw_base_url else None,
+        "model_key": raw_model or None,
+        "api_key": api_key,
+    }
+
+
 def _serialize_auth_user(user: User, db: Session) -> dict:
     capabilities = _user_api_override_capabilities(user, db)
     return {
@@ -879,11 +941,63 @@ def _custom_image_provider_active(request: Request) -> bool:
     db = getattr(request.state, "db", None)
     if db is None:
         return False
+    dual = getattr(request.state, "dual_track_image", None)
+    if isinstance(dual, dict):
+        return dual.get("mode") == "user_key"
+    header_mode = (request.headers.get("x-credential-mode") or "").strip().lower()
+    if header_mode == "platform":
+        return False
     user = getattr(request.state, "current_user", None)
+    if header_mode != "user_key" and user is not None:
+        try:
+            from models import UserAiPreference
+
+            pref = db.query(UserAiPreference).filter(UserAiPreference.user_id == user.id).first()
+            if pref and pref.credential_mode == "platform":
+                return False
+            if pref and pref.credential_mode == "user_key":
+                return True
+        except Exception:
+            pass
     capabilities = _user_api_override_capabilities(user, db)
     has_custom_key = capabilities["can_override_api_key"] and bool((request.headers.get("x-image-api-key") or "").strip())
     has_custom_url = capabilities["can_override_api_url"] and bool((request.headers.get("x-image-base-url") or "").strip())
     return has_custom_key or has_custom_url
+
+
+def _points_dual_track_enabled(db: Session) -> bool:
+    try:
+        return bool(_get_platform_setting("points.dual_track_enabled", db, True))
+    except Exception:
+        return True
+
+
+def _request_credential_mode(request: Request, db: Session) -> str:
+    header_mode = (request.headers.get("x-credential-mode") or "").strip().lower()
+    if header_mode in {"platform", "user_key"}:
+        return header_mode
+    user = getattr(request.state, "current_user", None)
+    if user is not None:
+        try:
+            from models import UserAiPreference
+
+            pref = db.query(UserAiPreference).filter(UserAiPreference.user_id == user.id).first()
+            if pref and pref.credential_mode in {"platform", "user_key"}:
+                return pref.credential_mode
+        except Exception:
+            pass
+    if _custom_text_provider_active(request) or _custom_image_provider_active(request):
+        return "user_key"
+    return "platform"
+
+
+def _feature_key_to_modality(feature_key: str) -> str:
+    key = (feature_key or "").lower()
+    if "video" in key:
+        return "video"
+    if "manga" in key or "image" in key:
+        return "image"
+    return "text"
 
 
 def _check_and_consume_feature_quota(
@@ -895,50 +1009,202 @@ def _check_and_consume_feature_quota(
     *,
     deduct: bool,
     provider_kind: str | None = None,
+    reserve: bool = True,
 ) -> dict:
-    if provider_kind == "text" and _custom_text_provider_active(request):
-        return {"skipped": True, "reason": "custom_text_provider", "feature_key": feature_key}
-    if provider_kind == "image" and _custom_image_provider_active(request):
-        return {"skipped": True, "reason": "custom_image_provider", "feature_key": feature_key}
-    return _check_and_consume_quota(user_id, feature_key, amount, db, deduct=deduct)
+    """积分双轨配额检查与扣费 — 旧套餐配额系统已移除"""
+    mode = _request_credential_mode(request, db)
+    modality = provider_kind if provider_kind in {"text", "image", "video"} else _feature_key_to_modality(feature_key)
+    charge = None
+    if not deduct and modality == "text":
+        from services.deepseek import reset_usage_accumulator
+
+        reset_usage_accumulator()
+    if mode == "platform":
+        if deduct:
+            charge = _settle_pending_platform_points(
+                request,
+                db,
+                user_id=user_id,
+                task_type=feature_key,
+                modality=modality,
+            ) or _charge_platform_points_immediate(
+                request,
+                db,
+                user_id=user_id,
+                task_type=feature_key,
+                modality=modality,
+                units=max(1, int(amount or 1)),
+            )
+        elif reserve:
+            charge = _charge_platform_points_immediate(
+                request,
+                db,
+                user_id=user_id,
+                task_type=feature_key,
+                modality=modality,
+                units=max(1, int(amount or 1)),
+                settle=False,
+            )
+        else:
+            _check_platform_points_available(
+                request,
+                db,
+                user_id=user_id,
+                task_type=feature_key,
+                modality=modality,
+                units=max(1, int(amount or 1)),
+            )
+    return {
+        "skipped": True,
+        "reason": "points_dual_track",
+        "credential_mode": mode,
+        "feature_key": feature_key,
+        "points_charged": float(charge.get("amount") or 0) if charge else 0,
+        "usage_event_id": charge.get("usage_event_id") if charge else None,
+        "billing_request_id": charge.get("request_id") if charge else None,
+    }
+
+
+def _resolve_dual_track_runtime(request: Request, db: Session, *, modality: str) -> dict | None:
+    if not _points_dual_track_enabled(db):
+        return None
+    try:
+        from services.ai.channels import load_platform_key
+        from services.ai.credentials import load_user_api_key_plain
+        from services.ai.resolver import resolve_credential_mode, resolve_model
+        from models import AiChannel
+
+        user = getattr(request.state, "current_user", None)
+        if user is None:
+            return None
+        mode = resolve_credential_mode(db, user.id, _request_credential_mode(request, db))
+        custom_upstream = _resolve_user_upstream_override(
+            request,
+            db,
+            user=user,
+            modality=modality,
+            mode=mode,
+        )
+        model_header = None
+        if modality == "text":
+            model_header = request.headers.get("x-ai-model-id") or request.headers.get("x-deepseek-model-id")
+        elif modality == "image":
+            model_header = request.headers.get("x-ai-model-id") or request.headers.get("x-image-model-id")
+        elif modality == "video":
+            model_header = request.headers.get("x-ai-model-id") or request.headers.get("x-video-model-id")
+        model_id = int(model_header) if model_header and str(model_header).isdigit() else None
+        model = resolve_model(db, user.id, modality=modality, model_id=model_id, task_type=None)
+        channel = db.get(AiChannel, model.channel_id)
+        if not channel or not channel.enabled:
+            return None
+        base_url = ((custom_upstream or {}).get("base_url") or channel.base_url or "").rstrip("/")
+        resolved_model_key = (custom_upstream or {}).get("model_key") or model.model_key
+        if mode == "user_key":
+            capabilities = _user_api_override_capabilities(user, db)
+            if not custom_upstream and not capabilities["can_override_api_key"]:
+                raise HTTPException(403, "管理员未授权当前账号使用自定义 API Key")
+            api_key = (custom_upstream or {}).get("api_key") or load_user_api_key_plain(db, user.id)
+            if not api_key:
+                raise HTTPException(403, "请先在账户页配置 API Key，或切换到平台账户模式")
+        else:
+            api_key = load_platform_key(channel)
+            if not api_key:
+                raise HTTPException(500, "平台渠道 API Key 未配置，请管理员在「积分与 AI 渠道」中设置")
+        return {
+            "mode": mode,
+            "base_url": base_url,
+            "api_key": api_key,
+            "model_key": resolved_model_key,
+            "model_id": model.id,
+            "channel_id": channel.id,
+            "user_id": user.id,
+            "custom_upstream": bool(custom_upstream),
+        }
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("双轨运行时解析失败 modality=%s", modality)
+        return None
 
 
 def _user_deepseek_api_key(request: Request) -> str | None:
-    override = request.headers.get("x-deepseek-api-key") or None
-    override_base_url = request.headers.get("x-deepseek-base-url") or None
-    override_model = request.headers.get("x-deepseek-model") or None
     db = getattr(request.state, "db", None)
+    if db is not None:
+        dual = _resolve_dual_track_runtime(request, db, modality="text")
+        if dual:
+            deepseek_service.configure_runtime(
+                base_url=dual["base_url"] or deepseek_service.DEEPSEEK_BASE_URL,
+                model=dual["model_key"] or deepseek_service.DEEPSEEK_MODEL,
+            )
+            request.state.dual_track_text = dual
+            return dual["api_key"]
+
+    override = request.headers.get("x-deepseek-api-key") or None
     if db is None:
         return override
     user = getattr(request.state, "current_user", None)
     capabilities = _user_api_override_capabilities(user, db)
     admin_base_url = str(_get_platform_setting("api.deepseek.base_url", db, deepseek_service.DEEPSEEK_BASE_URL)).strip()
     admin_model = str(_get_platform_setting("api.deepseek.model", db, deepseek_service.DEEPSEEK_MODEL)).strip()
-    resolved_base_url = override_base_url.strip() if capabilities["can_override_api_url"] and override_base_url and override_base_url.strip() else admin_base_url
-    resolved_model = override_model.strip() if capabilities["can_override_api_url"] and override_model and override_model.strip() else admin_model
+    requested_mode = _request_credential_mode(request, db)
+    custom_upstream = _resolve_user_upstream_override(
+        request,
+        db,
+        user=user,
+        modality="text",
+        mode=requested_mode,
+    )
+    resolved_base_url = (custom_upstream or {}).get("base_url") or admin_base_url
+    resolved_model = (custom_upstream or {}).get("model_key") or admin_model
     deepseek_service.configure_runtime(
         base_url=resolved_base_url.rstrip("/") or deepseek_service.DEEPSEEK_BASE_URL,
         model=resolved_model or deepseek_service.DEEPSEEK_MODEL,
     )
+    if custom_upstream:
+        return custom_upstream["api_key"]
+    if requested_mode == "user_key" and not capabilities["can_override_api_key"]:
+        raise HTTPException(403, "管理员未授权当前账号使用自定义 API Key")
     if capabilities["can_override_api_key"] and override:
         return override
     return _get_platform_setting("api.deepseek.api_key", db, "") or None
 
 
 def _user_image_api_key(request: Request) -> str | None:
-    override = request.headers.get("x-image-api-key") or None
-    override_base_url = request.headers.get("x-image-base-url") or None
-    override_model = request.headers.get("x-image-model") or None
     db = getattr(request.state, "db", None)
+    if db is not None:
+        dual = _resolve_dual_track_runtime(request, db, modality="image")
+        if dual:
+            image_service.configure_runtime(
+                base_url=dual["base_url"] or image_service.DEFAULT_IMAGE_API_BASE_URL,
+                model=dual["model_key"] or image_service.DEFAULT_IMAGE_MODEL,
+                size=str(_get_platform_setting("api.image.size", db, "") or ""),
+                quality=str(_get_platform_setting("api.image.quality", db, "") or ""),
+                background=str(_get_platform_setting("api.image.background", db, "") or ""),
+                moderation=str(_get_platform_setting("api.image.moderation", db, "") or ""),
+                output_format=str(_get_platform_setting("api.image.output_format", db, "") or ""),
+                output_compression=_get_platform_setting("api.image.output_compression", db, ""),
+                input_fidelity=str(_get_platform_setting("api.image.input_fidelity", db, "") or ""),
+            )
+            request.state.dual_track_image = dual
+            return dual["api_key"]
+
+    override = request.headers.get("x-image-api-key") or None
     if db is None:
         return override
     user = getattr(request.state, "current_user", None)
     capabilities = _user_api_override_capabilities(user, db)
     admin_base_url = str(_get_platform_setting("api.image.base_url", db, image_service.DEFAULT_IMAGE_API_BASE_URL)).strip()
     admin_model = str(_get_platform_setting("api.image.model", db, image_service.DEFAULT_IMAGE_MODEL)).strip()
-    resolved_base_url = override_base_url.strip() if capabilities["can_override_api_url"] and override_base_url and override_base_url.strip() else admin_base_url
-    resolved_model = override_model.strip() if capabilities["can_override_api_url"] and override_model and override_model.strip() else admin_model
-    # 过滤掉数据库中的占位值，确保回退到 image2.py 的硬编码默认值
+    requested_mode = _request_credential_mode(request, db)
+    custom_upstream = _resolve_user_upstream_override(
+        request,
+        db,
+        user=user,
+        modality="image",
+        mode=requested_mode,
+    )
+    resolved_base_url = (custom_upstream or {}).get("base_url") or admin_base_url
+    resolved_model = (custom_upstream or {}).get("model_key") or admin_model
     if not resolved_model or resolved_model.strip().lower() in ("default", "none", "null"):
         resolved_model = ""
     image_service.configure_runtime(
@@ -952,6 +1218,10 @@ def _user_image_api_key(request: Request) -> str | None:
         output_compression=_get_platform_setting("api.image.output_compression", db, ""),
         input_fidelity=str(_get_platform_setting("api.image.input_fidelity", db, "") or ""),
     )
+    if custom_upstream:
+        return custom_upstream["api_key"]
+    if requested_mode == "user_key" and not capabilities["can_override_api_key"]:
+        raise HTTPException(403, "管理员未授权当前账号使用自定义 API Key")
     if capabilities["can_override_api_key"] and override:
         return override
     return _get_platform_setting("api.image.api_key", db, "") or None
@@ -982,12 +1252,102 @@ def _release_db_transaction(db: Session) -> None:
         logger.debug("Failed to rollback request transaction before external API call", exc_info=True)
 
 
+def _bounded_env_int(name: str, default: int, minimum: int, maximum: int) -> int:
+    try:
+        value = int(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        value = default
+    return max(minimum, min(maximum, value))
+
+
+def _password_hash_iterations() -> int:
+    return _bounded_env_int("PASSWORD_HASH_ITERATIONS", 600_000, 100_000, 2_000_000)
+
+
 def _password_hash(raw: str) -> str:
-    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+    iterations = _password_hash_iterations()
+    salt = secrets.token_bytes(16)
+    digest = hashlib.pbkdf2_hmac("sha256", raw.encode("utf-8"), salt, iterations)
+    return f"pbkdf2_sha256${iterations}${salt.hex()}${digest.hex()}"
+
+
+def _verify_password(raw: str, encoded: str) -> bool:
+    value = str(encoded or "")
+    if value.startswith("pbkdf2_sha256$"):
+        try:
+            _, raw_iterations, raw_salt, expected = value.split("$", 3)
+            iterations = int(raw_iterations)
+            if not 100_000 <= iterations <= 2_000_000:
+                return False
+            salt = bytes.fromhex(raw_salt)
+            if len(salt) != 16 or len(expected) != 64:
+                return False
+            digest = hashlib.pbkdf2_hmac("sha256", raw.encode("utf-8"), salt, iterations).hex()
+        except (TypeError, ValueError):
+            return False
+        return secrets.compare_digest(digest, expected)
+
+    # 兼容旧版无盐 SHA-256；用户下次成功登录时会自动升级哈希。
+    legacy = hashlib.sha256(raw.encode("utf-8")).hexdigest()
+    return len(value) == 64 and secrets.compare_digest(legacy, value)
+
+
+def _password_needs_rehash(encoded: str) -> bool:
+    if not str(encoded or "").startswith("pbkdf2_sha256$"):
+        return True
+    try:
+        iterations = int(str(encoded).split("$", 3)[1])
+    except (IndexError, ValueError):
+        return True
+    return iterations < _password_hash_iterations()
+
+
+def _validate_new_password(raw: str) -> None:
+    if len(raw) < 8:
+        raise HTTPException(400, "密码长度不能少于 8 位")
+    if len(raw) > 128:
+        raise HTTPException(400, "密码长度不能超过 128 位")
+
+
+def _session_is_expired(session: UserSession) -> bool:
+    ttl_days = _bounded_env_int("SESSION_TTL_DAYS", 30, 1, 365)
+    created_at = session.created_at
+    if not created_at:
+        return True
+    return created_at + datetime.timedelta(days=ttl_days) <= _utcnow()
 
 
 def _new_session_token() -> str:
     return f"lv_{secrets.token_urlsafe(32)}"
+
+
+def _session_token_fingerprint(token: str) -> str:
+    return f"sha256${hashlib.sha256(token.encode('utf-8')).hexdigest()}"
+
+
+def _hash_legacy_session_tokens(db: Session) -> int:
+    """将历史明文会话令牌迁移为指纹，同时保持客户端令牌有效。"""
+    legacy_sessions = db.query(UserSession).filter(~UserSession.token.like("sha256$%")).all()
+    for session in legacy_sessions:
+        fingerprint = _session_token_fingerprint(session.token)
+        duplicate = db.query(UserSession.id).filter(
+            UserSession.token == fingerprint,
+            UserSession.id != session.id,
+        ).first()
+        if duplicate:
+            db.delete(session)
+        else:
+            session.token = fingerprint
+    db.flush()
+    return len(legacy_sessions)
+
+
+def _find_active_session(token: str, db: Session) -> UserSession | None:
+    fingerprint = _session_token_fingerprint(token)
+    return db.query(UserSession).filter(
+        UserSession.token == fingerprint,
+        UserSession.revoked_at.is_(None),
+    ).first()
 
 
 def _utcnow() -> datetime.datetime:
@@ -1001,24 +1361,6 @@ def _add_months(base: datetime.datetime, months: int) -> datetime.datetime:
     day = min(base.day, calendar.monthrange(year, month)[1])
     return base.replace(year=year, month=month, day=day)
 
-
-def _add_billing_cycle(base: datetime.datetime, billing_cycle: str) -> datetime.datetime:
-    cycle = (billing_cycle or "monthly").strip().lower()
-    if cycle == "yearly":
-        return _add_months(base, 12)
-    return _add_months(base, 1)
-
-
-def _current_period_key(
-    now: datetime.datetime | None = None,
-    *,
-    period_start: datetime.datetime | None = None,
-    period_end: datetime.datetime | None = None,
-) -> str:
-    if period_start and period_end:
-        return f"{period_start.strftime('%Y%m%d')}{period_end.strftime('%Y%m%d')}"
-    now = now or _utcnow()
-    return now.strftime("%Y%m")
 
 
 def _parse_auth_token(request: Request) -> str | None:
@@ -1087,7 +1429,7 @@ def _send_platform_email(to_email: str, subject: str, text_body: str, db: Sessio
         raise HTTPException(502, f"邮件发送失败：{exc}")
 
 
-def _issue_email_verification_code(email: str, purpose: str, db: Session) -> dict:
+def _issue_email_verification_code(email: str, purpose: str, db: Session, *, deliver: bool = True) -> dict:
     _validate_email_format(email)
     auth = _auth_settings_snapshot(db)
     code_length = int(auth.get("email_code_length") or 6)
@@ -1131,7 +1473,8 @@ def _issue_email_verification_code(email: str, purpose: str, db: Session) -> dic
         f"验证码将在 {expire_minutes} 分钟后失效。\n"
         f"如果这不是您的操作，请忽略这封邮件。\n"
     )
-    _send_platform_email(email, subject, body, db)
+    if deliver:
+        _send_platform_email(email, subject, body, db)
     db.commit()
     return {"ok": True, "expires_in_seconds": expire_minutes * 60}
 
@@ -1148,6 +1491,7 @@ def _consume_email_verification_code(email: str, purpose: str, code: str, db: Se
             EmailVerificationCode.purpose == purpose,
             EmailVerificationCode.consumed_at.is_(None),
         )
+        .with_for_update()
         .order_by(EmailVerificationCode.created_at.desc())
         .first()
     )
@@ -1157,7 +1501,11 @@ def _consume_email_verification_code(email: str, purpose: str, code: str, db: Se
         record.consumed_at = now
         db.commit()
         raise HTTPException(400, "验证码已过期，请重新发送")
-    if record.code_hash != _verification_code_hash(email, purpose, normalized_code):
+    if not secrets.compare_digest(record.code_hash, _verification_code_hash(email, purpose, normalized_code)):
+        record.attempt_count = int(record.attempt_count or 0) + 1
+        if record.attempt_count >= 5:
+            record.consumed_at = now
+        db.commit()
         raise HTTPException(400, "邮箱验证码不正确")
     record.consumed_at = now
     db.commit()
@@ -1169,78 +1517,7 @@ def _ensure_platform_seed(
     create_default_admin: bool = False,
     commit: bool = True,
 ) -> None:
-    # Keep the legacy admin seed disabled by default. First-run install creates
-    # the administrator from user-supplied credentials instead.
-    admin = db.query(User).filter(User.email == "admin@storycanvas.app").first()
-    if create_default_admin and not admin:
-        db.add(User(
-            email="admin@storycanvas.app",
-            password_hash=_password_hash("admin123"),
-            name="运营管理员",
-            role="admin",
-            status="active",
-        ))
-        if commit:
-            db.commit()
-
-    if db.query(Plan).count() > 0:
-        _ensure_plan_feature_seed(db, commit=commit)
-        _seed_platform_settings(db, commit=commit)
-        if commit:
-            db.commit()
-        return
-
-    free = Plan(
-        code="free",
-        name="Free",
-        description="适合体验",
-        monthly_price=0,
-        yearly_price=0,
-        is_recommended=False,
-        is_visible=True,
-    )
-    pro = Plan(
-        code="pro",
-        name="Pro",
-        description="适合稳定创作",
-        monthly_price=59,
-        yearly_price=599,
-        is_recommended=True,
-        is_visible=True,
-    )
-    premium = Plan(
-        code="premium",
-        name="Premium",
-        description="适合高频创作",
-        monthly_price=199,
-        yearly_price=1999,
-        is_recommended=False,
-        is_visible=True,
-    )
-    db.add_all([free, pro, premium])
-    db.flush()
-
-    for plan in [free, pro, premium]:
-        for key, value in PLAN_SEED_DEFAULTS[plan.code].items():
-            db.add(
-                PlanFeature(
-                    plan_id=plan.id,
-                    feature_key=key,
-                    value_json={"value": value},
-                )
-            )
-            db.add(
-                PlanQuotaRule(
-                    plan_id=plan.id,
-                    feature_key=key,
-                    reset_period="monthly",
-                    deduct_mode="on_success",
-                    extra_config={"carry_over_enabled": False},
-                )
-            )
-
-    if commit:
-        db.commit()
+    # 旧套餐配额种子已移除，仅保留平台设置种子
     _seed_platform_settings(db, commit=commit)
     if commit:
         db.commit()
@@ -1266,60 +1543,12 @@ def _create_install_admin_user(normalized_admin: dict[str, str], db: Session) ->
     )
     db.add(user)
     db.flush()
-    free_plan = db.query(Plan).filter(Plan.code == "free").first()
-    if free_plan:
-        _upsert_user_subscription(
-            user.id,
-            free_plan.id,
-            db,
-            billing_cycle="monthly",
-            effective_at=_utcnow(),
-            extend_if_same_plan=False,
-        )
     return user
 
 
 def _ensure_plan_feature_seed(db: Session, *, commit: bool = True) -> None:
-    changed = False
-    plans = db.query(Plan).all()
-    for plan in plans:
-        plan_defaults = PLAN_SEED_DEFAULTS.get(plan.code, {})
-        for feature in FEATURE_CATALOG:
-            feature_key = str(feature["key"])
-            feature_row = db.query(PlanFeature).filter(PlanFeature.plan_id == plan.id, PlanFeature.feature_key == feature_key).first()
-            if not feature_row:
-                default_value = plan_defaults.get(feature_key, 0)
-                db.add(PlanFeature(plan_id=plan.id, feature_key=feature_key, value_json={"value": default_value}))
-                changed = True
-            rule_row = db.query(PlanQuotaRule).filter(PlanQuotaRule.plan_id == plan.id, PlanQuotaRule.feature_key == feature_key).first()
-            if not rule_row:
-                default_rule = feature.get("default_rule") if isinstance(feature.get("default_rule"), dict) else {}
-                db.add(PlanQuotaRule(
-                    plan_id=plan.id,
-                    feature_key=feature_key,
-                    reset_period=str(default_rule.get("reset_period") or "monthly"),
-                    deduct_mode=str(default_rule.get("deduct_mode") or "on_success"),
-                    extra_config={"carry_over_enabled": False},
-                ))
-                changed = True
-        # 清理已从 FEATURE_CATALOG 中移除的旧功能项
-        valid_keys = {str(f["key"]) for f in FEATURE_CATALOG}
-        stale_features = db.query(PlanFeature).filter(
-            PlanFeature.plan_id == plan.id,
-            ~PlanFeature.feature_key.in_(valid_keys),
-        ).all()
-        for sf in stale_features:
-            db.delete(sf)
-            changed = True
-        stale_rules = db.query(PlanQuotaRule).filter(
-            PlanQuotaRule.plan_id == plan.id,
-            ~PlanQuotaRule.feature_key.in_(valid_keys),
-        ).all()
-        for sr in stale_rules:
-            db.delete(sr)
-            changed = True
-    if changed and commit:
-        db.commit()
+    """旧套餐配额种子函数 — 积分双轨系统已替代，保留为空实现"""
+    pass
 
 
 def _seed_platform_settings(db: Session, *, commit: bool = True) -> None:
@@ -1823,7 +2052,7 @@ _SYSTEM_PROMPT_SEEDS: dict[str, str] = {
     "prompt.reference_framework": FRAMEWORK_PROMPT_SEED,
     "prompt.reference_chapter": REFERENCE_CHAPTER_PROMPT_SEED,
     "prompt.reference_character": "你是专业漫画角色设定师，擅长把角色设定转化为具体可视化的外貌卡。\n\n要求：\n1. 每个角色必须有2-3个标志性特征（特定发型、疤痕、配饰等）\n2. 性格映射为外貌——冷静的人克制端正、张扬的人有攻击性视觉符号\n3. 禁止千篇一律的「俊美」「帅气」——具体到可画的特征\n4. 每个角色需包含：角色名、身份、外貌、发型发色、眼型、体型、服装、配饰、标志性表情（常态/高兴/愤怒）、动作习惯、神态气质",
-    "prompt.reference_manga_style": "黑白模式(bw)：黑白漫画风格，高对比度，清晰线条，网点/排线阴影，电影级分镜构图。\n彩色模式(color)：日式动漫风格，cel-shaded，鲜艳色彩，电影级分镜构图。\n\n用户可在增量修改中添加自己的风格偏好，如：\n- 禁止Q版/简笔画风格\n- 场景必须使用电影级构图\n- 角色服装必须符合故事时代背景\n- 画面整体偏暗色调/暖色调",
+    "prompt.reference_manga_style": "画面风格必须完全以用户上传或选择的风格参考图为准，禁止根据预设名称或文字模板改变画风。\n黑白模式(bw)：仅将参考图的最终色彩输出为黑白或灰度，保留参考图的真实感、材质、光影和构图语言。\n彩色模式(color)：保留参考图的原始色彩和视觉媒介，不额外套用动漫、插画、线稿或其他固定画风。\n\n用户可在增量修改中添加非画风约束，如：\n- 场景使用电影级构图\n- 角色服装符合故事时代背景\n- 画面整体偏暗色调或暖色调",
 }
 
 
@@ -1836,6 +2065,10 @@ def _seed_system_prompts(db: Session, *, commit: bool = True) -> None:
             if key == "prompt.onboarding":
                 cur = setting.value_json.get("value", "") if isinstance(setting.value_json, dict) else ""
                 if "灵感捕手" in cur or "创作灵感" in cur:
+                    setting.value_json = {"value": value}
+            elif key == "prompt.reference_manga_style":
+                cur = setting.value_json.get("value", "") if isinstance(setting.value_json, dict) else ""
+                if "日式动漫风格" in cur or "cel-shaded" in cur or "网点/排线阴影" in cur:
                     setting.value_json = {"value": value}
             continue
         db.add(PlatformSetting(setting_key=key, value_json={"value": value}))
@@ -1860,15 +2093,21 @@ def _seed_methodology(db: Session, *, commit: bool = True) -> None:
             continue
         content = _METHODOLOGY_FILE_FALLBACK[key]()
         if content:
-            save_methodology_to_db(db, key, content)
+            save_methodology_to_db(db, key, content, commit=False)
+    if commit:
+        db.commit()
 
 
 def _require_user(request: Request, db: Session) -> User:
     token = _parse_auth_token(request)
     if not token:
         raise HTTPException(401, "未授权")
-    session = db.query(UserSession).filter(UserSession.token == token, UserSession.revoked_at.is_(None)).first()
+    session = _find_active_session(token, db)
     if not session:
+        raise HTTPException(401, "会话已过期或令牌无效")
+    if _session_is_expired(session):
+        session.revoked_at = _utcnow()
+        db.commit()
         raise HTTPException(401, "会话已过期或令牌无效")
     user = db.get(User, session.user_id)
     if not user or user.status != "active":
@@ -1882,8 +2121,12 @@ def _get_current_user(request: Request, db: Session) -> User | None:
     token = _parse_auth_token(request)
     if not token:
         return None
-    session = db.query(UserSession).filter(UserSession.token == token, UserSession.revoked_at.is_(None)).first()
+    session = _find_active_session(token, db)
     if not session:
+        return None
+    if _session_is_expired(session):
+        session.revoked_at = _utcnow()
+        db.commit()
         return None
     user = db.get(User, session.user_id)
     if not user or user.status != "active":
@@ -1898,84 +2141,6 @@ def _require_admin(request: Request, db: Session) -> User:
         raise HTTPException(403, "需要管理员权限")
     return user
 
-
-def _subscription_is_expired(sub: UserSubscription | None, *, now: datetime.datetime | None = None) -> bool:
-    if not sub or not sub.expires_at:
-        return False
-    now = now or _utcnow()
-    return sub.expires_at <= now
-
-
-def _hydrate_subscription_period(
-    sub: UserSubscription,
-    db: Session,
-    *,
-    now: datetime.datetime | None = None,
-) -> UserSubscription:
-    now = now or _utcnow()
-    changed = False
-    cycle = str(sub.billing_cycle or "monthly").strip().lower() or "monthly"
-    if sub.billing_cycle != cycle:
-        sub.billing_cycle = cycle
-        changed = True
-    if not sub.current_period_start:
-        sub.current_period_start = sub.created_at or now
-        changed = True
-    plan = db.get(Plan, sub.plan_id)
-    if plan and plan.code == "free":
-        if sub.current_period_end is not None:
-            sub.current_period_end = None
-            changed = True
-        if sub.expires_at is not None:
-            sub.expires_at = None
-            changed = True
-    else:
-        if not sub.current_period_end:
-            sub.current_period_end = _add_billing_cycle(sub.current_period_start, cycle)
-            changed = True
-        if not sub.expires_at:
-            sub.expires_at = sub.current_period_end
-            changed = True
-        while sub.current_period_end and sub.expires_at and now >= sub.current_period_end and sub.current_period_end < sub.expires_at:
-            sub.current_period_start = sub.current_period_end
-            next_period_end = _add_billing_cycle(sub.current_period_start, cycle)
-            sub.current_period_end = min(next_period_end, sub.expires_at)
-            changed = True
-    if _subscription_is_expired(sub, now=now) and sub.status != "expired":
-        sub.status = "expired"
-        changed = True
-    elif not _subscription_is_expired(sub, now=now) and sub.status != "active":
-        sub.status = "active"
-        changed = True
-    if changed:
-        db.flush()
-    return sub
-
-
-def _subscription_for_user(user_id: int, db: Session) -> UserSubscription | None:
-    sub = db.query(UserSubscription).filter(UserSubscription.user_id == user_id).first()
-    if not sub:
-        return None
-    return _hydrate_subscription_period(sub, db)
-
-
-def _subscription_period_key(user_id: int, db: Session) -> str:
-    sub = _subscription_for_user(user_id, db)
-    if sub and sub.status == "active":
-        return _current_period_key(period_start=sub.current_period_start, period_end=sub.current_period_end)
-    return _current_period_key()
-
-
-def _active_plan_for_user(user_id: int, db: Session) -> Plan:
-    sub = _subscription_for_user(user_id, db)
-    if sub and sub.status == "active":
-        plan = db.get(Plan, sub.plan_id)
-        if plan:
-            return plan
-    free = db.query(Plan).filter(Plan.code == "free").first()
-    if not free:
-        raise HTTPException(500, "种子套餐缺失")
-    return free
 
 
 def _require_story_for_user(story_id: int, user: User, db: Session) -> Story:
@@ -2192,14 +2357,6 @@ def _require_chapter_for_user(chapter_id: int, user: User, db: Session) -> Chapt
     return chapter
 
 
-def _plan_feature_map(plan_id: int, db: Session) -> dict[str, object]:
-    features = db.query(PlanFeature).filter(PlanFeature.plan_id == plan_id).all()
-    result: dict[str, object] = {}
-    for item in features:
-        payload = item.value_json or {}
-        result[item.feature_key] = payload.get("value")
-    return result
-
 
 def _coerce_int(value: object, default: int = 0) -> int:
     try:
@@ -2249,17 +2406,16 @@ def _money_to_number(value: object) -> float:
     return float(_coerce_money(value))
 
 
-def _plan_feature_value(user_id: int, feature_key: str, db: Session):
-    plan = _active_plan_for_user(user_id, db)
-    return _plan_feature_map(plan.id, db).get(feature_key)
+def _payment_amount_matches(expected: object, reported: object) -> bool:
+    if reported is None or str(reported).strip() == "":
+        return False
+    try:
+        expected_amount = Decimal(str(expected)).quantize(MONEY_QUANT, rounding=ROUND_HALF_UP)
+        reported_amount = Decimal(str(reported)).quantize(MONEY_QUANT, rounding=ROUND_HALF_UP)
+    except (InvalidOperation, TypeError, ValueError):
+        return False
+    return expected_amount == reported_amount
 
-
-def _plan_feature_int(user_id: int, feature_key: str, db: Session, default: int = 0) -> int:
-    return _coerce_int(_plan_feature_value(user_id, feature_key, db), default=default)
-
-
-def _plan_feature_bool(user_id: int, feature_key: str, db: Session, default: bool = False) -> bool:
-    return _coerce_bool(_plan_feature_value(user_id, feature_key, db), default=default)
 
 
 def _check_and_consume_quota(
@@ -2270,55 +2426,109 @@ def _check_and_consume_quota(
     *,
     deduct: bool,
 ) -> dict:
+    """积分双轨配额检查与扣费（无 request 上下文）— 旧套餐配额系统已移除"""
     if amount <= 0:
         amount = 1
-    plan = _active_plan_for_user(user_id, db)
-    limits = _plan_feature_map(plan.id, db)
-    period_key = _subscription_period_key(user_id, db)
-    if deduct and db.bind and db.bind.dialect.name == "postgresql":
-        lock_key = int.from_bytes(
-            hashlib.sha256(f"quota:{user_id}:{feature_key}:{period_key}".encode("utf-8")).digest()[:8],
-            "big",
-            signed=True,
+    try:
+        from models import UserAiPreference
+        from decimal import Decimal as _Decimal
+        import uuid as _uuid
+        from services.ai.resolver import begin_ai_call, complete_ai_call, resolve_model
+
+        pref = db.query(UserAiPreference).filter(UserAiPreference.user_id == user_id).first()
+        mode = pref.credential_mode if pref and pref.credential_mode in {"platform", "user_key"} else "platform"
+        if not deduct or mode == "user_key":
+            return {
+                "skipped": True,
+                "reason": "points_dual_track",
+                "credential_mode": mode,
+                "feature_key": feature_key,
+                "used": 0,
+                "limit": 0,
+                "period_key": "",
+                "base_limit": 0,
+                "granted": 0,
+            }
+        modality = _feature_key_to_modality(feature_key)
+        model = resolve_model(db, user_id, modality=modality, model_id=None, task_type=None)
+        units = max(1, int(amount or 1))
+        estimate_kwargs = {}
+        if modality == "text":
+            estimate_kwargs["call_count"] = units
+        elif modality == "image":
+            estimate_kwargs["image_count"] = units
+        elif modality == "video":
+            estimate_kwargs["video_seconds"] = units
+        ctx = begin_ai_call(
+            db,
+            user_id=user_id,
+            modality=modality,
+            task_type=feature_key,
+            credential_mode="platform",
+            model_id=model.id,
+            request_id=str(_uuid.uuid4()),
+            estimate_kwargs=estimate_kwargs,
         )
-        db.execute(text("SELECT pg_advisory_xact_lock(:lock_key)"), {"lock_key": lock_key})
-    base_limit = _coerce_int(limits.get(feature_key), default=0)
-    granted = _extra_grant_amount(user_id, feature_key, period_key, db)
-    limit = base_limit + granted
-    usage = db.query(UserUsageMonthly).filter(
-        UserUsageMonthly.user_id == user_id,
-        UserUsageMonthly.feature_key == feature_key,
-        UserUsageMonthly.period_key == period_key,
-    ).first()
-    used = _coerce_int(usage.used_amount if usage else 0, default=0)
-    feature_name = FEATURE_CATALOG_MAP.get(feature_key, {}).get("name", feature_key)
-    if limit <= 0:
-        raise HTTPException(403, f"当前套餐不可用「{feature_name}」")
-    if used + amount > limit:
-        raise HTTPException(429, f"「{feature_name}」配额已超限 ({used}/{limit})")
-    if deduct:
-        if usage:
-            usage.used_amount = used + amount
-        else:
-            db.add(UserUsageMonthly(
-                user_id=user_id,
-                feature_key=feature_key,
-                period_key=period_key,
-                used_amount=amount,
-            ))
-        db.commit()
-    return {"feature_key": feature_key, "used": used, "base_limit": base_limit, "granted": granted, "limit": limit, "period_key": period_key}
+        complete_ai_call(
+            db,
+            ctx,
+            success=True,
+            image_count=units if modality == "image" else 0,
+            video_seconds=units if modality == "video" else 0,
+            usage_source="estimated",
+        )
+        return {
+            "skipped": True,
+            "reason": "points_dual_track",
+            "credential_mode": mode,
+            "feature_key": feature_key,
+            "points_charged": float(ctx.estimated_points or ctx.reserved_points or _Decimal("0")),
+            "usage_event_id": ctx.usage_event_id,
+            "billing_request_id": ctx.request_id,
+            "used": 0,
+            "limit": 0,
+            "period_key": "",
+            "base_limit": 0,
+            "granted": 0,
+        }
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("无 request 双轨扣费失败 feature=%s", feature_key)
+        raise
 
 
-def _refund_quota(user_id: int, feature_key: str, amount: int, db: Session, period_key: str | None = None) -> None:
-    """退还已扣除的配额（AI 调用失败时回退）。"""
-    task_manager.refund_quota(user_id, feature_key, amount, db, period_key)
+def _refund_quota(
+    user_id: int,
+    feature_key: str,
+    amount: int,
+    db: Session,
+    period_key: str | None = None,
+    *,
+    usage_event_id: int | None = None,
+) -> None:
+    """按原始用量事件退款；没有账本事件时拒绝猜测退款金额。"""
+    if not usage_event_id:
+        logger.warning(
+            "忽略缺少用量事件的退款请求 user=%s feature=%s amount=%s",
+            user_id,
+            feature_key,
+            amount,
+        )
+        return
+    try:
+        from services.ai.resolver import refund_ai_call
+
+        refund_ai_call(db, usage_event_id, error_code="quota_refund")
+    except Exception:
+        logger.exception("积分退款失败 feature=%s usage_event_id=%s", feature_key, usage_event_id)
 
 
 def _serialize_order(order: BillingOrder) -> dict:
     operator = None
     user_name = None
-    plan_name = None
+    extra = order.extra_json or {}
+    plan_name = str(extra.get("product_name") or "") or None
     db = getattr(_serialize_order, "_db", None)
     if db is not None:
         if order.operator_user_id:
@@ -2328,14 +2538,16 @@ def _serialize_order(order: BillingOrder) -> dict:
         user = db.get(User, order.user_id)
         if user:
             user_name = user.name
-        plan = db.get(Plan, order.plan_id)
-        if plan:
-            plan_name = plan.name
+        if not plan_name and order.plan_id:
+            historical_plan = db.get(Plan, order.plan_id)
+            if historical_plan:
+                plan_name = historical_plan.name
     return {
         "order_no": order.order_no,
         "user_id": order.user_id,
         "user_name": user_name,
         "plan_id": order.plan_id,
+        "points_product_id": order.points_product_id,
         "plan_name": plan_name,
         "amount": _money_to_number(order.amount),
         "currency": order.currency,
@@ -2346,7 +2558,7 @@ def _serialize_order(order: BillingOrder) -> dict:
         "payment_method": order.payment_method or "mock_qr",
         "operator": operator,
         "note": order.note or "",
-        "extra": order.extra_json or {},
+        "extra": extra,
         "paid_at": order.paid_at,
         "expired_at": order.expired_at,
         "created_at": order.created_at,
@@ -2359,24 +2571,6 @@ def _serialize_order_with_db(order: BillingOrder, db: Session) -> dict:
         return _serialize_order(order)
     finally:
         setattr(_serialize_order, "_db", None)
-
-
-def _serialize_subscription_summary(sub: UserSubscription | None, plan: Plan) -> dict:
-    return {
-        "status": sub.status if sub else "active",
-        "billing_cycle": (sub.billing_cycle if sub and sub.billing_cycle else "monthly"),
-        "current_period_start": sub.current_period_start if sub else None,
-        "current_period_end": sub.current_period_end if sub else None,
-        "expires_at": sub.expires_at if sub else None,
-        "plan": {
-            "id": plan.id,
-            "code": plan.code,
-            "name": plan.name,
-            "monthly_price": _money_to_number(plan.monthly_price),
-            "yearly_price": _money_to_number(plan.yearly_price) if plan.yearly_price is not None else None,
-            "currency": plan.currency,
-        },
-    }
 
 
 def _write_audit_log(
@@ -2469,58 +2663,322 @@ async def _call_updater(method: str, path: str, payload: dict[str, Any] | None =
     return data
 
 
-def _extra_grant_amount(user_id: int, feature_key: str, period_key: str, db: Session) -> int:
-    grant = db.query(UserQuotaGrantMonthly).filter(
-        UserQuotaGrantMonthly.user_id == user_id,
-        UserQuotaGrantMonthly.feature_key == feature_key,
-        UserQuotaGrantMonthly.period_key == period_key,
-    ).first()
-    return int(grant.granted_amount if grant else 0)
+
+def _check_platform_points_available(
+    request: Request,
+    db: Session,
+    *,
+    user_id: int,
+    task_type: str,
+    modality: str,
+    units: int,
+) -> None:
+    """为流式逐项计费接口做余额检查，不创建可退款账单。"""
+    from services.ai.catalog import get_active_price
+    from services.ai.resolver import resolve_model
+    from services.points import accounts as points_accounts
+    from services.points.pricing import estimate_points, reserve_points_from_estimate
+
+    dual = getattr(request.state, f"dual_track_{modality}", None) or _resolve_dual_track_runtime(
+        request, db, modality=modality
+    )
+    if not dual or dual.get("mode") != "platform":
+        return
+    model = resolve_model(
+        db,
+        user_id,
+        modality=modality,
+        model_id=dual.get("model_id"),
+        task_type=task_type,
+    )
+    price = get_active_price(db, model.id)
+    if not price:
+        raise HTTPException(400, "该模型尚未配置积分价格")
+    estimate_kwargs = {
+        "image_count": units if modality == "image" else 1,
+        "video_seconds": units if modality == "video" else 0,
+    }
+    estimated = estimate_points(
+        billing_type=price.billing_type,
+        price_config=price.price_config_json,
+        image_count=estimate_kwargs["image_count"],
+        video_seconds=estimate_kwargs["video_seconds"],
+        use_estimate_defaults=True,
+    )
+    required = reserve_points_from_estimate(estimated)
+    account = points_accounts.get_account_for_update(db, user_id)
+    if account.available_points < required:
+        raise HTTPException(402, f"积分不足：可用 {account.available_points}，需要 {required}")
 
 
-def _usage_entries_for_user(user_id: int, db: Session) -> list[dict]:
-    plan = _active_plan_for_user(user_id, db)
-    limits = _plan_feature_map(plan.id, db)
-    period = _subscription_period_key(user_id, db)
-    usage_items = db.query(UserUsageMonthly).filter(
-        UserUsageMonthly.user_id == user_id,
-        UserUsageMonthly.period_key == period,
-    ).all()
-    used_map = {item.feature_key: item.used_amount for item in usage_items}
-    grant_items = db.query(UserQuotaGrantMonthly).filter(
-        UserQuotaGrantMonthly.user_id == user_id,
-        UserQuotaGrantMonthly.period_key == period,
-    ).all()
-    grant_map = {item.feature_key: item.granted_amount for item in grant_items}
-    tracked = [
-        "framework.generate.monthly_limit",
-        "chapter.expand.monthly_limit",
-        "scene.generate.monthly_limit",
-        "manga.image.generate.monthly_limit",
-        "ai.text.advanced_calls.monthly_limit",
-        "deconstruction.run.monthly_limit",
-        "video.shot.split.monthly_limit",
-        "video.generate.count.monthly_limit",
-    ]
-    entries = []
-    for key in tracked:
-        base_limit = int(limits.get(key, 0) or 0)
-        granted = int(grant_map.get(key, 0) or 0)
-        limit = base_limit + granted
-        used = int(used_map.get(key, 0))
-        entries.append({
-            "feature_key": key,
-            "base_limit": base_limit,
-            "granted": granted,
-            "limit": limit,
-            "used": used,
-            "remaining": max(0, limit - used),
-        })
-    return entries
+def _charge_platform_points_immediate(
+    request: Request,
+    db: Session,
+    *,
+    user_id: int,
+    task_type: str,
+    modality: str = "text",
+    units: int = 1,
+    settle: bool = True,
+) -> dict | None:
+    if not _points_dual_track_enabled(db):
+        return None
+    dual = getattr(request.state, f"dual_track_{modality}", None) or _resolve_dual_track_runtime(
+        request, db, modality=modality
+    )
+    if not dual or dual.get("mode") != "platform":
+        return None
+    try:
+        import uuid as _uuid
+        from decimal import Decimal as _Decimal
+
+        from services.ai.resolver import begin_ai_call, complete_ai_call
+
+        units = max(1, int(units or 1))
+        rid = (request.headers.get("x-request-id") or "").strip() or str(_uuid.uuid4())
+        seq = int(getattr(request.state, "points_charge_seq", 0) or 0) + 1
+        request.state.points_charge_seq = seq
+        if units > 1 or seq > 1:
+            suffix = f":{seq}"
+            rid = f"{rid[:64 - len(suffix)]}{suffix}"
+        else:
+            rid = rid[:64]
+
+        estimate_kwargs = {}
+        if modality == "text":
+            estimate_kwargs["call_count"] = units
+        elif modality == "image":
+            estimate_kwargs["image_count"] = units
+        elif modality == "video":
+            estimate_kwargs["video_seconds"] = units
+
+        ctx = begin_ai_call(
+            db,
+            user_id=user_id,
+            modality=modality,
+            task_type=task_type,
+            credential_mode="platform",
+            model_id=dual.get("model_id"),
+            request_id=rid,
+            estimate_kwargs=estimate_kwargs,
+        )
+        charged = ctx.estimated_points or ctx.reserved_points or _Decimal("0")
+        result = {
+            "request_id": rid,
+            "usage_event_id": ctx.usage_event_id,
+            "user_id": user_id,
+            "amount": str(charged),
+            "task_type": task_type,
+            "modality": modality,
+            "units": units,
+        }
+        if settle:
+            usage = {"input_tokens": 0, "output_tokens": 0}
+            if modality == "text":
+                from services.deepseek import consume_usage_accumulator
+
+                usage = consume_usage_accumulator()
+            has_provider_usage = bool(usage["input_tokens"] or usage["output_tokens"])
+            complete_ai_call(
+                db,
+                ctx,
+                success=True,
+                input_tokens=usage["input_tokens"],
+                output_tokens=usage["output_tokens"],
+                image_count=units if modality == "image" else 0,
+                video_seconds=units if modality == "video" else 0,
+                usage_source="provider" if has_provider_usage else "estimated",
+            )
+            bag = getattr(request.state, "points_charge_ids", None)
+            if bag is None:
+                bag = []
+                request.state.points_charge_ids = bag
+            bag.append(result)
+        else:
+            pending = getattr(request.state, "points_pending_charges", None)
+            if pending is None:
+                pending = []
+                request.state.points_pending_charges = pending
+            pending.append({**result, "ctx": ctx})
+        return result
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("积分扣费失败 task=%s", task_type)
+        raise
 
 
-def _check_and_consume_advanced_text_quota(request: Request, user_id: int, db: Session, *, deduct: bool) -> None:
-    _check_and_consume_feature_quota(
+def _settle_pending_platform_points(
+    request: Request,
+    db: Session,
+    *,
+    user_id: int,
+    task_type: str,
+    modality: str,
+) -> dict | None:
+    pending = getattr(request.state, "points_pending_charges", None) or []
+    for index, item in enumerate(pending):
+        if (
+            item.get("user_id") == user_id
+            and item.get("task_type") == task_type
+            and item.get("modality") == modality
+        ):
+            from services.ai.resolver import complete_ai_call
+
+            ctx = item["ctx"]
+            units = max(1, int(item.get("units") or 1))
+            usage = {"input_tokens": 0, "output_tokens": 0}
+            if modality == "text":
+                from services.deepseek import consume_usage_accumulator
+
+                usage = consume_usage_accumulator()
+            has_provider_usage = bool(usage["input_tokens"] or usage["output_tokens"])
+            complete_ai_call(
+                db,
+                ctx,
+                success=True,
+                input_tokens=usage["input_tokens"],
+                output_tokens=usage["output_tokens"],
+                image_count=units if modality == "image" else 0,
+                video_seconds=units if modality == "video" else 0,
+                usage_source="provider" if has_provider_usage else "estimated",
+            )
+            pending.pop(index)
+            settled = {key: value for key, value in item.items() if key != "ctx"}
+            bag = getattr(request.state, "points_charge_ids", None)
+            if bag is None:
+                bag = []
+                request.state.points_charge_ids = bag
+            bag.append(settled)
+            return settled
+    return None
+
+
+def _detach_pending_platform_points(request: Request, usage_event_id: int | None):
+    """把流式请求的预留账单交给生成器管理，避免响应中间件提前释放。"""
+    if not usage_event_id:
+        return None
+    pending = getattr(request.state, "points_pending_charges", None) or []
+    for index, item in enumerate(pending):
+        if item.get("usage_event_id") == usage_event_id:
+            pending.pop(index)
+            return item.get("ctx")
+    return None
+
+
+def _finish_streaming_platform_points(
+    ctx,
+    *,
+    success: bool,
+    input_text: str = "",
+    output_text: str = "",
+    image_count: int = 0,
+    video_seconds: int | float = 0,
+    error_code: str | None = None,
+) -> None:
+    """终结脱离请求中间件托管的流式账单。"""
+    if ctx is None:
+        return
+    from services.ai.resolver import complete_ai_call
+    from services.deepseek import consume_usage_accumulator
+
+    usage = consume_usage_accumulator()
+    usage_source = "provider"
+    if (
+        success
+        and getattr(ctx, "modality", "text") == "text"
+        and not (usage["input_tokens"] or usage["output_tokens"])
+    ):
+        from services.token_utils import estimate_tokens
+
+        usage = {
+            "input_tokens": estimate_tokens(input_text),
+            "output_tokens": estimate_tokens(output_text),
+        }
+        usage_source = "estimated"
+    billing_db = SessionLocal()
+    try:
+        complete_ai_call(
+            billing_db,
+            ctx,
+            success=success,
+            input_tokens=usage["input_tokens"],
+            output_tokens=usage["output_tokens"],
+            image_count=max(0, int(image_count or 0)),
+            video_seconds=max(0, video_seconds or 0),
+            error_code=error_code,
+            usage_source=usage_source if getattr(ctx, "modality", "text") == "text" else "provider",
+        )
+    finally:
+        billing_db.close()
+
+
+def _reserve_background_image_points(
+    *,
+    user_id: int,
+    story_id: int,
+    chapter_id: int,
+    image_count: int,
+    credential_mode: str,
+    model_id: int | None,
+):
+    """后台按实际缺失资产数预留图片积分，不依赖已结束的 HTTP 请求状态。"""
+    if credential_mode != "platform" or image_count <= 0:
+        return None
+    from services.ai.resolver import begin_ai_call
+
+    billing_db = SessionLocal()
+    try:
+        return begin_ai_call(
+            billing_db,
+            user_id=user_id,
+            modality="image",
+            task_type="manga.image.generate.monthly_limit",
+            credential_mode=credential_mode,
+            model_id=model_id,
+            story_id=story_id,
+            chapter_id=chapter_id,
+            estimate_kwargs={"image_count": image_count},
+        )
+    finally:
+        billing_db.close()
+
+
+def _refund_request_points_charges(request: Request, db: Session, *, error_code: str) -> None:
+    charges = list(getattr(request.state, "points_charge_ids", None) or [])
+    if not charges:
+        return
+    from services.ai.resolver import refund_ai_call
+
+    for item in charges:
+        refund_ai_call(db, item.get("usage_event_id"), error_code=error_code)
+    request.state.points_charge_ids = []
+
+
+def _release_request_points_reservations(request: Request, db: Session) -> None:
+    pending = list(getattr(request.state, "points_pending_charges", None) or [])
+    if pending:
+        from services.ai.resolver import refund_ai_call
+
+        for item in pending:
+            with contextlib.suppress(Exception):
+                refund_ai_call(db, item.get("usage_event_id"), error_code="request_incomplete")
+        request.state.points_pending_charges = []
+    with contextlib.suppress(Exception):
+        from services.deepseek import consume_usage_accumulator
+
+        consume_usage_accumulator()
+
+
+def _check_and_consume_advanced_text_quota(
+    request: Request,
+    user_id: int,
+    db: Session,
+    *,
+    deduct: bool,
+    reserve: bool = True,
+) -> dict:
+    return _check_and_consume_feature_quota(
         request,
         user_id,
         "ai.text.advanced_calls.monthly_limit",
@@ -2528,54 +2986,11 @@ def _check_and_consume_advanced_text_quota(request: Request, user_id: int, db: S
         db,
         deduct=deduct,
         provider_kind="text",
+        reserve=reserve,
     )
 
 
-def _upsert_user_subscription(
-    user_id: int,
-    plan_id: int,
-    db: Session,
-    *,
-    billing_cycle: str = "monthly",
-    effective_at: datetime.datetime | None = None,
-    extend_if_same_plan: bool = True,
-) -> UserSubscription:
-    effective_at = effective_at or _utcnow()
-    cycle = (billing_cycle or "monthly").strip().lower() or "monthly"
-    plan = db.get(Plan, plan_id)
-    if not plan:
-        raise HTTPException(404, "套餐未找到")
-    sub = db.query(UserSubscription).filter(UserSubscription.user_id == user_id).first()
-    if sub:
-        sub = _hydrate_subscription_period(sub, db, now=effective_at)
-        previous_plan_id = sub.plan_id
-        sub.plan_id = plan_id
-        sub.status = "active"
-        sub.billing_cycle = cycle
-        if plan.code == "free":
-            sub.current_period_start = effective_at
-            sub.current_period_end = None
-            sub.expires_at = None
-            return sub
-        if extend_if_same_plan and previous_plan_id == plan_id and sub.expires_at and sub.expires_at > effective_at:
-            sub.expires_at = _add_billing_cycle(sub.expires_at, cycle)
-            return sub
-        sub.current_period_start = effective_at
-        sub.current_period_end = _add_billing_cycle(effective_at, cycle)
-        sub.expires_at = sub.current_period_end
-        return sub
-    sub = UserSubscription(
-        user_id=user_id,
-        plan_id=plan_id,
-        status="active",
-        billing_cycle=cycle,
-        current_period_start=effective_at,
-        current_period_end=None if plan.code == "free" else _add_billing_cycle(effective_at, cycle),
-        expires_at=None if plan.code == "free" else _add_billing_cycle(effective_at, cycle),
-    )
-    db.add(sub)
-    db.flush()
-    return sub
+
 
 
 def _mark_order_paid(order: BillingOrder, db: Session, *, operator_user_id: int | None = None, note: str = "") -> BillingOrder:
@@ -2587,39 +3002,29 @@ def _mark_order_paid(order: BillingOrder, db: Session, *, operator_user_id: int 
     if note:
         order.note = note
 
-    # 配额购买订单：追加配额到 UserQuotaGrantMonthly，不改套餐
-    if order.source == "quota_purchase":
+    if order.source == "points_purchase":
+        from decimal import Decimal as _Decimal
+
+        from services.points import accounts as points_accounts
+        from services.points.pricing import quantize_points
+
         extra = order.extra_json or {}
-        feature_key = extra.get("feature_key", "")
-        amount = int(extra.get("amount") or 0)
-        if feature_key and amount > 0:
-            period_key = extra.get("period_key") or _subscription_period_key(order.user_id, db)
-            grant = db.query(UserQuotaGrantMonthly).filter(
-                UserQuotaGrantMonthly.user_id == order.user_id,
-                UserQuotaGrantMonthly.feature_key == feature_key,
-                UserQuotaGrantMonthly.period_key == period_key,
-            ).first()
-            if grant:
-                grant.granted_amount += amount
-            else:
-                db.add(UserQuotaGrantMonthly(
-                    user_id=order.user_id,
-                    feature_key=feature_key,
-                    period_key=period_key,
-                    granted_amount=amount,
-                ))
+        pts = quantize_points(_Decimal(str(extra.get("points") or 0)))
+        bonus = quantize_points(_Decimal(str(extra.get("bonus_points") or 0)))
+        total = quantize_points(pts + bonus)
+        if total > 0:
+            points_accounts.credit_points(
+                db,
+                order.user_id,
+                total,
+                entry_type="purchase",
+                idempotency_key=f"points_purchase:{order.order_no}",
+                order_id=order.id,
+                metadata={"order_no": order.order_no, "product_id": extra.get("product_id")},
+            )
         db.flush()
         return order
 
-    # 普通订阅订单：更新套餐订阅
-    _upsert_user_subscription(
-        order.user_id,
-        order.plan_id,
-        db,
-        billing_cycle=order.billing_cycle or "monthly",
-        effective_at=order.paid_at or _utcnow(),
-        extend_if_same_plan=True,
-    )
     db.flush()
     return order
 
@@ -2652,11 +3057,22 @@ def _sync_order_status(order: BillingOrder, db: Session) -> BillingOrder:
     return order
 
 
-def _order_checkout_payload(order: BillingOrder, plan: Plan, db: Session, payment_override: dict | None = None) -> dict:
+def _order_checkout_payload(
+    order: BillingOrder,
+    plan,
+    db: Session,
+    payment_override: dict | None = None,
+    *,
+    raise_gateway_errors: bool = False,
+) -> dict:
     payment = payment_override if payment_override is not None else _payment_settings_snapshot(db)
     method = order.payment_method or str(payment.get("default_method") or "mock_qr")
     provider = order.payment_provider or "mock"
     extra = dict(order.extra_json or {})
+    item = plan or SimpleNamespace(
+        name=str(extra.get("product_name") or order.source or "订单"),
+        description=str(extra.get("product_description") or ""),
+    )
 
     if provider in {"alipay", "epay", "mapay"}:
         qr_code_text = str(
@@ -2681,7 +3097,7 @@ def _order_checkout_payload(order: BillingOrder, plan: Plan, db: Session, paymen
                 "instructions": str(payment.get("instructions") or ""),
                 "amount": _money_to_number(order.amount),
                 "currency": order.currency,
-                "plan_name": plan.name,
+                "plan_name": item.name,
                 "billing_cycle": order.billing_cycle or "monthly",
                 "expires_at": expires_at,
                 "qr_code_text": qr_code_text,
@@ -2692,15 +3108,15 @@ def _order_checkout_payload(order: BillingOrder, plan: Plan, db: Session, paymen
     gateway = get_gateway(method)
     if gateway is not None:
         try:
-            checkout = gateway.create_checkout(order, plan, payment)
+            checkout = gateway.create_checkout(order, item, payment)
             if checkout.extra:
                 merged = dict(order.extra_json or {})
                 merged.update(checkout.extra)
                 order.extra_json = merged
-            return gateway.build_checkout_response(order, plan, payment, checkout)
+            return gateway.build_checkout_response(order, item, payment, checkout)
         except RuntimeError:
-            # create_checkout 可能失败（如订单已在网关侧存在），降级为静默返回
-            pass
+            if raise_gateway_errors:
+                raise
 
     expire_minutes = int(payment.get("order_expire_minutes") or 30)
     expires_at = order.expired_at or (_utcnow() + datetime.timedelta(minutes=expire_minutes))
@@ -2711,7 +3127,7 @@ def _order_checkout_payload(order: BillingOrder, plan: Plan, db: Session, paymen
         "instructions": str(payment.get("instructions") or ""),
         "amount": _money_to_number(order.amount),
         "currency": order.currency,
-        "plan_name": plan.name,
+        "plan_name": item.name,
         "billing_cycle": order.billing_cycle or "monthly",
         "expires_at": expires_at,
         "qr_code_text": "",
@@ -2906,7 +3322,7 @@ def _build_framework_context(story: Story | None, chapter: Chapter | None = None
     if story.outline:
         chapter_scope = _outline_chapter_scope_for_generation(
             story.outline if isinstance(story.outline, dict) else {},
-            chapter.chapter_number if chapter else None,
+            getattr(chapter, "chapter_number", None) if chapter else None,
         )
         if chapter_scope:
             parts.append(f"章节大纲边界: {json.dumps(chapter_scope, ensure_ascii=False)}")
@@ -2928,7 +3344,7 @@ def _build_framework_context(story: Story | None, chapter: Chapter | None = None
         "characters": story.characters if isinstance(story.characters, list) else [],
         "story_bible": story.story_bible if isinstance(story.story_bible, dict) else {},
     }
-    current_chapter_number = chapter.chapter_number if chapter else None
+    current_chapter_number = getattr(chapter, "chapter_number", None) if chapter else None
     parts = compress_context_parts_if_needed(
         parts, full_context=full_context, current_chapter_number=current_chapter_number
     )
@@ -3841,9 +4257,22 @@ async def _refresh_chapter_memory(chapter: Chapter, request: Request, db: Sessio
     chapter.story.story_memory = _merge_story_memory(chapter.story.story_memory, story_memory_update, chapter, chapter_summary)
 
 
-async def _background_refresh_chapter_memory(chapter_id: int, api_key: str) -> None:
+async def _background_refresh_chapter_memory(
+    chapter_id: int,
+    api_key: str,
+    billing_ctx=None,
+    *,
+    task_id: str | None = None,
+    story_id: int | None = None,
+    shot_id: int | None = None,
+) -> None:
     """后台异步刷新章节记忆，不阻塞主请求响应。"""
+    del task_id, story_id, shot_id
+    from services.deepseek import reset_usage_accumulator
+
+    reset_usage_accumulator()
     db = SessionLocal()
+    billing_finished = False
     try:
         chapter = db.get(Chapter, chapter_id)
         if not chapter or not chapter.novel_content or not chapter.novel_content.strip():
@@ -3884,6 +4313,8 @@ async def _background_refresh_chapter_memory(chapter_id: int, api_key: str) -> N
         } if (chapter_summary or chapter_handoff) else None
         chapter.story.story_memory = _merge_story_memory(chapter.story.story_memory, story_memory_update, chapter, chapter_summary)
         db.commit()
+        _finish_streaming_platform_points(billing_ctx, success=True)
+        billing_finished = True
     except Exception as exc:
         logger.warning("后台刷新章节记忆异常 chapter=%s: %s", chapter_id, exc, exc_info=True)
         try:
@@ -3891,6 +4322,12 @@ async def _background_refresh_chapter_memory(chapter_id: int, api_key: str) -> N
         except Exception:
             pass
     finally:
+        if billing_ctx is not None and not billing_finished:
+            _finish_streaming_platform_points(
+                billing_ctx,
+                success=False,
+                error_code="chapter_memory_refresh_failed",
+            )
         db.close()
 
 
@@ -4439,6 +4876,7 @@ def register(body: dict, db: Session = Depends(get_db)):
     _validate_email_format(email)
     if not email or not password:
         raise HTTPException(400, "请输入邮箱和密码")
+    _validate_new_password(password)
     if db.query(User).filter(User.email == email).first():
         raise HTTPException(409, "该邮箱已注册")
     if bool(_auth_settings_snapshot(db).get("require_email_code_for_register")):
@@ -4447,11 +4885,27 @@ def register(body: dict, db: Session = Depends(get_db)):
     user = User(email=email, password_hash=_password_hash(password), name=name, role="user", status="active", email_verified=True)
     db.add(user)
     db.flush()
-    free_plan = db.query(Plan).filter(Plan.code == "free").first()
-    if free_plan:
-        _upsert_user_subscription(user.id, free_plan.id, db, billing_cycle="monthly", effective_at=_utcnow(), extend_if_same_plan=False)
+    try:
+        from decimal import Decimal as _Decimal
+
+        from services.points import accounts as points_accounts
+        from services.points.pricing import quantize_points
+
+        if bool(_get_platform_setting("points.register_grant_enabled", db, False)):
+            grant_amt = quantize_points(_Decimal(str(_get_platform_setting("points.register_grant_amount", db, 0) or 0)))
+            if grant_amt > 0:
+                points_accounts.credit_points(
+                    db,
+                    user.id,
+                    grant_amt,
+                    entry_type="register_grant",
+                    idempotency_key=f"register_grant:{user.id}",
+                    metadata={"source": "register"},
+                )
+    except Exception:
+        logger.exception("注册赠送积分失败 user_id=%s", user.id)
     token = _new_session_token()
-    db.add(UserSession(user_id=user.id, token=token))
+    db.add(UserSession(user_id=user.id, token=_session_token_fingerprint(token)))
     db.commit()
     return {"token": token, "user": _serialize_auth_user(user, db)}
 
@@ -4463,14 +4917,16 @@ def login(body: dict, db: Session = Depends(get_db)):
     password = str(body.get("password") or "").strip()
     verification_code = str(body.get("verification_code") or "").strip()
     user = db.query(User).filter(User.email == email).first()
-    if not user or user.password_hash != _password_hash(password):
+    if not user or not _verify_password(password, user.password_hash):
         raise HTTPException(401, "邮箱或密码错误")
     if user.status != "active":
         raise HTTPException(403, "账号已被停用")
     if bool(_auth_settings_snapshot(db).get("require_email_code_for_login")):
         _consume_email_verification_code(email, "login", verification_code, db)
+    if _password_needs_rehash(user.password_hash):
+        user.password_hash = _password_hash(password)
     token = _new_session_token()
-    db.add(UserSession(user_id=user.id, token=token))
+    db.add(UserSession(user_id=user.id, token=_session_token_fingerprint(token)))
     db.commit()
     return {"token": token, "user": _serialize_auth_user(user, db)}
 
@@ -4488,10 +4944,8 @@ def send_email_code(body: dict, db: Session = Depends(get_db)):
             raise HTTPException(409, "该邮箱已注册")
     else:
         user = db.query(User).filter(User.email == email).first()
-        if not user:
-            raise HTTPException(404, "该邮箱尚未注册")
-        if user.status != "active":
-            raise HTTPException(403, "账号已被停用")
+        if not user or user.status != "active":
+            return _issue_email_verification_code(email, purpose, db, deliver=False)
     return _issue_email_verification_code(email, purpose, db)
 
 
@@ -4506,7 +4960,7 @@ def me(request: Request, db: Session = Depends(get_db)):
 def logout(request: Request, db: Session = Depends(get_db)):
     token = _parse_auth_token(request)
     if token:
-        sess = db.query(UserSession).filter(UserSession.token == token, UserSession.revoked_at.is_(None)).first()
+        sess = _find_active_session(token, db)
         if sess:
             sess.revoked_at = datetime.datetime.utcnow()
             db.commit()
@@ -4521,13 +4975,16 @@ def change_password(request: Request, body: dict, db: Session = Depends(get_db))
     new_password = str(body.get("new_password") or "").strip()
     if not old_password or not new_password:
         raise HTTPException(400, "请输入旧密码和新密码")
-    if user.password_hash != _password_hash(old_password):
+    if not _verify_password(old_password, user.password_hash):
         raise HTTPException(403, "旧密码不正确")
-    if len(new_password) < 6:
-        raise HTTPException(400, "新密码长度不能少于 6 位")
+    _validate_new_password(new_password)
     if new_password == old_password:
         raise HTTPException(400, "新密码不能与旧密码相同")
     user.password_hash = _password_hash(new_password)
+    db.query(UserSession).filter(
+        UserSession.user_id == user.id,
+        UserSession.revoked_at.is_(None),
+    ).update({"revoked_at": _utcnow()}, synchronize_session=False)
     _write_audit_log(user, "user.change_password", "user", user.id, f"用户 {user.name}({user.email}) 修改了密码", db)
     db.commit()
     return {"ok": True}
@@ -4537,11 +4994,10 @@ def change_password(request: Request, body: dict, db: Session = Depends(get_db))
 def forgot_password(body: dict, db: Session = Depends(get_db)):
     _ensure_platform_seed(db)
     email = _normalize_email(body.get("email"))
+    _validate_email_format(email)
     user = db.query(User).filter(User.email == email).first()
-    if not user:
-        raise HTTPException(404, "该邮箱尚未注册")
-    if user.status != "active":
-        raise HTTPException(403, "账号已被停用")
+    if not user or user.status != "active":
+        return _issue_email_verification_code(email, "reset", db, deliver=False)
     return _issue_email_verification_code(email, "reset", db)
 
 
@@ -4550,79 +5006,22 @@ def reset_password(body: dict, db: Session = Depends(get_db)):
     _ensure_platform_seed(db)
     email = _normalize_email(body.get("email"))
     verification_code = str(body.get("verification_code") or "").strip()
+    new_password = str(body.get("new_password") or "").strip()
     user = db.query(User).filter(User.email == email).first()
-    if not user:
-        raise HTTPException(404, "该邮箱尚未注册")
-    if user.status != "active":
-        raise HTTPException(403, "账号已被停用")
+    if not user or user.status != "active":
+        raise HTTPException(400, "邮箱验证码不正确")
+    _validate_new_password(new_password)
     _consume_email_verification_code(email, "reset", verification_code, db)
-    new_password = secrets.token_urlsafe(12)
     user.password_hash = _password_hash(new_password)
-    _write_audit_log(None, "system.reset_password", "user", user.id, f"系统重置了 {user.name}({user.email}) 的密码并发送至邮箱", db)
+    db.query(UserSession).filter(
+        UserSession.user_id == user.id,
+        UserSession.revoked_at.is_(None),
+    ).update({"revoked_at": _utcnow()}, synchronize_session=False)
+    _write_audit_log(None, "system.reset_password", "user", user.id, f"用户 {user.name}({user.email}) 通过邮箱验证重置了密码", db)
     db.commit()
-    site_name = _get_platform_setting("platform.site_name", db, "StoryCanvas")
-    subject = f"{site_name} 密码已重置"
-    body_text = (
-        f"您好，\n\n"
-        f"您的 {site_name} 账号密码已被重置。\n\n"
-        f"新密码：{new_password}\n\n"
-        f"请使用新密码登录，登录后建议及时修改密码。\n"
-        f"如果这不是您的操作，请联系客服。\n"
-    )
-    _send_platform_email(email, subject, body_text, db)
-    return {"ok": True, "message": f"新密码已发送至 {email}，请查收邮件"}
+    return {"ok": True, "message": "密码已重置，请使用新密码登录"}
 
 
-@app.get("/api/plans/public")
-def plans_public(db: Session = Depends(get_db)):
-    _ensure_platform_seed(db)
-    plans = db.query(Plan).filter(Plan.is_visible.is_(True)).order_by(Plan.monthly_price.asc()).all()
-    result = []
-    for plan in plans:
-        result.append({
-            "id": plan.id,
-            "code": plan.code,
-            "name": plan.name,
-            "description": plan.description,
-            "monthly_price": _money_to_number(plan.monthly_price),
-            "yearly_price": _money_to_number(plan.yearly_price) if plan.yearly_price is not None else None,
-            "currency": plan.currency,
-            "is_recommended": plan.is_recommended,
-            "features": _plan_feature_map(plan.id, db),
-        })
-    return result
-
-
-@app.get("/api/me/entitlements")
-def my_entitlements(request: Request, db: Session = Depends(get_db)):
-    _ensure_platform_seed(db)
-    user = _require_user(request, db)
-    plan = _active_plan_for_user(user.id, db)
-    return {
-        "plan": {"id": plan.id, "code": plan.code, "name": plan.name},
-        "entitlements": _plan_feature_map(plan.id, db),
-    }
-
-
-@app.get("/api/me/subscription")
-def my_subscription(request: Request, db: Session = Depends(get_db)):
-    _ensure_platform_seed(db)
-    user = _require_user(request, db)
-    plan = _active_plan_for_user(user.id, db)
-    sub = _subscription_for_user(user.id, db)
-    latest_order = (
-        db.query(BillingOrder)
-        .filter(BillingOrder.user_id == user.id)
-        .order_by(BillingOrder.created_at.desc())
-        .first()
-    )
-    if latest_order:
-        latest_order = _sync_order_status(latest_order, db)
-    return {
-        "user": {"id": user.id, "name": user.name, "email": user.email, "role": user.role},
-        "subscription": _serialize_subscription_summary(sub, plan),
-        "latest_order": _serialize_order_with_db(latest_order, db) if latest_order else None,
-    }
 
 
 @app.get("/api/me/orders")
@@ -4658,21 +5057,16 @@ def my_order_sync(order_no: str, request: Request, db: Session = Depends(get_db)
                     _mark_order_cancelled(order, db, note=f"{gateway.provider} sync closed trade {sync_result.trade_no}")
                 db.commit()
                 db.refresh(order)
-    plan = db.get(Plan, order.plan_id)
-    current_plan = _active_plan_for_user(user.id, db)
-    sub = _subscription_for_user(user.id, db)
-
     checkout_payload = None
-    if plan and order.status == "pending":
+    if order.status == "pending":
         payment_with_ip = dict(payment)
         payment_with_ip["client_ip"] = request.client.host if request.client else ""
-        checkout_payload = _order_checkout_payload(order, plan, db, payment_override=payment_with_ip)
+        checkout_payload = _order_checkout_payload(order, None, db, payment_override=payment_with_ip)
 
     return {
         "ok": True,
         "status": order.status,
         "order": _serialize_order_with_db(order, db),
-        "subscription": _serialize_subscription_summary(sub, current_plan),
         "checkout": checkout_payload,
     }
 
@@ -4684,285 +5078,30 @@ def billing_payment_config(db: Session = Depends(get_db)):
     return _public_payment_config(db)
 
 
-@app.get("/api/billing/quota-prices")
-def billing_quota_prices(db: Session = Depends(get_db)):
-    """返回可购买的配额清单及单价"""
-    _ensure_platform_seed(db)
-    prices = []
-    for feature in FEATURE_CATALOG:
-        if not feature.get("purchasable"):
-            continue
-        key = str(feature["key"])
-        price_str = _get_platform_setting(f"pricing.quota.{key}", db)
-        if not price_str:
-            price = float(feature.get("price_per_unit", 0))
-        else:
-            try:
-                price = float(price_str)
-            except (ValueError, TypeError):
-                price = float(feature.get("price_per_unit", 0))
-        unit = "次" if any(s in key for s in ["count", "calls", "split"]) else "张"
-        prices.append({
-            "feature_key": key,
-            "name": feature.get("name", key),
-            "description": feature.get("description", ""),
-            "category": feature.get("category", ""),
-            "price_per_unit": price,
-            "unit": unit,
-        })
-    return prices
 
-
-@app.post("/api/billing/purchase-quota")
-def purchase_quota(body: dict, request: Request, db: Session = Depends(get_db)):
-    """用户自助购买配额"""
-    _ensure_platform_seed(db)
-    user = _require_user(request, db)
-    payment = _payment_settings_snapshot(db)
-    if not bool(payment.get("enabled")):
-        raise HTTPException(400, "支付当前已禁用")
-
-    feature_key = str(body.get("feature_key") or "").strip()
-    amount = int(body.get("amount") or 0)
-
-    if not feature_key:
-        raise HTTPException(400, "feature_key 必填")
-    if feature_key not in PURCHASABLE_FEATURE_KEYS:
-        raise HTTPException(400, "该功能不支持配额购买")
-    if amount <= 0:
-        raise HTTPException(400, "购买数量必须大于 0")
-
-    # 获取单价：优先读 PlatformSetting，回退到 FEATURE_CATALOG 默认值
-    price_str = _get_platform_setting(f"pricing.quota.{feature_key}", db)
-    if not price_str:
-        catalog_item = next((f for f in FEATURE_CATALOG if f["key"] == feature_key), None)
-        unit_price = float(catalog_item.get("price_per_unit", 0)) if catalog_item else 0
-    else:
-        try:
-            unit_price = float(price_str)
-        except (ValueError, TypeError):
-            unit_price = 0
-
-    if unit_price <= 0:
-        raise HTTPException(400, "该功能暂未定价，无法购买")
-
-    total_price = round(unit_price * amount, 2)
-    payment_method = str(body.get("payment_method") or payment.get("default_method") or "mock_qr").strip()
-    method_options = _payment_method_options(db)
-    selected_method = next((item for item in method_options if item["key"] == payment_method), None)
-    if not selected_method:
-        if payment_method == "epay_qr":
-            selected_method = next((item for item in method_options if item["key"].startswith("epay_")), None)
-        elif payment_method == "mapay_qr":
-            selected_method = next((item for item in method_options if item["key"].startswith("mapay_")), None)
-    if not selected_method:
-        raise HTTPException(400, "支付方式不可用")
-    selected_method_key = str(selected_method["key"])
-
-    expire_minutes = int(payment.get("order_expire_minutes") or 30)
-    expires_at = datetime.datetime.utcnow() + datetime.timedelta(minutes=expire_minutes)
-    period_key = _subscription_period_key(user.id, db)
-    current_plan = _active_plan_for_user(user.id, db)
-
-    # 取消同一用户的旧的待支付配额订单
-    stale_orders = (
-        db.query(BillingOrder)
-        .filter(
-            BillingOrder.user_id == user.id,
-            BillingOrder.status == "pending",
-            BillingOrder.source == "quota_purchase",
-        )
-        .all()
-    )
-    for stale_order in stale_orders:
-        _mark_order_cancelled(stale_order, db, operator_user_id=user.id, note="Superseded by a newer quota purchase request")
-
-    order = BillingOrder(
-        order_no=f"LVQP{datetime.datetime.utcnow().strftime('%Y%m%d%H%M%S')}{secrets.randbelow(10000):04d}",
-        user_id=user.id,
-        plan_id=current_plan.id,
-        amount=_coerce_money(total_price),
-        currency="CNY",
-        status="pending",
-        source="quota_purchase",
-        billing_cycle="monthly",
-        payment_provider=str(selected_method.get("provider") or "mock"),
-        payment_method=selected_method_key,
-        operator_user_id=user.id,
-        note=f"购买 {feature_key} 配额 x{amount}",
-        extra_json={
-            "action": "quota_purchase",
-            "feature_key": feature_key,
-            "amount": amount,
-            "unit_price": unit_price,
-            "total_price": total_price,
-            "period_key": period_key,
-        },
-        expired_at=expires_at,
-    )
-    db.add(order)
-
-    feature_name = FEATURE_CATALOG_MAP.get(feature_key, {}).get("name", feature_key)
-    quota_display_plan = SimpleNamespace(
-        name=f"购买 {feature_name} x{amount}",
-        description=f"配额购买：{feature_name} x{amount}",
-    )
-
-    checkout_override = None
-    if _coerce_money(total_price) <= Decimal("0.00"):
-        _mark_order_paid(order, db, operator_user_id=user.id, note="Zero-amount quota purchase auto-confirmed")
-    else:
-        gateway = get_gateway(selected_method_key)
-        if gateway is not None:
-            try:
-                payment_with_ip = dict(payment)
-                payment_with_ip["client_ip"] = request.client.host if request.client else ""
-                checkout_data = gateway.create_checkout(order, quota_display_plan, payment_with_ip)
-                if checkout_data.extra:
-                    merged = dict(order.extra_json or {})
-                    merged.update(checkout_data.extra)
-                    order.extra_json = merged
-                checkout_override = gateway.build_checkout_response(order, quota_display_plan, payment, checkout_data)
-            except RuntimeError as exc:
-                raise HTTPException(502, f"{gateway.label} checkout failed: {exc}") from exc
-
-    _write_audit_log(user, "purchase_quota", "billing_order", order.order_no,
-                     f"购买 {feature_key} 配额 x{amount}，金额 {total_price} 元", db, {
-        "feature_key": feature_key,
-        "amount": amount,
-        "unit_price": unit_price,
-        "total_price": total_price,
-        "payment_method": selected_method_key,
-    })
-    db.commit()
-    db.refresh(order)
-
-    return {
-        "ok": True,
-        "message": "配额购买订单已创建",
-        "status": order.status,
-        "order": _serialize_order_with_db(order, db),
-        "checkout": checkout_override or _order_checkout_payload(order, quota_display_plan, db),
-    }
-
-
-@app.post("/api/billing/subscribe")
-def subscribe_plan(body: dict, request: Request, db: Session = Depends(get_db)):
-    _ensure_platform_seed(db)
-    user = _require_user(request, db)
-    payment = _payment_settings_snapshot(db)
-    if not bool(payment.get("enabled")):
-        raise HTTPException(400, "支付当前已禁用")
-    plan_id = int(body.get("plan_id") or 0)
-    billing_cycle = str(body.get("billing_cycle") or "monthly").strip().lower()
-    payment_method = str(body.get("payment_method") or payment.get("default_method") or "mock_qr").strip()
-    if billing_cycle not in {"monthly", "yearly"}:
-        raise HTTPException(400, "计费周期必须是 monthly 或 yearly")
-    plan = db.get(Plan, plan_id)
-    if not plan or not plan.is_visible:
-        raise HTTPException(404, "套餐未找到")
-    method_options = _payment_method_options(db)
-    selected_method = next((item for item in method_options if item["key"] == payment_method), None)
-    if not selected_method:
-        if payment_method == "epay_qr":
-            selected_method = next((item for item in method_options if item["key"].startswith("epay_")), None)
-        elif payment_method == "mapay_qr":
-            selected_method = next((item for item in method_options if item["key"].startswith("mapay_")), None)
-    if not selected_method:
-        raise HTTPException(400, "支付方式不可用")
-    selected_method_key = str(selected_method["key"])
-
-    amount = plan.yearly_price if billing_cycle == "yearly" and plan.yearly_price is not None else plan.monthly_price
-    expire_minutes = int(payment.get("order_expire_minutes") or 30)
-    expires_at = datetime.datetime.utcnow() + datetime.timedelta(minutes=expire_minutes)
-    stale_orders = (
-        db.query(BillingOrder)
-        .filter(BillingOrder.user_id == user.id, BillingOrder.status == "pending")
-        .all()
-    )
-    for stale_order in stale_orders:
-        _mark_order_cancelled(stale_order, db, operator_user_id=user.id, note="Superseded by a newer checkout request")
-    order = BillingOrder(
-        order_no=f"LV{datetime.datetime.utcnow().strftime('%Y%m%d%H%M%S')}{secrets.randbelow(10000):04d}",
-        user_id=user.id,
-        plan_id=plan.id,
-        amount=_coerce_money(amount),
-        currency=plan.currency,
-        status="pending",
-        source="user_purchase",
-        billing_cycle=billing_cycle,
-        payment_provider=str(selected_method["provider"]),
-        payment_method=selected_method_key,
-        operator_user_id=user.id,
-        note=f"Checkout created for {plan.name}",
-        extra_json={"billing_cycle": billing_cycle, "payment_method": selected_method_key},
-        expired_at=expires_at,
-    )
-    db.add(order)
-    checkout_override = None
-    if _coerce_money(amount) <= Decimal("0.00") and bool(payment.get("auto_activate_free_plan", True)):
-        _mark_order_paid(order, db, operator_user_id=user.id, note=f"Auto-activated free plan {plan.name}")
-    else:
-        gateway = get_gateway(selected_method_key)
-        if gateway is not None:
-            try:
-                payment_with_ip = dict(payment)
-                payment_with_ip["client_ip"] = request.client.host if request.client else ""
-                checkout_data = gateway.create_checkout(order, plan, payment_with_ip)
-                if checkout_data.extra:
-                    merged = dict(order.extra_json or {})
-                    merged.update(checkout_data.extra)
-                    order.extra_json = merged
-                checkout_override = gateway.build_checkout_response(order, plan, payment, checkout_data)
-            except RuntimeError as exc:
-                raise HTTPException(502, f"{gateway.label} checkout failed: {exc}") from exc
-    _write_audit_log(user, "subscribe_plan", "billing_order", order.order_no, f"Created checkout for {plan.name}", db, {
-        "plan_id": plan.id,
-        "plan_name": plan.name,
-        "billing_cycle": billing_cycle,
-        "amount": _money_to_number(amount),
-        "payment_method": selected_method_key,
-    })
-    db.commit()
-    db.refresh(order)
-    current_plan = _active_plan_for_user(user.id, db)
-    sub = _subscription_for_user(user.id, db)
-    return {
-        "ok": True,
-        "message": "订阅已更新" if order.status == "paid" else "结账已创建",
-        "status": order.status,
-        "subscription": _serialize_subscription_summary(sub, current_plan),
-        "order": _serialize_order_with_db(order, db),
-        "checkout": checkout_override or _order_checkout_payload(order, plan, db),
-    }
 
 
 @app.post("/api/me/orders/{order_no}/mock-confirm")
 def my_order_mock_confirm(order_no: str, request: Request, db: Session = Depends(get_db)):
     _ensure_platform_seed(db)
     user = _require_user(request, db)
+    if not _mock_payments_enabled():
+        raise HTTPException(403, "模拟支付仅允许在显式启用的开发环境中使用")
     order = _order_for_user(order_no, user.id, db)
     if order.status != "pending":
         raise HTTPException(400, f"Order cannot be confirmed from status {order.status}")
     if order.payment_method != "mock_qr":
         raise HTTPException(400, "此处只能手动确认模拟支付订单")
-    plan = db.get(Plan, order.plan_id)
-    if not plan:
-        raise HTTPException(404, "套餐未找到")
     _mark_order_paid(order, db, operator_user_id=user.id, note=f"Mock payment confirmed by {user.name}")
-    _write_audit_log(user, "confirm_mock_payment", "billing_order", order.order_no, f"Confirmed mock payment for {plan.name}", db, {
+    _write_audit_log(user, "confirm_mock_payment", "billing_order", order.order_no, f"Confirmed mock payment", db, {
         "order_no": order.order_no,
-        "plan_id": order.plan_id,
     })
     db.commit()
     db.refresh(order)
-    current_plan = _active_plan_for_user(user.id, db)
-    sub = _subscription_for_user(user.id, db)
     return {
         "ok": True,
         "status": order.status,
         "order": _serialize_order_with_db(order, db),
-        "subscription": _serialize_subscription_summary(sub, current_plan),
     }
 
 
@@ -4973,12 +5112,9 @@ def my_order_cancel(order_no: str, request: Request, db: Session = Depends(get_d
     order = _order_for_user(order_no, user.id, db)
     if order.status != "pending":
         raise HTTPException(400, f"Order cannot be cancelled from status {order.status}")
-    plan = db.get(Plan, order.plan_id)
     _mark_order_cancelled(order, db, operator_user_id=user.id, note=f"Cancelled by {user.name}")
     _write_audit_log(user, "cancel_order", "billing_order", order.order_no, "User cancelled checkout", db, {
         "order_no": order.order_no,
-        "plan_id": order.plan_id,
-        "plan_name": plan.name if plan else "",
     })
     db.commit()
     db.refresh(order)
@@ -5005,10 +5141,16 @@ async def alipay_notify(request: Request, db: Session = Depends(get_db)):
     trade_status = payload.get("trade_status", "").strip()
     trade_no = payload.get("trade_no", "").strip()
     total_amount = payload.get("total_amount", "").strip()
-    order = db.query(BillingOrder).filter(BillingOrder.order_no == order_no).first()
+    order = (
+        db.query(BillingOrder)
+        .filter(BillingOrder.order_no == order_no)
+        .with_for_update()
+        .first()
+    )
     if not order:
         return Response("failure", media_type="text/plain", status_code=404)
-    plan = db.get(Plan, order.plan_id)
+    if order.payment_provider != "alipay":
+        return Response("failure", media_type="text/plain", status_code=400)
     extra = dict(order.extra_json or {})
     extra.update({
         "alipay_trade_no": trade_no,
@@ -5016,17 +5158,63 @@ async def alipay_notify(request: Request, db: Session = Depends(get_db)):
     })
     order.extra_json = extra
     if trade_status in {"TRADE_SUCCESS", "TRADE_FINISHED"}:
-        expected_amount = f"{float(order.amount or 0):.2f}"
-        if total_amount and total_amount != expected_amount:
+        if not _payment_amount_matches(order.amount, total_amount):
             return Response("failure", media_type="text/plain", status_code=400)
+        first_confirmation = order.status != "paid"
         _mark_order_paid(order, db, note=f"Alipay notify confirmed trade {trade_no}")
-        _write_audit_log(None, "alipay_notify_paid", "billing_order", order.order_no, f"Alipay async notify marked order paid", db, {
-            "order_no": order.order_no,
-            "trade_no": trade_no,
-            "plan_name": plan.name if plan else "",
-        })
+        if first_confirmation:
+            _write_audit_log(None, "alipay_notify_paid", "billing_order", order.order_no, "Alipay async notify marked order paid", db, {
+                "order_no": order.order_no,
+                "trade_no": trade_no,
+            })
     elif trade_status in {"TRADE_CLOSED"}:
         _mark_order_cancelled(order, db, note=f"Alipay notify closed trade {trade_no}")
+    db.commit()
+    return Response("success", media_type="text/plain")
+
+
+@app.post("/api/payments/epay/notify")
+@app.post("/epay/notify")
+async def epay_notify(request: Request, db: Session = Depends(get_db)):
+    _ensure_platform_seed(db)
+    raw_body = (await request.body()).decode("utf-8", errors="ignore")
+    payload = {key: value for key, value in parse_qsl(raw_body, keep_blank_values=True)}
+
+    gateway = get_gateway("epay_qr")
+    if gateway is None:
+        return Response("failure", media_type="text/plain", status_code=500)
+    result = gateway.verify_notify(payload, _payment_settings_snapshot(db))
+    if not result.verified:
+        return Response("failure", media_type="text/plain", status_code=400)
+
+    order_no = str(payload.get("out_trade_no") or "").strip()
+    order = (
+        db.query(BillingOrder)
+        .filter(BillingOrder.order_no == order_no)
+        .with_for_update()
+        .first()
+    )
+    if not order:
+        return Response("failure", media_type="text/plain", status_code=404)
+    if order.payment_provider != "epay":
+        return Response("failure", media_type="text/plain", status_code=400)
+
+    trade_no = str(result.trade_no or "").strip()
+    extra = dict(order.extra_json or {})
+    extra.update({"epay_trade_no": trade_no, "epay_notify_payload": payload})
+    order.extra_json = extra
+    if result.trade_status == "paid":
+        if not _payment_amount_matches(order.amount, result.amount):
+            return Response("failure", media_type="text/plain", status_code=400)
+        first_confirmation = order.status != "paid"
+        _mark_order_paid(order, db, note=f"Epay notify confirmed trade {trade_no}")
+        if first_confirmation:
+            _write_audit_log(None, "epay_notify_paid", "billing_order", order.order_no, "Epay async notify marked order paid", db, {
+                "order_no": order.order_no,
+                "trade_no": trade_no,
+            })
+    elif result.trade_status == "failed":
+        _mark_order_cancelled(order, db, note=f"Epay notify closed trade {trade_no}")
     db.commit()
     return Response("success", media_type="text/plain")
 
@@ -5050,11 +5238,17 @@ async def mapay_notify(request: Request, db: Session = Depends(get_db)):
     order_no = payload.get("out_trade_no", "").strip()
     trade_no = payload.get("trade_no", "").strip()
     notify_amount = payload.get("money", "").strip()
-    order = db.query(BillingOrder).filter(BillingOrder.order_no == order_no).first()
+    order = (
+        db.query(BillingOrder)
+        .filter(BillingOrder.order_no == order_no)
+        .with_for_update()
+        .first()
+    )
     if not order:
         return Response("failure", media_type="text/plain", status_code=404)
+    if order.payment_provider != "mapay":
+        return Response("failure", media_type="text/plain", status_code=400)
 
-    plan = db.get(Plan, order.plan_id)
     extra = dict(order.extra_json or {})
     extra.update({
         "mapay_trade_no": trade_no,
@@ -5063,15 +5257,15 @@ async def mapay_notify(request: Request, db: Session = Depends(get_db)):
     order.extra_json = extra
 
     if result.trade_status == "paid":
-        expected_amount = f"{float(order.amount or 0):.2f}"
-        if notify_amount and notify_amount != expected_amount:
+        if not _payment_amount_matches(order.amount, notify_amount):
             return Response("failure", media_type="text/plain", status_code=400)
+        first_confirmation = order.status != "paid"
         _mark_order_paid(order, db, note=f"MaPay notify confirmed trade {trade_no}")
-        _write_audit_log(None, "mapay_notify_paid", "billing_order", order.order_no, "MaPay async notify marked order paid", db, {
-            "order_no": order.order_no,
-            "trade_no": trade_no,
-            "plan_name": plan.name if plan else "",
-        })
+        if first_confirmation:
+            _write_audit_log(None, "mapay_notify_paid", "billing_order", order.order_no, "MaPay async notify marked order paid", db, {
+                "order_no": order.order_no,
+                "trade_no": trade_no,
+            })
     elif result.trade_status == "failed":
         _mark_order_cancelled(order, db, note=f"MaPay notify closed trade {trade_no}")
 
@@ -5079,196 +5273,24 @@ async def mapay_notify(request: Request, db: Session = Depends(get_db)):
     return Response("success", media_type="text/plain")
 
 
-@app.get("/api/me/usage")
-def my_usage(request: Request, db: Session = Depends(get_db)):
-    _ensure_platform_seed(db)
-    user = _require_user(request, db)
-    plan = _active_plan_for_user(user.id, db)
-    return {"period_key": _subscription_period_key(user.id, db), "plan_code": plan.code, "items": _usage_entries_for_user(user.id, db)}
-
-
-@app.get("/api/admin/plans")
-def admin_plans(request: Request, db: Session = Depends(get_db)):
-    _ensure_platform_seed(db)
-    _require_admin(request, db)
-    plans = db.query(Plan).order_by(Plan.monthly_price.asc()).all()
-    return [{
-        "id": plan.id,
-        "code": plan.code,
-        "name": plan.name,
-        "description": plan.description or "",
-        "monthly_price": _money_to_number(plan.monthly_price),
-        "yearly_price": _money_to_number(plan.yearly_price) if plan.yearly_price is not None else None,
-        "currency": plan.currency,
-        "is_visible": plan.is_visible,
-        "is_recommended": plan.is_recommended,
-    } for plan in plans]
-
-
-@app.get("/api/admin/feature-catalog")
-def admin_feature_catalog(request: Request, db: Session = Depends(get_db)):
-    _require_admin(request, db)
-    return FEATURE_CATALOG
-
-
-@app.post("/api/admin/plans")
-def admin_create_plan(body: dict, request: Request, db: Session = Depends(get_db)):
-    _require_admin(request, db)
-    code = str(body.get("code") or "").strip().lower()
-    name = str(body.get("name") or "").strip()
-    if not code or not name:
-        raise HTTPException(400, "代码和名称必填")
-    if db.query(Plan).filter(Plan.code == code).first():
-        raise HTTPException(409, "套餐代码已存在")
-    plan = Plan(
-        code=code,
-        name=name,
-        description=str(body.get("description") or ""),
-        monthly_price=_parse_money_input(body.get("monthly_price"), "monthly_price"),
-        yearly_price=_parse_money_input(body.get("yearly_price"), "yearly_price"),
-        currency=str(body.get("currency") or "CNY"),
-        is_visible=bool(body.get("is_visible", True)),
-        is_recommended=bool(body.get("is_recommended", False)),
-    )
-    db.add(plan)
-    db.flush()
-    for feature in FEATURE_CATALOG:
-        db.add(PlanFeature(plan_id=plan.id, feature_key=feature["key"], value_json={"value": 0}))
-        rule = feature.get("default_rule") or {}
-        db.add(
-            PlanQuotaRule(
-                plan_id=plan.id,
-                feature_key=feature["key"],
-                reset_period=str(rule.get("reset_period") or "monthly"),
-                deduct_mode=str(rule.get("deduct_mode") or "on_success"),
-                extra_config={},
-            )
-        )
-    db.commit()
-    return {"ok": True, "plan_id": plan.id}
-
-
-@app.delete("/api/admin/plans/{plan_id}")
-def admin_delete_plan(plan_id: int, request: Request, db: Session = Depends(get_db)):
-    _require_admin(request, db)
-    plan = db.get(Plan, plan_id)
-    if not plan:
-        raise HTTPException(404, "套餐未找到")
-    subscription_count = db.query(UserSubscription).filter(UserSubscription.plan_id == plan.id).count()
-    if subscription_count > 0:
-        raise HTTPException(409, f"Plan has {subscription_count} active subscription(s) and cannot be deleted")
-    order_count = db.query(BillingOrder).filter(BillingOrder.plan_id == plan.id).count()
-    if order_count > 0:
-        raise HTTPException(409, f"Plan has {order_count} historical order(s) and cannot be deleted")
-    db.delete(plan)
-    db.commit()
-    return {"ok": True}
-
-
-@app.put("/api/admin/plans/{plan_id}")
-def admin_update_plan(plan_id: int, body: dict, request: Request, db: Session = Depends(get_db)):
-    _require_admin(request, db)
-    plan = db.get(Plan, plan_id)
-    if not plan:
-        raise HTTPException(404, "套餐未找到")
-    plan.name = str(body.get("name") or plan.name)
-    plan.description = str(body.get("description") or plan.description or "")
-    if body.get("monthly_price") is not None:
-        plan.monthly_price = _parse_money_input(body.get("monthly_price"), "monthly_price")
-    if body.get("yearly_price") is not None:
-        plan.yearly_price = _parse_money_input(body.get("yearly_price"), "yearly_price")
-    if body.get("is_visible") is not None:
-        plan.is_visible = bool(body.get("is_visible"))
-    if body.get("is_recommended") is not None:
-        plan.is_recommended = bool(body.get("is_recommended"))
-    db.commit()
-    return {"ok": True}
-
-
-@app.get("/api/admin/plans/{plan_id}/features")
-def admin_plan_features(plan_id: int, request: Request, db: Session = Depends(get_db)):
-    _require_admin(request, db)
-    if not db.get(Plan, plan_id):
-        raise HTTPException(404, "套餐未找到")
-    return [{
-        "feature_key": f.feature_key,
-        "value": (f.value_json or {}).get("value"),
-    } for f in db.query(PlanFeature).filter(PlanFeature.plan_id == plan_id).order_by(PlanFeature.feature_key.asc()).all()]
-
-
-@app.put("/api/admin/plans/{plan_id}/features")
-def admin_save_plan_features(plan_id: int, body: dict, request: Request, db: Session = Depends(get_db)):
-    _require_admin(request, db)
-    if not db.get(Plan, plan_id):
-        raise HTTPException(404, "套餐未找到")
-    items = body.get("items", [])
-    if not isinstance(items, list):
-        raise HTTPException(400, "项目必须是列表")
-    for item in items:
-        if not isinstance(item, dict):
-            continue
-        feature_key = str(item.get("feature_key") or "").strip()
-        if not feature_key:
-            continue
-        value = item.get("value")
-        current = db.query(PlanFeature).filter(PlanFeature.plan_id == plan_id, PlanFeature.feature_key == feature_key).first()
-        if current:
-            current.value_json = {"value": value}
-        else:
-            db.add(PlanFeature(plan_id=plan_id, feature_key=feature_key, value_json={"value": value}))
-    db.commit()
-    return {"ok": True}
-
-
-@app.get("/api/admin/plans/{plan_id}/quota-rules")
-def admin_quota_rules(plan_id: int, request: Request, db: Session = Depends(get_db)):
-    _require_admin(request, db)
-    if not db.get(Plan, plan_id):
-        raise HTTPException(404, "套餐未找到")
-    rules = db.query(PlanQuotaRule).filter(PlanQuotaRule.plan_id == plan_id).order_by(PlanQuotaRule.feature_key.asc()).all()
-    return [{
-        "feature_key": item.feature_key,
-        "reset_period": item.reset_period,
-        "deduct_mode": item.deduct_mode,
-        "extra_config": item.extra_config or {},
-    } for item in rules]
-
-
-@app.put("/api/admin/plans/{plan_id}/quota-rules")
-def admin_save_quota_rules(plan_id: int, body: dict, request: Request, db: Session = Depends(get_db)):
-    _require_admin(request, db)
-    if not db.get(Plan, plan_id):
-        raise HTTPException(404, "套餐未找到")
-    items = body.get("items", [])
-    if not isinstance(items, list):
-        raise HTTPException(400, "项目必须是列表")
-    for item in items:
-        if not isinstance(item, dict):
-            continue
-        feature_key = str(item.get("feature_key") or "").strip()
-        if not feature_key:
-            continue
-        current = db.query(PlanQuotaRule).filter(PlanQuotaRule.plan_id == plan_id, PlanQuotaRule.feature_key == feature_key).first()
-        reset_period = str(item.get("reset_period") or "monthly")
-        deduct_mode = str(item.get("deduct_mode") or "on_success")
-        extra = item.get("extra_config")
-        if current:
-            current.reset_period = reset_period
-            current.deduct_mode = deduct_mode
-            current.extra_config = extra if isinstance(extra, dict) else {}
-        else:
-            db.add(PlanQuotaRule(plan_id=plan_id, feature_key=feature_key, reset_period=reset_period, deduct_mode=deduct_mode, extra_config=extra if isinstance(extra, dict) else {}))
-    db.commit()
-    return {"ok": True}
 
 
 @app.get("/api/admin/users")
 def admin_users(request: Request, db: Session = Depends(get_db)):
     _require_admin(request, db)
     users = db.query(User).order_by(User.created_at.desc()).all()
+    user_ids = [user.id for user in users]
+    accounts = (
+        db.query(PointsAccount)
+        .filter(PointsAccount.user_id.in_(user_ids))
+        .all()
+        if user_ids
+        else []
+    )
+    account_by_user_id = {account.user_id: account for account in accounts}
     result = []
     for user in users:
-        plan = _active_plan_for_user(user.id, db)
+        account = account_by_user_id.get(user.id)
         result.append({
             "id": user.id,
             "name": user.name,
@@ -5278,7 +5300,8 @@ def admin_users(request: Request, db: Session = Depends(get_db)):
             "allow_api_key_override": bool(user.allow_api_key_override),
             "allow_api_url_override": bool(user.allow_api_url_override),
             "created_at": user.created_at,
-            "plan_name": plan.name if plan else "Free",
+            "points_available": float(account.available_points) if account else 0,
+            "points_reserved": float(account.reserved_points) if account else 0,
         })
     return result
 
@@ -5294,6 +5317,8 @@ def admin_create_user(body: dict, request: Request, db: Session = Depends(get_db
     allow_api_url_override = bool(body.get("allow_api_url_override", False))
     if not email or not password:
         raise HTTPException(400, "邮箱和密码必填")
+    _validate_email_format(email)
+    _validate_new_password(password)
     if role not in {"user", "admin"}:
         raise HTTPException(400, "角色必须是 user 或 admin")
     if db.query(User).filter(User.email == email).first():
@@ -5324,6 +5349,7 @@ def admin_update_user(user_id: int, body: dict, request: Request, db: Session = 
         user.name = str(body.get("name") or user.name).strip() or user.name
     if body.get("email") is not None:
         email = str(body.get("email") or "").strip().lower()
+        _validate_email_format(email)
         existing = db.query(User).filter(User.email == email, User.id != user.id).first()
         if existing:
             raise HTTPException(409, "邮箱已存在")
@@ -5333,18 +5359,29 @@ def admin_update_user(user_id: int, body: dict, request: Request, db: Session = 
         role = str(body.get("role") or "").strip().lower()
         if role not in {"user", "admin"}:
             raise HTTPException(400, "角色必须是 user 或 admin")
+        if user.id == admin.id and role != "admin":
+            raise HTTPException(400, "不能取消当前管理员自己的管理员权限")
         user.role = role
     if body.get("status") is not None:
         status = str(body.get("status") or "").strip().lower()
         if status not in {"active", "disabled"}:
             raise HTTPException(400, "状态必须是 active 或 disabled")
+        if user.id == admin.id and status != "active":
+            raise HTTPException(400, "不能停用当前管理员自己的账号")
         user.status = status
     if body.get("allow_api_key_override") is not None:
         user.allow_api_key_override = bool(body.get("allow_api_key_override"))
     if body.get("allow_api_url_override") is not None:
         user.allow_api_url_override = bool(body.get("allow_api_url_override"))
     if body.get("password"):
-        user.password_hash = _password_hash(str(body.get("password")))
+        new_password = str(body.get("password")).strip()
+        _validate_new_password(new_password)
+        user.password_hash = _password_hash(new_password)
+    if body.get("password") or user.status != "active":
+        db.query(UserSession).filter(
+            UserSession.user_id == user.id,
+            UserSession.revoked_at.is_(None),
+        ).update({"revoked_at": _utcnow()}, synchronize_session=False)
     _write_audit_log(admin, "update_user", "user", user.id, f"更新用户 {user.email}", db, {
         "name": user.name,
         "email": user.email,
@@ -5367,32 +5404,13 @@ def admin_delete_user(user_id: int, request: Request, db: Session = Depends(get_
     if user.id == admin.id:
         raise HTTPException(400, "不能删除当前管理员")
     user.status = "disabled"
+    db.query(UserSession).filter(
+        UserSession.user_id == user.id,
+        UserSession.revoked_at.is_(None),
+    ).update({"revoked_at": _utcnow()}, synchronize_session=False)
     _write_audit_log(admin, "disable_user", "user", user.id, f"停用用户 {user.email}", db, {"email": user.email})
     db.commit()
     return {"ok": True}
-
-
-@app.get("/api/admin/users/{user_id}/entitlements")
-def admin_user_entitlements(user_id: int, request: Request, db: Session = Depends(get_db)):
-    _require_admin(request, db)
-    user = db.get(User, user_id)
-    if not user:
-        raise HTTPException(404, "用户未找到")
-    plan = _active_plan_for_user(user.id, db)
-    sub = _subscription_for_user(user.id, db)
-    return {
-        "user": {"id": user.id, "name": user.name, "email": user.email, "role": user.role},
-        "subscription": {
-            "status": sub.status if sub else "active",
-            "billing_cycle": (sub.billing_cycle if sub and sub.billing_cycle else "monthly"),
-            "current_period_start": sub.current_period_start if sub else None,
-            "current_period_end": sub.current_period_end if sub else None,
-            "expires_at": sub.expires_at if sub else None,
-        },
-        "plan": {"id": plan.id, "code": plan.code, "name": plan.name},
-        "entitlements": _plan_feature_map(plan.id, db),
-        "usage": _usage_entries_for_user(user.id, db),
-    }
 
 
 @app.get("/api/admin/users/{user_id}/stories")
@@ -5464,123 +5482,11 @@ def admin_story_chapters(story_id: int, request: Request, db: Session = Depends(
     }
 
 
-@app.post("/api/admin/users/{user_id}/subscription")
-def admin_update_user_subscription(user_id: int, body: dict, request: Request, db: Session = Depends(get_db)):
-    admin = _require_admin(request, db)
-    user = db.get(User, user_id)
-    if not user:
-        raise HTTPException(404, "用户未找到")
-    plan_id = int(body.get("plan_id") or 0)
-    plan = db.get(Plan, plan_id)
-    if not plan:
-        raise HTTPException(404, "套餐未找到")
-    _upsert_user_subscription(user.id, plan.id, db, billing_cycle="monthly", effective_at=_utcnow(), extend_if_same_plan=False)
-    order = BillingOrder(
-        order_no=f"LVADM{datetime.datetime.utcnow().strftime('%Y%m%d%H%M%S')}{secrets.randbelow(10000):04d}",
-        user_id=user.id,
-        plan_id=plan.id,
-        amount=_coerce_money(plan.monthly_price),
-        currency=plan.currency,
-        status="admin_adjusted",
-        source="admin_adjustment",
-        billing_cycle="monthly",
-        operator_user_id=admin.id,
-        note=f"管理员 {admin.name} 调整用户套餐为 {plan.name}",
-        extra_json={"action": "subscription_adjustment"},
-    )
-    db.add(order)
-    _write_audit_log(admin, "update_user_subscription", "user", user.id, f"将 {user.email} 套餐调整为 {plan.name}", db, {
-        "plan_id": plan.id,
-        "plan_name": plan.name,
-        "order_no": order.order_no,
-    })
-    db.commit()
-    return {
-        "ok": True,
-        "user": {"id": user.id, "email": user.email, "name": user.name},
-        "plan": {"id": plan.id, "code": plan.code, "name": plan.name},
-        "order": _serialize_order_with_db(order, db),
-    }
-
-
-@app.post("/api/admin/users/{user_id}/quota-grants")
-def admin_grant_user_quota(user_id: int, body: dict, request: Request, db: Session = Depends(get_db)):
-    admin = _require_admin(request, db)
-    user = db.get(User, user_id)
-    if not user:
-        raise HTTPException(404, "用户未找到")
-    feature_key = str(body.get("feature_key") or "").strip()
-    amount = int(body.get("amount") or 0)
-    if not feature_key:
-        raise HTTPException(400, "功能键必填")
-    if amount <= 0:
-        raise HTTPException(400, "数量必须大于 0")
-    period_key = _subscription_period_key(user.id, db)
-    grant = db.query(UserQuotaGrantMonthly).filter(
-        UserQuotaGrantMonthly.user_id == user.id,
-        UserQuotaGrantMonthly.feature_key == feature_key,
-        UserQuotaGrantMonthly.period_key == period_key,
-    ).first()
-    before = int(grant.granted_amount if grant else 0)
-    after = before + amount
-    if grant:
-        grant.granted_amount = after
-    else:
-        grant = UserQuotaGrantMonthly(
-            user_id=user.id,
-            feature_key=feature_key,
-            period_key=period_key,
-            granted_amount=amount,
-        )
-        db.add(grant)
-    order = BillingOrder(
-        order_no=f"LVGRT{datetime.datetime.utcnow().strftime('%Y%m%d%H%M%S')}{secrets.randbelow(10000):04d}",
-        user_id=user.id,
-        plan_id=_active_plan_for_user(user.id, db).id,
-        amount=0,
-        currency="CNY",
-        status="admin_adjusted",
-        source="quota_grant",
-        billing_cycle="monthly",
-        payment_provider="system",
-        payment_method="manual_adjustment",
-        operator_user_id=admin.id,
-        note=f"管理员 {admin.name} 补发 {feature_key} 额度 {amount}",
-        extra_json={
-            "action": "quota_grant",
-            "feature_key": feature_key,
-            "feature_name": FEATURE_CATALOG_MAP.get(feature_key, {}).get("name", feature_key),
-            "amount": amount,
-            "period_key": period_key,
-            "before_granted": before,
-            "after_granted": after,
-        },
-        paid_at=datetime.datetime.utcnow(),
-    )
-    db.add(order)
-    _write_audit_log(admin, "grant_user_quota", "user", user.id, f"为 {user.email} 补发 {feature_key} 额度", db, {
-        "feature_key": feature_key,
-        "amount": amount,
-        "period_key": period_key,
-        "before_granted": before,
-        "after_granted": after,
-    })
-    db.commit()
-    return {
-        "ok": True,
-        "feature_key": feature_key,
-        "granted_amount": amount,
-        "before_granted": before,
-        "after_granted": after,
-        "usage": _usage_entries_for_user(user.id, db),
-    }
-
-
 @app.get("/api/admin/platform/settings")
 def admin_platform_settings(request: Request, db: Session = Depends(get_db)):
     _ensure_platform_seed(db)
     _require_admin(request, db)
-    return _platform_settings_snapshot(db)
+    return _admin_platform_settings_snapshot(db)
 
 
 @app.get("/api/platform/settings/public")
@@ -5706,8 +5612,13 @@ def admin_save_platform_settings(body: dict, request: Request, db: Session = Dep
     icon_data = basic.get("icon_data")
     icon_mime = basic.get("icon_mime", "image/png")
     clear_icon = bool(basic.get("clear_icon", False))
+    clear_secret_keys = {
+        str(item).strip()
+        for item in (body.get("clear_secret_keys") or [])
+        if str(item).strip() in SENSITIVE_PLATFORM_SETTING_KEYS
+    }
     for key, value in mappings.items():
-        _set_platform_setting(key, value, db)
+        _set_platform_setting(key, value, db, clear_secret=key in clear_secret_keys)
     if clear_icon:
         _set_platform_setting("platform.icon_data", "", db)
         _set_platform_setting("platform.icon_mime", "", db)
@@ -5717,7 +5628,7 @@ def admin_save_platform_settings(body: dict, request: Request, db: Session = Dep
         _set_platform_setting("platform.icon_mime", str(icon_mime or "image/png"), db)
         _set_platform_setting("platform.icon_updated_at", datetime.datetime.utcnow().isoformat(), db)
     db.commit()
-    return {"ok": True, "settings": _platform_settings_snapshot(db)}
+    return {"ok": True, "settings": _admin_platform_settings_snapshot(db)}
 
 
 @app.get("/api/admin/platform/announcement")
@@ -5835,6 +5746,84 @@ def admin_orders(request: Request, db: Session = Depends(get_db)):
     return [_serialize_order_with_db(order, db) for order in orders]
 
 
+@app.get("/api/admin/revenue/summary")
+def admin_revenue_summary(request: Request, db: Session = Depends(get_db)):
+    _require_admin(request, db)
+    now = _utcnow()
+    month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    orders = db.query(BillingOrder).filter(BillingOrder.source == "points_purchase").all()
+    monthly_orders = [order for order in orders if order.created_at and order.created_at >= month_start]
+    paid_orders = [order for order in orders if order.status == "paid"]
+    monthly_paid = [
+        order
+        for order in paid_orders
+        if (order.paid_at or order.created_at) and (order.paid_at or order.created_at) >= month_start
+    ]
+    monthly_created_paid = [order for order in monthly_orders if order.status == "paid"]
+    monthly_paid_users = len({order.user_id for order in monthly_paid})
+
+    return {
+        "total_revenue": sum(_money_to_number(order.amount) for order in paid_orders),
+        "total_orders": len(orders),
+        "paid_orders": len(paid_orders),
+        "cancelled_orders": sum(1 for order in orders if order.status == "cancelled"),
+        "expired_orders": sum(1 for order in orders if order.status == "expired"),
+        "monthly_revenue": sum(_money_to_number(order.amount) for order in monthly_paid),
+        "monthly_orders": len(monthly_orders),
+        "monthly_paid_orders": len(monthly_paid),
+        "conversion_rate": round(len(monthly_created_paid) / len(monthly_orders) * 100, 1) if monthly_orders else 0,
+        "monthly_paid_users": monthly_paid_users,
+        "monthly_new_users": monthly_paid_users,
+    }
+
+
+@app.get("/api/admin/revenue/monthly")
+def admin_revenue_monthly(
+    months: int = Query(default=12, ge=1, le=24),
+    request: Request = None,
+    db: Session = Depends(get_db),
+):
+    _require_admin(request, db)
+    now = _utcnow()
+    periods: list[str] = []
+    year = now.year
+    month = now.month
+    for offset in range(months - 1, -1, -1):
+        absolute_month = year * 12 + month - 1 - offset
+        periods.append(f"{absolute_month // 12:04d}-{absolute_month % 12 + 1:02d}")
+    first_year, first_month = (int(part) for part in periods[0].split("-"))
+    start = datetime.datetime(first_year, first_month, 1)
+    rows = (
+        db.query(BillingOrder)
+        .filter(
+            BillingOrder.source == "points_purchase",
+            or_(BillingOrder.created_at >= start, BillingOrder.paid_at >= start),
+        )
+        .all()
+    )
+    buckets = {
+        period: {"period": period, "revenue": 0.0, "orders": 0, "paid": 0, "cancelled": 0, "expired": 0}
+        for period in periods
+    }
+    for order in rows:
+        if not order.created_at:
+            continue
+        created_bucket = buckets.get(order.created_at.strftime("%Y-%m"))
+        if created_bucket:
+            created_bucket["orders"] += 1
+            if order.status == "cancelled":
+                created_bucket["cancelled"] += 1
+            elif order.status == "expired":
+                created_bucket["expired"] += 1
+        if order.status == "paid":
+            paid_at = order.paid_at or order.created_at
+            paid_bucket = buckets.get(paid_at.strftime("%Y-%m")) if paid_at else None
+            if paid_bucket:
+                paid_bucket["paid"] += 1
+                paid_bucket["revenue"] += _money_to_number(order.amount)
+    return [buckets[period] for period in periods]
+
+
 @app.get("/api/admin/orders/search")
 def admin_orders_search(
     request: Request,
@@ -5891,7 +5880,6 @@ def admin_update_order_status(order_no: str, body: dict, request: Request, db: S
     order = _sync_order_status(order, db)
     next_status = str(body.get("status") or "").strip().lower()
     note = str(body.get("note") or "").strip()
-    plan = db.get(Plan, order.plan_id)
     if next_status == "paid":
         _mark_order_paid(order, db, operator_user_id=admin.id, note=note or f"Marked paid by admin {admin.name}")
     elif next_status == "cancelled":
@@ -5904,92 +5892,11 @@ def admin_update_order_status(order_no: str, body: dict, request: Request, db: S
         "order_no": order.order_no,
         "status": order.status,
         "plan_id": order.plan_id,
-        "plan_name": plan.name if plan else "",
     })
     db.commit()
     db.refresh(order)
     return {"ok": True, "order": _serialize_order_with_db(order, db)}
 
-
-@app.get("/api/admin/revenue/summary")
-def admin_revenue_summary(request: Request, db: Session = Depends(get_db)):
-    _require_admin(request, db)
-    now = _utcnow()
-    month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-
-    total = db.query(
-        func.count(BillingOrder.id).label("total_orders"),
-        func.coalesce(func.sum(case((BillingOrder.status == "paid", BillingOrder.amount), else_=0)), 0).label("total_revenue"),
-        func.count(case((BillingOrder.status == "paid", 1))).label("paid_orders"),
-        func.count(case((BillingOrder.status == "cancelled", 1))).label("cancelled_orders"),
-        func.count(case((BillingOrder.status == "expired", 1))).label("expired_orders"),
-    ).first()
-
-    monthly = db.query(
-        func.count(BillingOrder.id).label("monthly_orders"),
-        func.count(case((BillingOrder.status == "paid", 1))).label("monthly_paid_orders"),
-        func.coalesce(func.sum(case(
-            (and_(BillingOrder.status == "paid", BillingOrder.paid_at >= month_start), BillingOrder.amount),
-            else_=0
-        )), 0).label("monthly_revenue"),
-        func.count(func.distinct(case(
-            (and_(BillingOrder.status == "paid", BillingOrder.paid_at >= month_start), BillingOrder.user_id),
-        ))).label("monthly_new_users"),
-    ).filter(
-        BillingOrder.created_at >= month_start
-    ).first()
-
-    active_subs = db.query(func.count(UserSubscription.id)).filter(
-        UserSubscription.status == "active"
-    ).scalar() or 0
-
-    monthly_orders = monthly.monthly_orders or 0
-    monthly_paid = monthly.monthly_paid_orders or 0
-    conversion_rate = round(monthly_paid / monthly_orders * 100, 1) if monthly_orders > 0 else 0.0
-
-    return {
-        "total_revenue": float(total.total_revenue or 0),
-        "total_orders": total.total_orders or 0,
-        "paid_orders": total.paid_orders or 0,
-        "cancelled_orders": total.cancelled_orders or 0,
-        "expired_orders": total.expired_orders or 0,
-        "monthly_revenue": float(monthly.monthly_revenue or 0),
-        "monthly_orders": monthly_orders,
-        "monthly_paid_orders": monthly_paid,
-        "conversion_rate": conversion_rate,
-        "active_subscriptions": active_subs,
-        "monthly_new_users": monthly.monthly_new_users or 0,
-    }
-
-
-@app.get("/api/admin/revenue/monthly")
-def admin_revenue_monthly(months: int = 12, request: Request = None, db: Session = Depends(get_db)):
-    _require_admin(request, db)
-    now = _utcnow()
-    start_date = now - datetime.timedelta(days=months * 31)
-
-    rows = db.query(
-        func.date_trunc("month", BillingOrder.created_at).label("month"),
-        func.coalesce(func.sum(case((BillingOrder.status == "paid", BillingOrder.amount), else_=0)), 0).label("revenue"),
-        func.count(BillingOrder.id).label("orders"),
-        func.count(case((BillingOrder.status == "paid", 1))).label("paid"),
-        func.count(case((BillingOrder.status == "cancelled", 1))).label("cancelled"),
-        func.count(case((BillingOrder.status == "expired", 1))).label("expired"),
-    ).filter(
-        BillingOrder.created_at >= start_date
-    ).group_by("month").order_by("month").all()
-
-    return [
-        {
-            "period": row.month.strftime("%Y-%m"),
-            "revenue": float(row.revenue),
-            "orders": row.orders,
-            "paid": row.paid,
-            "cancelled": row.cancelled,
-            "expired": row.expired,
-        }
-        for row in rows
-    ]
 
 
 @app.post("/api/stories", response_model=StoryOut)
@@ -6088,6 +5995,16 @@ def delete_story(story_id: int, request: Request, db: Session = Depends(get_db))
         chapter_dir = Path(__file__).resolve().parent / "manga_outputs" / f"chapter_{chapter.id}"
         _rmtree_best_effort(chapter_dir, "chapter directory")
     if chapter_ids:
+        manga_asset_ids_subq = db.query(MangaAsset.id).filter(
+            MangaAsset.chapter_id.in_(chapter_ids)
+        ).subquery()
+        db.query(MangaAssetBinding).filter(
+            or_(
+                MangaAssetBinding.chapter_id.in_(chapter_ids),
+                MangaAssetBinding.asset_id.in_(manga_asset_ids_subq),
+            )
+        ).delete(synchronize_session=False)
+        db.query(MangaAsset).filter(MangaAsset.chapter_id.in_(chapter_ids)).delete(synchronize_session=False)
         db.query(MangaImage).filter(MangaImage.chapter_id.in_(chapter_ids)).delete(synchronize_session=False)
         db.query(ChatMessage).filter(ChatMessage.chapter_id.in_(chapter_ids)).delete(synchronize_session=False)
     # AgentConversation 及其子表必须在 Chapter 之前删除（chapter_id FK 引用 chapters.id，默认 RESTRICT）
@@ -6112,6 +6029,8 @@ def delete_story(story_id: int, request: Request, db: Session = Depends(get_db))
     db.query(ChapterVideoWorkflow).filter(ChapterVideoWorkflow.story_id == story_id).delete(synchronize_session=False)
     db.query(VideoProject).filter(VideoProject.story_id == story_id).delete(synchronize_session=False)
     db.query(StoryTemplateBinding).filter(StoryTemplateBinding.story_id == story_id).delete(synchronize_session=False)
+    db.query(MangaAssetBinding).filter(MangaAssetBinding.story_id == story_id).delete(synchronize_session=False)
+    db.query(MangaAsset).filter(MangaAsset.story_id == story_id).delete(synchronize_session=False)
     db.query(VideoAsset).filter(VideoAsset.story_id == story_id).delete(synchronize_session=False)
     db.query(DeconstructionResult).filter(DeconstructionResult.story_id == story_id).delete(synchronize_session=False)
     db.query(FrameworkSnapshot).filter(FrameworkSnapshot.story_id == story_id).delete(synchronize_session=False)
@@ -6313,25 +6232,263 @@ def delete_chapter(chapter_id: int, request: Request, db: Session = Depends(get_
         db.delete(msg)
     for asset in db.query(VideoAsset).filter(VideoAsset.chapter_id == chapter.id):
         db.delete(asset)
+    manga_asset_ids_subq = db.query(MangaAsset.id).filter(MangaAsset.chapter_id == chapter.id).subquery()
+    db.query(MangaAssetBinding).filter(
+        or_(
+            MangaAssetBinding.chapter_id == chapter.id,
+            MangaAssetBinding.asset_id.in_(manga_asset_ids_subq),
+        )
+    ).delete(synchronize_session=False)
+    db.query(MangaAsset).filter(MangaAsset.chapter_id == chapter.id).delete(synchronize_session=False)
     db.delete(chapter)
     db.commit()
     return {"ok": True}
+
+
+# ─── 漫画资产与章节绑定 ───────────────────────────────────
+
+def _serialize_manga_asset(asset: MangaAsset) -> dict[str, Any]:
+    """序列化漫画资产，屏蔽内部 ORM 字段名。"""
+    return {
+        "id": asset.id,
+        "owner_user_id": asset.owner_user_id,
+        "story_id": asset.story_id,
+        "chapter_id": asset.chapter_id,
+        "asset_type": asset.asset_type,
+        "name": asset.name,
+        "storage_path": asset.storage_path,
+        "source_type": asset.source_type,
+        "status": asset.status,
+        "metadata": asset.metadata_json,
+        "created_at": asset.created_at.isoformat() if asset.created_at else None,
+    }
+
+
+def _serialize_manga_asset_binding(binding: MangaAssetBinding, asset: MangaAsset | None = None) -> dict[str, Any]:
+    """序列化章节资产绑定，并在可用时附带资产信息。"""
+    result = {
+        "id": binding.id,
+        "asset_id": binding.asset_id,
+        "story_id": binding.story_id,
+        "chapter_id": binding.chapter_id,
+        "binding_role": binding.binding_role,
+        "label": binding.label,
+        "priority": binding.priority,
+        "is_required": binding.is_required,
+        "created_at": binding.created_at.isoformat() if binding.created_at else None,
+    }
+    if asset is not None:
+        result["asset"] = _serialize_manga_asset(asset)
+    return result
+
+
+def _manga_asset_for_user(asset_id: int, user: User, db: Session) -> MangaAsset:
+    """获取当前用户拥有的漫画资产。"""
+    asset = db.get(MangaAsset, asset_id)
+    if not asset:
+        raise HTTPException(404, "漫画资产未找到")
+    if asset.owner_user_id != user.id:
+        raise HTTPException(403, "漫画资产访问被拒绝")
+    return asset
+
+
+def _validate_manga_asset_chapter(chapter_id: object, story_id: int, user: User, db: Session) -> int | None:
+    """校验资产关联章节属于当前用户的指定作品。"""
+    if chapter_id is None:
+        return None
+    if isinstance(chapter_id, bool):
+        raise HTTPException(422, "chapter_id 必须是整数或 null")
+    try:
+        resolved_chapter_id = int(chapter_id)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(422, "chapter_id 必须是整数或 null") from exc
+    chapter = _require_chapter_for_user(resolved_chapter_id, user, db)
+    if chapter.story_id != story_id:
+        raise HTTPException(400, "章节不属于当前作品")
+    return chapter.id
+
+
+def _required_manga_asset_text(body: dict, key: str, limit: int) -> str:
+    """读取并校验创建资产所需的文本字段。"""
+    value = str(body.get(key) or "").strip()
+    if not value:
+        raise HTTPException(422, f"{key} 不能为空")
+    if len(value) > limit:
+        raise HTTPException(422, f"{key} 长度不能超过 {limit}")
+    return value
+
+
+def _optional_manga_asset_metadata(body: dict) -> dict[str, Any] | None:
+    """读取兼容 metadata 与 metadata_json 的资产元数据。"""
+    if "metadata" in body:
+        metadata = body["metadata"]
+    else:
+        metadata = body.get("metadata_json")
+    if metadata is not None and not isinstance(metadata, dict):
+        raise HTTPException(422, "metadata 必须是对象或 null")
+    return metadata
+
+
+@app.get("/api/stories/{story_id}/manga-assets")
+def list_manga_assets(story_id: int, request: Request, chapter_id: int | None = None, asset_type: str | None = None, db: Session = Depends(get_db)):
+    user = _require_user(request, db)
+    _require_story_for_user(story_id, user, db)
+    query = db.query(MangaAsset).filter(
+        MangaAsset.story_id == story_id,
+        MangaAsset.owner_user_id == user.id,
+    )
+    if chapter_id is not None:
+        _validate_manga_asset_chapter(chapter_id, story_id, user, db)
+        query = query.filter(MangaAsset.chapter_id == chapter_id)
+    if asset_type:
+        query = query.filter(MangaAsset.asset_type == asset_type.strip())
+    assets = query.order_by(MangaAsset.created_at.desc(), MangaAsset.id.desc()).all()
+    return {"assets": [_serialize_manga_asset(asset) for asset in assets]}
+
+
+@app.post("/api/stories/{story_id}/manga-assets", status_code=201)
+async def create_manga_asset(story_id: int, request: Request, db: Session = Depends(get_db)):
+    user = _require_user(request, db)
+    _require_story_for_user(story_id, user, db)
+    body = await request.json()
+    if not isinstance(body, dict):
+        raise HTTPException(422, "请求体必须是对象")
+    asset = MangaAsset(
+        owner_user_id=user.id,
+        story_id=story_id,
+        chapter_id=_validate_manga_asset_chapter(body.get("chapter_id"), story_id, user, db),
+        asset_type=_required_manga_asset_text(body, "asset_type", 32),
+        name=_required_manga_asset_text(body, "name", 255),
+        storage_path=_required_manga_asset_text(body, "storage_path", 500),
+        source_type=str(body.get("source_type") or "upload").strip()[:20] or "upload",
+        status=str(body.get("status") or "active").strip()[:20] or "active",
+        metadata_json=_optional_manga_asset_metadata(body),
+    )
+    db.add(asset)
+    db.commit()
+    db.refresh(asset)
+    return _serialize_manga_asset(asset)
+
+
+@app.patch("/api/manga-assets/{asset_id}")
+async def update_manga_asset(asset_id: int, request: Request, db: Session = Depends(get_db)):
+    user = _require_user(request, db)
+    asset = _manga_asset_for_user(asset_id, user, db)
+    _require_story_for_user(asset.story_id, user, db)
+    body = await request.json()
+    if not isinstance(body, dict):
+        raise HTTPException(422, "请求体必须是对象")
+    for field, limit in (("asset_type", 32), ("name", 255), ("storage_path", 500), ("source_type", 20), ("status", 20)):
+        if field in body:
+            value = _required_manga_asset_text(body, field, limit)
+            setattr(asset, field, value)
+    if "chapter_id" in body:
+        asset.chapter_id = _validate_manga_asset_chapter(body["chapter_id"], asset.story_id, user, db)
+    if "metadata" in body or "metadata_json" in body:
+        asset.metadata_json = _optional_manga_asset_metadata(body)
+    db.commit()
+    db.refresh(asset)
+    return _serialize_manga_asset(asset)
+
+
+@app.delete("/api/manga-assets/{asset_id}")
+def delete_manga_asset(asset_id: int, request: Request, db: Session = Depends(get_db)):
+    user = _require_user(request, db)
+    asset = _manga_asset_for_user(asset_id, user, db)
+    db.query(MangaAssetBinding).filter(MangaAssetBinding.asset_id == asset.id).delete(synchronize_session=False)
+    db.delete(asset)
+    db.commit()
+    return {"ok": True}
+
+
+@app.get("/api/chapters/{chapter_id}/manga-asset-bindings")
+def list_chapter_manga_asset_bindings(chapter_id: int, request: Request, db: Session = Depends(get_db)):
+    user = _require_user(request, db)
+    chapter = _require_chapter_for_user(chapter_id, user, db)
+    bindings = (
+        db.query(MangaAssetBinding)
+        .filter(MangaAssetBinding.chapter_id == chapter.id, MangaAssetBinding.story_id == chapter.story_id)
+        .order_by(MangaAssetBinding.priority.desc(), MangaAssetBinding.id.asc())
+        .all()
+    )
+    assets = {
+        asset.id: asset
+        for asset in db.query(MangaAsset).filter(
+            MangaAsset.id.in_([binding.asset_id for binding in bindings]),
+            MangaAsset.owner_user_id == user.id,
+            MangaAsset.story_id == chapter.story_id,
+        ).all()
+    } if bindings else {}
+    return {"bindings": [_serialize_manga_asset_binding(binding, assets.get(binding.asset_id)) for binding in bindings]}
+
+
+@app.put("/api/chapters/{chapter_id}/manga-asset-bindings")
+async def replace_chapter_manga_asset_bindings(chapter_id: int, request: Request, db: Session = Depends(get_db)):
+    user = _require_user(request, db)
+    chapter = _require_chapter_for_user(chapter_id, user, db)
+    body = await request.json()
+    if not isinstance(body, dict) or not isinstance(body.get("bindings"), list):
+        raise HTTPException(422, "bindings 必须是数组")
+
+    validated_bindings: list[tuple[MangaAsset, dict]] = []
+    for item in body["bindings"]:
+        if not isinstance(item, dict) or isinstance(item.get("asset_id"), bool):
+            raise HTTPException(422, "每个绑定必须包含有效的 asset_id")
+        try:
+            asset_id = int(item.get("asset_id"))
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(422, "每个绑定必须包含有效的 asset_id") from exc
+        asset = _manga_asset_for_user(asset_id, user, db)
+        if asset.story_id != chapter.story_id:
+            raise HTTPException(400, "不能绑定其他作品的漫画资产")
+        role = _required_manga_asset_text(item, "binding_role", 20)
+        label = item.get("label")
+        if label is not None:
+            label = str(label).strip()
+            if len(label) > 255:
+                raise HTTPException(422, "label 长度不能超过 255")
+        priority = _coerce_int(item.get("priority"), 0)
+        validated_bindings.append((asset, {
+            "binding_role": role,
+            "label": label or None,
+            "priority": priority,
+            "is_required": _coerce_bool(item.get("is_required"), False),
+        }))
+
+    db.query(MangaAssetBinding).filter(MangaAssetBinding.chapter_id == chapter.id).delete(synchronize_session=False)
+    new_bindings: list[MangaAssetBinding] = []
+    for asset, values in validated_bindings:
+        binding = MangaAssetBinding(
+            asset_id=asset.id,
+            story_id=chapter.story_id,
+            chapter_id=chapter.id,
+            **values,
+        )
+        db.add(binding)
+        new_bindings.append(binding)
+    db.commit()
+    for binding in new_bindings:
+        db.refresh(binding)
+    return {
+        "bindings": [
+            _serialize_manga_asset_binding(binding, asset)
+            for binding, (asset, _) in zip(new_bindings, validated_bindings)
+        ]
+    }
 
 
 # ─── Chat (SSE streaming) ──────────────────────────────────
 
 @app.post("/api/chapters/{chapter_id}/chat")
 async def chat(chapter_id: int, body: ChatMessageIn, request: Request, db: Session = Depends(get_db)):
-    chapter = db.get(Chapter, chapter_id)
-    if not chapter:
-        raise HTTPException(404, "章节未找到")
+    user = _require_user(request, db)
+    chapter = _require_chapter_for_user(chapter_id, user, db)
     if chapter.content_source == "import":
         raise HTTPException(409, "此章节是从现有小说文本导入的，无法使用 AI 对话")
 
     # 配额预检
-    user = _require_user(request, db)
     user_id = user.id
-    _check_and_consume_advanced_text_quota(request, user_id, db, deduct=False)
+    quota_result = _check_and_consume_advanced_text_quota(request, user_id, db, deduct=False)
 
     # Save user message
     chapter.content_source = "chat"
@@ -6367,9 +6524,14 @@ async def chat(chapter_id: int, body: ChatMessageIn, request: Request, db: Sessi
     framework_context = _build_framework_context(chapter.story, chapter)
     deepseek_api_key = _user_deepseek_api_key(request)
     template_ch_prompt = get_effective_prompt(chapter.story_id, "chapter", db)
+    streaming_billing_ctx = _detach_pending_platform_points(
+        request,
+        quota_result.get("usage_event_id"),
+    )
     _release_db_transaction(db)
 
     collected: list[str] = []
+    billing_state = {"finished": False}
 
     def save_interrupted_assistant() -> None:
         full_content = "".join(collected).strip()
@@ -6388,26 +6550,41 @@ async def chat(chapter_id: int, body: ChatMessageIn, request: Request, db: Sessi
             write_db.close()
 
     async def event_generator():
+        def finish_billing(*, success: bool, error_code: str | None = None) -> None:
+            if billing_state["finished"]:
+                return
+            full_content = "".join(collected)
+            _finish_streaming_platform_points(
+                streaming_billing_ctx,
+                success=success,
+                input_text=json.dumps(history, ensure_ascii=False),
+                output_text=full_content,
+                error_code=error_code,
+            )
+            billing_state["finished"] = True
+
         try:
             async for token in chat_stream(history, api_key=deepseek_api_key, framework_context=framework_context, system_prompt=template_ch_prompt or None):
                 collected.append(token)
                 yield {"event": "token", "data": json.dumps({"content": token}, ensure_ascii=False)}
             # Save assistant message
             full_content = "".join(collected)
+            finish_billing(success=True)
             write_db = SessionLocal()
             try:
                 assistant_msg = ChatMessage(chapter_id=chapter_id, role="assistant", content=full_content)
                 write_db.add(assistant_msg)
                 write_db.commit()
-                # 配额扣减
-                _check_and_consume_advanced_text_quota(request, user_id, write_db, deduct=True)
             finally:
                 write_db.close()
             yield {"event": "done", "data": json.dumps({"content": full_content}, ensure_ascii=False)}
         except asyncio.CancelledError:
+            finish_billing(success=bool(collected), error_code=None if collected else "stream_cancelled")
             save_interrupted_assistant()
             raise
         except Exception as e:
+            public_message = public_error_message(e, "对话生成失败，请稍后重试")
+            finish_billing(success=bool(collected), error_code=None if collected else "stream_failed")
             write_db = SessionLocal()
             try:
                 persisted_user_msg = write_db.get(ChatMessage, user_msg.id)
@@ -6416,18 +6593,34 @@ async def chat(chapter_id: int, body: ChatMessageIn, request: Request, db: Sessi
                     write_db.commit()
             finally:
                 write_db.close()
-            yield {"event": "error", "data": json.dumps({"error": str(e)}, ensure_ascii=False)}
+            logger.exception("章节对话流执行失败 chapter_id=%s", chapter_id)
+            yield {"event": "error", "data": json.dumps({"error": public_message, "code": "chat_stream_failed"}, ensure_ascii=False)}
 
-    return EventSourceResponse(event_generator())
+    def release_unfinished_billing() -> None:
+        if billing_state["finished"]:
+            return
+        try:
+            _finish_streaming_platform_points(
+                streaming_billing_ctx,
+                success=False,
+                error_code="stream_not_started_or_unfinished",
+            )
+            billing_state["finished"] = True
+        except Exception:
+            logger.exception("章节对话流清理预留积分失败 chapter_id=%s", chapter_id)
+
+    return EventSourceResponse(
+        event_generator(),
+        background=ResponseBackgroundTask(release_unfinished_billing),
+    )
 
 
 # ─── Generate Novel ─────────────────────────────────────────
 
 @app.post("/api/chapters/{chapter_id}/generate-novel", response_model=ChapterOut)
 async def generate_novel_endpoint(chapter_id: int, request: Request, db: Session = Depends(get_db)):
-    chapter = db.get(Chapter, chapter_id)
-    if not chapter:
-        raise HTTPException(404, "章节未找到")
+    user = _require_user(request, db)
+    chapter = _require_chapter_for_user(chapter_id, user, db)
     if chapter.content_source == "import":
         raise HTTPException(409, "此章节是从现有小说文本导入的，无法生成 AI 小说文本")
 
@@ -6436,7 +6629,6 @@ async def generate_novel_endpoint(chapter_id: int, request: Request, db: Session
         raise HTTPException(400, "没有对话历史可生成小说")
 
     # 配额预检
-    user = _require_user(request, db)
     user_id = user.id
     _check_and_consume_advanced_text_quota(request, user_id, db, deduct=False)
 
@@ -6516,9 +6708,8 @@ async def import_novel_endpoint(chapter_id: int, request: Request, db: Session =
     The imported text is saved both as a single chat message (so the existing
     `generate-scenes` flow works unchanged) and as `chapter.novel_content`.
     """
-    chapter = db.get(Chapter, chapter_id)
-    if not chapter:
-        raise HTTPException(404, "章节未找到")
+    user = _require_user(request, db)
+    chapter = _require_chapter_for_user(chapter_id, user, db)
 
     body = await request.json()
     raw = body.get("content", "")
@@ -6547,7 +6738,8 @@ async def import_novel_endpoint(chapter_id: int, request: Request, db: Session =
 
 @app.put("/api/chapters/{chapter_id}/content", response_model=ChapterOut)
 async def update_chapter_content(chapter_id: int, body: ChapterContentUpdate, request: Request, db: Session = Depends(get_db)):
-    chapter = _require_chapter(chapter_id, db)
+    user = _require_user(request, db)
+    chapter = _require_chapter_for_user(chapter_id, user, db)
     text = body.content.strip()
     if not text:
         raise HTTPException(400, "内容为空")
@@ -6595,21 +6787,42 @@ async def _load_characters_async(chapter_id: int, request: Request, db: Session)
     if not chapter or not chapter.novel_content or not chapter.novel_content.strip():
         return ""
 
-    # 从章节内容提取角色信息
+    # 从章节内容提取角色信息，并作为独立文本调用预扣与结算。
+    user = getattr(request.state, "current_user", None) or _require_user(request, db)
+    _check_and_consume_feature_quota(
+        request,
+        user.id,
+        "character.extract",
+        1,
+        db,
+        deduct=False,
+        provider_kind="text",
+    )
     deepseek_api_key = _user_deepseek_api_key(request)
     try:
         generated = await generate_character_profiles_from_content(
             chapter.novel_content,
             api_key=deepseek_api_key,
         )
-        if generated:
-            # 保存到章节文件
-            p = _characters_path(chapter_id)
-            p.parent.mkdir(parents=True, exist_ok=True)
-            p.write_text(generated, encoding="utf-8")
-            return generated
     except Exception as exc:
         logger.warning("Failed to generate character profiles from content for chapter %s: %s", chapter_id, exc)
+        return ""
+
+    _check_and_consume_feature_quota(
+        request,
+        user.id,
+        "character.extract",
+        1,
+        db,
+        deduct=True,
+        provider_kind="text",
+    )
+    if generated:
+        # 保存到章节文件
+        p = _characters_path(chapter_id)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(generated, encoding="utf-8")
+        return generated
 
     return ""
 
@@ -6826,14 +7039,45 @@ def _effective_ref_entries(chapter_id: int, db: Session) -> list[dict]:
     chapter_dir = _chapter_ref_dir(chapter_id)
     _migrate_legacy_ref(_legacy_chapter_ref_image(chapter_id), chapter_dir)
     chapter_refs = _build_ref_entries(chapter_dir, "chapter", chapter_id)
-    if chapter_refs:
-        return chapter_refs
     chapter = db.get(Chapter, chapter_id)
+    story_refs: list[dict] = []
     if chapter:
         story_dir = _story_ref_dir(chapter.story_id)
         _migrate_legacy_ref(_legacy_story_ref_image(chapter.story_id), story_dir)
-        return _build_ref_entries(story_dir, "story", chapter.story_id)
-    return []
+        story_refs = _build_ref_entries(story_dir, "story", chapter.story_id)
+        bindings = (
+            db.query(MangaAssetBinding, MangaAsset)
+            .join(MangaAsset, MangaAsset.id == MangaAssetBinding.asset_id)
+            .filter(
+                MangaAssetBinding.chapter_id == chapter_id,
+                MangaAssetBinding.story_id == chapter.story_id,
+                MangaAsset.status == "active",
+            )
+            .order_by(MangaAssetBinding.priority.desc(), MangaAssetBinding.id.asc())
+            .all()
+        )
+        asset_entries: list[dict] = []
+        for binding, asset in bindings:
+            resolved_path = ensure_local_media_path(asset.storage_path, "manga")
+            if not resolved_path:
+                logger.warning("漫画资产无法解析为本地参考图，已跳过 asset_id=%s path=%s", asset.id, asset.storage_path)
+                continue
+            path = Path(resolved_path)
+            if not path.exists() or path.suffix.lower() not in {".png", ".jpg", ".jpeg", ".webp"}:
+                continue
+            asset_entries.append({
+                "filename": path.name,
+                "path": path,
+                "image_path": asset.storage_path,
+                "kind": binding.binding_role,
+                "label": binding.label or asset.name,
+                "priority": binding.priority,
+                "is_required": binding.is_required,
+            })
+        if bindings:
+            return asset_entries
+        return [*chapter_refs, *story_refs]
+    return chapter_refs
 
 
 def _effective_ref_image_paths(chapter_id: int, db: Session) -> list[Path]:
@@ -6842,46 +7086,697 @@ def _effective_ref_image_paths(chapter_id: int, db: Session) -> list[Path]:
 
 
 def _label_matches_scene(label: str, scene_text: str) -> bool:
-    """模糊匹配角色标签和分镜文本，支持全名/简称/分段匹配。
-
-    例如 label="狂风之刃·狂刃" scene_text="狂刃站在雨中" → True。
-    """
-    if not label or not scene_text:
-        return False
-    if label in scene_text:
-        return True
-    segments = re.split(r"[·•・,、/／\s]+", label)
-    for seg in segments:
-        seg = seg.strip()
-        if len(seg) >= 2 and seg in scene_text:
-            return True
-    return False
+    return label_matches_visual_context(label, scene_text)
 
 
-def _select_ref_image_paths_for_scene(scene_prompt: str, ref_entries: list[dict]) -> list[tuple[Path, str]]:
-    """返回 (图片路径, 角色标签) 列表。无标签的垫图标签为空字符串。"""
-    if not ref_entries:
-        return []
+def _normalize_manga_ref_role(value: object) -> str:
+    role = str(value or "").strip().lower().replace("_reference", "")
+    return "style" if role == "style" else normalize_visual_role(role)
 
-    scene_text = (scene_prompt or "").strip()
-    unlabeled = [(entry["path"], entry.get("label", "") or "")
-                 for entry in ref_entries if not entry.get("label")]
-    labeled_matches = [
-        (entry["path"], entry.get("label", "") or "")
-        for entry in ref_entries
-        if entry.get("label") and _label_matches_scene(entry["label"], scene_text)
+
+def _select_ref_image_paths_for_scene(scene_prompt: str, ref_entries: list[dict]) -> list[tuple[Path, str, str]]:
+    """按分镜选择参考图，返回图片路径、匹配标签和资产类型。"""
+    all_style_entries = [entry for entry in ref_entries if _normalize_manga_ref_role(entry.get("kind")) == "style"]
+    content_entries = [entry for entry in ref_entries if entry not in all_style_entries]
+    valid_style_entries = [
+        entry
+        for entry in all_style_entries
+        if isinstance(entry.get("path"), Path) and entry["path"].exists()
     ]
-    if labeled_matches:
-        seen: set[str] = set()
-        selected: list[tuple[Path, str]] = []
-        for path, label in [*unlabeled, *labeled_matches]:
-            key = str(path)
-            if key in seen:
-                continue
-            seen.add(key)
-            selected.append((path, label))
-        return selected
-    return unlabeled
+    style_entries = max(
+        valid_style_entries,
+        key=lambda entry: int(entry.get("priority") or 0),
+        default=None,
+    )
+    selected = select_visual_references(scene_prompt, content_entries, max_items=7 if style_entries else 8)
+    # 角色身份一致性优先于环境和道具；同一类别内继续遵守全章固定和手动优先级。
+    role_rank = {"character": 0, "scene": 1, "prop": 2}
+    selected.sort(key=lambda reference: (
+        role_rank.get(reference.role, 3),
+        0 if reference.is_required else 1,
+        -reference.priority,
+    ))
+    result: list[tuple[Path, str, str]] = []
+    if style_entries:
+        result.append((style_entries["path"], str(style_entries.get("label") or "").strip(), "style"))
+    result.extend((reference.path, reference.label, reference.role) for reference in selected)
+    return result[:8]
+
+
+def _character_profiles_for_page(
+    character_profiles: str,
+    scene_prompt: str,
+    ref_labels: list[str],
+    ref_roles: list[str],
+) -> str:
+    """仅当当前页涉及的角色都有参考图时省略文本设定。"""
+    character_labels = [
+        str(label or "").strip()
+        for label, role in zip(ref_labels, ref_roles)
+        if role == "character" and str(label or "").strip()
+    ]
+    if not character_labels:
+        return character_profiles
+
+    cards = _parse_character_profile_cards(character_profiles)
+    character_names = [
+        str(card.get("name") or "").strip()
+        for card in cards
+        if str(card.get("name") or "").strip()
+        and not re.fullmatch(r"角色\s*\d+", str(card.get("name") or "").strip())
+    ]
+    if not character_names:
+        return character_profiles
+
+    involved_names = [name for name in character_names if name in scene_prompt]
+    names_to_cover = involved_names or (character_names if len(character_names) == 1 else [])
+    if not names_to_cover:
+        return character_profiles
+
+    def has_reference(name: str) -> bool:
+        canonical_name = _canonical_manga_asset_name(name)
+        return any(
+            canonical_name in _canonical_manga_asset_name(label)
+            or _canonical_manga_asset_name(label) in canonical_name
+            for label in character_labels
+        )
+
+    return "" if all(has_reference(name) for name in names_to_cover) else character_profiles
+
+
+def _effective_page_ref_entries(ref_entries: list[dict], style_ref_path: str | None) -> list[dict]:
+    """已显式选择风格图时移除资产库中的其他风格，避免两种画风同时参与。"""
+    if not style_ref_path:
+        return ref_entries
+    return [
+        entry
+        for entry in ref_entries
+        if _normalize_manga_ref_role(entry.get("kind")) != "style"
+    ]
+
+
+_AUTO_MANGA_ASSET_TYPE_MAP = {
+    "characters": "character_reference",
+    "scenes": "scene_reference",
+    "props": "prop_reference",
+}
+_AUTO_MANGA_ASSET_TYPE_LABELS = {
+    "character_reference": "角色",
+    "scene_reference": "场景",
+    "prop_reference": "道具",
+}
+
+
+def _canonical_manga_asset_name(value: object) -> str:
+    """构造自动资产精确复用键，不做可能误绑角色的模糊匹配。"""
+    return re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", str(value or "").strip().lower())
+
+
+def _manga_asset_analysis_fingerprint(
+    chapter_text: str,
+    character_context: str,
+    structured_characters: object,
+    selected_types: object = None,
+) -> str:
+    normalized_types = sorted(
+        set(selected_types)
+        if isinstance(selected_types, (set, list, tuple))
+        else set(_AUTO_MANGA_ASSET_TYPE_MAP.values())
+    )
+    payload = json.dumps(
+        {
+            "version": AUTO_MANGA_ASSET_ANALYSIS_VERSION,
+            "chapter_text": chapter_text,
+            "character_context": character_context,
+            "structured_characters": structured_characters if isinstance(structured_characters, list) else [],
+            "selected_types": normalized_types,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        default=str,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _normalize_auto_manga_asset_suggestions(raw_suggestions: object) -> list[dict[str, object]]:
+    if not isinstance(raw_suggestions, list):
+        return []
+    normalized: list[dict[str, object]] = []
+    seen: set[tuple[str, str]] = set()
+    allowed_types = set(_AUTO_MANGA_ASSET_TYPE_MAP.values())
+    for raw in raw_suggestions[:18]:
+        if not isinstance(raw, dict):
+            continue
+        asset_type = str(raw.get("asset_type") or "").strip()
+        name = str(raw.get("name") or "").strip()[:255]
+        prompt = str(raw.get("prompt") or "").strip()[:24000]
+        identity = (asset_type, _canonical_manga_asset_name(name))
+        if asset_type not in allowed_types or not identity[1] or not prompt or identity in seen:
+            continue
+        seen.add(identity)
+        normalized.append({
+            "asset_type": asset_type,
+            "name": name,
+            "description": str(raw.get("description") or "").strip()[:4000],
+            "evidence": str(raw.get("evidence") or "").strip()[:2000],
+            "prompt": prompt,
+            "candidates": raw.get("candidates") if isinstance(raw.get("candidates"), list) else [],
+        })
+    return normalized
+
+
+def _normalize_auto_manga_asset_options(enabled: object = True, raw_types: object = None) -> tuple[bool, set[str]]:
+    """规范化漫画生成的自动资产配置；旧请求默认提取全部三类资产。"""
+    if not isinstance(enabled, bool):
+        raise HTTPException(422, "auto_asset_extraction.enabled 必须是布尔值")
+    enabled_value = enabled
+    if raw_types is None:
+        selected_types = set(_AUTO_MANGA_ASSET_TYPE_MAP.values())
+    elif isinstance(raw_types, list):
+        aliases = {
+            "character": "character_reference",
+            "characters": "character_reference",
+            "character_reference": "character_reference",
+            "scene": "scene_reference",
+            "scenes": "scene_reference",
+            "scene_reference": "scene_reference",
+            "prop": "prop_reference",
+            "props": "prop_reference",
+            "prop_reference": "prop_reference",
+        }
+        normalized_values = [str(value).strip().lower() for value in raw_types]
+        unknown_types = sorted({value for value in normalized_values if value not in aliases})
+        if unknown_types:
+            raise HTTPException(422, f"不支持的自动资产类型: {', '.join(unknown_types)}")
+        selected_types = {aliases[value] for value in normalized_values}
+    else:
+        raise HTTPException(422, "auto_asset_extraction.types 必须是数组")
+    return enabled_value and bool(selected_types), selected_types
+
+
+def _filter_auto_manga_asset_suggestions(
+    suggestions: list[dict[str, object]],
+    selected_types: set[str],
+) -> list[dict[str, object]]:
+    """仅保留本次漫画生成选择的资产类型。"""
+    return [item for item in suggestions if item.get("asset_type") in selected_types]
+
+
+def _is_auto_manga_asset_analysis_cached(payload: object, fingerprint: str) -> bool:
+    """判断资产分析是否可复用，并兼容早期没有状态字段的非空缓存。"""
+    if not isinstance(payload, dict):
+        return False
+    cached_hash = str(payload.get("input_hash") or "").strip()
+    if cached_hash and cached_hash != fingerprint:
+        return False
+    status = str(payload.get("status") or "").strip().lower()
+    if status == "ready":
+        return True
+    return not status and bool(_normalize_auto_manga_asset_suggestions(payload.get("suggestions")))
+
+
+def _flatten_auto_manga_asset_analysis(result: object) -> list[dict[str, object]]:
+    if not isinstance(result, dict):
+        return []
+    suggestions: list[dict[str, object]] = []
+    for group, asset_type in _AUTO_MANGA_ASSET_TYPE_MAP.items():
+        rows = result.get(group)
+        if not isinstance(rows, list):
+            continue
+        for row in rows:
+            if isinstance(row, dict):
+                suggestions.append({**row, "asset_type": asset_type, "candidates": []})
+    return _normalize_auto_manga_asset_suggestions(suggestions)
+
+
+async def _load_or_analyze_auto_manga_assets(
+    *,
+    chapter: Chapter,
+    chapter_text: str,
+    character_context: str,
+    structured_characters: object,
+    selected_types: set[str],
+    request: Request | None,
+    user_id: int,
+    db: Session,
+    analysis_billing_ctx=None,
+    text_api_key: str | None = None,
+) -> tuple[list[dict[str, object]], str, bool]:
+    """读取同内容指纹的分析缓存；不存在时自动执行一次全量章节资产分析。"""
+    fingerprint = _manga_asset_analysis_fingerprint(
+        chapter_text,
+        character_context,
+        structured_characters,
+        selected_types,
+    )
+    cached_payload = chapter.manga_asset_analysis_json if isinstance(chapter.manga_asset_analysis_json, dict) else {}
+    cached_suggestions = _normalize_auto_manga_asset_suggestions(cached_payload.get("suggestions"))
+    if _is_auto_manga_asset_analysis_cached(cached_payload, fingerprint):
+        chapter.manga_asset_analysis_json = {
+            **cached_payload,
+            "version": AUTO_MANGA_ASSET_ANALYSIS_VERSION,
+            "input_hash": fingerprint,
+            "status": "ready",
+            "suggestions": cached_suggestions,
+            "updated_at": datetime.datetime.utcnow().isoformat(),
+        }
+        db.commit()
+        return cached_suggestions, fingerprint, True
+
+    if analysis_billing_ctx is None and request is not None:
+        _check_and_consume_feature_quota(
+            request,
+            user_id,
+            "ai.text.advanced_calls.monthly_limit",
+            1,
+            db,
+            deduct=False,
+            provider_kind="text",
+        )
+    text_api_key = text_api_key or (_user_deepseek_api_key(request) if request is not None else None)
+    if not text_api_key:
+        raise HTTPException(400, "文本 AI 服务未配置，无法自动提取章节资产")
+
+    chapter.manga_asset_analysis_json = {
+        "version": AUTO_MANGA_ASSET_ANALYSIS_VERSION,
+        "input_hash": fingerprint,
+        "status": "analyzing",
+        "suggestions": cached_suggestions,
+        "updated_at": datetime.datetime.utcnow().isoformat(),
+    }
+    db.commit()
+    try:
+        analyzed = await analyze_visual_assets(
+            chapter_text=chapter_text,
+            character_context=character_context,
+            structured_characters=structured_characters,
+            api_key=text_api_key,
+            max_items=6,
+            asset_groups={
+                group
+                for group, asset_type in _AUTO_MANGA_ASSET_TYPE_MAP.items()
+                if asset_type in selected_types
+            },
+        )
+        suggestions = _flatten_auto_manga_asset_analysis(analyzed)
+    except Exception as exc:
+        chapter.manga_asset_analysis_json = {
+            "version": AUTO_MANGA_ASSET_ANALYSIS_VERSION,
+            "input_hash": fingerprint,
+            "status": "failed",
+            "suggestions": cached_suggestions,
+            "error": public_error_message(exc, "自动章节资产分析失败，请稍后重试"),
+            "updated_at": datetime.datetime.utcnow().isoformat(),
+        }
+        db.commit()
+        logger.exception("自动章节资产分析失败 chapter_id=%s", chapter.id)
+        _finish_streaming_platform_points(
+            analysis_billing_ctx,
+            success=False,
+            error_code="asset_analysis_failed",
+        )
+        raise HTTPException(502, public_error_message(exc, "自动章节资产分析失败，请稍后重试")) from exc
+
+    chapter.manga_asset_analysis_json = {
+        "version": AUTO_MANGA_ASSET_ANALYSIS_VERSION,
+        "input_hash": fingerprint,
+        "status": "ready",
+        "suggestions": suggestions,
+        "updated_at": datetime.datetime.utcnow().isoformat(),
+    }
+    if analysis_billing_ctx is not None:
+        _finish_streaming_platform_points(analysis_billing_ctx, success=True)
+    elif request is not None:
+        _check_and_consume_feature_quota(
+            request,
+            user_id,
+            "ai.text.advanced_calls.monthly_limit",
+            1,
+            db,
+            deduct=True,
+            provider_kind="text",
+        )
+    db.commit()
+    return suggestions, fingerprint, False
+
+
+def _ensure_auto_manga_asset_binding(
+    db: Session,
+    *,
+    asset: MangaAsset,
+    chapter_id: int,
+    story_id: int,
+    label: str,
+) -> None:
+    role = asset.asset_type.replace("_reference", "")
+    binding = db.query(MangaAssetBinding).filter(
+        MangaAssetBinding.asset_id == asset.id,
+        MangaAssetBinding.chapter_id == chapter_id,
+        MangaAssetBinding.binding_role == role,
+    ).first()
+    if binding:
+        if not binding.label:
+            binding.label = label
+        return
+    db.add(MangaAssetBinding(
+        asset_id=asset.id,
+        story_id=story_id,
+        chapter_id=chapter_id,
+        binding_role=role,
+        label=label,
+        priority=0,
+        is_required=False,
+    ))
+
+
+def _find_reusable_auto_manga_asset(
+    db: Session,
+    *,
+    user_id: int,
+    story_id: int,
+    asset_type: str,
+    name: str,
+) -> tuple[MangaAsset | None, str | None]:
+    identity = _canonical_manga_asset_name(name)
+    assets = db.query(MangaAsset).filter(
+        MangaAsset.owner_user_id == user_id,
+        MangaAsset.story_id == story_id,
+        MangaAsset.asset_type == asset_type,
+        MangaAsset.status == "active",
+    ).order_by(MangaAsset.id.desc()).all()
+    for asset in assets:
+        if _canonical_manga_asset_name(asset.name) != identity:
+            continue
+        resolved = ensure_local_media_path(str(asset.storage_path or ""), "manga")
+        if resolved and Path(resolved).exists():
+            return asset, resolved
+    return None, None
+
+
+def _prepare_auto_manga_asset_plan(
+    db: Session,
+    *,
+    user_id: int,
+    story_id: int,
+    chapter_id: int,
+    suggestions: list[dict[str, object]],
+) -> tuple[list[dict[str, str]], int, str | None]:
+    """精确复用已有资产并补章节绑定，返回真正需要调用图片模型的缺失项。"""
+    missing: list[dict[str, str]] = []
+    reused = 0
+    anchor_path: str | None = None
+    for suggestion in suggestions:
+        asset_type = str(suggestion["asset_type"])
+        name = str(suggestion["name"])
+        asset, resolved = _find_reusable_auto_manga_asset(
+            db,
+            user_id=user_id,
+            story_id=story_id,
+            asset_type=asset_type,
+            name=name,
+        )
+        if asset:
+            _ensure_auto_manga_asset_binding(
+                db,
+                asset=asset,
+                chapter_id=chapter_id,
+                story_id=story_id,
+                label=name,
+            )
+            reused += 1
+            anchor_path = anchor_path or resolved
+            continue
+        missing.append({
+            "asset_type": asset_type,
+            "name": name,
+            "prompt": str(suggestion["prompt"]),
+            "description": str(suggestion.get("description") or ""),
+            "evidence": str(suggestion.get("evidence") or ""),
+        })
+    db.commit()
+    return missing, reused, anchor_path
+
+
+async def _generate_auto_manga_asset(
+    *,
+    chapter_id: int,
+    story_id: int,
+    user_id: int,
+    item: dict[str, str],
+    image_api_key: str | None,
+    style_anchor_path: str | None,
+    generation_task_id: str | None = None,
+) -> dict[str, object]:
+    """生成单个缺失资产；调用前后都复查，避免任务重试时重复出图。"""
+    check_db = SessionLocal()
+    try:
+        existing, resolved = _find_reusable_auto_manga_asset(
+            check_db,
+            user_id=user_id,
+            story_id=story_id,
+            asset_type=item["asset_type"],
+            name=item["name"],
+        )
+        if existing:
+            _ensure_auto_manga_asset_binding(
+                check_db,
+                asset=existing,
+                chapter_id=chapter_id,
+                story_id=story_id,
+                label=item["name"],
+            )
+            check_db.commit()
+            return {"status": "reused", "asset_id": existing.id, "resolved_path": resolved}
+    finally:
+        check_db.close()
+
+    relative_dir = Path(f"story_{story_id}") / "assets"
+    filename = f"asset_auto_{uuid.uuid4().hex}.png"
+    output_dir = manga_dir / relative_dir
+    output_path = output_dir / filename
+    await run_blocking(output_dir.mkdir, parents=True, exist_ok=True)
+
+    reference_paths = [style_anchor_path] if style_anchor_path else None
+    try:
+        saved_path = await generate_visual_asset_image(
+            prompt=item["prompt"],
+            output_path=output_path,
+            asset_type=item["asset_type"],
+            api_key=image_api_key or None,
+            size="1920x1080",
+            reference_paths=reference_paths,
+            reference_labels=["画面风格参考锚点"] if reference_paths else None,
+            reference_roles=["style"] if reference_paths else None,
+        )
+    except Exception:
+        if output_path.exists():
+            await run_blocking(output_path.unlink)
+        raise
+
+    saved_text = str(saved_path or "").strip()
+    storage_path = (
+        saved_text
+        if saved_text.startswith(("http://", "https://"))
+        else f"manga_outputs/{relative_dir.as_posix()}/{filename}"
+    )
+    write_db = SessionLocal()
+    try:
+        existing, resolved = _find_reusable_auto_manga_asset(
+            write_db,
+            user_id=user_id,
+            story_id=story_id,
+            asset_type=item["asset_type"],
+            name=item["name"],
+        )
+        if existing:
+            _ensure_auto_manga_asset_binding(
+                write_db,
+                asset=existing,
+                chapter_id=chapter_id,
+                story_id=story_id,
+                label=item["name"],
+            )
+            write_db.commit()
+            if output_path.exists():
+                await run_blocking(output_path.unlink)
+            return {"status": "reused", "asset_id": existing.id, "resolved_path": resolved}
+
+        asset = MangaAsset(
+            owner_user_id=user_id,
+            story_id=story_id,
+            chapter_id=chapter_id,
+            asset_type=item["asset_type"],
+            name=item["name"],
+            storage_path=storage_path,
+            source_type="generated",
+            status="active",
+            metadata_json={
+                "prompt": item["prompt"],
+                "description": item.get("description") or "",
+                "evidence": item.get("evidence") or "",
+                "provider": "image2",
+                "auto_generated": True,
+                "generation_task_id": generation_task_id,
+            },
+        )
+        write_db.add(asset)
+        write_db.flush()
+        _ensure_auto_manga_asset_binding(
+            write_db,
+            asset=asset,
+            chapter_id=chapter_id,
+            story_id=story_id,
+            label=item["name"],
+        )
+        write_db.commit()
+        write_db.refresh(asset)
+        resolved_path = ensure_local_media_path(storage_path, "manga")
+        return {"status": "generated", "asset_id": asset.id, "resolved_path": resolved_path}
+    except Exception:
+        write_db.rollback()
+        if output_path.exists():
+            await run_blocking(output_path.unlink)
+        raise
+    finally:
+        write_db.close()
+
+
+async def _ensure_auto_manga_assets(
+    *,
+    chapter_id: int,
+    story_id: int,
+    user_id: int,
+    items: list[dict[str, str]],
+    image_api_key: str | None,
+    style_ref_path: str | None,
+    fallback_anchor_path: str | None,
+    billing_ctx,
+    task_id: str | None,
+) -> dict[str, object]:
+    """在页面生成前补齐缺失资产，部分成功会保留，账单按实际新增数结算。"""
+    generated_count = 0
+    completed_count = 0
+    generated_asset_ids: list[int] = []
+    failures: list[tuple[str, Exception]] = []
+    anchor_path = style_ref_path or fallback_anchor_path
+    remaining = list(items)
+    child_tasks: list[asyncio.Task] = []
+
+    def record_result(result: dict[str, object]) -> None:
+        nonlocal completed_count, generated_count
+        completed_count += 1
+        if result.get("status") == "generated":
+            generated_count += 1
+            generated_asset_ids.append(int(result["asset_id"]))
+
+    def update_progress(message: str, running_names: list[str] | None = None) -> None:
+        task_manager.update_task_metadata(
+            task_id,
+            stage="asset_generating",
+            message=message,
+            asset_total=len(items),
+            asset_completed=completed_count,
+            asset_generated=generated_count,
+            asset_failed=len(failures),
+            asset_running=running_names or [],
+        )
+
+    async def generate_one(index: int, item: dict[str, str], reference_anchor: str | None) -> dict[str, object]:
+        if index > 0 and AUTO_MANGA_ASSET_START_INTERVAL_SECONDS > 0:
+            await asyncio.sleep(index * AUTO_MANGA_ASSET_START_INTERVAL_SECONDS)
+        if task_manager.is_cancellation_requested(task_id):
+            raise RuntimeError("用户取消了漫画生成任务")
+        return await _generate_auto_manga_asset(
+            chapter_id=chapter_id,
+            story_id=story_id,
+            user_id=user_id,
+            item=item,
+            image_api_key=image_api_key,
+            style_anchor_path=reference_anchor,
+            generation_task_id=task_id,
+        )
+
+    try:
+        update_progress(f"正在生成章节一致性资产 0/{len(items)}")
+        # 未选择风格图且没有可复用资产时，先生成一张锚点图，再让其余资产复用该视觉语言。
+        if remaining and not anchor_path:
+            first = remaining.pop(0)
+            try:
+                result = await generate_one(0, first, None)
+                record_result(result)
+                anchor_path = str(result.get("resolved_path") or "") or None
+            except Exception as exc:
+                failures.append((first["name"], exc))
+
+        semaphore = asyncio.Semaphore(AUTO_MANGA_ASSET_CONCURRENCY)
+
+        async def guarded(index: int, item: dict[str, str]) -> tuple[dict[str, str], dict[str, object] | None, Exception | None]:
+            async with semaphore:
+                update_progress(
+                    f"正在生成章节一致性资产 {completed_count}/{len(items)}",
+                    [item["name"]],
+                )
+                try:
+                    result = await generate_one(index, item, anchor_path)
+                except Exception as exc:
+                    failures.append((item["name"], exc))
+                    return item, None, exc
+                # 结果可能已经落库，必须在任何后续 await 之前完成本地结算记账。
+                record_result(result)
+                update_progress(f"正在生成章节一致性资产 {completed_count}/{len(items)}")
+                return item, result, None
+
+        if remaining and not failures:
+            child_tasks = [
+                asyncio.create_task(guarded(index, item))
+                for index, item in enumerate(remaining)
+            ]
+            await asyncio.gather(*child_tasks)
+    finally:
+        for child_task in child_tasks:
+            if not child_task.done():
+                child_task.cancel()
+        if child_tasks:
+            await asyncio.gather(*child_tasks, return_exceptions=True)
+        _finish_streaming_platform_points(
+            billing_ctx,
+            success=True,
+            image_count=generated_count,
+        )
+        task_manager.update_task_metadata(
+            task_id,
+            asset_billing_usage_event_id=0,
+            asset_generated_ids=generated_asset_ids,
+            asset_generated=generated_count,
+            asset_completed=completed_count,
+        )
+
+    if failures:
+        names = "、".join(name for name, _ in failures[:3])
+        first_error = failures[0][1]
+        update_progress(f"章节资产生成失败：{names}")
+        raise MangaImageGenerationError(
+            code="asset_preflight_failed",
+            user_message=f"章节资产生成失败（{names}），已生成的资产会保留，重试时只补缺失项。",
+            retryable=bool(getattr(first_error, "retryable", False)),
+            provider_message=str(first_error),
+        ) from first_error
+
+    task_manager.update_task_metadata(
+        task_id,
+        stage="asset_ready",
+        message=f"章节一致性资产已准备完成，共新增 {generated_count} 个，开始生成漫画。",
+        asset_total=len(items),
+        asset_completed=completed_count,
+        asset_generated=generated_count,
+        asset_failed=0,
+        asset_running=[],
+    )
+    return {
+        "generated": generated_count,
+        "completed": completed_count,
+        "asset_ids": generated_asset_ids,
+    }
 
 
 def _save_uploaded_ref(ref_dir: Path, img_bytes: bytes, label: str) -> str:
@@ -6918,12 +7813,11 @@ def _build_character_ref_prompt(story: Story, card: dict) -> str:
         "常态（自然表情）、高兴/微笑、愤怒/严肃、悲伤/惊讶。每个表情须有明显差异。\n"
         "3. 服装和配饰——所有服装款式、材质、色彩必须清晰展示。"
         "所有配饰（首饰、武器、道具、装饰品）必须在角色身上明确可见，不可省略或模糊。\n\n"
-        "风格与构图要求：\n"
-        "- 漫画/动画风格，线条干净利落，上色均匀平整\n"
+        "构图与内容要求：\n"
         "- 背景为纯白或浅灰，无场景、无背景元素\n"
         "- 只绘制这一个角色，画面中绝对不出现其他人物\n"
         "- 不要对话框、不要分镜线、不要叙事性文字或标题\n"
-        "- 整体呈现为专业动画/漫画角色设定稿的标准排版"
+        "- 整体呈现为专业角色设定稿的标准排版，不指定具体画风"
     )
 
 
@@ -6969,8 +7863,9 @@ async def generate_story_character_ref_images(story_id: int, request: Request, d
         pending_targets.append(card)
         prompt_map[card["name"]] = _build_character_ref_prompt(story, card)
 
+    streaming_billing_ctx = None
     if pending_targets:
-        _check_and_consume_feature_quota(
+        quota_result = _check_and_consume_feature_quota(
             request,
             user.id,
             "manga.image.generate.monthly_limit",
@@ -6979,17 +7874,33 @@ async def generate_story_character_ref_images(story_id: int, request: Request, d
             deduct=False,
             provider_kind="image",
         )
-    user_id = user.id
+        streaming_billing_ctx = _detach_pending_platform_points(
+            request,
+            quota_result.get("usage_event_id"),
+        )
     _release_db_transaction(db)
     # 清空 request.state 中的 db/user，避免后面异步 generator 中
     # _check_and_consume_feature_quota → _custom_image_provider_active
     # 访问到已 detached 的 User 实例触发 DetachedInstanceError
     request.state.db = None
     request.state.current_user = None
+    billing_state = {"finished": False}
 
     async def event_generator():
         nonlocal meta
         generated: list[str] = []
+
+        def finish_billing() -> None:
+            if billing_state["finished"]:
+                return
+            _finish_streaming_platform_points(
+                streaming_billing_ctx,
+                success=bool(generated),
+                image_count=len(generated),
+                error_code=None if generated else "no_image_generated",
+            )
+            billing_state["finished"] = True
+
         _save_ref_meta(ref_dir, meta)
         current_images = _serialize_refs(ref_dir, "story", story_id)
         yield {"event": "snapshot", "data": json.dumps({
@@ -7021,11 +7932,17 @@ async def generate_story_character_ref_images(story_id: int, request: Request, d
 
             filename = f"char_{_slugify_ref_label(card['name'])}_{uuid.uuid4().hex[:8]}.png"
             try:
-                await generate_reference_image(
-                    prompt_map.get(card["name"]) or _build_character_ref_prompt(story, card),
-                    ref_dir / filename,
+                generated_path = await generate_visual_asset_image(
+                    prompt=prompt_map.get(card["name"]) or _build_character_ref_prompt(story, card),
+                    output_path=ref_dir / filename,
+                    asset_type="character_reference",
                     api_key=image_api_key,
                 )
+                if str(generated_path).startswith(("http://", "https://")):
+                    cached_path = ensure_local_media_path(str(generated_path), "manga")
+                    if not cached_path:
+                        raise RuntimeError("角色参考图已生成，但无法恢复本地副本")
+                    await run_blocking(shutil.copyfile, cached_path, ref_dir / filename)
             except Exception:
                 continue
 
@@ -7039,20 +7956,7 @@ async def generate_story_character_ref_images(story_id: int, request: Request, d
                 "generated": [card["name"]],
             }, ensure_ascii=False)}
 
-        if generated:
-            quota_db = SessionLocal()
-            try:
-                _check_and_consume_feature_quota(
-                    request,
-                    user_id,
-                    "manga.image.generate.monthly_limit",
-                    len(generated),
-                    quota_db,
-                    deduct=True,
-                    provider_kind="image",
-                )
-            finally:
-                quota_db.close()
+        finish_billing()
 
         yield {"event": "done", "data": json.dumps({
             "images": _serialize_refs(ref_dir, "story", story_id),
@@ -7061,7 +7965,23 @@ async def generate_story_character_ref_images(story_id: int, request: Request, d
             "skipped": skipped,
         }, ensure_ascii=False)}
 
-    return EventSourceResponse(event_generator())
+    def release_unfinished_billing() -> None:
+        if billing_state["finished"]:
+            return
+        try:
+            _finish_streaming_platform_points(
+                streaming_billing_ctx,
+                success=False,
+                error_code="stream_not_started_or_unfinished",
+            )
+            billing_state["finished"] = True
+        except Exception:
+            logger.exception("角色参考图流清理预留积分失败 story_id=%s", story_id)
+
+    return EventSourceResponse(
+        event_generator(),
+        background=ResponseBackgroundTask(release_unfinished_billing),
+    )
 
 
 @app.post("/api/stories/{story_id}/character-ref-images/upload")
@@ -7305,8 +8225,8 @@ def _save_color_mode(chapter_id: int, mode: str):
 
 def _effective_color_mode(chapter_id: int, user_id: int, db: Session) -> str:
     stored_mode = _load_color_mode(chapter_id)
-    if stored_mode == "color" and not _plan_feature_bool(user_id, "manga.allow_color_mode", db, default=False):
-        return "bw"
+    if stored_mode == "color":
+        return "color"
     return stored_mode if stored_mode in ("bw", "color") else "bw"
 
 
@@ -7327,8 +8247,8 @@ async def set_color_mode(chapter_id: int, body: dict, request: Request, db: Sess
     mode = body.get("color_mode", "bw")
     if mode not in ("bw", "color"):
         raise HTTPException(400, "颜色模式必须是 'bw' 或 'color'")
-    if mode == "color" and not _plan_feature_bool(user.id, "manga.allow_color_mode", db, default=False):
-        raise HTTPException(403, "当前套餐不支持彩色漫画模式")
+    if mode == "color":
+        pass  # 积分双轨无需套餐限制
     _save_color_mode(chapter_id, mode)
     return {"ok": True}
 
@@ -7357,11 +8277,33 @@ def _load_manga_image_concurrency() -> int:
     try:
         configured = int(os.getenv("MANGA_IMAGE_CONCURRENCY", "4"))
     except (TypeError, ValueError):
-        configured = 4
-    return max(1, min(8, configured))
+        configured = 2
+    return max(1, min(2, configured))
 
 
 MANGA_IMAGE_CONCURRENCY = _load_manga_image_concurrency()
+
+
+def _load_manga_image_start_interval() -> int:
+    try:
+        configured = int(os.getenv("MANGA_IMAGE_START_INTERVAL_SECONDS", "5"))
+    except (TypeError, ValueError):
+        configured = 5
+    return max(0, min(60, configured))
+
+
+MANGA_IMAGE_START_INTERVAL_SECONDS = _load_manga_image_start_interval()
+
+
+def _load_manga_generation_timeout_per_image() -> int:
+    try:
+        configured = int(os.getenv("MANGA_IMAGE_TIMEOUT_PER_PAGE", "360"))
+    except (TypeError, ValueError):
+        configured = 360
+    return max(180, min(900, configured))
+
+
+MANGA_IMAGE_TIMEOUT_PER_PAGE = _load_manga_generation_timeout_per_image()
 
 
 def _manga_image_concurrency(total: int) -> int:
@@ -7384,17 +8326,10 @@ def _load_image_count(chapter_id: int) -> int:
     return DEFAULT_IMAGE_COUNT
 
 
-def _max_image_count_for_user(user_id: int, db: Session) -> int:
-    configured = _plan_feature_int(user_id, "manga.max_image_count_per_chapter", db, default=DEFAULT_IMAGE_COUNT)
-    allowed_values = [value for value in ALLOWED_IMAGE_COUNTS if value <= configured]
-    if allowed_values:
-        return max(allowed_values)
-    return min(ALLOWED_IMAGE_COUNTS)
-
-
 def _effective_image_count(chapter_id: int, user_id: int, db: Session) -> int:
     stored = _load_image_count(chapter_id)
-    return min(stored, _max_image_count_for_user(user_id, db))
+    # 积分双轨无套餐限制，使用系统最大可用值
+    return min(stored, max(ALLOWED_IMAGE_COUNTS))
 
 
 def _chapter_has_scene_file(chapter_id: int) -> bool:
@@ -7426,19 +8361,17 @@ async def get_image_count(chapter_id: int, request: Request, db: Session = Depen
 @app.put("/api/chapters/{chapter_id}/image-count")
 async def set_image_count(chapter_id: int, body: dict, request: Request, db: Session = Depends(get_db)):
     user = _require_user(request, db)
-    chapter = _require_chapter_for_user(chapter_id, user, db)
-    if chapter.images:
-        raise HTTPException(409, "创建图片后无法更改图片数量")
+    _require_chapter_for_user(chapter_id, user, db)
     count = body.get("image_count", DEFAULT_IMAGE_COUNT)
     if count not in ALLOWED_IMAGE_COUNTS:
         raise HTTPException(400, f"image_count must be one of {ALLOWED_IMAGE_COUNTS}")
-    max_allowed = _max_image_count_for_user(user.id, db)
+    max_allowed = max(ALLOWED_IMAGE_COUNTS)
     if count > max_allowed:
-        raise HTTPException(403, f"Current plan allows at most {max_allowed} images per chapter")
+        raise HTTPException(403, f"每章最多可生成 {max_allowed} 张图片")
     p = _image_count_path(chapter_id)
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(str(count), encoding="utf-8")
-    return {"ok": True}
+    return {"ok": True, "image_count": count}
 
 
 # ─── Scene generation & management ───────────────────────
@@ -7554,6 +8487,11 @@ async def _background_manga_generation(
     """后台漫画生成任务，由 TaskManager 调度"""
     manga_image_size = kwargs.get("manga_image_size")
     style_ref_path: str | None = kwargs.get("style_ref_path")
+    billing_ctx = kwargs.get("billing_ctx")
+    initial_existing_numbers = {
+        int(value)
+        for value in (kwargs.get("initial_existing_numbers") or [])
+    }
     logger.info(f"Background manga generation started: chapter={chapter_id}, images={image_count}")
     completed = 0
     total = len(scenes)
@@ -7612,8 +8550,9 @@ async def _background_manga_generation(
         
         # 生成参考图路径
         ref_imgs = _select_ref_image_paths_for_scene(scene_prompt, ref_entries)
-        ref_paths = [str(p) for p, _ in ref_imgs]
-        ref_labels = [label for _, label in ref_imgs]
+        ref_paths = [str(p) for p, _, _ in ref_imgs]
+        ref_labels = [label for _, label, _ in ref_imgs]
+        ref_roles = [role for _, _, role in ref_imgs]
         
         try:
             image_result = await generate_manga_image(
@@ -7624,6 +8563,7 @@ async def _background_manga_generation(
                 character_profiles=character_profiles,
                 ref_image_paths=ref_paths if ref_paths else None,
                 ref_labels=ref_labels if any(ref_labels) else None,
+                ref_roles=ref_roles if ref_roles else None,
                 color_mode=color_mode,
                 api_key=image_api_key,
                 size=manga_image_size,
@@ -7641,7 +8581,7 @@ async def _background_manga_generation(
             task_manager.update_task_metadata(
                 task_id,
                 stage="retrying" if getattr(e, "retryable", False) else "failed",
-                message=str(e),
+                message=public_error_message(e, f"第 {i} 张漫画生成失败，请稍后重试"),
                 current=completed,
                 total=total,
                 current_image=i,
@@ -7689,6 +8629,12 @@ async def _background_manga_generation(
     # 如果因用户取消而退出循环，在 DB 标记失败（_on_task_complete 不会覆盖已存在的 failed）
     if task_manager.is_cancellation_requested(task_id):
         task_manager.clear_cancellation_flag(task_id)
+        _finish_manga_batch_billing(
+            billing_ctx,
+            chapter_id=chapter_id,
+            initial_existing_numbers=initial_existing_numbers,
+            task_id=task_id,
+        )
         cancel_db = SessionLocal()
         try:
             bg_task = cancel_db.query(BackgroundTask).filter(BackgroundTask.task_id == task_id).first()
@@ -7709,7 +8655,7 @@ async def _background_manga_generation(
         finally:
             cancel_db.close()
         logger.info(f"Background manga generation cancelled: chapter={chapter_id}, completed={completed}/{total}")
-        return {"completed_images": completed, "total_images": total, "cancelled": True}
+        return {"status": "cancelled", "completed_images": completed, "total_images": total, "cancelled": True}
     
     task_manager.update_task_metadata(
         task_id,
@@ -7731,8 +8677,6 @@ async def _background_manga_generation_concurrent(
     ref_entries: list,
     color_mode: str,
     image_api_key: str,
-    custom_image_provider: bool,
-    user_id: int,
     task_id: str | None = None,
     **kwargs,
 ) -> dict:
@@ -7740,6 +8684,25 @@ async def _background_manga_generation_concurrent(
 
     manga_image_size = kwargs.get("manga_image_size")
     style_ref_path: str | None = kwargs.get("style_ref_path")
+    billing_ctx = kwargs.get("billing_ctx")
+    asset_billing_ctx = kwargs.get("asset_billing_ctx")
+    auto_asset_items = list(kwargs.get("auto_asset_items") or [])
+    auto_asset_preflight = bool(kwargs.get("auto_asset_preflight"))
+    auto_asset_chapter_text = str(kwargs.get("auto_asset_chapter_text") or "")
+    auto_asset_character_context = str(kwargs.get("auto_asset_character_context") or "")
+    auto_asset_structured_characters = kwargs.get("auto_asset_structured_characters")
+    auto_asset_types = set(kwargs.get("auto_asset_types") or _AUTO_MANGA_ASSET_TYPE_MAP.values())
+    auto_asset_text_api_key = kwargs.get("auto_asset_text_api_key")
+    auto_asset_analysis_billing_ctx = kwargs.get("auto_asset_analysis_billing_ctx")
+    auto_asset_credential_mode = str(kwargs.get("auto_asset_credential_mode") or "user_key")
+    auto_asset_image_model_id = kwargs.get("auto_asset_image_model_id")
+    auto_asset_story_id = kwargs.get("auto_asset_story_id")
+    auto_asset_user_id = kwargs.get("auto_asset_user_id")
+    auto_asset_fallback_anchor = kwargs.get("auto_asset_fallback_anchor")
+    initial_existing_numbers = {
+        int(value)
+        for value in (kwargs.get("initial_existing_numbers") or [])
+    }
 
     total = len(scenes)
     concurrency = _manga_image_concurrency(total)
@@ -7797,6 +8760,119 @@ async def _background_manga_generation_concurrent(
     )
     _write_result_progress(0)
 
+    if auto_asset_preflight:
+        asset_billing_started = False
+        try:
+            selected_asset_label = "、".join(
+                _AUTO_MANGA_ASSET_TYPE_LABELS[asset_type]
+                for asset_type in _AUTO_MANGA_ASSET_TYPE_LABELS
+                if asset_type in auto_asset_types
+            )
+            preflight_db = SessionLocal()
+            try:
+                preflight_chapter = preflight_db.get(Chapter, chapter_id)
+                if not preflight_chapter:
+                    raise RuntimeError("章节不存在，无法准备一致性资产")
+                task_manager.update_task_metadata(
+                    task_id,
+                    stage="asset_analyzing",
+                    message=f"正在准备当前章节的{selected_asset_label}资产...",
+                )
+                suggestions, analysis_hash, analysis_cached = await _load_or_analyze_auto_manga_assets(
+                    chapter=preflight_chapter,
+                    chapter_text=auto_asset_chapter_text,
+                    character_context=auto_asset_character_context,
+                    structured_characters=auto_asset_structured_characters,
+                    selected_types=auto_asset_types,
+                    request=None,
+                    user_id=int(auto_asset_user_id),
+                    db=preflight_db,
+                    analysis_billing_ctx=auto_asset_analysis_billing_ctx,
+                    text_api_key=auto_asset_text_api_key,
+                )
+                suggestions = _filter_auto_manga_asset_suggestions(suggestions, auto_asset_types)
+                task_manager.update_task_metadata(
+                    task_id,
+                    stage="asset_planning",
+                    message="资产分析完成，正在复用已有资产并规划缺失项...",
+                    asset_analysis_hash=analysis_hash,
+                    asset_analysis_cached=analysis_cached,
+                    analysis_billing_usage_event_id=0,
+                )
+                auto_asset_items, reused_asset_count, auto_asset_fallback_anchor = _prepare_auto_manga_asset_plan(
+                    preflight_db,
+                    user_id=int(auto_asset_user_id),
+                    story_id=int(auto_asset_story_id),
+                    chapter_id=chapter_id,
+                    suggestions=suggestions,
+                )
+                task_manager.update_task_metadata(
+                    task_id,
+                    asset_total=len(auto_asset_items),
+                    asset_reused=reused_asset_count,
+                    asset_completed=0,
+                    asset_generated=0,
+                    asset_failed=0,
+                )
+                if auto_asset_items:
+                    asset_billing_ctx = _reserve_background_image_points(
+                        user_id=int(auto_asset_user_id),
+                        story_id=int(auto_asset_story_id),
+                        chapter_id=chapter_id,
+                        image_count=len(auto_asset_items),
+                        credential_mode=auto_asset_credential_mode,
+                        model_id=int(auto_asset_image_model_id) if auto_asset_image_model_id else None,
+                    )
+                    task_manager.update_task_metadata(
+                        task_id,
+                        asset_billing_usage_event_id=getattr(asset_billing_ctx, "usage_event_id", 0),
+                    )
+            finally:
+                preflight_db.close()
+
+            if auto_asset_items:
+                asset_billing_started = True
+                await _ensure_auto_manga_assets(
+                    chapter_id=chapter_id,
+                    story_id=int(auto_asset_story_id),
+                    user_id=int(auto_asset_user_id),
+                    items=auto_asset_items,
+                    image_api_key=image_api_key,
+                    style_ref_path=style_ref_path,
+                    fallback_anchor_path=auto_asset_fallback_anchor,
+                    billing_ctx=asset_billing_ctx,
+                    task_id=task_id,
+                )
+            ref_db = SessionLocal()
+            try:
+                ref_entries = _effective_page_ref_entries(
+                    _effective_ref_entries(chapter_id, ref_db),
+                    style_ref_path,
+                )
+            finally:
+                ref_db.close()
+            task_manager.update_task_metadata(
+                task_id,
+                stage="preparing",
+                message=f"章节资产已就绪，正在准备生成 {total} 张漫画。",
+                selected_asset_count=len(ref_entries),
+            )
+        except Exception:
+            if asset_billing_ctx is not None and not asset_billing_started:
+                _finish_streaming_platform_points(
+                    asset_billing_ctx,
+                    success=False,
+                    error_code="asset_preflight_failed",
+                )
+                task_manager.update_task_metadata(task_id, asset_billing_usage_event_id=0)
+            _finish_manga_batch_billing(
+                billing_ctx,
+                chapter_id=chapter_id,
+                initial_existing_numbers=initial_existing_numbers,
+                task_id=task_id,
+            )
+            raise
+
     async def _generate_one(image_number: int, scene_prompt: str) -> dict[str, Any]:
         nonlocal completed
 
@@ -7842,17 +8918,31 @@ async def _background_manga_generation_concurrent(
                     return {"status": "skipped", "image_number": image_number}
 
                 ref_imgs = _select_ref_image_paths_for_scene(scene_prompt, ref_entries)
-                ref_paths = [str(p) for p, _ in ref_imgs]
-                ref_labels = [label for _, label in ref_imgs]
+                ref_paths = [str(p) for p, _, _ in ref_imgs]
+                ref_labels = [label for _, label, _ in ref_imgs]
+                ref_roles = [role for _, _, role in ref_imgs]
+                page_character_profiles = _character_profiles_for_page(
+                    character_profiles,
+                    scene_prompt,
+                    ref_labels,
+                    ref_roles,
+                )
+                logger.info(
+                    "漫画页参考资产 chapter=%s page=%s refs=%s",
+                    chapter_id,
+                    image_number,
+                    [f"{role}:{label}" for label, role in zip(ref_labels, ref_roles)],
+                )
 
                 image_result = await generate_manga_image(
                     scene_prompt,
                     chapter_id,
                     image_number,
                     all_scenes=list(scenes),
-                    character_profiles=character_profiles,
+                    character_profiles=page_character_profiles,
                     ref_image_paths=ref_paths if ref_paths else None,
                     ref_labels=ref_labels if any(ref_labels) else None,
+                    ref_roles=ref_roles if ref_roles else None,
                     color_mode=color_mode,
                     api_key=image_api_key,
                     size=manga_image_size,
@@ -7888,16 +8978,7 @@ async def _background_manga_generation_concurrent(
                             prompt=final_prompt,
                         )
                         write_db.add(manga)
-                        if custom_image_provider:
-                            write_db.commit()
-                        else:
-                            _check_and_consume_quota(
-                                user_id,
-                                "manga.image.generate.monthly_limit",
-                                1,
-                                write_db,
-                                deduct=True,
-                            )
+                        write_db.commit()
                         write_db.refresh(manga)
                 finally:
                     write_db.close()
@@ -7927,43 +9008,56 @@ async def _background_manga_generation_concurrent(
                 logger.error("Background manga image %s failed: %s", image_number, exc)
                 return {"status": "failed", "image_number": image_number, "exception": exc}
 
+    async def _staggered_generate(image_number: int, scene_prompt: str) -> dict[str, Any]:
+        if image_number > 1 and MANGA_IMAGE_START_INTERVAL_SECONDS > 0:
+            await asyncio.sleep((image_number - 1) * MANGA_IMAGE_START_INTERVAL_SECONDS)
+        return await _generate_one(image_number, scene_prompt)
+
     tasks = [
-        asyncio.create_task(_generate_one(i, scene_prompt))
+        asyncio.create_task(_staggered_generate(i, scene_prompt))
         for i, scene_prompt in enumerate(scenes, start=1)
     ]
     results: list[dict[str, Any]] = []
-    for finished in asyncio.as_completed(tasks):
-        results.append(await finished)
+    try:
+        for finished in asyncio.as_completed(tasks):
+            results.append(await finished)
+    finally:
+        # 外层任务超时或硬取消时，必须停止所有页面子任务，避免状态已失败但图片仍继续写入。
+        pending_tasks = [task for task in tasks if not task.done()]
+        for task in pending_tasks:
+            task.cancel()
+        if pending_tasks:
+            await asyncio.gather(*pending_tasks, return_exceptions=True)
 
     if task_manager.is_cancellation_requested(task_id):
         task_manager.clear_cancellation_flag(task_id)
-        cancel_db = SessionLocal()
-        try:
-            bg_task = cancel_db.query(BackgroundTask).filter(BackgroundTask.task_id == task_id).first()
-            if bg_task and bg_task.status != "failed":
-                bg_task.status = "failed"
-                bg_task.error_message = f"用户手动取消了任务，已完成 {completed}/{total} 张"
-                bg_task.completed_at = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
-                meta = bg_task.metadata_json if isinstance(bg_task.metadata_json, dict) else {}
-                bg_task.metadata_json = {
-                    **meta,
-                    "stage": "cancelled",
-                    "message": bg_task.error_message,
-                    "current": completed,
-                    "total": total,
-                    "running_images": [],
-                    "next_retry_at": None,
-                }
-                cancel_db.commit()
-        finally:
-            cancel_db.close()
+        settled_images = _finish_manga_batch_billing(
+            billing_ctx,
+            chapter_id=chapter_id,
+            initial_existing_numbers=initial_existing_numbers,
+            task_id=task_id,
+        )
+        task_manager.update_task_metadata(
+            task_id,
+            stage="cancelled",
+            message=f"用户手动取消了任务，已完成 {completed}/{total} 张",
+            current=completed,
+            total=total,
+            running_images=[],
+            next_retry_at=None,
+        )
         logger.info(
             "Concurrent manga generation cancelled: chapter=%s, completed=%s/%s",
             chapter_id,
             completed,
             total,
         )
-        return {"completed_images": completed, "total_images": total, "cancelled": True}
+        return {
+            "status": "cancelled",
+            "message": f"用户手动取消了任务，已结算 {settled_images} 张",
+            "completed_images": completed,
+            "total_images": total,
+        }
 
     failures = [result for result in results if result.get("status") == "failed"]
     if failures:
@@ -7979,9 +9073,21 @@ async def _background_manga_generation_concurrent(
                 failed_image=failed_image,
                 retryable=bool(getattr(exc, "retryable", False)),
             )
+        _finish_manga_batch_billing(
+            billing_ctx,
+            chapter_id=chapter_id,
+            initial_existing_numbers=initial_existing_numbers,
+            task_id=task_id,
+        )
         raise exc
 
     if completed < total:
+        _finish_manga_batch_billing(
+            billing_ctx,
+            chapter_id=chapter_id,
+            initial_existing_numbers=initial_existing_numbers,
+            task_id=task_id,
+        )
         raise MangaImageGenerationError(
             code="incomplete_generation",
             user_message=f"漫画生成未完整完成，已完成 {completed}/{total} 张，请稍后重试。",
@@ -8004,14 +9110,60 @@ async def _background_manga_generation_concurrent(
         completed,
         total,
     )
+    _finish_manga_batch_billing(
+        billing_ctx,
+        chapter_id=chapter_id,
+        initial_existing_numbers=initial_existing_numbers,
+        task_id=task_id,
+    )
     return {"completed_images": completed, "total_images": total}
+
+
+def _finish_manga_batch_billing(
+    billing_ctx,
+    *,
+    chapter_id: int,
+    initial_existing_numbers: set[int],
+    task_id: str | None,
+) -> int:
+    """按本批新增漫画数量结算，并阻止任务失败回调重复退款。"""
+    if billing_ctx is None:
+        return 0
+    billing_db = SessionLocal()
+    try:
+        generated_numbers = {
+            int(row[0])
+            for row in billing_db.query(MangaImage.image_number).filter(
+                MangaImage.chapter_id == chapter_id,
+            ).all()
+        }
+    finally:
+        billing_db.close()
+    generated_count = len(generated_numbers - initial_existing_numbers)
+    _finish_streaming_platform_points(
+        billing_ctx,
+        success=True,
+        image_count=generated_count,
+    )
+    if task_id:
+        task_manager.update_task_metadata(
+            task_id,
+            billing_usage_event_id=0,
+            billing_settled_images=generated_count,
+        )
+    return generated_count
 
 
 @app.delete("/api/chapters/{chapter_id}/manga-images")
 async def reset_manga_images(chapter_id: int, request: Request, db: Session = Depends(get_db)):
     user = _require_user(request, db)
     chapter = _require_chapter_for_user(chapter_id, user, db)
-    if chapter_id in ACTIVE_MANGA_GENERATIONS:
+    active_task = db.query(BackgroundTask.id).filter(
+        BackgroundTask.task_type == "manga_generation",
+        BackgroundTask.chapter_id == chapter_id,
+        BackgroundTask.status.in_(["pending", "running", "retrying", "cancel_requested"]),
+    ).first()
+    if chapter_id in ACTIVE_MANGA_GENERATIONS or active_task:
         raise HTTPException(409, "此章节的漫画生成已在运行中")
     _clear_chapter_images_only(chapter, db)
     db.commit()
@@ -8039,6 +9191,11 @@ async def upload_manga_style_reference(chapter_id: int, request: Request, file: 
     file_path = upload_dir / filename
 
     content = await file.read()
+    try:
+        with Image.open(io.BytesIO(content)) as image:
+            image.verify()
+    except Exception as exc:
+        raise HTTPException(400, "无法解析该风格参考图，请上传有效的图片文件") from exc
     await run_blocking(file_path.write_bytes, content)
 
     relative_path = f"style_references/{filename}"
@@ -8063,13 +9220,25 @@ async def generate_manga_stream(chapter_id: int, request: Request, db: Session =
     # 可选：读取请求体中的尺寸参数和风格预设
     try:
         body = await request.json()
-        manga_size: str | None = body.get("size")
-        style_preset_name: str | None = body.get("style_preset_name")
-        style_ref_url: str | None = body.get("style_ref_url")
-    except Exception:
-        manga_size = None
-        style_preset_name = None
-        style_ref_url = None
+    except json.JSONDecodeError as exc:
+        raise HTTPException(422, "请求体必须是有效的 JSON 对象") from exc
+    if body is None:
+        body = {}
+    if not isinstance(body, dict):
+        raise HTTPException(422, "请求体必须是 JSON 对象")
+    manga_size: str | None = body.get("size")
+    style_preset_name: str | None = body.get("style_preset_name")
+    style_ref_url: str | None = body.get("style_ref_url")
+    extraction_config = body.get("auto_asset_extraction")
+    if extraction_config is None:
+        auto_asset_enabled, auto_asset_types = _normalize_auto_manga_asset_options()
+    elif isinstance(extraction_config, dict):
+        auto_asset_enabled, auto_asset_types = _normalize_auto_manga_asset_options(
+            extraction_config.get("enabled", True),
+            extraction_config.get("types"),
+        )
+    else:
+        raise HTTPException(422, "auto_asset_extraction 必须是对象")
 
     # Load scenes from file (must exist - user should generate/confirm scenes first)
     prompts_file = Path(__file__).resolve().parent / "manga_outputs" / f"chapter_{chapter_id}" / "scenes.txt"
@@ -8089,63 +9258,194 @@ async def generate_manga_stream(chapter_id: int, request: Request, db: Session =
     existing_task = db.query(BackgroundTask).filter(
         BackgroundTask.task_type == "manga_generation",
         BackgroundTask.chapter_id == chapter_id,
-        BackgroundTask.status.in_(["pending", "running", "retrying"]),
+        BackgroundTask.status.in_(["pending", "running", "retrying", "cancel_requested"]),
     ).first()
     if existing_task:
         raise HTTPException(409, "此章节的漫画生成已在运行中")
     character_profiles = await _load_characters_async(chapter_id, request, db)
-    ref_entries = _effective_ref_entries(chapter_id, db)
     color_mode = _effective_color_mode(chapter_id, user.id, db)
     image_api_key = _user_image_api_key(request)
-    custom_image_provider = _custom_image_provider_active(request)
-    # 解析风格预设参考图（在释放 DB session 之前）
-    # 优先使用自定义参考图 URL，否则从预设名称解析
+    credential_mode = _request_credential_mode(request, db)
+    dual_image_runtime = getattr(request.state, "dual_track_image", None)
+    image_model_id = dual_image_runtime.get("model_id") if isinstance(dual_image_runtime, dict) else None
+    # 风格预设只允许使用参考图片，名称和文字模板不参与画风控制。
     style_ref_path = None
     if style_ref_url:
         from services.media_locator import ensure_local_media_path
         style_ref_path = ensure_local_media_path(style_ref_url, "manga")
-    if not style_ref_path:
+        if not style_ref_path:
+            raise HTTPException(422, "自定义风格参考图无法读取，请重新上传")
+    elif style_preset_name:
         style_ref_path = _resolve_style_preset_ref(db, style_preset_name)
+        if not style_ref_path:
+            raise HTTPException(422, "该风格预设尚未配置有效参考图，不能用于漫画生成")
+    logger.info(
+        "漫画风格参考图已解析 chapter_id=%s source=%s path=%s",
+        chapter_id,
+        "custom" if style_ref_url else ("preset" if style_preset_name else "none"),
+        style_ref_path or "",
+    )
 
-    _check_and_consume_feature_quota(request, user.id, "manga.image.generate.monthly_limit", len(scenes), db, deduct=False, provider_kind="image")
-    ACTIVE_MANGA_GENERATIONS.add(chapter_id)
+    story = chapter.story or db.get(Story, chapter.story_id)
+    chapter_asset_text = str(chapter.novel_content or "").strip() or "\n".join(scenes)
+    structured_characters = getattr(story, "characters", None) if story else None
+    asset_analysis_hash = _manga_asset_analysis_fingerprint(
+        chapter_asset_text,
+        character_profiles,
+        structured_characters,
+        auto_asset_types,
+    )
+    cached_analysis = chapter.manga_asset_analysis_json if isinstance(chapter.manga_asset_analysis_json, dict) else {}
+    should_prepare_assets = auto_asset_enabled and bool(auto_asset_types)
+    analysis_cached = not should_prepare_assets or _is_auto_manga_asset_analysis_cached(
+        cached_analysis,
+        asset_analysis_hash,
+    )
+    text_api_key = None if analysis_cached else _user_deepseek_api_key(request)
+    ref_entries = _effective_page_ref_entries(_effective_ref_entries(chapter_id, db), style_ref_path)
+    initial_existing_numbers = {
+        int(row[0])
+        for row in db.query(MangaImage.image_number).filter(MangaImage.chapter_id == chapter_id).all()
+    }
+    try:
+        quota_result = _check_and_consume_feature_quota(
+            request,
+            user.id,
+            "manga.image.generate.monthly_limit",
+            len(scenes),
+            db,
+            deduct=False,
+            provider_kind="image",
+        )
+    except Exception:
+        raise
+    manga_billing_ctx = _detach_pending_platform_points(
+        request,
+        quota_result.get("usage_event_id"),
+    )
+    analysis_quota_result: dict[str, object] = {}
+    analysis_billing_ctx = None
+    if not analysis_cached:
+        try:
+            analysis_quota_result = _check_and_consume_feature_quota(
+                request,
+                user.id,
+                "ai.text.advanced_calls.monthly_limit",
+                1,
+                db,
+                deduct=False,
+                provider_kind="text",
+            )
+            analysis_billing_ctx = _detach_pending_platform_points(
+                request,
+                analysis_quota_result.get("usage_event_id"),
+            )
+        except Exception:
+            _finish_streaming_platform_points(
+                manga_billing_ctx,
+                success=False,
+                error_code="analysis_quota_reservation_failed",
+            )
+            raise
     # 在释放事务前提取 user_id，避免异步 generator 中 user 对象 session 已关闭
     user_id = user.id
     _release_db_transaction(db)
 
-    # 慢上游下按图片数量动态放宽整章超时；页内图片使用受控并发执行。
-    _manga_gen_timeout = max(1800, len(scenes) * 900)
+    # 资产分析与缺失资产生成都在后台任务内完成，SSE 可以立即建立连接。
+    _manga_gen_timeout = max(
+        900,
+        min(14400, (len(scenes) + 18) * MANGA_IMAGE_TIMEOUT_PER_PAGE),
+    )
     _manga_concurrency = _manga_image_concurrency(len(scenes))
+    _manga_start_interval = MANGA_IMAGE_START_INTERVAL_SECONDS
+    selected_asset_label = "、".join(
+        _AUTO_MANGA_ASSET_TYPE_LABELS[asset_type]
+        for asset_type in _AUTO_MANGA_ASSET_TYPE_LABELS
+        if asset_type in auto_asset_types
+    )
 
     # 提交后台任务到 TaskManager
-    task_id = f"manga_gen_{chapter_id}_{int(datetime.datetime.utcnow().timestamp())}"
-    await task_manager.submit_task(
-        task_id=task_id,
-        task_type="manga_generation",
-        coro_func=_background_manga_generation_concurrent,
-        chapter_id=chapter_id,
-        scenes=scenes,
-        image_count=image_count,
-        character_profiles=character_profiles,
-        ref_entries=ref_entries,
-        color_mode=color_mode,
-        image_api_key=image_api_key,
-        custom_image_provider=custom_image_provider,
-        manga_image_size=manga_size,
-        style_ref_path=style_ref_path,
-        user_id=user_id,
-        timeout=_manga_gen_timeout,
-        max_retries=1,
-        metadata={
-            "stage": "queued",
-            "message": f"漫画生成任务已排队，共 {len(scenes)} 张，最多同时 {_manga_concurrency} 张...",
-            "current": 0,
-            "total": len(scenes),
-            "concurrency": _manga_concurrency,
-            "running_stage": "preparing",
-            "running_message": f"正在准备并发漫画生成，最多同时 {_manga_concurrency} 张...",
-        },
-    )
+    task_id = f"manga_gen_{chapter_id}_{uuid.uuid4().hex[:12]}"
+    ACTIVE_MANGA_GENERATIONS.add(chapter_id)
+    try:
+        await task_manager.submit_task(
+            task_id=task_id,
+            task_type="manga_generation",
+            coro_func=_background_manga_generation_concurrent,
+            chapter_id=chapter_id,
+            scenes=scenes,
+            image_count=image_count,
+            character_profiles=character_profiles,
+            ref_entries=ref_entries,
+            color_mode=color_mode,
+            image_api_key=image_api_key,
+            manga_image_size=manga_size,
+            style_ref_path=style_ref_path,
+            billing_ctx=manga_billing_ctx,
+            asset_billing_ctx=None,
+            auto_asset_preflight=should_prepare_assets,
+            auto_asset_items=[],
+            auto_asset_enabled=auto_asset_enabled,
+            auto_asset_types=sorted(auto_asset_types),
+            auto_asset_chapter_text=chapter_asset_text,
+            auto_asset_character_context=character_profiles,
+            auto_asset_structured_characters=structured_characters,
+            auto_asset_text_api_key=text_api_key,
+            auto_asset_analysis_billing_ctx=analysis_billing_ctx,
+            auto_asset_credential_mode=credential_mode,
+            auto_asset_image_model_id=image_model_id,
+            auto_asset_story_id=chapter.story_id,
+            auto_asset_user_id=user_id,
+            auto_asset_fallback_anchor=None,
+            initial_existing_numbers=sorted(initial_existing_numbers),
+            timeout=_manga_gen_timeout,
+            max_retries=0,
+            quota_user_id=user_id,
+            quota_feature_key="manga.image.generate.monthly_limit",
+            quota_amount=len(scenes),
+            quota_usage_event_id=quota_result.get("usage_event_id"),
+            metadata={
+                "stage": "queued",
+                "message": f"漫画生成任务已排队，共 {len(scenes)} 张，最多同时 {_manga_concurrency} 张...",
+                "current": 0,
+                "total": len(scenes),
+                "concurrency": _manga_concurrency,
+                "start_interval_seconds": _manga_start_interval,
+                "running_stage": "preparing",
+                "running_message": (
+                    f"正在准备当前章节的{selected_asset_label}资产..."
+                    if should_prepare_assets
+                    else f"正在准备错峰漫画生成，最多同时 {_manga_concurrency} 张..."
+                ),
+                "initial_existing_numbers": sorted(initial_existing_numbers),
+                "asset_analysis_hash": asset_analysis_hash,
+                "asset_analysis_cached": analysis_cached,
+                "auto_asset_extraction_enabled": auto_asset_enabled,
+                "auto_asset_extraction_types": sorted(auto_asset_types),
+                "analysis_billing_usage_event_id": analysis_quota_result.get("usage_event_id"),
+                "asset_total": 0,
+                "asset_reused": 0,
+                "asset_completed": 0,
+                "asset_generated": 0,
+                "asset_failed": 0,
+                "asset_billing_usage_event_id": 0,
+            },
+        )
+    except Exception as exc:
+        ACTIVE_MANGA_GENERATIONS.discard(chapter_id)
+        _finish_streaming_platform_points(
+            manga_billing_ctx,
+            success=False,
+            error_code="task_submission_failed",
+        )
+        _finish_streaming_platform_points(
+            analysis_billing_ctx,
+            success=False,
+            error_code="task_submission_failed",
+        )
+        if isinstance(exc, IntegrityError):
+            raise HTTPException(409, "此章节的漫画生成已在运行中") from exc
+        raise
 
     # 已发送过的图片编号集合，防止重复推送
     _yielded_image_numbers: set[int] = set()
@@ -8156,7 +9456,7 @@ async def generate_manga_stream(chapter_id: int, request: Request, db: Session =
             yield {"event": "scenes", "data": json.dumps({"scenes": scenes}, ensure_ascii=False)}
 
             poll_count = 0
-            max_polls = _manga_gen_timeout // 2  # 与 TaskManager 超时同步（默认 1800/2=900）
+            max_polls = _manga_gen_timeout // 2  # 与 TaskManager 超时同步，每 2 秒轮询一次。
 
             while poll_count < max_polls:
                 poll_count += 1
@@ -8183,6 +9483,11 @@ async def generate_manga_stream(chapter_id: int, request: Request, db: Session =
                         "current_image": info.get("current_image"),
                         "failed_image": info.get("failed_image"),
                         "concurrency": info.get("concurrency"),
+                        "asset_total": info.get("asset_total", 0),
+                        "asset_completed": info.get("asset_completed", 0),
+                        "asset_generated": info.get("asset_generated", 0),
+                        "asset_failed": info.get("asset_failed", 0),
+                        "asset_running": info.get("asset_running") or [],
                     }
 
                 if task_status is None:
@@ -8214,8 +9519,20 @@ async def generate_manga_stream(chapter_id: int, request: Request, db: Session =
                     return
 
                 elif status == "failed":
-                    error_msg = task_status.get("message") or task_status.get("error_message", "Generation failed")
-                    yield {"event": "error", "data": json.dumps({"error": error_msg}, ensure_ascii=False)}
+                    error_meta = task_status.get("metadata_json") if isinstance(task_status.get("metadata_json"), dict) else {}
+                    error_msg = task_status.get("message") or task_status.get("error_message") or "漫画生成失败，请重试"
+                    yield {
+                        "event": "error",
+                        "data": json.dumps({
+                            "error": error_msg,
+                            "code": error_meta.get("error_code") or "manga_generation_failed",
+                            "retryable": bool(error_meta.get("retryable")),
+                            "suggestion": error_meta.get("suggestion"),
+                            "stage": error_meta.get("stage"),
+                            "asset_generated": error_meta.get("asset_generated", 0),
+                            "asset_failed": error_meta.get("asset_failed", 0),
+                        }, ensure_ascii=False),
+                    }
                     return
 
                 elif status == "running":
@@ -8269,7 +9586,13 @@ async def generate_manga_stream(chapter_id: int, request: Request, db: Session =
             logger.info(f"Manga generation SSE cancelled for chapter {chapter_id}, background task continues")
         except Exception as e:
             logger.exception(f"Manga generation SSE error: {e}")
-            yield {"event": "error", "data": json.dumps({"error": str(e)}, ensure_ascii=False)}
+            yield {
+                "event": "error",
+                "data": json.dumps(
+                    {"error": public_error_message(e, "漫画生成连接异常，请稍后重试")},
+                    ensure_ascii=False,
+                ),
+            }
         finally:
             ACTIVE_MANGA_GENERATIONS.discard(chapter_id)
 
@@ -8295,25 +9618,20 @@ async def cancel_manga_generation(chapter_id: int, request: Request, db: Session
     # 1) 设置取消标志，不抛 CancelledError——让当前正在 await 的图片正常完成
     task_manager.request_cancellation(task.task_id)
 
-    # 2) 先设置数据库状态为失败（后续 _background_manga_generation 的取消检测
-    #    及 _on_task_complete 都不会覆盖已存在的 failed 状态）
-    task.status = "failed"
-    task.error_message = "用户手动取消了任务"
-    task.completed_at = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
+    # 2) 标记取消请求，后台协程会在当前图片结束后按实际产出结算。
+    task.status = "cancel_requested"
+    task.error_message = "用户已请求取消任务"
     meta = task.metadata_json if isinstance(task.metadata_json, dict) else {}
     task.metadata_json = {
         **meta,
-        "stage": "cancelled",
-        "message": "用户手动取消了任务",
+        "stage": "cancel_requested",
+        "message": "用户已请求取消任务，正在等待当前图片完成",
         "next_retry_at": None,
     }
     db.commit()
 
-    # 3) 清理活跃集合
-    ACTIVE_MANGA_GENERATIONS.discard(chapter_id)
-
     logger.info(f"Manga generation cancelled by user: chapter={chapter_id}, task={task.task_id}")
-    return {"ok": True, "message": "漫画生成任务已取消"}
+    return {"ok": True, "message": "漫画生成取消请求已提交"}
 
 
 @app.get("/api/chapters/{chapter_id}/manga-generation-status")
@@ -8358,6 +9676,13 @@ async def get_manga_generation_status(chapter_id: int, request: Request, db: Ses
         "running_images": meta.get("running_images") or [],
         "current_image": meta.get("current_image"),
         "failed_image": meta.get("failed_image"),
+        "error_code": meta.get("error_code"),
+        "retryable": bool(meta.get("retryable")),
+        "suggestion": meta.get("suggestion"),
+        "asset_total": meta.get("asset_total", 0),
+        "asset_completed": meta.get("asset_completed", 0),
+        "asset_generated": meta.get("asset_generated", 0),
+        "asset_failed": meta.get("asset_failed", 0),
         "concurrency": meta.get("concurrency"),
         "created_at": task.created_at.isoformat() if task.created_at else None,
         "completed_at": task.completed_at.isoformat() if task.completed_at else None,
@@ -8382,12 +9707,24 @@ async def regenerate_single_image(chapter_id: int, image_number: int, body: dict
     manga_size: str | None = body.get("size")
     style_preset_name: str | None = body.get("style_preset_name")
     style_ref_url: str | None = body.get("style_ref_url")
+    # 风格预设只允许使用参考图片，名称和文字模板不参与画风控制。
     style_ref_path = None
     if style_ref_url:
         from services.media_locator import ensure_local_media_path
         style_ref_path = ensure_local_media_path(style_ref_url, "manga")
-    if not style_ref_path:
+        if not style_ref_path:
+            raise HTTPException(422, "自定义风格参考图无法读取，请重新上传")
+    elif style_preset_name:
         style_ref_path = _resolve_style_preset_ref(db, style_preset_name)
+        if not style_ref_path:
+            raise HTTPException(422, "该风格预设尚未配置有效参考图，不能用于漫画生成")
+    logger.info(
+        "单格漫画风格参考图已解析 chapter_id=%s image_number=%s source=%s path=%s",
+        chapter_id,
+        image_number,
+        "custom" if style_ref_url else ("preset" if style_preset_name else "none"),
+        style_ref_path or "",
+    )
 
     # Load all scenes for context
     prompts_file = Path(__file__).resolve().parent / "manga_outputs" / f"chapter_{chapter_id}" / "scenes.txt"
@@ -8419,9 +9756,13 @@ async def regenerate_single_image(chapter_id: int, image_number: int, body: dict
 
     # Generate new image
     ref_entries = _effective_ref_entries(chapter_id, db)
-    ref_imgs = _select_ref_image_paths_for_scene(prompt, ref_entries)
-    ref_paths = [str(p) for p, _ in ref_imgs]
-    ref_labels = [label for _, label in ref_imgs]
+    reference_context = "\n".join(
+        value for value in ((old_img.prompt if old_img else ""), prompt) if value
+    )
+    ref_imgs = _select_ref_image_paths_for_scene(reference_context, ref_entries)
+    ref_paths = [str(p) for p, _, _ in ref_imgs]
+    ref_labels = [label for _, label, _ in ref_imgs]
+    ref_roles = [role for _, _, role in ref_imgs]
     try:
         _check_and_consume_feature_quota(request, user.id, "manga.image.generate.monthly_limit", 1, db, deduct=False, provider_kind="image")
         _release_db_transaction(db)
@@ -8442,6 +9783,10 @@ async def regenerate_single_image(chapter_id: int, image_number: int, body: dict
                 output_path,
                 mask_bytes=mask_bytes,
                 api_key=image_api_key,
+                style_reference_path=Path(style_ref_path) if style_ref_path else None,
+                reference_image_paths=[Path(path) for path in ref_paths],
+                reference_labels=ref_labels,
+                reference_roles=ref_roles,
             )
             # edit_existing_image 可能返回 OSS URL
             saved_path_str = str(saved_path) if saved_path else str(output_path)
@@ -8459,6 +9804,7 @@ async def regenerate_single_image(chapter_id: int, image_number: int, body: dict
                 character_profiles=character_profiles,
                 ref_image_paths=ref_paths if ref_paths else None,
                 ref_labels=ref_labels if any(ref_labels) else None,
+                ref_roles=ref_roles if ref_roles else None,
                 color_mode=color_mode,
                 api_key=image_api_key,
                 size=manga_size,
@@ -8624,6 +9970,15 @@ async def onboarding_confirm(story_id: int, request: Request, db: Session = Depe
 
     # 配额预检
     _check_and_consume_advanced_text_quota(request, user.id, db, deduct=False)
+    _check_and_consume_feature_quota(
+        request,
+        user.id,
+        "framework.generate.monthly_limit",
+        2,
+        db,
+        deduct=False,
+        provider_kind="text",
+    )
 
     _release_db_transaction(db)
     try:
@@ -8645,6 +10000,7 @@ async def onboarding_confirm(story_id: int, request: Request, db: Session = Depe
     story.description = story_bible.get("creative_brief", {}).get("one_line_premise", story.description or "")
     story.onboarding_completed = True
     db.commit()
+    _check_and_consume_advanced_text_quota(request, user.id, db, deduct=True)
 
     # --- 新增：自动生成故事框架 ---
     framework_result = None
@@ -8653,8 +10009,6 @@ async def onboarding_confirm(story_id: int, request: Request, db: Session = Depe
         if description.strip():
             story_context = _build_framework_ai_context(story, mode="initial_generate")
             template_fw_prompt = get_effective_prompt(story_id, "framework", db)
-            # 配额预检
-            _check_and_consume_feature_quota(request, user.id, "framework.generate.monthly_limit", 1, db, deduct=False, provider_kind="text")
             # 释放 DB 事务，避免 AI 调用期间长连接占用
             _release_db_transaction(db)
 
@@ -8684,7 +10038,7 @@ async def onboarding_confirm(story_id: int, request: Request, db: Session = Depe
             db.commit()
 
             # 配额扣减
-            _check_and_consume_feature_quota(request, user.id, "framework.generate.monthly_limit", 1, db, deduct=True, provider_kind="text")
+            _check_and_consume_feature_quota(request, user.id, "framework.generate.monthly_limit", 2, db, deduct=True, provider_kind="text")
 
             framework_result = {
                 "tags": story.tags,
@@ -8696,8 +10050,6 @@ async def onboarding_confirm(story_id: int, request: Request, db: Session = Depe
         framework_result = None
     # --- 新增结束 ---
 
-    # 高级文本配额扣减
-    _check_and_consume_advanced_text_quota(request, user.id, db, deduct=True)
     db.refresh(story)
 
     return {
@@ -8749,7 +10101,15 @@ async def import_context_send_message(story_id: int, request: Request, db: Sessi
         raise HTTPException(400, "没有有效消息")
 
     # 配额预检
-    _check_and_consume_advanced_text_quota(request, user.id, db, deduct=False)
+    _check_and_consume_feature_quota(
+        request,
+        user.id,
+        "ai.text.advanced_calls.monthly_limit",
+        2,
+        db,
+        deduct=False,
+        provider_kind="text",
+    )
 
     import_context = _build_import_guidance_context(story, db)
     creative_brief = None
@@ -8778,7 +10138,15 @@ async def import_context_send_message(story_id: int, request: Request, db: Sessi
         raise HTTPException(502, f"AI 导入补充调用失败: {exc}")
 
     # 配额扣减
-    _check_and_consume_advanced_text_quota(request, user.id, db, deduct=True)
+    _check_and_consume_feature_quota(
+        request,
+        user.id,
+        "ai.text.advanced_calls.monthly_limit",
+        2,
+        db,
+        deduct=True,
+        provider_kind="text",
+    )
 
     return OnboardingMessageOut(
         reply=result.get("reply", ""),
@@ -8810,7 +10178,15 @@ async def import_context_confirm(story_id: int, request: Request, db: Session = 
     deepseek_api_key = _user_deepseek_api_key(request)
 
     # 配额预检
-    _check_and_consume_advanced_text_quota(request, user.id, db, deduct=False)
+    _check_and_consume_feature_quota(
+        request,
+        user.id,
+        "ai.text.advanced_calls.monthly_limit",
+        2,
+        db,
+        deduct=False,
+        provider_kind="text",
+    )
 
     _release_db_transaction(db)
     try:
@@ -8834,7 +10210,15 @@ async def import_context_confirm(story_id: int, request: Request, db: Session = 
     story.import_context_completed = True
     db.commit()
     # 配额扣减
-    _check_and_consume_advanced_text_quota(request, user.id, db, deduct=True)
+    _check_and_consume_feature_quota(
+        request,
+        user.id,
+        "ai.text.advanced_calls.monthly_limit",
+        2,
+        db,
+        deduct=True,
+        provider_kind="text",
+    )
     db.refresh(story)
     return {
         "story_id": story.id,
@@ -8989,10 +10373,38 @@ async def _background_quality_check(
 # ─── 后台任务状态查询 ──────────────────────────────────
 
 
+def _background_task_belongs_to_user(task: BackgroundTask, user: User, db: Session) -> bool:
+    """管理员可查看全部任务，普通用户只能查看自己的任务。"""
+    if user.role == "admin":
+        return True
+    if task.quota_user_id is not None:
+        return task.quota_user_id == user.id
+    metadata = task.metadata_json if isinstance(task.metadata_json, dict) else {}
+    metadata_owner = metadata.get("owner_user_id") or metadata.get("user_id")
+    if metadata_owner is not None:
+        try:
+            return int(metadata_owner) == user.id
+        except (TypeError, ValueError):
+            return False
+    if task.story_id is not None:
+        story = db.query(Story).filter(Story.id == task.story_id).first()
+        return bool(story and story.owner_user_id == user.id)
+    if task.chapter_id is not None:
+        chapter = db.query(Chapter).filter(Chapter.id == task.chapter_id).first()
+        return bool(chapter and chapter.story.owner_user_id == user.id)
+    if task.shot_id is not None:
+        shot = db.query(VideoShot).filter(VideoShot.id == task.shot_id).first()
+        return bool(shot and shot.scene and shot.scene.chapter.story.owner_user_id == user.id)
+    return False
+
+
 @app.get("/api/tasks/{task_id}")
 async def get_task_status(task_id: str, request: Request, db: Session = Depends(get_db)):
     """查询后台任务状态"""
     user = _require_user(request, db)
+    task = db.query(BackgroundTask).filter(BackgroundTask.task_id == task_id).first()
+    if not task or not _background_task_belongs_to_user(task, user, db):
+        raise HTTPException(404, "任务未找到")
     status = task_manager.get_task_status(task_id)
     if not status:
         raise HTTPException(404, "任务未找到")
@@ -9011,6 +10423,27 @@ async def list_tasks(
     """列出后台任务"""
     user = _require_user(request, db)
     query = db.query(BackgroundTask)
+    if user.role != "admin":
+        owned_story_ids = db.query(Story.id).filter(Story.owner_user_id == user.id)
+        owned_chapter_ids = db.query(Chapter.id).join(Story).filter(Story.owner_user_id == user.id)
+        owned_shot_ids = (
+            db.query(VideoShot.id)
+            .join(ScriptScene, ScriptScene.id == VideoShot.scene_id)
+            .join(Chapter, Chapter.id == ScriptScene.chapter_id)
+            .join(Story, Story.id == Chapter.story_id)
+            .filter(Story.owner_user_id == user.id)
+        )
+        query = query.filter(or_(
+            BackgroundTask.quota_user_id == user.id,
+            and_(
+                BackgroundTask.quota_user_id.is_(None),
+                or_(
+                    BackgroundTask.story_id.in_(owned_story_ids),
+                    BackgroundTask.chapter_id.in_(owned_chapter_ids),
+                    BackgroundTask.shot_id.in_(owned_shot_ids),
+                ),
+            ),
+        ))
     if status:
         query = query.filter(BackgroundTask.status == status)
     if task_type:
@@ -9059,7 +10492,7 @@ async def generate_framework_endpoint(story_id: int, request: Request, db: Sessi
     story_length = template_story_length or _infer_story_length_from_story(story, description=description)
 
     template_fw_prompt = get_effective_prompt(story_id, "framework", db)
-    _check_and_consume_feature_quota(request, user.id, "framework.generate.monthly_limit", 1, db, deduct=False, provider_kind="text")
+    _check_and_consume_feature_quota(request, user.id, "framework.generate.monthly_limit", 4, db, deduct=False, provider_kind="text")
     _release_db_transaction(db)
     try:
         framework = await generate_framework(
@@ -9134,31 +10567,8 @@ async def generate_framework_endpoint(story_id: int, request: Request, db: Sessi
     _enforce_framework_snapshot_limit(story.id, max_count=20, db=db)
     db.commit()
 
-    _check_and_consume_feature_quota(request, user.id, "framework.generate.monthly_limit", 1, db, deduct=True, provider_kind="text")
+    _check_and_consume_feature_quota(request, user.id, "framework.generate.monthly_limit", 4, db, deduct=True, provider_kind="text")
     _release_db_transaction(db)
-
-    # Fire async background quality check via task manager
-    captured_tags = dict(story.tags or {})
-    captured_chars = list(story.characters or [])
-    captured_outline = dict(story.outline or {})
-    _api_key = deepseek_api_key
-    await task_manager.submit_task(
-        f"quality_check_{story.id}_{int(datetime.datetime.now(datetime.timezone.utc).timestamp())}",
-        "quality_check",
-        _background_quality_check,
-        story.id,
-        str(story.description or "").strip(),
-        _api_key,
-        captured_tags,
-        captured_chars,
-        captured_outline,
-        timeout=600,  # 10分钟超时
-        max_retries=2,
-        quota_user_id=user.id,
-        quota_feature_key="framework.generate.monthly_limit",
-        quota_amount=1,
-        # 注意：story_id 已作为第一个 positional arg 传入，不要再传 story_id= 关键字参数
-    )
 
     return {
         "tags": story.tags,
@@ -9612,6 +11022,7 @@ async def adjust_framework_endpoint(story_id: int, request: Request, db: Session
     deepseek_api_key = _user_deepseek_api_key(request)
     template_story_length = get_template_story_length(story_id, db)
     story_length = template_story_length or _infer_story_length_from_story(story, messages=messages)
+    template_edit_prompt = get_effective_prompt(story_id, "framework_editing", db)
 
     # 检查是否仅分析模式
     is_analyze_only = any(
@@ -9649,7 +11060,6 @@ async def adjust_framework_endpoint(story_id: int, request: Request, db: Session
             "validation_errors": [],
         }
 
-    template_edit_prompt = get_effective_prompt(story_id, "framework_editing", db)
     _check_and_consume_advanced_text_quota(request, user.id, db, deduct=False)
     _release_db_transaction(db)
     try:
@@ -9860,6 +11270,15 @@ async def expand_chapter_endpoint(story_id: int, request: Request, db: Session =
     }
 
     _check_and_consume_feature_quota(request, user.id, "chapter.expand.monthly_limit", 1, db, deduct=False, provider_kind="text")
+    memory_quota_result = _check_and_consume_feature_quota(
+        request,
+        user.id,
+        "chapter.memory.refresh",
+        1,
+        db,
+        deduct=False,
+        provider_kind="text",
+    )
 
     previous_chapter_summary = ""
     chapter_num_for_query = chapter_number_val
@@ -9981,7 +11400,34 @@ async def expand_chapter_endpoint(story_id: int, request: Request, db: Session =
     db.commit()
     _check_and_consume_feature_quota(request, user.id, "chapter.expand.monthly_limit", 1, db, deduct=True, provider_kind="text")
     db.refresh(chapter)
-    asyncio.create_task(_background_refresh_chapter_memory(chapter.id, deepseek_api_key))
+    memory_billing_ctx = _detach_pending_platform_points(
+        request,
+        memory_quota_result.get("usage_event_id"),
+    )
+    memory_task_id = f"chapter_memory_{chapter.id}_{uuid.uuid4().hex[:10]}"
+    try:
+        await task_manager.submit_task(
+            memory_task_id,
+            "chapter_memory_refresh",
+            _background_refresh_chapter_memory,
+            chapter.id,
+            deepseek_api_key,
+            memory_billing_ctx,
+            timeout=300,
+            max_retries=1,
+            chapter_id=chapter.id,
+            quota_user_id=user.id,
+            quota_feature_key="chapter.memory.refresh",
+            quota_amount=1,
+            quota_usage_event_id=memory_quota_result.get("usage_event_id"),
+        )
+    except Exception:
+        _finish_streaming_platform_points(
+            memory_billing_ctx,
+            success=False,
+            error_code="task_submission_failed",
+        )
+        logger.exception("提交章节记忆刷新任务失败 chapter=%s", chapter.id)
     return chapter
 
 
@@ -10410,7 +11856,24 @@ async def import_create(body: ImportCreateRequest, request: Request, db: Session
     if not combined:
         raise HTTPException(400, "导入内容为空，无法创建作品")
 
-    _check_and_consume_advanced_text_quota(request, user.id, db, deduct=False)
+    _check_and_consume_feature_quota(
+        request,
+        user.id,
+        "ai.text.advanced_calls.monthly_limit",
+        2,
+        db,
+        deduct=False,
+        provider_kind="text",
+    )
+    _check_and_consume_feature_quota(
+        request,
+        user.id,
+        "import.story_bible.generate",
+        2,
+        db,
+        deduct=False,
+        provider_kind="text",
+    )
     api_key = _user_deepseek_api_key(request)
     _release_db_transaction(db)
     try:
@@ -10478,7 +11941,15 @@ async def import_create(body: ImportCreateRequest, request: Request, db: Session
             _initialize_empty_chapter_workspace(chapter.id)
 
     db.commit()
-    _check_and_consume_advanced_text_quota(request, user.id, db, deduct=True)
+    _check_and_consume_feature_quota(
+        request,
+        user.id,
+        "ai.text.advanced_calls.monthly_limit",
+        2,
+        db,
+        deduct=True,
+        provider_kind="text",
+    )
     story_id = story.id
     db.refresh(story)
 
@@ -10496,6 +11967,15 @@ async def import_create(body: ImportCreateRequest, request: Request, db: Session
             if next_description:
                 story.description = next_description
             db.commit()
+            _check_and_consume_feature_quota(
+                request,
+                user.id,
+                "import.story_bible.generate",
+                2,
+                db,
+                deduct=True,
+                provider_kind="text",
+            )
             db.refresh(story)
     except Exception as exc:
         logger.warning("Import provisional story bible generation failed for story %s: %s", story.id, exc)
@@ -11090,11 +12570,15 @@ def admin_archive_template(template_id: int, body: dict, request: Request, db: S
 # 注意：import 放在文件末尾，确保辅助函数已全部定义，
 # 这样 agent_router.py 可以通过 sys.modules 访问 _require_user 等函数
 from routers.agent_router import router as agent_router
+from routers.points_ai import router as points_ai_router
+from routers.creation_studio import router as creation_studio_router
 
 app.include_router(video_router)
 app.include_router(agent_router)
 app.include_router(deconstruction_router)
 app.include_router(deconstruct_library_router)
+app.include_router(points_ai_router)
+app.include_router(creation_studio_router)
 
 
 if __name__ == "__main__":

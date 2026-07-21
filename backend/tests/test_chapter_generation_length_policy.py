@@ -959,6 +959,21 @@ def test_editor_hard_pass_allows_missing_local_safety():
     assert ca._review_is_hard_pass(review, content) is True
 
 
+def test_editor_hard_pass_rejects_high_score_with_real_blocking_issue():
+    import services.chapter_agents as ca
+
+    content = "陈玄扣住短刀。母亲看着药碗。她说：别逞强。他点头：我知道。门外有人压低声音：走。" * 60
+    review = ca._normalize_review({
+        "approved": True,
+        "overall_score": 92,
+        "blocking_issues": ["剧情逻辑矛盾，必须重写结算段。"],
+    })
+
+    assert review["approved"] is False
+    assert review["overall_score"] == 92
+    assert ca._review_is_hard_pass(review, content) is False
+
+
 def test_fragment_revision_rejects_shrunken_full_draft():
     import services.chapter_agents as ca
 
@@ -1103,7 +1118,7 @@ def test_finalize_reuses_below_90_cached_pipeline_without_rerun(monkeypatch):
     assert result["report"]["reused_pipeline_reason"] == "score_below_editor_pass"
 
 
-def test_finalize_accepts_near_pass_cached_pipeline_without_rerun(monkeypatch):
+def test_finalize_rejects_near_pass_cached_pipeline_without_rerun(monkeypatch):
     import services.chapter_agents as ca
     import services.chapter_quality as cq
 
@@ -1144,13 +1159,13 @@ def test_finalize_accepts_near_pass_cached_pipeline_without_rerun(monkeypatch):
         )
     )
 
-    assert result["ok"] is True
+    assert result["ok"] is False
     assert result["attempts"] == 2
     assert result["report"]["reused_pipeline_result"] is True
-    assert result["report"]["reused_pipeline_reason"] == "editor_near_pass"
+    assert result["report"]["reused_pipeline_reason"] == "score_below_editor_pass"
 
 
-def test_finalize_accepts_cached_pipeline_with_soft_blocking_brief(monkeypatch):
+def test_finalize_rejects_cached_pipeline_with_soft_blocking_brief_below_pass_score(monkeypatch):
     import services.chapter_agents as ca
     import services.chapter_quality as cq
 
@@ -1189,12 +1204,12 @@ def test_finalize_accepts_cached_pipeline_with_soft_blocking_brief(monkeypatch):
         )
     )
 
-    assert result["ok"] is True
+    assert result["ok"] is False
     assert result["report"]["reused_pipeline_result"] is True
-    assert result["report"]["reused_pipeline_reason"] == "editor_near_pass"
+    assert result["report"]["reused_pipeline_reason"] == "score_below_editor_pass"
 
 
-def test_finalize_accepts_cached_pipeline_with_dialogue_only_blocking_issue(monkeypatch):
+def test_finalize_rejects_cached_dialogue_issue_below_pass_score(monkeypatch):
     import services.chapter_agents as ca
     import services.chapter_quality as cq
 
@@ -1233,9 +1248,9 @@ def test_finalize_accepts_cached_pipeline_with_dialogue_only_blocking_issue(monk
         )
     )
 
-    assert result["ok"] is True
+    assert result["ok"] is False
     assert result["report"]["reused_pipeline_result"] is True
-    assert result["report"]["reused_pipeline_reason"] == "editor_near_pass"
+    assert result["report"]["reused_pipeline_reason"] == "score_below_editor_pass"
 
 
 def test_finalize_rejects_near_pass_cached_pipeline_with_blocking_issue(monkeypatch):
@@ -1449,7 +1464,7 @@ def test_scene_budget_caps_total_max_chars():
     assert all(item["max_chars"] >= item["target_chars"] for item in budget)
 
 
-def test_promote_near_pass_review_only_without_blocking_issues():
+def test_near_pass_review_keeps_original_score_and_remains_unapproved():
     import services.chapter_agents as ca
 
     content = "陈玄扣住短刀。母亲看着药碗。她说：别逞强。他点头：我知道。门外有人压低声音：走。" * 60
@@ -1465,10 +1480,10 @@ def test_promote_near_pass_review_only_without_blocking_issues():
 
     promoted = ca._promote_near_pass_review(review, content)
 
-    assert promoted["approved"] is True
-    assert promoted["overall_score"] == 90
-    assert promoted["scores"]["overall"] == 90
-    assert promoted["near_pass_promoted"] is True
+    assert promoted["approved"] is False
+    assert promoted["overall_score"] == 86
+    assert promoted["scores"]["overall"] == 86
+    assert "near_pass_promoted" not in promoted
 
 
 def test_promote_near_pass_review_keeps_real_blocking_failures():
@@ -1490,7 +1505,7 @@ def test_promote_near_pass_review_keeps_real_blocking_failures():
     assert "near_pass_promoted" not in result
 
 
-def test_revision_feedback_skips_soft_near_pass_suggestions():
+def test_revision_feedback_keeps_soft_suggestions_below_pass_score():
     import services.chapter_agents as ca
 
     content = "陈玄扣住短刀。母亲看着药碗。她说：别逞强。他点头：我知道。门外有人压低声音：走。" * 60
@@ -1505,10 +1520,10 @@ def test_revision_feedback_skips_soft_near_pass_suggestions():
 
     feedback = ca._revision_feedback_for_writer(review, {}, content)
 
-    assert feedback == []
+    assert feedback
 
 
-def test_revision_feedback_ignores_dialogue_only_blocking_issue():
+def test_revision_feedback_requires_revision_below_pass_score_after_dialogue_softening():
     import services.chapter_agents as ca
 
     content = "陈玄扣住短刀。母亲看着药碗。她说：别逞强。他点头：我知道。门外有人压低声音：走。" * 60
@@ -1522,10 +1537,10 @@ def test_revision_feedback_ignores_dialogue_only_blocking_issue():
 
     feedback = ca._revision_feedback_for_writer(review, {}, content)
 
-    assert feedback == []
+    assert feedback
 
 
-def test_revision_feedback_ignores_soft_blocking_brief_text():
+def test_revision_feedback_keeps_soft_blocking_brief_below_pass_score():
     import services.chapter_agents as ca
 
     content = "陈玄扣住短刀。母亲看着药碗。她说：别逞强。他点头：我知道。门外有人压低声音：走。" * 60
@@ -1539,7 +1554,7 @@ def test_revision_feedback_ignores_soft_blocking_brief_text():
 
     feedback = ca._revision_feedback_for_writer(review, {}, content)
 
-    assert feedback == []
+    assert feedback
 
 
 def test_revision_feedback_keeps_blockers_but_filters_future_drift_and_dialogue_quota():

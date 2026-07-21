@@ -118,7 +118,47 @@ def _ensure_varchar_column(
         )
 
 
+def _migrate_legacy_video_channel_adapters(target_engine=None) -> None:
+    """将历史视频渠道协议幂等迁移到 Lingdong，不改写其他渠道或未知值。"""
+    from sqlalchemy import inspect, text
+
+    db_engine = target_engine or engine
+    inspector = inspect(db_engine)
+    if "ai_channels" not in inspector.get_table_names():
+        return
+    columns = {column["name"] for column in inspector.get_columns("ai_channels")}
+    if not {"modality", "adapter_type"}.issubset(columns):
+        return
+    with db_engine.begin() as conn:
+        _prepare_migration_conn(conn)
+        conn.execute(text("""
+            UPDATE ai_channels
+            SET adapter_type = 'lingdong_video'
+            WHERE modality = 'video'
+              AND (
+                  adapter_type IS NULL
+                  OR trim(adapter_type) = ''
+                  OR adapter_type = 'openai_compatible'
+              )
+        """))
+
+
 def _migrate(target_engine=None):
+    """串行执行增量迁移，避免多进程同时执行 inspect-then-alter。"""
+    from sqlalchemy import text
+
+    db_engine = target_engine or engine
+    if db_engine.dialect.name != "postgresql":
+        return _migrate_unlocked(db_engine)
+    with db_engine.connect() as lock_conn:
+        lock_conn.execute(text("SELECT pg_advisory_lock(731945280164)"))
+        try:
+            return _migrate_unlocked(db_engine)
+        finally:
+            lock_conn.execute(text("SELECT pg_advisory_unlock(731945280164)"))
+
+
+def _migrate_unlocked(target_engine=None):
     """Add missing columns to existing tables (poor-man's migration)."""
     from sqlalchemy import inspect, text
     db_engine = target_engine or engine
@@ -170,6 +210,8 @@ def _migrate(target_engine=None):
                 conn.execute(text("ALTER TABLE chapters ADD COLUMN quality_score JSON"))
             if "memory_summary" not in cols:
                 conn.execute(text("ALTER TABLE chapters ADD COLUMN memory_summary JSON"))
+            if "manga_asset_analysis_json" not in cols:
+                conn.execute(text("ALTER TABLE chapters ADD COLUMN manga_asset_analysis_json JSON"))
             if "status" not in cols:
                 conn.execute(text("ALTER TABLE chapters ADD COLUMN status VARCHAR(20) DEFAULT 'pending'"))
             if "word_count" not in cols:
@@ -224,6 +266,26 @@ def _migrate(target_engine=None):
                 conn.execute(text("ALTER TABLE billing_orders ADD COLUMN paid_at TIMESTAMP"))
             if "expired_at" not in cols:
                 conn.execute(text("ALTER TABLE billing_orders ADD COLUMN expired_at TIMESTAMP"))
+            if "points_product_id" not in cols:
+                conn.execute(text("ALTER TABLE billing_orders ADD COLUMN points_product_id INTEGER"))
+            if db_engine.dialect.name == "postgresql":
+                conn.execute(text("ALTER TABLE billing_orders ALTER COLUMN plan_id DROP NOT NULL"))
+                conn.execute(text("""
+                    DO $$
+                    BEGIN
+                        IF NOT EXISTS (
+                            SELECT 1
+                            FROM pg_constraint
+                            WHERE conname = 'billing_orders_points_product_id_fkey'
+                              AND conrelid = 'billing_orders'::regclass
+                        ) THEN
+                            ALTER TABLE billing_orders
+                            ADD CONSTRAINT billing_orders_points_product_id_fkey
+                            FOREIGN KEY (points_product_id) REFERENCES points_products(id);
+                        END IF;
+                    END $$;
+                """))
+                conn.execute(text("CREATE INDEX IF NOT EXISTS ix_billing_orders_points_product_id ON billing_orders(points_product_id)"))
     if "user_subscriptions" in insp.get_table_names():
         cols = {c["name"] for c in insp.get_columns("user_subscriptions")}
         with db_engine.begin() as conn:
@@ -248,6 +310,61 @@ def _migrate(target_engine=None):
                 conn.execute(text("ALTER TABLE users ADD COLUMN allow_api_key_override BOOLEAN DEFAULT FALSE"))
             if "allow_api_url_override" not in cols:
                 conn.execute(text("ALTER TABLE users ADD COLUMN allow_api_url_override BOOLEAN DEFAULT FALSE"))
+    if "email_verification_codes" in insp.get_table_names():
+        cols = {c["name"] for c in insp.get_columns("email_verification_codes")}
+        with db_engine.begin() as conn:
+            _prepare_migration_conn(conn)
+            if "attempt_count" not in cols:
+                conn.execute(text("ALTER TABLE email_verification_codes ADD COLUMN attempt_count INTEGER DEFAULT 0 NOT NULL"))
+    if "points_products" in insp.get_table_names():
+        cols = {c["name"] for c in insp.get_columns("points_products")}
+        with db_engine.begin() as conn:
+            _prepare_migration_conn(conn)
+            if "description" not in cols:
+                conn.execute(text("ALTER TABLE points_products ADD COLUMN description TEXT"))
+            if "is_recommended" not in cols:
+                conn.execute(text("ALTER TABLE points_products ADD COLUMN is_recommended BOOLEAN DEFAULT FALSE"))
+            if "updated_at" not in cols:
+                conn.execute(text("ALTER TABLE points_products ADD COLUMN updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP"))
+    if "points_accounts" in insp.get_table_names() and db_engine.dialect.name == "postgresql":
+        with db_engine.begin() as conn:
+            _prepare_migration_conn(conn)
+            invalid_accounts = conn.execute(text("""
+                SELECT COUNT(*) FROM points_accounts
+                WHERE available_points < 0 OR reserved_points < 0
+            """)).scalar() or 0
+            if invalid_accounts:
+                raise RuntimeError(
+                    f"发现 {invalid_accounts} 个历史负积分账户，请先完成账本对账和修正流水后再迁移"
+                )
+            conn.execute(text("""
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM pg_constraint
+                        WHERE conname = 'ck_points_accounts_available_nonnegative'
+                          AND conrelid = 'points_accounts'::regclass
+                    ) THEN
+                        ALTER TABLE points_accounts
+                        ADD CONSTRAINT ck_points_accounts_available_nonnegative
+                        CHECK (available_points >= 0);
+                    END IF;
+                END $$;
+            """))
+            conn.execute(text("""
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM pg_constraint
+                        WHERE conname = 'ck_points_accounts_reserved_nonnegative'
+                          AND conrelid = 'points_accounts'::regclass
+                    ) THEN
+                        ALTER TABLE points_accounts
+                        ADD CONSTRAINT ck_points_accounts_reserved_nonnegative
+                        CHECK (reserved_points >= 0);
+                    END IF;
+                END $$;
+            """))
     if "background_tasks" in insp.get_table_names():
         cols = {c["name"] for c in insp.get_columns("background_tasks")}
         with db_engine.begin() as conn:
@@ -260,13 +377,41 @@ def _migrate(target_engine=None):
                 conn.execute(text("ALTER TABLE background_tasks ADD COLUMN quota_amount INTEGER DEFAULT 0"))
             if "quota_period_key" not in cols:
                 conn.execute(text("ALTER TABLE background_tasks ADD COLUMN quota_period_key VARCHAR(32)"))
+            # 同章节只能有一个活动漫画任务。先终结历史重复记录，再建立部分唯一索引。
+            conn.execute(text("""
+                UPDATE background_tasks
+                SET status = 'failed',
+                    error_message = '检测到重复活动任务，系统已自动终结',
+                    completed_at = CURRENT_TIMESTAMP
+                WHERE id IN (
+                    SELECT id FROM (
+                        SELECT id,
+                               ROW_NUMBER() OVER (
+                                   PARTITION BY chapter_id
+                                   ORDER BY created_at DESC, id DESC
+                               ) AS duplicate_rank
+                        FROM background_tasks
+                        WHERE task_type = 'manga_generation'
+                          AND chapter_id IS NOT NULL
+                          AND status IN ('pending', 'running', 'retrying', 'cancel_requested')
+                    ) ranked_tasks
+                    WHERE duplicate_rank > 1
+                )
+            """))
+            conn.execute(text("""
+                CREATE UNIQUE INDEX IF NOT EXISTS uq_background_tasks_active_manga_chapter
+                ON background_tasks (chapter_id)
+                WHERE task_type = 'manga_generation'
+                  AND chapter_id IS NOT NULL
+                  AND status IN ('pending', 'running', 'retrying', 'cancel_requested')
+            """))
+    _migrate_legacy_video_channel_adapters(db_engine)
     _migrate_video_tables(db_engine)
     _migrate_video_character_tables(db_engine)
     _seed_video_style_presets(db_engine)
     _normalize_video_style_names(db_engine)
     _migrate_money_columns(db_engine)
-    _cleanup_duplicate_chapters(db_engine)
-    _cleanup_duplicate_manga_images(db_engine)
+    _assert_no_duplicate_content(db_engine)
     _add_unique_constraints(db_engine)
     _migrate_prompt_templates(db_engine)
     _migrate_agent_pending_changes(db_engine)
@@ -339,26 +484,31 @@ def _migrate_money_columns(target_engine=None):
         logger.warning("Skipping money column migration for non-PostgreSQL database: %s", db_engine.dialect.name)
         return
 
+    from sqlalchemy import inspect
+
+    table_names = set(inspect(db_engine).get_table_names())
     with db_engine.begin() as conn:
         _prepare_migration_conn(conn)
-        conn.execute(text("""
-            ALTER TABLE plans
-            ALTER COLUMN monthly_price TYPE NUMERIC(10,2)
-            USING ROUND(COALESCE(monthly_price, 0)::numeric, 2)
-        """))
-        conn.execute(text("""
-            ALTER TABLE plans
-            ALTER COLUMN yearly_price TYPE NUMERIC(10,2)
-            USING CASE
-                WHEN yearly_price IS NULL THEN NULL
-                ELSE ROUND(yearly_price::numeric, 2)
-            END
-        """))
-        conn.execute(text("""
-            ALTER TABLE billing_orders
-            ALTER COLUMN amount TYPE NUMERIC(10,2)
-            USING ROUND(COALESCE(amount, 0)::numeric, 2)
-        """))
+        if "plans" in table_names:
+            conn.execute(text("""
+                ALTER TABLE plans
+                ALTER COLUMN monthly_price TYPE NUMERIC(10,2)
+                USING ROUND(COALESCE(monthly_price, 0)::numeric, 2)
+            """))
+            conn.execute(text("""
+                ALTER TABLE plans
+                ALTER COLUMN yearly_price TYPE NUMERIC(10,2)
+                USING CASE
+                    WHEN yearly_price IS NULL THEN NULL
+                    ELSE ROUND(yearly_price::numeric, 2)
+                END
+            """))
+        if "billing_orders" in table_names:
+            conn.execute(text("""
+                ALTER TABLE billing_orders
+                ALTER COLUMN amount TYPE NUMERIC(10,2)
+                USING ROUND(COALESCE(amount, 0)::numeric, 2)
+            """))
 
 def _safe_unlink(path: Path):
     try:
@@ -374,6 +524,28 @@ def _safe_rmtree(path: Path):
             shutil.rmtree(path)
     except OSError as exc:
         logger.warning("Failed to delete duplicate chapter directory %s: %s", path, exc)
+
+
+def _assert_no_duplicate_content(target_engine=None) -> None:
+    """阻止自动迁移删除重复内容，要求先完成可恢复的人工对账。"""
+    from sqlalchemy import inspect, text
+
+    db_engine = target_engine or engine
+    table_names = set(inspect(db_engine).get_table_names())
+    checks = []
+    if "chapters" in table_names:
+        checks.append(("章节", "SELECT COUNT(*) FROM (SELECT 1 FROM chapters GROUP BY story_id, chapter_number HAVING COUNT(*) > 1) AS duplicates"))
+    if "manga_images" in table_names:
+        checks.append(("漫画图片", "SELECT COUNT(*) FROM (SELECT 1 FROM manga_images GROUP BY chapter_id, image_number HAVING COUNT(*) > 1) AS duplicates"))
+    if not checks:
+        return
+    with db_engine.connect() as conn:
+        conflicts = [(label, int(conn.execute(text(sql)).scalar() or 0)) for label, sql in checks]
+    found = [f"{label} {count} 组" for label, count in conflicts if count > 0]
+    if found:
+        raise RuntimeError(
+            "检测到重复内容（" + "，".join(found) + "）；自动迁移禁止删除用户数据，请先备份并人工对账"
+        )
 
 
 def _cleanup_duplicate_manga_images(target_engine=None):
@@ -717,6 +889,9 @@ def _migrate_video_tables(target_engine=None):
                 conn.execute(text("ALTER TABLE chapter_video_shots ADD COLUMN scene_reference_ids JSON"))
             if "prop_reference_ids" not in chapter_video_shots_cols:
                 conn.execute(text("ALTER TABLE chapter_video_shots ADD COLUMN prop_reference_ids JSON"))
+            if "duration_seconds" not in chapter_video_shots_cols:
+                conn.execute(text("ALTER TABLE chapter_video_shots ADD COLUMN duration_seconds INTEGER DEFAULT 15"))
+            conn.execute(text("UPDATE chapter_video_shots SET duration_seconds = 15 WHERE duration_seconds IS NULL"))
             _ensure_varchar_column(conn, "chapter_video_shots", "screenplay_scene_id", chapter_video_shots_cols_by_name)
             _ensure_varchar_column(conn, "chapter_video_shots", "screenplay_beat_id", chapter_video_shots_cols_by_name)
             if "narrative_purpose" not in chapter_video_shots_cols:

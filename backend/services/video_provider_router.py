@@ -7,6 +7,7 @@ import logging
 from typing import Any
 
 from . import video_generation
+from .video_adapter import VIDEO_ADAPTER_LINGDONG
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +23,7 @@ async def submit(
     seed: int | None = None,
     api_key: str | None = None,
     base_url: str | None = None,
+    adapter_type: str = VIDEO_ADAPTER_LINGDONG,
 ) -> dict[str, Any]:
     return await video_generation.submit_video_job(
         shot_id=0,
@@ -35,6 +37,7 @@ async def submit(
         seed=seed,
         api_key=api_key,
         base_url=base_url,
+        adapter_type=adapter_type,
     )
 
 
@@ -43,8 +46,17 @@ async def query_status(
     provider_job_id: str,
     api_key: str | None = None,
     base_url: str | None = None,
+    model: str | None = None,
+    adapter_type: str = VIDEO_ADAPTER_LINGDONG,
 ) -> dict[str, Any]:
-    return await video_generation.query_job_status(provider, provider_job_id, api_key, base_url)
+    return await video_generation.query_job_status(
+        provider=provider,
+        provider_job_id=provider_job_id,
+        api_key=api_key,
+        base_url=base_url,
+        model=model,
+        adapter_type=adapter_type,
+    )
 
 
 async def fetch_result(
@@ -53,5 +65,15 @@ async def fetch_result(
     shot_id: int,
     api_key: str | None = None,
     base_url: str | None = None,
+    model: str | None = None,
+    adapter_type: str = VIDEO_ADAPTER_LINGDONG,
 ) -> dict[str, Any]:
-    return await video_generation.fetch_job_result(provider, provider_job_id, shot_id, api_key, base_url)
+    return await video_generation.fetch_job_result(
+        provider=provider,
+        provider_job_id=provider_job_id,
+        shot_id=shot_id,
+        api_key=api_key,
+        base_url=base_url,
+        model=model,
+        adapter_type=adapter_type,
+    )

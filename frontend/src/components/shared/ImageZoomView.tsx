@@ -23,6 +23,7 @@ export default function ImageZoomView({
   const containerRef = useRef<HTMLDivElement>(null);
   const imgRef = useRef<HTMLImageElement>(null);
   const fitZoomRef = useRef(1);
+  const [fitZoom, setFitZoom] = useState(1);
 
   const [zoom, setZoom] = useState(1);
   const [translateX, setTranslateX] = useState(0);
@@ -37,7 +38,7 @@ export default function ImageZoomView({
 
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
 
-  const isModified = Math.abs(zoom - fitZoomRef.current) > 0.01 || translateX !== 0 || translateY !== 0;
+  const isModified = Math.abs(zoom - fitZoom) > 0.01 || translateX !== 0 || translateY !== 0;
 
   useEffect(() => {
     onZoomChange?.(zoom);
@@ -187,6 +188,7 @@ export default function ImageZoomView({
       const scaleY = containerH / imgNaturalH;
       const fitZoom = Math.min(scaleX, scaleY, 1);
       fitZoomRef.current = fitZoom;
+      setFitZoom(fitZoom);
       setZoom(fitZoom);
     }
 
@@ -200,6 +202,7 @@ export default function ImageZoomView({
   useEffect(() => {
     setImgStatus('loading');
     fitZoomRef.current = 1;
+    setFitZoom(1);
     setZoom(1);
     setTranslateX(0);
     setTranslateY(0);

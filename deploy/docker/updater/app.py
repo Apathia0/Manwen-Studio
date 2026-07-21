@@ -1,6 +1,7 @@
 import base64
 import json
 import contextlib
+import hmac
 import os
 import re
 import subprocess
@@ -38,6 +39,10 @@ STALE_STATE_SECONDS = int(os.getenv("UPDATER_STALE_STATE_SECONDS", "60"))
 app = FastAPI(title="LoreVista Updater")
 _lock = threading.Lock()
 _process: subprocess.Popen[str] | None = None
+
+
+def _updater_token_configured() -> bool:
+    return len(UPDATER_TOKEN) >= 32 and not UPDATER_TOKEN.lower().startswith("change-this")
 
 
 class UpdateRequest(BaseModel):
@@ -141,13 +146,35 @@ def _string_field(payload: dict[str, Any], key: str) -> str:
     return str(value).strip()
 
 
+def _url_origin(url: str) -> tuple[str, str, int | None]:
+    parts = urllib.parse.urlsplit(url)
+    return parts.scheme.lower(), (parts.hostname or "").lower(), parts.port
+
+
+class _ManifestRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """跨源重定向时移除更新清单认证头。"""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        redirected = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if redirected is not None and _url_origin(req.full_url) != _url_origin(newurl):
+            sensitive_headers = {"authorization", "x-updater-token"}
+            for name, _value in list(redirected.header_items()):
+                if name.lower() in sensitive_headers:
+                    redirected.remove_header(name)
+        return redirected
+
+
 def _fetch_update_manifest() -> dict[str, Any]:
     headers = {"Accept": "application/json"}
+    manifest_host = (urllib.parse.urlsplit(UPDATE_MANIFEST_URL).hostname or "").lower()
+    if manifest_host in {"updater", "localhost", "127.0.0.1", "::1"} and UPDATER_TOKEN:
+        headers["X-Updater-Token"] = UPDATER_TOKEN
     if UPDATE_MANIFEST_TOKEN:
         headers["Authorization"] = f"Bearer {UPDATE_MANIFEST_TOKEN}"
     request = urllib.request.Request(UPDATE_MANIFEST_URL, headers=headers)
     try:
-        with urllib.request.urlopen(request, timeout=UPDATE_MANIFEST_TIMEOUT_SECONDS) as response:
+        opener = urllib.request.build_opener(_ManifestRedirectHandler())
+        with opener.open(request, timeout=UPDATE_MANIFEST_TIMEOUT_SECONDS) as response:
             body = response.read(1024 * 1024 + 1)
             if len(body) > 1024 * 1024:
                 raise HTTPException(502, "Update manifest is too large")
@@ -314,9 +341,9 @@ def _set_state(**updates: Any) -> dict[str, Any]:
 
 
 def _auth(x_updater_token: str | None = Header(default=None)) -> None:
-    if not UPDATER_TOKEN:
-        return
-    if x_updater_token != UPDATER_TOKEN:
+    if not _updater_token_configured():
+        raise HTTPException(503, "Updater token is not configured")
+    if not hmac.compare_digest(str(x_updater_token or ""), UPDATER_TOKEN):
         raise HTTPException(401, "Invalid updater token")
 
 
@@ -456,14 +483,6 @@ def _run_update(target_version: str | None) -> None:
         exit_code = proc.wait()
         _process = None
         if exit_code == 0:
-            # 更新成功后，自动配置 UPDATE_MANIFEST_URL 指向本机 /manifest
-            current_url = _read_env_value("UPDATE_MANIFEST_URL") or ""
-            if not current_url or current_url == DEFAULT_MANIFEST_URL or "example.com" in current_url:
-                try:
-                    _write_env_updates({"UPDATE_MANIFEST_URL": "http://updater:8090/manifest"})
-                    _append_log(state, "UPDATE_MANIFEST_URL 已设置为 http://updater:8090/manifest")
-                except Exception as exc:
-                    _append_log(state, f"UPDATE_MANIFEST_URL 自动配置失败: {exc}")
             _set_state(status="succeeded", message="Update completed.", finished_at=_now(), exit_code=exit_code)
         else:
             if target_version:
@@ -479,6 +498,8 @@ def _run_update(target_version: str | None) -> None:
 
 @app.get("/health")
 def health():
+    if not _updater_token_configured():
+        raise HTTPException(503, "Updater token is not configured")
     return {"ok": True}
 
 

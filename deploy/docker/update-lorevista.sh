@@ -134,9 +134,10 @@ main() {
     validate_version_images "$current_target"
   fi
 
-  local backend_before web_before backend_pulled web_pulled
+  local backend_before web_before updater_before backend_pulled web_pulled updater_pulled
   backend_before="$(running_image_id_for "$BACKEND_SERVICE")"
   web_before="$(running_image_id_for "$WEB_SERVICE")"
+  updater_before="$(running_image_id_for updater)"
   BACKEND_PREVIOUS_IMAGE_ID="$backend_before"
   WEB_PREVIOUS_IMAGE_ID="$web_before"
   BACKEND_IMAGE_REF="${BACKEND_IMAGE_REF:-$(image_ref_for "$BACKEND_SERVICE")}"
@@ -146,37 +147,40 @@ main() {
 
   backend_pulled="$(image_id_for "$BACKEND_SERVICE")"
   web_pulled="$(image_id_for "$WEB_SERVICE")"
+  updater_pulled="$(image_id_for updater)"
 
-  if [[ "$backend_before" == "$backend_pulled" && "$web_before" == "$web_pulled" ]]; then
+  if [[ "$backend_before" == "$backend_pulled" && "$web_before" == "$web_pulled" && "$updater_before" == "$updater_pulled" ]]; then
     log "no image changes detected"
     exit 0
   fi
 
-  log "new image detected; running migrations before service replacement"
-  compose_with_timeout "$MIGRATION_TIMEOUT_SECONDS" run --rm \
-    -e RUN_STARTUP_MIGRATIONS=true \
-    "$BACKEND_SERVICE" \
-    sh -lc "$MIGRATION_COMMAND"
+  if [[ "$backend_before" != "$backend_pulled" || "$web_before" != "$web_pulled" ]]; then
+    log "application image change detected; running migrations before service replacement"
+    compose_with_timeout "$MIGRATION_TIMEOUT_SECONDS" run --rm \
+      -e RUN_STARTUP_MIGRATIONS=true \
+      "$BACKEND_SERVICE" \
+      sh -lc "$MIGRATION_COMMAND"
 
-  log "starting backend with new image"
-  compose up -d --no-deps "$BACKEND_SERVICE"
-  if ! wait_for_health "$BACKEND_HEALTH_URL"; then
-    log "backend health check failed"
-    rollback
-    exit 1
-  fi
+    log "starting backend with new image"
+    compose up -d --no-deps "$BACKEND_SERVICE"
+    if ! wait_for_health "$BACKEND_HEALTH_URL"; then
+      log "backend health check failed"
+      rollback
+      exit 1
+    fi
 
-  log "starting web with new image"
-  compose up -d --no-deps "$WEB_SERVICE"
-  if ! wait_for_health "$WEB_HEALTH_URL"; then
-    log "web health check failed"
-    rollback
-    exit 1
-  fi
-  if ! wait_for_health "$H5_HEALTH_URL"; then
-    log "mobile H5 health check failed"
-    rollback
-    exit 1
+    log "starting web with new image"
+    compose up -d --no-deps "$WEB_SERVICE"
+    if ! wait_for_health "$WEB_HEALTH_URL"; then
+      log "web health check failed"
+      rollback
+      exit 1
+    fi
+    if ! wait_for_health "$H5_HEALTH_URL"; then
+      log "mobile H5 health check failed"
+      rollback
+      exit 1
+    fi
   fi
 
   if [[ "${SKIP_IMAGE_PRUNE:-false}" == "true" ]]; then
@@ -202,9 +206,23 @@ EOF
     log "updated local manifest to ${updated_version}"
   fi
 
-  log "restarting updater with new image"
-  # 使用 nohup 让重启命令在容器停止后仍能执行完毕
-  nohup bash -c "sleep 2 && compose up -d --no-deps updater" >/dev/null 2>&1 &
+  if [[ "$updater_before" != "$updater_pulled" ]]; then
+    log "restarting updater with new image"
+    # 使用独立 helper 容器替换 updater，避免当前容器停止时终止 Compose 进程。
+    local updater_image helper_name
+    updater_image="$(image_ref_for updater)"
+    helper_name="lorevista-updater-replacer-$(date +%s)-${RANDOM}"
+    docker run --rm -d \
+      --name "$helper_name" \
+      -v /var/run/docker.sock:/var/run/docker.sock \
+      -v "$APP_DIR:$APP_DIR" \
+      -e ENV_FILE="$ENV_FILE" \
+      -e COMPOSE_FILE="$COMPOSE_FILE" \
+      -e LOG_FILE="$LOG_FILE" \
+      --entrypoint bash \
+      "$updater_image" \
+      -lc 'sleep 2; docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" up -d --no-deps updater >>"$LOG_FILE" 2>&1'
+  fi
 
   log "update completed"
 }

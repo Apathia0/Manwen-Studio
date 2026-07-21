@@ -2,7 +2,7 @@ import datetime
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, JSON, Numeric, String, Text, UniqueConstraint, func
+from sqlalchemy import Boolean, CheckConstraint, DateTime, ForeignKey, Index, Integer, JSON, Numeric, String, Text, UniqueConstraint, func, text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from database import Base
@@ -63,6 +63,7 @@ class Chapter(Base):
     key_events: Mapped[list[Any] | None] = mapped_column(JSON, nullable=True)
     quality_score: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     memory_summary: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    manga_asset_analysis_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     status: Mapped[str] = mapped_column(String(20), default="pending")
     video_style_preset_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("video_style_presets.id"), nullable=True)
     word_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -212,12 +213,45 @@ class EmailVerificationCode(Base):
     email: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
     purpose: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
     code_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     expires_at: Mapped[datetime.datetime] = mapped_column(DateTime, nullable=False)
     consumed_at: Mapped[datetime.datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now())
 
 
+class MangaAsset(Base):
+    __tablename__ = "manga_assets"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    owner_user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    story_id: Mapped[int] = mapped_column(Integer, ForeignKey("stories.id"), nullable=False, index=True)
+    chapter_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("chapters.id"), nullable=True, index=True)
+    asset_type: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    storage_path: Mapped[str] = mapped_column(String(500), nullable=False)
+    source_type: Mapped[str] = mapped_column(String(20), nullable=False, default="upload")
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="active")
+    metadata_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class MangaAssetBinding(Base):
+    __tablename__ = "manga_asset_bindings"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    asset_id: Mapped[int] = mapped_column(Integer, ForeignKey("manga_assets.id"), nullable=False, index=True)
+    story_id: Mapped[int] = mapped_column(Integer, ForeignKey("stories.id"), nullable=False, index=True)
+    chapter_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("chapters.id"), nullable=True, index=True)
+    binding_role: Mapped[str] = mapped_column(String(20), nullable=False, default="character")
+    label: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    priority: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    is_required: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    created_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now())
+
+
 class Plan(Base):
+    """历史套餐定义，仅用于兼容旧订单与旧数据。"""
+
     __tablename__ = "plans"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
@@ -227,7 +261,7 @@ class Plan(Base):
     monthly_price: Mapped[Decimal] = mapped_column(Numeric(10, 2), nullable=False, default=Decimal("0.00"))
     yearly_price: Mapped[Decimal | None] = mapped_column(Numeric(10, 2), nullable=True)
     currency: Mapped[str] = mapped_column(String(16), nullable=False, default="CNY")
-    is_visible: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    is_visible: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     is_recommended: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     created_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now())
 
@@ -236,6 +270,8 @@ class Plan(Base):
 
 
 class PlanFeature(Base):
+    """历史套餐能力，仅用于读取旧数据。"""
+
     __tablename__ = "plan_features"
     __table_args__ = (UniqueConstraint("plan_id", "feature_key", name="uq_plan_feature_key"),)
 
@@ -249,6 +285,8 @@ class PlanFeature(Base):
 
 
 class PlanQuotaRule(Base):
+    """历史套餐次数规则，仅用于读取旧数据。"""
+
     __tablename__ = "plan_quota_rules"
     __table_args__ = (UniqueConstraint("plan_id", "feature_key", name="uq_plan_quota_feature_key"),)
 
@@ -264,6 +302,8 @@ class PlanQuotaRule(Base):
 
 
 class UserSubscription(Base):
+    """历史订阅记录，不再作为当前权益来源。"""
+
     __tablename__ = "user_subscriptions"
     __table_args__ = (UniqueConstraint("user_id", name="uq_user_subscription_user"),)
 
@@ -279,6 +319,8 @@ class UserSubscription(Base):
 
 
 class UserUsageMonthly(Base):
+    """历史次数用量，不再作为积分扣费来源。"""
+
     __tablename__ = "user_usage_monthly"
     __table_args__ = (UniqueConstraint("user_id", "feature_key", "period_key", name="uq_user_usage_monthly"),)
 
@@ -291,6 +333,8 @@ class UserUsageMonthly(Base):
 
 
 class UserQuotaGrantMonthly(Base):
+    """历史次数补发，不再作为积分余额来源。"""
+
     __tablename__ = "user_quota_grants_monthly"
     __table_args__ = (UniqueConstraint("user_id", "feature_key", "period_key", name="uq_user_quota_grants_monthly"),)
 
@@ -308,7 +352,8 @@ class BillingOrder(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     order_no: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
     user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False)
-    plan_id: Mapped[int] = mapped_column(Integer, ForeignKey("plans.id"), nullable=False)
+    plan_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("plans.id"), nullable=True)
+    points_product_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("points_products.id"), nullable=True, index=True)
     amount: Mapped[Decimal] = mapped_column(Numeric(10, 2), nullable=False, default=Decimal("0.00"))
     currency: Mapped[str] = mapped_column(String(16), nullable=False, default="CNY")
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="active")
@@ -467,6 +512,7 @@ class ChapterVideoShot(Base):
     # 图片和视频
     storyboard_image_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
     video_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    duration_seconds: Mapped[int] = mapped_column(Integer, default=15, nullable=False)
 
     # 状态
     status: Mapped[str] = mapped_column(String(32), default="pending")
@@ -669,6 +715,21 @@ class VideoProject(Base):
 class BackgroundTask(Base):
     """后台任务状态持久化"""
     __tablename__ = "background_tasks"
+    __table_args__ = (
+        Index(
+            "uq_background_tasks_active_manga_chapter",
+            "chapter_id",
+            unique=True,
+            postgresql_where=text(
+                "task_type = 'manga_generation' AND chapter_id IS NOT NULL "
+                "AND status IN ('pending', 'running', 'retrying', 'cancel_requested')"
+            ),
+            sqlite_where=text(
+                "task_type = 'manga_generation' AND chapter_id IS NOT NULL "
+                "AND status IN ('pending', 'running', 'retrying', 'cancel_requested')"
+            ),
+        ),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     task_id: Mapped[str] = mapped_column(String(50), unique=True, nullable=False, index=True)
@@ -922,3 +983,307 @@ class StoryDeconstructionRef(Base):
     applied_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now())
 
     work: Mapped["DeconstructionWork"] = relationship("DeconstructionWork")
+
+
+# ---------------------------------------------------------------------------
+# 积分双轨：渠道 / 模型 / 积分账本 / 用户凭据
+# ---------------------------------------------------------------------------
+
+
+class AiChannel(Base):
+    """上游 AI 渠道（Base URL + 平台 Key）"""
+
+    __tablename__ = "ai_channels"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    code: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    adapter_type: Mapped[str] = mapped_column(String(64), nullable=False, default="openai_compatible")
+    base_url: Mapped[str] = mapped_column(String(512), nullable=False, default="")
+    modality: Mapped[str] = mapped_column(String(32), nullable=False, default="text")
+    platform_secret_ciphertext: Mapped[str | None] = mapped_column(Text, nullable=True)
+    key_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    last_four: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    timeout_seconds: Mapped[int] = mapped_column(Integer, nullable=False, default=120)
+    extra_config_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+    models: Mapped[list["AiModel"]] = relationship("AiModel", back_populates="channel", cascade="all, delete-orphan")
+
+
+class AiModel(Base):
+    """平台模型目录"""
+
+    __tablename__ = "ai_models"
+    __table_args__ = (UniqueConstraint("channel_id", "model_key", name="uq_ai_models_channel_key"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    channel_id: Mapped[int] = mapped_column(Integer, ForeignKey("ai_channels.id", ondelete="CASCADE"), nullable=False, index=True)
+    model_key: Mapped[str] = mapped_column(String(191), nullable=False)
+    display_name: Mapped[str] = mapped_column(String(191), nullable=False)
+    modality: Mapped[str] = mapped_column(String(32), nullable=False, default="text")
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    user_visible: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    capabilities_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    synced_at: Mapped[datetime.datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+    channel: Mapped["AiChannel"] = relationship("AiChannel", back_populates="models")
+    prices: Mapped[list["AiModelPrice"]] = relationship("AiModelPrice", back_populates="model", cascade="all, delete-orphan")
+
+
+class AiModelPrice(Base):
+    """模型积分价格版本"""
+
+    __tablename__ = "ai_model_prices"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    model_id: Mapped[int] = mapped_column(Integer, ForeignKey("ai_models.id", ondelete="CASCADE"), nullable=False, index=True)
+    billing_type: Mapped[str] = mapped_column(String(32), nullable=False, default="per_call")
+    price_config_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    valid_from: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    valid_to: Mapped[datetime.datetime | None] = mapped_column(DateTime, nullable=True)
+    created_by: Mapped[int | None] = mapped_column(Integer, ForeignKey("users.id"), nullable=True)
+    created_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now())
+
+    model: Mapped["AiModel"] = relationship("AiModel", back_populates="prices")
+
+
+class AiTaskDefault(Base):
+    """业务任务默认模型"""
+
+    __tablename__ = "ai_task_defaults"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    task_type: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    model_id: Mapped[int] = mapped_column(Integer, ForeignKey("ai_models.id", ondelete="CASCADE"), nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    updated_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
+class UserAiCredential(Base):
+    """用户自有 API Key（加密）"""
+
+    __tablename__ = "user_ai_credentials"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, unique=True)
+    secret_ciphertext: Mapped[str | None] = mapped_column(Text, nullable=True)
+    key_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    last_four: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="empty")
+    last_validated_at: Mapped[datetime.datetime | None] = mapped_column(DateTime, nullable=True)
+    updated_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
+class UserAiPreference(Base):
+    """用户默认凭据模式与默认模型"""
+
+    __tablename__ = "user_ai_preferences"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, unique=True)
+    credential_mode: Mapped[str] = mapped_column(String(20), nullable=False, default="platform")
+    default_text_model_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("ai_models.id"), nullable=True)
+    default_image_model_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("ai_models.id"), nullable=True)
+    default_video_model_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("ai_models.id"), nullable=True)
+    updated_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
+class PointsAccount(Base):
+    """用户积分账户"""
+
+    __tablename__ = "points_accounts"
+    __table_args__ = (
+        CheckConstraint("available_points >= 0", name="ck_points_accounts_available_nonnegative"),
+        CheckConstraint("reserved_points >= 0", name="ck_points_accounts_reserved_nonnegative"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, unique=True)
+    available_points: Mapped[Decimal] = mapped_column(Numeric(18, 4), nullable=False, default=Decimal("0"))
+    reserved_points: Mapped[Decimal] = mapped_column(Numeric(18, 4), nullable=False, default=Decimal("0"))
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    updated_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
+class PointsLedgerEntry(Base):
+    """积分流水（不可变追加）"""
+
+    __tablename__ = "points_ledger_entries"
+    __table_args__ = (UniqueConstraint("idempotency_key", name="uq_points_ledger_idempotency"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    account_id: Mapped[int] = mapped_column(Integer, ForeignKey("points_accounts.id", ondelete="CASCADE"), nullable=False, index=True)
+    entry_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    amount: Mapped[Decimal] = mapped_column(Numeric(18, 4), nullable=False)
+    balance_after: Mapped[Decimal | None] = mapped_column(Numeric(18, 4), nullable=True)
+    idempotency_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    usage_event_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    order_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    metadata_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class AiUsageEvent(Base):
+    """一次逻辑 AI 请求用量事件"""
+
+    __tablename__ = "ai_usage_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    request_id: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    story_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("stories.id"), nullable=True)
+    chapter_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("chapters.id"), nullable=True)
+    task_type: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    credential_mode: Mapped[str] = mapped_column(String(20), nullable=False, default="platform")
+    model_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("ai_models.id"), nullable=True)
+    model_key: Mapped[str | None] = mapped_column(String(191), nullable=True)
+    channel_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("ai_channels.id"), nullable=True)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="reserved")
+    input_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    output_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    image_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    video_seconds: Mapped[Decimal | None] = mapped_column(Numeric(12, 3), nullable=True)
+    usage_source: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    estimated_points: Mapped[Decimal | None] = mapped_column(Numeric(18, 4), nullable=True)
+    reserved_points: Mapped[Decimal | None] = mapped_column(Numeric(18, 4), nullable=True)
+    settled_points: Mapped[Decimal | None] = mapped_column(Numeric(18, 4), nullable=True)
+    price_snapshot_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now())
+    completed_at: Mapped[datetime.datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class CreationStudioJob(Base):
+    """独立创作台中的一次图片或视频生成任务。"""
+
+    __tablename__ = "creation_studio_jobs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    owner_user_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    media_kind: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
+    generation_mode: Mapped[str] = mapped_column(String(40), nullable=False, default="text_to_media")
+    prompt: Mapped[str] = mapped_column(Text, nullable=False)
+    negative_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
+    model_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("ai_models.id"), nullable=True)
+    model_key: Mapped[str | None] = mapped_column(String(191), nullable=True)
+    parameters_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    status: Mapped[str] = mapped_column(String(24), nullable=False, default="queued", index=True)
+    stage: Mapped[str] = mapped_column(String(40), nullable=False, default="queued")
+    progress: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    background_task_id: Mapped[str | None] = mapped_column(String(50), nullable=True, unique=True, index=True)
+    provider_job_id: Mapped[str | None] = mapped_column(String(191), nullable=True, index=True)
+    output_asset_id: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey("creation_studio_assets.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    retry_of_job_id: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey("creation_studio_jobs.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    created_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now())
+    started_at: Mapped[datetime.datetime | None] = mapped_column(DateTime, nullable=True)
+    completed_at: Mapped[datetime.datetime | None] = mapped_column(DateTime, nullable=True)
+    updated_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+    deleted_at: Mapped[datetime.datetime | None] = mapped_column(DateTime, nullable=True, index=True)
+
+
+class CreationStudioAsset(Base):
+    """创作台上传的参考素材或生成结果。"""
+
+    __tablename__ = "creation_studio_assets"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    owner_user_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    job_id: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey("creation_studio_jobs.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    media_type: Mapped[str] = mapped_column(String(20), nullable=False, default="image")
+    role: Mapped[str] = mapped_column(String(20), nullable=False, default="upload")
+    storage_path: Mapped[str] = mapped_column(Text, nullable=False)
+    public_url: Mapped[str] = mapped_column(Text, nullable=False)
+    original_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    mime_type: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    file_size: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    width: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    height: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    duration_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    sha256: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    metadata_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="ready")
+    created_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now())
+    deleted_at: Mapped[datetime.datetime | None] = mapped_column(DateTime, nullable=True, index=True)
+
+
+class CreationStudioJobInput(Base):
+    """生成任务与参考素材之间的有序关联。"""
+
+    __tablename__ = "creation_studio_job_inputs"
+    __table_args__ = (UniqueConstraint("job_id", "asset_id", name="uq_creation_studio_job_asset"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    job_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("creation_studio_jobs.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    asset_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("creation_studio_assets.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    input_role: Mapped[str] = mapped_column(String(32), nullable=False, default="reference")
+    position: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class PointsProduct(Base):
+    """可一次性购买的积分套餐。"""
+
+    __tablename__ = "points_products"
+    __table_args__ = (
+        CheckConstraint("price_cny >= 0", name="ck_points_products_price_nonnegative"),
+        CheckConstraint("points > 0", name="ck_points_products_points_positive"),
+        CheckConstraint("bonus_points >= 0", name="ck_points_products_bonus_nonnegative"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    code: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    price_cny: Mapped[Decimal] = mapped_column(Numeric(10, 2), nullable=False)
+    points: Mapped[Decimal] = mapped_column(Numeric(18, 4), nullable=False)
+    bonus_points: Mapped[Decimal] = mapped_column(Numeric(18, 4), nullable=False, default=Decimal("0"))
+    is_visible: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    is_recommended: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())

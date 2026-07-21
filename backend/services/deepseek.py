@@ -1,4 +1,5 @@
 import asyncio
+import contextvars
 import hashlib
 import json
 import logging
@@ -19,9 +20,22 @@ DEEPSEEK_API_KEY = ""
 DEEPSEEK_BASE_URL = ""
 DEEPSEEK_MODEL = ""
 
-CHAPTER_TARGET_MIN_CHARS = 1800
-CHAPTER_TARGET_MAX_CHARS = 3500
-CHAPTER_TARGET_IDEAL_CHARS = 3000
+_RUNTIME_BASE_URL: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "deepseek_runtime_base_url",
+    default=None,
+)
+_RUNTIME_MODEL: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "deepseek_runtime_model",
+    default=None,
+)
+_USAGE_ACCUMULATOR: contextvars.ContextVar[dict[str, int] | None] = contextvars.ContextVar(
+    "deepseek_usage_accumulator",
+    default=None,
+)
+
+CHAPTER_TARGET_MIN_CHARS = 2200
+CHAPTER_TARGET_MAX_CHARS = 2800
+CHAPTER_TARGET_IDEAL_CHARS = 2500
 CHAPTER_FIRST_PASS_MIN_CHARS = 2300
 CHAPTER_FIRST_PASS_MAX_CHARS = 2550
 CHAPTER_COMPLETION_MAX_TOKENS = 2816
@@ -34,7 +48,7 @@ class ChapterPipelineQualityError(RuntimeError):
     """三角色章节链路产出正文但未通过编辑质量门禁。"""
 
     def __init__(self, review: Any | None = None):
-        super().__init__("三角色章节链路未达到编辑 90 分，已拒绝返回未达标候选稿")
+        super().__init__("三角色章节链路未达到编辑质量门禁，已拒绝返回未达标候选稿")
         self.review = review
 
 
@@ -172,19 +186,53 @@ def build_agent_chapter_system_prompt(db=None) -> str:
 
 
 def configure_runtime(base_url: str | None = None, model: str | None = None) -> None:
-    global DEEPSEEK_BASE_URL, DEEPSEEK_MODEL
     if isinstance(base_url, str) and base_url.strip():
-        DEEPSEEK_BASE_URL = base_url.strip().rstrip("/")
+        _RUNTIME_BASE_URL.set(base_url.strip().rstrip("/"))
     if isinstance(model, str) and model.strip():
-        DEEPSEEK_MODEL = model.strip()
+        _RUNTIME_MODEL.set(model.strip())
+
+
+def runtime_base_url() -> str:
+    """返回当前请求或任务上下文中的 DeepSeek API 地址。"""
+    return _RUNTIME_BASE_URL.get() or DEEPSEEK_BASE_URL
+
+
+def runtime_model() -> str:
+    """返回当前请求或任务上下文中的 DeepSeek 模型。"""
+    return _RUNTIME_MODEL.get() or DEEPSEEK_MODEL
+
+
+def reset_usage_accumulator() -> None:
+    """重置当前请求或异步任务的 token 用量累计。"""
+    _USAGE_ACCUMULATOR.set({"input_tokens": 0, "output_tokens": 0})
+
+
+def _record_response_usage(data: dict) -> None:
+    usage = data.get("usage") if isinstance(data, dict) else None
+    if not isinstance(usage, dict):
+        return
+    current = _USAGE_ACCUMULATOR.get()
+    if current is None:
+        current = {"input_tokens": 0, "output_tokens": 0}
+        _USAGE_ACCUMULATOR.set(current)
+    # 子任务会继承同一个累计器对象，原地更新才能把并行调用汇回父任务。
+    current["input_tokens"] += int(usage.get("prompt_tokens") or usage.get("input_tokens") or 0)
+    current["output_tokens"] += int(usage.get("completion_tokens") or usage.get("output_tokens") or 0)
+
+
+def consume_usage_accumulator() -> dict[str, int]:
+    """读取并清空当前上下文累计的 token 用量。"""
+    usage = dict(_USAGE_ACCUMULATOR.get() or {"input_tokens": 0, "output_tokens": 0})
+    _USAGE_ACCUMULATOR.set(None)
+    return usage
 
 # NOVEL_SYSTEM_PROMPT 已移至 main.py _seed_system_prompts
 
 
 def _deepseek_auth_headers(api_key: str | None = None) -> dict[str, str]:
-    if not DEEPSEEK_BASE_URL:
+    if not runtime_base_url():
         raise ValueError("DeepSeek API 地址未配置，请在后台设置中配置 API 地址后重试。")
-    if not DEEPSEEK_MODEL:
+    if not runtime_model():
         raise ValueError("DeepSeek 模型未配置，请在后台设置中配置模型名称后重试。")
     key = (api_key or DEEPSEEK_API_KEY or "").strip()
     if not key:
@@ -212,6 +260,7 @@ def _response_json(resp: httpx.Response, *, context: str = "DeepSeek") -> dict:
             data = json_loader()
             if not isinstance(data, dict):
                 raise ValueError(f"{context} 服务响应格式异常：顶层不是 JSON 对象")
+            _record_response_usage(data)
             return data
         text = ""
     if not text.strip():
@@ -230,7 +279,56 @@ def _response_json(resp: httpx.Response, *, context: str = "DeepSeek") -> dict:
         raise ValueError(f"{context} 服务返回了非 JSON 响应，请稍后重试或检查 API 地址、模型与代理配置") from exc
     if not isinstance(data, dict):
         raise ValueError(f"{context} 服务响应格式异常：顶层不是 JSON 对象")
+    _record_response_usage(data)
     return data
+
+
+async def repair_chapter_opening_only(
+    *,
+    content: str,
+    previous_handoff: dict | None,
+    story_context: dict | None,
+    chapter_info: dict | None,
+    api_key: str | None = None,
+    system_prompt: str | None = None,
+) -> str:
+    """只改写章节首句，保留后续正文不变。"""
+    original = str(content or "")
+    if not original.strip():
+        return original
+
+    opening_match = re.search(r"[。！？]\s*", original[:800])
+    opening_end = opening_match.end() if opening_match else min(len(original), 240)
+    body = original[opening_end:]
+    prompt = f"""请只重写下面章节的开头一句，使其自然承接上一章；不要续写正文，不要解释。
+
+上一章交接：{json.dumps(previous_handoff or {}, ensure_ascii=False)}
+当前章节：{json.dumps(chapter_info or {}, ensure_ascii=False)}
+作品上下文：{json.dumps(story_context or {}, ensure_ascii=False)[:3000]}
+待重写开头：{original[:opening_end]}
+"""
+    payload = {
+        "model": runtime_model(),
+        "messages": [
+            {"role": "system", "content": system_prompt or "你是小说连载编辑，只输出改写后的开头一句。"},
+            {"role": "user", "content": prompt},
+        ],
+        "stream": False,
+        "max_tokens": 300,
+    }
+    payload = _apply_runtime_params(payload)
+    async with httpx.AsyncClient(timeout=120) as client:
+        response = await client.post(
+            f"{runtime_base_url()}/chat/completions",
+            json=payload,
+            headers=_deepseek_auth_headers(api_key),
+        )
+    response.raise_for_status()
+    data = _response_json(response, context="DeepSeek")
+    repaired = str(data["choices"][0]["message"]["content"] or "").strip()
+    if not repaired:
+        return original
+    return repaired + body
 
 
 def _log_shot_summary(logger_obj, content: str, label: str = "拆镜"):
@@ -469,7 +567,7 @@ def _scene_split_prompt(page_count: int = 10) -> str:
 ## 格式示例
 "第1页：【第1格（大宽格）】场景环境全貌。【第2格（中景）】角色A和B面对面对话。对话气泡：「A的台词。」【第3格（窄格）】角色B的反应和动作。对话气泡：「B的回应。」【第4格（大宽格）】关键事件发生的动态画面。音效：动作音效。"
 
-风格：日式黑白漫画，高对比度，戏剧性光影，精细线条和网点。
+视觉风格由后续生成阶段的参考图决定；本分镜只负责构图、镜头和叙事信息。
 
 ## 禁止事项
 1. 禁止用氛围格/特写格凑数——每格都必须有叙事功能
@@ -492,9 +590,10 @@ async def chat_stream(messages: list[dict], api_key: str | None = None, framewor
     if framework_context:
         system_content += "\n\n## 故事框架约束\n" + framework_context
     payload = {
-        "model": DEEPSEEK_MODEL,
+        "model": runtime_model(),
         "messages": [{"role": "system", "content": system_content}] + messages,
         "stream": True,
+        "stream_options": {"include_usage": True},
         "max_tokens": 6144,
     }
     payload = _apply_runtime_params(payload)
@@ -502,7 +601,7 @@ async def chat_stream(messages: list[dict], api_key: str | None = None, framewor
     async with httpx.AsyncClient(timeout=600) as client:
         async with client.stream(
             "POST",
-            f"{DEEPSEEK_BASE_URL}/chat/completions",
+            f"{runtime_base_url()}/chat/completions",
             json=payload,
             headers=_deepseek_auth_headers(api_key),
         ) as response:
@@ -515,6 +614,9 @@ async def chat_stream(messages: list[dict], api_key: str | None = None, framewor
                     break
                 try:
                     data = json.loads(data_str)
+                    _record_response_usage(data)
+                    if not data.get("choices"):
+                        continue
                     delta = data["choices"][0].get("delta", {})
                     content = delta.get("content", "")
                     if content:
@@ -546,7 +648,7 @@ async def generate_novel(messages: list[dict], api_key: str | None = None, frame
 
     async def _complete_once(messages_for_call: list[dict]) -> str:
         payload = {
-            "model": DEEPSEEK_MODEL,
+            "model": runtime_model(),
             "messages": messages_for_call,
             "stream": False,
             "max_tokens": CHAPTER_COMPLETION_MAX_TOKENS,
@@ -555,7 +657,7 @@ async def generate_novel(messages: list[dict], api_key: str | None = None, frame
 
         async with httpx.AsyncClient(timeout=600) as client:
             resp = await client.post(
-                f"{DEEPSEEK_BASE_URL}/chat/completions",
+                f"{runtime_base_url()}/chat/completions",
                 json=payload,
                 headers=_deepseek_auth_headers(api_key),
             )
@@ -639,7 +741,7 @@ async def split_scenes(chat_messages: list[dict], character_profiles: str = "", 
             {"role": "user", "content": prompt},
         ]
         payload = {
-            "model": DEEPSEEK_MODEL,
+            "model": runtime_model(),
             "messages": [
                 {
                     "role": "system",
@@ -659,7 +761,7 @@ async def split_scenes(chat_messages: list[dict], character_profiles: str = "", 
 
         async with httpx.AsyncClient(timeout=120) as client:
             resp = await client.post(
-                f"{DEEPSEEK_BASE_URL}/chat/completions",
+                f"{runtime_base_url()}/chat/completions",
                 json=payload,
                 headers=_deepseek_auth_headers(api_key),
             )
@@ -881,7 +983,7 @@ async def _repair_onboarding_response(
 ) -> dict:
     fallback = _build_onboarding_fallback_response(messages, raw_content)
     payload = {
-        "model": DEEPSEEK_MODEL,
+        "model": runtime_model(),
         "messages": [
             {
                 "role": "system",
@@ -910,7 +1012,7 @@ async def _repair_onboarding_response(
 
     async with httpx.AsyncClient(timeout=120) as client:
         resp = await client.post(
-            f"{DEEPSEEK_BASE_URL}/chat/completions",
+            f"{runtime_base_url()}/chat/completions",
             json=payload,
             headers=_deepseek_auth_headers(api_key),
         )
@@ -1330,7 +1432,7 @@ async def regenerate_tags(story_context: dict, api_key: str | None = None, syste
     system_content = system_prompt or "你是小说策划编辑。基于已有的故事框架，输出仅包含 tags 的JSON对象。"
 
     payload = {
-        "model": DEEPSEEK_MODEL,
+        "model": runtime_model(),
         "messages": [
             {"role": "system", "content": system_content},
             {"role": "user", "content": user_prompt},
@@ -1343,7 +1445,7 @@ async def regenerate_tags(story_context: dict, api_key: str | None = None, syste
 
     async with httpx.AsyncClient(timeout=300) as client:
         resp = await client.post(
-            f"{DEEPSEEK_BASE_URL}/chat/completions",
+            f"{runtime_base_url()}/chat/completions",
             json=payload,
             headers=_deepseek_auth_headers(api_key),
         )
@@ -1375,7 +1477,7 @@ async def regenerate_characters_with_variance(story_context: dict, api_key: str 
 """
 
     payload = {
-        "model": DEEPSEEK_MODEL,
+        "model": runtime_model(),
         "messages": [
             {
                 "role": "system",
@@ -1393,7 +1495,7 @@ async def regenerate_characters_with_variance(story_context: dict, api_key: str 
 
     async with httpx.AsyncClient(timeout=300) as client:
         resp = await client.post(
-            f"{DEEPSEEK_BASE_URL}/chat/completions",
+            f"{runtime_base_url()}/chat/completions",
             json=payload,
             headers=_deepseek_auth_headers(api_key),
         )
@@ -1455,7 +1557,7 @@ async def generate_character_profiles_from_framework(story_context: dict, api_ke
 
     char_system_prompt = system_prompt or ""
     payload = {
-        "model": DEEPSEEK_MODEL,
+        "model": runtime_model(),
         "messages": [
             {
                 "role": "system",
@@ -1469,7 +1571,7 @@ async def generate_character_profiles_from_framework(story_context: dict, api_ke
 
     async with httpx.AsyncClient(timeout=300) as client:
         resp = await client.post(
-            f"{DEEPSEEK_BASE_URL}/chat/completions",
+            f"{runtime_base_url()}/chat/completions",
             json=payload,
             headers=_deepseek_auth_headers(api_key),
         )
@@ -1530,7 +1632,7 @@ async def generate_character_profiles_from_content(chapter_content: str, api_key
 """
 
     payload = {
-        "model": DEEPSEEK_MODEL,
+        "model": runtime_model(),
         "messages": [
             {
                 "role": "system",
@@ -1548,7 +1650,7 @@ async def generate_character_profiles_from_content(chapter_content: str, api_key
 
     async with httpx.AsyncClient(timeout=300) as client:
         resp = await client.post(
-            f"{DEEPSEEK_BASE_URL}/chat/completions",
+            f"{runtime_base_url()}/chat/completions",
             json=payload,
             headers=_deepseek_auth_headers(api_key),
         )
@@ -1817,7 +1919,7 @@ async def generate_framework(
 {quality_feedback_hint}"""
 
     payload = {
-        "model": DEEPSEEK_MODEL,
+        "model": runtime_model(),
         "messages": _framework_messages_with_long_form(system_prompt or "", user_prompt, effective_length),
         "stream": False,
         "max_tokens": 16384,
@@ -1826,7 +1928,7 @@ async def generate_framework(
 
     async with httpx.AsyncClient(timeout=600) as client:
         resp = await client.post(
-            f"{DEEPSEEK_BASE_URL}/chat/completions",
+            f"{runtime_base_url()}/chat/completions",
             json=payload,
             headers=_deepseek_auth_headers(api_key),
         )
@@ -1880,7 +1982,7 @@ async def regenerate_outline(story_context: dict, api_key: str | None = None, st
 7. 只输出 `{{"outline": ...}}` JSON 对象。"""
 
     payload = {
-        "model": DEEPSEEK_MODEL,
+        "model": runtime_model(),
         "messages": _framework_messages_with_long_form(
             system_prompt or "你是小说策划编辑。基于已有故事框架，只输出包含 outline 的 JSON 对象。",
             user_prompt,
@@ -1893,7 +1995,7 @@ async def regenerate_outline(story_context: dict, api_key: str | None = None, st
 
     async with httpx.AsyncClient(timeout=300) as client:
         resp = await client.post(
-            f"{DEEPSEEK_BASE_URL}/chat/completions",
+            f"{runtime_base_url()}/chat/completions",
             json=payload,
             headers=_deepseek_auth_headers(api_key),
         )
@@ -2016,7 +2118,7 @@ async def adjust_framework_with_chat(
 
     for attempt in range(MAX_RETRIES + 1):
         payload = {
-            "model": DEEPSEEK_MODEL,
+            "model": runtime_model(),
             "messages": _framework_messages_with_long_form(system_prompt or "", user_prompt, effective_length) + safe_messages,
             "stream": False,
             "max_tokens": 95536,
@@ -2026,7 +2128,7 @@ async def adjust_framework_with_chat(
         try:
             async with httpx.AsyncClient(timeout=600) as client:
                 resp = await client.post(
-                    f"{DEEPSEEK_BASE_URL}/chat/completions",
+                    f"{runtime_base_url()}/chat/completions",
                     json=payload,
                     headers=_deepseek_auth_headers(api_key),
                 )
@@ -2142,7 +2244,7 @@ async def continue_framework_with_chat(
 
     for attempt in range(MAX_RETRIES + 1):
         payload = {
-            "model": DEEPSEEK_MODEL,
+            "model": runtime_model(),
             "messages": _framework_messages_with_long_form(system_prompt or "", user_prompt, effective_length) + safe_messages,
             "stream": False,
             "max_tokens": 95536,
@@ -2152,7 +2254,7 @@ async def continue_framework_with_chat(
         try:
             async with httpx.AsyncClient(timeout=600) as client:
                 resp = await client.post(
-                    f"{DEEPSEEK_BASE_URL}/chat/completions",
+                    f"{runtime_base_url()}/chat/completions",
                     json=payload,
                     headers=_deepseek_auth_headers(api_key),
                 )
@@ -2249,7 +2351,7 @@ async def summarize_chapter_memory(
 4. 禁止输出 Markdown、解释或额外文本。"""
 
     payload = {
-        "model": DEEPSEEK_MODEL,
+        "model": runtime_model(),
         "messages": [
             {
                 "role": "system",
@@ -2272,7 +2374,7 @@ async def summarize_chapter_memory(
 
     async with httpx.AsyncClient(timeout=300) as client:
         resp = await client.post(
-            f"{DEEPSEEK_BASE_URL}/chat/completions",
+            f"{runtime_base_url()}/chat/completions",
             json=payload,
             headers=_deepseek_auth_headers(api_key),
         )
@@ -2462,9 +2564,13 @@ async def expand_chapter_to_content(
                     "attempts": pipeline_result.get("attempts", 0),
                     "finish_reason": pipeline_result.get("finish_reason"),
                 }
-            if pipeline_result.get("content"):
+            if pipeline_result.get("content") and pipeline_result.get("ok"):
                 return str(pipeline_result["content"])
+            if pipeline_result.get("content"):
+                raise ChapterPipelineQualityError(pipeline_result.get("review"))
             logging.warning("三角色章节链路未产出正文，回退旧章节扩写链路: %s", pipeline_result.get("review"))
+        except ChapterPipelineQualityError:
+            raise
         except Exception as exc:
             logging.warning("三角色章节链路执行失败，回退旧章节扩写链路: %s", exc)
 
@@ -2659,7 +2765,7 @@ async def expand_chapter_to_content(
     effective_system = _build_chapter_prompt_by_position(chapter_number, effective_system)
     effective_system = effective_system + _get_genre_prompt_addon(story_context)
     payload = {
-        "model": DEEPSEEK_MODEL,
+        "model": runtime_model(),
         "messages": [
             {"role": "system", "content": effective_system},
             {"role": "user", "content": user_prompt},
@@ -2670,7 +2776,7 @@ async def expand_chapter_to_content(
 
     async with httpx.AsyncClient(timeout=600) as client:
         resp = await client.post(
-            f"{DEEPSEEK_BASE_URL}/chat/completions",
+            f"{runtime_base_url()}/chat/completions",
             json=payload,
             headers=_deepseek_auth_headers(api_key),
         )
@@ -2839,7 +2945,7 @@ async def rewrite_selection(
     effective_system = system_prompt if system_prompt else HARDCODED_REWRITE_SYSTEM
 
     payload = {
-        "model": DEEPSEEK_MODEL,
+        "model": runtime_model(),
         "messages": [
             {"role": "system", "content": effective_system},
             {"role": "user", "content": user_prompt},
@@ -2850,7 +2956,7 @@ async def rewrite_selection(
 
     async with httpx.AsyncClient(timeout=600) as client:
         resp = await client.post(
-            f"{DEEPSEEK_BASE_URL}/chat/completions",
+            f"{runtime_base_url()}/chat/completions",
             json=payload,
             headers=_deepseek_auth_headers(api_key),
         )
@@ -2972,7 +3078,7 @@ async def adjust_chapter_content(
     effective_system = system_prompt if system_prompt else HARDCODED_CHAPTER_ADJUST_SYSTEM
 
     payload = {
-        "model": DEEPSEEK_MODEL,
+        "model": runtime_model(),
         "messages": [
             {"role": "system", "content": effective_system},
             {"role": "user", "content": user_prompt},
@@ -2983,7 +3089,7 @@ async def adjust_chapter_content(
 
     async with httpx.AsyncClient(timeout=600) as client:
         resp = await client.post(
-            f"{DEEPSEEK_BASE_URL}/chat/completions",
+            f"{runtime_base_url()}/chat/completions",
             json=payload,
             headers=_deepseek_auth_headers(api_key),
         )
@@ -3015,7 +3121,7 @@ async def quality_assess(chapter_content: str, api_key: str | None = None) -> di
 }}"""
 
     payload = {
-        "model": DEEPSEEK_MODEL,
+        "model": runtime_model(),
         "messages": [
             {"role": "system", "content": "你是一位资深文学评论家，对小说进行客观、专业的质量评估。请输出JSON格式。"},
             {"role": "user", "content": user_prompt},
@@ -3027,7 +3133,7 @@ async def quality_assess(chapter_content: str, api_key: str | None = None) -> di
 
     async with httpx.AsyncClient(timeout=300) as client:
         resp = await client.post(
-            f"{DEEPSEEK_BASE_URL}/chat/completions",
+            f"{runtime_base_url()}/chat/completions",
             json=payload,
             headers=_deepseek_auth_headers(api_key),
         )
@@ -3083,7 +3189,7 @@ JSON输出格式示例：
 请仅输出JSON，不要包含其他文字。"""
 
     payload = {
-        "model": DEEPSEEK_MODEL,
+        "model": runtime_model(),
         "messages": [
             {
                 "role": "system",
@@ -3102,7 +3208,7 @@ JSON输出格式示例：
 
     async with httpx.AsyncClient(timeout=600) as client:
         resp = await client.post(
-            f"{DEEPSEEK_BASE_URL}/chat/completions",
+            f"{runtime_base_url()}/chat/completions",
             json=payload,
             headers=_deepseek_auth_headers(api_key),
         )
@@ -3198,7 +3304,7 @@ JSON 顶层必须包含：
 """
 
     payload = {
-        "model": DEEPSEEK_MODEL,
+        "model": runtime_model(),
         "messages": [
             {
                 "role": "system",
@@ -3218,7 +3324,7 @@ JSON 顶层必须包含：
 
     async with httpx.AsyncClient(timeout=600) as client:
         resp = await client.post(
-            f"{DEEPSEEK_BASE_URL}/chat/completions",
+            f"{runtime_base_url()}/chat/completions",
             json=payload,
             headers=_deepseek_auth_headers(api_key),
         )
@@ -3271,7 +3377,7 @@ async def generate_onboarding_response(
     for attempt in range(max_retries + 1):
         try:
             payload = {
-                "model": DEEPSEEK_MODEL,
+                "model": runtime_model(),
                 "messages": [
                     {"role": "system", "content": (system_prompt or "") + onboarding_state_hint},
                     *messages,
@@ -3282,7 +3388,7 @@ async def generate_onboarding_response(
 
             async with httpx.AsyncClient(timeout=120) as client:
                 resp = await client.post(
-                    f"{DEEPSEEK_BASE_URL}/chat/completions",
+                    f"{runtime_base_url()}/chat/completions",
                     json=payload,
                     headers=_deepseek_auth_headers(api_key),
                 )
@@ -3388,7 +3494,7 @@ async def generate_import_guidance_response(
     for attempt in range(max_retries + 1):
         try:
             payload = {
-                "model": DEEPSEEK_MODEL,
+                "model": runtime_model(),
                 "messages": [
                     {"role": "system", "content": (system_prompt or "") + runtime_hint},
                     *messages,
@@ -3400,7 +3506,7 @@ async def generate_import_guidance_response(
 
             async with httpx.AsyncClient(timeout=120) as client:
                 resp = await client.post(
-                    f"{DEEPSEEK_BASE_URL}/chat/completions",
+                    f"{runtime_base_url()}/chat/completions",
                     json=payload,
                     headers=_deepseek_auth_headers(api_key),
                 )
@@ -3459,7 +3565,7 @@ async def build_import_creative_brief(
         collected_info=json.dumps(collected_info, ensure_ascii=False, indent=2),
     )
     payload = {
-        "model": DEEPSEEK_MODEL,
+        "model": runtime_model(),
         "messages": [
             {
                 "role": "system",
@@ -3474,7 +3580,7 @@ async def build_import_creative_brief(
 
     async with httpx.AsyncClient(timeout=120) as client:
         resp = await client.post(
-            f"{DEEPSEEK_BASE_URL}/chat/completions",
+            f"{runtime_base_url()}/chat/completions",
             json=payload,
             headers=_deepseek_auth_headers(api_key),
         )
@@ -3525,7 +3631,7 @@ async def build_creative_brief(
     user_prompt = BUILD_BRIEF_PROMPT.format(collected_info=info_str)
 
     payload = {
-        "model": DEEPSEEK_MODEL,
+        "model": runtime_model(),
         "messages": [
             {
                 "role": "system",
@@ -3540,7 +3646,7 @@ async def build_creative_brief(
 
     async with httpx.AsyncClient(timeout=120) as client:
         resp = await client.post(
-            f"{DEEPSEEK_BASE_URL}/chat/completions",
+            f"{runtime_base_url()}/chat/completions",
             json=payload,
             headers=_deepseek_auth_headers(api_key),
         )
@@ -3601,7 +3707,7 @@ async def build_story_bible(
     )
 
     payload = {
-        "model": DEEPSEEK_MODEL,
+        "model": runtime_model(),
         "messages": [
             {
                 "role": "system",
@@ -3616,7 +3722,7 @@ async def build_story_bible(
 
     async with httpx.AsyncClient(timeout=180) as client:
         resp = await client.post(
-            f"{DEEPSEEK_BASE_URL}/chat/completions",
+            f"{runtime_base_url()}/chat/completions",
             json=payload,
             headers=_deepseek_auth_headers(api_key),
         )
@@ -3806,7 +3912,7 @@ async def _parse_lite_chunk(
         user_prompt += f"\n\n## 角色外貌设定（参考）\n{character_profiles}"
 
     payload = {
-        "model": DEEPSEEK_MODEL,
+        "model": runtime_model(),
         "messages": [
             {"role": "system", "content": SHOT_PARSE_LITE_SYSTEM_PROMPT},
             {"role": "user", "content": user_prompt},
@@ -3818,7 +3924,7 @@ async def _parse_lite_chunk(
 
     async with httpx.AsyncClient(timeout=600) as client:
         resp = await client.post(
-            f"{DEEPSEEK_BASE_URL}/chat/completions",
+            f"{runtime_base_url()}/chat/completions",
             json=payload,
             headers=_deepseek_auth_headers(api_key),
         )
@@ -4068,7 +4174,7 @@ async def generate_shot_storyboard_prompt(
         system_prompt += continuity_rules
 
     payload = {
-        "model": DEEPSEEK_MODEL,
+        "model": runtime_model(),
         "messages": [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_message},
@@ -4080,7 +4186,7 @@ async def generate_shot_storyboard_prompt(
     try:
         async with httpx.AsyncClient(timeout=300) as client:
             resp = await client.post(
-                f"{DEEPSEEK_BASE_URL}/chat/completions",
+                f"{runtime_base_url()}/chat/completions",
                 json=payload,
                 headers=_deepseek_auth_headers(api_key),
             )
@@ -4106,7 +4212,7 @@ async def generate_shot_storyboard_prompt(
             }
             try:
                 resp2 = await client.post(
-                    f"{DEEPSEEK_BASE_URL}/chat/completions",
+                    f"{runtime_base_url()}/chat/completions",
                     json=retry_payload,
                     headers=_deepseek_auth_headers(api_key),
                 )
@@ -4168,7 +4274,7 @@ async def generate_shot_details(
     user_prompt = build_shot_detail_user_prompt(chapter_text, shots_basic_info, character_profiles)
 
     payload = {
-        "model": DEEPSEEK_MODEL,
+        "model": runtime_model(),
         "messages": [
             {"role": "system", "content": SHOT_DETAIL_SYSTEM_PROMPT},
             {"role": "user", "content": user_prompt},
@@ -4180,7 +4286,7 @@ async def generate_shot_details(
 
     async with httpx.AsyncClient(timeout=600) as client:
         resp = await client.post(
-            f"{DEEPSEEK_BASE_URL}/chat/completions",
+            f"{runtime_base_url()}/chat/completions",
             json=payload,
             headers=_deepseek_auth_headers(api_key),
         )
@@ -4232,7 +4338,7 @@ async def generate_shot_scene_prop_prompts(
     )
 
     payload = {
-        "model": DEEPSEEK_MODEL,
+        "model": runtime_model(),
         "messages": [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
@@ -4244,7 +4350,7 @@ async def generate_shot_scene_prop_prompts(
 
     async with httpx.AsyncClient(timeout=300) as client:
         resp = await client.post(
-            f"{DEEPSEEK_BASE_URL}/chat/completions",
+            f"{runtime_base_url()}/chat/completions",
             json=payload,
             headers=_deepseek_auth_headers(api_key),
         )
@@ -4304,7 +4410,7 @@ async def generate_shot_character_prompts_ai(
     )
 
     payload = {
-        "model": DEEPSEEK_MODEL,
+        "model": runtime_model(),
         "messages": [
             {"role": "system", "content": SHOT_CHARACTER_SYSTEM_PROMPT},
             {"role": "user", "content": user_prompt},
@@ -4316,7 +4422,7 @@ async def generate_shot_character_prompts_ai(
 
     async with httpx.AsyncClient(timeout=300) as client:
         resp = await client.post(
-            f"{DEEPSEEK_BASE_URL}/chat/completions",
+            f"{runtime_base_url()}/chat/completions",
             json=payload,
             headers=_deepseek_auth_headers(api_key),
         )

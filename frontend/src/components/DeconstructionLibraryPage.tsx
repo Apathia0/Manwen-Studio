@@ -7,6 +7,7 @@ import {
   getDeconstructWorkStatus,
   deleteDeconstructionWork,
 } from '../api';
+import { normalizeErrorMessage } from '../lib/errors';
 
 interface Props {
   onNavigate: (route: string, workId?: number) => void;
@@ -63,7 +64,9 @@ export default function DeconstructionLibraryPage({ onNavigate }: Props) {
   }, [loadWorks]);
 
   const worksRef = useRef(works);
-  worksRef.current = works;
+  useEffect(() => {
+    worksRef.current = works;
+  }, [works]);
 
   const hasActiveWorks = works.some(
     (w) =>
@@ -83,7 +86,8 @@ export default function DeconstructionLibraryPage({ onNavigate }: Props) {
             try {
               const cs = await getDeconstructWorkCrawlStatus(w.id);
               return { ...w, crawl_status: cs.status, crawled_chapters: cs.crawled_chapters, total_chapters: cs.total_chapters };
-            } catch {
+            } catch (error) {
+              setError(normalizeErrorMessage(error, '无法获取爬取任务状态，系统将继续重试'));
               return w;
             }
           }
@@ -91,7 +95,8 @@ export default function DeconstructionLibraryPage({ onNavigate }: Props) {
             try {
               const ds = await getDeconstructWorkStatus(w.id);
               return { ...w, decon_status: ds.status };
-            } catch {
+            } catch (error) {
+              setError(normalizeErrorMessage(error, '无法获取拆书任务状态，系统将继续重试'));
               return w;
             }
           }

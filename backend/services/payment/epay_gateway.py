@@ -1,10 +1,21 @@
 # EpayGateway — 易支付集成（V1 MD5 签名，对应 maajiko/Epay）
 
 import hashlib
+import hmac
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 import httpx
 from .base import PaymentGateway, CheckoutResult, NotifyResult, StatusSyncResult
+
+
+def _paid_amount_matches(order, raw_amount: Any) -> bool:
+    try:
+        expected = Decimal(str(order.amount or 0)).quantize(Decimal("0.01"))
+        actual = Decimal(str(raw_amount or "")).quantize(Decimal("0.01"))
+    except (InvalidOperation, ValueError):
+        return False
+    return actual == expected
 
 
 def _epay_sign(params: dict[str, Any], key: str) -> str:
@@ -95,7 +106,7 @@ class EpayGateway(PaymentGateway):
             "out_trade_no": order.order_no,
             "notify_url": str(payment_config.get("epay_notify_url") or "").strip(),
             "return_url": str(payment_config.get("epay_return_url") or "").strip(),
-            "name": f"{plan.name}订阅"[:32],
+            "name": str(plan.name)[:32],
             "money": f"{float(order.amount or 0):.2f}",
         }
         # 易支付要求传递客户端 IP
@@ -132,7 +143,7 @@ class EpayGateway(PaymentGateway):
                 mode="qrcode",
                 payment_url=pay_url,
                 qr_code_text=qr_code,
-                can_mock_confirm=True,
+                can_mock_confirm=False,
                 extra={
                     "epay_trade_no": trade_no,
                     "epay_qr_code": qr_code,
@@ -142,7 +153,7 @@ class EpayGateway(PaymentGateway):
         return CheckoutResult(
             mode="redirect",
             payment_url=pay_url,
-            can_mock_confirm=False if pay_type == "wxpay" else True,
+            can_mock_confirm=False,
             extra={"epay_trade_no": trade_no, "epay_payment_url": pay_url},
         )
 
@@ -152,12 +163,14 @@ class EpayGateway(PaymentGateway):
         payment_config: dict[str, Any],
     ) -> NotifyResult:
         key = str(payment_config.get("epay_key") or "").strip()
-        if not key:
+        configured_pid = str(payment_config.get("epay_pid") or "").strip()
+        callback_pid = str(body.get("pid") or "").strip()
+        if not key or not configured_pid or callback_pid != configured_pid:
             return NotifyResult(verified=False)
 
         expected = _epay_sign(body, key)
         sign = body.get("sign", "")
-        if not sign or sign.lower() != expected.lower():
+        if not sign or not hmac.compare_digest(str(sign).lower(), expected.lower()):
             return NotifyResult(verified=False)
 
         trade_status = str(body.get("trade_status") or "").strip()
@@ -206,7 +219,7 @@ class EpayGateway(PaymentGateway):
 
         # api.php?act=order 返回扁平 JSON，status 在顶层而非 data 子对象
         status = data.get("status", 0)
-        if status == 1:
+        if status == 1 and _paid_amount_matches(order, data.get("money")):
             return StatusSyncResult(
                 status_changed=True,
                 new_status="paid",

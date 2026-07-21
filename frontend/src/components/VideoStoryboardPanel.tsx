@@ -1,7 +1,7 @@
 import { useState, useMemo, useCallback, useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { Loader2, Film, CheckSquare, Square, ChevronLeft, ChevronRight, ChevronDown, ChevronUp, Sparkles, X, RefreshCw, Play, Check } from 'lucide-react';
-import type { VideoShot, VideoAsset, ShotFramesResponse, EntitlementResponse } from '../api';
+import type { VideoShot, VideoAsset, ShotFramesResponse } from '../api';
 import {
   deleteVideoAsset,
   getShotFrames,
@@ -14,6 +14,7 @@ import { ImageRedrawModal } from './shared/ImageRedrawModal';
 import ImageZoomView from './shared/ImageZoomView';
 import AssetReferenceSelector from './AssetReferenceSelector';
 import { toast } from '../lib/toast';
+import { readResponseError } from '../lib/errors';
 
 // ── 类型定义 ──────────────────────────────────────────────
 
@@ -41,7 +42,7 @@ interface VideoStoryboardPanelProps {
   page: number;
   perPage: number;
   totalShots: number;
-  entitlements?: EntitlementResponse | null;
+  entitlements?: Record<string, any> | null;
   /** 本章节可用资产（用于 AssetReferenceSelector） */
   chapterAssets: VideoAsset[];
   onCheckToggle: (shotId: number) => void;
@@ -1149,7 +1150,7 @@ export default function VideoStoryboardPanel({
           method: 'POST',
           body: formData,
         });
-        if (!res.ok) throw new Error(await res.text());
+        if (!res.ok) throw new Error(await readResponseError(res, '替换资产图失败，请稍后重试'));
         toast.success('资产图已替换');
         await onAssetsChanged?.();
         if (shotId) {

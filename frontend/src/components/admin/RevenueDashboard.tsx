@@ -346,7 +346,7 @@ export function AdminRevenueDashboardPage({ onError }: { onError: (message: stri
         <MetricCard
           label="支付转化率"
           value={`${summary.conversion_rate}%`}
-          sublabel={`活跃订阅 ${summary.active_subscriptions} · 新付费 ${summary.monthly_new_users}`}
+          sublabel={`本月付费用户 ${summary.monthly_paid_users}`}
           trend={summary.conversion_rate >= 50 ? '良好' : '偏低'}
           trendUp={summary.conversion_rate >= 50}
         />
@@ -372,7 +372,7 @@ export function AdminRevenueDashboardPage({ onError }: { onError: (message: stri
       </SectionCard>
 
       <div className="grid gap-5 md:grid-cols-2">
-        <SectionCard title="套餐收入分布">
+        <SectionCard title="积分套餐收入分布">
           {byPlan.length > 0 ? <DistributionBar items={byPlan} /> : <div className="py-4 text-center text-sm text-slate-500">暂无数据</div>}
         </SectionCard>
         <SectionCard title="订单状态分布">

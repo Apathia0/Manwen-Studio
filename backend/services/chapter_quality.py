@@ -6,6 +6,8 @@ from typing import Any
 
 import httpx
 
+from services.errors import public_error_message
+
 
 logger = logging.getLogger(__name__)
 
@@ -143,10 +145,8 @@ def _cached_pipeline_is_acceptable(cached: dict[str, Any], deterministic: dict[s
         return False, "editor_blocking_issue"
     if cached.get("ok") and review.get("approved") and score >= 90:
         return True, "editor_hard_pass"
-    if score >= 90:
-        return True, "editor_score_soft_pass"
-    if score >= 85:
-        return True, "editor_near_pass"
+    if score >= 90 and review.get("approved"):
+        return True, "editor_score_pass"
     return False, "score_below_editor_pass"
 
 
@@ -276,6 +276,15 @@ def run_deterministic_gate(
         match = re.search(pattern, text)
         if match:
             warnings.append(_issue(code, label, severity="warning", evidence=_line_context(text, match.group(0))))
+
+    for boundary_issue in _detect_boundary_issues(text, chapter_scope):
+        hard_failures.append(
+            _issue(
+                "boundary.future_event",
+                boundary_issue,
+                evidence=boundary_issue,
+            )
+        )
 
 
     paragraphs = [line.strip() for line in text.splitlines() if line.strip()]
@@ -413,7 +422,7 @@ async def review_chapter_for_qidian(
         from services import deepseek as deepseek_service
 
         payload = {
-            "model": deepseek_service.DEEPSEEK_MODEL,
+            "model": deepseek_service.runtime_model(),
             "messages": [
                 {"role": "system", "content": "你是起点资深责编，只输出严格 JSON。"},
                 {"role": "user", "content": review_prompt},
@@ -425,7 +434,7 @@ async def review_chapter_for_qidian(
         payload = deepseek_service._apply_runtime_params(payload)
         async with httpx.AsyncClient(timeout=300) as client:
             resp = await client.post(
-                f"{deepseek_service.DEEPSEEK_BASE_URL}/chat/completions",
+                f"{deepseek_service.runtime_base_url()}/chat/completions",
                 json=payload,
                 headers=deepseek_service._deepseek_auth_headers(api_key),
             )
@@ -434,7 +443,12 @@ async def review_chapter_for_qidian(
         assessment = deepseek_service._extract_json_object(data["choices"][0]["message"]["content"])
     except Exception as exc:
         logger.warning("AI 章节审稿失败，降级为确定性门禁: %s", exc)
-        return {"ok": True, "scores": {"overall": 0}, "findings": [str(exc)], "skipped": True}
+        return {
+            "ok": True,
+            "scores": {"overall": 0},
+            "findings": [public_error_message(exc, "质量检查暂时不可用，请稍后重试")],
+            "skipped": True,
+        }
 
     scores = assessment.get("scores") if isinstance(assessment, dict) else {}
     normalized_scores = {str(key): _normalize_score(value) for key, value in scores.items()} if isinstance(scores, dict) else {}

@@ -158,6 +158,7 @@ export function paymentMethodLabel(method: string | null | undefined): string {
 
 export function orderSourceLabel(source: string | null | undefined): string {
   if (!source) return '-';
+  if (source === 'points_purchase') return '积分套餐购买';
   if (source === 'admin_adjustment') return '后台套餐调整';
   if (source === 'quota_grant') return '额度补发';
   if (source === 'mock_checkout') return '模拟支付下单';

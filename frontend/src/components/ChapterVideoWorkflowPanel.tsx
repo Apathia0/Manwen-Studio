@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import { createPortal } from 'react-dom';
 import {
   Braces,
   BookOpen,
@@ -12,6 +13,7 @@ import {
   Home,
   Image as ImageIcon,
   Loader2,
+  Plus,
   MapPin,
   MessageSquare,
   Package,
@@ -32,11 +34,13 @@ import {
   Tag,
   ThumbsUp,
   Zap,
+  X,
 } from 'lucide-react';
-import type { ChapterVideoWorkflow, StoryVideoCharacter, VideoAsset } from '../api';
+import type { ChapterVideoShotCreate, ChapterVideoWorkflow, StoryVideoCharacter, VideoAsset } from '../api';
 import { saveChapterShotPrompts, replaceVideoAsset, regenerateVideoAsset, uploadShotStoryboard, uploadShotVideo, createVideoAsset, toPublicVideoAssetUrl, generateWorkflowScreenplay, saveWorkflowScreenplay, approveWorkflowScreenplay, regenerateWorkflowScreenplay } from '../api';
 import { canStartChapterWorkflowParse } from './chapterWorkflowUtils';
 import { toast } from '../lib/toast';
+import { normalizeErrorMessage } from '../lib/errors';
 
 import VideoCardWorkbench from './VideoCardWorkbench';
 import { videoGenStore } from '../videoGenStore';
@@ -54,6 +58,7 @@ interface ChapterVideoWorkflowPanelProps {
   workflow: ChapterVideoWorkflow | null;
   workflowLoading: boolean;
   workflowRunning: boolean;
+  screenplayGenerating: boolean;
   chapterNovelContent?: string | null;
   chapterAssets: VideoAsset[];
   selectedReferenceIds: number[];
@@ -64,6 +69,7 @@ interface ChapterVideoWorkflowPanelProps {
   selectedShotIds: Set<number>;
   skippedShotIds: Set<number>;
   onRefreshWorkflow: () => Promise<void> | void;
+  onCreateShot: (payload: ChapterVideoShotCreate) => Promise<void> | void;
   onConcatWorkflow: () => Promise<void> | void;
   onRegenerateStoryboard: (shotId: number, refAssetIds?: number[]) => Promise<void> | void;
   onRegenerateVideo: (shotId: number, refAssetIds?: number[], aspectRatio?: '16:9' | '9:16', promptOverride?: string) => Promise<void> | void;
@@ -144,6 +150,7 @@ export default function ChapterVideoWorkflowPanel({
   workflow,
   workflowLoading,
   workflowRunning,
+  screenplayGenerating,
   chapterNovelContent,
   chapterAssets,
   selectedReferenceIds,
@@ -153,6 +160,7 @@ export default function ChapterVideoWorkflowPanel({
   selectedShotIds,
   skippedShotIds,
   onRefreshWorkflow,
+  onCreateShot,
   onConcatWorkflow,
   onRegenerateStoryboard,
   onRegenerateVideo,
@@ -181,6 +189,34 @@ onOpenAssetManagement,
   const [concatModalOpen, setConcatModalOpen] = useState(false);
   const [screenplayText, setScreenplayText] = useState('');
   const [screenplayLoading, setScreenplayLoading] = useState(false);
+  const [createShotOpen, setCreateShotOpen] = useState(false);
+  const [createShotSaving, setCreateShotSaving] = useState(false);
+  const [newShot, setNewShot] = useState<ChapterVideoShotCreate>({
+    story_summary: '',
+    source_text_span: '',
+    scene_location: '',
+    time_of_day: '',
+    characters: [],
+    dialogue_or_narration: '',
+    camera_plan: '',
+    motion_plan: '',
+    emotion_plan: '',
+    continuity_notes: '',
+  });
+
+  const handleSubmitNewShot = useCallback(async () => {
+    if (!newShot.story_summary.trim() || createShotSaving) return;
+    setCreateShotSaving(true);
+    try {
+      await onCreateShot(newShot);
+      setCreateShotOpen(false);
+      setNewShot({ story_summary: '', characters: [] });
+    } catch (error: any) {
+      toast.error(`添加镜头失败: ${error.message || '未知错误'}`);
+    } finally {
+      setCreateShotSaving(false);
+    }
+  }, [createShotSaving, newShot, onCreateShot]);
 
   const [expandedScenes, setExpandedScenes] = useState<Set<string>>(new Set());
   const [showRawJson, setShowRawJson] = useState(false);
@@ -368,6 +404,7 @@ onOpenAssetManagement,
     : '';
 
   const screenplayApproved = !!workflow && workflow.screenplay_status === 'approved';
+  const screenplayBusy = screenplayLoading || screenplayGenerating;
   const canParse = canStartChapterWorkflowParse({
     workflowExists: Boolean(workflow),
     status,
@@ -475,20 +512,20 @@ onOpenAssetManagement,
           {!workflow ? (
             <button
               onClick={() => void onCreateAndGenerateScreenplay()}
-              disabled={workflowRunning}
+              disabled={workflowRunning || screenplayGenerating}
               className="inline-flex items-center gap-1 rounded-lg bg-blue-600 px-3 py-1.5 text-xs text-white hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed shadow-sm"
             >
-              <Send size={12} />
-              创建并生成剧本
+              {screenplayGenerating ? <Loader2 size={12} className="animate-spin" /> : <Send size={12} />}
+              {screenplayGenerating ? '正在创建并生成剧本...' : '创建并生成剧本'}
             </button>
           ) : !screenplayApproved ? (
             <button
               onClick={handleGenerateScreenplay}
-              disabled={screenplayLoading || workflowRunning}
+              disabled={screenplayBusy || workflowRunning}
               className="inline-flex items-center gap-1 rounded-lg bg-blue-600 px-3 py-1.5 text-xs text-white hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed shadow-sm"
             >
-              {screenplayLoading ? <Loader2 size={12} className="animate-spin" /> : <Send size={12} />}
-              生成剧本
+              {screenplayBusy ? <Loader2 size={12} className="animate-spin" /> : <Send size={12} />}
+              {screenplayGenerating ? '正在生成剧本...' : '生成剧本'}
             </button>
           ) : (
             <button
@@ -1165,15 +1202,27 @@ const typeConfig: Record<string, { label: string; icon: React.ReactNode; color: 
             {/* ── 镜头列表 ── */}
             <div className="flex-1 min-w-0 overflow-y-auto">
             {/* 镜头操作栏 */}
-              {sortedShots.length > 0 && (
-                <div className="mb-3 flex items-center justify-between">
-                <button
-                  onClick={onSelectAllShots}
-                  className="inline-flex items-center gap-1 rounded-lg border border-[#d7e3f4] px-2.5 py-1 text-xs text-slate-600 hover:bg-slate-50"
-                >
-                  <SquarePen size={11} />
-                  {selectedShotIds.size === workflow.shots.length ? '取消全选' : '全选镜头'}
-                </button>
+              <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  {sortedShots.length > 0 && (
+                    <button
+                      onClick={onSelectAllShots}
+                      className="inline-flex items-center gap-1 rounded-lg border border-[#d7e3f4] px-2.5 py-1 text-xs text-slate-600 hover:bg-slate-50"
+                    >
+                      <SquarePen size={11} />
+                      {selectedShotIds.size === workflow.shots.length ? '取消全选' : '全选镜头'}
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => setCreateShotOpen(true)}
+                    disabled={workflowRunning || parsing}
+                    className="inline-flex items-center gap-1 rounded-lg bg-slate-900 px-2.5 py-1 text-xs text-white hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    <Plus size={12} />
+                    添加镜头
+                  </button>
+                </div>
                 <div className="flex items-center gap-2 text-xs text-slate-400">
                   已选 {selectedShotIds.size} / {sortedShots.length} 镜
                   {skippedShotIds.size > 0 && (
@@ -1197,7 +1246,6 @@ const typeConfig: Record<string, { label: string; icon: React.ReactNode; color: 
                   )}
                 </div>
               </div>
-            )}
 
             <div className="space-y-3">
               {sortedShots.map((shot) => {
@@ -1264,7 +1312,7 @@ const typeConfig: Record<string, { label: string; icon: React.ReactNode; color: 
                         {/* 失败错误信息 */}
                         {shot.error_message && (
                           <div className="mt-2 rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-600">
-                            {shot.error_message}
+                            {normalizeErrorMessage(shot.error_message, '分镜任务失败，请重试')}
                           </div>
                         )}
 
@@ -1519,6 +1567,81 @@ const typeConfig: Record<string, { label: string; icon: React.ReactNode; color: 
             </div>
           </div>
         </div>
+      )}
+
+      {createShotOpen && createPortal(
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/50 p-4 backdrop-blur-sm" onClick={() => setCreateShotOpen(false)}>
+          <section className="flex h-[85vh] w-[min(1000px,95vw)] flex-col overflow-hidden rounded-2xl bg-white shadow-2xl" onClick={(event) => event.stopPropagation()} role="dialog" aria-modal="true" aria-label="添加镜头">
+          <header className="shrink-0 border-b border-[#d7e3f4] bg-white px-6 py-4">
+            <div className="flex items-center justify-between">
+              <div>
+                <h3 className="text-base font-semibold text-slate-900">添加镜头</h3>
+                <p className="mt-0.5 text-xs text-slate-400">镜头 {sortedShots.length + 1}</p>
+              </div>
+              <button type="button" onClick={() => setCreateShotOpen(false)} className="inline-flex h-9 w-9 items-center justify-center rounded-lg text-slate-500 hover:bg-slate-100" aria-label="关闭">
+                <X size={18} />
+              </button>
+            </div>
+          </header>
+          <div className="min-h-0 flex-1 overflow-y-auto bg-slate-50/60">
+            <div className="grid gap-4 px-6 py-5 sm:grid-cols-2">
+              <label className="sm:col-span-2">
+                <span className="mb-1 block text-xs font-medium text-slate-600">镜头情节 *</span>
+                <textarea
+                  value={newShot.story_summary}
+                  onChange={(event) => setNewShot((current) => ({ ...current, story_summary: event.target.value }))}
+                  rows={3}
+                  autoFocus
+                  className="w-full resize-y rounded-lg border border-[#d7e3f4] px-3 py-2 text-sm outline-none focus:border-blue-400"
+                  placeholder="描述这个镜头发生的情节"
+                />
+              </label>
+              <label>
+                <span className="mb-1 block text-xs font-medium text-slate-600">场景</span>
+                <input value={newShot.scene_location || ''} onChange={(event) => setNewShot((current) => ({ ...current, scene_location: event.target.value }))} className="w-full rounded-lg border border-[#d7e3f4] px-3 py-2 text-sm outline-none focus:border-blue-400" placeholder="例如：宫殿长廊" />
+              </label>
+              <label>
+                <span className="mb-1 block text-xs font-medium text-slate-600">时间</span>
+                <input value={newShot.time_of_day || ''} onChange={(event) => setNewShot((current) => ({ ...current, time_of_day: event.target.value }))} className="w-full rounded-lg border border-[#d7e3f4] px-3 py-2 text-sm outline-none focus:border-blue-400" placeholder="例如：黄昏" />
+              </label>
+              <label className="sm:col-span-2">
+                <span className="mb-1 block text-xs font-medium text-slate-600">角色</span>
+                <input value={(newShot.characters || []).join('、')} onChange={(event) => setNewShot((current) => ({ ...current, characters: event.target.value.split(/[、,，]/).map((item) => item.trim()).filter(Boolean) }))} className="w-full rounded-lg border border-[#d7e3f4] px-3 py-2 text-sm outline-none focus:border-blue-400" placeholder="多个角色用逗号分隔" />
+              </label>
+              <label className="sm:col-span-2">
+                <span className="mb-1 block text-xs font-medium text-slate-600">对白或旁白</span>
+                <textarea value={newShot.dialogue_or_narration || ''} onChange={(event) => setNewShot((current) => ({ ...current, dialogue_or_narration: event.target.value }))} rows={2} className="w-full resize-y rounded-lg border border-[#d7e3f4] px-3 py-2 text-sm outline-none focus:border-blue-400" />
+              </label>
+              <label>
+                <span className="mb-1 block text-xs font-medium text-slate-600">机位与景别</span>
+                <textarea value={newShot.camera_plan || ''} onChange={(event) => setNewShot((current) => ({ ...current, camera_plan: event.target.value }))} rows={2} className="w-full resize-y rounded-lg border border-[#d7e3f4] px-3 py-2 text-sm outline-none focus:border-blue-400" />
+              </label>
+              <label>
+                <span className="mb-1 block text-xs font-medium text-slate-600">动作设计</span>
+                <textarea value={newShot.motion_plan || ''} onChange={(event) => setNewShot((current) => ({ ...current, motion_plan: event.target.value }))} rows={2} className="w-full resize-y rounded-lg border border-[#d7e3f4] px-3 py-2 text-sm outline-none focus:border-blue-400" />
+              </label>
+              <label>
+                <span className="mb-1 block text-xs font-medium text-slate-600">情绪</span>
+                <input value={newShot.emotion_plan || ''} onChange={(event) => setNewShot((current) => ({ ...current, emotion_plan: event.target.value }))} className="w-full rounded-lg border border-[#d7e3f4] px-3 py-2 text-sm outline-none focus:border-blue-400" />
+              </label>
+              <label>
+                <span className="mb-1 block text-xs font-medium text-slate-600">连续性说明</span>
+                <input value={newShot.continuity_notes || ''} onChange={(event) => setNewShot((current) => ({ ...current, continuity_notes: event.target.value }))} className="w-full rounded-lg border border-[#d7e3f4] px-3 py-2 text-sm outline-none focus:border-blue-400" />
+              </label>
+            </div>
+          </div>
+          <footer className="shrink-0 border-t border-[#d7e3f4] bg-white px-6 py-3">
+            <div className="flex justify-end gap-2">
+              <button type="button" onClick={() => setCreateShotOpen(false)} className="rounded-lg border border-[#d7e3f4] px-4 py-2 text-sm text-slate-600 hover:bg-slate-50">取消</button>
+              <button type="button" onClick={() => void handleSubmitNewShot()} disabled={!newShot.story_summary.trim() || createShotSaving} className="inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-4 py-2 text-sm text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-40">
+                {createShotSaving ? <Loader2 size={14} className="animate-spin" /> : <Plus size={14} />}
+                {createShotSaving ? '添加中...' : '添加镜头'}
+              </button>
+            </div>
+          </footer>
+          </section>
+        </div>,
+        document.body,
       )}
 
       {concatModalOpen && (

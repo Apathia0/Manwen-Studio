@@ -1,10 +1,21 @@
 # MaPayGateway — 码支付开放接口（mapi.php / api.php）
 
 import hashlib
+import hmac
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 import httpx
 from .base import PaymentGateway, CheckoutResult, NotifyResult, StatusSyncResult
+
+
+def _paid_amount_matches(order, raw_amount: Any) -> bool:
+    try:
+        expected = Decimal(str(order.amount or 0)).quantize(Decimal("0.01"))
+        actual = Decimal(str(raw_amount or "")).quantize(Decimal("0.01"))
+    except (InvalidOperation, ValueError):
+        return False
+    return actual == expected
 
 
 def _mapay_sign(params: dict[str, Any], key: str) -> str:
@@ -87,7 +98,7 @@ class MaPayGateway(PaymentGateway):
             "pid": pid,
             "type": pay_type,
             "out_trade_no": order.order_no,
-            "name": f"{plan.name}订阅"[:32],
+            "name": str(plan.name)[:32],
             "money": f"{float(order.amount or 0):.2f}",
         }
         notify_url = str(payment_config.get("mapay_notify_url") or "").strip()
@@ -150,12 +161,14 @@ class MaPayGateway(PaymentGateway):
         payment_config: dict[str, Any],
     ) -> NotifyResult:
         key = str(payment_config.get("mapay_key") or "").strip()
-        if not key:
+        configured_pid = str(payment_config.get("mapay_pid") or "").strip()
+        callback_pid = str(body.get("pid") or "").strip()
+        if not key or not configured_pid or callback_pid != configured_pid:
             return NotifyResult(verified=False)
 
         expected = _mapay_sign(body, key)
         sign = str(body.get("sign") or "")
-        if not sign or sign.lower() != expected.lower():
+        if not sign or not hmac.compare_digest(sign.lower(), expected.lower()):
             return NotifyResult(verified=False)
 
         trade_status = str(body.get("trade_status") or "").strip()
@@ -209,7 +222,7 @@ class MaPayGateway(PaymentGateway):
         if str(data.get("code") or "").strip() != "1":
             return None
 
-        if str(data.get("status") or "").strip() == "1":
+        if str(data.get("status") or "").strip() == "1" and _paid_amount_matches(order, data.get("money")):
             return StatusSyncResult(
                 status_changed=True,
                 new_status="paid",

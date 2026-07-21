@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
-import { generateScreenplay, listScreenplayScenes, type ScriptScene, type EntitlementResponse } from '../api';
+import { generateScreenplay, listScreenplayScenes, type ScriptScene } from '../api';
 
-function entitlementNumber(entitlements: EntitlementResponse | null | undefined, key: string, fallback: number): number {
+function entitlementNumber(entitlements: Record<string, any> | null | undefined, key: string, fallback: number): number {
   const raw = entitlements?.entitlements?.[key];
   if (typeof raw === 'number' && Number.isFinite(raw)) return raw;
   if (typeof raw === 'string') {
@@ -16,7 +16,7 @@ interface Props {
   chapterContent?: string | null;
   scenes: ScriptScene[];
   screenplay: string;
-  entitlements?: EntitlementResponse | null;
+  entitlements?: Record<string, any> | null;
   onScenesChange: (scenes: ScriptScene[]) => void;
   onScreenplayChange: (text: string) => void;
   onSceneSelect: (scene: ScriptScene) => void;

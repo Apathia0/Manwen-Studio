@@ -17,11 +17,12 @@ export function ForgotPasswordPage({
   subtitle: string;
   onBack: () => void;
   onSendCode: (email: string) => Promise<{ ok: boolean; expires_in_seconds: number }>;
-  onResetPassword: (email: string, verificationCode: string) => Promise<void>;
+  onResetPassword: (email: string, verificationCode: string, newPassword: string) => Promise<void>;
   error: string | null;
 }) {
   const [email, setEmail] = useState('');
   const [verificationCode, setVerificationCode] = useState('');
+  const [newPassword, setNewPassword] = useState('');
   const [sendingCode, setSendingCode] = useState(false);
   const [codeCooldown, setCodeCooldown] = useState(0);
   const [resetting, setResetting] = useState(false);
@@ -39,7 +40,7 @@ export function ForgotPasswordPage({
       brandName={brandName}
       brandSlogan={brandSlogan}
       title="找回密码"
-      subtitle={`验证邮箱后，新密码将发送到您的邮箱。`}
+      subtitle="验证邮箱后设置新密码。"
       onBack={onBack}
     >
       <div className="space-y-3">
@@ -74,18 +75,26 @@ export function ForgotPasswordPage({
             {sendingCode ? '发送中...' : codeCooldown > 0 ? `${codeCooldown}s 后重发` : '发送验证码'}
           </button>
         </div>
+        <input
+          value={newPassword}
+          onChange={(e) => setNewPassword(e.target.value)}
+          type="password"
+          autoComplete="new-password"
+          className="w-full rounded-2xl border border-[#d7e3f4] bg-[#fafdff] px-4 py-3 text-sm text-slate-900 outline-none transition placeholder:text-slate-400 focus:border-[#93c5fd] focus:bg-white focus:ring-4 focus:ring-[#dbeafe]"
+          placeholder="新密码（至少 8 位）"
+        />
         <button
           onClick={() =>
             void (async () => {
               setResetting(true);
               try {
-                await onResetPassword(email, verificationCode);
+                await onResetPassword(email, verificationCode, newPassword);
               } finally {
                 setResetting(false);
               }
             })()
           }
-          disabled={resetting || !email || !verificationCode}
+          disabled={resetting || !email || !verificationCode || newPassword.length < 8}
           className="w-full rounded-2xl bg-[#2563eb] py-3 text-sm font-medium text-white shadow-[0_16px_34px_rgba(59,130,246,0.24)] transition hover:bg-[#1d4ed8] disabled:cursor-not-allowed disabled:opacity-60"
         >
           {resetting ? '处理中...' : '重置密码'}

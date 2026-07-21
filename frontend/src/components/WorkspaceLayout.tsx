@@ -1,6 +1,6 @@
 import { Suspense, lazy, useCallback, useEffect, useState } from 'react';
 import { Image, Bot } from 'lucide-react';
-import { type Story, type Chapter, type EntitlementResponse } from '../api';
+import { type Story, type Chapter } from '../api';
 import { RouteLoadingFallback } from './ui/RouteLoadingFallback';
 import StoryBibleSummaryCard from './StoryBibleSummaryCard';
 
@@ -13,7 +13,8 @@ interface Props {
   story: Story;
   chapters: Chapter[];
   currentChapter: Chapter | null;
-  entitlements?: EntitlementResponse | null;
+  entitlements?: Record<string, any> | null;
+  workspaceDomain: 'novel' | 'manga';
   onChapterChange: (chapter: Chapter) => void;
   onContentUpdated: () => void | Promise<void>;
 }
@@ -23,23 +24,20 @@ export default function WorkspaceLayout({
   chapters,
   currentChapter,
   entitlements,
+  workspaceDomain,
   onChapterChange,
   onContentUpdated,
 }: Props) {
   const [selectedText, setSelectedText] = useState('');
   const [chapterContext, setChapterContext] = useState<object | undefined>(undefined);
   const [mangaPreviewMode, setMangaPreviewMode] = useState(false);
-  const [rightPanelTab, setRightPanelTab] = useState<'manga' | 'agent'>(() => {
-    const saved = localStorage.getItem('rightPanelTab');
-    return (saved === 'manga' || saved === 'agent') ? saved : 'agent';
-  });
   const resolvedChapter = currentChapter ? mergeChapterWithFramework(story, currentChapter) : null;
 
   useEffect(() => {
     setSelectedText('');
     setChapterContext(undefined);
     setMangaPreviewMode(false);
-  }, [resolvedChapter?.id]);
+  }, [resolvedChapter?.id, workspaceDomain]);
 
   const handleChapterSelect = useCallback(
     (chapterNumber: number) => {
@@ -94,37 +92,16 @@ export default function WorkspaceLayout({
 
         <div className={`${mangaPreviewMode ? 'flex-1' : 'w-[400px] shrink-0'} min-w-0 overflow-hidden rounded-[24px] border border-[#d7e3f4] bg-[rgba(255,255,255,0.92)] shadow-[0_18px_42px_rgba(59,130,246,0.12)] backdrop-blur-xl`}>
           <div className="flex flex-col h-full">
-            <div className="shrink-0 flex border-b border-[#d7e3f4] px-3">
-              <button
-                onClick={() => { setRightPanelTab('manga'); localStorage.setItem('rightPanelTab', 'manga'); }}
-                className={`flex items-center gap-1.5 px-4 py-2.5 text-sm font-medium transition-colors relative ${
-                  rightPanelTab === 'manga'
-                    ? 'text-blue-600'
-                    : 'text-gray-500 hover:text-gray-700'
-                }`}
-              >
-                <Image size={16} /> 漫画操作区
-                {rightPanelTab === 'manga' && (
-                  <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-blue-600 rounded-full" />
-                )}
-              </button>
-              <button
-                onClick={() => { setRightPanelTab('agent'); localStorage.setItem('rightPanelTab', 'agent'); }}
-                className={`flex items-center gap-1.5 px-4 py-2.5 text-sm font-medium transition-colors relative ${
-                  rightPanelTab === 'agent'
-                    ? 'text-blue-600'
-                    : 'text-gray-500 hover:text-gray-700'
-                }`}
-              >
-                <Bot size={16} /> AI 助手
-                {rightPanelTab === 'agent' && (
-                  <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-blue-600 rounded-full" />
-                )}
-              </button>
+            <div className="shrink-0 flex items-center gap-2 border-b border-[#d7e3f4] px-4 py-2.5 text-sm font-semibold text-slate-800">
+              {workspaceDomain === 'manga' ? <Image size={16} className="text-blue-600" aria-hidden="true" /> : <Bot size={16} className="text-blue-600" aria-hidden="true" />}
+              <span>{workspaceDomain === 'manga' ? '漫画生成' : 'AI 写作助手'}</span>
+              <span className="ml-auto text-xs font-normal text-slate-400">
+                {workspaceDomain === 'manga' ? '基于当前章节生成画面' : '围绕当前章节协助创作'}
+              </span>
             </div>
             <div className="flex-1 min-h-0 overflow-hidden">
               <Suspense fallback={<RouteLoadingFallback />}>
-              {rightPanelTab === 'manga' ? (
+              {workspaceDomain === 'manga' ? (
                 <MangaPanel
                   chapter={resolvedChapter}
                   entitlements={entitlements}

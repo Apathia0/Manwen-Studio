@@ -1,4 +1,4 @@
-import { useState, useRef } from 'react';
+import { useEffect, useState, useRef } from 'react';
 import { X, Upload, Check, Loader2, Film } from 'lucide-react';
 import type { VideoStylePreset } from '../api';
 import { uploadStyleReferenceImage } from '../api';
@@ -10,6 +10,8 @@ interface StyleSelectorModalProps {
   selectedStyleName: string;
   styleReferenceImageUrl: string | null;
   workflowId?: number | null;
+  /** 漫画模式要求预设必须有真实参考图；视频模式仍可使用文字预设。 */
+  requireReferenceImage?: boolean;
   onFileUpload?: (file: File) => Promise<string>;
   onStyleSelect: (styleName: string, referenceImageUrl: string | null) => void;
 }
@@ -38,6 +40,7 @@ export default function StyleSelectorModal({
   selectedStyleName,
   styleReferenceImageUrl,
   workflowId,
+  requireReferenceImage = false,
   onFileUpload,
   onStyleSelect,
 }: StyleSelectorModalProps) {
@@ -46,17 +49,13 @@ export default function StyleSelectorModal({
   const [localSelectedStyle, setLocalSelectedStyle] = useState(selectedStyleName);
   const [localReferenceUrl, setLocalReferenceUrl] = useState(styleReferenceImageUrl);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const prevOpenRef = useRef(isOpen);
 
   // 每次弹窗打开时，将本地状态与父组件 prop 同步
-  if (isOpen && !prevOpenRef.current) {
-    prevOpenRef.current = true;
+  useEffect(() => {
+    if (!isOpen) return;
     setLocalSelectedStyle(selectedStyleName);
     setLocalReferenceUrl(styleReferenceImageUrl);
-  }
-  if (!isOpen) {
-    prevOpenRef.current = false;
-  }
+  }, [isOpen, selectedStyleName, styleReferenceImageUrl]);
 
   if (!isOpen) return null;
 
@@ -65,6 +64,7 @@ export default function StyleSelectorModal({
     : presets.filter((p) => p.category === activeCategory);
 
   const handlePresetClick = (preset: VideoStylePreset) => {
+    if (requireReferenceImage && !preset.image_url) return;
     setLocalSelectedStyle(preset.name);
     setLocalReferenceUrl(null); // 使用内置预设时清除自定义参考图
   };
@@ -155,12 +155,15 @@ export default function StyleSelectorModal({
           <div className="mb-6">
             <div className="mb-3 text-sm font-medium text-slate-700">自定义风格参考图</div>
             <div
-              className={`relative cursor-pointer rounded-xl border-2 border-dashed p-4 transition ${
+              className={`relative rounded-xl border-2 border-dashed p-4 transition ${
                 localReferenceUrl
                   ? 'border-blue-400 bg-blue-50'
                   : 'border-[#d7e3f4] bg-slate-50 hover:border-blue-300 hover:bg-blue-50/50'
-              }`}
-              onClick={() => fileInputRef.current?.click()}
+              } ${uploading ? 'cursor-wait' : 'cursor-pointer'}`}
+              onClick={() => {
+                if (!uploading) fileInputRef.current?.click();
+              }}
+              aria-busy={uploading}
             >
               {localReferenceUrl ? (
                 <div className="flex items-center gap-4">
@@ -189,11 +192,18 @@ export default function StyleSelectorModal({
                   </div>
                 </div>
               )}
+              {uploading && localReferenceUrl ? (
+                <div className="absolute inset-0 flex items-center justify-center gap-2 rounded-[10px] bg-white/85 text-sm font-medium text-blue-700 backdrop-blur-sm">
+                  <Loader2 size={20} className="animate-spin" />
+                  正在上传并替换风格图...
+                </div>
+              ) : null}
               <input
                 ref={fileInputRef}
                 type="file"
                 accept="image/*"
                 onChange={handleFileUpload}
+                disabled={uploading}
                 className="hidden"
               />
             </div>
@@ -208,11 +218,15 @@ export default function StyleSelectorModal({
                 return (
                   <button
                     key={preset.id}
+                    type="button"
                     onClick={() => handlePresetClick(preset)}
+                    disabled={requireReferenceImage && !preset.image_url}
                     className={`relative overflow-hidden rounded-xl border-2 text-left transition ${
                       isSelected
                         ? 'border-blue-500 ring-2 ring-blue-200'
-                        : 'border-[#e5edf8] hover:border-blue-300'
+                        : !requireReferenceImage || preset.image_url
+                          ? 'border-[#e5edf8] hover:border-blue-300'
+                          : 'cursor-not-allowed border-[#e5edf8] opacity-60'
                     }`}
                   >
                     {/* 预览图 */}
@@ -228,6 +242,7 @@ export default function StyleSelectorModal({
                           <div className="text-center">
                             <Film size={28} className="mx-auto text-slate-300" />
                             <div className="mt-1 text-xs">{preset.name}</div>
+                            {requireReferenceImage && <div className="mt-1 text-[10px] text-slate-400">未配置参考图</div>}
                           </div>
                         </div>
                       )}
@@ -254,9 +269,9 @@ export default function StyleSelectorModal({
         <div className="flex items-center justify-between border-t border-[#e5edf8] px-6 py-4">
           <div className="text-sm text-slate-500">
             {localReferenceUrl
-              ? '<Check size={12} className="inline-block" /> 已选择自定义风格参考图'
+              ? <span className="inline-flex items-center gap-1"><Check size={12} />已选择自定义风格参考图</span>
               : localSelectedStyle
-                ? `<Check size={12} className="inline-block" /> 已选择: ${localSelectedStyle}`
+                ? <span className="inline-flex items-center gap-1"><Check size={12} />已选择: {localSelectedStyle}</span>
                 : '未选择风格'}
           </div>
           <div className="flex gap-2">
@@ -268,9 +283,10 @@ export default function StyleSelectorModal({
             </button>
             <button
               onClick={handleConfirm}
-              className="rounded-lg bg-blue-600 px-4 py-2 text-sm text-white hover:bg-blue-700"
+              disabled={uploading}
+              className="rounded-lg bg-blue-600 px-4 py-2 text-sm text-white hover:bg-blue-700 disabled:cursor-wait disabled:opacity-50"
             >
-              确认选择
+              {uploading ? '上传中...' : '确认选择'}
             </button>
           </div>
         </div>

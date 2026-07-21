@@ -11,6 +11,7 @@ import {
   getCrawlStatus,
 } from '../api';
 import NovelSearchPanel from './NovelSearchPanel';
+import { normalizeErrorMessage } from '../lib/errors';
 
 interface Props {
   story: Story;
@@ -86,7 +87,9 @@ export default function DeconstructionPanel({ story }: Props) {
           await startDeconstruction(story.id);
           setStatus({ status: 'running', current_stage: 0, stages_completed: [], progress: null, result_id: null });
         }
-      } catch {}
+      } catch (error) {
+        setError(normalizeErrorMessage(error, '无法获取爬取任务状态，系统将继续重试'));
+      }
     }, 3000);
     return () => clearInterval(timer);
   }, [showSearch, story.id]);
@@ -107,13 +110,17 @@ export default function DeconstructionPanel({ story }: Props) {
             setResult(r);
             setActiveTab('report');
           }
-        } catch {}
+        } catch (error) {
+          setError(normalizeErrorMessage(error, '拆书阶段已完成，但暂时无法获取报告'));
+        }
       } else if (s.status === 'completed') {
         const r = await getDeconstructionResult(story.id);
         setResult(r);
         setActiveTab('report');
       }
-    } catch {}
+    } catch (error) {
+      setError(normalizeErrorMessage(error, '无法获取拆书任务状态，请稍后重试'));
+    }
   }, [story.id]);
 
   const handleStart = async () => {

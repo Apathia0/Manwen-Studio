@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session
 
 from database import SessionLocal
 from models import DeconstructionResult, Story, Chapter
+from services.errors import public_error_message
 from services.deconstruction import (
     _call_deepseek_json,
     _call_deepseek_text,
@@ -345,7 +346,13 @@ async def run_deconstruction_pipeline_v2(
                                 failed[0] += 1
                                 if should_flush_stage2_progress(completed[0], total):
                                     _update_progress(result, db, f"Stage 2: 逐章摘要 ({completed[0]}/{total}) - 第{ch.chapter_number}章失败（已跳过）")
-                            return (index, {"chapter_number": ch.chapter_number, "error": str(e)})
+                            return (
+                                index,
+                                {
+                                    "chapter_number": ch.chapter_number,
+                                    "error": public_error_message(e, f"第 {ch.chapter_number} 章摘要生成失败，请稍后重试"),
+                                },
+                            )
 
                 results = await asyncio.gather(
                     *[_summarize_one(ch, i) for i, ch in enumerate(chapters)]
@@ -577,7 +584,8 @@ async def run_deconstruction_pipeline_v2(
         except Exception as e:
             logger.error(f"拆书管道 Stage {result.current_stage} 失败: {e}")
             result.status = "failed"
-            result.progress_markdown = (result.progress_markdown or "") + f"\n\n## Stage {result.current_stage} 失败\n{str(e)}"
+            error_message = public_error_message(e, "拆书分析失败，请稍后重试")
+            result.progress_markdown = (result.progress_markdown or "") + f"\n\n## 阶段 {result.current_stage} 失败\n{error_message}"
             db.commit()
             raise
 

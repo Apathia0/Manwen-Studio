@@ -684,7 +684,6 @@ async def get_fanqie_chapter(book_id: str, chapter_id: str) -> str | None:
         async with httpx.AsyncClient(timeout=15, headers=headers_h, follow_redirects=True) as client:
             resp = await client.get(f"https://fanqienovel.com/page/{book_id}")
             if resp.status_code == 200:
-                import re
                 m = re.search(r"__INITIAL_STATE__\s*=\s*(\{.+?\});", resp.text, re.DOTALL)
                 if m:
                     state = json.loads(m.group(1))

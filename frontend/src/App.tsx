@@ -4,11 +4,11 @@ import {
   BookOpen,
   Brush,
   CreditCard,
-  Gauge,
   Home,
   Library,
   LogOut,
   MessageSquareQuote,
+  Sparkles,
   Settings2,
   ShieldCheck,
   UserCircle2,
@@ -26,7 +26,6 @@ import AdminTemplateReview from './components/AdminTemplateReview';
 import {
   AdminAnnouncementPage,
   AdminAuditLogsPage,
-  AdminPlanManagementPage,
   AdminPlatformSettingsPage,
   AdminRevenueDashboardPage,
   AdminSystemUpdatePage,
@@ -45,19 +44,16 @@ import DeconstructionWorkPage from './components/DeconstructionWorkPage';
 import { PaymentCheckoutDialog } from './components/PaymentCheckoutDialog';
 import { UserPricingPage } from './components/UserPricingPage';
 import { UserAccountUsagePage } from './components/UserAccountUsagePage';
+import { PointsAiAdminPage } from './components/admin/PointsAiAdminPage';
+import { CreationStudioPage } from './components/CreationStudioPage';
 import {
   cancelMyOrder,
   clearAuthToken,
   confirmMyOrderMock,
   createStory,
-  getMyEntitlements,
   getMyOrders,
   getPublicAnnouncement,
-  getPaymentConfig,
   getPublicPlatformSettings,
-  getMySubscription,
-  getMyUsage,
-  getPublicPlans,
   getStory,
   listChapters,
   listStories,
@@ -69,7 +65,6 @@ import {
   sendResetEmailCode,
   resetPassword as resetPasswordApi,
   setAuthToken,
-  subscribePlan,
   syncMyOrder,
   updateStory,
   deleteStory,
@@ -78,14 +73,9 @@ import {
   type AuthUser,
   type BillingCheckout,
   type Chapter,
-  type EntitlementResponse,
-  type MySubscriptionResponse,
-  type PaymentMethodOption,
   type PlatformAnnouncement,
   type PublicPlatformSettings,
-  type PublicPlan,
   type Story,
-  type UsageResponse,
 } from './api';
 
 type RouteKey =
@@ -95,6 +85,7 @@ type RouteKey =
   | 'register'
   | 'pricing'
   | 'stories'
+  | 'creation-studio'
   | 'onboarding'
   | 'import-guidance'
   | 'workspace'
@@ -112,7 +103,8 @@ type RouteKey =
   | 'system-update'
   | 'system-prompts'
   | 'style-presets'
-  | 'deconstruction-library';
+  | 'deconstruction-library'
+  | 'points-ai-admin';
 
 type NavItem = {
   key: RouteKey;
@@ -123,21 +115,23 @@ type NavItem = {
 const DEFAULT_SITE_NAME = 'StoryCanvas';
 const DEFAULT_SITE_SLOGAN = 'AI 小说与漫画创作平台';
 const DEFAULT_ICON_URL = '/brand-mark.svg';
+const LS_WORKSPACE_MODE = 'storycanvas.workspaceMode';
 
 const USER_NAV: NavItem[] = [
   { key: 'stories', label: '作品', icon: Home },
-  { key: 'workspace', label: '创作工作台', icon: Brush },
+  { key: 'creation-studio', label: '创作台', icon: Sparkles },
+  { key: 'workspace', label: '作品工作台', icon: Brush },
   { key: 'deconstruction-library', label: '拆书库', icon: BookOpen },
-  { key: 'account', label: '账户与用量', icon: UserCircle2 },
+  { key: 'account', label: '账户与积分', icon: UserCircle2 },
   { key: 'templates', label: '提示词模板', icon: Library },
-  { key: 'pricing', label: '套餐订阅', icon: CreditCard },
+  { key: 'pricing', label: '积分套餐', icon: CreditCard },
 ];
 
 const ADMIN_NAV: NavItem[] = [
-  { key: 'plan-config', label: '套餐配置', icon: Settings2 },
-  { key: 'quota-rules', label: '配额规则', icon: Gauge },
-  { key: 'entitlements', label: '用户权益', icon: ShieldCheck },
-  { key: 'revenue', label: '收入看板', icon: BarChart3 },
+  { key: 'points-ai-admin', label: '积分与 AI 渠道', icon: CreditCard },
+  { key: 'quota-rules', label: '平台配置', icon: Settings2 },
+  { key: 'entitlements', label: '用户管理', icon: ShieldCheck },
+  { key: 'revenue', label: '收入与订单', icon: BarChart3 },
   { key: 'audit-logs', label: '操作审计', icon: MessageSquareQuote },
   { key: 'announcement', label: '公告管理', icon: MessageSquareQuote },
   { key: 'style-presets', label: '风格预设', icon: Brush },
@@ -145,17 +139,6 @@ const ADMIN_NAV: NavItem[] = [
   { key: 'system-prompts', label: '系统提示词', icon: MessageSquareQuote },
   { key: 'system-update', label: '系统更新', icon: Settings2 },
 ];
-
-ADMIN_NAV[0].label = '套餐管理';
-ADMIN_NAV[1].label = '平台配置';
-ADMIN_NAV[2].label = '用户管理';
-ADMIN_NAV[3].label = '收入与订单';
-ADMIN_NAV[4].label = '操作审计';
-ADMIN_NAV[5].label = '公告管理';
-ADMIN_NAV[6].label = '风格预设';
-ADMIN_NAV[7].label = '模板审核';
-ADMIN_NAV[8].label = '系统提示词';
-ADMIN_NAV[9].label = '系统更新';
 
 function App() {
   const [session, setSession] = useState<AuthUser | null>(null);
@@ -169,7 +152,6 @@ function App() {
   const [activeChapterId, setActiveChapterId] = useState<number | null>(null);
   const [loadingStories, setLoadingStories] = useState(false);
   const [loadingWorkspace, setLoadingWorkspace] = useState(false);
-  const [plans, setPlans] = useState<PublicPlan[]>([]);
   const [platform, setPlatform] = useState<PublicPlatformSettings>({
     site_name: DEFAULT_SITE_NAME,
     site_slogan: DEFAULT_SITE_SLOGAN,
@@ -184,27 +166,28 @@ function App() {
       email_code_expire_minutes: 10,
     },
   });
-  const [usage, setUsage] = useState<UsageResponse | null>(null);
-  const [myEntitlements, setMyEntitlements] = useState<EntitlementResponse | null>(null);
-  const [mySubscription, setMySubscription] = useState<MySubscriptionResponse | null>(null);
   const [myOrders, setMyOrders] = useState<AdminOrderItem[]>([]);
-  const [subscribingPlanId, setSubscribingPlanId] = useState<number | null>(null);
   const [actioningOrderNo, setActioningOrderNo] = useState<string | null>(null);
   const [activeCheckout, setActiveCheckout] = useState<(BillingCheckout & { orderNo: string }) | null>(null);
   const [announcement, setAnnouncement] = useState<PlatformAnnouncement | null>(null);
   const [announcementDismissed, setAnnouncementDismissed] = useState(false);
   const [installRequired, setInstallRequired] = useState(false);
-  const [paymentMethods, setPaymentMethods] = useState<PaymentMethodOption[]>([]);
-  const [channelPicker, setChannelPicker] = useState<{ planId: number; billingCycle: 'monthly' | 'yearly'; options: PaymentMethodOption[] } | null>(null);
-  const [channelLoading, setChannelLoading] = useState<string | null>(null);
-  const [workspaceMode, setWorkspaceMode] = useState<'manga' | 'video'>('manga');
+  const [workspaceMode, setWorkspaceMode] = useState<'novel' | 'manga' | 'video'>(() => {
+    const savedMode = localStorage.getItem(LS_WORKSPACE_MODE);
+    if (savedMode === 'novel' || savedMode === 'manga' || savedMode === 'video') return savedMode;
+    return localStorage.getItem('rightPanelTab') === 'manga' ? 'manga' : 'novel';
+  });
   const [deconWorkId, setDeconWorkId] = useState<number>(0);
 
   const activeChapter = useMemo(
     () => chapters.find((chapter) => chapter.id === activeChapterId) ?? null,
     [chapters, activeChapterId],
   );
-  const isWorkspaceRoute = route === 'workspace';
+
+  useEffect(() => {
+    localStorage.setItem(LS_WORKSPACE_MODE, workspaceMode);
+  }, [workspaceMode]);
+  const isWorkspaceRoute = route === 'workspace' || route === 'creation-studio';
 
   useEffect(() => {
     void bootstrapApp();
@@ -231,51 +214,8 @@ function App() {
   useEffect(() => {
     if (!session) return;
     void refreshStories();
-    void refreshUsage();
-    void refreshSubscriptionData();
+    void refreshOrders();
   }, [session]);
-
-  useEffect(() => {
-    const checkoutOrderNo = activeCheckout?.orderNo;
-    if (!session || !checkoutOrderNo) return;
-
-    let cancelled = false;
-
-    async function syncCheckoutStatus() {
-      const orderNo = checkoutOrderNo!;
-      try {
-        const syncResult = await syncMyOrder(orderNo);
-        if (cancelled) return;
-        const orders = await getMyOrders();
-        if (cancelled) return;
-        setMyOrders(orders);
-        const currentOrder = orders.find((order) => order.order_no === orderNo) || syncResult.order;
-        if (!currentOrder) {
-          return;
-        }
-        if (currentOrder.status === 'paid') {
-          await Promise.all([refreshSubscriptionData(), refreshUsage()]);
-          if (!cancelled) {
-            setActiveCheckout(null);
-            setRoute('account');
-            toast.success(`支付成功，${syncResult.subscription.plan.name} 已生效。`);
-          }
-        }
-      } catch {
-        // Ignore transient polling failures and keep the dialog open.
-      }
-    }
-
-    void syncCheckoutStatus();
-    const timer = window.setInterval(() => {
-      void syncCheckoutStatus();
-    }, 5000);
-
-    return () => {
-      cancelled = true;
-      window.clearInterval(timer);
-    };
-  }, [session, activeCheckout?.orderNo]);
 
   async function bootstrapApp() {
     try {
@@ -288,9 +228,7 @@ function App() {
         return;
       }
       setInstallRequired(false);
-      void refreshPlans();
       void refreshPlatformSettings();
-      void fetchPaymentConfig();
       await bootstrapSession();
     } catch {
       clearAuthToken();
@@ -480,75 +418,18 @@ function App() {
     return result;
   }
 
-  async function doResetPassword(email: string, verificationCode: string) {
-    const result = await resetPasswordApi(email, verificationCode);
-    toast.success(result.message || `新密码已发送至 ${email}，请查收邮件。`);
+  async function doResetPassword(email: string, verificationCode: string, newPassword: string) {
+    const result = await resetPasswordApi(email, verificationCode, newPassword);
+    toast.success(result.message || '密码已重置，请使用新密码登录。');
     setRoute('login');
   }
 
-  async function refreshPlans() {
+  async function refreshOrders() {
     try {
-      const data = await getPublicPlans();
-      setPlans(data);
-    } catch {
-      setPlans([]);
-    }
-  }
-
-  async function refreshUsage() {
-    try {
-      const data = await getMyUsage();
-      setUsage(data);
-    } catch {
-      setUsage(null);
-    }
-  }
-
-  async function refreshSubscriptionData() {
-    try {
-      const [subscription, entitlements, orders] = await Promise.all([
-        getMySubscription(),
-        getMyEntitlements(),
-        getMyOrders(),
-      ]);
-      setMySubscription(subscription);
-      setMyEntitlements(entitlements);
+      const orders = await getMyOrders();
       setMyOrders(orders);
     } catch {
-      setMySubscription(null);
-      setMyEntitlements(null);
       setMyOrders([]);
-    }
-  }
-
-  async function purchasePlan(planId: number, billingCycle: 'monthly' | 'yearly' = 'monthly') {
-    if (paymentMethods.length > 1) {
-      setChannelPicker({ planId, billingCycle, options: paymentMethods });
-      return;
-    }
-    await doSubscribe(planId, billingCycle, paymentMethods.length === 1 ? paymentMethods[0].key : undefined);
-  }
-
-  /** 执行订阅，返回是否成功 */
-  async function doSubscribe(planId: number, billingCycle: 'monthly' | 'yearly', paymentMethod?: string): Promise<boolean> {
-    setSubscribingPlanId(planId);
-    try {
-      const result = await subscribePlan(planId, billingCycle, paymentMethod);
-      await Promise.all([refreshSubscriptionData(), refreshUsage()]);
-      if (result.status === 'pending') {
-        setActiveCheckout({ ...result.checkout, orderNo: result.order.order_no });
-        setRoute('account');
-      } else {
-        setActiveCheckout(null);
-        setRoute('account');
-        toast.success(`支付成功，${result.subscription.plan.name} 已生效。`);
-      }
-      return true;
-    } catch (error: any) {
-      toast.error(error.message || '订阅套餐失败');
-      return false;
-    } finally {
-      setSubscribingPlanId(null);
     }
   }
 
@@ -558,19 +439,6 @@ function App() {
       setPlatform(data);
     } catch {
       setPlatform((prev) => prev);
-    }
-  }
-
-  async function fetchPaymentConfig() {
-    try {
-      const data = await getPaymentConfig();
-      if (data.enabled && data.methods) {
-        setPaymentMethods(data.methods);
-      } else {
-        setPaymentMethods([]);
-      }
-    } catch {
-      setPaymentMethods([]);
     }
   }
 
@@ -588,9 +456,9 @@ function App() {
     setActioningOrderNo(orderNo);
     try {
       await confirmMyOrderMock(orderNo);
-      await Promise.all([refreshSubscriptionData(), refreshUsage()]);
+      await refreshOrders();
       setActiveCheckout((prev) => (prev?.orderNo === orderNo ? null : prev));
-      toast.success('支付成功，套餐已生效。');
+      toast.success('支付成功，积分已到账。');
       setRoute('account');
     } catch (error: any) {
       toast.error(error.message || '确认支付失败');
@@ -603,7 +471,7 @@ function App() {
     setActioningOrderNo(orderNo);
     try {
       await cancelMyOrder(orderNo);
-      await refreshSubscriptionData();
+      await refreshOrders();
       setActiveCheckout((prev) => (prev?.orderNo === orderNo ? null : prev));
     } catch (error: any) {
       toast.error(error.message || '取消订单失败');
@@ -669,9 +537,9 @@ function App() {
         />
     );
   }
-  if (!session && route === 'pricing') {
-    return <PricingPublicPage onBack={() => setRoute('landing')} plans={plans} onRegister={() => setRoute('register')} />;
-  }
+    if (!session && route === 'pricing') {
+      return <PricingPublicPage onBack={() => setRoute('landing')} onRegister={() => setRoute('register')} />;
+    }
   if (!session) {
     return (
       <PublicSite
@@ -832,7 +700,7 @@ function App() {
               story={activeStory}
               chapters={chapters}
               currentChapter={activeChapter}
-              entitlements={myEntitlements}
+              entitlements={null}
               workspaceMode={workspaceMode}
               onChapterChange={handleChapterChange}
               onContentUpdated={refreshWorkspaceData}
@@ -849,26 +717,26 @@ function App() {
             <UserAccountUsagePage
               session={session}
               platform={platform}
-              usage={usage}
-              subscription={mySubscription}
-              entitlements={myEntitlements}
               orders={myOrders}
               actioningOrderNo={actioningOrderNo}
               onConfirmMockPayment={confirmPendingOrder}
               onCancelOrder={cancelPendingOrder}
-              onRefreshUsage={refreshUsage}
+              onRefreshOrders={refreshOrders}
             />
+          )}
+          {route === 'points-ai-admin' && session.role === 'admin' && (
+            <PointsAiAdminPage />
           )}
           {route === 'pricing' && (
             <UserPricingPage
-              plans={plans}
-              subscription={mySubscription}
-              onSubscribe={(planId: number, billingCycle: 'monthly' | 'yearly') => void purchasePlan(planId, billingCycle)}
-              subscribingPlanId={subscribingPlanId}
+              onCheckout={(checkout) => {
+                setActiveCheckout(checkout);
+                void refreshOrders();
+              }}
             />
           )}
-          {route === 'plan-config' && session.role === 'admin' && (
-            <AdminPlanManagementPage onError={(message) => toast.error(message)} />
+          {route === 'creation-studio' && (
+            <CreationStudioPage />
           )}
           {route === 'quota-rules' && session.role === 'admin' && (
             <AdminPlatformSettingsPage
@@ -930,7 +798,6 @@ function App() {
         onClose={async () => {
           const orderNo = activeCheckout?.orderNo;
           setActiveCheckout(null);
-          setSubscribingPlanId(null);
           if (orderNo) {
             try {
               await syncMyOrder(orderNo);
@@ -938,58 +805,22 @@ function App() {
               setMyOrders(orders);
               const currentOrder = orders.find((o) => o.order_no === orderNo);
               if (currentOrder && currentOrder.status === 'paid') {
-                await Promise.all([refreshSubscriptionData(), refreshUsage()]);
+                await refreshOrders();
                 setRoute('account');
-                toast.success('支付成功，套餐已生效。');
+                toast.success('支付成功，积分已到账。');
               }
             } catch {
-              // 静默处理，不干扰用户操作
+              void 0;
             }
           }
         }}
         onSuccess={(message) => {
           setActiveCheckout(null);
-          setSubscribingPlanId(null);
           setRoute('account');
+          void refreshOrders();
           toast.success(message);
         }}
       />
-
-      {/* 支付方式选择弹窗 */}
-      {channelPicker && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-[rgba(15,23,42,0.48)] px-4">
-          <div className="w-full max-w-sm rounded-[28px] border border-[#d7e3f4] bg-white p-6 shadow-[0_24px_60px_rgba(15,23,42,0.2)]">
-            <div className="text-base font-semibold text-slate-900">选择支付方式</div>
-            <div className="mt-1 text-sm text-slate-500">请选择要使用的支付方式</div>
-            <div className="mt-4 space-y-2">
-              {channelPicker.options.map((opt) => {
-                const loading = channelLoading === opt.key;
-                return (
-                  <button
-                    key={opt.key}
-                    disabled={!!channelLoading}
-                    onClick={async () => {
-                      setChannelLoading(opt.key);
-                      const ok = await doSubscribe(channelPicker.planId, channelPicker.billingCycle, opt.key);
-                      if (ok) setChannelPicker(null);
-                      setChannelLoading(null);
-                    }}
-                    className="w-full rounded-2xl border border-[#d7e3f4] bg-[#f8fbff] px-4 py-3 text-left text-sm font-medium text-slate-900 transition hover:border-[#1d4ed8] hover:bg-[#eff6ff] disabled:cursor-not-allowed disabled:opacity-60"
-                  >
-                    {loading ? `${opt.label} ...` : opt.label}
-                  </button>
-                );
-              })}
-            </div>
-            <button
-              onClick={() => { setChannelPicker(null); setChannelLoading(null); }}
-              className="mt-4 w-full rounded-2xl border border-[#d7e3f4] px-4 py-2 text-sm text-slate-500 transition hover:bg-[#f8fbff]"
-            >
-              取消
-            </button>
-          </div>
-        </div>
-      )}
     </div>
   );
 }

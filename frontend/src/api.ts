@@ -1,25 +1,48 @@
+import { normalizeErrorMessage, readResponseError } from './lib/errors';
+
 const BASE = '';
+const DEFAULT_API_ERROR_MESSAGE = '请求失败，请稍后重试';
 const API_TOKEN = import.meta.env.VITE_API_TOKEN as string | undefined;
 export const DEEPSEEK_USAGE_URL = 'https://platform.deepseek.com/usage';
 export const IMAGE2_CONSOLE_URL = 'https://api.xbyjs.top/console/token';
 
 export interface ApiKeySettings {
   deepseekApiKey: string;
+  upstreamBaseUrl: string;
   deepseekBaseUrl: string;
   deepseekModel: string;
   imageApiKey: string;
   imageBaseUrl: string;
   imageModel: string;
+  videoBaseUrl: string;
+  videoModel: string;
 }
 
 // Stored in localStorage so multiple tabs share the same API key settings.
 const LS_DEEPSEEK_API_KEY = 'storycanvas.deepseekApiKey';
+const LS_UPSTREAM_BASE_URL = 'storycanvas.upstreamBaseUrl';
 const LS_DEEPSEEK_BASE_URL = 'storycanvas.deepseekBaseUrl';
 const LS_DEEPSEEK_MODEL = 'storycanvas.deepseekModel';
 const LS_IMAGE_API_KEY = 'storycanvas.imageApiKey';
 const LS_IMAGE_BASE_URL = 'storycanvas.imageBaseUrl';
 const LS_IMAGE_MODEL = 'storycanvas.imageModel';
+const LS_VIDEO_BASE_URL = 'storycanvas.videoBaseUrl';
+const LS_VIDEO_MODEL = 'storycanvas.videoModel';
 const LS_AUTH_TOKEN = 'storycanvas.authToken';
+const LS_AUTH_USER_ID = 'storycanvas.authUserId';
+const LS_CREDENTIAL_MODE = 'storycanvas_credential_mode';
+const LEGACY_API_SETTING_KEYS = [
+  LS_DEEPSEEK_API_KEY,
+  LS_UPSTREAM_BASE_URL,
+  LS_DEEPSEEK_BASE_URL,
+  LS_DEEPSEEK_MODEL,
+  LS_IMAGE_API_KEY,
+  LS_IMAGE_BASE_URL,
+  LS_IMAGE_MODEL,
+  LS_VIDEO_BASE_URL,
+  LS_VIDEO_MODEL,
+  LS_CREDENTIAL_MODE,
+] as const;
 export const API_KEY_CHANGE_EVENT = 'storycanvas:api-key-change';
 export const AUTH_CHANGE_EVENT = 'storycanvas:auth-change';
 
@@ -106,36 +129,62 @@ export interface InstallRestartResponse {
   message: string;
 }
 
+function scopedApiSettingKey(key: string): string | null {
+  const userId = localStorage.getItem(LS_AUTH_USER_ID);
+  return userId ? `${key}.user.${userId}` : null;
+}
+
+function getScopedApiSetting(key: string): string {
+  const scopedKey = scopedApiSettingKey(key);
+  return scopedKey ? localStorage.getItem(scopedKey) || '' : '';
+}
+
+function setScopedApiSetting(key: string, value: string): void {
+  const scopedKey = scopedApiSettingKey(key);
+  if (!scopedKey) return;
+  if (value) localStorage.setItem(scopedKey, value);
+  else localStorage.removeItem(scopedKey);
+}
+
 export function getApiKeySettings(): ApiKeySettings {
+  const upstreamBaseUrl = getScopedApiSetting(LS_UPSTREAM_BASE_URL);
+  const deepseekBaseUrl = getScopedApiSetting(LS_DEEPSEEK_BASE_URL);
+  const imageBaseUrl = getScopedApiSetting(LS_IMAGE_BASE_URL);
+  const videoBaseUrl = getScopedApiSetting(LS_VIDEO_BASE_URL);
+  const legacyUrls = [deepseekBaseUrl, imageBaseUrl, videoBaseUrl].filter(Boolean);
+  const legacySharedUrl = legacyUrls.length > 0 && legacyUrls.every((url) => url === legacyUrls[0]) ? legacyUrls[0] : '';
   return {
-    deepseekApiKey: localStorage.getItem(LS_DEEPSEEK_API_KEY) || '',
-    deepseekBaseUrl: localStorage.getItem(LS_DEEPSEEK_BASE_URL) || '',
-    deepseekModel: localStorage.getItem(LS_DEEPSEEK_MODEL) || '',
-    imageApiKey: localStorage.getItem(LS_IMAGE_API_KEY) || '',
-    imageBaseUrl: localStorage.getItem(LS_IMAGE_BASE_URL) || '',
-    imageModel: localStorage.getItem(LS_IMAGE_MODEL) || '',
+    deepseekApiKey: getScopedApiSetting(LS_DEEPSEEK_API_KEY),
+    upstreamBaseUrl: upstreamBaseUrl || legacySharedUrl,
+    deepseekBaseUrl,
+    deepseekModel: getScopedApiSetting(LS_DEEPSEEK_MODEL),
+    imageApiKey: getScopedApiSetting(LS_IMAGE_API_KEY),
+    imageBaseUrl,
+    imageModel: getScopedApiSetting(LS_IMAGE_MODEL),
+    videoBaseUrl,
+    videoModel: getScopedApiSetting(LS_VIDEO_MODEL),
   };
 }
 
 export function saveApiKeySettings(settings: ApiKeySettings): void {
   const deepseek = settings.deepseekApiKey.trim();
+  const upstreamBaseUrl = settings.upstreamBaseUrl.trim();
   const deepseekBaseUrl = settings.deepseekBaseUrl.trim();
   const deepseekModel = settings.deepseekModel.trim();
   const image = settings.imageApiKey.trim();
   const imageBaseUrl = settings.imageBaseUrl.trim();
   const imageModel = settings.imageModel.trim();
-  if (deepseek) localStorage.setItem(LS_DEEPSEEK_API_KEY, deepseek);
-  else localStorage.removeItem(LS_DEEPSEEK_API_KEY);
-  if (deepseekBaseUrl) localStorage.setItem(LS_DEEPSEEK_BASE_URL, deepseekBaseUrl);
-  else localStorage.removeItem(LS_DEEPSEEK_BASE_URL);
-  if (deepseekModel) localStorage.setItem(LS_DEEPSEEK_MODEL, deepseekModel);
-  else localStorage.removeItem(LS_DEEPSEEK_MODEL);
-  if (image) localStorage.setItem(LS_IMAGE_API_KEY, image);
-  else localStorage.removeItem(LS_IMAGE_API_KEY);
-  if (imageBaseUrl) localStorage.setItem(LS_IMAGE_BASE_URL, imageBaseUrl);
-  else localStorage.removeItem(LS_IMAGE_BASE_URL);
-  if (imageModel) localStorage.setItem(LS_IMAGE_MODEL, imageModel);
-  else localStorage.removeItem(LS_IMAGE_MODEL);
+  const videoBaseUrl = settings.videoBaseUrl.trim();
+  const videoModel = settings.videoModel.trim();
+  setScopedApiSetting(LS_DEEPSEEK_API_KEY, deepseek);
+  setScopedApiSetting(LS_UPSTREAM_BASE_URL, upstreamBaseUrl);
+  setScopedApiSetting(LS_DEEPSEEK_BASE_URL, deepseekBaseUrl);
+  setScopedApiSetting(LS_DEEPSEEK_MODEL, deepseekModel);
+  setScopedApiSetting(LS_IMAGE_API_KEY, image);
+  setScopedApiSetting(LS_IMAGE_BASE_URL, imageBaseUrl);
+  setScopedApiSetting(LS_IMAGE_MODEL, imageModel);
+  setScopedApiSetting(LS_VIDEO_BASE_URL, videoBaseUrl);
+  setScopedApiSetting(LS_VIDEO_MODEL, videoModel);
   // Notify same-tab listeners. Other tabs receive the browser 'storage' event.
   try {
     window.dispatchEvent(new Event(API_KEY_CHANGE_EVENT));
@@ -147,41 +196,71 @@ export function saveApiKeySettings(settings: ApiKeySettings): void {
 export function clearApiKeySettings(): void {
   saveApiKeySettings({
     deepseekApiKey: '',
+    upstreamBaseUrl: '',
     deepseekBaseUrl: '',
     deepseekModel: '',
     imageApiKey: '',
     imageBaseUrl: '',
     imageModel: '',
+    videoBaseUrl: '',
+    videoModel: '',
   });
+}
+
+export function clearApiUrlOverrideSettings(): void {
+  const settings = getApiKeySettings();
+  saveApiKeySettings({
+    ...settings,
+    upstreamBaseUrl: '',
+    deepseekBaseUrl: '',
+    deepseekModel: '',
+    imageBaseUrl: '',
+    imageModel: '',
+    videoBaseUrl: '',
+    videoModel: '',
+  });
+}
+
+function applyApiUrlOverrideCapability(user: AuthUser): AuthUser {
+  const legacyValues = new Map(
+    LEGACY_API_SETTING_KEYS.map((key) => [key, localStorage.getItem(key) || '']),
+  );
+  localStorage.setItem(LS_AUTH_USER_ID, String(user.id));
+  for (const [key, value] of legacyValues) {
+    const scopedKey = scopedApiSettingKey(key);
+    if (value && scopedKey && !localStorage.getItem(scopedKey)) {
+      localStorage.setItem(scopedKey, value);
+    }
+    localStorage.removeItem(key);
+  }
+  if (!user.can_override_api_url) clearApiUrlOverrideSettings();
+  if (!user.can_override_api_key && !user.can_override_api_url) setLocalCredentialMode('platform');
+  return user;
 }
 
 export function apiHeaders(json = false): HeadersInit {
   const keys = getApiKeySettings();
   const token = getAuthToken();
+  const mode = getLocalCredentialMode();
+  const upstreamBaseUrl = keys.upstreamBaseUrl.trim();
   return {
     ...(json ? { 'Content-Type': 'application/json' } : {}),
     ...(API_TOKEN ? { 'X-API-Token': API_TOKEN } : {}),
     ...(token ? { Authorization: `Bearer ${token}` } : {}),
-    ...(keys.deepseekApiKey ? { 'X-DeepSeek-API-Key': keys.deepseekApiKey } : {}),
-    ...(keys.deepseekBaseUrl ? { 'X-DeepSeek-Base-URL': keys.deepseekBaseUrl } : {}),
-    ...(keys.deepseekModel ? { 'X-DeepSeek-Model': keys.deepseekModel } : {}),
-    ...(keys.imageApiKey ? { 'X-Image-API-Key': keys.imageApiKey } : {}),
-    ...(keys.imageBaseUrl ? { 'X-Image-Base-URL': keys.imageBaseUrl } : {}),
-    ...(keys.imageModel ? { 'X-Image-Model': keys.imageModel } : {}),
+    'X-Credential-Mode': mode,
+    ...(mode === 'user_key' && keys.deepseekApiKey ? { 'X-DeepSeek-API-Key': keys.deepseekApiKey } : {}),
+    ...(mode === 'user_key' && (upstreamBaseUrl || keys.deepseekBaseUrl) ? { 'X-DeepSeek-Base-URL': upstreamBaseUrl || keys.deepseekBaseUrl } : {}),
+    ...(mode === 'user_key' && keys.deepseekModel ? { 'X-DeepSeek-Model': keys.deepseekModel } : {}),
+    ...(mode === 'user_key' && keys.imageApiKey ? { 'X-Image-API-Key': keys.imageApiKey } : {}),
+    ...(mode === 'user_key' && (upstreamBaseUrl || keys.imageBaseUrl) ? { 'X-Image-Base-URL': upstreamBaseUrl || keys.imageBaseUrl } : {}),
+    ...(mode === 'user_key' && keys.imageModel ? { 'X-Image-Model': keys.imageModel } : {}),
+    ...(mode === 'user_key' && (upstreamBaseUrl || keys.videoBaseUrl) ? { 'X-Video-Base-URL': upstreamBaseUrl || keys.videoBaseUrl } : {}),
+    ...(mode === 'user_key' && keys.videoModel ? { 'X-Video-Model': keys.videoModel } : {}),
   };
 }
 
 async function readErrorMessage(res: Response, fallback: string): Promise<string> {
-  const text = await res.text();
-  if (!text) return fallback;
-  try {
-    const parsed = JSON.parse(text);
-    if (typeof parsed?.detail === 'string' && parsed.detail.trim()) return parsed.detail.trim();
-    if (typeof parsed?.message === 'string' && parsed.message.trim()) return parsed.message.trim();
-  } catch {
-    // Fall through to plain text handling.
-  }
-  return text.trim() || fallback;
+  return readResponseError(res, fallback);
 }
 
 export function getAuthToken(): string {
@@ -190,7 +269,10 @@ export function getAuthToken(): string {
 
 export function setAuthToken(token: string): void {
   if (token) localStorage.setItem(LS_AUTH_TOKEN, token);
-  else localStorage.removeItem(LS_AUTH_TOKEN);
+  else {
+    localStorage.removeItem(LS_AUTH_TOKEN);
+    localStorage.removeItem(LS_AUTH_USER_ID);
+  }
   try {
     window.dispatchEvent(new Event(AUTH_CHANGE_EVENT));
   } catch {
@@ -543,18 +625,6 @@ export interface Chapter {
   images: MangaImage[];
 }
 
-export interface PublicPlan {
-  id: number;
-  code: string;
-  name: string;
-  description?: string;
-  monthly_price: number;
-  yearly_price?: number | null;
-  currency: string;
-  is_recommended: boolean;
-  features: Record<string, any>;
-}
-
 export interface PaymentMethodOption {
   key: string;
   label: string;
@@ -581,6 +651,8 @@ export interface PaymentSettings {
   alipay_gateway?: string;
   alipay_sign_type?: string;
   alipay_app_private_key?: string;
+  alipay_app_private_key_configured?: boolean;
+  alipay_app_private_key_last_four?: string;
   alipay_public_key?: string;
   alipay_notify_url?: string;
   epay_enabled?: boolean;
@@ -607,105 +679,19 @@ export interface BillingCheckout {
   amount: number;
   currency: string;
   plan_name: string;
-  billing_cycle: 'monthly' | 'yearly';
+  billing_cycle: 'monthly' | 'yearly' | 'one_time' | string;
   expires_at: string;
   qr_code_text: string;
   payment_url: string;
   can_mock_confirm: boolean;
 }
 
-export interface QuotaPriceItem {
-  feature_key: string;
-  name: string;
-  description: string;
-  category: string;
-  price_per_unit: number;
-  unit: string;
-}
-
-export interface PurchaseQuotaResponse {
-  ok: boolean;
-  message: string;
-  status: string;
-  order: AdminOrderItem;
-  checkout: BillingCheckout;
-}
-
-export interface UsageItem {
-  feature_key: string;
-  limit: number;
-  used: number;
-  remaining: number;
-}
-
-export interface UsageResponse {
-  period_key: string;
-  plan_code: string;
-  items: UsageItem[];
-}
-
-export interface EntitlementResponse {
-  plan: { id: number; code: string; name: string };
-  entitlements: Record<string, any>;
-}
-
-export interface SubscriptionSummary {
-  status: string;
-  billing_cycle?: 'monthly' | 'yearly' | string;
-  current_period_start?: string | null;
-  current_period_end?: string | null;
-  expires_at?: string | null;
-  plan: {
-    id: number;
-    code: string;
-    name: string;
-    monthly_price: number;
-    yearly_price?: number | null;
-    currency: string;
-  };
-}
-
-export interface AdminPlan {
-  id: number;
-  code: string;
-  name: string;
-  description?: string;
-  monthly_price: number;
-  yearly_price?: number | null;
-  currency: string;
-  is_visible: boolean;
-  is_recommended: boolean;
-}
-
-export interface AdminFeatureCatalogItem {
-  key: string;
-  name: string;
-  description: string;
-  category: string;
-  value_type: 'number' | 'boolean' | 'text';
-  default_rule?: {
-    reset_period: string;
-    deduct_mode: string;
-  };
-}
-
-export interface AdminFeatureItem {
-  feature_key: string;
-  value: any;
-}
-
-export interface AdminQuotaRule {
-  feature_key: string;
-  reset_period: string;
-  deduct_mode: string;
-  extra_config: Record<string, any>;
-}
-
 export interface AdminOrderItem {
   order_no: string;
   user_id: number;
   user_name?: string | null;
-  plan_id: number;
+  plan_id?: number | null;
+  points_product_id?: number | null;
   plan_name?: string | null;
   amount: number;
   currency: string;
@@ -736,7 +722,7 @@ export interface AdminRevenueSummary {
   monthly_orders: number;
   monthly_paid_orders: number;
   conversion_rate: number;
-  active_subscriptions: number;
+  monthly_paid_users: number;
   monthly_new_users: number;
 }
 
@@ -811,7 +797,8 @@ export interface AdminUserItem {
   allow_api_key_override?: boolean;
   allow_api_url_override?: boolean;
   created_at: string;
-  plan_name: string;
+  points_available: number;
+  points_reserved: number;
 }
 
 export interface PlatformSettings {
@@ -849,7 +836,11 @@ export interface PlatformSettings {
     enable_user_url_override?: boolean;
     oss_enabled?: boolean;
     oss_access_key_id?: string;
+    oss_access_key_id_configured?: boolean;
+    oss_access_key_id_last_four?: string;
     oss_access_key_secret?: string;
+    oss_access_key_secret_configured?: boolean;
+    oss_access_key_secret_last_four?: string;
     oss_endpoint?: string;
     oss_bucket?: string;
     oss_public_url_base?: string;
@@ -897,18 +888,14 @@ export interface PublicPlatformSettings {
     deepseek_model?: string;
     image_base_url?: string;
     image_model?: string;
+    video_base_url?: string;
+    video_model?: string;
   };
   auth?: {
     require_email_code_for_register?: boolean;
     require_email_code_for_login?: boolean;
     email_code_expire_minutes?: number;
   };
-}
-
-export interface MySubscriptionResponse {
-  user: AuthUser;
-  subscription: SubscriptionSummary;
-  latest_order: AdminOrderItem | null;
 }
 
 export interface PlatformAnnouncement {
@@ -979,7 +966,9 @@ export async function register(payload: { name: string; email: string; password:
     body: JSON.stringify(payload),
   });
   if (!res.ok) throw new Error(await readErrorMessage(res, '注册失败，请稍后重试。'));
-  return res.json();
+  const session = await res.json() as AuthSession;
+  applyApiUrlOverrideCapability(session.user);
+  return session;
 }
 
 export async function login(payload: { email: string; password: string; verification_code?: string }): Promise<AuthSession> {
@@ -989,18 +978,24 @@ export async function login(payload: { email: string; password: string; verifica
     body: JSON.stringify(payload),
   });
   if (!res.ok) throw new Error(await readErrorMessage(res, '登录失败，请检查账号或密码。'));
-  return res.json();
+  const session = await res.json() as AuthSession;
+  applyApiUrlOverrideCapability(session.user);
+  return session;
 }
 
 export async function logout(): Promise<void> {
   const res = await fetch(`${BASE}/api/auth/logout`, { method: 'POST', headers: apiHeaders() });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
+  localStorage.removeItem(LS_AUTH_USER_ID);
 }
 
 export async function me(): Promise<AuthUser> {
   const res = await fetch(`${BASE}/api/auth/me`, { headers: apiHeaders() });
-  if (!res.ok) throw new Error(await res.text());
-  return res.json();
+  if (!res.ok) {
+    localStorage.removeItem(LS_AUTH_USER_ID);
+    throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
+  }
+  return applyApiUrlOverrideCapability(await res.json() as AuthUser);
 }
 
 export async function changePassword(old_password: string, new_password: string): Promise<void> {
@@ -1022,43 +1017,19 @@ export async function sendResetEmailCode(email: string): Promise<{ ok: boolean; 
   return res.json();
 }
 
-export async function resetPassword(email: string, verification_code: string): Promise<{ ok: boolean; message: string }> {
+export async function resetPassword(email: string, verification_code: string, new_password: string): Promise<{ ok: boolean; message: string }> {
   const res = await fetch(`${BASE}/api/auth/reset-password`, {
     method: 'POST',
     headers: apiHeaders(true),
-    body: JSON.stringify({ email, verification_code }),
+    body: JSON.stringify({ email, verification_code, new_password }),
   });
   if (!res.ok) throw new Error(await readErrorMessage(res, '密码重置失败'));
   return res.json();
 }
 
-export async function getPublicPlans(): Promise<PublicPlan[]> {
-  const res = await fetch(`${BASE}/api/plans/public`, { headers: apiHeaders() });
-  if (!res.ok) throw new Error(await res.text());
-  return res.json();
-}
-
-export async function getMyUsage(): Promise<UsageResponse> {
-  const res = await fetch(`${BASE}/api/me/usage`, { headers: apiHeaders() });
-  if (!res.ok) throw new Error(await res.text());
-  return res.json();
-}
-
-export async function getMyEntitlements(): Promise<EntitlementResponse> {
-  const res = await fetch(`${BASE}/api/me/entitlements`, { headers: apiHeaders() });
-  if (!res.ok) throw new Error(await res.text());
-  return res.json();
-}
-
-export async function getMySubscription(): Promise<MySubscriptionResponse> {
-  const res = await fetch(`${BASE}/api/me/subscription`, { headers: apiHeaders() });
-  if (!res.ok) throw new Error(await res.text());
-  return res.json();
-}
-
 export async function getMyOrders(): Promise<AdminOrderItem[]> {
   const res = await fetch(`${BASE}/api/me/orders`, { headers: apiHeaders() });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   return res.json();
 }
 
@@ -1070,57 +1041,7 @@ export async function getPaymentConfig(): Promise<{
   methods: PaymentMethodOption[];
 }> {
   const res = await fetch(`${BASE}/api/billing/payment-config`);
-  if (!res.ok) throw new Error(await res.text());
-  return res.json();
-}
-
-export async function getQuotaPrices(): Promise<QuotaPriceItem[]> {
-  const res = await fetch(`${BASE}/api/billing/quota-prices`);
-  if (!res.ok) throw new Error(await res.text());
-  return res.json();
-}
-
-export async function purchaseQuota(
-  featureKey: string,
-  amount: number,
-  paymentMethod?: string,
-): Promise<PurchaseQuotaResponse> {
-  const body: Record<string, unknown> = { feature_key: featureKey, amount };
-  if (paymentMethod) body.payment_method = paymentMethod;
-  const res = await fetch(`${BASE}/api/billing/purchase-quota`, {
-    method: 'POST',
-    headers: apiHeaders(true),
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) throw new Error(await res.text());
-  return res.json();
-}
-
-export async function subscribePlan(
-  planId: number,
-  billingCycle: 'monthly' | 'yearly' = 'monthly',
-  paymentMethod?: string,
-): Promise<{
-  ok: boolean;
-  message: string;
-  status: string;
-  subscription: SubscriptionSummary;
-  order: AdminOrderItem;
-  checkout: BillingCheckout;
-}> {
-  const body: Record<string, unknown> = { plan_id: planId, billing_cycle: billingCycle };
-  if (paymentMethod) body.payment_method = paymentMethod;
-  const res = await fetch(`${BASE}/api/billing/subscribe`, {
-    method: 'POST',
-    headers: apiHeaders(true),
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) {
-    const text = await res.text();
-    let detail = text;
-    try { detail = JSON.parse(text).detail || text; } catch { /* 非 JSON 响应直接使用原文 */ }
-    throw new Error(detail);
-  }
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   return res.json();
 }
 
@@ -1128,13 +1049,12 @@ export async function confirmMyOrderMock(orderNo: string): Promise<{
   ok: boolean;
   status: string;
   order: AdminOrderItem;
-  subscription: SubscriptionSummary;
 }> {
   const res = await fetch(`${BASE}/api/me/orders/${orderNo}/mock-confirm`, {
     method: 'POST',
     headers: apiHeaders(),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   return res.json();
 }
 
@@ -1147,7 +1067,7 @@ export async function cancelMyOrder(orderNo: string): Promise<{
     method: 'POST',
     headers: apiHeaders(),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   return res.json();
 }
 
@@ -1155,153 +1075,33 @@ export async function syncMyOrder(orderNo: string): Promise<{
   ok: boolean;
   status: string;
   order: AdminOrderItem;
-  subscription: SubscriptionSummary;
   checkout?: BillingCheckout | null;
 }> {
   const res = await fetch(`${BASE}/api/me/orders/${orderNo}/sync`, {
     method: 'POST',
     headers: apiHeaders(),
   });
-  if (!res.ok) throw new Error(await res.text());
-  return res.json();
-}
-
-export async function getAdminPlans(): Promise<AdminPlan[]> {
-  const res = await fetch(`${BASE}/api/admin/plans`, { headers: apiHeaders() });
-  if (!res.ok) throw new Error(await res.text());
-  return res.json();
-}
-
-export async function createAdminPlan(payload: {
-  code: string;
-  name: string;
-  description?: string;
-  monthly_price?: number;
-  yearly_price?: number;
-  currency?: string;
-  is_visible?: boolean;
-  is_recommended?: boolean;
-}): Promise<void> {
-  const res = await fetch(`${BASE}/api/admin/plans`, {
-    method: 'POST',
-    headers: apiHeaders(true),
-    body: JSON.stringify(payload),
-  });
-  if (!res.ok) throw new Error(await res.text());
-}
-
-export async function deleteAdminPlan(planId: number): Promise<void> {
-  const res = await fetch(`${BASE}/api/admin/plans/${planId}`, {
-    method: 'DELETE',
-    headers: apiHeaders(),
-  });
-  if (!res.ok) throw new Error(await res.text());
-}
-
-export async function getAdminFeatureCatalog(): Promise<AdminFeatureCatalogItem[]> {
-  const res = await fetch(`${BASE}/api/admin/feature-catalog`, { headers: apiHeaders() });
-  if (!res.ok) throw new Error(await res.text());
-  return res.json();
-}
-
-export async function updateAdminPlan(planId: number, payload: Partial<AdminPlan> & { description?: string }): Promise<void> {
-  const res = await fetch(`${BASE}/api/admin/plans/${planId}`, {
-    method: 'PUT',
-    headers: apiHeaders(true),
-    body: JSON.stringify(payload),
-  });
-  if (!res.ok) throw new Error(await res.text());
-}
-
-export async function getAdminPlanFeatures(planId: number): Promise<AdminFeatureItem[]> {
-  const res = await fetch(`${BASE}/api/admin/plans/${planId}/features`, { headers: apiHeaders() });
-  if (!res.ok) throw new Error(await res.text());
-  return res.json();
-}
-
-export async function saveAdminPlanFeatures(planId: number, items: AdminFeatureItem[]): Promise<void> {
-  const res = await fetch(`${BASE}/api/admin/plans/${planId}/features`, {
-    method: 'PUT',
-    headers: apiHeaders(true),
-    body: JSON.stringify({ items }),
-  });
-  if (!res.ok) throw new Error(await res.text());
-}
-
-export async function getAdminQuotaRules(planId: number): Promise<AdminQuotaRule[]> {
-  const res = await fetch(`${BASE}/api/admin/plans/${planId}/quota-rules`, { headers: apiHeaders() });
-  if (!res.ok) throw new Error(await res.text());
-  return res.json();
-}
-
-export async function saveAdminQuotaRules(planId: number, items: AdminQuotaRule[]): Promise<void> {
-  const res = await fetch(`${BASE}/api/admin/plans/${planId}/quota-rules`, {
-    method: 'PUT',
-    headers: apiHeaders(true),
-    body: JSON.stringify({ items }),
-  });
-  if (!res.ok) throw new Error(await res.text());
-}
-
-export async function getAdminUserEntitlements(userId: number): Promise<{
-  user: AuthUser;
-  subscription: {
-    status: string;
-    billing_cycle?: string;
-    current_period_start?: string | null;
-    current_period_end?: string | null;
-    expires_at?: string | null;
-  };
-  plan: { id: number; code: string; name: string };
-  entitlements: Record<string, any>;
-  usage: UsageItem[];
-}> {
-  const res = await fetch(`${BASE}/api/admin/users/${userId}/entitlements`, { headers: apiHeaders() });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   return res.json();
 }
 
 export async function getAdminUserStories(userId: number): Promise<AdminReviewStory[]> {
   const res = await fetch(`${BASE}/api/admin/users/${userId}/stories`, { headers: apiHeaders() });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   return res.json();
 }
 
 export async function getAdminStoryChapters(storyId: number): Promise<AdminReviewStoryChaptersResponse> {
   const res = await fetch(`${BASE}/api/admin/stories/${storyId}/chapters`, { headers: apiHeaders() });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   return res.json();
 }
 
-export async function adminUpdateUserSubscription(userId: number, planId: number): Promise<void> {
-  const res = await fetch(`${BASE}/api/admin/users/${userId}/subscription`, {
-    method: 'POST',
-    headers: apiHeaders(true),
-    body: JSON.stringify({ plan_id: planId }),
-  });
-  if (!res.ok) throw new Error(await res.text());
-}
 
-export async function adminGrantUserQuota(userId: number, featureKey: string, amount: number): Promise<{
-  ok: boolean;
-  feature_key: string;
-  granted_amount: number;
-  before_granted: number;
-  after_granted: number;
-  usage: UsageItem[];
-}> {
-  const res = await fetch(`${BASE}/api/admin/users/${userId}/quota-grants`, {
-    method: 'POST',
-    headers: apiHeaders(true),
-    body: JSON.stringify({ feature_key: featureKey, amount }),
-  });
-  if (!res.ok) throw new Error(await res.text());
-  return res.json();
-}
 
 export async function getAdminOrders(): Promise<AdminOrderItem[]> {
   const res = await fetch(`${BASE}/api/admin/orders`, { headers: apiHeaders() });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   return res.json();
 }
 
@@ -1318,7 +1118,7 @@ export async function searchAdminOrders(
   const res = await fetch(`${BASE}/api/admin/orders/search${qs ? '?' + qs : ''}`, {
     headers: apiHeaders(),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   return res.json();
 }
 
@@ -1332,19 +1132,19 @@ export async function updateAdminOrderStatus(
     headers: apiHeaders(true),
     body: JSON.stringify({ status, note }),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   return res.json();
 }
 
 export async function getAdminRevenueSummary(): Promise<AdminRevenueSummary> {
   const res = await fetch(`${BASE}/api/admin/revenue/summary`, { headers: apiHeaders() });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   return res.json();
 }
 
 export async function getAdminRevenueMonthly(months = 12): Promise<AdminRevenueMonthlyItem[]> {
   const res = await fetch(`${BASE}/api/admin/revenue/monthly?months=${months}`, { headers: apiHeaders() });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   return res.json();
 }
 
@@ -1363,7 +1163,7 @@ export async function getAdminAuditLogs(params?: {
   if (params?.limit) query.set('limit', String(params.limit));
   const suffix = query.toString() ? `?${query.toString()}` : '';
   const res = await fetch(`${BASE}/api/admin/audit-logs${suffix}`, { headers: apiHeaders() });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   return res.json();
 }
 
@@ -1392,7 +1192,7 @@ export async function startAdminSystemUpdate(targetVersion?: string): Promise<Ad
 
 export async function getAdminUsers(): Promise<AdminUserItem[]> {
   const res = await fetch(`${BASE}/api/admin/users`, { headers: apiHeaders() });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   return res.json();
 }
 
@@ -1409,7 +1209,7 @@ export async function createAdminUser(payload: {
     headers: apiHeaders(true),
     body: JSON.stringify(payload),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
 }
 
 export async function updateAdminUser(
@@ -1429,7 +1229,7 @@ export async function updateAdminUser(
     headers: apiHeaders(true),
     body: JSON.stringify(payload),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
 }
 
 export async function deleteAdminUser(userId: number): Promise<void> {
@@ -1437,12 +1237,12 @@ export async function deleteAdminUser(userId: number): Promise<void> {
     method: 'DELETE',
     headers: apiHeaders(),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
 }
 
 export async function getAdminPlatformSettings(): Promise<PlatformSettings> {
   const res = await fetch(`${BASE}/api/admin/platform/settings`, { headers: apiHeaders() });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   return res.json();
 }
 
@@ -1452,14 +1252,14 @@ export async function updateAdminPlatformSettings(payload: PlatformSettings): Pr
     headers: apiHeaders(true),
     body: JSON.stringify(payload),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   const data = await res.json();
   return data.settings;
 }
 
 export async function getAdminAnnouncement(): Promise<PlatformAnnouncement> {
   const res = await fetch(`${BASE}/api/admin/platform/announcement`, { headers: apiHeaders() });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   return res.json();
 }
 
@@ -1469,19 +1269,19 @@ export async function updateAdminAnnouncement(payload: PlatformAnnouncement): Pr
     headers: apiHeaders(true),
     body: JSON.stringify(payload),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   return res.json();
 }
 
 export async function getPublicAnnouncement(): Promise<PlatformAnnouncement> {
   const res = await fetch(`${BASE}/api/platform/announcement`, { headers: apiHeaders() });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   return res.json();
 }
 
 export async function getPublicPlatformSettings(): Promise<PublicPlatformSettings> {
   const res = await fetch(`${BASE}/api/platform/settings/public`, { headers: apiHeaders() });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   return res.json();
 }
 
@@ -1493,19 +1293,19 @@ export async function createStory(title: string = '未命名故事', description
     headers: apiHeaders(true),
     body: JSON.stringify({ title, description }),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   return res.json();
 }
 
 export async function listStories(): Promise<Story[]> {
   const res = await fetch(`${BASE}/api/stories`, { headers: apiHeaders() });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   return res.json();
 }
 
 export async function getStory(storyId: number): Promise<Story> {
   const res = await fetch(`${BASE}/api/stories/${storyId}`, { headers: apiHeaders() });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   return res.json();
 }
 
@@ -1524,13 +1324,13 @@ export async function updateStory(
     headers: apiHeaders(true),
     body: JSON.stringify(data),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   return res.json();
 }
 
 export async function deleteStory(storyId: number): Promise<void> {
   const res = await fetch(`${BASE}/api/stories/${storyId}`, { method: 'DELETE', headers: apiHeaders() });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
 }
 
 export async function uploadStoryCover(storyId: number, base64: string): Promise<string> {
@@ -1539,7 +1339,7 @@ export async function uploadStoryCover(storyId: number, base64: string): Promise
     headers: apiHeaders(true),
     body: JSON.stringify({ image: base64 }),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   const data = await res.json();
   return data.cover_image;
 }
@@ -1609,25 +1409,25 @@ export function coverImageUrl(coverPath: string | null | undefined): string | nu
 
 export async function getChapter(chapterId: number): Promise<Chapter> {
   const res = await fetch(`${BASE}/api/chapters/${chapterId}`, { headers: apiHeaders() });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   return res.json();
 }
 
 export async function listChapters(storyId: number): Promise<Chapter[]> {
   const res = await fetch(`${BASE}/api/stories/${storyId}/chapters`, { headers: apiHeaders() });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   return res.json();
 }
 
 export async function createNextChapter(storyId: number): Promise<Chapter> {
   const res = await fetch(`${BASE}/api/stories/${storyId}/chapters`, { method: 'POST', headers: apiHeaders() });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   return res.json();
 }
 
 export async function deleteChapter(chapterId: number): Promise<void> {
   const res = await fetch(`${BASE}/api/chapters/${chapterId}`, { method: 'DELETE', headers: apiHeaders() });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
 }
 
 // ─── Chat (SSE) ─────────────────────────────────────────────
@@ -1649,14 +1449,18 @@ export function chatStream(
   })
     .then(async (res) => {
       if (!res.ok) {
-        onError(await res.text());
+        onError(await readErrorMessage(res, '对话请求失败，请稍后重试'));
         return;
       }
       const reader = res.body?.getReader();
-      if (!reader) return;
+      if (!reader) {
+        onError('对话连接未返回可读取内容，请稍后重试');
+        return;
+      }
       const decoder = new TextDecoder();
       let buffer = '';
       let currentEvent = 'message';
+      let terminalEventReceived = false;
       const handleLine = (line: string) => {
         const trimmed = line.trim();
         if (!trimmed || trimmed.startsWith(':')) return;
@@ -1669,12 +1473,15 @@ export function chatStream(
             if (currentEvent === 'token' && data.content !== undefined) {
               onToken(data.content);
             } else if (currentEvent === 'done' && data.content !== undefined) {
+              terminalEventReceived = true;
               _onDone(data.content);
             } else if (currentEvent === 'error' || data.error) {
-              onError(data.error);
+              terminalEventReceived = true;
+              onError(normalizeErrorMessage(data.error, '对话生成失败，请稍后重试'));
             }
           } catch {
-            // ignore
+            terminalEventReceived = true;
+            onError('对话任务返回了无法解析的数据，请刷新后重试');
           }
           currentEvent = 'message';
         }
@@ -1692,13 +1499,13 @@ export function chatStream(
         }
       }
       if (buffer.trim()) handleLine(buffer);
-
-      // If stream ended without a done event, call onDone with empty
-      // This handles edge cases where connection closes unexpectedly
+      if (!terminalEventReceived && !controller.signal.aborted) {
+        onError('对话连接意外中断，请重试');
+      }
     })
     .catch((err) => {
       if (err.name !== 'AbortError') {
-        onError(err.message);
+        onError(normalizeErrorMessage(err, '对话请求失败，请稍后重试'));
       }
     });
 
@@ -1712,7 +1519,7 @@ export async function generateNovel(chapterId: number): Promise<Chapter> {
     method: 'POST',
     headers: apiHeaders(),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   return res.json();
 }
 
@@ -1722,7 +1529,7 @@ export async function importNovel(chapterId: number, content: string): Promise<C
     headers: { ...apiHeaders(), 'Content-Type': 'application/json' },
     body: JSON.stringify({ content }),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   return res.json();
 }
 
@@ -1732,7 +1539,7 @@ export async function saveChapterContent(chapterId: number, content: string): Pr
     headers: apiHeaders(true),
     body: JSON.stringify({ content }),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   return res.json();
 }
 
@@ -1742,7 +1549,7 @@ export async function adjustChapterContent(chapterId: number, instruction: strin
     headers: apiHeaders(true),
     body: JSON.stringify({ instruction }),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   return res.json();
 }
 
@@ -1755,7 +1562,7 @@ export async function saveContinuityMemory(
     headers: apiHeaders(true),
     body: JSON.stringify(data),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   return res.json();
 }
 
@@ -1768,13 +1575,13 @@ export interface ScenesPayload {
 
 export async function generateScenes(chapterId: number, signal?: AbortSignal): Promise<ScenesPayload> {
   const res = await fetch(`${BASE}/api/chapters/${chapterId}/generate-scenes`, { method: 'POST', headers: apiHeaders(), signal });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   return res.json();
 }
 
 export async function getScenes(chapterId: number): Promise<ScenesPayload> {
   const res = await fetch(`${BASE}/api/chapters/${chapterId}/scenes`, { headers: apiHeaders() });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   return res.json();
 }
 
@@ -1784,7 +1591,7 @@ export async function updateScenes(chapterId: number, scenes: string[]): Promise
     headers: apiHeaders(true),
     body: JSON.stringify({ scenes }),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
 }
 
 // ─── Character Profiles ─────────────────────────────────────
@@ -1792,7 +1599,7 @@ export async function updateScenes(chapterId: number, scenes: string[]): Promise
 // Story-level (global)
 export async function getStoryCharacters(storyId: number): Promise<string> {
   const res = await fetch(`${BASE}/api/stories/${storyId}/characters`, { headers: apiHeaders() });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   const data = await res.json();
   return data.characters;
 }
@@ -1803,13 +1610,13 @@ export async function saveStoryCharacters(storyId: number, characters: string): 
     headers: apiHeaders(true),
     body: JSON.stringify({ characters }),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
 }
 
 // Chapter-level (with source info)
 export async function getCharacters(chapterId: number): Promise<{ characters: string; source: 'chapter' | 'story' | 'none' }> {
   const res = await fetch(`${BASE}/api/chapters/${chapterId}/characters`, { headers: apiHeaders() });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   return await res.json();
 }
 
@@ -1819,7 +1626,7 @@ export async function saveCharacters(chapterId: number, characters: string): Pro
     headers: apiHeaders(true),
     body: JSON.stringify({ characters }),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
 }
 
 export async function resetChapterCharacters(chapterId: number): Promise<void> {
@@ -1827,7 +1634,7 @@ export async function resetChapterCharacters(chapterId: number): Promise<void> {
     method: 'DELETE',
     headers: apiHeaders(),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
 }
 
 export async function generateStoryCharactersFromFramework(storyId: number): Promise<{ characters: string }> {
@@ -1835,7 +1642,7 @@ export async function generateStoryCharactersFromFramework(storyId: number): Pro
     method: 'POST',
     headers: apiHeaders(),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   return await res.json();
 }
 
@@ -1867,7 +1674,7 @@ export function refImageUrl(imagePath: string): string {
 // Story-level
 export async function getStoryRefImages(storyId: number): Promise<RefImagesPayload> {
   const res = await fetch(`${BASE}/api/stories/${storyId}/ref-images`, { headers: apiHeaders() });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   return res.json();
 }
 
@@ -1877,7 +1684,7 @@ export async function addStoryRefImage(storyId: number, base64: string): Promise
     headers: apiHeaders(true),
     body: JSON.stringify({ image: base64 }),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   return res.json();
 }
 
@@ -1886,7 +1693,7 @@ export async function deleteStoryRefImage(storyId: number, filename: string): Pr
     `${BASE}/api/stories/${storyId}/ref-images/${encodeURIComponent(filename)}`,
     { method: 'DELETE', headers: apiHeaders() },
   );
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   return res.json();
 }
 
@@ -1903,14 +1710,14 @@ export async function redrawStoryRefImage(
       body: JSON.stringify(data),
     },
   );
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   return res.json();
 }
 
 // Chapter-level (with story fallback)
 export async function getChapterRefImages(chapterId: number): Promise<RefImagesPayload> {
   const res = await fetch(`${BASE}/api/chapters/${chapterId}/ref-images`, { headers: apiHeaders() });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   return res.json();
 }
 
@@ -1920,7 +1727,7 @@ export async function addChapterRefImage(chapterId: number, base64: string): Pro
     headers: apiHeaders(true),
     body: JSON.stringify({ image: base64 }),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   return res.json();
 }
 
@@ -1929,7 +1736,7 @@ export async function deleteChapterRefImage(chapterId: number, filename: string)
     `${BASE}/api/chapters/${chapterId}/ref-images/${encodeURIComponent(filename)}`,
     { method: 'DELETE', headers: apiHeaders() },
   );
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   return res.json();
 }
 
@@ -1946,7 +1753,7 @@ export async function redrawChapterRefImage(
       body: JSON.stringify(data),
     },
   );
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   return res.json();
 }
 
@@ -1956,7 +1763,7 @@ export type ColorMode = 'bw' | 'color';
 
 export async function getColorMode(chapterId: number): Promise<ColorMode> {
   const res = await fetch(`${BASE}/api/chapters/${chapterId}/color-mode`, { headers: apiHeaders() });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   const data = await res.json();
   return data.color_mode || 'bw';
 }
@@ -1967,7 +1774,7 @@ export async function setColorMode(chapterId: number, mode: ColorMode): Promise<
     headers: apiHeaders(true),
     body: JSON.stringify({ color_mode: mode }),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
 }
 
 // ─── Image Count ─────────────────────────────────────────────
@@ -1976,18 +1783,20 @@ export const ALLOWED_IMAGE_COUNTS = [4, 6, 8, 10, 12, 15, 20] as const;
 
 export async function getImageCount(chapterId: number): Promise<number> {
   const res = await fetch(`${BASE}/api/chapters/${chapterId}/image-count`, { headers: apiHeaders() });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   const data = await res.json();
   return data.image_count || 10;
 }
 
-export async function setImageCount(chapterId: number, count: number): Promise<void> {
+export async function setImageCount(chapterId: number, count: number): Promise<number> {
   const res = await fetch(`${BASE}/api/chapters/${chapterId}/image-count`, {
     method: 'PUT',
     headers: apiHeaders(true),
     body: JSON.stringify({ image_count: count }),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
+  const data = await res.json();
+  return data.image_count;
 }
 
 export async function regenerateImage(
@@ -2001,7 +1810,7 @@ export async function regenerateImage(
     headers: apiHeaders(true),
     body: JSON.stringify({ prompt, mode: options?.mode, mask: options?.mask, size: options?.size, style_preset_name: options?.stylePresetName, style_ref_url: options?.styleRefUrl }),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   return res.json();
 }
 
@@ -2014,7 +1823,7 @@ export interface MangaProgress {
 
 export interface MangaGenStatusResponse {
   task_id: string | null;
-  status: 'none' | 'pending' | 'running' | 'succeeded' | 'failed' | 'retrying';
+  status: 'none' | 'pending' | 'running' | 'succeeded' | 'failed' | 'retrying' | 'cancel_requested' | 'cancelled';
   progress: number;
   total: number;
   error_message: string | null;
@@ -2023,6 +1832,13 @@ export interface MangaGenStatusResponse {
   retry_count?: number;
   max_retries?: number;
   next_retry_at?: string | null;
+  error_code?: string | null;
+  retryable?: boolean;
+  suggestion?: string | null;
+  asset_total?: number;
+  asset_completed?: number;
+  asset_generated?: number;
+  asset_failed?: number;
   created_at: string | null;
   completed_at: string | null;
 }
@@ -2032,7 +1848,7 @@ export async function getMangaGenerationStatus(chapterId: number): Promise<Manga
     headers: apiHeaders(),
   });
   if (!response.ok) {
-    throw new Error(`获取漫画生成状态失败: ${response.statusText}`);
+    throw new Error(await readErrorMessage(response, '获取漫画生成状态失败，请稍后重试'));
   }
   return response.json();
 }
@@ -2051,7 +1867,7 @@ export async function resetMangaImages(chapterId: number): Promise<void> {
     method: 'DELETE',
     headers: apiHeaders(),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
 }
 
 export function generateMangaStream(
@@ -2060,13 +1876,17 @@ export function generateMangaStream(
   size?: string,
   stylePresetName?: string,
   styleRefUrl?: string,
+  assetExtraction?: { enabled: boolean; types: Array<'character' | 'scene' | 'prop'> },
 ): AbortController {
   const controller = new AbortController();
 
-  const body: Record<string, string> = {};
+  const body: Record<string, unknown> = {};
   if (size) body.size = size;
   if (stylePresetName) body.style_preset_name = stylePresetName;
   if (styleRefUrl) body.style_ref_url = styleRefUrl;
+  if (assetExtraction) {
+    body.auto_asset_extraction = assetExtraction;
+  }
 
   fetch(`${BASE}/api/chapters/${chapterId}/generate-manga-stream`, {
     method: 'POST',
@@ -2076,14 +1896,18 @@ export function generateMangaStream(
   })
     .then(async (res) => {
       if (!res.ok) {
-        onEvent({ type: 'error', data: { error: await res.text() } });
+        onEvent({ type: 'error', data: { error: await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE) } });
         return;
       }
       const reader = res.body?.getReader();
-      if (!reader) return;
+      if (!reader) {
+        onEvent({ type: 'error', data: { error: '漫画生成连接未返回数据，请稍后重试' } });
+        return;
+      }
       const decoder = new TextDecoder();
       let buffer = '';
       let currentEvent = 'message';
+      let terminalReceived = false;
       const handleLine = (line: string) => {
         const trimmed = line.trim();
         if (!trimmed || trimmed.startsWith(':')) return;
@@ -2094,9 +1918,11 @@ export function generateMangaStream(
           try {
             const data = JSON.parse(dataStr);
             const eventType = currentEvent as MangaProgress['type'];
+            if (eventType === 'done' || eventType === 'error') terminalReceived = true;
             onEvent({ type: eventType, data });
           } catch {
-            // ignore unparseable data
+            terminalReceived = true;
+            onEvent({ type: 'error', data: { error: '漫画任务返回了无法解析的数据，请刷新后重试' } });
           }
           currentEvent = 'message';
         }
@@ -2114,10 +1940,13 @@ export function generateMangaStream(
         }
       }
       if (buffer.trim()) handleLine(buffer);
+      if (!terminalReceived) {
+        onEvent({ type: 'error', data: { error: '漫画生成连接意外中断，请稍后重试' } });
+      }
     })
     .catch((err) => {
       if (err.name !== 'AbortError') {
-        onEvent({ type: 'error', data: { error: err.message } });
+        onEvent({ type: 'error', data: { error: normalizeErrorMessage(err, '漫画生成连接失败，请稍后重试') } });
       }
     });
 
@@ -2146,14 +1975,18 @@ export function generateStoryCharRefStream(
   })
     .then(async (res) => {
       if (!res.ok) {
-        onEvent({ type: 'error', data: { error: await res.text() } });
+        onEvent({ type: 'error', data: { error: await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE) } });
         return;
       }
       const reader = res.body?.getReader();
-      if (!reader) return;
+      if (!reader) {
+        onEvent({ type: 'error', data: { error: '角色参考图连接未返回数据，请稍后重试' } });
+        return;
+      }
       const decoder = new TextDecoder();
       let buffer = '';
       let currentEvent = 'message';
+      let terminalReceived = false;
       const handleLine = (line: string) => {
         const trimmed = line.trim();
         if (!trimmed || trimmed.startsWith(':')) return;
@@ -2164,9 +1997,11 @@ export function generateStoryCharRefStream(
           try {
             const parsed = JSON.parse(dataStr);
             const eventType = currentEvent as CharRefEvent['type'];
+            if (eventType === 'done' || eventType === 'error') terminalReceived = true;
             onEvent({ type: eventType, data: parsed });
           } catch {
-            // ignore unparseable data
+            terminalReceived = true;
+            onEvent({ type: 'error', data: { error: '角色参考图任务返回了无法解析的数据，请刷新后重试' } });
           }
           currentEvent = 'message';
         }
@@ -2183,10 +2018,13 @@ export function generateStoryCharRefStream(
         }
       }
       if (buffer.trim()) handleLine(buffer);
+      if (!terminalReceived) {
+        onEvent({ type: 'error', data: { error: '角色参考图连接意外中断，请稍后重试' } });
+      }
     })
     .catch((err) => {
       if (err.name !== 'AbortError') {
-        onEvent({ type: 'error', data: { error: err.message } });
+        onEvent({ type: 'error', data: { error: normalizeErrorMessage(err, '角色参考图生成连接失败，请稍后重试') } });
       }
     });
 
@@ -2208,7 +2046,7 @@ export async function uploadCharacterRefImage(
       replace_existing: replaceExisting,
     }),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   return res.json();
 }
 
@@ -2220,7 +2058,7 @@ export async function deleteCharacterRefImage(
     `${BASE}/api/stories/${storyId}/character-ref-images/${encodeURIComponent(filename)}`,
     { method: 'DELETE', headers: apiHeaders() },
   );
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   return res.json();
 }
 
@@ -2316,7 +2154,7 @@ export async function getStoryBible(storyId: number): Promise<{ story_bible: Sto
   const res = await fetch(`${BASE}/api/stories/${storyId}/story-bible`, {
     headers: apiHeaders(),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   return res.json();
 }
 
@@ -2348,7 +2186,7 @@ export async function generateFramework(storyId: number, description: string): P
     throw new Error(e instanceof DOMException && e.name === 'AbortError' ? '框架生成超时，请重试' : '框架生成失败');
   }
   clearTimeout(timer);
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   return res.json();
 }
 
@@ -2388,7 +2226,7 @@ export async function regenerateTags(storyId: number): Promise<Tags> {
     method: 'POST',
     headers: apiHeaders(),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   const data = await res.json();
   return data.tags ?? data;
 }
@@ -2398,7 +2236,7 @@ export async function regenerateCharacters(storyId: number): Promise<Character[]
     method: 'POST',
     headers: apiHeaders(),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   const data = await res.json();
   return data.characters ?? data;
 }
@@ -2408,7 +2246,7 @@ export async function regenerateOutline(storyId: number): Promise<Outline> {
     method: 'POST',
     headers: apiHeaders(),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   const data = await res.json();
   return data.outline ?? data;
 }
@@ -2425,7 +2263,7 @@ export async function saveOutlineChapterPlan(
     headers: apiHeaders(true),
     body: JSON.stringify(data),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   const payload = await res.json();
   return payload.outline ?? payload;
 }
@@ -2439,7 +2277,7 @@ export async function adjustFramework(
     headers: apiHeaders(true),
     body: JSON.stringify({ messages }),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   return res.json();
 }
 
@@ -2480,7 +2318,7 @@ export async function generateStoryCharacterRefImages(
     headers: apiHeaders(true),
     body: JSON.stringify(data ?? {}),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   return res.json();
 }
 
@@ -2489,7 +2327,7 @@ export async function continueFramework(storyId: number): Promise<FrameworkConti
     method: 'POST',
     headers: apiHeaders(),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   return res.json();
 }
 
@@ -2513,7 +2351,7 @@ export async function expandChapter(
     headers: apiHeaders(true),
     body: JSON.stringify(data),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   return res.json();
 }
 
@@ -2527,7 +2365,7 @@ export async function rewriteSelection(
     headers: apiHeaders(true),
     body: JSON.stringify({ selected_text: selectedText, chapter_context: context }),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   const data = await res.json();
   return data.rewritten_text ?? data;
 }
@@ -2537,7 +2375,7 @@ export async function assessQuality(chapterId: number): Promise<QualityScore> {
     method: 'POST',
     headers: apiHeaders(),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   const data = await res.json();
   return data.scores ?? data;
 }
@@ -2551,7 +2389,7 @@ export async function scenesFromSelection(
     headers: apiHeaders(true),
     body: JSON.stringify(data),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   return res.json();
 }
 
@@ -2596,14 +2434,18 @@ export function agentChatStream(
   })
     .then(async (res) => {
       if (!res.ok) {
-        callbacks?.onError?.(await res.text());
+        callbacks?.onError?.(await readErrorMessage(res, 'AI 助手请求失败，请稍后重试'));
         return;
       }
       const reader = res.body?.getReader();
-      if (!reader) return;
+      if (!reader) {
+        callbacks?.onError?.('AI 助手连接未返回可读取内容，请稍后重试');
+        return;
+      }
       const decoder = new TextDecoder();
       let buffer = '';
       let currentEvent = 'message';
+      let terminalEventReceived = false;
       const handleLine = (line: string) => {
         const trimmed = line.trim();
         if (!trimmed || trimmed.startsWith(':')) return;
@@ -2660,12 +2502,15 @@ export function agentChatStream(
               toolCalls.set(key, toolCall);
               callbacks?.onToolResult?.(toolCall);
             } else if (currentEvent === 'done') {
+              terminalEventReceived = true;
               callbacks?.onDone?.(data.content ?? '', data.pending_changes);
             } else if (currentEvent === 'error' || data.error) {
-              callbacks?.onError?.(data.error);
+              terminalEventReceived = true;
+              callbacks?.onError?.(normalizeErrorMessage(data.error, 'AI 助手执行失败，请稍后重试'));
             }
           } catch {
-            // ignore
+            terminalEventReceived = true;
+            callbacks?.onError?.('AI 助手返回了无法解析的数据，请刷新后重试');
           }
           currentEvent = 'message';
         }
@@ -2683,10 +2528,13 @@ export function agentChatStream(
         }
       }
       if (buffer.trim()) handleLine(buffer);
+      if (!terminalEventReceived && !controller.signal.aborted) {
+        callbacks?.onError?.('AI 助手连接意外中断，请重试');
+      }
     })
     .catch((err) => {
       if (err.name !== 'AbortError') {
-        callbacks?.onError?.(err.message);
+        callbacks?.onError?.(normalizeErrorMessage(err, 'AI 助手连接失败，请稍后重试'));
       }
     });
 
@@ -2736,7 +2584,7 @@ export async function agentConfirmChanges(storyId: number, conversationId?: numb
     headers: apiHeaders(true),
     body: JSON.stringify(conversationId ? { conversation_id: conversationId } : {}),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
 }
 
 export async function agentRollbackChanges(storyId: number, conversationId?: number | null): Promise<void> {
@@ -2745,7 +2593,7 @@ export async function agentRollbackChanges(storyId: number, conversationId?: num
     headers: apiHeaders(true),
     body: JSON.stringify(conversationId ? { conversation_id: conversationId } : {}),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
 }
 
 // ── Video Workflow ──────────────────────────────────────────
@@ -2945,6 +2793,19 @@ export interface ChapterVideoShot {
   continuity_json?: Record<string, unknown> | null;
 }
 
+export interface ChapterVideoShotCreate {
+  story_summary: string;
+  source_text_span?: string;
+  scene_location?: string;
+  time_of_day?: string;
+  characters?: string[];
+  dialogue_or_narration?: string;
+  camera_plan?: string;
+  motion_plan?: string;
+  emotion_plan?: string;
+  continuity_notes?: string;
+}
+
 export interface ChapterVideoWorkflow {
   id: number;
   chapter_id: number;
@@ -3003,7 +2864,7 @@ export async function generateScreenplay(chapterId: number, payload: {
     headers: apiHeaders(true),
     body: JSON.stringify(payload),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   const data = await res.json();
   return {
     screenplay: data.screenplay || '',
@@ -3015,7 +2876,7 @@ export async function listScreenplayScenes(chapterId: number): Promise<{ scenes:
   const res = await fetch(`${BASE}/api/video/chapters/${chapterId}/screenplay/scenes`, {
     headers: apiHeaders(),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   const data = await res.json();
   return {
     scenes: (data.scenes || []) as ScriptScene[],
@@ -3029,7 +2890,7 @@ export async function generateSceneShots(sceneId: number, payload: { style?: str
     headers: apiHeaders(true),
     body: JSON.stringify(payload),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   return res.json();
 }
 
@@ -3037,7 +2898,7 @@ export async function listSceneShots(sceneId: number): Promise<{ scene_id: numbe
   const res = await fetch(`${BASE}/api/video/scenes/${sceneId}/shots`, {
     headers: apiHeaders(),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   return res.json();
 }
 
@@ -3047,7 +2908,7 @@ export async function updateVideoShot(shotId: number, payload: Partial<VideoShot
     headers: apiHeaders(true),
     body: JSON.stringify(payload),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   return res.json();
 }
 
@@ -3057,7 +2918,7 @@ export async function generateShotPrompts(shotId: number, payload: { style?: str
     headers: apiHeaders(true),
     body: JSON.stringify(payload),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   const data = await res.json();
   return { shot: data };
 }
@@ -3085,7 +2946,7 @@ export async function parseShotAssetPrompts(shotId: number, payload?: {
     headers: apiHeaders(true),
     body: JSON.stringify(payload || {}),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   return res.json();
 }
 
@@ -3096,13 +2957,14 @@ export async function generateShotCharacterAsset(shotId: number, payload: {
   reference_asset_ids?: number[];
   source_asset_ids?: number[];
 }): Promise<VideoAsset> {
-  const res = await fetch(`${BASE}/api/shots/${shotId}/assets/character/generate`, {
+  const res = await fetch(`${BASE}/api/shots/${shotId}/character-assets/generate`, {
     method: 'POST',
     headers: apiHeaders(true),
     body: JSON.stringify(payload),
   });
-  if (!res.ok) throw new Error(await res.text());
-  return res.json();
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
+  const data = await res.json();
+  return data.asset;
 }
 
 export async function generateShotPropAsset(shotId: number, payload: {
@@ -3117,8 +2979,9 @@ export async function generateShotPropAsset(shotId: number, payload: {
     headers: apiHeaders(true),
     body: JSON.stringify(payload),
   });
-  if (!res.ok) throw new Error(await res.text());
-  return res.json();
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
+  const data = await res.json();
+  return data.asset;
 }
 
 export async function generateShotSceneAsset(shotId: number, payload: {
@@ -3132,8 +2995,9 @@ export async function generateShotSceneAsset(shotId: number, payload: {
     headers: apiHeaders(true),
     body: JSON.stringify(payload),
   });
-  if (!res.ok) throw new Error(await res.text());
-  return res.json();
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
+  const data = await res.json();
+  return data.asset;
 }
 
 /** 一键生成章节分镜（分镜列表） */
@@ -3147,7 +3011,7 @@ export async function generateChapterStoryboard(chapterId: number, payload?: {
     headers: apiHeaders(true),
     body: payload ? JSON.stringify(payload) : '{}',
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   return res.json();
 }
 
@@ -3162,7 +3026,7 @@ export async function createChapterVideoWorkflow(payload: {
     headers: apiHeaders(true),
     body: JSON.stringify(payload),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   return res.json();
 }
 
@@ -3170,7 +3034,7 @@ export async function getChapterVideoWorkflow(workflowId: number): Promise<Chapt
   const res = await fetch(`${BASE}/api/video/chapter-workflows/${workflowId}`, {
     headers: apiHeaders(),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   return res.json();
 }
 
@@ -3178,7 +3042,7 @@ export async function listChapterVideoWorkflows(chapterId: number): Promise<{ wo
   const res = await fetch(`${BASE}/api/video/chapter-workflows/by-chapter/${chapterId}`, {
     headers: apiHeaders(),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   return res.json();
 }
 
@@ -3186,7 +3050,7 @@ export async function getChapterVideoWorkflowStatus(workflowId: number): Promise
   const res = await fetch(`${BASE}/api/video/chapter-workflows/${workflowId}/status`, {
     headers: apiHeaders(),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   return res.json();
 }
 
@@ -3200,7 +3064,7 @@ export async function regenerateChapterWorkflowStoryboard(shotId: number, prompt
       reference_asset_ids: referenceAssetIds ?? [],
     }),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   return res.json();
 }
 
@@ -3215,7 +3079,7 @@ export async function regenerateChapterWorkflowVideo(shotId: number, promptOverr
       aspect_ratio: aspectRatio,
     }),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   return res.json();
 }
 
@@ -3234,7 +3098,7 @@ export async function previewVideoPrompt(
   const qs = params.toString();
   const url = `${BASE}/api/video/chapter-workflows/shots/${shotId}/preview-video-prompt${qs ? `?${qs}` : ''}`;
   const res = await fetch(url, { headers: apiHeaders(true) });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   return res.json();
 }
 
@@ -3243,7 +3107,7 @@ export async function concatChapterVideoWorkflow(workflowId: number): Promise<{ 
     method: 'POST',
     headers: apiHeaders(true),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   return res.json();
 }
 
@@ -3251,7 +3115,7 @@ export async function listStoryVideoCharacters(storyId: number): Promise<{ chara
   const res = await fetch(`${BASE}/api/stories/${storyId}/video-characters`, {
     headers: apiHeaders(),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   return res.json();
 }
 
@@ -3260,7 +3124,7 @@ export async function generateStoryVideoCharacters(storyId: number): Promise<{ c
     method: 'POST',
     headers: apiHeaders(true),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   return res.json();
 }
 
@@ -3269,7 +3133,7 @@ export async function parseChapterWorkflowShots(workflowId: number): Promise<Rec
     method: 'POST',
     headers: apiHeaders(true),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   return res.json();
 }
 
@@ -3282,7 +3146,7 @@ export async function generateChapterWorkflowShotDetails(
     headers: apiHeaders(true),
     body: JSON.stringify(payload),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   return res.json();
 }
 
@@ -3297,7 +3161,7 @@ export async function uploadStyleReferenceImage(
     headers: apiHeaders(),
     body: formData,
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   return res.json();
 }
 
@@ -3310,7 +3174,7 @@ export async function generateChapterWorkflowStoryboards(
     headers: apiHeaders(true),
     body: JSON.stringify(payload),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   return res.json();
 }
 
@@ -3323,7 +3187,7 @@ export async function generateChapterWorkflowVideos(
     headers: apiHeaders(true),
     body: JSON.stringify(payload),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   return res.json();
 }
 
@@ -3332,7 +3196,7 @@ export async function runAllChapterWorkflowStages(workflowId: number): Promise<R
     method: 'POST',
     headers: apiHeaders(true),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   return res.json();
 }
 
@@ -3345,7 +3209,7 @@ export async function reanalyzeChapterWorkflowStoryboardPrompt(
     headers: apiHeaders(true),
     body: JSON.stringify(payload),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   return res.json();
 }
 
@@ -3362,7 +3226,7 @@ export async function renderStoryboardFrame(shotId: number, payload: {
     headers: apiHeaders(true),
     body: JSON.stringify(payload),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   const data = await res.json();
   return {
     shot_status: 'storyboard_ready',
@@ -3394,7 +3258,7 @@ export async function renderShotVideo(shotId: number, payload: {
     headers: apiHeaders(true),
     body: JSON.stringify(payload),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   const data = await res.json();
   return { job: data.job || data };
 }
@@ -3404,7 +3268,7 @@ export async function approveShotStoryboard(shotId: number): Promise<{ storyboar
     method: 'POST',
     headers: apiHeaders(true),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   const data = await res.json();
   return {
     storyboard_locked: true,
@@ -3417,7 +3281,7 @@ export async function rejectShotStoryboard(shotId: number): Promise<{ storyboard
     method: 'POST',
     headers: apiHeaders(true),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   const data = await res.json();
   return {
     storyboard_locked: false,
@@ -3430,7 +3294,7 @@ export async function setMasterStoryboard(shotId: number, assetId: number): Prom
     method: 'POST',
     headers: apiHeaders(true),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   return res.json();
 }
 
@@ -3442,7 +3306,7 @@ export async function getShotStoryboards(shotId: number): Promise<{
   const res = await fetch(`${BASE}/api/shots/${shotId}/storyboards`, {
     headers: apiHeaders(),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   const data = await res.json();
   return {
     assets: data.storyboards || [],
@@ -3456,7 +3320,7 @@ export async function deleteShot(shotId: number): Promise<{ ok: boolean; shot_id
     method: 'DELETE',
     headers: apiHeaders(true),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   return res.json();
 }
 
@@ -3466,7 +3330,7 @@ export async function createSceneShot(sceneId: number, payload?: Partial<VideoSh
     headers: apiHeaders(true),
     body: JSON.stringify(payload || {}),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   return res.json();
 }
 
@@ -3476,7 +3340,7 @@ export async function reorderSceneShots(sceneId: number, payload: { shot_ids: nu
     headers: apiHeaders(true),
     body: JSON.stringify(payload),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   const data = await res.json();
   return {
     scene_id: data.scene_id ?? sceneId,
@@ -3488,17 +3352,224 @@ export async function getVideoJob(jobId: number): Promise<VideoGenerationJob> {
   const res = await fetch(`${BASE}/api/video-jobs/${jobId}`, {
     headers: apiHeaders(),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   return res.json();
 }
 
 export async function retryVideoJob(jobId: number, payload?: { provider?: string; model?: string; duration_seconds?: number; aspect_ratio?: string; seed?: number; request_payload?: Record<string, unknown> }): Promise<VideoGenerationJob> {
-  const res = await fetch(`${BASE}/api/video/jobs/${jobId}/retry`, {
+  const res = await fetch(`${BASE}/api/video-jobs/${jobId}/retry`, {
     method: 'POST',
     headers: apiHeaders(true),
     body: JSON.stringify(payload || {}),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
+  const data = await res.json();
+  return data.job;
+}
+
+export type MangaAssetType = 'character_reference' | 'scene_reference' | 'prop_reference' | 'style_reference';
+
+export interface MangaAsset {
+  id: number;
+  story_id: number;
+  chapter_id: number | null;
+  asset_type: MangaAssetType;
+  name: string;
+  storage_path: string;
+  source_type: string;
+  status: string;
+  metadata?: Record<string, unknown> | null;
+}
+
+export interface MangaAssetBinding {
+  id: number;
+  asset_id: number;
+  binding_role: string;
+  label?: string | null;
+  priority: number;
+  is_required: boolean;
+  asset?: MangaAsset;
+}
+
+export interface MangaAssetAnalysisSuggestion {
+  asset_type: MangaAssetType;
+  name: string;
+  description: string;
+  evidence: string;
+  prompt: string;
+  candidates: Array<Pick<MangaAsset, 'id' | 'name' | 'asset_type' | 'storage_path'> & { match_score: number; match_reason: string }>;
+}
+
+export async function listMangaAssets(storyId: number): Promise<{ assets: MangaAsset[] }> {
+  const res = await fetch(`${BASE}/api/stories/${storyId}/manga-assets`, { headers: apiHeaders() });
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
+  return res.json();
+}
+
+export async function createChapterWorkflowShot(
+  workflowId: number,
+  payload: ChapterVideoShotCreate,
+): Promise<ChapterVideoShot> {
+  const res = await fetch(`${BASE}/api/video/chapter-workflows/${workflowId}/shots`, {
+    method: 'POST',
+    headers: apiHeaders(true),
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
+  return res.json();
+}
+
+export async function listMangaAssetBindings(chapterId: number): Promise<{ bindings: MangaAssetBinding[] }> {
+  const res = await fetch(`${BASE}/api/chapters/${chapterId}/manga-asset-bindings`, { headers: apiHeaders() });
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
+  return res.json();
+}
+
+export async function analyzeChapterMangaAssets(chapterId: number): Promise<{ chapter_id: number; suggestions: MangaAssetAnalysisSuggestion[] }> {
+  const res = await fetch(`${BASE}/api/chapters/${chapterId}/manga-assets/analyze`, {
+    method: 'POST',
+    headers: apiHeaders(true),
+    body: JSON.stringify({}),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '分析当前章节资产失败'));
+  return res.json();
+}
+
+export async function getMangaAssetAnalysis(chapterId: number): Promise<{ chapter_id: number; suggestions: MangaAssetAnalysisSuggestion[] }> {
+  const res = await fetch(`${BASE}/api/chapters/${chapterId}/manga-assets/analysis`, {
+    headers: apiHeaders(),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '读取漫画资产分析失败'));
+  return res.json();
+}
+
+export async function saveMangaAssetAnalysis(
+  chapterId: number,
+  suggestions: MangaAssetAnalysisSuggestion[],
+): Promise<{ chapter_id: number; suggestions: MangaAssetAnalysisSuggestion[] }> {
+  const res = await fetch(`${BASE}/api/chapters/${chapterId}/manga-assets/analysis`, {
+    method: 'PUT',
+    headers: apiHeaders(true),
+    body: JSON.stringify({ suggestions }),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '保存漫画资产提示词失败'));
+  return res.json();
+}
+
+export async function generateMangaAsset(
+  chapterId: number,
+  payload: Pick<MangaAssetAnalysisSuggestion, 'asset_type' | 'name' | 'prompt'>,
+): Promise<MangaAsset> {
+  const res = await fetch(`${BASE}/api/chapters/${chapterId}/manga-assets/generate`, {
+    method: 'POST',
+    headers: apiHeaders(true),
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '生成漫画资产失败'));
+  return res.json();
+}
+
+export interface MangaAssetBatchSubmitResult {
+  task_id: string;
+  status: string;
+  total: number;
+  message: string;
+}
+
+export interface BackgroundTaskStatus {
+  task_id: string;
+  task_type: string;
+  status: 'pending' | 'running' | 'retrying' | 'succeeded' | 'failed' | 'cancelled' | 'cancel_requested' | string;
+  error_message?: string | null;
+  result_json?: {
+    status?: string;
+    total?: number;
+    completed?: number;
+    failed?: number;
+    items?: Array<Record<string, unknown>>;
+  } | null;
+  metadata_json?: Record<string, unknown> | null;
+  stage?: string | null;
+  message?: string | null;
+  created_at?: string | null;
+  started_at?: string | null;
+  completed_at?: string | null;
+}
+
+export async function generateMangaAssetsBatch(
+  chapterId: number,
+  items: Array<Pick<MangaAssetAnalysisSuggestion, 'asset_type' | 'name' | 'prompt'>>,
+): Promise<MangaAssetBatchSubmitResult> {
+  const res = await fetch(`${BASE}/api/chapters/${chapterId}/manga-assets/generate-batch`, {
+    method: 'POST',
+    headers: apiHeaders(true),
+    body: JSON.stringify({ items }),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '提交漫画资产批量生成失败'));
+  return res.json();
+}
+
+export async function getBackgroundTaskStatus(taskId: string): Promise<BackgroundTaskStatus> {
+  const res = await fetch(`${BASE}/api/tasks/${encodeURIComponent(taskId)}`, { headers: apiHeaders() });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '查询后台任务状态失败'));
+  return res.json();
+}
+
+export async function saveMangaAssetBindings(chapterId: number, bindings: Array<Pick<MangaAssetBinding, 'asset_id' | 'binding_role' | 'label' | 'priority' | 'is_required'>>): Promise<{ bindings: MangaAssetBinding[] }> {
+  const res = await fetch(`${BASE}/api/chapters/${chapterId}/manga-asset-bindings`, { method: 'PUT', headers: apiHeaders(true), body: JSON.stringify({ bindings }) });
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
+  return res.json();
+}
+
+export async function uploadMangaAsset(
+  storyId: number,
+  payload: { file: File; asset_type: MangaAssetType; name: string; chapter_id?: number | null; bind_to_chapter?: boolean; binding_label?: string },
+): Promise<MangaAsset> {
+  const form = new FormData();
+  form.append('file', payload.file);
+  form.append('asset_type', payload.asset_type);
+  form.append('name', payload.name);
+  if (payload.chapter_id != null) form.append('chapter_id', String(payload.chapter_id));
+  if (payload.bind_to_chapter) form.append('bind_to_chapter', 'true');
+  if (payload.binding_label) form.append('binding_label', payload.binding_label);
+  const res = await fetch(`${BASE}/api/stories/${storyId}/manga-assets/upload`, {
+    method: 'POST',
+    headers: apiHeaders(),
+    body: form,
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '上传漫画资产失败'));
+  return res.json();
+}
+
+export async function updateMangaAsset(assetId: number, payload: Partial<Pick<MangaAsset, 'name' | 'asset_type' | 'chapter_id'>>): Promise<MangaAsset> {
+  const res = await fetch(`${BASE}/api/manga-assets/${assetId}`, {
+    method: 'PATCH',
+    headers: apiHeaders(true),
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '更新漫画资产失败'));
+  return res.json();
+}
+
+export async function redrawMangaAsset(
+  assetId: number,
+  payload: { prompt: string; mode: ImageRedrawMode; mask?: string },
+): Promise<MangaAsset> {
+  const res = await fetch(`${BASE}/api/manga-assets/${assetId}/redraw`, {
+    method: 'POST',
+    headers: apiHeaders(true),
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '重绘漫画资产失败'));
+  return res.json();
+}
+
+export async function deleteMangaAsset(assetId: number): Promise<{ ok: boolean }> {
+  const res = await fetch(`${BASE}/api/manga-assets/${assetId}/managed`, {
+    method: 'DELETE',
+    headers: apiHeaders(true),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '删除漫画资产失败'));
   return res.json();
 }
 
@@ -3506,7 +3577,7 @@ export async function listShotClips(shotId: number): Promise<{ shot_id: number; 
   const res = await fetch(`${BASE}/api/shots/${shotId}/clips`, {
     headers: apiHeaders(),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   return res.json();
 }
 
@@ -3515,7 +3586,7 @@ export async function activateShotClip(shotId: number, clipId: number): Promise<
     method: 'POST',
     headers: apiHeaders(true),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   return { active_clip_id: clipId };
 }
 
@@ -3524,7 +3595,7 @@ export async function listVideoAssets(chapterId: number, assetType?: string): Pr
   const res = await fetch(`${BASE}/api/chapters/${chapterId}/video-assets${params}`, {
     headers: apiHeaders(),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   return res.json();
 }
 
@@ -3544,7 +3615,7 @@ export async function createVideoAsset(chapterId: number, payload: {
     headers: apiHeaders(true),
     body: JSON.stringify(payload),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   return res.json();
 }
 
@@ -3553,7 +3624,7 @@ export async function deleteVideoAsset(assetId: number): Promise<{ ok: boolean; 
     method: 'DELETE',
     headers: apiHeaders(true),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   return res.json();
 }
 
@@ -3583,7 +3654,7 @@ export async function reanalyzeChapterShotPrompts(shotId: number): Promise<Reana
     method: 'POST',
     headers: apiHeaders(true),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   return res.json();
 }
 
@@ -3592,7 +3663,7 @@ export async function clearShotStoryboard(shotId: number): Promise<{ ok: boolean
     method: 'POST',
     headers: apiHeaders(true),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   return res.json();
 }
 
@@ -3601,7 +3672,7 @@ export async function clearShotVideo(shotId: number): Promise<{ ok: boolean; sho
     method: 'POST',
     headers: apiHeaders(true),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   return res.json();
 }
 
@@ -3610,7 +3681,7 @@ export async function resetChapterWorkflow(workflowId: number): Promise<{ ok: bo
     method: 'POST',
     headers: apiHeaders(true),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   return res.json();
 }
 
@@ -3622,7 +3693,7 @@ export async function replaceVideoAsset(assetId: number, file: File): Promise<{ 
     headers: apiHeaders(),
     body: formData,
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   return res.json();
 }
 
@@ -3635,7 +3706,7 @@ export async function regenerateVideoAsset(assetId: number, prompt?: string, mas
     headers: apiHeaders(true),
     body: JSON.stringify(body),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   return res.json();
 }
 
@@ -3647,7 +3718,7 @@ export async function uploadShotStoryboard(shotId: number, file: File): Promise<
     headers: apiHeaders(),
     body: formData,
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   return res.json();
 }
 
@@ -3659,7 +3730,7 @@ export async function uploadShotVideo(shotId: number, file: File): Promise<{ ok:
     headers: apiHeaders(),
     body: formData,
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   return res.json();
 }
 
@@ -3669,7 +3740,7 @@ export async function saveChapterShotPrompts(shotId: number, prompts: { storyboa
     headers: apiHeaders(true),
     body: JSON.stringify(prompts),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   return res.json();
 }
 
@@ -3685,7 +3756,7 @@ export async function createVideoProject(chapterId: number, payload: {
     headers: apiHeaders(true),
     body: JSON.stringify(payload),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   return res.json();
 }
 
@@ -3693,7 +3764,7 @@ export async function getVideoProject(projectId: number): Promise<VideoProject> 
   const res = await fetch(`${BASE}/api/video/projects/${projectId}`, {
     headers: apiHeaders(),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   return res.json();
 }
 
@@ -3703,7 +3774,7 @@ export async function updateVideoProject(projectId: number, payload: Partial<Vid
     headers: apiHeaders(true),
     body: JSON.stringify(payload),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   return res.json();
 }
 
@@ -3718,7 +3789,7 @@ export async function compileVideoProject(projectId: number, payload: {
     headers: apiHeaders(true),
     body: JSON.stringify(payload),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   return res.json();
 }
 
@@ -3770,7 +3841,7 @@ export async function generateShotFrames(shotId: number, payload: {
     headers: apiHeaders(true),
     body: JSON.stringify(payload),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   return res.json();
 }
 
@@ -3787,7 +3858,7 @@ export async function regenerateShotFrame(shotId: number, payload: {
     headers: apiHeaders(true),
     body: JSON.stringify(payload),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   return res.json();
 }
 
@@ -3795,7 +3866,7 @@ export async function getShotFrames(shotId: number): Promise<ShotFramesResponse>
   const res = await fetch(`${BASE}/api/shots/${shotId}/frames`, {
     headers: apiHeaders(),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   return res.json();
 }
 
@@ -3803,7 +3874,7 @@ export async function listChapterShotFrames(chapterId: number): Promise<ChapterS
   const res = await fetch(`${BASE}/api/video/chapters/${chapterId}/frames`, {
     headers: apiHeaders(),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   return res.json();
 }
 
@@ -3822,7 +3893,7 @@ export async function getStoryVideoStylePreset(storyId: number): Promise<{ story
   const res = await fetch(`${BASE}/api/video/stories/${storyId}/style-preset`, {
     headers: apiHeaders(),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   return res.json();
 }
 
@@ -3832,7 +3903,7 @@ export async function setStoryVideoStylePreset(storyId: number, stylePresetId: n
     headers: apiHeaders(true),
     body: JSON.stringify({ style_preset_id: stylePresetId }),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   return res.json();
 }
 
@@ -3842,7 +3913,7 @@ export async function setShotVideoStylePreset(shotId: number, stylePreset: strin
     headers: apiHeaders(true),
     body: JSON.stringify({ style_preset: stylePreset }),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   return res.json();
 }
 
@@ -3851,7 +3922,7 @@ export async function deleteShotVideoStylePreset(shotId: number): Promise<{ shot
     method: 'DELETE',
     headers: apiHeaders(true),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   return res.json();
 }
 
@@ -3874,7 +3945,7 @@ export async function getShotAssetBundle(shotId: number): Promise<ShotAssetBundl
   const res = await fetch(`${BASE}/api/shots/${shotId}/assets/bundle`, {
     headers: apiHeaders(),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   return res.json();
 }
 
@@ -3884,7 +3955,7 @@ export async function updateAssetScope(assetId: number, payload: { usage_scope: 
     headers: apiHeaders(true),
     body: JSON.stringify(payload),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   return res.json();
 }
 
@@ -3894,7 +3965,7 @@ export async function promoteAsset(assetId: number, payload: { level: string; in
     headers: apiHeaders(true),
     body: JSON.stringify(payload),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   return res.json();
 }
 
@@ -3902,7 +3973,7 @@ export async function listStylePresets(): Promise<{ presets: VideoStylePreset[] 
   const res = await fetch(`${BASE}/api/video-style-presets`, {
     headers: apiHeaders(),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   return res.json();
 }
 
@@ -3914,7 +3985,7 @@ export async function uploadMangaStyleReference(chapterId: number, file: File): 
     headers: apiHeaders(),
     body: formData,
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   return res.json();
 }
 
@@ -3932,7 +4003,7 @@ export async function createStylePreset(data: {
     headers: apiHeaders(true),
     body: JSON.stringify(data),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   return res.json();
 }
 
@@ -3953,7 +4024,7 @@ export async function updateStylePreset(
     headers: apiHeaders(true),
     body: JSON.stringify(data),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   return res.json();
 }
 
@@ -3962,7 +4033,7 @@ export async function deleteStylePreset(presetId: number): Promise<void> {
     method: 'DELETE',
     headers: apiHeaders(true),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
 }
 
 // ── 搜书 ──────────────────────────────────────────
@@ -4047,19 +4118,19 @@ export interface VideoCharactersResponse {
 }
 
 export async function listVideoCharacters(storyId: number): Promise<VideoCharactersResponse> {
-  const res = await fetch(`${BASE}/api/video/stories/${storyId}/characters`, {
+  const res = await fetch(`${BASE}/api/stories/${storyId}/video-characters`, {
     headers: apiHeaders(),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   return res.json();
 }
 
 export async function generateVideoCharacters(storyId: number): Promise<VideoCharactersResponse> {
-  const res = await fetch(`${BASE}/api/video/stories/${storyId}/characters/generate`, {
+  const res = await fetch(`${BASE}/api/stories/${storyId}/video-characters/generate`, {
     method: 'POST',
     headers: apiHeaders(true),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   return res.json();
 }
 
@@ -4068,22 +4139,25 @@ export async function createCharacterVersion(
   characterName: string,
   payload: { version_label: string; appearance_card?: string; set_default?: boolean },
 ): Promise<{ version: CharacterVersion }> {
-  const res = await fetch(`${BASE}/api/video/stories/${storyId}/characters/${characterName}/versions`, {
+  const encodedName = encodeURIComponent(characterName);
+  const res = await fetch(`${BASE}/api/stories/${storyId}/video-characters/${encodedName}/versions`, {
     method: 'POST',
     headers: apiHeaders(true),
     body: JSON.stringify(payload),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   const data = await res.json();
+  const raw = data.version ?? {};
   const version: CharacterVersion = {
-    id: data.id ?? Date.now(),
-    version: data.version_label ?? payload.version_label,
-    label: data.version_label ?? payload.version_label,
-    appearance_card: data.appearance_card ?? payload.appearance_card ?? '',
-    ref_asset: data.ref_asset ?? null,
-    ref_asset_url: data.ref_asset?.file_path ?? null,
-    is_default: data.is_default ?? false,
-    sort_order: data.sort_order ?? 0,
+    id: raw.id ?? Date.now(),
+    version: raw.version ?? raw.label ?? payload.version_label,
+    label: raw.label ?? raw.version_label ?? payload.version_label,
+    appearance_card: raw.appearance_card ?? payload.appearance_card ?? '',
+    ref_asset: raw.ref_asset ?? null,
+    ref_asset_id: raw.ref_asset_id ?? null,
+    ref_asset_url: raw.ref_asset_url ?? raw.ref_asset?.file_path,
+    is_default: raw.is_default ?? false,
+    sort_order: raw.sort_order ?? 0,
   };
   return { version };
 }
@@ -4093,12 +4167,13 @@ export async function deleteCharacterVersion(
   characterName: string,
   versionLabel: string | number,
 ): Promise<{ ok: boolean }> {
-  const label = String(versionLabel);
-  const res = await fetch(`${BASE}/api/video/stories/${storyId}/characters/${characterName}/versions/${label}`, {
+  const versionId = String(versionLabel);
+  const encodedName = encodeURIComponent(characterName);
+  const res = await fetch(`${BASE}/api/stories/${storyId}/video-characters/${encodedName}/versions/${versionId}`, {
     method: 'DELETE',
     headers: apiHeaders(true),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   return res.json();
 }
 
@@ -4108,13 +4183,16 @@ export async function generateCharacterRefImage(
   versionId: number,
   stylePreset?: string,
 ): Promise<VideoAsset> {
-  const res = await fetch(`${BASE}/api/video/stories/${storyId}/characters/${characterName}/ref-image/generate`, {
+  void stylePreset;
+  const encodedName = encodeURIComponent(characterName);
+  const res = await fetch(`${BASE}/api/stories/${storyId}/video-characters/${encodedName}/versions/${versionId}/generate-ref`, {
     method: 'POST',
     headers: apiHeaders(true),
-    body: JSON.stringify({ version_id: versionId, style_preset: stylePreset }),
+    body: JSON.stringify({}),
   });
-  if (!res.ok) throw new Error(await res.text());
-  return res.json();
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
+  const data = await res.json();
+  return { id: data.ref_asset_id, file_path: data.file_path } as VideoAsset;
 }
 
 export async function deleteVideoCharacterRefImage(
@@ -4122,12 +4200,12 @@ export async function deleteVideoCharacterRefImage(
   characterName: string,
   versionId: number,
 ): Promise<{ ok: boolean }> {
-  const res = await fetch(`${BASE}/api/video/stories/${storyId}/characters/${characterName}/ref-image`, {
+  const encodedName = encodeURIComponent(characterName);
+  const res = await fetch(`${BASE}/api/stories/${storyId}/video-characters/${encodedName}/versions/${versionId}/ref`, {
     method: 'DELETE',
     headers: apiHeaders(true),
-    body: JSON.stringify({ version_id: versionId }),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   return res.json();
 }
 
@@ -4137,13 +4215,15 @@ export async function redrawCharacterRefImage(
   versionId: number,
   payload: { prompt: string; mode: ImageRedrawMode; mask?: string },
 ): Promise<VideoAsset> {
-  const res = await fetch(`${BASE}/api/video/stories/${storyId}/characters/${characterName}/ref-image/redraw`, {
+  const encodedName = encodeURIComponent(characterName);
+  const res = await fetch(`${BASE}/api/stories/${storyId}/video-characters/${encodedName}/versions/${versionId}/ref/redraw`, {
     method: 'POST',
     headers: apiHeaders(true),
-    body: JSON.stringify({ version_id: versionId, ...payload }),
+    body: JSON.stringify(payload),
   });
-  if (!res.ok) throw new Error(await res.text());
-  return res.json();
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
+  const data = await res.json();
+  return { id: data.ref_asset_id, file_path: data.file_path } as VideoAsset;
 }
 
 // ─── Prompt Template API ─────────────────────────────────
@@ -4399,12 +4479,12 @@ export async function updateAdminMethodology(key: string, content: string): Prom
 }
 
 
-export async function generateWorkflowScreenplay(workflowId: number): Promise<ChapterVideoWorkflow> {
+export async function generateWorkflowScreenplay(workflowId: number): Promise<{ screenplay_status: string; scene_count: number }> {
   const res = await fetch(`${BASE}/api/video/chapter-workflows/${workflowId}/screenplay/generate`, {
     method: 'POST',
     headers: apiHeaders(true),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   return res.json();
 }
 
@@ -4414,7 +4494,7 @@ export async function saveWorkflowScreenplay(workflowId: number, data: { screenp
     headers: apiHeaders(true),
     body: JSON.stringify(data),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   return res.json();
 }
 
@@ -4423,7 +4503,7 @@ export async function approveWorkflowScreenplay(workflowId: number): Promise<Cha
     method: 'POST',
     headers: apiHeaders(true),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   return res.json();
 }
 
@@ -4432,7 +4512,7 @@ export async function regenerateWorkflowScreenplay(workflowId: number): Promise<
     method: 'POST',
     headers: apiHeaders(true),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   return res.json();
 }
 
@@ -4595,15 +4675,20 @@ export async function importDeconstructionFile(file: File, title?: string, autho
 
   const keys = getApiKeySettings();
   const token = getAuthToken();
+  const mode = getLocalCredentialMode();
+  const upstreamBaseUrl = keys.upstreamBaseUrl.trim();
   const headers: Record<string, string> = {};
   if (API_TOKEN) headers['X-API-Token'] = API_TOKEN;
   if (token) headers['Authorization'] = `Bearer ${token}`;
-  if (keys.deepseekApiKey) headers['X-DeepSeek-API-Key'] = keys.deepseekApiKey;
-  if (keys.deepseekBaseUrl) headers['X-DeepSeek-Base-URL'] = keys.deepseekBaseUrl;
-  if (keys.deepseekModel) headers['X-DeepSeek-Model'] = keys.deepseekModel;
-  if (keys.imageApiKey) headers['X-Image-API-Key'] = keys.imageApiKey;
-  if (keys.imageBaseUrl) headers['X-Image-Base-URL'] = keys.imageBaseUrl;
-  if (keys.imageModel) headers['X-Image-Model'] = keys.imageModel;
+  headers['X-Credential-Mode'] = mode;
+  if (mode === 'user_key' && keys.deepseekApiKey) headers['X-DeepSeek-API-Key'] = keys.deepseekApiKey;
+  if (mode === 'user_key' && (upstreamBaseUrl || keys.deepseekBaseUrl)) headers['X-DeepSeek-Base-URL'] = upstreamBaseUrl || keys.deepseekBaseUrl;
+  if (mode === 'user_key' && keys.deepseekModel) headers['X-DeepSeek-Model'] = keys.deepseekModel;
+  if (mode === 'user_key' && keys.imageApiKey) headers['X-Image-API-Key'] = keys.imageApiKey;
+  if (mode === 'user_key' && (upstreamBaseUrl || keys.imageBaseUrl)) headers['X-Image-Base-URL'] = upstreamBaseUrl || keys.imageBaseUrl;
+  if (mode === 'user_key' && keys.imageModel) headers['X-Image-Model'] = keys.imageModel;
+  if (mode === 'user_key' && (upstreamBaseUrl || keys.videoBaseUrl)) headers['X-Video-Base-URL'] = upstreamBaseUrl || keys.videoBaseUrl;
+  if (mode === 'user_key' && keys.videoModel) headers['X-Video-Model'] = keys.videoModel;
 
   const res = await fetch(`${BASE}/api/deconstruct/works/import-file`, {
     method: 'POST',
@@ -4848,5 +4933,586 @@ export async function removeDeconstructionRef(storyId: number, refId: number): P
     headers: apiHeaders(),
   });
   if (!res.ok) throw new Error('取消引用失败');
+  return res.json();
+}
+
+export type CredentialMode = 'platform' | 'user_key';
+
+export interface PointsAccount {
+  user_id: number;
+  available_points: number;
+  reserved_points: number;
+  updated_at?: string | null;
+}
+
+export interface PointsLedgerItem {
+  id: number;
+  entry_type: string;
+  amount: number;
+  balance_after?: number | null;
+  created_at?: string | null;
+  metadata?: Record<string, unknown>;
+}
+
+export interface PointsProduct {
+  id: number;
+  code: string;
+  name: string;
+  description: string;
+  price_cny: number;
+  points: number;
+  bonus_points: number;
+  is_visible: boolean;
+  is_recommended: boolean;
+  sort_order: number;
+}
+
+export interface AiModelItem {
+  id: number;
+  model_key: string;
+  display_name: string;
+  modality: string;
+  channel_id: number;
+  sort_order: number;
+  video_capabilities?: VideoModelCapabilities;
+  estimated_points?: number | null;
+  price?: {
+    billing_type: string;
+    price_config: Record<string, unknown>;
+    estimated_points?: number;
+  } | null;
+}
+
+export interface VideoModelCapabilities {
+  input_modes?: string[];
+  defaults?: {
+    duration_seconds?: number;
+    aspect_ratio?: string;
+    resolution?: string;
+  };
+  limits?: {
+    duration_seconds?: { min?: number; max?: number; allowed?: number[] };
+    aspect_ratios?: string[];
+    resolutions?: string[];
+    max_reference_images?: number;
+  };
+}
+
+export interface AiCredentialStatus {
+  configured: boolean;
+  status: string;
+  last_four?: string | null;
+  last_validated_at?: string | null;
+}
+
+export interface AiPreferences {
+  credential_mode: CredentialMode;
+  default_text_model_id?: number | null;
+  default_image_model_id?: number | null;
+  default_video_model_id?: number | null;
+}
+
+export interface AiChannelAdmin {
+  id: number;
+  code: string;
+  name: string;
+  adapter_type: VideoAdapterType | string;
+  base_url: string;
+  modality: string;
+  enabled: boolean;
+  timeout_seconds: number;
+  extra_config_json?: Record<string, unknown>;
+  has_platform_key?: boolean;
+  last_four?: string | null;
+}
+
+export interface AiModelAdmin {
+  id: number;
+  channel_id: number;
+  model_key: string;
+  display_name: string;
+  modality: string;
+  enabled: boolean;
+  user_visible: boolean;
+  sort_order: number;
+  capabilities_json?: Record<string, unknown>;
+  active_price?: {
+    id: number;
+    billing_type: string;
+    price_config_json: Record<string, unknown>;
+    valid_from?: string | null;
+  } | null;
+}
+
+export interface PointsSettings {
+  yuan_to_points: number;
+  register_grant_enabled: boolean;
+  register_grant_amount: number;
+  dual_track_enabled: boolean;
+}
+
+export function getLocalCredentialMode(): CredentialMode {
+  const v = getScopedApiSetting(LS_CREDENTIAL_MODE);
+  return v === 'user_key' ? 'user_key' : 'platform';
+}
+
+export function setLocalCredentialMode(mode: CredentialMode): void {
+  setScopedApiSetting(LS_CREDENTIAL_MODE, mode);
+}
+
+export type VideoAdapterType = 'openai_video' | 'lingdong_video';
+
+export interface AdminAiChannelPayload {
+  code?: string;
+  name: string;
+  adapter_type?: VideoAdapterType;
+  base_url: string;
+  modality: string;
+  platform_api_key?: string;
+  extra_config_json: Record<string, unknown>;
+}
+
+export function apiHeadersWithCredentialMode(json = false, mode?: CredentialMode): HeadersInit {
+  const headers = { ...apiHeaders(json) } as Record<string, string>;
+  const m = mode || getLocalCredentialMode();
+  headers['X-Credential-Mode'] = m;
+  return headers;
+}
+
+export async function getPointsAccount(): Promise<PointsAccount> {
+  const res = await fetch(`${BASE}/api/points/account`, { headers: apiHeaders() });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '获取积分账户失败'));
+  return res.json();
+}
+
+export async function getPointsLedger(limit = 50): Promise<{ items: PointsLedgerItem[] }> {
+  const res = await fetch(`${BASE}/api/points/ledger?limit=${limit}`, { headers: apiHeaders() });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '获取积分流水失败'));
+  return res.json();
+}
+
+export async function getPointsProducts(): Promise<{ products: PointsProduct[] }> {
+  const res = await fetch(`${BASE}/api/points/products`, { headers: apiHeaders() });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '获取积分套餐失败'));
+  return res.json();
+}
+
+export async function purchasePoints(productId: number, paymentMethod?: string): Promise<{
+  ok: boolean;
+  order_no: string;
+  amount: number;
+  status: string;
+  product_id: number;
+  points: number;
+  checkout: BillingCheckout;
+}> {
+  const res = await fetch(`${BASE}/api/points/purchase`, {
+    method: 'POST',
+    headers: apiHeaders(true),
+    body: JSON.stringify({ product_id: productId, payment_method: paymentMethod }),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '创建充值订单失败'));
+  return res.json();
+}
+
+export async function getAiCredential(): Promise<AiCredentialStatus> {
+  const res = await fetch(`${BASE}/api/ai/credential`, { headers: apiHeaders() });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '获取 API Key 状态失败'));
+  return res.json();
+}
+
+export async function saveAiCredential(apiKey: string): Promise<AiCredentialStatus> {
+  const res = await fetch(`${BASE}/api/ai/credential`, {
+    method: 'PUT',
+    headers: apiHeaders(true),
+    body: JSON.stringify({ api_key: apiKey }),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '保存 API Key 失败'));
+  return res.json();
+}
+
+export async function deleteAiCredential(): Promise<void> {
+  const res = await fetch(`${BASE}/api/ai/credential`, {
+    method: 'DELETE',
+    headers: apiHeaders(),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '清除 API Key 失败'));
+}
+
+export async function testAiCredential(apiKey?: string): Promise<{ ok: boolean; status_code?: number }> {
+  const draftKey = apiKey?.trim();
+  const res = await fetch(`${BASE}/api/ai/credential/test`, {
+    method: 'POST',
+    headers: apiHeaders(Boolean(draftKey)),
+    ...(draftKey ? { body: JSON.stringify({ api_key: draftKey }) } : {}),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '测试 API Key 失败'));
+  return res.json();
+}
+
+export async function getAiPreferences(): Promise<AiPreferences> {
+  const res = await fetch(`${BASE}/api/ai/preferences`, { headers: apiHeaders() });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '获取 AI 偏好失败'));
+  return res.json();
+}
+
+export async function saveAiPreferences(payload: Partial<AiPreferences>): Promise<AiPreferences> {
+  const res = await fetch(`${BASE}/api/ai/preferences`, {
+    method: 'PUT',
+    headers: apiHeaders(true),
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '保存 AI 偏好失败'));
+  return res.json();
+}
+
+export async function getAiModels(modality?: string): Promise<{ models: AiModelItem[] }> {
+  const q = modality ? `?modality=${encodeURIComponent(modality)}` : '';
+  const res = await fetch(`${BASE}/api/ai/models${q}`, { headers: apiHeaders() });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '获取模型列表失败'));
+  return res.json();
+}
+
+export async function estimateAiPoints(payload: {
+  model_id: number;
+  input_tokens?: number;
+  output_tokens?: number;
+  image_count?: number;
+  video_seconds?: number;
+}): Promise<{ model_id: number; estimated_points: number; available_points: number; sufficient: boolean }> {
+  const res = await fetch(`${BASE}/api/ai/estimate`, {
+    method: 'POST',
+    headers: apiHeaders(true),
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '费用预估失败'));
+  return res.json();
+}
+
+export async function getAdminAiChannels(): Promise<{ channels: AiChannelAdmin[] }> {
+  const res = await fetch(`${BASE}/api/admin/ai/channels`, { headers: apiHeaders() });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '获取渠道失败'));
+  return res.json();
+}
+
+export async function createAdminAiChannel(payload: AdminAiChannelPayload & { code: string }): Promise<AiChannelAdmin> {
+  const res = await fetch(`${BASE}/api/admin/ai/channels`, {
+    method: 'POST',
+    headers: apiHeaders(true),
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '创建渠道失败'));
+  return res.json();
+}
+
+export async function updateAdminAiChannel(id: number, payload: AdminAiChannelPayload): Promise<AiChannelAdmin> {
+  const res = await fetch(`${BASE}/api/admin/ai/channels/${id}`, {
+    method: 'PUT',
+    headers: apiHeaders(true),
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '更新渠道失败'));
+  return res.json();
+}
+
+export async function getAdminAiModels(channelId?: number): Promise<{ models: AiModelAdmin[] }> {
+  const q = channelId ? `?channel_id=${channelId}` : '';
+  const res = await fetch(`${BASE}/api/admin/ai/models${q}`, { headers: apiHeaders() });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '获取模型失败'));
+  return res.json();
+}
+
+export async function createAdminAiModel(payload: Record<string, unknown>): Promise<AiModelAdmin> {
+  const res = await fetch(`${BASE}/api/admin/ai/models`, {
+    method: 'POST',
+    headers: apiHeaders(true),
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '创建模型失败'));
+  return res.json();
+}
+
+export async function updateAdminAiModel(id: number, payload: Record<string, unknown>): Promise<AiModelAdmin> {
+  const res = await fetch(`${BASE}/api/admin/ai/models/${id}`, {
+    method: 'PUT',
+    headers: apiHeaders(true),
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '更新模型失败'));
+  return res.json();
+}
+
+export async function deleteAdminAiModel(id: number): Promise<{ ok: boolean }> {
+  const res = await fetch(`${BASE}/api/admin/ai/models/${id}`, {
+    method: 'DELETE',
+    headers: apiHeaders(),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '删除模型失败'));
+  return res.json();
+}
+
+export interface UpstreamAiModelCandidate {
+  key: string;
+  display_name: string;
+  capabilities: Record<string, unknown> | null;
+}
+
+export async function discoverAdminAiChannelModels(channelId: number): Promise<{ upstream_count: number; candidates: UpstreamAiModelCandidate[] }> {
+  const res = await fetch(`${BASE}/api/admin/ai/channels/${channelId}/models/sync`, {
+    method: 'POST',
+    headers: apiHeaders(),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '获取上游模型失败'));
+  return res.json();
+}
+
+export async function addAdminAiChannelModels(
+  channelId: number,
+  models: UpstreamAiModelCandidate[],
+): Promise<{ added: string[]; existing: string[] }> {
+  const res = await fetch(`${BASE}/api/admin/ai/channels/${channelId}/models`, {
+    method: 'POST',
+    headers: apiHeaders(true),
+    body: JSON.stringify({ models }),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '添加上游模型失败'));
+  return res.json();
+}
+
+export async function setAdminAiModelPrice(
+  modelId: number,
+  payload: { billing_type: string; price_config_json: Record<string, unknown> },
+): Promise<{ id: number; model_id: number; billing_type: string }> {
+  const res = await fetch(`${BASE}/api/admin/ai/models/${modelId}/prices`, {
+    method: 'POST',
+    headers: apiHeaders(true),
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '设置积分价失败'));
+  return res.json();
+}
+
+export async function getAdminPointsSettings(): Promise<PointsSettings> {
+  const res = await fetch(`${BASE}/api/admin/points/settings`, { headers: apiHeaders() });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '获取积分设置失败'));
+  return res.json();
+}
+
+export async function saveAdminPointsSettings(payload: Partial<PointsSettings>): Promise<PointsSettings> {
+  const res = await fetch(`${BASE}/api/admin/points/settings`, {
+    method: 'PUT',
+    headers: apiHeaders(true),
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '保存积分设置失败'));
+  return res.json();
+}
+
+export async function adminAdjustPoints(payload: {
+  user_id: number;
+  amount: number;
+  note?: string;
+  request_id: string;
+}): Promise<PointsAccount> {
+  const res = await fetch(`${BASE}/api/admin/points/adjust`, {
+    method: 'POST',
+    headers: apiHeaders(true),
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '调账失败'));
+  return res.json();
+}
+
+export async function grantAdminUserPoints(
+  userId: number,
+  payload: { amount: number; note?: string; request_id: string },
+): Promise<PointsAccount> {
+  const res = await fetch(`${BASE}/api/admin/users/${userId}/points`, {
+    method: 'POST',
+    headers: apiHeaders(true),
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '添加积分失败'));
+  return res.json();
+}
+
+export async function getAdminPointsProducts(): Promise<{ products: PointsProduct[] }> {
+  const res = await fetch(`${BASE}/api/admin/points/products`, { headers: apiHeaders() });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '获取积分套餐失败'));
+  return res.json();
+}
+
+export async function createAdminPointsProduct(
+  payload: Omit<PointsProduct, 'id'>,
+): Promise<PointsProduct> {
+  const res = await fetch(`${BASE}/api/admin/points/products`, {
+    method: 'POST',
+    headers: apiHeaders(true),
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '创建积分套餐失败'));
+  return res.json();
+}
+
+export async function updateAdminPointsProduct(
+  productId: number,
+  payload: Partial<Omit<PointsProduct, 'id'>>,
+): Promise<PointsProduct> {
+  const res = await fetch(`${BASE}/api/admin/points/products/${productId}`, {
+    method: 'PUT',
+    headers: apiHeaders(true),
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '更新积分套餐失败'));
+  return res.json();
+}
+
+export async function deleteAdminPointsProduct(productId: number): Promise<{ ok: boolean; archived: boolean }> {
+  const res = await fetch(`${BASE}/api/admin/points/products/${productId}`, {
+    method: 'DELETE',
+    headers: apiHeaders(),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '删除积分套餐失败'));
+  return res.json();
+}
+
+export type CreationStudioMediaKind = 'image' | 'video';
+export type CreationStudioJobStatus =
+  | 'queued'
+  | 'running'
+  | 'cancel_requested'
+  | 'cancelled'
+  | 'succeeded'
+  | 'failed';
+
+export interface CreationStudioAsset {
+  id: number;
+  job_id: number | null;
+  media_type: CreationStudioMediaKind;
+  role: 'upload' | 'output';
+  public_url: string;
+  original_name: string | null;
+  mime_type: string | null;
+  file_size: number | null;
+  width: number | null;
+  height: number | null;
+  duration_seconds: number | null;
+  status: string;
+  created_at: string;
+}
+
+export interface CreationStudioJob {
+  id: number;
+  media_kind: CreationStudioMediaKind;
+  generation_mode: string;
+  prompt: string;
+  negative_prompt: string | null;
+  model_id: number | null;
+  model_key: string | null;
+  parameters: Record<string, string | number | boolean | null>;
+  status: CreationStudioJobStatus;
+  stage: string;
+  progress: number;
+  background_task_id: string | null;
+  provider_job_id: string | null;
+  error_message: string | null;
+  retry_of_job_id: number | null;
+  inputs: CreationStudioAsset[];
+  output: CreationStudioAsset | null;
+  created_at: string;
+  started_at: string | null;
+  completed_at: string | null;
+  updated_at: string;
+}
+
+export interface CreationStudioJobCreate {
+  media_kind: CreationStudioMediaKind;
+  prompt: string;
+  negative_prompt?: string;
+  model_id?: number;
+  asset_ids?: number[];
+  count?: number;
+  width?: number;
+  height?: number;
+  quality?: 'auto' | 'high' | 'medium' | 'low';
+  reference_mode?: 'character' | 'style';
+  aspect_ratio?: '16:9' | '9:16' | '1:1' | '4:3' | '3:4';
+  resolution?: '480P' | '720P' | '1080P' | '1K' | '2K' | '4K';
+  duration_seconds?: number;
+}
+
+export async function listCreationStudioAssets(): Promise<{ assets: CreationStudioAsset[] }> {
+  const res = await fetch(`${BASE}/api/creation-studio/assets`, { headers: apiHeaders() });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '获取参考素材失败'));
+  return res.json();
+}
+
+export async function uploadCreationStudioAsset(file: File): Promise<{ asset: CreationStudioAsset; deduplicated: boolean }> {
+  const form = new FormData();
+  form.append('file', file);
+  form.append('media_type', 'image');
+  const res = await fetch(`${BASE}/api/creation-studio/assets`, {
+    method: 'POST',
+    headers: apiHeaders(),
+    body: form,
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '上传参考图片失败'));
+  return res.json();
+}
+
+export async function deleteCreationStudioAsset(assetId: number): Promise<{ ok: boolean }> {
+  const res = await fetch(`${BASE}/api/creation-studio/assets/${assetId}`, {
+    method: 'DELETE',
+    headers: apiHeaders(),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '删除参考图片失败'));
+  return res.json();
+}
+
+export async function listCreationStudioJobs(
+  mediaKind?: CreationStudioMediaKind,
+): Promise<{ jobs: CreationStudioJob[] }> {
+  const query = mediaKind ? `?media_kind=${encodeURIComponent(mediaKind)}` : '';
+  const res = await fetch(`${BASE}/api/creation-studio/jobs${query}`, { headers: apiHeaders() });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '获取生成记录失败'));
+  return res.json();
+}
+
+export async function createCreationStudioJobs(
+  payload: CreationStudioJobCreate,
+): Promise<{ jobs: CreationStudioJob[] }> {
+  const res = await fetch(`${BASE}/api/creation-studio/jobs`, {
+    method: 'POST',
+    headers: apiHeaders(true),
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '提交生成任务失败'));
+  return res.json();
+}
+
+export async function cancelCreationStudioJob(jobId: number): Promise<{ job: CreationStudioJob }> {
+  const res = await fetch(`${BASE}/api/creation-studio/jobs/${jobId}/cancel`, {
+    method: 'POST',
+    headers: apiHeaders(),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '取消生成任务失败'));
+  return res.json();
+}
+
+export async function retryCreationStudioJob(jobId: number): Promise<{ job: CreationStudioJob }> {
+  const res = await fetch(`${BASE}/api/creation-studio/jobs/${jobId}/retry`, {
+    method: 'POST',
+    headers: apiHeaders(),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '重试生成任务失败'));
+  return res.json();
+}
+
+export async function deleteCreationStudioJob(jobId: number): Promise<{ ok: boolean }> {
+  const res = await fetch(`${BASE}/api/creation-studio/jobs/${jobId}`, {
+    method: 'DELETE',
+    headers: apiHeaders(),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '删除生成记录失败'));
   return res.json();
 }

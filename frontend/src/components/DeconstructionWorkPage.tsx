@@ -7,6 +7,7 @@ import type {
   DeconstructionWorkItem, NovelSearchResult, CrawlStatus,
   AuthorStyleResult, AuthorStyleStatus,
 } from '../api';
+import { normalizeErrorMessage } from '../lib/errors';
 import {
   listDeconstructionWorks,
   searchDeconstructNovels,
@@ -140,8 +141,8 @@ export default function DeconstructionWorkPage({ workId, onBack }: Props) {
         const r = await getAuthorStyleResult(work?.id || workId);
         setAuthorStyleResult(r);
       }
-    } catch {
-      // 静默失败
+    } catch (error) {
+      setError(normalizeErrorMessage(error, '无法获取作者画像任务状态，请稍后重试'));
     }
   };
 
@@ -266,8 +267,9 @@ export default function DeconstructionWorkPage({ workId, onBack }: Props) {
           setPageState('failed');
           setError('爬取失败，请重试');
         }
-    } catch {
-    }
+      } catch (error) {
+        setError(normalizeErrorMessage(error, '无法获取爬取任务状态，系统将继续重试'));
+      }
     }, 3000);
     return () => clearInterval(timer);
   }, [pageState, work?.id]);

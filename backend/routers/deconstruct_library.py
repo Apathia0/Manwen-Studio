@@ -18,8 +18,10 @@ from models import (
 )
 from services.novel_crawler import search_novels, crawl_novel_raw
 from services.deconstruction_v2 import run_deconstruction_pipeline_v2
+from services.deconstruction_billing import refund_deconstruction_task, settle_deconstruction_usage
 from services.author_style import run_author_style_pipeline
 from services.task_manager import task_manager
+from services.errors import public_error_message
 
 router = APIRouter(tags=["deconstruction-library"])
 
@@ -118,6 +120,23 @@ def _require_user(request: Request, db: Session):
 def _require_story_for_user(story_id: int, user, db: Session):
     from main import _require_story_for_user as _rsfu
     return _rsfu(story_id, user, db)
+
+
+async def _run_deconstruction_with_billing(
+    *args,
+    pipeline,
+    billing_usage_event_id: int | None = None,
+    **kwargs,
+):
+    """运行拆书相关后台管线，成功后按 DeepSeek 实际 token 结算预留。"""
+    from services.deepseek import reset_usage_accumulator
+
+    reset_usage_accumulator()
+    result = await pipeline(*args, **kwargs)
+    status = str(result.get("status") or "").lower() if isinstance(result, dict) else ""
+    if status not in {"failed", "cancelled", "canceled"}:
+        settle_deconstruction_usage(billing_usage_event_id)
+    return result
 
 
 # ── 1. 搜书 ─────────────────────────────────────────
@@ -284,7 +303,12 @@ async def import_file_work(
 
     # 自动触发后台拆书管线
     try:
-        from main import _check_and_consume_feature_quota, _refund_quota, _user_deepseek_api_key
+        from main import (
+            _check_and_consume_feature_quota,
+            _detach_pending_platform_points,
+            _refund_quota,
+            _user_deepseek_api_key,
+        )
         deepseek_api_key = _user_deepseek_api_key(request)
 
         task_id_str = f"deconlib_{work.id}_{int(datetime.datetime.now(datetime.timezone.utc).timestamp() * 1_000_000)}_{uuid.uuid4().hex[:6]}"
@@ -292,13 +316,16 @@ async def import_file_work(
             request,
             user.id,
             "deconstruction.run.monthly_limit",
-            1,
+            4,
             db,
-            deduct=True,
+            deduct=False,
+            reserve=True,
             provider_kind="text",
         )
         quota_period_key = quota_result.get("period_key")
-        quota_amount = 0 if quota_result.get("skipped") else 1
+        quota_usage_event_id = quota_result.get("usage_event_id")
+        quota_amount = 4 if quota_usage_event_id else 0
+        _detach_pending_platform_points(request, quota_usage_event_id)
         work.decon_status = "running"
         work.current_stage = 0
         work.task_id = task_id_str
@@ -307,15 +334,18 @@ async def import_file_work(
         await task_manager.submit_task(
             task_id=task_id_str,
             task_type="deconlib_deconstruct",
-            coro_func=_run_deconstruction_for_work,
+            coro_func=_run_deconstruction_with_billing,
             work_id=work.id,
             api_key=deepseek_api_key,
+            pipeline=_run_deconstruction_for_work,
+            billing_usage_event_id=quota_usage_event_id,
             timeout=7200,
             max_retries=0,
             quota_user_id=user.id,
             quota_feature_key="deconstruction.run.monthly_limit",
             quota_amount=quota_amount,
             quota_period_key=quota_period_key,
+            quota_usage_event_id=quota_usage_event_id,
         )
         return {
             "work_id": work.id,
@@ -327,7 +357,14 @@ async def import_file_work(
     except Exception as e:
         db.rollback()
         if "quota_amount" in locals() and quota_amount > 0:
-            _refund_quota(user.id, "deconstruction.run.monthly_limit", quota_amount, db, locals().get("quota_period_key"))
+            _refund_quota(
+                user.id,
+                "deconstruction.run.monthly_limit",
+                quota_amount,
+                db,
+                locals().get("quota_period_key"),
+                usage_event_id=locals().get("quota_usage_event_id"),
+            )
         work.decon_status = "not_started"
         work.current_stage = None
         work.task_id = None
@@ -486,52 +523,89 @@ async def resume_deconstruction_work(
     if not status_valid:
         raise HTTPException(400, "当前状态不支持续跑（需要已完成黄金三章拆解并停靠）")
 
-    work.decon_status = "running"
-    db.commit()
-
-    from main import _user_deepseek_api_key
+    from main import (
+        _check_and_consume_feature_quota,
+        _detach_pending_platform_points,
+        _refund_quota,
+        _user_deepseek_api_key,
+    )
     api_key = _user_deepseek_api_key(request)
 
     task_id_str = f"decon_work_{work_id}_{int(datetime.datetime.now(datetime.timezone.utc).timestamp() * 1_000_000)}_{uuid.uuid4().hex[:6]}"
-
-    if mode == "quick_report":
-        await task_manager.submit_task(
-            task_id=task_id_str,
-            task_type="deconstruction",
-            coro_func=_run_deconstruction_for_work,
-            work_id=work_id,
-            api_key=api_key,
-            start_stage=5,
-            pause_after_stage1=False,
-            quick_report_mode=True,
-            timeout=600,
-            max_retries=2,
-        )
-        return {
-            "task_id": task_id_str,
-            "message": "快速报告生成已启动（基于黄金三章数据）",
-        }
-
     is_partial = mode == "partial"
+    total_chapters = db.query(DeconstructionChapter).filter(
+        DeconstructionChapter.work_id == work_id,
+    ).count()
+    try:
+        requested_max = int(max_chapters) if max_chapters else total_chapters
+    except (TypeError, ValueError):
+        requested_max = total_chapters
+    analyzed_chapters = min(total_chapters, max(1, requested_max))
+    call_count = 1 if mode == "quick_report" else analyzed_chapters + 4
+    quota_result = _check_and_consume_feature_quota(
+        request,
+        user.id,
+        "deconstruction.run.monthly_limit",
+        call_count,
+        db,
+        deduct=False,
+        reserve=True,
+        provider_kind="text",
+    )
+    quota_usage_event_id = quota_result.get("usage_event_id")
+    quota_period_key = quota_result.get("period_key")
+    quota_amount = call_count if quota_usage_event_id else 0
+    _detach_pending_platform_points(request, quota_usage_event_id)
+
+    original_status = work.decon_status
+    work.decon_status = "running"
+    work.task_id = task_id_str
+    db.commit()
     kwargs = dict(
         work_id=work_id,
         api_key=api_key,
-        start_stage=2,
+        start_stage=5 if mode == "quick_report" else 2,
         pause_after_stage1=False,
         partial_mode=is_partial,
-        timeout=7200,
-        max_retries=2,
+        quick_report_mode=mode == "quick_report",
     )
     if is_partial and max_chapters:
-        kwargs["max_chapters_for_partial"] = max_chapters
-    await task_manager.submit_task(
-        task_id=task_id_str,
-        task_type="deconstruction",
-        coro_func=_run_deconstruction_for_work,
-        **kwargs,
-    )
+        kwargs["max_chapters_for_partial"] = analyzed_chapters
+    try:
+        await task_manager.submit_task(
+            task_id=task_id_str,
+            task_type="deconstruction",
+            coro_func=_run_deconstruction_with_billing,
+            pipeline=_run_deconstruction_for_work,
+            billing_usage_event_id=quota_usage_event_id,
+            timeout=600 if mode == "quick_report" else 7200,
+            max_retries=0,
+            quota_user_id=user.id,
+            quota_feature_key="deconstruction.run.monthly_limit",
+            quota_amount=quota_amount,
+            quota_period_key=quota_period_key,
+            quota_usage_event_id=quota_usage_event_id,
+            **kwargs,
+        )
+    except Exception:
+        work.decon_status = original_status
+        work.task_id = None
+        if quota_amount > 0:
+            _refund_quota(
+                user.id,
+                "deconstruction.run.monthly_limit",
+                quota_amount,
+                db,
+                quota_period_key,
+                usage_event_id=quota_usage_event_id,
+            )
+        db.commit()
+        raise
 
-    msg = "试读模式已启动（Stage 2'-5'）" if is_partial else "拆书续跑任务已启动（Stage 2-6）"
+    if mode == "quick_report":
+        msg = "快速报告生成已启动（基于黄金三章数据）"
+    else:
+        msg = "试读模式已启动（Stage 2'-5'）" if is_partial else "拆书续跑任务已启动（Stage 2-6）"
     return {
         "task_id": task_id_str,
         "message": msg,
@@ -574,7 +648,12 @@ async def start_deconstruction(
     ).delete()
     db.commit()
 
-    from main import _check_and_consume_feature_quota, _refund_quota, _user_deepseek_api_key
+    from main import (
+        _check_and_consume_feature_quota,
+        _detach_pending_platform_points,
+        _refund_quota,
+        _user_deepseek_api_key,
+    )
     api_key = _user_deepseek_api_key(request)
 
     task_id_str = f"deconlib_{work_id}_{int(datetime.datetime.now(datetime.timezone.utc).timestamp() * 1_000_000)}_{uuid.uuid4().hex[:6]}"
@@ -583,13 +662,16 @@ async def start_deconstruction(
         request,
         user.id,
         "deconstruction.run.monthly_limit",
-        1,
+        4,
         db,
-        deduct=True,
+        deduct=False,
+        reserve=True,
         provider_kind="text",
     )
     quota_period_key = quota_result.get("period_key")
-    quota_amount = 0 if quota_result.get("skipped") else 1
+    quota_usage_event_id = quota_result.get("usage_event_id")
+    quota_amount = 4 if quota_usage_event_id else 0
+    _detach_pending_platform_points(request, quota_usage_event_id)
 
     try:
         work.decon_status = "running"
@@ -602,22 +684,32 @@ async def start_deconstruction(
         await task_manager.submit_task(
             task_id=task_id_str,
             task_type="deconlib_deconstruct",
-            coro_func=_run_deconstruction_for_work,
+            coro_func=_run_deconstruction_with_billing,
             work_id=work_id,
             api_key=api_key,
+            pipeline=_run_deconstruction_for_work,
+            billing_usage_event_id=quota_usage_event_id,
             timeout=7200,
             max_retries=0,
             quota_user_id=user.id,
             quota_feature_key="deconstruction.run.monthly_limit",
             quota_amount=quota_amount,
             quota_period_key=quota_period_key,
+            quota_usage_event_id=quota_usage_event_id,
             max_chapters_for_partial=max_chapters,
             pause_after_stage1=True,
         )
     except Exception:
         db.rollback()
         if quota_amount > 0:
-            _refund_quota(user.id, "deconstruction.run.monthly_limit", quota_amount, db, quota_period_key)
+            _refund_quota(
+                user.id,
+                "deconstruction.run.monthly_limit",
+                quota_amount,
+                db,
+                quota_period_key,
+                usage_event_id=quota_usage_event_id,
+            )
         work.decon_status = "not_started"
         work.current_stage = None
         work.task_id = None
@@ -833,7 +925,10 @@ async def _run_deconstruction_for_work(work_id: int, api_key: str, task_id: str 
                         raise
                     except Exception as e:
                         logger.error(f"第{ch.chapter_number}章摘要失败: {e}")
-                        err_entry = {"chapter_number": ch.chapter_number, "error": str(e)}
+                        err_entry = {
+                            "chapter_number": ch.chapter_number,
+                            "error": public_error_message(e, f"第 {ch.chapter_number} 章摘要生成失败，请稍后重试"),
+                        }
                         async with db_lock:
                             completed[0] += 1
                             _save_one_summary(ch.chapter_number, err_entry)
@@ -1004,9 +1099,10 @@ async def _run_deconstruction_for_work(work_id: int, api_key: str, task_id: str 
         db.commit()
 
     except Exception as e:
-        logger.error(f"拆书管道 work_id={work_id} Stage {work.current_stage if work else '?'} 失败: {e}")
+        logger.exception("拆书管道失败 work_id=%s stage=%s", work_id, work.current_stage if work else "?")
+        public_message = public_error_message(e, "拆书分析失败，请稍后重试")
         work.decon_status = "failed"
-        work.progress_markdown = (work.progress_markdown or "") + f"\n\n## Stage {work.current_stage} 失败\n{str(e)}"
+        work.progress_markdown = (work.progress_markdown or "") + f"\n\n## 阶段 {work.current_stage} 失败\n{public_message}"
         db.commit()
         raise
     finally:
@@ -1044,22 +1140,31 @@ async def start_author_style_analysis(
     if chapter_count < 3:
         raise HTTPException(400, f"至少需要 3 章有内容的章节才能提取作者风格（当前 {chapter_count} 章）")
 
-    from main import _check_and_consume_feature_quota, _refund_quota, _user_deepseek_api_key
+    from main import (
+        _check_and_consume_feature_quota,
+        _detach_pending_platform_points,
+        _refund_quota,
+        _user_deepseek_api_key,
+    )
 
     api_key = _user_deepseek_api_key(request)
     task_id_str = f"author_style_{work_id}_{int(datetime.datetime.now(datetime.timezone.utc).timestamp() * 1_000_000)}_{uuid.uuid4().hex[:6]}"
+    call_count = min(chapter_count, 20) + 2
 
     quota_result = _check_and_consume_feature_quota(
         request,
         user.id,
         "deconstruction.run.monthly_limit",
-        1,
+        call_count,
         db,
-        deduct=True,
+        deduct=False,
+        reserve=True,
         provider_kind="text",
     )
     quota_period_key = quota_result.get("period_key")
-    quota_amount = 0 if quota_result.get("skipped") else 1
+    quota_usage_event_id = quota_result.get("usage_event_id")
+    quota_amount = call_count if quota_usage_event_id else 0
+    _detach_pending_platform_points(request, quota_usage_event_id)
 
     work.author_style_status = "pending"
     work.author_style_task_id = task_id_str
@@ -1070,19 +1175,29 @@ async def start_author_style_analysis(
         await task_manager.submit_task(
             task_id=task_id_str,
             task_type="author_style",
-            coro_func=run_author_style_pipeline,
+            coro_func=_run_deconstruction_with_billing,
             work_id=work_id,
             api_key=api_key,
+            pipeline=run_author_style_pipeline,
+            billing_usage_event_id=quota_usage_event_id,
             timeout=1800,
             max_retries=0,
             quota_user_id=user.id,
             quota_feature_key="deconstruction.run.monthly_limit",
             quota_amount=quota_amount,
             quota_period_key=quota_period_key,
+            quota_usage_event_id=quota_usage_event_id,
         )
     except Exception:
         if quota_amount > 0:
-            _refund_quota(user.id, "deconstruction.run.monthly_limit", quota_amount, db, quota_period_key)
+            _refund_quota(
+                user.id,
+                "deconstruction.run.monthly_limit",
+                quota_amount,
+                db,
+                quota_period_key,
+                usage_event_id=quota_usage_event_id,
+            )
         work.author_style_status = "failed"
         db.commit()
         raise
@@ -1280,6 +1395,8 @@ async def cancel_deconstruction(
 
     if work.task_id:
         task_manager.request_cancellation(work.task_id)
+        task_manager.cancel_task(work.task_id)
+        refund_deconstruction_task(db, work.task_id, error_code="user_cancelled")
 
     work.decon_status = "failed"
     work.progress_markdown = (work.progress_markdown or "") + "\n- 用户取消"
@@ -1308,6 +1425,7 @@ async def delete_deconstruction_work(
         if work.task_id:
             task_manager.request_cancellation(work.task_id)
             task_manager.cancel_task(work.task_id)
+            refund_deconstruction_task(db, work.task_id, error_code="work_deleted")
 
     db.delete(work)
     db.commit()

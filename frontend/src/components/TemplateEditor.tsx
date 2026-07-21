@@ -7,6 +7,7 @@ import {
   type SystemDefaultPrompts,
 } from '../api';
 import { toast } from '../lib/toast';
+import { normalizeErrorMessage } from '../lib/errors';
 
 type PromptType = 'framework' | 'chapter' | 'character' | 'manga_style';
 
@@ -69,7 +70,7 @@ export default function TemplateEditor({ template, onSave, onCancel }: Props) {
   useEffect(() => {
     getSystemDefaultPrompts()
       .then(setSysDefaults)
-      .catch(() => {});
+      .catch((error) => setError(normalizeErrorMessage(error, '加载系统默认提示词失败，请稍后重试')));
   }, []);
 
   // 切换到专家模式时，把当前增量规则作为初始化 prompt

@@ -1,4 +1,4 @@
-import { get, post, put, del } from '@/utils/request'
+import { get, post, put, patch, del } from '@/utils/request'
 import { uploadFile } from '@/utils/upload'
 
 // 视频生成不设超时（24 小时，实际无限）
@@ -23,12 +23,12 @@ export function generateScreenplay(chapterId: number, payload: {
   scene_count_hint?: number
   regenerate?: boolean
 }): Promise<{ screenplay: string; scenes: ScriptScene[] }> {
-  return post(`/api/video/chapters/${chapterId}/screenplay/generate`, payload)
+  return post(`/api/chapters/${chapterId}/screenplay/generate`, payload)
 }
 
 /** 获取剧本场景列表 */
 export function listScreenplayScenes(chapterId: number): Promise<{ scenes: ScriptScene[]; screenplay: string }> {
-  return get(`/api/video/chapters/${chapterId}/screenplay/scenes`)
+  return get(`/api/chapters/${chapterId}/screenplay/scenes`)
 }
 
 // ── 镜头 (Shots) ──
@@ -40,17 +40,17 @@ export function generateSceneShots(sceneId: number, payload?: {
   regenerate?: boolean
   duration_budget_seconds?: number
 }): Promise<{ scene_id: number; shots: VideoShot[] }> {
-  return post(`/api/video/scenes/${sceneId}/shots/generate`, payload)
+  return post(`/api/scenes/${sceneId}/shots/generate`, payload)
 }
 
 /** 获取场景镜头列表 */
 export function listSceneShots(sceneId: number): Promise<{ scene_id: number; shots: VideoShot[] }> {
-  return get(`/api/video/scenes/${sceneId}/shots`)
+  return get(`/api/scenes/${sceneId}/shots`)
 }
 
 /** 更新镜头 */
 export function updateVideoShot(shotId: number, payload: Partial<VideoShot>): Promise<VideoShot> {
-  return put(`/api/shots/${shotId}`, payload)
+  return patch(`/api/shots/${shotId}`, payload)
 }
 
 /** 删除镜头 */
@@ -144,22 +144,35 @@ export function renderShotVideo(shotId: number, payload: {
   model: string
   prompt?: string
   aspect_ratio?: string
-  duration?: number
+  duration_seconds?: number
   size?: string
   orientation?: string
-  input_reference?: string
+  input_mode?: string
 }): Promise<VideoGenerationJob> {
-  return post(`/api/shots/${shotId}/render`, payload, undefined, NO_TIMEOUT)
+  return post<{ job: VideoGenerationJob }>(`/api/shots/${shotId}/video/render`, payload, undefined, NO_TIMEOUT)
+    .then((response) => response.job)
 }
 
 /** 获取视频模型列表 */
 export function getVideoModels(): Promise<{ models: VideoModel[] }> {
-  return get('/api/video/models')
+  return get<{ models: Array<{ model_key: string; display_name: string }> }>('/api/ai/models?modality=video')
+    .then((response) => ({
+      models: response.models.map((model) => ({
+        name: model.display_name,
+        value: model.model_key,
+        description: '',
+      })),
+    }))
 }
 
 /** 获取视频作业状态 */
 export function getVideoJob(jobId: number): Promise<VideoGenerationJob> {
-  return get(`/api/video/jobs/${jobId}`)
+  return get(`/api/video-jobs/${jobId}`)
+}
+
+/** 获取镜头最近一次视频作业 */
+export function getLatestVideoJobForShot(shotId: number): Promise<VideoGenerationJob> {
+  return get(`/api/shots/${shotId}/video-jobs/latest`)
 }
 
 /** 同意故事版 */
@@ -280,12 +293,12 @@ export function listStylePresets(): Promise<{ presets: VideoStylePreset[] }> {
 
 /** 获取故事视频风格预设 */
 export function getStoryVideoStylePreset(storyId: number): Promise<{ story_id: number; style_preset_id: number | null; style_preset: VideoStylePreset | null }> {
-  return get(`/api/video/stories/${storyId}/style-preset`)
+  return get(`/api/stories/${storyId}/video-style-preset`)
 }
 
 /** 设置故事视频风格预设 */
 export function setStoryVideoStylePreset(storyId: number, stylePresetId: number): Promise<{ story_id: number; style_preset_id: number }> {
-  return put(`/api/video/stories/${storyId}/style-preset`, { style_preset_id: stylePresetId })
+  return put(`/api/stories/${storyId}/video-style-preset`, { style_preset_id: stylePresetId })
 }
 
 // ── 资产管理 (Asset Management) ──
@@ -372,7 +385,8 @@ export function retryVideoJob(
   jobId: number,
   payload?: Record<string, unknown>
 ): Promise<VideoGenerationJob> {
-  return post(`/api/video/jobs/${jobId}/retry`, payload || {})
+  return post<{ job: VideoGenerationJob }>(`/api/video-jobs/${jobId}/retry`, payload || {})
+    .then((response) => response.job)
 }
 
 // ── 渲染片段 ──
@@ -406,7 +420,7 @@ export function renderStoryboardFrame(
 
 /** 设置主故事版 */
 export function setMasterStoryboard(shotId: number, assetId: number): Promise<{ shot_id: number; asset_id: number }> {
-  return post(`/api/shots/${shotId}/storyboard/${assetId}/master`)
+  return post(`/api/shots/${shotId}/storyboard/set-master`, { action: 'set_master', asset_id: assetId })
 }
 
 /** 获取镜头故事版列表 */

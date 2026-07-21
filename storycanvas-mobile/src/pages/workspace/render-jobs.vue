@@ -125,7 +125,7 @@ async function loadModels() {
 async function loadJobs() {
   if (!shotId.value) return
   try {
-    const job = await videoApi.getVideoJob(shotId.value)
+    const job = await videoApi.getLatestVideoJobForShot(shotId.value)
     if (job) {
       jobs.value = [job]
     }
@@ -145,10 +145,10 @@ async function handleRender() {
     const job = await videoApi.renderShotVideo(shotId.value, {
       model: models.value[modelIndex.value].value,
       aspect_ratio: renderParams.value.aspect_ratio,
-      duration: renderParams.value.duration,
+      duration_seconds: renderParams.value.duration,
       size: renderParams.value.size,
       orientation: renderParams.value.orientation,
-      input_reference: renderParams.value.input_mode,
+      input_mode: renderParams.value.input_mode,
     })
     jobs.value.unshift(job)
     uni.showToast({ title: '渲染已启动', icon: 'success' })

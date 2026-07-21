@@ -20,7 +20,7 @@
       <lv-input
         v-model="newPassword"
         type="password"
-        placeholder="新密码 (至少 6 位)"
+        placeholder="新密码 (至少 8 位)"
         show-password-toggle
         :error="passwordError"
       />
@@ -125,8 +125,8 @@ function validate(): boolean {
   if (!newPassword.value) {
     passwordError.value = '请输入新密码'
     valid = false
-  } else if (newPassword.value.length < 6) {
-    passwordError.value = '密码至少 6 位'
+  } else if (newPassword.value.length < 8) {
+    passwordError.value = '密码至少 8 位'
     valid = false
   } else {
     passwordError.value = ''

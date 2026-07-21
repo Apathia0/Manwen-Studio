@@ -1,3 +1,5 @@
+import { normalizeErrorMessage } from './errors';
+
 type ToastType = 'success' | 'error' | 'warning' | 'info';
 
 export interface Toast {
@@ -30,7 +32,7 @@ export const toast = {
   /** 成功提示（绿色，4 秒自动消失） */
   success: (message: string, duration = 4000) => add('success', message, duration),
   /** 错误提示（红色，6 秒自动消失） */
-  error: (message: string, duration = 6000) => add('error', message, duration),
+  error: (message: string, duration = 6000) => add('error', normalizeErrorMessage(message), duration),
   /** 警告提示（琥珀色，4 秒自动消失） */
   warning: (message: string, duration = 4000) => add('warning', message, duration),
   /** 信息提示（蓝色，4 秒自动消失） */

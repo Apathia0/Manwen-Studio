@@ -1,5 +1,6 @@
 import { ref } from 'vue'
 import { BASE_URL } from '@/utils/constants'
+import { normalizeErrorMessage } from '@/utils/errors'
 
 interface SSEEvent {
   type: string
@@ -34,7 +35,7 @@ export function useSSE() {
       },
       onError: (err) => {
         streaming.value = false
-        options.onError?.(err)
+        options.onError?.(new Error(normalizeErrorMessage(err, '连接失败，请稍后重试')))
       }
     })
   }
@@ -77,7 +78,10 @@ function createFetchSSE(options: SSEOptions): SSEHandle {
       const detail = (() => {
         try { return JSON.parse(body).detail } catch { return body }
       })()
-      throw new Error(`请求失败 (${res.status}): ${detail || res.statusText}`)
+      throw new Error(normalizeErrorMessage(
+        detail || `HTTP ${res.status}: ${res.statusText}`,
+        '请求失败，请稍后重试'
+      ))
     }
     const reader = res.body!.getReader()
     const decoder = new TextDecoder()
@@ -94,7 +98,7 @@ function createFetchSSE(options: SSEOptions): SSEHandle {
 
       for (const line of lines) {
         parseSSELine(line, currentEvent, (evt, data) => {
-          options.onEvent({ type: evt, data })
+          options.onEvent({ type: evt, data: normalizeSSEEventData(evt, data) })
         }, (evt) => { currentEvent = evt })
       }
     }
@@ -138,12 +142,12 @@ function createWxSSE(options: SSEOptions): SSEHandle {
           : detail
             ? JSON.stringify(detail)
             : `请求失败 (${res.statusCode})`
-        options.onError?.(new Error(message))
+        options.onError?.(new Error(normalizeErrorMessage(message, '请求失败，请稍后重试')))
         return
       }
       options.onComplete?.()
     },
-    fail: (err: any) => options.onError?.(new Error(err.errMsg))
+    fail: (err: any) => options.onError?.(new Error(normalizeErrorMessage(err?.errMsg, '网络连接失败，请稍后重试')))
   })
 
   ;(task as any).onChunkReceived((res: { data: ArrayBuffer }) => {
@@ -155,12 +159,21 @@ function createWxSSE(options: SSEOptions): SSEHandle {
 
     for (const line of lines) {
       parseSSELine(line, currentEvent, (evt, data) => {
-        options.onEvent({ type: evt, data })
+        options.onEvent({ type: evt, data: normalizeSSEEventData(evt, data) })
       }, (evt) => { currentEvent = evt })
     }
   })
 
   return { abort: () => task.abort() }
+}
+
+function normalizeSSEEventData(event: string, data: any): any {
+  if (event !== 'error') return data
+  const rawMessage = data?.error || data?.detail || data?.message || data?.raw || data
+  return {
+    ...(data && typeof data === 'object' ? data : {}),
+    error: normalizeErrorMessage(rawMessage, '任务执行失败，请稍后重试')
+  }
 }
 
 function arrayBufferToString(buf: ArrayBuffer): string {

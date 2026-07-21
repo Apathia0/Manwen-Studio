@@ -1,5 +1,6 @@
 import { BASE_URL } from './constants'
 import { getToken, clearAuth } from './storage'
+import { normalizeErrorMessage } from './errors'
 
 interface RequestOptions {
   url: string
@@ -52,12 +53,12 @@ export async function request<T = any>(options: RequestOptions): Promise<T> {
           resolve(res.data as T)
         } else {
           const errorData = res.data as any
-          const message = errorData?.detail || errorData?.message || '请求失败'
+          const message = normalizeErrorMessage(errorData, '请求失败，请稍后重试')
           reject(new Error(message))
         }
       },
       fail: (err) => {
-        reject(new Error(err.errMsg || '网络请求失败'))
+        reject(new Error(normalizeErrorMessage(err?.errMsg, '网络请求失败，请检查网络后重试')))
       }
     })
   })

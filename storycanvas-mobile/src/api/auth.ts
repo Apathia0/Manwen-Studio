@@ -22,7 +22,7 @@ export function changePassword(oldPassword: string, newPassword: string): Promis
 }
 
 export function sendEmailCode(email: string): Promise<void> {
-  return post('/api/auth/send-email-code', { email })
+  return post('/api/auth/forgot-password', { email })
 }
 
 export function forgotPassword(email: string): Promise<void> {
@@ -30,5 +30,5 @@ export function forgotPassword(email: string): Promise<void> {
 }
 
 export function resetPassword(email: string, code: string, newPassword: string): Promise<void> {
-  return post('/api/auth/reset-password', { email, code, new_password: newPassword })
+  return post('/api/auth/reset-password', { email, verification_code: code, new_password: newPassword })
 }

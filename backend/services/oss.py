@@ -12,7 +12,11 @@ from __future__ import annotations
 
 import logging
 import os
+import tempfile
 from pathlib import Path
+
+from .ai.channels import validate_remote_media_url
+from .media_logging import safe_media_url_for_log
 
 logger = logging.getLogger("oss_service")
 
@@ -23,6 +27,7 @@ _runtime_access_key_secret: str | None = None
 _runtime_endpoint: str | None = None
 _runtime_bucket: str | None = None
 _runtime_public_url_base: str | None = None  # CDN / 自定义域名
+MAX_REMOTE_MEDIA_BYTES = max(1, int(os.getenv("MAX_REMOTE_MEDIA_BYTES", str(2 * 1024 * 1024 * 1024))))
 
 
 def configure(
@@ -245,12 +250,13 @@ def auto_configure_from_db() -> bool:
     try:
         from database import SessionLocal
         from models import PlatformSetting
+        from services.ai.crypto_secrets import read_platform_setting_payload
 
         db = SessionLocal()
         try:
             def _get(key: str, default=None):
                 s = db.query(PlatformSetting).filter(PlatformSetting.setting_key == key).first()
-                return s.value_json.get("value", default) if s else default
+                return read_platform_setting_payload(s.value_json, default) if s else default
 
             enabled = bool(_get("oss.enabled", False))
             if not enabled:
@@ -293,6 +299,7 @@ def upload_from_url(
     if not is_enabled():
         return None
     try:
+        source_url = validate_remote_media_url(source_url)
         bucket = _get_client()
         headers: dict[str, str] = {}
         if content_type:
@@ -300,17 +307,34 @@ def upload_from_url(
 
         # 使用 httpx 流式下载并同时上传到 OSS
         import httpx
-        with httpx.Client(timeout=httpx.Timeout(30.0, connect=30, read=600, write=30, pool=30), follow_redirects=True) as client:
-            response = client.get(source_url)
-            response.raise_for_status()
-            data = response.content
-
-        bucket.put_object(remote_key, data, headers=headers)
+        with httpx.Client(timeout=httpx.Timeout(30.0, connect=30, read=600, write=30, pool=30), follow_redirects=False) as client:
+            with client.stream("GET", source_url) as response:
+                response.raise_for_status()
+                content_length = response.headers.get("content-length")
+                if content_length and int(content_length) > MAX_REMOTE_MEDIA_BYTES:
+                    raise RuntimeError("远程媒体超过允许的最大大小")
+                with tempfile.SpooledTemporaryFile(max_size=8 * 1024 * 1024) as data:
+                    total_bytes = 0
+                    for chunk in response.iter_bytes():
+                        total_bytes += len(chunk)
+                        if total_bytes > MAX_REMOTE_MEDIA_BYTES:
+                            raise RuntimeError("远程媒体超过允许的最大大小")
+                        data.write(chunk)
+                    data.seek(0)
+                    bucket.put_object(remote_key, data, headers=headers)
         url = _build_public_url(remote_key)
-        logger.info("OSS 从 URL 直传成功: %s -> %s", source_url[:60], url)
+        logger.info(
+            "OSS 从 URL 直传成功: %s -> %s",
+            safe_media_url_for_log(source_url),
+            safe_media_url_for_log(url),
+        )
         return url
     except Exception as exc:
-        logger.warning("OSS 从 URL 直传失败 %s: %s", source_url[:60], exc)
+        logger.warning(
+            "OSS 从 URL 直传失败 %s (%s)",
+            safe_media_url_for_log(source_url),
+            type(exc).__name__,
+        )
         return None
 
 

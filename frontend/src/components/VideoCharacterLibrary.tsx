@@ -14,6 +14,7 @@ import {
 import { ImageRedrawModal } from './shared/ImageRedrawModal';
 import { ChevronLeft, ChevronRight, X } from 'lucide-react';
 import { confirm } from '../lib/confirm';
+import { normalizeErrorMessage } from '../lib/errors';
 
 interface Props {
   storyId: number;
@@ -46,7 +47,9 @@ export default function VideoCharacterLibrary({ storyId }: Props) {
       const lsKey = `video_char_lib_style_${storyId}`;
       const saved = localStorage.getItem(lsKey) || localStorage.getItem('video_char_lib_style') || '';
       if (saved) setSelectedStyle(saved);
-    } catch {}
+    } catch (error) {
+      setError(normalizeErrorMessage(error, '加载视频风格预设失败，请稍后重试'));
+    }
   }, [storyId]);
 
   // 选中风格变化时持久化到 localStorage

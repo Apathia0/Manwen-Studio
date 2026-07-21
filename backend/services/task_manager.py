@@ -3,11 +3,14 @@ import logging
 from functools import wraps
 from datetime import datetime, timedelta, timezone
 from typing import Callable, Any, Optional
+from sqlalchemy import and_, or_
 from database import SessionLocal
-from models import BackgroundTask, UserUsageMonthly
-from services.errors import MissingApiKeyError
+from models import BackgroundTask
+from services.errors import MissingApiKeyError, public_error_message
 
 logger = logging.getLogger(__name__)
+
+_TERMINAL_TASK_STATUSES = {"succeeded", "failed", "cancelled", "canceled"}
 
 
 def _now_naive() -> datetime:
@@ -76,7 +79,7 @@ class TaskManager:
             task = db.query(BackgroundTask).filter(
                 BackgroundTask.task_id == task_id
             ).first()
-            if task and task.status != "failed":
+            if task and task.status not in _TERMINAL_TASK_STATUSES and task.status != "cancel_requested":
                 task.status = "running"
                 if not task.started_at:
                     task.started_at = _now_naive()
@@ -120,7 +123,7 @@ class TaskManager:
                     except Exception as e:
                         if isinstance(e, asyncio.TimeoutError) or not self._should_retry_exception(e):
                             if runtime_task_id:
-                                self._mark_task_failed(runtime_task_id, str(e))
+                                self._mark_task_failed(runtime_task_id, e)
                             raise
                         last_exception = e
                         if attempt < max_retries:
@@ -134,14 +137,14 @@ class TaskManager:
                                 f"retrying in {delay:.1f}s: {e}"
                             )
                             if runtime_task_id:
-                                self._update_task_retry(runtime_task_id, attempt + 1, str(e), next_retry)
+                                self._update_task_retry(runtime_task_id, attempt + 1, e, next_retry)
                             await asyncio.sleep(delay)
                         else:
                             logger.error(
                                 f"Task {runtime_task_id} failed after {max_retries + 1} attempts: {e}"
                             )
                             if runtime_task_id:
-                                self._mark_task_failed(runtime_task_id, str(e))
+                                self._mark_task_failed(runtime_task_id, e)
                             raise
 
                 raise last_exception
@@ -152,25 +155,26 @@ class TaskManager:
         self,
         task_id: str,
         retry_count: int,
-        error: str,
+        error: object,
         next_retry_at: datetime | None = None,
     ) -> None:
         """Update task retry state."""
+        public_error = public_error_message(error)
         db = SessionLocal()
         try:
             task = db.query(BackgroundTask).filter(
                 BackgroundTask.task_id == task_id
             ).first()
-            if task:
+            if task and task.status not in _TERMINAL_TASK_STATUSES and task.status != "cancel_requested":
                 task.retry_count = retry_count
-                task.error_message = error
+                task.error_message = public_error
                 task.status = "retrying"
                 self._merge_task_metadata(
                     task,
                     {
                         "stage": "retrying",
                         "message": f"上游服务暂时不可用，正在自动重试 ({retry_count}/{task.max_retries})...",
-                        "last_error": error,
+                        "last_error": public_error,
                         "next_retry_at": _iso(next_retry_at),
                     },
                 )
@@ -178,8 +182,12 @@ class TaskManager:
         finally:
             db.close()
 
-    def _mark_task_failed(self, task_id: str, error: str) -> None:
+    def _mark_task_failed(self, task_id: str, error: object) -> None:
         """Mark task as failed."""
+        public_error = public_error_message(error)
+        error_code = str(getattr(error, "code", "") or "task_failed")
+        retryable = bool(getattr(error, "retryable", False))
+        suggestion = str(getattr(error, "suggestion", "") or "").strip()
         db = SessionLocal()
         try:
             task = db.query(BackgroundTask).filter(
@@ -187,21 +195,21 @@ class TaskManager:
             ).first()
             if task:
                 # Preserve an existing failed state, for example user cancellation.
-                if task.status == "failed":
+                if task.status in _TERMINAL_TASK_STATUSES:
                     return
                 task.status = "failed"
-                task.error_message = error
+                task.error_message = public_error
                 task.completed_at = _now_naive()
-                # 自动回退配额（异步任务失败时回退已扣除的次数）
-                if task.quota_user_id and task.quota_feature_key and (task.quota_amount or 0) > 0:
-                    refund_amount = task.quota_amount or 0
-                    self.refund_quota(task.quota_user_id, task.quota_feature_key, refund_amount, db, task.quota_period_key)
+                self._finalize_failed_task_billing(task, db)
                 self._merge_task_metadata(
                     task,
                     {
                         "stage": "failed",
-                        "message": error,
-                        "last_error": error,
+                        "message": public_error,
+                        "last_error": public_error,
+                        "error_code": error_code,
+                        "retryable": retryable,
+                        "suggestion": suggestion or None,
                         "next_retry_at": None,
                     },
                 )
@@ -218,7 +226,7 @@ class TaskManager:
             ).first()
             if task:
                 # Do not overwrite a failed/cancelled task.
-                if task.status == "failed":
+                if task.status in _TERMINAL_TASK_STATUSES or task.status == "cancel_requested":
                     return
                 task.status = "succeeded"
                 task.result_json = result if isinstance(result, dict) else {"result": result}
@@ -235,6 +243,29 @@ class TaskManager:
         finally:
             db.close()
 
+    def _mark_task_cancelled(self, task_id: str, message: str) -> None:
+        """将任务标记为已取消，且不覆盖其他终态。"""
+        db = SessionLocal()
+        try:
+            task = db.query(BackgroundTask).filter(BackgroundTask.task_id == task_id).first()
+            if not task or task.status in _TERMINAL_TASK_STATUSES:
+                return
+            self._finalize_failed_task_billing(task, db)
+            task.status = "cancelled"
+            task.error_message = message
+            task.completed_at = _now_naive()
+            self._merge_task_metadata(
+                task,
+                {
+                    "stage": "cancelled",
+                    "message": message,
+                    "next_retry_at": None,
+                },
+            )
+            db.commit()
+        finally:
+            db.close()
+
     def _create_task_record(
         self,
         task_id: str,
@@ -248,10 +279,14 @@ class TaskManager:
         quota_feature_key: Optional[str] = None,
         quota_amount: int = 0,
         quota_period_key: Optional[str] = None,
+        quota_usage_event_id: Optional[int] = None,
     ) -> None:
         """Create a persisted task record."""
         db = SessionLocal()
         try:
+            task_metadata = dict(metadata or {})
+            if quota_usage_event_id:
+                task_metadata["billing_usage_event_id"] = int(quota_usage_event_id)
             task = BackgroundTask(
                 task_id=task_id,
                 task_type=task_type,
@@ -260,7 +295,7 @@ class TaskManager:
                 story_id=story_id,
                 chapter_id=chapter_id,
                 shot_id=shot_id,
-                metadata_json=metadata,
+                metadata_json=task_metadata,
                 quota_user_id=quota_user_id,
                 quota_feature_key=quota_feature_key,
                 quota_amount=quota_amount,
@@ -274,28 +309,162 @@ class TaskManager:
     def _on_task_complete(self, task_id: str, task: asyncio.Task) -> None:
         """Task completion callback."""
         self._running_tasks.pop(task_id, None)
+        self._cancellation_flags.pop(task_id, None)
 
         if task.cancelled():
-            self._mark_task_failed(task_id, "Task was cancelled")
+            self._mark_task_cancelled(task_id, "任务已取消")
         elif task.exception():
-            self._mark_task_failed(task_id, str(task.exception()))
+            self._mark_task_failed(task_id, task.exception())
         else:
-            self._mark_task_succeeded(task_id, task.result())
+            result = task.result()
+            result_status = str(result.get("status") or "").lower() if isinstance(result, dict) else ""
+            workflow_status = str(result.get("workflow_status") or "").lower() if isinstance(result, dict) else ""
+            result_failed = bool(
+                isinstance(result, dict)
+                and (
+                    result.get("success") is False
+                    or result_status in {"cancelled", "canceled", "failed"}
+                    or workflow_status in {"cancelled", "canceled", "failed"}
+                    or bool(result.get("error"))
+                )
+            )
+            if result_status in {"cancelled", "canceled"} or workflow_status in {"cancelled", "canceled"}:
+                self._mark_task_cancelled(
+                    task_id,
+                    str(result.get("message") or workflow_status or result_status or "任务已取消"),
+                )
+            elif result_failed:
+                self._mark_task_failed(
+                    task_id,
+                    str(result.get("error") or result.get("message") or workflow_status or result_status or "任务失败"),
+                )
+            else:
+                self._mark_task_succeeded(task_id, result)
 
-    def refund_quota(self, user_id: int, feature_key: str, amount: int, db, period_key: Optional[str] = None) -> None:
-        """当异步任务失败时回退已扣除的配额。"""
-        if amount <= 0:
+    def refund_quota(
+        self,
+        user_id: int,
+        feature_key: str,
+        amount: int,
+        db,
+        period_key: Optional[str] = None,
+        *,
+        usage_event_id: Optional[int] = None,
+    ) -> None:
+        """按任务绑定的用量事件幂等退款，不再按特性和数量猜测金额。"""
+        if not usage_event_id:
+            logger.warning(
+                "忽略缺少用量事件的任务退款 user=%s feature=%s amount=%s",
+                user_id,
+                feature_key,
+                amount,
+            )
             return
-        period_key = period_key or datetime.utcnow().strftime("%Y%m")
-        usage = db.query(UserUsageMonthly).filter(
-            UserUsageMonthly.user_id == user_id,
-            UserUsageMonthly.feature_key == feature_key,
-            UserUsageMonthly.period_key == period_key,
-        ).first()
-        if usage:
-            usage.used_amount = max(0, usage.used_amount - amount)
-            db.commit()
-            logger.info("配额回退: user=%s key=%s amount=%s", user_id, feature_key, amount)
+        from services.ai.resolver import refund_ai_call
+
+        refund_ai_call(db, usage_event_id, error_code="background_task_failed", commit=False)
+
+    def _finalize_failed_task_billing(self, task: BackgroundTask, db) -> None:
+        """失败任务有部分漫画产物时按实际数量结算，否则释放原预扣。"""
+        metadata = task.metadata_json if isinstance(task.metadata_json, dict) else {}
+        analysis_usage_event_id = int(metadata.get("analysis_billing_usage_event_id") or 0)
+        if task.task_type == "manga_generation" and analysis_usage_event_id:
+            from models import Chapter
+            from services.ai.resolver import complete_ai_call_by_usage_event
+
+            chapter = db.get(Chapter, task.chapter_id) if task.chapter_id else None
+            analysis = chapter.manga_asset_analysis_json if chapter and isinstance(chapter.manga_asset_analysis_json, dict) else {}
+            analysis_completed = bool(
+                analysis.get("status") == "ready"
+                and analysis.get("input_hash") == metadata.get("asset_analysis_hash")
+            )
+            complete_ai_call_by_usage_event(
+                db,
+                analysis_usage_event_id,
+                success=analysis_completed,
+                # 无法恢复供应商 usage 时传 0，计费层会回退到持久化 estimated_points。
+                input_tokens=0,
+                output_tokens=0,
+                error_code=None if analysis_completed else "background_task_failed",
+                usage_source="database_recovery",
+                commit=False,
+            )
+            self._merge_task_metadata(task, {"analysis_billing_usage_event_id": 0})
+
+        asset_usage_event_id = int(metadata.get("asset_billing_usage_event_id") or 0)
+        if task.task_type == "manga_generation" and asset_usage_event_id:
+            from models import MangaAsset
+            from services.ai.resolver import complete_ai_call_by_usage_event
+
+            generated_assets = db.query(MangaAsset).filter(
+                MangaAsset.chapter_id == task.chapter_id,
+                MangaAsset.status == "active",
+            ).all()
+            generated_count = sum(
+                1
+                for asset in generated_assets
+                if isinstance(asset.metadata_json, dict)
+                and asset.metadata_json.get("generation_task_id") == task.task_id
+            )
+            complete_ai_call_by_usage_event(
+                db,
+                asset_usage_event_id,
+                success=True,
+                image_count=generated_count,
+                usage_source="database_recovery",
+                commit=False,
+            )
+            self._merge_task_metadata(
+                task,
+                {
+                    "asset_billing_usage_event_id": 0,
+                    "asset_generated": generated_count,
+                },
+            )
+
+        usage_event_id = int(metadata.get("billing_usage_event_id") or 0)
+        if not usage_event_id:
+            return
+
+        initial_numbers = metadata.get("initial_existing_numbers")
+        if task.task_type == "manga_generation" and task.chapter_id and isinstance(initial_numbers, list):
+            from models import MangaImage
+            from services.ai.resolver import complete_ai_call_by_usage_event
+
+            initial_set = {int(value) for value in initial_numbers}
+            current_numbers = {
+                int(row[0])
+                for row in db.query(MangaImage.image_number).filter(
+                    MangaImage.chapter_id == task.chapter_id,
+                ).all()
+            }
+            generated_count = len(current_numbers - initial_set)
+            complete_ai_call_by_usage_event(
+                db,
+                usage_event_id,
+                success=True,
+                image_count=generated_count,
+                usage_source="database_recovery",
+                commit=False,
+            )
+            self._merge_task_metadata(
+                task,
+                {
+                    "billing_usage_event_id": 0,
+                    "billing_settled_images": generated_count,
+                },
+            )
+            return
+
+        if task.quota_user_id and task.quota_feature_key:
+            self.refund_quota(
+                task.quota_user_id,
+                task.quota_feature_key,
+                task.quota_amount or 0,
+                db,
+                task.quota_period_key,
+                usage_event_id=usage_event_id,
+            )
 
     async def submit_task(
         self,
@@ -313,6 +482,7 @@ class TaskManager:
         quota_feature_key: Optional[str] = None,
         quota_amount: int = 0,
         quota_period_key: Optional[str] = None,
+        quota_usage_event_id: Optional[int] = None,
         **kwargs
     ) -> str:
         """Submit a coroutine to run in the background."""
@@ -322,6 +492,7 @@ class TaskManager:
         self._create_task_record(
             task_id, task_type, max_retries, story_id, chapter_id, shot_id,
             initial_metadata, quota_user_id, quota_feature_key, quota_amount, quota_period_key,
+            quota_usage_event_id,
         )
 
         @self.with_retry(max_retries=max_retries, task_id=task_id)
@@ -357,6 +528,15 @@ class TaskManager:
         if task is None:
             return False
         self._cancellation_flags[task_id] = True
+        db = SessionLocal()
+        try:
+            record = db.query(BackgroundTask).filter(BackgroundTask.task_id == task_id).first()
+            if record and record.status not in _TERMINAL_TASK_STATUSES:
+                record.status = "cancel_requested"
+                self._merge_task_metadata(record, {"stage": "cancel_requested", "message": "正在取消任务..."})
+                db.commit()
+        finally:
+            db.close()
         return True
 
     def request_cancellation_by_prefix(self, task_id_prefix: str) -> list[str]:
@@ -367,7 +547,7 @@ class TaskManager:
             if task_id.startswith(task_id_prefix)
         ]
         for task_id in matched:
-            self._cancellation_flags[task_id] = True
+            self.request_cancellation(task_id)
         return matched
 
     def is_cancellation_requested(self, task_id: str | None) -> bool:
@@ -394,7 +574,7 @@ class TaskManager:
         try:
             cutoff = _now_naive() - timedelta(hours=max_age_hours)
             stale_tasks = db.query(BackgroundTask).filter(
-                BackgroundTask.status.in_(["pending", "running", "retrying"]),
+                BackgroundTask.status.in_(["pending", "running", "retrying", "cancel_requested"]),
                 BackgroundTask.created_at < cutoff
             ).all()
 
@@ -411,11 +591,42 @@ class TaskManager:
                     },
                 )
 
+                self._finalize_failed_task_billing(task, db)
+
                 if task.task_id in self._running_tasks:
                     self._running_tasks[task.task_id].cancel()
 
             db.commit()
             return len(stale_tasks)
+        finally:
+            db.close()
+
+    def fail_interrupted_tasks(self) -> int:
+        """应用启动时终止已失去执行者的任务，并按已有产物完成结算。"""
+        db = SessionLocal()
+        try:
+            interrupted_tasks = db.query(BackgroundTask).filter(or_(
+                BackgroundTask.status.in_(["pending", "running", "retrying", "cancel_requested"]),
+                and_(
+                    BackgroundTask.status == "failed",
+                    BackgroundTask.error_message == "检测到重复活动任务，系统已自动终结",
+                ),
+            )).all()
+            for task in interrupted_tasks:
+                task.status = "failed"
+                task.error_message = "服务重启导致任务中断，积分已按实际产物自动结算"
+                task.completed_at = _now_naive()
+                self._merge_task_metadata(
+                    task,
+                    {
+                        "stage": "failed",
+                        "message": task.error_message,
+                        "next_retry_at": None,
+                    },
+                )
+                self._finalize_failed_task_billing(task, db)
+            db.commit()
+            return len(interrupted_tasks)
         finally:
             db.close()
 

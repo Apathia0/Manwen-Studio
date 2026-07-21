@@ -9,6 +9,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import subprocess
 import uuid
 from datetime import datetime, timezone
@@ -16,17 +17,29 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 from database import SessionLocal
-from models import ChapterVideoWorkflow, ChapterVideoShot, BackgroundTask, Story, StoryCharacterVersion, VideoAsset
+from models import (
+    BackgroundTask,
+    Chapter,
+    ChapterVideoShot,
+    ChapterVideoWorkflow,
+    ScriptScene,
+    Story,
+    StoryCharacterVersion,
+    VideoAsset,
+    VideoShot,
+)
 from sqlalchemy import func
 from sqlalchemy.orm import selectinload
 from services import deepseek as deepseek_service
 from services import image2 as image_service
+from services import video_api as video_api_service
 from services import video_chapter_prompts as prompts
 from services import video_generation as video_gen_service
 from services.blocking import run_blocking
-from services.errors import UpstreamServiceError
+from services.errors import UpstreamServiceError, public_error_message
 from services.media_locator import ensure_local_media_path, resolve_reference_input
 from services.task_manager import task_manager
+from services.visual_asset_generation import select_visual_references
 
 logger = logging.getLogger(__name__)
 
@@ -594,6 +607,19 @@ def _apply_story_reuse_cache_to_shots(shots_data: list[dict[str, Any]], story_ca
     return hydrated
 
 
+def _positive_reference_ids(values: list[Any] | None) -> list[int]:
+    """清理引用 ID，忽略空值、非数字和非正数并保持原始顺序。"""
+    result: list[int] = []
+    for raw_value in values or []:
+        try:
+            asset_id = int(raw_value)
+        except (TypeError, ValueError):
+            continue
+        if asset_id > 0 and asset_id not in result:
+            result.append(asset_id)
+    return result
+
+
 def get_shot(shot_id: int) -> ChapterVideoShot | None:
     """获取单个 shot。"""
     db = SessionLocal()
@@ -639,7 +665,7 @@ def _build_chapter_storyboard_asset(
         provider=provider,
         prompt=prompt or "",
         source_asset_ids_json=source_asset_ids or None,
-        style_preset=getattr(workflow, "video_style", None),
+        style_preset=None,
         source_type=source_type,
         meta_json={
             "chapter_video_workflow_id": workflow.id,
@@ -716,11 +742,36 @@ async def parse_chapter_shots(
 ) -> dict[str, object]:
     """阶段1：将章节正文解析为 15s 分镜列表，停在工作流状态 shots_ready。"""
     logger.info("阶段1-拆镜 workflow=%s chapter=%s", workflow_id, chapter_id)
+    billing_ctx = kwargs.get("billing_ctx")
+    billing_finished = False
+
+    def _finish_billing(success: bool, error_code: str | None = None) -> None:
+        nonlocal billing_finished
+        if billing_ctx is None or billing_finished:
+            return
+        from services.ai.resolver import complete_ai_call
+
+        usage = deepseek_service.consume_usage_accumulator()
+        billing_db = SessionLocal()
+        try:
+            complete_ai_call(
+                billing_db,
+                billing_ctx,
+                success=success,
+                input_tokens=usage["input_tokens"],
+                output_tokens=usage["output_tokens"],
+                error_code=error_code,
+                usage_source="provider" if usage["input_tokens"] or usage["output_tokens"] else "estimated",
+            )
+            billing_finished = True
+        finally:
+            billing_db.close()
 
     update_workflow_status(workflow_id, "parsing_shots")
 
     if task_id and task_manager.is_cancellation_requested(task_id):
         update_workflow_status(workflow_id, "failed", "用户取消")
+        _finish_billing(False, "cancelled")
         return {"workflow_status": "failed", "error": "用户取消"}
 
     _clear_workflow_shots(workflow_id)
@@ -733,8 +784,10 @@ async def parse_chapter_shots(
         )
     except Exception as exc:
         logger.error("镜头解析失败 workflow=%s: %s", workflow_id, exc)
-        update_workflow_status(workflow_id, "failed", f"镜头解析失败: {exc}")
-        return {"workflow_status": "failed", "error": str(exc)}
+        error_message = public_error_message(exc, "镜头解析失败，请稍后重试")
+        update_workflow_status(workflow_id, "failed", error_message)
+        _finish_billing(False, type(exc).__name__)
+        return {"workflow_status": "failed", "error": error_message}
     story_cache = _build_story_reuse_cache(story_id)
     shots_data = _apply_story_reuse_cache_to_shots(shots_data, story_cache)
 
@@ -761,6 +814,7 @@ async def parse_chapter_shots(
             expand_result.get("workflow_status"),
         )
         if expand_result.get("workflow_status") == "failed":
+            _finish_billing(False, "prompt_expansion_failed")
             return expand_result
 
         result["expanded_shot_count"] = expand_result.get("expanded_shot_count", 0)
@@ -769,6 +823,7 @@ async def parse_chapter_shots(
     # 在提示词扩展（Phase 1.5）完成后才标记 shots_ready，
     # 确保前端轮询到 shots_ready 时所有提示词已写入 DB
     update_workflow_status(workflow_id, "shots_ready")
+    _finish_billing(True)
     return result
 
 
@@ -835,7 +890,11 @@ async def expand_shots_with_role_prompts(
                 )
                 return shot.id, True
             except Exception as exc:
-                update_shot(shot.id, error_message=str(exc), status="failed")
+                update_shot(
+                    shot.id,
+                    error_message=public_error_message(exc, "镜头提示词补全失败，请稍后重试"),
+                    status="failed",
+                )
                 logger.error("镜头提示词补全失败 shot=%s: %s", shot.id, exc)
                 return shot.id, False
 
@@ -940,7 +999,9 @@ async def generate_shot_details_batch(
                 shot.emotion_plan = detail.get("emotion_plan") or ""
                 shot.continuity_notes = detail.get("continuity_notes") or ""
                 shot.storyboard_json = detail.get("storyboard_json")
-                shot.storyboard_prompt = detail.get("storyboard_prompt") or ""
+                shot.storyboard_prompt = _strip_storyboard_style_directives(
+                    detail.get("storyboard_prompt") or ""
+                )
                 shot.scene_prompt = detail.get("scene_prompt") or ""
                 shot.prop_prompts_json = detail.get("prop_prompts_json")
                 updated_ids.append(shot.id)
@@ -961,7 +1022,7 @@ async def generate_shot_details_batch(
     except Exception as e:
         db.rollback()
         logger.error("批量生成详情失败: %s", e)
-        return {"success": False, "error": str(e)}
+        return {"success": False, "error": public_error_message(e, "批量生成镜头详情失败，请稍后重试")}
     finally:
         db.close()
 
@@ -1014,10 +1075,16 @@ async def generate_storyboards_for_shots(
             return {"workflow_status": "failed", "error": "用户取消"}
 
         try:
+            stage_ref_ids = _positive_reference_ids(
+                list(character_reference_ids or [])
+                + list(getattr(shot, "character_reference_ids", None) or [])
+                + list(getattr(shot, "scene_reference_ids", None) or [])
+                + list(getattr(shot, "prop_reference_ids", None) or [])
+            )
             await regenerate_shot_storyboard(
                 shot_id=shot.id,
                 api_key=image_api_key,
-                ref_asset_ids=character_reference_ids,
+                ref_asset_ids=stage_ref_ids or None,
             )
         except Exception:
             failed_ids.append(shot.id)
@@ -1086,8 +1153,6 @@ async def reanalyze_storyboard_prompts(
     updated_ids: list[int] = []
     prompts: dict[int, str] = {}
     wf = get_workflow(workflow_id)
-    style_preset = wf.video_style if wf else None
-
     for shot in target_shots:
         try:
             shot_context = _build_shot_narrative_context(wf, shot.shot_index)
@@ -1107,12 +1172,13 @@ async def reanalyze_storyboard_prompts(
                 "camera_plan": shot.camera_plan,
                 "motion_plan": shot.motion_plan,
                 "emotion_plan": shot.emotion_plan,
-                "style_preset": style_preset,
+                "style_preset": None,
                 "shot_context": shot_context,
                 "screenplay_context": build_screenplay_context_for_shot(wf, shot),
                 "storyboard_json": shot.storyboard_json,
             }, api_key=deepseek_api_key)
 
+            new_content = _strip_storyboard_style_directives(new_content)
             update_shot(shot.id, storyboard_prompt=new_content)
             updated_ids.append(shot.id)
             prompts[shot.id] = new_content
@@ -1251,7 +1317,7 @@ async def _expand_single_shot_prompts(
         raise ValueError(f"镜头不存在: {shot_id}")
 
     workflow = get_workflow(shot.workflow_id)
-    style_preset = workflow.video_style if workflow else None
+    style_preset = None
     if story is None and workflow:
         db = SessionLocal()
         try:
@@ -1488,6 +1554,8 @@ async def generate_videos_for_shots(
     video_api_key: str | None = None,
     video_base_url: str | None = None,
     video_model: str | None = None,
+    video_capabilities: dict | None = None,
+    adapter_type: str = "lingdong_video",
     task_id: str | None = None,
     story_id: int | None = None,
     chapter_id: int | None = None,
@@ -1531,9 +1599,12 @@ async def generate_videos_for_shots(
         try:
             await regenerate_shot_video(
                 shot_id=shot.id,
-                api_key=image_api_key,
+                api_key=video_api_key,
                 base_url=video_base_url,
                 model=video_model,
+                video_capabilities=video_capabilities,
+                adapter_type=adapter_type,
+                duration_seconds=max(1, min(60, int(getattr(shot, "duration_seconds", None) or 15))),
             )
         except Exception:
             failed_ids.append(shot.id)
@@ -1584,14 +1655,21 @@ def _resolve_ref_image_paths(story_id: int, ref_ids: list[int]) -> list[str] | N
         resolved: list[str] = []
         video_dir = get_video_output_dir()
         backend_root = Path(__file__).resolve().parent.parent
+        manga_dir = backend_root / "manga_outputs"
         for a in assets:
             fp = (a.file_path or "").strip()
             if not fp:
                 continue
-            resolved_input = resolve_reference_input(fp, "video")
+            media_kind = "manga" if fp.startswith("/static/manga/") else "video"
+            resolved_input = resolve_reference_input(fp, media_kind)
             if resolved_input:
                 resolved.append(resolved_input)
                 continue
+            if fp.startswith("/static/manga/"):
+                candidate = str(manga_dir / fp[len("/static/manga/"):])
+                if os.path.isfile(candidate):
+                    resolved.append(candidate)
+                    continue
             # /static/video/ 前缀 → 转 video_outputs 下文件
             if fp.startswith("/static/video/"):
                 candidate = str(video_dir / fp[len("/static/video/"):])
@@ -1615,6 +1693,119 @@ def _resolve_ref_image_paths(story_id: int, ref_ids: list[int]) -> list[str] | N
         return resolved if resolved else None
     finally:
         db.close()
+
+
+def _load_owned_visual_assets(
+    story_id: int,
+    ref_ids: list[int],
+    *,
+    include_storyboard: bool = False,
+) -> list[tuple[VideoAsset, str]]:
+    """按用户选择顺序加载当前作品的角色、场景和道具资产。"""
+    real_ids = _positive_reference_ids(ref_ids)
+    if not real_ids:
+        return []
+    owned_assets: list[tuple[VideoAsset, str]] = []
+    db = SessionLocal()
+    try:
+        assets = {
+            asset.id: asset
+            for asset in db.query(VideoAsset).filter(
+                VideoAsset.id.in_(real_ids),
+                VideoAsset.status == "active",
+            ).all()
+        }
+        role_map = {
+            "character_reference": "character",
+            "story_character_reference": "character",
+            "scene_reference": "scene",
+            "prop_reference": "prop",
+            "style_reference": "style",
+            "style": "style",
+        }
+        if include_storyboard:
+            role_map["storyboard_frame"] = "storyboard"
+        for ref_id in real_ids:
+            asset = assets.get(ref_id)
+            role = role_map.get(asset.asset_type if asset else "")
+            if not asset or not role:
+                continue
+
+            linked_story_ids: set[int] = set()
+            if asset.story_id is not None:
+                linked_story_ids.add(asset.story_id)
+            if asset.chapter_id is not None:
+                chapter = db.get(Chapter, asset.chapter_id)
+                if chapter:
+                    linked_story_ids.add(chapter.story_id)
+            if asset.scene_id is not None:
+                scene = db.get(ScriptScene, asset.scene_id)
+                chapter = db.get(Chapter, scene.chapter_id) if scene else None
+                if chapter:
+                    linked_story_ids.add(chapter.story_id)
+            if asset.shot_id is not None:
+                video_shot = db.get(VideoShot, asset.shot_id)
+                chapter = db.get(Chapter, video_shot.scene.chapter_id) if video_shot and video_shot.scene else None
+                if chapter:
+                    linked_story_ids.add(chapter.story_id)
+            if linked_story_ids != {story_id}:
+                logger.warning("跳过跨作品或归属不明的故事板参考资产 asset_id=%s", ref_id)
+                continue
+            owned_assets.append((asset, role))
+    finally:
+        db.close()
+
+    return owned_assets
+
+
+def _resolve_video_asset_references(
+    story_id: int,
+    ref_ids: list[int],
+    context_text: str,
+) -> list[tuple[Path, str, str]]:
+    """将已校验的视觉资产本地化，供图片模型读取。"""
+    entries: list[dict[str, object]] = []
+    for asset, role in _load_owned_visual_assets(story_id, ref_ids):
+        for raw_path in _resolve_ref_image_paths(story_id, [asset.id]) or []:
+            local_path = raw_path
+            if raw_path.lower().startswith(("http://", "https://")):
+                local_path = ensure_local_media_path(raw_path, "manga") or ""
+            if not local_path:
+                continue
+            path = Path(local_path)
+            if not path.exists():
+                continue
+            entries.append({
+                "path": path,
+                "label": asset.name or "",
+                "kind": role,
+                "is_required": True,
+            })
+
+    selected = [
+        (reference.path, reference.label, reference.role)
+        for reference in select_visual_references(context_text, entries, max_items=8)
+    ]
+    return selected
+
+
+def _resolve_video_asset_inputs(
+    story_id: int,
+    ref_ids: list[int],
+) -> list[tuple[str, str, str]]:
+    """解析视频 API 参考输入，保留 URL 或可用路径及用户选择顺序。"""
+    resolved: list[tuple[str, str, str]] = []
+    for asset, role in _load_owned_visual_assets(story_id, ref_ids, include_storyboard=True):
+        input_value = (
+            resolve_reference_input(asset.file_path, "video")
+            or resolve_reference_input(asset.file_path, "manga")
+        )
+        if not input_value:
+            paths = _resolve_ref_image_paths(story_id, [asset.id]) or []
+            input_value = paths[0] if paths else ""
+        if input_value:
+            resolved.append((str(input_value), asset.name or "", role))
+    return resolved
 
 
 def _resolve_style_ref_local_path(style_reference_image_url: str | None) -> str | None:
@@ -1645,7 +1836,14 @@ def assemble_video_prompt_text(
         return {"assembled_prompt": "", "parts": {"part1": "", "part2": "", "part3": None}}
 
     workflow = get_workflow(shot.workflow_id)
-    effective_ref_ids = ref_asset_ids or (shot.character_reference_ids or [])
+    if ref_asset_ids is not None:
+        effective_ref_ids = list(ref_asset_ids)
+    else:
+        effective_ref_ids = list(dict.fromkeys(
+            list(shot.character_reference_ids or [])
+            + list(getattr(shot, "scene_reference_ids", None) or [])
+            + list(getattr(shot, "prop_reference_ids", None) or [])
+        ))
 
     from models import VideoAsset
     ref_details: list[tuple[int, str]] = []
@@ -1672,12 +1870,12 @@ def assemble_video_prompt_text(
         else:
             ref_details.append((rid, "reference"))
 
-    has_storyboard_ref = any(rt == "storyboard" for _, rt in ref_details)
+    has_storyboard_ref = any(rt in {"storyboard", "storyboard_frame"} for _, rt in ref_details)
 
     system_prompt_parts: list[str] = []
     image_index = 1
     for _rid, ref_type in ref_details:
-        if ref_type == "storyboard":
+        if ref_type in {"storyboard", "storyboard_frame"}:
             system_prompt_parts.append(
                 f"使用 @image{image_index} 作为故事版构图参考：场景布局、镜头角度、人物站位必须严格匹配这张图。"
             )
@@ -1737,7 +1935,7 @@ def assemble_video_prompt_text(
         part2 = prompt_override
     elif has_storyboard_ref:
         part2 = (
-            "按照故事版图片中的分镜脚本内容生成15秒视频。"
+            f"按照故事版图片中的分镜脚本内容生成{int(getattr(shot, 'duration_seconds', None) or 15)}秒视频。"
             "严格遵循分镜中每个时间段指定的镜头运动、画面内容、人物动作和情绪变化。"
             "不得添加分镜中未描述的元素，不得改变分镜中的场景关系和叙事逻辑。"
         )
@@ -1771,6 +1969,29 @@ def _to_storyboard_static_url(image_path: str | None) -> str:
     if normalized.startswith("manga_outputs/"):
         normalized = normalized[len("manga_outputs/"):]
     return f"/static/manga/{normalized}"
+
+
+def _strip_storyboard_style_directives(prompt: str) -> str:
+    """移除旧故事版提示词中遗留的风格预设字段。"""
+    cleaned = re.sub(r"\s*\|\s*【风格】[^|\n]*", "", str(prompt or ""))
+    cleaned = re.sub(
+        r"(?im)^\s*(?:visual\s+style|style|画面风格|风格预设)\s*[:：]\s*[^，,；;。.\n]*(?:[，,；;。. ]\s*)?",
+        "",
+        cleaned,
+    )
+    cleaned = re.sub(
+        r"(?i)(?:整体画风约束|视觉风格要求|风格参考图|风格预设约束)\s*[:：]?\s*[^，,；;。|\n]*[，,；;。|]?",
+        "",
+        cleaned,
+    )
+    cleaned = re.sub(
+        r"(?i)(?:写实电影感|日式动漫风|3A游戏渲染|水墨国风|水彩手绘风|暗黑哥特风|复古胶片感|科技赛博风|线稿电影感)",
+        "",
+        cleaned,
+    )
+    cleaned = re.sub(r"([，,；;。|])\s*(?:[，,；;。|]\s*)+", r"\1", cleaned)
+    cleaned = re.sub(r"(?m)^\s*[，,；;。|]\s*|\s*[，,；;。|]\s*$", "", cleaned)
+    return re.sub(r"\n{3,}", "\n\n", cleaned).strip()
 
 
 def _pick_style_anchor_image(workflow_id: int, current_shot_id: int) -> str | None:
@@ -1844,6 +2065,7 @@ async def _poll_video_job(
     model: str | None = None,
     max_poll_seconds: int = 7200,
     poll_interval: float = 5.0,
+    adapter_type: str = "lingdong_video",
 ) -> str | None:
     """轮询视频任务直到完成，返回视频 URL。"""
     import asyncio
@@ -1856,6 +2078,7 @@ async def _poll_video_job(
             api_key=api_key,
             base_url=base_url,
             model=model,
+            adapter_type=adapter_type,
         )
         if status.get("status") == "succeeded":
             # 获取最终结果
@@ -1866,6 +2089,7 @@ async def _poll_video_job(
                 api_key=api_key,
                 base_url=base_url,
                 model=model,
+                adapter_type=adapter_type,
             )
             video_path = result.get("video_path", "")
             if video_path:
@@ -1915,7 +2139,7 @@ async def regenerate_shot_storyboard(
 
     # 1. 确认最终使用的提示词
     workflow = get_workflow(shot.workflow_id)
-    style_preset = getattr(workflow, "video_style", None) if workflow else None
+    style_preset = None
 
     director_prompt = prompt_override or shot.storyboard_prompt
     if director_prompt:
@@ -1949,55 +2173,40 @@ async def regenerate_shot_storyboard(
             "screenplay_context": build_screenplay_context_for_shot(workflow, shot),
             "storyboard_json": shot.storyboard_json,
         })
+    director_prompt = _strip_storyboard_style_directives(director_prompt)
 
     chapter_id = getattr(workflow, "chapter_id", 0) if workflow else 0
     story_id = getattr(workflow, "story_id", 0) if workflow else 0
     workflow_id = shot.workflow_id
 
-    # 解析参考资产 ID：优先使用请求传入的，兜底用 shot 自带的 character_reference_ids
-    effective_ref_ids = ref_asset_ids or (shot.character_reference_ids or [])
+    # 显式选择覆盖自动引用；默认同时使用镜头关联的角色、场景和道具资产。
+    if ref_asset_ids is not None:
+        effective_ref_ids = _positive_reference_ids(ref_asset_ids)
+    else:
+        effective_ref_ids = _positive_reference_ids(
+            list(getattr(shot, "character_reference_ids", None) or [])
+            + list(getattr(shot, "scene_reference_ids", None) or [])
+            + list(getattr(shot, "prop_reference_ids", None) or [])
+        )
     logger.info("regenerate_shot_storyboard shot=%s ref_asset_ids=%s effective=%s",
                 shot_id, ref_asset_ids, effective_ref_ids)
-    ref_image_paths = None
-    if effective_ref_ids:
-        ref_image_paths = _resolve_ref_image_paths(story_id, effective_ref_ids)
-        logger.info("regenerate_shot_storyboard resolved paths=%s", ref_image_paths)
-        if ref_image_paths:
-            # 将远程 URL 下载到本地缓存，确保 generate_manga_image 能读取为实际图片
-            localized: list[str] = []
-            for ref_path in ref_image_paths:
-                if ref_path.lower().startswith(("http://", "https://")):
-                    local = ensure_local_media_path(ref_path, "manga")
-                    if local:
-                        localized.append(local)
-                    else:
-                        logger.warning("故事版参考图远程下载失败，跳过: %s", ref_path)
-                else:
-                    localized.append(ref_path)
-            ref_image_paths = localized if localized else None
-            for index, ref_path in enumerate(ref_image_paths or [], start=1):
-                ref_kind = "remote" if ref_path.lower().startswith(("http://", "https://")) else "local"
-                logger.info("故事版参考图 %s [%s]: %s", index, ref_kind, ref_path)
+    resolved_references = _resolve_video_asset_references(story_id, effective_ref_ids, director_prompt)
+    ref_image_paths = [str(path).replace("\\", "/") for path, _, _ in resolved_references]
+    character_names = [str(name) for name in (shot.characters or []) if str(name).strip()]
+    ref_labels = [
+        label or (character_names[index] if index < len(character_names) else "")
+        for index, (_, label, _) in enumerate(resolved_references)
+    ]
+    ref_roles = [role for _, _, role in resolved_references]
+    safe_ref_paths = [video_api_service.safe_media_url_for_log(path) for path in ref_image_paths]
+    logger.info("regenerate_shot_storyboard resolved references=%s", list(zip(ref_labels, ref_roles, safe_ref_paths)))
+    for index, ref_path in enumerate(ref_image_paths, start=1):
+        logger.info("故事版参考图 %s [local]: %s", index, video_api_service.safe_media_url_for_log(ref_path))
 
     try:
         update_shot(shot_id, status="storyboard_generating", storyboard_prompt=director_prompt, error_message=None)
 
-        # 传入 ref_labels 确保多角色参考图与角色名一一对应
-        ref_labels: list[str] | None = None
-        if effective_ref_ids:
-            ref_labels = [str(c) for c in (shot.characters or []) if c] or None
-
-        # 风格锚点：如果工作流中已有成功生成的故事版图片，将其作为本镜头的风格参考图
-        # 这能确保同一章节内不同镜头的画风（线条、着色、色彩方案）保持一致
-        style_anchor_image = _pick_style_anchor_image(workflow_id, shot_id)
-
-        # 合并参考图路径：角色参考图 + 风格锚点图
-        combined_refs = list(ref_image_paths) if ref_image_paths else []
-        combined_labels = list(ref_labels) if ref_labels else []
-        if style_anchor_image and style_anchor_image not in combined_refs:
-            combined_refs.append(style_anchor_image)
-            combined_labels.append("【画面风格参考锚点】")
-
+        # 视频故事板只使用角色、场景和道具参考，不注入风格预设或自动风格锚点。
         image_result = await image_service.generate_manga_image(
             prompt=director_prompt,
             chapter_id=chapter_id,
@@ -2005,24 +2214,34 @@ async def regenerate_shot_storyboard(
             api_key=api_key,
             color_mode="bw",
             size="3840x2160",
-            ref_image_paths=combined_refs if combined_refs else None,
-            ref_labels=combined_labels if combined_labels else None,
+            ref_image_paths=ref_image_paths or None,
+            ref_labels=ref_labels or None,
+            ref_roles=ref_roles or None,
+            suppress_default_style=True,
         )
 
         storyboard_url = _to_storyboard_static_url(image_result.image_path)
         update_shot(shot_id, status="storyboard_ready", storyboard_image_url=storyboard_url)
         if workflow:
-            _persist_chapter_storyboard_asset(
-                workflow=workflow,
-                shot=shot,
-                file_path=storyboard_url,
-                prompt=director_prompt,
-                provider="image2",
-                source_asset_ids=effective_ref_ids,
-                source_type="ai_generated",
-            )
+            try:
+                _persist_chapter_storyboard_asset(
+                    workflow=workflow,
+                    shot=shot,
+                    file_path=storyboard_url,
+                    prompt=director_prompt,
+                    provider="image2",
+                    source_asset_ids=effective_ref_ids,
+                    source_type="ai_generated",
+                )
+            except Exception:
+                # 资产目录是派生索引，写入失败不能覆盖已经成功生成的故事板结果。
+                logger.exception("故事板资产索引写入失败 shot=%s", shot_id)
     except Exception as exc:
-        update_shot(shot_id, status="failed", error_message=str(exc))
+        update_shot(
+            shot_id,
+            status="failed",
+            error_message=public_error_message(exc, "故事版生成失败，请稍后重试"),
+        )
         raise
 
     return get_shot(shot_id)
@@ -2037,6 +2256,9 @@ async def regenerate_shot_video(
     model: str | None = None,
     deepseek_api_key: str | None = None,
     aspect_ratio: str = DEFAULT_VIDEO_ASPECT_RATIO,
+    video_capabilities: dict | None = None,
+    adapter_type: str = "lingdong_video",
+    duration_seconds: int | None = None,
 ) -> ChapterVideoShot | None:
     """重新生成单镜头的视频。
 
@@ -2050,6 +2272,7 @@ async def regenerate_shot_video(
     shot = get_shot(shot_id)
     if not shot:
         return None
+    submitted_duration = int(duration_seconds or getattr(shot, "duration_seconds", None) or 15)
 
     video_prompt = prompt_override or shot.video_prompt
     # 清理：去除 shot.video_prompt 中残留的旧 enrichments（以 === 开头的内容）
@@ -2063,23 +2286,33 @@ async def regenerate_shot_video(
 
     workflow = get_workflow(shot.workflow_id)
     story_id = workflow.story_id if workflow else 0
-    effective_ref_ids = ref_asset_ids or (shot.character_reference_ids or [])
+    style_prompt_template = ""
+    if workflow:
+        db_for_style_prompt = SessionLocal()
+        try:
+            from models import Chapter, VideoStylePreset
+            chapter = db_for_style_prompt.get(Chapter, workflow.chapter_id)
+            preset = None
+            workflow_style = getattr(workflow, "video_style", None)
+            if workflow_style:
+                preset = db_for_style_prompt.query(VideoStylePreset).filter(
+                    VideoStylePreset.name == workflow_style
+                ).first()
+            if not preset and chapter and chapter.video_style_preset_id:
+                preset = db_for_style_prompt.get(VideoStylePreset, chapter.video_style_preset_id)
+            style_prompt_template = (preset.prompt_template or "").strip() if preset else ""
+        finally:
+            db_for_style_prompt.close()
+    if ref_asset_ids is not None:
+        effective_ref_ids = list(ref_asset_ids)
+    else:
+        effective_ref_ids = list(dict.fromkeys(
+            list(shot.character_reference_ids or [])
+            + list(getattr(shot, "scene_reference_ids", None) or [])
+            + list(getattr(shot, "prop_reference_ids", None) or [])
+        ))
     # 过滤掉特殊 ID -1（故事版图片），只查询实际的资产 ID
     real_asset_ids = [rid for rid in effective_ref_ids if rid != -1]
-
-    asset_type_map: dict[int, str] = {}
-    if real_asset_ids:
-        db_types = SessionLocal()
-        try:
-            for a in db_types.query(VideoAsset).filter(
-                VideoAsset.id.in_(real_asset_ids),
-                VideoAsset.status == "active",
-            ).all():
-                asset_type_map[a.id] = a.asset_type or "reference"
-        finally:
-            db_types.close()
-
-    ref_image_paths = _resolve_ref_image_paths(story_id, real_asset_ids) if real_asset_ids else None
 
     # ── 构建三段式视频 prompt ──────────────────────────
     # 第1步：收集参考图片及其类型
@@ -2090,8 +2323,12 @@ async def regenerate_shot_video(
 
     reference_image_details: list[tuple[str, str]] = []
 
-    # 故事版图片：仅当显式引用当前镜头故事版（legacy -1 或当前 shot_id）时启用
-    if shot.id in effective_ref_ids:
+    # 旧客户端曾用当前 shot_id 表示故事版；若同号真实资产存在，则优先按资产 ID 解释。
+    shot_id_is_visual_asset = bool(
+        shot.id in effective_ref_ids
+        and _load_owned_visual_assets(story_id, [shot.id], include_storyboard=True)
+    )
+    if shot.id in effective_ref_ids and not shot_id_is_visual_asset:
         storyboard_remote_path = resolve_reference_input(shot.storyboard_image_url, "manga")
         if storyboard_remote_path:
             reference_images.append(storyboard_remote_path)
@@ -2117,22 +2354,22 @@ async def regenerate_shot_video(
                 reference_image_details.append(("storyboard", storyboard_local_path))
                 has_storyboard_ref = True
 
-    type_to_role = {
-        "character_reference": "character",
-        "scene_reference": "scene",
-        "prop_reference": "prop",
-        "storyboard_frame": "storyboard",
-    }
-    if real_asset_ids and ref_image_paths:
-        for rid, path in zip(real_asset_ids, ref_image_paths):
-            if path in reference_images:
-                continue
-            asset_type = asset_type_map.get(rid, "reference")
-            role = type_to_role.get(asset_type, "reference")
-            reference_images.append(path)
-            reference_image_details.append((role, path))
-            if role == "character":
-                has_character_ref = True
+    content_asset_ids = [
+        rid for rid in real_asset_ids
+        if rid != shot.id or shot_id_is_visual_asset
+    ]
+    for path_text, _label, role in _resolve_video_asset_inputs(story_id, content_asset_ids):
+        path_text = path_text.replace("\\", "/")
+        if path_text in reference_images:
+            continue
+        reference_images.append(path_text)
+        reference_image_details.append((role, path_text))
+        if role == "character":
+            has_character_ref = True
+        elif role == "storyboard":
+            has_storyboard_ref = True
+        elif role == "style":
+            has_style_ref = True
 
     # 风格参考图：优先从 workflow，回退到章节预设
     style_ref_source = workflow.style_reference_image_url if workflow else None
@@ -2146,19 +2383,32 @@ async def regenerate_shot_video(
             chapter = db_for_style.query(Chapter).filter(Chapter.id == workflow.chapter_id).first()
             if chapter and chapter.video_style_preset_id:
                 preset = db_for_style.get(VideoStylePreset, chapter.video_style_preset_id)
-                logger.info("从章节预设读取风格参考图: video_style_preset_id=%s preset.image_url=%s", chapter.video_style_preset_id, preset.image_url if preset else "N/A")
+                logger.info(
+                    "从章节预设读取风格参考图: video_style_preset_id=%s preset.image_url=%s",
+                    chapter.video_style_preset_id,
+                    video_api_service.safe_media_url_for_log(preset.image_url) if preset else "N/A",
+                )
                 if preset and preset.image_url:
                     style_ref_path = resolve_reference_input(preset.image_url, "manga") or _resolve_style_ref_local_path(preset.image_url)
         finally:
             db_for_style.close()
-    if style_ref_path and style_ref_path not in reference_images:
-        reference_images.append(style_ref_path)
-        reference_image_details.append(("style", style_ref_path))
+    if style_ref_path:
         has_style_ref = True
+        if style_ref_path not in reference_images:
+            reference_images.append(style_ref_path)
+            reference_image_details.append(("style", style_ref_path))
     if style_ref_source:
-        logger.info("风格参考图来源: workflow.style_reference_image_url=%s 解析结果=%s", style_ref_source, style_ref_path)
+        logger.info(
+            "风格参考图来源: workflow.style_reference_image_url=%s 解析结果=%s",
+            video_api_service.safe_media_url_for_log(style_ref_source),
+            video_api_service.safe_media_url_for_log(style_ref_path),
+        )
     else:
-        logger.info("风格参考图来源: 章节预设 (video_style_preset_id=%s) 解析结果=%s", getattr(workflow, 'chapter_id', None) if workflow else None, style_ref_path)
+        logger.info(
+            "风格参考图来源: 章节预设 (video_style_preset_id=%s) 解析结果=%s",
+            getattr(workflow, 'chapter_id', None) if workflow else None,
+            video_api_service.safe_media_url_for_log(style_ref_path),
+        )
 
     # 第2步：构建系统提示词（按 reference_image_details 实际顺序，每张图独立说明）
     system_prompt_parts: list[str] = []
@@ -2201,12 +2451,12 @@ async def regenerate_shot_video(
         prompt_sections.append(prompt_override)
     elif has_storyboard_ref:
         prompt_sections.append(
-            "按照故事版图片中的分镜脚本内容生成15秒视频。"
+            f"按照故事版图片中的分镜脚本内容生成{submitted_duration}秒视频。"
             "严格遵循分镜中每个时间段指定的镜头运动、画面内容、人物动作和情绪变化。"
             "不得添加分镜中未描述的元素，不得改变分镜中的场景关系和叙事逻辑。"
         )
     else:
-        prompt_sections.append(video_prompt or "生成15秒视频，保持画面流畅自然。")
+        prompt_sections.append(video_prompt or f"生成{submitted_duration}秒视频，保持画面流畅自然。")
 
     # Part 3: 风格参考图约束（仅当有风格参考图时）
     if has_style_ref:
@@ -2219,9 +2469,17 @@ async def regenerate_shot_video(
     core_prompt = video_prompt
     # 组装含 enrichments 的完整 prompt 用于提交 API
     video_prompt = "\n\n".join(prompt_sections)
+    if style_prompt_template and not has_style_ref:
+        video_prompt = f"{video_prompt}\n\nVisual style: {style_prompt_template}"
 
     try:
-        update_shot(shot_id, status="video_generating", video_prompt=core_prompt, error_message=None)
+        update_shot(
+            shot_id,
+            status="video_generating",
+            video_prompt=core_prompt,
+            duration_seconds=submitted_duration,
+            error_message=None,
+        )
 
         # ── 将本地参考图上传到 OSS，确保外部 API 可访问 ──
         if reference_images:
@@ -2234,19 +2492,31 @@ async def regenerate_shot_video(
                     oss_uploaded.append(img_path)
                     oss_details.append((role, img_path))
                     continue
-                logger.info("[video_submit] 尝试将本地参考图上传到 OSS: %s", img_path)
+                logger.info(
+                    "[video_submit] 尝试将本地参考图上传到 OSS: %s",
+                    video_api_service.safe_media_url_for_log(img_path),
+                )
                 oss_url = await run_blocking(oss_service.upload_file, img_path)
                 if oss_url:
-                    logger.info("[video_submit] 本地参考图上 OSS 成功: %s → %s", img_path, oss_url)
+                    logger.info(
+                        "[video_submit] 本地参考图上 OSS 成功: %s → %s",
+                        video_api_service.safe_media_url_for_log(img_path),
+                        video_api_service.safe_media_url_for_log(oss_url),
+                    )
                     oss_uploaded.append(oss_url)
                     oss_details.append((role, oss_url))
                 else:
-                    logger.warning("[video_submit] 本地参考图上 OSS 失败，跳过该图: %s", img_path)
+                    raise UpstreamServiceError(
+                        "参考图无法发布到 OSS，已中止视频提交: "
+                        f"{video_api_service.safe_media_url_for_log(img_path)}",
+                        retryable=False,
+                        provider=DEFAULT_VIDEO_PROVIDER,
+                    )
             if oss_uploaded:
                 reference_images = oss_uploaded
                 reference_image_details = oss_details
 
-        reference_images = reference_images or None
+        submitted_reference_images = reference_images or None
 
         # ── 日志输出：提交的提示词和参考图 ──
         logger.info("=" * 60)
@@ -2255,15 +2525,25 @@ async def regenerate_shot_video(
         for line in video_prompt.splitlines():
             logger.info("[video_submit]   %s", line)
         logger.info("[video_submit] 参考图片列表:")
-        if reference_images:
+        if submitted_reference_images:
             for i, (ref_role, img_path) in enumerate(reference_image_details, start=1):
                 ref_kind = "remote" if img_path.lower().startswith(("http://", "https://")) else "local"
-                logger.info("[video_submit]   参考图 %s [%s][%s]: %s", i, ref_role, ref_kind, img_path)
+                logger.info(
+                    "[video_submit]   参考图 %s [%s][%s]: %s",
+                    i,
+                    ref_role,
+                    ref_kind,
+                    video_api_service.safe_media_url_for_log(img_path),
+                )
         else:
             logger.info("[video_submit]   （无参考图）")
         logger.info("[video_submit] 参考资产 ID: %s", effective_ref_ids)
-        logger.info("[video_submit] 模型: %s, 提供方: %s, base_url: %s",
-                     model or DEFAULT_VIDEO_MODEL, DEFAULT_VIDEO_PROVIDER, base_url or "默认")
+        logger.info(
+            "[video_submit] 模型: %s, 提供方: %s, base_url: %s",
+            model or DEFAULT_VIDEO_MODEL,
+            DEFAULT_VIDEO_PROVIDER,
+            video_api_service.safe_media_url_for_log(base_url) if base_url else "默认",
+        )
         logger.info("=" * 60)
 
         result = await video_gen_service.submit_video_job(
@@ -2272,12 +2552,14 @@ async def regenerate_shot_video(
             model=model or DEFAULT_VIDEO_MODEL,
             prompt=video_prompt,
             negative_prompt="",
-            duration_seconds=15,
+            duration_seconds=submitted_duration,
             aspect_ratio=aspect_ratio or DEFAULT_VIDEO_ASPECT_RATIO,
-            reference_images=reference_images,
+            reference_images=submitted_reference_images,
             input_mode="image_to_video",
             api_key=api_key,
             base_url=base_url,
+            video_capabilities=video_capabilities,
+            adapter_type=adapter_type,
         )
 
         provider_job_id = result.get("provider_job_id", "")
@@ -2288,6 +2570,7 @@ async def regenerate_shot_video(
                 api_key=api_key,
                 base_url=base_url,
                 model=model,
+                adapter_type=adapter_type,
             )
             update_shot(shot_id, status="video_ready", video_url=video_url or "")
         else:
@@ -2297,7 +2580,11 @@ async def regenerate_shot_video(
                 provider=DEFAULT_VIDEO_PROVIDER,
             )
     except Exception as exc:
-        update_shot(shot_id, status="failed", error_message=str(exc))
+        update_shot(
+            shot_id,
+            status="failed",
+            error_message=public_error_message(exc, "视频生成失败，请稍后重试"),
+        )
         raise
 
     return get_shot(shot_id)
@@ -2342,6 +2629,15 @@ async def async_retry(
 def get_video_output_dir() -> Path:
     """获取视频输出目录。"""
     return Path(__file__).resolve().parent.parent / "video_outputs"
+
+
+def _log_unavailable_shot_video(shot_index: int, video_url: str | None) -> None:
+    """记录不可用视频时移除 URL 中的认证信息和签名参数。"""
+    logger.warning(
+        "镜头 %s 视频文件不可用: %s",
+        shot_index,
+        video_api_service.safe_media_url_for_log(video_url),
+    )
 
 
 def concat_chapter_videos(
@@ -2396,7 +2692,7 @@ def concat_chapter_videos(
                     f.write(f"file '{video_path}'\n")
                     video_paths.append(video_path)
                 else:
-                    logger.warning("镜头 %s 视频文件不可用: %s", shot.shot_index, shot.video_url)
+                    _log_unavailable_shot_video(shot.shot_index, shot.video_url)
 
         if not video_paths:
             raise ValueError("没有可用的视频文件进行拼接")
@@ -2565,7 +2861,7 @@ async def generate_workflow_screenplay(
 
         # 调用 DeepSeek 生成剧本
         payload = {
-            "model": deepseek_service.DEEPSEEK_MODEL,
+            "model": deepseek_service.runtime_model(),
             "messages": [
                 {"role": "system", "content": prompts.NOVEL_TO_SHORT_DRAMA_SCREENPLAY_SYSTEM_PROMPT},
                 {"role": "user", "content": prompts.NOVEL_TO_SHORT_DRAMA_SCREENPLAY_USER_PROMPT_HEADER + "\n\n" + novel_content},
@@ -2577,7 +2873,7 @@ async def generate_workflow_screenplay(
 
         async with deepseek_service.httpx.AsyncClient(timeout=600) as client:
             resp = await client.post(
-                f"{deepseek_service.DEEPSEEK_BASE_URL}/chat/completions",
+                f"{deepseek_service.runtime_base_url()}/chat/completions",
                 json=payload,
                 headers=deepseek_service._deepseek_auth_headers(deepseek_api_key),
             )

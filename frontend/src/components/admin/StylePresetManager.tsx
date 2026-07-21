@@ -10,6 +10,7 @@ import {
 import { Film } from 'lucide-react';
 import { toast } from '../../lib/toast';
 import { confirm } from '../../lib/confirm';
+import { readResponseError } from '../../lib/errors';
 
 function toStyleImageUrl(filePath?: string | null): string {
   if (!filePath) return '';
@@ -64,7 +65,7 @@ export default function StylePresetManager() {
         headers: apiHeaders(),
         body: formData,
       });
-      if (!res.ok) throw new Error(await res.text());
+      if (!res.ok) throw new Error(await readResponseError(res, '上传风格参考图失败'));
       const result = await res.json();
       setFormData(prev => ({ ...prev, image_url: result.url }));
       setPreviewUrl(result.url);

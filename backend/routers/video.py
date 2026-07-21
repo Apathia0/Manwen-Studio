@@ -7,7 +7,9 @@ asset management, and video project compilation endpoints.
 from __future__ import annotations
 
 import asyncio
+import base64
 import datetime
+from io import BytesIO
 import json
 import logging
 import os
@@ -16,13 +18,16 @@ from pathlib import Path
 import re
 import httpx
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, UploadFile, File
+from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request, UploadFile, File
+from PIL import Image, UnidentifiedImageError
 from sqlalchemy import func as sa_func
 from sqlalchemy.orm import Session
 from sse_starlette.sse import EventSourceResponse
+from starlette.background import BackgroundTask as ResponseBackgroundTask
 
 from database import SessionLocal, get_db, init_db
 _VIDEO_OUTPUTS_DIR = Path(__file__).resolve().parent.parent / "video_outputs"
+_MANGA_OUTPUTS_DIR = Path(__file__).resolve().parent.parent / "manga_outputs"
 
 SHOT_TYPES = [
     "全景 (Wide Shot)", "中景 (Medium Shot)", "近景 (Close-up)",
@@ -65,7 +70,40 @@ def _from_video_url(video_url: str) -> str | None:
     return str(Path(__file__).resolve().parent.parent / url)
 
 
+def _validate_video_asset_storage_path(value: str | None) -> str:
+    """限制客户端创建的视频资产只能引用受控媒体目录或公网 HTTPS。"""
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    if raw.lower().startswith(("http://", "https://")):
+        return validate_remote_media_url(raw)
+
+    normalized = raw.replace("\\", "/")
+    if normalized.startswith("/static/video/"):
+        candidate = (_VIDEO_OUTPUTS_DIR / normalized[len("/static/video/"):]).resolve()
+        root = _VIDEO_OUTPUTS_DIR.resolve()
+    elif normalized.startswith("video_outputs/"):
+        candidate = (Path(__file__).resolve().parent.parent / normalized).resolve()
+        root = _VIDEO_OUTPUTS_DIR.resolve()
+    elif normalized.startswith("/static/manga/"):
+        candidate = (_MANGA_OUTPUTS_DIR / normalized[len("/static/manga/"):]).resolve()
+        root = _MANGA_OUTPUTS_DIR.resolve()
+    elif normalized.startswith("manga_outputs/"):
+        candidate = (Path(__file__).resolve().parent.parent / normalized).resolve()
+        root = _MANGA_OUTPUTS_DIR.resolve()
+    elif not Path(raw).is_absolute():
+        candidate = (_VIDEO_OUTPUTS_DIR / normalized).resolve()
+        root = _VIDEO_OUTPUTS_DIR.resolve()
+    else:
+        raise HTTPException(422, "视频素材路径不在受控媒体目录内")
+
+    if not candidate.is_relative_to(root):
+        raise HTTPException(422, "视频素材路径不在受控媒体目录内")
+    return normalized
+
+
 from models import (
+    AiModel,
     BackgroundTask,
     Chapter,
     ChapterVideoWorkflow,
@@ -81,6 +119,8 @@ from models import (
     VideoProject,
     VideoStylePreset,
     RenderedClip,
+    MangaAsset,
+    MangaAssetBinding,
     VideoShot,
 )
 from schemas import (
@@ -89,6 +129,7 @@ from schemas import (
     ChapterVideoWorkflowOut,
     ChapterVideoWorkflowListOut,
     ChapterVideoWorkflowStatusOut,
+    ChapterVideoShotCreate,
     ChapterVideoShotOut,
     CreateVideoAssetRequest,
     CreateVideoProjectRequest,
@@ -120,12 +161,17 @@ from services.screenplay import generate_screenplay, regenerate_scenes
 from services.storyboard import generate_shots, generate_shot_prompts as generate_shot_prompts_service
 from services import deepseek as deepseek_service
 from services import image2 as image2_service
+from services.ai.channels import validate_remote_media_url
+from services.visual_asset_prompts import analyze_visual_assets
+from services.visual_asset_generation import generate_visual_asset_image
 from services import video_generation as video_gen_service
 from services.media_locator import ensure_local_media_path, resolve_local_media_path, resolve_reference_input
+from services.media_logging import safe_media_url_for_log
 from services import video_api as video_api_service
+from services import video_adapter as video_adapter_service
 from services import video_qa
 from services.blocking import run_blocking
-from services.errors import UpstreamServiceError
+from services.errors import UpstreamServiceError, public_error_message
 from services.video_compiler import compile_project
 from services.task_manager import task_manager
 from services.video_chapter_pipeline import (
@@ -147,6 +193,7 @@ from services.video_chapter_pipeline import (
     generate_workflow_screenplay,
     build_shot_source_from_screenplay,
     _build_chapter_storyboard_asset,
+    _strip_storyboard_style_directives,
 )
 
 # 模块级标记：init_db 在整个进程生命周期中只调用一次
@@ -157,6 +204,26 @@ logger = logging.getLogger("video_router")
 router = APIRouter()
 
 SHOT_DURATION_SECONDS = 15
+DEFAULT_VIDEO_DURATION_SECONDS = 15
+MAX_VIDEO_DURATION_SECONDS = 60
+MAX_VIDEO_REFERENCE_COUNT = 9
+MAX_VIDEO_REFERENCE_FILE_BYTES = max(
+    1,
+    int(os.getenv("MAX_VIDEO_REFERENCE_FILE_BYTES", str(30 * 1024 * 1024))),
+)
+MAX_VIDEO_REFERENCE_TOTAL_BYTES = max(
+    MAX_VIDEO_REFERENCE_FILE_BYTES,
+    int(os.getenv("MAX_VIDEO_REFERENCE_TOTAL_BYTES", str(270 * 1024 * 1024))),
+)
+MAX_VIDEO_REFERENCE_BASE64_BYTES = max(
+    1,
+    int(os.getenv("MAX_VIDEO_REFERENCE_BASE64_BYTES", str(360 * 1024 * 1024))),
+)
+MANGA_ASSET_BATCH_MAX_ITEMS = 50
+MANGA_ASSET_GENERATION_CONCURRENCY = max(
+    1,
+    min(8, int(os.getenv("MANGA_ASSET_GENERATION_CONCURRENCY", "2") or "2")),
+)
 
 
 def _same_story_video_asset_types(asset_type: str | None) -> list[str]:
@@ -294,24 +361,41 @@ def _user_video_api_key(request: Request) -> tuple[str | None, str, str]:
     if db is None:
         return key or None, video_api_service._resolved_base_url(), video_api_service._resolved_model()
 
+    try:
+        import main as main_mod
+
+        dual = main_mod._resolve_dual_track_runtime(request, db, modality="video")
+        if dual:
+            request.state.dual_track_video = dual
+            return dual["api_key"], dual["base_url"], dual["model_key"]
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("video 路由双轨视频解析失败")
+
     user = getattr(request.state, "current_user", None)
     capabilities = _user_api_override_capabilities(user, db)
-    override_base_url = request.headers.get("x-video-base-url") or None
-    override_model = request.headers.get("x-video-model") or None
     admin_base_url = str(_get_platform_setting("api.video.base_url", db, video_api_service._resolved_base_url())).strip()
     admin_model = str(_get_platform_setting("api.video.model", db, video_api_service._resolved_model())).strip()
     admin_api_key = str(_get_platform_setting("api.video.api_key", db, "") or "").strip()
 
-    resolved_base_url = (
-        override_base_url.strip()
-        if capabilities["can_override_api_url"] and override_base_url and override_base_url.strip()
-        else admin_base_url
+    import main as main_mod
+
+    requested_mode = main_mod._request_credential_mode(request, db)
+    custom_upstream = main_mod._resolve_user_upstream_override(
+        request,
+        db,
+        user=user,
+        modality="video",
+        mode=requested_mode,
     )
-    resolved_model = (
-        override_model.strip()
-        if capabilities["can_override_api_url"] and override_model and override_model.strip()
-        else admin_model
-    )
+    resolved_base_url = (custom_upstream or {}).get("base_url") or admin_base_url
+    resolved_model = (custom_upstream or {}).get("model_key") or admin_model
+
+    if custom_upstream:
+        return custom_upstream["api_key"], resolved_base_url.rstrip("/"), resolved_model
+    if requested_mode == "user_key" and not capabilities["can_override_api_key"]:
+        raise HTTPException(403, "管理员未授权当前账号使用自定义 API Key")
 
     if capabilities["can_override_api_key"] and key:
         effective_key = key
@@ -323,23 +407,313 @@ def _user_video_api_key(request: Request) -> tuple[str | None, str, str]:
     return effective_key, resolved_base_url.rstrip("/"), resolved_model
 
 
-def _user_image_api_key(request: Request) -> str | None:
-    """Return image API key for current request/user context.
+_VIDEO_RUNTIME_SNAPSHOT_KEY = "_runtime"
+_VIDEO_USAGE_EVENT_ID_KEY = "billing_usage_event_id"
 
-    同时自动配置 image2 服务的 base_url 和 model，确保后续调用不会报错。
-    """
+
+def _build_video_runtime_snapshot(
+    request: Request,
+    db: Session,
+    *,
+    api_key: str | None,
+    base_url: str,
+    model: str,
+) -> dict:
+    """保存视频任务后续轮询所需的上游快照，API Key 仅以密文存储。"""
+    from services.ai.crypto_secrets import encrypt_secret
+
+    dual = getattr(request.state, "dual_track_video", None)
+    if isinstance(dual, dict):
+        mode = str(dual.get("mode") or "platform")
+        channel_id = dual.get("channel_id")
+        custom_upstream = bool(dual.get("custom_upstream"))
+        adapter_type = _current_video_adapter_type(request)
+    else:
+        import main as main_mod
+
+        mode = main_mod._request_credential_mode(request, db)
+        channel_id = None
+        custom_upstream = mode == "user_key" and bool(
+            (request.headers.get("x-video-base-url") or "").strip()
+            or (request.headers.get("x-video-model") or "").strip()
+        )
+        adapter_type = video_adapter_service.VIDEO_ADAPTER_LINGDONG
+    return {
+        "credential_mode": mode,
+        "base_url": str(base_url or "").rstrip("/"),
+        "model": str(model or "").strip(),
+        "channel_id": int(channel_id) if channel_id is not None else None,
+        "custom_upstream": custom_upstream,
+        "adapter_type": adapter_type,
+        "secret_ciphertext": encrypt_secret(api_key or ""),
+    }
+
+
+def _video_provider_metadata(runtime_snapshot: dict, usage_event_id: int | None = None) -> dict:
+    metadata = {_VIDEO_RUNTIME_SNAPSHOT_KEY: runtime_snapshot}
+    if usage_event_id:
+        metadata[_VIDEO_USAGE_EVENT_ID_KEY] = int(usage_event_id)
+    return metadata
+
+
+def _current_video_capabilities(request: Request, db: Session, model_key: str) -> dict | None:
+    """仅为当前选中的平台视频模型透传受控 capabilities。"""
+    runtime = getattr(getattr(request, "state", None), "dual_track_video", None)
+    if not isinstance(runtime, dict) or runtime.get("custom_upstream"):
+        return None
+    if str(runtime.get("model_key") or "").strip() != str(model_key or "").strip():
+        return None
+    model_id = runtime.get("model_id")
+    if not isinstance(model_id, int):
+        return None
+    model = db.get(AiModel, model_id)
+    raw = model.capabilities_json if model else None
+    video = raw.get("video") if isinstance(raw, dict) else None
+    return video if isinstance(video, dict) else None
+
+
+def _current_video_adapter_type(request: Request) -> str:
+    """读取权威渠道适配器；历史与自定义上游固定按 Lingdong 协议处理。"""
+    runtime = getattr(getattr(request, "state", None), "dual_track_video", None)
+    if not isinstance(runtime, dict) or runtime.get("custom_upstream"):
+        return video_adapter_service.VIDEO_ADAPTER_LINGDONG
+    return video_adapter_service.normalize_video_adapter_type(
+        runtime.get("adapter_type"),
+        legacy_default=True,
+    )
+
+
+def _validate_video_request_before_billing(
+    *,
+    adapter_type: str,
+    model: str,
+    video_capabilities: dict | None,
+    aspect_ratio: str,
+    duration_seconds: int,
+    reference_count: int,
+) -> None:
+    """在计费和上游提交前验证视频协议能力。"""
+    if adapter_type == video_adapter_service.VIDEO_ADAPTER_LINGDONG:
+        video_api_service.validate_legacy_model_duration(
+            model=model,
+            duration_seconds=duration_seconds,
+            video_capabilities=video_capabilities,
+        )
+        return
+    video_adapter_service._openai_video_config(
+        video_capabilities,
+        aspect_ratio=aspect_ratio,
+        size="720P",
+        duration_seconds=duration_seconds,
+        reference_count=reference_count,
+    )
+
+
+def _chapter_video_reference_count(
+    shot: ChapterVideoShot,
+    workflow: ChapterVideoWorkflow,
+    explicit_reference_ids: list[int] | None,
+    db: Session,
+) -> int:
+    """按章节流水线的确定性来源统计预提交参考图数量。"""
+    if explicit_reference_ids is not None:
+        reference_ids = list(dict.fromkeys(explicit_reference_ids))
+    else:
+        reference_ids = list(dict.fromkeys(
+            list(getattr(shot, "character_reference_ids", None) or [])
+            + list(getattr(shot, "scene_reference_ids", None) or [])
+            + list(getattr(shot, "prop_reference_ids", None) or [])
+        ))
+    count = len(reference_ids)
+    if getattr(workflow, "style_reference_image_url", None):
+        count += 1
+    else:
+        chapter_id = getattr(workflow, "chapter_id", None)
+        chapter = db.get(Chapter, chapter_id) if chapter_id else None
+        preset_id = getattr(chapter, "video_style_preset_id", None) if chapter else None
+        preset = db.get(VideoStylePreset, preset_id) if preset_id else None
+        if preset and getattr(preset, "image_url", None):
+            count += 1
+    return count
+
+
+def _chapter_video_target_shots(
+    db: Session,
+    workflow_id: int,
+    shot_ids: list[int] | None,
+) -> list[ChapterVideoShot]:
+    """返回与章节视频流水线实际执行条件一致的计费目标。"""
+    query = db.query(ChapterVideoShot).filter(ChapterVideoShot.workflow_id == workflow_id)
+    if shot_ids:
+        query = query.filter(
+            ChapterVideoShot.id.in_(shot_ids),
+            ChapterVideoShot.status.in_(["storyboard_ready", "video_generating", "pending"]),
+        )
+    else:
+        query = query.filter(ChapterVideoShot.status == "storyboard_ready")
+    return query.order_by(ChapterVideoShot.shot_index).all()
+
+
+def _video_billing_usage_event_id(job: VideoGenerationJob) -> int | None:
+    metadata = job.provider_payload_json if isinstance(job.provider_payload_json, dict) else {}
+    raw_value = metadata.get(_VIDEO_USAGE_EVENT_ID_KEY)
+    try:
+        return int(raw_value) if raw_value else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _refund_video_billing(
+    db: Session,
+    *,
+    job: VideoGenerationJob | None = None,
+    usage_event_id: int | None = None,
+    reason: str,
+    commit: bool = True,
+) -> None:
+    resolved_usage_event_id = usage_event_id or (_video_billing_usage_event_id(job) if job else None)
+    if not resolved_usage_event_id:
+        return
+    from services.ai.resolver import refund_ai_call
+
+    refund_ai_call(db, resolved_usage_event_id, error_code=reason, commit=commit)
+
+
+def _settle_video_billing(
+    db: Session,
+    *,
+    job: VideoGenerationJob | None = None,
+    usage_event_id: int | None = None,
+    video_seconds: int | float | None = None,
+    commit: bool = True,
+) -> None:
+    resolved_usage_event_id = usage_event_id or (_video_billing_usage_event_id(job) if job else None)
+    if not resolved_usage_event_id:
+        return
+    from services.ai.resolver import complete_ai_call_by_usage_event
+
+    duration = video_seconds if video_seconds is not None else (job.duration_seconds if job else 0)
+    complete_ai_call_by_usage_event(
+        db,
+        resolved_usage_event_id,
+        success=True,
+        video_seconds=max(0, float(duration or 0)),
+        commit=commit,
+    )
+
+
+def _fail_video_job_and_refund(
+    db: Session,
+    job: VideoGenerationJob,
+    *,
+    error_message: str,
+    reason: str,
+) -> None:
+    """在同一事务中标记视频无产物失败并退回原始积分。"""
+    job.status = "failed"
+    job.error_message = error_message
+    job.completed_at = job.completed_at or datetime.datetime.utcnow()
+    _refund_video_billing(db, job=job, reason=reason, commit=False)
+    db.commit()
+
+
+def _resolve_video_job_runtime(
+    job: VideoGenerationJob,
+    request: Request,
+    db: Session,
+) -> tuple[str | None, str, str]:
+    """使用任务创建时的上游信息解析轮询凭据，兼容无快照的旧任务。"""
+    provider_metadata = job.provider_payload_json if isinstance(job.provider_payload_json, dict) else {}
+    snapshot = provider_metadata.get(_VIDEO_RUNTIME_SNAPSHOT_KEY)
+    if not isinstance(snapshot, dict):
+        raise HTTPException(409, "旧版本视频任务缺少上游快照，请重新提交任务")
+
+    base_url = str(snapshot.get("base_url") or "").rstrip("/")
+    model = str(snapshot.get("model") or job.model or "").strip()
+    mode = str(snapshot.get("credential_mode") or "platform")
+
+    if mode == "user_key":
+        import main as main_mod
+
+        current_user = getattr(request.state, "current_user", None) or _require_user(request, db)
+        capabilities = main_mod._user_api_override_capabilities(current_user, db)
+        if not capabilities["can_override_api_key"]:
+            raise HTTPException(403, "管理员已撤销当前账号使用自定义 API Key 的权限")
+        if snapshot.get("custom_upstream") and not capabilities["can_override_api_url"]:
+            raise HTTPException(403, "管理员已撤销当前账号使用自定义 API URL 的权限")
+
+    secret_ciphertext = str(snapshot.get("secret_ciphertext") or "").strip()
+    if not secret_ciphertext:
+        raise HTTPException(409, "视频任务缺少凭据快照，请重新提交任务")
+    try:
+        from services.ai.crypto_secrets import decrypt_secret
+
+        api_key = decrypt_secret(secret_ciphertext)
+    except Exception as exc:
+        raise HTTPException(500, "视频任务凭据快照无法解密") from exc
+    if not api_key:
+        raise HTTPException(500, "视频任务凭据快照为空")
+    if mode == "user_key" and snapshot.get("custom_upstream") and base_url:
+        from services.ai.channels import validate_user_base_url
+
+        base_url = validate_user_base_url(base_url)
+    return api_key, base_url, model
+
+
+def _video_job_adapter_type(job: VideoGenerationJob) -> str:
+    """从任务快照恢复协议；历史任务不根据模型名推断，固定回退 Lingdong。"""
+    provider_metadata = job.provider_payload_json if isinstance(job.provider_payload_json, dict) else {}
+    snapshot = provider_metadata.get(_VIDEO_RUNTIME_SNAPSHOT_KEY)
+    raw_adapter = snapshot.get("adapter_type") if isinstance(snapshot, dict) else None
+    return video_adapter_service.normalize_video_adapter_type(raw_adapter, legacy_default=True)
+
+
+def _user_image_api_key(request: Request) -> str | None:
     from services import image2 as image_service
 
-    override = request.headers.get("x-image-api-key") or None
     db = getattr(request.state, "db", None)
+    if db is not None:
+        try:
+            import main as main_mod
+
+            dual = main_mod._resolve_dual_track_runtime(request, db, modality="image")
+            if dual:
+                image_service.configure_runtime(
+                    base_url=dual["base_url"] or image_service.DEFAULT_IMAGE_API_BASE_URL,
+                    model=dual["model_key"] or image_service.DEFAULT_IMAGE_MODEL,
+                )
+                request.state.dual_track_image = dual
+                return dual["api_key"]
+        except HTTPException:
+            raise
+        except Exception:
+            logger.exception("video 路由双轨图片解析失败")
+
+    override = request.headers.get("x-image-api-key") or None
     if db is None:
         return override
     user = getattr(request.state, "current_user", None)
     capabilities = _user_api_override_capabilities(user, db)
+    import main as main_mod
+
+    requested_mode = main_mod._request_credential_mode(request, db)
+    custom_upstream = main_mod._resolve_user_upstream_override(
+        request,
+        db,
+        user=user,
+        modality="image",
+        mode=requested_mode,
+    )
+    if custom_upstream:
+        base_url = custom_upstream.get("base_url") or str(_get_platform_setting("api.image.base_url", db, "") or "").strip()
+        model = custom_upstream.get("model_key") or str(_get_platform_setting("api.image.model", db, "") or "").strip()
+        image_service.configure_runtime(base_url=base_url, model=model)
+        return custom_upstream["api_key"]
+    if requested_mode == "user_key" and not capabilities["can_override_api_key"]:
+        raise HTTPException(403, "管理员未授权当前账号使用自定义 API Key")
     if capabilities["can_override_api_key"] and override:
         return override
 
-    # 自动配置 image2 服务
     base_url = str(_get_platform_setting("api.image.base_url", db, "") or "").strip()
     model = str(_get_platform_setting("api.image.model", db, "") or "").strip()
     if base_url:
@@ -349,11 +723,12 @@ def _user_image_api_key(request: Request) -> str | None:
 
 
 def _get_platform_setting(key: str, db: Session, default=None):
+    from services.ai.crypto_secrets import read_platform_setting_payload
+
     setting = db.query(PlatformSetting).filter(PlatformSetting.setting_key == key).first()
     if not setting:
         return default
-    payload = setting.value_json or {}
-    return payload.get("value", default)
+    return read_platform_setting_payload(setting.value_json, default)
 
 
 def _user_api_override_capabilities(user: User | None, db: Session) -> dict[str, bool]:
@@ -371,17 +746,7 @@ def _configure_image_service_from_db(request: Request, db: Session) -> None:
     ⚠️ 必须在调用任何图片生成函数前调用此函数！
     否则 image2._image_auth_headers 会抛出 '图片 API 地址未配置' 错误。
     """
-    from services import image2 as image_service
-
-    base_url = str(_get_platform_setting("api.image.base_url", db, "") or "").strip()
-    model = str(_get_platform_setting("api.image.model", db, "") or "").strip()
-    api_key = _user_image_api_key(request)
-
-    if base_url:
-        image_service.configure_runtime(base_url=base_url, model=model)
-    elif api_key:
-        # 仅有 API Key 时至少初始化一次运行时的 base_url 默认值
-        image_service.configure_runtime()
+    _user_image_api_key(request)
 
 
 def _configure_video_service_from_db(request: Request, db: Session) -> None:
@@ -432,19 +797,46 @@ def _resolve_video_provider(request_provider: str | None, db: Session | None) ->
 
 
 def _user_deepseek_api_key(request: Request, db: Session) -> str | None:
+    try:
+        import main as main_mod
+
+        dual = main_mod._resolve_dual_track_runtime(request, db, modality="text")
+        if dual:
+            deepseek_service.configure_runtime(
+                base_url=dual["base_url"] or deepseek_service.DEEPSEEK_BASE_URL,
+                model=dual["model_key"] or deepseek_service.DEEPSEEK_MODEL,
+            )
+            request.state.dual_track_text = dual
+            return dual["api_key"]
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("video 路由双轨文本解析失败")
+
     override = request.headers.get("x-deepseek-api-key") or None
-    override_base_url = request.headers.get("x-deepseek-base-url") or None
-    override_model = request.headers.get("x-deepseek-model") or None
     user = getattr(request.state, "current_user", None)
     capabilities = _user_api_override_capabilities(user, db)
     admin_base_url = str(_get_platform_setting("api.deepseek.base_url", db, deepseek_service.DEEPSEEK_BASE_URL)).strip()
     admin_model = str(_get_platform_setting("api.deepseek.model", db, deepseek_service.DEEPSEEK_MODEL)).strip()
-    resolved_base_url = override_base_url.strip() if capabilities["can_override_api_url"] and override_base_url and override_base_url.strip() else admin_base_url
-    resolved_model = override_model.strip() if capabilities["can_override_api_url"] and override_model and override_model.strip() else admin_model
+    import main as main_mod
 
-    # 使用 configure_runtime 而不是直接设置全局变量
+    requested_mode = main_mod._request_credential_mode(request, db)
+    custom_upstream = main_mod._resolve_user_upstream_override(
+        request,
+        db,
+        user=user,
+        modality="text",
+        mode=requested_mode,
+    )
+    resolved_base_url = (custom_upstream or {}).get("base_url") or admin_base_url
+    resolved_model = (custom_upstream or {}).get("model_key") or admin_model
+
     deepseek_service.configure_runtime(base_url=resolved_base_url, model=resolved_model)
 
+    if custom_upstream:
+        return custom_upstream["api_key"]
+    if requested_mode == "user_key" and not capabilities["can_override_api_key"]:
+        raise HTTPException(403, "管理员未授权当前账号使用自定义 API Key")
     if capabilities["can_override_api_key"] and override:
         return override
     return _get_platform_setting("api.deepseek.api_key", db, "") or None
@@ -459,20 +851,9 @@ def _parse_auth_token(request: Request) -> str | None:
 
 
 def _require_user(request: Request, db: Session) -> User:
-    token = _parse_auth_token(request)
-    if not token:
-        raise HTTPException(401, "未授权")
-    session = db.query(UserSession).filter(
-        UserSession.token == token,
-        UserSession.revoked_at.is_(None),
-    ).first()
-    if not session:
-        raise HTTPException(401, "会话已过期或令牌无效")
-    user = db.get(User, session.user_id)
-    if not user or user.status != "active":
-        raise HTTPException(403, "用户不可用")
-    request.state.current_user = user
-    return user
+    import main as main_mod
+
+    return main_mod._require_user(request, db)
 
 
 def _require_chapter(chapter_id: int, db: Session) -> Chapter:
@@ -499,6 +880,921 @@ def _require_chapter_for_user(chapter_id: int, user: User, db: Session) -> Chapt
     if story.owner_user_id != user.id:
         raise HTTPException(403, "章节访问被拒绝")
     return chapter
+
+
+@router.post("/api/stories/{story_id}/manga-assets/upload", status_code=201)
+async def upload_manga_asset(
+    story_id: int,
+    request: Request,
+    file: UploadFile = File(...),
+    asset_type: str = Form("character_reference"),
+    name: str = Form(""),
+    chapter_id: int | None = Form(None),
+    bind_to_chapter: bool = Form(False),
+    binding_label: str = Form(""),
+    db: Session = Depends(get_db),
+):
+    """上传独立漫画资产，写入漫画资源目录并创建资产记录。"""
+    user = _require_user(request, db)
+    _require_story_for_user(story_id, user, db)
+    allowed_types = {"character_reference", "scene_reference", "prop_reference", "style_reference"}
+    if asset_type not in allowed_types:
+        raise HTTPException(422, "不支持的漫画资产类型")
+    if chapter_id is not None:
+        chapter = _require_chapter_for_user(chapter_id, user, db)
+        if chapter.story_id != story_id:
+            raise HTTPException(400, "章节不属于当前作品")
+    if not file.content_type or not file.content_type.startswith("image/"):
+        raise HTTPException(400, "请上传图片文件")
+
+    content = await file.read()
+    if not content:
+        raise HTTPException(422, "上传文件不能为空")
+    if len(content) > 10 * 1024 * 1024:
+        raise HTTPException(413, "图片不能超过 10MB")
+    suffix = Path(file.filename or "asset.png").suffix.lower()
+    if suffix not in {".jpg", ".jpeg", ".png", ".webp"}:
+        raise HTTPException(422, "仅支持 JPG、PNG、WebP 图片")
+    try:
+        with Image.open(BytesIO(content)) as image:
+            image.verify()
+    except (UnidentifiedImageError, OSError, ValueError) as exc:
+        raise HTTPException(422, "上传文件不是有效图片") from exc
+
+    asset_name = name.strip() or Path(file.filename or "漫画资产").stem
+    if len(asset_name) > 255:
+        raise HTTPException(422, "资产名称不能超过 255 个字符")
+    if bind_to_chapter and chapter_id is None:
+        raise HTTPException(422, "自动绑定资产时必须提供 chapter_id")
+    resolved_binding_label = binding_label.strip() or asset_name
+    if len(resolved_binding_label) > 255:
+        raise HTTPException(422, "绑定名称不能超过 255 个字符")
+    relative_dir = Path(f"story_{story_id}") / "assets"
+    filename = f"asset_{uuid.uuid4().hex}{suffix}"
+    target_dir = _MANGA_OUTPUTS_DIR / relative_dir
+    target_path = target_dir / filename
+    await run_blocking(target_dir.mkdir, parents=True, exist_ok=True)
+    await run_blocking(target_path.write_bytes, content)
+
+    asset = MangaAsset(
+        owner_user_id=user.id,
+        story_id=story_id,
+        chapter_id=chapter_id,
+        asset_type=asset_type,
+        name=asset_name,
+        storage_path=f"manga_outputs/{relative_dir.as_posix()}/{filename}",
+        source_type="upload",
+        status="active",
+        metadata_json={"mime_type": file.content_type, "original_filename": file.filename or filename},
+    )
+    try:
+        db.add(asset)
+        db.flush()
+        if bind_to_chapter:
+            db.add(MangaAssetBinding(
+                asset_id=asset.id,
+                story_id=story_id,
+                chapter_id=chapter_id,
+                binding_role=asset_type.replace("_reference", ""),
+                label=resolved_binding_label,
+                priority=0,
+                is_required=False,
+            ))
+        db.commit()
+    except Exception:
+        db.rollback()
+        if target_path.exists():
+            await run_blocking(target_path.unlink)
+        raise
+    db.refresh(asset)
+    return {
+        "id": asset.id,
+        "owner_user_id": asset.owner_user_id,
+        "story_id": asset.story_id,
+        "chapter_id": asset.chapter_id,
+        "asset_type": asset.asset_type,
+        "name": asset.name,
+        "storage_path": asset.storage_path,
+        "source_type": asset.source_type,
+        "status": asset.status,
+        "metadata": asset.metadata_json,
+        "created_at": asset.created_at.isoformat() if asset.created_at else None,
+    }
+
+
+@router.delete("/api/manga-assets/{asset_id}/managed")
+async def delete_managed_manga_asset(asset_id: int, request: Request, db: Session = Depends(get_db)):
+    """删除漫画资产记录、章节绑定及受控上传目录内的本地文件。"""
+    user = _require_user(request, db)
+    asset = db.get(MangaAsset, asset_id)
+    if not asset:
+        raise HTTPException(404, "漫画资产未找到")
+    if asset.owner_user_id != user.id:
+        raise HTTPException(403, "漫画资产访问被拒绝")
+
+    storage_path = str(asset.storage_path or "").replace("\\", "/")
+    local_file: Path | None = None
+    prefix = "manga_outputs/"
+    if storage_path.startswith(prefix):
+        candidate = (_MANGA_OUTPUTS_DIR / storage_path[len(prefix):]).resolve()
+        allowed_root = (_MANGA_OUTPUTS_DIR / f"story_{asset.story_id}" / "assets").resolve()
+        if candidate.is_relative_to(allowed_root):
+            local_file = candidate
+
+    db.query(MangaAssetBinding).filter(MangaAssetBinding.asset_id == asset.id).delete(synchronize_session=False)
+    db.delete(asset)
+    db.commit()
+    if local_file and local_file.exists():
+        await run_blocking(local_file.unlink)
+    return {"ok": True}
+
+
+def _serialize_managed_manga_asset(asset: MangaAsset) -> dict[str, object]:
+    return {
+        "id": asset.id,
+        "owner_user_id": asset.owner_user_id,
+        "story_id": asset.story_id,
+        "chapter_id": asset.chapter_id,
+        "asset_type": asset.asset_type,
+        "name": asset.name,
+        "storage_path": asset.storage_path,
+        "source_type": asset.source_type,
+        "status": asset.status,
+        "metadata": asset.metadata_json,
+        "created_at": asset.created_at.isoformat() if asset.created_at else None,
+    }
+
+
+def _managed_manga_asset_local_path(storage_path: str) -> Path | None:
+    normalized = str(storage_path or "").replace("\\", "/")
+    if normalized.startswith("manga_outputs/"):
+        candidate = (_MANGA_OUTPUTS_DIR / normalized[len("manga_outputs/"):]).resolve()
+    elif normalized.startswith("/static/manga/"):
+        candidate = (_MANGA_OUTPUTS_DIR / normalized[len("/static/manga/"):]).resolve()
+    elif Path(normalized).is_absolute():
+        candidate = Path(normalized).resolve()
+    else:
+        return None
+    return candidate if candidate.is_relative_to(_MANGA_OUTPUTS_DIR.resolve()) else None
+
+
+@router.post("/api/manga-assets/{asset_id}/redraw")
+async def redraw_managed_manga_asset(asset_id: int, request: Request, db: Session = Depends(get_db)):
+    """重绘漫画资产，并在成功后原子切换到新图片。"""
+    user = _require_user(request, db)
+    asset = db.get(MangaAsset, asset_id)
+    if not asset:
+        raise HTTPException(404, "漫画资产未找到")
+    if asset.owner_user_id != user.id:
+        raise HTTPException(403, "漫画资产访问被拒绝")
+
+    body = await request.json()
+    if not isinstance(body, dict):
+        raise HTTPException(422, "请求体必须是对象")
+    prompt = str(body.get("prompt") or "").strip()
+    if not prompt:
+        raise HTTPException(422, "重绘提示词不能为空")
+    if len(prompt) > 24000:
+        raise HTTPException(422, "重绘提示词不能超过 24000 个字符")
+    mode = str(body.get("mode") or "full").strip().lower()
+    if mode not in {"full", "partial"}:
+        raise HTTPException(422, "重绘方式仅支持 full 或 partial")
+
+    old_local_path = _managed_manga_asset_local_path(asset.storage_path)
+    source_value = str(asset.storage_path or "").strip()
+    if source_value.startswith(("http://", "https://")):
+        source_value = validate_remote_media_url(source_value)
+    source_path_text = str(old_local_path) if old_local_path and old_local_path.exists() else ensure_local_media_path(source_value, "manga")
+    if not source_path_text:
+        raise HTTPException(404, "漫画资产原图不存在，请刷新后重试")
+    source_path = Path(source_path_text)
+
+    mask_bytes: bytes | None = None
+    if mode == "partial":
+        encoded_mask = str(body.get("mask") or "").strip()
+        if not encoded_mask:
+            raise HTTPException(422, "局部重绘必须提供涂抹蒙版")
+        if len(encoded_mask) > 20 * 1024 * 1024:
+            raise HTTPException(413, "重绘蒙版不能超过 20MB")
+        try:
+            mask_bytes = base64.b64decode(encoded_mask.split(",", 1)[-1], validate=True)
+            with Image.open(BytesIO(mask_bytes)) as mask_image:
+                mask_image.verify()
+        except Exception as exc:
+            raise HTTPException(422, "重绘蒙版不是有效图片") from exc
+
+    relative_dir = Path(f"story_{asset.story_id}") / "assets"
+    output_dir = _MANGA_OUTPUTS_DIR / relative_dir
+    output_path = output_dir / f"asset_redraw_{uuid.uuid4().hex}.png"
+    await run_blocking(output_dir.mkdir, parents=True, exist_ok=True)
+
+    _check_and_consume_quota_wrapper(
+        user.id,
+        "manga.image.generate.monthly_limit",
+        1,
+        db,
+        deduct=False,
+        request=request,
+        provider_kind="image",
+    )
+    api_key = _user_image_api_key(request)
+    _configure_image_service_from_db(request, db)
+    try:
+        saved_path = await image2_service.edit_existing_image(
+            prompt=prompt,
+            source_image_path=source_path,
+            output_path=output_path,
+            mask_bytes=mask_bytes,
+            api_key=api_key or None,
+        )
+    except Exception as exc:
+        if output_path.exists():
+            await run_blocking(output_path.unlink)
+        logger.warning("漫画资产重绘失败 asset_id=%s: %s", asset.id, exc)
+        raise HTTPException(502, public_error_message(exc, "重绘漫画资产失败，请稍后重试")) from exc
+
+    saved_text = str(saved_path or "").strip()
+    asset.storage_path = saved_text if saved_text.startswith(("http://", "https://")) else f"manga_outputs/{relative_dir.as_posix()}/{output_path.name}"
+    metadata = dict(asset.metadata_json or {})
+    try:
+        previous_revision = max(0, int(metadata.get("revision") or 0))
+    except (TypeError, ValueError):
+        previous_revision = 0
+    metadata.update({
+        "prompt": prompt,
+        "provider": "image2",
+        "revision": previous_revision + 1,
+        "redraw_mode": mode,
+    })
+    asset.metadata_json = metadata
+    asset.source_type = "generated"
+    db.commit()
+    db.refresh(asset)
+
+    _check_and_consume_quota_wrapper(
+        user.id,
+        "manga.image.generate.monthly_limit",
+        1,
+        db,
+        deduct=True,
+        request=request,
+        provider_kind="image",
+    )
+    if old_local_path and old_local_path != output_path and old_local_path.exists():
+        await run_blocking(old_local_path.unlink)
+    return _serialize_managed_manga_asset(asset)
+
+
+_MANGA_ASSET_ANALYSIS_TYPES = {"character_reference", "scene_reference", "prop_reference"}
+
+
+def _normalize_manga_asset_analysis_suggestions(raw_suggestions: object) -> list[dict[str, object]]:
+    """校验并限制章节级漫画资产分析缓存。"""
+    if not isinstance(raw_suggestions, list):
+        return []
+    normalized: list[dict[str, object]] = []
+    for item in raw_suggestions[:18]:
+        if not isinstance(item, dict):
+            continue
+        asset_type = str(item.get("asset_type") or "").strip()
+        name = str(item.get("name") or "").strip()[:255]
+        if asset_type not in _MANGA_ASSET_ANALYSIS_TYPES or not name:
+            continue
+        candidates: list[dict[str, object]] = []
+        raw_candidates = item.get("candidates")
+        if isinstance(raw_candidates, list):
+            for candidate in raw_candidates[:4]:
+                if not isinstance(candidate, dict) or isinstance(candidate.get("id"), bool):
+                    continue
+                try:
+                    candidate_id = int(candidate.get("id"))
+                except (TypeError, ValueError):
+                    continue
+                candidate_type = str(candidate.get("asset_type") or "").strip()
+                if candidate_id <= 0 or candidate_type not in _MANGA_ASSET_ANALYSIS_TYPES:
+                    continue
+                try:
+                    match_score = int(candidate.get("match_score") or 0)
+                except (TypeError, ValueError):
+                    match_score = 0
+                candidates.append({
+                    "id": candidate_id,
+                    "name": str(candidate.get("name") or "").strip()[:255],
+                    "asset_type": candidate_type,
+                    "storage_path": str(candidate.get("storage_path") or "").strip()[:500],
+                    "match_score": max(0, min(match_score, 100)),
+                    "match_reason": str(candidate.get("match_reason") or "").strip()[:500],
+                })
+        normalized.append({
+            "asset_type": asset_type,
+            "name": name,
+            "description": str(item.get("description") or "").strip()[:4000],
+            "evidence": str(item.get("evidence") or "").strip()[:2000],
+            "prompt": str(item.get("prompt") or "").strip()[:24000],
+            "candidates": candidates,
+        })
+    return normalized
+
+
+def _stored_manga_asset_analysis_suggestions(chapter: Chapter) -> list[dict[str, object]]:
+    payload = chapter.manga_asset_analysis_json
+    if isinstance(payload, dict):
+        return _normalize_manga_asset_analysis_suggestions(payload.get("suggestions"))
+    return []
+
+
+@router.get("/api/chapters/{chapter_id}/manga-assets/analysis")
+async def get_chapter_manga_asset_analysis(
+    chapter_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """读取当前章节已保存的漫画资产分析。"""
+    user = _require_user(request, db)
+    chapter = _require_chapter_for_user(chapter_id, user, db)
+    return {"chapter_id": chapter.id, "suggestions": _stored_manga_asset_analysis_suggestions(chapter)}
+
+
+@router.put("/api/chapters/{chapter_id}/manga-assets/analysis")
+async def save_chapter_manga_asset_analysis(
+    chapter_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """显式保存用户编辑后的漫画资产提示词。"""
+    user = _require_user(request, db)
+    chapter = _require_chapter_for_user(chapter_id, user, db)
+    body = await request.json()
+    if not isinstance(body, dict) or not isinstance(body.get("suggestions"), list):
+        raise HTTPException(422, "suggestions 必须是数组")
+    suggestions = _normalize_manga_asset_analysis_suggestions(body["suggestions"])
+    chapter.manga_asset_analysis_json = {"version": 1, "suggestions": suggestions}
+    db.commit()
+    return {"chapter_id": chapter.id, "suggestions": suggestions}
+
+
+@router.post("/api/chapters/{chapter_id}/manga-assets/analyze")
+async def analyze_chapter_manga_assets(chapter_id: int, request: Request, db: Session = Depends(get_db)):
+    """分析当前章节中适合建立一致性参考的角色、场景和道具。"""
+    user = _require_user(request, db)
+    chapter = _require_chapter_for_user(chapter_id, user, db)
+    chapter_text = str(chapter.novel_content or "").strip()
+    if not chapter_text:
+        raise HTTPException(422, "当前章节没有可分析的正文")
+    story = chapter.story
+    character_context = str(getattr(story, "character_profiles", "") or "").strip()
+    structured_characters = getattr(story, "characters", None)
+
+    _check_and_consume_quota_wrapper(
+        user.id,
+        "ai.text.advanced_calls.monthly_limit",
+        1,
+        db,
+        deduct=False,
+        request=request,
+        provider_kind="text",
+    )
+    api_key = _user_deepseek_api_key(request, db)
+    if not api_key:
+        raise HTTPException(400, "文本 AI 服务未配置")
+
+    try:
+        result = await analyze_visual_assets(
+            chapter_text=chapter_text,
+            character_context=character_context,
+            structured_characters=structured_characters,
+            api_key=api_key,
+            max_items=6,
+        )
+    except Exception as exc:
+        logger.exception("漫画资产分析失败 chapter_id=%s", chapter_id)
+        raise HTTPException(502, public_error_message(exc, "漫画资产分析失败，请稍后重试")) from exc
+
+    type_map = {
+        "characters": "character_reference",
+        "scenes": "scene_reference",
+        "props": "prop_reference",
+    }
+    existing_assets = (
+        db.query(MangaAsset)
+        .filter(
+            MangaAsset.story_id == chapter.story_id,
+            MangaAsset.owner_user_id == user.id,
+            MangaAsset.status == "active",
+        )
+        .order_by(MangaAsset.id.desc())
+        .all()
+    )
+    normalized: list[dict[str, object]] = []
+    for group, asset_type in type_map.items():
+        items = result.get(group, []) if isinstance(result, dict) else []
+        if not isinstance(items, list):
+            continue
+        for item in items[:6]:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name") or "").strip()[:255]
+            if not name:
+                continue
+            def normalize_match_text(value: str) -> str:
+                return re.sub(r"[^\w\u4e00-\u9fff]+", "", value.lower())
+
+            normalized_name = normalize_match_text(name)
+            ranked_candidates: list[tuple[int, MangaAsset]] = []
+            for asset in existing_assets:
+                if asset.asset_type != asset_type:
+                    continue
+                normalized_asset_name = normalize_match_text(asset.name)
+                score = 100 if normalized_asset_name == normalized_name else 0
+                if not score and len(normalized_name) >= 2 and normalized_name in normalized_asset_name:
+                    score = 70
+                if not score and len(normalized_asset_name) >= 2 and normalized_asset_name in normalized_name:
+                    score = 60
+                if score:
+                    ranked_candidates.append((score, asset))
+            ranked_candidates.sort(key=lambda item: (-item[0], -item[1].id))
+            candidates = [
+                {
+                    "id": asset.id,
+                    "name": asset.name,
+                    "asset_type": asset.asset_type,
+                    "storage_path": asset.storage_path,
+                    "match_score": score,
+                    "match_reason": "名称完全匹配" if score == 100 else "名称相近，请确认形象是否一致",
+                }
+                for score, asset in ranked_candidates[:4]
+            ]
+            normalized.append({
+                "asset_type": asset_type,
+                "name": name,
+                "description": str(item.get("description") or "").strip()[:4000],
+                "evidence": str(item.get("evidence") or "").strip()[:2000],
+                "prompt": str(item.get("prompt") or "").strip()[:24000],
+                "candidates": candidates,
+            })
+
+    normalized = _normalize_manga_asset_analysis_suggestions(normalized)
+    chapter.manga_asset_analysis_json = {"version": 1, "suggestions": normalized}
+    _check_and_consume_quota_wrapper(
+        user.id,
+        "ai.text.advanced_calls.monthly_limit",
+        1,
+        db,
+        deduct=True,
+        request=request,
+        provider_kind="text",
+    )
+    db.commit()
+    return {"chapter_id": chapter.id, "suggestions": normalized}
+
+
+def _validate_manga_asset_generation_item(body: object) -> dict[str, str]:
+    if not isinstance(body, dict):
+        raise HTTPException(422, "资产生成项必须是对象")
+    asset_type = str(body.get("asset_type") or "").strip()
+    allowed_types = {"character_reference", "scene_reference", "prop_reference"}
+    if asset_type not in allowed_types:
+        raise HTTPException(422, "仅支持生成角色、场景或道具资产")
+    name = str(body.get("name") or "").strip()
+    prompt = str(body.get("prompt") or "").strip()
+    if not name:
+        raise HTTPException(422, "资产名称不能为空")
+    if len(name) > 255:
+        raise HTTPException(422, "资产名称不能超过 255 个字符")
+    if not prompt:
+        raise HTTPException(422, "资产提示词不能为空")
+    if len(prompt) > 24000:
+        raise HTTPException(422, "资产提示词不能超过 24000 个字符")
+    return {"asset_type": asset_type, "name": name, "prompt": prompt}
+
+
+async def _generate_and_bind_manga_asset(
+    *,
+    db: Session,
+    chapter_id: int,
+    story_id: int,
+    user_id: int,
+    item: dict[str, str],
+    api_key: str | None,
+) -> dict:
+    asset_type = item["asset_type"]
+    name = item["name"]
+    prompt = item["prompt"]
+
+    relative_dir = Path(f"story_{story_id}") / "assets"
+    filename = f"asset_{uuid.uuid4().hex}.png"
+    target_dir = _MANGA_OUTPUTS_DIR / relative_dir
+    target_path = target_dir / filename
+    await run_blocking(target_dir.mkdir, parents=True, exist_ok=True)
+
+    try:
+        saved_path = await generate_visual_asset_image(
+            prompt=prompt,
+            output_path=target_path,
+            asset_type=asset_type,
+            api_key=api_key or None,
+            size="1920x1080",
+        )
+    except Exception as exc:
+        if target_path.exists():
+            await run_blocking(target_path.unlink)
+        logger.warning("漫画资产图片生成失败 chapter_id=%s name=%s: %s", chapter_id, name, exc)
+        raise
+
+    saved_text = str(saved_path or "").strip()
+    storage_path = saved_text if saved_text.startswith(("http://", "https://")) else f"manga_outputs/{relative_dir.as_posix()}/{filename}"
+    asset = MangaAsset(
+        owner_user_id=user_id,
+        story_id=story_id,
+        chapter_id=chapter_id,
+        asset_type=asset_type,
+        name=name,
+        storage_path=storage_path,
+        source_type="generated",
+        status="active",
+        metadata_json={"prompt": prompt, "provider": "image2"},
+    )
+    try:
+        db.add(asset)
+        db.flush()
+        db.add(MangaAssetBinding(
+            asset_id=asset.id,
+            story_id=story_id,
+            chapter_id=chapter_id,
+            binding_role=asset_type.replace("_reference", ""),
+            label=name,
+            priority=0,
+            is_required=False,
+        ))
+        db.commit()
+    except Exception:
+        db.rollback()
+        if target_path.exists():
+            await run_blocking(target_path.unlink)
+        raise
+    db.refresh(asset)
+    return {
+        "id": asset.id,
+        "owner_user_id": asset.owner_user_id,
+        "story_id": asset.story_id,
+        "chapter_id": asset.chapter_id,
+        "asset_type": asset.asset_type,
+        "name": asset.name,
+        "storage_path": asset.storage_path,
+        "source_type": asset.source_type,
+        "status": asset.status,
+        "metadata": asset.metadata_json,
+        "created_at": asset.created_at.isoformat() if asset.created_at else None,
+    }
+
+
+async def _run_manga_asset_batch(
+    *,
+    items: list[dict[str, str]],
+    user_id: int,
+    api_key: str | None,
+    billing_usage_event_id: int | None,
+    style_ref_paths: list[str] | None = None,
+    task_id: str | None = None,
+    story_id: int | None = None,
+    chapter_id: int | None = None,
+    shot_id: int | None = None,
+) -> dict:
+    del shot_id, style_ref_paths
+    if story_id is None or chapter_id is None:
+        raise ValueError("漫画资产批量任务缺少作品或章节信息")
+
+    concurrency = min(len(items), MANGA_ASSET_GENERATION_CONCURRENCY)
+    semaphore = asyncio.Semaphore(concurrency)
+    progress_lock = asyncio.Lock()
+    results: list[dict | None] = [None] * len(items)
+    completed = 0
+    failed = 0
+    running_indices: set[int] = set()
+
+    async def update_progress(index: int, *, state: str, result: dict | None = None, error: str | None = None) -> None:
+        nonlocal completed, failed
+        async with progress_lock:
+            if state == "running":
+                running_indices.add(index)
+            else:
+                running_indices.discard(index)
+                if state == "succeeded":
+                    completed += 1
+                else:
+                    failed += 1
+                results[index] = {
+                    "index": index,
+                    "name": items[index]["name"],
+                    "asset_type": items[index]["asset_type"],
+                    "status": state,
+                    "asset": result,
+                    "error": error,
+                }
+            task_manager.update_task_metadata(
+                task_id,
+                stage="generating_assets",
+                message=f"正在并行生成资产图，已完成 {completed + failed}/{len(items)} 张",
+                total=len(items),
+                completed=completed,
+                failed=failed,
+                running_indices=sorted(running_indices),
+                concurrency=concurrency,
+            )
+
+    async def generate_one(index: int, item: dict[str, str]) -> None:
+        async with semaphore:
+            await update_progress(index, state="running")
+            item_db = SessionLocal()
+            try:
+                asset = await _generate_and_bind_manga_asset(
+                    db=item_db,
+                    chapter_id=chapter_id,
+                    story_id=story_id,
+                    user_id=user_id,
+                    item=item,
+                    api_key=api_key,
+                )
+                await update_progress(index, state="succeeded", result=asset)
+            except Exception as exc:
+                item_db.rollback()
+                logger.exception(
+                    "批量生成漫画资产失败 chapter_id=%s index=%s name=%s",
+                    chapter_id,
+                    index,
+                    item["name"],
+                )
+                await update_progress(
+                    index,
+                    state="failed",
+                    error=public_error_message(exc, "漫画资产生成失败，请稍后重试"),
+                )
+            finally:
+                item_db.close()
+
+    try:
+        await asyncio.gather(*(generate_one(index, item) for index, item in enumerate(items)))
+    finally:
+        if billing_usage_event_id:
+            billing_db = SessionLocal()
+            try:
+                from services.ai.resolver import complete_ai_call_by_usage_event
+
+                complete_ai_call_by_usage_event(
+                    billing_db,
+                    billing_usage_event_id,
+                    success=True,
+                    image_count=completed,
+                    usage_source="provider",
+                )
+            finally:
+                billing_db.close()
+            task_manager.update_task_metadata(
+                task_id,
+                billing_usage_event_id=0,
+                billing_settled_images=completed,
+            )
+
+    task_manager.update_task_metadata(
+        task_id,
+        stage="succeeded",
+        message=f"批量生成完成：成功 {completed} 张，失败 {failed} 张",
+        total=len(items),
+        completed=completed,
+        failed=failed,
+        running_indices=[],
+        concurrency=concurrency,
+    )
+    return {
+        "status": "completed",
+        "total": len(items),
+        "completed": completed,
+        "failed": failed,
+        "items": [result for result in results if result is not None],
+    }
+
+
+@router.post("/api/chapters/{chapter_id}/manga-assets/generate", status_code=201)
+async def generate_chapter_manga_asset(
+    chapter_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """根据可编辑提示词生成漫画资产并自动绑定到当前章节。"""
+    user = _require_user(request, db)
+    chapter = _require_chapter_for_user(chapter_id, user, db)
+    item = _validate_manga_asset_generation_item(await request.json())
+    _check_and_consume_quota_wrapper(
+        user.id,
+        "manga.image.generate.monthly_limit",
+        1,
+        db,
+        deduct=False,
+        request=request,
+        provider_kind="image",
+    )
+    api_key = _user_image_api_key(request)
+    _configure_image_service_from_db(request, db)
+    try:
+        asset = await _generate_and_bind_manga_asset(
+            db=db,
+            chapter_id=chapter.id,
+            story_id=chapter.story_id,
+            user_id=user.id,
+            item=item,
+            api_key=api_key,
+        )
+    except Exception as exc:
+        raise HTTPException(502, public_error_message(exc, "生成漫画资产失败，请稍后重试")) from exc
+    _check_and_consume_quota_wrapper(
+        user.id,
+        "manga.image.generate.monthly_limit",
+        1,
+        db,
+        deduct=True,
+        request=request,
+        provider_kind="image",
+    )
+    return asset
+
+
+@router.post("/api/chapters/{chapter_id}/manga-assets/generate-batch", status_code=202)
+async def generate_chapter_manga_assets_batch(
+    chapter_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """提交章节漫画资产批量出图任务，响应返回后仍在后台并发执行。"""
+    user = _require_user(request, db)
+    chapter = _require_chapter_for_user(chapter_id, user, db)
+    body = await request.json()
+    raw_items = body.get("items") if isinstance(body, dict) else None
+    if not isinstance(raw_items, list) or not raw_items:
+        raise HTTPException(422, "请至少选择一个待生成资产")
+    if len(raw_items) > MANGA_ASSET_BATCH_MAX_ITEMS:
+        raise HTTPException(422, f"单次最多生成 {MANGA_ASSET_BATCH_MAX_ITEMS} 个资产")
+    items = [_validate_manga_asset_generation_item(item) for item in raw_items]
+
+    quota_result = _check_and_consume_quota_wrapper(
+        user.id,
+        "manga.image.generate.monthly_limit",
+        len(items),
+        db,
+        deduct=False,
+        request=request,
+        provider_kind="image",
+    )
+    api_key = _user_image_api_key(request)
+    _configure_image_service_from_db(request, db)
+    import main as main_mod
+
+    usage_event_id = quota_result.get("usage_event_id")
+    main_mod._detach_pending_platform_points(request, usage_event_id)
+    task_id = f"manga_asset_batch_{chapter.id}_{uuid.uuid4().hex[:12]}"
+    try:
+        await task_manager.submit_task(
+            task_id=task_id,
+            task_type="manga_asset_batch_generation",
+            coro_func=_run_manga_asset_batch,
+            items=items,
+            user_id=user.id,
+            api_key=api_key,
+            billing_usage_event_id=usage_event_id,
+            story_id=chapter.story_id,
+            chapter_id=chapter.id,
+            timeout=max(600.0, len(items) * 180.0),
+            max_retries=0,
+            quota_user_id=user.id,
+            quota_feature_key="manga.image.generate.monthly_limit",
+            quota_amount=len(items),
+            quota_usage_event_id=usage_event_id,
+            metadata={
+                "owner_user_id": user.id,
+                "stage": "queued",
+                "message": f"{len(items)} 个资产已加入后台生成队列",
+                "running_stage": "generating_assets",
+                "running_message": "正在并行生成漫画资产图",
+                "total": len(items),
+                "completed": 0,
+                "failed": 0,
+                "running_indices": [],
+                "concurrency": min(len(items), MANGA_ASSET_GENERATION_CONCURRENCY),
+                "item_names": [item["name"] for item in items],
+            },
+        )
+    except Exception as exc:
+        if usage_event_id:
+            refund_db = SessionLocal()
+            try:
+                from services.ai.resolver import refund_ai_call
+
+                refund_ai_call(refund_db, usage_event_id, error_code="task_submission_failed")
+            finally:
+                refund_db.close()
+        raise HTTPException(500, public_error_message(exc, "提交漫画资产后台任务失败，请稍后重试")) from exc
+
+    return {
+        "task_id": task_id,
+        "status": "pending",
+        "total": len(items),
+        "message": "资产已加入后台生成队列，关闭弹窗或网页不会中断任务",
+    }
+
+
+def _require_shot_for_user(shot_id: int, user: User, db: Session) -> VideoShot:
+    shot = db.get(VideoShot, shot_id)
+    if not shot:
+        raise HTTPException(404, "视频分镜未找到")
+    if not shot.scene:
+        raise HTTPException(404, "场景未找到")
+    _require_chapter_for_user(shot.scene.chapter_id, user, db)
+    return shot
+
+
+def _require_video_asset_for_user(asset_id: int, user: User, db: Session) -> VideoAsset:
+    asset = db.get(VideoAsset, asset_id)
+    if not asset:
+        raise HTTPException(404, "视频素材未找到")
+
+    linked_story_ids: set[int] = set()
+    chapter_id = None
+    if asset.story_id is not None:
+        linked_story_ids.add(asset.story_id)
+    if asset.chapter_id is not None:
+        chapter = db.get(Chapter, asset.chapter_id)
+        if not chapter:
+            raise HTTPException(404, "视频素材关联章节不存在")
+        linked_story_ids.add(chapter.story_id)
+        chapter_id = chapter.id
+    if asset.scene_id is not None:
+        scene = db.get(ScriptScene, asset.scene_id)
+        if not scene:
+            raise HTTPException(404, "视频素材关联场景不存在")
+        scene_chapter = db.get(Chapter, scene.chapter_id)
+        if not scene_chapter:
+            raise HTTPException(404, "视频素材关联场景的章节不存在")
+        linked_story_ids.add(scene_chapter.story_id)
+        chapter_id = chapter_id or scene_chapter.id
+    if asset.shot_id is not None:
+        shot = db.get(VideoShot, asset.shot_id)
+        if not shot or not shot.scene:
+            raise HTTPException(404, "视频素材关联分镜不存在")
+        shot_chapter = db.get(Chapter, shot.scene.chapter_id)
+        if not shot_chapter:
+            raise HTTPException(404, "视频素材关联分镜的章节不存在")
+        linked_story_ids.add(shot_chapter.story_id)
+        chapter_id = chapter_id or shot_chapter.id
+    if not linked_story_ids:
+        raise HTTPException(404, "视频素材未关联有效章节")
+    if len(linked_story_ids) != 1:
+        raise HTTPException(409, "视频素材关联的作品不一致")
+
+    if chapter_id is not None:
+        _require_chapter_for_user(chapter_id, user, db)
+    else:
+        _require_story_for_user(next(iter(linked_story_ids)), user, db)
+    return asset
+
+
+def _require_reference_assets_for_story(
+    asset_ids: list[int],
+    story_id: int,
+    db: Session,
+) -> list[VideoAsset]:
+    if not asset_ids:
+        return []
+    unique_ids = list(dict.fromkeys(int(asset_id) for asset_id in asset_ids))
+    assets = db.query(VideoAsset).filter(VideoAsset.id.in_(unique_ids)).all()
+    asset_map = {asset.id: asset for asset in assets}
+    if len(asset_map) != len(unique_ids):
+        raise HTTPException(404, "参考素材不存在")
+
+    for asset_id in unique_ids:
+        asset = asset_map[asset_id]
+        linked_story_ids: set[int] = set()
+        if asset.story_id is not None:
+            linked_story_ids.add(asset.story_id)
+        if asset.chapter_id is not None:
+            chapter = db.get(Chapter, asset.chapter_id)
+            if not chapter:
+                raise HTTPException(404, "参考素材关联章节不存在")
+            linked_story_ids.add(chapter.story_id)
+        if asset.scene_id is not None:
+            scene = db.get(ScriptScene, asset.scene_id)
+            chapter = db.get(Chapter, scene.chapter_id) if scene else None
+            if not chapter:
+                raise HTTPException(404, "参考素材关联场景不存在")
+            linked_story_ids.add(chapter.story_id)
+        if asset.shot_id is not None:
+            shot = db.get(VideoShot, asset.shot_id)
+            chapter = db.get(Chapter, shot.scene.chapter_id) if shot and shot.scene else None
+            if not chapter:
+                raise HTTPException(404, "参考素材关联分镜不存在")
+            linked_story_ids.add(chapter.story_id)
+        if linked_story_ids != {story_id}:
+            raise HTTPException(403, "参考素材不属于当前作品")
+
+    return [asset_map[asset_id] for asset_id in unique_ids]
 
 
 
@@ -600,6 +1896,17 @@ def _merge_style_prompt(base_prompt: str, style_template: str | None, style_name
     return f"{style_text}. {base}"
 
 
+def _merge_style_prompt_for_reference_image(
+    base_prompt: str,
+    style_ref_path: str | None,
+    style_template: str | None,
+    style_name: str | None,
+) -> str:
+    """已有风格参考图时只保留内容提示词，避免文字预设覆盖图片画风。"""
+    base = (base_prompt or "").strip()
+    return base if style_ref_path else _merge_style_prompt(base, style_template, style_name)
+
+
 def _build_shot_asset_context(shot: VideoShot, asset_type: str, target_name: str = "") -> str:
     """从 shot 已提取的关键元素构建资产生成上下文，确保形象与时代背景一致。
 
@@ -679,7 +1986,6 @@ def _find_character_struct(story: Story | None, character_name: str) -> dict | N
 
 def _build_character_sheet_prompt(
     character_name: str,
-    style_ctx: dict,
     story: Story | None,
     note_from_profiles: str,
     inherited_prompt: str,
@@ -705,11 +2011,10 @@ def _build_character_sheet_prompt(
         f"Personality profile (Big Five): {traits}. "
         f"Appearance details: {note_from_profiles or 'detailed facial features, hairstyle, eye shape, body type, signature colors required'}. "
         f"Reference anchor: {inherited_prompt or 'consistent identity markers across all frames'}. "
-        f"Style requirement: strictly follow the visual style of the attached style reference image. " f"No other art style, rendering technique, or aesthetic direction applies. "
         "Mandatory consistency: lock face shape, eye distance, nose bridge contour, lip shape, jawline angle, hair parting, and 3 signature color swatches across ALL generated frames. "
         "This is a master reference sheet for video animation consistency. Every subsequent frame MUST match these identity markers exactly."
     )
-    return _merge_style_prompt(card, style_ctx.get("prompt_template"), style_ctx.get("name"))
+    return card
 
 
 def _get_active_frame_assets_for_shot(shot_id: int, db: Session) -> list[VideoAsset]:
@@ -744,7 +2049,15 @@ def _collect_shot_reference_asset_ids(
     if include_frames:
         ids.extend([a.id for a in _get_active_frame_assets_for_shot(shot.id, db)])
     if explicit_asset_ids:
-        ids.extend([int(x) for x in explicit_asset_ids if str(x).isdigit()])
+        explicit_ids = [int(x) for x in explicit_asset_ids if str(x).isdigit()]
+        chapter = shot.scene.chapter if shot.scene and shot.scene.chapter else None
+        if chapter is None and shot.scene:
+            chapter = db.get(Chapter, shot.scene.chapter_id)
+        story_id = chapter.story_id if chapter else None
+        if story_id is None:
+            raise HTTPException(404, "分镜未关联有效作品")
+        _require_reference_assets_for_story(explicit_ids, story_id, db)
+        ids.extend(explicit_ids)
     return list(dict.fromkeys(ids))
 
 
@@ -1003,6 +2316,8 @@ def _build_reference_constraints_block(character_assets: list[VideoAsset]) -> st
         ("story_character_reference", "人物参考图"),
         ("scene_reference", "场景参考图"),
         ("prop_reference", "道具参考图"),
+        ("style_reference", "风格参考图"),
+        ("style", "风格参考图"),
         ("frame", "首尾帧参考图"),
     ]
 
@@ -1047,6 +2362,10 @@ def _build_reference_constraints_block(character_assets: list[VideoAsset]) -> st
         elif "道具" in label:
             constraint_parts.append(
                 "道具参考图确保道具一致性：材质、颜色、大小、形状、纹理必须与道具参考图完全相同。"
+            )
+        elif "风格" in label:
+            constraint_parts.append(
+                "风格参考图只决定画面媒介、笔触、色调、光影和渲染质感，不复制其中的角色、场景或道具。"
             )
 
     parts = ["<<<REFERENCE_ASSET_GUIDE>>>"]
@@ -1094,49 +2413,224 @@ def _resolve_asset_reference_urls(
     return urls
 
 
-def _encode_file_to_base64_data_uri(file_path: str) -> str | None:
-    """读取本地文件并编码为 base64 data URI。"""
-    import base64 as b64
-    try:
-        with open(file_path, "rb") as fh:
-            data = fh.read()
-        ext = os.path.splitext(file_path)[1].lower()
-        mime_map = {
-            ".png": "image/png",
-            ".jpg": "image/jpeg",
-            ".jpeg": "image/jpeg",
-            ".webp": "image/webp",
-            ".gif": "image/gif",
+def _sanitize_media_boundary_value(value):
+    """递归移除持久化、响应和日志边界中的媒体凭据与内联二进制。"""
+    if isinstance(value, dict):
+        return {
+            str(key): sanitized
+            for key, item in value.items()
+            if (sanitized := _sanitize_media_boundary_value(item)) is not None
         }
-        mime = mime_map.get(ext, "image/png")
-        return f"data:{mime};base64,{b64.b64encode(data).decode()}"
-    except Exception:
-        logger.warning("无法读取参考图片文件: %s", file_path)
+    if isinstance(value, (list, tuple)):
+        return [
+            sanitized
+            for item in value
+            if (sanitized := _sanitize_media_boundary_value(item)) is not None
+        ]
+    if isinstance(value, str):
+        text = value.strip()
+        if text.lower().startswith("data:"):
+            return None
+        if text.lower().startswith(("http://", "https://")):
+            return safe_media_url_for_log(text)
+    return value
+
+
+def _sanitize_video_job_request_payload(payload: dict | None) -> dict:
+    """生成只含资产标识、角色元数据和安全 URL 标识的任务快照。"""
+    sanitized = _sanitize_media_boundary_value(payload or {})
+    return sanitized if isinstance(sanitized, dict) else {}
+
+
+def _sanitize_video_provider_result(result: dict | None) -> dict:
+    """递归清理供应商结果，禁止签名参数和 Base64 越过安全边界。"""
+    sanitized = _sanitize_media_boundary_value(result or {})
+    return sanitized if isinstance(sanitized, dict) else {}
+
+
+def _projected_base64_size(raw_size: int) -> int:
+    return 4 * ((raw_size + 2) // 3)
+
+
+def _encode_reference_files_to_base64_data_uris(file_paths: list[str]) -> list[str]:
+    """先完成整批大小预检，再以分块方式编码本地参考文件。"""
+    import base64 as b64
+
+    inspected: list[tuple[str, int]] = []
+    total_bytes = 0
+    projected_bytes = 0
+    for file_path in file_paths:
+        try:
+            size = os.stat(file_path).st_size
+        except OSError as exc:
+            raise ValueError(f"无法读取参考文件: {file_path}") from exc
+        if size > MAX_VIDEO_REFERENCE_FILE_BYTES:
+            raise ValueError("单个参考文件超过 30 MiB 限制")
+        total_bytes += size
+        projected_bytes += _projected_base64_size(size)
+        if total_bytes > MAX_VIDEO_REFERENCE_TOTAL_BYTES:
+            raise ValueError("参考文件累计大小超过限制")
+        if projected_bytes > MAX_VIDEO_REFERENCE_BASE64_BYTES:
+            raise ValueError("参考文件投影 Base64 大小超过限制")
+        inspected.append((file_path, size))
+
+    encoded: list[str] = []
+    mime_map = {
+        ".png": "image/png",
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".webp": "image/webp",
+        ".gif": "image/gif",
+    }
+    for file_path, _size in inspected:
+        chunks: list[bytes] = []
+        carry = b""
+        with open(file_path, "rb") as fh:
+            while chunk := fh.read(1024 * 1024):
+                block = carry + chunk
+                aligned = len(block) - (len(block) % 3)
+                if aligned:
+                    chunks.append(b64.b64encode(block[:aligned]))
+                carry = block[aligned:]
+        if carry:
+            chunks.append(b64.b64encode(carry))
+        mime = mime_map.get(os.path.splitext(file_path)[1].lower(), "image/png")
+        encoded.append(f"data:{mime};base64,{b''.join(chunks).decode('ascii')}")
+    return encoded
+
+
+def _preencode_local_video_references(
+    file_paths: list[str],
+    *,
+    remote_reference_count: int = 0,
+) -> list[str]:
+    """在读取任一文件前同时校验引用总数与本地文件预算。"""
+    if len(file_paths) + remote_reference_count > MAX_VIDEO_REFERENCE_COUNT:
+        raise ValueError(f"视频参考输入最多允许 {MAX_VIDEO_REFERENCE_COUNT} 张")
+    return _encode_reference_files_to_base64_data_uris(file_paths)
+
+
+def _prepare_video_reference_images(reference_inputs: list[str]) -> list[str]:
+    """整批预检本地引用，并保持本地文件与远程 URL 的原始顺序。"""
+    if len(reference_inputs) > MAX_VIDEO_REFERENCE_COUNT:
+        raise ValueError(f"视频参考输入最多允许 {MAX_VIDEO_REFERENCE_COUNT} 张")
+    local_paths = [
+        value
+        for value in reference_inputs
+        if not value.lower().startswith(("http://", "https://", "data:"))
+    ]
+    encoded_local = iter(
+        _preencode_local_video_references(
+            local_paths,
+            remote_reference_count=len(reference_inputs) - len(local_paths),
+        )
+    )
+    return [
+        value
+        if value.lower().startswith(("http://", "https://", "data:"))
+        else next(encoded_local)
+        for value in reference_inputs
+    ]
+
+
+def _validate_video_reference_count(reference_count: int) -> None:
+    """在计费和上游调用前拒绝超出供应商硬上限的最终引用集合。"""
+    if reference_count > MAX_VIDEO_REFERENCE_COUNT:
+        raise ValueError(f"视频参考输入最多允许 {MAX_VIDEO_REFERENCE_COUNT} 张")
+
+
+def _encode_file_to_base64_data_uri(file_path: str) -> str | None:
+    """兼容单文件调用，并复用整批预检与分块编码。"""
+    try:
+        return _encode_reference_files_to_base64_data_uris([file_path])[0]
+    except OSError:
+        logger.warning("无法读取参考图片文件: %s", safe_media_url_for_log(file_path))
         return None
 
 
 def _resolve_asset_file_paths(assets: list[VideoAsset]) -> list[str]:
-    """将资产 file_path 解析为绝对磁盘路径（兼容相对路径、/static/video/ 前缀、绝对路径）。"""
+    """将资产解析为图片模型可读取的受控本地路径。"""
     paths: list[str] = []
     for asset in assets:
         fp = (asset.file_path or "").strip()
         if not fp:
             continue
-        # 多级 fallback 查找文件
-        candidates: list[str] = []
-        if os.path.isabs(fp):
-            candidates.append(fp)
-        if fp.startswith("/static/video/"):
-            candidates.append(str(_VIDEO_OUTPUTS_DIR / fp[len("/static/video/"):]))
-        candidates.append(str(_VIDEO_OUTPUTS_DIR / fp))
-        candidates.append(str(Path(__file__).resolve().parent.parent / fp))
-        for local in candidates:
-            if os.path.isfile(local):
-                paths.append(local)
-                break
+        local = ensure_local_media_path(fp, "video") or ensure_local_media_path(fp, "manga")
+        if local:
+            paths.append(local)
         else:
             logger.warning("找不到参考图片文件: %s", fp)
     return paths
+
+
+def _resolve_visual_asset_references(
+    assets: list[VideoAsset],
+) -> list[tuple[VideoAsset, str, str, str]]:
+    """解析并对齐角色、场景、道具资产的路径、标签和角色。"""
+    role_map = {
+        "character_reference": "character",
+        "story_character_reference": "character",
+        "scene_reference": "scene",
+        "prop_reference": "prop",
+        "style_reference": "style",
+        "style": "style",
+    }
+    resolved: list[tuple[VideoAsset, str, str, str]] = []
+    for asset in assets:
+        role = role_map.get(asset.asset_type or "")
+        if not role:
+            continue
+        paths = _resolve_asset_file_paths([asset])
+        if paths:
+            resolved.append((asset, paths[0], asset.name or "", role))
+    return resolved
+
+
+def _resolve_frame_reference_inputs(
+    assets: list[VideoAsset],
+    style_ref_path: str | None = None,
+) -> tuple[list[str], list[str], list[str]]:
+    """解析首尾帧参考图，并保证路径、标签和角色严格同序。"""
+    role_map = {
+        "character_reference": "character",
+        "story_character_reference": "character",
+        "scene_reference": "scene",
+        "prop_reference": "prop",
+        "style_reference": "style",
+        "style": "style",
+        "storyboard_frame": "scene",
+        "frame": "scene",
+    }
+    ref_paths: list[str] = []
+    ref_labels: list[str] = []
+    ref_roles: list[str] = []
+    for asset in assets:
+        role = role_map.get(asset.asset_type or "")
+        if not role:
+            continue
+        paths = _resolve_asset_file_paths([asset])
+        if not paths or paths[0] in ref_paths:
+            continue
+        ref_paths.append(paths[0])
+        ref_labels.append(asset.name or "")
+        ref_roles.append(role)
+    ordered = sorted(
+        zip(ref_paths, ref_labels, ref_roles),
+        key=lambda item: 1 if item[2] == "style" else 0,
+    )
+    ref_paths = [item[0] for item in ordered]
+    ref_labels = [item[1] for item in ordered]
+    ref_roles = [item[2] for item in ordered]
+    if style_ref_path:
+        if style_ref_path in ref_paths:
+            existing_index = ref_paths.index(style_ref_path)
+            ref_paths.pop(existing_index)
+            ref_labels.pop(existing_index)
+            ref_roles.pop(existing_index)
+        ref_paths.append(style_ref_path)
+        ref_labels.append("画面风格参考锚点")
+        ref_roles.append("style")
+    return ref_paths, ref_labels, ref_roles
 
 
 def _compact_json(value: object, limit: int = 600) -> str:
@@ -1448,7 +2942,10 @@ def _resolve_workflow_style_ref_path(
     resolved_path = ensure_local_media_path(ref_url, "manga")
     if resolved_path:
         return resolved_path
-    logger.warning("风格参考图文件不存在或无法下载: %s", ref_url)
+    logger.warning(
+        "风格参考图文件不存在或无法下载: %s",
+        safe_media_url_for_log(ref_url),
+    )
     return None
 
 
@@ -1485,6 +2982,15 @@ async def generate_chapter_screenplay(
 ):
     user = _require_user(request, db)
     chapter = _require_chapter_for_user(chapter_id, user, db)
+    _check_and_consume_quota_wrapper(
+        user.id,
+        "ai.text.advanced_calls.monthly_limit",
+        1,
+        db,
+        deduct=False,
+        request=request,
+        provider_kind="text",
+    )
 
     # 娉ㄥ叆鏁呬簨绾т笂涓嬫枃淇℃伅
     story = chapter.story
@@ -1500,6 +3006,7 @@ async def generate_chapter_screenplay(
         story_memory=getattr(story, 'story_memory', None),
         chapter_memory_summary=chapter.memory_summary,
         story_outline=getattr(story, 'outline', None),
+        strict_ai=True,
     )
 
     _clear_chapter_scenes(chapter_id, db)
@@ -1527,6 +3034,15 @@ async def generate_chapter_screenplay(
         scenes.append(scene)
 
     db.commit()
+    _check_and_consume_quota_wrapper(
+        user.id,
+        "ai.text.advanced_calls.monthly_limit",
+        1,
+        db,
+        deduct=True,
+        request=request,
+        provider_kind="text",
+    )
 
     # Refresh to get IDs
     for scene in scenes:
@@ -1571,6 +3087,15 @@ async def regenerate_chapter_scenes(
 ):
     user = _require_user(request, db)
     chapter = _require_chapter_for_user(chapter_id, user, db)
+    _check_and_consume_quota_wrapper(
+        user.id,
+        "ai.text.advanced_calls.monthly_limit",
+        1,
+        db,
+        deduct=False,
+        request=request,
+        provider_kind="text",
+    )
 
     _clear_chapter_scenes(chapter_id, db)
 
@@ -1580,6 +3105,7 @@ async def regenerate_chapter_scenes(
         instruction=body.instruction or "閲嶆柊鐢熸垚",
         scene_count_hint=body.scene_count_hint or 4,
         api_key=_user_deepseek_api_key(request, db),
+        strict_ai=True,
     )
 
     scenes = []
@@ -1603,6 +3129,15 @@ async def regenerate_chapter_scenes(
         scenes.append(scene)
 
     db.commit()
+    _check_and_consume_quota_wrapper(
+        user.id,
+        "ai.text.advanced_calls.monthly_limit",
+        1,
+        db,
+        deduct=True,
+        request=request,
+        provider_kind="text",
+    )
 
     for scene in scenes:
         db.refresh(scene)
@@ -1636,6 +3171,15 @@ async def generate_chapter_storyboard(chapter_id: int, body: dict, request: Requ
     story = chapter.story
     if not chapter.novel_content or not chapter.novel_content.strip():
         raise HTTPException(400, "Chapter content is empty")
+    _check_and_consume_quota_wrapper(
+        user.id,
+        "ai.text.advanced_calls.monthly_limit",
+        1,
+        db,
+        deduct=False,
+        request=request,
+        provider_kind="text",
+    )
 
     shot_count_hint = int(body.get("shot_count_hint") or 0) or 0
     style_preset = str(body.get("style_preset") or "").strip() or "cinematic"
@@ -1685,7 +3229,7 @@ async def generate_chapter_storyboard(chapter_id: int, body: dict, request: Requ
         raise HTTPException(400, "DeepSeek API key not configured")
 
     payload = {
-        "model": deepseek_service.DEEPSEEK_MODEL,
+        "model": deepseek_service.runtime_model(),
         "messages": [
             {"role": "system", "content": "You are a storyboard director. Output strict JSON only."},
             {"role": "user", "content": ai_prompt},
@@ -1698,12 +3242,13 @@ async def generate_chapter_storyboard(chapter_id: int, body: dict, request: Requ
     try:
         async with httpx.AsyncClient(timeout=300) as client:
             resp = await client.post(
-                f"{deepseek_service.DEEPSEEK_BASE_URL}/chat/completions",
+                f"{deepseek_service.runtime_base_url()}/chat/completions",
                 json=payload,
                 headers=deepseek_service._deepseek_auth_headers(api_key),
             )
             resp.raise_for_status()
             ai_data = resp.json()
+            deepseek_service._record_response_usage(ai_data)
             ai_content = str(ai_data["choices"][0]["message"]["content"] or "").strip()
     except Exception as e:
         logger.exception("Chapter storyboard AI call failed")
@@ -1768,6 +3313,15 @@ async def generate_chapter_storyboard(chapter_id: int, body: dict, request: Requ
         shots.append(shot)
 
     db.commit()
+    _check_and_consume_quota_wrapper(
+        user.id,
+        "ai.text.advanced_calls.monthly_limit",
+        1,
+        db,
+        deduct=True,
+        request=request,
+        provider_kind="text",
+    )
     for shot in shots:
         db.refresh(shot)
     return {
@@ -1862,6 +3416,15 @@ async def generate_scene_shots(
     if not scene:
         raise HTTPException(404, "场景未找到")
     _require_chapter_for_user(scene.chapter_id, user, db)
+    _check_and_consume_quota_wrapper(
+        user.id,
+        "ai.text.advanced_calls.monthly_limit",
+        1,
+        db,
+        deduct=False,
+        request=request,
+        provider_kind="text",
+    )
 
     # 娉ㄥ叆瑙掕壊涓婁笅鏂囦俊鎭?
     chapter = db.query(Chapter).filter(Chapter.id == scene.chapter_id).first()
@@ -1882,6 +3445,7 @@ async def generate_scene_shots(
         # Context injection
         character_profiles=character_profiles,
         scene_characters=scene_characters,
+        strict_ai=True,
     )
 
     _clear_scene_shots(scene_id, db)
@@ -1912,6 +3476,15 @@ async def generate_scene_shots(
         shots.append(shot)
 
     db.commit()
+    _check_and_consume_quota_wrapper(
+        user.id,
+        "ai.text.advanced_calls.monthly_limit",
+        1,
+        db,
+        deduct=True,
+        request=request,
+        provider_kind="text",
+    )
 
     for shot in shots:
         db.refresh(shot)
@@ -1963,7 +3536,6 @@ async def generate_scene_concept_art(
         raise HTTPException(404, "场景未找到")
     _require_chapter_for_user(scene.chapter_id, user, db)
 
-    style_preset_name = (body.get("style_preset") or "").strip()
     overwrite = body.get("overwrite", False)
     explicit_ref_ids_raw = body.get("reference_asset_ids") or []
     explicit_ref_ids = [int(x) for x in explicit_ref_ids_raw if str(x).isdigit()]
@@ -1976,9 +3548,6 @@ async def generate_scene_concept_art(
     characters = scene.characters_json or []
     character_profiles = getattr(story, 'character_profiles', None) if story else ""
 
-    style_ctx = _resolve_effective_style_for_scene(scene, db, requested_style_name=style_preset_name or None)
-    style_name = style_ctx["name"]
-    image_style_params = style_ctx["image_style_params"]
     grounding = _build_story_grounding_block(story, chapter, scene)
     prompt_base = (
         f"Scene concept art: {scene_summary}. Location: {scene_location}. Mood: {scene_mood}. "
@@ -1988,21 +3557,19 @@ async def generate_scene_concept_art(
     )
     ref_assets = _select_character_reference_assets_for_scene(scene, db)
     if explicit_ref_ids:
-        explicit_assets = db.query(VideoAsset).filter(VideoAsset.id.in_(explicit_ref_ids)).all()
+        explicit_assets = _require_reference_assets_for_story(explicit_ref_ids, chapter.story_id, db)
         id_set = {a.id for a in ref_assets}
         for a in explicit_assets:
             if a.id not in id_set:
                 ref_assets.append(a)
                 id_set.add(a.id)
+    resolved_refs = _resolve_visual_asset_references(ref_assets)
+    ref_assets = [asset for asset, _, _, _ in resolved_refs]
     ref_block = _build_reference_constraints_block(ref_assets)
-    ref_paths = _resolve_asset_file_paths(ref_assets)
-    # 追加风格预设参考图，确保场景概念图风格统一
-    style_ref_path = _resolve_workflow_style_ref_path(scene.chapter_id, db)
-    if style_ref_path:
-        ref_paths = list(ref_paths) if ref_paths else []
-        if style_ref_path not in ref_paths:
-            ref_paths.append(style_ref_path)
-    prompt = _merge_style_prompt(f"{prompt_base} {ref_block}".strip(), style_ctx["prompt_template"], style_name)
+    ref_paths = [path for _, path, _, _ in resolved_refs]
+    prompt = f"{prompt_base} {ref_block}".strip()
+    ref_labels = [label for _, _, label, _ in resolved_refs]
+    ref_roles = [role for _, _, _, role in resolved_refs]
 
     scene_dir = _VIDEO_OUTPUTS_DIR / f"scene_{scene_id}"
     scene_dir.mkdir(parents=True, exist_ok=True)
@@ -2016,18 +3583,22 @@ async def generate_scene_concept_art(
     _check_and_consume_quota_wrapper(user.id, "manga.image.generate.monthly_limit", 1, db, deduct=False)
 
     try:
-        await image2_service.generate_reference_image(
+        saved_path = await generate_visual_asset_image(
             prompt=prompt,
             output_path=full_path,
+            asset_type="scene_reference",
             api_key=api_key or None,
-            size=image_style_params.get("size", "1920x1080"),
-            ref_image_paths=ref_paths if ref_paths else None,
+            size="1920x1080",
+            reference_paths=ref_paths if ref_paths else None,
+            reference_labels=ref_labels if ref_labels else None,
+            reference_roles=ref_roles if ref_roles else None,
         )
     except Exception as e:
         logger.warning("Concept art generation failed: %s", e)
         raise HTTPException(502, f"姒傚康鍥剧敓鎴愬け璐? {e}")
 
-    file_path = f"scene_{scene_id}/{filename}"
+    relative_file_path = f"scene_{scene_id}/{filename}"
+    file_path = saved_path if str(saved_path).startswith(("http://", "https://")) else relative_file_path
 
     existing_assets = (
         db.query(VideoAsset)
@@ -2052,7 +3623,7 @@ async def generate_scene_concept_art(
         file_path=str(file_path),
         prompt=prompt,
         source_asset_ids_json=[a.id for a in ref_assets] if ref_assets else None,
-        style_preset=style_name,
+        style_preset=None,
         status="active",
     )
     db.add(asset)
@@ -2062,7 +3633,15 @@ async def generate_scene_concept_art(
 
     db.commit()
     # 配额扣减
-    _check_and_consume_quota_wrapper(user.id, "manga.image.generate.monthly_limit", 1, db, deduct=True)
+    _check_and_consume_quota_wrapper(
+        user.id,
+        "manga.image.generate.monthly_limit",
+        1,
+        db,
+        deduct=True,
+        request=request,
+        provider_kind="image",
+    )
     db.refresh(asset)
 
     return {
@@ -2134,189 +3713,17 @@ async def update_shot(
         raise HTTPException(404, "分镜未找到")
     if not shot.scene:
         raise HTTPException(404, "场景未找到")
+    _require_chapter_for_user(shot.scene.chapter_id, user, db)
 
-    effective_provider = _resolve_video_provider(body.provider, db)
-
-    duration = max(1, min(SHOT_DURATION_SECONDS, body.duration_seconds or shot.duration_seconds or SHOT_DURATION_SECONDS))
-    _check_and_consume_quota_wrapper(
-        user.id, "video.generate.count.monthly_limit", 1, db, deduct=True,
-    )
-
-    source_storyboard_asset_id = body.source_storyboard_asset_id or shot.storyboard_asset_id
-    auto_reference_asset_ids = _collect_shot_reference_asset_ids(
-        shot,
-        db,
-        include_characters=False,
-        include_scene=False,
-        include_storyboard=False,
-        include_frames=False,
-        explicit_asset_ids=body.reference_asset_ids or [],
-    )
-    auto_reference_asset_ids = list(dict.fromkeys(auto_reference_asset_ids))
-    if body.use_reference_assets:
-        reference_image_urls = _resolve_asset_reference_urls(auto_reference_asset_ids, db, request)
-    else:
-        auto_reference_asset_ids = []
-        reference_image_urls = []
-    input_mode = body.input_mode
-    if not input_mode:
-        has_ref_images = bool(reference_image_urls)
-        has_storyboard = source_storyboard_asset_id and shot.storyboard_locked
-        if has_storyboard:
-            input_mode = "image_to_video"
-        else:
-            input_mode = "text_to_video"
-
-    # Warn if storyboard exists but not locked
-    if source_storyboard_asset_id and not shot.storyboard_locked and input_mode == "image_to_video":
-        logger.warning(
-            "Shot %s storyboard not locked, but image_to_video requested. "
-            "Consider approving the storyboard first.", shot_id
-        )
-
-    ref_assets = db.query(VideoAsset).filter(VideoAsset.id.in_(auto_reference_asset_ids)).all() if auto_reference_asset_ids else []
-    first_frame_asset, last_frame_asset, other_refs = _split_frame_assets(ref_assets)
-    ref_block = _build_reference_constraints_block(ref_assets)
-
-    ordered_images: list[str] = []
-    # 用户未选首帧时，自动继承前一个镜头的尾帧作为连贯参考
-    prev_last_frame = _get_previous_shot_last_frame(shot, db) if not first_frame_asset else None
-    if prev_last_frame:
-        p = _resolve_asset_file_paths([prev_last_frame])
-        b = _encode_file_to_base64_data_uri(p[0]) if p else None
-        if b:
-            ordered_images.append(b)
-            if not first_frame_asset:
-                first_frame_url_text = b[:80] + "..."
-                logger.info("Shot %s: 继承前镜头尾帧作为首帧连贯参考", shot_id)
-    if first_frame_asset:
-        path = _resolve_asset_file_paths([first_frame_asset])
-        b64 = _encode_file_to_base64_data_uri(path[0]) if path else None
-        if b64:
-            ordered_images.append(b64)
-    ordered_images.extend(_resolve_asset_reference_urls([a.id for a in other_refs], db, request) if other_refs else [])
-    if last_frame_asset:
-        path = _resolve_asset_file_paths([last_frame_asset])
-        b64 = _encode_file_to_base64_data_uri(path[0]) if path else None
-        if b64:
-            ordered_images.append(b64)
-
-    style_ctx = _resolve_effective_style_for_shot(shot, db, requested_style_name=body.style)
-    style_name = style_ctx["name"]
-    video_style_params = style_ctx["video_style_params"]
-    style_template = style_ctx["prompt_template"]
-
-    api_key, base_url, resolved_model = _user_video_api_key(request)
-    resolved_model = body.model or resolved_model
-    aspect_ratio = body.aspect_ratio or video_style_params.get("aspect_ratio") or "16:9"
-    grounding = _build_story_grounding_block(shot.scene.chapter.story if shot.scene and shot.scene.chapter else None, shot.scene.chapter if shot.scene else None, shot.scene)
-    storyboard_guide = ""
-    if shot.storyboard_prompt:
-        storyboard_guide = (
-            f"\n\n<<<故事版蓝图_STORYBOARD_BLUEPRINT>>>\n"
-            f"以下分镜脚本是视频生成的导演蓝图，视频必须严格遵循：\n"
-            f"{shot.storyboard_prompt}\n"
-            f"<<<蓝图结束_END_BLUEPRINT>>>\n"
-            f"核心要求：生成的视频必须严格匹配蓝图中的每一个时间段、镜头运动方式、"
-            f"角色动作和情绪变化，不得偏离分镜脚本的任何细节。"
-        )
-    full_prompt = _merge_style_prompt(
-        f"{body.prompt or storyboard_guide} {ref_block} Grounding: {grounding}".strip(),
-        style_template, style_name,
-    )
-    logger.info("视频提交提示词 shot=%s:\n%s", shot_id, full_prompt)
-
-    task_id = f"video_render_{shot_id}_{int(datetime.datetime.utcnow().timestamp())}"
-    await task_manager.submit_task(
-        task_id=task_id,
-        task_type="video_render",
-        coro_func=video_gen_service.submit_video_job,
-        shot_id=shot_id,
-        provider=effective_provider,
-        model=resolved_model,
-        prompt=full_prompt,
-        negative_prompt=body.negative_prompt or shot.negative_prompt or "",
-        duration_seconds=duration,
-        aspect_ratio=aspect_ratio,
-        reference_images=ordered_images if ordered_images else None,
-        api_key=api_key,
-        base_url=base_url,
-        input_mode=input_mode,
-            timeout=600,
-            max_retries=2,
-            quota_user_id=user.id,
-            quota_feature_key="video.generate.count.monthly_limit",
-            quota_amount=1,
-            metadata={
-                "stage": "submitting",
-                "message": "正在提交视频生成任务...",
-                "provider_status": "submitting",
-                "running_stage": "submitting",
-                "running_message": "正在提交视频生成任务...",
-            },
-        )
-
-    job_status = "pending"
-    job = VideoGenerationJob(
-        shot_id=shot_id,
-        provider=effective_provider,
-        provider_job_id=task_id,
-        model=resolved_model,
-        request_payload_json={
-            "model": resolved_model,
-            "prompt": full_prompt,
-            "negative_prompt": body.negative_prompt or shot.negative_prompt or "",
-            "duration_seconds": duration,
-            "aspect_ratio": aspect_ratio,
-            "style": style_name,
-            "reference_asset_ids": auto_reference_asset_ids,
-            "reference_image_urls": reference_image_urls,
-        },
-        status=job_status,
-        progress=0,
-        duration_seconds=duration,
-        aspect_ratio=aspect_ratio,
-        error_message=None,
-        input_mode=input_mode,
-        source_storyboard_asset_id=source_storyboard_asset_id if input_mode == "image_to_video" else None,
-        reference_asset_ids_json=auto_reference_asset_ids,
-    )
-    db.add(job)
-    db.flush()
-
-    # Update shot status
-    shot.status = "rendering"
+    update_values = body.model_dump(exclude_unset=True)
+    for field, value in update_values.items():
+        if field == "duration_seconds" and value is not None:
+            value = max(1, min(SHOT_DURATION_SECONDS, int(value)))
+        setattr(shot, field, value)
     shot.updated_at = datetime.datetime.utcnow()
-
     db.commit()
-    db.refresh(job)
-
-    return {
-        "job": {
-            "id": job.id,
-            "shot_id": job.shot_id,
-            "provider": job.provider,
-            "provider_job_id": job.provider_job_id,
-            "model": job.model,
-            "status": job.status,
-            "progress": job.progress,
-            "duration_seconds": job.duration_seconds,
-            "aspect_ratio": job.aspect_ratio,
-            "request_payload": job.request_payload_json or {},
-            "error_message": job.error_message,
-            "stage": "submitting",
-            "message": "正在提交视频生成任务...",
-            "provider_status": "submitting",
-            "retry_count": 0,
-            "max_retries": 2,
-            "next_retry_at": None,
-            "input_mode": job.input_mode,
-            "source_storyboard_asset_id": job.source_storyboard_asset_id,
-            "submitted_at": _serialize_datetime(job.submitted_at),
-            "completed_at": _serialize_datetime(job.completed_at),
-        },
-        "shot_status": shot.status,
-    }
+    db.refresh(shot)
+    return _serialize_shot(shot)
 
 
 @router.post("/api/shots/{shot_id}/video/render-stream")
@@ -2327,7 +3734,7 @@ async def render_shot_video_stream(
     db: Session = Depends(get_db),
 ):
     """SSE-streaming video render endpoint.
-    
+
     Events:
       event: progress -> { job_id, progress, stage, message }
       event: done      -> { job_id, clip }
@@ -2343,11 +3750,13 @@ async def render_shot_video_stream(
 
     effective_provider = _resolve_video_provider(body.provider, db)
 
-    duration = max(1, min(SHOT_DURATION_SECONDS, body.duration_seconds or shot.duration_seconds or SHOT_DURATION_SECONDS))
-    _check_and_consume_quota_wrapper(
-        user.id, "video.generate.count.monthly_limit", 1, db, deduct=True,
+    duration = max(
+        1,
+        min(
+            MAX_VIDEO_DURATION_SECONDS,
+            int(body.duration_seconds or shot.duration_seconds or DEFAULT_VIDEO_DURATION_SECONDS),
+        ),
     )
-
     source_storyboard_asset_id = body.source_storyboard_asset_id or shot.storyboard_asset_id
     auto_reference_asset_ids = _collect_shot_reference_asset_ids(
         shot,
@@ -2377,37 +3786,66 @@ async def render_shot_video_stream(
     first_frame_asset, last_frame_asset, other_refs = _split_frame_assets(ref_assets)
     ref_block = _build_reference_constraints_block(ref_assets)
 
-    ordered_images: list[str] = []
+    ordered_reference_inputs: list[str] = []
     # 用户未选首帧时，自动继承前一个镜头的尾帧作为连贯参考
     prev_last_frame = _get_previous_shot_last_frame(shot, db) if not first_frame_asset else None
     if prev_last_frame:
         p = _resolve_asset_file_paths([prev_last_frame])
-        b = _encode_file_to_base64_data_uri(p[0]) if p else None
-        if b:
-            ordered_images.append(b)
+        if p:
+            ordered_reference_inputs.append(p[0])
             if not first_frame_asset:
-                first_frame_url_text = b[:80] + "..."
                 logger.info("Shot %s: 继承前镜头尾帧作为首帧连贯参考", shot_id)
     if first_frame_asset:
         path = _resolve_asset_file_paths([first_frame_asset])
-        b64 = _encode_file_to_base64_data_uri(path[0]) if path else None
-        if b64:
-            ordered_images.append(b64)
-    ordered_images.extend(_resolve_asset_reference_urls([a.id for a in other_refs], db, request) if other_refs else [])
+        if path:
+            ordered_reference_inputs.append(path[0])
+    ordered_reference_inputs.extend(
+        _resolve_asset_reference_urls([a.id for a in other_refs], db, request)
+        if other_refs else []
+    )
     if last_frame_asset:
         path = _resolve_asset_file_paths([last_frame_asset])
-        b64 = _encode_file_to_base64_data_uri(path[0]) if path else None
-        if b64:
-            ordered_images.append(b64)
+        if path:
+            ordered_reference_inputs.append(path[0])
 
     style_ctx = _resolve_effective_style_for_shot(shot, db, requested_style_name=body.style)
     style_name = style_ctx["name"]
     video_style_params = style_ctx["video_style_params"]
     style_template = style_ctx["prompt_template"]
+    style_ref_path = _resolve_workflow_style_ref_path(shot.scene.chapter_id, db, style_name)
+    if style_ref_path:
+        if style_ref_path not in ordered_reference_inputs:
+            ordered_reference_inputs.append(style_ref_path)
+    ordered_images = _prepare_video_reference_images(ordered_reference_inputs)
+    if ordered_images:
+        input_mode = "image_to_video"
 
     api_key, base_url, resolved_model = _user_video_api_key(request)
     resolved_model = body.model or resolved_model
+    video_capabilities = _current_video_capabilities(request, db, resolved_model)
+    adapter_type = _current_video_adapter_type(request)
+    runtime_snapshot = _build_video_runtime_snapshot(
+        request,
+        db,
+        api_key=api_key,
+        base_url=base_url,
+        model=resolved_model,
+    )
     aspect_ratio = body.aspect_ratio or video_style_params.get("aspect_ratio") or "16:9"
+    _validate_video_request_before_billing(
+        adapter_type=adapter_type,
+        model=resolved_model,
+        video_capabilities=video_capabilities,
+        aspect_ratio=aspect_ratio,
+        duration_seconds=duration,
+        reference_count=len(ordered_images),
+    )
+    quota_result = _reserve_video_billing(
+        request,
+        db,
+        user_id=user.id,
+        video_seconds=duration,
+    )
     grounding = _build_story_grounding_block(shot.scene.chapter.story if shot.scene and shot.scene.chapter else None, shot.scene.chapter if shot.scene else None, shot.scene)
     storyboard_guide = ""
     if shot.storyboard_prompt:
@@ -2424,6 +3862,7 @@ async def render_shot_video_stream(
         style_template, style_name,
     )
     logger.info("视频提交提示词 shot=%s:\n%s", shot_id, full_prompt)
+    stream_state = {"task_submitted": False}
 
     async def event_generator():
         nonlocal db, base_url
@@ -2436,7 +3875,8 @@ async def render_shot_video_stream(
             await task_manager.submit_task(
                 task_id=task_id,
                 task_type="video_render",
-                coro_func=video_gen_service.submit_video_job,
+                coro_func=_submit_and_monitor_video_job,
+                billing_usage_event_id=quota_result.get("usage_event_id"),
                 shot_id=shot_id,
                 provider=effective_provider,
                 model=resolved_model,
@@ -2448,11 +3888,14 @@ async def render_shot_video_stream(
                 api_key=api_key,
                 base_url=base_url,
                 input_mode=input_mode,
+                video_capabilities=video_capabilities,
+                adapter_type=adapter_type,
                 timeout=600,
-                max_retries=2,
+                max_retries=0,
                 quota_user_id=user.id,
                 quota_feature_key="video.generate.count.monthly_limit",
-                quota_amount=1,
+                quota_amount=duration,
+                quota_usage_event_id=quota_result.get("usage_event_id"),
                 metadata={
                     "stage": "submitting",
                     "message": "正在提交视频生成任务...",
@@ -2461,6 +3904,7 @@ async def render_shot_video_stream(
                     "running_message": "正在提交视频生成任务...",
                 },
             )
+            stream_state["task_submitted"] = True
 
             job_status = "pending"
             provider_job_id = task_id
@@ -2471,15 +3915,24 @@ async def render_shot_video_stream(
                 provider=effective_provider,
                 provider_job_id=provider_job_id,
                 model=resolved_model,
-                request_payload_json={
+                request_payload_json=_sanitize_video_job_request_payload({
                     "model": resolved_model,
                     "prompt": full_prompt,
                     "duration_seconds": duration,
                     "aspect_ratio": aspect_ratio,
                     "style": style_name,
+                    "input_mode": input_mode,
                     "reference_asset_ids": auto_reference_asset_ids,
-                    "reference_image_urls": reference_image_urls,
-                },
+                    "reference_sources": [
+                        {"asset_id": asset_id, "source": "video_asset"}
+                        for asset_id in auto_reference_asset_ids
+                    ],
+                    "reference_summary": {
+                        "count": len(ordered_images),
+                        "roles": ["reference" for _ in ordered_images],
+                    },
+                }),
+                provider_payload_json=_video_provider_metadata(runtime_snapshot, quota_result.get("usage_event_id")),
                 status=job_status,
                 progress=0,
                 duration_seconds=duration,
@@ -2526,6 +3979,7 @@ async def render_shot_video_stream(
                             provider_job_id=provider_job_id,
                             api_key=api_key,
                             base_url=base_url,
+                            adapter_type=adapter_type,
                         )
                         current_status = latest.get("status", "queued") or "queued"
                         progress = int(latest.get("progress") or 0)
@@ -2545,19 +3999,35 @@ async def render_shot_video_stream(
                             db_job = write_db.get(VideoGenerationJob, job_id)
                             if db_job:
                                 db_job.provider_job_id = provider_job_id
-                                db_job.provider_result_json = {**(db_job.provider_result_json or {}), **latest}
+                                db_job.provider_result_json = _sanitize_video_provider_result({
+                                    **(db_job.provider_result_json or {}),
+                                    **latest,
+                                })
                                 db_job.status = current_status if current_status in {"queued", "running", "succeeded", "failed", "cancelled"} else "running"
                                 db_job.progress = progress
                                 if latest.get("error"):
-                                    db_job.error_message = str(latest["error"])
+                                    db_job.error_message = public_error_message(
+                                        latest["error"],
+                                        "视频生成失败，请稍后重试",
+                                    )
                                 if current_status in {"succeeded", "failed", "cancelled"}:
                                     db_job.completed_at = datetime.datetime.utcnow()
+                                if current_status in {"failed", "cancelled"}:
+                                    _refund_video_billing(
+                                        write_db,
+                                        job=db_job,
+                                        reason=f"provider_{current_status}",
+                                        commit=False,
+                                    )
                                 write_db.commit()
                         finally:
                             write_db.close()
 
                         if current_status in {"failed", "cancelled"}:
-                            error_msg = latest.get("error") or "视频生成失败"
+                            error_msg = public_error_message(
+                                latest.get("error"),
+                                "视频生成失败，请稍后重试",
+                            )
                             yield {"event": "error", "data": json.dumps({"job_id": job_id, "error": error_msg}, ensure_ascii=False)}
                             return
                     else:
@@ -2566,7 +4036,7 @@ async def render_shot_video_stream(
                         task_fields["stage"] = "submitting"
                         task_fields["message"] = "任务已提交，等待上游任务编号..."
                 elif task_status["status"] == "failed":
-                    error_msg = task_status.get("error_message", "Generation failed")
+                    error_msg = public_error_message(task_status.get("error_message"), "视频任务提交失败，请稍后重试")
                     yield {"event": "error", "data": json.dumps({"job_id": job_id, "error": error_msg})}
                     
                     write_db = SessionLocal()
@@ -2576,6 +4046,12 @@ async def render_shot_video_stream(
                             db_job.status = "failed"
                             db_job.error_message = error_msg
                             db_job.completed_at = datetime.datetime.utcnow()
+                            _refund_video_billing(
+                                write_db,
+                                job=db_job,
+                                reason="submission_failed",
+                                commit=False,
+                            )
                             write_db.commit()
                     finally:
                         write_db.close()
@@ -2595,6 +4071,25 @@ async def render_shot_video_stream(
                     progress = 50
                 
                 if current_status == "succeeded":
+                    existing_db = SessionLocal()
+                    try:
+                        existing_clip = existing_db.query(RenderedClip).filter(
+                            RenderedClip.job_id == job_id,
+                        ).first()
+                        if existing_clip:
+                            yield {"event": "done", "data": json.dumps({
+                                "job_id": job_id,
+                                "clip": {
+                                    "id": existing_clip.id,
+                                    "shot_id": existing_clip.shot_id,
+                                    "video_path": _to_video_url(existing_clip.video_path),
+                                    "duration_seconds": existing_clip.duration_seconds,
+                                    "resolution": existing_clip.resolution,
+                                },
+                            }, ensure_ascii=False)}
+                            return
+                    finally:
+                        existing_db.close()
                     if not download_attempted:
                         progress_val = max(progress, 80)
                         yield {"event": "progress", "data": json.dumps({
@@ -2609,14 +4104,38 @@ async def render_shot_video_stream(
                         }, ensure_ascii=False)}
                         download_attempted = True
                     
-                    from models import RenderedClip
-                    result = await video_gen_service.fetch_job_result(
-                        provider=provider,
-                        provider_job_id=provider_job_id,
-                        shot_id=shot_id,
-                        api_key=api_key,
-                        base_url=base_url,
-                    )
+                    try:
+                        result = await video_gen_service.fetch_job_result(
+                            provider=provider,
+                            provider_job_id=provider_job_id,
+                            shot_id=shot_id,
+                            api_key=api_key,
+                            base_url=base_url,
+                            adapter_type=adapter_type,
+                        )
+                    except Exception as exc:
+                        logger.exception("视频结果下载失败 job_id=%s", job_id)
+                        error_msg = public_error_message(exc, "视频结果下载失败，请稍后重试")
+                        write_db = SessionLocal()
+                        try:
+                            db_job = write_db.get(VideoGenerationJob, job_id)
+                            db_shot = write_db.get(VideoShot, shot_id)
+                            if db_shot:
+                                db_shot.status = "failed"
+                                db_shot.updated_at = datetime.datetime.utcnow()
+                            if db_job:
+                                _fail_video_job_and_refund(
+                                    write_db,
+                                    db_job,
+                                    error_message=error_msg,
+                                    reason="result_download_failed",
+                                )
+                            else:
+                                write_db.commit()
+                        finally:
+                            write_db.close()
+                        yield {"event": "error", "data": json.dumps({"job_id": job_id, "error": error_msg}, ensure_ascii=False)}
+                        return
                     
                     video_path = result.get("video_path", "")
                     
@@ -2642,6 +4161,12 @@ async def render_shot_video_stream(
                                 db_job.status = "succeeded"
                                 db_job.progress = 100
                                 db_job.completed_at = datetime.datetime.utcnow()
+                                _settle_video_billing(
+                                    write_db,
+                                    job=db_job,
+                                    video_seconds=duration,
+                                    commit=False,
+                                )
                             
                             write_db.commit()
                             write_db.refresh(clip)
@@ -2659,7 +4184,26 @@ async def render_shot_video_stream(
                         finally:
                             write_db.close()
                     else:
-                        yield {"event": "error", "data": json.dumps({"job_id": job_id, "error": "Failed to download video"})}
+                        error_msg = "视频生成成功但未返回可下载文件"
+                        write_db = SessionLocal()
+                        try:
+                            db_job = write_db.get(VideoGenerationJob, job_id)
+                            db_shot = write_db.get(VideoShot, shot_id)
+                            if db_shot:
+                                db_shot.status = "failed"
+                                db_shot.updated_at = datetime.datetime.utcnow()
+                            if db_job:
+                                _fail_video_job_and_refund(
+                                    write_db,
+                                    db_job,
+                                    error_message=error_msg,
+                                    reason="result_missing_video_path",
+                                )
+                            else:
+                                write_db.commit()
+                        finally:
+                            write_db.close()
+                        yield {"event": "error", "data": json.dumps({"job_id": job_id, "error": error_msg}, ensure_ascii=False)}
                     return
                 
                 progress_val = max(15, min(75, int(progress) or (poll_count * 5 + 15)))
@@ -2686,16 +4230,60 @@ async def render_shot_video_stream(
                 
                 await asyncio.sleep(3)
             
-            yield {"event": "error", "data": json.dumps({"job_id": job_id, "error": "Generation timed out"})}
+            yield {"event": "error", "data": json.dumps({"job_id": job_id, "error": "视频生成超时，请稍后重试"}, ensure_ascii=False)}
             
         except asyncio.CancelledError:
-            yield {"event": "error", "data": json.dumps({"job_id": job_id, "error": "cancelled"})}
+            if not stream_state["task_submitted"]:
+                refund_db = SessionLocal()
+                try:
+                    _refund_video_billing(
+                        refund_db,
+                        usage_event_id=quota_result.get("usage_event_id"),
+                        reason="stream_cancelled_before_submission",
+                    )
+                finally:
+                    refund_db.close()
+            yield {"event": "error", "data": json.dumps({"job_id": job_id, "error": "视频任务已取消"}, ensure_ascii=False)}
             raise
         except Exception as e:
             logger.exception("SSE video render failed")
-            yield {"event": "error", "data": json.dumps({"job_id": job_id, "error": str(e)})}
+            if not stream_state["task_submitted"]:
+                refund_db = SessionLocal()
+                try:
+                    _refund_video_billing(
+                        refund_db,
+                        usage_event_id=quota_result.get("usage_event_id"),
+                        reason="stream_failed_before_submission",
+                    )
+                finally:
+                    refund_db.close()
+            yield {
+                "event": "error",
+                "data": json.dumps({
+                    "job_id": job_id,
+                    "error": public_error_message(e, "视频生成失败，请稍后重试"),
+                }, ensure_ascii=False),
+            }
 
-    return EventSourceResponse(event_generator())
+    def refund_unsubmitted_stream() -> None:
+        if stream_state["task_submitted"]:
+            return
+        refund_db = SessionLocal()
+        try:
+            _refund_video_billing(
+                refund_db,
+                usage_event_id=quota_result.get("usage_event_id"),
+                reason="stream_not_started_before_submission",
+            )
+        except Exception:
+            logger.exception("视频流清理未提交账单失败 shot_id=%s", shot_id)
+        finally:
+            refund_db.close()
+
+    return EventSourceResponse(
+        event_generator(),
+        background=ResponseBackgroundTask(refund_unsubmitted_stream),
+    )
 
 
 @router.get("/api/shots/{shot_id}/clips")
@@ -2796,6 +4384,16 @@ async def get_video_job(
         raise HTTPException(404, "关联分镜未找到")
     _require_chapter_for_user(shot.scene.chapter_id, user, db)
 
+    # 读取终态任务时补做幂等退款，覆盖进程在状态提交后、退款提交前退出的窗口。
+    if job.status in {"failed", "cancelled"}:
+        _refund_video_billing(
+            db,
+            job=job,
+            reason=f"provider_{job.status}",
+            commit=False,
+        )
+        db.commit()
+
     # 内部 task_id 时尝试从 task_manager 获取真实 API task_id
     task_fields = _flatten_task_status(None)
     if job.provider_job_id and job.provider_job_id.startswith("video_render_"):
@@ -2809,7 +4407,10 @@ async def get_video_job(
                 task_fields["message"] = task_fields.get("message") or "视频任务已提交到上游"
             if real_id and real_id != job.provider_job_id:
                 job.provider_job_id = real_id
-                job.provider_result_json = {**(job.provider_result_json or {}), **result}
+                job.provider_result_json = _sanitize_video_provider_result({
+                    **(job.provider_result_json or {}),
+                    **result,
+                })
                 db.commit()
         if task_status and task_status.get("status") == "failed":
             job.status = "failed"
@@ -2817,6 +4418,7 @@ async def get_video_job(
             job.completed_at = job.completed_at or datetime.datetime.utcnow()
             shot.status = "failed"
             shot.updated_at = datetime.datetime.utcnow()
+            _refund_video_billing(db, job=job, reason="submission_failed", commit=False)
             db.commit()
         # task_manager 还没完成提交，跳过本次查询，下次轮询重试
         if job.provider_job_id and job.provider_job_id.startswith("video_render_"):
@@ -2824,7 +4426,7 @@ async def get_video_job(
             return {
                 "id": job.id, "shot_id": job.shot_id, "provider": job.provider,
                 "provider_job_id": job.provider_job_id, "model": job.model,
-                "request_payload": job.request_payload_json or {}, "status": job.status,
+                "request_payload": _sanitize_video_job_request_payload(job.request_payload_json), "status": job.status,
                 "progress": job.progress, "duration_seconds": job.duration_seconds,
                 "aspect_ratio": job.aspect_ratio or "",
                 "error_message": job.error_message or "",
@@ -2834,33 +4436,47 @@ async def get_video_job(
             }
 
     if job.status not in {"succeeded", "failed", "cancelled"} and job.provider_job_id:
-        api_key, base_url, _model = _user_video_api_key(request)
+        api_key, base_url, runtime_model = _resolve_video_job_runtime(job, request, db)
         latest = await video_gen_service.query_job_status(
             provider=job.provider,
             provider_job_id=job.provider_job_id,
             api_key=api_key,
             base_url=base_url,
+            model=runtime_model,
+            adapter_type=_video_job_adapter_type(job),
         )
 
         job.status = latest.get("status", job.status) or job.status
         job.progress = int(latest.get("progress", job.progress) or 0)
-        job.provider_result_json = {**(job.provider_result_json or {}), **latest}
+        job.provider_result_json = _sanitize_video_provider_result({
+            **(job.provider_result_json or {}),
+            **latest,
+        })
         task_fields.update({
             "provider_status": latest.get("provider_status") or latest.get("status") or task_fields.get("provider_status"),
             "stage": "generating" if latest.get("status") in {"queued", "running"} else latest.get("status") or task_fields.get("stage"),
             "message": latest.get("message") or task_fields.get("message"),
         })
         if latest.get("error"):
-            job.error_message = str(latest["error"])
+            job.error_message = public_error_message(
+                latest["error"],
+                "视频生成失败，请稍后重试",
+            )
 
         if job.status == "succeeded":
             if not job.completed_at:
                 job.completed_at = datetime.datetime.utcnow()
             shot.status = "ready"
-        elif job.status == "failed":
+        elif job.status in {"failed", "cancelled"}:
             if not job.completed_at:
                 job.completed_at = datetime.datetime.utcnow()
             shot.status = "failed"
+            _refund_video_billing(
+                db,
+                job=job,
+                reason=f"provider_{job.status}",
+                commit=False,
+            )
         elif job.status == "running":
             shot.status = "rendering"
 
@@ -2877,14 +4493,29 @@ async def get_video_job(
             .first()
         )
         if clip is None and job.provider_job_id:
-            api_key, base_url, _model = _user_video_api_key(request)
-            fetched = await video_gen_service.fetch_job_result(
-                provider=job.provider,
-                provider_job_id=job.provider_job_id,
-                shot_id=job.shot_id,
-                api_key=api_key,
-                base_url=base_url,
-            )
+            api_key, base_url, runtime_model = _resolve_video_job_runtime(job, request, db)
+            try:
+                fetched = await video_gen_service.fetch_job_result(
+                    provider=job.provider,
+                    provider_job_id=job.provider_job_id,
+                    shot_id=job.shot_id,
+                    api_key=api_key,
+                    base_url=base_url,
+                    model=runtime_model,
+                    adapter_type=_video_job_adapter_type(job),
+                )
+            except Exception as exc:
+                error_msg = f"视频结果下载失败: {exc}"
+                shot.status = "failed"
+                shot.updated_at = datetime.datetime.utcnow()
+                _fail_video_job_and_refund(
+                    db,
+                    job,
+                    error_message=error_msg,
+                    reason="result_download_failed",
+                )
+                db.refresh(job)
+                fetched = {}
             video_path_abs = str(fetched.get("video_path") or "").strip()
             video_path = _to_video_url(video_path_abs) if video_path_abs else ""
             if video_path:
@@ -2937,12 +4568,35 @@ async def get_video_job(
                     logger.warning("璐ㄦ璇勫垎澶辫触 (涓嶉樆鏂祦绋?: %s", qa_err)
 
                 db.add(clip)
+                _settle_video_billing(
+                    db,
+                    job=job,
+                    video_seconds=clip.duration_seconds or job.duration_seconds,
+                    commit=False,
+                )
                 db.commit()
                 db.refresh(clip)
-                logger.info("Video job %s created clip id=%s path=%s version=%s", job_id, clip.id, clip.video_path, clip.version)
+                logger.info(
+                    "Video job %s created clip id=%s path=%s version=%s",
+                    job_id,
+                    clip.id,
+                    safe_media_url_for_log(clip.video_path),
+                    clip.version,
+                )
                 shot.status = "ready"
                 shot.updated_at = datetime.datetime.utcnow()
                 db.commit()
+            elif job.status == "succeeded":
+                error_msg = "视频生成成功但未返回可下载文件"
+                shot.status = "failed"
+                shot.updated_at = datetime.datetime.utcnow()
+                _fail_video_job_and_refund(
+                    db,
+                    job,
+                    error_message=error_msg,
+                    reason="result_missing_video_path",
+                )
+                db.refresh(job)
         else:
             clip = (
                 db.query(RenderedClip)
@@ -2950,20 +4604,31 @@ async def get_video_job(
                 .first()
             )
 
+    if job.status == "succeeded" and clip is not None:
+        _settle_video_billing(
+            db,
+            job=job,
+            video_seconds=clip.duration_seconds or job.duration_seconds,
+        )
+
     result = {
         "id": job.id,
         "shot_id": job.shot_id,
         "provider": job.provider,
         "provider_job_id": job.provider_job_id,
         "model": job.model,
-        "request_payload": job.request_payload_json or {},
+        "request_payload": _sanitize_video_job_request_payload(job.request_payload_json),
         "status": job.status,
         "progress": job.progress,
         "duration_seconds": job.duration_seconds,
         "aspect_ratio": job.aspect_ratio or "",
-        "error_message": job.error_message or "",
+        "error_message": public_error_message(job.error_message, "视频生成失败，请稍后重试") if job.error_message else "",
         "stage": task_fields.get("stage") or (job.provider_result_json or {}).get("stage"),
-        "message": task_fields.get("message") or (job.provider_result_json or {}).get("message") or job.error_message or "",
+        "message": (
+            public_error_message(job.error_message, "视频生成失败，请稍后重试")
+            if job.status in {"failed", "cancelled"}
+            else task_fields.get("message") or (job.provider_result_json or {}).get("message") or ""
+        ),
         "provider_status": task_fields.get("provider_status") or (job.provider_result_json or {}).get("provider_status"),
         "retry_count": task_fields.get("retry_count", 0),
         "max_retries": task_fields.get("max_retries", 0),
@@ -2981,9 +4646,36 @@ async def get_video_job(
             "resolution": clip.resolution or "",
             "version": clip.version,
         }
-        logger.info("Video job %s returning clip: id=%s path=%s", job_id, clip.id, clip.video_path)
+        logger.info(
+            "Video job %s returning clip: id=%s path=%s",
+            job_id,
+            clip.id,
+            safe_media_url_for_log(clip.video_path),
+        )
 
     return result
+
+
+@router.get("/api/shots/{shot_id}/video-jobs/latest")
+async def get_latest_video_job_for_shot(
+    shot_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    user = _require_user(request, db)
+    _require_shot_for_user(shot_id, user, db)
+    job = (
+        db.query(VideoGenerationJob)
+        .filter(VideoGenerationJob.shot_id == shot_id)
+        .order_by(
+            VideoGenerationJob.submitted_at.desc(),
+            VideoGenerationJob.id.desc(),
+        )
+        .first()
+    )
+    if not job:
+        raise HTTPException(404, "视频生成任务未找到")
+    return await get_video_job(job.id, request, db)
 
 
 @router.post("/api/video-jobs/{job_id}/retry")
@@ -3003,22 +4695,122 @@ async def retry_video_job(
         raise HTTPException(404, "关联分镜未找到")
     _require_chapter_for_user(shot.scene.chapter_id, user, db)
 
-    # 配额预检
-    _check_and_consume_quota_wrapper(
-        user.id, "video.generate.count.monthly_limit", 1, db, deduct=True,
+    retry_duration = max(
+        1,
+        min(
+            MAX_VIDEO_DURATION_SECONDS,
+            int(body.duration_seconds or old_job.duration_seconds or DEFAULT_VIDEO_DURATION_SECONDS),
+        ),
     )
+    request_payload = _sanitize_video_job_request_payload(
+        body.request_payload or old_job.request_payload_json or {}
+    )
+    api_key, base_url, runtime_model = _user_video_api_key(request)
+    retry_provider = _resolve_video_provider(body.provider, db)
+    retry_model = body.model or runtime_model
+    video_capabilities = _current_video_capabilities(request, db, retry_model)
+    adapter_type = _current_video_adapter_type(request)
+    retry_reference_ids = list(dict.fromkeys(
+        request_payload.get("reference_asset_ids")
+        or getattr(old_job, "reference_asset_ids_json", None)
+        or []
+    ))
+    _validate_video_reference_count(len(retry_reference_ids))
+    story_id = shot.scene.chapter.story_id
+    _require_reference_assets_for_story(retry_reference_ids, story_id, db)
+    retry_reference_inputs = _resolve_asset_reference_urls(retry_reference_ids, db, request)
+    retry_references = _prepare_video_reference_images(retry_reference_inputs)
+    _validate_video_request_before_billing(
+        adapter_type=adapter_type,
+        model=retry_model,
+        video_capabilities=video_capabilities,
+        aspect_ratio=body.aspect_ratio or old_job.aspect_ratio or "16:9",
+        duration_seconds=retry_duration,
+        reference_count=len(retry_references),
+    )
+    quota_result = _reserve_video_billing(
+        request,
+        db,
+        user_id=user.id,
+        video_seconds=retry_duration,
+        detach=False,
+    )
+    runtime_snapshot = _build_video_runtime_snapshot(
+        request,
+        db,
+        api_key=api_key,
+        base_url=base_url,
+        model=retry_model,
+    )
+    task_id = f"video_retry_{old_job.shot_id}_{uuid.uuid4().hex[:10]}"
+    try:
+        await task_manager.submit_task(
+            task_id=task_id,
+            task_type="video_render",
+            coro_func=_submit_and_monitor_video_job,
+            billing_usage_event_id=quota_result.get("usage_event_id"),
+            shot_id=old_job.shot_id,
+            provider=retry_provider,
+            model=retry_model,
+            prompt=str(request_payload.get("prompt") or ""),
+            negative_prompt=str(request_payload.get("negative_prompt") or ""),
+            duration_seconds=retry_duration,
+            aspect_ratio=body.aspect_ratio or old_job.aspect_ratio or "16:9",
+            reference_images=retry_references or None,
+            api_key=api_key,
+            base_url=base_url,
+            input_mode=str(request_payload.get("input_mode") or old_job.input_mode or "text_to_video"),
+            video_capabilities=video_capabilities,
+            adapter_type=adapter_type,
+            timeout=600,
+            max_retries=0,
+            quota_user_id=user.id,
+            quota_feature_key="video.generate.count.monthly_limit",
+            quota_amount=retry_duration,
+            quota_usage_event_id=quota_result.get("usage_event_id"),
+            metadata={
+                "stage": "submitting",
+                "message": "正在重新提交视频生成任务...",
+                "provider_status": "submitting",
+            },
+        )
+        _detach_video_billing(request, quota_result)
+    except Exception:
+        refund_db = SessionLocal()
+        try:
+            _refund_video_billing(
+                refund_db,
+                usage_event_id=quota_result.get("usage_event_id"),
+                reason="retry_submission_failed",
+            )
+        finally:
+            refund_db.close()
+        raise
 
     # Create new job with same shot_id
+    provider_metadata = _video_provider_metadata(
+        runtime_snapshot,
+        quota_result.get("usage_event_id"),
+    )
+
     new_job = VideoGenerationJob(
         shot_id=old_job.shot_id,
-        provider=body.provider or old_job.provider,
-        provider_job_id=f"mock_job_{uuid.uuid4().hex[:12]}",
-        model=body.model or old_job.model,
-        request_payload_json=body.request_payload or old_job.request_payload_json or {},
-        status="queued",
+        provider=retry_provider,
+        provider_job_id=task_id,
+        model=retry_model,
+        request_payload_json=_sanitize_video_job_request_payload({
+            **request_payload,
+            "reference_asset_ids": retry_reference_ids,
+            "reference_sources": ["video_asset" for _ in retry_reference_ids],
+        }),
+        provider_payload_json=provider_metadata or None,
+        status="pending",
         progress=0,
-        duration_seconds=old_job.duration_seconds,
+        duration_seconds=retry_duration,
         aspect_ratio=body.aspect_ratio or old_job.aspect_ratio or "16:9",
+        input_mode=str(request_payload.get("input_mode") or old_job.input_mode or "text_to_video"),
+        source_storyboard_asset_id=old_job.source_storyboard_asset_id,
+        reference_asset_ids_json=retry_reference_ids,
     )
     db.add(new_job)
     db.commit()
@@ -3035,7 +4827,7 @@ async def retry_video_job(
             "progress": new_job.progress,
             "duration_seconds": new_job.duration_seconds,
             "aspect_ratio": new_job.aspect_ratio,
-            "request_payload": new_job.request_payload_json or {},
+            "request_payload": _sanitize_video_job_request_payload(new_job.request_payload_json),
             "error_message": new_job.error_message,
             "submitted_at": _serialize_datetime(new_job.submitted_at),
             "completed_at": _serialize_datetime(new_job.completed_at),
@@ -3130,25 +4922,33 @@ async def create_video_asset(
     db: Session = Depends(get_db),
 ):
     user = _require_user(request, db)
-    _require_chapter_for_user(chapter_id, user, db)
-
     chapter = _require_chapter_for_user(chapter_id, user, db)
 
-    # 验证 shot_id：如果提供了但对应的 VideoShot 不存在，设 None 避免外键冲突
+    if body.story_id is not None and body.story_id != chapter.story_id:
+        raise HTTPException(400, "素材作品与章节不一致")
+
+    scene = None
+    if body.scene_id is not None:
+        scene = db.get(ScriptScene, body.scene_id)
+        if not scene or scene.chapter_id != chapter_id:
+            raise HTTPException(400, "素材场景与章节不一致")
+
     shot_id = body.shot_id
     if shot_id is not None:
-        shot_exists = db.get(VideoShot, shot_id)
-        if not shot_exists:
-            shot_id = None
+        shot = db.get(VideoShot, shot_id)
+        if not shot or not shot.scene or shot.scene.chapter_id != chapter_id:
+            raise HTTPException(400, "素材分镜与章节不一致")
+        if scene is not None and shot.scene_id != scene.id:
+            raise HTTPException(400, "素材分镜与场景不一致")
 
     asset = VideoAsset(
-        story_id=body.story_id if body.story_id is not None else chapter.story_id,
+        story_id=chapter.story_id,
         chapter_id=chapter_id,
         scene_id=body.scene_id,
         shot_id=shot_id,
         asset_type=body.asset_type,
         name=body.name,
-        file_path=body.file_path or "",
+        file_path=_validate_video_asset_storage_path(body.file_path),
         provider=body.provider or "",
         prompt=body.prompt or "",
         style_preset=body.style_preset or None,
@@ -3181,16 +4981,7 @@ async def get_video_asset(
     db: Session = Depends(get_db),
 ):
     user = _require_user(request, db)
-    asset = db.get(VideoAsset, asset_id)
-    if not asset:
-        raise HTTPException(404, "视频素材未找到")
-
-    if asset.chapter_id:
-        _require_chapter_for_user(asset.chapter_id, user, db)
-    elif asset.story_id:
-        _require_story_for_user(asset.story_id, user, db)
-    else:
-        raise HTTPException(403, "无法确定素材所有权")
+    asset = _require_video_asset_for_user(asset_id, user, db)
 
     return {
         "id": asset.id,
@@ -3226,17 +5017,7 @@ async def delete_video_asset(
     db: Session = Depends(get_db),
 ):
     user = _require_user(request, db)
-    asset = db.get(VideoAsset, asset_id)
-    if not asset:
-        raise HTTPException(404, "视频素材未找到")
-
-    # Validate ownership via chapter
-    if asset.chapter_id:
-        _require_chapter_for_user(asset.chapter_id, user, db)
-    elif asset.story_id:
-        _require_story_for_user(asset.story_id, user, db)
-    else:
-        raise HTTPException(403, "无法确定素材所有权")
+    asset = _require_video_asset_for_user(asset_id, user, db)
 
     # 清空 script_scenes 对该 asset 的外键引用
     db.query(ScriptScene).filter(
@@ -3257,16 +5038,7 @@ async def delete_video_asset(
 async def update_video_asset(asset_id: int, request: Request, db: Session = Depends(get_db)):
     """更新视频资产的基本信息（名称等）"""
     user = _require_user(request, db)
-    asset = db.get(VideoAsset, asset_id)
-    if not asset:
-        raise HTTPException(404, "视频素材未找到")
-
-    if asset.chapter_id:
-        _require_chapter_for_user(asset.chapter_id, user, db)
-    elif asset.story_id:
-        _require_story_for_user(asset.story_id, user, db)
-    else:
-        raise HTTPException(403, "无法确定素材所有权")
+    asset = _require_video_asset_for_user(asset_id, user, db)
 
     try:
         body = await request.json()
@@ -3286,15 +5058,7 @@ async def update_video_asset(asset_id: int, request: Request, db: Session = Depe
 async def replace_video_asset(asset_id: int, request: Request, db: Session = Depends(get_db)):
     """上传本地图片替换资产文件。"""
     user = _require_user(request, db)
-    asset = db.get(VideoAsset, asset_id)
-    if not asset:
-        raise HTTPException(404, "Video asset not found")
-    if asset.chapter_id:
-        _require_chapter_for_user(asset.chapter_id, user, db)
-    elif asset.story_id:
-        _require_story_for_user(asset.story_id, user, db)
-    else:
-        raise HTTPException(403, "Cannot determine asset ownership")
+    asset = _require_video_asset_for_user(asset_id, user, db)
 
     content_type = request.headers.get("content-type", "")
     if "multipart/form-data" not in content_type:
@@ -3351,16 +5115,7 @@ async def regenerate_video_asset(
     db: Session = Depends(get_db),
 ):
     user = _require_user(request, db)
-    asset = db.get(VideoAsset, asset_id)
-    if not asset:
-        raise HTTPException(404, "视频素材未找到")
-
-    if asset.chapter_id:
-        _require_chapter_for_user(asset.chapter_id, user, db)
-    elif asset.story_id:
-        _require_story_for_user(asset.story_id, user, db)
-    else:
-        raise HTTPException(403, "无法确定素材所有权")
+    asset = _require_video_asset_for_user(asset_id, user, db)
 
     prompt = str(body.get("prompt") or "").strip()
     if not prompt:
@@ -3393,7 +5148,15 @@ async def regenerate_video_asset(
     output_path = regen_dir / output_filename
 
     # 配额预检
-    _check_and_consume_quota_wrapper(user.id, "manga.image.generate.monthly_limit", 1, db, deduct=True)
+    _check_and_consume_quota_wrapper(
+        user.id,
+        "manga.image.generate.monthly_limit",
+        1,
+        db,
+        deduct=False,
+        request=request,
+        provider_kind="image",
+    )
 
     try:
         if has_source:
@@ -3408,35 +5171,24 @@ async def regenerate_video_asset(
                     api_key=api_key or None,
                 )
             else:
-                # 有源图全量重绘：将源图作为参考图，同时追加风格预设参考图确保风格统一
-                style_ref_path = _resolve_workflow_style_ref_path(asset.chapter_id, db, asset.style_preset) if asset.chapter_id else None
-                ref_paths = []
-                if source_path_obj is not None and source_path_obj.exists():
-                    ref_paths.append(str(source_path_obj))
-                if style_ref_path and style_ref_path not in ref_paths:
-                    ref_paths.append(style_ref_path)
-                logger.info("[regen_asset] full refs asset_id=%s style_ref=%s ref_count=%s", asset_id, style_ref_path, len(ref_paths))
-                saved_path = await image2_service.generate_reference_image(
+                saved_path = await image2_service.edit_existing_image(
                     prompt=prompt,
+                    source_image_path=source_path_obj,
                     output_path=output_path,
                     api_key=api_key or None,
-                    size="1920x1080",
-                    ref_image_paths=ref_paths if ref_paths else None,
-                    ref_type="style",
                 )
         else:
-            # 无源图片（首次生成占位资产）：用风格参考图示图生图保证画风一致
-            style_ref_path = _resolve_workflow_style_ref_path(asset.chapter_id, db, asset.style_preset) if asset.chapter_id else None
-            ref_paths = [style_ref_path] if style_ref_path else None
-            logger.info("[regen_asset] no-source refs asset_id=%s style_ref=%s ref_count=%s", asset_id, style_ref_path, len(ref_paths or []))
-            saved_path = await image2_service.generate_reference_image(
+            if asset.asset_type not in {"character_reference", "story_character_reference", "scene_reference", "prop_reference"}:
+                raise HTTPException(404, "素材原图不存在，无法重绘")
+            saved_path = await generate_visual_asset_image(
                 prompt=prompt,
                 output_path=output_path,
+                asset_type=asset.asset_type,
                 api_key=api_key or None,
                 size="1920x1080",
-                ref_image_paths=ref_paths,
-                ref_type="style",
             )
+    except HTTPException:
+        raise
     except Exception as exc:
         logger.warning("Regenerate video asset failed: asset_id=%s err=%s", asset_id, exc)
         raise HTTPException(502, f"重绘失败: {exc}")
@@ -3472,7 +5224,15 @@ async def regenerate_video_asset(
 
     db.commit()
     # 配额扣减
-    _check_and_consume_quota_wrapper(user.id, "manga.image.generate.monthly_limit", 1, db, deduct=True)
+    _check_and_consume_quota_wrapper(
+        user.id,
+        "manga.image.generate.monthly_limit",
+        1,
+        db,
+        deduct=True,
+        request=request,
+        provider_kind="image",
+    )
     db.refresh(new_asset)
 
     return {
@@ -3550,12 +5310,12 @@ async def upload_style_preset_image(
     _configure_oss_from_db(db)
     oss_url = await run_blocking(oss_service.upload_file, str(file_path))
     if oss_url:
-        logger.info("风格预设图片已上传到 OSS: %s", oss_url)
+        logger.info("风格预设图片已上传到 OSS: %s", safe_media_url_for_log(oss_url))
         relative_path = oss_url
     else:
         logger.info("风格预设图片未上传到 OSS（未配置或上传失败），使用本地路径: %s", relative_path)
 
-    logger.info("上传风格预设图片完成，返回 URL: %s", relative_path)
+    logger.info("上传风格预设图片完成，返回 URL: %s", safe_media_url_for_log(relative_path))
     return {"success": True, "url": relative_path}
 
 
@@ -3605,10 +5365,14 @@ async def update_video_style_preset(
         raise HTTPException(404, "视频风格预设未找到")
 
     update_data = body.model_dump(exclude_unset=True)
-    logger.info("更新风格预设 %s: received fields=%s image_url=%s", preset_id, list(update_data.keys()), update_data.get("image_url", "(未发送)"))
+    logger.info(
+        "更新风格预设 %s: received fields=%s image_url=%s",
+        preset_id,
+        list(update_data.keys()),
+        safe_media_url_for_log(update_data.get("image_url", "(未发送)")),
+    )
     for field, value in update_data.items():
-        if value is not None:
-            setattr(preset, field, value)
+        setattr(preset, field, value)
 
     db.commit()
     db.refresh(preset)
@@ -3894,7 +5658,17 @@ async def generate_video_characters(
         raise HTTPException(400, "无法从角色数据中提取角色名")
 
     api_key = _user_deepseek_api_key(request, db)
+    ai_succeeded = False
     if api_key:
+        _check_and_consume_quota_wrapper(
+            user.id,
+            "ai.text.advanced_calls.monthly_limit",
+            1,
+            db,
+            deduct=False,
+            request=request,
+            provider_kind="text",
+        )
         import httpx
         prompt_text = f"""你是一名专业的影视动画角色设计主管。请为以下每个角色生成一份详细的角色设计表（Character Design Sheet）文本描述。
 
@@ -3919,15 +5693,12 @@ async def generate_video_characters(
 5. 「大五人格」用数值标注，格式固定为 O:xx C:xx E:xx A:xx N:xx
 6. 角色设计表用于视频动画的一致性参考，所有帧必须严格匹配这些标记"""
 
-        # 配额预检
-        _check_and_consume_quota_wrapper(user.id, "ai.text.advanced_calls.monthly_limit", 1, db, deduct=False)
-
         try:
             async with httpx.AsyncClient(timeout=300) as client:
                 response = await client.post(
-                    f"{deepseek_service.DEEPSEEK_BASE_URL}/chat/completions",
+                    f"{deepseek_service.runtime_base_url()}/chat/completions",
                     json={
-                        "model": deepseek_service.DEEPSEEK_MODEL,
+                        "model": deepseek_service.runtime_model(),
                         "messages": [
                             {"role": "system", "content": "你是专业的影视角色设计师。直接输出纯文本角色卡。"},
                             {"role": "user", "content": prompt_text},
@@ -3939,7 +5710,9 @@ async def generate_video_characters(
                 )
                 response.raise_for_status()
                 data = response.json()
+                deepseek_service._record_response_usage(data)
                 content = str(data["choices"][0]["message"]["content"] or "").strip()
+                ai_succeeded = True
         except Exception as e:
             logger.warning("AI generate character profiles failed: %s", e)
             content = ""
@@ -4010,8 +5783,16 @@ async def generate_video_characters(
             created.append({"name": name, "versions": _serialize_character_versions(db, story_id, name)})
 
     db.commit()
-    # 配额扣减
-    _check_and_consume_quota_wrapper(user.id, "ai.text.advanced_calls.monthly_limit", 1, db, deduct=True)
+    if ai_succeeded:
+        _check_and_consume_quota_wrapper(
+            user.id,
+            "ai.text.advanced_calls.monthly_limit",
+            1,
+            db,
+            deduct=True,
+            request=request,
+            provider_kind="text",
+        )
     return {"characters": created, "video_character_profiles": content}
 
 
@@ -4127,29 +5908,8 @@ async def generate_character_ref_image(
     if not (version.appearance_card or "").strip():
         raise HTTPException(400, "该版本尚无外貌卡，请先生成或编辑")
 
-    style_name = str(body.get("style_preset") or "").strip()
-    style_ctx: dict = {}
-    style_preset_ref_path: str | None = None
-    if style_name:
-        preset = db.query(VideoStylePreset).filter(VideoStylePreset.name == style_name).first()
-        if not preset:
-            preset = db.get(VideoStylePreset, int(style_name)) if style_name.isdigit() else None
-        if preset:
-            style_ctx = {
-                "name": preset.name,
-                "prompt_template": preset.prompt_template or "",
-                "image_style_params": preset.image_style_params if isinstance(preset.image_style_params, dict) else {},
-            }
-            if preset.image_url:
-                style_preset_ref_path = ensure_local_media_path(preset.image_url, "manga")
-    if not style_ctx:
-        style_ctx = {"name": "", "prompt_template": "", "image_style_params": {}}
-
-    final_prompt = _merge_style_prompt(
-        str(version.appearance_card or ""),
-        style_ctx.get("prompt_template"),
-        style_ctx.get("name", ""),
-    )
+    del body
+    final_prompt = str(version.appearance_card or "")
     # 追加角色设计表布局和一致性锁定指令
     final_prompt = (
         f"Character design sheet, one-page turnaround board. {final_prompt}. "
@@ -4161,8 +5921,6 @@ async def generate_character_ref_image(
         "hair parting, and 3 signature color swatches across ALL frames. "
         "Master reference sheet for video animation consistency."
     )
-    img_size = style_ctx.get("image_style_params", {}).get("size", "1920x1080")
-
     char_dir = _VIDEO_OUTPUTS_DIR / f"story_{story_id}" / "characters"
     char_dir.mkdir(parents=True, exist_ok=True)
     filename = f"{uuid.uuid4().hex}_{version.id}.png"
@@ -4173,29 +5931,27 @@ async def generate_character_ref_image(
     # 配额预检
     _check_and_consume_quota_wrapper(user.id, "manga.image.generate.monthly_limit", 1, db, deduct=False)
 
-    ref_paths = [style_preset_ref_path] if style_preset_ref_path else None
     try:
-        await image2_service.generate_reference_image(
+        saved_path = await generate_visual_asset_image(
             prompt=final_prompt,
             output_path=full_path,
+            asset_type="character_reference",
             api_key=api_key or None,
-            size=img_size,
-            ref_image_paths=ref_paths,
-            ref_type="style",
+            size="1920x1080",
         )
     except Exception as e:
         logger.warning("Character ref generation failed for %s/%s: %s", character_name, version.version_label, e)
         raise HTTPException(502, f"角色参考图生成失败: {e}")
 
-    file_path = str(full_path)
+    file_path = saved_path if str(saved_path).startswith(("http://", "https://")) else str(full_path)
     ref_asset = VideoAsset(
         story_id=story_id,
         asset_type="story_character_reference",
         name=f"Character - {character_name} ({version.version_label})",
         file_path=file_path,
         provider="image2",
-        prompt=version.appearance_card,
-        style_preset=style_name or None,
+        prompt=final_prompt,
+        style_preset=None,
         status="active",
     )
     db.add(ref_asset)
@@ -4276,7 +6032,7 @@ async def redraw_character_ref_image(
     if not old_asset:
         raise HTTPException(404, "参考图资源不存在")
 
-    source_path = _from_video_url(old_asset.file_path) or str(_VIDEO_OUTPUTS_DIR / (old_asset.file_path or ""))
+    source_path = ensure_local_media_path(old_asset.file_path, "video") or _from_video_url(old_asset.file_path) or str(_VIDEO_OUTPUTS_DIR / (old_asset.file_path or ""))
     source_path_obj = Path(source_path)
     if not source_path_obj.exists():
         raise HTTPException(404, "参考图文件不存在，请重新生成")
@@ -4288,36 +6044,20 @@ async def redraw_character_ref_image(
 
     api_key = _user_image_api_key(request)
 
-    # 解析风格预设参考图用于重绘
-    style_preset_name = (body.get("style_preset") or old_asset.style_preset or "").strip()
-    style_preset_ref_path: str | None = None
-    if style_preset_name:
-        preset = db.query(VideoStylePreset).filter(VideoStylePreset.name == style_preset_name).first()
-        if preset and preset.image_url:
-            style_preset_ref_path = ensure_local_media_path(preset.image_url, "manga")
-    ref_paths = [style_preset_ref_path] if style_preset_ref_path else None
-
     _check_and_consume_quota_wrapper(user.id, "manga.image.generate.monthly_limit", 1, db, deduct=False)
 
     try:
+        mask_bytes = None
         if mode == "partial" and mask_base64:
             import base64
             mask_bytes = base64.b64decode(mask_base64.split(",")[-1] if "," in mask_base64 else mask_base64)
-            await image2_service.edit_existing_image(
-                prompt=redraw_prompt,
-                source_image_path=source_path_obj,
-                output_path=full_path,
-                mask_bytes=mask_bytes,
-                api_key=api_key or None,
-            )
-        else:
-            await image2_service.generate_reference_image(
-                prompt=redraw_prompt,
-                output_path=full_path,
-                api_key=api_key or None,
-                ref_image_paths=ref_paths,
-                ref_type="style",
-            )
+        saved_path = await image2_service.edit_existing_image(
+            prompt=redraw_prompt,
+            source_image_path=source_path_obj,
+            output_path=full_path,
+            mask_bytes=mask_bytes,
+            api_key=api_key or None,
+        )
     except Exception as e:
         logger.warning("Character ref redraw failed for %s/%s: %s", character_name, version.version_label, e)
         raise HTTPException(502, f"角色参考图重绘失败: {e}")
@@ -4326,10 +6066,10 @@ async def redraw_character_ref_image(
         story_id=story_id,
         asset_type="story_character_reference",
         name=f"Character - {character_name} ({version.version_label})",
-        file_path=str(full_path),
+        file_path=saved_path if str(saved_path).startswith(("http://", "https://")) else str(full_path),
         provider="image2",
         prompt=redraw_prompt,
-        style_preset=old_asset.style_preset,
+        style_preset=None,
         status="active",
     )
     db.add(new_asset)
@@ -4355,9 +6095,7 @@ async def set_shot_video_style_preset(
     db: Session = Depends(get_db),
 ):
     user = _require_user(request, db)
-    shot = db.get(VideoShot, shot_id)
-    if not shot:
-        raise HTTPException(404, "视频分镜未找到")
+    shot = _require_shot_for_user(shot_id, user, db)
 
     shot.style_preset = _normalize_style_name(body.style_preset) or None
     db.commit()
@@ -4375,9 +6113,7 @@ async def delete_shot_video_style_preset(
     db: Session = Depends(get_db),
 ):
     user = _require_user(request, db)
-    shot = db.get(VideoShot, shot_id)
-    if not shot:
-        raise HTTPException(404, "视频分镜未找到")
+    shot = _require_shot_for_user(shot_id, user, db)
 
     shot.style_preset = None
     db.commit()
@@ -4397,9 +6133,7 @@ async def get_shot_asset_bundle(
     db: Session = Depends(get_db),
 ):
     user = _require_user(request, db)
-    shot = db.get(VideoShot, shot_id)
-    if not shot:
-        raise HTTPException(404, "视频分镜未找到")
+    shot = _require_shot_for_user(shot_id, user, db)
 
     storyboard_asset = None
     if shot.storyboard_asset_id:
@@ -4557,9 +6291,7 @@ async def update_asset_scope(
     db: Session = Depends(get_db),
 ):
     user = _require_user(request, db)
-    asset = db.get(VideoAsset, asset_id)
-    if not asset:
-        raise HTTPException(404, "视频素材未找到")
+    asset = _require_video_asset_for_user(asset_id, user, db)
 
     asset.usage_scope = body.usage_scope
     asset.inherit_to_next_shot = body.inherit_to_next_shot
@@ -4580,9 +6312,7 @@ async def promote_asset(
     db: Session = Depends(get_db),
 ):
     user = _require_user(request, db)
-    asset = db.get(VideoAsset, asset_id)
-    if not asset:
-        raise HTTPException(404, "视频素材未找到")
+    asset = _require_video_asset_for_user(asset_id, user, db)
 
     level = body.level
     if level == "scene_shared":
@@ -4742,6 +6472,7 @@ async def generate_shot_prompts(
         provider=body.provider or "sora",
         continuity_notes=body.continuity_notes or shot.continuity_notes or "",
         api_key=_user_deepseek_api_key(request, db),
+        strict_ai=True,
     )
 
     shot.storyboard_prompt = prompts.get("storyboard_prompt", "")
@@ -4793,21 +6524,21 @@ async def render_shot_storyboard(
         raise HTTPException(404, "场景未找到")
     _require_chapter_for_user(shot.scene.chapter_id, user, db)
 
-    style_ctx = _resolve_effective_style_for_shot(shot, db, body.style_preset)
-    style_name = style_ctx.get("name") or (body.style_preset or "")
-    image_style_params = style_ctx.get("image_style_params") or {}
     ref_asset_ids = _collect_shot_reference_asset_ids(
         shot,
         db,
-        include_characters=False,
-        include_scene=False,
+        include_characters=True,
+        include_scene=True,
         include_storyboard=False,
         include_frames=False,
         explicit_asset_ids=body.reference_asset_ids or [],
     )
     ref_assets = db.query(VideoAsset).filter(VideoAsset.id.in_(ref_asset_ids)).all() if ref_asset_ids else []
-    ref_block = _build_reference_constraints_block(ref_assets)
-    ref_paths = _resolve_asset_file_paths(ref_assets)
+    resolved_refs = _resolve_visual_asset_references(ref_assets)
+    ref_asset_ids = [asset.id for asset, _, _, _ in resolved_refs]
+    ref_paths = [path for _, path, _, _ in resolved_refs]
+    ref_labels = [label for _, _, label, _ in resolved_refs]
+    ref_roles = [role for _, _, _, role in resolved_refs]
 
     storyboards_dir = _VIDEO_OUTPUTS_DIR / "storyboards" / f"chapter_{shot.scene.chapter_id}" / f"shot_{shot_id}"
     storyboards_dir.mkdir(parents=True, exist_ok=True)
@@ -4816,7 +6547,9 @@ async def render_shot_storyboard(
 
     # 构建故事版 prompt（精简，避免图片 API 超时）
     duration = min(10, shot.duration_seconds or 10)
-    content_full = shot.storyboard_prompt or shot.action_description or f"Shot {shot.shot_number}"
+    content_full = _strip_storyboard_style_directives(
+        shot.storyboard_prompt or shot.action_description or f"Shot {shot.shot_number}"
+    )
     # 专业电影导演故事板 prompt — 中文输出，9:16 纵向，角色形象由参考图决定
     storyboard_prompt = (
         f"你是一位拥有20年经验的好莱坞电影导演和分镜导演。请将以下剧情转换为一张完整的电影级故事板展示图。\n\n"
@@ -4849,29 +6582,29 @@ async def render_shot_storyboard(
         f"- 只输出一张完整的中文电影故事板展示图\n"
         f"- 角色形象严格匹配参考图"
     )
-    prompt = _merge_style_prompt(
-        storyboard_prompt.strip(),
-        style_ctx.get("prompt_template"),
-        style_name,
-    )
+    prompt = storyboard_prompt.strip()
     api_key = _user_image_api_key(request)
 
     # 配额预检
     _check_and_consume_quota_wrapper(user.id, "manga.image.generate.monthly_limit", 1, db, deduct=False)
 
     try:
-        await image2_service.generate_reference_image(
+        saved_path = await image2_service.generate_reference_image(
             prompt=prompt,
             output_path=full_path,
             api_key=api_key,
-            size=image_style_params.get("size", "1920x1080"),
+            size="1920x1080",
             ref_image_paths=ref_paths if ref_paths else None,
+            ref_type="storyboard",
+            ref_labels=ref_labels if ref_labels else None,
+            ref_roles=ref_roles if ref_roles else None,
         )
     except Exception as e:
         logger.warning("Storyboard render failed (shot=%s): %s", shot_id, e)
         raise HTTPException(502, f"分镜图生成失败: {e}")
 
-    file_path = f"storyboards/chapter_{shot.scene.chapter_id}/shot_{shot_id}/{file_name}"
+    relative_path = f"storyboards/chapter_{shot.scene.chapter_id}/shot_{shot_id}/{file_name}"
+    file_path = saved_path if str(saved_path).startswith(("http://", "https://")) else relative_path
     asset = VideoAsset(
         story_id=shot.scene.chapter.story_id if shot.scene.chapter else None,
         chapter_id=shot.scene.chapter_id,
@@ -4883,7 +6616,7 @@ async def render_shot_storyboard(
         provider=body.provider or "image2",
         prompt=prompt,
         source_asset_ids_json=ref_asset_ids or None,
-        style_preset=style_name or None,
+        style_preset=None,
     )
     db.add(asset)
 
@@ -4981,6 +6714,9 @@ async def set_master_storyboard(
     asset = db.get(VideoAsset, asset_id)
     if not asset:
         raise HTTPException(404, "素材未找到")
+    if asset.shot_id != shot_id or asset.asset_type != "storyboard_frame":
+        raise HTTPException(400, "素材不是当前分镜的故事板")
+    _require_reference_assets_for_story([asset.id], shot.scene.chapter.story_id, db)
 
     shot.storyboard_asset_id = asset_id
     shot.updated_at = datetime.datetime.utcnow()
@@ -5077,13 +6813,9 @@ async def generate_shot_frames(
     )
     ref_assets = db.query(VideoAsset).filter(VideoAsset.id.in_(ref_asset_ids)).all() if ref_asset_ids else []
     ref_block = _build_reference_constraints_block(ref_assets)
-    ref_paths = _resolve_asset_file_paths(ref_assets)
     # 追加风格预设参考图，确保首尾帧风格统一
     style_ref_path = _resolve_workflow_style_ref_path(shot.scene.chapter_id, db)
-    if style_ref_path:
-        ref_paths = list(ref_paths) if ref_paths else []
-        if style_ref_path not in ref_paths:
-            ref_paths.append(style_ref_path)
+    ref_paths, ref_labels, ref_roles = _resolve_frame_reference_inputs(ref_assets, style_ref_path)
 
     api_key, _base_url, _model = _user_video_api_key(request)
     frames_dir = _VIDEO_OUTPUTS_DIR / "frames"
@@ -5101,7 +6833,12 @@ async def generate_shot_frames(
         else:
             frame_phase = "last frame key visual, post-action state"
         prompt_seed = f"{frame_phase}. {prompt_base}".strip()
-        prompt = _merge_style_prompt(f"{prompt_seed} {ref_block}".strip(), style_template, style_ctx.get("name", ""))
+        prompt = _merge_style_prompt_for_reference_image(
+            f"{prompt_seed} {ref_block}".strip(),
+            style_ref_path,
+            style_template,
+            style_ctx.get("name", ""),
+        )
         prompt = prompt or "shot frame"
 
         filename = f"shot_{shot_id}_{subtype}_{uuid.uuid4().hex[:8]}.png"
@@ -5114,6 +6851,9 @@ async def generate_shot_frames(
                 api_key=api_key or None,
                 size=image_style_params.get("size", "1920x1080"),
                 ref_image_paths=ref_paths if ref_paths else None,
+                ref_type="frame",
+                ref_labels=ref_labels if ref_labels else None,
+                ref_roles=ref_roles if ref_roles else None,
             )
         except Exception as e:
             logger.warning("Frame %s generation failed for shot %s: %s", subtype, shot_id, e)
@@ -5216,14 +6956,15 @@ async def regenerate_shot_frame(
     )
     ref_assets = db.query(VideoAsset).filter(VideoAsset.id.in_(ref_asset_ids)).all() if ref_asset_ids else []
     ref_block = _build_reference_constraints_block(ref_assets)
-    ref_paths = _resolve_asset_file_paths(ref_assets)
     # 追加风格预设参考图，确保帧重绘风格统一
     style_ref_path = _resolve_workflow_style_ref_path(shot.scene.chapter_id, db)
-    if style_ref_path:
-        ref_paths = list(ref_paths) if ref_paths else []
-        if style_ref_path not in ref_paths:
-            ref_paths.append(style_ref_path)
-    prompt = _merge_style_prompt(f"{prompt} {ref_block}".strip(), style_ctx.get("prompt_template"), style_ctx.get("name"))
+    ref_paths, ref_labels, ref_roles = _resolve_frame_reference_inputs(ref_assets, style_ref_path)
+    prompt = _merge_style_prompt_for_reference_image(
+        f"{prompt} {ref_block}".strip(),
+        style_ref_path,
+        style_ctx.get("prompt_template"),
+        style_ctx.get("name"),
+    )
     _check_and_consume_quota_wrapper(user.id, "manga.image.generate.monthly_limit", 1, db, deduct=False)
     try:
         await image2_service.generate_reference_image(
@@ -5232,6 +6973,9 @@ async def regenerate_shot_frame(
             api_key=api_key or None,
             size=(style_ctx.get("image_style_params") or {}).get("size", "1920x1080"),
             ref_image_paths=ref_paths if ref_paths else None,
+            ref_type="frame",
+            ref_labels=ref_labels if ref_labels else None,
+            ref_roles=ref_roles if ref_roles else None,
         )
     except Exception as e:
         logger.warning("Frame regen failed for shot %s asset %s: %s", shot_id, body.asset_id, e)
@@ -5466,7 +7210,6 @@ async def parse_shot_asset_prompts(
                 "name": name,
                 "prompt": _build_character_sheet_prompt(
                     character_name=name,
-                    style_ctx=style_ctx,
                     story=story,
                     note_from_profiles=note,
                     inherited_prompt=inherited_prompt,
@@ -5477,21 +7220,17 @@ async def parse_shot_asset_prompts(
     duration = min(10, shot.duration_seconds or 10)
     segments = max(3, min(5, duration // 2))  # 10s → 5段×2s, 8s → 4段×2s
     seg_dur = duration // segments
-    base_storyboard = _merge_style_prompt(
-        (
-            f"SHOT TIMELINE STORYBOARD for shot {shot.shot_number} ({duration}s total, {shot.shot_type or 'medium'}, {shot.camera_angle or 'eye_level'}, {shot.camera_movement or 'static'}). "
-            f"Characters: {', '.join(character_names) if character_names else 'N/A'}. "
-            f"Action: {shot.action_description or ''}. Dialogue: {shot.dialogue or 'none'}. "
-            f"Break this {duration}s shot into exactly {segments} time segments of {seg_dur}s each. "
-            f"For EACH segment describe: (a) timestamp range, (b) character positions and expressions at that moment, "
-            f"(c) camera framing at that moment (wide/medium/close-up), (d) what action happens in this segment, "
-            f"(e) any dialogue spoken in this segment. "
-            f"Format as:\n"
-            f"[0-{seg_dur}s] ...\n[{seg_dur}-{2*seg_dur}s] ...\n...\n"
-            f"End with camera/director notes for video generation reference."
-        ),
-        style_ctx.get("prompt_template"),
-        style_name,
+    base_storyboard = (
+        f"SHOT TIMELINE STORYBOARD for shot {shot.shot_number} ({duration}s total, {shot.shot_type or 'medium'}, {shot.camera_angle or 'eye_level'}, {shot.camera_movement or 'static'}). "
+        f"Characters: {', '.join(character_names) if character_names else 'N/A'}. "
+        f"Action: {shot.action_description or ''}. Dialogue: {shot.dialogue or 'none'}. "
+        f"Break this {duration}s shot into exactly {segments} time segments of {seg_dur}s each. "
+        f"For EACH segment describe: (a) timestamp range, (b) character positions and expressions at that moment, "
+        f"(c) camera framing at that moment (wide/medium/close-up), (d) what action happens in this segment, "
+        f"(e) any dialogue spoken in this segment. "
+        f"Format as:\n"
+        f"[0-{seg_dur}s] ...\n[{seg_dur}-{2*seg_dur}s] ...\n...\n"
+        f"End with camera/director notes for video generation reference."
     )
     base_first = _merge_style_prompt(
         (
@@ -5563,6 +7302,15 @@ async def parse_shot_asset_prompts(
 
     api_key = _user_deepseek_api_key(request, db)
     if api_key:
+        _check_and_consume_quota_wrapper(
+            user.id,
+            "ai.text.advanced_calls.monthly_limit",
+            1,
+            db,
+            deduct=False,
+            request=request,
+            provider_kind="text",
+        )
         import httpx
 
         ai_character_json = json.dumps(
@@ -5598,10 +7346,9 @@ Rules:
    e. End with complete camera/director notes: lens choice, focus pull, lighting setup, color temperature, depth of field.
 4. Video prompt must describe the COMPLETE continuous action of the shot from start to end, including all camera movement, character blocking, lighting progression, and sound design. It must be consistent with the storyboard segments.
 5. First/last frame prompts must capture the exact visual state at the beginning and end of the shot.
-6. Keep style consistency with selected style preset.
+6. Character, scene, prop and storyboard prompts must not contain style preset names or art-style instructions. Their visual consistency is supplied by reference assets during image generation.
 7. Output valid JSON object only.
 
-Selected style: {style_name}
 Shot grounding: {shot_grounding}
 Inherited character constraints: {inherited_constraints}
 
@@ -5622,7 +7369,7 @@ Base video prompt:
 """
 
         payload = {
-            "model": deepseek_service.DEEPSEEK_MODEL,
+            "model": deepseek_service.runtime_model(),
             "messages": [
                 {"role": "system", "content": "You are a film production prompt engineer. Return strict JSON only."},
                 {"role": "user", "content": prompt_text},
@@ -5634,12 +7381,13 @@ Base video prompt:
         try:
             async with httpx.AsyncClient(timeout=300) as client:
                 response = await client.post(
-                    f"{deepseek_service.DEEPSEEK_BASE_URL}/chat/completions",
+                    f"{deepseek_service.runtime_base_url()}/chat/completions",
                     json=payload,
                     headers=deepseek_service._deepseek_auth_headers(api_key),
                 )
                 response.raise_for_status()
                 data = response.json()
+                deepseek_service._record_response_usage(data)
                 content = str(data["choices"][0]["message"]["content"] or "").strip()
             result = deepseek_service._extract_json_object(content)
 
@@ -5670,7 +7418,9 @@ Base video prompt:
                     if name and prompt:
                         cleaned_prop_prompts.append({"name": name, "prompt": prompt})
 
-            final_storyboard = str(result.get("storyboard_prompt") or "").strip() or base_storyboard
+            final_storyboard = _strip_storyboard_style_directives(
+                str(result.get("storyboard_prompt") or "").strip() or base_storyboard
+            )
             final_first = str(result.get("first_frame_prompt") or "").strip() or base_first
             final_last = str(result.get("last_frame_prompt") or "").strip() or base_last
             final_video = str(result.get("video_prompt") or "").strip() or base_video
@@ -5684,6 +7434,15 @@ Base video prompt:
             shot.scene_prompt = final_scene_prompt
             shot.prop_prompts_json = cleaned_prop_prompts
             db.commit()
+            _check_and_consume_quota_wrapper(
+                user.id,
+                "ai.text.advanced_calls.monthly_limit",
+                1,
+                db,
+                deduct=True,
+                request=request,
+                provider_kind="text",
+            )
 
             logger.info("Shot %s parse_prompts AI OK: char_count=%d storyboard_len=%d",
                         shot_id, len(cleaned_char_prompts), len(final_storyboard))
@@ -5709,7 +7468,7 @@ Base video prompt:
 
     # 构造确定性回退
     fallback_char = [{"name": i["name"], "prompt": i["prompt"]} for i in default_character_prompts]
-    fallback_storyboard = shot.storyboard_prompt or base_storyboard
+    fallback_storyboard = _strip_storyboard_style_directives(shot.storyboard_prompt or base_storyboard)
     fallback_first = base_first
     fallback_last = base_last
     fallback_video = shot.video_prompt or base_video
@@ -5766,10 +7525,6 @@ async def generate_shot_character_asset(
     if not prompt:
         raise HTTPException(400, "角色提示词必填")
 
-    style_ctx = _resolve_effective_style_for_shot(shot, db, body.get("style_preset"))
-    style_name = style_ctx.get("name") or ""
-    image_style_params = style_ctx.get("image_style_params") or {}
-
     chapter_id = shot.scene.chapter_id
     char_dir = _VIDEO_OUTPUTS_DIR / "character_refs" / f"chapter_{chapter_id}" / f"shot_{shot_id}"
     char_dir.mkdir(parents=True, exist_ok=True)
@@ -5777,34 +7532,30 @@ async def generate_shot_character_asset(
     file_name = f"{safe_name}_{uuid.uuid4().hex[:8]}.png"
     full_path = char_dir / file_name
 
-    final_prompt = _merge_style_prompt(prompt, style_ctx.get("prompt_template"), style_name)
+    final_prompt = prompt
     context = _build_shot_asset_context(shot, "character", character_name)
     if context:
         final_prompt = f"{final_prompt}\n\n---\n上下文参考（确保形象与时代背景一致）：\n{context}"
     api_key = _user_image_api_key(request)
     _configure_image_service_from_db(request, db)
 
-    # 图生图：将顶部预选的风格参考图作为 img2img 源图传入
-    style_ref_path = _resolve_workflow_style_ref_path(chapter_id, db)
-    ref_paths = [style_ref_path] if style_ref_path else None
-
     # 配额预检
     _check_and_consume_quota_wrapper(user.id, "manga.image.generate.monthly_limit", 1, db, deduct=False)
 
     try:
-        await image2_service.generate_reference_image(
+        saved_path = await generate_visual_asset_image(
             prompt=final_prompt,
             output_path=full_path,
+            asset_type="character_reference",
             api_key=api_key or None,
-            size=image_style_params.get("size", "1920x1080"),
-            ref_image_paths=ref_paths,
-            ref_type="style",
+            size="1920x1080",
         )
     except Exception as e:
         logger.warning("Character reference generation failed (shot=%s, name=%s): %s", shot_id, character_name, e)
         raise HTTPException(502, f"角色参考图生成失败: {e}")
 
     relative_path = f"character_refs/chapter_{chapter_id}/shot_{shot_id}/{file_name}"
+    asset_path = saved_path if str(saved_path).startswith(("http://", "https://")) else relative_path
     source_asset_ids = body.get("source_asset_ids")
     if not isinstance(source_asset_ids, list):
         source_asset_ids = None
@@ -5816,11 +7567,11 @@ async def generate_shot_character_asset(
         shot_id=shot_id,
         asset_type="character_reference",
         name=f"Character - {character_name}",
-        file_path=relative_path,
+        file_path=asset_path,
         provider="image2",
         prompt=final_prompt,
         source_asset_ids_json=source_asset_ids,
-        style_preset=style_name or None,
+        style_preset=None,
     )
     db.add(asset)
     db.commit()
@@ -5864,10 +7615,6 @@ async def generate_shot_prop_asset(
     if not prompt:
         raise HTTPException(400, "Prop prompt is required")
 
-    style_ctx = _resolve_effective_style_for_shot(shot, db, body.get("style_preset"))
-    style_name = style_ctx.get("name") or ""
-    image_style_params = style_ctx.get("image_style_params") or {}
-
     chapter_id = shot.scene.chapter_id
     prop_dir = _VIDEO_OUTPUTS_DIR / "prop_refs" / f"chapter_{chapter_id}" / f"shot_{shot_id}"
     prop_dir.mkdir(parents=True, exist_ok=True)
@@ -5875,33 +7622,29 @@ async def generate_shot_prop_asset(
     file_name = f"{safe_name}_{uuid.uuid4().hex[:8]}.png"
     full_path = prop_dir / file_name
 
-    final_prompt = _merge_style_prompt(prompt, style_ctx.get("prompt_template"), style_name)
+    final_prompt = prompt
     context = _build_shot_asset_context(shot, "prop", prop_name)
     if context:
         final_prompt = f"{final_prompt}\n\n---\n上下文参考（确保形象与时代背景一致）：\n{context}"
     api_key = _user_image_api_key(request)
     _configure_image_service_from_db(request, db)
 
-    # 图生图：将顶部预选的风格参考图作为 img2img 源图传入
-    style_ref_path = _resolve_workflow_style_ref_path(chapter_id, db)
-    ref_paths = [style_ref_path] if style_ref_path else None
-
     _check_and_consume_quota_wrapper(user.id, "manga.image.generate.monthly_limit", 1, db, deduct=False)
 
     try:
-        await image2_service.generate_reference_image(
+        saved_path = await generate_visual_asset_image(
             prompt=final_prompt,
             output_path=full_path,
+            asset_type="prop_reference",
             api_key=api_key or None,
-            size=image_style_params.get("size", "1920x1080"),
-            ref_image_paths=ref_paths,
-            ref_type="style",
+            size="1920x1080",
         )
     except Exception as e:
         logger.warning("Prop reference generation failed (shot=%s, name=%s): %s", shot_id, prop_name, e)
         raise HTTPException(502, f"道具参考图生成失败: {e}")
 
     relative_path = f"prop_refs/chapter_{chapter_id}/shot_{shot_id}/{file_name}"
+    asset_path = saved_path if str(saved_path).startswith(("http://", "https://")) else relative_path
     source_asset_ids = body.get("source_asset_ids")
     if not isinstance(source_asset_ids, list):
         source_asset_ids = None
@@ -5913,11 +7656,11 @@ async def generate_shot_prop_asset(
         shot_id=shot_id,
         asset_type="prop_reference",
         name=f"Prop - {prop_name}",
-        file_path=relative_path,
+        file_path=asset_path,
         provider="image2",
         prompt=final_prompt,
         source_asset_ids_json=source_asset_ids,
-        style_preset=style_name or None,
+        style_preset=None,
     )
     db.add(asset)
     db.commit()
@@ -5959,43 +7702,35 @@ async def generate_shot_scene_asset(
     if not prompt:
         prompt = shot.scene_prompt or f"Scene at {shot.scene.location or 'unknown'}. Mood: {shot.scene.mood or 'neutral'}."
 
-    style_ctx = _resolve_effective_style_for_shot(shot, db, body.get("style_preset"))
-    style_name = style_ctx.get("name") or ""
-    image_style_params = style_ctx.get("image_style_params") or {}
-
     chapter_id = shot.scene.chapter_id
     scene_dir = _VIDEO_OUTPUTS_DIR / "scene_refs" / f"chapter_{chapter_id}" / f"shot_{shot_id}"
     scene_dir.mkdir(parents=True, exist_ok=True)
     file_name = f"scene_{uuid.uuid4().hex[:8]}.png"
     full_path = scene_dir / file_name
 
-    final_prompt = _merge_style_prompt(prompt, style_ctx.get("prompt_template"), style_name)
+    final_prompt = prompt
     context = _build_shot_asset_context(shot, "scene", "")
     if context:
         final_prompt = f"{final_prompt}\n\n---\n上下文参考（确保形象与时代背景一致）：\n{context}"
     api_key = _user_image_api_key(request)
     _configure_image_service_from_db(request, db)
 
-    # 图生图：将顶部预选的风格参考图作为 img2img 源图传入
-    style_ref_path = _resolve_workflow_style_ref_path(chapter_id, db)
-    ref_paths = [style_ref_path] if style_ref_path else None
-
     _check_and_consume_quota_wrapper(user.id, "manga.image.generate.monthly_limit", 1, db, deduct=False)
 
     try:
-        await image2_service.generate_reference_image(
+        saved_path = await generate_visual_asset_image(
             prompt=final_prompt,
             output_path=full_path,
+            asset_type="scene_reference",
             api_key=api_key or None,
-            size=image_style_params.get("size", "1920x1080"),
-            ref_image_paths=ref_paths,
-            ref_type="style",
+            size="1920x1080",
         )
     except Exception as e:
         logger.warning("Scene reference generation failed (shot=%s): %s", shot_id, e)
         raise HTTPException(502, f"场景参考图生成失败: {e}")
 
     relative_path = f"scene_refs/chapter_{chapter_id}/shot_{shot_id}/{file_name}"
+    asset_path = saved_path if str(saved_path).startswith(("http://", "https://")) else relative_path
     source_asset_ids = body.get("source_asset_ids")
     if not isinstance(source_asset_ids, list):
         source_asset_ids = None
@@ -6007,11 +7742,11 @@ async def generate_shot_scene_asset(
         shot_id=shot_id,
         asset_type="scene_reference",
         name=f"Scene - {shot.scene.title or f'Scene {shot.scene.scene_number}'}",
-        file_path=relative_path,
+        file_path=asset_path,
         provider="image2",
         prompt=final_prompt,
         source_asset_ids_json=source_asset_ids,
-        style_preset=style_name or None,
+        style_preset=None,
     )
     db.add(asset)
     db.commit()
@@ -6053,11 +7788,13 @@ async def render_shot_video(
 
     effective_provider = _resolve_video_provider(body.provider, db)
 
-    duration = max(1, min(SHOT_DURATION_SECONDS, body.duration_seconds or shot.duration_seconds or SHOT_DURATION_SECONDS))
-    _check_and_consume_quota_wrapper(
-        user.id, "video.generate.count.monthly_limit", 1, db, deduct=True,
+    duration = max(
+        1,
+        min(
+            MAX_VIDEO_DURATION_SECONDS,
+            int(body.duration_seconds or shot.duration_seconds or DEFAULT_VIDEO_DURATION_SECONDS),
+        ),
     )
-
     source_storyboard_asset_id = body.source_storyboard_asset_id or shot.storyboard_asset_id
     auto_reference_asset_ids = _collect_shot_reference_asset_ids(
         shot,
@@ -6088,37 +7825,68 @@ async def render_shot_video(
     ref_block = _build_reference_constraints_block(ref_assets)
 
     # 构建图片列表：首帧→主图(image[0])，其他→中间，尾帧→最后
-    ordered_images: list[str] = []
+    ordered_reference_inputs: list[str] = []
     # 用户未选首帧时，自动继承前一个镜头的尾帧作为连贯参考
     prev_last_frame = _get_previous_shot_last_frame(shot, db) if not first_frame_asset else None
     if prev_last_frame:
         p = _resolve_asset_file_paths([prev_last_frame])
-        b = _encode_file_to_base64_data_uri(p[0]) if p else None
-        if b:
-            ordered_images.append(b)
+        if p:
+            ordered_reference_inputs.append(p[0])
             if not first_frame_asset:
-                first_frame_url_text = b[:80] + "..."
                 logger.info("Shot %s: 继承前镜头尾帧作为首帧连贯参考", shot_id)
     if first_frame_asset:
         path = _resolve_asset_file_paths([first_frame_asset])
-        b64 = _encode_file_to_base64_data_uri(path[0]) if path else None
-        if b64:
-            ordered_images.append(b64)
-    ordered_images.extend(_resolve_asset_reference_urls([a.id for a in other_refs], db, request) if other_refs else [])
+        if path:
+            ordered_reference_inputs.append(path[0])
+    ordered_reference_inputs.extend(
+        _resolve_asset_reference_urls([a.id for a in other_refs], db, request)
+        if other_refs else []
+    )
     if last_frame_asset:
         path = _resolve_asset_file_paths([last_frame_asset])
-        b64 = _encode_file_to_base64_data_uri(path[0]) if path else None
-        if b64:
-            ordered_images.append(b64)
+        if path:
+            ordered_reference_inputs.append(path[0])
 
     style_ctx = _resolve_effective_style_for_shot(shot, db, requested_style_name=body.style)
     style_name = style_ctx["name"]
     video_style_params = style_ctx["video_style_params"]
     style_template = style_ctx["prompt_template"]
 
+    style_ref_path = _resolve_workflow_style_ref_path(shot.scene.chapter_id, db, style_name)
+    if style_ref_path:
+        if style_ref_path not in ordered_reference_inputs:
+            ordered_reference_inputs.append(style_ref_path)
+    ordered_images = _prepare_video_reference_images(ordered_reference_inputs)
+    if ordered_images:
+        input_mode = "image_to_video"
+
     api_key, base_url, resolved_model = _user_video_api_key(request)
     resolved_model = body.model or resolved_model
+    video_capabilities = _current_video_capabilities(request, db, resolved_model)
+    adapter_type = _current_video_adapter_type(request)
+    runtime_snapshot = _build_video_runtime_snapshot(
+        request,
+        db,
+        api_key=api_key,
+        base_url=base_url,
+        model=resolved_model,
+    )
     aspect_ratio = body.aspect_ratio or video_style_params.get("aspect_ratio") or "16:9"
+    _validate_video_request_before_billing(
+        adapter_type=adapter_type,
+        model=resolved_model,
+        video_capabilities=video_capabilities,
+        aspect_ratio=aspect_ratio,
+        duration_seconds=duration,
+        reference_count=len(ordered_images),
+    )
+    quota_result = _reserve_video_billing(
+        request,
+        db,
+        user_id=user.id,
+        video_seconds=duration,
+        detach=False,
+    )
     grounding = _build_story_grounding_block(shot.scene.chapter.story if shot.scene and shot.scene.chapter else None, shot.scene.chapter if shot.scene else None, shot.scene)
     storyboard_guide = ""
     if shot.storyboard_prompt:
@@ -6140,7 +7908,8 @@ async def render_shot_video(
     await task_manager.submit_task(
         task_id=task_id,
         task_type="video_render",
-        coro_func=video_gen_service.submit_video_job,
+        coro_func=_submit_and_monitor_video_job,
+        billing_usage_event_id=quota_result.get("usage_event_id"),
         shot_id=shot_id,
         provider=effective_provider,
         model=resolved_model,
@@ -6152,11 +7921,14 @@ async def render_shot_video(
         api_key=api_key,
         base_url=base_url,
         input_mode=input_mode,
+        video_capabilities=video_capabilities,
+        adapter_type=adapter_type,
             timeout=600,
-            max_retries=2,
+            max_retries=0,
             quota_user_id=user.id,
             quota_feature_key="video.generate.count.monthly_limit",
-            quota_amount=1,
+            quota_amount=duration,
+            quota_usage_event_id=quota_result.get("usage_event_id"),
             metadata={
                 "stage": "submitting",
                 "message": "正在提交视频生成任务...",
@@ -6165,6 +7937,7 @@ async def render_shot_video(
                 "running_message": "正在提交视频生成任务...",
             },
         )
+    _detach_video_billing(request, quota_result)
 
     job_status = "pending"
     job = VideoGenerationJob(
@@ -6172,16 +7945,21 @@ async def render_shot_video(
         provider=effective_provider,
         provider_job_id=task_id,
         model=resolved_model,
-        request_payload_json={
+        request_payload_json=_sanitize_video_job_request_payload({
             "model": resolved_model,
             "prompt": full_prompt,
             "negative_prompt": body.negative_prompt or shot.negative_prompt or "",
             "duration_seconds": duration,
             "aspect_ratio": aspect_ratio,
             "style": style_name,
+            "input_mode": input_mode,
             "reference_asset_ids": auto_reference_asset_ids,
-            "reference_image_urls": reference_image_urls,
-        },
+            "reference_sources": [
+                {"asset_id": asset_id, "source": "video_asset"}
+                for asset_id in auto_reference_asset_ids
+            ],
+        }),
+        provider_payload_json=_video_provider_metadata(runtime_snapshot, quota_result.get("usage_event_id")),
         status=job_status,
         progress=0,
         duration_seconds=duration,
@@ -6210,7 +7988,7 @@ async def render_shot_video(
             "progress": job.progress,
             "duration_seconds": job.duration_seconds,
             "aspect_ratio": job.aspect_ratio,
-            "request_payload": job.request_payload_json or {},
+            "request_payload": _sanitize_video_job_request_payload(job.request_payload_json),
             "error_message": job.error_message,
             "input_mode": job.input_mode,
             "source_storyboard_asset_id": job.source_storyboard_asset_id,
@@ -6238,8 +8016,8 @@ async def create_video_project(
         name=body.name or f"Project - {chapter.title or f'Chapter {chapter.chapter_number}'}",
         timeline_json=[item.model_dump() for item in body.timeline],
         subtitle_json=[item.model_dump() for item in (body.subtitle or [])],
-        bgm_path=body.bgm_path or "",
-        cover_path=body.cover_path or "",
+        bgm_path=_validate_video_asset_storage_path(body.bgm_path),
+        cover_path=_validate_video_asset_storage_path(body.cover_path),
         status="draft",
     )
     db.add(project)
@@ -6327,7 +8105,10 @@ async def update_video_project(
     }
     for body_field, model_field in field_map.items():
         if body_field in update_data and update_data[body_field] is not None:
-            setattr(project, model_field, update_data[body_field])
+            value = update_data[body_field]
+            if body_field in {"bgm_path", "cover_path"}:
+                value = _validate_video_asset_storage_path(value)
+            setattr(project, model_field, value)
 
     project.updated_at = datetime.datetime.utcnow()
     db.commit()
@@ -6382,9 +8163,23 @@ async def compile_video_project(
             logger.warning("Clip %s not found or inactive, skipping", clip_id)
             continue
 
-        video_path = _from_video_url(clip.video_path)
+        clip_shot = db.get(VideoShot, clip.shot_id)
+        clip_scene = db.get(ScriptScene, clip_shot.scene_id) if clip_shot else None
+        clip_chapter = db.get(Chapter, clip_scene.chapter_id) if clip_scene else None
+        if not clip_chapter:
+            raise HTTPException(404, f"视频片段 {clip_id} 未关联有效章节")
+        if project.chapter_id and clip_chapter.id != project.chapter_id:
+            raise HTTPException(403, "视频片段不属于当前项目章节")
+        if project.story_id and clip_chapter.story_id != project.story_id:
+            raise HTTPException(403, "视频片段不属于当前项目作品")
+
+        video_path = ensure_local_media_path(clip.video_path, "video")
         if not video_path:
-            logger.warning("Could not resolve path for clip %s: %s", clip_id, clip.video_path)
+            logger.warning(
+                "Could not resolve path for clip %s: %s",
+                clip_id,
+                safe_media_url_for_log(clip.video_path),
+            )
             continue
 
         clips.append({
@@ -6401,7 +8196,9 @@ async def compile_video_project(
 
     bgm_path = None
     if body.include_bgm and project.bgm_path:
-        bgm_path = _from_video_url(project.bgm_path)
+        bgm_path = ensure_local_media_path(project.bgm_path, "video")
+        if not bgm_path:
+            raise HTTPException(422, "背景音乐文件不存在或地址不可用")
 
     result = await compile_project(
         output_path=fs_output_path,
@@ -6453,123 +8250,513 @@ def _check_and_consume_quota_wrapper(
     amount: int,
     db: Session,
     deduct: bool,
+    request: Request | None = None,
+    provider_kind: str | None = None,
 ) -> dict:
-    """Minimal quota check/consume inline (avoids circular import from main.py).
-    扣减时自动使用独立 session，避免受中间件自动回滚影响。"""
     if amount <= 0:
         amount = 1
 
-    from models import Plan, PlanFeature, UserSubscription, UserUsageMonthly, UserQuotaGrantMonthly
+    try:
+        import main as main_mod
 
-    # 扣减路径使用独立 session，预检查使用传入的 db
-    own_session = deduct
-    work_db = SessionLocal() if own_session else db
+        if main_mod._points_dual_track_enabled(db):
+            request = request or getattr(db, "info", {}).get("request")
+            modality = provider_kind if provider_kind in {"text", "image", "video"} else (
+                "text"
+                if feature_key == "video.shot.split.monthly_limit"
+                else main_mod._feature_key_to_modality(feature_key)
+            )
+            if request is not None:
+                return main_mod._check_and_consume_feature_quota(
+                    request,
+                    user_id,
+                    feature_key,
+                    amount,
+                    db,
+                    deduct=deduct,
+                    provider_kind=modality,
+                )
+            mode = "platform"
+            try:
+                from models import UserAiPreference
+
+                pref = db.query(UserAiPreference).filter(UserAiPreference.user_id == user_id).first()
+                if pref and pref.credential_mode in {"platform", "user_key"}:
+                    mode = pref.credential_mode
+            except Exception:
+                pass
+            charged = 0
+            usage_event_id = None
+            billing_request_id = None
+            if deduct and mode == "platform":
+                from decimal import Decimal as _Decimal
+                import uuid as _uuid
+                from services.ai.resolver import begin_ai_call, complete_ai_call, resolve_model
+
+                model = resolve_model(db, user_id, modality=modality, model_id=None, task_type=None)
+                rid = str(_uuid.uuid4())
+                estimate_kwargs = {}
+                units = max(1, int(amount or 1))
+                if modality == "image":
+                    estimate_kwargs["image_count"] = units
+                elif modality == "video":
+                    estimate_kwargs["video_seconds"] = units
+                ctx = begin_ai_call(
+                    db,
+                    user_id=user_id,
+                    modality=modality,
+                    task_type=feature_key,
+                    credential_mode="platform",
+                    model_id=model.id,
+                    request_id=rid,
+                    estimate_kwargs=estimate_kwargs,
+                )
+                complete_ai_call(
+                    db,
+                    ctx,
+                    success=True,
+                    image_count=units if modality == "image" else 0,
+                    video_seconds=units if modality == "video" else 0,
+                    usage_source="estimated",
+                )
+                charged = float(ctx.estimated_points or ctx.reserved_points or _Decimal("0"))
+                usage_event_id = ctx.usage_event_id
+                billing_request_id = ctx.request_id
+            return {
+                "skipped": True,
+                "reason": "points_dual_track",
+                "credential_mode": mode,
+                "feature_key": feature_key,
+                "points_charged": charged,
+                "usage_event_id": usage_event_id,
+                "billing_request_id": billing_request_id,
+                "used": 0,
+                "limit": 0,
+                "period_key": "",
+                "base_limit": 0,
+                "granted": 0,
+            }
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("video 双轨配额失败（旧配额系统已移除，无 fallback）")
+        raise
+
+
+def _reserve_text_billing(
+    request: Request,
+    db: Session,
+    *,
+    user_id: int,
+    feature_key: str = "ai.text.advanced_calls.monthly_limit",
+) -> tuple[dict, object | None]:
+    quota_result = _check_and_consume_quota_wrapper(
+        user_id,
+        feature_key,
+        1,
+        db,
+        deduct=False,
+        request=request,
+        provider_kind="text",
+    )
+    import main as main_mod
+
+    billing_ctx = main_mod._detach_pending_platform_points(
+        request,
+        quota_result.get("usage_event_id"),
+    )
+    return quota_result, billing_ctx
+
+
+def _reserve_video_billing(
+    request: Request,
+    db: Session,
+    *,
+    user_id: int,
+    video_seconds: int,
+    detach: bool = True,
+) -> dict:
+    quota_result = _check_and_consume_quota_wrapper(
+        user_id,
+        "video.generate.count.monthly_limit",
+        video_seconds,
+        db,
+        deduct=False,
+    )
+    if detach:
+        import main as main_mod
+
+        main_mod._detach_pending_platform_points(
+            request,
+            quota_result.get("usage_event_id"),
+        )
+    return quota_result
+
+
+def _detach_video_billing(request: Request, quota_result: dict) -> None:
+    if not quota_result.get("usage_event_id"):
+        return
+    import main as main_mod
+
+    main_mod._detach_pending_platform_points(
+        request,
+        quota_result.get("usage_event_id"),
+    )
+
+
+async def _run_billed_text_task(
+    *,
+    billed_coro,
+    billing_ctx,
+    task_id: str | None = None,
+    **kwargs,
+):
+    """统一执行后台文本 AI 任务，并按最终结果结算或释放预留积分。"""
+    import main as main_mod
 
     try:
-        sub = work_db.query(UserSubscription).filter(UserSubscription.user_id == user_id).first()
-        plan = None
-        if sub:
-            plan = work_db.get(Plan, sub.plan_id)
-        if not plan:
-            plan = work_db.query(Plan).filter(Plan.code == "free").first()
-        if not plan:
-            if not deduct:
-                return {"used": 0, "limit": 0, "feature_key": feature_key, "period_key": "", "base_limit": 0, "granted": 0}
-            raise HTTPException(500, "未配置套餐")
-
-        feature = (
-            work_db.query(PlanFeature)
-            .filter(PlanFeature.plan_id == plan.id, PlanFeature.feature_key == feature_key)
-            .first()
-        )
-        base_limit = 0
-        if feature and feature.value_json:
-            base_limit = int(feature.value_json.get("value", 0))
-
-        # period_key 需要与 main.py _subscription_period_key 保持一致
-        # 有订阅→订阅周期；无订阅→当前月份
-        sub_row = work_db.query(UserSubscription).filter(
-            UserSubscription.user_id == user_id,
-            UserSubscription.status == "active",
-        ).first()
-        if sub_row and sub_row.current_period_start and sub_row.current_period_end:
-            period_key = f"{sub_row.current_period_start.strftime('%Y%m%d')}{sub_row.current_period_end.strftime('%Y%m%d')}"
-        else:
-            period_key = datetime.datetime.utcnow().strftime("%Y%m")
-
-        grant = (
-            work_db.query(UserQuotaGrantMonthly)
-            .filter(
-                UserQuotaGrantMonthly.user_id == user_id,
-                UserQuotaGrantMonthly.feature_key == feature_key,
-                UserQuotaGrantMonthly.period_key == period_key,
+        result = await billed_coro(task_id=task_id, **kwargs)
+        failed = bool(
+            isinstance(result, dict)
+            and (
+                result.get("success") is False
+                or result.get("status") in {"failed", "cancelled"}
+                or result.get("workflow_status") in {"failed", "cancelled"}
+                or bool(result.get("error"))
             )
-            .first()
         )
-        granted = int(grant.granted_amount) if grant else 0
-        limit = base_limit + granted
+        main_mod._finish_streaming_platform_points(
+            billing_ctx,
+            success=not failed,
+            error_code="background_task_failed" if failed else None,
+        )
+        return result
+    except Exception as exc:
+        main_mod._finish_streaming_platform_points(
+            billing_ctx,
+            success=False,
+            error_code=type(exc).__name__,
+        )
+        raise
 
-        usage = (
-            work_db.query(UserUsageMonthly)
-            .filter(
-                UserUsageMonthly.user_id == user_id,
-                UserUsageMonthly.feature_key == feature_key,
-                UserUsageMonthly.period_key == period_key,
+
+async def _run_billed_media_task(
+    *,
+    billed_coro,
+    billing_usage_event_id: int | None,
+    billing_modality: str,
+    billing_units: int,
+    task_id: str | None = None,
+    **kwargs,
+):
+    """执行后台图片或视频任务，并按成功产出量结算预留积分。"""
+    try:
+        result = await billed_coro(task_id=task_id, **kwargs)
+    except Exception as exc:
+        if billing_usage_event_id:
+            from services.ai.resolver import complete_ai_call_by_usage_event
+
+            billing_db = SessionLocal()
+            try:
+                complete_ai_call_by_usage_event(
+                    billing_db,
+                    billing_usage_event_id,
+                    success=False,
+                    error_code=type(exc).__name__,
+                )
+            finally:
+                billing_db.close()
+        raise
+    failed = bool(
+        isinstance(result, dict)
+        and (
+            result.get("success") is False
+            or result.get("status") in {"failed", "cancelled", "canceled"}
+            or result.get("workflow_status") in {"failed", "cancelled", "canceled"}
+            or bool(result.get("error"))
+        )
+    )
+    if failed and billing_usage_event_id:
+        from services.ai.resolver import complete_ai_call_by_usage_event
+
+        billing_db = SessionLocal()
+        try:
+            complete_ai_call_by_usage_event(
+                billing_db,
+                billing_usage_event_id,
+                success=False,
+                error_code="background_task_failed",
             )
-            .first()
+        finally:
+            billing_db.close()
+    if failed or not billing_usage_event_id:
+        return result
+
+    actual_units = max(0, int(billing_units or 0))
+    if isinstance(result, dict) and billing_modality == "image":
+        actual_units = max(0, int(result.get("shot_count") or 0))
+    elif isinstance(result, dict) and billing_modality == "video" and kwargs.get("workflow_id"):
+        failed_ids = {int(item) for item in (result.get("failed_shot_ids") or [])}
+        billing_db = SessionLocal()
+        try:
+            query = billing_db.query(ChapterVideoShot).filter(
+                ChapterVideoShot.workflow_id == int(kwargs["workflow_id"]),
+            )
+            shot_ids = kwargs.get("shot_ids")
+            if shot_ids:
+                query = query.filter(ChapterVideoShot.id.in_(shot_ids))
+            actual_units = sum(
+                max(1, min(MAX_VIDEO_DURATION_SECONDS, int(shot.duration_seconds or DEFAULT_VIDEO_DURATION_SECONDS)))
+                for shot in query.all()
+                if shot.id not in failed_ids
+            )
+        finally:
+            billing_db.close()
+
+    from services.ai.resolver import complete_ai_call_by_usage_event
+
+    billing_db = SessionLocal()
+    try:
+        complete_ai_call_by_usage_event(
+            billing_db,
+            billing_usage_event_id,
+            success=True,
+            image_count=actual_units if billing_modality == "image" else 0,
+            video_seconds=actual_units if billing_modality == "video" else 0,
         )
-        used = int(usage.used_amount) if usage else 0
-
-        feature_name = _FEATURE_NAME_MAP.get(feature_key, feature_key)
-        if limit <= 0:
-            raise HTTPException(403, f"当前套餐不可用「{feature_name}」")
-        if used + amount > limit:
-            raise HTTPException(429, f"「{feature_name}」配额已超限 ({used}/{limit})")
-
-        if not deduct:
-            return {
-                "used": used,
-                "limit": limit,
-                "feature_key": feature_key,
-                "period_key": period_key,
-                "base_limit": base_limit,
-                "granted": granted,
-            }
-
-        if usage:
-            usage.used_amount = used + amount
-        else:
-            work_db.add(UserUsageMonthly(
-                user_id=user_id,
-                feature_key=feature_key,
-                period_key=period_key,
-                used_amount=amount,
-            ))
-        work_db.commit()
-        logger.info("配额扣除成功: user=%s feature=%s amount=%s used=%s/%s period=%s",
-                    user_id, feature_key, amount, used + amount, limit, period_key)
-        # 即时回读验证
-        verify = work_db.query(UserUsageMonthly).filter(
-            UserUsageMonthly.user_id == user_id,
-            UserUsageMonthly.feature_key == feature_key,
-            UserUsageMonthly.period_key == period_key,
-        ).first()
-        logger.info("配额回读验证: user=%s feature=%s db_used=%s session_id=%s",
-                    user_id, feature_key,
-                    verify.used_amount if verify else "NOT_FOUND",
-                    id(work_db))
-
-        return {
-            "used": used + amount,
-            "limit": limit,
-            "feature_key": feature_key,
-            "period_key": period_key,
-            "base_limit": base_limit,
-            "granted": granted,
-        }
     finally:
-        if own_session:
-            work_db.close()
+        billing_db.close()
+    return result
+
+
+async def _submit_and_monitor_video_job(
+    *,
+    shot_id: int,
+    provider: str,
+    model: str,
+    prompt: str,
+    negative_prompt: str,
+    duration_seconds: int,
+    aspect_ratio: str,
+    reference_images: list[str] | None,
+    api_key: str | None,
+    base_url: str | None,
+    input_mode: str,
+    video_capabilities: dict | None = None,
+    adapter_type: str = video_adapter_service.VIDEO_ADAPTER_LINGDONG,
+    billing_usage_event_id: int | None = None,
+    task_id: str | None = None,
+    story_id: int | None = None,
+    chapter_id: int | None = None,
+) -> dict:
+    """提交视频任务并在后台完成轮询、下载、入库和最终计费。"""
+    del story_id, chapter_id
+    submit_result = await video_gen_service.submit_video_job(
+        shot_id=shot_id,
+        provider=provider,
+        model=model,
+        prompt=prompt,
+        negative_prompt=negative_prompt,
+        duration_seconds=duration_seconds,
+        aspect_ratio=aspect_ratio,
+        reference_images=reference_images,
+        api_key=api_key,
+        base_url=base_url,
+        input_mode=input_mode,
+        video_capabilities=video_capabilities,
+        adapter_type=adapter_type,
+    )
+    provider_job_id = str(submit_result.get("provider_job_id") or "").strip()
+    if not provider_job_id:
+        raise RuntimeError("视频上游未返回任务 ID")
+
+    db_job: VideoGenerationJob | None = None
+    for _ in range(50):
+        billing_db = SessionLocal()
+        try:
+            db_job = billing_db.query(VideoGenerationJob).filter(
+                VideoGenerationJob.provider_job_id == task_id,
+            ).first()
+            if db_job:
+                db_job.provider_job_id = provider_job_id
+                db_job.status = "running"
+                db_job.progress = max(1, int(submit_result.get("progress") or 1))
+                billing_db.commit()
+                break
+        finally:
+            billing_db.close()
+        await asyncio.sleep(0.1)
+
+    consecutive_poll_errors = 0
+    for _ in range(200):
+        if task_id and task_manager.is_cancellation_requested(task_id):
+            raise asyncio.CancelledError
+        try:
+            latest = await video_gen_service.query_job_status(
+                provider=provider,
+                provider_job_id=provider_job_id,
+                api_key=api_key,
+                base_url=base_url,
+                model=model,
+                adapter_type=adapter_type,
+            )
+            consecutive_poll_errors = 0
+        except Exception as exc:
+            consecutive_poll_errors += 1
+            if consecutive_poll_errors >= 5:
+                raise
+            if task_id:
+                task_manager.update_task_metadata(
+                    task_id,
+                    stage="generating",
+                    message=f"状态查询暂时失败，正在重试（{consecutive_poll_errors}/5）...",
+                    last_error=public_error_message(exc, "视频状态查询失败，正在重试"),
+                    provider_job_id=provider_job_id,
+                )
+            await asyncio.sleep(min(10, 2 ** consecutive_poll_errors))
+            continue
+        status = str(latest.get("status") or "queued").lower()
+        progress = max(1, min(100, int(latest.get("progress") or 1)))
+        if task_id:
+            task_manager.update_task_metadata(
+                task_id,
+                stage="generating" if status not in {"succeeded", "failed", "cancelled"} else status,
+                message="视频正在生成..." if status not in {"succeeded", "failed", "cancelled"} else "视频生成已完成",
+                provider_status=latest.get("provider_status") or status,
+                progress=progress,
+                provider_job_id=provider_job_id,
+            )
+
+        billing_db = SessionLocal()
+        try:
+            db_job = billing_db.query(VideoGenerationJob).filter(
+                VideoGenerationJob.provider_job_id == provider_job_id,
+            ).first()
+            if db_job:
+                db_job.status = status
+                db_job.progress = progress
+                if latest.get("error"):
+                    db_job.error_message = public_error_message(
+                        latest["error"],
+                        "视频生成失败，请稍后重试",
+                    )
+                billing_db.commit()
+        finally:
+            billing_db.close()
+
+        if status in {"failed", "cancelled", "canceled"}:
+            billing_db = SessionLocal()
+            try:
+                db_job = billing_db.query(VideoGenerationJob).filter(
+                    VideoGenerationJob.provider_job_id == provider_job_id,
+                ).first()
+                if db_job:
+                    _fail_video_job_and_refund(
+                        billing_db,
+                        db_job,
+                        error_message=public_error_message(
+                            latest.get("error"),
+                            "视频生成失败，请稍后重试",
+                        ),
+                        reason=f"provider_{status}",
+                    )
+                else:
+                    _refund_video_billing(
+                        billing_db,
+                        usage_event_id=billing_usage_event_id,
+                        reason=f"provider_{status}",
+                    )
+            finally:
+                billing_db.close()
+            return {**submit_result, **latest, "status": "failed"}
+
+        if status == "succeeded":
+            fetched = await video_gen_service.fetch_job_result(
+                provider=provider,
+                provider_job_id=provider_job_id,
+                shot_id=shot_id,
+                api_key=api_key,
+                base_url=base_url,
+                model=model,
+                adapter_type=adapter_type,
+            )
+            video_path_abs = str(fetched.get("video_path") or "").strip()
+            if not video_path_abs:
+                billing_db = SessionLocal()
+                try:
+                    db_job = billing_db.query(VideoGenerationJob).filter(
+                        VideoGenerationJob.provider_job_id == provider_job_id,
+                    ).first()
+                    if db_job:
+                        _fail_video_job_and_refund(
+                            billing_db,
+                            db_job,
+                            error_message="视频生成成功但未返回可下载文件",
+                            reason="result_missing_video_path",
+                        )
+                    else:
+                        _refund_video_billing(
+                            billing_db,
+                            usage_event_id=billing_usage_event_id,
+                            reason="result_missing_video_path",
+                        )
+                finally:
+                    billing_db.close()
+                return {**submit_result, "status": "failed", "error": "视频生成成功但未返回可下载文件"}
+
+            billing_db = SessionLocal()
+            try:
+                db_job = billing_db.query(VideoGenerationJob).filter(
+                    VideoGenerationJob.provider_job_id == provider_job_id,
+                ).first()
+                shot = billing_db.get(VideoShot, shot_id)
+                if not db_job or not shot:
+                    raise RuntimeError("视频任务记录不存在")
+                clip = billing_db.query(RenderedClip).filter(RenderedClip.job_id == db_job.id).first()
+                if clip is None:
+                    billing_db.query(RenderedClip).filter(RenderedClip.shot_id == shot_id).update(
+                        {"is_active": False},
+                        synchronize_session=False,
+                    )
+                    next_version = billing_db.query(RenderedClip).filter(RenderedClip.shot_id == shot_id).count() + 1
+                    clip = RenderedClip(
+                        shot_id=shot_id,
+                        job_id=db_job.id,
+                        video_path=_to_video_url(video_path_abs),
+                        duration_seconds=duration_seconds,
+                        resolution=aspect_ratio,
+                        version=next_version,
+                        is_active=True,
+                        source_storyboard_asset_id=db_job.source_storyboard_asset_id,
+                    )
+                    billing_db.add(clip)
+                db_job.status = "succeeded"
+                db_job.progress = 100
+                db_job.completed_at = datetime.datetime.utcnow()
+                shot.status = "ready"
+                shot.updated_at = datetime.datetime.utcnow()
+                _settle_video_billing(
+                    billing_db,
+                    job=db_job,
+                    usage_event_id=billing_usage_event_id,
+                    video_seconds=duration_seconds,
+                    commit=False,
+                )
+                billing_db.commit()
+                billing_db.refresh(clip)
+                return {
+                    **submit_result,
+                    "status": "succeeded",
+                    "progress": 100,
+                    "video_path": clip.video_path,
+                    "clip_id": clip.id,
+                }
+            finally:
+                billing_db.close()
+
+        await asyncio.sleep(3)
+
+    raise TimeoutError("视频生成超时")
 
 
 # ── 章节视频工作流 API ────────────────────────────────────
@@ -6582,20 +8769,15 @@ async def api_create_chapter_workflow(
     db: Session = Depends(get_db),
 ):
     """创建并启动章节视频工作流。"""
-    global _db_schema_verified
-
     user = _require_user(request, db)
     chapter = _require_chapter_for_user(body.chapter_id, user, db)
-
-    # init_db 在整个进程生命周期中只执行一次
-    if not _db_schema_verified:
-        init_db(run_migrations=True, raise_errors=True)
-        _db_schema_verified = True
 
     # 若未传入参考图 ID，从角色库默认版本自动填充
     ref_ids = body.character_reference_ids
     if not ref_ids:
         ref_ids = _get_story_character_reference_asset_ids(chapter.story_id, db)
+    if ref_ids:
+        _require_reference_assets_for_story(ref_ids, chapter.story_id, db)
 
     # 创建工作流
     wf = create_chapter_workflow(
@@ -6632,6 +8814,68 @@ async def api_get_chapter_workflow(
         raise HTTPException(403, "无权访问此工作流")
 
     return wf
+
+
+@router.post("/api/video/chapter-workflows/{workflow_id}/shots", response_model=ChapterVideoShotOut)
+async def api_create_chapter_workflow_shot(
+    workflow_id: int,
+    body: ChapterVideoShotCreate,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """在章节视频工作流末尾手动添加一个分镜。"""
+    user = _require_user(request, db)
+    workflow = db.get(ChapterVideoWorkflow, workflow_id)
+    if not workflow:
+        raise HTTPException(404, "工作流不存在")
+
+    story = db.get(Story, workflow.story_id)
+    if not story or story.owner_user_id != user.id:
+        raise HTTPException(403, "无权访问此工作流")
+
+    summary = body.story_summary.strip()
+    if not summary:
+        raise HTTPException(422, "镜头情节不能为空")
+
+    active_statuses = {
+        "parsing_shots",
+        "generating_details",
+        "generating_storyboards",
+        "generating_videos",
+        "reanalyzing_prompts",
+    }
+    if workflow.workflow_status in active_statuses:
+        raise HTTPException(409, "工作流任务执行中，暂时无法添加镜头")
+
+    shot_query = db.query(ChapterVideoShot).filter(ChapterVideoShot.workflow_id == workflow_id)
+    max_index = db.query(sa_func.max(ChapterVideoShot.shot_index)).filter(
+        ChapterVideoShot.workflow_id == workflow_id
+    ).scalar() or 0
+    shot = ChapterVideoShot(
+        workflow_id=workflow_id,
+        shot_index=max_index + 1,
+        source_text_span=(body.source_text_span or summary).strip(),
+        scene_location=(body.scene_location or "").strip() or None,
+        time_of_day=(body.time_of_day or "").strip() or None,
+        characters=[name.strip() for name in body.characters if name.strip()],
+        story_summary=summary,
+        dialogue_or_narration=(body.dialogue_or_narration or "").strip() or None,
+        camera_plan=(body.camera_plan or "").strip() or None,
+        motion_plan=(body.motion_plan or "").strip() or None,
+        emotion_plan=(body.emotion_plan or "").strip() or None,
+        continuity_notes=(body.continuity_notes or "").strip() or None,
+        character_reference_ids=list(workflow.character_reference_ids or []),
+        status="pending",
+    )
+    db.add(shot)
+    workflow.total_shots = shot_query.count() + 1
+    workflow.completed_shots = shot_query.filter(ChapterVideoShot.status == "video_ready").count()
+    workflow.failed_shots = shot_query.filter(ChapterVideoShot.status == "failed").count()
+    workflow.workflow_status = "shots_ready"
+    workflow.error_message = None
+    db.commit()
+    db.refresh(shot)
+    return shot
 
 
 @router.get("/api/video/chapter-workflows/by-chapter/{chapter_id}", response_model=ChapterVideoWorkflowListOut)
@@ -6765,6 +9009,8 @@ async def api_regenerate_shot_storyboard(
     api_key = _user_image_api_key(request)
     _configure_image_service_from_db(request, db)
     ref_asset_ids = body.reference_asset_ids or None
+    if ref_asset_ids:
+        _require_reference_assets_for_story(ref_asset_ids, wf.story_id, db)
     _check_and_consume_quota_wrapper(user.id, "manga.image.generate.monthly_limit", 1, db, deduct=False)
     updated_shot = await regenerate_shot_storyboard(
         shot_id,
@@ -6841,9 +9087,7 @@ async def api_regenerate_shot_video(
     request: Request,
     db: Session = Depends(get_db),
 ):
-    """重新生成单镜头的视频。"""
     user = _require_user(request, db)
-    _check_and_consume_quota_wrapper(user.id, "video.generate.count.monthly_limit", 1, db, deduct=True)
     shot = db.get(ChapterVideoShot, shot_id)
     if not shot:
         raise HTTPException(404, "镜头不存在")
@@ -6856,25 +9100,73 @@ async def api_regenerate_shot_video(
     if not story or story.owner_user_id != user.id:
         raise HTTPException(403, "无权访问")
 
-    # 从数据库读取视频 API 配置并注入运行时
+    regen_duration = max(
+        1,
+        min(
+            MAX_VIDEO_DURATION_SECONDS,
+            int(
+                getattr(body, "duration_seconds", None)
+                or getattr(shot, "duration_seconds", None)
+                or DEFAULT_VIDEO_DURATION_SECONDS
+            ),
+        ),
+    )
     _configure_video_service_from_db(request, db)
-    # 从数据库读取 DeepSeek API 配置并注入运行时
     deepseek_api_key = _user_deepseek_api_key(request, db)
 
     api_key, base_url, model = _user_video_api_key(request)
+    video_capabilities = _current_video_capabilities(request, db, model)
+    adapter_type = _current_video_adapter_type(request)
     ref_asset_ids = body.reference_asset_ids or None
+    if ref_asset_ids:
+        _require_reference_assets_for_story(ref_asset_ids, wf.story_id, db)
+    _validate_video_request_before_billing(
+        adapter_type=adapter_type,
+        model=model,
+        video_capabilities=video_capabilities,
+        aspect_ratio=body.aspect_ratio or "16:9",
+        duration_seconds=regen_duration,
+        reference_count=_chapter_video_reference_count(shot, wf, ref_asset_ids, db),
+    )
+    quota_result = _reserve_video_billing(
+        request,
+        db,
+        user_id=user.id,
+        video_seconds=regen_duration,
+    )
     try:
-        updated_shot = await regenerate_shot_video(shot_id, api_key, body.prompt_override, ref_asset_ids=ref_asset_ids, base_url=base_url, model=model, deepseek_api_key=deepseek_api_key, aspect_ratio=body.aspect_ratio or "16:9")
+        updated_shot = await regenerate_shot_video(shot_id, api_key, body.prompt_override, ref_asset_ids=ref_asset_ids, base_url=base_url, model=model, deepseek_api_key=deepseek_api_key, aspect_ratio=body.aspect_ratio or "16:9", video_capabilities=video_capabilities, adapter_type=adapter_type, duration_seconds=regen_duration)
     except UpstreamServiceError as exc:
+        _refund_video_billing(
+            db,
+            usage_event_id=quota_result.get("usage_event_id"),
+            reason="regenerate_upstream_failed",
+        )
         logger.warning("Regenerate shot video upstream failed: shot_id=%s provider=%s err=%s", shot_id, exc.provider, exc)
         raise HTTPException(502, str(exc))
     except Exception as exc:
+        _refund_video_billing(
+            db,
+            usage_event_id=quota_result.get("usage_event_id"),
+            reason="regenerate_failed",
+        )
         if "视频 API 地址未配置" in str(exc) or "视频生成模型未配置" in str(exc):
             raise HTTPException(400, str(exc))
         raise
 
     if not updated_shot:
+        _refund_video_billing(
+            db,
+            usage_event_id=quota_result.get("usage_event_id"),
+            reason="regenerate_empty_result",
+        )
         raise HTTPException(500, "重新生成视频失败")
+
+    _settle_video_billing(
+        db,
+        usage_event_id=quota_result.get("usage_event_id"),
+        video_seconds=regen_duration,
+    )
 
     return ChapterVideoShotOut.model_validate(updated_shot)
 
@@ -6959,10 +9251,29 @@ async def api_reanalyze_shot_prompts(
         raise HTTPException(403, "无权访问")
 
     deepseek_api_key = _user_deepseek_api_key(request, db)
+    _check_and_consume_quota_wrapper(
+        user.id,
+        "ai.text.advanced_calls.monthly_limit",
+        1,
+        db,
+        deduct=False,
+        request=request,
+        provider_kind="text",
+    )
     try:
         result = await reanalyze_shot_prompts(shot_id, deepseek_api_key=deepseek_api_key)
     except Exception as exc:
         raise HTTPException(500, f"重新分析失败: {exc}")
+
+    _check_and_consume_quota_wrapper(
+        user.id,
+        "ai.text.advanced_calls.monthly_limit",
+        1,
+        db,
+        deduct=True,
+        request=request,
+        provider_kind="text",
+    )
 
     return result
 
@@ -7094,6 +9405,11 @@ async def api_reanalyze_storyboard_prompts(
     shot_ids = body.get("shot_ids")
     if not shot_ids:
         raise HTTPException(400, "请指定至少一个镜头")
+    quota_result, billing_ctx = _reserve_text_billing(
+        request,
+        db,
+        user_id=user.id,
+    )
 
     task_id = f"chapter_video_{workflow_id}_reanalyze_{uuid.uuid4().hex[:8]}"
 
@@ -7103,14 +9419,27 @@ async def api_reanalyze_storyboard_prompts(
         await task_manager.submit_task(
             task_id=task_id,
             task_type="chapter_video_reanalyze",
-            coro_func=reanalyze_storyboard_prompts,
+            coro_func=_run_billed_text_task,
+            billed_coro=reanalyze_storyboard_prompts,
+            billing_ctx=billing_ctx,
             workflow_id=workflow_id,
             shot_ids=shot_ids,
             deepseek_api_key=deepseek_api_key,
             timeout=300.0,
             max_retries=1,
+            quota_user_id=user.id,
+            quota_feature_key="ai.text.advanced_calls.monthly_limit",
+            quota_amount=1,
+            quota_usage_event_id=quota_result.get("usage_event_id"),
         )
     except Exception as exc:
+        import main as main_mod
+
+        main_mod._finish_streaming_platform_points(
+            billing_ctx,
+            success=False,
+            error_code="task_submission_failed",
+        )
         raise HTTPException(500, f"提交后台任务失败: {exc}")
 
     return {
@@ -7214,10 +9543,28 @@ async def api_generate_screenplay(
     deepseek_api_key = _user_deepseek_api_key(request, db)
     if not deepseek_api_key:
         raise HTTPException(400, "请配置 DeepSeek API Key")
+    _check_and_consume_quota_wrapper(
+        user.id,
+        "ai.text.advanced_calls.monthly_limit",
+        1,
+        db,
+        deduct=False,
+        request=request,
+        provider_kind="text",
+    )
 
     result = await generate_workflow_screenplay(
         workflow_id=workflow_id,
         deepseek_api_key=deepseek_api_key,
+    )
+    _check_and_consume_quota_wrapper(
+        user.id,
+        "ai.text.advanced_calls.monthly_limit",
+        1,
+        db,
+        deduct=True,
+        request=request,
+        provider_kind="text",
     )
     return result
 
@@ -7321,10 +9668,28 @@ async def api_regenerate_screenplay(
     deepseek_api_key = _user_deepseek_api_key(request, db)
     if not deepseek_api_key:
         raise HTTPException(400, "请配置 DeepSeek API Key")
+    _check_and_consume_quota_wrapper(
+        user.id,
+        "ai.text.advanced_calls.monthly_limit",
+        1,
+        db,
+        deduct=False,
+        request=request,
+        provider_kind="text",
+    )
 
     result = await generate_workflow_screenplay(
         workflow_id=workflow_id,
         deepseek_api_key=deepseek_api_key,
+    )
+    _check_and_consume_quota_wrapper(
+        user.id,
+        "ai.text.advanced_calls.monthly_limit",
+        1,
+        db,
+        deduct=True,
+        request=request,
+        provider_kind="text",
     )
     return result
 
@@ -7347,7 +9712,7 @@ async def api_parse_chapter_shots(
     if not story or story.owner_user_id != user.id:
         raise HTTPException(403, "无权访问")
 
-    if wf.screenplay_status != "approved":
+    if getattr(wf, "screenplay_status", "approved") != "approved":
         raise HTTPException(409, "请先批准剧本后再执行拆镜操作")
 
     if wf.workflow_status == "parsing_shots":
@@ -7366,7 +9731,7 @@ async def api_parse_chapter_shots(
 
     # 如果剧本已批准，优先使用剧本作为拆镜输入源
     wf_in_db = db.get(ChapterVideoWorkflow, workflow_id)
-    if wf_in_db and wf_in_db.screenplay_status == "approved":
+    if wf_in_db and getattr(wf_in_db, "screenplay_status", None) == "approved":
         screenplay_source = build_shot_source_from_screenplay(wf_in_db)
         if screenplay_source.strip():
             current_source_text = screenplay_source
@@ -7394,8 +9759,20 @@ async def api_parse_chapter_shots(
                 logger.info("拆镜前刷新工作流风格 %s -> %s", wf_in_db.video_style, preset.name)
         db.commit()
 
-    # 直接扣除配额（wrapper 内部自动使用独立 session，不受中间件回滚影响）
-    _check_and_consume_quota_wrapper(user.id, "video.shot.split.monthly_limit", 1, db, deduct=True)
+    # 拆镜使用文本模型：先冻结积分，后台成功后按真实 token 结算。
+    quota_result = _check_and_consume_quota_wrapper(
+        user.id,
+        "video.shot.split.monthly_limit",
+        1,
+        db,
+        deduct=False,
+    )
+    import main as main_mod
+
+    billing_ctx = main_mod._detach_pending_platform_points(
+        request,
+        quota_result.get("usage_event_id"),
+    )
 
     task_id = f"chapter_video_{workflow_id}_stage_{uuid.uuid4().hex[:8]}"
 
@@ -7410,11 +9787,13 @@ async def api_parse_chapter_shots(
             story_id=wf.story_id,
             source_text=current_source_text,
             deepseek_api_key=deepseek_api_key,
+            billing_ctx=billing_ctx,
             timeout=600.0,
             max_retries=1,
             quota_user_id=user.id,
             quota_feature_key="video.shot.split.monthly_limit",
             quota_amount=1,
+            quota_usage_event_id=quota_result.get("usage_event_id"),
             metadata={
                 "workflow_id": workflow_id,
                 "stage": "parsing_shots",
@@ -7423,10 +9802,18 @@ async def api_parse_chapter_shots(
                 "running_message": "正在拆解章节分镜...",
             },
         )
+        main_mod._detach_pending_platform_points(request, quota_result.get("usage_event_id"))
     except Exception as exc:
         refund_db = SessionLocal()
         try:
-            task_manager.refund_quota(user.id, "video.shot.split.monthly_limit", 1, refund_db)
+            task_manager.refund_quota(
+                user.id,
+                "video.shot.split.monthly_limit",
+                1,
+                refund_db,
+                usage_event_id=quota_result.get("usage_event_id"),
+            )
+            refund_db.commit()
         finally:
             refund_db.close()
         raise HTTPException(500, f"提交后台任务失败: {exc}")
@@ -7463,6 +9850,11 @@ async def api_generate_shot_details(
     deepseek_api_key = _user_deepseek_api_key(request, db)
     if not deepseek_api_key:
         raise HTTPException(400, "请配置 DeepSeek API Key")
+    quota_result, billing_ctx = _reserve_text_billing(
+        request,
+        db,
+        user_id=user.id,
+    )
 
     task_id = f"chapter_video_{workflow_id}_detail_{uuid.uuid4().hex[:8]}"
 
@@ -7472,7 +9864,9 @@ async def api_generate_shot_details(
         await task_manager.submit_task(
             task_id=task_id,
             task_type="chapter_video_generate_details",
-            coro_func=generate_shot_details_batch,
+            coro_func=_run_billed_text_task,
+            billed_coro=generate_shot_details_batch,
+            billing_ctx=billing_ctx,
             workflow_id=workflow_id,
             shot_ids=body.shot_ids,
             chapter_text=wf.source_text or "",
@@ -7480,6 +9874,10 @@ async def api_generate_shot_details(
             deepseek_api_key=deepseek_api_key,
             timeout=120.0,
             max_retries=1,
+            quota_user_id=user.id,
+            quota_feature_key="ai.text.advanced_calls.monthly_limit",
+            quota_amount=1,
+            quota_usage_event_id=quota_result.get("usage_event_id"),
             metadata={
                 "workflow_id": workflow_id,
                 "stage": "generating_details",
@@ -7489,6 +9887,13 @@ async def api_generate_shot_details(
             },
         )
     except Exception as exc:
+        import main as main_mod
+
+        main_mod._finish_streaming_platform_points(
+            billing_ctx,
+            success=False,
+            error_code="task_submission_failed",
+        )
         raise HTTPException(500, f"提交后台任务失败: {exc}")
 
     return {
@@ -7539,7 +9944,7 @@ async def api_upload_style_reference(
     _configure_oss_from_db(db)
     oss_url = await run_blocking(oss_service.upload_file, str(file_path))
     if oss_url:
-        logger.info("工作流风格参考图已上传到 OSS: %s", oss_url)
+        logger.info("工作流风格参考图已上传到 OSS: %s", safe_media_url_for_log(oss_url))
         relative_path = oss_url
     else:
         logger.info("工作流风格参考图未上传到 OSS（未配置或上传失败），使用本地路径: %s", relative_path)
@@ -7567,6 +9972,8 @@ async def api_update_style_reference_url(
         raise HTTPException(403, "无权访问")
 
     style_reference_image_url = body.get("style_reference_image_url")
+    if "video_style" in body:
+        wf.video_style = str(body.get("video_style") or "").strip() or None
     wf.style_reference_image_url = style_reference_image_url
     db.commit()
 
@@ -7609,20 +10016,40 @@ async def api_generate_storyboards(
             if db_wf:
                 db_wf.character_reference_ids = ref_ids
                 db.commit()
+    if ref_ids:
+        _require_reference_assets_for_story(ref_ids, wf.story_id, db)
 
-    # 先设置工作流状态，确保前端轮询能立即检测到
+    try:
+        storyboard_conditions = [ChapterVideoShot.workflow_id == workflow_id]
+        if body.shot_ids:
+            storyboard_conditions.append(ChapterVideoShot.id.in_(body.shot_ids))
+        else:
+            storyboard_conditions.append(ChapterVideoShot.status == "pending")
+        shot_count = db.query(ChapterVideoShot).filter(*storyboard_conditions).count()
+    except AttributeError:
+        shot_count = len(body.shot_ids or []) or int(getattr(wf, "total_shots", 0) or 0)
+    if shot_count <= 0:
+        raise HTTPException(400, "没有可生成的故事版镜头")
+    quota_result = _check_and_consume_quota_wrapper(
+        user.id,
+        "manga.image.generate.monthly_limit",
+        shot_count,
+        db,
+        deduct=False,
+    )
+    import main as main_mod
+
     update_chapter_workflow_status(workflow_id, "generating_storyboards")
-
-    shot_ids_list = body.shot_ids or []
-    shot_count = len(shot_ids_list)
-    if shot_count > 0:
-        _check_and_consume_quota_wrapper(user.id, "manga.image.generate.monthly_limit", shot_count, db, deduct=True)
 
     try:
         await task_manager.submit_task(
             task_id=task_id,
             task_type="chapter_video_storyboards",
-            coro_func=generate_storyboards_for_shots,
+            coro_func=_run_billed_media_task,
+            billed_coro=generate_storyboards_for_shots,
+            billing_usage_event_id=quota_result.get("usage_event_id"),
+            billing_modality="image",
+            billing_units=shot_count,
             workflow_id=workflow_id,
             story_id=wf.story_id,
             shot_ids=body.shot_ids or None,
@@ -7634,6 +10061,7 @@ async def api_generate_storyboards(
             quota_user_id=user.id,
             quota_feature_key="manga.image.generate.monthly_limit",
             quota_amount=shot_count,
+            quota_usage_event_id=quota_result.get("usage_event_id"),
             metadata={
                 "workflow_id": workflow_id,
                 "stage": "generating_storyboards",
@@ -7642,11 +10070,19 @@ async def api_generate_storyboards(
                 "running_message": "正在生成故事版图片...",
             },
         )
+        main_mod._detach_pending_platform_points(request, quota_result.get("usage_event_id"))
     except Exception as exc:
         if shot_count > 0:
             refund_db = SessionLocal()
             try:
-                task_manager.refund_quota(user.id, "manga.image.generate.monthly_limit", shot_count, refund_db)
+                task_manager.refund_quota(
+                    user.id,
+                    "manga.image.generate.monthly_limit",
+                    shot_count,
+                    refund_db,
+                    usage_event_id=quota_result.get("usage_event_id"),
+                )
+                refund_db.commit()
             finally:
                 refund_db.close()
         raise HTTPException(500, f"提交后台任务失败: {exc}")
@@ -7680,17 +10116,13 @@ async def api_generate_videos(
     deepseek_api_key = _user_deepseek_api_key(request, db)
     image_api_key = _user_image_api_key(request)
 
-    if not image_api_key:
-        raise HTTPException(400, "请提供 Image API Key")
-
     # 从数据库读取视频 API 配置并注入运行时
     _configure_video_service_from_db(request, db)
     video_api_key, video_base_url, video_model = _user_video_api_key(request)
+    video_capabilities = _current_video_capabilities(request, db, video_model)
+    adapter_type = _current_video_adapter_type(request)
 
     task_id = f"chapter_video_{workflow_id}_stage_{uuid.uuid4().hex[:8]}"
-
-    # 先设置工作流状态，确保前端轮询能立即检测到
-    update_chapter_workflow_status(workflow_id, "generating_videos")
 
     # 刷新角色参考图 asset_id：视频阶段依赖 shot.character_reference_ids，
     # 若用户在拆镜后新增了参考图，确保 worklfow 和 shots 拿到最新数据
@@ -7712,19 +10144,62 @@ async def api_generate_videos(
                 logger.info("视频生成前刷新角色参考图 asset_ids=%s (影响 %d 个镜头)", ref_ids, len(stale_shots))
 
     try:
+        billed_shots = _chapter_video_target_shots(db, workflow_id, body.shot_ids or None)
+    except AttributeError:
+        billed_shots = []
+    if billed_shots:
+        total_duration = sum(
+            max(1, min(MAX_VIDEO_DURATION_SECONDS, int(shot.duration_seconds or DEFAULT_VIDEO_DURATION_SECONDS)))
+            for shot in billed_shots
+        )
+    else:
+        fallback_count = len(body.shot_ids or []) or int(getattr(wf, "total_shots", 0) or 0)
+        if fallback_count <= 0:
+            raise HTTPException(400, "没有可生成的视频镜头")
+        total_duration = fallback_count * DEFAULT_VIDEO_DURATION_SECONDS
+    target_shot_ids = [shot.id for shot in billed_shots]
+    for billed_shot in billed_shots:
+        _validate_video_request_before_billing(
+            adapter_type=adapter_type,
+            model=video_model,
+            video_capabilities=video_capabilities,
+            aspect_ratio="16:9",
+            duration_seconds=max(1, min(MAX_VIDEO_DURATION_SECONDS, int(billed_shot.duration_seconds or DEFAULT_VIDEO_DURATION_SECONDS))),
+            reference_count=_chapter_video_reference_count(billed_shot, wf, None, db),
+        )
+    quota_result = _reserve_video_billing(
+        request,
+        db,
+        user_id=user.id,
+        video_seconds=total_duration,
+        detach=False,
+    )
+    update_chapter_workflow_status(workflow_id, "generating_videos")
+
+    try:
         await task_manager.submit_task(
             task_id=task_id,
             task_type="chapter_video_videos",
-            coro_func=generate_videos_for_shots,
+            coro_func=_run_billed_media_task,
+            billed_coro=generate_videos_for_shots,
+            billing_usage_event_id=quota_result.get("usage_event_id"),
+            billing_modality="video",
+            billing_units=total_duration,
             workflow_id=workflow_id,
-            shot_ids=body.shot_ids or None,
+            shot_ids=target_shot_ids,
             image_api_key=image_api_key,
             deepseek_api_key=deepseek_api_key,
             video_api_key=video_api_key,
             video_base_url=video_base_url,
             video_model=video_model,
+            video_capabilities=video_capabilities,
+            adapter_type=adapter_type,
             timeout=1800.0,
             max_retries=1,
+            quota_user_id=user.id,
+            quota_feature_key="video.generate.count.monthly_limit",
+            quota_amount=total_duration,
+            quota_usage_event_id=quota_result.get("usage_event_id"),
             metadata={
                 "workflow_id": workflow_id,
                 "stage": "generating_videos",
@@ -7733,7 +10208,20 @@ async def api_generate_videos(
                 "running_message": "正在生成镜头视频...",
             },
         )
+        _detach_video_billing(request, quota_result)
     except Exception as exc:
+        refund_db = SessionLocal()
+        try:
+            task_manager.refund_quota(
+                user.id,
+                "video.generate.count.monthly_limit",
+                total_duration,
+                refund_db,
+                usage_event_id=quota_result.get("usage_event_id"),
+            )
+            refund_db.commit()
+        finally:
+            refund_db.close()
         raise HTTPException(500, f"提交后台任务失败: {exc}")
 
     return {

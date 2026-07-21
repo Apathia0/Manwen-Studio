@@ -2,13 +2,14 @@ import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } fro
 import {
   type Story,
   type Chapter,
-  type EntitlementResponse,
   type ChapterVideoWorkflow,
+  type ChapterVideoShotCreate,
   type StoryVideoCharacter,
   type VideoAsset,
   apiHeaders,
   concatChapterVideoWorkflow,
   createChapterVideoWorkflow,
+  createChapterWorkflowShot,
   getChapterVideoWorkflow,
   getChapterVideoWorkflowStatus,
   listChapterVideoWorkflows,
@@ -37,6 +38,7 @@ import ChapterVideoWorkflowPanel from './ChapterVideoWorkflowPanel';
 import StyleSelectorModal from './StyleSelectorModal';
 import AssetManagementModal from './AssetManagementModal';
 import { toast } from '../lib/toast';
+import { normalizeErrorMessage, readResponseError } from '../lib/errors';
 import { videoGenStore } from '../videoGenStore';
 
 const AgentPanel = lazy(() => import('./AgentPanel/AgentPanel'));
@@ -45,7 +47,7 @@ interface Props {
   story: Story;
   chapters: Chapter[];
   currentChapter: Chapter | null;
-  entitlements?: EntitlementResponse | null;
+  entitlements?: Record<string, any> | null;
   onChapterChange: (chapter: Chapter) => void;
   onContentUpdated?: () => void | Promise<void>;
 }
@@ -89,12 +91,25 @@ export default function VideoStoryboardLayout({
   const [videoCharacters, setVideoCharacters] = useState<StoryVideoCharacter[]>([]);
   const [characterLoading, setCharacterLoading] = useState(false);
   const [parsing, setParsing] = useState(false);
+  const [screenplayGenerating, setScreenplayGenerating] = useState(false);
   const [assetManagementOpen, setAssetManagementOpen] = useState(false);
   const [videoAgentOpen, setVideoAgentOpen] = useState(false);
   const [agentShotId, setAgentShotId] = useState<number | undefined>(undefined);
   const pollTimerRef = useRef<number | null>(null);
+  const workflowStyleChapterIdRef = useRef<number | null>(null);
 
   const resolvedChapter = currentChapter;
+
+  const restoreWorkflowStyle = useCallback((nextWorkflow: ChapterVideoWorkflow | null) => {
+    if (!nextWorkflow) {
+      workflowStyleChapterIdRef.current = null;
+      setStyleReferenceImageUrl(null);
+      return;
+    }
+    workflowStyleChapterIdRef.current = nextWorkflow.chapter_id;
+    setSelectedStyle(nextWorkflow.video_style ?? '');
+    setStyleReferenceImageUrl(nextWorkflow.style_reference_image_url ?? null);
+  }, []);
 
   const stopPolling = useCallback(() => {
     if (pollTimerRef.current) {
@@ -117,8 +132,9 @@ export default function VideoStoryboardLayout({
     const detail = await getChapterVideoWorkflow(workflowId);
     if (signal?.aborted) return null;
     setWorkflow(detail);
+    restoreWorkflowStyle(detail);
     return detail;
-  }, []);
+  }, [restoreWorkflowStyle]);
 
   const loadVideoCharacters = useCallback(async (storyId: number, signal?: AbortSignal) => {
     try {
@@ -144,6 +160,7 @@ export default function VideoStoryboardLayout({
         const status = await getChapterVideoWorkflowStatus(workflowId);
         const detail = await getChapterVideoWorkflow(workflowId);
         setWorkflow({ ...detail, ...status });
+        restoreWorkflowStyle(detail);
 
         const running = ACTIVE_STATUSES.has(status.workflow_status);
         setWorkflowRunning(running);
@@ -166,9 +183,9 @@ export default function VideoStoryboardLayout({
             // 仅清除或标记仍在 active 的故事版状态
             const sbState = videoGenStore.get(shot.id, 'storyboard');
             if (sbState?.active) {
-              videoGenStore.markFailed(shot.id, shot.error_message || '故事版生成失败', 'storyboard');
+              videoGenStore.markFailed(shot.id, normalizeErrorMessage(shot.error_message, '故事版生成失败，请重试'), 'storyboard');
             }
-            videoGenStore.markFailed(shot.id, shot.error_message || '视频生成失败');
+            videoGenStore.markFailed(shot.id, normalizeErrorMessage(shot.error_message, '视频生成失败，请重试'));
           }
         });
 
@@ -182,7 +199,7 @@ export default function VideoStoryboardLayout({
     };
 
     void tick();
-  }, [loadChapterAssets, stopPolling]);
+  }, [loadChapterAssets, restoreWorkflowStyle, stopPolling]);
 
   const loadLatestWorkflow = useCallback(async (chapterId: number, signal?: AbortSignal) => {
     setWorkflowLoading(true);
@@ -193,6 +210,7 @@ export default function VideoStoryboardLayout({
       if (signal?.aborted) return;
       const latest = data.workflows?.[0] ?? null;
       setWorkflow(latest);
+      restoreWorkflowStyle(latest);
       setConcatVideoUrl(null);
 
       if (latest) {
@@ -225,9 +243,9 @@ export default function VideoStoryboardLayout({
               if (shot.status === 'failed') {
                 const sbState = videoGenStore.get(shot.id, 'storyboard');
                 if (sbState?.active) {
-                  videoGenStore.markFailed(shot.id, shot.error_message || '故事版生成失败', 'storyboard');
+                  videoGenStore.markFailed(shot.id, normalizeErrorMessage(shot.error_message, '故事版生成失败，请重试'), 'storyboard');
                 }
-                videoGenStore.markFailed(shot.id, shot.error_message || '视频生成失败');
+                videoGenStore.markFailed(shot.id, normalizeErrorMessage(shot.error_message, '视频生成失败，请重试'));
               }
             });
           }
@@ -244,7 +262,7 @@ export default function VideoStoryboardLayout({
     } finally {
       if (!signal?.aborted) setWorkflowLoading(false);
     }
-  }, [loadWorkflowDetail, pollWorkflowUntilSettled]);
+  }, [loadWorkflowDetail, pollWorkflowUntilSettled, restoreWorkflowStyle]);
 
   useEffect(() => {
     fetch('/api/video-style-presets', { headers: apiHeaders() })
@@ -261,12 +279,18 @@ export default function VideoStoryboardLayout({
           fetch(`/api/chapters/${resolvedChapter.id}/video-style-preset`, { headers: apiHeaders() })
             .then((response) => response.json())
             .then((payload) => {
-              if (payload?.style_preset?.name) setSelectedStyle(payload.style_preset.name);
+              if (payload?.style_preset?.name && workflowStyleChapterIdRef.current !== resolvedChapter.id) {
+                setSelectedStyle(payload.style_preset.name);
+              }
             })
-            .catch(() => {});
+            .catch((error) => {
+              toast.error(normalizeErrorMessage(error, '加载视频风格配置失败，请稍后重试'));
+            });
         }
       })
-      .catch(() => {});
+      .catch((error) => {
+        toast.error(normalizeErrorMessage(error, '加载视频工作流失败，请稍后重试'));
+      });
   }, [resolvedChapter?.id]);
 
   useEffect(() => {
@@ -329,9 +353,10 @@ export default function VideoStoryboardLayout({
 
   const handleCreateAndGenerateScreenplay = useCallback(async () => {
     if (!resolvedChapter?.id) return;
-    if (workflowRunning) return;
+    if (workflowRunning || screenplayGenerating) return;
     try {
       setWorkflowRunning(true);
+      setScreenplayGenerating(true);
       let wf = workflow;
       if (!wf) {
         wf = await createChapterVideoWorkflow({
@@ -342,15 +367,18 @@ export default function VideoStoryboardLayout({
         });
         setWorkflow(wf);
       }
-      const updated = await generateWorkflowScreenplay(wf.id);
-      setWorkflow(updated);
+      await generateWorkflowScreenplay(wf.id);
+      const refreshedWorkflow = await getChapterVideoWorkflow(wf.id);
+      setWorkflow(refreshedWorkflow);
+      restoreWorkflowStyle(refreshedWorkflow);
       toast.success('剧本生成完成');
     } catch (error: any) {
       toast.error(`剧本生成失败: ${error.message || '未知错误'}`);
     } finally {
+      setScreenplayGenerating(false);
       setWorkflowRunning(false);
     }
-  }, [workflowRunning, workflow, resolvedChapter?.id, selectedReferenceIds, selectedStyle, styleReferenceImageUrl]);
+  }, [workflowRunning, screenplayGenerating, workflow, resolvedChapter?.id, selectedReferenceIds, selectedStyle, styleReferenceImageUrl, restoreWorkflowStyle]);
 
   const handleGenerateShotDetails = useCallback(async (shotIds: number[]) => {
     if (!workflow || shotIds.length === 0) return;
@@ -382,6 +410,16 @@ export default function VideoStoryboardLayout({
       await loadWorkflowDetail(workflow.id);
     }
   }, [loadLatestWorkflow, loadChapterAssets, resolvedChapter?.id, workflow?.id, loadWorkflowDetail]);
+
+  const handleCreateShot = useCallback(async (payload: ChapterVideoShotCreate) => {
+    if (!workflow) return;
+    const shot = await createChapterWorkflowShot(workflow.id, payload);
+    setWorkflow((current) => current?.id === workflow.id
+      ? { ...current, shots: [...current.shots, shot], total_shots: current.shots.length + 1, workflow_status: 'shots_ready' }
+      : current);
+    setSelectedShotIds((current) => new Set(current).add(shot.id));
+    toast.success(`镜头 ${shot.shot_index} 已添加`);
+  }, [workflow]);
   const handleConcatWorkflow = useCallback(async () => {
     if (!workflow) return;
     try {
@@ -472,24 +510,36 @@ export default function VideoStoryboardLayout({
     const preset = stylePresets.find((item) => item.name === styleName);
     if (preset && resolvedChapter?.id) {
       try {
-        await fetch(`/api/chapters/${resolvedChapter.id}/video-style-preset`, {
+        const response = await fetch(`/api/chapters/${resolvedChapter.id}/video-style-preset`, {
           method: 'PUT',
           headers: apiHeaders(true),
           body: JSON.stringify({ style_preset_id: preset.id }),
         });
-      } catch {
+        if (!response.ok) throw new Error(await readResponseError(response, '保存视频风格失败'));
+      } catch (error: any) {
+        toast.error(`保存视频风格失败: ${error.message || '未知错误'}`);
         // 静默失败，不阻断主流程
       }
     }
     // 如果工作流已存在，更新其风格参考图
-    if (workflow?.id && referenceImageUrl) {
+    if (workflow?.id) {
       try {
-        await fetch(`/api/video/chapter-workflows/${workflow.id}/style-reference-url`, {
+        const response = await fetch(`/api/video/chapter-workflows/${workflow.id}/style-reference-url`, {
           method: 'PUT',
           headers: apiHeaders(true),
-          body: JSON.stringify({ style_reference_image_url: referenceImageUrl }),
+          body: JSON.stringify({
+            video_style: styleName || null,
+            style_reference_image_url: referenceImageUrl,
+          }),
         });
-      } catch {
+        if (!response.ok) throw new Error(await readResponseError(response, '保存风格参考图失败'));
+        setWorkflow((current) => (
+          current?.id === workflow.id
+            ? { ...current, style_reference_image_url: referenceImageUrl }
+            : current
+        ));
+      } catch (error: any) {
+        toast.error(`保存风格参考图失败: ${error.message || '未知错误'}`);
         // 静默失败，不阻断主流程
       }
     }
@@ -705,6 +755,7 @@ export default function VideoStoryboardLayout({
           workflow={workflow}
           workflowLoading={workflowLoading}
           workflowRunning={workflowRunning}
+          screenplayGenerating={screenplayGenerating}
           chapterNovelContent={resolvedChapter?.novel_content ?? undefined}
           chapterAssets={chapterAssets}
           selectedReferenceIds={selectedReferenceIds}
@@ -715,6 +766,7 @@ export default function VideoStoryboardLayout({
           selectedShotIds={selectedShotIds}
           skippedShotIds={skippedShotIds}
           onRefreshWorkflow={handleRefreshWorkflow}
+          onCreateShot={handleCreateShot}
           onConcatWorkflow={handleConcatWorkflow}
           onRegenerateStoryboard={handleRegenerateStoryboard}
           onRegenerateVideo={handleRegenerateVideo}

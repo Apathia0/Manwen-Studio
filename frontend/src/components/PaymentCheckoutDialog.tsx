@@ -17,9 +17,12 @@ export function PaymentCheckoutDialog({
   const [qrDataUrl, setQrDataUrl] = useState<string>('');
   const [checkingPayment, setCheckingPayment] = useState(false);
   const onSuccessRef = useRef(onSuccess);
-  onSuccessRef.current = onSuccess;
   const pollingRef = useRef(false);
   const paidHandledRef = useRef(false);
+
+  useEffect(() => {
+    onSuccessRef.current = onSuccess;
+  }, [onSuccess]);
 
   useEffect(() => {
     let cancelled = false;
@@ -90,7 +93,7 @@ export function PaymentCheckoutDialog({
       const result = await syncMyOrder(checkout.orderNo);
       if (result.status === 'paid') {
         paidHandledRef.current = true;
-        onSuccess(`支付成功，${result.subscription.plan.name} 已生效。`);
+        onSuccess('支付成功。');
       }
     } finally {
       setCheckingPayment(false);
@@ -99,9 +102,13 @@ export function PaymentCheckoutDialog({
 
   if (!checkout) return null;
 
-  const isQuotaPurchase = checkout.source === 'quota_purchase';
-  const itemLabel = isQuotaPurchase ? '购买内容' : '套餐';
-  const cycleLabel = isQuotaPurchase ? '单次购买' : (checkout.billing_cycle === 'yearly' ? '年付' : '月付');
+  const isOneTimePurchase = checkout.source === 'quota_purchase' || checkout.source === 'points_purchase';
+  const itemLabel = checkout.source === 'points_purchase' ? '积分套餐' : isOneTimePurchase ? '购买内容' : '套餐';
+  const cycleLabel = isOneTimePurchase || checkout.billing_cycle === 'one_time'
+    ? '单次购买'
+    : checkout.billing_cycle === 'yearly'
+      ? '年付'
+      : '月付';
 
   const canCheckManually =
     checkout.method === 'alipay_qr' ||
@@ -167,7 +174,7 @@ export function PaymentCheckoutDialog({
                   <div className="mt-1 text-sm font-medium text-slate-900">{checkout.currency} {formatMoney(checkout.amount)}</div>
                 </div>
                 <div className="rounded-2xl bg-[#f8fbff] px-4 py-3">
-                  <div className="text-xs text-slate-500">{isQuotaPurchase ? '购买类型' : '计费周期'}</div>
+                  <div className="text-xs text-slate-500">{isOneTimePurchase ? '购买类型' : '计费周期'}</div>
                   <div className="mt-1 text-sm font-medium text-slate-900">{cycleLabel}</div>
                 </div>
                 <div className="rounded-2xl bg-[#f8fbff] px-4 py-3">
