@@ -27,6 +27,25 @@ def _public_video_capabilities(raw: dict[str, Any] | None) -> dict[str, Any]:
     return result
 
 
+def _public_image_capabilities(raw: dict[str, Any] | None) -> dict[str, Any]:
+    """只向普通用户暴露图片质量选择所需的受控字段。"""
+    image = (raw or {}).get("image")
+    if not isinstance(image, dict):
+        return {}
+    result: dict[str, Any] = {}
+    defaults = image.get("defaults")
+    limits = image.get("limits")
+    if isinstance(defaults, dict):
+        public_defaults = {key: defaults[key] for key in ("quality",) if isinstance(defaults.get(key), str)}
+        if public_defaults:
+            result["defaults"] = public_defaults
+    if isinstance(limits, dict):
+        public_limits = {key: list(limits[key]) for key in ("qualities",) if isinstance(limits.get(key), list)}
+        if public_limits:
+            result["limits"] = public_limits
+    return result
+
+
 def get_active_price(db: Session, model_id: int) -> AiModelPrice | None:
     now = datetime.datetime.utcnow()
     return (
@@ -81,6 +100,7 @@ def serialize_model_for_user(db: Session, model: AiModel) -> dict[str, Any]:
         "channel_id": model.channel_id,
         "sort_order": model.sort_order,
         "video_capabilities": _public_video_capabilities(model.capabilities_json),
+        "image_capabilities": _public_image_capabilities(model.capabilities_json),
         "price": price_summary,
         "estimated_points": estimated,
     }

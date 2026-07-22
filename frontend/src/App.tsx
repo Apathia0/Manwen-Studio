@@ -736,7 +736,12 @@ function App() {
             />
           )}
           {route === 'creation-studio' && (
-            <CreationStudioPage />
+            <CreationStudioPage
+              storyId={activeStory?.id}
+              chapterId={activeChapter?.id}
+              storyTitle={activeStory?.title}
+              chapterTitle={activeChapter?.title || undefined}
+            />
           )}
           {route === 'quota-rules' && session.role === 'admin' && (
             <AdminPlatformSettingsPage

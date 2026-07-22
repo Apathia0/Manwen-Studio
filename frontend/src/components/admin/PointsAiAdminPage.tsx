@@ -91,6 +91,22 @@ const EMPTY_CHANNEL_FORM = {
   extra_config_json: '{}',
 };
 
+const IMAGE_QUALITY_OPTIONS = ['auto', 'low', 'medium', 'high'] as const;
+const DEFAULT_IMAGE_CAPABILITIES = {
+  schema_version: 1,
+  image: {
+    defaults: { quality: 'high' },
+    limits: { qualities: [...IMAGE_QUALITY_OPTIONS] },
+  },
+};
+const DEFAULT_TEXT_POINTS_PER_1M_TOKENS = 2000;
+
+function defaultPointsForModality(modality: string) {
+  if (modality === 'video') return 3;
+  if (modality === 'image') return 5;
+  return DEFAULT_TEXT_POINTS_PER_1M_TOKENS;
+}
+
 function Field({ label, hint, children }: { label: string; hint?: string; children: ReactNode }) {
   return (
     <label className="block min-w-0 text-sm font-medium text-slate-700">
@@ -124,8 +140,67 @@ function readPrice(config: Record<string, unknown> | undefined, key: string, fal
   return Number.isFinite(value) ? value : fallback;
 }
 
+function readTextPrices(model: AiModelAdmin) {
+  const price = model.active_price;
+  const config = price?.price_config_json;
+  if (price?.billing_type === 'per_1m_tokens') {
+    const legacyRate = readPrice(config, 'points_per_1m_tokens', DEFAULT_TEXT_POINTS_PER_1M_TOKENS);
+    return {
+      input: readPrice(config, 'input_points_per_1m', legacyRate),
+      output: readPrice(config, 'output_points_per_1m', legacyRate),
+    };
+  }
+  if (price?.billing_type === 'per_call') {
+    const totalTokens = 20000 + 8192;
+    const rate = totalTokens > 0 ? (readPrice(config, 'points_per_call', 2) * 1000000) / totalTokens : DEFAULT_TEXT_POINTS_PER_1M_TOKENS;
+    return { input: rate, output: rate };
+  }
+  if (price?.billing_type === 'per_1k_tokens') {
+    return {
+      input: readPrice(config, 'input_points_per_1k', 0) * 1000,
+      output: readPrice(config, 'output_points_per_1k', 0) * 1000,
+    };
+  }
+  return { input: DEFAULT_TEXT_POINTS_PER_1M_TOKENS, output: DEFAULT_TEXT_POINTS_PER_1M_TOKENS };
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && !Array.isArray(value) && typeof value === 'object';
+}
+
+function getImageCapabilitiesDraft(capabilities: Record<string, unknown> | null | undefined) {
+  return capabilities?.image ? capabilities : DEFAULT_IMAGE_CAPABILITIES;
+}
+
+function getImageQualityDraft(raw: string) {
+  try {
+    const value: unknown = JSON.parse(raw);
+    const quality = isRecord(value) && isRecord(value.image) && isRecord(value.image.defaults)
+      ? value.image.defaults.quality
+      : undefined;
+    return typeof quality === 'string' && IMAGE_QUALITY_OPTIONS.includes(quality as (typeof IMAGE_QUALITY_OPTIONS)[number])
+      ? quality
+      : 'high';
+  } catch {
+    return 'high';
+  }
+}
+
+function setImageQualityDraft(raw: string, quality: string) {
+  let value: Record<string, unknown> = DEFAULT_IMAGE_CAPABILITIES;
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (isRecord(parsed)) value = getImageCapabilitiesDraft(parsed);
+  } catch {
+    // JSON 草稿尚未完成时，以受控默认配置继续编辑。
+  }
+  const image = isRecord(value.image) ? value.image : {};
+  const defaults = isRecord(image.defaults) ? image.defaults : {};
+  return JSON.stringify({
+    ...value,
+    schema_version: 1,
+    image: { ...image, defaults: { ...defaults, quality } },
+  }, null, 2);
 }
 
 export function PointsAiAdminPage() {
@@ -151,13 +226,18 @@ export function PointsAiAdminPage() {
   const [capabilitiesModelId, setCapabilitiesModelId] = useState<number | null>(null);
   const [capabilitiesDraft, setCapabilitiesDraft] = useState('');
   const [selectedVideoPreset, setSelectedVideoPreset] = useState<VideoAdapterType | ''>('');
-  const [priceForm, setPriceForm] = useState({ points: 2, estimate_default_seconds: 15 });
+  const [priceForm, setPriceForm] = useState({
+    points: DEFAULT_TEXT_POINTS_PER_1M_TOKENS,
+    output_points: DEFAULT_TEXT_POINTS_PER_1M_TOKENS,
+    estimate_default_seconds: 15,
+  });
   const [modelForm, setModelForm] = useState({
     channel_id: 0,
     model_key: '',
     display_name: '',
     modality: 'text',
-    points_per_call: 2,
+    initial_points: DEFAULT_TEXT_POINTS_PER_1M_TOKENS,
+    initial_output_points: DEFAULT_TEXT_POINTS_PER_1M_TOKENS,
     sort_order: 0,
     user_visible: true,
     capabilities_json: '{}',
@@ -178,7 +258,13 @@ export function PointsAiAdminPage() {
     setModelForm((prev) =>
       prev.channel_id || !nextChannels[0]
         ? prev
-        : { ...prev, channel_id: nextChannels[0].id, modality: nextChannels[0].modality },
+        : {
+            ...prev,
+            channel_id: nextChannels[0].id,
+            modality: nextChannels[0].modality,
+            initial_points: defaultPointsForModality(nextChannels[0].modality),
+            initial_output_points: defaultPointsForModality(nextChannels[0].modality),
+          },
     );
   }, []);
 
@@ -249,15 +335,13 @@ export function PointsAiAdminPage() {
 
   const startPriceEdit = (model: AiModelAdmin) => {
     const config = model.active_price?.price_config_json;
-    const priceKey =
-      model.modality === 'video'
-        ? 'points_per_second'
-        : model.modality === 'image'
-          ? 'points_per_image'
-          : 'points_per_call';
+    const textPrices = readTextPrices(model);
     setPricingModelId(model.id);
     setPriceForm({
-      points: readPrice(config, priceKey, model.modality === 'video' ? 3 : 2),
+      points: model.modality === 'text'
+        ? textPrices.input
+        : readPrice(config, model.modality === 'video' ? 'points_per_second' : 'points_per_image', defaultPointsForModality(model.modality)),
+      output_points: textPrices.output,
       estimate_default_seconds: readPrice(config, 'estimate_default_seconds', 15),
     });
   };
@@ -270,7 +354,8 @@ export function PointsAiAdminPage() {
       model_key: '',
       display_name: '',
       modality: 'text',
-      points_per_call: 2,
+      initial_points: DEFAULT_TEXT_POINTS_PER_1M_TOKENS,
+      initial_output_points: DEFAULT_TEXT_POINTS_PER_1M_TOKENS,
       sort_order: 0,
       user_visible: true,
       capabilities_json: '{}',
@@ -283,34 +368,47 @@ export function PointsAiAdminPage() {
     setEditingModelId(model.id);
     const channel = channels.find((item) => item.id === model.channel_id);
     setSelectedVideoPreset(getVideoModelCapabilitiesAdapter(model.modality, channel?.adapter_type) || '');
+    const textPrices = readTextPrices(model);
     setModelForm({
       channel_id: model.channel_id,
       model_key: model.model_key,
       display_name: model.display_name,
       modality: model.modality,
-      points_per_call: readPrice(
-        model.active_price?.price_config_json,
-        model.modality === 'video' ? 'points_per_second' : model.modality === 'image' ? 'points_per_image' : 'points_per_call',
-        model.modality === 'video' ? 3 : 2,
-      ),
+      initial_points: model.modality === 'text'
+        ? textPrices.input
+        : readPrice(
+            model.active_price?.price_config_json,
+            model.modality === 'video' ? 'points_per_second' : 'points_per_image',
+            defaultPointsForModality(model.modality),
+          ),
+      initial_output_points: textPrices.output,
       sort_order: model.sort_order,
       user_visible: model.user_visible,
-      capabilities_json: JSON.stringify(model.capabilities_json || {}, null, 2),
+      capabilities_json: JSON.stringify(
+        model.modality === 'image'
+          ? getImageCapabilitiesDraft(model.capabilities_json)
+          : model.capabilities_json || {},
+        null,
+        2,
+      ),
     });
   };
 
   const startCapabilitiesEdit = (model: AiModelAdmin) => {
     setPricingModelId(null);
     setCapabilitiesModelId(model.id);
-    setCapabilitiesDraft(JSON.stringify(model.capabilities_json || {
-      schema_version: 1,
-      video: {
-        payload_profile: 'legacy_lingdong',
-        input_modes: ['text_to_video'],
-        defaults: { duration_seconds: 5, aspect_ratio: '16:9', resolution: '720P' },
-        limits: { aspect_ratios: ['16:9', '9:16'], resolutions: ['720P'], duration_seconds: { min: 4, max: 15 } },
-      },
-    }, null, 2));
+    const draft = model.modality === 'image'
+      ? getImageCapabilitiesDraft(model.capabilities_json)
+      : model.capabilities_json || {
+          schema_version: 1,
+          video: {
+            payload_profile: 'legacy_lingdong',
+            defaults: { aspect_ratio: '16:9', resolution: '720P', duration_seconds: 15 },
+            input_modes: ['text_to_video'],
+            limits: { aspect_ratios: ['16:9', '9:16'], resolutions: ['720P'], duration_seconds: { allowed: [15] }, max_reference_images: 9 },
+          },
+        };
+    setCapabilitiesDraft(JSON.stringify(draft, null, 2));
   };
 
   const saveCapabilities = async (model: AiModelAdmin) => {
@@ -321,7 +419,7 @@ export function PointsAiAdminPage() {
       await updateAdminAiModel(model.id, { capabilities_json: value });
       setCapabilitiesModelId(null);
       await reload();
-      toast.success('模型视频参数配置已保存');
+      toast.success(`${model.modality === 'image' ? '图片质量' : '视频'}参数配置已保存`);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : '参数配置格式无效');
     } finally {
@@ -391,7 +489,7 @@ export function PointsAiAdminPage() {
           ? 'per_second'
           : model.modality === 'image'
             ? 'per_image'
-            : 'per_call';
+            : 'per_1m_tokens';
       const priceConfig =
         model.modality === 'video'
           ? {
@@ -400,7 +498,10 @@ export function PointsAiAdminPage() {
             }
           : model.modality === 'image'
             ? { points_per_image: priceForm.points }
-            : { points_per_call: priceForm.points };
+            : {
+                input_points_per_1m: priceForm.points,
+                output_points_per_1m: priceForm.output_points,
+              };
       await setAdminAiModelPrice(model.id, {
         billing_type: billingType,
         price_config_json: priceConfig,
@@ -919,7 +1020,7 @@ export function PointsAiAdminPage() {
               <div className="mb-4 flex items-end justify-between gap-4">
                 <div>
                   <h2 className="text-base font-semibold text-slate-900">模型目录</h2>
-                  <p className="mt-1 text-sm text-slate-500">控制模型可见性，并按调用、图片或视频秒数设置积分价。</p>
+                  <p className="mt-1 text-sm text-slate-500">控制模型可见性，并按 Token、图片或视频秒数设置积分价。</p>
                 </div>
                 <div className="flex shrink-0 items-center gap-3">
                   <span className="text-xs text-slate-400">
@@ -988,9 +1089,9 @@ export function PointsAiAdminPage() {
                           <Button type="button" variant="secondary" size="sm" disabled={busy} icon={<Pencil size={13} />} onClick={() => startModelEdit(model)}>
                             编辑
                           </Button>
-                          {model.modality === 'video' ? (
+                          {model.modality === 'video' || model.modality === 'image' ? (
                             <Button type="button" variant="secondary" size="sm" disabled={busy} icon={<Pencil size={13} />} onClick={() => startCapabilitiesEdit(model)}>
-                              参数
+                              {model.modality === 'image' ? '质量' : '参数'}
                             </Button>
                           ) : null}
                           <Button
@@ -1028,9 +1129,14 @@ export function PointsAiAdminPage() {
                       {pricingModelId === model.id ? (
                         <div className="mt-3 flex flex-col gap-3 border-l-2 border-blue-500 bg-blue-50/60 p-3 sm:flex-row sm:items-end">
                           <div className="grid min-w-0 flex-1 gap-3 sm:grid-cols-2">
-                            <Field label={model.modality === 'video' ? '每秒积分价' : model.modality === 'image' ? '每张积分价' : '每次调用积分价'}>
+                            <Field label={model.modality === 'video' ? '每秒积分价' : model.modality === 'image' ? '每张积分价' : '每百万输入 Token 积分价'}>
                               <Input type="number" min="0" step="0.0001" value={priceForm.points} onChange={(event) => setPriceForm({ ...priceForm, points: Number(event.target.value) })} />
                             </Field>
+                            {model.modality === 'text' ? (
+                              <Field label="每百万输出 Token 积分价">
+                                <Input type="number" min="0" step="0.0001" value={priceForm.output_points} onChange={(event) => setPriceForm({ ...priceForm, output_points: Number(event.target.value) })} />
+                              </Field>
+                            ) : null}
                             {model.modality === 'video' ? (
                               <Field label="默认估算时长" hint="秒">
                                 <Input type="number" min="1" step="1" value={priceForm.estimate_default_seconds} onChange={(event) => setPriceForm({ ...priceForm, estimate_default_seconds: Number(event.target.value) })} />
@@ -1046,6 +1152,8 @@ export function PointsAiAdminPage() {
                               disabled={
                                 !Number.isFinite(priceForm.points) ||
                                 priceForm.points < 0 ||
+                                (model.modality === 'text' &&
+                                  (!Number.isFinite(priceForm.output_points) || priceForm.output_points < 0)) ||
                                 (model.modality === 'video' &&
                                   (!Number.isFinite(priceForm.estimate_default_seconds) ||
                                     priceForm.estimate_default_seconds < 1))
@@ -1062,9 +1170,18 @@ export function PointsAiAdminPage() {
                       ) : null}
                       {capabilitiesModelId === model.id ? (
                         <div className="mt-3 border-l-2 border-violet-500 bg-violet-50/60 p-3">
-                          <Field label="视频参数配置" hint="仅允许受支持 profile 和能力字段">
+                          <Field label={model.modality === 'image' ? '图片质量配置' : '视频参数配置'} hint={model.modality === 'image' ? '仅允许默认质量与可选质量' : '仅允许受支持 profile 和能力字段'}>
                             <TextArea rows={16} value={capabilitiesDraft} className="font-mono text-xs" onChange={(event) => setCapabilitiesDraft(event.target.value)} />
                           </Field>
+                          {model.modality === 'image' ? (
+                            <div className="mt-3 grid max-w-xl gap-3 sm:grid-cols-2">
+                              <Field label="默认质量">
+                                <Select value={getImageQualityDraft(capabilitiesDraft)} onChange={(event) => setCapabilitiesDraft(setImageQualityDraft(capabilitiesDraft, event.target.value))}>
+                                  {IMAGE_QUALITY_OPTIONS.map((quality) => <option key={quality} value={quality}>{quality}</option>)}
+                                </Select>
+                              </Field>
+                            </div>
+                          ) : null}
                           <div className="mt-3 flex gap-2">
                             <Button type="button" size="sm" loading={busy} icon={<Save size={13} />} onClick={() => void saveCapabilities(model)}>保存参数</Button>
                             <Button type="button" variant="secondary" size="sm" disabled={busy} icon={<X size={13} />} onClick={() => setCapabilitiesModelId(null)}>取消</Button>
@@ -1092,7 +1209,15 @@ export function PointsAiAdminPage() {
                     const channelId = Number(event.target.value);
                     const channel = channels.find((item) => item.id === channelId);
                     setSelectedVideoPreset('');
-                    setModelForm({ ...modelForm, channel_id: channelId, modality: channel?.modality || modelForm.modality });
+                    const modality = channel?.modality || modelForm.modality;
+                    setModelForm({
+                      ...modelForm,
+                      channel_id: channelId,
+                      modality,
+                      initial_points: defaultPointsForModality(modality),
+                      initial_output_points: defaultPointsForModality(modality),
+                      capabilities_json: modality === 'image' ? JSON.stringify(DEFAULT_IMAGE_CAPABILITIES, null, 2) : modelForm.capabilities_json,
+                    });
                   }}>
                     {!channels.length ? <option value={0}>暂无可用渠道</option> : null}
                     {channels.map((channel) => <option key={channel.id} value={channel.id}>{channel.name}</option>)}
@@ -1137,14 +1262,30 @@ export function PointsAiAdminPage() {
                 <Field label="能力类型">
                   <Select disabled={Boolean(editingModelId)} value={modelForm.modality} onChange={(event) => {
                     setSelectedVideoPreset('');
-                    setModelForm({ ...modelForm, modality: event.target.value });
+                    setModelForm({
+                      ...modelForm,
+                      modality: event.target.value,
+                      initial_points: defaultPointsForModality(event.target.value),
+                      initial_output_points: defaultPointsForModality(event.target.value),
+                    });
                   }}>
                     <option value="text">文本</option>
                     <option value="image">图片</option>
                     <option value="video">视频</option>
                   </Select>
                 </Field>
-                {modelForm.modality === 'video' ? (
+                {modelForm.modality === 'image' ? (
+                  <>
+                    <Field label="默认质量" hint="将优先覆盖平台默认质量">
+                      <Select value={getImageQualityDraft(modelForm.capabilities_json)} onChange={(event) => setModelForm({ ...modelForm, capabilities_json: setImageQualityDraft(modelForm.capabilities_json, event.target.value) })}>
+                        {IMAGE_QUALITY_OPTIONS.map((quality) => <option key={quality} value={quality}>{quality}</option>)}
+                      </Select>
+                    </Field>
+                    <Field label="图片质量配置" hint="JSON，可继续调整可选质量">
+                      <TextArea rows={12} value={modelForm.capabilities_json} className="font-mono text-xs" onChange={(event) => setModelForm({ ...modelForm, capabilities_json: event.target.value })} />
+                    </Field>
+                  </>
+                ) : modelForm.modality === 'video' ? (
                   <Field label="视频参数配置" hint="JSON，可在预设后继续修改">
                     <TextArea
                       rows={12}
@@ -1155,12 +1296,19 @@ export function PointsAiAdminPage() {
                   </Field>
                 ) : null}
                 {!editingModelId ? (
-                  <Field
-                    label="初始积分价"
-                    hint={modelForm.modality === 'video' ? '积分 / 秒' : modelForm.modality === 'image' ? '积分 / 张' : '积分 / 次'}
-                  >
-                    <Input type="number" min="0" step="0.0001" value={modelForm.points_per_call} onChange={(event) => setModelForm({ ...modelForm, points_per_call: Number(event.target.value) })} />
-                  </Field>
+                  <>
+                    <Field
+                      label={modelForm.modality === 'text' ? '初始输入积分价' : '初始积分价'}
+                      hint={modelForm.modality === 'video' ? '积分 / 秒' : modelForm.modality === 'image' ? '积分 / 张' : '积分 / 百万输入 Token'}
+                    >
+                      <Input type="number" min="0" step="0.0001" value={modelForm.initial_points} onChange={(event) => setModelForm({ ...modelForm, initial_points: Number(event.target.value) })} />
+                    </Field>
+                    {modelForm.modality === 'text' ? (
+                      <Field label="初始输出积分价" hint="积分 / 百万输出 Token">
+                        <Input type="number" min="0" step="0.0001" value={modelForm.initial_output_points} onChange={(event) => setModelForm({ ...modelForm, initial_output_points: Number(event.target.value) })} />
+                      </Field>
+                    ) : null}
+                  </>
                 ) : null}
                 <Field label="排序">
                   <Input type="number" value={modelForm.sort_order} onChange={(event) => setModelForm({ ...modelForm, sort_order: Number(event.target.value) })} />
@@ -1172,16 +1320,23 @@ export function PointsAiAdminPage() {
                 className="mt-4 w-full"
                 loading={busy}
                 icon={editingModelId ? <Save size={15} /> : <Plus size={15} />}
-                disabled={!modelForm.channel_id || !modelForm.model_key.trim() || !Number.isFinite(modelForm.points_per_call) || modelForm.points_per_call < 0}
+                disabled={
+                  !modelForm.channel_id ||
+                  !modelForm.model_key.trim() ||
+                  !Number.isFinite(modelForm.initial_points) ||
+                  modelForm.initial_points < 0 ||
+                  (modelForm.modality === 'text' &&
+                    (!Number.isFinite(modelForm.initial_output_points) || modelForm.initial_output_points < 0))
+                }
                 onClick={async () => {
                   setBusy(true);
                   try {
                     if (editingModelId) {
-                      const capabilities = modelForm.modality === 'video'
+                      const capabilities = modelForm.modality === 'video' || modelForm.modality === 'image'
                         ? (() => {
                             const value: unknown = JSON.parse(modelForm.capabilities_json);
                             if (!isRecord(value)) {
-                              throw new Error('视频参数配置必须是 JSON 对象');
+                              throw new Error(`${modelForm.modality === 'image' ? '图片质量' : '视频'}参数配置必须是 JSON 对象`);
                             }
                             return value;
                           })()
@@ -1198,13 +1353,14 @@ export function PointsAiAdminPage() {
                       return;
                     }
                     const initialModality = modelForm.modality;
-                    const initialPoints = modelForm.points_per_call;
+                    const initialPoints = modelForm.initial_points;
+                    const initialOutputPoints = modelForm.initial_output_points;
                     const initialUserVisible = modelForm.user_visible;
-                    const initialCapabilities = initialModality === 'video'
+                    const initialCapabilities = initialModality === 'video' || initialModality === 'image'
                       ? (() => {
                           const value: unknown = JSON.parse(modelForm.capabilities_json);
                           if (!isRecord(value)) {
-                            throw new Error('视频参数配置必须是 JSON 对象');
+                            throw new Error(`${initialModality === 'image' ? '图片质量' : '视频'}参数配置必须是 JSON 对象`);
                           }
                           return value;
                         })()
@@ -1223,7 +1379,7 @@ export function PointsAiAdminPage() {
                         ? 'per_second'
                         : initialModality === 'image'
                           ? 'per_image'
-                          : 'per_call';
+                          : 'per_1m_tokens';
                     const priceConfig =
                       initialModality === 'video'
                         ? {
@@ -1232,7 +1388,10 @@ export function PointsAiAdminPage() {
                           }
                         : initialModality === 'image'
                           ? { points_per_image: initialPoints }
-                          : { points_per_call: initialPoints };
+                          : {
+                              input_points_per_1m: initialPoints,
+                              output_points_per_1m: initialOutputPoints,
+                            };
                     try {
                       await setAdminAiModelPrice(model.id, {
                         billing_type: billingType,
@@ -1241,7 +1400,11 @@ export function PointsAiAdminPage() {
                     } catch (priceError) {
                       await reload().catch(() => undefined);
                       setPricingModelId(model.id);
-                      setPriceForm({ points: initialPoints, estimate_default_seconds: 15 });
+                      setPriceForm({
+                        points: initialPoints,
+                        output_points: initialOutputPoints,
+                        estimate_default_seconds: 15,
+                      });
                       toast.error(
                         priceError instanceof Error
                           ? `模型已创建，但初始定价失败：${priceError.message}`

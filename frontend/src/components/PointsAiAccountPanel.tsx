@@ -104,6 +104,52 @@ const UPSTREAM_GUIDE_MODALITIES = [
   { key: 'video', label: '视频' },
 ] as const;
 
+const LEDGER_TYPE_LABELS: Record<string, string> = {
+  reserve: '预扣积分',
+  settle: '实际结算',
+  release: '退回预扣',
+  usage: '积分消费',
+  register_grant: '注册赠送',
+  admin_grant: '平台赠送',
+  adjust: '人工调整',
+  purchase: '充值到账',
+  recharge: '充值到账',
+  refund: '积分退回',
+  stream_reconcile: '流式计费校准',
+};
+
+const POINTS_NUMBER_FORMATTER = new Intl.NumberFormat('zh-CN', {
+  minimumFractionDigits: 0,
+  maximumFractionDigits: 4,
+});
+
+function formatLedgerTime(value?: string | null): string {
+  if (!value) return '-';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value.replace('T', ' ').replace(/\.\d+$/, '');
+  const parts = new Intl.DateTimeFormat('zh-CN', {
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  }).formatToParts(date);
+  const pick = (type: Intl.DateTimeFormatPartTypes) => parts.find((part) => part.type === type)?.value || '';
+  return `${pick('year')}-${pick('month')}-${pick('day')} ${pick('hour')}:${pick('minute')}:${pick('second')}`;
+}
+
+function formatLedgerType(value: string): string {
+  return LEDGER_TYPE_LABELS[value] || '其他变动';
+}
+
+function formatPoints(value?: number | null, showSign = false): string {
+  if (value == null || !Number.isFinite(value)) return '-';
+  const normalized = POINTS_NUMBER_FORMATTER.format(value);
+  return showSign && value > 0 ? `+${normalized}` : normalized;
+}
+
 type UpstreamGuideItem = {
   url: string;
   openUrl: string;
@@ -203,6 +249,15 @@ function getPriceSummary(model: AiModelItem, mode: CredentialMode) {
   }
   if (estimatedPoints == null) return '按实际用量计费';
   if (billingType === 'per_image') return `预计 ${estimatedPoints} 积分/张`;
+  if (billingType === 'per_1m_tokens') {
+    const config = model.price?.price_config;
+    const legacyRate = typeof config?.points_per_1m_tokens === 'number' ? config.points_per_1m_tokens : null;
+    const inputRate = typeof config?.input_points_per_1m === 'number' ? config.input_points_per_1m : legacyRate;
+    const outputRate = typeof config?.output_points_per_1m === 'number' ? config.output_points_per_1m : legacyRate;
+    return inputRate != null && outputRate != null
+      ? `输入 ${inputRate}/百万 · 输出 ${outputRate}/百万 Token`
+      : `参考 ${estimatedPoints} 积分 · 按 Token 结算`;
+  }
   if (billingType === 'per_1k_tokens') return `参考 ${estimatedPoints} 积分/次 · 按 Token 结算`;
   return `预计 ${estimatedPoints} 积分/次`;
 }
@@ -221,6 +276,16 @@ export function PointsAiAccountPanel({
   const [activeModality, setActiveModality] = useState<ModelModality>('text');
   const [account, setAccount] = useState<PointsAccount | null>(null);
   const [ledger, setLedger] = useState<PointsLedgerItem[]>([]);
+  const [ledgerLoading, setLedgerLoading] = useState(false);
+  const [ledgerPage, setLedgerPage] = useState(1);
+  const [ledgerPageSize, setLedgerPageSize] = useState(20);
+  const [ledgerTotal, setLedgerTotal] = useState(0);
+  const [ledgerTotalPages, setLedgerTotalPages] = useState(0);
+  const [ledgerStartDate, setLedgerStartDate] = useState('');
+  const [ledgerEndDate, setLedgerEndDate] = useState('');
+  const [ledgerEntryType, setLedgerEntryType] = useState('');
+  const [ledgerDirection, setLedgerDirection] = useState('');
+  const [ledgerFilters, setLedgerFilters] = useState({ startDate: '', endDate: '', entryType: '', direction: '' });
   const [credential, setCredential] = useState<AiCredentialStatus | null>(null);
   const [prefs, setPrefs] = useState<AiPreferences | null>(null);
   const [models, setModels] = useState<AiModelItem[]>([]);
@@ -230,15 +295,13 @@ export function PointsAiAccountPanel({
   const [mode, setMode] = useState<CredentialMode>(getLocalCredentialMode());
 
   const reload = useCallback(async () => {
-    const [a, l, c, pr, m] = await Promise.all([
+    const [a, c, pr, m] = await Promise.all([
       getPointsAccount(),
-      getPointsLedger(30),
       getAiCredential(),
       getAiPreferences(),
       getAiModels(),
     ]);
     setAccount(a);
-    setLedger(l.items || []);
     setCredential(c);
     setModels(m.models || []);
     let nextPreferences = pr;
@@ -258,6 +321,34 @@ export function PointsAiAccountPanel({
     }
   }, [canUseOwnKey]);
 
+  const loadLedger = useCallback(async (signal?: AbortSignal) => {
+    setLedgerLoading(true);
+    try {
+      const result = await getPointsLedger({
+        page: ledgerPage,
+        page_size: ledgerPageSize,
+        start_date: ledgerFilters.startDate || undefined,
+        end_date: ledgerFilters.endDate || undefined,
+        entry_type: ledgerFilters.entryType || undefined,
+        direction: ledgerFilters.direction === 'income' || ledgerFilters.direction === 'expense'
+          ? ledgerFilters.direction
+          : undefined,
+      }, signal);
+      if (signal?.aborted) return;
+      setLedger(result.items || []);
+      setLedgerTotal(result.total);
+      setLedgerTotalPages(result.total_pages);
+      if (result.total_pages > 0 && ledgerPage > result.total_pages) {
+        setLedgerPage(result.total_pages);
+      }
+    } catch (error) {
+      if (signal?.aborted) return;
+      toast.error(error instanceof Error ? error.message : '积分流水加载失败');
+    } finally {
+      if (!signal?.aborted) setLedgerLoading(false);
+    }
+  }, [ledgerFilters, ledgerPage, ledgerPageSize]);
+
   useEffect(() => {
     const timer = window.setTimeout(() => {
       void reload().catch((error) =>
@@ -266,6 +357,38 @@ export function PointsAiAccountPanel({
     }, 0);
     return () => window.clearTimeout(timer);
   }, [reload]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => void loadLedger(controller.signal), 0);
+    return () => {
+      window.clearTimeout(timer);
+      controller.abort();
+    };
+  }, [loadLedger]);
+
+  const queryLedger = () => {
+    if (ledgerStartDate && ledgerEndDate && ledgerStartDate > ledgerEndDate) {
+      toast.error('开始日期不能晚于结束日期');
+      return;
+    }
+    setLedgerPage(1);
+    setLedgerFilters({
+      startDate: ledgerStartDate,
+      endDate: ledgerEndDate,
+      entryType: ledgerEntryType,
+      direction: ledgerDirection,
+    });
+  };
+
+  const resetLedger = () => {
+    setLedgerStartDate('');
+    setLedgerEndDate('');
+    setLedgerEntryType('');
+    setLedgerDirection('');
+    setLedgerPage(1);
+    setLedgerFilters({ startDate: '', endDate: '', entryType: '', direction: '' });
+  };
 
   const onSaveKey = async () => {
     setBusy(true);
@@ -859,7 +982,36 @@ export function PointsAiAccountPanel({
         >
           <div className="mb-3">
             <h4 className="text-sm font-semibold text-slate-900">积分流水</h4>
-            <p className="mt-1 text-xs text-slate-500">最近 30 条积分收入与消费记录。</p>
+            <p className="mt-1 text-xs text-slate-500">按时间、类型和收支方向查询积分变动记录。</p>
+          </div>
+          <div className="mb-4 grid gap-3 rounded-lg border border-slate-200 bg-slate-50 p-3 sm:grid-cols-2 lg:grid-cols-4">
+            <label className="text-xs font-medium text-slate-600">
+              开始日期
+              <Input type="date" value={ledgerStartDate} onChange={(event) => setLedgerStartDate(event.target.value)} className="mt-1" />
+            </label>
+            <label className="text-xs font-medium text-slate-600">
+              结束日期
+              <Input type="date" value={ledgerEndDate} onChange={(event) => setLedgerEndDate(event.target.value)} className="mt-1" />
+            </label>
+            <label className="text-xs font-medium text-slate-600">
+              流水类型
+              <Select value={ledgerEntryType} onChange={(event) => setLedgerEntryType(event.target.value)} className="mt-1">
+                <option value="">全部类型</option>
+                {Object.entries(LEDGER_TYPE_LABELS).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+              </Select>
+            </label>
+            <label className="text-xs font-medium text-slate-600">
+              收支方向
+              <Select value={ledgerDirection} onChange={(event) => setLedgerDirection(event.target.value)} className="mt-1">
+                <option value="">全部方向</option>
+                <option value="income">收入</option>
+                <option value="expense">支出</option>
+              </Select>
+            </label>
+            <div className="flex flex-wrap gap-2 sm:col-span-2 lg:col-span-4">
+              <Button type="button" size="sm" disabled={ledgerLoading} onClick={queryLedger}>查询</Button>
+              <Button type="button" size="sm" variant="secondary" disabled={ledgerLoading} onClick={resetLedger}>重置</Button>
+            </div>
           </div>
           <div className="overflow-x-auto">
             <table className="min-w-full text-left text-sm">
@@ -874,23 +1026,73 @@ export function PointsAiAccountPanel({
               <tbody>
                 {ledger.map((row) => (
                   <tr key={row.id} className="border-t border-slate-100">
-                    <td className="whitespace-nowrap py-2.5 pr-4 text-slate-600">{row.created_at || '-'}</td>
-                    <td className="whitespace-nowrap py-2.5 pr-4">{row.entry_type}</td>
-                    <td className={`whitespace-nowrap py-2.5 pr-4 ${row.amount >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>
-                      {row.amount}
+                    <td className="whitespace-nowrap py-2.5 pr-4 text-slate-600">{formatLedgerTime(row.created_at)}</td>
+                    <td className="min-w-[300px] py-2.5 pr-4">
+                      <span className="inline-flex rounded-md bg-slate-100 px-2 py-1 text-xs font-medium text-slate-700">
+                        {formatLedgerType(row.entry_type)}
+                      </span>
+                      {row.usage_detail ? (
+                        <div className="mt-1 text-[11px] leading-5 text-slate-500">
+                          <div>
+                            {row.usage_detail.model_key || 'AI 模型'} · 输入 {Number(row.usage_detail.input_tokens || 0).toLocaleString()} · 输出 {Number(row.usage_detail.output_tokens || 0).toLocaleString()}
+                          </div>
+                          <div>
+                            {row.usage_detail.streaming && row.metadata?.final ? '流式最终校准' : row.usage_detail.streaming ? '流式增量扣除' : '请求结算'}
+                            {' · '}本次请求累计 {formatPoints(
+                              row.usage_detail.streaming && (row.usage_detail.stream_charged_points || 0) > 0
+                                ? row.usage_detail.stream_charged_points
+                                : Number(row.usage_detail.settled_points || 0),
+                            )} 积分
+                            {row.usage_detail.input_points_per_1m != null && row.usage_detail.output_points_per_1m != null
+                              ? ` · 输入 ${row.usage_detail.input_points_per_1m}/百万 · 输出 ${row.usage_detail.output_points_per_1m}/百万`
+                              : row.usage_detail.points_per_1m_tokens
+                                ? ` · ${row.usage_detail.points_per_1m_tokens} 积分/百万 Token`
+                                : ''}
+                          </div>
+                        </div>
+                      ) : null}
                     </td>
-                    <td className="whitespace-nowrap py-2.5">{row.balance_after ?? '-'}</td>
+                    <td className={`whitespace-nowrap py-2.5 pr-4 ${row.amount >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>
+                      {formatPoints(row.amount, true)}
+                    </td>
+                    <td className="whitespace-nowrap py-2.5">{formatPoints(row.balance_after)}</td>
                   </tr>
                 ))}
-                {ledger.length === 0 ? (
+                {!ledgerLoading && ledger.length === 0 ? (
                   <tr>
                     <td colSpan={4} className="py-10 text-center text-slate-500">
                       暂无流水
                     </td>
                   </tr>
                 ) : null}
+                {ledgerLoading ? (
+                  <tr>
+                    <td colSpan={4} className="py-10 text-center text-slate-500">正在加载流水...</td>
+                  </tr>
+                ) : null}
               </tbody>
             </table>
+          </div>
+          <div className="mt-4 flex flex-col gap-3 border-t border-slate-100 pt-4 text-sm text-slate-600 sm:flex-row sm:items-center sm:justify-between">
+            <div>共 {ledgerTotal} 条，第 {ledgerTotal === 0 ? 0 : ledgerPage} / {ledgerTotalPages} 页</div>
+            <div className="flex flex-wrap items-center gap-2">
+              <label className="flex items-center gap-2 text-xs">
+                每页
+                <Select
+                  value={String(ledgerPageSize)}
+                  disabled={ledgerLoading}
+                  onChange={(event) => {
+                    setLedgerPageSize(Number(event.target.value));
+                    setLedgerPage(1);
+                  }}
+                  className="w-20"
+                >
+                  {[10, 20, 50, 100].map((size) => <option key={size} value={size}>{size}</option>)}
+                </Select>
+              </label>
+              <Button type="button" size="sm" variant="secondary" disabled={ledgerLoading || ledgerPage <= 1} onClick={() => setLedgerPage((page) => page - 1)}>上一页</Button>
+              <Button type="button" size="sm" variant="secondary" disabled={ledgerLoading || ledgerPage >= ledgerTotalPages} onClick={() => setLedgerPage((page) => page + 1)}>下一页</Button>
+            </div>
           </div>
         </div>
       ) : null}

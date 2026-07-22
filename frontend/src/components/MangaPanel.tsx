@@ -652,7 +652,7 @@ const [aspectRatio, setAspectRatio] = useState<string>('9:16');
       const attempt = (tryIndex: number) => {
         const preload = new window.Image();
         preload.onload = () => {
-          const resolvedSrc = mangaImageUrl(img.image_path, tryIndex);
+          const resolvedSrc = mangaImageUrl(img.image_path);
           imagePreloadAttemptsRef.current[key] = tryIndex;
           setImageLoadSrcs((prev) => (prev[key] === resolvedSrc ? prev : { ...prev, [key]: resolvedSrc }));
           setImageLoadStates((prev) => ({ ...prev, [key]: 'ready' }));
@@ -672,7 +672,7 @@ const [aspectRatio, setAspectRatio] = useState<string>('9:16');
           });
           setImageLoadStates((prev) => ({ ...prev, [key]: 'error' }));
         };
-        preload.src = mangaImageUrl(img.image_path, tryIndex);
+        preload.src = mangaImageUrl(img.image_path);
       };
 
       const nextAttempt = (imagePreloadAttemptsRef.current[key] ?? 0) + 1;

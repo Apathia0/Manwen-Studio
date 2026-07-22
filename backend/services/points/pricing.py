@@ -6,6 +6,10 @@ from typing import Any
 
 ZERO = Decimal("0")
 Q4 = Decimal("0.0001")
+TOKEN_BILLING_TYPES = frozenset({"per_1k_tokens", "per_1m_tokens"})
+DEFAULT_TEXT_INPUT_TOKENS = 20000
+DEFAULT_TEXT_OUTPUT_TOKENS = 8192
+DEFAULT_TEXT_MIN_POINTS = Decimal("0.1")
 
 
 def _d(value: Any, default: str = "0") -> Decimal:
@@ -48,6 +52,22 @@ def estimate_points(
             actual_in = int(cfg.get("estimate_default_input_tokens") or 1000)
         points = (Decimal(actual_in) / Decimal(1000)) * in_rate + (Decimal(actual_out) / Decimal(1000)) * out_rate
         min_pts = _d(cfg.get("min_points_per_call"), "0")
+        if points < min_pts:
+            points = min_pts
+    elif btype == "per_1m_tokens":
+        legacy_rate = cfg.get("points_per_1m_tokens")
+        input_rate = _d(cfg.get("input_points_per_1m", legacy_rate), "0")
+        output_rate = _d(cfg.get("output_points_per_1m", legacy_rate), "0")
+        actual_in = max(0, int(input_tokens or 0))
+        actual_out = max(0, int(output_tokens or 0))
+        if use_estimate_defaults and actual_in <= 0:
+            actual_in = int(cfg.get("estimate_default_input_tokens") or DEFAULT_TEXT_INPUT_TOKENS)
+        if use_estimate_defaults and actual_out <= 0:
+            actual_out = int(cfg.get("estimate_default_output_tokens") or DEFAULT_TEXT_OUTPUT_TOKENS)
+        points = (
+            Decimal(actual_in) * input_rate + Decimal(actual_out) * output_rate
+        ) / Decimal(1_000_000)
+        min_pts = _d(cfg.get("min_points_per_call"), str(DEFAULT_TEXT_MIN_POINTS))
         if points < min_pts:
             points = min_pts
     elif btype == "per_image":

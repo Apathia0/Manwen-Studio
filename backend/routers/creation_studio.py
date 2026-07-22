@@ -14,6 +14,7 @@ from copy import deepcopy
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
+from io import BytesIO
 
 import httpx
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
@@ -35,8 +36,10 @@ from services.ai.channels import validate_remote_media_url
 from services.ai.context import AIExecutionContext
 from services.ai.crypto_secrets import get_secret_key_material
 from services.ai.resolver import begin_ai_call, complete_ai_call, resolve_model
+from services.ai.video_capabilities import validate_video_capability_limits
 from services import video_adapter
 from services import video_api as video_api_service
+from services import deepseek as deepseek_service
 from services.task_manager import task_manager
 
 logger = logging.getLogger(__name__)
@@ -74,6 +77,12 @@ def _utcnow() -> datetime.datetime:
     return datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
 
 
+def _encode_analysis_image(image: Image.Image) -> bytes:
+    buffer = BytesIO()
+    image.save(buffer, format="JPEG", quality=82, optimize=True)
+    return buffer.getvalue()
+
+
 class CreationStudioJobCreate(BaseModel):
     model_config = {"protected_namespaces": ()}
 
@@ -89,7 +98,31 @@ class CreationStudioJobCreate(BaseModel):
     reference_mode: str = "character"
     aspect_ratio: str = "16:9"
     resolution: str = "720P"
-    duration_seconds: int = Field(default=5, ge=4, le=15)
+    duration_seconds: int = Field(default=15, ge=1, le=300)
+
+
+class CreationStudioAnalyzeIn(BaseModel):
+    asset_ids: list[int] = Field(default_factory=list, min_length=1, max_length=9)
+    instruction: str = Field(default="请反推这些参考图的可复用生成提示词", max_length=2000)
+
+
+def _resolve_image_quality(
+    image_capabilities: dict[str, Any] | None,
+    requested_quality: str,
+) -> str:
+    """根据目录模型能力解析并校验创作台实际下发的图片质量。"""
+    if not isinstance(image_capabilities, dict):
+        return requested_quality
+    defaults = image_capabilities.get("defaults")
+    limits = image_capabilities.get("limits")
+    default_quality = defaults.get("quality") if isinstance(defaults, dict) else None
+    effective_quality = default_quality if requested_quality == "auto" and isinstance(default_quality, str) else requested_quality
+    qualities = limits.get("qualities") if isinstance(limits, dict) else None
+    if requested_quality == "auto" and effective_quality == "auto" and isinstance(qualities, list) and qualities:
+        effective_quality = str(qualities[0])
+    if isinstance(qualities, list) and effective_quality not in qualities:
+        raise HTTPException(400, "所选图片质量不受当前模型支持")
+    return effective_quality
 
 
 def _validate_video_submission_capabilities(
@@ -98,11 +131,12 @@ def _validate_video_submission_capabilities(
     reference_count: int,
 ) -> None:
     """在预扣积分前校验模型公开的视频约束。"""
-    if not isinstance(video_capabilities, dict):
-        return
-    limits = video_capabilities.get("limits")
-    if not isinstance(limits, dict):
-        return
+    validate_video_capability_limits(
+        video_capabilities,
+        resolution=payload.resolution,
+        duration_seconds=payload.duration_seconds,
+    )
+    limits = video_capabilities["limits"]
     ratios = limits.get("aspect_ratios")
     if isinstance(ratios, list) and payload.aspect_ratio not in ratios:
         raise HTTPException(400, "当前视频模型不支持该画面比例")
@@ -112,16 +146,6 @@ def _validate_video_submission_capabilities(
     maximum_references = limits.get("max_reference_images")
     if isinstance(maximum_references, int) and reference_count > maximum_references:
         raise HTTPException(400, "参考图数量超过当前视频模型限制")
-    duration = limits.get("duration_seconds")
-    if isinstance(duration, dict):
-        allowed = duration.get("allowed")
-        if isinstance(allowed, list) and payload.duration_seconds not in allowed:
-            raise HTTPException(400, "当前视频模型不支持该时长")
-        minimum, maximum = duration.get("min"), duration.get("max")
-        if isinstance(minimum, int) and payload.duration_seconds < minimum:
-            raise HTTPException(400, "视频时长低于当前模型最小限制")
-        if isinstance(maximum, int) and payload.duration_seconds > maximum:
-            raise HTTPException(400, "视频时长超过当前模型最大限制")
     input_modes = video_capabilities.get("input_modes")
     requested_mode = "image_to_video" if reference_count else "text_to_video"
     if isinstance(input_modes, list) and requested_mode not in input_modes:
@@ -148,6 +172,8 @@ def _serialize_asset(asset: CreationStudioAsset) -> dict[str, Any]:
 
 def _serialize_job(db: Session, job: CreationStudioJob) -> dict[str, Any]:
     output = db.get(CreationStudioAsset, job.output_asset_id) if job.output_asset_id else None
+    model = db.get(AiModel, job.model_id) if job.model_id else None
+    model_display_name = str(getattr(model, "display_name", "") or "").strip() or job.model_key
     links = (
         db.query(CreationStudioJobInput)
         .filter(CreationStudioJobInput.job_id == job.id)
@@ -173,6 +199,7 @@ def _serialize_job(db: Session, job: CreationStudioJob) -> dict[str, Any]:
         "negative_prompt": job.negative_prompt,
         "model_id": job.model_id,
         "model_key": job.model_key,
+        "model_display_name": model_display_name,
         "parameters": public_parameters,
         "status": job.status,
         "stage": job.stage,
@@ -461,6 +488,107 @@ async def list_assets(request: Request, db: Session = Depends(get_db)):
     return {"assets": [_serialize_asset(asset) for asset in assets]}
 
 
+@router.post("/assets/analyze")
+async def analyze_assets(
+    body: CreationStudioAnalyzeIn,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """使用视觉模型分析创作台参考图，并返回可直接回填提示词的结构化文本。"""
+    user = _require_user(request, db)
+    assets = [_owned_asset(db, user.id, asset_id) for asset_id in body.asset_ids]
+    image_parts: list[dict[str, Any]] = []
+    total_payload_bytes = 0
+    for asset in assets:
+        if not str(asset.mime_type or "").startswith("image/"):
+            raise HTTPException(400, "当前只支持分析图片参考素材")
+        path = Path(str(asset.storage_path)).resolve()
+        allowed_roots = [(BACKEND_DIR / "manga_outputs" / "creative_studio").resolve()]
+        if not path.is_file() or not any(path.is_relative_to(root) for root in allowed_roots):
+            raise HTTPException(404, "参考素材文件不存在")
+        with Image.open(path) as image:
+            image = image.convert("RGB")
+            image.thumbnail((1600, 1600))
+            encoded_buffer = base64.b64encode(_encode_analysis_image(image)).decode("ascii")
+        total_payload_bytes += len(encoded_buffer)
+        if total_payload_bytes > 10 * 1024 * 1024:
+            raise HTTPException(413, "参考图视觉输入总量过大，请减少图片数量或压缩图片")
+        image_parts.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{encoded_buffer}"}})
+    main_mod = _main()
+    runtime = main_mod._resolve_dual_track_runtime(request, db, modality="text")
+    if runtime:
+        deepseek_service.configure_runtime(
+            base_url=runtime["base_url"],
+            model=runtime["model_key"],
+        )
+        api_key = runtime["api_key"]
+        credential_mode = runtime["mode"]
+        model_id = runtime["model_id"]
+    else:
+        api_key = main_mod._user_deepseek_api_key(request)
+        credential_mode = main_mod._request_credential_mode(request, db)
+        model_id = None
+    if not api_key:
+        raise HTTPException(400, "尚未配置可用的视觉模型 API Key")
+    billing_ctx = begin_ai_call(
+        db,
+        user_id=user.id,
+        modality="text",
+        task_type="creation_studio.assets.analyze",
+        credential_mode=credential_mode,
+        model_id=model_id,
+        request_id=f"studio-analyze-{uuid.uuid4()}",
+        estimate_kwargs={"input_tokens": 0, "output_tokens": 4096},
+    )
+    user_content = [{"type": "text", "text": f"{body.instruction}\n请输出：prompt、negative_prompt、style、composition、characters、lighting。"}, *image_parts]
+    payload = {
+        "model": deepseek_service.runtime_model(),
+        "messages": [
+            {"role": "system", "content": "你是视觉提示词反推助手。只分析图片中可观察到的内容，不臆造敏感信息；用中文输出 JSON。"},
+            {"role": "user", "content": user_content},
+        ],
+        "stream": False,
+        "max_tokens": 4096,
+    }
+    try:
+        async with httpx.AsyncClient(timeout=180) as client:
+            response = await client.post(
+                f"{deepseek_service.runtime_base_url()}/chat/completions",
+                json=payload,
+                headers=deepseek_service._deepseek_auth_headers(api_key),
+            )
+            if response.status_code in {400, 404}:
+                raise HTTPException(422, "当前文本模型不支持图片输入，请在 AI 渠道中配置支持视觉输入的模型")
+            response.raise_for_status()
+            result = response.json()
+        if not isinstance(result, dict):
+            raise HTTPException(502, "视觉模型返回格式无效")
+        content = str(result.get("choices", [{}])[0].get("message", {}).get("content") or "").strip()
+        if not content:
+            raise HTTPException(502, "视觉模型未返回分析结果")
+        usage = result.get("usage")
+        usage = usage if isinstance(usage, dict) else {}
+        input_tokens = int(usage.get("prompt_tokens") or usage.get("input_tokens") or 0)
+        output_tokens = int(usage.get("completion_tokens") or usage.get("output_tokens") or 0)
+    except Exception as exc:
+        error_code = (
+            "empty_response"
+            if isinstance(exc, HTTPException) and exc.detail == "视觉模型未返回分析结果"
+            else type(exc).__name__
+        )
+        complete_ai_call(db, billing_ctx, success=False, error_code=error_code)
+        raise
+    complete_ai_call(
+        db,
+        billing_ctx,
+        success=True,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        usage_source="provider",
+    )
+    return {"analysis": content, "asset_ids": body.asset_ids}
+
+
 @router.get("/assets/{asset_id}/content")
 async def get_asset_content(
     asset_id: int,
@@ -590,12 +718,12 @@ async def create_jobs(payload: CreationStudioJobCreate, request: Request, db: Se
     if credential_mode == "user_key" and not custom_upstream and not capabilities["can_override_api_key"]:
         raise HTTPException(403, "管理员未授权当前账号使用自定义 API Key")
 
-    if media_kind == "video" and selected_model is None:
+    if selected_model is None:
         selected_model = resolve_model(
             db,
             user.id,
-            modality="video",
-            task_type="creation_studio.video",
+            modality=media_kind,
+            task_type=f"creation_studio.{media_kind}",
         )
 
     assets = [_owned_asset(db, user.id, asset_id) for asset_id in dict.fromkeys(payload.asset_ids)]
@@ -603,6 +731,12 @@ async def create_jobs(payload: CreationStudioJobCreate, request: Request, db: Se
         raise HTTPException(400, "当前模型输入仅支持参考图片")
     adapter_type: str | None = None
     video_capabilities: dict[str, Any] | None = None
+    image_capabilities: dict[str, Any] | None = None
+    effective_image_quality = payload.quality
+    if media_kind == "image" and not custom_upstream:
+        raw_capabilities = selected_model.capabilities_json if selected_model else None
+        image_capabilities = raw_capabilities.get("image") if isinstance(raw_capabilities, dict) else None
+        effective_image_quality = _resolve_image_quality(image_capabilities, payload.quality)
     if media_kind == "video":
         channel = db.get(AiChannel, selected_model.channel_id) if selected_model else None
         source_adapter_type = video_adapter.normalize_video_adapter_type(
@@ -623,6 +757,8 @@ async def create_jobs(payload: CreationStudioJobCreate, request: Request, db: Se
             if not custom_upstream or source_adapter_type == video_adapter.VIDEO_ADAPTER_LINGDONG
             else None
         )
+        if not custom_upstream or source_adapter_type == video_adapter.VIDEO_ADAPTER_LINGDONG:
+            _validate_video_submission_capabilities(video_capabilities, payload, len(assets))
         if adapter_type == video_adapter.VIDEO_ADAPTER_OPENAI:
             video_adapter._openai_video_config(
                 video_capabilities,
@@ -632,7 +768,6 @@ async def create_jobs(payload: CreationStudioJobCreate, request: Request, db: Se
                 reference_count=len(assets),
             )
         else:
-            _validate_video_submission_capabilities(video_capabilities, payload, len(assets))
             video_api_service.validate_legacy_model_duration(
                 model=str(
                     (custom_upstream or {}).get("model_key")
@@ -647,7 +782,7 @@ async def create_jobs(payload: CreationStudioJobCreate, request: Request, db: Se
         "size": f"{payload.width}x{payload.height}",
         "width": payload.width,
         "height": payload.height,
-        "quality": payload.quality,
+        "quality": effective_image_quality,
         "reference_mode": payload.reference_mode,
         "aspect_ratio": payload.aspect_ratio,
         "resolution": payload.resolution,

@@ -1,6 +1,7 @@
 import asyncio
 import datetime
 from decimal import Decimal
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -10,10 +11,14 @@ from sqlalchemy.orm import sessionmaker
 
 from database import Base
 from models import AiChannel, AiModel, AiModelPrice, AiUsageEvent, BackgroundTask, Chapter, MangaImage, PointsAccount, PointsLedgerEntry, Story, User
+from routers import points_ai
+from services.ai.bootstrap import ensure_default_channels_and_models, migrate_active_text_per_call_prices
+from services.ai.catalog import get_active_price
 from services.ai.channels import set_platform_key
 from services.ai.credentials import save_user_api_key
 from services.ai.resolver import begin_ai_call, complete_ai_call, refund_ai_call
 from services.points import accounts as points_accounts
+from services.points.pricing import estimate_points
 from services import deepseek
 from services.task_manager import TaskManager
 
@@ -91,6 +96,56 @@ def test_reserved_call_failure_releases_all_points_once():
     db.refresh(account)
     assert account.available_points == Decimal("20.0000")
     assert account.reserved_points == Decimal("0.0000")
+
+
+def test_reservation_settlement_rejects_cross_event_reserve_key():
+    db, user, model = _billing_session()
+    first = begin_ai_call(
+        db,
+        user_id=user.id,
+        modality="text",
+        task_type="billing.first",
+        credential_mode="platform",
+        model_id=model.id,
+        request_id="cross-event-first",
+    )
+    second = begin_ai_call(
+        db,
+        user_id=user.id,
+        modality="text",
+        task_type="billing.second",
+        credential_mode="platform",
+        model_id=model.id,
+        request_id="cross-event-second",
+    )
+    with pytest.raises(RuntimeError, match="用量事件不匹配"):
+        points_accounts.settle_reservation(
+            db,
+            user.id,
+            reserved_amount=first.reserved_points,
+            actual_amount=first.reserved_points,
+            reserve_idempotency_key=f"reserve:{second.request_id}",
+            settle_idempotency_key="settle:cross-event",
+            release_idempotency_key="release:cross-event",
+            usage_event_id=first.usage_event_id,
+        )
+
+
+def test_settlement_idempotency_key_cannot_cross_usage_events():
+    db, user, model = _billing_session()
+    first = begin_ai_call(db, user_id=user.id, modality="text", task_type="billing.first", credential_mode="platform", model_id=model.id, request_id="idem-first")
+    second = begin_ai_call(db, user_id=user.id, modality="text", task_type="billing.second", credential_mode="platform", model_id=model.id, request_id="idem-second")
+    points_accounts.settle_reservation(
+        db, user.id, reserved_amount=first.reserved_points, actual_amount=first.reserved_points,
+        reserve_idempotency_key=f"reserve:{first.request_id}", settle_idempotency_key="settle:shared",
+        release_idempotency_key="release:shared", usage_event_id=first.usage_event_id,
+    )
+    with pytest.raises(RuntimeError, match="结算幂等流水与用量事件不匹配"):
+        points_accounts.settle_reservation(
+            db, user.id, reserved_amount=second.reserved_points, actual_amount=second.reserved_points,
+            reserve_idempotency_key=f"reserve:{second.request_id}", settle_idempotency_key="settle:shared",
+            release_idempotency_key="release:shared-2", usage_event_id=second.usage_event_id,
+        )
 
 
 def test_insufficient_points_rejects_request_before_reservation():
@@ -204,6 +259,216 @@ def test_token_call_reserves_configured_ceiling_and_settles_actual_usage():
     assert account.reserved_points == Decimal("0.0000")
 
 
+def test_per_1m_token_call_reserves_ceiling_and_settles_actual_usage():
+    db, user, model = _billing_session(
+        billing_type="per_1m_tokens",
+        price_config={
+            "input_points_per_1m": 100,
+            "output_points_per_1m": 200,
+            "estimate_default_input_tokens": 20000,
+            "estimate_default_output_tokens": 8192,
+            "reservation_max_input_tokens": 20000,
+            "reservation_max_output_tokens": 8192,
+            "min_points_per_call": 0.1,
+        },
+    )
+    ctx = begin_ai_call(
+        db,
+        user_id=user.id,
+        modality="text",
+        task_type="chapter.expand",
+        credential_mode="platform",
+        model_id=model.id,
+        request_id="per-1m-reserve-settle",
+    )
+
+    assert ctx.estimated_points == Decimal("3.6384")
+    assert ctx.reserved_points == Decimal("3.6384")
+    assert ctx.price_snapshot["reservation_max_input_tokens"] == 20000
+    assert ctx.price_snapshot["reservation_max_output_tokens"] == 8192
+
+    complete_ai_call(db, ctx, success=True, input_tokens=1000, output_tokens=500)
+
+    event = db.get(AiUsageEvent, ctx.usage_event_id)
+    account = db.query(PointsAccount).filter_by(user_id=user.id).one()
+    assert event.settled_points == Decimal("0.2000")
+    assert account.available_points == Decimal("19.8000")
+    assert account.reserved_points == Decimal("0.0000")
+
+
+def test_per_1m_token_formula_uses_separate_usage_rates_and_legacy_fallback():
+    config = {"input_points_per_1m": 2000, "output_points_per_1m": 4000, "min_points_per_call": 0.1}
+    assert estimate_points(
+        billing_type="per_1m_tokens",
+        price_config=config,
+        input_tokens=1000,
+        output_tokens=500,
+        use_estimate_defaults=False,
+    ) == Decimal("4.0000")
+    assert estimate_points(
+        billing_type="per_1m_tokens",
+        price_config=config,
+        input_tokens=10,
+        output_tokens=10,
+        use_estimate_defaults=False,
+    ) == Decimal("0.1000")
+
+    config = {"points_per_1m_tokens": 2000, "min_points_per_call": 0.1}
+    assert estimate_points(
+        billing_type="per_1m_tokens",
+        price_config=config,
+        input_tokens=1000,
+        output_tokens=500,
+        use_estimate_defaults=False,
+    ) == Decimal("3.0000")
+    assert estimate_points(
+        billing_type="per_1m_tokens",
+        price_config=config,
+        input_tokens=10,
+        output_tokens=10,
+        use_estimate_defaults=False,
+    ) == Decimal("0.1000")
+
+
+def test_bootstrap_creates_default_text_per_1m_price():
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    db = sessionmaker(bind=engine, expire_on_commit=False)()
+
+    ensure_default_channels_and_models(db)
+
+    model = db.query(AiModel).filter(AiModel.modality == "text").one()
+    price = get_active_price(db, model.id)
+    assert price.billing_type == "per_1m_tokens"
+    assert price.price_config_json == {
+        "input_points_per_1m": 2000.0,
+        "output_points_per_1m": 2000.0,
+        "estimate_default_input_tokens": 20000,
+        "estimate_default_output_tokens": 8192,
+        "reservation_max_input_tokens": 20000,
+        "reservation_max_output_tokens": 8192,
+        "min_points_per_call": 0.1,
+    }
+
+
+def test_per_call_price_migration_preserves_gradient_and_is_idempotent():
+    db, _user, first_model = _billing_session()
+    first_price = get_active_price(db, first_model.id)
+    first_price.price_config_json = {"points_per_call": 4}
+    now = datetime.datetime.utcnow()
+
+    second_channel = AiChannel(
+        code="migration-second",
+        name="迁移测试渠道二",
+        adapter_type="openai_compatible",
+        base_url="https://api.example.com/v1",
+        modality="text",
+        enabled=True,
+    )
+    custom_channel = AiChannel(
+        code="migration-custom",
+        name="迁移自定义渠道",
+        adapter_type="openai_compatible",
+        base_url="https://api.example.com/v1",
+        modality="text",
+        enabled=True,
+    )
+    db.add_all([second_channel, custom_channel])
+    db.flush()
+    second_model = AiModel(
+        channel_id=second_channel.id,
+        model_key="migration-second",
+        display_name="迁移模型二",
+        modality="text",
+        enabled=True,
+        user_visible=True,
+    )
+    custom_model = AiModel(
+        channel_id=custom_channel.id,
+        model_key="migration-custom",
+        display_name="迁移自定义模型",
+        modality="text",
+        enabled=True,
+        user_visible=True,
+    )
+    db.add_all([second_model, custom_model])
+    db.flush()
+    db.add_all(
+        [
+            AiModelPrice(
+                model_id=second_model.id,
+                billing_type="per_call",
+                price_config_json={"points_per_call": 2},
+                valid_from=now - datetime.timedelta(minutes=1),
+            ),
+            AiModelPrice(
+                model_id=custom_model.id,
+                billing_type="per_1k_tokens",
+                price_config_json={"input_points_per_1k": 1, "output_points_per_1k": 2},
+                valid_from=now - datetime.timedelta(minutes=1),
+            ),
+        ]
+    )
+    db.commit()
+
+    assert migrate_active_text_per_call_prices(db, now=now) == 3
+    db.commit()
+    assert migrate_active_text_per_call_prices(db, now=now + datetime.timedelta(seconds=1)) == 0
+    db.commit()
+
+    assert get_active_price(db, first_model.id).price_config_json["input_points_per_1m"] == pytest.approx(4 * 1_000_000 / 28_192)
+    assert get_active_price(db, first_model.id).price_config_json["output_points_per_1m"] == pytest.approx(4 * 1_000_000 / 28_192)
+    assert get_active_price(db, second_model.id).price_config_json["input_points_per_1m"] == pytest.approx(2 * 1_000_000 / 28_192)
+    assert get_active_price(db, custom_model.id).price_config_json["input_points_per_1m"] == pytest.approx(1000)
+    assert get_active_price(db, custom_model.id).price_config_json["output_points_per_1m"] == pytest.approx(2000)
+
+
+def test_admin_text_price_api_forces_per_1m_defaults(monkeypatch):
+    db, admin, model = _billing_session()
+    monkeypatch.setattr(points_ai, "_require_admin", lambda *_args: admin)
+
+    result = points_ai.admin_set_price(
+        model.id,
+        points_ai.PriceIn(
+            billing_type="per_call",
+            price_config_json={"points_per_1m_tokens": 2500, "points_per_call": 999},
+        ),
+        SimpleNamespace(),
+        db,
+    )
+
+    assert result["billing_type"] == "per_1m_tokens"
+    assert result["price_config_json"] == {
+        "input_points_per_1m": 2500.0,
+        "output_points_per_1m": 2500.0,
+        "estimate_default_input_tokens": 20000,
+        "estimate_default_output_tokens": 8192,
+        "reservation_max_input_tokens": 20000,
+        "reservation_max_output_tokens": 8192,
+        "min_points_per_call": 0.1,
+    }
+    split_result = points_ai.admin_set_price(
+        model.id,
+        points_ai.PriceIn(
+            price_config_json={
+                "input_points_per_1m": 1200,
+                "output_points_per_1m": 3600,
+            }
+        ),
+        SimpleNamespace(),
+        db,
+    )
+    assert split_result["price_config_json"]["input_points_per_1m"] == 1200.0
+    assert split_result["price_config_json"]["output_points_per_1m"] == 3600.0
+    with pytest.raises(HTTPException, match="非负数字"):
+        points_ai.admin_set_price(
+            model.id,
+            points_ai.PriceIn(price_config_json={"points_per_1m_tokens": -1}),
+            SimpleNamespace(),
+            db,
+        )
+
+
 def test_token_ceiling_above_total_balance_rejects_before_upstream_call():
     db, user, model = _billing_session(
         billing_type="per_1k_tokens",
@@ -235,7 +500,7 @@ def test_token_ceiling_above_total_balance_rejects_before_upstream_call():
     assert account.reserved_points == Decimal("0.0000")
 
 
-def test_text_call_count_expands_reservation_without_overcharging_per_call():
+def test_text_call_count_expands_reservation_and_per_call_settlement():
     db, user, model = _billing_session()
     ctx = begin_ai_call(
         db,
@@ -257,9 +522,78 @@ def test_text_call_count_expands_reservation_without_overcharging_per_call():
 
     event = db.get(AiUsageEvent, ctx.usage_event_id)
     db.refresh(account)
-    assert event.settled_points == Decimal("2.0000")
-    assert account.available_points == Decimal("18.0000")
+    assert event.settled_points == Decimal("6.0000")
+    assert event.price_snapshot_json["actual_call_count"] == 3
+    assert account.available_points == Decimal("14.0000")
     assert account.reserved_points == Decimal("0.0000")
+
+
+def test_per_call_settlement_prefers_actual_call_count():
+    db, user, model = _billing_session()
+    ctx = begin_ai_call(
+        db,
+        user_id=user.id,
+        modality="text",
+        task_type="import.story_bible.generate",
+        credential_mode="platform",
+        model_id=model.id,
+        request_id="actual-multi-call-settlement",
+        estimate_kwargs={"call_count": 3},
+    )
+
+    complete_ai_call(db, ctx, success=True, actual_call_count=2)
+
+    event = db.get(AiUsageEvent, ctx.usage_event_id)
+    account = db.query(PointsAccount).filter_by(user_id=user.id).one()
+    assert event.settled_points == Decimal("4.0000")
+    assert event.price_snapshot_json["call_count"] == 3
+    assert event.price_snapshot_json["actual_call_count"] == 2
+    assert account.available_points == Decimal("16.0000")
+    assert account.reserved_points == Decimal("0.0000")
+
+
+def test_per_call_zero_actual_calls_releases_full_reservation():
+    db, user, model = _billing_session()
+    ctx = begin_ai_call(
+        db,
+        user_id=user.id,
+        modality="text",
+        task_type="import.story_bible.generate",
+        credential_mode="platform",
+        model_id=model.id,
+        request_id="zero-actual-call-settlement",
+        estimate_kwargs={"call_count": 3},
+    )
+
+    complete_ai_call(db, ctx, success=True, actual_call_count=0)
+
+    event = db.get(AiUsageEvent, ctx.usage_event_id)
+    account = db.query(PointsAccount).filter_by(user_id=user.id).one()
+    assert event.settled_points == Decimal("0.0000")
+    assert event.price_snapshot_json["actual_call_count"] == 0
+    assert account.available_points == Decimal("20.0000")
+    assert account.reserved_points == Decimal("0.0000")
+
+
+def test_per_call_settlement_uses_persisted_actual_call_count():
+    db, user, model = _billing_session()
+    ctx = begin_ai_call(
+        db,
+        user_id=user.id,
+        modality="text",
+        task_type="import.story_bible.generate",
+        credential_mode="platform",
+        model_id=model.id,
+        request_id="persisted-actual-call-settlement",
+        estimate_kwargs={"call_count": 3},
+    )
+    ctx = replace(ctx, price_snapshot={**ctx.price_snapshot, "actual_call_count": 2})
+
+    complete_ai_call(db, ctx, success=True)
+
+    event = db.get(AiUsageEvent, ctx.usage_event_id)
+    assert event.settled_points == Decimal("4.0000")
+    assert event.price_snapshot_json["actual_call_count"] == 2
 
 
 def test_deepseek_usage_accumulator_collects_and_clears_provider_usage():

@@ -11,6 +11,8 @@ interface Props {
   onClipsChange: Dispatch<SetStateAction<RenderedClip[]>>;
 }
 
+const ACTIVE_VIDEO_JOB_STATUSES = new Set(['pending', 'queued', 'running']);
+
 export default function VideoPanel({
   shot,
   jobs,
@@ -31,6 +33,7 @@ export default function VideoPanel({
     max_retries?: number;
     next_retry_at?: string | null;
   } | null>(null);
+  const submissionLockRef = useRef(false);
 
   // 用于组件卸载时清理轮询定时器
   const pollingRef = useRef<{ timeoutId: ReturnType<typeof setTimeout> | null; mounted: boolean }>({
@@ -50,7 +53,8 @@ export default function VideoPanel({
   }, []);
 
   async function handleRenderVideo(forceTextToVideo = false) {
-    if (!shot?.id) return;
+    if (!shot?.id || submissionLockRef.current || sseConnected || jobs.some((job) => ACTIVE_VIDEO_JOB_STATUSES.has(job.status))) return;
+    submissionLockRef.current = true;
     setRendering(true);
     setError(null);
     setShowUnlockWarning(false);
@@ -76,12 +80,13 @@ export default function VideoPanel({
     } catch (err: any) {
       setError(err.message || '提交视频任务失败');
     } finally {
+      submissionLockRef.current = false;
       setRendering(false);
     }
   }
 
   function handleRenderClick() {
-    if (!shot) return;
+    if (!shot || rendering || jobs.some((job) => ACTIVE_VIDEO_JOB_STATUSES.has(job.status))) return;
     const hasStoryboard = !!shot.storyboard_asset_id;
     const storyboardLocked = !!shot.storyboard_locked;
 
@@ -95,7 +100,9 @@ export default function VideoPanel({
   }
 
   const submitViaSSE = async () => {
-    if (!shot) return;
+    if (!shot || submissionLockRef.current || rendering || sseConnected || jobs.some((job) => ACTIVE_VIDEO_JOB_STATUSES.has(job.status))) return;
+    submissionLockRef.current = true;
+    setSseConnected(true);
     setError(null);
     try {
       const response = await fetch(`/api/shots/${shot.id}/video/render-stream`, {
@@ -113,8 +120,6 @@ export default function VideoPanel({
         setError(await readResponseError(response, '视频任务启动失败，请稍后重试'));
         return;
       }
-    
-    setSseConnected(true);
     
       const reader = response.body?.getReader();
       if (!reader) {
@@ -201,26 +206,19 @@ export default function VideoPanel({
         setError('视频任务连接意外中断，请刷新任务状态后重试');
       }
     } catch (error) {
-      setSseConnected(false);
       setError(normalizeErrorMessage(error, '视频任务连接失败，请稍后重试'));
+    } finally {
+      submissionLockRef.current = false;
+      setSseConnected(false);
     }
   };
 
   function pollJobStatus(jobId: number) {
     let delay = 3000;
     const maxDelay = 30000;
-    const maxRetries = 60;
-    let attemptCount = 0;
 
     const poll = async () => {
       if (!pollingRef.current.mounted) return;
-
-      attemptCount++;
-      if (attemptCount > maxRetries) {
-        console.error(`视频任务 ${jobId} 轮询已达最大次数 ${maxRetries}，停止轮询`);
-        setError('视频任务状态查询超时，请刷新页面查看最新结果');
-        return;
-      }
 
       try {
         const job = await getVideoJob(jobId);
@@ -236,7 +234,7 @@ export default function VideoPanel({
           });
         }
 
-        if (job.status === 'running' || job.status === 'queued') {
+        if (ACTIVE_VIDEO_JOB_STATUSES.has(job.status)) {
           delay = Math.min(delay * 1.5, maxDelay);
           pollingRef.current.timeoutId = setTimeout(poll, delay);
         } else {
@@ -244,10 +242,8 @@ export default function VideoPanel({
         }
       } catch (err) {
         console.error(`视频任务 ${jobId} 轮询出错:`, err);
-        if (attemptCount >= maxRetries) {
-          setError(normalizeErrorMessage(err, '无法获取视频任务状态，请刷新页面重试'));
-          return;
-        }
+        if (!pollingRef.current.mounted) return;
+        // 状态查询失败只影响本次轮询，继续等待后端终态，避免前端提前判定超时。
         pollingRef.current.timeoutId = setTimeout(poll, delay);
       }
     };
@@ -256,6 +252,8 @@ export default function VideoPanel({
   }
 
   const activeClip = clips.find((clip) => clip.is_active);
+  const activeVideoJob = jobs.some((job) => ACTIVE_VIDEO_JOB_STATUSES.has(job.status));
+  const videoBusy = rendering || sseConnected || activeVideoJob;
   const hasStoryboard = !!shot?.storyboard_asset_id;
   const storyboardLocked = !!shot?.storyboard_locked;
 
@@ -406,7 +404,7 @@ export default function VideoPanel({
       <div className="flex gap-2">
         <button
           onClick={handleRenderClick}
-          disabled={rendering}
+          disabled={videoBusy}
           className={`flex-1 rounded-xl py-2 text-sm text-white disabled:opacity-60 ${
             hasStoryboard && storyboardLocked
               ? 'bg-[#2563eb]'
@@ -415,6 +413,8 @@ export default function VideoPanel({
         >
           {rendering
             ? '提交中...'
+            : activeVideoJob
+              ? '视频生成中...'
             : !hasStoryboard
               ? '生成视频（文生视频）'
               : storyboardLocked
@@ -423,7 +423,7 @@ export default function VideoPanel({
         </button>
         <button
           onClick={submitViaSSE}
-          disabled={sseConnected || !shot}
+          disabled={sseConnected || videoBusy || !shot}
           className="px-3 py-1.5 bg-indigo-600 text-white text-xs rounded-lg hover:bg-indigo-700 disabled:opacity-50"
         >
           {sseConnected ? '生成中...' : 'SSE 生成'}

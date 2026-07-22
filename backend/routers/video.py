@@ -333,6 +333,8 @@ def _flatten_background_task(task: BackgroundTask | None) -> dict:
         "max_retries": task.max_retries,
         "next_retry_at": meta.get("next_retry_at"),
         "task_id": task.task_id,
+        "task_status": task.status,
+        "error_message": task.error_message,
     }
 
 
@@ -496,6 +498,13 @@ def _validate_video_request_before_billing(
     reference_count: int,
 ) -> None:
     """在计费和上游提交前验证视频协议能力。"""
+    if video_capabilities is not None:
+        from services.ai.video_capabilities import validate_video_capability_limits
+
+        validate_video_capability_limits(
+            video_capabilities,
+            duration_seconds=duration_seconds,
+        )
     if adapter_type == video_adapter_service.VIDEO_ADAPTER_LINGDONG:
         video_api_service.validate_legacy_model_duration(
             model=model,
@@ -672,57 +681,9 @@ def _video_job_adapter_type(job: VideoGenerationJob) -> str:
 
 
 def _user_image_api_key(request: Request) -> str | None:
-    from services import image2 as image_service
-
-    db = getattr(request.state, "db", None)
-    if db is not None:
-        try:
-            import main as main_mod
-
-            dual = main_mod._resolve_dual_track_runtime(request, db, modality="image")
-            if dual:
-                image_service.configure_runtime(
-                    base_url=dual["base_url"] or image_service.DEFAULT_IMAGE_API_BASE_URL,
-                    model=dual["model_key"] or image_service.DEFAULT_IMAGE_MODEL,
-                )
-                request.state.dual_track_image = dual
-                return dual["api_key"]
-        except HTTPException:
-            raise
-        except Exception:
-            logger.exception("video 路由双轨图片解析失败")
-
-    override = request.headers.get("x-image-api-key") or None
-    if db is None:
-        return override
-    user = getattr(request.state, "current_user", None)
-    capabilities = _user_api_override_capabilities(user, db)
     import main as main_mod
-
-    requested_mode = main_mod._request_credential_mode(request, db)
-    custom_upstream = main_mod._resolve_user_upstream_override(
-        request,
-        db,
-        user=user,
-        modality="image",
-        mode=requested_mode,
-    )
-    if custom_upstream:
-        base_url = custom_upstream.get("base_url") or str(_get_platform_setting("api.image.base_url", db, "") or "").strip()
-        model = custom_upstream.get("model_key") or str(_get_platform_setting("api.image.model", db, "") or "").strip()
-        image_service.configure_runtime(base_url=base_url, model=model)
-        return custom_upstream["api_key"]
-    if requested_mode == "user_key" and not capabilities["can_override_api_key"]:
-        raise HTTPException(403, "管理员未授权当前账号使用自定义 API Key")
-    if capabilities["can_override_api_key"] and override:
-        return override
-
-    base_url = str(_get_platform_setting("api.image.base_url", db, "") or "").strip()
-    model = str(_get_platform_setting("api.image.model", db, "") or "").strip()
-    if base_url:
-        image_service.configure_runtime(base_url=base_url, model=model)
-
-    return _get_platform_setting("api.image.api_key", db, "") or None
+    # 与主应用共享运行时解析，避免视频资产生成绕过目录模型能力配置。
+    return main_mod._user_image_api_key(request)
 
 
 def _get_platform_setting(key: str, db: Session, default=None):
@@ -2910,6 +2871,7 @@ def _resolve_workflow_style_ref_path(
     ).order_by(ChapterVideoWorkflow.created_at.desc()).first()
 
     ref_url = None
+    # 镜头显式覆盖风格时，参考图也必须切换到该预设，避免文字与图片风格不一致。
     if wf and wf.style_reference_image_url:
         ref_url = wf.style_reference_image_url.strip()
 
@@ -5123,6 +5085,38 @@ async def regenerate_video_asset(
     prompt = str(body.get("prompt") or "").strip()
     if not prompt:
         raise HTTPException(400, "提示词必填")
+    requested_style_preset = _normalize_style_name(str(body.get("style_preset") or ""))
+    effective_style_preset = requested_style_preset or _normalize_style_name(asset.style_preset)
+    if not effective_style_preset and asset.chapter_id:
+        workflow = (
+            db.query(ChapterVideoWorkflow)
+            .filter(ChapterVideoWorkflow.chapter_id == asset.chapter_id)
+            .order_by(ChapterVideoWorkflow.created_at.desc())
+            .first()
+        )
+        effective_style_preset = _normalize_style_name(workflow.video_style if workflow else None)
+    if not effective_style_preset and asset.chapter_id:
+        chapter = db.get(Chapter, asset.chapter_id)
+        if chapter and chapter.video_style_preset_id:
+            chapter_preset = db.get(VideoStylePreset, chapter.video_style_preset_id)
+            effective_style_preset = _normalize_style_name(chapter_preset.name if chapter_preset else None)
+    style_template = ""
+    if effective_style_preset:
+        preset = (
+            db.query(VideoStylePreset)
+            .filter(VideoStylePreset.name == effective_style_preset)
+            .first()
+        )
+        if preset:
+            effective_style_preset = preset.name
+            style_template = preset.prompt_template or ""
+    generation_prompt = _merge_style_prompt(prompt, style_template, effective_style_preset)
+    style_ref_path = (
+        _resolve_workflow_style_ref_path(asset.chapter_id, db, effective_style_preset)
+        if asset.chapter_id
+        else None
+    )
+    style_reference_path = Path(style_ref_path) if style_ref_path else None
     mode = str(body.get("mode") or "full").strip().lower()
     if mode not in {"full", "partial"}:
         mode = "full"
@@ -5139,7 +5133,7 @@ async def regenerate_video_asset(
         asset.file_path,
         source_path,
         bool(has_source),
-        asset.style_preset,
+        effective_style_preset,
         mode,
     )
 
@@ -5172,6 +5166,8 @@ async def regenerate_video_asset(
                     output_path=output_path,
                     mask_bytes=mask_bytes,
                     api_key=api_key or None,
+                    style_reference_path=style_reference_path,
+                    style_prompt=style_template or effective_style_preset or None,
                 )
             else:
                 saved_path = await image2_service.edit_existing_image(
@@ -5179,16 +5175,21 @@ async def regenerate_video_asset(
                     source_image_path=source_path_obj,
                     output_path=output_path,
                     api_key=api_key or None,
+                    style_reference_path=style_reference_path,
+                    style_prompt=style_template or effective_style_preset or None,
                 )
         else:
             if asset.asset_type not in {"character_reference", "story_character_reference", "scene_reference", "prop_reference"}:
                 raise HTTPException(404, "素材原图不存在，无法重绘")
             saved_path = await generate_visual_asset_image(
-                prompt=prompt,
+                prompt=generation_prompt,
                 output_path=output_path,
                 asset_type=asset.asset_type,
                 api_key=api_key or None,
                 size="1920x1080",
+                reference_paths=[str(style_reference_path)] if style_reference_path else None,
+                reference_labels=[effective_style_preset] if style_reference_path else None,
+                reference_roles=["style"] if style_reference_path else None,
             )
     except HTTPException:
         raise
@@ -5208,7 +5209,7 @@ async def regenerate_video_asset(
         file_path=_to_video_url(str(output_path)) if not (saved_path and str(saved_path).startswith("http")) else str(saved_path),
         provider=asset.provider or "image2",
         prompt=prompt,
-        style_preset=asset.style_preset,
+        style_preset=effective_style_preset or None,
         source_type=getattr(asset, "source_type", "ai_generated"),
         source_asset_ids_json=[asset.id],
         revision=new_revision,
@@ -8920,8 +8921,30 @@ async def api_get_chapter_workflow_status(
     if not story or story.owner_user_id != user.id:
         raise HTTPException(403, "无权访问")
 
-    task_fields = _flatten_background_task(_latest_chapter_workflow_task(db, workflow_id))
-    message = task_fields.get("message") or wf.error_message
+    latest_task = _latest_chapter_workflow_task(db, workflow_id)
+    task_fields = _flatten_background_task(latest_task)
+    workflow_status = wf.workflow_status
+    error_message = wf.error_message
+    active_statuses = {
+        "parsing_shots",
+        "generating_details",
+        "generating_storyboards",
+        "generating_videos",
+        "reanalyzing_prompts",
+    }
+    if (
+        workflow_status in active_statuses
+        and task_fields.get("task_status") in {"failed", "cancelled", "canceled"}
+    ):
+        workflow_status = "failed"
+        error_message = task_fields.get("error_message") or task_fields.get("message") or "后台任务失败"
+        persisted_wf = db.get(ChapterVideoWorkflow, workflow_id)
+        if persisted_wf:
+            persisted_wf.workflow_status = workflow_status
+            persisted_wf.error_message = error_message
+            db.commit()
+
+    message = task_fields.get("message") or error_message
     if not message:
         status_messages = {
             "pending": "等待开始",
@@ -8935,18 +8958,18 @@ async def api_get_chapter_workflow_status(
             "completed": "章节视频已完成",
             "failed": "章节视频任务已失败",
         }
-        message = status_messages.get(wf.workflow_status, wf.workflow_status)
+        message = status_messages.get(workflow_status, workflow_status)
 
     return ChapterVideoWorkflowStatusOut(
         id=wf.id,
         chapter_id=wf.chapter_id,
-        workflow_status=wf.workflow_status,
+        workflow_status=workflow_status,
         total_shots=wf.total_shots,
         completed_shots=wf.completed_shots,
         failed_shots=wf.failed_shots,
-        error_message=wf.error_message,
+        error_message=error_message,
         task_id=task_fields.get("task_id"),
-        stage=task_fields.get("stage") or wf.workflow_status,
+        stage=task_fields.get("stage") or workflow_status,
         message=message,
         retry_count=task_fields.get("retry_count", 0),
         max_retries=task_fields.get("max_retries", 0),
@@ -9807,6 +9830,8 @@ async def api_parse_chapter_shots(
         )
         main_mod._detach_pending_platform_points(request, quota_result.get("usage_event_id"))
     except Exception as exc:
+        error_message = f"提交后台任务失败: {public_error_message(exc)}"
+        update_chapter_workflow_status(workflow_id, "failed", error_message)
         refund_db = SessionLocal()
         try:
             task_manager.refund_quota(
@@ -9819,7 +9844,7 @@ async def api_parse_chapter_shots(
             refund_db.commit()
         finally:
             refund_db.close()
-        raise HTTPException(500, f"提交后台任务失败: {exc}")
+        raise HTTPException(500, error_message)
 
     return {
         "task_id": task_id,
@@ -10150,16 +10175,12 @@ async def api_generate_videos(
         billed_shots = _chapter_video_target_shots(db, workflow_id, body.shot_ids or None)
     except AttributeError:
         billed_shots = []
-    if billed_shots:
-        total_duration = sum(
-            max(1, min(MAX_VIDEO_DURATION_SECONDS, int(shot.duration_seconds or DEFAULT_VIDEO_DURATION_SECONDS)))
-            for shot in billed_shots
-        )
-    else:
-        fallback_count = len(body.shot_ids or []) or int(getattr(wf, "total_shots", 0) or 0)
-        if fallback_count <= 0:
-            raise HTTPException(400, "没有可生成的视频镜头")
-        total_duration = fallback_count * DEFAULT_VIDEO_DURATION_SECONDS
+    if not billed_shots:
+        raise HTTPException(400, "没有可生成的视频镜头")
+    total_duration = sum(
+        max(1, min(MAX_VIDEO_DURATION_SECONDS, int(shot.duration_seconds or DEFAULT_VIDEO_DURATION_SECONDS)))
+        for shot in billed_shots
+    )
     target_shot_ids = [shot.id for shot in billed_shots]
     for billed_shot in billed_shots:
         _validate_video_request_before_billing(

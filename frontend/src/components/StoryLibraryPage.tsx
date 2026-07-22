@@ -4,6 +4,7 @@ import { coverImageUrl, listChapters, type Story } from '../api';
 import { exportStoryAsZip } from '../lib/exportStory';
 import { confirm } from '../lib/confirm';
 import NovelCoverEditModal from './NovelCoverEditModal';
+import MediaImage from './shared/MediaImage';
 
 interface Props {
   stories: Story[];
@@ -236,13 +237,12 @@ export default function StoryLibraryPage({
                       className="group/book relative block w-full cursor-pointer overflow-hidden rounded-lg border border-[#e2e8f0] bg-gradient-to-br from-slate-50 to-slate-100 shadow-sm transition-all hover:shadow-md"
                     >
                       {story.cover_image ? (
-                        <div className="aspect-[2/3] w-full">
-                          <img
+                        <div className="relative aspect-[2/3] w-full overflow-hidden bg-slate-100">
+                          <MediaImage
                             src={coverImageUrl(story.cover_image) || ''}
                             alt={story.title}
                             className="h-full w-full object-cover"
-                            loading="lazy"
-                            decoding="async"
+                            priority
                           />
                         </div>
                       ) : (

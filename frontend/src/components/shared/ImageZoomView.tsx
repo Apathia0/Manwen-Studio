@@ -9,6 +9,7 @@ interface ImageZoomViewProps {
   maxZoom?: number;
   fallback?: ReactNode;
   onZoomChange?: (zoom: number) => void;
+  onLoadError?: () => void;
 }
 
 export default function ImageZoomView({
@@ -19,6 +20,7 @@ export default function ImageZoomView({
   maxZoom = 5,
   fallback,
   onZoomChange,
+  onLoadError,
 }: ImageZoomViewProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const imgRef = useRef<HTMLImageElement>(null);
@@ -197,7 +199,8 @@ export default function ImageZoomView({
 
   const handleImageError = useCallback(() => {
     setImgStatus('error');
-  }, []);
+    onLoadError?.();
+  }, [onLoadError]);
 
   useEffect(() => {
     setImgStatus('loading');

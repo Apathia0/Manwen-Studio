@@ -2,16 +2,19 @@ import asyncio
 import datetime
 import json
 import logging
+import shutil
 import sys
+import tempfile
+from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 from sqlalchemy.orm import Session
 from sse_starlette.sse import EventSourceResponse
 from starlette.background import BackgroundTask as ResponseBackgroundTask
 
 from database import SessionLocal, get_db
-from models import AgentConversation, AgentConversationMessage, AgentPendingChange, Chapter, ChapterVideoShot, ChapterVideoWorkflow, Story
+from models import AgentConversation, AgentConversationMessage, AgentPendingChange, Chapter, ChapterVideoShot, ChapterVideoWorkflow, MangaImage, Story
 from schemas import AgentChatIn, AgentConversationCreateIn, AgentConversationOut, AgentConversationSummaryOut
 from services.agent_service import (
     AgentPendingChangeKey,
@@ -20,7 +23,11 @@ from services.agent_service import (
     agent_service,
     normalize_agent_mode,
 )
+from services.agent_media import _extract_video_frames, _probe_video
 from services.errors import public_error_message
+from services.redaction import redact_sensitive_text
+from services.agent_media import multimodal_content, resolve_attachments, save_attachment
+from services.media_locator import ensure_local_media_path
 
 logger = logging.getLogger("agent_router")
 
@@ -38,6 +45,23 @@ _check_and_consume_advanced_text_quota = _main._check_and_consume_advanced_text_
 _detach_pending_platform_points = _main._detach_pending_platform_points
 _finish_streaming_platform_points = _main._finish_streaming_platform_points
 _build_framework_context = _main._build_framework_context
+
+
+@router.post("/attachments")
+async def upload_agent_attachments(
+    story_id: int,
+    request: Request,
+    files: list[UploadFile] = File(...),
+    db: Session = Depends(get_db),
+):
+    user = _require_user(request, db)
+    _require_story_for_user(story_id, user, db)
+    if len(files) > 5:
+        raise HTTPException(400, "一次最多上传 5 个附件")
+    attachments = []
+    for item in files:
+        attachments.append(await save_attachment(item, db=db, owner_user_id=user.id, story_id=story_id))
+    return {"attachments": attachments}
 
 
 def _conversation_preview(content: str, limit: int = 72) -> str:
@@ -277,8 +301,10 @@ async def agent_chat(
     agent_mode = normalize_agent_mode(body.mode)
     if not conversation_id:
         raise HTTPException(400, "对话 ID 必填")
-    if not content:
+    if not content and not body.attachment_ids:
         raise HTTPException(400, "内容必填")
+    if not content:
+        content = "请分析我上传的附件，并给出可直接用于创作的结构化建议。"
 
     conversation = _require_conversation(
         db,
@@ -290,6 +316,13 @@ async def agent_chat(
     persisted_user_id = user.id
     pending_change_key = AgentPendingChangeKey(
         user_id=persisted_user_id,
+        story_id=story_id,
+        conversation_id=persisted_conversation_id,
+    )
+    attachments = resolve_attachments(
+        body.attachment_ids,
+        db=db,
+        owner_user_id=user.id,
         story_id=story_id,
         conversation_id=persisted_conversation_id,
     )
@@ -320,6 +353,38 @@ async def agent_chat(
     workflow_id = body.workflow_id
     shot_id = body.shot_id
 
+    # 漫画工作流自动附带当前章节的已生成图片，用户无需重复上传即可让视觉模型检查画面。
+    context_image_attachments: list[dict[str, Any]] = []
+    temporary_context_paths: list[Path] = []
+    if workflow_type == "manga" and current_chapter:
+        backend_root = Path(__file__).resolve().parent.parent
+        manga_images = (
+            db.query(MangaImage)
+            .filter(MangaImage.chapter_id == current_chapter.id)
+            .order_by(MangaImage.image_number)
+            .limit(6)
+            .all()
+        )
+        for image in manga_images:
+            raw_path = str(image.image_path or "")
+            if raw_path.startswith(("http://", "https://")):
+                continue
+            local_path = (backend_root / raw_path).resolve()
+            if not local_path.is_file() or not local_path.is_relative_to(backend_root):
+                continue
+            context_image_attachments.append({
+                "filename": f"第{image.image_number}张漫画图",
+                "content_type": "image/*",
+                "media_kind": "image",
+                "path": str(local_path),
+            })
+        if context_image_attachments:
+            story_context += (
+                "\n\n## 当前章节视觉上下文\n"
+                f"已自动附带当前章节 {len(context_image_attachments)} 张漫画图。"
+                "请直接查看这些图片后再回答，不要要求用户重复上传；如图片不可见，再明确说明原因。"
+            )
+
     if workflow_type == "video" and workflow_id:
         video_workflow = db.get(ChapterVideoWorkflow, workflow_id)
         if video_workflow and video_workflow.story_id == story_id:
@@ -330,18 +395,66 @@ async def agent_chat(
                 .all()
             )
             story_context += _build_video_agent_context(video_workflow, video_shots, current_shot_id=shot_id)
+            context_media_count = 0
+            storyboard_count = 0
+            video_count = 0
+            for shot in video_shots:
+                if storyboard_count < 8 and shot.storyboard_image_url:
+                    storyboard_path = await asyncio.to_thread(ensure_local_media_path, shot.storyboard_image_url, "manga")
+                    if storyboard_path and Path(storyboard_path).is_file():
+                        context_image_attachments.append({
+                            "filename": f"分镜{shot.shot_index}故事版",
+                            "content_type": "image/jpeg",
+                            "media_kind": "image",
+                            "path": storyboard_path,
+                        })
+                        storyboard_count += 1
+                        context_media_count += 1
+                if video_count < 4 and shot.video_url:
+                    video_path = await asyncio.to_thread(ensure_local_media_path, shot.video_url, "video")
+                    if video_path and Path(video_path).is_file():
+                        frame_dir = Path(tempfile.mkdtemp(prefix=f"agent_video_{shot.id}_"))
+                        temporary_context_paths.append(frame_dir)
+                        try:
+                            probe = await asyncio.to_thread(_probe_video, Path(video_path))
+                            frame_paths = await asyncio.to_thread(_extract_video_frames, Path(video_path), frame_dir, probe["duration"])
+                        except Exception:
+                            frame_paths = []
+                        if frame_paths:
+                            context_image_attachments.append({
+                                "filename": f"分镜{shot.shot_index}视频关键帧",
+                                "content_type": "video/mp4",
+                                "media_kind": "video",
+                                "path": video_path,
+                                "frame_paths": frame_paths,
+                            })
+                            video_count += 1
+                            context_media_count += 1
+            if context_media_count:
+                story_context += (
+                    "\n\n## 视频工作流视觉上下文\n"
+                    f"已自动附带分镜列表中的 {storyboard_count} 张故事版图片和 {video_count} 个视频的关键帧。"
+                    "请直接查看这些视觉资料后回答，不要要求用户重复上传；视频按时间顺序提供关键帧。"
+                )
         else:
             raise HTTPException(403, "视频工作流不属于当前故事")
+
+    attachments = [*context_image_attachments, *attachments]
 
     quota_result = _check_and_consume_advanced_text_quota(request, user.id, db, deduct=False)
 
     if len(conversation.messages) == 0 or (conversation.title or "").strip() in {"", "新对话"}:
         conversation.title = _conversation_title_from_text(content)
 
+    attachment_note = ""
+    if attachments:
+        attachment_note = "\n\n" + "\n".join(
+            f"[附件] {item['filename']}（{item['media_kind']}）" for item in attachments
+        )
     user_message = AgentConversationMessage(
         conversation_id=persisted_conversation_id,
         role="user",
-        content=content,
+        content=content + attachment_note,
     )
     conversation.updated_at = datetime.datetime.utcnow()
     db.add(user_message)
@@ -349,6 +462,9 @@ async def agent_chat(
 
     db.refresh(conversation, ["messages"])
     history = [{"role": item.role, "content": item.content} for item in conversation.messages]
+    if attachments and history:
+        # 数据库存储纯文本，发送给模型时为最后一条用户消息附加多模态结构。
+        history[-1]["content"] = multimodal_content(content, attachments)
     deepseek_api_key = _user_deepseek_api_key(request)
     streaming_billing_ctx = _detach_pending_platform_points(
         request,
@@ -361,6 +477,7 @@ async def agent_chat(
         collected: list[str] = []
         assistant_saved = False
         stream_failed = False
+        stream_token_count = 0
 
         def settle_billing(*, success: bool, error_code: str | None = None) -> None:
             if billing_state["finished"]:
@@ -376,7 +493,7 @@ async def agent_chat(
 
         def persist_assistant_message(content_text: str) -> None:
             nonlocal assistant_saved
-            normalized = (content_text or "").strip()
+            normalized = redact_sensitive_text(content_text).strip()
             if not normalized or assistant_saved:
                 return
             write_db = SessionLocal()
@@ -423,6 +540,23 @@ async def agent_chat(
                         token = str(payload.get("content") or "")
                         if token:
                             collected.append(token)
+                            stream_token_count += 1
+                            if stream_token_count % 16 == 0:
+                                from services.ai.resolver import charge_streaming_tokens
+                                from services.token_utils import estimate_tokens
+
+                                billing_db = SessionLocal()
+                                try:
+                                    charge_streaming_tokens(
+                                        billing_db,
+                                        streaming_billing_ctx,
+                                        input_tokens=estimate_tokens(
+                                            json.dumps(history, ensure_ascii=False) + story_context
+                                        ),
+                                        output_tokens=estimate_tokens("".join(collected)),
+                                    )
+                                finally:
+                                    billing_db.close()
                     except Exception:
                         pass
                 elif event_type == "done":
@@ -445,6 +579,18 @@ async def agent_chat(
                         error_text = ""
                     if error_text:
                         persist_assistant_message(f"错误: {error_text}")
+                # SSE 也做一层清洗，避免上游工具结果或异常文本直接暴露给浏览器。
+                if event_type in {"token", "done", "error", "tool"}:
+                    try:
+                        event_payload = json.loads(event.get("data", "{}"))
+                        for key in ("content", "error", "result", "message"):
+                            if isinstance(event_payload.get(key), str):
+                                event_payload[key] = redact_sensitive_text(event_payload[key])
+                        event = {**event, "data": json.dumps(event_payload, ensure_ascii=False)}
+                    except HTTPException:
+                        raise
+                    except Exception:
+                        pass
                 yield event
 
             if not assistant_saved:
@@ -467,6 +613,8 @@ async def agent_chat(
             yield {"event": "error", "data": json.dumps({"error": public_message, "code": "agent_stream_failed"}, ensure_ascii=False)}
 
     def release_unfinished_billing() -> None:
+        for temporary_path in temporary_context_paths:
+            shutil.rmtree(temporary_path, ignore_errors=True)
         if billing_state["finished"]:
             return
         try:

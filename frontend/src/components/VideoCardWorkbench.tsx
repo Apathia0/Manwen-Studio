@@ -4,6 +4,7 @@ import { RotateCcw, Upload, Trash2, Wand2, X, Loader2, CheckSquare, MousePointer
 import { ImageRedrawModal } from './shared/ImageRedrawModal';
 import ImageZoomView from './shared/ImageZoomView';
 import AssetReferenceSelector from './AssetReferenceSelector';
+import { videoGenStore, type AssetType } from '../videoGenStore';
 
 import { previewVideoPrompt } from '../api';
 import type { VideoAsset } from '../api';
@@ -74,7 +75,10 @@ export default function VideoCardWorkbench({ type, shotId, assetId, displayShotI
 
   const currentResource = resources[currentIndex];
   const previewUrl = currentResource?.url;
-  const effectiveBusy = state.busy ?? externalBusy;
+  const generationType: AssetType = type === 'video' || type === 'storyboard' ? type : type === 'character' ? 'character' : 'scene';
+  const generationState = videoGenStore.get(shotId, generationType);
+  const generationActive = Boolean(generationState?.active);
+  const effectiveBusy = state.busy ?? externalBusy ?? (generationActive ? 'regenerate' : null);
 
   // 选择角色/资源
   const handleSelectIndex = (idx: number) => {
@@ -269,17 +273,29 @@ export default function VideoCardWorkbench({ type, shotId, assetId, displayShotI
               </div>
               <div className="mx-auto flex h-[62vh] w-full items-center justify-center rounded-[24px] border border-white/10 bg-black/20 p-4">
                 <div className="rounded-[24px] bg-[#0b1220] p-4 shadow-2xl">
-                  {previewUrl ? (
-                    <video
-                      src={previewUrl}
-                      controls
-                      className="mx-auto h-auto max-h-[56vh] rounded-xl shadow-2xl"
-                    />
-                  ) : (
-                    <div className="flex min-h-[420px] min-w-[320px] items-center justify-center rounded-xl bg-[linear-gradient(180deg,_#08111d_0%,_#111827_100%)] text-white/70">
-                      暂无内容
-                    </div>
-                  )}
+                  <div className="relative">
+                    {previewUrl ? (
+                      <video
+                        src={previewUrl}
+                        controls={!generationActive}
+                        className={`mx-auto h-auto max-h-[56vh] rounded-xl shadow-2xl ${generationActive ? 'opacity-45' : ''}`}
+                      />
+                    ) : (
+                      <div className="flex min-h-[420px] min-w-[320px] items-center justify-center rounded-xl bg-[linear-gradient(180deg,_#08111d_0%,_#111827_100%)] text-white/70">
+                        {generationActive ? '正在准备视频...' : '暂无内容'}
+                      </div>
+                    )}
+                    {generationActive && (
+                      <div className="absolute inset-0 flex flex-col items-center justify-center rounded-xl bg-slate-950/55 text-white">
+                        <Loader2 size={34} className="animate-spin text-blue-300" />
+                        <span className="mt-3 text-sm font-medium">{generationState?.statusMsg || '视频生成中...'}</span>
+                        {(generationState?.progress || 0) > 0 && (
+                          <span className="mt-1 text-xs text-blue-100">{generationState?.progress}%</span>
+                        )}
+                        <span className="mt-1 text-xs text-white/70">完成后会自动更新预览</span>
+                      </div>
+                    )}
+                  </div>
                 </div>
               </div>
             </div>
@@ -574,17 +590,26 @@ export default function VideoCardWorkbench({ type, shotId, assetId, displayShotI
                 {zoomHint}
               </div>
               <div className="mx-auto flex h-[62vh] w-full items-center justify-center rounded-[24px] border border-white/10 bg-black/20 p-4">
-                {previewUrl ? (
-                  <ImageZoomView
-                    src={previewUrl}
-                    alt="故事版预览"
-                    className="h-full w-full rounded-xl"
-                  />
-                ) : (
-                  <div className="flex min-h-[420px] min-w-[320px] items-center justify-center rounded-xl bg-[linear-gradient(180deg,_#08111d_0%,_#111827_100%)] text-white/70">
-                    <Loader2 size={24} className="animate-spin" />
-                  </div>
-                )}
+                <div className="relative h-full w-full">
+                  {previewUrl ? (
+                    <ImageZoomView
+                      src={previewUrl}
+                      alt="故事版预览"
+                      className={`h-full w-full rounded-xl ${generationActive ? 'opacity-45' : ''}`}
+                    />
+                  ) : (
+                    <div className="flex h-full min-h-[420px] min-w-[320px] items-center justify-center rounded-xl bg-[linear-gradient(180deg,_#08111d_0%,_#111827_100%)] text-white/70">
+                      {generationActive ? '正在准备故事版...' : '暂无内容'}
+                    </div>
+                  )}
+                  {generationActive && (
+                    <div className="absolute inset-0 flex flex-col items-center justify-center rounded-xl bg-slate-950/45 text-white">
+                      <Loader2 size={34} className="animate-spin text-blue-300" />
+                      <span className="mt-3 text-sm font-medium">{generationState?.statusMsg || '故事版生成中...'}</span>
+                      <span className="mt-1 text-xs text-white/70">完成后会自动更新预览</span>
+                    </div>
+                  )}
+                </div>
               </div>
             </div>
 

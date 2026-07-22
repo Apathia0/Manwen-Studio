@@ -131,6 +131,62 @@ def test_api_create_chapter_workflow_does_not_refresh_detached_instance(monkeypa
     assert init_db_calls == []
 
 
+def test_workflow_status_reconciles_failed_background_parse(monkeypatch):
+    """后台拆镜已失败时，状态接口不得继续返回 parsing_shots。"""
+    persisted_workflow = SimpleNamespace(
+        id=11,
+        chapter_id=444,
+        story_id=900,
+        workflow_status="parsing_shots",
+        total_shots=0,
+        completed_shots=0,
+        failed_shots=0,
+        error_message=None,
+    )
+    failed_task = SimpleNamespace(
+        task_id="chapter_video_11_stage_deadbeef",
+        status="failed",
+        retry_count=1,
+        max_retries=1,
+        error_message="上游拆镜服务失败",
+        metadata_json={"stage": "failed", "message": "上游拆镜服务失败"},
+    )
+
+    class _StatusDb:
+        def __init__(self):
+            self.commit_called = False
+
+        def get(self, model, pk):
+            name = getattr(model, "__name__", "")
+            if name == "Story":
+                return SimpleNamespace(id=pk, owner_user_id=1)
+            if name == "ChapterVideoWorkflow":
+                return persisted_workflow
+            return None
+
+        def commit(self):
+            self.commit_called = True
+
+    db = _StatusDb()
+    monkeypatch.setattr(video_router, "_require_user", lambda request, db_session: SimpleNamespace(id=1))
+    monkeypatch.setattr(video_router, "get_chapter_workflow", lambda workflow_id: persisted_workflow)
+    monkeypatch.setattr(video_router, "_latest_chapter_workflow_task", lambda db_session, workflow_id: failed_task)
+
+    result = asyncio.run(
+        video_router.api_get_chapter_workflow_status(
+            workflow_id=11,
+            request=SimpleNamespace(),
+            db=db,
+        )
+    )
+
+    assert result.workflow_status == "failed"
+    assert result.error_message == "上游拆镜服务失败"
+    assert persisted_workflow.workflow_status == "failed"
+    assert persisted_workflow.error_message == "上游拆镜服务失败"
+    assert db.commit_called
+
+
 def test_regenerate_shot_storyboard_uses_workflow_lookup_for_chapter_id(monkeypatch):
     captured: dict[str, object] = {}
 
@@ -679,6 +735,7 @@ def test_regenerate_shot_video_logs_reference_roles(monkeypatch, caplog):
 
 def test_regenerate_shot_video_preserves_storyboard_character_style_reference_order(monkeypatch):
     captured: dict[str, object] = {}
+    uploaded_paths: list[str] = []
 
     monkeypatch.setattr(
         video_chapter_pipeline,
@@ -714,7 +771,11 @@ def test_regenerate_shot_video_preserves_storyboard_character_style_reference_or
     monkeypatch.setattr(video_chapter_pipeline, 'resolve_reference_input', lambda value, kind: value)
     monkeypatch.setattr(video_chapter_pipeline, '_resolve_style_ref_local_path', lambda value: 'C:/tmp/style.png')
     monkeypatch.setattr(oss_service, 'auto_configure_from_db', lambda: None)
-    monkeypatch.setattr(oss_service, 'upload_file', lambda path: path)
+    monkeypatch.setattr(
+        oss_service,
+        'upload_file',
+        lambda path: uploaded_paths.append(path) or f'https://oss.example.com/{Path(path).name}',
+    )
 
     async def fake_poll_video_job(**kwargs):
         return 'https://cdn.example.com/video.mp4'
@@ -757,9 +818,10 @@ def test_regenerate_shot_video_preserves_storyboard_character_style_reference_or
 
     assert captured['reference_images'] == [
         'https://cdn.example.com/storyboard-194.png',
-        'C:/tmp/character-86.png',
+        'https://oss.example.com/character-86.png',
         'https://cdn.example.com/style.png',
     ]
+    assert uploaded_paths == ['C:/tmp/character-86.png']
     assert '文字冲突画风' not in captured['prompt']
     assert 'Visual style:' not in captured['prompt']
 
@@ -795,6 +857,38 @@ def test_resolve_workflow_style_ref_path_accepts_oss_url(monkeypatch):
     result = video_router._resolve_workflow_style_ref_path(440, _Db())
 
     assert result == 'C:/tmp/style.png'
+
+
+@pytest.mark.parametrize(
+    'source_url',
+    [
+        'https://cdn.example.com/style.png?signature=abc',
+        'http://images.example.com/style.png',
+    ],
+)
+def test_video_style_reference_input_reuses_public_url(monkeypatch, source_url):
+    def fail_localize(_value):
+        raise AssertionError('公开 URL 不应下载为本地文件后再次上传 OSS')
+
+    monkeypatch.setattr(video_chapter_pipeline, '_resolve_style_ref_local_path', fail_localize)
+    monkeypatch.setattr(video_chapter_pipeline, 'resolve_reference_input', lambda value, kind: value)
+
+    assert video_chapter_pipeline._resolve_style_reference_input(source_url) == source_url
+
+
+def test_video_style_reference_input_resolves_preset_relative_path(monkeypatch):
+    captured: list[str] = []
+
+    def resolve_local(value):
+        captured.append(value)
+        return 'C:/app/backend/manga_outputs/style-presets/preset.png'
+
+    monkeypatch.setattr(video_chapter_pipeline, '_resolve_style_ref_local_path', resolve_local)
+
+    result = video_chapter_pipeline._resolve_style_reference_input('style-presets/preset.png')
+
+    assert result == 'C:/app/backend/manga_outputs/style-presets/preset.png'
+    assert captured == ['style-presets/preset.png']
 
 
 def test_from_video_url_keeps_https_url():

@@ -522,14 +522,42 @@ async def create_video_job(
         )
     elif payload_profile == VIDEO_PAYLOAD_PROFILE_SEEDANCE_FAST:
         payload["seconds"] = str(effective_duration)
-        payload["ratio"] = aspect_ratio
-        payload["resolution"] = size
+        ratio_field = _wire_field(capabilities, "ratio_field", "ratio", {"ratio", "orientation"})
+        resolution_field = _wire_field(capabilities, "resolution_field", "resolution", {"resolution", "size"})
+        payload[ratio_field] = aspect_ratio if ratio_field == "ratio" else _aspect_to_orientation(aspect_ratio)
+        payload[resolution_field] = size
     elif payload_profile is None and is_seedance and "fast" in model_lower:
         payload["ratio"] = aspect_ratio
         payload["resolution"] = size
     else:
-        payload["size"] = "large"
-        payload["orientation"] = _aspect_to_orientation(aspect_ratio)
+        wire = capabilities.get("wire")
+        wire = wire if isinstance(wire, dict) else {}
+
+        duration_field = _wire_field(capabilities, "duration_field", "duration", {"duration", "seconds"})
+        duration_as_string = bool(wire.get("duration_as_string"))
+        if duration_field != "duration":
+            payload.pop("duration", None)
+        payload[duration_field] = str(effective_duration) if duration_as_string else effective_duration
+
+        resolution_field = (
+            _wire_field(capabilities, "resolution_field", "size", {"resolution", "size"})
+            if "resolution_field" in wire
+            else None
+        )
+        if resolution_field is None:
+            payload["size"] = "large"
+        else:
+            payload[resolution_field] = size
+
+        ratio_field = (
+            _wire_field(capabilities, "ratio_field", "orientation", {"ratio", "orientation"})
+            if "ratio_field" in wire
+            else None
+        )
+        if ratio_field == "ratio":
+            payload["ratio"] = aspect_ratio
+        else:
+            payload["orientation"] = _aspect_to_orientation(aspect_ratio)
 
     if images:
         # ── 自动将本地图片上传到 OSS，确保第三方 API 可访问 ──

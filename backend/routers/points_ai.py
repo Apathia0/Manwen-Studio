@@ -6,9 +6,10 @@ import uuid
 from decimal import Decimal
 from types import SimpleNamespace
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 from sqlalchemy import or_
 from sqlalchemy.exc import IntegrityError
@@ -34,8 +35,15 @@ from services.ai import bootstrap as ai_bootstrap
 from services.ai import channels as ai_channels
 from services.ai import credentials as ai_credentials
 from services.ai.crypto_secrets import last_four
+from services.ai.video_capabilities import validate_video_capability_limits
 from services.points import accounts as points_accounts
-from services.points.pricing import estimate_points, quantize_points
+from services.points.pricing import (
+    DEFAULT_TEXT_INPUT_TOKENS,
+    DEFAULT_TEXT_MIN_POINTS,
+    DEFAULT_TEXT_OUTPUT_TOKENS,
+    estimate_points,
+    quantize_points,
+)
 from services.video_adapter import (
     VIDEO_ADAPTER_LINGDONG,
     VIDEO_ADAPTER_OPENAI,
@@ -43,6 +51,9 @@ from services.video_adapter import (
 )
 
 router = APIRouter(tags=["points-ai"])
+_LOCAL_TIMEZONE = ZoneInfo("Asia/Shanghai")
+_UTC = datetime.timezone.utc
+_VIDEO_RESOLUTIONS = {"480P", "720P", "1080P", "1K", "2K", "4K"}
 
 
 def _main():
@@ -135,7 +146,7 @@ def _parse_discovered_models(payload: Any) -> list[tuple[str, str, dict[str, Any
 
 def _validate_openai_video_capabilities(video: dict[str, Any]) -> None:
     """校验 OpenAI 官方视频能力，禁止混入中转协议字段。"""
-    allowed_video_fields = {"input_modes", "limits", "wire"}
+    allowed_video_fields = {"input_modes", "defaults", "limits", "wire"}
     if set(video) - allowed_video_fields:
         raise HTTPException(400, "OpenAI 视频模型包含不受支持的能力字段")
     input_modes = video.get("input_modes")
@@ -160,6 +171,8 @@ def _validate_openai_video_capabilities(video: dict[str, Any]) -> None:
     if set(limits) - allowed_limit_fields:
         raise HTTPException(400, "OpenAI 视频模型 limits 包含不受支持的字段")
     duration_limit = limits.get("duration_seconds")
+    if not isinstance(duration_limit, dict) or set(duration_limit) != {"allowed"}:
+        raise HTTPException(400, "OpenAI 视频模型 duration_seconds 仅支持 allowed 时长集合")
     allowed_durations = duration_limit.get("allowed") if isinstance(duration_limit, dict) else None
     if (
         not isinstance(allowed_durations, list)
@@ -197,11 +210,71 @@ def _validate_openai_video_capabilities(video: dict[str, Any]) -> None:
             raise HTTPException(400, "OpenAI 视频 size 映射包含未声明画面比例")
         if not isinstance(value, str) or re.fullmatch(r"[1-9]\d{2,4}x[1-9]\d{2,4}", value) is None:
             raise HTTPException(400, "OpenAI 视频上游 size 必须是像素尺寸")
+    _validate_video_defaults(video, provider_name="OpenAI")
+    defaults = video.get("defaults")
+    if isinstance(defaults, dict):
+        default_resolution = defaults.get("resolution")
+        default_aspect_ratio = defaults.get("aspect_ratio")
+        if (
+            isinstance(default_resolution, str)
+            and isinstance(default_aspect_ratio, str)
+            and f"{default_resolution}|{default_aspect_ratio}" not in mapping
+        ):
+            raise HTTPException(400, "OpenAI 视频模型默认清晰度与比例缺少上游 size 映射")
+
+
+def _validate_video_defaults(video: dict[str, Any], *, provider_name: str) -> None:
+    """校验视频默认参数必须落在模型声明的可选范围内。"""
+    defaults = video.get("defaults")
+    if defaults is None:
+        return
+    if not isinstance(defaults, dict) or set(defaults) - {
+        "aspect_ratio",
+        "resolution",
+        "duration_seconds",
+    }:
+        raise HTTPException(400, f"{provider_name} 视频模型 defaults 配置无效")
+
+    limits = video.get("limits")
+    limits = limits if isinstance(limits, dict) else {}
+    for default_key, limit_key in (
+        ("aspect_ratio", "aspect_ratios"),
+        ("resolution", "resolutions"),
+    ):
+        value = defaults.get(default_key)
+        allowed = limits.get(limit_key)
+        if value is not None and (
+            not isinstance(value, str)
+            or not isinstance(allowed, list)
+            or value not in allowed
+        ):
+            raise HTTPException(400, f"{provider_name} 视频模型 defaults.{default_key} 未包含在 limits 中")
+
+    duration = defaults.get("duration_seconds")
+    if duration is None:
+        return
+    if not isinstance(duration, int) or isinstance(duration, bool) or duration <= 0:
+        raise HTTPException(400, f"{provider_name} 视频模型 defaults.duration_seconds 必须是正整数")
+    duration_limit = limits.get("duration_seconds")
+    duration_limit = duration_limit if isinstance(duration_limit, dict) else {}
+    allowed = duration_limit.get("allowed")
+    minimum = duration_limit.get("min")
+    maximum = duration_limit.get("max")
+    if isinstance(allowed, list):
+        valid_duration = duration in allowed
+    else:
+        valid_duration = (
+            isinstance(minimum, int)
+            and isinstance(maximum, int)
+            and minimum <= duration <= maximum
+        )
+    if not valid_duration:
+        raise HTTPException(400, f"{provider_name} 视频模型默认时长未包含在 limits 中")
 
 
 def _validate_lingdong_video_capabilities(video: dict[str, Any]) -> None:
     """校验 Lingdong 中转能力并保留现有受控 profile。"""
-    allowed_video_fields = {"payload_profile", "input_modes", "limits", "wire"}
+    allowed_video_fields = {"payload_profile", "input_modes", "defaults", "limits", "wire"}
     if set(video) - allowed_video_fields:
         raise HTTPException(400, "Lingdong 视频模型包含不受支持的能力字段")
     profile = video.get("payload_profile", "legacy_lingdong")
@@ -214,51 +287,66 @@ def _validate_lingdong_video_capabilities(video: dict[str, Any]) -> None:
     ):
         raise HTTPException(400, "视频模型 input_modes 必须是字符串数组")
     limits = video.get("limits")
-    if limits is not None and not isinstance(limits, dict):
+    if limits is None:
+        limits = {}
+    elif not isinstance(limits, dict):
         raise HTTPException(400, "视频模型 limits 必须是对象")
-    if isinstance(limits, dict):
-        allowed_limit_fields = {
-            "aspect_ratios",
-            "resolutions",
-            "duration_seconds",
-            "max_reference_images",
-        }
-        if set(limits) - allowed_limit_fields:
-            raise HTTPException(400, "Lingdong 视频模型 limits 包含不受支持的字段")
-        for key in ("aspect_ratios", "resolutions"):
-            value = limits.get(key)
-            if value is not None and (
-                not isinstance(value, list)
-                or not all(isinstance(item, str) and item.strip() for item in value)
-            ):
-                raise HTTPException(400, f"Lingdong 视频模型 {key} 必须是字符串数组")
-        max_references = limits.get("max_reference_images")
-        if max_references is not None and (
-            not isinstance(max_references, int)
-            or isinstance(max_references, bool)
-            or max_references < 0
+    allowed_limit_fields = {
+        "aspect_ratios",
+        "resolutions",
+        "duration_seconds",
+        "max_reference_images",
+    }
+    if set(limits) - allowed_limit_fields:
+        raise HTTPException(400, "Lingdong 视频模型 limits 包含不受支持的字段")
+    for key in ("aspect_ratios", "resolutions"):
+        value = limits.get(key)
+        if value is not None and (
+            not isinstance(value, list)
+            or not value
+            or not all(isinstance(item, str) and item.strip() for item in value)
         ):
-            raise HTTPException(400, "Lingdong 视频模型 max_reference_images 必须是非负整数")
-        duration_limit = limits.get("duration_seconds")
-        if duration_limit is not None:
-            if not isinstance(duration_limit, dict):
-                raise HTTPException(400, "Lingdong 视频模型 duration_seconds 必须是对象")
-            if set(duration_limit) - {"allowed", "min", "max"}:
-                raise HTTPException(400, "Lingdong 视频模型 duration_seconds 包含不受支持的字段")
-            allowed = duration_limit.get("allowed")
-            if allowed is not None and (
-                not isinstance(allowed, list)
-                or not all(isinstance(item, int) and not isinstance(item, bool) and item > 0 for item in allowed)
+            raise HTTPException(400, f"Lingdong 视频模型 {key} 必须是非空字符串数组")
+    resolutions = limits.get("resolutions")
+    if isinstance(resolutions, list) and any(item not in _VIDEO_RESOLUTIONS for item in resolutions):
+        raise HTTPException(400, "Lingdong 视频模型包含不受支持的清晰度")
+    max_references = limits.get("max_reference_images")
+    if max_references is not None and (
+        not isinstance(max_references, int)
+        or isinstance(max_references, bool)
+        or max_references < 0
+    ):
+        raise HTTPException(400, "Lingdong 视频模型 max_reference_images 必须是非负整数")
+    duration_limit = limits.get("duration_seconds")
+    if duration_limit is not None:
+        if not isinstance(duration_limit, dict):
+            raise HTTPException(400, "Lingdong 视频模型 duration_seconds 必须是对象")
+        if set(duration_limit) - {"allowed", "min", "max"}:
+            raise HTTPException(400, "Lingdong 视频模型 duration_seconds 包含不受支持的字段")
+        allowed = duration_limit.get("allowed")
+        if allowed is not None and ("min" in duration_limit or "max" in duration_limit):
+            raise HTTPException(400, "Lingdong 视频模型时长请配置 allowed 或 min/max 其中一种")
+        if allowed is not None and (
+            not isinstance(allowed, list)
+            or not allowed
+            or not all(isinstance(item, int) and not isinstance(item, bool) and item > 0 for item in allowed)
+        ):
+            raise HTTPException(400, "Lingdong 视频模型 allowed 时长必须是非空正整数数组")
+        for key in ("min", "max"):
+            value = duration_limit.get(key)
+            if value is not None and (
+                not isinstance(value, int)
+                or isinstance(value, bool)
+                or value <= 0
             ):
-                raise HTTPException(400, "Lingdong 视频模型 allowed 时长必须是正整数数组")
-            for key in ("min", "max"):
-                value = duration_limit.get(key)
-                if value is not None and (
-                    not isinstance(value, int)
-                    or isinstance(value, bool)
-                    or value <= 0
-                ):
-                    raise HTTPException(400, f"Lingdong 视频模型 {key} 时长必须是正整数")
+                raise HTTPException(400, f"Lingdong 视频模型 {key} 时长必须是正整数")
+        if allowed is None and not (
+            isinstance(duration_limit.get("min"), int)
+            and isinstance(duration_limit.get("max"), int)
+            and duration_limit["min"] <= duration_limit["max"]
+        ):
+            raise HTTPException(400, "Lingdong 视频模型必须配置 allowed 时长集合或合法 min/max")
+    _validate_video_defaults(video, provider_name="Lingdong")
     wire = video.get("wire")
     if wire is not None and not isinstance(wire, dict):
         raise HTTPException(400, "视频模型 wire 必须是对象")
@@ -267,6 +355,8 @@ def _validate_lingdong_video_capabilities(video: dict[str, Any]) -> None:
             "duration_field",
             "duration_as_string",
             "reference_field",
+            "resolution_field",
+            "ratio_field",
             "size_by_resolution_aspect",
         }
         if set(wire) - allowed_wire_fields:
@@ -280,6 +370,12 @@ def _validate_lingdong_video_capabilities(video: dict[str, Any]) -> None:
         duration_as_string = wire.get("duration_as_string")
         if duration_as_string is not None and not isinstance(duration_as_string, bool):
             raise HTTPException(400, "Lingdong duration_as_string 必须是布尔值")
+        resolution_field = wire.get("resolution_field")
+        if resolution_field is not None and resolution_field not in {"resolution", "size"}:
+            raise HTTPException(400, "Lingdong resolution_field 仅支持 resolution 或 size")
+        ratio_field = wire.get("ratio_field")
+        if ratio_field is not None and ratio_field not in {"ratio", "orientation"}:
+            raise HTTPException(400, "Lingdong ratio_field 仅支持 ratio 或 orientation")
         mapping = wire.get("size_by_resolution_aspect")
         if mapping is not None and (
             not isinstance(mapping, dict)
@@ -310,7 +406,10 @@ def _validate_model_capabilities(
     modality: str,
     adapter_type: str,
 ) -> None:
-    """在保存边界校验视频能力配置，避免异步任务才暴露配置错误。"""
+    """在保存边界校验受控模型能力配置，避免异步任务才暴露配置错误。"""
+    if modality == "image":
+        _validate_image_model_capabilities(raw)
+        return
     if modality != "video":
         return
     if raw is None:
@@ -328,6 +427,49 @@ def _validate_model_capabilities(
         _validate_openai_video_capabilities(video)
     elif adapter == VIDEO_ADAPTER_LINGDONG:
         _validate_lingdong_video_capabilities(video)
+
+
+def _validate_image_model_capabilities(raw: dict[str, Any] | None) -> None:
+    """校验图片模型可安全下发的默认质量与可选质量。"""
+    if raw is None:
+        # 历史模型与上游发现记录可能没有 image 节点，保持兼容。
+        return
+    if not isinstance(raw, dict):
+        raise HTTPException(400, "图片模型能力配置必须是 JSON 对象")
+    if "image" not in raw:
+        # 历史模型与上游发现记录可能没有 image 节点，保持兼容。
+        return
+    if not isinstance(raw["image"], dict):
+        raise HTTPException(400, "图片模型参数配置必须包含 image 对象")
+    if set(raw) - {"schema_version", "image", "meta"}:
+        raise HTTPException(400, "图片模型包含不受支持的能力字段")
+    schema_version = raw.get("schema_version", 1)
+    if schema_version != 1:
+        raise HTTPException(400, "图片模型 schema_version 仅支持 1")
+    image = raw["image"]
+    if set(image) - {"defaults", "limits"}:
+        raise HTTPException(400, "图片模型 image 仅支持 defaults 和 limits")
+    allowed_qualities = {"auto", "low", "medium", "high"}
+    defaults = image.get("defaults", {})
+    limits = image.get("limits", {})
+    if not isinstance(defaults, dict) or set(defaults) - {"quality"}:
+        raise HTTPException(400, "图片模型 defaults 仅支持 quality")
+    if not isinstance(limits, dict) or set(limits) - {"qualities"}:
+        raise HTTPException(400, "图片模型 limits 仅支持 qualities")
+    quality = defaults.get("quality")
+    if quality is not None and (not isinstance(quality, str) or quality not in allowed_qualities):
+        raise HTTPException(400, "图片模型默认 quality 不受支持")
+    qualities = limits.get("qualities")
+    if qualities is not None:
+        if (
+            not isinstance(qualities, list)
+            or not qualities
+            or not all(isinstance(item, str) and item in allowed_qualities for item in qualities)
+            or len(set(qualities)) != len(qualities)
+        ):
+            raise HTTPException(400, "图片模型 qualities 必须是无重复的受支持质量列表")
+        if quality is not None and quality not in qualities:
+            raise HTTPException(400, "图片模型默认 quality 必须包含在 qualities 中")
 
 
 def _validate_channel_adapter(modality: str, adapter_type: str) -> None:
@@ -427,6 +569,38 @@ class ChannelModelsAddIn(BaseModel):
 class PriceIn(BaseModel):
     billing_type: str = "per_call"
     price_config_json: dict[str, Any] = Field(default_factory=dict)
+
+
+def _normalize_model_price(model: AiModel, body: PriceIn) -> tuple[str, dict[str, Any]]:
+    if model.modality == "text":
+        legacy_rate = body.price_config_json.get("points_per_1m_tokens")
+        rates: dict[str, Decimal] = {}
+        for key, label in (
+            ("input_points_per_1m", "输入"),
+            ("output_points_per_1m", "输出"),
+        ):
+            raw_rate = body.price_config_json.get(key, legacy_rate)
+            try:
+                rate = Decimal(str(raw_rate))
+            except Exception as exc:
+                raise HTTPException(400, f"文本模型每百万 Token {label}积分价必须是非负数字") from exc
+            if not rate.is_finite() or rate < 0:
+                raise HTTPException(400, f"文本模型每百万 Token {label}积分价必须是非负数字")
+            rates[key] = rate
+        return "per_1m_tokens", {
+            "input_points_per_1m": float(rates["input_points_per_1m"]),
+            "output_points_per_1m": float(rates["output_points_per_1m"]),
+            "estimate_default_input_tokens": DEFAULT_TEXT_INPUT_TOKENS,
+            "estimate_default_output_tokens": DEFAULT_TEXT_OUTPUT_TOKENS,
+            "reservation_max_input_tokens": DEFAULT_TEXT_INPUT_TOKENS,
+            "reservation_max_output_tokens": DEFAULT_TEXT_OUTPUT_TOKENS,
+            "min_points_per_call": float(DEFAULT_TEXT_MIN_POINTS),
+        }
+    if model.modality == "image":
+        return "per_image", dict(body.price_config_json)
+    if model.modality == "video":
+        return "per_second", dict(body.price_config_json)
+    return body.billing_type, dict(body.price_config_json)
 
 
 class AdjustPointsIn(BaseModel):
@@ -636,6 +810,13 @@ def list_models(request: Request, modality: str | None = None, db: Session = Dep
 def estimate(body: EstimateIn, request: Request, db: Session = Depends(get_db)):
     user = _require_user(request, db)
     model = ai_catalog.get_visible_model(db, body.model_id)
+    if model.modality == "video":
+        raw_capabilities = model.capabilities_json
+        video_capabilities = raw_capabilities.get("video") if isinstance(raw_capabilities, dict) else None
+        validate_video_capability_limits(
+            video_capabilities,
+            duration_seconds=body.video_seconds,
+        )
     price = ai_catalog.get_active_price(db, model.id)
     if not price:
         raise HTTPException(400, "模型未配置积分价")
@@ -667,17 +848,60 @@ def points_account(request: Request, db: Session = Depends(get_db)):
 
 
 @router.get("/api/points/ledger")
-def points_ledger(request: Request, limit: int = 50, db: Session = Depends(get_db)):
+def points_ledger(
+    request: Request,
+    page: int = Query(1, ge=1, le=1_000_000),
+    page_size: int | None = Query(None, ge=1, le=200),
+    start_date: datetime.date | None = None,
+    end_date: datetime.date | None = None,
+    entry_type: str | None = Query(None, min_length=1, max_length=64),
+    direction: str | None = Query(None, pattern="^(income|expense)$"),
+    limit: int | None = Query(None, ge=1, le=200),
+    db: Session = Depends(get_db),
+):
     user = _require_user(request, db)
     account = points_accounts.ensure_account(db, user.id)
     db.commit()
+    # 直接调用路由函数时，FastAPI 的 Query 默认值不会自动解析。
+    if not isinstance(page, int):
+        page = 1
+    if not isinstance(limit, int):
+        limit = None
+    if not isinstance(page_size, int):
+        page_size = limit or 20
+    if start_date and end_date and start_date > end_date:
+        raise HTTPException(400, "开始日期不能晚于结束日期")
+    query = db.query(PointsLedgerEntry).filter(PointsLedgerEntry.account_id == account.id)
+    if start_date:
+        local_start = datetime.datetime.combine(start_date, datetime.time.min, tzinfo=_LOCAL_TIMEZONE)
+        query = query.filter(PointsLedgerEntry.created_at >= local_start.astimezone(_UTC).replace(tzinfo=None))
+    if end_date:
+        if end_date == datetime.date.max:
+            query = query.filter(PointsLedgerEntry.created_at <= datetime.datetime.max)
+        else:
+            local_next_day = datetime.datetime.combine(end_date + datetime.timedelta(days=1), datetime.time.min, tzinfo=_LOCAL_TIMEZONE)
+            query = query.filter(PointsLedgerEntry.created_at < local_next_day.astimezone(_UTC).replace(tzinfo=None))
+    if entry_type:
+        query = query.filter(PointsLedgerEntry.entry_type == entry_type)
+    if direction == "income":
+        query = query.filter(PointsLedgerEntry.amount > 0)
+    elif direction == "expense":
+        query = query.filter(PointsLedgerEntry.amount < 0)
+
+    total = query.count()
+    total_pages = (total + page_size - 1) // page_size
     rows = (
-        db.query(PointsLedgerEntry)
-        .filter(PointsLedgerEntry.account_id == account.id)
+        query
         .order_by(PointsLedgerEntry.id.desc())
-        .limit(min(limit, 200))
+        .offset((page - 1) * page_size)
+        .limit(page_size)
         .all()
     )
+    usage_ids = {r.usage_event_id for r in rows if r.usage_event_id}
+    usage_map = {
+        event.id: event
+        for event in db.query(AiUsageEvent).filter(AiUsageEvent.id.in_(usage_ids)).all()
+    } if usage_ids else {}
     return {
         "items": [
             {
@@ -685,11 +909,39 @@ def points_ledger(request: Request, limit: int = 50, db: Session = Depends(get_d
                 "entry_type": r.entry_type,
                 "amount": float(r.amount),
                 "balance_after": float(r.balance_after) if r.balance_after is not None else None,
-                "created_at": r.created_at.isoformat() if r.created_at else None,
+                "created_at": r.created_at.replace(tzinfo=_UTC).isoformat() if r.created_at else None,
                 "metadata": r.metadata_json or {},
+                "usage_event_id": r.usage_event_id,
+                "usage_detail": (
+                    {
+                        "request_id": event.request_id,
+                        "model_key": event.model_key,
+                        "task_type": event.task_type,
+                        "status": event.status,
+                        "input_tokens": event.input_tokens or 0,
+                        "output_tokens": event.output_tokens or 0,
+                        "settled_points": float(event.settled_points or 0),
+                        "stream_charged_points": (
+                            float((event.price_snapshot_json or {}).get("stream_charged_points"))
+                            if (event.price_snapshot_json or {}).get("stream_charged_points") is not None
+                            else None
+                        ),
+                        "billing_type": (event.price_snapshot_json or {}).get("billing_type"),
+                        "points_per_1m_tokens": (event.price_snapshot_json or {}).get("price_config", {}).get("points_per_1m_tokens"),
+                        "input_points_per_1m": (event.price_snapshot_json or {}).get("price_config", {}).get("input_points_per_1m"),
+                        "output_points_per_1m": (event.price_snapshot_json or {}).get("price_config", {}).get("output_points_per_1m"),
+                        "streaming": bool((event.price_snapshot_json or {}).get("streaming")),
+                    }
+                    if (event := usage_map.get(r.usage_event_id))
+                    else None
+                ),
             }
             for r in rows
-        ]
+        ],
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "total_pages": total_pages,
     }
 
 
@@ -1221,14 +1473,15 @@ def admin_set_price(model_id: int, body: PriceIn, request: Request, db: Session 
     model = db.get(AiModel, model_id)
     if not model:
         raise HTTPException(404, "模型不存在")
+    billing_type, price_config = _normalize_model_price(model, body)
     now = datetime.datetime.utcnow()
     active = ai_catalog.get_active_price(db, model_id)
     if active:
         active.valid_to = now
     price = AiModelPrice(
         model_id=model_id,
-        billing_type=body.billing_type,
-        price_config_json=body.price_config_json,
+        billing_type=billing_type,
+        price_config_json=price_config,
         valid_from=now,
         created_by=admin.id,
     )

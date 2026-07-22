@@ -1,10 +1,11 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { FileText, ListTree, Save, X } from 'lucide-react';
+import { Bot, FileText, ListTree, Save, X } from 'lucide-react';
 import { getScenes, updateScenes, type Chapter, type Story } from '../api';
 import ChapterListPanel from './ChapterListPanel';
 import { RouteLoadingFallback } from './ui/RouteLoadingFallback';
 
 const MangaPanel = lazy(() => import('./MangaPanel'));
+const AgentPanel = lazy(() => import('./AgentPanel/AgentPanel'));
 
 interface Props {
   story: Story;
@@ -16,7 +17,7 @@ interface Props {
 }
 
 export default function MangaWorkspaceLayout({
-  story: _story,
+  story,
   chapters,
   currentChapter,
   entitlements,
@@ -26,6 +27,7 @@ export default function MangaWorkspaceLayout({
   const [leftCollapsed, setLeftCollapsed] = useState(false);
   const [sourceViewerOpen, setSourceViewerOpen] = useState(false);
   const [panelVersion, setPanelVersion] = useState(0);
+  const [agentOpen, setAgentOpen] = useState(false);
 
   const chapterInfos = useMemo(
     () => chapters.map((chapter) => ({
@@ -64,6 +66,29 @@ export default function MangaWorkspaceLayout({
           </Suspense>
         </div>
       </section>
+
+      {agentOpen ? (
+        <aside className="flex min-h-0 w-[380px] shrink-0 flex-col overflow-hidden rounded-[24px] border border-[#d7e3f4] bg-white shadow-[0_18px_42px_rgba(59,130,246,0.12)] max-lg:absolute max-lg:inset-4 max-lg:z-40">
+          <header className="flex shrink-0 items-center justify-between border-b border-[#d7e3f4] px-4 py-3 text-sm font-semibold text-slate-800">
+            <span className="flex items-center gap-2"><Bot size={16} className="text-blue-600" />漫画创作助手</span>
+            <button type="button" onClick={() => setAgentOpen(false)} className="rounded-md p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-700" title="关闭 AI 助手"><X size={16} /></button>
+          </header>
+          <div className="min-h-0 flex-1">
+            <Suspense fallback={<RouteLoadingFallback />}>
+              <AgentPanel
+                storyId={story.id}
+                chapterId={currentChapter?.id}
+                storyTitle={story.title}
+                chapterTitle={currentChapter?.title || undefined}
+                workflowType="manga"
+                onContentUpdated={onContentUpdated}
+              />
+            </Suspense>
+          </div>
+        </aside>
+      ) : (
+        <button type="button" onClick={() => setAgentOpen(true)} className="inline-flex h-10 shrink-0 items-center gap-2 self-start rounded-xl border border-blue-200 bg-white px-3 text-xs font-medium text-blue-700 shadow-sm hover:bg-blue-50" title="打开漫画 AI 助手"><Bot size={15} />AI 助手</button>
+      )}
 
       {sourceViewerOpen && currentChapter ? (
         <MangaSourceViewer

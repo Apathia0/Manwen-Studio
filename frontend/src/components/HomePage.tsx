@@ -1,4 +1,5 @@
 import { useEffect, useState, useRef } from 'react';
+import MediaImage from './shared/MediaImage';
 import {
   Plus,
   BookOpenText,
@@ -400,12 +401,11 @@ export default function HomePage({ onSelectStory }: Props) {
                   onClick={() => handleCoverClick(s.id)}
                 >
                   {s.cover_image ? (
-                    <img
+                    <MediaImage
                       src={coverImageUrl(s.cover_image)!}
                       alt={s.title}
                       className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
-                      loading="lazy"
-                      decoding="async"
+                      priority
                     />
                   ) : (
                     <div className="flex flex-col items-center justify-center h-full text-gray-600 group-hover:text-gray-500 transition-colors">

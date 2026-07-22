@@ -419,8 +419,20 @@ def test_admin_update_video_channel_rejects_openai_model_without_capabilities(mo
         {"payload_profile": "legacy_lingdong", "input_modes": "text_to_video"},
         {"payload_profile": "legacy_lingdong", "limits": {"unknown": 1}},
         {"payload_profile": "legacy_lingdong", "limits": {"max_reference_images": "9"}},
+        {"payload_profile": "legacy_lingdong", "limits": {"resolutions": ["ultra"]}},
         {"payload_profile": "legacy_lingdong", "limits": {"duration_seconds": {"allowed": [5], "unknown": 1}}},
         {"payload_profile": "legacy_lingdong", "wire": {"unknown": "field"}},
+        {"payload_profile": "legacy_lingdong", "wire": {"resolution_field": "quality"}},
+        {"payload_profile": "legacy_lingdong", "wire": {"ratio_field": "aspect_ratio"}},
+        {
+            "payload_profile": "legacy_lingdong",
+            "defaults": {"resolution": "1080P"},
+            "limits": {
+                "aspect_ratios": ["16:9"],
+                "resolutions": ["720P"],
+                "duration_seconds": {"allowed": [15]},
+            },
+        },
         {"payload_profile": "sora_v2", "wire": {"reference_field": "images", "size_by_resolution_aspect": {"720P|16:9": "1280x720"}}},
     ],
 )
@@ -438,6 +450,11 @@ def test_lingdong_capabilities_reject_unknown_or_invalid_fields(video):
     [
         {
             "payload_profile": "legacy_lingdong",
+            "defaults": {
+                "aspect_ratio": "16:9",
+                "resolution": "720P",
+                "duration_seconds": 15,
+            },
             "input_modes": ["text_to_video", "image_to_video"],
             "limits": {
                 "aspect_ratios": ["16:9"],
@@ -445,7 +462,11 @@ def test_lingdong_capabilities_reject_unknown_or_invalid_fields(video):
                 "max_reference_images": 9,
                 "duration_seconds": {"min": 4, "max": 15},
             },
-            "wire": {"reference_field": "input_reference"},
+            "wire": {
+                "reference_field": "input_reference",
+                "resolution_field": "resolution",
+                "ratio_field": "ratio",
+            },
         },
         {
             "payload_profile": "seedance_fast",

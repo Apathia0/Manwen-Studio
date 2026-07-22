@@ -142,6 +142,21 @@ class AgentConversationMessage(Base):
     conversation: Mapped["AgentConversation"] = relationship("AgentConversation", back_populates="messages")
 
 
+class AgentAttachment(Base):
+    __tablename__ = "agent_attachments"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    owner_user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    story_id: Mapped[int] = mapped_column(Integer, ForeignKey("stories.id"), nullable=False, index=True)
+    conversation_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("agent_conversations.id"), nullable=True, index=True)
+    original_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    content_type: Mapped[str] = mapped_column(String(100), nullable=False)
+    file_size: Mapped[int] = mapped_column(Integer, nullable=False)
+    storage_path: Mapped[str] = mapped_column(String(1000), nullable=False)
+    metadata_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now())
+
+
 class AgentPendingChange(Base):
     __tablename__ = "agent_pending_changes"
 

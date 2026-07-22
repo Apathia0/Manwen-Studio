@@ -1,6 +1,6 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 
-import { analyzeChapterMangaAssets, apiHeaders, coverImageUrl, createAdminAiChannel, generateMangaAsset, generateMangaAssetsBatch, generateMangaStream, generateStoryCharRefStream, getApiKeySettings, getAuthorStyleResult, getAuthorStyleStatus, getBackgroundTaskStatus, getLocalCredentialMode, getMangaAssetAnalysis, login, redrawMangaAsset, retryVideoJob, saveApiKeySettings, saveMangaAssetAnalysis, setLocalCredentialMode, startAuthorStyleAnalysis, toPublicMangaAssetUrl, toPublicVideoAssetUrl, updateAdminAiChannel, updateAuthorStyleReport, updateDeconstructionReport } from './api';
+import { analyzeChapterMangaAssets, apiHeaders, coverImageUrl, createAdminAiChannel, generateMangaAsset, generateMangaAssetsBatch, generateMangaStream, generateStoryCharRefStream, getApiKeySettings, getAuthorStyleResult, getAuthorStyleStatus, getBackgroundTaskStatus, getLocalCredentialMode, getMangaAssetAnalysis, login, redrawMangaAsset, regenerateVideoAsset, retryVideoJob, saveApiKeySettings, saveMangaAssetAnalysis, setLocalCredentialMode, startAuthorStyleAnalysis, toPublicMangaAssetUrl, toPublicVideoAssetUrl, updateAdminAiChannel, updateAuthorStyleReport, updateDeconstructionReport } from './api';
 import { shouldShowAuthorStyleEntry } from './components/DeconstructionWorkPage';
 
 describe('coverImageUrl', () => {
@@ -34,6 +34,27 @@ describe('toPublicVideoAssetUrl', () => {
 
   it('保留静态视频路径', () => {
     expect(toPublicVideoAssetUrl('/static/video/shot_12/test.mp4')).toBe('/static/video/shot_12/test.mp4');
+  });
+});
+
+describe('regenerateVideoAsset', () => {
+  it('重生成请求会携带当前风格预设', async () => {
+    vi.stubGlobal('localStorage', {
+      getItem: vi.fn(() => null),
+      setItem: vi.fn(),
+      removeItem: vi.fn(),
+    });
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ asset: {} }), { status: 200 })));
+
+    await regenerateVideoAsset(42, '角色提示词', undefined, '日式动漫风');
+
+    expect(fetch).toHaveBeenCalledWith(
+      '/api/video-assets/42/regen',
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({ prompt: '角色提示词', style_preset: '日式动漫风' }),
+      }),
+    );
   });
 });
 

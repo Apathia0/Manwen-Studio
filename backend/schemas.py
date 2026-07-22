@@ -127,6 +127,7 @@ class AgentChatIn(BaseModel):
     shot_id: Optional[int] = None
     session_id: Optional[str] = None
     enabled_skills: Optional[list[str]] = None
+    attachment_ids: Optional[list[str]] = None
 
 
 class AgentConversationCreateIn(BaseModel):

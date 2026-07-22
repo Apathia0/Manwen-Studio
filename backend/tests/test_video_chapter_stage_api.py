@@ -15,6 +15,7 @@ import uuid
 from types import SimpleNamespace
 
 import pytest
+from fastapi import HTTPException
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -194,6 +195,12 @@ def test_stage_routes_pass_task_id(monkeypatch):
 
     # 测试 /videos 路由
     monkeypatch.setattr(video_router, "get_chapter_workflow", lambda wid: wf_vid_mock)
+    monkeypatch.setattr(
+        video_router,
+        "_chapter_video_target_shots",
+        lambda *_args, **_kwargs: [SimpleNamespace(id=1, duration_seconds=5, character_reference_ids=[], scene_reference_ids=[], prop_reference_ids=[])],
+    )
+    monkeypatch.setattr(video_router, "_reserve_video_billing", lambda *_args, **_kwargs: {})
     result = asyncio.run(video_router.api_generate_videos(
         workflow_id=99, body=ChapterWorkflowStageActionRequest(),
         request=SimpleNamespace(), db=FakeDb(),
@@ -415,7 +422,8 @@ def test_openai_regenerate_rejects_unsupported_request_before_billing(
         lambda *args, **kwargs: pytest.fail("能力校验失败时不应预扣积分"),
     )
 
-    with pytest.raises(ValueError, match=error_text):
+    expected_error = HTTPException if duration_seconds == 15 else ValueError
+    with pytest.raises(expected_error, match=error_text):
         asyncio.run(video_router.api_regenerate_shot_video(
             shot_id=1,
             body=RegenerateShotRequest(

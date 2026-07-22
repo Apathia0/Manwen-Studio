@@ -505,7 +505,7 @@ class GeneratedMediaStaticFiles(StaticFiles):
 
     async def get_response(self, path: str, scope):
         normalized = os.path.normpath(f"/{path}").replace("\\", "/").lstrip("/")
-        if normalized == "creative_studio" or normalized.startswith("creative_studio/"):
+        if normalized in {"creative_studio", "agent_attachments"} or normalized.startswith(("creative_studio/", "agent_attachments/")):
             return Response(status_code=404)
         return await super().get_response(path, scope)
 
@@ -524,7 +524,7 @@ app.mount("/static/video", GeneratedMediaStaticFiles(directory=str(video_dir)), 
 @app.middleware("http")
 async def require_api_token(request: Request, call_next):
     normalized_path = "/" + "/".join(part for part in request.url.path.split("/") if part)
-    if normalized_path.startswith(("/static/manga/creative_studio/", "/static/video/creative_studio/")):
+    if normalized_path.startswith(("/static/manga/creative_studio/", "/static/manga/agent_attachments/", "/static/video/creative_studio/")):
         return JSONResponse({"detail": "Not found"}, status_code=404)
     if API_TOKEN and request.url.path.startswith("/api") and not _is_public_runtime_api_path(request.url.path) and request.method != "OPTIONS":
         supplied = request.headers.get("x-api-token", "").strip()
@@ -1036,6 +1036,15 @@ def _check_and_consume_feature_quota(
                 units=max(1, int(amount or 1)),
             )
         elif reserve:
+            if modality == "text":
+                _check_platform_points_available(
+                    request,
+                    db,
+                    user_id=user_id,
+                    task_type=feature_key,
+                    modality=modality,
+                    units=max(1, int(amount or 1)),
+                )
             charge = _charge_platform_points_immediate(
                 request,
                 db,
@@ -1044,6 +1053,7 @@ def _check_and_consume_feature_quota(
                 modality=modality,
                 units=max(1, int(amount or 1)),
                 settle=False,
+                streaming=modality == "text",
             )
         else:
             _check_platform_points_available(
@@ -1119,6 +1129,8 @@ def _resolve_dual_track_runtime(request: Request, db: Session, *, modality: str)
             "channel_id": channel.id,
             "user_id": user.id,
             "custom_upstream": bool(custom_upstream),
+            # 自定义上游没有目录模型能力，避免把当前模型能力错误套用到用户配置。
+            "capabilities_json": None if custom_upstream else model.capabilities_json,
         }
     except HTTPException:
         raise
@@ -1174,11 +1186,15 @@ def _user_image_api_key(request: Request) -> str | None:
     if db is not None:
         dual = _resolve_dual_track_runtime(request, db, modality="image")
         if dual:
+            capabilities = dual.get("capabilities_json")
+            image_capabilities = capabilities.get("image") if isinstance(capabilities, dict) else None
+            defaults = image_capabilities.get("defaults") if isinstance(image_capabilities, dict) else None
+            model_quality = defaults.get("quality") if isinstance(defaults, dict) else ""
             image_service.configure_runtime(
                 base_url=dual["base_url"] or image_service.DEFAULT_IMAGE_API_BASE_URL,
                 model=dual["model_key"] or image_service.DEFAULT_IMAGE_MODEL,
                 size=str(_get_platform_setting("api.image.size", db, "") or ""),
-                quality=str(_get_platform_setting("api.image.quality", db, "") or ""),
+                quality=str(model_quality or _get_platform_setting("api.image.quality", db, "") or ""),
                 background=str(_get_platform_setting("api.image.background", db, "") or ""),
                 moderation=str(_get_platform_setting("api.image.moderation", db, "") or ""),
                 output_format=str(_get_platform_setting("api.image.output_format", db, "") or ""),
@@ -1207,6 +1223,13 @@ def _user_image_api_key(request: Request) -> str | None:
     resolved_model = (custom_upstream or {}).get("model_key") or admin_model
     if not resolved_model or resolved_model.strip().lower() in ("default", "none", "null"):
         resolved_model = ""
+    if custom_upstream:
+        # 用户自定义上游不继承平台专属图片参数或目录模型能力。
+        image_service.configure_runtime(
+            base_url=resolved_base_url.rstrip("/") or image_service.DEFAULT_IMAGE_API_BASE_URL,
+            model=resolved_model or image_service.DEFAULT_IMAGE_MODEL,
+        )
+        return custom_upstream["api_key"]
     image_service.configure_runtime(
         base_url=resolved_base_url.rstrip("/") or image_service.DEFAULT_IMAGE_API_BASE_URL,
         model=resolved_model or image_service.DEFAULT_IMAGE_MODEL,
@@ -1218,8 +1241,6 @@ def _user_image_api_key(request: Request) -> str | None:
         output_compression=_get_platform_setting("api.image.output_compression", db, ""),
         input_fidelity=str(_get_platform_setting("api.image.input_fidelity", db, "") or ""),
     )
-    if custom_upstream:
-        return custom_upstream["api_key"]
     if requested_mode == "user_key" and not capabilities["can_override_api_key"]:
         raise HTTPException(403, "管理员未授权当前账号使用自定义 API Key")
     if capabilities["can_override_api_key"] and override:
@@ -2720,6 +2741,7 @@ def _charge_platform_points_immediate(
     modality: str = "text",
     units: int = 1,
     settle: bool = True,
+    streaming: bool = False,
 ) -> dict | None:
     if not _points_dual_track_enabled(db):
         return None
@@ -2747,6 +2769,7 @@ def _charge_platform_points_immediate(
         estimate_kwargs = {}
         if modality == "text":
             estimate_kwargs["call_count"] = units
+            estimate_kwargs["streaming"] = streaming
         elif modality == "image":
             estimate_kwargs["image_count"] = units
         elif modality == "video":
@@ -6532,6 +6555,7 @@ async def chat(chapter_id: int, body: ChatMessageIn, request: Request, db: Sessi
 
     collected: list[str] = []
     billing_state = {"finished": False}
+    stream_token_checkpoint = {"count": 0}
 
     def save_interrupted_assistant() -> None:
         full_content = "".join(collected).strip()
@@ -6566,6 +6590,25 @@ async def chat(chapter_id: int, body: ChatMessageIn, request: Request, db: Sessi
         try:
             async for token in chat_stream(history, api_key=deepseek_api_key, framework_context=framework_context, system_prompt=template_ch_prompt or None):
                 collected.append(token)
+                stream_token_checkpoint["count"] += 1
+                if stream_token_checkpoint["count"] % 16 == 0:
+                    from services.ai.resolver import charge_streaming_tokens
+                    from services.token_utils import estimate_tokens
+
+                    billing_db = SessionLocal()
+                    try:
+                        charge_streaming_tokens(
+                            billing_db,
+                            streaming_billing_ctx,
+                            input_tokens=estimate_tokens(
+                                json.dumps(history, ensure_ascii=False)
+                                + framework_context
+                                + (template_ch_prompt or "")
+                            ),
+                            output_tokens=estimate_tokens("".join(collected)),
+                        )
+                    finally:
+                        billing_db.close()
                 yield {"event": "token", "data": json.dumps({"content": token}, ensure_ascii=False)}
             # Save assistant message
             full_content = "".join(collected)

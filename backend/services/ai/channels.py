@@ -86,17 +86,19 @@ def validate_user_base_url(base_url: str) -> str:
     return url
 
 
-def validate_remote_media_url(media_url: str) -> str:
-    """校验上游返回的远程媒体地址，查询参数可用于签名但禁止内网目标。"""
+def validate_remote_media_url(media_url: str, *, allow_http_hosts: set[str] | None = None) -> str:
+    """校验上游返回的远程媒体地址，受信任 HTTP 域名仅可用于服务端下载回退。"""
     url = (media_url or "").strip()
     if not url or len(url) > 4096:
         raise HTTPException(400, "上游返回的媒体 URL 不合法")
     parsed = urlparse(url)
-    if parsed.scheme != "https":
+    host = (parsed.hostname or "").rstrip(".").lower()
+    trusted_http_hosts = {item.rstrip(".").lower() for item in (allow_http_hosts or set())}
+    if parsed.scheme != "https" and not (parsed.scheme == "http" and host in trusted_http_hosts):
         raise HTTPException(400, "远程媒体仅允许 HTTPS 地址")
-    if not parsed.hostname or parsed.username or parsed.password:
+    if not host or parsed.username or parsed.password:
         raise HTTPException(400, "远程媒体 URL 格式不合法")
-    _validate_public_host(parsed.hostname, parsed.port or 443)
+    _validate_public_host(host, parsed.port or (443 if parsed.scheme == "https" else 80))
     return urlunparse(parsed._replace(fragment=""))
 
 

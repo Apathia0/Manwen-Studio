@@ -3,6 +3,7 @@ from __future__ import annotations
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import ANY
 
 import pytest
 from fastapi import HTTPException
@@ -107,11 +108,253 @@ def test_media_access_token_is_scoped_to_asset_and_user():
 
 
 @pytest.mark.asyncio
+async def test_analyze_assets_settles_provider_tokens(monkeypatch, tmp_path):
+    from routers import creation_studio as studio_router
+
+    image_path = tmp_path / "reference.jpg"
+    image_path.write_bytes(b"image")
+    asset = SimpleNamespace(id=3, mime_type="image/jpeg", storage_path=str(image_path))
+    runtime = {
+        "mode": "user_key",
+        "base_url": "https://vision.example.com/v1",
+        "model_key": "vision-model",
+        "model_id": 12,
+        "api_key": "user-secret",
+    }
+    ctx = SimpleNamespace(request_id="analyze-1")
+    begin_calls = []
+    completed = []
+
+    class FakeImage:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def convert(self, _mode):
+            return self
+
+        def thumbnail(self, _size):
+            return None
+
+    class FakeResponse:
+        status_code = 200
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "choices": [{"message": {"content": "分析结果"}}],
+                "usage": {"prompt_tokens": 321, "completion_tokens": 45},
+            }
+
+    class FakeClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def post(self, *_args, **_kwargs):
+            return FakeResponse()
+
+    main_mod = SimpleNamespace(
+        _resolve_dual_track_runtime=lambda *_args, **_kwargs: runtime,
+    )
+    monkeypatch.setattr(studio_router, "_require_user", lambda *_args: SimpleNamespace(id=7))
+    monkeypatch.setattr(studio_router, "_owned_asset", lambda *_args: asset)
+    monkeypatch.setattr(studio_router, "_main", lambda: main_mod)
+    monkeypatch.setattr(studio_router.Path, "is_file", lambda _path: True)
+    monkeypatch.setattr(studio_router.Path, "is_relative_to", lambda _path, _root: True)
+    monkeypatch.setattr(studio_router.Image, "open", lambda _path: FakeImage())
+    monkeypatch.setattr(studio_router, "_encode_analysis_image", lambda _image: b"jpeg")
+    monkeypatch.setattr(
+        studio_router,
+        "begin_ai_call",
+        lambda *args, **kwargs: begin_calls.append((args, kwargs)) or ctx,
+    )
+    monkeypatch.setattr(
+        studio_router,
+        "complete_ai_call",
+        lambda *args, **kwargs: completed.append((args, kwargs)),
+    )
+    monkeypatch.setattr(studio_router.httpx, "AsyncClient", FakeClient)
+
+    result = await studio_router.analyze_assets(
+        studio_router.CreationStudioAnalyzeIn(asset_ids=[3]),
+        SimpleNamespace(),
+        SimpleNamespace(),
+    )
+
+    assert result["analysis"] == "分析结果"
+    assert begin_calls[0][1]["credential_mode"] == "user_key"
+    assert begin_calls[0][1]["model_id"] == 12
+    assert completed == [
+        (
+            (ANY, ctx),
+            {
+                "success": True,
+                "input_tokens": 321,
+                "output_tokens": 45,
+                "usage_source": "provider",
+            },
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_analyze_assets_releases_reservation_on_empty_response(monkeypatch, tmp_path):
+    from routers import creation_studio as studio_router
+
+    image_path = tmp_path / "reference.jpg"
+    image_path.write_bytes(b"image")
+    asset = SimpleNamespace(id=4, mime_type="image/jpeg", storage_path=str(image_path))
+    ctx = SimpleNamespace(request_id="analyze-2")
+    completed = []
+
+    class FakeImage:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def convert(self, _mode):
+            return self
+
+        def thumbnail(self, _size):
+            return None
+
+    class FakeResponse:
+        status_code = 200
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"choices": [{"message": {"content": ""}}], "usage": {}}
+
+    class FakeClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def post(self, *_args, **_kwargs):
+            return FakeResponse()
+
+    runtime = {
+        "mode": "platform", "base_url": "https://vision.example.com/v1",
+        "model_key": "vision-model", "model_id": 12, "api_key": "platform-secret",
+    }
+    monkeypatch.setattr(studio_router, "_require_user", lambda *_args: SimpleNamespace(id=7))
+    monkeypatch.setattr(studio_router, "_owned_asset", lambda *_args: asset)
+    monkeypatch.setattr(
+        studio_router,
+        "_main",
+        lambda: SimpleNamespace(_resolve_dual_track_runtime=lambda *_args, **_kwargs: runtime),
+    )
+    monkeypatch.setattr(studio_router.Path, "is_file", lambda _path: True)
+    monkeypatch.setattr(studio_router.Path, "is_relative_to", lambda _path, _root: True)
+    monkeypatch.setattr(studio_router.Image, "open", lambda _path: FakeImage())
+    monkeypatch.setattr(studio_router, "_encode_analysis_image", lambda _image: b"jpeg")
+    monkeypatch.setattr(studio_router, "begin_ai_call", lambda *_args, **_kwargs: ctx)
+    monkeypatch.setattr(
+        studio_router,
+        "complete_ai_call",
+        lambda *args, **kwargs: completed.append((args, kwargs)),
+    )
+    monkeypatch.setattr(studio_router.httpx, "AsyncClient", FakeClient)
+
+    with pytest.raises(HTTPException, match="未返回分析结果"):
+        await studio_router.analyze_assets(
+            studio_router.CreationStudioAnalyzeIn(asset_ids=[4]),
+            SimpleNamespace(),
+            SimpleNamespace(),
+        )
+
+    assert completed == [
+        ((ANY, ctx), {"success": False, "error_code": "empty_response"})
+    ]
+
+
+def test_video_estimate_rejects_duration_not_supported_by_fixed_15_second_model(monkeypatch):
+    from routers import points_ai
+
+    model = SimpleNamespace(
+        id=9,
+        modality="video",
+        capabilities_json={
+            "video": {
+                "limits": {
+                    "resolutions": ["720P"],
+                    "duration_seconds": {"allowed": [15]},
+                }
+            }
+        },
+    )
+    monkeypatch.setattr(points_ai, "_require_user", lambda *_args: SimpleNamespace(id=7))
+    monkeypatch.setattr(points_ai.ai_catalog, "get_visible_model", lambda *_args: model)
+    monkeypatch.setattr(
+        points_ai.ai_catalog,
+        "get_active_price",
+        lambda *_args: pytest.fail("时长校验失败时不应查询价格"),
+    )
+
+    with pytest.raises(HTTPException, match="不支持该时长"):
+        points_ai.estimate(
+            points_ai.EstimateIn(model_id=9, video_seconds=5),
+            SimpleNamespace(),
+            SimpleNamespace(),
+        )
+
+
+def test_video_estimate_rejects_fractional_duration(monkeypatch):
+    from routers import points_ai
+
+    model = SimpleNamespace(
+        id=9,
+        modality="video",
+        capabilities_json={
+            "video": {
+                "limits": {
+                    "resolutions": ["720P"],
+                    "duration_seconds": {"min": 4, "max": 15},
+                }
+            }
+        },
+    )
+    monkeypatch.setattr(points_ai, "_require_user", lambda *_args: SimpleNamespace(id=7))
+    monkeypatch.setattr(points_ai.ai_catalog, "get_visible_model", lambda *_args: model)
+    monkeypatch.setattr(
+        points_ai.ai_catalog,
+        "get_active_price",
+        lambda *_args: pytest.fail("时长校验失败时不应查询价格"),
+    )
+
+    with pytest.raises(HTTPException, match="正整数秒"):
+        points_ai.estimate(
+            points_ai.EstimateIn(model_id=9, video_seconds=5.5),
+            SimpleNamespace(),
+            SimpleNamespace(),
+        )
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("duration_seconds", "asset_ids", "error_text"),
     [
         (15, [], "不支持该时长"),
-        (5, [1, 2], "最多一张参考图"),
+        (5, [1, 2], "参考图数量超过当前视频模型限制"),
     ],
 )
 async def test_default_openai_video_model_is_validated_before_begin_ai_call(
@@ -124,7 +367,11 @@ async def test_default_openai_video_model_is_validated_before_begin_ai_call(
         channel_id=3,
         capabilities_json={
             "video": {
-                "limits": {"duration_seconds": {"allowed": [5]}, "max_reference_images": 1},
+                "limits": {
+                    "duration_seconds": {"allowed": [5]},
+                    "resolutions": ["720P"],
+                    "max_reference_images": 1,
+                },
                 "input_modes": ["text_to_video", "image_to_video"],
                 "wire": {"size_by_resolution_aspect": {"720P|16:9": "1280x720"}},
             }
@@ -195,7 +442,7 @@ async def test_custom_seedance_duration_is_validated_before_begin_ai_call(monkey
         capabilities_json={
             "video": {
                 "payload_profile": "openai_native",
-                "limits": {"duration_seconds": {"allowed": [5, 15]}},
+                "limits": {"duration_seconds": {"allowed": [5, 15]}, "resolutions": ["720P"]},
             }
         },
     )
@@ -250,7 +497,7 @@ async def test_custom_video_upstream_snapshots_and_executes_lingdong_without_ope
     openai_capabilities = {
         "video": {
             "payload_profile": "openai_native",
-            "limits": {"duration_seconds": {"allowed": [5]}},
+            "limits": {"duration_seconds": {"allowed": [5]}, "resolutions": ["720P"]},
             "wire": {"size_by_resolution_aspect": {"720P|16:9": "1280x720"}},
         }
     }
@@ -339,7 +586,7 @@ async def test_custom_video_upstream_snapshots_and_executes_lingdong_without_ope
     monkeypatch.setattr(studio_router, "_enqueue_job", fake_enqueue)
 
     response = await studio_router.create_jobs(
-        studio_router.CreationStudioJobCreate(media_kind="video", prompt="测试中转视频"),
+        studio_router.CreationStudioJobCreate(media_kind="video", prompt="测试中转视频", duration_seconds=5),
         SimpleNamespace(),
         Db(),
     )
@@ -586,6 +833,65 @@ async def test_video_reference_payload_uses_input_reference(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_legacy_video_payload_uses_configured_resolution_and_ratio_fields(monkeypatch):
+    captured: dict = {}
+
+    class FakeResponse:
+        is_success = True
+        status_code = 200
+        text = ""
+
+        @staticmethod
+        def json():
+            return {"task_id": "task-resolution", "status": "queued"}
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+        async def post(self, url, json, headers):
+            captured.update(json)
+            return FakeResponse()
+
+    monkeypatch.setattr(video_api.httpx, "AsyncClient", FakeClient)
+
+    await video_api.create_video_job(
+        model="gz-video-720",
+        prompt="测试视频",
+        aspect_ratio="16:9",
+        size="720P",
+        duration_seconds=15,
+        api_key="test-key",
+        base_url="https://example.com",
+        video_capabilities={
+            "payload_profile": "legacy_lingdong",
+            "limits": {
+                "aspect_ratios": ["16:9"],
+                "resolutions": ["720P"],
+                "duration_seconds": {"allowed": [15]},
+            },
+            "wire": {
+                "duration_field": "duration",
+                "resolution_field": "resolution",
+                "ratio_field": "ratio",
+            },
+        },
+    )
+
+    assert captured["duration"] == 15
+    assert captured["resolution"] == "720P"
+    assert captured["ratio"] == "16:9"
+    assert "size" not in captured
+    assert "orientation" not in captured
+
+
+@pytest.mark.asyncio
 async def test_sora_video_payload_uses_configured_wire_size(monkeypatch):
     captured: dict = {}
 
@@ -700,7 +1006,17 @@ async def test_legacy_seedance_15_seconds_is_rejected_before_billing(monkeypatch
     from routers import creation_studio as studio_router
 
     selected_model = SimpleNamespace(
-        id=9, channel_id=3, model_key="seedance-1.5-pro", capabilities_json={}
+        id=9,
+        channel_id=3,
+        model_key="seedance-1.5-pro",
+        capabilities_json={
+            "video": {
+                "limits": {
+                    "resolutions": ["720P"],
+                    "duration_seconds": {"min": 4, "max": 15},
+                }
+            }
+        },
     )
 
     class Db:

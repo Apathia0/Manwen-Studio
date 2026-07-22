@@ -14,7 +14,13 @@ from services.ai.channels import get_channel, load_platform_key
 from services.ai.context import AIExecutionContext
 from services.ai.credentials import load_user_api_key_plain
 from services.points import accounts as points_accounts
-from services.points.pricing import estimate_points, price_snapshot, quantize_points, reserve_points_from_estimate
+from services.points.pricing import (
+    TOKEN_BILLING_TYPES,
+    estimate_points,
+    price_snapshot,
+    quantize_points,
+    reserve_points_from_estimate,
+)
 
 
 def _positive_int(value: Any, default: int) -> int:
@@ -140,7 +146,7 @@ def begin_ai_call(
             use_estimate_defaults=True,
         )
         reservation_estimate = estimated
-        if price.billing_type == "per_1k_tokens":
+        if price.billing_type in TOKEN_BILLING_TYPES:
             estimated = quantize_points(estimated * call_count)
             reservation_max_input_tokens = max(
                 _positive_int(ek.get("reservation_max_input_tokens"), 1),
@@ -162,10 +168,12 @@ def begin_ai_call(
             )
         elif price.billing_type == "per_call":
             reservation_estimate = quantize_points(estimated * call_count)
-        reserved = reserve_points_from_estimate(reservation_estimate)
+        streaming = bool(ek.get("streaming")) and modality == "text"
+        reserved = Decimal("0") if streaming else reserve_points_from_estimate(reservation_estimate)
         price_snap = price_snapshot(price.billing_type, price.price_config_json, price.id)
         price_snap["call_count"] = call_count
-        if price.billing_type == "per_1k_tokens":
+        price_snap["streaming"] = streaming
+        if price.billing_type in TOKEN_BILLING_TYPES:
             price_snap["reservation_max_input_tokens"] = reservation_max_input_tokens
             price_snap["reservation_max_output_tokens"] = reservation_max_output_tokens
 
@@ -187,7 +195,7 @@ def begin_ai_call(
     db.add(event)
     db.flush()
 
-    if mode == "platform" and reserved is not None:
+    if mode == "platform" and reserved is not None and reserved > 0:
         points_accounts.reserve_points(
             db,
             user_id,
@@ -219,6 +227,50 @@ def begin_ai_call(
     )
 
 
+def charge_streaming_tokens(
+    db: Session,
+    ctx: AIExecutionContext,
+    *,
+    input_tokens: int = 0,
+    output_tokens: int = 0,
+) -> Decimal:
+    """按累计 Token 增量扣除流式文本费用，调用可安全重复。"""
+    if ctx.credential_mode != "platform" or ctx.modality != "text":
+        return Decimal("0")
+    snap = ctx.price_snapshot or {}
+    if not snap.get("streaming"):
+        return Decimal("0")
+    event = db.query(AiUsageEvent).filter(AiUsageEvent.id == ctx.usage_event_id).with_for_update().first()
+    if not event or event.status in {"succeeded", "failed", "refunded"}:
+        return Decimal("0")
+    cfg = {**(snap.get("price_config") or {}), "min_points_per_call": 0}
+    total = estimate_points(
+        billing_type=str(snap.get("billing_type") or "per_1m_tokens"),
+        price_config=cfg,
+        input_tokens=max(0, int(input_tokens or 0)),
+        output_tokens=max(0, int(output_tokens or 0)),
+        use_estimate_defaults=False,
+    )
+    metadata = event.price_snapshot_json if isinstance(event.price_snapshot_json, dict) else dict(snap)
+    charged_before = Decimal(str(metadata.get("stream_charged_points") or 0))
+    delta = quantize_points(max(Decimal("0"), total - charged_before))
+    if delta <= 0:
+        return Decimal("0")
+    charged = points_accounts.charge_points(
+        db,
+        ctx.user_id,
+        delta,
+        idempotency_key=f"stream:{ctx.request_id}:{max(0, int(output_tokens or 0))}",
+        usage_event_id=event.id,
+        metadata={"input_tokens": int(input_tokens or 0), "output_tokens": int(output_tokens or 0)},
+    )
+    event.price_snapshot_json = {**metadata, "stream_charged_points": str(quantize_points(charged_before + charged))}
+    event.input_tokens = max(event.input_tokens or 0, int(input_tokens or 0))
+    event.output_tokens = max(event.output_tokens or 0, int(output_tokens or 0))
+    db.commit()
+    return charged
+
+
 def complete_ai_call(
     db: Session,
     ctx: AIExecutionContext,
@@ -228,6 +280,7 @@ def complete_ai_call(
     output_tokens: int = 0,
     image_count: int = 0,
     video_seconds: float | Decimal = 0,
+    actual_call_count: int | None = None,
     error_code: str | None = None,
     usage_source: str = "provider",
     commit: bool = True,
@@ -261,6 +314,19 @@ def complete_ai_call(
 
     reserved = quantize_points(Decimal(str(ctx.reserved_points or 0)))
     if not success:
+        if (ctx.price_snapshot or {}).get("streaming"):
+            metadata = event.price_snapshot_json if isinstance(event.price_snapshot_json, dict) else {}
+            captured = quantize_points(Decimal(str(metadata.get("stream_charged_points") or 0)))
+            event.status = "failed"
+            event.input_tokens = input_tokens
+            event.output_tokens = output_tokens
+            event.settled_points = captured
+            event.error_code = error_code
+            event.usage_source = usage_source
+            event.completed_at = datetime.datetime.utcnow()
+            if commit:
+                db.commit()
+            return
         points_accounts.release_reservation(
             db,
             ctx.user_id,
@@ -292,12 +358,74 @@ def complete_ai_call(
             video_seconds=video_seconds,
             use_estimate_defaults=False,
         )
+        if billing_type == "per_call":
+            snapshot_actual_count = snap.get("actual_call_count")
+            selected_call_count = (
+                actual_call_count
+                if actual_call_count is not None
+                else snapshot_actual_count
+            )
+            call_count = (
+                max(0, int(selected_call_count))
+                if selected_call_count is not None
+                else _positive_int(snap.get("call_count"), 1)
+            )
+            actual = quantize_points(actual * call_count)
+            event.price_snapshot_json = {**snap, "actual_call_count": call_count}
     measured_zero = (
         (ctx.modality == "image" and image_count <= 0)
         or (ctx.modality == "video" and Decimal(str(video_seconds or 0)) <= 0)
+        or (
+            billing_type == "per_call"
+            and (
+                (actual_call_count is not None and actual_call_count <= 0)
+                or (
+                    actual_call_count is None
+                    and snap.get("actual_call_count") is not None
+                    and int(snap.get("actual_call_count")) <= 0
+                )
+            )
+        )
     )
     if actual <= 0 and ctx.estimated_points and not measured_zero:
         actual = quantize_points(Decimal(str(ctx.estimated_points)))
+    if snap.get("streaming") and billing_type in TOKEN_BILLING_TYPES:
+        metadata = event.price_snapshot_json if isinstance(event.price_snapshot_json, dict) else dict(snap)
+        captured = quantize_points(Decimal(str(metadata.get("stream_charged_points") or 0)))
+        remainder = quantize_points(max(Decimal("0"), actual - captured))
+        if captured > actual:
+            refund = quantize_points(captured - actual)
+            points_accounts.credit_points(
+                db,
+                ctx.user_id,
+                refund,
+                entry_type="stream_reconcile",
+                idempotency_key=f"stream:{ctx.request_id}:final-refund",
+                usage_event_id=event.id,
+                metadata={"captured": str(captured), "actual": str(actual)},
+            )
+            captured = actual
+        if remainder > 0:
+            charged = points_accounts.charge_points(
+                db,
+                ctx.user_id,
+                remainder,
+                idempotency_key=f"stream:{ctx.request_id}:final",
+                usage_event_id=event.id,
+                metadata={"final": True, "input_tokens": input_tokens, "output_tokens": output_tokens},
+            )
+            captured = quantize_points(captured + charged)
+        event.price_snapshot_json = {**metadata, "stream_charged_points": str(captured)}
+        event.status = "succeeded" if captured >= actual else "failed"
+        event.input_tokens = input_tokens
+        event.output_tokens = output_tokens
+        event.settled_points = captured
+        event.error_code = None if captured >= actual else "insufficient_settlement_balance"
+        event.usage_source = usage_source
+        event.completed_at = datetime.datetime.utcnow()
+        if commit:
+            db.commit()
+        return
     charged = points_accounts.settle_reservation(
         db,
         ctx.user_id,
@@ -331,6 +459,7 @@ def complete_ai_call_by_usage_event(
     output_tokens: int = 0,
     image_count: int = 0,
     video_seconds: float | Decimal = 0,
+    actual_call_count: int | None = None,
     error_code: str | None = None,
     usage_source: str = "provider",
     commit: bool = True,
@@ -367,6 +496,7 @@ def complete_ai_call_by_usage_event(
         output_tokens=output_tokens,
         image_count=image_count,
         video_seconds=video_seconds,
+        actual_call_count=actual_call_count,
         error_code=error_code,
         usage_source=usage_source,
         commit=commit,

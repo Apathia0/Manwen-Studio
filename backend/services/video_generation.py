@@ -82,12 +82,14 @@ async def submit_video_job(
             base_url=base_url,
         )
     else:
+        defaults = video_capabilities.get("defaults") if isinstance(video_capabilities, dict) else None
+        default_resolution = defaults.get("resolution") if isinstance(defaults, dict) else None
         result = await video_adapter.create_video_job(
             adapter_type=adapter_type,
             model=model or video_api._resolved_model(),
             prompt=prompt,
             aspect_ratio=aspect_ratio or "16:9",
-            size=str(kwargs.get("size") or "720P"),
+            size=str(kwargs.get("size") or default_resolution or "720P"),
             duration_seconds=duration_seconds,
             images=reference_images or None,
             api_key=api_key,

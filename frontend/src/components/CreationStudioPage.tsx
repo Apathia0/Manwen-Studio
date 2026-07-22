@@ -1,5 +1,6 @@
 import {
   AlertCircle,
+  Bot,
   Check,
   ChevronDown,
   Clipboard,
@@ -19,9 +20,10 @@ import {
   Video,
   X,
 } from 'lucide-react';
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { lazy, memo, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   apiHeaders,
+  analyzeCreationStudioAssets,
   cancelCreationStudioJob,
   createCreationStudioJobs,
   deleteCreationStudioAsset,
@@ -42,6 +44,16 @@ import { toast } from '../lib/toast';
 import { normalizeErrorMessage } from '../lib/errors';
 import ImageZoomView from './shared/ImageZoomView';
 
+const AgentPanel = lazy(() => import('./AgentPanel/AgentPanel'));
+
+interface CreationStudioPageProps {
+  /** 作品上下文仅用于助手增强，不参与创作台生成与记录归属。 */
+  storyId?: number;
+  chapterId?: number;
+  storyTitle?: string;
+  chapterTitle?: string;
+}
+
 const ACTIVE_STATUSES = new Set(['queued', 'running', 'cancel_requested']);
 const IMAGE_RATIOS = [
   { label: '1:1', width: 1024, height: 1024 },
@@ -52,7 +64,7 @@ const IMAGE_RATIOS = [
 ] as const;
 const VIDEO_RATIOS = ['16:9', '9:16', '1:1', '4:3', '3:4'] as const;
 const VIDEO_RESOLUTIONS = ['480P', '720P', '1080P', '1K', '2K', '4K'] as const;
-const VIDEO_DURATIONS = [4, 5, 6, 8, 10, 12, 15];
+const IMAGE_QUALITIES = ['auto', 'high', 'medium', 'low'] as const;
 
 type MobilePane = 'create' | 'result' | 'history';
 
@@ -106,17 +118,19 @@ function mediaUrl(url: string): string {
   return url.replace(/\\/g, '/');
 }
 
-function useAssetMediaUrl(publicUrl: string, mediaType: CreationStudioMediaKind): [string, () => void, boolean] {
+function useAssetMediaUrl(publicUrl: string, mediaType: CreationStudioMediaKind): [string, () => void, boolean, boolean] {
   const protectedAsset = publicUrl.startsWith('/api/creation-studio/');
-  const [resolvedUrl, setResolvedUrl] = useState('');
   const [reloadKey, setReloadKey] = useState(0);
-  const [loadFailed, setLoadFailed] = useState(false);
+  const [resolved, setResolved] = useState({ sourceKey: '', url: '' });
+  const [failedSourceKey, setFailedSourceKey] = useState('');
+  const sourceKey = `${mediaType}:${publicUrl}:${reloadKey}`;
+  const reload = useCallback(() => setReloadKey((value) => value + 1), []);
 
   useEffect(() => {
-    setLoadFailed(false);
     if (!protectedAsset || !publicUrl) return;
     let active = true;
     let objectUrl = '';
+    setFailedSourceKey('');
     if (mediaType === 'video') {
       const accessUrl = publicUrl.replace(/\/content(?:\?.*)?$/, '/access-url');
       void fetch(accessUrl, { headers: apiHeaders() })
@@ -125,12 +139,11 @@ function useAssetMediaUrl(publicUrl: string, mediaType: CreationStudioMediaKind)
           return response.json() as Promise<{ url: string }>;
         })
         .then((result) => {
-          if (active) setResolvedUrl(result.url);
+          if (active) setResolved({ sourceKey, url: result.url });
         })
         .catch(() => {
           if (active) {
-            setResolvedUrl('');
-            setLoadFailed(true);
+            setFailedSourceKey(sourceKey);
           }
         });
       return () => {
@@ -145,21 +158,25 @@ function useAssetMediaUrl(publicUrl: string, mediaType: CreationStudioMediaKind)
       .then((blob) => {
         if (!active) return;
         objectUrl = URL.createObjectURL(blob);
-        setResolvedUrl(objectUrl);
+        setResolved({ sourceKey, url: objectUrl });
       })
       .catch(() => {
         if (active) {
-          setResolvedUrl('');
-          setLoadFailed(true);
+          setFailedSourceKey(sourceKey);
         }
       });
     return () => {
       active = false;
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
-  }, [mediaType, protectedAsset, publicUrl, reloadKey]);
+  }, [mediaType, protectedAsset, publicUrl, sourceKey]);
 
-  return [protectedAsset ? resolvedUrl : mediaUrl(publicUrl), () => setReloadKey((value) => value + 1), loadFailed];
+  const url = protectedAsset
+    ? (resolved.sourceKey === sourceKey ? resolved.url : '')
+    : mediaUrl(publicUrl);
+  const loadFailed = failedSourceKey === sourceKey;
+  const loading = protectedAsset && Boolean(publicUrl) && !url && !loadFailed;
+  return [url, reload, loadFailed, loading];
 }
 
 function AssetThumbnail({ asset }: { asset: CreationStudioAsset }) {
@@ -277,13 +294,17 @@ interface ResultPanelProps {
 
 const ResultPanel = memo(function ResultPanel({ mediaKind, job, onCancel, onRetry, onRedraw }: ResultPanelProps) {
   const active = job ? ACTIVE_STATUSES.has(job.status) : false;
-  const [outputUrl, reloadOutput, outputLoadFailed] = useAssetMediaUrl(job?.output?.public_url || '', job?.media_kind || mediaKind);
+  const [outputUrl, reloadOutput, outputLoadFailed, outputLoading] = useAssetMediaUrl(job?.output?.public_url || '', job?.media_kind || mediaKind);
   const retriedVideoOutputRef = useRef('');
   const videoRef = useRef<HTMLVideoElement>(null);
   const [videoPlaying, setVideoPlaying] = useState(false);
+  const [imageDecodeFailedUrl, setImageDecodeFailedUrl] = useState('');
+  const imageDecodeFailed = job?.media_kind === 'image' && imageDecodeFailedUrl === outputUrl;
 
   useEffect(() => {
     setVideoPlaying(false);
+    retriedVideoOutputRef.current = '';
+    setImageDecodeFailedUrl('');
   }, [job?.id]);
 
   const toggleVideoPlayback = useCallback(async () => {
@@ -303,12 +324,19 @@ const ResultPanel = memo(function ResultPanel({ mediaKind, job, onCancel, onRetr
     retriedVideoOutputRef.current = outputKey;
     reloadOutput();
   }, [job?.output?.public_url, reloadOutput]);
+  const handleImageError = useCallback(() => {
+    setImageDecodeFailedUrl(outputUrl);
+  }, [outputUrl]);
+  const handleReloadOutput = useCallback(() => {
+    setImageDecodeFailedUrl('');
+    reloadOutput();
+  }, [reloadOutput]);
   return (
     <section className="flex h-full min-h-0 flex-col border border-[#d7e3f4] bg-[rgba(255,255,255,0.78)] shadow-[0_16px_36px_rgba(59,130,246,0.09)] backdrop-blur-xl xl:rounded-lg">
       <div className="flex h-[57px] items-center justify-between border-b border-[#d7e3f4] px-4">
         <div>
           <h2 className="text-sm font-semibold text-slate-900">生成结果</h2>
-          {job ? <div className="mt-0.5 text-[11px] text-slate-400">任务 #{job.id} · {job.model_key || '自动模型'}</div> : null}
+          {job ? <div className="mt-0.5 text-[11px] text-slate-400">任务 #{job.id} · {job.model_display_name || job.model_key || '自动模型'}</div> : null}
         </div>
         <div className="flex flex-wrap items-center justify-end gap-2">
           {active && job ? (
@@ -354,18 +382,23 @@ const ResultPanel = memo(function ResultPanel({ mediaKind, job, onCancel, onRetr
             <div className="mt-4 text-sm font-medium text-slate-700">{job.status === 'cancelled' ? '任务已取消' : '生成失败'}</div>
             <div className="mt-2 max-w-lg text-xs leading-5 text-slate-500">{normalizeErrorMessage(job.error_message, '可以调整参数后重试')}</div>
           </div>
-        ) : outputLoadFailed ? (
+        ) : outputLoadFailed || imageDecodeFailed ? (
           <div className="flex h-[clamp(360px,62vh,640px)] max-h-[640px] min-h-[360px] flex-col items-center justify-center rounded-lg border border-dashed border-amber-200 bg-amber-50/50 px-8 text-center">
             <AlertCircle size={28} className="text-amber-500" />
             <div className="mt-4 text-sm font-medium text-slate-700">{job.media_kind === 'video' ? '视频预览加载失败' : '图片预览加载失败'}</div>
-            <button type="button" onClick={reloadOutput} className="mt-4 inline-flex items-center gap-1.5 rounded-lg border border-amber-300 bg-white px-3 py-1.5 text-xs font-medium text-amber-700 transition hover:bg-amber-50">
+            <button type="button" onClick={handleReloadOutput} className="mt-4 inline-flex items-center gap-1.5 rounded-lg border border-amber-300 bg-white px-3 py-1.5 text-xs font-medium text-amber-700 transition hover:bg-amber-50">
               <RefreshCw size={12} /> 重新加载
             </button>
+          </div>
+        ) : outputLoading ? (
+          <div className="flex h-[clamp(360px,62vh,640px)] max-h-[640px] min-h-[360px] flex-col items-center justify-center rounded-lg border border-dashed border-[#c8d8ef] bg-[linear-gradient(180deg,rgba(248,251,255,0.72),rgba(238,245,255,0.72))]">
+            <Loader2 size={28} className="animate-spin text-[#3b82f6]" />
+            <div className="mt-4 text-sm font-medium text-slate-600">正在加载{job.media_kind === 'video' ? '视频' : '图片'}预览</div>
           </div>
         ) : outputUrl ? (
           <div className="relative flex h-[clamp(360px,62vh,640px)] max-h-[640px] min-h-[360px] items-center justify-center overflow-hidden rounded-lg bg-[#101725]">
             {job.media_kind === 'image' ? (
-              <ImageZoomView src={outputUrl} alt={job.prompt} className="h-full w-full" fallback={<Loader2 size={24} className="animate-spin text-white/60" />} />
+              <ImageZoomView src={outputUrl} alt={job.prompt} className="h-full w-full" fallback={<Loader2 size={24} className="animate-spin text-white/60" />} onLoadError={handleImageError} />
             ) : (
               <video ref={videoRef} src={outputUrl} controls playsInline preload="metadata" onError={handleVideoError} onPlay={() => setVideoPlaying(true)} onPause={() => setVideoPlaying(false)} onPointerDown={(event) => event.stopPropagation()} onClick={(event) => event.stopPropagation()} className="relative z-10 h-full w-full pointer-events-auto object-contain" />
             )}
@@ -381,7 +414,7 @@ const ResultPanel = memo(function ResultPanel({ mediaKind, job, onCancel, onRetr
   );
 });
 
-export function CreationStudioPage() {
+export function CreationStudioPage({ storyId, chapterId, storyTitle, chapterTitle }: CreationStudioPageProps) {
   const [mediaKind, setMediaKind] = useState<CreationStudioMediaKind>('image');
   const [mobilePane, setMobilePane] = useState<MobilePane>('create');
   const [jobs, setJobs] = useState<CreationStudioJob[]>([]);
@@ -407,6 +440,8 @@ export function CreationStudioPage() {
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [uploading, setUploading] = useState(false);
+  const [analyzingAssets, setAnalyzingAssets] = useState(false);
+  const [assistantOpen, setAssistantOpen] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const refreshFailureCountRef = useRef(0);
   const draftsRef = useRef<Record<CreationStudioMediaKind, CreationDraft>>({
@@ -449,14 +484,32 @@ export function CreationStudioPage() {
     ? modelId
     : currentModels[0]?.id ?? null;
   const selectedVideoModel = videoModels.find((model) => model.id === effectiveModelId);
+  const selectedImageModel = imageModels.find((model) => model.id === effectiveModelId);
+  const imageCapabilities = selectedImageModel?.image_capabilities;
+  const imageQualities = useMemo(() => (imageCapabilities?.limits?.qualities || IMAGE_QUALITIES)
+    .filter((item): item is (typeof IMAGE_QUALITIES)[number] => IMAGE_QUALITIES.includes(item)), [imageCapabilities?.limits?.qualities]);
   const videoCapabilities = selectedVideoModel?.video_capabilities;
   const videoLimits = videoCapabilities?.limits;
-  const videoRatios = useMemo(() => (videoLimits?.aspect_ratios || VIDEO_RATIOS).filter((item): item is typeof VIDEO_RATIOS[number] => VIDEO_RATIOS.includes(item as typeof VIDEO_RATIOS[number])), [videoLimits?.aspect_ratios]);
-  const videoResolutions = useMemo(() => (videoLimits?.resolutions || VIDEO_RESOLUTIONS).filter((item): item is typeof VIDEO_RESOLUTIONS[number] => VIDEO_RESOLUTIONS.includes(item as typeof VIDEO_RESOLUTIONS[number])), [videoLimits?.resolutions]);
-  const durationRule = videoLimits?.duration_seconds;
-  const videoDurations = useMemo(() => (durationRule?.allowed?.length ? durationRule.allowed : VIDEO_DURATIONS).filter((item) =>
-    (!durationRule?.min || item >= durationRule.min) && (!durationRule?.max || item <= durationRule.max),
-  ), [durationRule]);
+  const videoRatios = useMemo(() => (videoLimits?.aspect_ratios || [])
+    .filter((item): item is typeof VIDEO_RATIOS[number] => VIDEO_RATIOS.includes(item as typeof VIDEO_RATIOS[number])), [videoLimits?.aspect_ratios]);
+  const videoResolutions = useMemo(() => (videoLimits?.resolutions || [])
+    .filter((item): item is typeof VIDEO_RESOLUTIONS[number] => VIDEO_RESOLUTIONS.includes(item as typeof VIDEO_RESOLUTIONS[number])), [videoLimits?.resolutions]);
+  const videoDurations = useMemo(() => {
+    const rule = videoLimits?.duration_seconds;
+    const allowed = rule?.allowed?.filter((item): item is number => Number.isInteger(item) && item > 0) || [];
+    if (allowed.length) return allowed;
+    const minimum = rule?.min;
+    const maximum = rule?.max;
+    if (typeof minimum !== 'number' || typeof maximum !== 'number' || !Number.isInteger(minimum) || !Number.isInteger(maximum) || minimum > maximum) return [];
+    return Array.from({ length: maximum - minimum + 1 }, (_, index) => minimum + index);
+  }, [videoLimits?.duration_seconds]);
+  const videoParametersConfigured = Boolean(
+    selectedVideoModel
+    && videoRatios.length
+    && videoResolutions.length
+    && videoDurations.length,
+  );
+
   const visibleJobs = useMemo(() => jobs.filter((job) => job.media_kind === mediaKind), [jobs, mediaKind]);
   const selectedJob = useMemo(
     () => jobs.find((job) => job.id === selectedJobId) || null,
@@ -516,7 +569,10 @@ export function CreationStudioPage() {
 
   useEffect(() => {
     const requestId = ++estimateRequestRef.current;
-    if (credentialMode === 'user_key' || !effectiveModelId) return;
+    if (credentialMode === 'user_key' || !effectiveModelId || (mediaKind === 'video' && !videoParametersConfigured)) {
+      setEstimate(null);
+      return;
+    }
     const timer = window.setTimeout(() => {
       void estimateAiPoints({
         model_id: effectiveModelId,
@@ -533,19 +589,32 @@ export function CreationStudioPage() {
         });
     }, 350);
     return () => window.clearTimeout(timer);
-  }, [count, credentialMode, durationSeconds, effectiveModelId, mediaKind]);
+  }, [count, credentialMode, durationSeconds, effectiveModelId, mediaKind, videoParametersConfigured]);
 
   useEffect(() => {
-    if (mediaKind !== 'video') return;
+    if (mediaKind !== 'video' || !videoParametersConfigured) return;
     const defaults = videoCapabilities?.defaults;
     setAspectRatio((current) => videoRatios.includes(current) ? current : (defaults?.aspect_ratio && videoRatios.includes(defaults.aspect_ratio as typeof VIDEO_RATIOS[number]) ? defaults.aspect_ratio as typeof VIDEO_RATIOS[number] : videoRatios[0] || '16:9'));
     setResolution((current) => videoResolutions.includes(current) ? current : (defaults?.resolution && videoResolutions.includes(defaults.resolution as typeof VIDEO_RESOLUTIONS[number]) ? defaults.resolution as typeof VIDEO_RESOLUTIONS[number] : videoResolutions[0] || '720P'));
-    setDurationSeconds((current) => videoDurations.includes(current) ? current : (defaults?.duration_seconds && videoDurations.includes(defaults.duration_seconds) ? defaults.duration_seconds : videoDurations[0] || 5));
+    setDurationSeconds((current) => videoDurations.includes(current) ? current : (defaults?.duration_seconds && videoDurations.includes(defaults.duration_seconds) ? defaults.duration_seconds : videoDurations[0]));
     const maxReferences = videoLimits?.max_reference_images;
     const supportsReferences = videoCapabilities?.input_modes?.includes('image_to_video') ?? true;
     if (!supportsReferences || maxReferences === 0) setSelectedAssetIds([]);
     else if (maxReferences) setSelectedAssetIds((current) => current.slice(0, maxReferences));
-  }, [mediaKind, videoCapabilities, videoDurations, videoLimits?.max_reference_images, videoRatios, videoResolutions]);
+  }, [mediaKind, videoCapabilities, videoDurations, videoLimits?.max_reference_images, videoParametersConfigured, videoRatios, videoResolutions]);
+
+  useEffect(() => {
+    if (mediaKind !== 'image') return;
+    const defaultQuality = imageCapabilities?.defaults?.quality;
+    setQuality((current) => {
+      if (defaultQuality && imageQualities.includes(defaultQuality) && current === 'auto') return defaultQuality;
+      return imageQualities.includes(current) ? current : imageQualities[0] || 'auto';
+    });
+  }, [imageCapabilities?.defaults?.quality, imageQualities, mediaKind]);
+
+  useEffect(() => {
+    if (!storyId) setAssistantOpen(false);
+  }, [storyId]);
 
   const switchMediaKind = (next: CreationStudioMediaKind) => {
     if (next === mediaKind) return;
@@ -558,6 +627,10 @@ export function CreationStudioPage() {
 
   const handleFiles = useCallback(async (files: File[]) => {
     if (uploading) return;
+    if (mediaKind === 'video' && !videoParametersConfigured) {
+      toast.error('当前视频模型尚未配置可用时长、清晰度和比例，无法添加参考图');
+      return;
+    }
     const maxReferences = mediaKind === 'video' ? (videoLimits?.max_reference_images ?? 9) : 9;
     const available = Math.max(0, maxReferences - selectedAssetIds.length);
     const accepted = files.filter((file) => file.type.startsWith('image/')).slice(0, available);
@@ -581,7 +654,7 @@ export function CreationStudioPage() {
     } finally {
       setUploading(false);
     }
-  }, [mediaKind, selectedAssetIds.length, uploading, videoLimits?.max_reference_images]);
+  }, [mediaKind, selectedAssetIds.length, uploading, videoLimits?.max_reference_images, videoParametersConfigured]);
 
   const handleClipboard = async () => {
     if (uploading) return;
@@ -600,6 +673,30 @@ export function CreationStudioPage() {
     }
   };
 
+  const handleAnalyzeAssets = useCallback(async () => {
+    if (!selectedAssetIds.length || analyzingAssets) return;
+    setAnalyzingAssets(true);
+    try {
+      const result = await analyzeCreationStudioAssets(selectedAssetIds);
+      type PromptAnalysis = { prompt?: string; negative_prompt?: string };
+      let parsed: PromptAnalysis | null = null;
+      try {
+        const normalized = result.analysis.replace(/^```json\s*/i, '').replace(/```$/i, '').trim();
+        const value = JSON.parse(normalized) as unknown;
+        if (value && typeof value === 'object') parsed = value as PromptAnalysis;
+      } catch {
+        // 模型返回普通文本时仍然保留完整分析结果，避免丢失有用内容。
+      }
+      setPrompt(parsed?.prompt?.trim() || result.analysis);
+      if (parsed?.negative_prompt) setNegativePrompt(parsed.negative_prompt.trim());
+      toast.success('参考素材分析完成，已回填提示词');
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : '参考素材分析失败');
+    } finally {
+      setAnalyzingAssets(false);
+    }
+  }, [analyzingAssets, selectedAssetIds]);
+
   const handleSubmit = async () => {
     if (!prompt.trim()) {
       toast.error('请输入提示词');
@@ -607,6 +704,10 @@ export function CreationStudioPage() {
     }
     if (!effectiveModelId) {
       toast.error(`暂无可用的${mediaKind === 'image' ? '图片' : '视频'}模型`);
+      return;
+    }
+    if (mediaKind === 'video' && !videoParametersConfigured) {
+      toast.error('当前视频模型尚未配置明确的时长、清晰度和比例，请联系管理员完成模型参数配置');
       return;
     }
     if (credentialMode === 'platform' && estimate && !estimate.sufficient) {
@@ -755,7 +856,7 @@ export function CreationStudioPage() {
   }
 
   return (
-    <div className="flex h-full min-h-[520px] flex-col overflow-hidden rounded-lg border border-[#d7e3f4] bg-[rgba(245,249,255,0.72)] shadow-[0_18px_42px_rgba(59,130,246,0.08)] backdrop-blur-xl xl:min-h-[620px]">
+    <div className="relative flex h-full min-h-[520px] flex-col overflow-hidden rounded-lg border border-[#d7e3f4] bg-[rgba(245,249,255,0.72)] shadow-[0_18px_42px_rgba(59,130,246,0.08)] backdrop-blur-xl xl:min-h-[620px]">
       <div className="flex min-h-14 items-center justify-between gap-3 border-b border-[#d7e3f4] bg-white/72 px-3 sm:px-4">
         <div className="flex items-center gap-3">
           <div className="grid h-9 w-9 place-items-center rounded-lg bg-[linear-gradient(145deg,#1d4ed8,#3b82f6)] text-white shadow-[0_8px_18px_rgba(37,99,235,0.24)]">
@@ -774,6 +875,9 @@ export function CreationStudioPage() {
             <Video size={14} /> 视频
           </button>
         </div>
+        <button type="button" disabled={!storyId} onClick={() => setAssistantOpen((value) => !value)} className={`inline-flex h-8 items-center gap-1.5 rounded-lg border px-2.5 text-xs font-medium transition ${assistantOpen ? 'border-blue-300 bg-blue-50 text-blue-700' : 'border-[#c8d8ef] bg-white text-slate-600 hover:border-blue-300 hover:text-blue-700'} disabled:cursor-not-allowed disabled:opacity-50`} title={storyId ? '打开创作台 AI 助手' : '独立创作无需绑定作品'}>
+          <Bot size={14} /> AI 助手
+        </button>
       </div>
 
       <div className="grid grid-cols-3 border-b border-[#d7e3f4] bg-white/80 xl:hidden">
@@ -815,14 +919,14 @@ export function CreationStudioPage() {
 
             <div>
               <div className="mb-2 flex items-center justify-between">
-                <label className="text-xs font-semibold text-slate-700">参考图片 <span className="font-normal text-slate-400">{selectedAssetIds.length}/{mediaKind === 'video' ? (videoLimits?.max_reference_images ?? 9) : 9}</span></label>
+                <label className="text-xs font-semibold text-slate-700">参考图片 <span className="font-normal text-slate-400">{selectedAssetIds.length}/{mediaKind === 'video' ? (videoParametersConfigured ? (videoLimits?.max_reference_images ?? 0) : 0) : 9}</span></label>
                 <div className="flex gap-1.5">
-                  <button type="button" disabled={uploading} title="从剪贴板读取图片" onClick={() => void handleClipboard()} className="grid h-7 w-7 place-items-center rounded-lg border border-[#c8d8ef] bg-white text-slate-500 transition hover:text-[#1d4ed8] disabled:cursor-not-allowed disabled:opacity-50"><Clipboard size={13} /></button>
-                  <button type="button" disabled={uploading} title="上传参考图片" onClick={() => fileInputRef.current?.click()} className="grid h-7 w-7 place-items-center rounded-lg border border-[#c8d8ef] bg-white text-slate-500 transition hover:text-[#1d4ed8] disabled:cursor-not-allowed disabled:opacity-50"><Upload size={13} /></button>
+                  <button type="button" disabled={uploading || (mediaKind === 'video' && !videoParametersConfigured)} title="从剪贴板读取图片" onClick={() => void handleClipboard()} className="grid h-7 w-7 place-items-center rounded-lg border border-[#c8d8ef] bg-white text-slate-500 transition hover:text-[#1d4ed8] disabled:cursor-not-allowed disabled:opacity-50"><Clipboard size={13} /></button>
+                  <button type="button" disabled={uploading || (mediaKind === 'video' && !videoParametersConfigured)} title="上传参考图片" onClick={() => fileInputRef.current?.click()} className="grid h-7 w-7 place-items-center rounded-lg border border-[#c8d8ef] bg-white text-slate-500 transition hover:text-[#1d4ed8] disabled:cursor-not-allowed disabled:opacity-50"><Upload size={13} /></button>
                 </div>
               </div>
               <input ref={fileInputRef} type="file" accept="image/png,image/jpeg,image/webp" multiple className="hidden" onChange={(event) => { void handleFiles(Array.from(event.target.files || [])); event.currentTarget.value = ''; }} />
-              <button type="button" disabled={uploading || (mediaKind === 'video' && videoCapabilities?.input_modes?.includes('image_to_video') === false)} onClick={() => fileInputRef.current?.click()} onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); void handleFiles(Array.from(event.dataTransfer.files)); }} className="flex min-h-20 w-full items-center justify-center rounded-lg border border-dashed border-[#b8cce8] bg-[#f7faff] text-xs text-slate-400 transition hover:border-[#6c9ee6] hover:bg-[#eff6ff] disabled:cursor-not-allowed disabled:opacity-50">
+              <button type="button" disabled={uploading || (mediaKind === 'video' && (!videoParametersConfigured || videoCapabilities?.input_modes?.includes('image_to_video') === false))} onClick={() => fileInputRef.current?.click()} onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); void handleFiles(Array.from(event.dataTransfer.files)); }} className="flex min-h-20 w-full items-center justify-center rounded-lg border border-dashed border-[#b8cce8] bg-[#f7faff] text-xs text-slate-400 transition hover:border-[#6c9ee6] hover:bg-[#eff6ff] disabled:cursor-not-allowed disabled:opacity-50">
                 {uploading ? <><Loader2 size={15} className="mr-2 animate-spin" /> 上传中...</> : <><Images size={16} className="mr-2" /> 添加或拖入参考图片</>}
               </button>
               {selectedAssets.length ? (
@@ -841,6 +945,12 @@ export function CreationStudioPage() {
                     );
                   })}
                 </div>
+              ) : null}
+              {mediaKind === 'image' && selectedAssetIds.length ? (
+                <button type="button" disabled={analyzingAssets} onClick={() => void handleAnalyzeAssets()} className="mt-2 inline-flex items-center gap-1.5 rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-xs font-medium text-blue-700 hover:bg-blue-100 disabled:cursor-not-allowed disabled:opacity-50">
+                  {analyzingAssets ? <Loader2 size={13} className="animate-spin" /> : <Sparkles size={13} />}
+                  {analyzingAssets ? '正在分析参考图...' : 'AI 反推提示词'}
+                </button>
               ) : null}
               {mediaKind === 'image' && selectedAssetIds.length ? (
                 <div className="mt-2 flex gap-2">
@@ -864,17 +974,12 @@ export function CreationStudioPage() {
                 <div>
                   <div className="mb-2 text-xs font-semibold text-slate-700">质量</div>
                   <div className="grid grid-cols-4 gap-2">
-                    {(['auto', 'high', 'medium', 'low'] as const).map((item) => <button key={item} type="button" onClick={() => setQuality(item)} className={`rounded-lg border py-2 text-xs ${quality === item ? 'border-[#6c9ee6] bg-[#edf5ff] font-medium text-[#1d4ed8]' : 'border-[#d7e3f4] bg-white text-slate-500'}`}>{({ auto: '自动', high: '高', medium: '中', low: '低' })[item]}</button>)}
+                    {imageQualities.map((item) => <button key={item} type="button" onClick={() => setQuality(item)} className={`rounded-lg border py-2 text-xs ${quality === item ? 'border-[#6c9ee6] bg-[#edf5ff] font-medium text-[#1d4ed8]' : 'border-[#d7e3f4] bg-white text-slate-500'}`}>{({ auto: '自动', high: '高', medium: '中', low: '低' })[item]}</button>)}
                   </div>
                 </div>
                 <div>
-                  <div className="mb-2 flex items-center justify-between text-xs font-semibold text-slate-700"><span>尺寸</span><span className="text-[10px] font-normal text-slate-400">16 倍数对齐</span></div>
-                  <div className="grid grid-cols-[1fr_auto_1fr] items-center gap-2">
-                    <label className="flex h-10 items-center rounded-lg border border-[#d7e3f4] bg-[#f8fbff] px-3 text-xs text-slate-400">W<input type="number" min={256} max={2048} step={16} value={width} onChange={(event) => setWidth(Math.max(256, Math.min(2048, Math.round(Number(event.target.value || 256) / 16) * 16)))} className="ml-3 min-w-0 flex-1 bg-transparent font-medium text-slate-700 outline-none" /></label>
-                    <span className="text-xs text-slate-300">×</span>
-                    <label className="flex h-10 items-center rounded-lg border border-[#d7e3f4] bg-[#f8fbff] px-3 text-xs text-slate-400">H<input type="number" min={256} max={2048} step={16} value={height} onChange={(event) => setHeight(Math.max(256, Math.min(2048, Math.round(Number(event.target.value || 256) / 16) * 16)))} className="ml-3 min-w-0 flex-1 bg-transparent font-medium text-slate-700 outline-none" /></label>
-                  </div>
-                  <div className="mt-2 grid grid-cols-5 gap-2">
+                  <div className="mb-2 text-xs font-semibold text-slate-700">图片比例</div>
+                  <div className="grid grid-cols-5 gap-2">
                     {IMAGE_RATIOS.map((ratio) => <button key={ratio.label} type="button" onClick={() => { setWidth(ratio.width); setHeight(ratio.height); }} className={`rounded-lg border py-2 text-[11px] ${width === ratio.width && height === ratio.height ? 'border-[#6c9ee6] bg-[#edf5ff] text-[#1d4ed8]' : 'border-[#d7e3f4] bg-white text-slate-500'}`}>{ratio.label}</button>)}
                   </div>
                 </div>
@@ -884,6 +989,10 @@ export function CreationStudioPage() {
                   <div className="mt-1 flex justify-between text-[10px] text-slate-400"><span>1</span><span className="font-medium text-[#1d4ed8]">{count} 张</span><span>4</span></div>
                 </div>
               </>
+            ) : !videoParametersConfigured ? (
+              <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-3 text-xs leading-5 text-amber-800">
+                当前视频模型尚未配置可用的时长、清晰度和画面比例。请管理员在“积分与 AI 渠道”的模型参数中完成视频能力配置。
+              </div>
             ) : (
               <>
                 <div>
@@ -892,12 +1001,12 @@ export function CreationStudioPage() {
                 </div>
                 <div className="grid grid-cols-2 gap-3">
                   <div>
-                    <label htmlFor="creation-studio-resolution" className="mb-2 block text-xs font-semibold text-slate-700">清晰度</label>
-                    <select id="creation-studio-resolution" value={resolution} onChange={(event) => setResolution(event.target.value as typeof resolution)} className="h-10 w-full rounded-lg border border-[#c8d8ef] bg-white px-3 text-xs text-slate-700 outline-none">{videoResolutions.map((item) => <option key={item}>{item}</option>)}</select>
+                    <label htmlFor="creation-studio-resolution" className="mb-2 block text-xs font-semibold text-slate-700">清晰度{videoResolutions.length === 1 ? '（固定）' : ''}</label>
+                    <select id="creation-studio-resolution" disabled={videoResolutions.length === 1} value={resolution} onChange={(event) => setResolution(event.target.value as typeof resolution)} className="h-10 w-full rounded-lg border border-[#c8d8ef] bg-white px-3 text-xs text-slate-700 outline-none disabled:cursor-not-allowed disabled:bg-slate-50 disabled:text-slate-500">{videoResolutions.map((item) => <option key={item}>{item}</option>)}</select>
                   </div>
                   <div>
-                    <label htmlFor="creation-studio-duration" className="mb-2 block text-xs font-semibold text-slate-700">时长</label>
-                    <select id="creation-studio-duration" value={durationSeconds} onChange={(event) => setDurationSeconds(Number(event.target.value))} className="h-10 w-full rounded-lg border border-[#c8d8ef] bg-white px-3 text-xs text-slate-700 outline-none">{videoDurations.map((item) => <option key={item} value={item}>{item} 秒</option>)}</select>
+                    <label htmlFor="creation-studio-duration" className="mb-2 block text-xs font-semibold text-slate-700">时长{videoDurations.length === 1 ? '（固定）' : ''}</label>
+                    <select id="creation-studio-duration" disabled={videoDurations.length === 1} value={durationSeconds} onChange={(event) => setDurationSeconds(Number(event.target.value))} className="h-10 w-full rounded-lg border border-[#c8d8ef] bg-white px-3 text-xs text-slate-700 outline-none disabled:cursor-not-allowed disabled:bg-slate-50 disabled:text-slate-500">{videoDurations.map((item) => <option key={item} value={item}>{item} 秒</option>)}</select>
                   </div>
                 </div>
               </>
@@ -927,6 +1036,28 @@ export function CreationStudioPage() {
           <ResultPanel mediaKind={mediaKind} job={selectedJob} onCancel={handleCancel} onRetry={handleRetry} onRedraw={handleRedraw} />
         </div>
       </div>
+      {assistantOpen ? (
+        <aside className="absolute inset-y-14 right-2 z-30 flex w-[380px] min-h-0 flex-col overflow-hidden rounded-xl border border-[#d7e3f4] bg-white/95 shadow-[0_18px_42px_rgba(15,23,42,0.2)] backdrop-blur-xl max-sm:inset-x-2 max-sm:w-auto">
+          <header className="flex shrink-0 items-center justify-between border-b border-[#d7e3f4] px-4 py-3 text-sm font-semibold text-slate-800">
+            <span className="flex items-center gap-2"><Bot size={16} className="text-blue-600" />创作台 AI 助手</span>
+            <button type="button" onClick={() => setAssistantOpen(false)} className="rounded-md px-2 py-1 text-xs text-slate-400 hover:bg-slate-100 hover:text-slate-700">关闭</button>
+          </header>
+          <div className="min-h-0 flex-1">
+            {storyId ? (
+              <Suspense fallback={<div className="p-4 text-sm text-slate-500">正在加载 AI 助手...</div>}>
+                <AgentPanel
+                  storyId={storyId}
+                  chapterId={chapterId}
+                  storyTitle={storyTitle}
+                  chapterTitle={chapterTitle}
+                />
+              </Suspense>
+            ) : (
+              <div className="flex h-full items-center justify-center px-6 text-center text-sm leading-6 text-slate-500">请先在作品工作台选择一部作品，再使用创作台 AI 助手。</div>
+            )}
+          </div>
+        </aside>
+      ) : null}
     </div>
   );
 }

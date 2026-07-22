@@ -3489,7 +3489,16 @@ class AgentService:
             _last_user_msg = ""
             for m in reversed(messages):
                 if isinstance(m, dict) and m.get("role") == "user":
-                    _last_user_msg = (m.get("content") or "").strip()
+                    raw_content = m.get("content")
+                    if isinstance(raw_content, list):
+                        # 多模态消息的 content 是 text/image_url 数组，意图判断只读取其中的文字。
+                        _last_user_msg = " ".join(
+                            str(item.get("text") or "")
+                            for item in raw_content
+                            if isinstance(item, dict) and item.get("type") == "text"
+                        ).strip()
+                    else:
+                        _last_user_msg = str(raw_content or "").strip()
                     break
             _CONTENT_WRITE_KEYWORDS = {
                 "写正文", "写第", "写章", "写小说",

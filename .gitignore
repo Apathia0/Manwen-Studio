@@ -85,6 +85,7 @@ backend/tests/*
 !backend/tests/test_video_chapter_stage_api.py
 !backend/tests/test_video_chapter_workflow_api.py
 !backend/tests/test_chapter_workflow_manual_shot.py
+!backend/tests/test_agent_media.py
 test_*.png
 test_*.txt
 generate_image.py

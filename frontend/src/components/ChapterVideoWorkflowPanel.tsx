@@ -1747,7 +1747,7 @@ const typeConfig: Record<string, { label: string; icon: React.ReactNode; color: 
                 assetId = created.id;
               }
               if (assetId) {
-                await regenerateVideoAsset(assetId, resource?.prompt);
+                await regenerateVideoAsset(assetId, resource?.prompt, undefined, selectedStyle);
                 if (onRefreshWorkflow) await onRefreshWorkflow();
               }
             });
@@ -1939,7 +1939,7 @@ const typeConfig: Record<string, { label: string; icon: React.ReactNode; color: 
                 assetId = created.id;
               }
               if (assetId) {
-                await regenerateVideoAsset(assetId, r.prompt);
+                await regenerateVideoAsset(assetId, r.prompt, undefined, selectedStyle);
               }
               if (onRefreshWorkflow) await onRefreshWorkflow();
             });

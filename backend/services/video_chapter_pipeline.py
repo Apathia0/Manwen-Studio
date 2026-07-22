@@ -1815,6 +1815,16 @@ def _resolve_style_ref_local_path(style_reference_image_url: str | None) -> str 
     return ensure_local_media_path(style_reference_image_url, "manga")
 
 
+def _resolve_style_reference_input(style_reference_image_url: str | None) -> str | None:
+    """保留公开风格图 URL，仅将相对路径解析为本地文件。"""
+    raw = (style_reference_image_url or "").strip()
+    if not raw:
+        return None
+    if raw.lower().startswith(("http://", "https://")):
+        return resolve_reference_input(raw, "manga")
+    return _resolve_style_ref_local_path(raw)
+
+
 def _resolve_storyboard_local_path(storyboard_url: str | None) -> str | None:
     """将故事版 URL 解析为本地文件路径。"""
     if not storyboard_url:
@@ -2373,23 +2383,30 @@ async def regenerate_shot_video(
 
     # 风格参考图：优先从 workflow，回退到章节预设
     style_ref_source = workflow.style_reference_image_url if workflow else None
-    style_ref_path = resolve_reference_input(style_ref_source, "manga") if style_ref_source else None
-    if not style_ref_path:
-        style_ref_path = _resolve_style_ref_local_path(style_ref_source)
+    resolved_style_preset_id: int | None = None
+    style_ref_path = _resolve_style_reference_input(style_ref_source)
     if not style_ref_path and workflow:
         try:
             db_for_style = SessionLocal()
             from models import Chapter, VideoStylePreset
             chapter = db_for_style.query(Chapter).filter(Chapter.id == workflow.chapter_id).first()
-            if chapter and chapter.video_style_preset_id:
+            preset = None
+            workflow_style = getattr(workflow, "video_style", None)
+            if workflow_style:
+                preset = db_for_style.query(VideoStylePreset).filter(
+                    VideoStylePreset.name == workflow_style
+                ).first()
+            if not preset and chapter and chapter.video_style_preset_id:
                 preset = db_for_style.get(VideoStylePreset, chapter.video_style_preset_id)
+            if preset:
+                resolved_style_preset_id = preset.id
                 logger.info(
-                    "从章节预设读取风格参考图: video_style_preset_id=%s preset.image_url=%s",
-                    chapter.video_style_preset_id,
-                    video_api_service.safe_media_url_for_log(preset.image_url) if preset else "N/A",
+                    "读取风格预设参考图: preset_id=%s preset.image_url=%s",
+                    preset.id,
+                    video_api_service.safe_media_url_for_log(preset.image_url),
                 )
-                if preset and preset.image_url:
-                    style_ref_path = resolve_reference_input(preset.image_url, "manga") or _resolve_style_ref_local_path(preset.image_url)
+                if preset.image_url:
+                    style_ref_path = _resolve_style_reference_input(preset.image_url)
         finally:
             db_for_style.close()
     if style_ref_path:
@@ -2505,6 +2522,22 @@ async def regenerate_shot_video(
                     )
                     oss_uploaded.append(oss_url)
                     oss_details.append((role, oss_url))
+                    if role == "style" and img_path == style_ref_path and workflow:
+                        persist_db = SessionLocal()
+                        try:
+                            if style_ref_source:
+                                persisted_workflow = persist_db.get(ChapterVideoWorkflow, workflow.id)
+                                if persisted_workflow:
+                                    persisted_workflow.style_reference_image_url = oss_url
+                            elif resolved_style_preset_id:
+                                from models import VideoStylePreset
+
+                                persisted_preset = persist_db.get(VideoStylePreset, resolved_style_preset_id)
+                                if persisted_preset:
+                                    persisted_preset.image_url = oss_url
+                            persist_db.commit()
+                        finally:
+                            persist_db.close()
                 else:
                     raise UpstreamServiceError(
                         "参考图无法发布到 OSS，已中止视频提交: "

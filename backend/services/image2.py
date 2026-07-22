@@ -39,6 +39,20 @@ IMAGE_MODERATION = ""
 IMAGE_OUTPUT_FORMAT = ""
 IMAGE_OUTPUT_COMPRESSION: int | None = None
 IMAGE_INPUT_FIDELITY = ""
+_DEFAULT_HTTP_DOWNLOAD_HOSTS = {"nana.code2alita.com"}
+
+
+def _trusted_http_download_hosts() -> set[str]:
+    configured_hosts = {
+        item.strip().rstrip(".").lower()
+        for item in (os.getenv("IMAGE_HTTP_DOWNLOAD_ALLOWLIST") or "").split(",")
+        if item.strip()
+    }
+    return _DEFAULT_HTTP_DOWNLOAD_HOSTS | configured_hosts
+
+
+def _safe_generated_image_url(url: str) -> str:
+    return validate_remote_media_url(url, allow_http_hosts=_trusted_http_download_hosts())
 # 用于所有图片生成请求的负面提示词（抑制解剖学畸形和画面污染）
 IMAGE_NEGATIVE_PROMPT = (
     "extra limbs, extra hands, extra feet, extra fingers, six fingers, "
@@ -227,7 +241,7 @@ def _runtime_base_url() -> str:
 
 def _normalize_image_size(size: str | None) -> str:
     runtime = _runtime_settings()
-    candidate = (size or runtime.size).strip() or DEFAULT_IMAGE_SIZE
+    candidate = str(size or getattr(runtime, "size", DEFAULT_IMAGE_SIZE) or "").strip() or DEFAULT_IMAGE_SIZE
     if IMAGE2_SIZE_PATTERN.match(candidate):
         return candidate
     logger.warning("尺寸格式 %s 不合法，回退到 %s", candidate, DEFAULT_IMAGE_SIZE)
@@ -237,16 +251,16 @@ def _normalize_image_size(size: str | None) -> str:
 def _base_image_payload(prompt: str, size: str | None) -> dict[str, str | int]:
     runtime = _runtime_settings()
     payload: dict[str, str | int] = {
-        "model": runtime.model,
+        "model": runtime_model(),
         "prompt": prompt,
         "size": _normalize_image_size(size),
     }
     optional: dict[str, str | int | None] = {
-        "quality": runtime.quality,
-        "background": runtime.background,
-        "moderation": runtime.moderation,
-        "output_format": runtime.output_format,
-        "output_compression": runtime.output_compression,
+        "quality": getattr(runtime, "quality", ""),
+        "background": getattr(runtime, "background", ""),
+        "moderation": getattr(runtime, "moderation", ""),
+        "output_format": getattr(runtime, "output_format", ""),
+        "output_compression": getattr(runtime, "output_compression", None),
     }
     for key, value in optional.items():
         if value not in ("", None):
@@ -261,8 +275,9 @@ def _generation_payload(prompt: str, size: str | None = None) -> dict[str, str |
 def _edit_payload(prompt: str, size: str | None = None) -> dict[str, str | int]:
     runtime = _runtime_settings()
     payload = _base_image_payload(prompt, size)
-    if runtime.input_fidelity:
-        payload["input_fidelity"] = runtime.input_fidelity
+    input_fidelity = getattr(runtime, "input_fidelity", "")
+    if input_fidelity:
+        payload["input_fidelity"] = input_fidelity
     return payload
 
 
@@ -696,14 +711,12 @@ def _prepare_ref_blobs(
 
 def _manga_edit_payload(prompt: str, size: str, ref_roles: list[str]) -> dict[str, object]:
     """按参考图用途构造编辑载荷，纯风格参考不启用高输入保真。"""
-    payload: dict[str, object] = {
-        "model": runtime_model(),
-        "prompt": prompt,
-        "size": size,
-    }
+    payload: dict[str, object] = _edit_payload(prompt, size)
     normalized_roles = [_normalize_ref_role(role) for role in ref_roles]
     if any(role != "style" for role in normalized_roles):
         payload["input_fidelity"] = _runtime_settings().input_fidelity or "high"
+    else:
+        payload.pop("input_fidelity", None)
     return payload
 
 
@@ -884,7 +897,7 @@ async def _download_generated_image(image_entry: dict, progress_label: str) -> b
         return image_bytes
     if image_entry.get("url"):
         logger.info("[%s] 收到图片 URL，开始下载", progress_label)
-        safe_url = validate_remote_media_url(str(image_entry["url"]))
+        safe_url = _safe_generated_image_url(str(image_entry["url"]))
         async with httpx.AsyncClient(timeout=300, follow_redirects=False) as client:
             async with client.stream("GET", safe_url) as img_resp:
                 img_resp.raise_for_status()
@@ -899,7 +912,7 @@ async def _download_generated_image(image_entry: dict, progress_label: str) -> b
     )
 
 async def _download_image_from_url(url: str, progress_label: str) -> bytes:
-    safe_url = validate_remote_media_url(url)
+    safe_url = _safe_generated_image_url(url)
     last_exc: Exception | None = None
     for attempt in range(1, DOWNLOAD_RETRIES + 1):
         try:
@@ -1106,13 +1119,13 @@ async def generate_reference_image(
                         logger.warning("[%s] 所有参考图片均不可用，降级为纯文本生成", progress_label)
                         resp = await client.post(
                             f"{runtime_base_url()}/images/generations",
-                            json={"model": runtime_model(), "prompt": current_prompt, "size": size},
+                            json=_generation_payload(current_prompt, size),
                             headers=_image_auth_headers(api_key, json_content=True),
                         )
                 else:
                     resp = await client.post(
                         f"{runtime_base_url()}/images/generations",
-                        json={"model": runtime_model(), "prompt": current_prompt, "size": size},
+                        json=_generation_payload(current_prompt, size),
                         headers=_image_auth_headers(api_key, json_content=True),
                     )
 
@@ -1615,7 +1628,7 @@ async def generate_manga_image(
                         effective_size = size or _runtime_settings().size
                         resp = await client.post(
                             f"{runtime_base_url()}/images/generations",
-                            json={"model": runtime_model(), "prompt": full_prompt, "size": effective_size},
+                            json=_generation_payload(full_prompt, effective_size),
                             headers=_image_auth_headers(api_key, json_content=True),
                         )
 
@@ -1784,6 +1797,9 @@ def _upload_image_url_to_oss(image_entry: dict, remote_key: str) -> str | None:
     """
     image_url = image_entry.get("url") if isinstance(image_entry, dict) else None
     if not image_url:
+        return None
+    if str(image_url).strip().lower().startswith("http://"):
+        logger.info("OSS URL 直传仅支持 HTTPS，改用受信任 HTTP 下载后上传")
         return None
     try:
         from . import oss as oss_service

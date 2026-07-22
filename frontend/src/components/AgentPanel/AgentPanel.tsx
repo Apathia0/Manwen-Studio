@@ -6,10 +6,12 @@ import {
   deleteAgentConversation,
   getAgentConversation,
   listAgentConversations,
+  uploadAgentAttachments,
   type AgentConversationSummary,
   type AgentWorkflowType,
 } from '../../api';
 import AgentMessage from './AgentMessage';
+import { renderAgentText } from './agentText';
 import AgentInput from './AgentInput';
 import QuickActions from './QuickActions';
 import ChangesBanner from './ChangesBanner';
@@ -114,6 +116,7 @@ export default function AgentPanel({
   shotId,
 }: AgentPanelProps) {
   const [input, setInput] = useState('');
+  const [attachments, setAttachments] = useState<File[]>([]);
   const [messages, setMessages] = useState<AgentMessageData[]>([]);
   const [streaming, setStreaming] = useState(false);
   const [streamContent, setStreamContent] = useState('');
@@ -310,8 +313,18 @@ export default function AgentPanel({
 
   const handleSend = useCallback(
     async (overrideContent?: string) => {
-      const content = (overrideContent ?? input).trim();
-      if (!content || streaming || !storyId) return;
+      const typedContent = (overrideContent ?? input).trim();
+      if ((!typedContent && attachments.length === 0) || streaming || !storyId) return;
+      const content = typedContent || '请分析我上传的附件，并给出可直接用于创作的结构化建议。';
+      let attachmentIds: string[] = [];
+      if (attachments.length) {
+        try {
+          attachmentIds = (await uploadAgentAttachments(storyId, attachments)).map((item) => item.id);
+        } catch (error: any) {
+          setSidebarError(error?.message || '附件上传失败');
+          return;
+        }
+      }
 
       let conversationId = activeConversationId;
       if (!conversationId) {
@@ -354,6 +367,7 @@ export default function AgentPanel({
 
       setMessages((prev) => [...prev, userMsg, emptyAssistantMsg]);
       setInput('');
+      setAttachments([]);
       setStreaming(true);
       setStreamContent('');
       setSidebarError('');
@@ -361,7 +375,7 @@ export default function AgentPanel({
       let accumulated = '';
       const toolCallMap = new Map<string, ToolCallInfo>();
 
-      abortRef.current = agentChatStream(storyId, conversationId, content, chapterId, 'execute', workflowType, workflowId, shotId, undefined, {
+      abortRef.current = agentChatStream(storyId, conversationId, content, chapterId, 'execute', workflowType, workflowId, shotId, undefined, attachmentIds, {
         onToken: (token: string) => {
           accumulated += token;
           setStreamContent(accumulated);
@@ -435,7 +449,7 @@ export default function AgentPanel({
         },
       });
     },
-    [activeConversationId, chapterId, generateId, input, storyId, streaming, syncAfterStream, workflowType, workflowId, shotId],
+    [activeConversationId, attachments, chapterId, generateId, input, storyId, streaming, syncAfterStream, workflowType, workflowId, shotId],
   );
 
   const handleAbort = useCallback(() => {
@@ -625,7 +639,7 @@ export default function AgentPanel({
                   <div className="max-w-[80%] rounded-2xl rounded-bl-md border border-[#d7e3f4] bg-[#f4f8ff] px-4 py-2.5">
                     {streamContent ? (
                       <div className="flex flex-col">
-                        <span className="whitespace-pre-wrap text-sm leading-relaxed text-gray-700">{streamContent}</span>
+                        <div className="text-sm leading-relaxed text-gray-700">{renderAgentText(streamContent)}</div>
                         <span className="ml-0.5 inline-block h-4 w-1.5 rounded-sm bg-blue-500 animate-pulse" />
                       </div>
                     ) : (
@@ -673,6 +687,8 @@ export default function AgentPanel({
               value={input}
               onChange={setInput}
               onSend={() => void handleSend()}
+              attachments={attachments}
+              onAttachmentsChange={setAttachments}
               disabled={loadingMessages}
               placeholder="输入你的问题，AI 助手会保留在当前历史会话里"
             />

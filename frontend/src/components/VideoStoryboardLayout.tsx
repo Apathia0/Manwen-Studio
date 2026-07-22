@@ -33,6 +33,7 @@ import {
   type VideoStylePreset,
 } from '../api';
 import { findCharacterPromptByName } from './videoWorkbenchUtils';
+import { isChapterWorkflowActive } from './chapterWorkflowUtils';
 import ChapterListPanel from './ChapterListPanel';
 import ChapterVideoWorkflowPanel from './ChapterVideoWorkflowPanel';
 import StyleSelectorModal from './StyleSelectorModal';
@@ -96,6 +97,8 @@ export default function VideoStoryboardLayout({
   const [videoAgentOpen, setVideoAgentOpen] = useState(false);
   const [agentShotId, setAgentShotId] = useState<number | undefined>(undefined);
   const pollTimerRef = useRef<number | null>(null);
+  const pollGenerationRef = useRef(0);
+  const pollAbortRef = useRef<AbortController | null>(null);
   const workflowStyleChapterIdRef = useRef<number | null>(null);
 
   const resolvedChapter = currentChapter;
@@ -112,6 +115,9 @@ export default function VideoStoryboardLayout({
   }, []);
 
   const stopPolling = useCallback(() => {
+    pollGenerationRef.current += 1;
+    pollAbortRef.current?.abort();
+    pollAbortRef.current = null;
     if (pollTimerRef.current) {
       window.clearTimeout(pollTimerRef.current);
       pollTimerRef.current = null;
@@ -151,21 +157,25 @@ export default function VideoStoryboardLayout({
 
   const pollWorkflowUntilSettled = useCallback(async (workflowId: number) => {
     stopPolling();
-
-    // 只有后台真正在处理的状态才算 running，等待用户操作的空闲状态不算
-    const ACTIVE_STATUSES = new Set(['parsing_shots', 'generating_storyboards', 'generating_videos', 'reanalyzing_prompts', 'generating_details']);
+    const pollGeneration = pollGenerationRef.current;
+    const pollAborter = new AbortController();
+    pollAbortRef.current = pollAborter;
 
     const tick = async () => {
+      if (pollGenerationRef.current !== pollGeneration) return;
       try {
         const status = await getChapterVideoWorkflowStatus(workflowId);
+        if (pollGenerationRef.current !== pollGeneration) return;
         const detail = await getChapterVideoWorkflow(workflowId);
+        if (pollGenerationRef.current !== pollGeneration) return;
         setWorkflow({ ...detail, ...status });
         restoreWorkflowStyle(detail);
 
-        const running = ACTIVE_STATUSES.has(status.workflow_status);
+        const running = isChapterWorkflowActive(status.workflow_status);
         setWorkflowRunning(running);
 
         if (running) {
+          if (pollGenerationRef.current !== pollGeneration) return;
           pollTimerRef.current = window.setTimeout(() => {
             void tick();
           }, 4000);
@@ -191,10 +201,18 @@ export default function VideoStoryboardLayout({
 
         // 解析完成，清除 parsing 状态
         setParsing(false);
-        await loadChapterAssets(status.chapter_id);
+        if (status.workflow_status === 'failed') {
+          toast.error(normalizeErrorMessage(status.error_message || status.message, '拆镜失败，请重试'));
+        }
+        await loadChapterAssets(status.chapter_id, pollAborter.signal);
       } catch (error: any) {
-        setWorkflowRunning(false);
-        toast.error(`刷新视频工作流失败: ${error.message || '未知错误'}`);
+        if (pollGenerationRef.current !== pollGeneration) return;
+        // 网络抖动不代表后端任务结束，保持运行态并继续查询，直到后端返回终态。
+        setWorkflowRunning(true);
+        console.error(`刷新视频工作流失败，稍后重试: ${error.message || '未知错误'}`);
+        pollTimerRef.current = window.setTimeout(() => {
+          void tick();
+        }, 8000);
       }
     };
 
@@ -215,8 +233,7 @@ export default function VideoStoryboardLayout({
 
       if (latest) {
         setSelectedReferenceIds(latest.character_reference_ids || []);
-        const ACTIVE_STATUSES = new Set(['parsing_shots', 'generating_storyboards', 'generating_videos', 'reanalyzing_prompts', 'generating_details']);
-        const isActive = ACTIVE_STATUSES.has(latest.workflow_status);
+        const isActive = isChapterWorkflowActive(latest.workflow_status);
         if (isActive) {
           // 立即设置运行状态，防止按钮在轮询启动前可点击
           setWorkflowRunning(true);

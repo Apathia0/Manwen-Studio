@@ -35,6 +35,19 @@ def test_validate_remote_media_url_allows_signed_public_url(monkeypatch):
     assert channels.validate_remote_media_url(url) == "https://cdn.example.com/video.mp4?signature=test"
 
 
+def test_validate_remote_media_url_allows_only_explicit_http_download_host(monkeypatch):
+    monkeypatch.setattr(
+        channels.socket,
+        "getaddrinfo",
+        lambda *args, **kwargs: [(channels.socket.AF_INET, channels.socket.SOCK_STREAM, 6, "", ("93.184.216.34", 80))],
+    )
+
+    url = "http://nana.code2alita.com/generated-images/example.jpg#fragment"
+    assert channels.validate_remote_media_url(url, allow_http_hosts={"nana.code2alita.com"}) == "http://nana.code2alita.com/generated-images/example.jpg"
+    with pytest.raises(HTTPException):
+        channels.validate_remote_media_url("http://cdn.example.com/image.png", allow_http_hosts={"nana.code2alita.com"})
+
+
 @pytest.mark.parametrize(
     "url",
     [

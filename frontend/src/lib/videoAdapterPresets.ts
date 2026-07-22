@@ -38,6 +38,11 @@ export const VIDEO_ADAPTER_PRESETS: readonly VideoAdapterPreset[] = [
     capabilities: {
       schema_version: 1,
       video: {
+        defaults: {
+          aspect_ratio: '16:9',
+          resolution: '720P',
+          duration_seconds: 8,
+        },
         input_modes: ['text_to_video', 'image_to_video'],
         limits: {
           aspect_ratios: ['16:9', '9:16'],
@@ -64,11 +69,16 @@ export const VIDEO_ADAPTER_PRESETS: readonly VideoAdapterPreset[] = [
       schema_version: 1,
       video: {
         payload_profile: 'legacy_lingdong',
+        defaults: {
+          aspect_ratio: '16:9',
+          resolution: '720P',
+          duration_seconds: 15,
+        },
         input_modes: ['text_to_video', 'image_to_video'],
         limits: {
           aspect_ratios: ['16:9', '9:16'],
           resolutions: ['720P'],
-          duration_seconds: { min: 4, max: 15 },
+          duration_seconds: { allowed: [15] },
           max_reference_images: 9,
         },
         wire: {

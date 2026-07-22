@@ -1667,8 +1667,7 @@ export interface RefImagesPayload {
 export type ImageRedrawMode = 'regenerate' | 'full' | 'partial';
 
 export function refImageUrl(imagePath: string): string {
-  if (imagePath.startsWith('http://') || imagePath.startsWith('https://')) return imagePath;
-  return `${BASE}/static/manga/${imagePath.replace('manga_outputs/', '')}`;
+  return toPublicMangaAssetUrl(imagePath) || '';
 }
 
 // Story-level
@@ -2394,15 +2393,10 @@ export async function scenesFromSelection(
 }
 
 export function mangaImageUrl(imagePath: string, cacheBust?: number): string {
-  // imagePath could be:
-  //   - "manga_outputs/chapter_1/panel_01_abc12345.png" (local)
-  //   - "https://oss.../manga_outputs/chapter_1/panel_01_abc12345.png" (OSS URL)
-  // For OSS/full URLs, use directly; otherwise proxy through /static/manga/
-  if (imagePath.startsWith('http://') || imagePath.startsWith('https://')) {
-    return cacheBust ? `${imagePath}?t=${cacheBust}` : imagePath;
-  }
-  const url = `${BASE}/static/manga/${imagePath.replace('manga_outputs/', '')}`;
-  return cacheBust ? `${url}?t=${cacheBust}` : url;
+  const url = toPublicMangaAssetUrl(imagePath) || '';
+  if (!cacheBust || !url) return url;
+  const separator = url.includes('?') ? '&' : '?';
+  return `${url}${separator}v=${encodeURIComponent(String(cacheBust))}`;
 }
 
 export function agentChatStream(
@@ -2415,6 +2409,7 @@ export function agentChatStream(
   workflowId?: number,
   shotId?: number,
   enabledSkills?: string[],
+  attachmentIds?: string[],
   callbacks?: {
     onToken?: (token: string) => void;
     onToolCall?: (toolCall: { id: string; name: string; args: any; status: 'running' }) => void;
@@ -2429,7 +2424,7 @@ export function agentChatStream(
   fetch(`${BASE}/api/stories/${storyId}/agent/chat`, {
     method: 'POST',
     headers: apiHeaders(true),
-    body: JSON.stringify({ conversation_id: conversationId, message: content, chapter_id: chapterId, mode, workflow_type: workflowType, workflow_id: workflowId, shot_id: shotId, enabled_skills: enabledSkills }),
+    body: JSON.stringify({ conversation_id: conversationId, message: content, chapter_id: chapterId, mode, workflow_type: workflowType, workflow_id: workflowId, shot_id: shotId, enabled_skills: enabledSkills, attachment_ids: attachmentIds }),
     signal: controller.signal,
   })
     .then(async (res) => {
@@ -2791,6 +2786,27 @@ export interface ChapterVideoShot {
   beat_density?: string | null;
   transition_to_next?: string | null;
   continuity_json?: Record<string, unknown> | null;
+}
+
+export interface AgentAttachment {
+  id: string;
+  filename: string;
+  content_type: string;
+  size: number;
+  url?: string | null;
+}
+
+export async function uploadAgentAttachments(storyId: number, files: File[]): Promise<AgentAttachment[]> {
+  const form = new FormData();
+  files.forEach((file) => form.append('files', file));
+  const res = await fetch(`${BASE}/api/stories/${storyId}/agent/attachments`, {
+    method: 'POST',
+    headers: apiHeaders(false),
+    body: form,
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '附件上传失败'));
+  const data = await res.json();
+  return data.attachments || [];
 }
 
 export interface ChapterVideoShotCreate {
@@ -3697,10 +3713,11 @@ export async function replaceVideoAsset(assetId: number, file: File): Promise<{ 
   return res.json();
 }
 
-export async function regenerateVideoAsset(assetId: number, prompt?: string, mask?: string): Promise<{ ok: boolean; asset: { id: number; file_path: string; revision: number } }> {
+export async function regenerateVideoAsset(assetId: number, prompt?: string, mask?: string, stylePreset?: string): Promise<{ ok: boolean; asset: { id: number; file_path: string; revision: number; style_preset?: string | null } }> {
   const body: Record<string, unknown> = {};
   if (prompt) body.prompt = prompt;
   if (mask) { body.mask = mask; body.mode = 'partial'; }
+  if (stylePreset) body.style_preset = stylePreset;
   const res = await fetch(`${BASE}/api/video-assets/${assetId}/regen`, {
     method: 'POST',
     headers: apiHeaders(true),
@@ -3908,7 +3925,7 @@ export async function setStoryVideoStylePreset(storyId: number, stylePresetId: n
 }
 
 export async function setShotVideoStylePreset(shotId: number, stylePreset: string): Promise<{ shot_id: number; style_preset: string }> {
-  const res = await fetch(`${BASE}/api/shots/${shotId}/style-preset`, {
+  const res = await fetch(`${BASE}/api/shots/${shotId}/video-style-preset`, {
     method: 'PUT',
     headers: apiHeaders(true),
     body: JSON.stringify({ style_preset: stylePreset }),
@@ -3918,7 +3935,7 @@ export async function setShotVideoStylePreset(shotId: number, stylePreset: strin
 }
 
 export async function deleteShotVideoStylePreset(shotId: number): Promise<{ shot_id: number; style_preset: null }> {
-  const res = await fetch(`${BASE}/api/shots/${shotId}/style-preset`, {
+  const res = await fetch(`${BASE}/api/shots/${shotId}/video-style-preset`, {
     method: 'DELETE',
     headers: apiHeaders(true),
   });
@@ -4952,6 +4969,39 @@ export interface PointsLedgerItem {
   balance_after?: number | null;
   created_at?: string | null;
   metadata?: Record<string, unknown>;
+  usage_event_id?: number | null;
+  usage_detail?: {
+    request_id?: string | null;
+    model_key?: string | null;
+    task_type?: string | null;
+    status?: string | null;
+    input_tokens?: number;
+    output_tokens?: number;
+    settled_points?: number;
+    stream_charged_points?: number | null;
+    billing_type?: string | null;
+    points_per_1m_tokens?: number | null;
+    input_points_per_1m?: number | null;
+    output_points_per_1m?: number | null;
+    streaming?: boolean;
+  } | null;
+}
+
+export interface PointsLedgerParams {
+  page?: number;
+  page_size?: number;
+  start_date?: string;
+  end_date?: string;
+  entry_type?: string;
+  direction?: 'income' | 'expense';
+}
+
+export interface PointsLedgerResponse {
+  items: PointsLedgerItem[];
+  total: number;
+  page: number;
+  page_size: number;
+  total_pages: number;
 }
 
 export interface PointsProduct {
@@ -4975,6 +5025,7 @@ export interface AiModelItem {
   channel_id: number;
   sort_order: number;
   video_capabilities?: VideoModelCapabilities;
+  image_capabilities?: ImageModelCapabilities;
   estimated_points?: number | null;
   price?: {
     billing_type: string;
@@ -4996,6 +5047,11 @@ export interface VideoModelCapabilities {
     resolutions?: string[];
     max_reference_images?: number;
   };
+}
+
+export interface ImageModelCapabilities {
+  defaults?: { quality?: 'auto' | 'high' | 'medium' | 'low' };
+  limits?: { qualities?: Array<'auto' | 'high' | 'medium' | 'low'> };
 }
 
 export interface AiCredentialStatus {
@@ -5085,8 +5141,20 @@ export async function getPointsAccount(): Promise<PointsAccount> {
   return res.json();
 }
 
-export async function getPointsLedger(limit = 50): Promise<{ items: PointsLedgerItem[] }> {
-  const res = await fetch(`${BASE}/api/points/ledger?limit=${limit}`, { headers: apiHeaders() });
+export async function getPointsLedger(
+  params: PointsLedgerParams | number = {},
+  signal?: AbortSignal,
+): Promise<PointsLedgerResponse> {
+  const normalized: PointsLedgerParams = typeof params === 'number' ? { page_size: params } : params;
+  const search = new URLSearchParams();
+  if (normalized.page != null) search.set('page', String(normalized.page));
+  if (normalized.page_size != null) search.set('page_size', String(normalized.page_size));
+  if (normalized.start_date) search.set('start_date', normalized.start_date);
+  if (normalized.end_date) search.set('end_date', normalized.end_date);
+  if (normalized.entry_type) search.set('entry_type', normalized.entry_type);
+  if (normalized.direction) search.set('direction', normalized.direction);
+  const query = search.toString();
+  const res = await fetch(`${BASE}/api/points/ledger${query ? `?${query}` : ''}`, { headers: apiHeaders(), signal });
   if (!res.ok) throw new Error(await readErrorMessage(res, '获取积分流水失败'));
   return res.json();
 }
@@ -5409,6 +5477,7 @@ export interface CreationStudioJob {
   negative_prompt: string | null;
   model_id: number | null;
   model_key: string | null;
+  model_display_name: string | null;
   parameters: Record<string, string | number | boolean | null>;
   status: CreationStudioJobStatus;
   stage: string;
@@ -5457,6 +5526,19 @@ export async function uploadCreationStudioAsset(file: File): Promise<{ asset: Cr
     body: form,
   });
   if (!res.ok) throw new Error(await readErrorMessage(res, '上传参考图片失败'));
+  return res.json();
+}
+
+export async function analyzeCreationStudioAssets(
+  assetIds: number[],
+  instruction?: string,
+): Promise<{ analysis: string; asset_ids: number[] }> {
+  const res = await fetch(`${BASE}/api/creation-studio/assets/analyze`, {
+    method: 'POST',
+    headers: apiHeaders(true),
+    body: JSON.stringify({ asset_ids: assetIds, instruction }),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '参考素材分析失败'));
   return res.json();
 }
 
