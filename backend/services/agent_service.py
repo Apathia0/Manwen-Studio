@@ -100,6 +100,16 @@ class AgentContextLimitError(RuntimeError):
         super().__init__(self.user_message)
 
 
+class AgentUpstreamInvalidRequestError(RuntimeError):
+    """上游拒绝了 Agent 请求参数。"""
+
+    code = "agent_upstream_invalid_request"
+    user_message = "上游 AI 模型拒绝了当前请求，请检查模型兼容配置或稍后重试。"
+
+    def __init__(self) -> None:
+        super().__init__(self.user_message)
+
+
 def _strip_repeated_continuation_prefix(previous: str, continuation: str) -> str:
     """移除续写开头与已输出结尾完全重叠的文本。"""
     if not previous or not continuation:
@@ -201,6 +211,39 @@ def _is_context_length_exceeded_response(status_code: int, response_text: str) -
         r"request.{0,40}\d+\s*tokens?.{0,60}exceed.{0,60}token.{0,20}limit",
     )
     return any(re.search(pattern, text, re.IGNORECASE) for pattern in context_patterns)
+
+
+def _is_output_token_limit_response(status_code: int, response_text: str) -> bool:
+    """识别输出 Token 数值过大，但不把它误判成输入上下文超限。"""
+    if status_code not in {400, 422}:
+        return False
+    text = (response_text or "").lower()
+    output_subjects = (
+        "max_tokens",
+        "max_completion_tokens",
+        "max completion",
+        "completion tokens",
+        "output token",
+        "输出 token",
+        "输出令牌",
+    )
+    limit_semantics = ("maximum", "must be", "allowed", "exceed", "too large", "limit", "上限", "超过", "过大")
+    return any(marker in text for marker in output_subjects) and any(
+        marker in text for marker in limit_semantics
+    )
+
+
+def _is_unsupported_output_token_parameter_response(status_code: int, response_text: str) -> bool:
+    """识别上游不支持当前输出 Token 字段的错误。"""
+    if status_code not in {400, 422}:
+        return False
+    text = (response_text or "").lower()
+    has_parameter = "max_tokens" in text or "max_completion_tokens" in text
+    unsupported = any(
+        marker in text
+        for marker in ("unsupported", "not support", "unknown parameter", "unrecognized", "不支持", "未知参数")
+    )
+    return has_parameter and unsupported
 
 
 def _safe_upstream_error_details(response_text: str) -> tuple[str, str, str, int]:
@@ -4573,24 +4616,66 @@ class AgentService:
             all_messages: list[dict] = [{"role": "system", "content": system_prompt}] + list(messages)
 
             from services.token_utils import (
+                TOKEN_COMPRESS_THRESHOLD,
                 emergency_compact_messages,
+                estimate_messages_tokens,
+                estimate_tokens,
                 should_compress_messages,
                 split_messages_for_compression,
             )
 
+            # 给 64K 级兼容上游预留工具 schema、输出和估算误差空间。
+            agent_prompt_token_budget = min(TOKEN_COMPRESS_THRESHOLD, 48_000)
+            tool_specs = self.tool_registry.get_tool_specs(
+                mode=mode,
+                workflow_type=workflow_type,
+                enabled_skills=enabled_skills,
+            )
+            tool_schema_tokens = estimate_tokens(
+                json.dumps(tool_specs, ensure_ascii=False, separators=(",", ":"))
+            )
+
+            def _estimated_prompt_tokens() -> int:
+                return estimate_messages_tokens(all_messages) + tool_schema_tokens
+
+            def _compact_to_agent_budget() -> None:
+                nonlocal all_messages
+                all_messages = emergency_compact_messages(
+                    all_messages,
+                    system_max_chars=12000,
+                    summary_max_chars=4000,
+                    user_max_chars=3000,
+                    assistant_max_chars=1500,
+                    tool_max_chars=800,
+                )
+                if _estimated_prompt_tokens() >= agent_prompt_token_budget:
+                    all_messages = emergency_compact_messages(
+                        all_messages,
+                        system_max_chars=8000,
+                        summary_max_chars=2000,
+                        user_max_chars=2000,
+                        assistant_max_chars=1000,
+                        tool_max_chars=500,
+                    )
+                if _estimated_prompt_tokens() >= agent_prompt_token_budget:
+                    raise AgentContextLimitError()
+
             async def _maybe_compress_history(*, force: bool = False):
                 nonlocal all_messages
                 if force:
-                    all_messages = emergency_compact_messages(all_messages)
+                    _compact_to_agent_budget()
                     logger.warning("Agent 上下文超限，已对当前会话执行紧急压缩")
                     return
-                if not should_compress_messages(all_messages):
+                if (
+                    not should_compress_messages(all_messages, threshold=agent_prompt_token_budget)
+                    and _estimated_prompt_tokens() < agent_prompt_token_budget
+                ):
                     return
                 system_msg = all_messages[0] if all_messages and all_messages[0].get("role") == "system" else None
                 conversation_messages = all_messages[1:] if system_msg else all_messages
                 old_messages, recent_messages = split_messages_for_compression(conversation_messages, keep_recent=8)
                 if not old_messages:
-                    all_messages = emergency_compact_messages(all_messages)
+                    _compact_to_agent_budget()
                     logger.warning("Agent 上下文达到压缩阈值，已执行确定性紧急压缩")
                     return
                 try:
@@ -4598,9 +4683,14 @@ class AgentService:
                     compressed_msg = {"role": "system", "content": f"## 对话历史摘要\n\n以下是之前对话的关键信息摘要：\n\n{summary}"}
                     all_messages = ([system_msg] if system_msg else []) + [compressed_msg] + recent_messages
                     logger.info("Agent 对话历史已压缩: %d 条旧消息 → 摘要", len(old_messages))
+                    if _estimated_prompt_tokens() >= agent_prompt_token_budget:
+                        _compact_to_agent_budget()
+                        logger.warning("Agent 历史摘要后仍超过输入预算，已执行确定性紧急压缩")
+                except AgentContextLimitError:
+                    raise
                 except Exception as exc:
                     logger.warning("Agent 对话历史压缩失败: %s", exc)
-                    all_messages = emergency_compact_messages(all_messages)
+                    _compact_to_agent_budget()
                     logger.warning("Agent 历史摘要失败，已切换确定性紧急压缩")
 
             await _maybe_compress_history()
@@ -4615,6 +4705,12 @@ class AgentService:
             write_executed = False
             write_tool_started = False
             context_limit_retry_count = 0
+            output_field_retry_count = 0
+            output_limit_retry_count = 0
+            output_token_field: str | None = "max_tokens"
+            output_token_limit = 4096
+            executed_write_tool_results: dict[tuple[str, str, str], str] = {}
+            historical_tool_call_ids: set[str] = set()
 
             # 提取用户最后一条消息，判断是否涉及正文或视频分镜写入请求
             _last_user_msg = ""
@@ -4677,6 +4773,8 @@ class AgentService:
                     break
 
                 await _maybe_compress_history()
+                if _estimated_prompt_tokens() >= agent_prompt_token_budget:
+                    _compact_to_agent_budget()
 
                 is_truncation_continuation = truncation_continuation_pending
                 payload = {
@@ -4684,9 +4782,10 @@ class AgentService:
                     "messages": all_messages,
                     "stream": True,
                     "stream_options": {"include_usage": True},
-                    "tools": self.tool_registry.get_tool_specs(mode=mode, workflow_type=workflow_type, enabled_skills=enabled_skills),
-                    "max_tokens": 8192,
+                    "tools": tool_specs,
                 }
+                if output_token_field:
+                    payload[output_token_field] = output_token_limit
 
                 collected_content = ""
                 tool_calls_acc: dict[int, dict[str, Any]] = {}
@@ -4704,7 +4803,8 @@ class AgentService:
                             error_code, error_type, error_hash, error_chars = _safe_upstream_error_details(response_text)
                             logger.warning(
                                 "Agent 上游请求失败 status=%s iteration=%s model=%s code=%s type=%s "
-                                "message_hash=%s message_chars=%s messages=%s payload_chars=%s topology=%s",
+                                "message_hash=%s message_chars=%s messages=%s payload_chars=%s estimated_prompt_tokens=%s "
+                                "output_token_field=%s output_token_limit=%s topology=%s",
                                 response.status_code,
                                 iteration_count,
                                 _deepseek_service.runtime_model(),
@@ -4714,10 +4814,32 @@ class AgentService:
                                 error_chars,
                                 len(all_messages),
                                 len(json.dumps(payload, ensure_ascii=False, default=str)),
+                                _estimated_prompt_tokens(),
+                                output_token_field or "-",
+                                output_token_limit,
                                 _message_topology(all_messages),
                             )
                             if _is_multimodal_unsupported_response(response.status_code, response_text):
                                 raise AgentMultimodalUnsupportedError()
+                            if _is_unsupported_output_token_parameter_response(response.status_code, response_text):
+                                if output_field_retry_count < 2:
+                                    output_field_retry_count += 1
+                                    if output_token_field == "max_tokens" and "max_completion_tokens" in response_text.lower():
+                                        output_token_field = "max_completion_tokens"
+                                    else:
+                                        output_token_field = None
+                                    iteration_count -= 1
+                                    logger.warning("Agent 输出 Token 字段不兼容，切换字段后重试 field=%s", output_token_field or "none")
+                                    continue
+                                raise AgentUpstreamInvalidRequestError()
+                            if _is_output_token_limit_response(response.status_code, response_text):
+                                if output_limit_retry_count < 2 and output_token_limit > 1024:
+                                    output_limit_retry_count += 1
+                                    output_token_limit = max(1024, output_token_limit // 2)
+                                    iteration_count -= 1
+                                    logger.warning("Agent 输出 Token 上限被拒绝，降至 %s 后重试", output_token_limit)
+                                    continue
+                                raise AgentUpstreamInvalidRequestError()
                             if _is_context_length_exceeded_response(response.status_code, response_text):
                                 if context_limit_retry_count == 0 and not write_tool_started:
                                     context_limit_retry_count += 1
@@ -4725,6 +4847,8 @@ class AgentService:
                                     iteration_count -= 1
                                     continue
                                 raise AgentContextLimitError()
+                            if error_code == "invalid_request_error" or error_type == "invalid_request_error":
+                                raise AgentUpstreamInvalidRequestError()
                         response.raise_for_status()
                         async for line in response.aiter_lines():
                             if not line.startswith("data: "):
@@ -4839,7 +4963,8 @@ class AgentService:
                         if not tool_call_id:
                             tool_call_id = f"call_agent_{iteration_count}_{i}_{uuid.uuid4().hex[:10]}"
                             tc["id"] = tool_call_id
-                        seen_tool_call_ids.add(tool_call_id)
+                        original_tool_call_id = tool_call_id
+                        seen_tool_call_ids.add(original_tool_call_id)
 
                         function = tc.get("function") if isinstance(tc.get("function"), dict) else {}
                         function_name = str(function.get("name") or "").strip()
@@ -4852,9 +4977,25 @@ class AgentService:
                             parsed_arguments = json.loads(raw_arguments) if raw_arguments else {}
                             if not isinstance(parsed_arguments, dict):
                                 raise ValueError("工具参数必须是 JSON 对象")
-                            history_arguments = json.dumps(parsed_arguments, ensure_ascii=False, separators=(",", ":"))
+                            history_arguments = json.dumps(
+                                parsed_arguments,
+                                ensure_ascii=False,
+                                separators=(",", ":"),
+                                sort_keys=True,
+                            )
                         except (json.JSONDecodeError, ValueError):
                             history_arguments = "{}"
+                        if self.tool_registry.is_write_tool(function_name):
+                            tc["_write_signature"] = (
+                                original_tool_call_id,
+                                function_name,
+                                history_arguments,
+                            )
+                        if original_tool_call_id in historical_tool_call_ids:
+                            tool_call_id = f"call_agent_replay_{iteration_count}_{i}_{uuid.uuid4().hex[:8]}"
+                            tc["id"] = tool_call_id
+                        historical_tool_call_ids.add(original_tool_call_id)
+                        historical_tool_call_ids.add(tool_call_id)
                         history_tool_calls.append({
                             "id": tool_call_id,
                             "type": "function",
@@ -4909,8 +5050,30 @@ class AgentService:
 
                         yield {"event": "tool_call", "data": json.dumps({"name": name, "arguments": args}, ensure_ascii=False)}
 
-                        if self.tool_registry.is_write_tool(name):
+                        is_write_tool = self.tool_registry.is_write_tool(name)
+                        if is_write_tool:
                             write_tool_started = True
+
+                        canonical_args = json.dumps(
+                            args,
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                            sort_keys=True,
+                        )
+                        write_signature = tc.get("_write_signature")
+                        if not isinstance(write_signature, tuple):
+                            write_signature = (str(tc["id"]), name, canonical_args)
+                        cached_write_result = executed_write_tool_results.get(write_signature) if is_write_tool else None
+                        if cached_write_result is not None:
+                            result_str = cached_write_result
+                            logger.warning("Agent 跳过跨轮重复写工具 tool=%s iteration=%s", name, iteration_count)
+                            yield {"event": "tool_result", "data": json.dumps({"name": name, "result": result_str}, ensure_ascii=False)}
+                            all_messages.append({
+                                "role": "tool",
+                                "tool_call_id": tc["id"],
+                                "content": result_str,
+                            })
+                            continue
 
                         try:
                             result_str = await asyncio.wait_for(
@@ -4929,6 +5092,9 @@ class AgentService:
                             )
                             yield {"event": "tool_result", "data": json.dumps({"name": name, "result": error_msg}, ensure_ascii=False)}
                             result_str = error_msg
+
+                        if is_write_tool and '"error"' not in result_str:
+                            executed_write_tool_results[write_signature] = result_str
 
                         all_messages.append({
                             "role": "tool",

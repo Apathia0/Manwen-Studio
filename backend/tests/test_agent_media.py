@@ -170,6 +170,16 @@ class _FakeAgentInputLengthErrorResponse(_FakeAgentContextErrorResponse):
         return b'{"error":{"type":"invalid_request_error","message":"Input length exceeds the model context length"}}'
 
 
+class _FakeAgentOutputLimitErrorResponse(_FakeAgentContextErrorResponse):
+    async def aread(self):
+        return b'{"error":{"type":"invalid_request_error","message":"Maximum completion tokens must be between 1 and 2048"}}'
+
+
+class _FakeAgentUnsupportedMaxTokensResponse(_FakeAgentContextErrorResponse):
+    async def aread(self):
+        return b'{"error":{"type":"invalid_request_error","message":"Unsupported parameter max_tokens; use max_completion_tokens instead"}}'
+
+
 def _agent_sse_response(content: str, finish_reason: str, tool_calls: list[dict] | None = None) -> list[str]:
     delta: dict = {}
     if content:
@@ -592,6 +602,101 @@ async def test_agent_skips_duplicate_tool_call_id(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_agent_skips_repeated_write_tool_id_across_iterations(monkeypatch):
+    first_call = [{
+        "index": 0,
+        "id": "call-write-once",
+        "function": {"name": "update_chapter_content", "arguments": '{"chapter_id":1,"content":"正文"}'},
+    }]
+    reordered_call = [{
+        "index": 0,
+        "id": "call-write-once",
+        "function": {"name": "update_chapter_content", "arguments": '{"content":"正文","chapter_id":1}'},
+    }]
+    _install_agent_stream_client(
+        monkeypatch,
+        [
+            _agent_sse_response("", "tool_calls", tool_calls=first_call),
+            _agent_sse_response("", "tool_calls", tool_calls=reordered_call),
+            _agent_sse_response("写入完成", "stop"),
+        ],
+    )
+    service = agent_service_module.AgentService()
+    execute_count = 0
+
+    async def fake_execute(_name, _args):
+        nonlocal execute_count
+        execute_count += 1
+        return '{"ok":true}'
+
+    monkeypatch.setattr(service.tool_registry, "execute", fake_execute)
+    monkeypatch.setattr(service.tool_registry, "is_write_tool", lambda name: name == "update_chapter_content")
+
+    events = [
+        event
+        async for event in service.run_stream(
+            messages=[{"role": "user", "content": "更新章节正文"}],
+            story_context="测试上下文",
+            api_key="test-key",
+            mode="execute",
+        )
+    ]
+
+    assert execute_count == 1
+    assert json.loads(next(event for event in events if event["event"] == "done")["data"])["content"] == "写入完成"
+
+
+@pytest.mark.asyncio
+async def test_agent_executes_reused_write_tool_id_when_arguments_change(monkeypatch):
+    first_call = [{
+        "index": 0,
+        "id": "call-reused",
+        "function": {"name": "update_chapter_content", "arguments": '{"chapter_id":1}'},
+    }]
+    second_call = [{
+        "index": 0,
+        "id": "call-reused",
+        "function": {"name": "update_chapter_content", "arguments": '{"chapter_id":2}'},
+    }]
+    payloads = _install_agent_stream_client(
+        monkeypatch,
+        [
+            _agent_sse_response("", "tool_calls", tool_calls=first_call),
+            _agent_sse_response("", "tool_calls", tool_calls=second_call),
+            _agent_sse_response("写入完成", "stop"),
+        ],
+    )
+    service = agent_service_module.AgentService()
+    executed_args: list[dict] = []
+
+    async def fake_execute(_name, args):
+        executed_args.append(args)
+        return '{"ok":true}'
+
+    monkeypatch.setattr(service.tool_registry, "execute", fake_execute)
+    monkeypatch.setattr(service.tool_registry, "is_write_tool", lambda name: name == "update_chapter_content")
+
+    events = [
+        event
+        async for event in service.run_stream(
+            messages=[{"role": "user", "content": "更新两章正文"}],
+            story_context="测试上下文",
+            api_key="test-key",
+            mode="execute",
+        )
+    ]
+
+    assert executed_args == [{"chapter_id": 1}, {"chapter_id": 2}]
+    replay_calls = [
+        message["tool_calls"][0]["id"]
+        for message in payloads[-1]["messages"]
+        if message.get("role") == "assistant" and message.get("tool_calls")
+    ]
+    assert len(replay_calls) == len(set(replay_calls))
+    assert json.loads(next(event for event in events if event["event"] == "done")["data"])["content"] == "写入完成"
+
+
+@pytest.mark.asyncio
 async def test_agent_run_stream_sets_token_limit_and_continues_after_length(monkeypatch):
     payloads = _install_agent_stream_client(
         monkeypatch,
@@ -612,7 +717,7 @@ async def test_agent_run_stream_sets_token_limit_and_continues_after_length(monk
     ]
 
     assert len(payloads) == 2
-    assert all(payload["max_tokens"] == 8192 for payload in payloads)
+    assert all(payload["max_tokens"] == 4096 for payload in payloads)
     assert all("max_completion_tokens" not in payload for payload in payloads)
     token_text = "".join(
         json.loads(event["data"])["content"]
@@ -623,6 +728,56 @@ async def test_agent_run_stream_sets_token_limit_and_continues_after_length(monk
     done = next(event for event in events if event["event"] == "done")
     assert json.loads(done["data"])["content"] == token_text
     assert "不要重复" in payloads[1]["messages"][-1]["content"]
+
+
+@pytest.mark.asyncio
+async def test_agent_reduces_output_token_limit_after_upstream_rejection(monkeypatch):
+    payloads = _install_agent_stream_client(
+        monkeypatch,
+        [_FakeAgentOutputLimitErrorResponse(), _agent_sse_response("降档成功", "stop")],
+    )
+    events = [
+        event
+        async for event in agent_service_module.AgentService().run_stream(
+            messages=[{"role": "user", "content": "继续处理"}],
+            story_context="测试上下文",
+            api_key="test-key",
+            mode="analyze",
+        )
+    ]
+
+    assert [payload["max_tokens"] for payload in payloads] == [4096, 2048]
+    assert json.loads(next(event for event in events if event["event"] == "done")["data"])["content"] == "降档成功"
+
+
+def test_output_limit_error_recognizes_max_completion_tokens_field():
+    assert agent_service_module._is_output_token_limit_response(
+        400,
+        '{"error":{"type":"invalid_request_error","message":"Invalid max_completion_tokens: value exceeds maximum 2048"}}',
+    )
+
+
+@pytest.mark.asyncio
+async def test_agent_switches_output_token_field_when_upstream_requires_it(monkeypatch):
+    payloads = _install_agent_stream_client(
+        monkeypatch,
+        [_FakeAgentUnsupportedMaxTokensResponse(), _agent_sse_response("兼容成功", "stop")],
+    )
+
+    events = [
+        event
+        async for event in agent_service_module.AgentService().run_stream(
+            messages=[{"role": "user", "content": "继续处理"}],
+            story_context="测试上下文",
+            api_key="test-key",
+            mode="analyze",
+        )
+    ]
+
+    assert payloads[0]["max_tokens"] == 4096
+    assert "max_tokens" not in payloads[1]
+    assert payloads[1]["max_completion_tokens"] == 4096
+    assert json.loads(next(event for event in events if event["event"] == "done")["data"])["content"] == "兼容成功"
 
 
 @pytest.mark.asyncio

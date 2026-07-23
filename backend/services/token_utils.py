@@ -524,7 +524,15 @@ def _deterministic_history_summary(messages: list[dict], max_chars: int = 10000)
     return "\n".join(lines) or "更早的对话已因上下文超限被压缩，请以最新用户指令为准。"
 
 
-def emergency_compact_messages(messages: list[dict]) -> list[dict]:
+def emergency_compact_messages(
+    messages: list[dict],
+    *,
+    system_max_chars: int = 30000,
+    summary_max_chars: int = 10000,
+    user_max_chars: int = 12000,
+    assistant_max_chars: int = 6000,
+    tool_max_chars: int = 2000,
+) -> list[dict]:
     """上下文超限后的确定性压缩，仅用于一次安全重试。"""
     if not messages:
         return []
@@ -550,16 +558,19 @@ def emergency_compact_messages(messages: list[dict]) -> list[dict]:
     if system_message:
         result.append({
             **system_message,
-            "content": _emergency_compact_content(system_message.get("content", ""), max_chars=30000),
+            "content": _emergency_compact_content(system_message.get("content", ""), max_chars=system_max_chars),
         })
     if old_messages:
         result.append({
             "role": "system",
-            "content": "## 当前会话历史紧急摘要\n\n" + _deterministic_history_summary(old_messages),
+            "content": "## 当前会话历史紧急摘要\n\n" + _deterministic_history_summary(
+                old_messages,
+                max_chars=summary_max_chars,
+            ),
         })
     for message in recent_messages:
         role = str(message.get("role") or "")
-        max_chars = 12000 if role == "user" else 6000 if role == "assistant" else 2000
+        max_chars = user_max_chars if role == "user" else assistant_max_chars if role == "assistant" else tool_max_chars
         result.append({
             **message,
             "content": _emergency_compact_content(message.get("content", ""), max_chars=max_chars),
