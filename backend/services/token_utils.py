@@ -561,12 +561,12 @@ def emergency_compact_messages(
             "content": _emergency_compact_content(system_message.get("content", ""), max_chars=system_max_chars),
         })
     if old_messages:
+        history_summary = _deterministic_history_summary(old_messages, max_chars=summary_max_chars)
+        escaped_summary = history_summary.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
         result.append({
-            "role": "system",
-            "content": "## 当前会话历史紧急摘要\n\n" + _deterministic_history_summary(
-                old_messages,
-                max_chars=summary_max_chars,
-            ),
+            "role": "user",
+            "_agent_synthetic_context": "history",
+            "content": "## 当前会话历史紧急摘要\n\n" + escaped_summary,
         })
     for message in recent_messages:
         role = str(message.get("role") or "")
