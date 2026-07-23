@@ -22,6 +22,10 @@ const 工具标签映射: Record<string, string> = {
   bulk_add_chapter_plans: '正在批量添加章节规划…',
   batch_adjust_chapters: '正在批量调整章节…',
   update_scenes: '正在更新分镜脚本…',
+  get_manga_storyboard: '正在读取漫画分镜…',
+  update_manga_storyboard_scene: '正在修改单格分镜…',
+  batch_update_manga_storyboard_scenes: '正在批量修改漫画分镜…',
+  replace_manga_storyboard: '正在替换完整漫画分镜…',
   // ── 视频读取工具 ──
   get_video_workflow: '正在读取视频工作流…',
   get_workflow_shots: '正在读取镜头列表…',

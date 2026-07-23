@@ -235,6 +235,7 @@ export function PointsAiAdminPage() {
     channel_id: 0,
     model_key: '',
     display_name: '',
+    intro_tag: '',
     modality: 'text',
     initial_points: DEFAULT_TEXT_POINTS_PER_1M_TOKENS,
     initial_output_points: DEFAULT_TEXT_POINTS_PER_1M_TOKENS,
@@ -353,6 +354,7 @@ export function PointsAiAdminPage() {
       channel_id: previous.channel_id || channels[0]?.id || 0,
       model_key: '',
       display_name: '',
+      intro_tag: '',
       modality: 'text',
       initial_points: DEFAULT_TEXT_POINTS_PER_1M_TOKENS,
       initial_output_points: DEFAULT_TEXT_POINTS_PER_1M_TOKENS,
@@ -373,6 +375,7 @@ export function PointsAiAdminPage() {
       channel_id: model.channel_id,
       model_key: model.model_key,
       display_name: model.display_name,
+      intro_tag: model.intro_tag || '',
       modality: model.modality,
       initial_points: model.modality === 'text'
         ? textPrices.input
@@ -1054,6 +1057,7 @@ export function PointsAiAdminPage() {
                         <div className="min-w-0">
                           <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
                             <span className="font-medium text-slate-900">{model.display_name}</span>
+                            {model.intro_tag ? <span className="rounded bg-blue-50 px-1.5 py-0.5 text-xs text-blue-700">{model.intro_tag}</span> : null}
                             <span className="break-all font-mono text-xs text-slate-400">{model.model_key}</span>
                             <span className="rounded bg-slate-100 px-1.5 py-0.5 text-xs text-slate-600">{model.modality}</span>
                           </div>
@@ -1259,6 +1263,9 @@ export function PointsAiAdminPage() {
                 <Field label="显示名称" hint="留空使用模型标识">
                   <Input value={modelForm.display_name} placeholder="面向用户展示的名称" onChange={(event) => setModelForm({ ...modelForm, display_name: event.target.value })} />
                 </Field>
+                <Field label="介绍标签" hint={`${modelForm.intro_tag.length}/80`}>
+                  <Input maxLength={80} value={modelForm.intro_tag} placeholder="例如：高性价比、长视频、细节出色" onChange={(event) => setModelForm({ ...modelForm, intro_tag: event.target.value })} />
+                </Field>
                 <Field label="能力类型">
                   <Select disabled={Boolean(editingModelId)} value={modelForm.modality} onChange={(event) => {
                     setSelectedVideoPreset('');
@@ -1343,6 +1350,7 @@ export function PointsAiAdminPage() {
                         : undefined;
                       await updateAdminAiModel(editingModelId, {
                         display_name: modelForm.display_name || modelForm.model_key,
+                        intro_tag: modelForm.intro_tag,
                         sort_order: modelForm.sort_order,
                         user_visible: modelForm.user_visible,
                         ...(capabilities ? { capabilities_json: capabilities } : {}),
@@ -1369,6 +1377,7 @@ export function PointsAiAdminPage() {
                       channel_id: modelForm.channel_id,
                       model_key: modelForm.model_key,
                       display_name: modelForm.display_name || modelForm.model_key,
+                      intro_tag: modelForm.intro_tag,
                       modality: initialModality,
                       enabled: true,
                       user_visible: false,

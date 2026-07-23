@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -454,6 +455,105 @@ def build_history_summary_system_prompt() -> str:
         "确保压缩后的摘要保留所有关键信息，包括：讨论主题、决定、修改内容、用户偏好、"
         "任务进展、未解决问题等。摘要应该足够详细，让 AI 助手在阅读后能无缝继续对话。"
     )
+
+
+def _truncate_middle(text: str, max_chars: int) -> str:
+    """保留文本首尾，避免紧急压缩时丢失目标和最新约束。"""
+    if len(text) <= max_chars:
+        return text
+    head_chars = max_chars * 2 // 3
+    tail_chars = max_chars - head_chars
+    return text[:head_chars] + "\n...（上下文超限，已紧急压缩）...\n" + text[-tail_chars:]
+
+
+def _emergency_compact_content(content: Any, *, max_chars: int) -> Any:
+    """压缩单条文本或多模态内容，最多保留两张当前视觉输入。"""
+    if isinstance(content, str):
+        return _truncate_middle(content, max_chars)
+    if not isinstance(content, list):
+        return _truncate_middle(str(content or ""), max_chars)
+
+    compacted: list[dict[str, Any]] = []
+    image_count = 0
+    remaining_text_chars = max_chars
+    for item in content:
+        if not isinstance(item, dict):
+            continue
+        if item.get("type") == "image_url":
+            if image_count < 2:
+                compacted.append(item)
+                image_count += 1
+            continue
+        if item.get("type") == "text":
+            text = str(item.get("text") or "")
+            if remaining_text_chars <= 0:
+                continue
+            next_text = _truncate_middle(text, remaining_text_chars)
+            compacted.append({**item, "text": next_text})
+            remaining_text_chars -= len(next_text)
+    return compacted or [{"type": "text", "text": "当前多模态内容已因上下文超限压缩，请按用户最新指令继续。"}]
+
+
+def _deterministic_history_summary(messages: list[dict], max_chars: int = 10000) -> str:
+    """不依赖上游模型生成紧急历史摘要，确保 400 后一定能缩短请求。"""
+    lines: list[str] = []
+    used = 0
+    role_labels = {"user": "用户", "assistant": "助手", "tool": "工具", "system": "系统"}
+    for message in reversed(messages):
+        role = str(message.get("role") or "unknown")
+        raw_content = message.get("content", "")
+        if isinstance(raw_content, list):
+            raw_content = " ".join(
+                str(item.get("text") or "")
+                for item in raw_content
+                if isinstance(item, dict) and item.get("type") == "text"
+            )
+        text = re.sub(r"\s+", " ", str(raw_content or "")).strip()
+        if not text:
+            continue
+        excerpt = _truncate_middle(text, min(1200, max_chars - used))
+        line = f"- {role_labels.get(role, role)}：{excerpt}"
+        if used + len(line) > max_chars:
+            break
+        lines.append(line)
+        used += len(line)
+    lines.reverse()
+    return "\n".join(lines) or "更早的对话已因上下文超限被压缩，请以最新用户指令为准。"
+
+
+def emergency_compact_messages(messages: list[dict]) -> list[dict]:
+    """上下文超限后的确定性压缩，仅用于一次安全重试。"""
+    if not messages:
+        return []
+    system_message = messages[0] if messages[0].get("role") == "system" else None
+    conversation = messages[1:] if system_message else list(messages)
+
+    if len(conversation) <= 6:
+        old_messages = conversation[:-1]
+        recent_messages = conversation[-1:]
+    else:
+        old_messages = conversation[:-6]
+        recent_messages = conversation[-6:]
+
+    result: list[dict] = []
+    if system_message:
+        result.append({
+            **system_message,
+            "content": _emergency_compact_content(system_message.get("content", ""), max_chars=30000),
+        })
+    if old_messages:
+        result.append({
+            "role": "system",
+            "content": "## 当前会话历史紧急摘要\n\n" + _deterministic_history_summary(old_messages),
+        })
+    for message in recent_messages:
+        role = str(message.get("role") or "")
+        max_chars = 12000 if role == "user" else 6000 if role == "assistant" else 2000
+        result.append({
+            **message,
+            "content": _emergency_compact_content(message.get("content", ""), max_chars=max_chars),
+        })
+    return result
 
 
 # ─── 通用压缩入口 ──────────────────────────────────────────

@@ -8,7 +8,7 @@ from typing import Any
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
-from models import AiModel, AiTaskDefault, AiUsageEvent, UserAiPreference
+from models import AiChannel, AiModel, AiTaskDefault, AiUsageEvent, UserAiPreference
 from services.ai.catalog import get_active_price, get_visible_model
 from services.ai.channels import get_channel, load_platform_key
 from services.ai.context import AIExecutionContext
@@ -84,7 +84,13 @@ def resolve_model(
 
     model = (
         db.query(AiModel)
-        .filter(AiModel.enabled.is_(True), AiModel.user_visible.is_(True), AiModel.modality == modality)
+        .join(AiChannel, AiChannel.id == AiModel.channel_id)
+        .filter(
+            AiModel.enabled.is_(True),
+            AiModel.user_visible.is_(True),
+            AiModel.modality == modality,
+            AiChannel.enabled.is_(True),
+        )
         .order_by(AiModel.sort_order.asc(), AiModel.id.asc())
         .first()
     )

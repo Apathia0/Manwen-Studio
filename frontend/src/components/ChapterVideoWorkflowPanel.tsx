@@ -1482,6 +1482,11 @@ const typeConfig: Record<string, { label: string; icon: React.ReactNode; color: 
 
                     {/* 底部操作按钮 */}
                     <div className="mt-4 flex flex-wrap items-center gap-2">
+                       {shot.storyboard_prompt_stale && (
+                         <span className="inline-flex items-center gap-1 rounded-lg border border-amber-200 bg-amber-50 px-3 py-1.5 text-xs text-amber-700">
+                           <Sparkles size={12} /> Agent 已更新分镜，提示词待重新分析
+                         </span>
+                       )}
                        <button
                          onClick={() => void onReanalyzePrompt([shot.id])}
                          disabled={workflowRunning}

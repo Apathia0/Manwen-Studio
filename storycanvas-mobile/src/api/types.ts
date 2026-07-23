@@ -400,6 +400,7 @@ export interface ChapterVideoShot {
   emotion_plan?: string | null
   continuity_notes?: string | null
   storyboard_prompt?: string | null
+  storyboard_prompt_stale: boolean
   video_prompt?: string | null
   character_prompts?: Array<{ name: string; prompt: string }> | null
   scene_prompt?: string | null

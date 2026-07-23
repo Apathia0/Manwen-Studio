@@ -2404,7 +2404,7 @@ export function agentChatStream(
   conversationId: number,
   content: string,
   chapterId?: number,
-  mode: AgentMode = 'execute',
+  mode: AgentMode = 'analyze',
   workflowType?: string,
   workflowId?: number,
   shotId?: number,
@@ -2414,8 +2414,8 @@ export function agentChatStream(
     onToken?: (token: string) => void;
     onToolCall?: (toolCall: { id: string; name: string; args: any; status: 'running' }) => void;
     onToolResult?: (toolCall: { id: string; name: string; args: any; status: 'success' | 'error'; summary?: string }) => void;
-    onDone?: (content: string, pendingChanges?: any[]) => void;
-    onError?: (err: string) => void;
+    onDone?: (content: string, pendingChanges?: any[], runId?: string) => void;
+    onError?: (error: { message: string; code?: string }) => void;
   },
 ): AbortController {
   const controller = new AbortController();
@@ -2429,12 +2429,12 @@ export function agentChatStream(
   })
     .then(async (res) => {
       if (!res.ok) {
-        callbacks?.onError?.(await readErrorMessage(res, 'AI 助手请求失败，请稍后重试'));
+        callbacks?.onError?.({ message: await readErrorMessage(res, 'AI 助手请求失败，请稍后重试') });
         return;
       }
       const reader = res.body?.getReader();
       if (!reader) {
-        callbacks?.onError?.('AI 助手连接未返回可读取内容，请稍后重试');
+        callbacks?.onError?.({ message: 'AI 助手连接未返回可读取内容，请稍后重试' });
         return;
       }
       const decoder = new TextDecoder();
@@ -2498,14 +2498,17 @@ export function agentChatStream(
               callbacks?.onToolResult?.(toolCall);
             } else if (currentEvent === 'done') {
               terminalEventReceived = true;
-              callbacks?.onDone?.(data.content ?? '', data.pending_changes);
+              callbacks?.onDone?.(data.content ?? '', data.pending_changes, data.run_id);
             } else if (currentEvent === 'error' || data.error) {
               terminalEventReceived = true;
-              callbacks?.onError?.(normalizeErrorMessage(data.error, 'AI 助手执行失败，请稍后重试'));
+              callbacks?.onError?.({
+                message: normalizeErrorMessage(data.error, 'AI 助手执行失败，请稍后重试'),
+                code: typeof data.code === 'string' ? data.code : undefined,
+              });
             }
           } catch {
             terminalEventReceived = true;
-            callbacks?.onError?.('AI 助手返回了无法解析的数据，请刷新后重试');
+            callbacks?.onError?.({ message: 'AI 助手返回了无法解析的数据，请刷新后重试' });
           }
           currentEvent = 'message';
         }
@@ -2524,12 +2527,12 @@ export function agentChatStream(
       }
       if (buffer.trim()) handleLine(buffer);
       if (!terminalEventReceived && !controller.signal.aborted) {
-        callbacks?.onError?.('AI 助手连接意外中断，请重试');
+        callbacks?.onError?.({ message: 'AI 助手连接意外中断，请重试' });
       }
     })
     .catch((err) => {
       if (err.name !== 'AbortError') {
-        callbacks?.onError?.(normalizeErrorMessage(err, 'AI 助手连接失败，请稍后重试'));
+        callbacks?.onError?.({ message: normalizeErrorMessage(err, 'AI 助手连接失败，请稍后重试') });
       }
     });
 
@@ -2573,22 +2576,41 @@ export async function deleteAgentConversation(storyId: number, conversationId: n
   if (!res.ok) throw new Error(await readErrorMessage(res, '删除助手对话失败'));
 }
 
-export async function agentConfirmChanges(storyId: number, conversationId?: number | null): Promise<void> {
+export async function getAgentPendingChanges(
+  storyId: number,
+  conversationId: number,
+): Promise<{ changes: any[] }> {
+  const query = new URLSearchParams({ conversation_id: String(conversationId) });
+  const res = await fetch(`${BASE}/api/stories/${storyId}/agent/pending-changes?${query.toString()}`, {
+    headers: apiHeaders(),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '获取助手修改记录失败'));
+  return res.json();
+}
+
+export async function agentConfirmChanges(storyId: number, conversationId?: number | null, runId?: string | null): Promise<void> {
   const res = await fetch(`${BASE}/api/stories/${storyId}/agent/confirm`, {
     method: 'POST',
     headers: apiHeaders(true),
-    body: JSON.stringify(conversationId ? { conversation_id: conversationId } : {}),
+    body: JSON.stringify({ ...(conversationId ? { conversation_id: conversationId } : {}), ...(runId ? { run_id: runId } : {}) }),
   });
   if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
 }
 
-export async function agentRollbackChanges(storyId: number, conversationId?: number | null): Promise<void> {
+export interface AgentRollbackResult {
+  ok: boolean;
+  pending_retained?: boolean;
+  results?: Array<{ ok?: boolean; conflict?: boolean; error?: string }>;
+}
+
+export async function agentRollbackChanges(storyId: number, conversationId?: number | null, runId?: string | null): Promise<AgentRollbackResult> {
   const res = await fetch(`${BASE}/api/stories/${storyId}/agent/rollback`, {
     method: 'POST',
     headers: apiHeaders(true),
-    body: JSON.stringify(conversationId ? { conversation_id: conversationId } : {}),
+    body: JSON.stringify({ ...(conversationId ? { conversation_id: conversationId } : {}), ...(runId ? { run_id: runId } : {}) }),
   });
   if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
+  return res.json();
 }
 
 // ── Video Workflow ──────────────────────────────────────────
@@ -2765,6 +2787,7 @@ export interface ChapterVideoShot {
   emotion_plan?: string | null;
   continuity_notes?: string | null;
   storyboard_prompt?: string | null;
+  storyboard_prompt_stale: boolean;
   video_prompt?: string | null;
   character_prompts?: Array<{ name: string; prompt: string }> | null;
   scene_prompt?: string | null;
@@ -5021,12 +5044,14 @@ export interface AiModelItem {
   id: number;
   model_key: string;
   display_name: string;
+  intro_tag: string;
   modality: string;
   channel_id: number;
   sort_order: number;
   video_capabilities?: VideoModelCapabilities;
   image_capabilities?: ImageModelCapabilities;
   estimated_points?: number | null;
+  platform_configured: boolean;
   price?: {
     billing_type: string;
     price_config: Record<string, unknown>;
@@ -5087,6 +5112,7 @@ export interface AiModelAdmin {
   channel_id: number;
   model_key: string;
   display_name: string;
+  intro_tag: string;
   modality: string;
   enabled: boolean;
   user_visible: boolean;

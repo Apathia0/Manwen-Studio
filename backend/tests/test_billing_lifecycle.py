@@ -13,10 +13,10 @@ from database import Base
 from models import AiChannel, AiModel, AiModelPrice, AiUsageEvent, BackgroundTask, Chapter, MangaImage, PointsAccount, PointsLedgerEntry, Story, User
 from routers import points_ai
 from services.ai.bootstrap import ensure_default_channels_and_models, migrate_active_text_per_call_prices
-from services.ai.catalog import get_active_price
+from services.ai.catalog import get_active_price, get_visible_model, list_user_visible_models, serialize_model_for_user
 from services.ai.channels import set_platform_key
 from services.ai.credentials import save_user_api_key
-from services.ai.resolver import begin_ai_call, complete_ai_call, refund_ai_call
+from services.ai.resolver import begin_ai_call, complete_ai_call, refund_ai_call, resolve_model
 from services.points import accounts as points_accounts
 from services.points.pricing import estimate_points
 from services import deepseek
@@ -73,6 +73,40 @@ def _billing_session(*, billing_type: str = "per_call", price_config: dict | Non
     )
     db.commit()
     return db, user, model
+
+
+def test_user_model_catalog_serializes_intro_tag_price_and_platform_availability():
+    db, _user, model = _billing_session(billing_type="per_image", price_config={"points_per_image": 6}, modality="image")
+    model.intro_tag = "细节出色"
+    model.capabilities_json = {"image": {"defaults": {"quality": "high"}}}
+    db.commit()
+
+    result = serialize_model_for_user(db, model)
+
+    assert result["intro_tag"] == "细节出色"
+    assert result["image_capabilities"] == {"defaults": {"quality": "high"}}
+    assert result["price"]["billing_type"] == "per_image"
+    assert result["estimated_points"] == pytest.approx(6)
+    assert result["platform_configured"] is True
+
+    model.channel.platform_secret_ciphertext = None
+    db.commit()
+    assert serialize_model_for_user(db, model)["platform_configured"] is False
+
+
+def test_disabled_channel_models_are_not_visible_or_selected_as_fallback():
+    db, user, model = _billing_session()
+    model.channel.enabled = False
+    db.commit()
+
+    assert list_user_visible_models(db) == []
+    with pytest.raises(HTTPException) as visible_error:
+        get_visible_model(db, model.id)
+    assert visible_error.value.status_code == 404
+
+    with pytest.raises(HTTPException) as fallback_error:
+        resolve_model(db, user.id, modality="text")
+    assert fallback_error.value.status_code == 400
 
 
 def test_reserved_call_failure_releases_all_points_once():

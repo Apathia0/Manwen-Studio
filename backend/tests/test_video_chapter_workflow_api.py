@@ -63,6 +63,26 @@ class _FakeDb:
         return None
 
 
+@pytest.fixture(autouse=True)
+def isolate_storyboard_completion(monkeypatch):
+    """这些单元测试只验证编排参数，不连接真实数据库完成生成写回。"""
+    monkeypatch.setattr(
+        video_chapter_pipeline,
+        "_begin_storyboard_generation_if_current",
+        lambda *_args, **_kwargs: "test-generation-token",
+    )
+    monkeypatch.setattr(
+        video_chapter_pipeline,
+        "_complete_storyboard_generation_if_current",
+        lambda *_args, **_kwargs: True,
+    )
+    monkeypatch.setattr(
+        video_chapter_pipeline,
+        "_fail_storyboard_generation_if_current",
+        lambda *_args, **_kwargs: None,
+    )
+
+
 def test_api_create_chapter_workflow_does_not_refresh_detached_instance(monkeypatch):
     db = _FakeDb()
     init_db_calls: list[dict[str, object]] = []

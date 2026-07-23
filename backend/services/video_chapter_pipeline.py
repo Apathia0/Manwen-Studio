@@ -154,6 +154,7 @@ def save_shots_from_parse(workflow_id: int, shots_data: list[dict[str, Any]]) ->
                 emotion_plan=shot_data.get("emotion_plan"),
                 continuity_notes=shot_data.get("continuity_notes"),
                 storyboard_prompt=shot_data.get("storyboard_prompt") or "",  # ← 新增：保存 DeepSeek 生成的简洁提示词
+                storyboard_prompt_stale=False,
                 character_prompts_json=shot_data.get("character_prompts_json"),
                 scene_prompt=shot_data.get("scene_prompt"),
                 prop_prompts_json=shot_data.get("prop_prompts_json"),
@@ -645,6 +646,200 @@ def update_shot(shot_id: int, **kwargs) -> ChapterVideoShot | None:
         db.close()
 
 
+_STORYBOARD_SOURCE_FIELDS = (
+    "scene_location",
+    "time_of_day",
+    "characters",
+    "screenplay_scene_id",
+    "screenplay_beat_id",
+    "narrative_purpose",
+    "beat_density",
+    "transition_to_next",
+    "story_summary",
+    "dialogue_or_narration",
+    "source_text_span",
+    "camera_plan",
+    "motion_plan",
+    "emotion_plan",
+    "continuity_notes",
+    "continuity_json",
+    "storyboard_json",
+    "storyboard_prompt",
+    "storyboard_prompt_stale",
+    "character_reference_ids",
+    "scene_reference_ids",
+    "prop_reference_ids",
+)
+
+
+def _storyboard_source_snapshot(shot: ChapterVideoShot) -> dict[str, Any]:
+    """生成故事板所依赖字段的稳定快照，用于阻止过期结果覆盖新修改。"""
+    return {
+        field: json.loads(json.dumps(getattr(shot, field, None), ensure_ascii=False, default=str))
+        for field in _STORYBOARD_SOURCE_FIELDS
+    }
+
+
+def _storyboard_workflow_snapshot(
+    workflow: ChapterVideoWorkflow,
+    shot: ChapterVideoShot,
+    shots: list[ChapterVideoShot] | None = None,
+) -> dict[str, Any]:
+    """记录目标镜头、相邻镜头和剧本上下文的完整生成输入。"""
+    workflow_shots = list(getattr(workflow, "shots", None) or [shot])
+    ordered_shots = sorted(shots if shots is not None else workflow_shots, key=lambda item: item.shot_index or 0)
+    current_index = next((index for index, item in enumerate(ordered_shots) if item.id == shot.id), None)
+    neighbors: list[dict[str, Any]] = []
+    if current_index is not None:
+        for index in (current_index - 1, current_index + 1):
+            if 0 <= index < len(ordered_shots):
+                neighbor = ordered_shots[index]
+                neighbors.append({
+                    "id": neighbor.id,
+                    "shot_index": neighbor.shot_index,
+                    "scene_location": neighbor.scene_location,
+                    "time_of_day": neighbor.time_of_day,
+                    "characters": neighbor.characters,
+                    "story_summary": neighbor.story_summary,
+                })
+    return json.loads(json.dumps({
+        "workflow_id": workflow.id,
+        "screenplay_json": getattr(workflow, "screenplay_json", None),
+        "shot": _storyboard_source_snapshot(shot),
+        "neighbors": neighbors,
+    }, ensure_ascii=False, default=str))
+
+
+def _locked_storyboard_context(db: Any, shot_id: int) -> tuple[ChapterVideoWorkflow, ChapterVideoShot, list[ChapterVideoShot]] | None:
+    shot_probe = (
+        db.query(ChapterVideoShot)
+        .filter(ChapterVideoShot.id == shot_id)
+        .first()
+    )
+    if not shot_probe:
+        return None
+    workflow = (
+        db.query(ChapterVideoWorkflow)
+        .filter(ChapterVideoWorkflow.id == shot_probe.workflow_id)
+        .with_for_update()
+        .first()
+    )
+    if not workflow:
+        return None
+    shots = (
+        db.query(ChapterVideoShot)
+        .filter(ChapterVideoShot.workflow_id == workflow.id)
+        .order_by(ChapterVideoShot.shot_index)
+        .with_for_update()
+        .all()
+    )
+    shot = next((item for item in shots if item.id == shot_id), None)
+    if not shot:
+        return None
+    return workflow, shot, shots
+
+
+def _begin_storyboard_generation_if_current(
+    shot_id: int,
+    expected_source: dict[str, Any],
+) -> str | None:
+    """源数据仍匹配时登记本次生成令牌，并使旧任务失去写回资格。"""
+    db = SessionLocal()
+    try:
+        context = _locked_storyboard_context(db, shot_id)
+        if not context:
+            return None
+        workflow, shot, shots = context
+        if _storyboard_workflow_snapshot(workflow, shot, shots) != expected_source:
+            return None
+        generation_token = uuid.uuid4().hex
+        shot.storyboard_generation_token = generation_token
+        shot.status = "storyboard_generating"
+        shot.error_message = None
+        db.commit()
+        return generation_token
+    finally:
+        db.close()
+
+
+def _complete_storyboard_generation_if_current(
+    shot_id: int,
+    expected_source: dict[str, Any],
+    *,
+    generation_token: str,
+    director_prompt: str,
+    storyboard_url: str,
+) -> bool:
+    """仅当生成期间镜头源数据未变化时保存故事板结果。"""
+    db = SessionLocal()
+    try:
+        context = _locked_storyboard_context(db, shot_id)
+        if not context:
+            return False
+        workflow, shot, shots = context
+        if shot.storyboard_generation_token != generation_token:
+            return False
+        if _storyboard_workflow_snapshot(workflow, shot, shots) != expected_source:
+            shot.status = "pending"
+            shot.error_message = "分镜内容已在生成期间更新，本次旧版本故事板结果未保存，请重新生成"
+            shot.storyboard_generation_token = None
+            db.commit()
+            return False
+        shot.status = "storyboard_ready"
+        shot.storyboard_prompt = director_prompt
+        shot.storyboard_prompt_stale = False
+        shot.storyboard_image_url = storyboard_url
+        shot.storyboard_generation_token = None
+        shot.error_message = None
+        db.commit()
+        return True
+    finally:
+        db.close()
+
+
+def _save_storyboard_prompt_if_current(
+    shot_id: int,
+    expected_source: dict[str, Any],
+    *,
+    director_prompt: str,
+) -> bool:
+    """仅当分析期间镜头源数据未变化时保存新的故事板提示词。"""
+    db = SessionLocal()
+    try:
+        context = _locked_storyboard_context(db, shot_id)
+        if not context:
+            return False
+        workflow, shot, shots = context
+        if _storyboard_workflow_snapshot(workflow, shot, shots) != expected_source:
+            return False
+        shot.storyboard_prompt = director_prompt
+        shot.storyboard_prompt_stale = False
+        shot.storyboard_generation_token = None
+        db.commit()
+        return True
+    finally:
+        db.close()
+
+
+def _fail_storyboard_generation_if_current(shot_id: int, generation_token: str, error_message: str) -> None:
+    """仅允许最新生成任务写入失败状态。"""
+    db = SessionLocal()
+    try:
+        shot = (
+            db.query(ChapterVideoShot)
+            .filter(ChapterVideoShot.id == shot_id)
+            .with_for_update()
+            .first()
+        )
+        if shot and shot.storyboard_generation_token == generation_token:
+            shot.status = "failed"
+            shot.error_message = error_message
+            shot.storyboard_generation_token = None
+            db.commit()
+    finally:
+        db.close()
+
+
 def _build_chapter_storyboard_asset(
     *,
     workflow: ChapterVideoWorkflow,
@@ -999,9 +1194,12 @@ async def generate_shot_details_batch(
                 shot.emotion_plan = detail.get("emotion_plan") or ""
                 shot.continuity_notes = detail.get("continuity_notes") or ""
                 shot.storyboard_json = detail.get("storyboard_json")
-                shot.storyboard_prompt = _strip_storyboard_style_directives(
+                generated_storyboard_prompt = _strip_storyboard_style_directives(
                     detail.get("storyboard_prompt") or ""
-                )
+                ).strip()
+                if generated_storyboard_prompt:
+                    shot.storyboard_prompt = generated_storyboard_prompt
+                    shot.storyboard_prompt_stale = False
                 shot.scene_prompt = detail.get("scene_prompt") or ""
                 shot.prop_prompts_json = detail.get("prop_prompts_json")
                 updated_ids.append(shot.id)
@@ -1151,10 +1349,20 @@ async def reanalyze_storyboard_prompts(
         return {"workflow_status": "ok", "updated_shot_ids": [], "prompts": {}}
 
     updated_ids: list[int] = []
+    failed_ids: list[int] = []
     prompts: dict[int, str] = {}
     wf = get_workflow(workflow_id)
+    if not wf:
+        update_workflow_status(workflow_id, _prev_status)
+        return {
+            "workflow_status": "failed",
+            "updated_shot_ids": [],
+            "failed_shot_ids": [shot.id for shot in target_shots],
+            "prompts": {},
+        }
     for shot in target_shots:
         try:
+            source_snapshot = _storyboard_workflow_snapshot(wf, shot)
             shot_context = _build_shot_narrative_context(wf, shot.shot_index)
             new_content = await deepseek_service.generate_shot_storyboard_prompt({
                 "shot_index": shot.shot_index,
@@ -1172,17 +1380,28 @@ async def reanalyze_storyboard_prompts(
                 "camera_plan": shot.camera_plan,
                 "motion_plan": shot.motion_plan,
                 "emotion_plan": shot.emotion_plan,
+                "continuity_notes": shot.continuity_notes,
                 "style_preset": None,
                 "shot_context": shot_context,
                 "screenplay_context": build_screenplay_context_for_shot(wf, shot),
                 "storyboard_json": shot.storyboard_json,
             }, api_key=deepseek_api_key)
 
-            new_content = _strip_storyboard_style_directives(new_content)
-            update_shot(shot.id, storyboard_prompt=new_content)
+            new_content = _strip_storyboard_style_directives(new_content).strip()
+            if not new_content:
+                raise ValueError("故事版提示词生成结果为空")
+            if not _save_storyboard_prompt_if_current(
+                shot.id,
+                source_snapshot,
+                director_prompt=new_content,
+            ):
+                failed_ids.append(shot.id)
+                logger.warning("重新分析期间镜头内容已变化，丢弃过期提示词 shot=%s", shot.id)
+                continue
             updated_ids.append(shot.id)
             prompts[shot.id] = new_content
         except Exception as exc:
+            failed_ids.append(shot.id)
             logger.error("重新分析 shot %s 提示词失败: %s", shot.id, exc)
 
     logger.info("重新分析完成: updated=%s", updated_ids)
@@ -1190,6 +1409,7 @@ async def reanalyze_storyboard_prompts(
     return {
         "workflow_status": "ok",
         "updated_shot_ids": updated_ids,
+        "failed_shot_ids": failed_ids,
         "prompts": prompts,
     }
 
@@ -1382,6 +1602,7 @@ async def _expand_single_shot_prompts(
         "camera_plan": camera_plan,
         "motion_plan": motion_plan,
         "emotion_plan": emotion_plan,
+        "continuity_notes": continuity_notes,
         "style_preset": style_preset,
         "storyboard_json": storyboard_json,
     }
@@ -1465,8 +1686,13 @@ async def _expand_single_shot_prompts(
 
     storyboard_payload["shot_context"] = shot_context
     storyboard_payload["screenplay_context"] = screenplay_context
+    storyboard_prompt_generated = False
     try:
         storyboard_prompt = await deepseek_service.generate_shot_storyboard_prompt(storyboard_payload, api_key=deepseek_api_key)
+        storyboard_prompt = _strip_storyboard_style_directives(storyboard_prompt).strip()
+        if not storyboard_prompt:
+            raise ValueError("故事版提示词生成结果为空")
+        storyboard_prompt_generated = True
     except Exception as exc:
         logger.warning("故事版提示词生成失败 shot=%s: %s", shot_id, exc)
         storyboard_prompt = shot.storyboard_prompt or ""
@@ -1516,6 +1742,7 @@ async def _expand_single_shot_prompts(
         continuity_notes=continuity_notes,
         storyboard_json=storyboard_json,
         storyboard_prompt=storyboard_prompt,
+        **({"storyboard_prompt_stale": False} if storyboard_prompt_generated else {}),
         video_prompt=video_prompt,
         character_prompts_json=character_prompts,
         scene_prompt=scene_prompt,
@@ -2149,9 +2376,14 @@ async def regenerate_shot_storyboard(
 
     # 1. 确认最终使用的提示词
     workflow = get_workflow(shot.workflow_id)
+    if not workflow:
+        return None
+    storyboard_source_snapshot = _storyboard_workflow_snapshot(workflow, shot)
     style_preset = None
 
-    director_prompt = prompt_override or shot.storyboard_prompt
+    director_prompt = prompt_override or (
+        None if getattr(shot, "storyboard_prompt_stale", False) else shot.storyboard_prompt
+    )
     if director_prompt:
         # 校验现有提示词是否有效，防止复用被污染的元响应内容
         is_valid, reason = deepseek_service.is_valid_storyboard_prompt(director_prompt)
@@ -2178,12 +2410,18 @@ async def regenerate_shot_storyboard(
             "camera_plan": shot.camera_plan,
             "motion_plan": shot.motion_plan,
             "emotion_plan": shot.emotion_plan,
+            "continuity_notes": shot.continuity_notes,
             "style_preset": style_preset,
             "shot_context": shot_context,
             "screenplay_context": build_screenplay_context_for_shot(workflow, shot),
             "storyboard_json": shot.storyboard_json,
         })
     director_prompt = _strip_storyboard_style_directives(director_prompt)
+
+    generation_token = _begin_storyboard_generation_if_current(shot_id, storyboard_source_snapshot)
+    if not generation_token:
+        logger.warning("故事板开始生成前镜头内容已变化，取消过期任务 shot=%s", shot_id)
+        return get_shot(shot_id)
 
     chapter_id = getattr(workflow, "chapter_id", 0) if workflow else 0
     story_id = getattr(workflow, "story_id", 0) if workflow else 0
@@ -2214,8 +2452,6 @@ async def regenerate_shot_storyboard(
         logger.info("故事版参考图 %s [local]: %s", index, video_api_service.safe_media_url_for_log(ref_path))
 
     try:
-        update_shot(shot_id, status="storyboard_generating", storyboard_prompt=director_prompt, error_message=None)
-
         # 视频故事板只使用角色、场景和道具参考，不注入风格预设或自动风格锚点。
         image_result = await image_service.generate_manga_image(
             prompt=director_prompt,
@@ -2231,8 +2467,16 @@ async def regenerate_shot_storyboard(
         )
 
         storyboard_url = _to_storyboard_static_url(image_result.image_path)
-        update_shot(shot_id, status="storyboard_ready", storyboard_image_url=storyboard_url)
-        if workflow:
+        result_saved = _complete_storyboard_generation_if_current(
+            shot_id,
+            storyboard_source_snapshot,
+            generation_token=generation_token,
+            director_prompt=director_prompt,
+            storyboard_url=storyboard_url,
+        )
+        if not result_saved:
+            logger.warning("故事板生成期间镜头内容已变化，丢弃过期结果 shot=%s", shot_id)
+        if workflow and result_saved:
             try:
                 _persist_chapter_storyboard_asset(
                     workflow=workflow,
@@ -2247,10 +2491,10 @@ async def regenerate_shot_storyboard(
                 # 资产目录是派生索引，写入失败不能覆盖已经成功生成的故事板结果。
                 logger.exception("故事板资产索引写入失败 shot=%s", shot_id)
     except Exception as exc:
-        update_shot(
+        _fail_storyboard_generation_if_current(
             shot_id,
-            status="failed",
-            error_message=public_error_message(exc, "故事版生成失败，请稍后重试"),
+            generation_token,
+            public_error_message(exc, "故事版生成失败，请稍后重试"),
         )
         raise
 

@@ -4158,6 +4158,20 @@ async def generate_shot_storyboard_prompt(
     if additional_sj_reference:
         user_message += additional_sj_reference
 
+    supplemental_fields = (
+        ("连续性备注", shot_data.get("continuity_notes")),
+        ("叙事目的", shot_data.get("narrative_purpose")),
+        ("节奏密度", shot_data.get("beat_density")),
+        ("下一镜转场", shot_data.get("transition_to_next")),
+    )
+    supplemental_lines = [
+        f"{label}：{str(value).strip()}"
+        for label, value in supplemental_fields
+        if value is not None and str(value).strip()
+    ]
+    if supplemental_lines:
+        user_message += "\n\n## 补充分镜约束\n\n" + "\n".join(supplemental_lines)
+
     # 如果 shot_context 中包含连续性要求，追加到 system prompt 末尾
     ctx = shot_data.get("shot_context")
     if ctx and "前后镜头衔接" in ctx:

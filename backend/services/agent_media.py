@@ -8,7 +8,9 @@ import hashlib
 import hmac
 import json
 import mimetypes
+import multiprocessing
 import os
+import queue
 import secrets
 import subprocess
 import tempfile
@@ -107,7 +109,76 @@ def _extract_document_text(path: Path, suffix: str) -> str:
 
         document = Document(str(path))
         return "\n".join(paragraph.text for paragraph in document.paragraphs if paragraph.text.strip())[:20_000]
+    if suffix == ".pdf":
+        from pypdf import PdfReader
+
+        try:
+            reader = PdfReader(str(path), strict=False)
+        except Exception as exc:
+            raise HTTPException(400, "PDF 文件损坏或无法解析") from exc
+        if len(reader.pages) > 100:
+            raise HTTPException(400, "PDF 页数不能超过 100 页")
+        chunks: list[str] = []
+        total_length = 0
+        for page in reader.pages:
+            try:
+                text = (page.extract_text() or "").strip()
+            except Exception as exc:
+                raise HTTPException(400, "PDF 正文解析失败") from exc
+            if not text:
+                continue
+            remaining = 20_000 - total_length
+            if remaining <= 0:
+                break
+            chunks.append(text[:remaining])
+            total_length += len(chunks[-1])
+        return "\n".join(chunks)
     return ""
+
+
+def _extract_pdf_worker(path: str, result_queue) -> None:
+    """在隔离进程中解析 PDF，限制异常文件占用主服务资源。"""
+    if os.name != "nt":
+        try:
+            import resource
+
+            resource.setrlimit(resource.RLIMIT_AS, (512 * 1024 * 1024, 512 * 1024 * 1024))
+            resource.setrlimit(resource.RLIMIT_CPU, (10, 10))
+        except Exception:
+            pass
+    try:
+        result_queue.put(("ok", _extract_document_text(Path(path), ".pdf")))
+    except HTTPException as exc:
+        result_queue.put(("error", str(exc.detail)))
+    except Exception:
+        result_queue.put(("error", "PDF 文件损坏或无法解析"))
+
+
+def _extract_document_text_safely(path: Path, suffix: str) -> str:
+    if suffix != ".pdf":
+        return _extract_document_text(path, suffix)
+
+    context = multiprocessing.get_context("spawn" if os.name == "nt" else "fork")
+    result_queue = context.Queue(maxsize=1)
+    process = context.Process(target=_extract_pdf_worker, args=(str(path), result_queue), daemon=True)
+    process.start()
+    try:
+        try:
+            status, payload = result_queue.get(timeout=15)
+        except queue.Empty:
+            process.terminate()
+            process.join(2)
+            raise HTTPException(408, "PDF 解析超时，请压缩或拆分文件后重试")
+        process.join(2)
+        if process.is_alive():
+            process.terminate()
+            process.join(2)
+        if status != "ok":
+            raise HTTPException(400, payload)
+        return str(payload)
+    finally:
+        result_queue.close()
+        result_queue.join_thread()
 
 
 async def save_attachment(
@@ -152,7 +223,7 @@ async def save_attachment(
             frames_dir = target_dir / f"{attachment_id}_frames"
             metadata["frame_paths"] = await asyncio.to_thread(_extract_video_frames, temp_path, frames_dir, metadata["duration"])
         else:
-            metadata = {"media_kind": "document", "text_excerpt": await asyncio.to_thread(_extract_document_text, temp_path, suffix)}
+            metadata = {"media_kind": "document", "text_excerpt": await asyncio.to_thread(_extract_document_text_safely, temp_path, suffix)}
 
         final_path = target_dir / f"{attachment_id}{final_suffix}"
         temp_path.replace(final_path)

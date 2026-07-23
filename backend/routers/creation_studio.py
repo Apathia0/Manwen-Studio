@@ -131,11 +131,14 @@ def _validate_video_submission_capabilities(
     reference_count: int,
 ) -> None:
     """在预扣积分前校验模型公开的视频约束。"""
-    validate_video_capability_limits(
-        video_capabilities,
-        resolution=payload.resolution,
-        duration_seconds=payload.duration_seconds,
-    )
+    try:
+        validate_video_capability_limits(
+            video_capabilities,
+            resolution=payload.resolution,
+            duration_seconds=payload.duration_seconds,
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
     limits = video_capabilities["limits"]
     ratios = limits.get("aspect_ratios")
     if isinstance(ratios, list) and payload.aspect_ratio not in ratios:

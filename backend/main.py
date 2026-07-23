@@ -500,6 +500,16 @@ async def _http_exception_handler(request: Request, exc: HTTPException):
     )
 
 
+@app.exception_handler(ValueError)
+async def _value_error_handler(request: Request, exc: ValueError):
+    """将业务校验错误统一转换为可读的 400 响应。"""
+    detail = public_error_message(exc, "请求参数不合法，请检查后重试")
+    return JSONResponse(
+        status_code=400,
+        content={"detail": detail},
+    )
+
+
 class GeneratedMediaStaticFiles(StaticFiles):
     """公开旧媒体目录，但强制隔离创作台的鉴权素材。"""
 
@@ -4633,15 +4643,13 @@ def _scene_meta_path(chapter_id: int) -> Path:
 
 
 def _write_scenes_file(chapter_id: int, scenes: list[str], sanitized_indices: list[int] | None = None) -> None:
-    prompts_dir = _chapter_dir(chapter_id)
-    prompts_dir.mkdir(parents=True, exist_ok=True)
-    prompts_file = prompts_dir / "scenes.txt"
-    with open(prompts_file, "w", encoding="utf-8") as f:
-        for idx, scene in enumerate(scenes, start=1):
-            f.write(f"=== 第{idx}格 ===\n{scene.strip()}\n\n")
-    meta_path = _scene_meta_path(chapter_id)
-    payload = {"sanitized_indices": sorted(set(sanitized_indices or []))}
-    meta_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    from services.agent_service import _render_scenes_text, _scenes_file_lock, _write_scenes_text_atomic
+
+    with _scenes_file_lock(chapter_id):
+        _write_scenes_text_atomic(chapter_id, _render_scenes_text(scenes))
+        meta_path = _scene_meta_path(chapter_id)
+        payload = {"sanitized_indices": sorted(set(sanitized_indices or []))}
+        meta_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
 
 
 def _parse_scenes_text(raw: str) -> list[str]:
@@ -4664,10 +4672,12 @@ def _load_scene_meta(chapter_id: int) -> dict:
 def _clear_chapter_manga_state(chapter: Chapter, db: Session) -> None:
     chapter_dir = _chapter_dir(chapter.id)
     if chapter_dir.exists():
-        for filename in ("scenes.txt",):
-            path = chapter_dir / filename
-            if path.exists():
-                _unlink_file(path, filename)
+        from services.agent_service import _scenes_file_lock
+
+        with _scenes_file_lock(chapter.id):
+            scenes_path = chapter_dir / "scenes.txt"
+            if scenes_path.exists():
+                _unlink_file(scenes_path, "scenes.txt")
         for img in list(chapter.images):
             img_path = Path(__file__).resolve().parent / img.image_path
             if img_path.exists():

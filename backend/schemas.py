@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import datetime
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -116,26 +116,54 @@ class ChatMessageOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
+AgentMode = Literal["chat", "analyze", "execute"]
+AgentWorkflowType = Literal["novel", "manga", "video"]
+AgentSkillName = Literal[
+    "chapter_writer",
+    "framework_designer",
+    "manga_workflow",
+    "quality_reviewer",
+    "video_workflow",
+    "deconstruction_reader",
+]
+
+
 class AgentChatIn(BaseModel):
     conversation_id: int
     message: str
     chapter_id: Optional[int] = 0
     chapter_number: Optional[int] = 0
-    mode: Optional[str] = "execute"
-    workflow_type: Optional[str] = None
-    workflow_id: Optional[int] = None
+    mode: AgentMode = "analyze"
+    workflow_type: Optional[AgentWorkflowType] = None
+    workflow_id: Optional[int] = Field(default=None, gt=0)
     shot_id: Optional[int] = None
     session_id: Optional[str] = None
-    enabled_skills: Optional[list[str]] = None
+    enabled_skills: Optional[list[AgentSkillName]] = None
     attachment_ids: Optional[list[str]] = None
+
+    @model_validator(mode="after")
+    def validate_workflow_context(self):
+        if self.workflow_type == "video" and (self.workflow_id is None or not self.chapter_id):
+            raise ValueError("视频工作流必须提供 workflow_id 和 chapter_id")
+        if self.workflow_type == "manga" and not self.chapter_id:
+            raise ValueError("漫画工作流必须提供 chapter_id")
+        return self
 
 
 class AgentConversationCreateIn(BaseModel):
     title: Optional[str] = None
     chapter_id: Optional[int] = None
-    workflow_type: Optional[str] = None
-    workflow_id: Optional[int] = None
+    workflow_type: Optional[AgentWorkflowType] = None
+    workflow_id: Optional[int] = Field(default=None, gt=0)
     shot_id: Optional[int] = None
+
+    @model_validator(mode="after")
+    def validate_workflow_context(self):
+        if self.workflow_type == "video" and (self.workflow_id is None or self.chapter_id is None):
+            raise ValueError("视频工作流必须提供 workflow_id 和 chapter_id")
+        if self.workflow_type == "manga" and self.chapter_id is None:
+            raise ValueError("漫画工作流必须提供 chapter_id")
+        return self
 
 
 class AgentConversationMessageCreateIn(BaseModel):
@@ -954,6 +982,7 @@ class ChapterVideoShotOut(BaseModel):
     emotion_plan: str | None = None
     continuity_notes: str | None = None
     storyboard_prompt: str | None = None
+    storyboard_prompt_stale: bool = False
     video_prompt: str | None = None
     character_prompts_json: list[dict[str, str]] | None = None
     character_prompts: list[dict[str, str]] | None = None

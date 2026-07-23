@@ -7,7 +7,7 @@ from fastapi import HTTPException
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
-from models import AiModel, AiModelPrice
+from models import AiChannel, AiModel, AiModelPrice
 from services.points.pricing import estimate_points
 
 
@@ -61,15 +61,33 @@ def get_active_price(db: Session, model_id: int) -> AiModelPrice | None:
 
 
 def list_user_visible_models(db: Session, modality: str | None = None) -> list[AiModel]:
-    q = db.query(AiModel).filter(AiModel.enabled.is_(True), AiModel.user_visible.is_(True))
+    q = (
+        db.query(AiModel)
+        .join(AiChannel, AiChannel.id == AiModel.channel_id)
+        .filter(
+            AiModel.enabled.is_(True),
+            AiModel.user_visible.is_(True),
+            AiChannel.enabled.is_(True),
+        )
+    )
     if modality:
         q = q.filter(AiModel.modality == modality)
     return q.order_by(AiModel.sort_order.asc(), AiModel.id.asc()).all()
 
 
 def get_visible_model(db: Session, model_id: int) -> AiModel:
-    model = db.get(AiModel, model_id)
-    if not model or not model.enabled or not model.user_visible:
+    model = (
+        db.query(AiModel)
+        .join(AiChannel, AiChannel.id == AiModel.channel_id)
+        .filter(
+            AiModel.id == model_id,
+            AiModel.enabled.is_(True),
+            AiModel.user_visible.is_(True),
+            AiChannel.enabled.is_(True),
+        )
+        .first()
+    )
+    if not model:
         raise HTTPException(404, "模型不存在或不可用")
     return model
 
@@ -96,6 +114,7 @@ def serialize_model_for_user(db: Session, model: AiModel) -> dict[str, Any]:
         "id": model.id,
         "model_key": model.model_key,
         "display_name": model.display_name,
+        "intro_tag": model.intro_tag or "",
         "modality": model.modality,
         "channel_id": model.channel_id,
         "sort_order": model.sort_order,
@@ -103,6 +122,7 @@ def serialize_model_for_user(db: Session, model: AiModel) -> dict[str, Any]:
         "image_capabilities": _public_image_capabilities(model.capabilities_json),
         "price": price_summary,
         "estimated_points": estimated,
+        "platform_configured": bool(price and model.channel.platform_secret_ciphertext),
     }
 
 
@@ -113,6 +133,7 @@ def serialize_model_admin(db: Session, model: AiModel) -> dict[str, Any]:
         "channel_id": model.channel_id,
         "model_key": model.model_key,
         "display_name": model.display_name,
+        "intro_tag": model.intro_tag or "",
         "modality": model.modality,
         "enabled": model.enabled,
         "user_visible": model.user_visible,

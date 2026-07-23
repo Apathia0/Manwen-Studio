@@ -8869,6 +8869,7 @@ async def api_create_chapter_workflow_shot(
         emotion_plan=(body.emotion_plan or "").strip() or None,
         continuity_notes=(body.continuity_notes or "").strip() or None,
         character_reference_ids=list(workflow.character_reference_ids or []),
+        storyboard_prompt_stale=False,
         status="pending",
     )
     db.add(shot)
@@ -9146,14 +9147,19 @@ async def api_regenerate_shot_video(
     ref_asset_ids = body.reference_asset_ids or None
     if ref_asset_ids:
         _require_reference_assets_for_story(ref_asset_ids, wf.story_id, db)
-    _validate_video_request_before_billing(
-        adapter_type=adapter_type,
-        model=model,
-        video_capabilities=video_capabilities,
-        aspect_ratio=body.aspect_ratio or "16:9",
-        duration_seconds=regen_duration,
-        reference_count=_chapter_video_reference_count(shot, wf, ref_asset_ids, db),
-    )
+    try:
+        _validate_video_request_before_billing(
+            adapter_type=adapter_type,
+            model=model,
+            video_capabilities=video_capabilities,
+            aspect_ratio=body.aspect_ratio or "16:9",
+            duration_seconds=regen_duration,
+            reference_count=_chapter_video_reference_count(shot, wf, ref_asset_ids, db),
+        )
+    except ValueError as exc:
+        if "时长" in str(exc):
+            raise HTTPException(400, str(exc)) from exc
+        raise
     quota_result = _reserve_video_billing(
         request,
         db,
@@ -9218,6 +9224,8 @@ async def api_save_shot_prompts(
 
     if "storyboard_prompt" in body:
         shot.storyboard_prompt = body["storyboard_prompt"]
+        shot.storyboard_prompt_stale = False
+        shot.storyboard_generation_token = None
     if "video_prompt" in body:
         shot.video_prompt = body["video_prompt"]
     db.commit()

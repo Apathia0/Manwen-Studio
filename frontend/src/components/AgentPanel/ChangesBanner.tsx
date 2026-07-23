@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { Check, Undo2, Loader2, Eye } from 'lucide-react';
 import ChangeDiffModal from './ChangeDiffModal';
+import { toast } from '../../lib/toast';
 
 export interface PendingChangeItem {
   type: string;
@@ -13,11 +14,12 @@ interface ChangesBannerProps {
   changes: PendingChangeItem[];
   storyId: number;
   conversationId?: number | null;
+  runId?: string | null;
   onConfirm: () => void;
   onRollback: () => void;
 }
 
-export default function ChangesBanner({ changes, storyId, conversationId, onConfirm, onRollback }: ChangesBannerProps) {
+export default function ChangesBanner({ changes, storyId, conversationId, runId, onConfirm, onRollback }: ChangesBannerProps) {
   const [busy, setBusy] = useState<'confirming' | 'rolling' | null>(null);
   const [showDiff, setShowDiff] = useState(false);
 
@@ -27,7 +29,7 @@ export default function ChangesBanner({ changes, storyId, conversationId, onConf
     setBusy('confirming');
     try {
       const { agentConfirmChanges } = await import('../../api');
-      await agentConfirmChanges(storyId, conversationId);
+      await agentConfirmChanges(storyId, conversationId, runId);
       onConfirm();
     } finally {
       setBusy(null);
@@ -38,7 +40,12 @@ export default function ChangesBanner({ changes, storyId, conversationId, onConf
     setBusy('rolling');
     try {
       const { agentRollbackChanges } = await import('../../api');
-      await agentRollbackChanges(storyId, conversationId);
+      const result = await agentRollbackChanges(storyId, conversationId, runId);
+      if (result.pending_retained) {
+        const message = result.results?.find((item) => !item.ok)?.error || '部分修改已发生变化，无法安全撤回';
+        toast.error(message, 8000);
+        return;
+      }
       onRollback();
     } finally {
       setBusy(null);
@@ -52,7 +59,7 @@ export default function ChangesBanner({ changes, storyId, conversationId, onConf
           <div className="flex items-center gap-2 min-w-0">
             <span className="w-2 h-2 rounded-full bg-blue-500 animate-pulse shrink-0" />
             <span className="text-xs text-blue-600 truncate">
-              有 <span className="font-semibold">{changes.length}</span> 项修改待确认
+              已保存 <span className="font-semibold">{changes.length}</span> 项修改，可查看或撤回
             </span>
           </div>
           <div className="flex items-center gap-2 shrink-0 ml-3">
@@ -74,7 +81,7 @@ export default function ChangesBanner({ changes, storyId, conversationId, onConf
               ) : (
                 <Check size={14} />
               )}
-              确认保存
+              保留修改
             </button>
             <button
               onClick={handleRollback}
@@ -96,6 +103,7 @@ export default function ChangesBanner({ changes, storyId, conversationId, onConf
         <ChangeDiffModal
           storyId={storyId}
           conversationId={conversationId}
+          runId={runId}
           onConfirm={() => { setShowDiff(false); onConfirm(); }}
           onRollback={() => { setShowDiff(false); onRollback(); }}
           onClose={() => setShowDiff(false)}

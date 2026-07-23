@@ -536,6 +536,7 @@ class ModelIn(BaseModel):
     channel_id: int
     model_key: str
     display_name: str
+    intro_tag: str = Field(default="", max_length=80)
     modality: str = "text"
     enabled: bool = True
     user_visible: bool = True
@@ -545,6 +546,7 @@ class ModelIn(BaseModel):
 
 class ModelUpdateIn(BaseModel):
     display_name: str | None = None
+    intro_tag: str | None = Field(default=None, max_length=80)
     enabled: bool | None = None
     user_visible: bool | None = None
     sort_order: int | None = None
@@ -813,10 +815,13 @@ def estimate(body: EstimateIn, request: Request, db: Session = Depends(get_db)):
     if model.modality == "video":
         raw_capabilities = model.capabilities_json
         video_capabilities = raw_capabilities.get("video") if isinstance(raw_capabilities, dict) else None
-        validate_video_capability_limits(
-            video_capabilities,
-            duration_seconds=body.video_seconds,
-        )
+        try:
+            validate_video_capability_limits(
+                video_capabilities,
+                duration_seconds=body.video_seconds,
+            )
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
     price = ai_catalog.get_active_price(db, model.id)
     if not price:
         raise HTTPException(400, "模型未配置积分价")
@@ -1285,6 +1290,7 @@ def admin_create_model(body: ModelIn, request: Request, db: Session = Depends(ge
         channel_id=body.channel_id,
         model_key=body.model_key.strip(),
         display_name=body.display_name.strip(),
+        intro_tag=body.intro_tag.strip(),
         modality=body.modality,
         enabled=body.enabled,
         user_visible=body.user_visible,
@@ -1312,7 +1318,9 @@ def admin_update_model(model_id: int, body: ModelUpdateIn, request: Request, db:
             raise HTTPException(404, "模型所属渠道不存在")
         _validate_model_capabilities(body.capabilities_json, target_modality, channel.adapter_type)
     if body.display_name is not None:
-        model.display_name = body.display_name
+        model.display_name = body.display_name.strip()
+    if body.intro_tag is not None:
+        model.intro_tag = body.intro_tag.strip()
     if body.enabled is not None:
         model.enabled = body.enabled
     if body.user_visible is not None:
@@ -1444,6 +1452,7 @@ def admin_add_channel_models(
                         channel_id=channel.id,
                         model_key=key,
                         display_name=display_name,
+                        intro_tag="",
                         modality=channel.modality,
                         enabled=True,
                         user_visible=False,

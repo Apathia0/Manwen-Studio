@@ -8,6 +8,7 @@ import {
   Library,
   LogOut,
   MessageSquareQuote,
+  Cpu,
   Sparkles,
   Settings2,
   ShieldCheck,
@@ -46,6 +47,7 @@ import { UserPricingPage } from './components/UserPricingPage';
 import { UserAccountUsagePage } from './components/UserAccountUsagePage';
 import { PointsAiAdminPage } from './components/admin/PointsAiAdminPage';
 import { CreationStudioPage } from './components/CreationStudioPage';
+import { ModelCatalogPage } from './components/ModelCatalogPage';
 import {
   cancelMyOrder,
   clearAuthToken,
@@ -86,6 +88,7 @@ type RouteKey =
   | 'pricing'
   | 'stories'
   | 'creation-studio'
+  | 'model-catalog'
   | 'onboarding'
   | 'import-guidance'
   | 'workspace'
@@ -120,6 +123,7 @@ const LS_WORKSPACE_MODE = 'storycanvas.workspaceMode';
 const USER_NAV: NavItem[] = [
   { key: 'stories', label: '作品', icon: Home },
   { key: 'creation-studio', label: '创作台', icon: Sparkles },
+  { key: 'model-catalog', label: '模型广场', icon: Cpu },
   { key: 'workspace', label: '作品工作台', icon: Brush },
   { key: 'deconstruction-library', label: '拆书库', icon: BookOpen },
   { key: 'account', label: '账户与积分', icon: UserCircle2 },
@@ -743,6 +747,7 @@ function App() {
               chapterTitle={activeChapter?.title || undefined}
             />
           )}
+          {route === 'model-catalog' && <ModelCatalogPage />}
           {route === 'quota-rules' && session.role === 'admin' && (
             <AdminPlatformSettingsPage
               onError={(message) => toast.error(message)}

@@ -96,6 +96,8 @@ class AgentConversation(Base):
     owner_user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False, index=True)
     chapter_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("chapters.id"), nullable=True, index=True)
     title: Mapped[str] = mapped_column(String(255), nullable=False, default="新对话")
+    active_run_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    active_run_started_at: Mapped[datetime.datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
 
@@ -164,6 +166,7 @@ class AgentPendingChange(Base):
     user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False, index=True)
     story_id: Mapped[int] = mapped_column(Integer, ForeignKey("stories.id"), nullable=False, index=True)
     conversation_id: Mapped[int] = mapped_column(Integer, ForeignKey("agent_conversations.id"), nullable=False, index=True)
+    run_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     change_type: Mapped[str] = mapped_column(String(40), nullable=False)
     record_id: Mapped[int] = mapped_column(Integer, nullable=False)
     display_name: Mapped[str] = mapped_column(String(255), nullable=False, default="")
@@ -509,6 +512,8 @@ class ChapterVideoShot(Base):
 
     # Prompt
     storyboard_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
+    storyboard_prompt_stale: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    storyboard_generation_token: Mapped[str | None] = mapped_column(String(64), nullable=True)
     video_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
     character_prompts_json: Mapped[Any] = mapped_column(JSON, nullable=True)
     scene_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -1038,6 +1043,7 @@ class AiModel(Base):
     channel_id: Mapped[int] = mapped_column(Integer, ForeignKey("ai_channels.id", ondelete="CASCADE"), nullable=False, index=True)
     model_key: Mapped[str] = mapped_column(String(191), nullable=False)
     display_name: Mapped[str] = mapped_column(String(191), nullable=False)
+    intro_tag: Mapped[str] = mapped_column(String(80), nullable=False, default="")
     modality: Mapped[str] = mapped_column(String(32), nullable=False, default="text")
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     user_visible: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)

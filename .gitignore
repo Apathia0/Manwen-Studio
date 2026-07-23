@@ -69,6 +69,11 @@ backend/tests/
 backend/tests/*
 !backend/tests/test_chapter_generation_length_policy.py
 !backend/tests/test_agent_content_sanitization.py
+!backend/tests/test_agent_api_validation_pending_runs.py
+!backend/tests/test_agent_multimodal_errors.py
+!backend/tests/test_agent_policy_boundaries.py
+!backend/tests/test_agent_video_mutations.py
+!backend/tests/test_agent_manga_storyboard.py
 !backend/tests/test_points_packages.py
 !backend/tests/test_video_adapter.py
 !backend/tests/test_user_upstream_override.py

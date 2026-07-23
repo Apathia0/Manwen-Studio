@@ -4,10 +4,12 @@ import {
   agentChatStream,
   createAgentConversation,
   deleteAgentConversation,
+  getAgentPendingChanges,
   getAgentConversation,
   listAgentConversations,
   uploadAgentAttachments,
   type AgentConversationSummary,
+  type AgentMode,
   type AgentWorkflowType,
 } from '../../api';
 import AgentMessage from './AgentMessage';
@@ -16,6 +18,7 @@ import AgentInput from './AgentInput';
 import QuickActions from './QuickActions';
 import ChangesBanner from './ChangesBanner';
 import type { PendingChangeItem } from './ChangesBanner';
+import { toast } from '../../lib/toast';
 
 export interface ToolCallInfo {
   id: string;
@@ -117,10 +120,12 @@ export default function AgentPanel({
 }: AgentPanelProps) {
   const [input, setInput] = useState('');
   const [attachments, setAttachments] = useState<File[]>([]);
+  const [agentMode, setAgentMode] = useState<AgentMode>('analyze');
   const [messages, setMessages] = useState<AgentMessageData[]>([]);
   const [streaming, setStreaming] = useState(false);
   const [streamContent, setStreamContent] = useState('');
   const [pendingChanges, setPendingChanges] = useState<PendingChangeItem[]>([]);
+  const [pendingRunId, setPendingRunId] = useState<string | null>(null);
   const [conversations, setConversations] = useState<AgentConversationSummary[]>([]);
   const [activeConversationId, setActiveConversationId] = useState<number | null>(null);
   const [loadingConversations, setLoadingConversations] = useState(true);
@@ -151,10 +156,14 @@ export default function AgentPanel({
       setLoadingMessages(true);
       setSidebarError('');
       try {
-        const detail = await getAgentConversation(storyId, conversationId);
+        const [detail, pending] = await Promise.all([
+          getAgentConversation(storyId, conversationId),
+          getAgentPendingChanges(storyId, conversationId),
+        ]);
         setActiveConversationId(detail.id);
         setMessages(detail.messages.map(mapConversationMessage));
-        setPendingChanges([]);
+        setPendingChanges(pending.changes ?? []);
+        setPendingRunId(null);
       } catch (error: any) {
         setSidebarError(error?.message || '加载助手对话失败');
       } finally {
@@ -295,14 +304,17 @@ export default function AgentPanel({
   const syncAfterStream = useCallback(
     async (conversationId: number) => {
       try {
-        const [items, detail] = await Promise.all([
+        const [items, detail, pending] = await Promise.all([
           listAgentConversations(storyId),
           getAgentConversation(storyId, conversationId),
+          getAgentPendingChanges(storyId, conversationId),
         ]);
         setConversations(items);
         if (activeConversationId === conversationId || activeConversationId === null) {
           setActiveConversationId(detail.id);
           setMessages(detail.messages.map(mapConversationMessage));
+          setPendingChanges(pending.changes ?? []);
+          setPendingRunId(null);
         }
       } catch {
         // Keep optimistic UI if refresh fails.
@@ -375,7 +387,7 @@ export default function AgentPanel({
       let accumulated = '';
       const toolCallMap = new Map<string, ToolCallInfo>();
 
-      abortRef.current = agentChatStream(storyId, conversationId, content, chapterId, 'execute', workflowType, workflowId, shotId, undefined, attachmentIds, {
+      abortRef.current = agentChatStream(storyId, conversationId, content, chapterId, agentMode, workflowType, workflowId, shotId, undefined, attachmentIds, {
         onToken: (token: string) => {
           accumulated += token;
           setStreamContent(accumulated);
@@ -408,12 +420,14 @@ export default function AgentPanel({
             return updated;
           });
         },
-        onDone: (_content: string, changes?: PendingChangeItem[]) => {
+        onDone: (_content: string, changes?: PendingChangeItem[], runId?: string) => {
           abortRef.current = null;
           setStreamContent('');
           setStreaming(false);
           if (changes && changes.length > 0) {
             setPendingChanges(changes);
+            setPendingRunId(runId || null);
+            onContentUpdated?.();
           }
           setMessages((prev) => {
             const updated = [...prev];
@@ -429,7 +443,7 @@ export default function AgentPanel({
           });
           void syncAfterStream(conversationId);
         },
-        onError: (err: string) => {
+        onError: ({ message, code }) => {
           abortRef.current = null;
           setMessages((prev) => {
             const updated = [...prev];
@@ -437,19 +451,22 @@ export default function AgentPanel({
             if (lastIndex >= 0 && updated[lastIndex].role === 'assistant') {
               updated[lastIndex] = {
                 ...updated[lastIndex],
-                content: `错误: ${err}`,
+                content: `错误: ${message}`,
               };
             }
             return updated;
           });
           setStreamContent('');
           setStreaming(false);
-          setSidebarError(err);
+          setSidebarError(message);
+          if (code === 'agent_multimodal_unsupported') {
+            toast.error(message, 9000);
+          }
           void syncAfterStream(conversationId);
         },
       });
     },
-    [activeConversationId, attachments, chapterId, generateId, input, storyId, streaming, syncAfterStream, workflowType, workflowId, shotId],
+    [activeConversationId, agentMode, attachments, chapterId, generateId, input, onContentUpdated, storyId, streaming, syncAfterStream, workflowType, workflowId, shotId],
   );
 
   const handleAbort = useCallback(() => {
@@ -482,11 +499,13 @@ export default function AgentPanel({
 
   const handleConfirmChanges = useCallback(() => {
     setPendingChanges([]);
+    setPendingRunId(null);
     onContentUpdated?.();
   }, [onContentUpdated]);
 
   const handleRollbackChanges = useCallback(() => {
     setPendingChanges([]);
+    setPendingRunId(null);
     onContentUpdated?.();
   }, [onContentUpdated]);
 
@@ -664,6 +683,7 @@ export default function AgentPanel({
             changes={pendingChanges}
             storyId={storyId}
             conversationId={activeConversationId}
+            runId={pendingRunId}
             onConfirm={handleConfirmChanges}
             onRollback={handleRollbackChanges}
           />
@@ -689,6 +709,8 @@ export default function AgentPanel({
               onSend={() => void handleSend()}
               attachments={attachments}
               onAttachmentsChange={setAttachments}
+              mode={agentMode}
+              onModeChange={setAgentMode}
               disabled={loadingMessages}
               placeholder="输入你的问题，AI 助手会保留在当前历史会话里"
             />

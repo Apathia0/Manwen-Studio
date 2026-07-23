@@ -326,6 +326,12 @@ def _migrate_unlocked(target_engine=None):
                 conn.execute(text("ALTER TABLE points_products ADD COLUMN is_recommended BOOLEAN DEFAULT FALSE"))
             if "updated_at" not in cols:
                 conn.execute(text("ALTER TABLE points_products ADD COLUMN updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP"))
+    if "ai_models" in insp.get_table_names():
+        cols = {c["name"] for c in insp.get_columns("ai_models")}
+        with db_engine.begin() as conn:
+            _prepare_migration_conn(conn)
+            if "intro_tag" not in cols:
+                conn.execute(text("ALTER TABLE ai_models ADD COLUMN intro_tag VARCHAR(80) DEFAULT '' NOT NULL"))
     if "points_accounts" in insp.get_table_names() and db_engine.dialect.name == "postgresql":
         with db_engine.begin() as conn:
             _prepare_migration_conn(conn)
@@ -446,11 +452,24 @@ def _migrate_unlocked(target_engine=None):
 
 
 def _migrate_agent_pending_changes(target_engine=None):
-    """agent_pending_changes 持久化待确认修改表"""
+    """迁移 Agent 待确认修改和对话运行占用字段。"""
     from sqlalchemy import inspect, text
 
     db_engine = target_engine or engine
     insp = inspect(db_engine)
+
+    if "agent_conversations" in insp.get_table_names():
+        conversation_cols = {column["name"] for column in insp.get_columns("agent_conversations")}
+        with db_engine.begin() as conn:
+            _prepare_migration_conn(conn)
+            if "active_run_id" not in conversation_cols:
+                conn.execute(text("ALTER TABLE agent_conversations ADD COLUMN active_run_id VARCHAR(64)"))
+            if "active_run_started_at" not in conversation_cols:
+                conn.execute(text("ALTER TABLE agent_conversations ADD COLUMN active_run_started_at TIMESTAMP"))
+            conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS agent_conversations_active_run_id_idx "
+                "ON agent_conversations (active_run_id)"
+            ))
 
     if "agent_pending_changes" not in insp.get_table_names():
         with db_engine.begin() as conn:
@@ -461,6 +480,7 @@ def _migrate_agent_pending_changes(target_engine=None):
                     user_id INTEGER NOT NULL REFERENCES users(id),
                     story_id INTEGER NOT NULL REFERENCES stories(id),
                     conversation_id INTEGER NOT NULL REFERENCES agent_conversations(id),
+                    run_id VARCHAR(64),
                     change_type VARCHAR(40) NOT NULL,
                     record_id INTEGER NOT NULL,
                     display_name VARCHAR(255) NOT NULL DEFAULT '',
@@ -473,6 +493,18 @@ def _migrate_agent_pending_changes(target_engine=None):
             conn.execute(text("CREATE INDEX IF NOT EXISTS agent_pending_changes_user_id_idx ON agent_pending_changes (user_id)"))
             conn.execute(text("CREATE INDEX IF NOT EXISTS agent_pending_changes_story_id_idx ON agent_pending_changes (story_id)"))
             conn.execute(text("CREATE INDEX IF NOT EXISTS agent_pending_changes_conversation_id_idx ON agent_pending_changes (conversation_id)"))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS agent_pending_changes_run_id_idx ON agent_pending_changes (run_id)"))
+        return
+
+    pending_cols = {column["name"] for column in insp.get_columns("agent_pending_changes")}
+    with db_engine.begin() as conn:
+        _prepare_migration_conn(conn)
+        if "run_id" not in pending_cols:
+            conn.execute(text("ALTER TABLE agent_pending_changes ADD COLUMN run_id VARCHAR(64)"))
+        conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS agent_pending_changes_run_id_idx "
+            "ON agent_pending_changes (run_id)"
+        ))
 
 
 def _migrate_money_columns(target_engine=None):
@@ -902,6 +934,11 @@ def _migrate_video_tables(target_engine=None):
                 conn.execute(text("ALTER TABLE chapter_video_shots ADD COLUMN transition_to_next VARCHAR(32)"))
             if "continuity_json" not in chapter_video_shots_cols:
                 conn.execute(text("ALTER TABLE chapter_video_shots ADD COLUMN continuity_json JSON"))
+            if "storyboard_prompt_stale" not in chapter_video_shots_cols:
+                conn.execute(text("ALTER TABLE chapter_video_shots ADD COLUMN storyboard_prompt_stale BOOLEAN DEFAULT FALSE"))
+            if "storyboard_generation_token" not in chapter_video_shots_cols:
+                conn.execute(text("ALTER TABLE chapter_video_shots ADD COLUMN storyboard_generation_token VARCHAR(64)"))
+            conn.execute(text("UPDATE chapter_video_shots SET storyboard_prompt_stale = FALSE WHERE storyboard_prompt_stale IS NULL"))
 
 
 def _seed_video_style_presets(target_engine=None):

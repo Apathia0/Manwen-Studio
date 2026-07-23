@@ -1,7 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { X, Loader2, Check, Undo2, FileText, Tags, Users, BookOpen, Film, ChevronRight, ChevronsUpDown } from 'lucide-react';
 import { lineDiff, type DiffLine } from '../../utils/diff';
 import { apiHeaders } from '../../api';
+import { toast } from '../../lib/toast';
 
 export interface FullChangeData {
   type: string;
@@ -15,6 +17,7 @@ export interface FullChangeData {
 interface Props {
   storyId: number;
   conversationId?: number | null;
+  runId?: string | null;
   onConfirm: () => void;
   onRollback: () => void;
   onClose: () => void;
@@ -93,7 +96,7 @@ function DiffBlock({ lines }: { lines: DiffLine[] }) {
 
   return (
     <div className="overflow-hidden rounded-lg border border-gray-200 text-xs font-mono leading-5">
-      <div className="max-h-[40vh] overflow-y-auto">
+      <div>
         {lines.map((line, i) => (
           <div
             key={i}
@@ -108,7 +111,7 @@ function DiffBlock({ lines }: { lines: DiffLine[] }) {
             <span className="inline-block w-4 shrink-0 select-none opacity-50">
               {line.type === 'add' ? '+' : line.type === 'remove' ? '−' : ' '}
             </span>
-            <span className="whitespace-pre-wrap">{line.text || ' '}</span>
+            <span className="whitespace-pre-wrap [overflow-wrap:anywhere]">{line.text || ' '}</span>
           </div>
         ))}
       </div>
@@ -131,8 +134,10 @@ function FieldSection({ change, defaultCollapsed = false }: { change: FullChange
 
   return (
     <div className={`border-l-2 ${类型色[change.type] || 'border-l-gray-300'} pl-4 py-1.5`}>
-      <div
-        className="flex items-center gap-2 cursor-pointer select-none py-1.5 -ml-1 pl-1 rounded-lg hover:bg-gray-50/80 transition-colors group"
+      <button
+        type="button"
+        aria-expanded={!collapsed}
+        className="group -ml-1 flex w-full cursor-pointer select-none items-center gap-2 rounded-lg py-1.5 pl-1 text-left transition-colors hover:bg-gray-50/80"
         onClick={() => setCollapsed(!collapsed)}
       >
         <ChevronRight
@@ -152,7 +157,7 @@ function FieldSection({ change, defaultCollapsed = false }: { change: FullChange
           {' '}
           <span className="text-red-500">−{removed}</span>
         </span>
-      </div>
+      </button>
 
       {!collapsed && (
         <div className="mt-1 transition-all duration-200">
@@ -174,12 +179,12 @@ function FieldSection({ change, defaultCollapsed = false }: { change: FullChange
 
           {mode === 'diff' && <DiffBlock lines={diff} />}
           {mode === 'old' && (
-            <div className="rounded-lg border border-gray-200 bg-gray-50 p-3 text-xs font-mono text-gray-600 leading-5 whitespace-pre-wrap max-h-60 overflow-y-auto">
+            <div className="rounded-lg border border-gray-200 bg-gray-50 p-3 text-xs font-mono text-gray-600 leading-5 whitespace-pre-wrap [overflow-wrap:anywhere]">
               {change.old_value || '(空)'}
             </div>
           )}
           {mode === 'new' && (
-            <div className="rounded-lg border border-emerald-200 bg-emerald-50/50 p-3 text-xs font-mono text-emerald-700 leading-5 whitespace-pre-wrap max-h-60 overflow-y-auto">
+            <div className="rounded-lg border border-emerald-200 bg-emerald-50/50 p-3 text-xs font-mono text-emerald-700 leading-5 whitespace-pre-wrap [overflow-wrap:anywhere]">
               {change.new_value || '(空)'}
             </div>
           )}
@@ -189,18 +194,33 @@ function FieldSection({ change, defaultCollapsed = false }: { change: FullChange
   );
 }
 
-export default function ChangeDiffModal({ storyId, conversationId, onConfirm, onRollback, onClose }: Props) {
+export default function ChangeDiffModal({ storyId, conversationId, runId, onConfirm, onRollback, onClose }: Props) {
   const [changes, setChanges] = useState<FullChangeData[] | null>(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState<'confirming' | 'rolling' | null>(null);
   const [allExpanded, setAllExpanded] = useState(true);
   const overlayRef = useRef<HTMLDivElement>(null);
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const closeButtonRef = useRef<HTMLButtonElement>(null);
+  const onCloseRef = useRef(onClose);
+  const busyRef = useRef(busy);
+
+  useEffect(() => {
+    onCloseRef.current = onClose;
+  }, [onClose]);
+
+  useEffect(() => {
+    busyRef.current = busy;
+  }, [busy]);
 
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
-        const query = conversationId ? `?conversation_id=${encodeURIComponent(String(conversationId))}` : '';
+        const params = new URLSearchParams();
+        if (conversationId) params.set('conversation_id', String(conversationId));
+        if (runId) params.set('run_id', runId);
+        const query = params.size ? `?${params.toString()}` : '';
         const res = await fetch(`/api/stories/${storyId}/agent/pending-changes${query}`, {
           headers: apiHeaders(),
         });
@@ -215,13 +235,62 @@ export default function ChangeDiffModal({ storyId, conversationId, onConfirm, on
       }
     })();
     return () => { cancelled = true; };
-  }, [storyId, conversationId]);
+  }, [storyId, conversationId, runId]);
+
+  useEffect(() => {
+    const previousOverflow = document.body.style.overflow;
+    const previouslyFocused = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const focusFrame = window.requestAnimationFrame(() => closeButtonRef.current?.focus());
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        if (busyRef.current === null) onCloseRef.current();
+        return;
+      }
+      if (event.key !== 'Tab' || !dialogRef.current) return;
+
+      const focusable = Array.from(dialogRef.current.querySelectorAll<HTMLElement>(
+        'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+      ));
+      if (focusable.length === 0) {
+        event.preventDefault();
+        return;
+      }
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      const activeElement = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+      if (!activeElement || !focusable.includes(activeElement)) {
+        event.preventDefault();
+        (event.shiftKey ? last : first).focus();
+      } else if (event.shiftKey && activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+
+    document.body.style.overflow = 'hidden';
+    window.addEventListener('keydown', handleKeyDown);
+
+    return () => {
+      window.cancelAnimationFrame(focusFrame);
+      document.body.style.overflow = previousOverflow;
+      window.removeEventListener('keydown', handleKeyDown);
+      previouslyFocused?.focus();
+    };
+  }, []);
+
+  const handleClose = () => {
+    if (busy === null) onClose();
+  };
 
   const handleConfirm = async () => {
+    if (busy !== null) return;
     setBusy('confirming');
     try {
       const { agentConfirmChanges } = await import('../../api');
-      await agentConfirmChanges(storyId, conversationId);
+      await agentConfirmChanges(storyId, conversationId, runId);
       onConfirm();
     } finally {
       setBusy(null);
@@ -229,27 +298,39 @@ export default function ChangeDiffModal({ storyId, conversationId, onConfirm, on
   };
 
   const handleRollback = async () => {
+    if (busy !== null) return;
     setBusy('rolling');
     try {
       const { agentRollbackChanges } = await import('../../api');
-      await agentRollbackChanges(storyId, conversationId);
+      const result = await agentRollbackChanges(storyId, conversationId, runId);
+      if (result.pending_retained) {
+        const message = result.results?.find((item) => !item.ok)?.error || '部分修改已发生变化，无法安全撤回';
+        toast.error(message, 8000);
+        return;
+      }
       onRollback();
     } finally {
       setBusy(null);
     }
   };
 
-  return (
+  return createPortal(
     <div
       ref={overlayRef}
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm"
-      onClick={(e) => { if (e.target === overlayRef.current) onClose(); }}
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 p-3 backdrop-blur-sm sm:p-6"
+      onClick={(e) => { if (e.target === overlayRef.current) handleClose(); }}
     >
-      <div className="w-[90vw] max-w-4xl max-h-[85vh] bg-white rounded-2xl border border-[#d7e3f4] shadow-[0_18px_42px_rgba(59,130,246,0.15)] flex flex-col">
+      <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="change-diff-title"
+        className="flex h-[85dvh] min-h-[min(32rem,calc(100dvh-1.5rem))] max-h-[calc(100dvh-1.5rem)] w-full max-w-4xl flex-col overflow-hidden rounded-2xl border border-[#d7e3f4] bg-white shadow-[0_18px_42px_rgba(59,130,246,0.15)]"
+      >
         {/* 标题栏 */}
         <div className="flex items-center justify-between px-5 py-4 border-b border-[#d7e3f4] shrink-0">
           <div className="flex items-center gap-3">
-            <h2 className="text-base font-semibold text-gray-800">修改对比</h2>
+            <h2 id="change-diff-title" className="text-base font-semibold text-gray-800">修改对比</h2>
             {changes && changes.length > 0 && (
               <button
                 onClick={() => setAllExpanded(!allExpanded)}
@@ -260,13 +341,21 @@ export default function ChangeDiffModal({ storyId, conversationId, onConfirm, on
               </button>
             )}
           </div>
-          <button onClick={onClose} className="p-1 rounded-lg hover:bg-gray-100 text-gray-400 hover:text-gray-600 transition-colors">
+          <button
+            ref={closeButtonRef}
+            type="button"
+            onClick={handleClose}
+            disabled={busy !== null}
+            aria-label="关闭修改对比"
+            title="关闭"
+            className="p-1 rounded-lg hover:bg-gray-100 text-gray-400 hover:text-gray-600 transition-colors disabled:cursor-not-allowed disabled:opacity-40"
+          >
             <X size={18} />
           </button>
         </div>
 
         {/* 内容 */}
-        <div className="flex-1 overflow-y-auto px-5 py-3 space-y-1">
+        <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-5 py-3 space-y-1">
           {loading ? (
             <div className="flex items-center justify-center py-16 text-gray-400">
               <Loader2 size={20} className="animate-spin mr-2" />
@@ -301,6 +390,7 @@ export default function ChangeDiffModal({ storyId, conversationId, onConfirm, on
           </div>
         )}
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }
