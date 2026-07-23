@@ -5,6 +5,15 @@ from pathlib import Path
 from fastapi import HTTPException
 
 
+def test_update_script_resolves_image_by_service_name():
+    script_path = Path(__file__).resolve().parents[2] / "deploy" / "docker" / "update-lorevista.sh"
+    script = script_path.read_text(encoding="utf-8")
+
+    assert "compose config --format json" in script
+    assert '["services"][sys.argv[1]]["image"]' in script
+    assert 'config --images "$service"' not in script
+
+
 def _load_updater_app():
     module_name = "lorevista_docker_updater_app"
     module_path = Path(__file__).resolve().parents[2] / "deploy" / "docker" / "updater" / "app.py"

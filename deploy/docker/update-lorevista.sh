@@ -53,7 +53,10 @@ image_id_for() {
 
 image_ref_for() {
   local service="$1"
-  compose config --images "$service" 2>/dev/null | head -n1 || true
+  local config_json
+  config_json="$(compose config --format json 2>/dev/null)" || return 0
+  python3 -c 'import json, sys; print(json.load(sys.stdin)["services"][sys.argv[1]]["image"])' \
+    "$service" <<<"$config_json" 2>/dev/null || true
 }
 
 running_image_id_for() {
