@@ -10,7 +10,7 @@ from zoneinfo import ZoneInfo
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import or_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -34,6 +34,7 @@ from services.ai import catalog as ai_catalog
 from services.ai import bootstrap as ai_bootstrap
 from services.ai import channels as ai_channels
 from services.ai import credentials as ai_credentials
+from services.ai import upstream_pricing
 from services.ai.crypto_secrets import last_four
 from services.ai.video_capabilities import validate_video_capability_limits
 from services.points import accounts as points_accounts
@@ -601,6 +602,15 @@ def _normalize_model_price(model: AiModel, body: PriceIn) -> tuple[str, dict[str
     if model.modality == "image":
         return "per_image", dict(body.price_config_json)
     if model.modality == "video":
+        if body.billing_type == "per_call":
+            raw_rate = body.price_config_json.get("points_per_call")
+            try:
+                rate = Decimal(str(raw_rate))
+            except Exception as exc:
+                raise HTTPException(400, "视频模型每次调用积分价必须是非负数字") from exc
+            if not rate.is_finite() or rate < 0:
+                raise HTTPException(400, "视频模型每次调用积分价必须是非负数字")
+            return "per_call", {"points_per_call": float(rate)}
         return "per_second", dict(body.price_config_json)
     return body.billing_type, dict(body.price_config_json)
 
@@ -619,11 +629,38 @@ class GrantPointsIn(BaseModel):
 
 
 class PointsSettingsIn(BaseModel):
-    yuan_to_points: float | None = None
+    yuan_to_points: Decimal | None = None
     register_grant_enabled: bool | None = None
     register_grant_amount: float | None = None
     dual_track_enabled: bool | None = None
     allow_all_users_api_key_override: bool | None = None
+
+    @field_validator("yuan_to_points")
+    @classmethod
+    def validate_yuan_to_points(cls, value: Decimal | None) -> Decimal | None:
+        if value is not None:
+            try:
+                upstream_pricing.validate_yuan_to_points(value)
+            except HTTPException as exc:
+                raise ValueError(exc.detail) from exc
+        return value
+
+
+class ChannelPriceSyncIn(BaseModel):
+    model_config = {"protected_namespaces": ()}
+
+    model_ids: list[int] = Field(min_length=1, max_length=500)
+    expected_price_ids: dict[int, int | None]
+    expected_pricing_version: str = Field(min_length=1, max_length=128)
+    expected_yuan_to_points: Decimal
+
+    @field_validator("expected_yuan_to_points")
+    @classmethod
+    def validate_expected_yuan_to_points(cls, value: Decimal) -> Decimal:
+        try:
+            return upstream_pricing.validate_yuan_to_points(value)
+        except HTTPException as exc:
+            raise ValueError(exc.detail) from exc
 
 
 class PurchasePointsIn(BaseModel):
@@ -1331,6 +1368,206 @@ def admin_delete_channel(channel_id: int, request: Request, db: Session = Depend
     return {"ok": True, "channel_id": channel_id}
 
 
+def _price_payload(price: AiModelPrice | None) -> dict[str, Any] | None:
+    if price is None:
+        return None
+    return {
+        "id": price.id,
+        "billing_type": price.billing_type,
+        "price_config_json": price.price_config_json or {},
+        "valid_from": price.valid_from.isoformat() if price.valid_from else None,
+    }
+
+
+def _prices_match(current: AiModelPrice | None, proposed: dict[str, Any]) -> bool:
+    if current is None or current.billing_type != proposed.get("billing_type"):
+        return False
+    current_config = current.price_config_json or {}
+    proposed_config = proposed.get("price_config_json") or {}
+    if current.billing_type == "per_1m_tokens":
+        keys = ("input_points_per_1m", "output_points_per_1m")
+    elif current.billing_type == "per_image":
+        keys = ("points_per_image",)
+    elif current.billing_type == "per_call":
+        keys = ("points_per_call",)
+    else:
+        return False
+    try:
+        return all(
+            quantize_points(Decimal(str(current_config.get(key))))
+            == quantize_points(Decimal(str(proposed_config.get(key))))
+            for key in keys
+        )
+    except Exception:
+        return False
+
+
+def _build_channel_price_items(
+    db: Session,
+    models: list[AiModel],
+    snapshot: upstream_pricing.UpstreamPricingSnapshot,
+    yuan_to_points: Decimal,
+) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    for model in models:
+        proposal = upstream_pricing.propose_model_price(model, snapshot, yuan_to_points)
+        current = ai_catalog.get_active_price(db, model.id)
+        status = proposal["status"]
+        if status == "ready" and _prices_match(current, proposal):
+            status = "unchanged"
+        items.append(
+            {
+                "model_id": model.id,
+                "model_key": model.model_key,
+                "display_name": model.display_name,
+                "modality": model.modality,
+                "status": status,
+                "reason": proposal.get("reason"),
+                "current_price": _price_payload(current),
+                "proposed_price": (
+                    {
+                        "billing_type": proposal["billing_type"],
+                        "price_config_json": proposal["price_config_json"],
+                    }
+                    if proposal.get("billing_type")
+                    else None
+                ),
+                "upstream_price": proposal.get("upstream_price"),
+                "cache_ignored": bool(proposal.get("cache_ignored")),
+            }
+        )
+    return items
+
+
+def _yuan_to_points(db: Session) -> Decimal:
+    raw_value = _get_platform_setting("points.yuan_to_points", db, 10)
+    return upstream_pricing.validate_yuan_to_points(raw_value)
+
+
+def _lock_models_for_price_sync(db: Session, model_ids: list[int]) -> list[AiModel]:
+    """按稳定顺序锁定批量价格同步涉及的模型行。"""
+    return (
+        db.query(AiModel)
+        .filter(AiModel.id.in_(model_ids))
+        .order_by(AiModel.id.asc())
+        .with_for_update()
+        .all()
+    )
+
+
+def _lock_model_for_price_update(db: Session, model_id: int) -> AiModel | None:
+    """锁定手工价格更新涉及的模型行。"""
+    return (
+        db.query(AiModel)
+        .filter(AiModel.id == model_id)
+        .with_for_update()
+        .first()
+    )
+
+
+@router.post("/api/admin/ai/channels/{channel_id}/prices/preview")
+async def admin_preview_channel_prices(channel_id: int, request: Request, db: Session = Depends(get_db)):
+    _require_admin(request, db)
+    channel = db.get(AiChannel, channel_id)
+    if not channel:
+        raise HTTPException(404, "渠道不存在")
+    yuan_to_points = _yuan_to_points(db)
+    snapshot = await upstream_pricing.fetch_new_api_pricing(channel)
+    models = (
+        db.query(AiModel)
+        .filter(AiModel.channel_id == channel.id)
+        .order_by(AiModel.id.asc())
+        .all()
+    )
+    items = _build_channel_price_items(db, models, snapshot, yuan_to_points)
+    return {
+        "channel": ai_channels.serialize_channel(channel),
+        "yuan_to_points": float(yuan_to_points),
+        "yuan_per_point": float(Decimal("1") / yuan_to_points),
+        "upstream": {
+            "quota_per_unit": float(snapshot.quota_per_unit),
+            "currency": snapshot.quota_display_type,
+            "group": snapshot.group,
+            "group_ratio": float(snapshot.group_ratio),
+            "pricing_version": snapshot.pricing_version,
+        },
+        "summary": {
+            "total": len(items),
+            "ready": sum(item["status"] == "ready" for item in items),
+            "unchanged": sum(item["status"] == "unchanged" for item in items),
+            "skipped": sum(item["status"] == "skipped" for item in items),
+        },
+        "items": items,
+    }
+
+
+@router.post("/api/admin/ai/channels/{channel_id}/prices/sync")
+async def admin_sync_channel_prices(
+    channel_id: int,
+    body: ChannelPriceSyncIn,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    admin = _require_admin(request, db)
+    channel = db.get(AiChannel, channel_id)
+    if not channel:
+        raise HTTPException(404, "渠道不存在")
+    yuan_to_points = _yuan_to_points(db)
+    if yuan_to_points != body.expected_yuan_to_points:
+        raise HTTPException(409, "积分换算比例已变化，请重新预览后再同步")
+    snapshot = await upstream_pricing.fetch_new_api_pricing(channel)
+    if snapshot.pricing_version != body.expected_pricing_version:
+        raise HTTPException(409, "上游价格版本已变化，请重新预览后再同步")
+
+    selected_ids = list(dict.fromkeys(body.model_ids))
+    models = _lock_models_for_price_sync(db, selected_ids)
+    models_by_id = {model.id: model for model in models}
+    if set(models_by_id) != set(selected_ids) or any(model.channel_id != channel.id for model in models):
+        raise HTTPException(400, "所选模型不存在或不属于当前渠道")
+    if set(body.expected_price_ids) != set(selected_ids):
+        raise HTTPException(400, "预览价格版本与所选模型不一致")
+    current_price_ids = {
+        model.id: (active.id if (active := ai_catalog.get_active_price(db, model.id)) else None)
+        for model in models
+    }
+    items = _build_channel_price_items(db, models, snapshot, yuan_to_points)
+    items_by_model_id = {item["model_id"]: item for item in items}
+    if any(
+        current_price_ids[model_id] != body.expected_price_ids[model_id]
+        and items_by_model_id[model_id]["status"] != "unchanged"
+        for model_id in selected_ids
+    ):
+        raise HTTPException(409, "本地模型价格已变化，请重新预览后再同步")
+    invalid = [item for item in items if item["status"] not in {"ready", "unchanged"}]
+    if invalid:
+        names = "、".join(item["display_name"] for item in invalid)
+        raise HTTPException(400, f"所选模型当前无法同步价格：{names}")
+
+    now = datetime.datetime.utcnow()
+    updated: list[int] = []
+    unchanged: list[int] = []
+    for item in items:
+        if item["status"] == "unchanged":
+            unchanged.append(item["model_id"])
+            continue
+        current = ai_catalog.get_active_price(db, item["model_id"])
+        if current:
+            current.valid_to = now
+        proposed = item["proposed_price"]
+        db.add(
+            AiModelPrice(
+                model_id=item["model_id"],
+                billing_type=proposed["billing_type"],
+                price_config_json=proposed["price_config_json"],
+                valid_from=now,
+                created_by=admin.id,
+            )
+        )
+        updated.append(item["model_id"])
+    db.commit()
+    return {"updated": updated, "unchanged": unchanged, "skipped": []}
+
+
 @router.get("/api/admin/ai/models")
 def admin_list_models(request: Request, channel_id: int | None = None, db: Session = Depends(get_db)):
     _require_admin(request, db)
@@ -1550,7 +1787,7 @@ def admin_add_channel_models(
 @router.post("/api/admin/ai/models/{model_id}/prices")
 def admin_set_price(model_id: int, body: PriceIn, request: Request, db: Session = Depends(get_db)):
     admin = _require_admin(request, db)
-    model = db.get(AiModel, model_id)
+    model = _lock_model_for_price_update(db, model_id)
     if not model:
         raise HTTPException(404, "模型不存在")
     billing_type, price_config = _normalize_model_price(model, body)
@@ -1579,8 +1816,9 @@ def admin_set_price(model_id: int, body: PriceIn, request: Request, db: Session 
 @router.get("/api/admin/points/settings")
 def admin_get_points_settings(request: Request, db: Session = Depends(get_db)):
     _require_admin(request, db)
+    yuan_to_points = _get_platform_setting("points.yuan_to_points", db, 10)
     return {
-        "yuan_to_points": float(_get_platform_setting("points.yuan_to_points", db, 10) or 10),
+        "yuan_to_points": float(yuan_to_points),
         "register_grant_enabled": bool(_get_platform_setting("points.register_grant_enabled", db, False)),
         "register_grant_amount": float(_get_platform_setting("points.register_grant_amount", db, 0) or 0),
         "dual_track_enabled": bool(_get_platform_setting("points.dual_track_enabled", db, True)),
@@ -1594,7 +1832,7 @@ def admin_get_points_settings(request: Request, db: Session = Depends(get_db)):
 def admin_put_points_settings(body: PointsSettingsIn, request: Request, db: Session = Depends(get_db)):
     _require_admin(request, db)
     if body.yuan_to_points is not None:
-        _set_platform_setting("points.yuan_to_points", body.yuan_to_points, db)
+        _set_platform_setting("points.yuan_to_points", float(body.yuan_to_points), db)
     if body.register_grant_enabled is not None:
         _set_platform_setting("points.register_grant_enabled", body.register_grant_enabled, db)
     if body.register_grant_amount is not None:

@@ -586,6 +586,52 @@ def test_per_call_settlement_prefers_actual_call_count():
     assert account.reserved_points == Decimal("0.0000")
 
 
+@pytest.mark.parametrize(
+    ("video_seconds", "estimate_call_count", "actual_call_count", "expected_points"),
+    [
+        (0, None, None, Decimal("3.0000")),
+        (None, None, None, Decimal("3.0000")),
+        (0, 3, 2, Decimal("6.0000")),
+    ],
+)
+def test_video_per_call_success_charges_without_duration(
+    video_seconds,
+    estimate_call_count,
+    actual_call_count,
+    expected_points,
+):
+    db, user, model = _billing_session(
+        billing_type="per_call",
+        price_config={"points_per_call": 3},
+        modality="video",
+    )
+    ctx = begin_ai_call(
+        db,
+        user_id=user.id,
+        modality="video",
+        task_type="video.generate",
+        credential_mode="platform",
+        model_id=model.id,
+        request_id=f"video-per-call-{video_seconds}-{estimate_call_count}",
+        estimate_kwargs={"call_count": estimate_call_count} if estimate_call_count else None,
+    )
+
+    complete_ai_call(
+        db,
+        ctx,
+        success=True,
+        video_seconds=video_seconds,
+        actual_call_count=actual_call_count,
+    )
+
+    event = db.get(AiUsageEvent, ctx.usage_event_id)
+    account = db.query(PointsAccount).filter_by(user_id=user.id).one()
+    assert event.settled_points == expected_points
+    assert event.price_snapshot_json["actual_call_count"] == (actual_call_count or 1)
+    assert account.available_points == Decimal("20.0000") - expected_points
+    assert account.reserved_points == Decimal("0.0000")
+
+
 def test_per_call_zero_actual_calls_releases_full_reservation():
     db, user, model = _billing_session()
     ctx = begin_ai_call(

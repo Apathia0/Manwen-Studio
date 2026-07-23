@@ -18,6 +18,7 @@ from models import AgentAttachment
 from services import agent_service as agent_service_module
 from services.agent_media import _extract_document_text, _extract_document_text_safely, multimodal_content, resolve_attachments
 from services.token_utils import emergency_compact_messages, split_messages_for_compression
+from services.token_utils import should_compress_messages
 
 
 @pytest.fixture()
@@ -239,6 +240,42 @@ def test_emergency_compaction_keeps_latest_request_and_limits_images():
         for item in latest_content
         if item.get("type") == "image_url"
     ] == ["data:image/jpeg;base64,user-1", "data:image/jpeg;base64,user-2"]
+
+
+def test_agent_compression_threshold_includes_exact_128k(monkeypatch):
+    monkeypatch.setattr(
+        "services.token_utils.estimate_messages_tokens",
+        lambda _messages: 128_000,
+    )
+
+    assert should_compress_messages([{"role": "user", "content": "测试"}]) is True
+
+
+@pytest.mark.asyncio
+async def test_agent_compacts_short_oversized_history_before_request(monkeypatch):
+    payloads = _install_agent_stream_client(
+        monkeypatch,
+        [_agent_sse_response("压缩后完成", "stop")],
+    )
+    oversized = "旧内容" * 50_000
+
+    events = [
+        event
+        async for event in agent_service_module.AgentService().run_stream(
+            messages=[
+                {"role": "user", "content": oversized},
+                {"role": "assistant", "content": oversized},
+                {"role": "user", "content": "请继续处理"},
+            ],
+            story_context="测试上下文",
+            api_key="test-key",
+            mode="analyze",
+        )
+    ]
+
+    assert len(payloads) == 1
+    assert len(json.dumps(payloads[0]["messages"], ensure_ascii=False)) < len(oversized) * 2
+    assert json.loads(next(event for event in events if event["event"] == "done")["data"])["content"] == "压缩后完成"
 
 
 @pytest.mark.asyncio
@@ -555,7 +592,7 @@ async def test_agent_skips_duplicate_tool_call_id(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_agent_run_stream_omits_token_limits_and_continues_after_length(monkeypatch):
+async def test_agent_run_stream_sets_token_limit_and_continues_after_length(monkeypatch):
     payloads = _install_agent_stream_client(
         monkeypatch,
         [
@@ -575,7 +612,7 @@ async def test_agent_run_stream_omits_token_limits_and_continues_after_length(mo
     ]
 
     assert len(payloads) == 2
-    assert all("max_tokens" not in payload for payload in payloads)
+    assert all(payload["max_tokens"] == 8192 for payload in payloads)
     assert all("max_completion_tokens" not in payload for payload in payloads)
     token_text = "".join(
         json.loads(event["data"])["content"]
@@ -708,7 +745,7 @@ async def test_agent_finish_reason_ignores_trailing_null_choice(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_agent_history_compression_payload_omits_token_limits(monkeypatch):
+async def test_agent_history_compression_payload_sets_token_limit(monkeypatch):
     payloads: list[dict] = []
 
     class FakeResponse:
@@ -743,5 +780,5 @@ async def test_agent_history_compression_payload_omits_token_limits(monkeypatch)
     )
 
     assert summary == "摘要"
-    assert "max_tokens" not in payloads[0]
+    assert payloads[0]["max_tokens"] == 2048
     assert "max_completion_tokens" not in payloads[0]

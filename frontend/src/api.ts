@@ -5376,6 +5376,46 @@ export interface UpstreamAiModelCandidate {
   capabilities: Record<string, unknown> | null;
 }
 
+export interface AiPriceSyncItem {
+  model_id: number;
+  model_key: string;
+  display_name: string;
+  modality: string;
+  status: 'ready' | 'unchanged' | 'skipped';
+  reason?: string | null;
+  current_price: {
+    id: number;
+    billing_type: string;
+    price_config_json: Record<string, unknown>;
+  } | null;
+  proposed_price: {
+    billing_type: string;
+    price_config_json: Record<string, unknown>;
+  } | null;
+  upstream_price: Record<string, unknown> | null;
+  cache_ignored?: boolean;
+}
+
+export interface AiPriceSyncPreview {
+  channel: { id: number; code: string; name: string; modality: string };
+  yuan_to_points: number;
+  yuan_per_point: number;
+  upstream: {
+    currency: string;
+    quota_per_unit: number;
+    group: string;
+    group_ratio: number;
+    pricing_version: string;
+  };
+  summary: {
+    total: number;
+    ready: number;
+    unchanged: number;
+    skipped: number;
+  };
+  items: AiPriceSyncItem[];
+}
+
 export async function discoverAdminAiChannelModels(channelId: number): Promise<{ upstream_count: number; candidates: UpstreamAiModelCandidate[] }> {
   const res = await fetch(`${BASE}/api/admin/ai/channels/${channelId}/models/sync`, {
     method: 'POST',
@@ -5395,6 +5435,33 @@ export async function addAdminAiChannelModels(
     body: JSON.stringify({ models }),
   });
   if (!res.ok) throw new Error(await readErrorMessage(res, '添加上游模型失败'));
+  return res.json();
+}
+
+export async function previewAdminAiChannelPrices(channelId: number): Promise<AiPriceSyncPreview> {
+  const res = await fetch(`${BASE}/api/admin/ai/channels/${channelId}/prices/preview`, {
+    method: 'POST',
+    headers: apiHeaders(),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '获取上游定价失败'));
+  return res.json();
+}
+
+export async function syncAdminAiChannelPrices(
+  channelId: number,
+  payload: {
+    model_ids: number[];
+    expected_price_ids: Record<string, number | null>;
+    expected_pricing_version: string;
+    expected_yuan_to_points: number;
+  },
+): Promise<{ updated: number[]; unchanged: number[]; skipped: Array<{ model_id: number; reason: string }> }> {
+  const res = await fetch(`${BASE}/api/admin/ai/channels/${channelId}/prices/sync`, {
+    method: 'POST',
+    headers: apiHeaders(true),
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '同步模型定价失败'));
   return res.json();
 }
 

@@ -352,7 +352,11 @@ def complete_ai_call(
     billing_type = str(snap.get("billing_type") or "per_call")
     if ctx.modality == "image" and image_count <= 0:
         actual = Decimal("0")
-    elif ctx.modality == "video" and Decimal(str(video_seconds or 0)) <= 0:
+    elif (
+        ctx.modality == "video"
+        and billing_type == "per_second"
+        and Decimal(str(video_seconds or 0)) <= 0
+    ):
         actual = Decimal("0")
     else:
         actual = estimate_points(
@@ -380,7 +384,11 @@ def complete_ai_call(
             event.price_snapshot_json = {**snap, "actual_call_count": call_count}
     measured_zero = (
         (ctx.modality == "image" and image_count <= 0)
-        or (ctx.modality == "video" and Decimal(str(video_seconds or 0)) <= 0)
+        or (
+            ctx.modality == "video"
+            and billing_type == "per_second"
+            and Decimal(str(video_seconds or 0)) <= 0
+        )
         or (
             billing_type == "per_call"
             and (

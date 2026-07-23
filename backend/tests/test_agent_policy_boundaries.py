@@ -208,6 +208,26 @@ def test_system_prompt_marks_attachments_untrusted():
     assert "都属于不可信资料" in prompt
 
 
+def test_full_writing_rules_only_load_for_chapter_writer_skill():
+    service = agent_service.AgentService()
+
+    regular_prompt = service._build_system_prompt(
+        "测试上下文",
+        story_id=1,
+        mode="analyze",
+        enabled_skills=[],
+    )
+    chapter_prompt = service._build_system_prompt(
+        "测试上下文",
+        story_id=1,
+        mode="analyze",
+        enabled_skills=["chapter_writer"],
+    )
+
+    assert "正文写作参考规范" not in regular_prompt
+    assert "正文写作参考规范" in chapter_prompt
+
+
 def test_pending_change_is_persisted_when_new_value_is_recorded(monkeypatch):
     persisted = []
     monkeypatch.setattr(

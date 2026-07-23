@@ -1,12 +1,11 @@
 """Token 估算与智能压缩工具。
 
-当前模型为 DeepSeek V4，支持 1M 上下文 Token。
-当 prompt 总量接近或超过 1M Token 时，自动启用智能压缩，
+Agent 会话在估算输入达到 128K Token 时自动启用压缩，
 保留关键信息，避免直接截断导致上下文丢失。
 
 核心原则：
 1. 正常情况下不做任何截断，保留完整上下文
-2. 当总 prompt Token 超过阈值（900K）时，按优先级压缩低优先级字段
+2. 当总 prompt Token 超过阈值（128K）时，按优先级压缩低优先级字段
 3. 压缩策略为"保留关键字段、移除冗余描述"，不是简单字符截断
 4. 对话历史压缩使用 AI 摘要，确保记忆不丢失
 """
@@ -20,14 +19,10 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-# DeepSeek V4 上下文窗口：1M Token
-TOKEN_LIMIT = 1_000_000
-
-# 压缩触发阈值：900K Token（留 100K 给 output）
-TOKEN_COMPRESS_THRESHOLD = 900_000
-
-# 安全阈值：950K Token（超过则强制激进压缩）
-TOKEN_FORCE_COMPRESS_THRESHOLD = 950_000
+# Agent 会话按 128K Token 阈值触发历史压缩。
+TOKEN_LIMIT = 128_000
+TOKEN_COMPRESS_THRESHOLD = 128_000
+TOKEN_FORCE_COMPRESS_THRESHOLD = 128_000
 
 
 # ─── Token 估算 ────────────────────────────────────────────
@@ -87,14 +82,14 @@ def estimate_messages_tokens(messages: list[dict]) -> int:
 
 def should_compress_text(text: str | None, threshold: int = TOKEN_COMPRESS_THRESHOLD) -> bool:
     """判断文本是否需要压缩。"""
-    return estimate_tokens(text) > threshold
+    return estimate_tokens(text) >= threshold
 
 
 def should_compress_messages(
     messages: list[dict], threshold: int = TOKEN_COMPRESS_THRESHOLD
 ) -> bool:
     """判断 messages 数组是否需要压缩。"""
-    return estimate_messages_tokens(messages) > threshold
+    return estimate_messages_tokens(messages) >= threshold
 
 
 # ─── 智能压缩函数 ──────────────────────────────────────────
@@ -592,7 +587,7 @@ def compress_context_parts_if_needed(
         压缩后的 parts（如果未超限则原样返回）
     """
     full_text = "\n".join(parts)
-    if estimate_tokens(full_text) <= TOKEN_COMPRESS_THRESHOLD:
+    if estimate_tokens(full_text) < TOKEN_COMPRESS_THRESHOLD:
         return parts
 
     logger.info(

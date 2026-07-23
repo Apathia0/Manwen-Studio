@@ -1,6 +1,6 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 
-import { analyzeChapterMangaAssets, apiHeaders, coverImageUrl, createAdminAiChannel, deleteAdminAiChannel, generateMangaAsset, generateMangaAssetsBatch, generateMangaStream, generateStoryCharRefStream, getAiChannels, getApiKeySettings, getAuthorStyleResult, getAuthorStyleStatus, getBackgroundTaskStatus, getLocalCredentialMode, getMangaAssetAnalysis, login, redrawMangaAsset, regenerateVideoAsset, retryVideoJob, saveApiKeySettings, saveMangaAssetAnalysis, setLocalCredentialMode, startAuthorStyleAnalysis, toPublicMangaAssetUrl, toPublicVideoAssetUrl, updateAdminAiChannel, updateAuthorStyleReport, updateDeconstructionReport } from './api';
+import { analyzeChapterMangaAssets, apiHeaders, coverImageUrl, createAdminAiChannel, deleteAdminAiChannel, generateMangaAsset, generateMangaAssetsBatch, generateMangaStream, generateStoryCharRefStream, getAiChannels, getApiKeySettings, getAuthorStyleResult, getAuthorStyleStatus, getBackgroundTaskStatus, getLocalCredentialMode, getMangaAssetAnalysis, login, previewAdminAiChannelPrices, redrawMangaAsset, regenerateVideoAsset, retryVideoJob, saveApiKeySettings, saveMangaAssetAnalysis, setLocalCredentialMode, startAuthorStyleAnalysis, syncAdminAiChannelPrices, toPublicMangaAssetUrl, toPublicVideoAssetUrl, updateAdminAiChannel, updateAuthorStyleReport, updateDeconstructionReport } from './api';
 import { shouldShowAuthorStyleEntry } from './components/DeconstructionWorkPage';
 
 describe('coverImageUrl', () => {
@@ -291,6 +291,41 @@ describe('AI 渠道 API', () => {
     expect(fetch).toHaveBeenCalledWith(
       '/api/admin/ai/channels/3',
       expect.objectContaining({ method: 'DELETE' }),
+    );
+  });
+
+  it('读取渠道模型定价同步预览', async () => {
+    const result = {
+      channel: { id: 3, code: 'text', name: '文本', modality: 'text' },
+      yuan_to_points: 10,
+      yuan_per_point: 0.1,
+      upstream: { currency: 'CNY', quota_per_unit: 500000, group: 'default', group_ratio: 1, pricing_version: 'v1' },
+      summary: { total: 1, ready: 1, unchanged: 0, skipped: 0 },
+      items: [],
+    };
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(result), { status: 200 })));
+
+    await expect(previewAdminAiChannelPrices(3)).resolves.toEqual(result);
+    expect(fetch).toHaveBeenCalledWith(
+      '/api/admin/ai/channels/3/prices/preview',
+      expect.objectContaining({ method: 'POST' }),
+    );
+  });
+
+  it('提交选中的已有模型定价', async () => {
+    const payload = {
+      model_ids: [5, 8],
+      expected_price_ids: { 5: null, 8: 12 },
+      expected_pricing_version: 'v1',
+      expected_yuan_to_points: 10,
+    };
+    const result = { updated: [5], unchanged: [8], skipped: [] };
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(result), { status: 200 })));
+
+    await expect(syncAdminAiChannelPrices(3, payload)).resolves.toEqual(result);
+    expect(fetch).toHaveBeenCalledWith(
+      '/api/admin/ai/channels/3/prices/sync',
+      expect.objectContaining({ method: 'POST', body: JSON.stringify(payload) }),
     );
   });
 });

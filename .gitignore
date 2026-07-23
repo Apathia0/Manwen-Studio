@@ -74,6 +74,7 @@ backend/tests/*
 !backend/tests/test_agent_policy_boundaries.py
 !backend/tests/test_agent_video_mutations.py
 !backend/tests/test_points_ai_channel_delete.py
+!backend/tests/test_ai_price_sync.py
 !backend/tests/test_agent_manga_storyboard.py
 !backend/tests/test_points_packages.py
 !backend/tests/test_video_adapter.py

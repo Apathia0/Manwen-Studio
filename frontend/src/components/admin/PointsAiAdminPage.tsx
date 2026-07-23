@@ -9,6 +9,7 @@ import {
   Pencil,
   Plus,
   RadioTower,
+  RefreshCw,
   Save,
   Square,
   SquareCheckBig,
@@ -20,6 +21,7 @@ import {
 import {
   type AiChannelAdmin,
   type AiModelAdmin,
+  type AiPriceSyncPreview,
   type VideoAdapterType,
   type UpstreamAiModelCandidate,
   type PointsProduct,
@@ -36,8 +38,10 @@ import {
   getAdminAiModels,
   getAdminPointsProducts,
   getAdminPointsSettings,
+  previewAdminAiChannelPrices,
   saveAdminPointsSettings,
   setAdminAiModelPrice,
+  syncAdminAiChannelPrices,
   updateAdminAiChannel,
   updateAdminAiModel,
   updateAdminPointsProduct,
@@ -101,6 +105,10 @@ const DEFAULT_IMAGE_CAPABILITIES = {
   },
 };
 const DEFAULT_TEXT_POINTS_PER_1M_TOKENS = 2000;
+const PRICE_NUMBER_FORMATTER = new Intl.NumberFormat('zh-CN', {
+  minimumFractionDigits: 0,
+  maximumFractionDigits: 4,
+});
 
 function defaultPointsForModality(modality: string) {
   if (modality === 'video') return 3;
@@ -139,6 +147,33 @@ function StatusLabel({ active, activeText, inactiveText }: { active: boolean; ac
 function readPrice(config: Record<string, unknown> | undefined, key: string, fallback: number) {
   const value = Number(config?.[key]);
   return Number.isFinite(value) ? value : fallback;
+}
+
+function formatPriceNumber(value: unknown) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? PRICE_NUMBER_FORMATTER.format(parsed) : '-';
+}
+
+function formatModelPrice(price: { billing_type: string; price_config_json: Record<string, unknown> } | null) {
+  if (!price) return '未定价';
+  const config = price.price_config_json;
+  if (price.billing_type === 'per_1m_tokens') {
+    const legacy = config.points_per_1m_tokens;
+    return `输入 ${formatPriceNumber(config.input_points_per_1m ?? legacy)} / 输出 ${formatPriceNumber(config.output_points_per_1m ?? legacy)} 积分/百万 Token`;
+  }
+  if (price.billing_type === 'per_image') return `${formatPriceNumber(config.points_per_image)} 积分/张`;
+  if (price.billing_type === 'per_second') return `${formatPriceNumber(config.points_per_second)} 积分/秒`;
+  if (price.billing_type === 'per_call') return `${formatPriceNumber(config.points_per_call)} 积分/次`;
+  return price.billing_type;
+}
+
+function formatUpstreamPrice(price: Record<string, unknown> | null, modality: string) {
+  if (!price) return '-';
+  if (price.input_cny_per_1m != null || price.output_cny_per_1m != null) {
+    return `输入 ¥${formatPriceNumber(price.input_cny_per_1m)} / 输出 ¥${formatPriceNumber(price.output_cny_per_1m)} 每百万 Token`;
+  }
+  const fixed = price.fixed_cny ?? price.cny_per_call ?? price.cny_per_image;
+  return fixed == null ? '-' : `¥${formatPriceNumber(fixed)} / ${modality === 'image' ? '张' : '次'}`;
 }
 
 function readTextPrices(model: AiModelAdmin) {
@@ -224,10 +259,17 @@ export function PointsAiAdminPage() {
   const [selectedUpstreamKeys, setSelectedUpstreamKeys] = useState<string[]>([]);
   const [discoveringModels, setDiscoveringModels] = useState(false);
   const [addingModels, setAddingModels] = useState(false);
+  const [priceSyncModalOpen, setPriceSyncModalOpen] = useState(false);
+  const [priceSyncChannelId, setPriceSyncChannelId] = useState(0);
+  const [priceSyncPreview, setPriceSyncPreview] = useState<AiPriceSyncPreview | null>(null);
+  const [selectedPriceSyncModelIds, setSelectedPriceSyncModelIds] = useState<number[]>([]);
+  const [previewingPrices, setPreviewingPrices] = useState(false);
+  const [applyingPrices, setApplyingPrices] = useState(false);
   const [capabilitiesModelId, setCapabilitiesModelId] = useState<number | null>(null);
   const [capabilitiesDraft, setCapabilitiesDraft] = useState('');
   const [selectedVideoPreset, setSelectedVideoPreset] = useState<VideoAdapterType | ''>('');
   const [priceForm, setPriceForm] = useState({
+    billing_type: 'per_1m_tokens',
     points: DEFAULT_TEXT_POINTS_PER_1M_TOKENS,
     output_points: DEFAULT_TEXT_POINTS_PER_1M_TOKENS,
     estimate_default_seconds: 15,
@@ -342,9 +384,16 @@ export function PointsAiAdminPage() {
     const textPrices = readTextPrices(model);
     setPricingModelId(model.id);
     setPriceForm({
+      billing_type: model.active_price?.billing_type || (model.modality === 'text' ? 'per_1m_tokens' : model.modality === 'video' ? 'per_second' : 'per_image'),
       points: model.modality === 'text'
         ? textPrices.input
-        : readPrice(config, model.modality === 'video' ? 'points_per_second' : 'points_per_image', defaultPointsForModality(model.modality)),
+        : readPrice(
+            config,
+            model.active_price?.billing_type === 'per_call'
+              ? 'points_per_call'
+              : model.modality === 'video' ? 'points_per_second' : 'points_per_image',
+            defaultPointsForModality(model.modality),
+          ),
       output_points: textPrices.output,
       estimate_default_seconds: readPrice(config, 'estimate_default_seconds', 15),
     });
@@ -513,13 +562,15 @@ export function PointsAiAdminPage() {
     try {
       const billingType =
         model.modality === 'video'
-          ? 'per_second'
+          ? priceForm.billing_type === 'per_call' ? 'per_call' : 'per_second'
           : model.modality === 'image'
             ? 'per_image'
             : 'per_1m_tokens';
       const priceConfig =
         model.modality === 'video'
-          ? {
+          ? billingType === 'per_call'
+            ? { points_per_call: priceForm.points }
+            : {
               points_per_second: priceForm.points,
               estimate_default_seconds: priceForm.estimate_default_seconds,
             }
@@ -581,6 +632,66 @@ export function PointsAiAdminPage() {
     }
   };
 
+  const openPriceSync = () => {
+    const preferredChannel = channels.find((channel) => (
+      modelModalityFilter === 'all' || channel.modality === modelModalityFilter
+    )) || channels[0];
+    setPriceSyncChannelId(preferredChannel?.id || 0);
+    setPriceSyncPreview(null);
+    setSelectedPriceSyncModelIds([]);
+    setPriceSyncModalOpen(true);
+  };
+
+  const previewPriceSync = async () => {
+    if (!priceSyncChannelId) return;
+    setPreviewingPrices(true);
+    try {
+      const result = await previewAdminAiChannelPrices(priceSyncChannelId);
+      setPriceSyncPreview(result);
+      setSelectedPriceSyncModelIds(
+        result.items.filter((item) => item.status === 'ready').map((item) => item.model_id),
+      );
+    } catch (error) {
+      setPriceSyncPreview(null);
+      setSelectedPriceSyncModelIds([]);
+      toast.error(error instanceof Error ? error.message : '获取上游定价失败');
+    } finally {
+      setPreviewingPrices(false);
+    }
+  };
+
+  const applyPriceSync = async () => {
+    if (!priceSyncPreview || !selectedPriceSyncModelIds.length) return;
+    const accepted = await confirm({
+      title: '同步模型定价',
+      message: `将按 1 元 = ${formatPriceNumber(priceSyncPreview.yuan_to_points)} 积分，为 ${selectedPriceSyncModelIds.length} 个已有模型创建新价格版本。确认继续吗？`,
+      confirmText: '确认同步',
+    });
+    if (!accepted) return;
+    setApplyingPrices(true);
+    try {
+      const result = await syncAdminAiChannelPrices(priceSyncPreview.channel.id, {
+        model_ids: selectedPriceSyncModelIds,
+        expected_price_ids: Object.fromEntries(
+          priceSyncPreview.items
+            .filter((item) => selectedPriceSyncModelIds.includes(item.model_id))
+            .map((item) => [String(item.model_id), item.current_price?.id ?? null]),
+        ),
+        expected_pricing_version: priceSyncPreview.upstream.pricing_version,
+        expected_yuan_to_points: priceSyncPreview.yuan_to_points,
+      });
+      await reload();
+      setPriceSyncModalOpen(false);
+      toast.success(`已更新 ${result.updated.length} 个模型定价${result.unchanged.length ? `，${result.unchanged.length} 个无需变更` : ''}`);
+    } catch (error) {
+      setPriceSyncPreview(null);
+      setSelectedPriceSyncModelIds([]);
+      toast.error(error instanceof Error ? error.message : '同步模型定价失败');
+    } finally {
+      setApplyingPrices(false);
+    }
+  };
+
   const allUpstreamModelsSelected = upstreamCandidates.length > 0
     && selectedUpstreamKeys.length === upstreamCandidates.length;
 
@@ -613,7 +724,8 @@ export function PointsAiAdminPage() {
   const settingsInvalid =
     !settings ||
     !Number.isFinite(settings.yuan_to_points) ||
-    settings.yuan_to_points < 0 ||
+    settings.yuan_to_points <= 0 ||
+    settings.yuan_to_points > 1_000_000_000 ||
     !Number.isFinite(settings.register_grant_amount) ||
     settings.register_grant_amount < 0;
   const selectedModelChannel = channels.find((channel) => channel.id === modelForm.channel_id);
@@ -681,7 +793,8 @@ export function PointsAiAdminPage() {
                   <Field label="1 元兑换积分" hint="积分 / 元">
                     <Input
                       type="number"
-                      min="0"
+                      min="0.0001"
+                      max="1000000000"
                       step="0.0001"
                       value={settings.yuan_to_points}
                       onChange={(event) =>
@@ -1068,15 +1181,16 @@ export function PointsAiAdminPage() {
             className="grid min-w-0 lg:grid-cols-[minmax(0,1fr)_380px]"
           >
             <div className="min-w-0 p-4 sm:p-6">
-              <div className="mb-4 flex items-end justify-between gap-4">
+              <div className="mb-4 flex flex-col items-start gap-3 sm:flex-row sm:items-end sm:justify-between">
                 <div>
                   <h2 className="text-base font-semibold text-slate-900">模型目录</h2>
                   <p className="mt-1 text-sm text-slate-500">控制模型可见性，并按 Token、图片或视频秒数设置积分价。</p>
                 </div>
-                <div className="flex shrink-0 items-center gap-3">
+                <div className="flex flex-wrap items-center gap-2">
                   <span className="text-xs text-slate-400">
                     {modelModalityFilter === 'all' ? `共 ${models.length} 项` : `${filteredModels.length} / ${models.length} 项`}
                   </span>
+                  <Button type="button" variant="secondary" size="sm" disabled={busy || channels.length === 0} icon={<RefreshCw size={13} />} onClick={openPriceSync}>同步模型定价</Button>
                   <Button type="button" variant="secondary" size="sm" disabled={busy || channels.length === 0} icon={<DatabaseZap size={13} />} onClick={openUpstreamModels}>从上游获取模型</Button>
                 </div>
               </div>
@@ -1181,7 +1295,7 @@ export function PointsAiAdminPage() {
                       {pricingModelId === model.id ? (
                         <div className="mt-3 flex flex-col gap-3 border-l-2 border-blue-500 bg-blue-50/60 p-3 sm:flex-row sm:items-end">
                           <div className="grid min-w-0 flex-1 gap-3 sm:grid-cols-2">
-                            <Field label={model.modality === 'video' ? '每秒积分价' : model.modality === 'image' ? '每张积分价' : '每百万输入 Token 积分价'}>
+                            <Field label={model.modality === 'video' ? priceForm.billing_type === 'per_call' ? '每次积分价' : '每秒积分价' : model.modality === 'image' ? '每张积分价' : '每百万输入 Token 积分价'}>
                               <Input type="number" min="0" step="0.0001" value={priceForm.points} onChange={(event) => setPriceForm({ ...priceForm, points: Number(event.target.value) })} />
                             </Field>
                             {model.modality === 'text' ? (
@@ -1189,7 +1303,7 @@ export function PointsAiAdminPage() {
                                 <Input type="number" min="0" step="0.0001" value={priceForm.output_points} onChange={(event) => setPriceForm({ ...priceForm, output_points: Number(event.target.value) })} />
                               </Field>
                             ) : null}
-                            {model.modality === 'video' ? (
+                            {model.modality === 'video' && priceForm.billing_type !== 'per_call' ? (
                               <Field label="默认估算时长" hint="秒">
                                 <Input type="number" min="1" step="1" value={priceForm.estimate_default_seconds} onChange={(event) => setPriceForm({ ...priceForm, estimate_default_seconds: Number(event.target.value) })} />
                               </Field>
@@ -1206,7 +1320,7 @@ export function PointsAiAdminPage() {
                                 priceForm.points < 0 ||
                                 (model.modality === 'text' &&
                                   (!Number.isFinite(priceForm.output_points) || priceForm.output_points < 0)) ||
-                                (model.modality === 'video' &&
+                                (model.modality === 'video' && priceForm.billing_type !== 'per_call' &&
                                   (!Number.isFinite(priceForm.estimate_default_seconds) ||
                                     priceForm.estimate_default_seconds < 1))
                               }
@@ -1458,6 +1572,7 @@ export function PointsAiAdminPage() {
                       await reload().catch(() => undefined);
                       setPricingModelId(model.id);
                       setPriceForm({
+                        billing_type: billingType,
                         points: initialPoints,
                         output_points: initialOutputPoints,
                         estimate_default_seconds: 15,
@@ -1538,6 +1653,92 @@ export function PointsAiAdminPage() {
                 <div className="flex gap-2">
                   <Button type="button" variant="secondary" size="sm" disabled={discoveringModels || addingModels} onClick={() => setUpstreamModalOpen(false)}>取消</Button>
                   <Button type="button" size="sm" loading={addingModels} disabled={!selectedUpstreamKeys.length || discoveringModels} icon={<Plus size={13} />} onClick={() => void addSelectedUpstreamModels()}>添加选中模型</Button>
+                </div>
+              </div>
+            </section>
+          </div>
+        ) : null}
+
+        {priceSyncModalOpen ? (
+          <div className="fixed inset-0 z-[110] flex items-center justify-center bg-black/45 p-4 backdrop-blur-sm" onMouseDown={() => { if (!previewingPrices && !applyingPrices) setPriceSyncModalOpen(false); }}>
+            <section role="dialog" aria-modal="true" aria-label="同步模型定价" className="flex max-h-[min(760px,calc(100vh-2rem))] w-full max-w-3xl flex-col overflow-hidden rounded-lg bg-white shadow-2xl" onMouseDown={(event) => event.stopPropagation()}>
+              <div className="flex items-center justify-between border-b border-slate-200 px-5 py-4">
+                <div>
+                  <h2 className="text-base font-semibold text-slate-900">同步模型定价</h2>
+                  <p className="mt-1 text-xs text-slate-500">只同步当前渠道已加入模型目录的项目；文本缓存价格不会参与换算。</p>
+                </div>
+                <Button type="button" variant="secondary" size="sm" disabled={previewingPrices || applyingPrices} icon={<X size={13} />} onClick={() => setPriceSyncModalOpen(false)}>关闭</Button>
+              </div>
+              <div className="min-h-0 flex-1 space-y-4 overflow-y-auto p-5">
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-end">
+                  <div className="min-w-0 flex-1">
+                    <Field label="上游渠道">
+                      <Select value={priceSyncChannelId} onChange={(event) => { setPriceSyncChannelId(Number(event.target.value)); setPriceSyncPreview(null); setSelectedPriceSyncModelIds([]); }}>
+                        {channels.map((channel) => <option key={channel.id} value={channel.id}>{channel.name} · {channel.modality}</option>)}
+                      </Select>
+                    </Field>
+                  </div>
+                  <Button type="button" loading={previewingPrices} disabled={!priceSyncChannelId || applyingPrices} icon={<RefreshCw size={14} />} onClick={() => void previewPriceSync()}>获取定价预览</Button>
+                </div>
+
+                {priceSyncPreview ? (
+                  <>
+                    <div className="grid gap-3 border-y border-blue-100 bg-blue-50/60 px-3 py-3 text-sm sm:grid-cols-3">
+                      <div><span className="block text-xs text-slate-500">当前积分兑换</span><span className="font-semibold text-slate-900">1 元 = {formatPriceNumber(priceSyncPreview.yuan_to_points)} 积分</span></div>
+                      <div><span className="block text-xs text-slate-500">积分人民币价值</span><span className="font-semibold text-slate-900">1 积分 = ¥{formatPriceNumber(priceSyncPreview.yuan_per_point)}</span></div>
+                      <div><span className="block text-xs text-slate-500">上游计价组</span><span className="font-semibold text-slate-900">{priceSyncPreview.upstream.group} × {formatPriceNumber(priceSyncPreview.upstream.group_ratio)}</span></div>
+                    </div>
+                    <div className="flex flex-wrap items-center gap-3 text-xs text-slate-500">
+                      <span>已有模型 {priceSyncPreview.summary.total}</span>
+                      <span className="text-blue-700">可更新 {priceSyncPreview.summary.ready}</span>
+                      <span className="text-emerald-700">无需变更 {priceSyncPreview.summary.unchanged}</span>
+                      <span>跳过 {priceSyncPreview.summary.skipped}</span>
+                    </div>
+                    <div className="divide-y divide-slate-100 border-y border-slate-200">
+                      {priceSyncPreview.items.map((item) => {
+                        const selectable = item.status === 'ready';
+                        const checked = selectedPriceSyncModelIds.includes(item.model_id);
+                        return (
+                          <label key={item.model_id} className={`flex gap-3 px-1 py-3 text-sm ${selectable ? 'cursor-pointer' : 'cursor-default'}`}>
+                            <input
+                              type="checkbox"
+                              className="mt-0.5 h-4 w-4 shrink-0 accent-blue-600"
+                              disabled={!selectable || applyingPrices}
+                              checked={checked}
+                              onChange={() => setSelectedPriceSyncModelIds((previous) => checked ? previous.filter((id) => id !== item.model_id) : [...previous, item.model_id])}
+                            />
+                            <span className="min-w-0 flex-1">
+                              <span className="flex flex-wrap items-center gap-2">
+                                <span className="font-medium text-slate-900">{item.display_name}</span>
+                                <span className="font-mono text-xs text-slate-400">{item.model_key}</span>
+                                <span className={`text-xs ${item.status === 'ready' ? 'text-blue-700' : item.status === 'unchanged' ? 'text-emerald-700' : 'text-slate-400'}`}>
+                                  {item.status === 'ready' ? '可更新' : item.status === 'unchanged' ? '无需变更' : '已跳过'}
+                                </span>
+                              </span>
+                              {item.proposed_price ? (
+                                <span className="mt-1 grid gap-1 text-xs text-slate-500 sm:grid-cols-2">
+                                  <span>当前：{formatModelPrice(item.current_price)}</span>
+                                  <span>建议：{formatModelPrice(item.proposed_price)}</span>
+                                  <span className="sm:col-span-2">上游：{formatUpstreamPrice(item.upstream_price, item.modality)}{item.cache_ignored ? ' · 已忽略缓存价' : ''}</span>
+                                </span>
+                              ) : (
+                                <span className="mt-1 block text-xs text-slate-400">{item.reason || '上游价格类型与当前模型计费方式不兼容'}</span>
+                              )}
+                            </span>
+                          </label>
+                        );
+                      })}
+                    </div>
+                  </>
+                ) : (
+                  <div className="border-y border-dashed border-slate-200 py-12 text-center text-sm text-slate-400">选择渠道后获取定价预览</div>
+                )}
+              </div>
+              <div className="flex flex-col gap-3 border-t border-slate-200 px-5 py-4 sm:flex-row sm:items-center sm:justify-between">
+                <span className="text-xs text-slate-500">已选择 {selectedPriceSyncModelIds.length} 个待更新模型</span>
+                <div className="flex justify-end gap-2">
+                  <Button type="button" variant="secondary" size="sm" disabled={previewingPrices || applyingPrices} onClick={() => setPriceSyncModalOpen(false)}>取消</Button>
+                  <Button type="button" size="sm" loading={applyingPrices} disabled={!priceSyncPreview || !selectedPriceSyncModelIds.length || previewingPrices} icon={<Save size={13} />} onClick={() => void applyPriceSync()}>应用选中定价</Button>
                 </div>
               </div>
             </section>

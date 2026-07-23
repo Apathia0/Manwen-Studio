@@ -4212,6 +4212,7 @@ class AgentService:
                 {"role": "user", "content": user_prompt},
             ],
             "stream": False,
+            "max_tokens": 2048,
         }
 
         async with httpx.AsyncClient(timeout=120) as client:
@@ -4310,7 +4311,11 @@ class AgentService:
 
 {skills_fragment}
 """
-        writing_quality = self._build_writing_quality_section(db=db)
+        writing_quality = (
+            self._build_writing_quality_section(db=db)
+            if "chapter_writer" in (enabled_skills or [])
+            else ""
+        )
         permission_description = (
             "当前处于执行模式，只能使用本轮明确授权的读写工具。"
             if normalize_agent_mode(mode) == "execute"
@@ -4583,8 +4588,10 @@ class AgentService:
                     return
                 system_msg = all_messages[0] if all_messages and all_messages[0].get("role") == "system" else None
                 conversation_messages = all_messages[1:] if system_msg else all_messages
-                old_messages, recent_messages = split_messages_for_compression(conversation_messages, keep_recent=20)
+                old_messages, recent_messages = split_messages_for_compression(conversation_messages, keep_recent=8)
                 if not old_messages:
+                    all_messages = emergency_compact_messages(all_messages)
+                    logger.warning("Agent 上下文达到压缩阈值，已执行确定性紧急压缩")
                     return
                 try:
                     summary = await self._compress_history_with_ai(old_messages, api_key)
@@ -4678,6 +4685,7 @@ class AgentService:
                     "stream": True,
                     "stream_options": {"include_usage": True},
                     "tools": self.tool_registry.get_tool_specs(mode=mode, workflow_type=workflow_type, enabled_skills=enabled_skills),
+                    "max_tokens": 8192,
                 }
 
                 collected_content = ""
