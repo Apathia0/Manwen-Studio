@@ -87,6 +87,7 @@ def _cleanup_fixture(fixture: dict[str, Any]) -> None:
         story = db.get(Story, fixture["story_id"])
         if story:
             db.delete(story)
+            db.flush()
         session = db.query(UserSession).filter(UserSession.user_id == fixture["user_id"]).first()
         if session:
             db.delete(session)
@@ -223,88 +224,88 @@ async def _run_api_checks() -> list[dict[str, Any]]:
     headers = {"Authorization": f"Bearer {fixture['token']}"}
     transport = httpx.ASGITransport(app=app_main.app)
     results: list[dict[str, Any]] = []
-
-    async with _patched_generation():
-        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
-            response, idle_delta = await _measure_idle_during_request(
-                lambda: client.post(f"/api/chapters/{fixture['chapter_id']}/generate-novel", headers=headers)
-            )
-            results.append(
-                {
-                    "name": "generate_novel",
-                    "status": response.status_code,
-                    "idle_delta": idle_delta,
-                }
-            )
-
-            response, idle_delta = await _measure_idle_during_request(
-                lambda: client.post(
-                    f"/api/stories/{fixture['story_id']}/framework/generate",
-                    headers=headers,
-                    json={"description": "请生成一个两阶段测试框架"},
+    original_ready = app_main.SYSTEM_READY
+    original_status = dict(app_main.INSTALL_STATUS)
+    app_main.SYSTEM_READY = True
+    app_main.INSTALL_STATUS = {
+        "installed": True,
+        "source": "transaction_safety_check",
+        "database_reachable": True,
+    }
+    try:
+        async with _patched_generation():
+            async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+                response, idle_delta = await _measure_idle_during_request(
+                    lambda: client.post(f"/api/chapters/{fixture['chapter_id']}/generate-novel", headers=headers)
                 )
-            )
-            results.append(
-                {
-                    "name": "framework_generate",
-                    "status": response.status_code,
-                    "idle_delta": idle_delta,
-                }
-            )
+                results.append(
+                    {
+                        "name": "generate_novel",
+                        "status": response.status_code,
+                        "idle_delta": idle_delta,
+                    }
+                )
 
-            app_main._write_scenes_file(
-                fixture["chapter_id"],
-                ["镜头一", "镜头二", "镜头三", "镜头四", "镜头五", "镜头六"],
-                [],
-            )
+                response, idle_delta = await _measure_idle_during_request(
+                    lambda: client.post(
+                        f"/api/stories/{fixture['story_id']}/framework/generate",
+                        headers=headers,
+                        json={"description": "请生成一个两阶段测试框架"},
+                    )
+                )
+                results.append(
+                    {
+                        "name": "framework_generate",
+                        "status": response.status_code,
+                        "idle_delta": idle_delta,
+                    }
+                )
 
-            response, idle_delta = await _measure_idle_during_request(
-                lambda: client.post(f"/api/chapters/{fixture['chapter_id']}/generate-manga-stream", headers=headers)
-            )
-            results.append(
-                {
-                    "name": "generate_manga_stream",
-                    "status": response.status_code,
-                    "idle_delta": idle_delta,
-                    "body_preview": response.text[:120],
-                }
-            )
+                app_main._write_scenes_file(
+                    fixture["chapter_id"],
+                    ["镜头一", "镜头二", "镜头三", "镜头四", "镜头五", "镜头六"],
+                    [],
+                )
 
-    _cleanup_fixture(fixture)
+                response, idle_delta = await _measure_idle_during_request(
+                    lambda: client.post(f"/api/chapters/{fixture['chapter_id']}/generate-manga-stream", headers=headers)
+                )
+                results.append(
+                    {
+                        "name": "generate_manga_stream",
+                        "status": response.status_code,
+                        "idle_delta": idle_delta,
+                        "body_preview": response.text[:120],
+                    }
+                )
+    finally:
+        app_main.SYSTEM_READY = original_ready
+        app_main.INSTALL_STATUS = original_status
+        _cleanup_fixture(fixture)
     return results
 
 
 def _run_startup_migration_check() -> dict[str, Any]:
-    called = {"value": False}
-    original = app_main.init_db
-
-    def fake_init_db(*, run_migrations=None):
-        called["value"] = True
-        assert run_migrations is False, f"startup should disable migrations, got {run_migrations!r}"
-
-    try:
-        app_main.init_db = fake_init_db
-        app_main.on_startup()
-    finally:
-        app_main.init_db = original
-
-    migrate_called = {"value": False}
     import database as database_module  # noqa: E402
 
     original_migrate = database_module._migrate
+    original_assert_schema = database_module._assert_model_schema_present
+    calls: list[dict[str, Any]] = []
 
-    def fake_migrate():
-        migrate_called["value"] = True
+    def fake_migrate(*_args, **kwargs):
+        calls.append(kwargs)
 
     try:
         database_module._migrate = fake_migrate
+        database_module._assert_model_schema_present = lambda *_args, **_kwargs: None
         init_db(run_migrations=False)
     finally:
         database_module._migrate = original_migrate
+        database_module._assert_model_schema_present = original_assert_schema
 
     return {
-        "startup_init_db_called": called["value"],
-        "migrate_called_when_disabled": migrate_called["value"],
+        "lock_path_called": bool(calls),
+        "migration_changes_disabled": bool(calls) and calls[0].get("run_changes") is False,
     }
 
 
@@ -319,8 +320,10 @@ async def main() -> None:
         if item["idle_delta"] > 0:
             failures.append(f"{item['name']} observed idle-in-transaction delta {item['idle_delta']}")
 
-    if migration_result["migrate_called_when_disabled"]:
-        failures.append("init_db(run_migrations=False) still invoked _migrate()")
+    if not migration_result["lock_path_called"]:
+        failures.append("init_db(run_migrations=False) did not enter the PostgreSQL lock path")
+    if not migration_result["migration_changes_disabled"]:
+        failures.append("init_db(run_migrations=False) enabled incremental migration changes")
 
     summary = {
         "api_results": api_results,

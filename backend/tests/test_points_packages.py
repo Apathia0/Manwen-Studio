@@ -1,13 +1,15 @@
 import asyncio
 import datetime
 from decimal import Decimal
+import os
 from types import SimpleNamespace
 from urllib.parse import urlencode
+import uuid
 
 import httpx
 import pytest
 from fastapi import HTTPException, Request
-from sqlalchemy import create_engine, text
+from sqlalchemy import String, create_engine, inspect, text
 from sqlalchemy.orm import sessionmaker
 
 import main
@@ -168,6 +170,153 @@ def test_migrate_unlocked_invokes_legacy_video_channel_adapter_migration(monkeyp
     database._migrate_unlocked(engine)
 
     assert calls == [engine, engine]
+
+
+def test_ensure_varchar_column_expands_short_varchar():
+    import database
+
+    executed_sql = []
+
+    class RecordingConnection:
+        dialect = SimpleNamespace(name="postgresql")
+
+        def execute(self, statement):
+            executed_sql.append(str(statement))
+
+    database._ensure_varchar_column(
+        RecordingConnection(),
+        "chapter_video_shots",
+        "screenplay_scene_id",
+        {"screenplay_scene_id": {"type": String(20)}},
+        length=64,
+    )
+
+    assert executed_sql == [
+        "ALTER TABLE chapter_video_shots ALTER COLUMN screenplay_scene_id "
+        "TYPE VARCHAR(64) USING screenplay_scene_id::text"
+    ]
+
+
+def test_migrate_video_tables_skips_alter_when_dependency_tables_are_missing():
+    import database
+
+    engine = create_engine("sqlite:///:memory:")
+    with engine.begin() as conn:
+        conn.execute(text("""
+            CREATE TABLE video_style_presets (
+                id INTEGER PRIMARY KEY,
+                name VARCHAR(100) NOT NULL,
+                category VARCHAR(50) NOT NULL,
+                prompt_template TEXT,
+                image_style_params JSON,
+                video_style_params JSON,
+                sort_order INTEGER DEFAULT 0,
+                image_url VARCHAR(500)
+            )
+        """))
+
+    database._migrate_video_tables(engine)
+
+    tables = set(inspect(engine).get_table_names())
+    assert "chapters" not in tables
+    assert "stories" not in tables
+    assert "script_scenes" not in tables
+    assert "video_shots" not in tables
+
+
+def test_migrate_video_tables_refreshes_inspector_after_creating_table():
+    import database
+
+    engine = create_engine("sqlite:///:memory:")
+
+    database._migrate_video_tables(engine)
+
+    inspector = inspect(engine)
+    columns = {column["name"] for column in inspector.get_columns("video_style_presets")}
+    assert "image_url" in columns
+
+
+@pytest.mark.skipif(
+    os.getenv("RUN_POSTGRES_MIGRATION_TESTS", "").lower() != "true",
+    reason="仅在 CI PostgreSQL 迁移环境运行",
+)
+def test_postgres_legacy_schema_upgrades_in_one_idempotent_run():
+    import database
+
+    schema_name = f"migration_{uuid.uuid4().hex}"
+    with database.engine.begin() as conn:
+        conn.execute(text(f'CREATE SCHEMA "{schema_name}"'))
+
+    legacy_engine = create_engine(
+        database.DATABASE_URL,
+        connect_args={"options": f"-csearch_path={schema_name}"},
+    )
+    try:
+        Base.metadata.create_all(legacy_engine)
+        with legacy_engine.begin() as conn:
+            conn.execute(text("ALTER TABLE deconstruction_results ALTER COLUMN status TYPE VARCHAR(20)"))
+            conn.execute(text("ALTER TABLE deconstruction_works ALTER COLUMN decon_status TYPE VARCHAR(20)"))
+            conn.execute(text("ALTER TABLE billing_orders DROP CONSTRAINT billing_orders_points_product_id_fkey"))
+            conn.execute(text("ALTER TABLE billing_orders DROP COLUMN points_product_id"))
+            conn.execute(text("DROP TABLE points_products"))
+            conn.execute(text("ALTER TABLE stories DROP CONSTRAINT stories_owner_user_id_fkey"))
+            conn.execute(text("DROP INDEX ix_stories_owner_user_id"))
+            conn.execute(text("ALTER TABLE video_style_presets DROP COLUMN image_url"))
+            conn.execute(text("ALTER TABLE ai_models DROP COLUMN intro_tag"))
+            conn.execute(text("ALTER TABLE agent_conversations DROP COLUMN active_run_id"))
+            conn.execute(text("ALTER TABLE agent_conversations DROP COLUMN active_run_started_at"))
+            conn.execute(text("ALTER TABLE agent_pending_changes DROP COLUMN run_id"))
+            conn.execute(text("ALTER TABLE email_verification_codes DROP COLUMN attempt_count"))
+            conn.execute(text("ALTER TABLE chapters DROP COLUMN manga_asset_analysis_json"))
+
+        database.init_db(
+            bind_engine=legacy_engine,
+            run_migrations=True,
+            raise_errors=True,
+        )
+        database.init_db(
+            bind_engine=legacy_engine,
+            run_migrations=True,
+            raise_errors=True,
+        )
+
+        inspector = inspect(legacy_engine)
+        tables = set(inspector.get_table_names())
+        assert "points_products" in tables
+        assert "points_product_id" in {
+            column["name"] for column in inspector.get_columns("billing_orders")
+        }
+        assert getattr(
+            next(
+                column["type"]
+                for column in inspector.get_columns("deconstruction_results")
+                if column["name"] == "status"
+            ),
+            "length",
+            None,
+        ) == 30
+        assert getattr(
+            next(
+                column["type"]
+                for column in inspector.get_columns("deconstruction_works")
+                if column["name"] == "decon_status"
+            ),
+            "length",
+            None,
+        ) == 30
+        assert any(
+            foreign_key.get("constrained_columns") == ["owner_user_id"]
+            and foreign_key.get("referred_table") == "users"
+            for foreign_key in inspector.get_foreign_keys("stories")
+        )
+        assert any(
+            index.get("name") == "ix_stories_owner_user_id"
+            for index in inspector.get_indexes("stories")
+        )
+    finally:
+        legacy_engine.dispose()
+        with database.engine.begin() as conn:
+            conn.execute(text(f'DROP SCHEMA IF EXISTS "{schema_name}" CASCADE'))
 
 
 @pytest.mark.parametrize("adapter_type", [VIDEO_ADAPTER_OPENAI, VIDEO_ADAPTER_LINGDONG])

@@ -346,14 +346,18 @@ def health_check():
         "version": os.getenv("APP_VERSION", "dev"),
         "installed": installed,
         "requires_restart": requires_restart,
+        "system_ready": SYSTEM_READY,
     }
     if not installed:
-        return {
-            "ok": True,
+        payload = {
+            "ok": database_reachable is not False,
             "ready": False,
             "database_reachable": database_reachable,
             **base_payload,
         }
+        if database_reachable is False:
+            return JSONResponse(status_code=503, content=payload)
+        return payload
     if requires_restart:
         return JSONResponse(
             status_code=503,
@@ -380,7 +384,7 @@ def health_check():
                     **base_payload,
                 },
             )
-    ok = database_reachable is not False
+    ok = database_reachable is not False and SYSTEM_READY
     payload = {
         "ok": ok,
         "ready": ok,

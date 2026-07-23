@@ -66,11 +66,21 @@ def init_db(*, run_migrations: bool | None = None, bind_engine=None, raise_error
     try:
         # 确保从迁移脚本直接调用 init_db 时，所有 ORM 表都已注册到元数据。
         importlib.import_module("models")
-        Base.metadata.create_all(bind=target_engine)
-        if run_migrations:
-            _migrate(target_engine)
+        if target_engine.dialect.name == "postgresql":
+            _migrate(
+                target_engine,
+                create_schema=True,
+                run_changes=run_migrations,
+            )
+            if not run_migrations:
+                logger.info("跳过启动时数据库迁移（RUN_STARTUP_MIGRATIONS=false）")
         else:
-            logger.info("跳过启动时数据库迁移（RUN_STARTUP_MIGRATIONS=false）")
+            Base.metadata.create_all(bind=target_engine)
+            if run_migrations:
+                _migrate(target_engine)
+            else:
+                logger.info("跳过启动时数据库迁移（RUN_STARTUP_MIGRATIONS=false）")
+        _assert_model_schema_present(target_engine)
     except Exception as exc:
         logger.warning("数据库初始化失败（将在下次启动时重试）: %s", exc)
         if raise_errors:
@@ -103,7 +113,9 @@ def _ensure_varchar_column(
         return
 
     column_type = column.get("type")
-    if isinstance(column_type, (String, Text)):
+    if isinstance(column_type, Text):
+        return
+    if isinstance(column_type, String) and not _varchar_length_is_below(column, length):
         return
 
     if getattr(conn.dialect, "name", "") == "postgresql":
@@ -119,6 +131,41 @@ def _ensure_varchar_column(
             column_name,
             getattr(conn.dialect, "name", "unknown"),
         )
+
+
+def _varchar_length_is_below(column: Mapping[str, Any] | None, minimum_length: int) -> bool:
+    if not column:
+        return False
+    length = getattr(column.get("type"), "length", None)
+    return isinstance(length, int) and length < minimum_length
+
+
+def _assert_model_schema_present(target_engine=None) -> None:
+    """确保数据库具备当前 ORM 模型声明的全部表和列。"""
+    from sqlalchemy import inspect
+
+    db_engine = target_engine or engine
+    inspector = inspect(db_engine)
+    actual_tables = set(inspector.get_table_names())
+    expected_tables = set(Base.metadata.tables)
+    missing_tables = sorted(expected_tables - actual_tables)
+    missing_columns: list[str] = []
+
+    for table_name in sorted(expected_tables & actual_tables):
+        expected_columns = set(Base.metadata.tables[table_name].columns.keys())
+        actual_columns = {column["name"] for column in inspector.get_columns(table_name)}
+        missing_columns.extend(
+            f"{table_name}.{column_name}"
+            for column_name in sorted(expected_columns - actual_columns)
+        )
+
+    if missing_tables or missing_columns:
+        details = []
+        if missing_tables:
+            details.append("缺失表: " + ", ".join(missing_tables))
+        if missing_columns:
+            details.append("缺失列: " + ", ".join(missing_columns))
+        raise RuntimeError("数据库结构未达到当前版本要求；" + "；".join(details))
 
 
 def _migrate_legacy_video_channel_adapters(target_engine=None) -> None:
@@ -146,17 +193,32 @@ def _migrate_legacy_video_channel_adapters(target_engine=None) -> None:
         """))
 
 
-def _migrate(target_engine=None):
+def _migrate(
+    target_engine=None,
+    *,
+    create_schema: bool = False,
+    run_changes: bool = True,
+):
     """串行执行增量迁移，避免多进程同时执行 inspect-then-alter。"""
     from sqlalchemy import text
 
     db_engine = target_engine or engine
     if db_engine.dialect.name != "postgresql":
-        return _migrate_unlocked(db_engine)
+        if create_schema:
+            Base.metadata.create_all(bind=db_engine)
+        if run_changes:
+            return _migrate_unlocked(db_engine)
+        return None
     with db_engine.connect() as lock_conn:
+        lock_conn.execute(text("SET lock_timeout = '30s'"))
+        lock_conn.execute(text("SET statement_timeout = '30s'"))
         lock_conn.execute(text("SELECT pg_advisory_lock(731945280164)"))
         try:
-            return _migrate_unlocked(db_engine)
+            if create_schema:
+                Base.metadata.create_all(bind=db_engine)
+            if run_changes:
+                return _migrate_unlocked(db_engine)
+            return None
         finally:
             lock_conn.execute(text("SELECT pg_advisory_unlock(731945280164)"))
 
@@ -197,6 +259,8 @@ def _migrate_unlocked(target_engine=None):
             if "import_context_completed" not in cols:
                 conn.execute(text("ALTER TABLE stories ADD COLUMN import_context_completed BOOLEAN DEFAULT TRUE"))
                 conn.execute(text("UPDATE stories SET import_context_completed = TRUE WHERE import_context_completed IS NULL"))
+    _ensure_story_owner_integrity(db_engine)
+
     if "chapters" in insp.get_table_names():
         cols = {c["name"] for c in insp.get_columns("chapters")}
         with db_engine.begin() as conn:
@@ -272,6 +336,9 @@ def _migrate_unlocked(target_engine=None):
             if "points_product_id" not in cols:
                 conn.execute(text("ALTER TABLE billing_orders ADD COLUMN points_product_id INTEGER"))
             if db_engine.dialect.name == "postgresql":
+                current_tables = set(inspect(db_engine).get_table_names())
+                if "points_products" not in current_tables:
+                    raise RuntimeError("积分商品表 points_products 未创建，拒绝添加 billing_orders 外键")
                 conn.execute(text("ALTER TABLE billing_orders ALTER COLUMN plan_id DROP NOT NULL"))
                 conn.execute(text("""
                     DO $$
@@ -434,7 +501,7 @@ def _migrate_unlocked(target_engine=None):
                 conn.execute(text("ALTER TABLE deconstruction_results ADD COLUMN decon_range INTEGER"))
             # 扩大 status 字段以容纳 paused_after_partial:N 格式
             res_status_col = next((c for c in insp.get_columns("deconstruction_results") if c["name"] == "status"), None)
-            if res_status_col and isinstance(res_status_col.get("type"), str) and "20" in res_status_col["type"]:
+            if db_engine.dialect.name == "postgresql" and _varchar_length_is_below(res_status_col, 30):
                 conn.execute(text("ALTER TABLE deconstruction_results ALTER COLUMN status TYPE VARCHAR(30)"))
 
     if "deconstruction_works" in insp.get_table_names():
@@ -447,11 +514,12 @@ def _migrate_unlocked(target_engine=None):
                 conn.execute(text("ALTER TABLE deconstruction_works ADD COLUMN decon_range INTEGER"))
             # 扩大 status 字段
             works_status_col = next((c for c in insp.get_columns("deconstruction_works") if c["name"] == "decon_status"), None)
-            if works_status_col and isinstance(works_status_col.get("type"), str) and "20" in works_status_col["type"]:
+            if db_engine.dialect.name == "postgresql" and _varchar_length_is_below(works_status_col, 30):
                 conn.execute(text("ALTER TABLE deconstruction_works ALTER COLUMN decon_status TYPE VARCHAR(30)"))
 
     _migrate_deconstruction_tables(db_engine)
     _migrate_deconstruction_library_tables(db_engine)
+    _ensure_deconstruction_status_lengths(db_engine)
 
 
 def _migrate_agent_pending_changes(target_engine=None):
@@ -544,6 +612,61 @@ def _migrate_money_columns(target_engine=None):
                 ALTER COLUMN amount TYPE NUMERIC(10,2)
                 USING ROUND(COALESCE(amount, 0)::numeric, 2)
             """))
+
+
+def _ensure_story_owner_integrity(target_engine=None) -> None:
+    """为历史 stories.owner_user_id 补齐索引和外键约束。"""
+    from sqlalchemy import inspect, text
+
+    db_engine = target_engine or engine
+    inspector = inspect(db_engine)
+    tables = set(inspector.get_table_names())
+    if not {"stories", "users"}.issubset(tables):
+        return
+    story_columns = {column["name"] for column in inspector.get_columns("stories")}
+    if "owner_user_id" not in story_columns:
+        return
+
+    with db_engine.begin() as conn:
+        _prepare_migration_conn(conn)
+        conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS ix_stories_owner_user_id "
+            "ON stories(owner_user_id)"
+        ))
+
+        if db_engine.dialect.name != "postgresql":
+            return
+
+        foreign_keys = inspector.get_foreign_keys("stories")
+        has_owner_foreign_key = any(
+            foreign_key.get("constrained_columns") == ["owner_user_id"]
+            and foreign_key.get("referred_table") == "users"
+            for foreign_key in foreign_keys
+        )
+        if has_owner_foreign_key:
+            return
+
+        orphan_count = int(conn.execute(text("""
+            SELECT COUNT(*)
+            FROM stories AS s
+            LEFT JOIN users AS u ON u.id = s.owner_user_id
+            WHERE s.owner_user_id IS NOT NULL AND u.id IS NULL
+        """)).scalar() or 0)
+        conn.execute(text("""
+            ALTER TABLE stories
+            ADD CONSTRAINT stories_owner_user_id_fkey
+            FOREIGN KEY (owner_user_id) REFERENCES users(id) NOT VALID
+        """))
+        if orphan_count == 0:
+            conn.execute(text("""
+                ALTER TABLE stories
+                VALIDATE CONSTRAINT stories_owner_user_id_fkey
+            """))
+        else:
+            logger.warning(
+                "stories.owner_user_id 存在 %s 条孤儿引用；已约束新写入，历史数据需人工对账后再验证约束",
+                orphan_count,
+            )
 
 def _safe_unlink(path: Path):
     try:
@@ -722,7 +845,8 @@ def _migrate_video_tables(target_engine=None):
 
     db_engine = target_engine or engine
     insp = inspect(db_engine)
-    video_shots_cols = {c["name"] for c in insp.get_columns("video_shots")} if "video_shots" in insp.get_table_names() else set()
+    table_names = set(insp.get_table_names())
+    video_shots_cols = {c["name"] for c in insp.get_columns("video_shots")} if "video_shots" in table_names else set()
     if video_shots_cols:
         with db_engine.begin() as conn:
             _prepare_migration_conn(conn)
@@ -739,7 +863,7 @@ def _migrate_video_tables(target_engine=None):
             if "character_prompts_json" not in video_shots_cols:
                 conn.execute(text("ALTER TABLE video_shots ADD COLUMN character_prompts_json JSON"))
 
-    video_assets_cols = {c["name"] for c in insp.get_columns("video_assets")} if "video_assets" in insp.get_table_names() else set()
+    video_assets_cols = {c["name"] for c in insp.get_columns("video_assets")} if "video_assets" in table_names else set()
     if video_assets_cols:
         with db_engine.begin() as conn:
             _prepare_migration_conn(conn)
@@ -779,7 +903,7 @@ def _migrate_video_tables(target_engine=None):
             if "chapter_level_default" not in video_assets_cols:
                 conn.execute(text("ALTER TABLE video_assets ADD COLUMN chapter_level_default BOOLEAN DEFAULT FALSE"))
 
-    video_jobs_cols = {c["name"] for c in insp.get_columns("video_generation_jobs")} if "video_generation_jobs" in insp.get_table_names() else set()
+    video_jobs_cols = {c["name"] for c in insp.get_columns("video_generation_jobs")} if "video_generation_jobs" in table_names else set()
     if video_jobs_cols:
         with db_engine.begin() as conn:
             _prepare_migration_conn(conn)
@@ -796,7 +920,7 @@ def _migrate_video_tables(target_engine=None):
             if "retry_of_job_id" not in video_jobs_cols:
                 conn.execute(text("ALTER TABLE video_generation_jobs ADD COLUMN retry_of_job_id INTEGER REFERENCES video_generation_jobs(id)"))
 
-    rendered_clips_cols = {c["name"] for c in insp.get_columns("rendered_clips")} if "rendered_clips" in insp.get_table_names() else set()
+    rendered_clips_cols = {c["name"] for c in insp.get_columns("rendered_clips")} if "rendered_clips" in table_names else set()
     if rendered_clips_cols:
         with db_engine.begin() as conn:
             _prepare_migration_conn(conn)
@@ -812,7 +936,7 @@ def _migrate_video_tables(target_engine=None):
                 conn.execute(text("ALTER TABLE rendered_clips ADD COLUMN review_status VARCHAR(20) DEFAULT 'pending'"))
                 conn.execute(text("UPDATE rendered_clips SET review_status = 'pending' WHERE review_status IS NULL"))
 
-    if "video_style_presets" not in insp.get_table_names():
+    if "video_style_presets" not in table_names:
         with db_engine.begin() as conn:
             _prepare_migration_conn(conn)
             conn.execute(text("""
@@ -823,30 +947,33 @@ def _migrate_video_tables(target_engine=None):
                     prompt_template TEXT,
                     image_style_params JSONB,
                     video_style_params JSONB,
-                    sort_order INTEGER DEFAULT 0
+                    sort_order INTEGER DEFAULT 0,
+                    image_url VARCHAR(500)
                 )
             """))
 
-    chapters_cols = {c["name"] for c in insp.get_columns("chapters")} if "chapters" in insp.get_table_names() else set()
-    if "video_style_preset_id" not in chapters_cols:
+    insp = inspect(db_engine)
+    table_names = set(insp.get_table_names())
+    chapters_cols = {c["name"] for c in insp.get_columns("chapters")} if "chapters" in table_names else set()
+    if chapters_cols and "video_style_preset_id" not in chapters_cols:
         with db_engine.begin() as conn:
             _prepare_migration_conn(conn)
             conn.execute(text("ALTER TABLE chapters ADD COLUMN video_style_preset_id INTEGER REFERENCES video_style_presets(id)"))
 
-    stories_cols = {c["name"] for c in insp.get_columns("stories")} if "stories" in insp.get_table_names() else set()
-    if "video_style_preset_id" not in stories_cols:
+    stories_cols = {c["name"] for c in insp.get_columns("stories")} if "stories" in table_names else set()
+    if stories_cols and "video_style_preset_id" not in stories_cols:
         with db_engine.begin() as conn:
             _prepare_migration_conn(conn)
             conn.execute(text("ALTER TABLE stories ADD COLUMN video_style_preset_id INTEGER REFERENCES video_style_presets(id)"))
 
     # 风格参考图字段迁移
-    video_style_presets_cols = {c["name"] for c in insp.get_columns("video_style_presets")} if "video_style_presets" in insp.get_table_names() else set()
+    video_style_presets_cols = {c["name"] for c in insp.get_columns("video_style_presets")} if "video_style_presets" in table_names else set()
     if video_style_presets_cols and "image_url" not in video_style_presets_cols:
         with db_engine.begin() as conn:
             _prepare_migration_conn(conn)
             conn.execute(text("ALTER TABLE video_style_presets ADD COLUMN image_url VARCHAR(500)"))
 
-    chapter_video_workflows_cols = {c["name"] for c in insp.get_columns("chapter_video_workflows")} if "chapter_video_workflows" in insp.get_table_names() else set()
+    chapter_video_workflows_cols = {c["name"] for c in insp.get_columns("chapter_video_workflows")} if "chapter_video_workflows" in table_names else set()
     if chapter_video_workflows_cols:
         with db_engine.begin() as conn:
             _prepare_migration_conn(conn)
@@ -865,13 +992,13 @@ def _migrate_video_tables(target_engine=None):
             if "screenplay_version" not in chapter_video_workflows_cols:
                 conn.execute(text("ALTER TABLE chapter_video_workflows ADD COLUMN screenplay_version INTEGER DEFAULT 0"))
 
-    script_scenes_cols = {c["name"] for c in insp.get_columns("script_scenes")} if "script_scenes" in insp.get_table_names() else set()
-    if "concept_art_asset_id" not in script_scenes_cols:
+    script_scenes_cols = {c["name"] for c in insp.get_columns("script_scenes")} if "script_scenes" in table_names else set()
+    if script_scenes_cols and "concept_art_asset_id" not in script_scenes_cols:
         with db_engine.begin() as conn:
             _prepare_migration_conn(conn)
             conn.execute(text("ALTER TABLE script_scenes ADD COLUMN concept_art_asset_id INTEGER REFERENCES video_assets(id)"))
 
-    if "shot_asset_bindings" not in insp.get_table_names():
+    if {"video_shots", "video_assets"}.issubset(table_names) and "shot_asset_bindings" not in table_names:
         with db_engine.begin() as conn:
             _prepare_migration_conn(conn)
             conn.execute(text("""
@@ -888,25 +1015,25 @@ def _migrate_video_tables(target_engine=None):
             """))
             conn.execute(text("CREATE INDEX IF NOT EXISTS idx_shot_asset_bindings_shot_id ON shot_asset_bindings(shot_id)"))
 
-    if "character_involvement" not in video_shots_cols:
+    if video_shots_cols and "character_involvement" not in video_shots_cols:
         with db_engine.begin() as conn:
             _prepare_migration_conn(conn)
             conn.execute(text("ALTER TABLE video_shots ADD COLUMN character_involvement TEXT"))
-    if "scene_mood" not in video_shots_cols:
+    if video_shots_cols and "scene_mood" not in video_shots_cols:
         with db_engine.begin() as conn:
             _prepare_migration_conn(conn)
             conn.execute(text("ALTER TABLE video_shots ADD COLUMN scene_mood VARCHAR(50)"))
-    if "scene_prompt" not in video_shots_cols:
+    if video_shots_cols and "scene_prompt" not in video_shots_cols:
         with db_engine.begin() as conn:
             _prepare_migration_conn(conn)
             conn.execute(text("ALTER TABLE video_shots ADD COLUMN scene_prompt TEXT"))
-    if "prop_prompts_json" not in video_shots_cols:
+    if video_shots_cols and "prop_prompts_json" not in video_shots_cols:
         with db_engine.begin() as conn:
             _prepare_migration_conn(conn)
             conn.execute(text("ALTER TABLE video_shots ADD COLUMN prop_prompts_json JSON"))
 
     # chapter_video_shots 表迁移
-    chapter_video_shots_columns = insp.get_columns("chapter_video_shots") if "chapter_video_shots" in insp.get_table_names() else []
+    chapter_video_shots_columns = insp.get_columns("chapter_video_shots") if "chapter_video_shots" in table_names else []
     chapter_video_shots_cols_by_name = {c["name"]: c for c in chapter_video_shots_columns}
     chapter_video_shots_cols = set(chapter_video_shots_cols_by_name)
     if chapter_video_shots_cols:
@@ -980,6 +1107,7 @@ def _seed_video_style_presets(target_engine=None):
             logger.info("Seeded %d default video style presets", len(presets))
     except Exception as exc:
         logger.warning("Failed to seed video style presets: %s", exc)
+        raise
 
 
 def _normalize_video_style_names(target_engine=None):
@@ -1042,6 +1170,7 @@ def _normalize_video_style_names(target_engine=None):
         logger.info("Normalized legacy video style names")
     except Exception as exc:
         logger.warning("Failed to normalize video style names: %s", exc)
+        raise
 
 
 def _migrate_video_character_tables(target_engine=None):
@@ -1158,6 +1287,35 @@ def _migrate_prompt_templates(target_engine=None):
             conn.execute(text("CREATE INDEX IF NOT EXISTS idx_template_likes_user_id ON template_likes(user_id)"))
 
 
+def _ensure_deconstruction_status_lengths(target_engine=None) -> None:
+    """确保拆书状态字段可以容纳 paused_after_partial:N。"""
+    from sqlalchemy import inspect, text
+
+    db_engine = target_engine or engine
+    if db_engine.dialect.name != "postgresql":
+        return
+
+    inspector = inspect(db_engine)
+    table_columns = (
+        ("deconstruction_results", "status"),
+        ("deconstruction_works", "decon_status"),
+    )
+    tables = set(inspector.get_table_names())
+    with db_engine.begin() as conn:
+        _prepare_migration_conn(conn)
+        for table_name, column_name in table_columns:
+            if table_name not in tables:
+                continue
+            column = next(
+                (item for item in inspector.get_columns(table_name) if item["name"] == column_name),
+                None,
+            )
+            if _varchar_length_is_below(column, 30):
+                conn.execute(text(
+                    f"ALTER TABLE {table_name} ALTER COLUMN {column_name} TYPE VARCHAR(30)"
+                ))
+
+
 def _migrate_deconstruction_tables(target_engine=None):
     """创建拆书相关表（novel_sources, deconstruction_results）"""
     from sqlalchemy import inspect, text
@@ -1197,7 +1355,7 @@ def _migrate_deconstruction_tables(target_engine=None):
                 CREATE TABLE deconstruction_results (
                     id SERIAL PRIMARY KEY,
                     story_id INTEGER NOT NULL REFERENCES stories(id),
-                    status VARCHAR(20) DEFAULT 'pending',
+                    status VARCHAR(30) DEFAULT 'pending',
                     current_stage INTEGER,
                     framework_type VARCHAR(50),
                     stages_completed JSON,
@@ -1248,7 +1406,7 @@ def _migrate_deconstruction_library_tables(target_engine=None):
                     total_chapters INTEGER,
                     crawled_chapters INTEGER DEFAULT 0,
                     word_count INTEGER,
-                    decon_status VARCHAR(20) DEFAULT 'not_started',
+                    decon_status VARCHAR(30) DEFAULT 'not_started',
                     current_stage INTEGER,
                     framework_type VARCHAR(50),
                     stages_completed JSON,
@@ -1264,6 +1422,11 @@ def _migrate_deconstruction_library_tables(target_engine=None):
                     report_markdown TEXT,
                     writing_style JSON,
                     writing_techniques JSON,
+                    author_style_status VARCHAR(30) DEFAULT 'not_started',
+                    author_style_task_id VARCHAR(80),
+                    author_style_profile JSON,
+                    author_style_report_markdown TEXT,
+                    author_style_progress_markdown TEXT,
                     progress_markdown TEXT,
                     task_id VARCHAR(50),
                     created_at TIMESTAMP DEFAULT NOW(),
@@ -1304,8 +1467,9 @@ def _migrate_deconstruction_library_tables(target_engine=None):
             """))
             conn.execute(text("CREATE INDEX ix_story_decon_refs_story ON story_deconstruction_refs(story_id)"))
 
-    if "deconstruction_works" in insp.get_table_names():
-        works_cols = {c["name"] for c in insp.get_columns("deconstruction_works")}
+    refreshed_insp = inspect(db_engine)
+    if "deconstruction_works" in refreshed_insp.get_table_names():
+        works_cols = {c["name"] for c in refreshed_insp.get_columns("deconstruction_works")}
         with db_engine.begin() as conn:
             _prepare_migration_conn(conn)
             if "author_style_status" not in works_cols:

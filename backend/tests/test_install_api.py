@@ -12,6 +12,48 @@ from database import Base
 import main
 
 
+def test_health_check_requires_completed_startup(monkeypatch):
+    monkeypatch.setattr(main, "_refresh_install_status", lambda: {
+        "installed": True,
+        "requires_restart": False,
+        "database_reachable": True,
+    })
+    monkeypatch.setattr(main, "SYSTEM_READY", False)
+
+    result = main.health_check()
+
+    assert result.status_code == 503
+    assert b'"system_ready":false' in result.body
+
+
+def test_health_check_rejects_uninstalled_unreachable_database(monkeypatch):
+    monkeypatch.setattr(main, "_refresh_install_status", lambda: {
+        "installed": False,
+        "requires_restart": False,
+        "database_reachable": False,
+    })
+
+    result = main.health_check()
+
+    assert result.status_code == 503
+    assert b'"database_reachable":false' in result.body
+
+
+def test_health_check_reports_ready_after_completed_startup(monkeypatch):
+    monkeypatch.setattr(main, "_refresh_install_status", lambda: {
+        "installed": True,
+        "requires_restart": False,
+        "database_reachable": True,
+    })
+    monkeypatch.setattr(main, "SYSTEM_READY", True)
+
+    result = main.health_check()
+
+    assert result["ok"] is True
+    assert result["ready"] is True
+    assert result["system_ready"] is True
+
+
 def test_init_db_direct_import_registers_all_models():
     backend_dir = Path(__file__).resolve().parents[1]
     env = os.environ.copy()
@@ -44,6 +86,22 @@ def test_run_migrations_script_propagates_failures(monkeypatch):
 
     monkeypatch.setattr(database, "init_db", fake_init_db)
     script_path = Path(__file__).resolve().parents[1] / "run_migrations.py"
+
+    runpy.run_path(str(script_path), run_name="__main__")
+
+    assert calls == [{"run_migrations": True, "raise_errors": True}]
+
+
+def test_manual_migrate_uses_complete_migration_chain(monkeypatch):
+    import database
+
+    calls = []
+
+    def fake_init_db(**kwargs):
+        calls.append(kwargs)
+
+    monkeypatch.setattr(database, "init_db", fake_init_db)
+    script_path = Path(__file__).resolve().parents[1] / "manual_migrate.py"
 
     runpy.run_path(str(script_path), run_name="__main__")
 
