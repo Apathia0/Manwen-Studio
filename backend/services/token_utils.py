@@ -407,8 +407,16 @@ def split_messages_for_compression(
     """
     if len(messages) <= keep_recent:
         return [], messages
-    old_messages = messages[:-keep_recent]
-    recent_messages = messages[-keep_recent:]
+    recent_start = len(messages) - keep_recent
+    if messages[recent_start].get("role") == "tool":
+        tool_group_start = recent_start
+        while tool_group_start > 0 and messages[tool_group_start].get("role") == "tool":
+            tool_group_start -= 1
+        candidate = messages[tool_group_start]
+        if candidate.get("role") == "assistant" and candidate.get("tool_calls"):
+            recent_start = tool_group_start
+    old_messages = messages[:recent_start]
+    recent_messages = messages[recent_start:]
     return old_messages, recent_messages
 
 

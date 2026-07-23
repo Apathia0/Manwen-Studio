@@ -35,6 +35,7 @@ from services.deepseek import (
 from services.chapter_quality import finalize_generated_chapter_content, format_quality_gate_detail
 from services.prompt_template import get_effective_prompt
 from services.errors import public_error_message
+from services.redaction import redact_sensitive_text
 from services.story_state import build_story_bible_compact, build_story_memory_compact
 from services.framework_utils import (
     _build_current_snapshot_data,
@@ -166,10 +167,12 @@ def _is_context_length_exceeded_response(status_code: int, response_text: str) -
                 "context_length_exceeded",
                 "context_window_exceeded",
                 "input_too_long",
-                "max_tokens_exceeded",
-                "token_limit_exceeded",
             }:
                 return True
+    has_input_subject = any(marker in text for marker in ("context", "input", "prompt", "上下文", "输入"))
+    output_markers = ("completion", "output", "max" + "_tokens", "max completion", "输出")
+    if not has_input_subject and any(marker in text for marker in output_markers):
+        return False
     markers = (
         "context_length_exceeded",
         "context_window_exceeded",
@@ -177,7 +180,6 @@ def _is_context_length_exceeded_response(status_code: int, response_text: str) -
         "max context length",
         "context window",
         "too many tokens",
-        "token limit",
         "prompt is too long",
         "request too large",
         "上下文长度",
@@ -189,9 +191,54 @@ def _is_context_length_exceeded_response(status_code: int, response_text: str) -
         return True
     length_subjects = ("context length", "input length", "input tokens", "prompt tokens")
     exceeded_semantics = ("exceed", "too long", "over the limit", "larger than", "reduce")
-    return any(subject in text for subject in length_subjects) and any(
+    if any(subject in text for subject in length_subjects) and any(
         marker in text for marker in exceeded_semantics
+    ):
+        return True
+    context_patterns = (
+        r"(?:context|input|prompt).{0,80}(?:exceed|too long|over.{0,12}limit|maximum|超限|超过|过长)",
+        r"(?:exceed|too long|over.{0,12}limit|maximum|超限|超过|过长).{0,80}(?:context|input|prompt|上下文|输入)",
+        r"request.{0,40}\d+\s*tokens?.{0,60}exceed.{0,60}token.{0,20}limit",
     )
+    return any(re.search(pattern, text, re.IGNORECASE) for pattern in context_patterns)
+
+
+def _safe_upstream_error_details(response_text: str) -> tuple[str, str, str, int]:
+    """提取受控错误元数据，只记录类型与消息指纹。"""
+    error_code = ""
+    error_type = ""
+    message = ""
+    try:
+        payload = json.loads(response_text)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        payload = None
+    if isinstance(payload, dict):
+        error = payload.get("error", payload)
+        if isinstance(error, dict):
+            error_code = str(error.get("code") or "").strip()[:120]
+            error_type = str(error.get("type") or "").strip()[:120]
+            message = str(error.get("message") or error.get("detail") or "").strip()
+        elif error not in (None, ""):
+            message = str(error).strip()
+    if not message:
+        message = str(response_text or "").strip()
+    message = re.sub(r"\s+", " ", redact_sensitive_text(message)).strip()
+    safe_code = re.sub(r"[^A-Za-z0-9_.:-]", "", redact_sensitive_text(error_code))[:80]
+    safe_type = re.sub(r"[^A-Za-z0-9_.:-]", "", redact_sensitive_text(error_type))[:80]
+    message_hash = hashlib.sha256(message.encode("utf-8", errors="replace")).hexdigest()[:16] if message else ""
+    return safe_code, safe_type, message_hash, len(message)
+
+
+def _message_topology(messages: list[dict]) -> str:
+    """仅记录消息角色和工具数量，用于定位协议错误。"""
+    parts: list[str] = []
+    for message in messages:
+        role = str(message.get("role") or "unknown")
+        tool_calls = message.get("tool_calls")
+        if isinstance(tool_calls, list) and tool_calls:
+            role = f"{role}(tool_calls={len(tool_calls)})"
+        parts.append(role)
+    return ",".join(parts[-30:])
 
 
 _VIDEO_MUTATION_ACTION_PATTERN = re.compile(
@@ -4646,6 +4693,21 @@ class AgentService:
                     ) as response:
                         if response.is_error:
                             response_text = (await response.aread()).decode("utf-8", errors="replace")
+                            error_code, error_type, error_hash, error_chars = _safe_upstream_error_details(response_text)
+                            logger.warning(
+                                "Agent 上游请求失败 status=%s iteration=%s model=%s code=%s type=%s "
+                                "message_hash=%s message_chars=%s messages=%s payload_chars=%s topology=%s",
+                                response.status_code,
+                                iteration_count,
+                                _deepseek_service.runtime_model(),
+                                error_code or "-",
+                                error_type or "-",
+                                error_hash or "-",
+                                error_chars,
+                                len(all_messages),
+                                len(json.dumps(payload, ensure_ascii=False, default=str)),
+                                _message_topology(all_messages),
+                            )
                             if _is_multimodal_unsupported_response(response.status_code, response_text):
                                 raise AgentMultimodalUnsupportedError()
                             if _is_context_length_exceeded_response(response.status_code, response_text):
@@ -4749,22 +4811,51 @@ class AgentService:
                 assistant_msg: dict[str, Any] = {"role": "assistant"}
                 if collected_content:
                     assistant_msg["content"] = collected_content
+                elif tool_calls_acc:
+                    # 部分 OpenAI 兼容网关不接受工具调用消息的 content=null。
+                    assistant_msg["content"] = ""
                 else:
-                    assistant_msg["content"] = None
+                    assistant_msg["content"] = ""
 
                 if tool_calls_acc:
                     sorted_indices = sorted(tool_calls_acc.keys())
-                    assistant_msg["tool_calls"] = [
-                        {
-                            "id": tool_calls_acc[i]["id"],
+                    history_tool_calls: list[dict[str, Any]] = []
+                    seen_tool_call_ids: set[str] = set()
+                    for i in sorted_indices:
+                        tc = tool_calls_acc[i]
+                        tool_call_id = str(tc.get("id") or "").strip()
+                        if tool_call_id in seen_tool_call_ids:
+                            tc["_skip_execution"] = True
+                            logger.warning("Agent 忽略重复 tool_call_id iteration=%s index=%s", iteration_count, i)
+                            continue
+                        if not tool_call_id:
+                            tool_call_id = f"call_agent_{iteration_count}_{i}_{uuid.uuid4().hex[:10]}"
+                            tc["id"] = tool_call_id
+                        seen_tool_call_ids.add(tool_call_id)
+
+                        function = tc.get("function") if isinstance(tc.get("function"), dict) else {}
+                        function_name = str(function.get("name") or "").strip()
+                        if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", function_name):
+                            function_name = "invalid_tool_call"
+                            function["name"] = function_name
+                            tc["function"] = function
+                        raw_arguments = str(function.get("arguments") or "").strip()
+                        try:
+                            parsed_arguments = json.loads(raw_arguments) if raw_arguments else {}
+                            if not isinstance(parsed_arguments, dict):
+                                raise ValueError("工具参数必须是 JSON 对象")
+                            history_arguments = json.dumps(parsed_arguments, ensure_ascii=False, separators=(",", ":"))
+                        except (json.JSONDecodeError, ValueError):
+                            history_arguments = "{}"
+                        history_tool_calls.append({
+                            "id": tool_call_id,
                             "type": "function",
                             "function": {
-                                "name": tool_calls_acc[i]["function"]["name"],
-                                "arguments": tool_calls_acc[i]["function"]["arguments"],
+                                "name": function_name,
+                                "arguments": history_arguments,
                             },
-                        }
-                        for i in sorted_indices
-                    ]
+                        })
+                    assistant_msg["tool_calls"] = history_tool_calls
                 all_messages.append(assistant_msg)
 
                 if is_truncation_continuation:
@@ -4788,11 +4879,15 @@ class AgentService:
                     sorted_indices = sorted(tool_calls_acc.keys())
                     for i in sorted_indices:
                         tc = tool_calls_acc[i]
+                        if tc.get("_skip_execution"):
+                            continue
                         name = tc["function"]["name"]
                         raw_args_str = tc["function"]["arguments"].strip()
                         try:
                             args = json.loads(raw_args_str) if raw_args_str else {}
-                        except json.JSONDecodeError:
+                            if not isinstance(args, dict):
+                                raise ValueError("工具参数必须是 JSON 对象")
+                        except (json.JSONDecodeError, ValueError):
                             logger.warning("Agent 工具 %s 参数JSON解析失败，通知AI重试", name)
                             result_str = json.dumps({"error": f"参数JSON格式解析失败，请重新调用 {name} 并确保输出合法的JSON"})
                             yield {"event": "tool_call", "data": json.dumps({"name": name, "arguments": {}}, ensure_ascii=False)}
@@ -4836,6 +4931,8 @@ class AgentService:
                     # 检查是否有写工具成功执行（不含 error）
                     for i in sorted_indices:
                         tc = tool_calls_acc[i]
+                        if tc.get("_skip_execution"):
+                            continue
                         tool_name = tc["function"]["name"]
                         if self.tool_registry.is_write_tool(tool_name):
                             write_tool_attempted = True

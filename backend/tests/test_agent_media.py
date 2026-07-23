@@ -17,7 +17,7 @@ from database import Base
 from models import AgentAttachment
 from services import agent_service as agent_service_module
 from services.agent_media import _extract_document_text, _extract_document_text_safely, multimodal_content, resolve_attachments
-from services.token_utils import emergency_compact_messages
+from services.token_utils import emergency_compact_messages, split_messages_for_compression
 
 
 @pytest.fixture()
@@ -362,6 +362,8 @@ async def test_agent_context_limit_after_read_tool_compresses_and_retries(monkey
     )
     assert retry_messages[assistant_index + 1]["role"] == "tool"
     assert retry_messages[assistant_index + 1]["tool_call_id"] == "call-read"
+    assert retry_messages[assistant_index]["content"] == ""
+    assert json.loads(retry_messages[assistant_index]["tool_calls"][0]["function"]["arguments"]) == {}
     assert json.loads(next(event for event in events if event["event"] == "done")["data"])["content"] == "压缩后完成"
 
 
@@ -404,6 +406,152 @@ def test_context_length_error_recognizes_common_input_length_message():
         400,
         '{"error":{"type":"invalid_request_error","message":"Input length exceeds the model context length"}}',
     )
+
+
+def test_context_length_error_recognizes_generic_token_limit_message():
+    assert agent_service_module._is_context_length_exceeded_response(
+        400,
+        '{"error":{"message":"Request has 200000 tokens, exceeds the 131072 token limit"}}',
+    )
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Maximum completion tokens must be between 1 and 8192",
+        "Invalid max_tokens: maximum 8192 tokens are allowed for output",
+        "The output token limit exceeds the model's allowed maximum",
+        "Invalid max_tokens: requested output token limit is 9000",
+        "Completion token limit must not exceed 8192",
+    ],
+)
+def test_context_length_error_rejects_output_token_parameter_errors(message):
+    assert not agent_service_module._is_context_length_exceeded_response(400, message)
+
+
+def test_safe_upstream_error_details_only_returns_controlled_metadata():
+    code, error_type, message_hash, message_chars = agent_service_module._safe_upstream_error_details(
+        '{"error":{"code":"invalid_request","type":"payload_error",'
+        '"message":"Authorization: Bearer sk-secret-value payload invalid"}}'
+    )
+
+    assert code == "invalid_request"
+    assert error_type == "payload_error"
+    assert len(message_hash) == 16
+    assert message_chars > 0
+    assert "sk-secret-value" not in "".join((code, error_type, message_hash))
+
+
+def test_history_compression_keeps_tool_exchange_atomic():
+    messages = [
+        {"role": "user", "content": f"旧消息 {index}"}
+        for index in range(20)
+    ] + [
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{
+                "id": "call-atomic",
+                "type": "function",
+                "function": {"name": "get_story_overview", "arguments": "{}"},
+            }],
+        },
+        {"role": "tool", "tool_call_id": "call-atomic", "content": "{}"},
+    ]
+
+    old_messages, recent_messages = split_messages_for_compression(messages, keep_recent=1)
+
+    assert old_messages[-1]["role"] == "user"
+    assert recent_messages[0]["role"] == "assistant"
+    assert recent_messages[1]["role"] == "tool"
+
+
+@pytest.mark.asyncio
+async def test_agent_normalizes_missing_tool_id_and_invalid_arguments(monkeypatch):
+    tool_call = [{
+        "index": 0,
+        "id": "",
+        "function": {"name": "get_story_overview", "arguments": "[invalid"},
+    }]
+    payloads = _install_agent_stream_client(
+        monkeypatch,
+        [
+            _agent_sse_response("", "tool_calls", tool_calls=tool_call),
+            _agent_sse_response("已恢复", "stop"),
+        ],
+    )
+    service = agent_service_module.AgentService()
+
+    events = [
+        event
+        async for event in service.run_stream(
+            messages=[{"role": "user", "content": "分析故事"}],
+            story_context="测试上下文",
+            api_key="test-key",
+            mode="analyze",
+        )
+    ]
+
+    assistant_message = next(
+        message for message in payloads[1]["messages"]
+        if message.get("role") == "assistant" and message.get("tool_calls")
+    )
+    normalized_call = assistant_message["tool_calls"][0]
+    tool_message = next(message for message in payloads[1]["messages"] if message.get("role") == "tool")
+    assert normalized_call["id"]
+    assert normalized_call["function"]["arguments"] == "{}"
+    assert tool_message["tool_call_id"] == normalized_call["id"]
+    assert json.loads(next(event for event in events if event["event"] == "done")["data"])["content"] == "已恢复"
+
+
+@pytest.mark.asyncio
+async def test_agent_skips_duplicate_tool_call_id(monkeypatch):
+    tool_calls = [
+        {
+            "index": 0,
+            "id": "call-duplicate",
+            "function": {"name": "get_story_overview", "arguments": "{}"},
+        },
+        {
+            "index": 1,
+            "id": "call-duplicate",
+            "function": {"name": "get_story_overview", "arguments": "{}"},
+        },
+    ]
+    payloads = _install_agent_stream_client(
+        monkeypatch,
+        [
+            _agent_sse_response("", "tool_calls", tool_calls=tool_calls),
+            _agent_sse_response("结果如下", "stop"),
+        ],
+    )
+    service = agent_service_module.AgentService()
+    execute_count = 0
+
+    async def fake_execute(_name, _args):
+        nonlocal execute_count
+        execute_count += 1
+        return '{"ok":true}'
+
+    monkeypatch.setattr(service.tool_registry, "execute", fake_execute)
+
+    events = [
+        event
+        async for event in service.run_stream(
+            messages=[{"role": "user", "content": "分析故事"}],
+            story_context="测试上下文",
+            api_key="test-key",
+            mode="analyze",
+        )
+    ]
+
+    assistant_message = next(
+        message for message in payloads[1]["messages"]
+        if message.get("role") == "assistant" and message.get("tool_calls")
+    )
+    assert execute_count == 1
+    assert len(assistant_message["tool_calls"]) == 1
+    assert json.loads(next(event for event in events if event["event"] == "done")["data"])["content"] == "结果如下"
 
 
 @pytest.mark.asyncio
