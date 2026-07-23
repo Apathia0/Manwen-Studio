@@ -18,6 +18,7 @@ import {
 import {
   type ApiKeySettings,
   type AiCredentialStatus,
+  type AiChannelItem,
   type AiModelItem,
   type AiPreferences,
   type CredentialMode,
@@ -27,6 +28,7 @@ import {
   deleteAiCredential,
   getApiKeySettings,
   getAiCredential,
+  getAiChannels,
   getAiModels,
   getAiPreferences,
   getLocalCredentialMode,
@@ -189,16 +191,48 @@ function normalizeUpstreamUrl(rawUrl: string) {
 function buildUpstreamGuideItems(
   apiSettings: ApiKeySettings,
   platformApi: PlatformApiSettings | undefined,
+  platformChannels: AiChannelItem[] | null,
   canOverrideApiUrl: boolean,
   mode: CredentialMode,
 ): UpstreamGuideItem[] {
   const grouped = new Map<string, UpstreamGuideItem>();
+  const customUrl = apiSettings.upstreamBaseUrl.trim();
+  const useCustomUrl = mode === 'user_key' && canOverrideApiUrl && customUrl.length > 0;
+
+  if (!useCustomUrl && platformChannels !== null) {
+    for (const channel of platformChannels) {
+      const normalized = normalizeUpstreamUrl(channel.base_url);
+      const item = grouped.get(normalized.groupKey) || {
+        url: normalized.url,
+        openUrl: normalized.openUrl,
+        status: normalized.status,
+        services: [],
+      };
+      const modality = UPSTREAM_GUIDE_MODALITIES.find((entry) => entry.key === channel.modality);
+      item.services.push({
+        label: `${modality?.label || channel.modality} · ${channel.name}`,
+        source: '平台',
+      });
+      grouped.set(normalized.groupKey, item);
+    }
+    if (grouped.size === 0) {
+      const normalized = normalizeUpstreamUrl('');
+      grouped.set(normalized.groupKey, {
+        url: normalized.url,
+        openUrl: normalized.openUrl,
+        status: normalized.status,
+        services: UPSTREAM_GUIDE_MODALITIES.map((modality) => ({
+          label: modality.label,
+          source: '平台',
+        })),
+      });
+    }
+    return [...grouped.values()];
+  }
 
   for (const modality of UPSTREAM_GUIDE_MODALITIES) {
     const fields = UPSTREAM_FIELDS[modality.key];
-    const customUrl = apiSettings.upstreamBaseUrl.trim();
     const platformUrl = String(platformApi?.[fields.platformBaseUrlKey] || '').trim();
-    const useCustomUrl = mode === 'user_key' && canOverrideApiUrl && customUrl.length > 0;
     const normalized = normalizeUpstreamUrl(useCustomUrl ? customUrl : platformUrl);
     const item = grouped.get(normalized.groupKey) || {
       url: normalized.url,
@@ -287,6 +321,7 @@ export function PointsAiAccountPanel({
   const [ledgerDirection, setLedgerDirection] = useState('');
   const [ledgerFilters, setLedgerFilters] = useState({ startDate: '', endDate: '', entryType: '', direction: '' });
   const [credential, setCredential] = useState<AiCredentialStatus | null>(null);
+  const [channels, setChannels] = useState<AiChannelItem[] | null>(null);
   const [prefs, setPrefs] = useState<AiPreferences | null>(null);
   const [models, setModels] = useState<AiModelItem[]>([]);
   const [apiKeyInput, setApiKeyInput] = useState('');
@@ -295,15 +330,17 @@ export function PointsAiAccountPanel({
   const [mode, setMode] = useState<CredentialMode>(getLocalCredentialMode());
 
   const reload = useCallback(async () => {
-    const [a, c, pr, m] = await Promise.all([
+    const [a, c, pr, m, channelResult] = await Promise.all([
       getPointsAccount(),
       getAiCredential(),
       getAiPreferences(),
       getAiModels(),
+      getAiChannels().catch(() => null),
     ]);
     setAccount(a);
     setCredential(c);
     setModels(m.models || []);
+    if (channelResult) setChannels(channelResult.channels || []);
     let nextPreferences = pr;
     if (pr.credential_mode === 'user_key' && (!c.configured || !canUseOwnKey)) {
       try {
@@ -542,7 +579,7 @@ export function PointsAiAccountPanel({
   const selectableModels = availableModels.filter((item) => mode === 'user_key' || item.price);
   const selectedModelId = prefs?.[modelConfig.preferenceKey] ?? null;
   const selectedModel = availableModels.find((item) => item.id === selectedModelId) || null;
-  const upstreamGuideItems = buildUpstreamGuideItems(apiSettings, platformApi, canOverrideApiUrl, mode);
+  const upstreamGuideItems = buildUpstreamGuideItems(apiSettings, platformApi, channels, canOverrideApiUrl, mode);
 
   return (
     <section className="mt-6 overflow-hidden rounded-2xl border border-[#d7e3f4] bg-white shadow-[0_12px_30px_rgba(37,99,235,0.06)]">

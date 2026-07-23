@@ -833,6 +833,7 @@ export interface PlatformSettings {
     image_output_compression: string;
     image_input_fidelity: string;
     enable_user_override: boolean;
+    allow_all_users_api_key_override?: boolean;
     enable_user_url_override?: boolean;
     oss_enabled?: boolean;
     oss_access_key_id?: string;
@@ -5107,6 +5108,14 @@ export interface AiChannelAdmin {
   last_four?: string | null;
 }
 
+export interface AiChannelItem {
+  id: number;
+  code: string;
+  name: string;
+  base_url: string;
+  modality: string;
+}
+
 export interface AiModelAdmin {
   id: number;
   channel_id: number;
@@ -5131,6 +5140,7 @@ export interface PointsSettings {
   register_grant_enabled: boolean;
   register_grant_amount: number;
   dual_track_enabled: boolean;
+  allow_all_users_api_key_override: boolean;
 }
 
 export function getLocalCredentialMode(): CredentialMode {
@@ -5267,6 +5277,12 @@ export async function getAiModels(modality?: string): Promise<{ models: AiModelI
   return res.json();
 }
 
+export async function getAiChannels(): Promise<{ channels: AiChannelItem[] }> {
+  const res = await fetch(`${BASE}/api/ai/channels`, { headers: apiHeaders() });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '获取 AI 渠道失败'));
+  return res.json();
+}
+
 export async function estimateAiPoints(payload: {
   model_id: number;
   input_tokens?: number;
@@ -5306,6 +5322,15 @@ export async function updateAdminAiChannel(id: number, payload: AdminAiChannelPa
     body: JSON.stringify(payload),
   });
   if (!res.ok) throw new Error(await readErrorMessage(res, '更新渠道失败'));
+  return res.json();
+}
+
+export async function deleteAdminAiChannel(id: number): Promise<{ ok: boolean; channel_id: number }> {
+  const res = await fetch(`${BASE}/api/admin/ai/channels/${id}`, {
+    method: 'DELETE',
+    headers: apiHeaders(),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '删除渠道失败'));
   return res.json();
 }
 

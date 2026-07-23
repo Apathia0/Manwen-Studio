@@ -623,6 +623,7 @@ class PointsSettingsIn(BaseModel):
     register_grant_enabled: bool | None = None
     register_grant_amount: float | None = None
     dual_track_enabled: bool | None = None
+    allow_all_users_api_key_override: bool | None = None
 
 
 class PurchasePointsIn(BaseModel):
@@ -666,6 +667,30 @@ def _serialize_points_product(product: PointsProduct) -> dict[str, Any]:
         "is_visible": bool(product.is_visible),
         "is_recommended": bool(product.is_recommended),
         "sort_order": int(product.sort_order or 0),
+    }
+
+
+@router.get("/api/ai/channels")
+def list_user_channels(request: Request, db: Session = Depends(get_db)):
+    """返回用户中心展示所需的启用渠道，不暴露平台密钥或高级配置。"""
+    _require_user(request, db)
+    channels = (
+        db.query(AiChannel)
+        .filter(AiChannel.enabled.is_(True), AiChannel.base_url != "")
+        .order_by(AiChannel.id.asc())
+        .all()
+    )
+    return {
+        "channels": [
+            {
+                "id": channel.id,
+                "code": channel.code,
+                "name": channel.name,
+                "base_url": channel.base_url,
+                "modality": channel.modality,
+            }
+            for channel in channels
+        ]
     }
 
 
@@ -1260,6 +1285,52 @@ def admin_update_channel(channel_id: int, body: ChannelUpdateIn, request: Reques
     return ai_channels.serialize_channel(ch)
 
 
+@router.delete("/api/admin/ai/channels/{channel_id}")
+def admin_delete_channel(channel_id: int, request: Request, db: Session = Depends(get_db)):
+    """删除渠道及其未被业务数据引用的模型和价格。"""
+    _require_admin(request, db)
+    channel = (
+        db.query(AiChannel)
+        .filter(AiChannel.id == channel_id)
+        .with_for_update()
+        .first()
+    )
+    if not channel:
+        raise HTTPException(404, "渠道不存在")
+
+    model_ids = [
+        model_id
+        for (model_id,) in db.query(AiModel.id).filter(AiModel.channel_id == channel_id).all()
+    ]
+    references = {
+        "计费用量记录": db.query(AiUsageEvent).filter(AiUsageEvent.channel_id == channel_id).count(),
+    }
+    if model_ids:
+        references.update({
+            "任务默认模型": db.query(AiTaskDefault).filter(AiTaskDefault.model_id.in_(model_ids)).count(),
+            "用户默认模型": db.query(UserAiPreference).filter(
+                or_(
+                    UserAiPreference.default_text_model_id.in_(model_ids),
+                    UserAiPreference.default_image_model_id.in_(model_ids),
+                    UserAiPreference.default_video_model_id.in_(model_ids),
+                )
+            ).count(),
+            "创作台任务": db.query(CreationStudioJob).filter(CreationStudioJob.model_id.in_(model_ids)).count(),
+            "模型计费用量记录": db.query(AiUsageEvent).filter(AiUsageEvent.model_id.in_(model_ids)).count(),
+        })
+    active_references = [f"{label}（{count}）" for label, count in references.items() if count]
+    if active_references:
+        raise HTTPException(409, f"渠道或其模型仍被引用，无法删除：{'、'.join(active_references)}")
+
+    db.delete(channel)
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(409, "渠道刚被业务数据引用，无法删除，请刷新后重试") from exc
+    return {"ok": True, "channel_id": channel_id}
+
+
 @router.get("/api/admin/ai/models")
 def admin_list_models(request: Request, channel_id: int | None = None, db: Session = Depends(get_db)):
     _require_admin(request, db)
@@ -1513,6 +1584,9 @@ def admin_get_points_settings(request: Request, db: Session = Depends(get_db)):
         "register_grant_enabled": bool(_get_platform_setting("points.register_grant_enabled", db, False)),
         "register_grant_amount": float(_get_platform_setting("points.register_grant_amount", db, 0) or 0),
         "dual_track_enabled": bool(_get_platform_setting("points.dual_track_enabled", db, True)),
+        "allow_all_users_api_key_override": bool(
+            _get_platform_setting("api.allow_all_users_api_key_override", db, False)
+        ),
     }
 
 
@@ -1527,6 +1601,12 @@ def admin_put_points_settings(body: PointsSettingsIn, request: Request, db: Sess
         _set_platform_setting("points.register_grant_amount", body.register_grant_amount, db)
     if body.dual_track_enabled is not None:
         _set_platform_setting("points.dual_track_enabled", body.dual_track_enabled, db)
+    if body.allow_all_users_api_key_override is not None:
+        _set_platform_setting(
+            "api.allow_all_users_api_key_override",
+            body.allow_all_users_api_key_override,
+            db,
+        )
     return admin_get_points_settings(request, db)
 
 

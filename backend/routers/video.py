@@ -696,12 +696,9 @@ def _get_platform_setting(key: str, db: Session, default=None):
 
 
 def _user_api_override_capabilities(user: User | None, db: Session) -> dict[str, bool]:
-    key_global = bool(_get_platform_setting("api.enable_user_override", db, True))
-    url_global = bool(_get_platform_setting("api.enable_user_url_override", db, False))
-    return {
-        "can_override_api_key": key_global and bool(user and user.allow_api_key_override),
-        "can_override_api_url": url_global and bool(user and user.allow_api_url_override),
-    }
+    import main as main_mod
+
+    return main_mod._user_api_override_capabilities(user, db)
 
 
 def _configure_image_service_from_db(request: Request, db: Session) -> None:

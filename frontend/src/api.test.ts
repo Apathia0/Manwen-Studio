@@ -1,6 +1,6 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 
-import { analyzeChapterMangaAssets, apiHeaders, coverImageUrl, createAdminAiChannel, generateMangaAsset, generateMangaAssetsBatch, generateMangaStream, generateStoryCharRefStream, getApiKeySettings, getAuthorStyleResult, getAuthorStyleStatus, getBackgroundTaskStatus, getLocalCredentialMode, getMangaAssetAnalysis, login, redrawMangaAsset, regenerateVideoAsset, retryVideoJob, saveApiKeySettings, saveMangaAssetAnalysis, setLocalCredentialMode, startAuthorStyleAnalysis, toPublicMangaAssetUrl, toPublicVideoAssetUrl, updateAdminAiChannel, updateAuthorStyleReport, updateDeconstructionReport } from './api';
+import { analyzeChapterMangaAssets, apiHeaders, coverImageUrl, createAdminAiChannel, deleteAdminAiChannel, generateMangaAsset, generateMangaAssetsBatch, generateMangaStream, generateStoryCharRefStream, getAiChannels, getApiKeySettings, getAuthorStyleResult, getAuthorStyleStatus, getBackgroundTaskStatus, getLocalCredentialMode, getMangaAssetAnalysis, login, redrawMangaAsset, regenerateVideoAsset, retryVideoJob, saveApiKeySettings, saveMangaAssetAnalysis, setLocalCredentialMode, startAuthorStyleAnalysis, toPublicMangaAssetUrl, toPublicVideoAssetUrl, updateAdminAiChannel, updateAuthorStyleReport, updateDeconstructionReport } from './api';
 import { shouldShowAuthorStyleEntry } from './components/DeconstructionWorkPage';
 
 describe('coverImageUrl', () => {
@@ -239,6 +239,14 @@ describe('video job API', () => {
 });
 
 describe('AI 渠道 API', () => {
+  it('读取用户可见渠道列表', async () => {
+    const result = { channels: [{ id: 1, code: 'text', name: '文本', base_url: 'https://example.com/v1', modality: 'text' }] };
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(result), { status: 200 })));
+
+    await expect(getAiChannels()).resolves.toEqual(result);
+    expect(fetch).toHaveBeenCalledWith('/api/ai/channels', expect.any(Object));
+  });
+
   it('创建视频渠道时发送显式 adapter_type', async () => {
     const channel = { id: 3, code: 'openai-video', name: 'OpenAI 视频', adapter_type: 'openai_video' };
     vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(channel), { status: 200 })));
@@ -273,6 +281,16 @@ describe('AI 渠道 API', () => {
     expect(fetch).toHaveBeenCalledWith(
       '/api/admin/ai/channels/3',
       expect.objectContaining({ method: 'PUT', body: JSON.stringify(payload) }),
+    );
+  });
+
+  it('删除渠道时调用渠道删除接口', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ ok: true, channel_id: 3 }), { status: 200 })));
+
+    await expect(deleteAdminAiChannel(3)).resolves.toEqual({ ok: true, channel_id: 3 });
+    expect(fetch).toHaveBeenCalledWith(
+      '/api/admin/ai/channels/3',
+      expect.objectContaining({ method: 'DELETE' }),
     );
   });
 });

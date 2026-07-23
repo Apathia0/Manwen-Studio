@@ -29,6 +29,7 @@ import {
   createAdminAiModel,
   createAdminPointsProduct,
   deleteAdminPointsProduct,
+  deleteAdminAiChannel,
   deleteAdminAiModel,
   discoverAdminAiChannelModels,
   getAdminAiChannels,
@@ -256,17 +257,19 @@ export function PointsAiAdminPage() {
     setModels(modelResult.models || []);
     setSettings(settingsResult);
     setProducts(productResult.products || []);
-    setModelForm((prev) =>
-      prev.channel_id || !nextChannels[0]
-        ? prev
-        : {
+    setModelForm((prev) => {
+      if (nextChannels.some((channel) => channel.id === prev.channel_id)) return prev;
+      const fallbackChannel = nextChannels[0];
+      return fallbackChannel
+        ? {
             ...prev,
-            channel_id: nextChannels[0].id,
-            modality: nextChannels[0].modality,
-            initial_points: defaultPointsForModality(nextChannels[0].modality),
-            initial_output_points: defaultPointsForModality(nextChannels[0].modality),
-          },
-    );
+            channel_id: fallbackChannel.id,
+            modality: fallbackChannel.modality,
+            initial_points: defaultPointsForModality(fallbackChannel.modality),
+            initial_output_points: defaultPointsForModality(fallbackChannel.modality),
+          }
+        : { ...prev, channel_id: 0 };
+    });
   }, []);
 
   useEffect(() => {
@@ -479,6 +482,27 @@ export function PointsAiAdminPage() {
       await reload();
     } catch (error) {
       toast.error(error instanceof Error ? error.message : '保存失败');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const deleteChannel = async (channel: AiChannelAdmin) => {
+    const accepted = await confirm({
+      title: '删除 AI 渠道',
+      message: `确定删除渠道“${channel.name}”吗？未被业务引用的所属模型和价格也会一并删除。`,
+      confirmText: '删除渠道',
+      danger: true,
+    });
+    if (!accepted) return;
+    setBusy(true);
+    try {
+      await deleteAdminAiChannel(channel.id);
+      if (editingChannelId === channel.id) resetChannelForm();
+      await reload();
+      toast.success('渠道已删除');
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : '删除渠道失败');
     } finally {
       setBusy(false);
     }
@@ -706,6 +730,25 @@ export function PointsAiAdminPage() {
                       }
                     />
                   </label>
+                  <label className="flex cursor-pointer items-center justify-between gap-4 py-3 text-sm">
+                    <span>
+                      <span className="block font-medium text-slate-800">允许所有用户填写 API Key</span>
+                      <span className="mt-0.5 block text-xs text-slate-500">
+                        开启后无需逐个授权；关闭后仅已单独授权的用户可使用自己的 Key。
+                      </span>
+                    </span>
+                    <input
+                      type="checkbox"
+                      className="h-4 w-4 shrink-0 accent-blue-600"
+                      checked={settings.allow_all_users_api_key_override}
+                      onChange={(event) =>
+                        setSettings({
+                          ...settings,
+                          allow_all_users_api_key_override: event.target.checked,
+                        })
+                      }
+                    />
+                  </label>
                 </div>
                 <Button
                   type="button"
@@ -917,9 +960,14 @@ export function PointsAiAdminPage() {
                           {channel.base_url || '未设置 Base URL'} · Key {channel.has_platform_key ? `···${channel.last_four || ''}` : '未配置'}
                         </p>
                       </div>
-                      <Button type="button" variant="secondary" size="sm" disabled={busy} icon={<Pencil size={13} />} onClick={() => startChannelEdit(channel)}>
-                        编辑
-                      </Button>
+                      <div className="flex shrink-0 items-center gap-2">
+                        <Button type="button" variant="secondary" size="sm" disabled={busy} icon={<Pencil size={13} />} onClick={() => startChannelEdit(channel)}>
+                          编辑
+                        </Button>
+                        <Button type="button" variant="danger" size="sm" disabled={busy} icon={<Trash2 size={13} />} onClick={() => void deleteChannel(channel)}>
+                          删除
+                        </Button>
+                      </div>
                     </div>
                   ))}
                 </div>

@@ -724,6 +724,9 @@ def _platform_settings_snapshot(db: Session) -> dict:
             "video_api_key": _get_platform_setting("api.video.api_key", db, ""),
             "video_provider": _get_platform_setting("api.video.provider", db, ""),
             "enable_user_override": bool(_get_platform_setting("api.enable_user_override", db, True)),
+            "allow_all_users_api_key_override": bool(
+                _get_platform_setting("api.allow_all_users_api_key_override", db, False)
+            ),
             "enable_user_url_override": bool(_get_platform_setting("api.enable_user_url_override", db, False)),
             "oss_enabled": bool(_get_platform_setting("oss.enabled", db, False)),
             "oss_access_key_id": _get_platform_setting("oss.access_key_id", db, ""),
@@ -878,9 +881,14 @@ def _public_payment_config(db: Session) -> dict:
 
 def _user_api_override_capabilities(user: User | None, db: Session) -> dict[str, bool]:
     key_global = bool(_get_platform_setting("api.enable_user_override", db, True))
+    key_allowed_for_all_users = bool(
+        _get_platform_setting("api.allow_all_users_api_key_override", db, False)
+    )
     url_global = bool(_get_platform_setting("api.enable_user_url_override", db, False))
     return {
-        "can_override_api_key": key_global and bool(user and user.allow_api_key_override),
+        "can_override_api_key": key_global
+        and user is not None
+        and (key_allowed_for_all_users or bool(user.allow_api_key_override)),
         "can_override_api_url": url_global and bool(user and user.allow_api_url_override),
     }
 
@@ -1612,6 +1620,7 @@ def _seed_platform_settings(db: Session, *, commit: bool = True) -> None:
         "api.video.api_key": "",
         "api.video.provider": "",
         "api.enable_user_override": True,
+        "api.allow_all_users_api_key_override": False,
         "api.enable_user_url_override": False,
         "oss.enabled": False,
         "oss.access_key_id": "",
@@ -5583,6 +5592,12 @@ def admin_save_platform_settings(body: dict, request: Request, db: Session = Dep
         "api.video.api_key": api.get("video_api_key", ""),
         "api.video.provider": api.get("video_provider", ""),
         "api.enable_user_override": bool(api.get("enable_user_override", True)),
+        "api.allow_all_users_api_key_override": bool(
+            api.get(
+                "allow_all_users_api_key_override",
+                _get_platform_setting("api.allow_all_users_api_key_override", db, False),
+            )
+        ),
         "api.enable_user_url_override": bool(api.get("enable_user_url_override", False)),
         "oss.enabled": bool(api.get("oss_enabled", False)),
         "oss.access_key_id": str(api.get("oss_access_key_id", "") or ""),

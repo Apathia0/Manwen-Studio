@@ -57,6 +57,8 @@ interface CreationStudioPageProps {
 const ACTIVE_STATUSES = new Set(['queued', 'running', 'cancel_requested']);
 const IMAGE_RATIOS = [
   { label: '1:1', width: 1024, height: 1024 },
+  { label: '4:3', width: 1024, height: 768 },
+  { label: '3:4', width: 768, height: 1024 },
   { label: '3:2', width: 1536, height: 1024 },
   { label: '2:3', width: 1024, height: 1536 },
   { label: '16:9', width: 1344, height: 768 },
@@ -978,9 +980,23 @@ export function CreationStudioPage({ storyId, chapterId, storyTitle, chapterTitl
                   </div>
                 </div>
                 <div>
-                  <div className="mb-2 text-xs font-semibold text-slate-700">图片比例</div>
-                  <div className="grid grid-cols-5 gap-2">
-                    {IMAGE_RATIOS.map((ratio) => <button key={ratio.label} type="button" onClick={() => { setWidth(ratio.width); setHeight(ratio.height); }} className={`rounded-lg border py-2 text-[11px] ${width === ratio.width && height === ratio.height ? 'border-[#6c9ee6] bg-[#edf5ff] text-[#1d4ed8]' : 'border-[#d7e3f4] bg-white text-slate-500'}`}>{ratio.label}</button>)}
+                  <label htmlFor="creation-studio-image-ratio" className="mb-2 block text-xs font-semibold text-slate-700">图片比例</label>
+                  <div className="relative">
+                    <select
+                      id="creation-studio-image-ratio"
+                      value={`${width}x${height}`}
+                      onChange={(event) => {
+                        const ratio = IMAGE_RATIOS.find((item) => `${item.width}x${item.height}` === event.target.value);
+                        if (ratio) {
+                          setWidth(ratio.width);
+                          setHeight(ratio.height);
+                        }
+                      }}
+                      className="h-10 w-full appearance-none rounded-lg border border-[#c8d8ef] bg-white px-3 pr-9 text-xs text-slate-700 outline-none focus:border-[#6c9ee6]"
+                    >
+                      {IMAGE_RATIOS.map((ratio) => <option key={ratio.label} value={`${ratio.width}x${ratio.height}`}>{ratio.label}</option>)}
+                    </select>
+                    <ChevronDown size={14} className="pointer-events-none absolute right-3 top-3 text-slate-400" />
                   </div>
                 </div>
                 <div>

@@ -92,6 +92,113 @@ def test_user_upstream_override_is_ignored_without_permission(monkeypatch):
     assert result is None
 
 
+@pytest.mark.parametrize(
+    ("enable_user_override", "allow_all_users", "user_permission", "expected"),
+    [
+        (False, False, False, False),
+        (False, True, True, False),
+        (True, False, False, False),
+        (True, False, True, True),
+        (True, True, False, True),
+    ],
+)
+def test_api_key_override_capability_combines_platform_and_user_permissions(
+    monkeypatch,
+    enable_user_override,
+    allow_all_users,
+    user_permission,
+    expected,
+):
+    values = {
+        "api.enable_user_override": enable_user_override,
+        "api.allow_all_users_api_key_override": allow_all_users,
+        "api.enable_user_url_override": True,
+    }
+    monkeypatch.setattr(
+        main_mod,
+        "_get_platform_setting",
+        lambda key, db, default=None: values.get(key, default),
+    )
+    user = SimpleNamespace(
+        allow_api_key_override=user_permission,
+        allow_api_url_override=False,
+    )
+
+    capabilities = main_mod._user_api_override_capabilities(user, object())
+
+    assert capabilities == {
+        "can_override_api_key": expected,
+        "can_override_api_url": False,
+    }
+
+
+def test_api_key_override_capability_never_allows_anonymous_user(monkeypatch):
+    monkeypatch.setattr(
+        main_mod,
+        "_get_platform_setting",
+        lambda key, db, default=None: {
+            "api.enable_user_override": True,
+            "api.allow_all_users_api_key_override": True,
+            "api.enable_user_url_override": True,
+        }.get(key, default),
+    )
+
+    assert main_mod._user_api_override_capabilities(None, object()) == {
+        "can_override_api_key": False,
+        "can_override_api_url": False,
+    }
+
+
+def test_video_api_key_override_capability_uses_main_policy(monkeypatch):
+    expected = {"can_override_api_key": True, "can_override_api_url": False}
+    monkeypatch.setattr(main_mod, "_user_api_override_capabilities", lambda user, db: expected)
+
+    assert video_router._user_api_override_capabilities(object(), object()) is expected
+
+
+def test_admin_points_settings_reads_and_updates_global_api_key_permission(monkeypatch):
+    values = {
+        "points.yuan_to_points": 10,
+        "points.register_grant_enabled": False,
+        "points.register_grant_amount": 0,
+        "points.dual_track_enabled": True,
+        "api.allow_all_users_api_key_override": False,
+    }
+    monkeypatch.setattr(points_ai, "_require_admin", lambda request, db: object())
+    monkeypatch.setattr(
+        points_ai,
+        "_get_platform_setting",
+        lambda key, db, default=None: values.get(key, default),
+    )
+    monkeypatch.setattr(
+        points_ai,
+        "_set_platform_setting",
+        lambda key, value, db: values.__setitem__(key, value),
+    )
+
+    result = points_ai.admin_put_points_settings(
+        points_ai.PointsSettingsIn(allow_all_users_api_key_override=True),
+        object(),
+        object(),
+    )
+
+    assert values["api.allow_all_users_api_key_override"] is True
+    assert result["allow_all_users_api_key_override"] is True
+
+
+def test_platform_settings_save_preserves_global_api_key_permission_when_field_is_omitted(monkeypatch):
+    captured = {}
+    db = SimpleNamespace(commit=lambda: None)
+    monkeypatch.setattr(main_mod, "_require_admin", lambda request, db: object())
+    monkeypatch.setattr(main_mod, "_get_platform_setting", lambda key, db, default=None: True if key == "api.allow_all_users_api_key_override" else default)
+    monkeypatch.setattr(main_mod, "_set_platform_setting", lambda key, value, db, **kwargs: captured.setdefault(key, value))
+    monkeypatch.setattr(main_mod, "_admin_platform_settings_snapshot", lambda db: {"api": {"allow_all_users_api_key_override": True}})
+
+    main_mod.admin_save_platform_settings({"api": {}}, object(), db)
+
+    assert captured["api.allow_all_users_api_key_override"] is True
+
+
 def test_draft_credential_test_does_not_update_saved_status(monkeypatch):
     user = SimpleNamespace(id=7)
     saved_row = SimpleNamespace(status="invalid", last_validated_at=None)
