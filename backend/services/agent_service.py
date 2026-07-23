@@ -154,8 +154,25 @@ def _is_context_length_exceeded_response(status_code: int, response_text: str) -
     if status_code == 413:
         return True
     text = (response_text or "").lower()
+    try:
+        payload = json.loads(response_text)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        payload = None
+    if isinstance(payload, dict):
+        error = payload.get("error", payload)
+        if isinstance(error, dict):
+            error_code = str(error.get("code") or error.get("type") or "").strip().lower()
+            if error_code in {
+                "context_length_exceeded",
+                "context_window_exceeded",
+                "input_too_long",
+                "max_tokens_exceeded",
+                "token_limit_exceeded",
+            }:
+                return True
     markers = (
         "context_length_exceeded",
+        "context_window_exceeded",
         "maximum context length",
         "max context length",
         "context window",
@@ -168,7 +185,13 @@ def _is_context_length_exceeded_response(status_code: int, response_text: str) -
         "令牌数超限",
         "token 超限",
     )
-    return any(marker in text for marker in markers)
+    if any(marker in text for marker in markers):
+        return True
+    length_subjects = ("context length", "input length", "input tokens", "prompt tokens")
+    exceeded_semantics = ("exceed", "too long", "over the limit", "larger than", "reduce")
+    return any(subject in text for subject in length_subjects) and any(
+        marker in text for marker in exceeded_semantics
+    )
 
 
 _VIDEO_MUTATION_ACTION_PATTERN = re.compile(
@@ -4536,6 +4559,7 @@ class AgentService:
             truncation_continuation_pending = False
             truncation_content = ""
             write_executed = False
+            write_tool_started = False
             context_limit_retry_count = 0
 
             # 提取用户最后一条消息，判断是否涉及正文或视频分镜写入请求
@@ -4625,7 +4649,7 @@ class AgentService:
                             if _is_multimodal_unsupported_response(response.status_code, response_text):
                                 raise AgentMultimodalUnsupportedError()
                             if _is_context_length_exceeded_response(response.status_code, response_text):
-                                if context_limit_retry_count == 0 and iteration_count == 1 and not write_executed:
+                                if context_limit_retry_count == 0 and not write_tool_started:
                                     context_limit_retry_count += 1
                                     await _maybe_compress_history(force=True)
                                     iteration_count -= 1
@@ -4781,6 +4805,9 @@ class AgentService:
                             continue
 
                         yield {"event": "tool_call", "data": json.dumps({"name": name, "arguments": args}, ensure_ascii=False)}
+
+                        if self.tool_registry.is_write_tool(name):
+                            write_tool_started = True
 
                         try:
                             result_str = await asyncio.wait_for(

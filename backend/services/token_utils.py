@@ -528,12 +528,20 @@ def emergency_compact_messages(messages: list[dict]) -> list[dict]:
     system_message = messages[0] if messages[0].get("role") == "system" else None
     conversation = messages[1:] if system_message else list(messages)
 
-    if len(conversation) <= 6:
-        old_messages = conversation[:-1]
-        recent_messages = conversation[-1:]
-    else:
-        old_messages = conversation[:-6]
-        recent_messages = conversation[-6:]
+    recent_count = 1 if len(conversation) <= 6 else 6
+    recent_start = max(0, len(conversation) - recent_count)
+
+    # 工具结果必须与发起它的 assistant.tool_calls 一起保留，避免生成孤立 tool 消息。
+    if recent_start < len(conversation) and conversation[recent_start].get("role") == "tool":
+        tool_group_start = recent_start
+        while tool_group_start > 0 and conversation[tool_group_start].get("role") == "tool":
+            tool_group_start -= 1
+        candidate = conversation[tool_group_start]
+        if candidate.get("role") == "assistant" and candidate.get("tool_calls"):
+            recent_start = tool_group_start
+
+    old_messages = conversation[:recent_start]
+    recent_messages = conversation[recent_start:]
 
     result: list[dict] = []
     if system_message:

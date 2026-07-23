@@ -164,6 +164,11 @@ class _FakeAgentPayloadTooLargeResponse(_FakeAgentContextErrorResponse):
         self.status_code = 413
 
 
+class _FakeAgentInputLengthErrorResponse(_FakeAgentContextErrorResponse):
+    async def aread(self):
+        return b'{"error":{"type":"invalid_request_error","message":"Input length exceeds the model context length"}}'
+
+
 def _agent_sse_response(content: str, finish_reason: str, tool_calls: list[dict] | None = None) -> list[str]:
     delta: dict = {}
     if content:
@@ -315,6 +320,90 @@ async def test_agent_context_limit_fails_after_single_retry(monkeypatch):
 
     assert len(payloads) == 2
     assert exc_info.value.code == "agent_context_limit_exceeded"
+
+
+@pytest.mark.asyncio
+async def test_agent_context_limit_after_read_tool_compresses_and_retries(monkeypatch):
+    tool_call = [{
+        "index": 0,
+        "id": "call-read",
+        "function": {"name": "get_story_overview", "arguments": "{}"},
+    }]
+    payloads = _install_agent_stream_client(
+        monkeypatch,
+        [
+            _agent_sse_response("", "tool_calls", tool_calls=tool_call),
+            _FakeAgentInputLengthErrorResponse(),
+            _agent_sse_response("压缩后完成", "stop"),
+        ],
+    )
+    service = agent_service_module.AgentService()
+
+    async def fake_execute(_name, _args):
+        return '{"title":"测试作品"}'
+
+    monkeypatch.setattr(service.tool_registry, "execute", fake_execute)
+
+    events = [
+        event
+        async for event in service.run_stream(
+            messages=[{"role": "user", "content": "分析当前故事"}],
+            story_context="测试上下文",
+            api_key="test-key",
+            mode="analyze",
+        )
+    ]
+
+    assert len(payloads) == 3
+    retry_messages = payloads[2]["messages"]
+    assistant_index = next(
+        index for index, message in enumerate(retry_messages)
+        if message.get("role") == "assistant" and message.get("tool_calls")
+    )
+    assert retry_messages[assistant_index + 1]["role"] == "tool"
+    assert retry_messages[assistant_index + 1]["tool_call_id"] == "call-read"
+    assert json.loads(next(event for event in events if event["event"] == "done")["data"])["content"] == "压缩后完成"
+
+
+@pytest.mark.asyncio
+async def test_agent_context_limit_after_uncertain_write_tool_does_not_retry(monkeypatch):
+    tool_call = [{
+        "index": 0,
+        "id": "call-write",
+        "function": {"name": "update_chapter_content", "arguments": "{}"},
+    }]
+    payloads = _install_agent_stream_client(
+        monkeypatch,
+        [
+            _agent_sse_response("", "tool_calls", tool_calls=tool_call),
+            _FakeAgentContextErrorResponse(),
+        ],
+    )
+    service = agent_service_module.AgentService()
+
+    async def fake_execute(_name, _args):
+        raise RuntimeError("写入结果未知")
+
+    monkeypatch.setattr(service.tool_registry, "execute", fake_execute)
+    monkeypatch.setattr(service.tool_registry, "is_write_tool", lambda name: name == "update_chapter_content")
+
+    with pytest.raises(agent_service_module.AgentContextLimitError):
+        async for _ in service.run_stream(
+            messages=[{"role": "user", "content": "更新章节正文"}],
+            story_context="测试上下文",
+            api_key="test-key",
+            mode="execute",
+        ):
+            pass
+
+    assert len(payloads) == 2
+
+
+def test_context_length_error_recognizes_common_input_length_message():
+    assert agent_service_module._is_context_length_exceeded_response(
+        400,
+        '{"error":{"type":"invalid_request_error","message":"Input length exceeds the model context length"}}',
+    )
 
 
 @pytest.mark.asyncio
