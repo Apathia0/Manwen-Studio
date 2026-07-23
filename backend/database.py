@@ -1,5 +1,6 @@
-import os
+import importlib
 import logging
+import os
 import shutil
 from pathlib import Path
 from typing import Any, Mapping
@@ -63,6 +64,8 @@ def init_db(*, run_migrations: bool | None = None, bind_engine=None, raise_error
     if run_migrations is None:
         run_migrations = _env_flag("RUN_STARTUP_MIGRATIONS", True)
     try:
+        # 确保从迁移脚本直接调用 init_db 时，所有 ORM 表都已注册到元数据。
+        importlib.import_module("models")
         Base.metadata.create_all(bind=target_engine)
         if run_migrations:
             _migrate(target_engine)

@@ -1,9 +1,53 @@
+import os
+from pathlib import Path
+import runpy
+import subprocess
+import sys
+
 import pytest
 from fastapi import HTTPException
 from sqlalchemy import create_engine, text
 
 from database import Base
 import main
+
+
+def test_init_db_direct_import_registers_all_models():
+    backend_dir = Path(__file__).resolve().parents[1]
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(backend_dir)
+    command = (
+        "from sqlalchemy import create_engine, inspect; "
+        "from database import init_db; "
+        "engine = create_engine('sqlite:///:memory:'); "
+        "init_db(bind_engine=engine, run_migrations=False, raise_errors=True); "
+        "assert 'points_products' in inspect(engine).get_table_names()"
+    )
+
+    subprocess.run(
+        [sys.executable, "-c", command],
+        cwd=backend_dir,
+        env=env,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
+def test_run_migrations_script_propagates_failures(monkeypatch):
+    import database
+
+    calls = []
+
+    def fake_init_db(**kwargs):
+        calls.append(kwargs)
+
+    monkeypatch.setattr(database, "init_db", fake_init_db)
+    script_path = Path(__file__).resolve().parents[1] / "run_migrations.py"
+
+    runpy.run_path(str(script_path), run_name="__main__")
+
+    assert calls == [{"run_migrations": True, "raise_errors": True}]
 
 
 def _sqlite_install_engine(tmp_path):
