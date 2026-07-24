@@ -74,8 +74,8 @@ export const WRITING_STYLES: Record<WritingStyleName, WritingStyle> = {
 
 export const WORD_COUNT_GUIDELINES: Record<string, WordRange> = {
   '短章节': { min: 1800, max: 2300, ideal: 2000 },
-  '标准章节': { min: 2200, max: 2800, ideal: 2500 },
-  '长章节': { min: 2800, max: 3500, ideal: 3200 },
+  '标准章节': { min: 2200, max: 3000, ideal: 2500 },
+  '长章节': { min: 2600, max: 3000, ideal: 2900 },
 };
 
 export const EMOTIONAL_WORDS: Record<string, string[]> = {

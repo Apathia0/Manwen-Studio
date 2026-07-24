@@ -37,29 +37,34 @@ def _run(coro):
 def test_length_policy_constants_are_aligned():
     deepseek_text = (BACKEND_DIR / "services" / "deepseek.py").read_text(encoding="utf-8")
     main_text = (BACKEND_DIR / "main.py").read_text(encoding="utf-8")
+    chapter_quality_text = (BACKEND_DIR / "services" / "chapter_quality.py").read_text(encoding="utf-8")
     prompt_template_text = (BACKEND_DIR / "services" / "prompt_template.py").read_text(encoding="utf-8")
     frontend_text = (PROJECT_DIR / "frontend" / "src" / "prompts" / "inkai-chapter.ts").read_text(encoding="utf-8")
     calibrate_text = (BACKEND_DIR / "scripts" / "calibrate_max_tokens.py").read_text(encoding="utf-8")
 
     assert "CHAPTER_TARGET_MIN_CHARS = 2200" in deepseek_text
-    assert "CHAPTER_TARGET_MAX_CHARS = 2800" in deepseek_text
+    assert "CHAPTER_TARGET_MAX_CHARS = 3000" in deepseek_text
     assert "CHAPTER_TARGET_IDEAL_CHARS = 2500" in deepseek_text
     assert "CHAPTER_FIRST_PASS_MIN_CHARS = 2300" in deepseek_text
-    assert "CHAPTER_FIRST_PASS_MAX_CHARS = 2550" in deepseek_text
-    assert "CHAPTER_COMPLETION_MAX_TOKENS = 2816" in deepseek_text
+    assert "CHAPTER_FIRST_PASS_MAX_CHARS = 2700" in deepseek_text
+    assert "CHAPTER_COMPLETION_MAX_TOKENS = 3072" in deepseek_text
+    assert "MIN_CHAPTER_CHARS = 2200" in chapter_quality_text
+    assert "MAX_CHAPTER_CHARS = 3000" in chapter_quality_text
+    assert "IDEAL_CHAPTER_CHARS = 2500" in chapter_quality_text
     assert "CHAPTER_SOFT_MAX_CHARS" not in deepseek_text
     assert "CHAR_RETRY_LIMIT" not in deepseek_text
     assert "if _char_count > CHAR_RETRY_LIMIT" not in deepseek_text
     assert "已保留完整正文不做截断" not in deepseek_text
     assert '"max_tokens": 3328' not in deepseek_text
 
-    assert "'标准章节': { min: 2200, max: 2800, ideal: 2500 }" in frontend_text
-    assert "TARGET_CHARS = (2200, 2800)" in calibrate_text
-    assert "RECOMMENDED_MAX_TOKENS = 2816" in calibrate_text
+    assert "'标准章节': { min: 2200, max: 3000, ideal: 2500 }" in frontend_text
+    assert "'长章节': { min: 2600, max: 3000, ideal: 2900 }" in frontend_text
+    assert "TARGET_CHARS = (2200, 3000)" in calibrate_text
+    assert "RECOMMENDED_MAX_TOKENS = 3072" in calibrate_text
     assert "9-10 段结构" in calibrate_text
 
     assert "REFERENCE_CHAPTER_PROMPT_SEED" in main_text
-    assert "标准章节必须控制在 2200-2800 字，理想约 2500 字" in main_text
+    assert "标准章节必须控制在 2200-3000 字，理想约 2500 字" in main_text
     assert '"prompt.chapter_generation": NOVEL_PROMPT_SEED' in main_text
     assert '"prompt.reference_chapter": REFERENCE_CHAPTER_PROMPT_SEED' in main_text
 
@@ -492,7 +497,7 @@ def test_creation_pack_boundary_filters_rules_checklist_and_scene_budget():
         "closure_requirements": ["采集精血兽骨。", "完成黑市交易变现。"],
         "writer_execution_order": ["先猎杀。", "再进入黑市找到买家。"],
         "missing_if_absent": ["未写黑市交易必须打回。"],
-        "writing_rules": ["结尾必须写黑市交易价格。", "字数 2200-2800。"],
+        "writing_rules": ["结尾必须写黑市交易价格。", "字数 2200-3000。"],
         "acceptance_checklist": ["检查是否写出交易变现。", "检查是否完成采集。"],
         "review_focus": ["若未进入黑市则打回。", "检查因果闭环。"],
         "must_keep": ["保留明日前往黑市路线。", "保留精血兽骨。"],
@@ -525,7 +530,7 @@ def test_creation_pack_boundary_filters_rules_checklist_and_scene_budget():
     assert "黑市" not in joined
     assert "交易变现" not in joined
     assert "市场价" not in joined
-    assert "字数 2200-2800" in joined
+    assert "字数 2200-3000" in joined
     assert "检查是否完成采集" in joined
     assert cleaned["scene_budget"][0]["scene"] == "当前事件余波与必要结算"
     assert "不展开后续地点" in cleaned["scene_budget"][0]["purpose"]
@@ -645,7 +650,7 @@ def test_boundary_tail_local_repair_removes_trade_plan():
 
     assert changed is True
     assert {"黑市", "交易", "变现", "明日", "下一步"} & set(hits)
-    assert 2200 <= ca.count_chapter_chars(repaired) <= 2800
+    assert ca.LOCAL_MIN_CHARS <= ca.count_chapter_chars(repaired) <= ca.LOCAL_MAX_CHARS
     assert not ca._tail_boundary_hits(repaired)
     assert "陈玄把包口扎紧" in repaired
 
@@ -716,7 +721,7 @@ def test_pipeline_uses_best_candidate_when_later_revision_gets_worse(monkeypatch
             "local_safety": {
                 "ok": False,
                 "char_count": ca.count_chapter_chars(content),
-                "hard_failures": [{"code": "length.too_long", "message": "正文字数超过 2800 字"}],
+                "hard_failures": [{"code": "length.too_long", "message": "正文字数超过 3000 字"}],
             },
         }
 
@@ -914,7 +919,7 @@ def test_finalize_reuses_cached_pipeline_result(monkeypatch):
 
     content = "陈玄扣住石刃。“别动。”母亲看着药碗。“去吧。”他点头。“我会回来。”\n" * 65
     char_count = cq.count_content_chars(content)
-    assert 2200 <= char_count <= 2800
+    assert ca.LOCAL_MIN_CHARS <= char_count <= ca.LOCAL_MAX_CHARS
 
     story_context = {
         "_last_chapter_pipeline_result": {
@@ -1085,7 +1090,7 @@ def test_finalize_reuses_below_90_cached_pipeline_without_rerun(monkeypatch):
 
     content = "陈玄扣住短刀。母亲看着药碗。她说：别逞强。他点头：我知道。门外有人压低声音：走。" * 60
     char_count = cq.count_content_chars(content)
-    assert 2200 <= char_count <= 2800
+    assert ca.LOCAL_MIN_CHARS <= char_count <= ca.LOCAL_MAX_CHARS
     story_context = {
         "_last_chapter_pipeline_result": {
             "ok": False,
@@ -1129,7 +1134,7 @@ def test_finalize_rejects_near_pass_cached_pipeline_without_rerun(monkeypatch):
 
     content = "陈玄扣住短刀。母亲看着药碗。她说：别逞强。他点头：我知道。门外有人压低声音：走。" * 60
     char_count = cq.count_content_chars(content)
-    assert 2200 <= char_count <= 2800
+    assert ca.LOCAL_MIN_CHARS <= char_count <= ca.LOCAL_MAX_CHARS
     story_context = {
         "_last_chapter_pipeline_result": {
             "ok": False,
@@ -1308,7 +1313,7 @@ def test_finalize_skips_pipeline_rerun_when_disabled_on_cache_miss(monkeypatch):
 
     content = "陈玄扣住短刀。母亲看着药碗。她说：别逞强。他点头：我知道。门外有人压低声音：走。" * 60
     char_count = cq.count_content_chars(content)
-    assert 2200 <= char_count <= 2800
+    assert ca.LOCAL_MIN_CHARS <= char_count <= ca.LOCAL_MAX_CHARS
     story_context = {
         "_last_chapter_pipeline_result": {
             "ok": True,
@@ -1355,7 +1360,7 @@ def test_finalize_rejects_previous_failed_pipeline_when_rerun_disabled(monkeypat
 
     content = "陈玄扣住短刀。母亲看着药碗。她说：别逞强。他点头：我知道。门外有人压低声音：走。" * 60
     char_count = cq.count_content_chars(content)
-    assert 2200 <= char_count <= 2800
+    assert ca.LOCAL_MIN_CHARS <= char_count <= ca.LOCAL_MAX_CHARS
     story_context = {
         "_last_chapter_pipeline_result": {
             "ok": False,
@@ -1423,9 +1428,9 @@ def test_creation_pack_summary_and_completion_fields_are_normalized():
     ca._ensure_completion_fields(pack)
     summary = ca._pack_log_zh_summary(pack)
 
-    assert pack["target"] == {"min": 2200, "ideal": 2400, "max": 2800}
+    assert pack["target"] == {"min": 2200, "ideal": 2500, "max": 3000}
     assert pack["completion_contract"]["pass_score"] == 90
-    assert pack["completion_contract"]["target_chars"] == {"min": 2200, "ideal": 2400, "max": 2800}
+    assert pack["completion_contract"]["target_chars"] == {"min": 2200, "ideal": 2500, "max": 3000}
     assert pack["completion_contract"]["execution_policy"]
     assert pack["hard_requirements"] == ["猎杀獠牙野猪", "采集精血、獠牙和兽骨"]
     assert "清理现场" in pack["closure_requirements"]
@@ -1435,7 +1440,7 @@ def test_creation_pack_summary_and_completion_fields_are_normalized():
     assert any("剧情闭环" in item or "核心任务" in item for item in pack["acceptance_checklist"])
     assert any("hard_requirements" in item for item in pack["acceptance_checklist"])
     assert "目标字数" in summary
-    assert "2200-2800" in summary["目标字数"]
+    assert "2200-3000" in summary["目标字数"]
     assert summary["编辑通过分"] == 90
     assert summary["场景预算总字数"] >= ca.SCENE_BUDGET_IDEAL_TOTAL
     assert summary["硬性动作"]
@@ -1611,7 +1616,7 @@ def test_repair_truncated_tail_locally_when_repaired_text_still_in_range():
     assert changed is True
     assert repaired.endswith("。")
     assert "转身听见林子里" not in repaired
-    assert 2200 <= ca.count_chapter_chars(repaired) <= 2800
+    assert ca.LOCAL_MIN_CHARS <= ca.count_chapter_chars(repaired) <= ca.LOCAL_MAX_CHARS
 
 
 def test_repair_truncated_tail_locally_keeps_original_when_repair_too_short():
@@ -1623,3 +1628,68 @@ def test_repair_truncated_tail_locally_keeps_original_when_repair_too_short():
 
     assert changed is False
     assert repaired == content
+
+
+@pytest.mark.parametrize("chars, expected_code", [(1200, "length.too_short"), (3100, "length.too_long")])
+def test_editor_skips_remote_call_for_local_length_failure(monkeypatch, chars, expected_code):
+    import services.chapter_agents as ca
+
+    async def fail_remote_call(**kwargs):
+        raise AssertionError("纯长度硬失败不应调用远程 editor")
+
+    monkeypatch.setattr(ca, "_chat_completion", fail_remote_call)
+    review = _run(ca.review_chapter_with_editor_agent(
+        creation_pack={"chapter_task": {"chapter_number": 4}, "chapter_boundary": {}},
+        content="文" * chars + "。",
+        api_key="sk-real",
+    ))
+
+    assert review["approved"] is False
+    assert review["skipped_editor"] is True
+    assert review["skip_reason"] == "local_length_hard_failure"
+    assert expected_code in {item["code"] for item in review["local_safety"]["hard_failures"]}
+
+
+def test_pipeline_can_skip_initial_editor_for_lightweight_adjustment(monkeypatch):
+    import services.chapter_agents as ca
+
+    initial = "初" * 2300 + "。"
+    revised = "改" * 2400 + "。"
+    writer_calls: list[dict] = []
+    editor_calls: list[dict] = []
+
+    async def fake_writer(**kwargs):
+        writer_calls.append(kwargs)
+        return {"content": revised, "finish_reason": "stop"}
+
+    async def fake_editor(**kwargs):
+        editor_calls.append(kwargs)
+        local = ca._local_safety_review(kwargs["content"], {})
+        return {
+            "approved": True,
+            "overall_score": 95,
+            "scores": {"overall": 95},
+            "findings": [],
+            "rewrite_brief": [],
+            "local_safety": local,
+            "raw": {"blocking_issues": []},
+        }
+
+    monkeypatch.setattr(ca, "write_chapter_from_pack", fake_writer)
+    monkeypatch.setattr(ca, "review_chapter_with_editor_agent", fake_editor)
+    result = _run(ca.run_chapter_creation_pipeline(
+        story_context={"id": 1, "title": "测试"},
+        chapter_info={"chapter_number": 4},
+        api_key="test",
+        initial_content=initial,
+        creation_pack={"chapter_task": {"chapter_number": 4}, "chapter_boundary": {}},
+        skip_initial_review=True,
+        max_revisions=1,
+    ))
+
+    assert result["ok"] is True
+    assert result["attempts"] == 1
+    assert len(writer_calls) == 1
+    assert len(editor_calls) == 1
+    assert writer_calls[0]["previous_draft"] == initial
+    assert writer_calls[0]["editor_feedback"]

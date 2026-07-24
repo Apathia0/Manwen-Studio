@@ -11,9 +11,9 @@ from services.errors import public_error_message
 
 logger = logging.getLogger(__name__)
 
-MIN_CHAPTER_CHARS = 1800
-MAX_CHAPTER_CHARS = 3500
-IDEAL_CHAPTER_CHARS = 3000
+MIN_CHAPTER_CHARS = 2200
+MAX_CHAPTER_CHARS = 3000
+IDEAL_CHAPTER_CHARS = 2500
 
 FORBIDDEN_PHRASES = {
     "眼中闪过": "模板化表情",
@@ -529,7 +529,7 @@ async def repair_chapter_to_pass_quality_gate(
         "必须保留本章任务卡的核心因果，不得提前兑现后续章节爽点。\n"
         "第一句必须直接写人物动作、对白、冲突或异常，不得以时间、天气、景物、街巷、山林、光线或空气起笔。\n"
         "删除模板化 AI 味、破折号、省略号、总结升华、无效景物描写、重复心理活动、战后尾声和无关的下一章短信/传闻式钩子。\n"
-        "如果当前稿超过 2800 字，必须优先删掉战斗结束后的生活尾声、解释性复盘、路程转场和重复观众反应，不得压缩核心因果后保留尾声。\n"
+        "如果当前稿超过 3000 字，必须优先删掉战斗结束后的生活尾声、解释性复盘、路程转场和重复观众反应，不得压缩核心因果后保留尾声。\n"
         "如果驳回原因里出现了具体词句或证据，重写正文中必须完全避开这些词句和对应场面。\n"
         "本次驳回原因：\n" + "\n".join(issue_lines) + boundary_block
     )

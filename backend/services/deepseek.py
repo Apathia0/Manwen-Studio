@@ -34,11 +34,11 @@ _USAGE_ACCUMULATOR: contextvars.ContextVar[dict[str, int] | None] = contextvars.
 )
 
 CHAPTER_TARGET_MIN_CHARS = 2200
-CHAPTER_TARGET_MAX_CHARS = 2800
+CHAPTER_TARGET_MAX_CHARS = 3000
 CHAPTER_TARGET_IDEAL_CHARS = 2500
 CHAPTER_FIRST_PASS_MIN_CHARS = 2300
-CHAPTER_FIRST_PASS_MAX_CHARS = 2550
-CHAPTER_COMPLETION_MAX_TOKENS = 2816
+CHAPTER_FIRST_PASS_MAX_CHARS = 2700
+CHAPTER_COMPLETION_MAX_TOKENS = 3072
 
 _RUNTIME_TEMPERATURE: float | None = None
 _RUNTIME_TOP_P: float | None = None
@@ -2658,7 +2658,7 @@ async def expand_chapter_to_content(
 - 每句话都必须推进剧情或建立人设。删除所有对推进剧情无贡献的句子。
 
 ## 首轮篇幅结构（用于一次命中）
-- 首轮优先写到 {CHAPTER_FIRST_PASS_MIN_CHARS}-{CHAPTER_FIRST_PASS_MAX_CHARS} 字，给校验留余量，不要贴着 2800 字上限写。
+- 首轮优先写到 {CHAPTER_FIRST_PASS_MIN_CHARS}-{CHAPTER_FIRST_PASS_MAX_CHARS} 字，给校验留余量，不要贴着 3000 字上限写。
 - 全章控制在 9-10 个自然段，每段约 200-240 字，最长段落不要超过 280 字。
 - 段落功能建议：开篇危机 1 段，冲突铺垫 2 段，行动推进 4-5 段，爽点或转折 1 段，章末钩子 1 段。
 - 章末钩子完成后立刻停笔，禁止追加尾声、总结、感悟、下一章预告或重复解释。

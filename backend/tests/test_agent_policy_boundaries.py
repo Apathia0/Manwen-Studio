@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+from contextlib import nullcontext
 from types import SimpleNamespace
 
 from services import agent_service
@@ -259,3 +260,191 @@ def test_pending_change_is_persisted_when_new_value_is_recorded(monkeypatch):
 
     assert persisted[0][0] == key
     assert persisted[0][2] == "run-1"
+
+
+def test_chapter_pipeline_tools_use_extended_timeout(monkeypatch):
+    monkeypatch.delenv("AGENT_TOOL_EXECUTION_TIMEOUT_SECONDS", raising=False)
+    monkeypatch.delenv("AGENT_LONG_TOOL_EXECUTION_TIMEOUT_SECONDS", raising=False)
+
+    for tool_name in (
+        "adjust_chapter_by_instruction",
+        "generate_chapter_content",
+        "batch_adjust_chapters",
+    ):
+        assert agent_service._agent_tool_execution_timeout_seconds(tool_name) == 1200
+
+
+def test_regular_agent_tool_keeps_default_timeout(monkeypatch):
+    monkeypatch.delenv("AGENT_TOOL_EXECUTION_TIMEOUT_SECONDS", raising=False)
+
+    assert agent_service._agent_tool_execution_timeout_seconds("get_chapter_full") == 300
+
+
+def test_agent_timeout_environment_variables_override_each_tier(monkeypatch):
+    monkeypatch.setenv("AGENT_TOOL_EXECUTION_TIMEOUT_SECONDS", "450")
+    monkeypatch.setenv("AGENT_LONG_TOOL_EXECUTION_TIMEOUT_SECONDS", "1500")
+
+    assert agent_service._agent_tool_execution_timeout_seconds("get_chapter_full") == 450
+    assert agent_service._agent_tool_execution_timeout_seconds("adjust_chapter_by_instruction") == 1500
+
+
+def test_invalid_agent_timeout_configuration_falls_back_to_default(monkeypatch):
+    monkeypatch.delenv("AGENT_TOOL_EXECUTION_TIMEOUT_SECONDS", raising=False)
+    for invalid_value in ("", "abc", "0", "-1"):
+        monkeypatch.setenv("AGENT_LONG_TOOL_EXECUTION_TIMEOUT_SECONDS", invalid_value)
+        assert (
+            agent_service._agent_tool_execution_timeout_seconds("generate_chapter_content")
+            == agent_service.DEFAULT_AGENT_LONG_TOOL_EXECUTION_TIMEOUT_SECONDS
+        )
+
+
+def test_long_tool_timeout_is_never_shorter_than_regular_timeout(monkeypatch):
+    monkeypatch.setenv("AGENT_TOOL_EXECUTION_TIMEOUT_SECONDS", "1800")
+    monkeypatch.delenv("AGENT_LONG_TOOL_EXECUTION_TIMEOUT_SECONDS", raising=False)
+
+    regular_timeout = agent_service._agent_tool_execution_timeout_seconds("get_story_info")
+    long_timeout = agent_service._agent_tool_execution_timeout_seconds("batch_adjust_chapters")
+
+    assert regular_timeout == 1800
+    assert long_timeout == regular_timeout
+
+
+def test_reusable_creation_pack_replaces_previous_instruction_without_mutating_source():
+    quality_score = {
+        "creation_pack_fingerprint": "fingerprint",
+        "creation_pack": {
+            "chapter_task": {"user_instruction": "旧调整要求"},
+            "hard_requirements": ["旧调整要求", "保留核心冲突"],
+        },
+    }
+
+    reusable = agent_service._reusable_chapter_creation_pack(
+        quality_score,
+        expected_fingerprint="fingerprint",
+        instruction="新的去AI味要求",
+    )
+
+    assert reusable is not None
+    assert reusable["chapter_task"]["user_instruction"] == "新的去AI味要求"
+    assert reusable["hard_requirements"] == ["新的去AI味要求", "保留核心冲突"]
+    assert quality_score["creation_pack"]["chapter_task"]["user_instruction"] == "旧调整要求"
+
+
+def test_reusable_creation_pack_rejects_explicitly_stale_fingerprint():
+    quality_score = {
+        "creation_pack_fingerprint": "old",
+        "creation_pack": {"chapter_task": {}},
+    }
+
+    reusable = agent_service._reusable_chapter_creation_pack(
+        quality_score,
+        expected_fingerprint="new",
+        instruction="调整节奏",
+    )
+
+    assert reusable is None
+
+
+def test_reusable_creation_pack_rejects_legacy_cache_without_fingerprint():
+    quality_score = {"creation_pack": {"chapter_task": {}}}
+
+    reusable = agent_service._reusable_chapter_creation_pack(
+        quality_score,
+        expected_fingerprint="new",
+        instruction="调整节奏",
+    )
+
+    assert reusable is None
+
+
+def test_creation_pack_fingerprint_tracks_structural_source_changes():
+    base_context = {
+        "outline": {"chapters": [{"chapter_number": 1}]},
+        "story_bible": {"world": "测试世界"},
+        "characters": {"主角": {"name": "林墨"}},
+        "story_memory": {"summary": "旧记忆"},
+    }
+    chapter_info = {"chapter_number": 1, "title": "开端", "act": "第一幕", "key_events": []}
+
+    first = agent_service._chapter_creation_pack_fingerprint(base_context, chapter_info, "规则")
+    memory_changed = agent_service._chapter_creation_pack_fingerprint(
+        {**base_context, "story_memory": {"summary": "新记忆"}},
+        chapter_info,
+        "规则",
+    )
+    outline_changed = agent_service._chapter_creation_pack_fingerprint(
+        {**base_context, "outline": {"chapters": [{"chapter_number": 1, "goal": "新目标"}]}},
+        chapter_info,
+        "规则",
+    )
+    description_changed = agent_service._chapter_creation_pack_fingerprint(
+        {**base_context, "description": "新的作品简介", "tags": {"genre": "悬疑"}},
+        chapter_info,
+        "规则",
+    )
+
+    assert first == memory_changed
+    assert first != outline_changed
+    assert first != description_changed
+
+
+def test_background_memory_refresh_skips_stale_chapter_content(monkeypatch):
+    class FakeDb:
+        def __init__(self):
+            self.chapter = SimpleNamespace(id=7, story_id=3, novel_content="新正文")
+            self.closed = False
+            self.committed = False
+
+        def get(self, model, record_id):
+            return self.chapter
+
+        def commit(self):
+            self.committed = True
+
+        def rollback(self):
+            pass
+
+        def close(self):
+            self.closed = True
+
+    fake_db = FakeDb()
+    monkeypatch.setattr(agent_service, "SessionLocal", lambda: fake_db)
+    agent_service._AGENT_MEMORY_REFRESH_LOCKS.clear()
+
+    asyncio.run(agent_service._refresh_agent_memory_background(
+        chapter_id=7,
+        story_id=3,
+        api_key="sk-test",
+        expected_content_fingerprint=agent_service._chapter_content_fingerprint("旧正文"),
+    ))
+
+    assert fake_db.closed is True
+    assert fake_db.committed is False
+
+
+def test_memory_refresh_final_check_locks_story_and_chapter_rows():
+    lock_count = 0
+    scalar_values = iter([3, "最新正文"])
+
+    class FakeQuery:
+        def filter(self, *args):
+            return self
+
+        def with_for_update(self):
+            nonlocal lock_count
+            lock_count += 1
+            return self
+
+        def scalar(self):
+            return next(scalar_values)
+
+    class FakeDb:
+        no_autoflush = nullcontext()
+
+        def query(self, *args):
+            return FakeQuery()
+
+    content = agent_service._lock_agent_memory_rows(FakeDb(), story_id=3, chapter_id=7)
+
+    assert content == "最新正文"
+    assert lock_count == 2

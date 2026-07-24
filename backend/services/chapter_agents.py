@@ -12,12 +12,12 @@ logger = logging.getLogger(__name__)
 
 EDITOR_PASS_SCORE = 90
 LOCAL_MIN_CHARS = 2200
-LOCAL_MAX_CHARS = 2800
-LOCAL_IDEAL_CHARS = 2400
-WRITER_TARGET_MIN_CHARS = 2200
-WRITER_TARGET_MAX_CHARS = 2600
-WRITER_REVISION_TARGET_MAX_CHARS = 3200
-LOCAL_SOFT_MAX_CHARS = 3300
+LOCAL_MAX_CHARS = 3000
+LOCAL_IDEAL_CHARS = 2500
+WRITER_TARGET_MIN_CHARS = 2300
+WRITER_TARGET_MAX_CHARS = 2700
+WRITER_REVISION_TARGET_MAX_CHARS = 3000
+LOCAL_SOFT_MAX_CHARS = LOCAL_MAX_CHARS
 SCENE_BUDGET_IDEAL_TOTAL = 2100
 SCENE_BUDGET_SOFT_MAX_TOTAL = 2200
 SCENE_BUDGET_HARD_MAX_TOTAL = 2480
@@ -608,7 +608,7 @@ def _default_acceptance_checklist(pack: dict[str, Any] | None) -> list[str]:
         goal = str(task.get("goal") or task.get("summary") or "").strip()
     checklist = [
         f"当前章节核心任务已完整闭环：{goal[:120] or '按章节任务卡完成起因、冲突、转折、结果和章尾余波'}",
-        f"正文有效字数落在 {LOCAL_MIN_CHARS}-{LOCAL_MAX_CHARS} 字，优先 {LOCAL_MIN_CHARS + 100}-{LOCAL_SOFT_MAX_CHARS} 字。",
+        f"正文有效字数落在 {LOCAL_MIN_CHARS}-{LOCAL_MAX_CHARS} 字，优先 {WRITER_TARGET_MIN_CHARS}-{WRITER_TARGET_MAX_CHARS} 字。",
         "plot_beats 中的关键情节点按因果顺序完成，不能只写开端或只写结尾。",
         "hard_requirements 中列出的硬性动作必须逐项落地；缺任一项都不能视为完成当前章。",
         "closure_requirements 中的回报结算、处理动作和章尾余波必须写成正文主体，不能当作最后一句补丁。",
@@ -927,6 +927,14 @@ def _local_safety_review(content: str, chapter_scope: dict[str, Any] | None) -> 
 
 
 def _should_skip_remote_editor(local: dict[str, Any]) -> tuple[bool, str]:
+    hard_failures = local.get("hard_failures") if isinstance(local.get("hard_failures"), list) else []
+    failure_codes = {
+        str(item.get("code"))
+        for item in hard_failures
+        if isinstance(item, dict) and item.get("code")
+    }
+    if failure_codes and all(code.startswith("length.") for code in failure_codes):
+        return True, "local_length_hard_failure"
     return False, ""
 
 
@@ -934,6 +942,17 @@ def _local_failure_review(local: dict[str, Any], *, skip_reason: str) -> dict[st
     local_notes = [str(item.get("message")) for item in local.get("hard_failures", []) if isinstance(item, dict)]
     if not local_notes:
         local_notes = ["正文未通过本地底线检查，需要按创作包重新输出完整章节全文。"]
+    char_count = int(local.get("char_count") or 0)
+    if char_count < LOCAL_MIN_CHARS:
+        length_guidance = [
+            f"在保留当前正文主体的前提下补写到 {LOCAL_MIN_CHARS}-{WRITER_REVISION_TARGET_MAX_CHARS} 字。",
+            "只补当前章节内缺失的动作反馈、因果衔接、回报结算、身体代价或人物反应，不新增后续章节场景。",
+        ]
+    else:
+        length_guidance = [
+            f"删减到 {WRITER_TARGET_MIN_CHARS}-{WRITER_REVISION_TARGET_MAX_CHARS} 字；超过 {LOCAL_MAX_CHARS} 字会继续硬失败。",
+            "不要新增场景、人物、路线或解释句；优先合并观察、战斗复盘、采集细节和返程动作。",
+        ]
     return {
         "approved": False,
         "overall_score": 0,
@@ -941,8 +960,7 @@ def _local_failure_review(local: dict[str, Any], *, skip_reason: str) -> dict[st
         "findings": local_notes,
         "rewrite_brief": local_notes + [
             "必须输出完整章节全文，不能只输出补丁、片段、说明或结尾续写。",
-            f"本轮必须删减到 {WRITER_TARGET_MIN_CHARS}-{WRITER_REVISION_TARGET_MAX_CHARS} 字；超过 {LOCAL_MAX_CHARS} 字会继续硬失败。",
-            "不要新增场景、人物、路线或解释句；优先合并观察、战斗复盘、采集细节和返程动作。",
+            *length_guidance,
             "保留核心因果、回报结算、身体代价和章尾余波，用更短句子完成。",
         ],
         "local_safety": local,
@@ -1025,20 +1043,20 @@ def _truncated_generation_review(content: str, creation_pack: dict[str, Any], fi
     char_count = count_chapter_chars(content)
     if char_count > LOCAL_MAX_CHARS:
         rewrite_brief = [
-            "上一版超长且触发模型截断，下一轮必须压缩成 2200-2400 字完整章节全文，禁止续写结尾或新增场景。",
+            f"上一版超长且触发模型截断，下一轮必须压缩成 {WRITER_TARGET_MIN_CHARS}-{WRITER_REVISION_TARGET_MAX_CHARS} 字完整章节全文，禁止续写结尾或新增场景。",
             "优先删除重复观察、等待、走位、解释性复盘和环境描写；保留完整猎杀、采集、撤离、章尾余波。",
             "按场景预算重排篇幅：开场和观察合计不超过 650 字，核心冲突不超过 950 字，必须给结算和章尾留下 450 字左右。",
         ]
     elif char_count < LOCAL_MIN_CHARS:
         rewrite_brief = [
-            "上一版偏短且触发模型截断，下一轮必须输出 2200-2400 字完整章节全文，禁止只续写尾巴或输出补丁。",
+            f"上一版偏短且触发模型截断，下一轮必须输出 {WRITER_TARGET_MIN_CHARS}-{WRITER_REVISION_TARGET_MAX_CHARS} 字完整章节全文，禁止只续写尾巴或输出补丁。",
             "优先补当前章节缺失的核心交锋、回报结算、身体代价和章尾余波；可留一句以内模糊伏笔，不新增后续章节地点、路线、交易或探索的完整场面。",
             "如果已经进入核心冲突，必须先完成当前事件闭环，再用一两段完成采集和收束。",
         ]
     else:
         rewrite_brief = [
             "上一版触发模型截断，下一轮必须输出完整章节全文，禁止只续写结尾或输出补丁。",
-            "只做收束式返修：保留有效动作链，补完整断句、结算和章尾余波，目标 2200-2400 字。",
+            f"只做收束式返修：保留有效动作链，补完整断句、结算和章尾余波，目标 {WRITER_TARGET_MIN_CHARS}-{WRITER_REVISION_TARGET_MAX_CHARS} 字。",
             "完成当前章节核心因果后立刻停笔；可留一句以内模糊伏笔，不新增后续章节地点、路线、交易或探索的完整场面。",
         ]
     return {
@@ -1669,7 +1687,7 @@ def _revision_feedback_for_writer(
         return []
 
     if _content_looks_truncated(content) and char_count > LOCAL_MAX_CHARS:
-        source_items.insert(0, "blocking_issues: 上一版超长且尾句疑似截断，必须压缩成 2200-2400 字完整章节全文；禁止续写残尾或新增场景。")
+        source_items.insert(0, f"blocking_issues: 上一版超长且尾句疑似截断，必须压缩成 {WRITER_TARGET_MIN_CHARS}-{WRITER_REVISION_TARGET_MAX_CHARS} 字完整章节全文；禁止续写残尾或新增场景。")
     elif _content_looks_truncated(content):
         source_items.insert(0, "blocking_issues: 正文尾句疑似截断，必须在上一版全文基础上补完句子和章节收束，禁止只输出补丁。")
     elif score >= 75 and LOCAL_MIN_CHARS <= char_count <= LOCAL_MAX_CHARS:
@@ -1839,7 +1857,7 @@ async def build_chapter_creation_pack(
   "completion_contract": {{
     "pass_score": {EDITOR_PASS_SCORE},
     "target_chars": {{"min": {LOCAL_MIN_CHARS}, "ideal": {LOCAL_IDEAL_CHARS}, "max": {LOCAL_MAX_CHARS}}},
-    "writer_target_chars": {{"min": {WRITER_TARGET_MIN_CHARS}, "ideal": 2400, "max": {WRITER_TARGET_MAX_CHARS}}},
+    "writer_target_chars": {{"min": {WRITER_TARGET_MIN_CHARS}, "ideal": {LOCAL_IDEAL_CHARS}, "max": {WRITER_TARGET_MAX_CHARS}}},
     "writer_output": "每轮必须输出完整章节全文，不输出补丁或续写尾巴",
     "revision_policy": "编辑问题包一次性处理，避免先改字数再二次审稿",
     "boundary_policy": "当前章节必须闭环；后续章节可作一句以内模糊伏笔，不提前兑现完整场面",
@@ -1852,7 +1870,7 @@ async def build_chapter_creation_pack(
   "must_keep": ["必须写进正文的关键因果"],
   "do_not_write": ["不得提前兑现成完整场面的后续事件、地点推进、资源获取或冲突解决"],
   "chapter_boundary": {{}},
-  "target": {{"min": 2200, "ideal": 2400, "max": 2800}},
+  "target": {{"min": {LOCAL_MIN_CHARS}, "ideal": {LOCAL_IDEAL_CHARS}, "max": {LOCAL_MAX_CHARS}}},
   "review_focus": ["编辑审阅时重点检查什么"]
 }}"""
 
@@ -2058,7 +2076,7 @@ async def write_chapter_from_pack(
             "- 编辑意见是一份完整问题包，必须一次性处理字数、边界、剧情执行、节奏、角色声音、逻辑和 AI 味，不允许只修其中一项。\n"
             "- 返修输出仍然必须是完整章节全文，不是补丁、不是新增片段、不是结尾续写；上一版有效正文默认保留并做最小必要改动。\n"
             "- 如果编辑意见包含“无需修改”“直接通过”“只补一句”“微调”等内容，也必须在上一版全文基础上输出完整章节，禁止只输出被修改的句子。\n"
-            "- 如果上一版已经在 2200-2800 字内且编辑意见接近通过，只做最小修复：补完整断句、替换禁用词或微调一两处表达，必须保留上一版全文主体。\n"
+            f"- 如果上一版已经在 {LOCAL_MIN_CHARS}-{LOCAL_MAX_CHARS} 字内且编辑意见接近通过，只做最小修复：补完整断句、替换禁用词或微调一两处表达，必须保留上一版全文主体。\n"
             "- 返修顺序：先守住 do_not_write/chapter_boundary 的兑现边界和字数硬线，再修剧情漏点与因果，再压节奏、去总结腔、补角色反应。\n"
             "- 如果上一版超长，先做结构性删减，再在保留下来的场景里完成所有编辑要求；不要通过新增场景解决问题。\n"
             "- 如果上一版偏短，只补当前章节内的必要交锋、结算、选择、身体代价和旁人反应；可以保留一句以内模糊伏笔，禁止补后续章节资源或探索的完整场面。"
@@ -2073,7 +2091,7 @@ async def write_chapter_from_pack(
         if previous_char_count > LOCAL_MAX_CHARS or any("字数" in str(item) or "length" in str(item) or "超过" in str(item) for item in editor_feedback):
             feedback_block += (
                 "\n\n## 本轮返修优先级\n"
-                "- 这是综合减法返修，不是扩写重写；压缩到 2200-2400 字的同时完成编辑指出的剧情、节奏、角色和边界问题。\n"
+                f"- 这是综合减法返修，不是扩写重写；压缩到 {WRITER_TARGET_MIN_CHARS}-{WRITER_REVISION_TARGET_MAX_CHARS} 字的同时完成编辑指出的剧情、节奏、角色和边界问题。\n"
                 "- 优先删除战斗后的尾声复盘、重复观众反应、重复走位、测力/报名的旁枝细节。\n"
                 "- 保留核心因果链，不要为了凑字新增场景、地点、人物或设定解释。"
             )
@@ -2105,12 +2123,12 @@ async def write_chapter_from_pack(
 - 自检未通过时直接在本轮正文内修完，不要把问题留给编辑 agent；尤其不能缺剧情闭环、结算和章尾余波。
 - 如果这是返修轮，仍然输出完整章节全文；禁止只输出新增段落、差异片段、修改说明或续写尾巴。
 - 如果编辑反馈写着“无需修改”“直接通过”“只补一句”“微调”，请直接以上一版正文为底稿输出完整全文，只做对应最小修复。
-- 正文目标约 {LOCAL_IDEAL_CHARS} 字，推荐落在 2200-2400 字；{LOCAL_MAX_CHARS} 字是绝对上限，超过会被编辑打回。
-- 首稿强目标是 2200-2400 字，超过 2500 字视为节奏失控；不要把正文写到上限附近再匆忙收尾。
+- 正文目标约 {LOCAL_IDEAL_CHARS} 字，推荐落在 {WRITER_TARGET_MIN_CHARS}-{WRITER_TARGET_MAX_CHARS} 字；{LOCAL_MAX_CHARS} 字是绝对上限，超过会被编辑打回。
+- 首稿强目标是 {WRITER_TARGET_MIN_CHARS}-{WRITER_TARGET_MAX_CHARS} 字；不要把正文写到上限附近再匆忙收尾。
 - 首稿必须按“场景字数预算”分配篇幅：前置准备和入场观察不得挤占核心冲突，必须给兑现回报、必要结算和章尾余波预留 400-600 字。
 - 核心冲突最多占总字数 40%-45%；前置准备加入场观察合计尽量不超过 650-750 字。
 - 如果某个预算场景写完功能但未到目标字数，直接进入下一场景；不要为了凑满预算追加解释、复盘、环境描写或同类动作。
-- 首稿不要把每个情节点都铺满，优先用 2200-2400 字完成完整因果；重要动作写实，过场和环境一句带过。
+- 首稿不要把每个情节点都铺满，优先用 {WRITER_TARGET_MIN_CHARS}-{WRITER_TARGET_MAX_CHARS} 字完成完整因果；重要动作写实，过场和环境一句带过。
 - 必须先写完回报结算和章尾余波再停；接近 2500 字后只允许收束，不再新增动作链、地点、人物或设定。
 - 写到 1600-1800 字必须结束核心冲突、胜负或阶段性结果，并进入回报结算；正文 75% 前必须开始结算。
 - 写到约 2000 字后，优先检查 missing_if_absent 和 closure_requirements；若还有缺项，立刻压缩战斗复盘和解释句，把篇幅交给闭环动作。
@@ -2263,7 +2281,7 @@ async def review_chapter_with_editor_agent(
 - blocking_issues 只写不修就无法过关的硬伤：剧情任务缺失、提前兑现后续完整场面、明显逻辑断裂、严重 AI 味或正文残缺；轻微润色建议或字数偏差放入 findings，不得仅因字数拉低 overall_score 到 85 以下。
 - 如果正文已经完成创作包核心任务、没有提前兑现后续完整场面、无明显逻辑断裂，只存在轻微表达、个别句式、少量对话或可选润色建议，应在 overall_score>=90 时 approved=true；这些建议只能放入 findings/revision_notes，blocking_issues 必须为空。
 - approved=true 且 overall_score>=90 时，rewrite_brief 可以写"无需返修，仅保留建议"，不得给出会触发整章返修的执行清单。
-- 字数建议 3000 字左右，上限不超过 3500 字；如果缺回报结算，应优先要求压缩前置观察或战斗重复动作来腾出篇幅，而不是继续扩写到上限。
+- 字数硬区间为 {LOCAL_MIN_CHARS}-{LOCAL_MAX_CHARS} 字，理想约 {LOCAL_IDEAL_CHARS} 字；如果缺回报结算，应优先要求压缩前置观察或战斗重复动作来腾出篇幅，而不是继续扩写到上限。
 - 本地底线检查里的 soft_warnings 不是自动失败原因；你必须从编辑视角判断：一句以内钩子、未解压力、模糊方向可通过，提前写完后续章节核心场面、交易流程、路线坐标、战斗胜负或资源闭环才算边界硬伤。
 - 只在总分 {EDITOR_PASS_SCORE} 分以上且无底线问题时 approved=true。
 - 如果不通过，必须给正文 agent 一份完整问题包：阻断问题、保留内容、删除内容、重写目标、执行顺序都要写清楚，让下一轮尽量一次性修完。
@@ -2282,27 +2300,14 @@ async def review_chapter_with_editor_agent(
 {{
   "approved": false,
   "overall_score": 0,
-  "scores": {{
-    "brief_execution": 0,
-    "continuity": 0,
-    "logic": 0,
-    "qidian_readability": 0,
-    "rhythm_density": 0,
-    "character_voice": 0,
-    "ai_flavor_control": 0,
-    "boundary_control": 0,
-    "overall": 0
-  }},
+  "scores": {{"brief_execution": 0, "logic": 0, "readability": 0, "overall": 0}},
   "findings": ["具体问题"],
-  "revision_notes": ["给正文 agent 的具体返修动作"],
   "length_action": "字数是否合格；若不合格，明确压缩或补写到哪个区间以及怎么处理",
   "blocking_issues": ["不修就不能通过的问题，含字数、边界、剧情执行、逻辑、AI 味"],
   "keep": ["返修时必须保留的有效正文内容或核心因果"],
   "fill": ["必须补齐的当前章硬性动作、闭环动作、结算或余波"],
   "cut": ["返修时优先删除或压缩的内容类型"],
   "forbid": ["返修时禁止新增或展开的后续章节内容、重复动作或无效解释"],
-  "rewrite_targets": ["需要重写、补强或改写的具体目标"],
-  "revision_plan": ["建议正文 agent 按顺序执行的一次性返修步骤"],
   "rewrite_brief": ["给正文 agent 的综合返修清单，必须覆盖所有阻断问题"]
 }}"""
 
@@ -2312,7 +2317,7 @@ async def review_chapter_with_editor_agent(
             {"role": "user", "content": user_prompt},
         ],
         api_key=api_key,
-        max_tokens=4096,
+        max_tokens=2048,
         response_format={"type": "json_object"},
     )
     from services import deepseek as deepseek_service
@@ -2355,7 +2360,7 @@ blocking_issues, keep, fill, cut, forbid, rewrite_targets, revision_plan, rewrit
                     {"role": "user", "content": retry_prompt},
                 ],
                 api_key=api_key,
-                max_tokens=3072,
+                max_tokens=1536,
                 response_format={"type": "json_object"},
             )
             parsed = deepseek_service._extract_json_object(retry_content)
@@ -2418,17 +2423,19 @@ async def run_chapter_creation_pipeline(
     initial_content: str | None = None,
     creation_pack: dict[str, Any] | None = None,
     max_revisions: int = 3,
+    skip_initial_review: bool = False,
 ) -> dict[str, Any]:
     """三角色链路：创作包 agent -> 正文 agent -> 编辑 agent 返修闭环。"""
     started_at = time.perf_counter()
     trace_id = uuid.uuid4().hex[:8]
+    revision_limit = max(0, max_revisions)
     logger.info(
         "chapter_pipeline.start trace_id=%s story_id=%s story_title=%s chapter=%s max_revisions=%s has_initial_content=%s has_creation_pack=%s",
         trace_id,
         story_context.get("id") or story_context.get("story_id"),
         story_context.get("title") or story_context.get("name"),
         _chapter_label(chapter_info),
-        max_revisions,
+        revision_limit,
         bool(initial_content),
         isinstance(creation_pack, dict) and bool(creation_pack),
     )
@@ -2480,7 +2487,39 @@ async def run_chapter_creation_pipeline(
     finish_reason = None
     best_candidate: dict[str, Any] | None = None
 
-    if content:
+    if content and skip_initial_review:
+        local = _local_safety_review(content, creation_pack.get("chapter_boundary"))
+        if local["ok"]:
+            review = {
+                "approved": False,
+                "overall_score": 0,
+                "scores": {"overall": 0},
+                "findings": [],
+                "rewrite_brief": [
+                    "以上一版完整正文为底稿做轻量调整，保留有效主体，只修复调用方要求和明显表达问题。",
+                ],
+                "local_safety": local,
+                "skipped_editor": True,
+                "skip_reason": "lightweight_initial_review",
+            }
+        else:
+            review = _local_failure_review(local, skip_reason="lightweight_local_hard_failure")
+        logger.info(
+            "chapter_pipeline.initial_review.skipped trace_id=%s chapter=%s reason=%s summary=%s",
+            trace_id,
+            _chapter_label(chapter_info),
+            review.get("skip_reason"),
+            _review_log_summary(review),
+        )
+        best_candidate = _select_better_candidate(
+            best_candidate,
+            content=content,
+            review=review,
+            attempts=0,
+            finish_reason=finish_reason,
+            source="initial_local_review",
+        )
+    elif content:
         logger.info(
             "chapter_pipeline.initial_review.start trace_id=%s chapter=%s chars=%s",
             trace_id,
@@ -2528,7 +2567,7 @@ async def run_chapter_creation_pipeline(
                 "finish_reason": finish_reason,
             }
 
-    while revisions < max_revisions:
+    while revisions < revision_limit:
         feedback = _revision_feedback_for_writer(review, creation_pack, content)
         attempt = revisions + 1
         logger.info(

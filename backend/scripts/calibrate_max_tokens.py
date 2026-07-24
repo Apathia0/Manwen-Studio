@@ -5,7 +5,7 @@ max_tokens 校准脚本
   2. python scripts/calibrate_max_tokens.py
 
 原理：用不同的 max_tokens 值多次调用 expand_chapter_to_content，
-统计输出字数与 max_tokens 的比例，找到稳定产生 2200-2800 字、理想约 2500 字的安全值。
+统计输出字数与 max_tokens 的比例，找到稳定产生 2200-3000 字、理想约 2500 字的安全值。
 """
 import asyncio
 import json
@@ -19,9 +19,9 @@ from dotenv import load_dotenv
 load_dotenv()
 
 TEST_VALUES = [2304, 2560, 2816, 3072, 3328]
-TARGET_CHARS = (2200, 2800)  # 目标字数范围
+TARGET_CHARS = (2200, 3000)  # 目标字数范围
 IDEAL_CHARS = 2500
-RECOMMENDED_MAX_TOKENS = 2816
+RECOMMENDED_MAX_TOKENS = 3072
 
 # 一个简化的测试章节信息
 TEST_CHAPTER = {
@@ -89,8 +89,8 @@ async def main():
         print("=" * 60)
         print()
         print("【理论推算】基于用户提供的经验数据点：")
-        print("  max_tokens=2816 用于给 2500 字正文留出安全输出空间，同时减少模型写到 3000 字以上的惯性")
-        print("  实际字数由 prompt 的 9-10 段结构和 2200-2800 字约束共同控制")
+        print("  max_tokens=3072 用于给 2500 字正文留出安全输出空间，同时支持放宽后的 3000 字上限")
+        print("  实际字数由 prompt 的 9-10 段结构和 2200-3000 字约束共同控制")
         print()
         print(f"  目标字数范围: {TARGET_CHARS[0]}-{TARGET_CHARS[1]} 字")
         print(f"  理想字数: {IDEAL_CHARS} 字")

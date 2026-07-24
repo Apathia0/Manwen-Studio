@@ -1,4 +1,5 @@
 import asyncio
+import copy
 import contextvars
 import hashlib
 import json
@@ -1273,29 +1274,99 @@ def _current_pending_changes() -> PendingChangesTracker | None:
     return context.pending_changes if context else None
 
 
-async def _refresh_agent_memory(chapter, db: Session) -> None:
-    try:
-        story_id = _current_story_id()
-        api_key = _current_api_key()
-        if not api_key:
-            return
-        import sys
-        _main = sys.modules.get("main")
-        if not _main:
-            return
-        from services.story_state import refresh_chapter_memory_for_content
-        from services.deepseek import summarize_chapter_memory
-        refreshed = await refresh_chapter_memory_for_content(
-            chapter=chapter,
-            api_key=api_key,
-            story_context_func=lambda story: _main._build_framework_ai_context(story),
-            summarize_chapter_memory_func=summarize_chapter_memory,
-            merge_story_memory_func=_main._merge_story_memory,
+_AGENT_MEMORY_REFRESH_TASKS: set[asyncio.Task[Any]] = set()
+_AGENT_MEMORY_REFRESH_LOCKS: dict[int, asyncio.Lock] = {}
+
+
+def _chapter_content_fingerprint(content: str | None) -> str:
+    return hashlib.sha256((content or "").encode("utf-8")).hexdigest()
+
+
+def _lock_agent_memory_rows(db: Session, story_id: int, chapter_id: int) -> str | None:
+    """锁定作品与章节行，并返回数据库中的最新正文。"""
+    with db.no_autoflush:
+        story_row = (
+            db.query(Story.id)
+            .filter(Story.id == story_id)
+            .with_for_update()
+            .scalar()
         )
-        if refreshed:
-            logger.info("Agent 写章节后已刷新连续记忆 story=%s chapter=%s", story_id, chapter.id)
-    except Exception as e:
-        logger.warning("Agent 刷新连续记忆失败 story=%s chapter=%s: %s", _current_story_id(), chapter.id, e)
+        if story_row is None:
+            return None
+        return (
+            db.query(Chapter.novel_content)
+            .filter(Chapter.id == chapter_id, Chapter.story_id == story_id)
+            .with_for_update()
+            .scalar()
+        )
+
+
+async def _refresh_agent_memory_background(
+    chapter_id: int,
+    story_id: int,
+    api_key: str,
+    expected_content_fingerprint: str,
+) -> None:
+    """使用独立事务在后台刷新章节连续记忆。"""
+    story_lock = _AGENT_MEMORY_REFRESH_LOCKS.setdefault(story_id, asyncio.Lock())
+    async with story_lock:
+        db = SessionLocal()
+        try:
+            chapter = db.get(Chapter, chapter_id)
+            if (
+                not chapter
+                or chapter.story_id != story_id
+                or _chapter_content_fingerprint(chapter.novel_content) != expected_content_fingerprint
+            ):
+                return
+            import sys
+            _main = sys.modules.get("main")
+            if not _main:
+                return
+            from services.story_state import refresh_chapter_memory_for_content
+            from services.deepseek import summarize_chapter_memory
+            refreshed = await refresh_chapter_memory_for_content(
+                chapter=chapter,
+                api_key=api_key,
+                story_context_func=lambda story: _main._build_framework_ai_context(story),
+                summarize_chapter_memory_func=summarize_chapter_memory,
+                merge_story_memory_func=_main._merge_story_memory,
+            )
+            latest_content = _lock_agent_memory_rows(db, story_id, chapter_id)
+            if _chapter_content_fingerprint(latest_content) != expected_content_fingerprint:
+                db.rollback()
+                logger.info("Agent 跳过过期记忆刷新 story=%s chapter=%s", story_id, chapter_id)
+                return
+            if refreshed:
+                db.commit()
+                logger.info("Agent 写章节后已刷新连续记忆 story=%s chapter=%s", story_id, chapter.id)
+        except Exception as e:
+            db.rollback()
+            logger.warning("Agent 后台刷新连续记忆失败 story=%s chapter=%s: %s", story_id, chapter_id, e)
+        finally:
+            db.close()
+
+
+def _schedule_agent_memory_refresh(
+    chapter_id: int,
+    story_id: int,
+    api_key: str | None,
+    content: str,
+) -> None:
+    """调度后台记忆刷新，不阻塞正文写入结果返回。"""
+    if not api_key:
+        return
+    task = asyncio.create_task(
+        _refresh_agent_memory_background(
+            chapter_id,
+            story_id,
+            api_key,
+            _chapter_content_fingerprint(content),
+        ),
+        name=f"agent-memory-{chapter_id}",
+    )
+    _AGENT_MEMORY_REFRESH_TASKS.add(task)
+    task.add_done_callback(_AGENT_MEMORY_REFRESH_TASKS.discard)
 
 
 def _serialize_for_diff(value: Any) -> str:
@@ -1310,6 +1381,46 @@ def _serialize_for_diff(value: Any) -> str:
 
 
 logger = logging.getLogger("agent_service")
+
+# Agent 工具超时按任务成本分级，避免多阶段章节流水线被普通工具预算提前终止。
+DEFAULT_AGENT_TOOL_EXECUTION_TIMEOUT_SECONDS = 300
+DEFAULT_AGENT_LONG_TOOL_EXECUTION_TIMEOUT_SECONDS = 1200
+_AGENT_LONG_RUNNING_TOOL_NAMES = {
+    "adjust_chapter_by_instruction",
+    "generate_chapter_content",
+    "batch_adjust_chapters",
+}
+
+
+def _positive_timeout_from_env(name: str, default: int) -> int:
+    """读取正整数超时配置，非法值回退到默认值。"""
+    raw_value = os.getenv(name)
+    if raw_value is None:
+        return default
+    try:
+        value = int(raw_value)
+    except (TypeError, ValueError):
+        logger.warning("Agent 超时配置 %s=%r 非法，使用默认值 %ss", name, raw_value, default)
+        return default
+    if value <= 0:
+        logger.warning("Agent 超时配置 %s=%r 必须为正整数，使用默认值 %ss", name, raw_value, default)
+        return default
+    return value
+
+
+def _agent_tool_execution_timeout_seconds(tool_name: str) -> int:
+    """根据工具成本返回对应的执行超时秒数。"""
+    regular_timeout = _positive_timeout_from_env(
+        "AGENT_TOOL_EXECUTION_TIMEOUT_SECONDS",
+        DEFAULT_AGENT_TOOL_EXECUTION_TIMEOUT_SECONDS,
+    )
+    if tool_name in _AGENT_LONG_RUNNING_TOOL_NAMES:
+        long_timeout = _positive_timeout_from_env(
+            "AGENT_LONG_TOOL_EXECUTION_TIMEOUT_SECONDS",
+            DEFAULT_AGENT_LONG_TOOL_EXECUTION_TIMEOUT_SECONDS,
+        )
+        return max(regular_timeout, long_timeout)
+    return regular_timeout
 
 # ── 文件系统辅助 ──────────────────────────────────────────
 
@@ -2072,6 +2183,71 @@ def _sanitize_agent_generated_content(content: str) -> str:
     return _deepseek_service._sanitize_novel_content(content)
 
 
+def _chapter_creation_pack_fingerprint(
+    story_context: dict[str, Any],
+    chapter_info: dict[str, Any],
+    system_rules: str,
+) -> str:
+    """计算影响创作包有效性的稳定输入指纹。"""
+    payload = {
+        "story_meta": {
+            "id": story_context.get("id") or story_context.get("story_id"),
+            "title": story_context.get("title") or story_context.get("name"),
+            "genre": story_context.get("genre"),
+            "description": story_context.get("description"),
+            "tags": story_context.get("tags"),
+        },
+        "outline": story_context.get("outline"),
+        "story_bible": story_context.get("story_bible"),
+        "characters": story_context.get("characters"),
+        "reference_takeaways": story_context.get("reference_takeaways"),
+        "deconstruction_report": story_context.get("deconstruction_report"),
+        "chapter": {
+            key: chapter_info.get(key)
+            for key in ("chapter_number", "title", "act", "key_events")
+        },
+        "system_rules": system_rules,
+    }
+    serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def _reusable_chapter_creation_pack(
+    quality_score: Any,
+    *,
+    expected_fingerprint: str,
+    instruction: str,
+) -> dict[str, Any] | None:
+    """读取并更新可复用创作包；明确过期的缓存不会复用。"""
+    if not isinstance(quality_score, dict):
+        return None
+    creation_pack = quality_score.get("creation_pack")
+    if not isinstance(creation_pack, dict) or not creation_pack:
+        return None
+    stored_fingerprint = str(quality_score.get("creation_pack_fingerprint") or "").strip()
+    if not stored_fingerprint or stored_fingerprint != expected_fingerprint:
+        return None
+
+    reusable = copy.deepcopy(creation_pack)
+    chapter_task = reusable.get("chapter_task")
+    if not isinstance(chapter_task, dict):
+        chapter_task = {}
+        reusable["chapter_task"] = chapter_task
+    previous_instruction = str(chapter_task.get("user_instruction") or "").strip()
+    chapter_task["user_instruction"] = instruction
+
+    requirements = reusable.get("hard_requirements")
+    if not isinstance(requirements, list):
+        requirements = []
+    normalized_requirements = [
+        str(item).strip()
+        for item in requirements
+        if str(item).strip() and str(item).strip() != previous_instruction
+    ]
+    reusable["hard_requirements"] = [instruction, *normalized_requirements][:6]
+    return reusable
+
+
 @tool_registry.register(
     name="update_chapter_content",
     description="保存/更新章节正文。仅当用户已给出完整改写文本时使用。如果用户要求AI「写出」「生成」「创作」正文，请使用 generate_chapter_content 委托框架引擎生成。",
@@ -2100,8 +2276,8 @@ async def update_chapter_content(chapter_id: int, content: str) -> dict:
             _current_pending_changes().update_new_value(
                 "chapter", chapter.id, "novel_content", sanitized_content
             )
-        await _refresh_agent_memory(chapter, db)
         db.commit()
+        _schedule_agent_memory_refresh(chapter.id, chapter.story_id, _current_api_key(), sanitized_content)
         logger.info(
             "Agent tool=update_chapter_content story=%s chapter=%s len=%s sanitized=%s",
             _current_story_id(),
@@ -2361,7 +2537,7 @@ async def generate_chapter_content(story_id: int, chapter_number: int, instructi
             _current_pending_changes().update_new_value("chapter", chapter.id, "novel_content", novel_content)
 
         db.commit()
-        await _refresh_agent_memory(chapter, db)
+        _schedule_agent_memory_refresh(chapter.id, story_id, api_key, novel_content)
 
         logger.info(
             "Agent tool=generate_chapter_content story=%s chapter=%s len=%s instruction=%s",
@@ -2480,9 +2656,6 @@ async def adjust_chapter_by_instruction(chapter_id: int, instruction: str) -> di
         if not story_obj:
             return {"error": "所属故事不存在"}
 
-        if _current_pending_changes():
-            _current_pending_changes().record_chapter_field(chapter, "novel_content")
-
         story_context = _build_story_context_dict(story_obj)
         chapter_info = {
             "chapter_number": chapter.chapter_number,
@@ -2499,6 +2672,16 @@ async def adjust_chapter_by_instruction(chapter_id: int, instruction: str) -> di
         template_system = get_effective_prompt(chapter.story_id, "chapter", db)
         fallback_prompt = build_agent_chapter_system_prompt(db=db)
         system_rules = template_system or fallback_prompt or ""
+        creation_pack_fingerprint = _chapter_creation_pack_fingerprint(
+            story_context,
+            chapter_info,
+            system_rules,
+        )
+        reusable_creation_pack = _reusable_chapter_creation_pack(
+            chapter.quality_score,
+            expected_fingerprint=creation_pack_fingerprint,
+            instruction=instruction,
+        )
 
         from services.chapter_agents import run_chapter_creation_pipeline
 
@@ -2509,24 +2692,39 @@ async def adjust_chapter_by_instruction(chapter_id: int, instruction: str) -> di
             api_key=api_key,
             previous_chapter_summary="",
             system_rules=system_rules,
-            max_revisions=3,
+            max_revisions=1,
             initial_content=chapter_content,
+            creation_pack=reusable_creation_pack,
+            skip_initial_review=True,
         )
+        if not pipeline_result.get("ok"):
+            review = pipeline_result.get("review") if isinstance(pipeline_result.get("review"), dict) else {}
+            return {
+                "error": "调整后的正文未通过质量门禁，已保留原正文",
+                "detail": {
+                    "attempts": pipeline_result.get("attempts", 0),
+                    "score": review.get("overall_score"),
+                    "findings": review.get("findings") or review.get("blocking_issues") or [],
+                },
+            }
         new_content = pipeline_result.get("content") or ""
         if not new_content or not new_content.strip():
             return {"error": "AI 返回内容为空"}
 
+        if _current_pending_changes():
+            _current_pending_changes().record_chapter_field(chapter, "novel_content")
         chapter.novel_content = new_content
         chapter.quality_score = {
             "review": pipeline_result.get("review"),
             "creation_pack": pipeline_result.get("creation_pack"),
             "attempts": pipeline_result.get("attempts"),
-            "pipeline_approved": True,
+            "pipeline_approved": bool(pipeline_result.get("ok")),
+            "creation_pack_fingerprint": creation_pack_fingerprint,
         }
         if _current_pending_changes():
             _current_pending_changes().update_new_value("chapter", chapter.id, "novel_content", new_content)
-        await _refresh_agent_memory(chapter, db)
         db.commit()
+        _schedule_agent_memory_refresh(chapter.id, chapter.story_id, api_key, new_content)
         logger.info("Agent tool=adjust_chapter_by_instruction (pipeline) story=%s chapter=%s new_len=%s", _current_story_id(), chapter_id, len(new_content))
         return {"ok": True, "chapter_id": chapter_id, "content_length": len(new_content)}
     finally:
@@ -3009,8 +3207,6 @@ async def batch_adjust_chapters(chapters: list[dict]) -> dict:
             story_obj = db.get(Story, chapter.story_id)
             if not story_obj:
                 return {"chapter_id": chapter_id, "error": "所属故事不存在"}
-            if _current_pending_changes():
-                _current_pending_changes().record_chapter_field(chapter, "novel_content")
             story_context = _build_story_context_dict(story_obj)
             chapter_info = {
                 "chapter_number": chapter.chapter_number,
@@ -3022,6 +3218,16 @@ async def batch_adjust_chapters(chapters: list[dict]) -> dict:
             template_system = get_effective_prompt(chapter.story_id, "chapter", db)
             fallback_prompt = build_agent_chapter_system_prompt(db=db)
             system_rules = template_system or fallback_prompt or ""
+            creation_pack_fingerprint = _chapter_creation_pack_fingerprint(
+                story_context,
+                chapter_info,
+                system_rules,
+            )
+            reusable_creation_pack = _reusable_chapter_creation_pack(
+                chapter.quality_score,
+                expected_fingerprint=creation_pack_fingerprint,
+                instruction=instruction,
+            )
 
             from services.chapter_agents import run_chapter_creation_pipeline
 
@@ -3032,23 +3238,35 @@ async def batch_adjust_chapters(chapters: list[dict]) -> dict:
                 api_key=api_key,
                 previous_chapter_summary="",
                 system_rules=system_rules,
-                max_revisions=3,
+                max_revisions=1,
                 initial_content=chapter_content,
+                creation_pack=reusable_creation_pack,
+                skip_initial_review=True,
             )
+            if not pipeline_result.get("ok"):
+                review = pipeline_result.get("review") if isinstance(pipeline_result.get("review"), dict) else {}
+                return {
+                    "chapter_id": chapter_id,
+                    "error": "调整后的正文未通过质量门禁，已保留原正文",
+                    "score": review.get("overall_score"),
+                }
             new_content = pipeline_result.get("content") or ""
             if not new_content or not new_content.strip():
                 return {"chapter_id": chapter_id, "error": "AI 返回内容为空"}
+            if _current_pending_changes():
+                _current_pending_changes().record_chapter_field(chapter, "novel_content")
             chapter.novel_content = new_content
             chapter.quality_score = {
                 "review": pipeline_result.get("review"),
                 "creation_pack": pipeline_result.get("creation_pack"),
                 "attempts": pipeline_result.get("attempts"),
-                "pipeline_approved": True,
+                "pipeline_approved": bool(pipeline_result.get("ok")),
+                "creation_pack_fingerprint": creation_pack_fingerprint,
             }
             if _current_pending_changes():
                 _current_pending_changes().update_new_value("chapter", chapter.id, "novel_content", new_content)
-            await _refresh_agent_memory(chapter, db)
             db.commit()
+            _schedule_agent_memory_refresh(chapter.id, chapter.story_id, api_key, new_content)
             return {"chapter_id": chapter_id, "ok": True}
         except Exception as e:
             return {"chapter_id": chapter_id, "error": public_error_message(e, "章节处理失败，请稍后重试")}
@@ -4439,6 +4657,9 @@ def _build_story_context_dict(story: Story, user_instruction: str = "") -> dict:
     chapters = _extract_outline_chapters(outline)
     chapter_numbers = [item["chapter_number"] for item in chapters if isinstance(item.get("chapter_number"), int)]
     return {
+        "id": story.id,
+        "story_id": story.id,
+        "title": story.title or "",
         "description": story.description or "",
         "tags": story.tags,
         "characters": story.characters,
@@ -4472,21 +4693,16 @@ class AgentService:
         self.tool_registry = tool_registry
 
     def _build_writing_quality_section(self, db=None) -> str:
-        """构建正文写作参考规范（供 Agent 分析和评估时参考）。
-
-        正文生成已委托给框架管道（generate_chapter_content），其中内置了字数铁律/场景经济性/
-        对话铁律/章末钩子/AI禁令等完整约束。此段落仅供 Agent 做分析/评估/优化建议时参考。
-        """
-        full_prompt = build_agent_chapter_system_prompt(db=db)
-        if not full_prompt:
-            return ""
+        """构建正文工具的精简路由说明，完整方法论由章节流水线负责。"""
         return (
             "\n\n---\n\n"
             "## ✍️ 正文写作参考规范\n\n"
-            "**正文生成已委托给框架创作引擎（generate_chapter_content 工具），引擎内置了字数铁律（2800上限）、"
-            "场景经济性（400字无变化即切）、对话铁律、章末钩子强制等起点签约级质量约束。**\n\n"
-            "以下规范供你在分析/评估/优化建议时参考：\n\n"
-            + full_prompt
+            "正文方法论、3000 字上限和质量门禁由章节流水线执行，此处只负责选择正确工具：\n"
+            "- 首次生成完整章节使用 `generate_chapter_content`。\n"
+            "- 根据指令整体重写已有正文使用 `adjust_chapter_by_instruction`。\n"
+            "- 用户提供了完整成稿时才使用 `update_chapter_content`。\n"
+            "- 用户只要求替换明确段落时使用 `rewrite_text_segment`。\n"
+            "不要在 Agent 回复中自行生成整章正文，也不要重复复述章节流水线的写作规则。"
         )
 
     async def _compress_history_with_ai(self, old_messages: list[dict], api_key: str) -> str:
@@ -4679,7 +4895,7 @@ class AgentService:
 | "帮我检查这一章写得怎么样" | 调 `get_chapter_full` 读取本章 → 给出评价/问题/建议 → 等待用户反馈 |
 | "提出优化建议" | 调读取工具获取数据 → 输出具体优化方案列表 → 等用户选定后执行 |
 | "把这段改成……"（附具体文本） | 调 `rewrite_text_segment` 或 `update_chapter_content` 直接执行 |
-| "帮我重写这一章，改成……风格"（无具体文本） | 先调 `get_chapter_full` 读取本章 → 给出重写方案/方向让用户确认 → 再调 `adjust_chapter_by_instruction` |
+| "帮我重写这一章，改成……风格"（无具体文本） | 当前章节 ID 已明确时直接调 `adjust_chapter_by_instruction`；只有章节不明确时才先读取确认 |
 | "帮我修改角色设定" | 调 `get_framework_detail` 查看当前角色 → 给出修改方案 → 待确认后调 `update_characters` |
 | "帮我调整世界观/修改核心设定/改作品圣经" | 调 `get_story_bible` 查看当前圣经 → 给出调整方案 → 待确认后调 `update_story_bible` |
 | **用户在对话中详细描述了世界观设定**（如力量体系、势力分布、等级划分、世界历史等具体内容） | **主动调用 `update_story_bible`** 将讨论确认的内容保存到 world_setting 中。不要等用户说出"改作品圣经"才保存。world_setting 是 `creative_brief` 下的嵌套 JSON，建议包含 power_system（力量体系）、society_structure（社会结构）、key_locations（关键地点）、world_history（世界历史）、hidden_truths（隐藏真相）等子字段，也接受任意其他键名。保存后说明存入了哪些设定模块 |
@@ -5041,8 +5257,6 @@ class AgentService:
             if _has_video_mutation_intent or _has_manga_mutation_intent:
                 SAFETY_MAX_ITERATIONS = min(SAFETY_MAX_ITERATIONS, 12)
 
-            TOOL_EXECUTION_TIMEOUT = 300
-
             while iteration_count < SAFETY_MAX_ITERATIONS:
                 iteration_count += 1
 
@@ -5400,14 +5614,15 @@ class AgentService:
                             continue
 
                         try:
+                            tool_execution_timeout = _agent_tool_execution_timeout_seconds(name)
                             result_str = await asyncio.wait_for(
                                 self.tool_registry.execute(name, args),
-                                timeout=TOOL_EXECUTION_TIMEOUT,
+                                timeout=tool_execution_timeout,
                             )
                             yield {"event": "tool_result", "data": json.dumps({"name": name, "result": result_str}, ensure_ascii=False)}
                         except asyncio.TimeoutError:
-                            logger.warning("Agent 工具 %s 执行超时（%ss）", name, TOOL_EXECUTION_TIMEOUT)
-                            result_str = json.dumps({"error": f"工具 {name} 执行超时（{TOOL_EXECUTION_TIMEOUT}s），操作未完成"})
+                            logger.warning("Agent 工具 %s 执行超时（%ss）", name, tool_execution_timeout)
+                            result_str = json.dumps({"error": f"工具 {name} 执行超时（{tool_execution_timeout}s），操作未完成"})
                             yield {"event": "tool_result", "data": json.dumps({"name": name, "result": result_str}, ensure_ascii=False)}
                         except Exception as e:
                             error_msg = json.dumps(
