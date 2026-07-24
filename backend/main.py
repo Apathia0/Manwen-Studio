@@ -926,7 +926,7 @@ def _resolve_user_upstream_override(
     from services.ai.channels import validate_user_base_url
     from services.ai.credentials import load_user_api_key_plain
 
-    api_key = (api_key_override or "").strip() or load_user_api_key_plain(db, user.id)
+    api_key = (api_key_override or "").strip() or load_user_api_key_plain(db, user.id, modality)
     if not api_key:
         raise HTTPException(403, "请先在用户中心配置 API Key，再使用自定义上游")
     return {
@@ -1135,9 +1135,10 @@ def _resolve_dual_track_runtime(request: Request, db: Session, *, modality: str)
             capabilities = _user_api_override_capabilities(user, db)
             if not custom_upstream and not capabilities["can_override_api_key"]:
                 raise HTTPException(403, "管理员未授权当前账号使用自定义 API Key")
-            api_key = (custom_upstream or {}).get("api_key") or load_user_api_key_plain(db, user.id)
+            api_key = (custom_upstream or {}).get("api_key") or load_user_api_key_plain(db, user.id, modality)
             if not api_key:
-                raise HTTPException(403, "请先在账户页配置 API Key，或切换到平台账户模式")
+                labels = {"text": "文本", "image": "图片", "video": "视频"}
+                raise HTTPException(403, f"请先在账户页配置{labels.get(modality, modality)} API Key，或切换到平台账户模式")
         else:
             api_key = load_platform_key(channel)
             if not api_key:

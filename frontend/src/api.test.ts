@@ -1,6 +1,6 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 
-import { analyzeChapterMangaAssets, apiHeaders, coverImageUrl, createAdminAiChannel, deleteAdminAiChannel, generateMangaAsset, generateMangaAssetsBatch, generateMangaStream, generateStoryCharRefStream, getAiChannels, getApiKeySettings, getAuthorStyleResult, getAuthorStyleStatus, getBackgroundTaskStatus, getLocalCredentialMode, getMangaAssetAnalysis, login, previewAdminAiChannelPrices, redrawMangaAsset, regenerateVideoAsset, retryVideoJob, saveApiKeySettings, saveMangaAssetAnalysis, setLocalCredentialMode, startAuthorStyleAnalysis, syncAdminAiChannelPrices, toPublicMangaAssetUrl, toPublicVideoAssetUrl, updateAdminAiChannel, updateAuthorStyleReport, updateDeconstructionReport } from './api';
+import { analyzeChapterMangaAssets, apiHeaders, coverImageUrl, createAdminAiChannel, deleteAdminAiChannel, generateMangaAsset, generateMangaAssetsBatch, generateMangaStream, generateStoryCharRefStream, getAiChannels, getAiCredentials, getApiKeySettings, getAuthorStyleResult, getAuthorStyleStatus, getBackgroundTaskStatus, getLocalCredentialMode, getMangaAssetAnalysis, login, previewAdminAiChannelPrices, redrawMangaAsset, regenerateVideoAsset, retryVideoJob, saveAiModalityCredential, saveApiKeySettings, saveMangaAssetAnalysis, setLocalCredentialMode, startAuthorStyleAnalysis, syncAdminAiChannelPrices, testAiModalityCredential, toPublicMangaAssetUrl, toPublicVideoAssetUrl, updateAdminAiChannel, updateAuthorStyleReport, updateDeconstructionReport } from './api';
 import { shouldShowAuthorStyleEntry } from './components/DeconstructionWorkPage';
 
 describe('coverImageUrl', () => {
@@ -12,6 +12,42 @@ describe('coverImageUrl', () => {
 
   it('将本地相对路径转换为静态资源路径', () => {
     expect(coverImageUrl('manga_outputs/covers/cover_114_test.png')).toBe('/static/manga/covers/cover_114_test.png');
+  });
+});
+
+describe('分类 AI 凭据 API', () => {
+  beforeEach(() => {
+    vi.stubGlobal('localStorage', {
+      getItem: vi.fn(() => null),
+      setItem: vi.fn(),
+      removeItem: vi.fn(),
+    });
+  });
+
+  it('读取三类凭据聚合状态', async () => {
+    const payload = { credentials: { text: { configured: true }, image: { configured: false }, video: { configured: false } }, configured_count: 1 };
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(payload), { status: 200 })));
+
+    await expect(getAiCredentials()).resolves.toEqual(payload);
+    expect(fetch).toHaveBeenCalledWith('/api/ai/credentials', expect.any(Object));
+  });
+
+  it('保存图片 Key 时只发送到图片槽位', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ modality: 'image', configured: true }), { status: 200 })));
+
+    await saveAiModalityCredential('image', 'image-secret');
+
+    expect(fetch).toHaveBeenCalledWith('/api/ai/credentials/image', expect.objectContaining({
+      method: 'PUT',
+      body: JSON.stringify({ api_key: 'image-secret' }),
+    }));
+  });
+
+  it('视频 Key 测试返回明确模态且不调用生成端点', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ ok: true, verified: false, modality: 'video' }), { status: 200 })));
+
+    await expect(testAiModalityCredential('video')).resolves.toMatchObject({ modality: 'video' });
+    expect(fetch).toHaveBeenCalledWith('/api/ai/credentials/video/test', expect.objectContaining({ method: 'POST' }));
   });
 });
 

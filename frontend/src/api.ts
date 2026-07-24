@@ -5081,10 +5081,18 @@ export interface ImageModelCapabilities {
 }
 
 export interface AiCredentialStatus {
+  modality?: AiModality;
   configured: boolean;
   status: string;
   last_four?: string | null;
   last_validated_at?: string | null;
+}
+
+export type AiModality = 'text' | 'image' | 'video';
+
+export interface AiModalityCredentialsStatus {
+  credentials: Record<AiModality, AiCredentialStatus>;
+  configured_count: number;
 }
 
 export interface AiPreferences {
@@ -5251,6 +5259,44 @@ export async function testAiCredential(apiKey?: string): Promise<{ ok: boolean; 
     ...(draftKey ? { body: JSON.stringify({ api_key: draftKey }) } : {}),
   });
   if (!res.ok) throw new Error(await readErrorMessage(res, '测试 API Key 失败'));
+  return res.json();
+}
+
+export async function getAiCredentials(): Promise<AiModalityCredentialsStatus> {
+  const res = await fetch(`${BASE}/api/ai/credentials`, { headers: apiHeaders() });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '获取分类 API Key 状态失败'));
+  return res.json();
+}
+
+export async function saveAiModalityCredential(modality: AiModality, apiKey: string): Promise<AiCredentialStatus> {
+  const res = await fetch(`${BASE}/api/ai/credentials/${modality}`, {
+    method: 'PUT',
+    headers: apiHeaders(true),
+    body: JSON.stringify({ api_key: apiKey }),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, `保存${modality} API Key 失败`));
+  return res.json();
+}
+
+export async function deleteAiModalityCredential(modality: AiModality): Promise<void> {
+  const res = await fetch(`${BASE}/api/ai/credentials/${modality}`, {
+    method: 'DELETE',
+    headers: apiHeaders(),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, `清除${modality} API Key 失败`));
+}
+
+export async function testAiModalityCredential(
+  modality: AiModality,
+  apiKey?: string,
+): Promise<{ ok: boolean; verified: boolean; modality: AiModality; status_code?: number; message?: string }> {
+  const draftKey = apiKey?.trim();
+  const res = await fetch(`${BASE}/api/ai/credentials/${modality}/test`, {
+    method: 'POST',
+    headers: apiHeaders(Boolean(draftKey)),
+    ...(draftKey ? { body: JSON.stringify({ api_key: draftKey }) } : {}),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, `测试${modality} API Key 失败`));
   return res.json();
 }
 

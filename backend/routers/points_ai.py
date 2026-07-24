@@ -34,6 +34,7 @@ from services.ai import catalog as ai_catalog
 from services.ai import bootstrap as ai_bootstrap
 from services.ai import channels as ai_channels
 from services.ai import credentials as ai_credentials
+from services.ai import resolver as ai_resolver
 from services.ai import upstream_pricing
 from services.ai.crypto_secrets import last_four
 from services.ai.video_capabilities import validate_video_capability_limits
@@ -742,7 +743,7 @@ def get_credential(request: Request, db: Session = Depends(get_db)):
 def put_credential(body: CredentialIn, request: Request, db: Session = Depends(get_db)):
     user = _require_user(request, db)
     _require_user_credential_permission(user, db)
-    row = ai_credentials.save_user_api_key(db, user.id, body.api_key)
+    row = ai_credentials.save_shared_api_key_to_all_modalities(db, user.id, body.api_key)
     db.commit()
     return ai_credentials.serialize_credential(row)
 
@@ -750,7 +751,7 @@ def put_credential(body: CredentialIn, request: Request, db: Session = Depends(g
 @router.delete("/api/ai/credential")
 def delete_credential(request: Request, db: Session = Depends(get_db)):
     user = _require_user(request, db)
-    ai_credentials.clear_user_api_key(db, user.id)
+    ai_credentials.clear_all_user_api_keys(db, user.id)
     db.commit()
     return {"ok": True}
 
@@ -809,6 +810,99 @@ async def test_credential(
             ai_credentials.mark_credential_validated(db, user.id, False)
         db.commit()
         raise HTTPException(400, f"测试失败: {exc}") from exc
+
+
+@router.get("/api/ai/credentials")
+def get_modality_credentials(request: Request, db: Session = Depends(get_db)):
+    user = _require_user(request, db)
+    return ai_credentials.serialize_modality_credentials(db, user.id)
+
+
+@router.get("/api/ai/credentials/{modality}")
+def get_modality_credential(modality: str, request: Request, db: Session = Depends(get_db)):
+    user = _require_user(request, db)
+    row = ai_credentials.get_modality_credential_row(db, user.id, modality)
+    return ai_credentials.serialize_modality_credential(row, modality)
+
+
+@router.put("/api/ai/credentials/{modality}")
+def put_modality_credential(
+    modality: str, body: CredentialIn, request: Request, db: Session = Depends(get_db)
+):
+    user = _require_user(request, db)
+    _require_user_credential_permission(user, db)
+    row = ai_credentials.save_user_modality_api_key(db, user.id, modality, body.api_key)
+    db.commit()
+    return ai_credentials.serialize_modality_credential(row, modality)
+
+
+@router.delete("/api/ai/credentials/{modality}")
+def delete_modality_credential(modality: str, request: Request, db: Session = Depends(get_db)):
+    user = _require_user(request, db)
+    ai_credentials.clear_user_modality_api_key(db, user.id, modality)
+    db.commit()
+    return {"ok": True, "modality": ai_credentials.normalize_modality(modality)}
+
+
+@router.post("/api/ai/credentials/{modality}/test")
+async def test_modality_credential(
+    modality: str,
+    request: Request,
+    body: CredentialTestIn | None = None,
+    db: Session = Depends(get_db),
+):
+    user = _require_user(request, db)
+    capabilities = _require_user_credential_permission(user, db)
+    value = ai_credentials.normalize_modality(modality)
+    draft_key = body.api_key.strip() if body and body.api_key is not None else ""
+    if body and body.api_key is not None and not draft_key:
+        raise HTTPException(400, "API Key 不能为空")
+    if draft_key and not capabilities["can_override_api_key"]:
+        raise HTTPException(403, "管理员未授权当前账号使用自定义 API Key")
+    key = draft_key or ai_credentials.load_user_api_key_plain(db, user.id, value)
+    if not key:
+        labels = {"text": "文本", "image": "图片", "video": "视频"}
+        raise HTTPException(400, f"尚未配置{labels[value]} API Key")
+    model = ai_resolver.resolve_model(db, user.id, modality=value)
+    channel = db.get(AiChannel, model.channel_id)
+    if not channel or not channel.base_url:
+        labels = {"text": "文本", "image": "图片", "video": "视频"}
+        raise HTTPException(400, f"管理员尚未配置{labels[value]}渠道 Base URL")
+    custom_upstream = _main()._resolve_user_upstream_override(
+        request,
+        db,
+        user=user,
+        modality=value,
+        mode="user_key",
+        api_key_override=draft_key or None,
+    )
+    base_url = (custom_upstream or {}).get("base_url") or channel.base_url
+    persist_validation = not bool(draft_key)
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            response = await client.get(
+                base_url.rstrip("/") + "/models",
+                headers={"Authorization": f"Bearer {key}"},
+            )
+        if response.status_code in {404, 405}:
+            return {
+                "ok": True,
+                "verified": False,
+                "modality": value,
+                "status_code": response.status_code,
+                "message": "当前渠道不支持无副作用鉴权验证，未判定 Key 无效",
+            }
+        ok = response.status_code < 400
+        if persist_validation and (ok or response.status_code in {401, 403}):
+            ai_credentials.mark_modality_credential_validated(db, user.id, value, ok)
+            db.commit()
+        if not ok:
+            raise HTTPException(400, f"上游返回 {response.status_code}，{value} Key 可能无效")
+        return {"ok": True, "verified": True, "modality": value, "status_code": response.status_code}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(400, f"{value} Key 测试失败: {exc}") from exc
 
 
 @router.get("/api/ai/preferences")

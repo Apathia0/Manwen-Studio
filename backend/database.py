@@ -402,6 +402,27 @@ def _migrate_unlocked(target_engine=None):
             _prepare_migration_conn(conn)
             if "intro_tag" not in cols:
                 conn.execute(text("ALTER TABLE ai_models ADD COLUMN intro_tag VARCHAR(80) DEFAULT '' NOT NULL"))
+    if "user_ai_credentials" in insp.get_table_names() and "user_ai_modality_credentials" in inspect(db_engine).get_table_names():
+        with db_engine.begin() as conn:
+            _prepare_migration_conn(conn)
+            insert_prefix = "INSERT OR IGNORE" if db_engine.dialect.name == "sqlite" else "INSERT"
+            conflict_suffix = "" if db_engine.dialect.name == "sqlite" else " ON CONFLICT (user_id, modality) DO NOTHING"
+            conn.execute(text(f"""
+                {insert_prefix} INTO user_ai_modality_credentials
+                    (user_id, modality, secret_ciphertext, key_version, last_four, status, last_validated_at, updated_at)
+                SELECT legacy.user_id, modalities.modality, legacy.secret_ciphertext, legacy.key_version,
+                       legacy.last_four, legacy.status, legacy.last_validated_at, legacy.updated_at
+                FROM user_ai_credentials AS legacy
+                CROSS JOIN (
+                    SELECT 'text' AS modality UNION ALL SELECT 'image' UNION ALL SELECT 'video'
+                ) AS modalities
+                WHERE NOT EXISTS (
+                    SELECT 1
+                    FROM user_ai_modality_credentials AS existing
+                    WHERE existing.user_id = legacy.user_id
+                )
+                {conflict_suffix}
+            """))
     if "points_accounts" in insp.get_table_names() and db_engine.dialect.name == "postgresql":
         with db_engine.begin() as conn:
             _prepare_migration_conn(conn)

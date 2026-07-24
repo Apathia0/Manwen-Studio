@@ -1,6 +1,8 @@
-import { type KeyboardEvent, useCallback, useEffect, useState } from 'react';
+import { type KeyboardEvent, useCallback, useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import {
   CheckCircle2,
+  ChevronRight,
   Coins,
   ExternalLink,
   FileImage,
@@ -14,10 +16,12 @@ import {
   Trash2,
   Type,
   Video,
+  X,
 } from 'lucide-react';
 import {
   type ApiKeySettings,
-  type AiCredentialStatus,
+  type AiModality,
+  type AiModalityCredentialsStatus,
   type AiChannelItem,
   type AiModelItem,
   type AiPreferences,
@@ -25,20 +29,20 @@ import {
   type PointsAccount,
   type PointsLedgerItem,
   type PublicPlatformSettings,
-  deleteAiCredential,
+  deleteAiModalityCredential,
   getApiKeySettings,
-  getAiCredential,
+  getAiCredentials,
   getAiChannels,
   getAiModels,
   getAiPreferences,
   getLocalCredentialMode,
   getPointsAccount,
   getPointsLedger,
-  saveAiCredential,
+  saveAiModalityCredential,
   saveApiKeySettings,
   saveAiPreferences,
   setLocalCredentialMode,
-  testAiCredential,
+  testAiModalityCredential,
 } from '../api';
 import { toast } from '../lib/toast';
 import { Button, Input, Select } from './ui';
@@ -106,6 +110,8 @@ const UPSTREAM_GUIDE_MODALITIES = [
   { key: 'video', label: '视频' },
 ] as const;
 
+const EMPTY_API_KEY_INPUTS: Record<AiModality, string> = { text: '', image: '', video: '' };
+
 const LEDGER_TYPE_LABELS: Record<string, string> = {
   reserve: '预扣积分',
   settle: '实际结算',
@@ -152,11 +158,12 @@ function formatPoints(value?: number | null, showSign = false): string {
   return showSign && value > 0 ? `+${normalized}` : normalized;
 }
 
-type UpstreamGuideItem = {
+type ModalityUpstreamGuide = {
+  channelName: string;
+  source: '自定义' | '平台';
   url: string;
   openUrl: string;
   status: 'available' | 'missing' | 'unsafe';
-  services: Array<{ label: string; source: '自定义' | '平台' }>;
 };
 
 function normalizeUpstreamUrl(rawUrl: string) {
@@ -188,66 +195,34 @@ function normalizeUpstreamUrl(rawUrl: string) {
   }
 }
 
-function buildUpstreamGuideItems(
+function getModalityUpstreamGuide(
+  modality: ModelModality,
   apiSettings: ApiKeySettings,
   platformApi: PlatformApiSettings | undefined,
   platformChannels: AiChannelItem[] | null,
   canOverrideApiUrl: boolean,
   mode: CredentialMode,
-): UpstreamGuideItem[] {
-  const grouped = new Map<string, UpstreamGuideItem>();
+  preferredChannelId?: number | null,
+): ModalityUpstreamGuide {
   const customUrl = apiSettings.upstreamBaseUrl.trim();
   const useCustomUrl = mode === 'user_key' && canOverrideApiUrl && customUrl.length > 0;
-
-  if (!useCustomUrl && platformChannels !== null) {
-    for (const channel of platformChannels) {
-      const normalized = normalizeUpstreamUrl(channel.base_url);
-      const item = grouped.get(normalized.groupKey) || {
-        url: normalized.url,
-        openUrl: normalized.openUrl,
-        status: normalized.status,
-        services: [],
-      };
-      const modality = UPSTREAM_GUIDE_MODALITIES.find((entry) => entry.key === channel.modality);
-      item.services.push({
-        label: `${modality?.label || channel.modality} · ${channel.name}`,
-        source: '平台',
-      });
-      grouped.set(normalized.groupKey, item);
-    }
-    if (grouped.size === 0) {
-      const normalized = normalizeUpstreamUrl('');
-      grouped.set(normalized.groupKey, {
-        url: normalized.url,
-        openUrl: normalized.openUrl,
-        status: normalized.status,
-        services: UPSTREAM_GUIDE_MODALITIES.map((modality) => ({
-          label: modality.label,
-          source: '平台',
-        })),
-      });
-    }
-    return [...grouped.values()];
+  if (useCustomUrl) {
+    const normalized = normalizeUpstreamUrl(customUrl);
+    return { channelName: '自定义上游', source: '自定义', ...normalized };
   }
 
-  for (const modality of UPSTREAM_GUIDE_MODALITIES) {
-    const fields = UPSTREAM_FIELDS[modality.key];
-    const platformUrl = String(platformApi?.[fields.platformBaseUrlKey] || '').trim();
-    const normalized = normalizeUpstreamUrl(useCustomUrl ? customUrl : platformUrl);
-    const item = grouped.get(normalized.groupKey) || {
-      url: normalized.url,
-      openUrl: normalized.openUrl,
-      status: normalized.status,
-      services: [],
-    };
-    item.services.push({
-      label: modality.label,
-      source: useCustomUrl ? '自定义' : '平台',
-    });
-    grouped.set(normalized.groupKey, item);
-  }
-
-  return [...grouped.values()];
+  const platformChannel = platformChannels?.find((channel) => channel.id === preferredChannelId)
+    || platformChannels?.find((channel) => channel.modality === modality)
+    || platformChannels?.find((channel) => channel.modality === 'multi');
+  const fields = UPSTREAM_FIELDS[modality];
+  const platformUrl = platformChannel?.base_url
+    || String(platformApi?.[fields.platformBaseUrlKey] || '').trim();
+  const normalized = normalizeUpstreamUrl(platformUrl);
+  return {
+    channelName: platformChannel?.name || `${UPSTREAM_GUIDE_MODALITIES.find((item) => item.key === modality)?.label || modality}平台上游`,
+    source: '平台',
+    ...normalized,
+  };
 }
 
 function focusTab(id: string) {
@@ -308,6 +283,7 @@ export function PointsAiAccountPanel({
   const canUseOwnKey = canOverrideApiKey || canOverrideApiUrl;
   const [activeTab, setActiveTab] = useState<AccountTab>('overview');
   const [activeModality, setActiveModality] = useState<ModelModality>('text');
+  const [credentialModalOpen, setCredentialModalOpen] = useState(false);
   const [account, setAccount] = useState<PointsAccount | null>(null);
   const [ledger, setLedger] = useState<PointsLedgerItem[]>([]);
   const [ledgerLoading, setLedgerLoading] = useState(false);
@@ -320,29 +296,30 @@ export function PointsAiAccountPanel({
   const [ledgerEntryType, setLedgerEntryType] = useState('');
   const [ledgerDirection, setLedgerDirection] = useState('');
   const [ledgerFilters, setLedgerFilters] = useState({ startDate: '', endDate: '', entryType: '', direction: '' });
-  const [credential, setCredential] = useState<AiCredentialStatus | null>(null);
+  const [credentialSummary, setCredentialSummary] = useState<AiModalityCredentialsStatus | null>(null);
   const [channels, setChannels] = useState<AiChannelItem[] | null>(null);
   const [prefs, setPrefs] = useState<AiPreferences | null>(null);
   const [models, setModels] = useState<AiModelItem[]>([]);
-  const [apiKeyInput, setApiKeyInput] = useState('');
+  const [apiKeyInputs, setApiKeyInputs] = useState<Record<AiModality, string>>(() => ({ ...EMPTY_API_KEY_INPUTS }));
   const [apiSettings, setApiSettings] = useState<ApiKeySettings>(() => getApiKeySettings());
   const [busy, setBusy] = useState(false);
   const [mode, setMode] = useState<CredentialMode>(getLocalCredentialMode());
+  const credentialModalRef = useRef<HTMLDivElement>(null);
 
   const reload = useCallback(async () => {
     const [a, c, pr, m, channelResult] = await Promise.all([
       getPointsAccount(),
-      getAiCredential(),
+      getAiCredentials(),
       getAiPreferences(),
       getAiModels(),
       getAiChannels().catch(() => null),
     ]);
     setAccount(a);
-    setCredential(c);
+    setCredentialSummary(c);
     setModels(m.models || []);
     if (channelResult) setChannels(channelResult.channels || []);
     let nextPreferences = pr;
-    if (pr.credential_mode === 'user_key' && (!c.configured || !canUseOwnKey)) {
+    if (pr.credential_mode === 'user_key' && (c.configured_count === 0 || !canUseOwnKey)) {
       try {
         nextPreferences = await saveAiPreferences({ credential_mode: 'platform' });
         toast.info(canUseOwnKey ? '未检测到可用 API Key，已自动切换为平台账户' : '当前账号未获自定义上游权限，已切换为平台账户');
@@ -404,6 +381,46 @@ export function PointsAiAccountPanel({
     };
   }, [loadLedger]);
 
+  useEffect(() => {
+    if (!credentialModalOpen) return;
+    const previousOverflow = document.body.style.overflow;
+    const appRoot = document.getElementById('root');
+    const previousAriaHidden = appRoot?.getAttribute('aria-hidden');
+    document.body.style.overflow = 'hidden';
+    appRoot?.setAttribute('inert', '');
+    appRoot?.setAttribute('aria-hidden', 'true');
+    const handleKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.key === 'Escape' && !busy) {
+        setApiKeyInputs({ ...EMPTY_API_KEY_INPUTS });
+        setCredentialModalOpen(false);
+        focusTab(`credential-row-${activeModality}`);
+        return;
+      }
+      if (event.key !== 'Tab') return;
+      const focusableElements = credentialModalRef.current?.querySelectorAll<HTMLElement>(
+        'a[href], button:not([disabled]), input:not([disabled]), [tabindex]:not([tabindex="-1"])',
+      );
+      if (!focusableElements?.length) return;
+      const first = focusableElements[0];
+      const last = focusableElements[focusableElements.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('keydown', handleKeyDown);
+      document.body.style.overflow = previousOverflow;
+      appRoot?.removeAttribute('inert');
+      if (previousAriaHidden == null) appRoot?.removeAttribute('aria-hidden');
+      else appRoot?.setAttribute('aria-hidden', previousAriaHidden);
+    };
+  }, [activeModality, busy, credentialModalOpen]);
+
   const queryLedger = () => {
     if (ledgerStartDate && ledgerEndDate && ledgerStartDate > ledgerEndDate) {
       toast.error('开始日期不能晚于结束日期');
@@ -427,13 +444,13 @@ export function PointsAiAccountPanel({
     setLedgerFilters({ startDate: '', endDate: '', entryType: '', direction: '' });
   };
 
-  const onSaveKey = async () => {
+  const onSaveKey = async (modality: AiModality) => {
     setBusy(true);
     try {
-      const c = await saveAiCredential(apiKeyInput.trim());
-      setCredential(c);
-      setApiKeyInput('');
-      toast.success('API Key 已保存');
+      await saveAiModalityCredential(modality, apiKeyInputs[modality].trim());
+      setApiKeyInputs((previous) => ({ ...previous, [modality]: '' }));
+      await reload();
+      toast.success(`${MODEL_TABS.find((item) => item.key === modality)?.label || modality} API Key 已保存`);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : '保存失败');
     } finally {
@@ -441,13 +458,13 @@ export function PointsAiAccountPanel({
     }
   };
 
-  const onTestKey = async () => {
-    const draftKey = apiKeyInput.trim();
+  const onTestKey = async (modality: AiModality) => {
+    const draftKey = apiKeyInputs[modality].trim();
     const testingDraft = Boolean(draftKey);
     setBusy(true);
     try {
-      await testAiCredential(draftKey || undefined);
-      toast.success(testingDraft ? '当前输入的 Key 测试通过' : 'Key 测试通过');
+      const result = await testAiModalityCredential(modality, draftKey || undefined);
+      toast.success(result.verified ? (testingDraft ? '当前输入的 Key 测试通过' : 'Key 测试通过') : (result.message || '渠道不支持无副作用验证'));
       if (!testingDraft) await reload();
     } catch (error) {
       toast.error(error instanceof Error ? error.message : '测试失败');
@@ -456,17 +473,18 @@ export function PointsAiAccountPanel({
     }
   };
 
-  const onClearKey = async () => {
+  const onClearKey = async (modality: AiModality) => {
     setBusy(true);
     try {
-      if (mode === 'user_key') {
+      const remainingCount = (credentialSummary?.configured_count || 0) - (credentialSummary?.credentials[modality]?.configured ? 1 : 0);
+      if (mode === 'user_key' && remainingCount === 0) {
         const nextPrefs = await saveAiPreferences({ credential_mode: 'platform' });
         setPrefs(nextPrefs);
         setMode(nextPrefs.credential_mode);
         setLocalCredentialMode(nextPrefs.credential_mode);
       }
-      await deleteAiCredential();
-      toast.success('已清除 API Key');
+      await deleteAiModalityCredential(modality);
+      toast.success(`已清除${MODEL_TABS.find((item) => item.key === modality)?.label || modality} API Key`);
       await reload();
     } catch (error) {
       toast.error(error instanceof Error ? error.message : '清除失败');
@@ -579,7 +597,30 @@ export function PointsAiAccountPanel({
   const selectableModels = availableModels.filter((item) => mode === 'user_key' || item.price);
   const selectedModelId = prefs?.[modelConfig.preferenceKey] ?? null;
   const selectedModel = availableModels.find((item) => item.id === selectedModelId) || null;
-  const upstreamGuideItems = buildUpstreamGuideItems(apiSettings, platformApi, channels, canOverrideApiUrl, mode);
+  const activeUpstreamGuide = getModalityUpstreamGuide(
+    activeModality,
+    apiSettings,
+    platformApi,
+    channels,
+    canOverrideApiUrl,
+    mode,
+    (selectedModel || availableModels[0])?.channel_id,
+  );
+  const activeCredentialStatus = credentialSummary?.credentials[activeModality];
+  const activeKeyInput = apiKeyInputs[activeModality];
+
+  const openCredentialModal = (modality: ModelModality) => {
+    setApiKeyInputs({ ...EMPTY_API_KEY_INPUTS });
+    setActiveModality(modality);
+    setCredentialModalOpen(true);
+  };
+
+  const closeCredentialModal = () => {
+    if (busy) return;
+    setApiKeyInputs({ ...EMPTY_API_KEY_INPUTS });
+    setCredentialModalOpen(false);
+    focusTab(`credential-row-${activeModality}`);
+  };
 
   return (
     <section className="mt-6 overflow-hidden rounded-2xl border border-[#d7e3f4] bg-white shadow-[0_12px_30px_rgba(37,99,235,0.06)]">
@@ -662,9 +703,9 @@ export function PointsAiAccountPanel({
                 </button>
                 <button
                   type="button"
-                  disabled={busy || !canUseOwnKey || !credential?.configured}
+                  disabled={busy || !canUseOwnKey || !credentialSummary?.configured_count}
                   aria-pressed={mode === 'user_key'}
-                  title={!canUseOwnKey ? '管理员尚未授权' : credential?.configured ? undefined : '请先保存 API Key'}
+                  title={!canUseOwnKey ? '管理员尚未授权' : credentialSummary?.configured_count ? undefined : '请先保存至少一类 API Key'}
                   onClick={() => onModeChange('user_key')}
                   className={`min-w-0 flex-1 rounded-lg px-3 py-1.5 text-sm font-medium transition sm:min-w-24 ${mode === 'user_key' ? 'bg-[#2563eb] text-white shadow-sm' : 'text-slate-600 hover:bg-slate-50'}`}
                 >
@@ -674,16 +715,16 @@ export function PointsAiAccountPanel({
             </div>
 
             <div className="flex min-h-28 items-center gap-3 border-t border-[#e5edf8] px-4 py-5 sm:px-5 md:border-t-0">
-              <div className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-white shadow-sm ${credential?.configured ? 'text-emerald-600' : 'text-slate-400'}`}>
-                {credential?.configured ? <ShieldCheck size={19} aria-hidden="true" /> : <KeyRound size={19} aria-hidden="true" />}
+              <div className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-white shadow-sm ${credentialSummary?.configured_count ? 'text-emerald-600' : 'text-slate-400'}`}>
+                {credentialSummary?.configured_count ? <ShieldCheck size={19} aria-hidden="true" /> : <KeyRound size={19} aria-hidden="true" />}
               </div>
               <div className="min-w-0">
                 <div className="text-xs font-medium text-slate-500">API Key 状态</div>
                 <div className="mt-0.5 truncate text-sm font-semibold text-slate-900">
-                  {!canUseOwnKey ? '未授权' : credential?.configured ? `已配置 ···${credential.last_four || ''}` : '未配置'}
+                  {!canUseOwnKey ? '未授权' : `已配置 ${credentialSummary?.configured_count || 0}/3 类`}
                 </div>
                 <div className="mt-0.5 text-xs text-slate-500">
-                  {!canUseOwnKey ? '请联系管理员开放权限' : credential?.configured ? `验证状态：${credential.status || '待验证'}` : '使用平台账户无需填写'}
+                  {!canUseOwnKey ? '请联系管理员开放权限' : credentialSummary?.configured_count ? '文本、图片、视频可分别管理' : '使用平台账户无需填写'}
                 </div>
               </div>
             </div>
@@ -713,120 +754,192 @@ export function PointsAiAccountPanel({
           className="p-5 sm:p-6"
         >
           <div className="max-w-3xl">
-            <div className="flex items-start gap-3">
-              <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-[#f8fbff] text-[#2563eb]">
-                <KeyRound size={18} aria-hidden="true" />
-              </div>
-              <div>
-                <h4 className="text-sm font-semibold text-slate-900">配置我的 API Key</h4>
-                <p className="mt-1 text-xs leading-5 text-slate-500">
-                  {!canUseOwnKey ? '当前账号未获自定义 API Key 或上游权限。' : canOverrideApiUrl ? 'Key 会加密保存；已授权的自定义地址在「模型配置」中管理。' : 'Key 会加密保存，上游服务地址由管理员统一维护。'}
-                </p>
-              </div>
+            <div>
+              <h4 className="text-sm font-semibold text-slate-900">API 凭据</h4>
+              <p className="mt-1 text-xs leading-5 text-slate-500">
+                {!canUseOwnKey ? '当前账号未获自定义 API Key 或上游权限。' : '按任务类型管理上游和加密保存的 API Key。'}
+              </p>
             </div>
 
-            <div className="mt-5 border-y border-[#e5edf8] bg-slate-50/70 py-4">
-              <div className="px-3">
-                <h5 className="text-xs font-semibold text-slate-800">当前 API 服务地址</h5>
-                <p className="mt-1 text-xs leading-5 text-slate-500">可打开服务地址确认上游；API Key 请按服务商控制台或页面指引获取。</p>
-              </div>
-              <div className="mt-3 divide-y divide-[#e5edf8]">
-                {upstreamGuideItems.map((item, index) => (
-                  <div
-                    key={item.url || `missing-${index}`}
-                    className="flex flex-col gap-2 px-3 py-3 sm:flex-row sm:items-center sm:justify-between"
+            <div className="mt-5 divide-y divide-[#e5edf8] border-y border-[#e5edf8]">
+              {MODEL_TABS.map((item) => {
+                const status = credentialSummary?.credentials[item.key];
+                const defaultModelId = prefs?.[item.preferenceKey] ?? null;
+                const upstreamModel = models.find((model) => model.id === defaultModelId)
+                  || models.find((model) => model.modality === item.key);
+                const guide = getModalityUpstreamGuide(
+                  item.key,
+                  apiSettings,
+                  platformApi,
+                  channels,
+                  canOverrideApiUrl,
+                  mode,
+                  upstreamModel?.channel_id,
+                );
+                const Icon = item.icon;
+                return (
+                  <button
+                    key={item.key}
+                    id={`credential-row-${item.key}`}
+                    type="button"
+                    onClick={() => openCredentialModal(item.key)}
+                    className="flex w-full items-center gap-3 py-4 text-left transition-colors hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-500 sm:px-2"
+                    aria-label={`管理${item.label} API 凭据`}
                   >
-                    <div className="min-w-0">
-                      <div className="flex flex-wrap gap-1.5">
-                        {item.services.map((service) => (
-                          <span
-                            key={`${service.label}-${service.source}`}
-                            className="rounded-md border border-[#d7e3f4] bg-white px-2 py-0.5 text-[11px] font-medium text-slate-600"
-                          >
-                            {service.label} · {service.source}
-                          </span>
-                        ))}
-                      </div>
-                      <div className="mt-1.5 break-all text-xs text-slate-700">
-                        {item.status === 'unsafe'
-                          ? '地址格式不安全，请联系管理员更新'
-                          : item.url || '管理员暂未配置'}
-                      </div>
-                    </div>
-                    {item.status === 'available' ? (
-                      <a
-                        href={item.openUrl}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="inline-flex shrink-0 items-center gap-1.5 self-start text-xs font-medium text-[#2563eb] hover:text-[#1d4ed8] sm:self-center"
-                      >
+                    <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-[#eff6ff] text-[#2563eb]">
+                      <Icon size={18} aria-hidden="true" />
+                    </span>
+                    <span className="min-w-0 flex-1">
+                      <span className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                        <span className="text-sm font-semibold text-slate-900">{item.label}</span>
+                        <span className={`text-xs font-medium ${status?.configured ? 'text-emerald-700' : 'text-slate-400'}`}>
+                          {status?.configured ? `已配置 ···${status.last_four || ''}` : '未配置'}
+                        </span>
+                      </span>
+                      <span className="mt-1 block text-xs leading-5 text-slate-500">{item.description}</span>
+                      <span className="mt-0.5 block truncate text-xs text-slate-400">
+                        {guide.source} · {guide.channelName} · {status?.configured ? `验证状态：${status.status || '待验证'}` : '等待配置'}
+                      </span>
+                    </span>
+                    <ChevronRight size={18} className="shrink-0 text-slate-400" aria-hidden="true" />
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {credentialModalOpen ? createPortal(
+        <div
+          className="fixed inset-0 z-[100] flex items-end justify-center bg-slate-950/45 p-0 sm:items-center sm:p-4"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) closeCredentialModal();
+          }}
+        >
+          <div
+            ref={credentialModalRef}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="credential-modal-title"
+            className="max-h-[92dvh] w-full overflow-y-auto rounded-t-lg bg-white shadow-2xl sm:max-w-xl sm:rounded-lg"
+          >
+            <div className="sticky top-0 z-10 flex items-start justify-between gap-3 border-b border-slate-200 bg-white px-4 py-4 sm:px-5">
+              <div className="min-w-0">
+                <h4 id="credential-modal-title" className="text-base font-semibold text-slate-900">管理 API 凭据</h4>
+                <p className="mt-1 text-xs text-slate-500">Key 将加密保存，仅用于对应类型的 AI 请求。</p>
+              </div>
+              <button
+                type="button"
+                autoFocus
+                disabled={busy}
+                onClick={closeCredentialModal}
+                className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-slate-500 transition-colors hover:bg-slate-100 hover:text-slate-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 disabled:cursor-not-allowed disabled:opacity-50"
+                aria-label="关闭 API 凭据弹窗"
+              >
+                <X size={18} aria-hidden="true" />
+              </button>
+            </div>
+
+            <div className="px-4 py-5 sm:px-5">
+              <div className="grid grid-cols-3 rounded-lg border border-[#d7e3f4] bg-[#f8fbff] p-1" role="tablist" aria-label="API 凭据类型">
+                {MODEL_TABS.map((tab, index) => {
+                  const Icon = tab.icon;
+                  const selected = activeModality === tab.key;
+                  return (
+                    <button
+                      key={tab.key}
+                      id={`credential-modal-tab-${tab.key}`}
+                      type="button"
+                      role="tab"
+                      aria-selected={selected}
+                      aria-controls="credential-modal-panel"
+                      tabIndex={selected ? 0 : -1}
+                      disabled={busy}
+                      onClick={() => setActiveModality(tab.key)}
+                      onKeyDown={(event) => {
+                        const nextIndex = getNextTabIndex(event, index, MODEL_TABS.length);
+                        if (nextIndex == null) return;
+                        event.preventDefault();
+                        const nextTab = MODEL_TABS[nextIndex];
+                        setActiveModality(nextTab.key);
+                        focusTab(`credential-modal-tab-${nextTab.key}`);
+                      }}
+                      className={`flex min-h-10 min-w-0 items-center justify-center gap-1.5 rounded-lg px-2 py-2 text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 disabled:cursor-not-allowed disabled:opacity-60 ${
+                        selected ? 'bg-white text-blue-700 shadow-sm' : 'text-slate-500 hover:text-slate-800'
+                      }`}
+                    >
+                      <Icon size={15} className="shrink-0" aria-hidden="true" />
+                      <span className="truncate">{tab.label.replace('模型', '')}</span>
+                    </button>
+                  );
+                })}
+              </div>
+
+              <div id="credential-modal-panel" role="tabpanel" aria-labelledby={`credential-modal-tab-${activeModality}`} className="mt-5">
+                <dl className="grid gap-4 border-y border-slate-200 py-4 text-sm sm:grid-cols-2">
+                  <div className="min-w-0">
+                    <dt className="text-xs font-medium text-slate-500">上游渠道</dt>
+                    <dd className="mt-1 flex items-center gap-2 font-medium text-slate-900">
+                      <span className="truncate">{activeUpstreamGuide.channelName}</span>
+                      <span className="shrink-0 rounded-md bg-slate-100 px-1.5 py-0.5 text-[11px] font-medium text-slate-600">{activeUpstreamGuide.source}</span>
+                    </dd>
+                  </div>
+                  <div className="min-w-0">
+                    <dt className="text-xs font-medium text-slate-500">Key 状态</dt>
+                    <dd className={`mt-1 flex items-center gap-1.5 font-medium ${activeCredentialStatus?.configured ? 'text-emerald-700' : 'text-slate-500'}`}>
+                      {activeCredentialStatus?.configured ? <CheckCircle2 size={15} aria-hidden="true" /> : <ShieldCheck size={15} aria-hidden="true" />}
+                      {activeCredentialStatus?.configured
+                        ? `已配置 ···${activeCredentialStatus.last_four || ''} · ${activeCredentialStatus.status || '待验证'}`
+                        : '未配置'}
+                    </dd>
+                  </div>
+                  <div className="min-w-0 sm:col-span-2">
+                    <dt className="text-xs font-medium text-slate-500">Base URL</dt>
+                    <dd className="mt-1 break-all text-xs leading-5 text-slate-700">
+                      {activeUpstreamGuide.status === 'unsafe'
+                        ? '地址格式不安全，请联系管理员更新'
+                        : activeUpstreamGuide.url || '管理员暂未配置'}
+                    </dd>
+                    {activeUpstreamGuide.status === 'available' ? (
+                      <a href={activeUpstreamGuide.openUrl} target="_blank" rel="noopener noreferrer" className="mt-2 inline-flex items-center gap-1.5 text-xs font-medium text-blue-600 hover:text-blue-700">
                         访问上游网站
                         <ExternalLink size={14} aria-hidden="true" />
                       </a>
                     ) : null}
                   </div>
-                ))}
+                </dl>
+
+                <label className="mt-5 block text-xs font-medium text-slate-700" htmlFor={`user-ai-api-key-${activeModality}`}>
+                  {modelConfig.label} API Key
+                </label>
+                <Input
+                  id={`user-ai-api-key-${activeModality}`}
+                  type="password"
+                  autoComplete="new-password"
+                  disabled={busy || !canUseOwnKey}
+                  value={activeKeyInput}
+                  onChange={(event) => setApiKeyInputs((previous) => ({ ...previous, [activeModality]: event.target.value }))}
+                  placeholder={activeCredentialStatus?.configured ? `已配置 ···${activeCredentialStatus.last_four || ''}` : '请输入 API Key'}
+                  className="mt-2 rounded-lg"
+                />
+
+                <div className="mt-5 flex flex-col gap-2 min-[390px]:flex-row min-[390px]:flex-wrap">
+                  <Button type="button" disabled={busy || !canUseOwnKey || !activeKeyInput.trim()} onClick={() => onSaveKey(activeModality)} size="sm" icon={<Save size={14} />}>
+                    保存
+                  </Button>
+                  <Button type="button" disabled={busy || !canUseOwnKey || (!activeKeyInput.trim() && !activeCredentialStatus?.configured)} onClick={() => onTestKey(activeModality)} size="sm" variant="secondary" icon={<FlaskConical size={14} />}>
+                    {activeKeyInput.trim() ? '测试当前 Key' : '测试已保存 Key'}
+                  </Button>
+                  <Button type="button" disabled={busy || !canUseOwnKey || !activeCredentialStatus?.configured} onClick={() => onClearKey(activeModality)} size="sm" variant="danger" icon={<Trash2 size={14} />}>
+                    清除
+                  </Button>
+                </div>
               </div>
             </div>
-
-            <label className="mt-5 block text-xs font-medium text-slate-600" htmlFor="user-ai-api-key">
-              API Key
-            </label>
-            <Input
-              id="user-ai-api-key"
-              type="password"
-              disabled={!canUseOwnKey}
-              value={apiKeyInput}
-              onChange={(event) => setApiKeyInput(event.target.value)}
-              placeholder={credential?.configured ? `已配置 ···${credential.last_four || ''}` : 'sk-...'}
-              className="mt-1 rounded-xl"
-            />
-            <div className="mt-3 flex flex-wrap gap-2">
-              <Button
-                type="button"
-                disabled={busy || !canUseOwnKey || !apiKeyInput.trim()}
-                onClick={onSaveKey}
-                size="sm"
-                icon={<Save size={14} />}
-              >
-                保存
-              </Button>
-              <Button
-                type="button"
-                disabled={busy || !canUseOwnKey || (!apiKeyInput.trim() && !credential?.configured)}
-                onClick={onTestKey}
-                size="sm"
-                variant="secondary"
-                icon={<FlaskConical size={14} />}
-              >
-                {apiKeyInput.trim() ? '测试当前 Key' : '测试已保存 Key'}
-              </Button>
-              <Button
-                type="button"
-                disabled={busy || !canUseOwnKey || !credential?.configured}
-                onClick={onClearKey}
-                size="sm"
-                variant="danger"
-                icon={<Trash2 size={14} />}
-              >
-                清除
-              </Button>
-            </div>
-
-            <div className="mt-5 flex items-center gap-3 border-t border-[#e5edf8] pt-4 text-xs text-slate-500">
-              {credential?.configured ? (
-                <CheckCircle2 size={16} className="shrink-0 text-emerald-600" aria-hidden="true" />
-              ) : (
-                <ShieldCheck size={16} className="shrink-0 text-slate-400" aria-hidden="true" />
-              )}
-              <span>
-                {credential?.configured
-                  ? `当前凭据已保存，验证状态：${credential.status || '待验证'}。`
-                  : '保存并通过测试后，即可在账户概览中切换为「我的 Key」。'}
-              </span>
-            </div>
           </div>
-        </div>
+        </div>,
+        document.body,
       ) : null}
 
       {activeTab === 'models' ? (

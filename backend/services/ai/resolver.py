@@ -130,9 +130,10 @@ def begin_ai_call(
     price_snap = None
 
     if mode == "user_key":
-        api_key = load_user_api_key_plain(db, user_id)
+        api_key = load_user_api_key_plain(db, user_id, modality)
         if not api_key:
-            raise HTTPException(403, "请先在用户中心配置 API Key，或切换到平台账户模式")
+            labels = {"text": "文本", "image": "图片", "video": "视频"}
+            raise HTTPException(403, f"请先在用户中心配置{labels.get(modality, modality)} API Key，或切换到平台账户模式")
     else:
         api_key = load_platform_key(channel)
         if not api_key:

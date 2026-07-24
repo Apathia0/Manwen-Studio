@@ -3,8 +3,12 @@ from types import SimpleNamespace
 
 import pytest
 from fastapi import HTTPException
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
 
 import main as main_mod
+from database import Base
+from models import User
 from routers import points_ai
 from routers import video as video_router
 from services.ai import channels, credentials
@@ -12,6 +16,80 @@ from services.ai.crypto_secrets import encrypt_secret
 from services.ai import resolver as ai_resolver
 from services import deepseek, image2, video_api
 from schemas import VideoShotUpdate
+
+
+def _modality_credential_session():
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    db = sessionmaker(bind=engine, expire_on_commit=False)()
+    user = User(
+        email="modality-credentials@example.com",
+        password_hash="test",
+        name="modality-credentials",
+        role="user",
+        status="active",
+        email_verified=True,
+    )
+    db.add(user)
+    db.flush()
+    return db, user
+
+
+def test_modality_key_falls_back_to_legacy_only_before_any_slot_exists():
+    db, user = _modality_credential_session()
+    credentials.save_user_api_key(db, user.id, "legacy-secret")
+    assert credentials.load_user_api_key_plain(db, user.id, "image") == "legacy-secret"
+    legacy_summary = credentials.serialize_modality_credentials(db, user.id)
+    assert legacy_summary["configured_count"] == 3
+
+    credentials.clear_user_modality_api_key(db, user.id, "image")
+
+    assert credentials.load_user_api_key_plain(db, user.id, "image") is None
+    assert credentials.load_user_api_key_plain(db, user.id, "text") == "legacy-secret"
+    assert credentials.load_user_api_key_plain(db, user.id, "video") == "legacy-secret"
+
+
+def test_first_modality_save_preserves_legacy_key_for_other_modalities():
+    db, user = _modality_credential_session()
+    credentials.save_user_api_key(db, user.id, "legacy-secret")
+
+    credentials.save_user_modality_api_key(db, user.id, "image", "image-secret")
+
+    assert credentials.load_user_api_key_plain(db, user.id, "text") == "legacy-secret"
+    assert credentials.load_user_api_key_plain(db, user.id, "image") == "image-secret"
+    assert credentials.load_user_api_key_plain(db, user.id, "video") == "legacy-secret"
+
+
+def test_modality_credentials_are_independent_and_aggregated():
+    db, user = _modality_credential_session()
+    credentials.save_user_modality_api_key(db, user.id, "text", "text-secret")
+    credentials.save_user_modality_api_key(db, user.id, "image", "image-secret")
+
+    assert credentials.load_user_api_key_plain(db, user.id, "text") == "text-secret"
+    assert credentials.load_user_api_key_plain(db, user.id, "image") == "image-secret"
+    assert credentials.load_user_api_key_plain(db, user.id, "video") is None
+    assert db.query(credentials.UserAiModalityCredential).filter(
+        credentials.UserAiModalityCredential.user_id == user.id
+    ).count() == 3
+    result = credentials.serialize_modality_credentials(db, user.id)
+    assert result["configured_count"] == 2
+    assert result["credentials"]["text"]["last_four"] == "cret"
+    assert result["credentials"]["video"]["configured"] is False
+
+
+def test_legacy_save_and_clear_updates_all_modality_slots():
+    db, user = _modality_credential_session()
+    credentials.save_shared_api_key_to_all_modalities(db, user.id, "shared-secret")
+    assert all(
+        credentials.load_user_api_key_plain(db, user.id, modality) == "shared-secret"
+        for modality in credentials.MODALITIES
+    )
+
+    credentials.clear_all_user_api_keys(db, user.id)
+    assert all(
+        credentials.load_user_api_key_plain(db, user.id, modality) is None
+        for modality in credentials.MODALITIES
+    )
 
 
 def test_validate_user_base_url_accepts_public_https(monkeypatch):
@@ -376,7 +454,7 @@ def test_spoofed_image_key_header_does_not_bypass_platform_billing(monkeypatch):
 def test_user_upstream_override_uses_encrypted_user_key(monkeypatch):
     monkeypatch.setattr(main_mod, "_user_api_override_capabilities", lambda user, db: {"can_override_api_key": True, "can_override_api_url": True})
     monkeypatch.setattr(channels, "validate_user_base_url", lambda value: value.rstrip("/"))
-    monkeypatch.setattr(credentials, "load_user_api_key_plain", lambda db, user_id: "user-secret")
+    monkeypatch.setattr(credentials, "load_user_api_key_plain", lambda db, user_id, modality=None: "user-secret")
     request = SimpleNamespace(
         headers={
             "x-image-base-url": "https://image.example.com/v1/",
@@ -527,7 +605,7 @@ def test_custom_video_upstream_forces_lingdong_for_submit_snapshot_and_job_resol
 
 def test_video_job_runtime_keeps_original_key_after_user_rotates_key(monkeypatch):
     monkeypatch.setattr(channels, "validate_user_base_url", lambda value: value.rstrip("/"))
-    monkeypatch.setattr(credentials, "load_user_api_key_plain", lambda db, user_id: "rotated-key")
+    monkeypatch.setattr(credentials, "load_user_api_key_plain", lambda db, user_id, modality=None: "rotated-key")
     monkeypatch.setattr(
         main_mod,
         "_user_api_override_capabilities",

@@ -1101,6 +1101,26 @@ class UserAiCredential(Base):
     updated_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
 
 
+class UserAiModalityCredential(Base):
+    """用户按 AI 模态保存的加密 API Key。"""
+
+    __tablename__ = "user_ai_modality_credentials"
+    __table_args__ = (
+        CheckConstraint("modality IN ('text', 'image', 'video')", name="ck_user_ai_modality_credentials_modality"),
+        UniqueConstraint("user_id", "modality", name="uq_user_ai_modality_credentials_user_modality"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    modality: Mapped[str] = mapped_column(String(20), nullable=False)
+    secret_ciphertext: Mapped[str | None] = mapped_column(Text, nullable=True)
+    key_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    last_four: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="empty")
+    last_validated_at: Mapped[datetime.datetime | None] = mapped_column(DateTime, nullable=True)
+    updated_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
 class UserAiPreference(Base):
     """用户默认凭据模式与默认模型"""
 
