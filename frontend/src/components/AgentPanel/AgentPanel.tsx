@@ -312,7 +312,16 @@ export default function AgentPanel({
         setConversations(items);
         if (activeConversationId === conversationId || activeConversationId === null) {
           setActiveConversationId(detail.id);
-          setMessages(detail.messages.map(mapConversationMessage));
+          const serverMessages = detail.messages.map(mapConversationMessage);
+          setMessages((currentMessages) => {
+            const localLast = currentMessages[currentMessages.length - 1];
+            const serverIsBehindOptimisticReply = (
+              localLast?.role === 'assistant'
+              && Boolean(localLast.content)
+              && serverMessages.length < currentMessages.length
+            );
+            return serverIsBehindOptimisticReply ? currentMessages : serverMessages;
+          });
           setPendingChanges(pending.changes ?? []);
           setPendingRunId(null);
         }
@@ -420,8 +429,9 @@ export default function AgentPanel({
             return updated;
           });
         },
-        onDone: (_content: string, changes?: PendingChangeItem[], runId?: string) => {
+        onDone: (content: string, changes?: PendingChangeItem[], runId?: string) => {
           abortRef.current = null;
+          const settledContent = content || accumulated;
           setStreamContent('');
           setStreaming(false);
           if (changes && changes.length > 0) {
@@ -435,7 +445,7 @@ export default function AgentPanel({
             if (lastIndex >= 0 && updated[lastIndex].role === 'assistant') {
               updated[lastIndex] = {
                 ...updated[lastIndex],
-                content: accumulated || updated[lastIndex].content,
+                content: settledContent || updated[lastIndex].content,
                 toolCalls: Array.from(toolCallMap.values()),
               };
             }
@@ -445,13 +455,14 @@ export default function AgentPanel({
         },
         onError: ({ message, code }) => {
           abortRef.current = null;
+          const errorContent = `${accumulated}${accumulated ? '\n\n' : ''}错误: ${message}`;
           setMessages((prev) => {
             const updated = [...prev];
             const lastIndex = updated.length - 1;
             if (lastIndex >= 0 && updated[lastIndex].role === 'assistant') {
               updated[lastIndex] = {
                 ...updated[lastIndex],
-                content: `错误: ${message}`,
+                content: errorContent,
               };
             }
             return updated;

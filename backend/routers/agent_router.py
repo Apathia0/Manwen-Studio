@@ -82,6 +82,20 @@ def _conversation_title_from_text(content: str) -> str:
     return normalized[:30]
 
 
+def _settle_agent_response_content(
+    streamed_parts: list[str],
+    final_content: str = "",
+    suffix: str = "",
+) -> str:
+    """以完整流式内容为准，避免最终事件只含最后一轮文本时截断回复。"""
+    streamed_content = "".join(streamed_parts).strip()
+    settled = streamed_content or str(final_content or "").strip()
+    normalized_suffix = str(suffix or "").strip()
+    if normalized_suffix:
+        return f"{settled}\n\n{normalized_suffix}".strip()
+    return settled
+
+
 def _require_conversation(
     db: Session,
     *,
@@ -856,14 +870,16 @@ async def agent_chat(
                     try:
                         payload = json.loads(event.get("data", "{}"))
                         final_content = str(payload.get("content") or "").strip()
+                        settled_content = _settle_agent_response_content(collected, final_content)
+                        payload["content"] = settled_content
                         payload["run_id"] = run_id
                         event = {**event, "data": json.dumps(payload, ensure_ascii=False)}
                     except Exception:
                         final_content = ""
+                        settled_content = _settle_agent_response_content(collected)
                     finalize_pending_once()
-                    settled_content = final_content or "".join(collected)
-                    if final_content and not collected:
-                        collected.append(final_content)
+                    if settled_content and not collected:
+                        collected.append(settled_content)
                     settle_billing(success=True)
                     persist_assistant_message(settled_content)
                     release_run_once()
@@ -875,7 +891,9 @@ async def agent_chat(
                     except Exception:
                         error_text = ""
                     if error_text:
-                        persist_assistant_message(f"错误: {error_text}")
+                        persist_assistant_message(
+                            _settle_agent_response_content(collected, suffix=f"错误: {error_text}")
+                        )
                 # SSE 也做一层清洗，避免上游工具结果或异常文本直接暴露给浏览器。
                 if event_type in {"token", "done", "error", "tool"}:
                     try:
@@ -891,7 +909,7 @@ async def agent_chat(
                 yield event
 
             if not assistant_saved:
-                persist_assistant_message("".join(collected))
+                persist_assistant_message(_settle_agent_response_content(collected))
             if not stream_failed:
                 settle_billing(success=True)
             elif not billing_state["finished"]:
@@ -907,7 +925,9 @@ async def agent_chat(
             error_code = str(getattr(exc, "code", "agent_stream_failed") or "agent_stream_failed")
             settle_billing(success=bool(collected), error_code=None if collected else "stream_failed")
             if not assistant_saved:
-                persist_assistant_message(f"执行失败：{public_message}")
+                persist_assistant_message(
+                    _settle_agent_response_content(collected, suffix=f"执行失败：{public_message}")
+                )
             yield {"event": "error", "data": json.dumps({"error": public_message, "code": error_code}, ensure_ascii=False)}
         finally:
             heartbeat_task.cancel()

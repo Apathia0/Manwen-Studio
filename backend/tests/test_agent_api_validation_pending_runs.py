@@ -40,6 +40,24 @@ def test_agent_chat_defaults_to_read_only_analyze_mode():
     assert body.mode == "analyze"
 
 
+def test_agent_response_settlement_prefers_complete_streamed_content():
+    settled = agent_router._settle_agent_response_content(
+        ["完整分析第一段。", "完整分析第二段。", "最终建议。"],
+        "最终建议。",
+    )
+
+    assert settled == "完整分析第一段。完整分析第二段。最终建议。"
+
+
+def test_agent_response_settlement_preserves_partial_content_on_error():
+    settled = agent_router._settle_agent_response_content(
+        ["已经完成的分析。"],
+        suffix="错误: 上游请求失败",
+    )
+
+    assert settled == "已经完成的分析。\n\n错误: 上游请求失败"
+
+
 def test_agent_workflow_context_requires_necessary_ids():
     with pytest.raises(ValidationError, match="workflow_id"):
         AgentChatIn(conversation_id=1, message="测试", workflow_type="video")

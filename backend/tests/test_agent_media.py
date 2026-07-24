@@ -17,7 +17,7 @@ from database import Base
 from models import AgentAttachment
 from services import agent_service as agent_service_module
 from services.agent_media import _extract_document_text, _extract_document_text_safely, multimodal_content, resolve_attachments
-from services.token_utils import emergency_compact_messages, split_messages_for_compression
+from services.token_utils import emergency_compact_messages, estimate_messages_tokens, split_messages_for_compression
 from services.token_utils import should_compress_messages
 
 
@@ -180,10 +180,22 @@ class _FakeAgentUnsupportedMaxTokensResponse(_FakeAgentContextErrorResponse):
         return b'{"error":{"type":"invalid_request_error","message":"Unsupported parameter max_tokens; use max_completion_tokens instead"}}'
 
 
-def _agent_sse_response(content: str, finish_reason: str, tool_calls: list[dict] | None = None) -> list[str]:
+class _FakeAgentToolProtocolErrorResponse(_FakeAgentContextErrorResponse):
+    async def aread(self):
+        return b'{"error":{"type":"invalid_request_error","message":"Invalid tool_call_id in tool message"}}'
+
+
+def _agent_sse_response(
+    content: str,
+    finish_reason: str,
+    tool_calls: list[dict] | None = None,
+    reasoning_content: str = "",
+) -> list[str]:
     delta: dict = {}
     if content:
         delta["content"] = content
+    if reasoning_content:
+        delta["reasoning_content"] = reasoning_content
     if tool_calls:
         delta["tool_calls"] = tool_calls
     data = {"choices": [{"delta": delta, "finish_reason": finish_reason}]}
@@ -453,7 +465,7 @@ async def test_agent_context_limit_after_read_tool_compresses_and_retries(monkey
         if message.get("role") == "assistant" and message.get("tool_calls")
     )
     assert retry_messages[assistant_index + 1]["role"] == "tool"
-    assert retry_messages[assistant_index + 1]["tool_call_id"] == "call-read"
+    assert retry_messages[assistant_index + 1]["tool_call_id"] == retry_messages[assistant_index]["tool_calls"][0]["id"]
     assert retry_messages[assistant_index]["content"] == ""
     assert json.loads(retry_messages[assistant_index]["tool_calls"][0]["function"]["arguments"]) == {}
     assert json.loads(next(event for event in events if event["event"] == "done")["data"])["content"] == "压缩后完成"
@@ -534,6 +546,78 @@ def test_safe_upstream_error_details_only_returns_controlled_metadata():
     assert "sk-secret-value" not in "".join((code, error_type, message_hash))
 
 
+def test_upstream_error_classifies_reasoning_content_without_logging_message():
+    message = "The `reasoning_content` in the thinking mode must be passed back to the API."
+
+    assert agent_service_module._classify_upstream_error(message) == "reasoning_content"
+    assert agent_service_module._safe_upstream_error_details(message)[2] == "ed2cbaabf042848d"
+
+
+def test_framework_request_is_not_misclassified_as_chapter_content_write():
+    assert not agent_service_module._has_chapter_content_write_intent("按照此方案，先生成第181-191章框架")
+    assert agent_service_module._has_chapter_content_write_intent("按照此方案，先生成第181章正文")
+    assert not agent_service_module._has_chapter_content_write_intent("不要写正文，只生成第181章框架")
+    assert not agent_service_module._has_chapter_content_write_intent("不写正文，只生成第181章框架")
+    assert not agent_service_module._has_chapter_content_write_intent("稍后再写正文，现在只做框架")
+    assert not agent_service_module._has_chapter_content_write_intent("不要继续写正文，只做框架")
+    assert not agent_service_module._has_chapter_content_write_intent("先别急着写正文，只做框架")
+    assert not agent_service_module._has_chapter_content_write_intent("不再写正文，只做框架")
+    assert not agent_service_module._has_chapter_content_write_intent("不能写正文，只做框架")
+    assert not agent_service_module._has_chapter_content_write_intent("不可写正文，只做框架")
+    assert not agent_service_module._has_chapter_content_write_intent("不应该写正文，只做框架")
+    assert not agent_service_module._has_chapter_content_write_intent("不需要写正文，只做框架")
+    assert not agent_service_module._has_chapter_content_write_intent("生成第181-191章后续第三卷的完整详细章节规划")
+    assert not agent_service_module._has_chapter_content_write_intent("生成第181-191章后续部分每一章的完整详细故事框架")
+    assert agent_service_module._has_chapter_content_write_intent("先生成第181章框架，再写第182章")
+    assert agent_service_module._has_chapter_content_write_intent("先生成第181章框架再写第182章")
+    assert agent_service_module._has_chapter_content_write_intent("不但要写正文，还要写两章")
+    assert agent_service_module._has_chapter_content_write_intent("不得不写正文")
+    assert agent_service_module._has_chapter_content_write_intent("不能不写正文")
+
+
+def test_execute_intent_distinguishes_confirmation_from_immediate_write():
+    deferred = "请检查当前故事的框架结构，提出优化建议并允许我确认后进行调整。"
+
+    assert agent_service_module._requests_confirmation_before_write(deferred)
+    assert not agent_service_module._has_immediate_write_intent(deferred)
+    assert not agent_service_module._has_immediate_write_intent("帮我优化故事框架")
+    assert agent_service_module._has_immediate_write_intent("请修改故事框架")
+    assert agent_service_module._has_immediate_write_intent("请立即只修改角色名，不改其他内容")
+    assert agent_service_module._has_immediate_write_intent("请立即只修改角色名，不要改其他内容")
+    assert agent_service_module._has_immediate_write_intent("无需确认，立即修改故事框架")
+    assert agent_service_module._has_immediate_write_intent("不用确认，马上删除第3章")
+    assert not agent_service_module._has_immediate_write_intent("请不要立即修改故事框架")
+    assert not agent_service_module._has_immediate_write_intent("请不要修改故事框架，马上执行检查并告诉我结果")
+    assert not agent_service_module._has_immediate_write_intent("请不要修改故事框架，马上优化你的分析过程并给建议")
+    assert agent_service_module._has_immediate_write_intent("请立即修改故事框架")
+    assert agent_service_module._has_immediate_write_intent("就按上述方案执行修改")
+    assert agent_service_module._has_chapter_content_write_intent("不是不写正文")
+
+
+def test_reasoning_content_is_counted_and_preserved_by_emergency_compaction():
+    messages = [
+        {"role": "system", "content": "系统"},
+        {
+            "role": "assistant",
+            "reasoning_content": "推理过程" * 20,
+            "tool_calls": [{
+                "id": "call-reasoning",
+                "type": "function",
+                "function": {"name": "get_story_overview", "arguments": "{}"},
+            }],
+        },
+        {"role": "tool", "tool_call_id": "call-reasoning", "content": "{}"},
+    ]
+
+    assert estimate_messages_tokens(messages) > estimate_messages_tokens([
+        {key: value for key, value in message.items() if key != "reasoning_content"}
+        for message in messages
+    ])
+    compacted = emergency_compact_messages(messages)
+    assistant_message = next(message for message in compacted if message.get("role") == "assistant")
+    assert assistant_message["reasoning_content"] == "推理过程" * 20
+
+
 def test_history_compression_keeps_tool_exchange_atomic():
     messages = [
         {"role": "user", "content": f"旧消息 {index}"}
@@ -594,6 +678,385 @@ async def test_agent_normalizes_missing_tool_id_and_invalid_arguments(monkeypatc
     assert normalized_call["function"]["arguments"] == "{}"
     assert tool_message["tool_call_id"] == normalized_call["id"]
     assert json.loads(next(event for event in events if event["event"] == "done")["data"])["content"] == "已恢复"
+
+
+@pytest.mark.asyncio
+async def test_agent_tool_protocol_error_flattens_completed_exchange_without_reexecution(monkeypatch):
+    tool_call = [{
+        "index": 0,
+        "id": "provider/id:unsupported",
+        "function": {"name": "bulk_add_chapter_plans", "arguments": '{"count":11}'},
+    }]
+    payloads = _install_agent_stream_client(
+        monkeypatch,
+        [
+            _agent_sse_response("", "tool_calls", tool_calls=tool_call),
+            _FakeAgentToolProtocolErrorResponse(),
+            _agent_sse_response("已完成第181至191章框架", "stop"),
+        ],
+    )
+    service = agent_service_module.AgentService()
+    execute_count = 0
+
+    async def fake_execute(_name, _args):
+        nonlocal execute_count
+        execute_count += 1
+        return '{"ok":true,"count":11}'
+
+    monkeypatch.setattr(service.tool_registry, "execute", fake_execute)
+
+    events = [
+        event
+        async for event in service.run_stream(
+            messages=[{"role": "user", "content": "补充后续十一章框架"}],
+            story_context="第九幕尚无章节",
+            api_key="test-key",
+            mode="execute",
+        )
+    ]
+
+    assert execute_count == 1
+    assert len(payloads) == 3
+    assert any(message.get("role") == "tool" for message in payloads[1]["messages"])
+    assert not any(message.get("role") == "tool" for message in payloads[2]["messages"])
+    flattened = next(
+        message for message in payloads[2]["messages"]
+        if "kind=completed_tools" in str(message.get("content") or "")
+    )
+    assert "bulk_add_chapter_plans" in flattened["content"]
+    assert "不得重复执行这些工具" in flattened["content"]
+    assert json.loads(next(event for event in events if event["event"] == "done")["data"])["content"] == "已完成第181至191章框架"
+
+
+@pytest.mark.asyncio
+async def test_agent_replays_reasoning_content_for_deepseek_tool_followup(monkeypatch):
+    tool_call = [{
+        "index": 0,
+        "id": "call-reasoning",
+        "function": {"name": "get_story_overview", "arguments": "{}"},
+    }]
+    first_response = [
+        f'data: {json.dumps({"choices": [{"delta": {"reasoning_content": "先读取"}, "finish_reason": None}]}, ensure_ascii=False)}',
+        f'data: {json.dumps({"choices": [{"delta": {"reasoning_content": "故事概览", "tool_calls": tool_call}, "finish_reason": "tool_calls"}]}, ensure_ascii=False)}',
+        "data: [DONE]",
+    ]
+    payloads = _install_agent_stream_client(
+        monkeypatch,
+        [first_response, _agent_sse_response("分析完成", "stop")],
+    )
+    service = agent_service_module.AgentService()
+
+    async def fake_execute(_name, _args):
+        return '{"ok":true}'
+
+    monkeypatch.setattr(service.tool_registry, "execute", fake_execute)
+
+    async for _ in service.run_stream(
+        messages=[{"role": "user", "content": "分析故事"}],
+        story_context="测试上下文",
+        api_key="test-key",
+        mode="analyze",
+    ):
+        pass
+
+    assistant_message = next(
+        message for message in payloads[1]["messages"]
+        if message.get("role") == "assistant" and message.get("tool_calls")
+    )
+    assert assistant_message["reasoning_content"] == "先读取故事概览"
+    assert assistant_message["content"] == ""
+
+
+@pytest.mark.asyncio
+async def test_agent_done_contains_all_text_across_tool_iterations(monkeypatch):
+    tool_call = [{
+        "index": 0,
+        "id": "call-full-response",
+        "function": {"name": "get_story_overview", "arguments": "{}"},
+    }]
+    _install_agent_stream_client(
+        monkeypatch,
+        [
+            _agent_sse_response("前置框架分析。", "tool_calls", tool_calls=tool_call),
+            _agent_sse_response("最终优化建议。", "stop"),
+        ],
+    )
+    service = agent_service_module.AgentService()
+
+    async def fake_execute(_name, _args):
+        return '{"ok":true}'
+
+    monkeypatch.setattr(service.tool_registry, "execute", fake_execute)
+
+    events = [
+        event
+        async for event in service.run_stream(
+            messages=[{"role": "user", "content": "检查故事框架"}],
+            story_context="测试上下文",
+            api_key="test-key",
+            mode="analyze",
+        )
+    ]
+
+    streamed_content = "".join(
+        json.loads(event["data"])["content"]
+        for event in events
+        if event["event"] == "token"
+    )
+    done_content = json.loads(next(event for event in events if event["event"] == "done")["data"])["content"]
+    assert streamed_content == "前置框架分析。最终优化建议。"
+    assert done_content == streamed_content
+
+
+@pytest.mark.asyncio
+async def test_execute_mode_waits_for_confirmation_without_write_correction(monkeypatch):
+    tool_call = [{
+        "index": 0,
+        "id": "call-framework-analysis",
+        "function": {"name": "get_story_overview", "arguments": "{}"},
+    }]
+    payloads = _install_agent_stream_client(
+        monkeypatch,
+        [
+            _agent_sse_response("", "tool_calls", tool_calls=tool_call),
+            _agent_sse_response("数据已全部获取。以下是完整框架分析，请确认后再调整。", "stop"),
+        ],
+    )
+    service = agent_service_module.AgentService()
+
+    async def fake_execute(_name, _args):
+        return '{"ok":true}'
+
+    monkeypatch.setattr(service.tool_registry, "execute", fake_execute)
+
+    events = [
+        event
+        async for event in service.run_stream(
+            messages=[{
+                "role": "user",
+                "content": "请检查当前故事的框架结构，提出优化建议并允许我确认后进行调整。",
+            }],
+            story_context="测试上下文",
+            api_key="test-key",
+            mode="execute",
+        )
+    ]
+
+    assert len(payloads) == 2
+    done_content = json.loads(next(event for event in events if event["event"] == "done")["data"])["content"]
+    assert done_content == "数据已全部获取。以下是完整框架分析，请确认后再调整。"
+    assert "检测到未实际写入" not in done_content
+
+
+@pytest.mark.asyncio
+async def test_video_execute_mode_respects_confirmation_before_mutation(monkeypatch):
+    prompt = "先分析分镜问题，等我确认后再调整"
+    assert agent_service_module.has_video_mutation_intent(prompt)
+    payloads = _install_agent_stream_client(
+        monkeypatch,
+        [_agent_sse_response("分镜分析完成，请确认后再调整。", "stop")],
+    )
+
+    events = [
+        event
+        async for event in agent_service_module.AgentService().run_stream(
+            messages=[{"role": "user", "content": prompt}],
+            story_context="测试上下文",
+            api_key="test-key",
+            mode="execute",
+            workflow_type="video",
+            workflow_id=1,
+        )
+    ]
+
+    assert len(payloads) == 1
+    done_content = json.loads(next(event for event in events if event["event"] == "done")["data"])["content"]
+    assert done_content == "分镜分析完成，请确认后再调整。"
+
+
+@pytest.mark.asyncio
+async def test_immediate_execute_write_correction_is_limited_to_one_retry(monkeypatch):
+    payloads = _install_agent_stream_client(
+        monkeypatch,
+        [
+            _agent_sse_response("修改已完成。", "stop"),
+            _agent_sse_response("修改已完成。", "stop"),
+        ],
+    )
+
+    with pytest.raises(agent_service_module.AgentWriteNotExecutedError):
+        async for _ in agent_service_module.AgentService().run_stream(
+            messages=[{"role": "user", "content": "请立即修改故事框架"}],
+            story_context="测试上下文",
+            api_key="test-key",
+            mode="execute",
+        ):
+            pass
+
+    assert len(payloads) == 2
+
+
+@pytest.mark.asyncio
+async def test_agent_preserves_repeated_stream_delta_fragments(monkeypatch):
+    def stream_line(delta: dict, finish_reason: str | None) -> str:
+        return "data: " + json.dumps(
+            {"choices": [{"delta": delta, "finish_reason": finish_reason}]},
+            ensure_ascii=False,
+        )
+
+    first_response = [
+        stream_line({
+            "reasoning_content": "想",
+            "tool_calls": [{
+                "index": 0,
+                "id": "call-delta",
+                "function": {"name": "get_story_overview", "arguments": '{"value":"'},
+            }],
+        }, None),
+        stream_line({
+            "reasoning_content": "想",
+            "tool_calls": [{"index": 0, "function": {"arguments": "a"}}],
+        }, None),
+        stream_line({"tool_calls": [{"index": 0, "function": {"arguments": "a"}}]}, None),
+        stream_line({"tool_calls": [{"index": 0, "function": {"arguments": '"}'}}]}, "tool_calls"),
+        "data: [DONE]",
+    ]
+    payloads = _install_agent_stream_client(
+        monkeypatch,
+        [first_response, _agent_sse_response("完成", "stop")],
+    )
+    service = agent_service_module.AgentService()
+    executed_args: list[dict] = []
+
+    async def fake_execute(_name, args):
+        executed_args.append(args)
+        return '{"ok":true}'
+
+    monkeypatch.setattr(service.tool_registry, "execute", fake_execute)
+
+    async for _ in service.run_stream(
+        messages=[{"role": "user", "content": "分析故事"}],
+        story_context="测试上下文",
+        api_key="test-key",
+        mode="analyze",
+    ):
+        pass
+
+    assert executed_args == [{"value": "aa"}]
+    assistant_message = next(
+        message for message in payloads[1]["messages"]
+        if message.get("role") == "assistant" and message.get("tool_calls")
+    )
+    assert assistant_message["reasoning_content"] == "想想"
+
+
+@pytest.mark.asyncio
+async def test_agent_executes_complete_tool_call_even_when_finish_reason_is_stop(monkeypatch):
+    tool_call = [{
+        "index": 0,
+        "id": "call-stop-tool",
+        "function": {"name": "get_story_overview", "arguments": "{}"},
+    }]
+    payloads = _install_agent_stream_client(
+        monkeypatch,
+        [
+            _agent_sse_response("", "stop", tool_calls=tool_call),
+            _agent_sse_response("分析完成", "stop"),
+        ],
+    )
+    service = agent_service_module.AgentService()
+    execute_count = 0
+
+    async def fake_execute(_name, _args):
+        nonlocal execute_count
+        execute_count += 1
+        return '{"ok":true}'
+
+    monkeypatch.setattr(service.tool_registry, "execute", fake_execute)
+
+    async for _ in service.run_stream(
+        messages=[{"role": "user", "content": "分析故事"}],
+        story_context="测试上下文",
+        api_key="test-key",
+        mode="analyze",
+    ):
+        pass
+
+    assert execute_count == 1
+    assert any(message.get("role") == "tool" for message in payloads[1]["messages"])
+
+
+@pytest.mark.asyncio
+async def test_agent_does_not_execute_tool_from_content_filter_finish(monkeypatch):
+    tool_call = [{
+        "index": 0,
+        "id": "call-filtered",
+        "function": {"name": "update_chapter_content", "arguments": '{"chapter_id":1}'},
+    }]
+    _install_agent_stream_client(
+        monkeypatch,
+        [_agent_sse_response("", "content_filter", tool_calls=tool_call)],
+    )
+    service = agent_service_module.AgentService()
+    execute_count = 0
+
+    async def fake_execute(_name, _args):
+        nonlocal execute_count
+        execute_count += 1
+        return '{"ok":true}'
+
+    monkeypatch.setattr(service.tool_registry, "execute", fake_execute)
+
+    async for _ in service.run_stream(
+        messages=[{"role": "user", "content": "检查内容"}],
+        story_context="测试上下文",
+        api_key="test-key",
+        mode="analyze",
+    ):
+        pass
+
+    assert execute_count == 0
+
+
+@pytest.mark.asyncio
+async def test_agent_does_not_execute_write_tool_without_final_finish_reason(monkeypatch):
+    interrupted_response = [
+        "data: " + json.dumps({
+            "choices": [{
+                "delta": {
+                    "tool_calls": [{
+                        "index": 0,
+                        "id": "call-interrupted",
+                        "function": {
+                            "name": "update_chapter_content",
+                            "arguments": '{"chapter_id":1,"content":"正文"}',
+                        },
+                    }],
+                },
+                "finish_reason": None,
+            }],
+        }, ensure_ascii=False),
+    ]
+    _install_agent_stream_client(monkeypatch, [interrupted_response])
+    service = agent_service_module.AgentService()
+    execute_count = 0
+
+    async def fake_execute(_name, _args):
+        nonlocal execute_count
+        execute_count += 1
+        return '{"ok":true}'
+
+    monkeypatch.setattr(service.tool_registry, "execute", fake_execute)
+
+    async for _ in service.run_stream(
+        messages=[{"role": "user", "content": "检查内容"}],
+        story_context="测试上下文",
+        api_key="test-key",
+        mode="analyze",
+    ):
+        pass
+
+    assert execute_count == 0
 
 
 @pytest.mark.asyncio
@@ -689,6 +1152,48 @@ async def test_agent_skips_repeated_write_tool_id_across_iterations(monkeypatch)
 
     assert execute_count == 1
     assert json.loads(next(event for event in events if event["event"] == "done")["data"])["content"] == "写入完成"
+
+
+@pytest.mark.asyncio
+async def test_agent_allows_same_write_with_new_tool_id_across_iterations(monkeypatch):
+    first_call = [{
+        "index": 0,
+        "id": "call-write-first",
+        "function": {"name": "update_chapter_content", "arguments": '{"chapter_id":1,"content":"正文"}'},
+    }]
+    repeated_call = [{
+        "index": 0,
+        "id": "call-write-second",
+        "function": {"name": "update_chapter_content", "arguments": '{"content":"正文","chapter_id":1}'},
+    }]
+    _install_agent_stream_client(
+        monkeypatch,
+        [
+            _agent_sse_response("", "tool_calls", tool_calls=first_call),
+            _agent_sse_response("", "tool_calls", tool_calls=repeated_call),
+            _agent_sse_response("写入完成", "stop"),
+        ],
+    )
+    service = agent_service_module.AgentService()
+    execute_count = 0
+
+    async def fake_execute(_name, _args):
+        nonlocal execute_count
+        execute_count += 1
+        return '{"ok":true}'
+
+    monkeypatch.setattr(service.tool_registry, "execute", fake_execute)
+    monkeypatch.setattr(service.tool_registry, "is_write_tool", lambda name: name == "update_chapter_content")
+
+    async for _ in service.run_stream(
+        messages=[{"role": "user", "content": "更新章节正文"}],
+        story_context="测试上下文",
+        api_key="test-key",
+        mode="execute",
+    ):
+        pass
+
+    assert execute_count == 2
 
 
 @pytest.mark.asyncio

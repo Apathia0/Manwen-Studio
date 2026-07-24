@@ -69,6 +69,9 @@ def estimate_messages_tokens(messages: list[dict]) -> int:
                     total += estimate_tokens(str(item.get("text", "")))
                 else:
                     total += estimate_tokens(str(item))
+        reasoning_content = msg.get("reasoning_content", "")
+        if isinstance(reasoning_content, str):
+            total += estimate_tokens(reasoning_content)
         # tool_calls 的 token
         tool_calls = msg.get("tool_calls")
         if isinstance(tool_calls, list):
