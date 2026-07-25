@@ -105,6 +105,8 @@ from schemas import (
     ImportCreateRequest,
     ImportParseResponse,
     MangaImageOut,
+    MangaStoryboardImportCommitIn,
+    MangaStoryboardImportPreviewIn,
     OnboardingConfirmIn,
     OnboardingMessageIn,
     OnboardingMessageOut,
@@ -163,6 +165,17 @@ from services.chapter_quality import finalize_generated_chapter_content, format_
 from services.image2 import edit_existing_image, generate_cover_image, generate_manga_image
 from services.media_locator import ensure_local_media_path
 from services.scene_safety import sanitize_scene_list
+from services.manga_storyboard_import import MAX_IMPORT_BYTES, decode_uploaded_file, parse_import_text
+from services.manga_storyboard_storage import (
+    atomic_write_text,
+    canonical_scenes_hash,
+    content_revision,
+    parse_scenes_text as parse_stored_scenes_text,
+    render_scenes_text,
+    scenes_file_lock,
+    scenes_path,
+    write_scenes_text_atomic,
+)
 from services.visual_asset_generation import (
     generate_visual_asset_image,
     label_matches_visual_context,
@@ -4657,20 +4670,16 @@ def _scene_meta_path(chapter_id: int) -> Path:
 
 
 def _write_scenes_file(chapter_id: int, scenes: list[str], sanitized_indices: list[int] | None = None) -> None:
-    from services.agent_service import _render_scenes_text, _scenes_file_lock, _write_scenes_text_atomic
-
-    with _scenes_file_lock(chapter_id):
-        _write_scenes_text_atomic(chapter_id, _render_scenes_text(scenes))
+    backend_dir = Path(__file__).resolve().parent
+    with scenes_file_lock(backend_dir, chapter_id):
+        write_scenes_text_atomic(backend_dir, chapter_id, render_scenes_text(scenes))
         meta_path = _scene_meta_path(chapter_id)
         payload = {"sanitized_indices": sorted(set(sanitized_indices or []))}
-        meta_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        atomic_write_text(meta_path, json.dumps(payload, ensure_ascii=False))
 
 
 def _parse_scenes_text(raw: str) -> list[str]:
-    import re
-
-    parts = [p.strip() for p in re.split(r"(?m)^=== .*? ===\n", raw) if p.strip()]
-    return parts
+    return parse_stored_scenes_text(raw)
 
 
 def _load_scene_meta(chapter_id: int) -> dict:
@@ -8329,7 +8338,8 @@ async def set_color_mode(chapter_id: int, body: dict, request: Request, db: Sess
 # ─── Image Count ───────────────────────────────────────────
 
 DEFAULT_IMAGE_COUNT = 10
-ALLOWED_IMAGE_COUNTS = [4, 6, 8, 10, 12, 15, 20]
+MIN_IMAGE_COUNT = 1
+MAX_IMAGE_COUNT = 20
 
 
 def _resolve_style_preset_ref(db: Session, style_preset_name: str | None) -> str | None:
@@ -8392,7 +8402,7 @@ def _load_image_count(chapter_id: int) -> int:
     if p.exists():
         try:
             v = int(p.read_text(encoding="utf-8").strip())
-            if v in ALLOWED_IMAGE_COUNTS:
+            if MIN_IMAGE_COUNT <= v <= MAX_IMAGE_COUNT:
                 return v
         except (ValueError, OSError):
             pass
@@ -8402,7 +8412,7 @@ def _load_image_count(chapter_id: int) -> int:
 def _effective_image_count(chapter_id: int, user_id: int, db: Session) -> int:
     stored = _load_image_count(chapter_id)
     # 积分双轨无套餐限制，使用系统最大可用值
-    return min(stored, max(ALLOWED_IMAGE_COUNTS))
+    return min(stored, MAX_IMAGE_COUNT)
 
 
 def _chapter_has_scene_file(chapter_id: int) -> bool:
@@ -8427,7 +8437,7 @@ async def get_image_count(chapter_id: int, request: Request, db: Session = Depen
     if image_count != _load_image_count(chapter_id):
         p = _image_count_path(chapter_id)
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(str(image_count), encoding="utf-8")
+        atomic_write_text(p, str(image_count))
     return {"image_count": image_count}
 
 
@@ -8436,14 +8446,11 @@ async def set_image_count(chapter_id: int, body: dict, request: Request, db: Ses
     user = _require_user(request, db)
     _require_chapter_for_user(chapter_id, user, db)
     count = body.get("image_count", DEFAULT_IMAGE_COUNT)
-    if count not in ALLOWED_IMAGE_COUNTS:
-        raise HTTPException(400, f"image_count must be one of {ALLOWED_IMAGE_COUNTS}")
-    max_allowed = max(ALLOWED_IMAGE_COUNTS)
-    if count > max_allowed:
-        raise HTTPException(403, f"每章最多可生成 {max_allowed} 张图片")
+    if not isinstance(count, int) or isinstance(count, bool) or not MIN_IMAGE_COUNT <= count <= MAX_IMAGE_COUNT:
+        raise HTTPException(400, f"image_count must be between {MIN_IMAGE_COUNT} and {MAX_IMAGE_COUNT}")
     p = _image_count_path(chapter_id)
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(str(count), encoding="utf-8")
+    atomic_write_text(p, str(count))
     return {"ok": True, "image_count": count}
 
 
@@ -8525,20 +8532,213 @@ async def get_scenes_endpoint(chapter_id: int, request: Request, db: Session = D
 async def update_scenes_endpoint(chapter_id: int, body: dict, request: Request, db: Session = Depends(get_db)):
     """Save user-edited scene prompts."""
     user = _require_user(request, db)
-    _require_chapter_for_user(chapter_id, user, db)
+    chapter = _require_chapter_for_user(chapter_id, user, db)
     scenes = body.get("scenes", [])
     if not isinstance(scenes, list) or not all(isinstance(s, str) and s.strip() for s in scenes):
         raise HTTPException(400, "无效的场景格式")
-    if len(scenes) < 1:
-        raise HTTPException(400, "至少需要一个场景")
+    if not MIN_IMAGE_COUNT <= len(scenes) <= MAX_IMAGE_COUNT:
+        raise HTTPException(400, f"每章分镜数量必须为 {MIN_IMAGE_COUNT}-{MAX_IMAGE_COUNT} 格")
+    if getattr(chapter, "images", None):
+        path = scenes_path(Path(__file__).resolve().parent, chapter_id)
+        old_scenes = _parse_scenes_text(path.read_text(encoding="utf-8")) if path.exists() else []
+        if len(old_scenes) != len(scenes):
+            raise HTTPException(409, "当前章节已有漫画图片，改变分镜格数会导致图片错位")
 
     # 自动对齐 image_count 和分镜数量
     count_path = _image_count_path(chapter_id)
     count_path.parent.mkdir(parents=True, exist_ok=True)
-    count_path.write_text(str(len(scenes)), encoding="utf-8")
+    atomic_write_text(count_path, str(len(scenes)))
 
     _write_scenes_file(chapter_id, scenes, [])
     return {"ok": True, "image_count": len(scenes)}
+
+
+def _storyboard_import_state(chapter_id: int, db: Session) -> tuple[str, list[str], list[int]]:
+    path = scenes_path(Path(__file__).resolve().parent, chapter_id)
+    raw = path.read_text(encoding="utf-8") if path.exists() else ""
+    current_scenes = _parse_scenes_text(raw)
+    generated_indices = sorted({
+        int(row.image_number)
+        for row in db.query(MangaImage.image_number).filter(MangaImage.chapter_id == chapter_id).all()
+    })
+    return raw, current_scenes, generated_indices
+
+
+def _storyboard_import_payload(
+    chapter_id: int,
+    db: Session,
+    parsed: dict,
+    *,
+    revision: str | None = None,
+    stale_image_indices: list[int] | None = None,
+) -> dict:
+    raw, current_scenes, generated_indices = _storyboard_import_state(chapter_id, db)
+    scenes = parsed.get("scenes", [])
+    errors = list(parsed.get("errors", []))
+    structural_conflict_error = "当前章节已有漫画图片，改变分镜格数会导致图片错位；请先处理已有图片"
+    if generated_indices and len(current_scenes) != len(scenes):
+        if structural_conflict_error not in errors:
+            errors.append(structural_conflict_error)
+    computed_stale_indices = [
+        index
+        for index in generated_indices
+        if index <= len(current_scenes)
+        and index <= len(scenes)
+        and current_scenes[index - 1] != scenes[index - 1]
+    ]
+    canonical_hash = parsed.get("canonical_hash") or canonical_scenes_hash(scenes)
+    return {
+        "scenes": scenes,
+        "scene_count": len(scenes),
+        "count": len(scenes),
+        "revision": revision or content_revision(raw),
+        "canonical_hash": canonical_hash,
+        "hash": canonical_hash,
+        "warnings": list(parsed.get("warnings", [])),
+        "errors": errors,
+        "generated_image_indices": generated_indices,
+        "stale_image_indices": sorted(set(stale_image_indices or computed_stale_indices)),
+        "can_commit": not errors,
+    }
+
+
+@app.post("/api/chapters/{chapter_id}/manga-storyboard/import/preview-file")
+async def preview_manga_storyboard_file(
+    chapter_id: int,
+    request: Request,
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+):
+    user = _require_user(request, db)
+    _require_chapter_for_user(chapter_id, user, db)
+    data = await file.read(MAX_IMPORT_BYTES + 1)
+    try:
+        text_content = decode_uploaded_file(file.filename or "", data)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    parsed = parse_import_text(text_content, require_markers_for_prose=True)
+    return _storyboard_import_payload(chapter_id, db, parsed)
+
+
+@app.post("/api/chapters/{chapter_id}/manga-storyboard/import/preview")
+async def preview_manga_storyboard(
+    chapter_id: int,
+    body: MangaStoryboardImportPreviewIn,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    user = _require_user(request, db)
+    chapter = _require_chapter_for_user(chapter_id, user, db)
+    if body.source_kind == "chapter_content":
+        text_content = chapter.novel_content or ""
+    else:
+        text_content = body.content or ""
+    parsed = parse_import_text(text_content, require_markers_for_prose=True)
+    return _storyboard_import_payload(chapter_id, db, parsed)
+
+
+@app.post("/api/chapters/{chapter_id}/manga-storyboard/import/commit")
+async def commit_manga_storyboard_import(
+    chapter_id: int,
+    body: MangaStoryboardImportCommitIn,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    user = _require_user(request, db)
+    _require_chapter_for_user(chapter_id, user, db)
+    normalized_scenes = [scene.strip() for scene in body.scenes if isinstance(scene, str)]
+    errors: list[str] = []
+    if len(normalized_scenes) != len(body.scenes) or any(not scene for scene in normalized_scenes):
+        errors.append("分镜脚本必须是非空字符串数组")
+    if not MIN_IMAGE_COUNT <= len(normalized_scenes) <= MAX_IMAGE_COUNT:
+        errors.append(f"每章分镜数量必须为 {MIN_IMAGE_COUNT}-{MAX_IMAGE_COUNT} 格")
+    submitted_hash = canonical_scenes_hash(normalized_scenes)
+    if not re.fullmatch(r"[0-9a-f]{64}", body.expected_revision or ""):
+        errors.append("expected_revision 必须是 64 位小写 SHA-256")
+    if not secrets.compare_digest(submitted_hash, body.canonical_hash or ""):
+        errors.append("canonical_hash 与提交的分镜内容不一致，请重新预览")
+    active_task = db.query(BackgroundTask.id).filter(
+        BackgroundTask.task_type == "manga_generation",
+        BackgroundTask.chapter_id == chapter_id,
+        BackgroundTask.status.in_(["pending", "running", "retrying", "cancel_requested"]),
+    ).first()
+    if active_task or chapter_id in ACTIVE_MANGA_GENERATIONS:
+        errors.append("当前章节有正在进行的漫画生成任务，请等待任务结束后再导入")
+    if errors:
+        parsed = {"scenes": normalized_scenes, "warnings": [], "errors": errors, "canonical_hash": submitted_hash}
+        return JSONResponse(_storyboard_import_payload(chapter_id, db, parsed), status_code=409)
+
+    backend_dir = Path(__file__).resolve().parent
+    with scenes_file_lock(backend_dir, chapter_id):
+        raw, old_scenes, generated_indices = _storyboard_import_state(chapter_id, db)
+        current_revision = content_revision(raw)
+        active_task = db.query(BackgroundTask.id).filter(
+            BackgroundTask.task_type == "manga_generation",
+            BackgroundTask.chapter_id == chapter_id,
+            BackgroundTask.status.in_(["pending", "running", "retrying", "cancel_requested"]),
+        ).first()
+        if active_task or chapter_id in ACTIVE_MANGA_GENERATIONS:
+            parsed = {
+                "scenes": normalized_scenes,
+                "warnings": [],
+                "errors": ["当前章节有正在进行的漫画生成任务，请等待任务结束后再导入"],
+                "canonical_hash": submitted_hash,
+            }
+            return JSONResponse(_storyboard_import_payload(chapter_id, db, parsed), status_code=409)
+        if not secrets.compare_digest(current_revision, body.expected_revision):
+            parsed = {
+                "scenes": normalized_scenes,
+                "warnings": [],
+                "errors": ["分镜已被其他操作更新，请重新预览后再提交"],
+                "canonical_hash": submitted_hash,
+            }
+            return JSONResponse(_storyboard_import_payload(chapter_id, db, parsed), status_code=409)
+        if generated_indices and len(old_scenes) != len(normalized_scenes):
+            parsed = {
+                "scenes": normalized_scenes,
+                "warnings": [],
+                "errors": ["当前章节已有漫画图片，改变分镜格数会导致图片错位；请先处理已有图片"],
+                "canonical_hash": submitted_hash,
+            }
+            return JSONResponse(_storyboard_import_payload(chapter_id, db, parsed), status_code=409)
+
+        sanitized_scenes, sanitized_zero_indices = sanitize_scene_list(normalized_scenes)
+        stale_indices = [
+            index
+            for index in generated_indices
+            if index <= len(old_scenes) and old_scenes[index - 1] != sanitized_scenes[index - 1]
+        ]
+        warnings = []
+        if sanitized_zero_indices:
+            warnings.append("部分分镜包含敏感表达，提交时已自动替换")
+        if stale_indices:
+            warnings.append("部分已有图片对应的脚本已变化，建议重新生成这些图片")
+        new_text = render_scenes_text(sanitized_scenes)
+        changed = new_text != raw
+        if changed:
+            write_scenes_text_atomic(backend_dir, chapter_id, new_text)
+            atomic_write_text(_image_count_path(chapter_id), str(len(sanitized_scenes)))
+            atomic_write_text(
+                _scene_meta_path(chapter_id),
+                json.dumps({"sanitized_indices": sanitized_zero_indices}, ensure_ascii=False),
+            )
+        new_revision = content_revision(new_text if changed else raw)
+
+    parsed = {
+        "scenes": sanitized_scenes,
+        "warnings": warnings,
+        "errors": [],
+        "canonical_hash": canonical_scenes_hash(sanitized_scenes),
+    }
+    payload = _storyboard_import_payload(
+        chapter_id,
+        db,
+        parsed,
+        revision=new_revision,
+        stale_image_indices=stale_indices,
+    )
+    payload.update({"ok": True, "changed": changed})
+    return payload
 
 
 # ─── SSE for manga image generation ─────────────────────
@@ -9439,9 +9639,24 @@ async def generate_manga_stream(chapter_id: int, request: Request, db: Session =
 
     # 提交后台任务到 TaskManager
     task_id = f"manga_gen_{chapter_id}_{uuid.uuid4().hex[:12]}"
-    ACTIVE_MANGA_GENERATIONS.add(chapter_id)
     try:
-        await task_manager.submit_task(
+        # 与分镜导入共享章节锁；在登记生成状态前复核版本，关闭读取后的竞态窗口。
+        backend_dir = Path(__file__).resolve().parent
+        with scenes_file_lock(backend_dir, chapter_id):
+            latest_raw = prompts_file.read_text(encoding="utf-8") if prompts_file.exists() else ""
+            if not secrets.compare_digest(content_revision(latest_raw), content_revision(raw)):
+                raise HTTPException(409, "分镜已在生成准备期间更新，请重新发起漫画生成")
+            if chapter_id in ACTIVE_MANGA_GENERATIONS:
+                raise HTTPException(409, "此章节的漫画生成已在运行中")
+            latest_task = db.query(BackgroundTask.id).filter(
+                BackgroundTask.task_type == "manga_generation",
+                BackgroundTask.chapter_id == chapter_id,
+                BackgroundTask.status.in_(["pending", "running", "retrying", "cancel_requested"]),
+            ).first()
+            if latest_task:
+                raise HTTPException(409, "此章节的漫画生成已在运行中")
+            ACTIVE_MANGA_GENERATIONS.add(chapter_id)
+            await task_manager.submit_task(
             task_id=task_id,
             task_type="manga_generation",
             coro_func=_background_manga_generation_concurrent,
@@ -9503,7 +9718,7 @@ async def generate_manga_stream(chapter_id: int, request: Request, db: Session =
                 "asset_failed": 0,
                 "asset_billing_usage_event_id": 0,
             },
-        )
+            )
     except Exception as exc:
         ACTIVE_MANGA_GENERATIONS.discard(chapter_id)
         _finish_streaming_platform_points(

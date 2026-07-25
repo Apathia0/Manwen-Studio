@@ -1574,6 +1574,24 @@ export interface ScenesPayload {
   sanitized_indices?: number[];
 }
 
+export type MangaStoryboardImportSource = 'paste' | 'chapter_content';
+
+export interface MangaStoryboardImportResult {
+  ok?: boolean;
+  changed?: boolean;
+  scenes: string[];
+  scene_count: number;
+  count?: number;
+  revision: string;
+  canonical_hash: string;
+  hash?: string;
+  warnings: string[];
+  errors: string[];
+  generated_image_indices: number[];
+  stale_image_indices: number[];
+  can_commit: boolean;
+}
+
 export async function generateScenes(chapterId: number, signal?: AbortSignal): Promise<ScenesPayload> {
   const res = await fetch(`${BASE}/api/chapters/${chapterId}/generate-scenes`, { method: 'POST', headers: apiHeaders(), signal });
   if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
@@ -1593,6 +1611,47 @@ export async function updateScenes(chapterId: number, scenes: string[]): Promise
     body: JSON.stringify({ scenes }),
   });
   if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
+}
+
+export async function previewMangaStoryboardImport(
+  chapterId: number,
+  payload: { source_kind: MangaStoryboardImportSource; content?: string },
+): Promise<MangaStoryboardImportResult> {
+  const res = await fetch(`${BASE}/api/chapters/${chapterId}/manga-storyboard/import/preview`, {
+    method: 'POST',
+    headers: apiHeaders(true),
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '分镜脚本解析失败，请检查格式后重试'));
+  return res.json();
+}
+
+export async function previewMangaStoryboardImportFile(
+  chapterId: number,
+  file: File,
+): Promise<MangaStoryboardImportResult> {
+  const form = new FormData();
+  form.append('file', file);
+  const res = await fetch(`${BASE}/api/chapters/${chapterId}/manga-storyboard/import/preview-file`, {
+    method: 'POST',
+    headers: apiHeaders(),
+    body: form,
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '分镜文件解析失败，请检查格式后重试'));
+  return res.json();
+}
+
+export async function commitMangaStoryboardImport(
+  chapterId: number,
+  payload: { scenes: string[]; expected_revision: string; canonical_hash: string },
+): Promise<MangaStoryboardImportResult> {
+  const res = await fetch(`${BASE}/api/chapters/${chapterId}/manga-storyboard/import/commit`, {
+    method: 'POST',
+    headers: apiHeaders(true),
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '导入分镜失败，请重新预览后再试'));
+  return res.json();
 }
 
 // ─── Character Profiles ─────────────────────────────────────
@@ -1779,7 +1838,7 @@ export async function setColorMode(chapterId: number, mode: ColorMode): Promise<
 
 // ─── Image Count ─────────────────────────────────────────────
 
-export const ALLOWED_IMAGE_COUNTS = [4, 6, 8, 10, 12, 15, 20] as const;
+export const ALLOWED_IMAGE_COUNTS = Array.from({ length: 20 }, (_, index) => index + 1);
 
 export async function getImageCount(chapterId: number): Promise<number> {
   const res = await fetch(`${BASE}/api/chapters/${chapterId}/image-count`, { headers: apiHeaders() });

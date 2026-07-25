@@ -29,6 +29,11 @@ describe('normalizeErrorMessage', () => {
     const payload = JSON.stringify({ detail: { error: '图片生成失败', suggestion: '请切换模型后重试' } });
     expect(normalizeErrorMessage(payload)).toBe('图片生成失败。请切换模型后重试');
   });
+
+  it('提取分镜导入冲突的 errors 数组', () => {
+    const payload = JSON.stringify({ errors: ['分镜已被其他操作更新，请重新预览后再提交'] });
+    expect(normalizeErrorMessage(payload)).toBe('分镜已被其他操作更新，请重新预览后再提交');
+  });
 });
 
 describe('readResponseError', () => {

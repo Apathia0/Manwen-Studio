@@ -29,6 +29,8 @@ function extractPayloadMessage(value: unknown): unknown {
   const payload = value as Record<string, unknown>;
   const detail = extractPayloadMessage(payload.detail);
   if (typeof detail === 'string' && detail.trim()) return detail;
+  const errors = extractPayloadMessage(payload.errors);
+  if (typeof errors === 'string' && errors.trim()) return errors;
 
   let primary = '';
   for (const key of ['user_message', 'error', 'error_message', 'message']) {

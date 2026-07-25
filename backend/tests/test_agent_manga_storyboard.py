@@ -3,7 +3,11 @@ from types import SimpleNamespace
 
 import pytest
 
+import main
+from schemas import MangaStoryboardImportCommitIn, MangaStoryboardImportPreviewIn
 from services import agent_service as agent_service_module
+from services.manga_storyboard_import import END_MARKER, START_MARKER, parse_import_text
+from services.manga_storyboard_storage import canonical_scenes_hash, content_revision
 
 
 class FakeQuery:
@@ -219,6 +223,134 @@ def test_manga_write_rejects_unowned_chapter(manga_workspace):
     ))
 
     assert result == {"error": "章节不存在或无权访问"}
+
+
+class ImportQuery:
+    def __init__(self, rows=None, active_task=None):
+        self.rows = list(rows or [])
+        self.active_task = active_task
+
+    def filter(self, *_args):
+        return self
+
+    def all(self):
+        return list(self.rows)
+
+    def first(self):
+        return self.active_task
+
+
+class ImportDb:
+    def __init__(self, image_indices=None):
+        self.image_indices = list(image_indices or [])
+
+    def query(self, entity):
+        if getattr(entity, "key", None) == "image_number":
+            rows = [SimpleNamespace(image_number=index) for index in self.image_indices]
+            return ImportQuery(rows)
+        return ImportQuery()
+
+
+def test_import_parser_requires_markers_for_plain_content():
+    unmarked = parse_import_text("这是普通章节正文。", require_markers_for_prose=True)
+    marked = parse_import_text(
+        f"{START_MARKER}\n第一格正文\n\n第二格正文\n{END_MARKER}",
+        require_markers_for_prose=True,
+    )
+
+    assert unmarked["errors"]
+    assert marked["scenes"] == ["第一格正文", "第二格正文"]
+
+
+def test_import_parser_rejects_empty_heading_scene():
+    result = parse_import_text(
+        f"{START_MARKER}\n=== 第1格 ===\n\n=== 第2格 ===\n第二格正文\n{END_MARKER}",
+        require_markers_for_prose=True,
+    )
+
+    assert result["scenes"] == []
+    assert result["errors"] == ["第 1 格脚本为空"]
+
+
+def test_import_parser_accepts_simple_episode_headings():
+    result = parse_import_text(
+        "第一话\n画面：雨夜推门\n对白：还有人在吗？\n\n"
+        "第二话\n画面：男人抬头\n对白：等你很久了。\n\n"
+        "第三话：\n画面：两人对视",
+        require_markers_for_prose=True,
+    )
+
+    assert result["errors"] == []
+    assert result["scenes"] == [
+        "画面：雨夜推门\n对白：还有人在吗？",
+        "画面：男人抬头\n对白：等你很久了。",
+        "画面：两人对视",
+    ]
+
+
+def test_import_parser_accepts_episode_headings_up_to_twenty():
+    headings = [
+        "第一话",
+        "第二话",
+        "第三话",
+        "第四话",
+        "第五话",
+        "第六话",
+        "第七话",
+        "第八话",
+        "第九话",
+        "第十话",
+        "第十一话",
+        "第十二话",
+        "第十三话",
+        "第十四话",
+        "第十五话",
+        "第十六话",
+        "第十七话",
+        "第十八话",
+        "第十九话",
+        "第二十话",
+    ]
+    text = "\n\n".join(f"{heading}\n画面：第 {index} 格" for index, heading in enumerate(headings, start=1))
+
+    result = parse_import_text(text, require_markers_for_prose=True)
+
+    assert result["errors"] == []
+    assert len(result["scenes"]) == 20
+
+
+def test_import_preview_and_same_count_commit_report_stale_images(tmp_path, monkeypatch):
+    monkeypatch.setattr(main, "__file__", str(tmp_path / "main.py"))
+    monkeypatch.setattr(main, "_require_user", lambda *_args: SimpleNamespace(id=5))
+    chapter = SimpleNamespace(id=7, story_id=3, novel_content=(
+        f"{START_MARKER}\n旧第一格\n\n旧第二格\n{END_MARKER}"
+    ))
+    monkeypatch.setattr(main, "_require_chapter_for_user", lambda *_args: chapter)
+    db = ImportDb([1])
+    preview = asyncio.run(main.preview_manga_storyboard(
+        chapter.id,
+        MangaStoryboardImportPreviewIn(source_kind="chapter_content"),
+        SimpleNamespace(),
+        db,
+    ))
+    main._write_scenes_file(chapter.id, preview["scenes"], [])
+    raw = (tmp_path / "manga_outputs" / "chapter_7" / "scenes.txt").read_text(encoding="utf-8")
+    scenes = ["尸体位于走廊", "旧第二格"]
+
+    result = asyncio.run(main.commit_manga_storyboard_import(
+        chapter.id,
+        MangaStoryboardImportCommitIn(
+            scenes=scenes,
+            expected_revision=content_revision(raw),
+            canonical_hash=canonical_scenes_hash(scenes),
+        ),
+        SimpleNamespace(),
+        db,
+    ))
+
+    assert preview["scene_count"] == 2
+    assert result["stale_image_indices"] == [1]
+    assert "尸体" not in result["scenes"][0]
 
 
 def test_manga_context_rejects_sibling_chapter():

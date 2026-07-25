@@ -225,6 +225,17 @@ class GenerateMangaRequest(BaseModel):
     pass
 
 
+class MangaStoryboardImportPreviewIn(BaseModel):
+    source_kind: Literal["paste", "chapter_content"]
+    content: Optional[str] = None
+
+
+class MangaStoryboardImportCommitIn(BaseModel):
+    scenes: list[str]
+    expected_revision: str
+    canonical_hash: str
+
+
 # --- Framework (InkAI) ---
 class TagsSchema(BaseModel):
     type: Optional[str] = None

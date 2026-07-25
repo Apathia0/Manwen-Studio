@@ -8,7 +8,6 @@ import os
 import re
 import threading
 import uuid
-from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, AsyncGenerator
@@ -48,6 +47,10 @@ from services.framework_utils import (
     _normalize_framework_outline,
     _save_framework_snapshot,
     apply_framework_operations,
+)
+from services.manga_storyboard_storage import (
+    scenes_file_lock as _shared_scenes_file_lock,
+    write_scenes_text_atomic as _shared_write_scenes_text_atomic,
 )
 
 
@@ -1494,48 +1497,12 @@ def _scenes_revision(content: str) -> str:
     return hashlib.sha256(content.encode("utf-8")).hexdigest()
 
 
-@contextmanager
 def _scenes_file_lock(chapter_id: int):
-    """跨进程串行化同一章节的分镜文件写入。"""
-    chapter_dir = _chapter_dir(chapter_id)
-    chapter_dir.mkdir(parents=True, exist_ok=True)
-    lock_path = chapter_dir / ".scenes.lock"
-    with lock_path.open("a+b") as lock_file:
-        if os.name == "nt":
-            import msvcrt
-
-            lock_file.seek(0, os.SEEK_END)
-            if lock_file.tell() == 0:
-                lock_file.write(b"\0")
-                lock_file.flush()
-            lock_file.seek(0)
-            msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
-            try:
-                yield
-            finally:
-                lock_file.seek(0)
-                msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
-        else:
-            import fcntl
-
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-            try:
-                yield
-            finally:
-                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+    return _shared_scenes_file_lock(BACKEND_DIR, chapter_id)
 
 
 def _write_scenes_text_atomic(chapter_id: int, content: str) -> None:
-    chapter_dir = _chapter_dir(chapter_id)
-    chapter_dir.mkdir(parents=True, exist_ok=True)
-    scenes_path = _scenes_path(chapter_id)
-    temporary_path = scenes_path.with_suffix(f".txt.agent-{uuid.uuid4().hex}.tmp")
-    try:
-        temporary_path.write_text(content, encoding="utf-8")
-        temporary_path.replace(scenes_path)
-    finally:
-        if temporary_path.exists():
-            temporary_path.unlink()
+    _shared_write_scenes_text_atomic(BACKEND_DIR, chapter_id, content)
 
 
 def _record_scenes_pending_change(chapter: Chapter, old_text: str) -> None:
@@ -3570,8 +3537,8 @@ def _save_manga_storyboard_scenes(
         return {"error": "expected_revision 必须是读取分镜时返回的 64 位版本值"}
     if not isinstance(scenes, list):
         return {"error": "scenes 必须是字符串数组"}
-    if len(scenes) > 200:
-        return {"error": "单个章节最多支持 200 格分镜"}
+    if not 1 <= len(scenes) <= 20:
+        return {"error": "每章分镜数量必须为 1-20 格"}
     normalized_scenes = [str(scene or "").strip() for scene in scenes]
     if any(not scene for scene in normalized_scenes):
         return {"error": "分镜脚本不能为空；如需删除格子，请使用整表替换并移除该项"}

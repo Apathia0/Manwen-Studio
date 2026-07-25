@@ -6,6 +6,7 @@ import { ImageRedrawModal } from './shared/ImageRedrawModal';
 import ImageZoomView from './shared/ImageZoomView';
 import StyleSelectorModal from './StyleSelectorModal';
 import MangaAssetManagementModal from './MangaAssetManagementModal';
+import MangaStoryboardImportModal from './MangaStoryboardImportModal';
 import {
   generateMangaStream,
   generateScenes, scenesFromSelection,
@@ -222,19 +223,8 @@ const ASPECT_RATIO_OPTIONS = [
   { label: '16:9', size: '1792x1024' },
 ] as const;
 
-function entitlementNumber(entitlements: Record<string, any> | null | undefined, key: string, fallback: number): number {
-  const raw = entitlements?.entitlements?.[key];
-  if (typeof raw === 'number' && Number.isFinite(raw)) return raw;
-  if (typeof raw === 'string') {
-    const parsed = Number(raw);
-    if (Number.isFinite(parsed)) return parsed;
-  }
-  return fallback;
-}
-
 export default memo(function MangaPanel({
   chapter,
-  entitlements,
   onChapterRefresh,
   selectedText,
   chapterContext,
@@ -271,6 +261,7 @@ export default memo(function MangaPanel({
   const [refMax, setRefMax] = useState(4);
   const [refUploading, setRefUploading] = useState(false);
   const [assetModalOpen, setAssetModalOpen] = useState(false);
+  const [storyboardImportOpen, setStoryboardImportOpen] = useState(false);
   // 仅保留历史引用图的兼容状态，旧垫图界面不再对用户开放。
   const [refModalOpen, setRefModalOpen] = useState(false);
   const [legacyReferenceUiEnabled] = useState(false);
@@ -319,15 +310,8 @@ const [aspectRatio, setAspectRatio] = useState<string>('9:16');
   const [charRefModalUploading, setCharRefModalUploading] = useState(false);
   const charRefFileRef = useRef<HTMLInputElement>(null);
   const parsedCharacterCards = useMemoValue(() => parseCharacterAppearanceCards(charText), [charText]);
-  const maxImagesPerChapter = useMemoValue(() => {
-    const configured = entitlementNumber(entitlements, 'manga.max_image_count_per_chapter', DEFAULT_IMAGE_COUNT);
-    const allowedCounts = ALLOWED_IMAGE_COUNTS.filter((count) => count <= configured);
-    return allowedCounts.length > 0 ? allowedCounts[allowedCounts.length - 1] : ALLOWED_IMAGE_COUNTS[0];
-  }, [entitlements]);
-  const selectableImageCounts = useMemoValue(
-    () => ALLOWED_IMAGE_COUNTS.filter((count) => count <= maxImagesPerChapter),
-    [maxImagesPerChapter],
-  );
+  const maxImagesPerChapter = 20;
+  const selectableImageCounts = ALLOWED_IMAGE_COUNTS;
   const refImageByLabel = useMemoValue(() => {
     const map = new Map<string, RefImage>();
     refImages.forEach((img) => {
@@ -388,6 +372,7 @@ const [aspectRatio, setAspectRatio] = useState<string>('9:16');
     setRefImages([]);
     setRefSource('none');
     setAssetModalOpen(false);
+    setStoryboardImportOpen(false);
     setAutoAssetExtractionEnabled(true);
     setAutoAssetExtractionTypes(['character', 'scene', 'prop']);
     setColorModeState('bw');
@@ -1488,6 +1473,17 @@ const [aspectRatio, setAspectRatio] = useState<string>('9:16');
               >
                 <Download size={13} />
                 下载
+              </button>
+            )}
+            {!generating && (phase === 'idle' || phase === 'editing-scenes') && (
+              <button
+                type="button"
+                onClick={() => setStoryboardImportOpen(true)}
+                disabled={!chapter}
+                className="flex items-center gap-1.5 rounded-md border border-blue-200 bg-blue-50 px-3 py-1.5 text-xs font-medium text-blue-700 transition-colors hover:bg-blue-100 disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                <Upload size={13} />
+                导入分镜
               </button>
             )}
             {!generating && (phase === 'idle' || phase === 'editing-scenes') && (
@@ -2716,6 +2712,28 @@ const [aspectRatio, setAspectRatio] = useState<string>('9:16');
           onAssetsChanged={() => onChapterRefresh?.(chapter.id)}
         />
       )}
+
+      {storyboardImportOpen && chapter ? (
+        <MangaStoryboardImportModal
+          chapterId={chapter.id}
+          chapterTitle={`第 ${chapter.chapter_number} 话 · ${chapter.title || '未命名章节'}`}
+          onClose={() => setStoryboardImportOpen(false)}
+          onImported={async (result) => {
+            setScenes(result.scenes);
+            setSanitizedSceneIdxs([]);
+            setImageCountState(result.scene_count);
+            setFailedSceneIdx(-1);
+            setEditingIdx(-1);
+            setPhase('editing-scenes');
+            if (result.stale_image_indices.length > 0) {
+              toast.warning(`已导入 ${result.scene_count} 格分镜；第 ${result.stale_image_indices.join('、')} 格图片需要重新生成`);
+            } else {
+              toast.success(`已导入 ${result.scene_count} 格分镜`);
+            }
+            await onChapterRefresh?.(chapter.id);
+          }}
+        />
+      ) : null}
 
       {refPreviewImage && (
         <RefPreviewModal
