@@ -2563,16 +2563,19 @@ async def expand_chapter_to_content(
                     "creation_pack": pipeline_result.get("creation_pack") if isinstance(pipeline_result.get("creation_pack"), dict) else None,
                     "attempts": pipeline_result.get("attempts", 0),
                     "finish_reason": pipeline_result.get("finish_reason"),
+                    "stages": pipeline_result.get("stages") if isinstance(pipeline_result.get("stages"), dict) else {},
+                    "editor_review_skipped": bool(pipeline_result.get("editor_review_skipped")),
                 }
             if pipeline_result.get("content") and pipeline_result.get("ok"):
                 return str(pipeline_result["content"])
-            if pipeline_result.get("content"):
-                raise ChapterPipelineQualityError(pipeline_result.get("review"))
-            logging.warning("三角色章节链路未产出正文，回退旧章节扩写链路: %s", pipeline_result.get("review"))
+            review = pipeline_result.get("review") if isinstance(pipeline_result.get("review"), dict) else {}
+            if not pipeline_result.get("content"):
+                review = {**review, "reason": review.get("reason") or "pipeline_empty_content"}
+            raise ChapterPipelineQualityError(review)
         except ChapterPipelineQualityError:
             raise
-        except Exception as exc:
-            logging.warning("三角色章节链路执行失败，回退旧章节扩写链路: %s", exc)
+        except Exception:
+            raise
 
     MAX_RETRIES = 2
 
@@ -3922,7 +3925,7 @@ async def _parse_lite_chunk(
         "response_format": {"type": "json_object"},
     }
 
-    async with httpx.AsyncClient(timeout=600) as client:
+    async with httpx.AsyncClient(timeout=None) as client:
         resp = await client.post(
             f"{runtime_base_url()}/chat/completions",
             json=payload,

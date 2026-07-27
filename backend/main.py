@@ -11532,6 +11532,23 @@ async def continue_framework_endpoint(story_id: int, request: Request, db: Sessi
     }
 
 
+def _build_chapter_pipeline_error_quality_gate(review: Any) -> dict[str, Any]:
+    """把章节流水线异常中的结构化门禁报告映射为 API 详情输入。"""
+    error_review = review if isinstance(review, dict) else {"reason": str(review)}
+    error_deterministic = error_review.get("deterministic") if isinstance(error_review.get("deterministic"), dict) else {}
+    return {
+        "ok": False,
+        "content": "",
+        "attempts": error_review.get("attempts", 0),
+        "report": {
+            "deterministic": error_deterministic,
+            "review": error_review,
+            "pipeline_quality_error": True,
+        },
+        "source": "expand_chapter",
+    }
+
+
 @app.post("/api/stories/{story_id}/expand-chapter", response_model=ChapterOut)
 async def expand_chapter_endpoint(story_id: int, request: Request, db: Session = Depends(get_db)):
     user = _require_user(request, db)
@@ -11632,27 +11649,21 @@ async def expand_chapter_endpoint(story_id: int, request: Request, db: Session =
             db=db,
         )
     except ChapterPipelineQualityError as exc:
-        quality_gate = {
-            "ok": False,
-            "content": "",
-            "attempts": 0,
-            "report": {
-                "deterministic": {},
-                "review": exc.review if isinstance(exc.review, dict) else {"reason": str(exc)},
-                "pipeline_quality_error": True,
-            },
-            "source": "expand_chapter",
-        }
+        quality_gate = _build_chapter_pipeline_error_quality_gate(exc.review)
         raise HTTPException(status_code=422, detail=format_quality_gate_detail(quality_gate)) from exc
     pipeline_result = chapter_runtime_context.get("_last_chapter_pipeline_result") if isinstance(chapter_runtime_context, dict) else {}
     review = pipeline_result.get("review") if isinstance(pipeline_result, dict) else {}
+    deterministic_report = review.get("deterministic") if isinstance(review, dict) and isinstance(review.get("deterministic"), dict) else {}
     quality_gate = {
         "ok": True,
         "content": novel_content,
         "report": {
-            "deterministic": {"ok": True, "skipped": True, "reason": "pipeline_already_approved"},
+            "deterministic": deterministic_report,
             "review": review if isinstance(review, dict) else {},
-            "pipeline_approved": True,
+            "pipeline_ok": bool(pipeline_result.get("ok")) if isinstance(pipeline_result, dict) else False,
+            "pipeline_mode": "two_stage",
+            "stages": pipeline_result.get("stages") if isinstance(pipeline_result, dict) else {},
+            "editor_review_skipped": bool(pipeline_result.get("editor_review_skipped")) if isinstance(pipeline_result, dict) else True,
         },
     }
 

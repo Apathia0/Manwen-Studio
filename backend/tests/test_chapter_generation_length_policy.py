@@ -67,6 +67,8 @@ def test_length_policy_constants_are_aligned():
     assert "标准章节必须控制在 2200-3000 字，理想约 2500 字" in main_text
     assert '"prompt.chapter_generation": NOVEL_PROMPT_SEED' in main_text
     assert '"prompt.reference_chapter": REFERENCE_CHAPTER_PROMPT_SEED' in main_text
+    assert '"pipeline_mode": "two_stage"' in main_text
+    assert '"editor_review_skipped": bool(pipeline_result.get("editor_review_skipped"))' in main_text
 
     assert "CHAPTER_CUSTOM_STYLE_MAX_CHARS = 16000" in prompt_template_text
     assert "超过2000字符限制" not in prompt_template_text
@@ -118,7 +120,7 @@ def test_expand_chapter_prefers_multi_agent_pipeline(monkeypatch):
     assert calls[0]["chapter_info"]["chapter_number"] == 1
 
 
-def test_expand_chapter_rejects_failed_multi_agent_candidate(monkeypatch):
+def test_expand_chapter_rejects_failed_two_stage_pipeline(monkeypatch):
     import services.deepseek as ds
     import services.chapter_agents as ca
 
@@ -130,6 +132,7 @@ def test_expand_chapter_rejects_failed_multi_agent_candidate(monkeypatch):
             "creation_pack": {"writer_brief": "测试"},
             "attempts": 3,
             "finish_reason": "length",
+            "editor_review_skipped": True,
         }
 
     monkeypatch.setattr(ca, "run_chapter_creation_pipeline", failed_pipeline)
@@ -142,16 +145,50 @@ def test_expand_chapter_rejects_failed_multi_agent_candidate(monkeypatch):
     assert cached["ok"] is False
     assert cached["review"]["overall_score"] == 60
     assert cached["finish_reason"] == "length"
+    assert cached["editor_review_skipped"] is True
+    assert "fallback" not in cached
+
+
+def test_expand_chapter_pipeline_exception_never_enters_legacy_generator(monkeypatch):
+    import services.deepseek as ds
+    import services.chapter_agents as ca
+
+    async def failed_pipeline(**kwargs):
+        raise RuntimeError("pipeline unavailable")
+
+    class ForbiddenAsyncClient:
+        def __init__(self, *args, **kwargs):
+            raise AssertionError("首次两阶段入口失败后不得调用旧生成链路")
+
+    monkeypatch.setattr(ca, "run_chapter_creation_pipeline", failed_pipeline)
+    monkeypatch.setattr(ds.httpx, "AsyncClient", ForbiddenAsyncClient)
+
+    with pytest.raises(RuntimeError, match="pipeline unavailable"):
+        _run(ds.expand_chapter_to_content({"title": "测试故事"}, {"chapter_number": 1}, api_key="sk-test"))
+
+
+def test_expand_chapter_empty_pipeline_content_is_quality_failure(monkeypatch):
+    import services.deepseek as ds
+    import services.chapter_agents as ca
+
+    async def empty_pipeline(**kwargs):
+        return {"ok": True, "content": "", "review": {"skipped": True}}
+
+    class ForbiddenAsyncClient:
+        def __init__(self, *args, **kwargs):
+            raise AssertionError("空正文不得降级到旧生成链路")
+
+    monkeypatch.setattr(ca, "run_chapter_creation_pipeline", empty_pipeline)
+    monkeypatch.setattr(ds.httpx, "AsyncClient", ForbiddenAsyncClient)
+
+    with pytest.raises(ds.ChapterPipelineQualityError) as exc_info:
+        _run(ds.expand_chapter_to_content({"title": "测试故事"}, {"chapter_number": 1}, api_key="sk-test"))
+
+    assert exc_info.value.review["reason"] == "pipeline_empty_content"
 
 
 def test_expand_chapter_rewrites_when_text_exceeds_standard(monkeypatch):
     import services.deepseek as ds
-    import services.chapter_agents as ca
-
-    async def force_legacy_pipeline(**kwargs):
-        raise RuntimeError("force legacy fallback")
-
-    monkeypatch.setattr(ca, "run_chapter_creation_pipeline", force_legacy_pipeline)
 
     calls: list[dict] = []
     responses = ["长" * 3100, "准" * 2500]
@@ -174,7 +211,9 @@ def test_expand_chapter_rewrites_when_text_exceeds_standard(monkeypatch):
     monkeypatch.setattr(ds, "DEEPSEEK_BASE_URL", "https://example.invalid")
     monkeypatch.setattr(ds, "DEEPSEEK_MODEL", "deepseek-chat")
 
-    content = _run(ds.expand_chapter_to_content({"title": "测试故事"}, {"chapter_number": 1}, api_key="sk-test"))
+    content = _run(ds.expand_chapter_to_content(
+        {"title": "测试故事"}, {"chapter_number": 1}, api_key="sk-test", _retry_count=1,
+    ))
 
     assert content == "准" * 2500
     assert len(calls) == 2
@@ -188,12 +227,6 @@ def test_expand_chapter_rewrites_when_text_exceeds_standard(monkeypatch):
 
 def test_expand_chapter_retries_when_text_is_too_short(monkeypatch):
     import services.deepseek as ds
-    import services.chapter_agents as ca
-
-    async def force_legacy_pipeline(**kwargs):
-        raise RuntimeError("force legacy fallback")
-
-    monkeypatch.setattr(ca, "run_chapter_creation_pipeline", force_legacy_pipeline)
 
     calls: list[dict] = []
     responses = ["短" * 1800, "足" * 2300]
@@ -216,7 +249,9 @@ def test_expand_chapter_retries_when_text_is_too_short(monkeypatch):
     monkeypatch.setattr(ds, "DEEPSEEK_BASE_URL", "https://example.invalid")
     monkeypatch.setattr(ds, "DEEPSEEK_MODEL", "deepseek-chat")
 
-    content = _run(ds.expand_chapter_to_content({"title": "测试故事"}, {"chapter_number": 1}, api_key="sk-test"))
+    content = _run(ds.expand_chapter_to_content(
+        {"title": "测试故事"}, {"chapter_number": 1}, api_key="sk-test", _retry_count=1,
+    ))
 
     assert content == "足" * 2300
     assert len(calls) == 2
@@ -225,12 +260,6 @@ def test_expand_chapter_retries_when_text_is_too_short(monkeypatch):
 
 def test_expand_chapter_treats_finish_reason_length_as_rewrite(monkeypatch):
     import services.deepseek as ds
-    import services.chapter_agents as ca
-
-    async def force_legacy_pipeline(**kwargs):
-        raise RuntimeError("force legacy fallback")
-
-    monkeypatch.setattr(ca, "run_chapter_creation_pipeline", force_legacy_pipeline)
 
     calls: list[dict] = []
     responses = [("截" * 2500, "length"), ("整" * 2450, "stop")]
@@ -254,7 +283,9 @@ def test_expand_chapter_treats_finish_reason_length_as_rewrite(monkeypatch):
     monkeypatch.setattr(ds, "DEEPSEEK_BASE_URL", "https://example.invalid")
     monkeypatch.setattr(ds, "DEEPSEEK_MODEL", "deepseek-chat")
 
-    content = _run(ds.expand_chapter_to_content({"title": "测试故事"}, {"chapter_number": 1}, api_key="sk-test"))
+    content = _run(ds.expand_chapter_to_content(
+        {"title": "测试故事"}, {"chapter_number": 1}, api_key="sk-test", _retry_count=1,
+    ))
 
     assert content == "整" * 2450
     assert len(calls) == 2
@@ -263,12 +294,6 @@ def test_expand_chapter_treats_finish_reason_length_as_rewrite(monkeypatch):
 
 def test_expand_chapter_does_not_fallback_to_invalid_overlong_candidate(monkeypatch):
     import services.deepseek as ds
-    import services.chapter_agents as ca
-
-    async def force_legacy_pipeline(**kwargs):
-        raise RuntimeError("force legacy fallback")
-
-    monkeypatch.setattr(ca, "run_chapter_creation_pipeline", force_legacy_pipeline)
 
     calls: list[dict] = []
     responses = ["长" * 3100, "更长" * 1050, "最长" * 1100]
@@ -291,10 +316,12 @@ def test_expand_chapter_does_not_fallback_to_invalid_overlong_candidate(monkeypa
     monkeypatch.setattr(ds, "DEEPSEEK_BASE_URL", "https://example.invalid")
     monkeypatch.setattr(ds, "DEEPSEEK_MODEL", "deepseek-chat")
 
-    content = _run(ds.expand_chapter_to_content({"title": "测试故事"}, {"chapter_number": 1}, api_key="sk-test"))
+    content = _run(ds.expand_chapter_to_content(
+        {"title": "测试故事"}, {"chapter_number": 1}, api_key="sk-test", _retry_count=1,
+    ))
 
-    assert content == "最长" * 1100
-    assert len(calls) == 3
+    assert content == "更长" * 1050
+    assert len(calls) == 2
 
 
 def test_creation_pack_boundary_filters_current_chapter_generic_terms():
@@ -690,7 +717,7 @@ def test_boundary_tail_repair_only_when_editor_mentions_real_boundary_issue():
     assert ca._review_mentions_boundary_issue(hard_review) is True
 
 
-def test_pipeline_uses_best_candidate_when_later_revision_gets_worse(monkeypatch):
+def test_pipeline_writes_once_and_never_calls_editor(monkeypatch):
     import services.chapter_agents as ca
 
     usable = "陈玄压住左臂伤口，拖着布袋回到安全区域。" + "伤口还在发热。" * 390
@@ -704,26 +731,7 @@ def test_pipeline_uses_best_candidate_when_later_revision_gets_worse(monkeypatch
         return {"content": worse, "finish_reason": "length"}
 
     async def fake_editor(**kwargs):
-        content = kwargs["content"]
-        if content == usable:
-            return {
-                "approved": False,
-                "overall_score": 86,
-                "findings": ["可读性达标，仅建议轻微润色。"],
-                "rewrite_brief": ["无需返修，主体可用。"],
-                "local_safety": {"ok": True, "char_count": ca.count_chapter_chars(content), "hard_failures": []},
-            }
-        return {
-            "approved": False,
-            "overall_score": 0,
-            "findings": ["正文生成被模型截断。"],
-            "rewrite_brief": ["必须重写。"],
-            "local_safety": {
-                "ok": False,
-                "char_count": ca.count_chapter_chars(content),
-                "hard_failures": [{"code": "length.too_long", "message": "正文字数超过 3000 字"}],
-            },
-        }
+        raise AssertionError("两阶段流水线不得调用编辑 Agent")
 
     monkeypatch.setattr(ca, "write_chapter_from_pack", fake_writer)
     monkeypatch.setattr(ca, "review_chapter_with_editor_agent", fake_editor)
@@ -740,10 +748,111 @@ def test_pipeline_uses_best_candidate_when_later_revision_gets_worse(monkeypatch
         max_revisions=2,
     ))
 
-    assert result["ok"] is False
+    assert result["ok"] is True
     assert result["content"] == usable
-    assert result["best_candidate_source"] == "editor_review"
-    assert len(writes) == 2
+    assert result["review"]["skipped"] is True
+    assert result["review"]["reason"] == "editor_agent_removed"
+    assert result["attempts"] == 1
+    assert len(writes) == 1
+
+
+def test_pipeline_local_gate_allows_short_non_empty_writer_output(monkeypatch):
+    import services.chapter_agents as ca
+
+    initial = "陈玄扣住短刀，母亲守着药碗，他听见门外有人经过。" * 90
+    fragment = "陈玄把瓶口拧紧，门外脚步忽然停住。" * 10
+
+    async def fake_writer(**kwargs):
+        return {"content": fragment, "finish_reason": "stop"}
+
+    monkeypatch.setattr(ca, "write_chapter_from_pack", fake_writer)
+
+    result = _run(ca.run_chapter_creation_pipeline(
+        story_context={"title": "测试故事"},
+        chapter_info={"chapter_number": 6, "title": "异兽初猎，技术制胜"},
+        api_key="sk-test",
+        initial_content=initial,
+        skip_initial_review=True,
+        creation_pack={
+            "chapter_task": {"chapter_number": 6, "title": "异兽初猎，技术制胜"},
+            "plot_beats": ["猎杀", "采集", "余波"],
+            "do_not_write": [],
+        },
+        max_revisions=1,
+    ))
+
+    assert result["ok"] is True
+    assert result["content"] == fragment
+    assert result["review"]["skipped"] is True
+    assert result["review"]["deterministic"]["ok"] is True
+    assert "fallback" not in result
+
+
+def test_pipeline_builds_pack_once_and_reused_pack_skips_pack_agent(monkeypatch):
+    import services.chapter_agents as ca
+
+    content = "陈玄扣住短刀，沿着石壁逼近洞口。" * 150
+    calls = {"pack": 0, "writer": 0}
+
+    async def fake_pack(**kwargs):
+        calls["pack"] += 1
+        return {"chapter_task": kwargs["chapter_info"], "chapter_boundary": {}, "do_not_write": []}
+
+    async def fake_writer(**kwargs):
+        calls["writer"] += 1
+        return {"content": content, "finish_reason": "stop"}
+
+    monkeypatch.setattr(ca, "build_chapter_creation_pack", fake_pack)
+    monkeypatch.setattr(ca, "write_chapter_from_pack", fake_writer)
+
+    built = _run(ca.run_chapter_creation_pipeline(
+        story_context={"title": "测试故事"},
+        chapter_info={"chapter_number": 6},
+        api_key="sk-test",
+    ))
+    reused = _run(ca.run_chapter_creation_pipeline(
+        story_context={"title": "测试故事"},
+        chapter_info={"chapter_number": 6},
+        api_key="sk-test",
+        creation_pack={"chapter_task": {"chapter_number": 6}, "chapter_boundary": {}},
+    ))
+
+    assert built["ok"] is True
+    assert reused["ok"] is True
+    assert calls == {"pack": 1, "writer": 2}
+    assert built["stages"]["creation_pack"] == "built"
+    assert reused["stages"]["creation_pack"] == "reused"
+
+
+def test_finalize_pipeline_error_never_calls_legacy_remote_editor(monkeypatch):
+    import services.chapter_agents as ca
+    import services.chapter_quality as cq
+
+    content = "陈玄扣住短刀，沿着石壁逼近洞口。" * 150
+
+    async def failed_pipeline(**kwargs):
+        raise RuntimeError("writer unavailable")
+
+    async def forbidden_editor(*args, **kwargs):
+        raise AssertionError("流水线异常时不得调用旧远程编辑")
+
+    monkeypatch.setattr(ca, "run_chapter_creation_pipeline", failed_pipeline)
+    monkeypatch.setattr(cq, "review_chapter_for_qidian", forbidden_editor)
+
+    result = _run(cq.finalize_generated_chapter_content(
+        content=content,
+        story_context={"title": "测试故事"},
+        chapter_info={"chapter_number": 6},
+        api_key="sk-test",
+        source="unit-test",
+    ))
+
+    assert result["ok"] is True
+    assert result["report"]["review"] == {
+        "skipped": True,
+        "reason": "pipeline_error_no_remote_editor",
+    }
+    assert result["report"]["editor_review_skipped"] is True
 
 
 def test_creation_pack_adds_default_scene_budget():
@@ -813,8 +922,9 @@ def test_length_finish_reason_inside_range_forces_revision_when_editor_not_passe
     assert reason == "model_length_finish"
 
 
-def test_pipeline_accepts_editor_pass_even_when_finish_reason_length(monkeypatch):
+def test_pipeline_rejects_length_finish_reason_even_with_complete_sentence(monkeypatch):
     import services.chapter_agents as ca
+    import services.chapter_quality as cq
 
     content = "陈玄完成当前章的观察、交锋、采集和撤离。" * 120
     calls = {"write": 0, "review": 0}
@@ -832,12 +942,7 @@ def test_pipeline_accepts_editor_pass_even_when_finish_reason_length(monkeypatch
 
     async def fake_review(**kwargs):
         calls["review"] += 1
-        return {
-            "approved": True,
-            "overall_score": 92,
-            "rewrite_brief": ["无需修改，直接通过。"],
-            "local_safety": {"ok": True, "char_count": ca.count_chapter_chars(content), "hard_failures": []},
-        }
+        raise AssertionError("两阶段流水线不得调用编辑 Agent")
 
     monkeypatch.setattr(ca, "build_chapter_creation_pack", fake_pack)
     monkeypatch.setattr(ca, "write_chapter_from_pack", fake_write)
@@ -852,11 +957,26 @@ def test_pipeline_accepts_editor_pass_even_when_finish_reason_length(monkeypatch
         )
     )
 
-    assert result["ok"] is True
+    assert result["ok"] is False
     assert result["content"] == content
     assert result["attempts"] == 1
     assert result["finish_reason"] == "length"
-    assert calls == {"write": 1, "review": 1}
+    assert calls == {"write": 1, "review": 0}
+    assert result["review"]["reason"] == "editor_agent_removed"
+    assert result["review"]["hard_failures"][0]["code"] == "generation.token_limit"
+    assert any(
+        item["code"] == "generation.token_limit"
+        for item in result["review"]["deterministic"]["hard_failures"]
+    )
+    detail = cq.format_quality_gate_detail({
+        "ok": False,
+        "attempts": result["attempts"],
+        "report": {
+            "deterministic": result["review"]["deterministic"],
+            "review": result["review"],
+        },
+    })
+    assert detail["review_hard_failures"][0]["code"] == "generation.token_limit"
 
 
 def test_writer_local_sanitize_removes_zero_tolerance_terms():
@@ -953,6 +1073,144 @@ def test_finalize_reuses_cached_pipeline_result(monkeypatch):
     assert result["report"]["reused_pipeline_result"] is True
 
 
+def test_finalize_accepts_editor_removed_cache_without_score(monkeypatch):
+    import services.chapter_agents as ca
+    import services.chapter_quality as cq
+
+    async def fail_if_called(**kwargs):
+        raise AssertionError("命中两阶段缓存时不应重跑流水线")
+
+    monkeypatch.setattr(ca, "run_chapter_creation_pipeline", fail_if_called)
+    content = "陈玄扣住短刀，沿着石壁逼近洞口。" * 150
+    deterministic = cq.run_deterministic_gate(content, {"chapter_number": 6})
+    story_context = {
+        "_last_chapter_pipeline_result": {
+            "ok": True,
+            "content_sha256": hashlib.sha256(content.encode("utf-8")).hexdigest(),
+            "char_count": deterministic["char_count"],
+            "review": {
+                "skipped": True,
+                "reason": "editor_agent_removed",
+                "deterministic": deterministic,
+                "local_safety": {"ok": True, "hard_failures": []},
+            },
+            "attempts": 1,
+        }
+    }
+
+    result = _run(cq.finalize_generated_chapter_content(
+        content=content,
+        story_context=story_context,
+        chapter_info={"chapter_number": 6},
+        api_key="sk-test",
+        source="unit-test",
+    ))
+
+    assert result["ok"] is True
+    assert result["report"]["reused_pipeline_reason"] == "deterministic_pass_editor_removed"
+    assert "overall_score" not in result["report"]["review"]
+
+
+def _two_stage_cache(content, cq, *, ok=True, finish_reason="stop"):
+    char_count = cq.count_content_chars(content)
+    cached_deterministic = {
+        "ok": ok,
+        "char_count": char_count,
+        "hard_failures": [] if ok else [{"code": "generation.token_limit", "severity": "hard"}],
+        "warnings": [],
+    }
+    return {
+        "ok": ok,
+        "content_sha256": hashlib.sha256(content.encode("utf-8")).hexdigest(),
+        "char_count": char_count,
+        "review": {
+            "skipped": True,
+            "reason": "editor_agent_removed",
+            "deterministic": cached_deterministic,
+            "local_safety": {"ok": True, "char_count": char_count, "hard_failures": []},
+        },
+        "attempts": 1,
+        "finish_reason": finish_reason,
+    }
+
+
+@pytest.mark.parametrize("chars", [1200, 3301, 5000])
+def test_finalize_reuses_two_stage_cache_for_any_non_empty_length(monkeypatch, chars):
+    import services.chapter_agents as ca
+    import services.chapter_quality as cq
+
+    async def fail_if_called(**kwargs):
+        raise AssertionError("缓存终检不应重跑两阶段流水线")
+
+    monkeypatch.setattr(ca, "run_chapter_creation_pipeline", fail_if_called)
+    content = "文" * chars
+    result = _run(cq.finalize_generated_chapter_content(
+        content=content,
+        story_context={"_last_chapter_pipeline_result": _two_stage_cache(content, cq)},
+        chapter_info={"chapter_number": 6},
+        api_key="sk-test",
+        source="agent",
+        allow_pipeline_rerun=False,
+    ))
+
+    assert result["ok"] is True
+    assert result["report"]["reused_pipeline_reason"] == "deterministic_pass_editor_removed"
+    assert result["report"]["deterministic"]["ok"] is True
+    assert result["report"]["deterministic"]["char_count"] == chars
+    assert result["report"]["deterministic"]["hard_failures"] == []
+
+
+@pytest.mark.parametrize("failure_kind", ["boundary", "token_limit"])
+def test_finalize_rejects_cached_pipeline_with_hard_failure(monkeypatch, failure_kind):
+    import services.chapter_quality as cq
+
+    content = "文" * 3201
+    cached = _two_stage_cache(content, cq)
+    if failure_kind == "boundary":
+        original_gate = cq.run_deterministic_gate
+
+        def gate_with_boundary(*args, **kwargs):
+            report = original_gate(*args, **kwargs)
+            return {
+                **report,
+                "ok": False,
+                "hard_failures": [
+                    *report["hard_failures"],
+                    {"code": "boundary.future_event", "message": "写入后续章节事件", "severity": "hard"},
+                ],
+            }
+
+        monkeypatch.setattr(cq, "run_deterministic_gate", gate_with_boundary)
+    elif failure_kind == "token_limit":
+        cached["ok"] = False
+        cached["finish_reason"] = "length"
+        cached["review"]["deterministic"] = {
+            **cached["review"]["deterministic"],
+            "ok": False,
+            "hard_failures": [
+                {"code": "generation.token_limit", "message": "模型达到 token 上限", "severity": "hard"},
+            ],
+        }
+        cached["review"]["hard_failures"] = [
+            {"code": "generation.token_limit", "message": "模型达到 token 上限", "severity": "hard"},
+        ]
+
+    result = _run(cq.finalize_generated_chapter_content(
+        content=content,
+        story_context={"_last_chapter_pipeline_result": cached},
+        chapter_info={"chapter_number": 6},
+        source="agent",
+        allow_pipeline_rerun=False,
+    ))
+
+    assert result["ok"] is False
+    if failure_kind == "boundary":
+        assert result["report"]["deterministic"]["ok"] is False
+    else:
+        assert result["report"]["review"]["hard_failures"][0]["code"] == "generation.token_limit"
+        assert result["report"]["finish_reason"] == "length"
+
+
 def test_editor_hard_pass_allows_missing_local_safety():
     import services.chapter_agents as ca
 
@@ -989,7 +1247,7 @@ def test_fragment_revision_rejects_shrunken_full_draft():
     assert ca._looks_like_fragment_revision(previous, fragment, True) is True
 
 
-def test_pipeline_rejects_last_valid_score_below_editor_pass(monkeypatch):
+def test_pipeline_ignores_removed_editor_score_and_uses_local_gate(monkeypatch):
     import services.chapter_agents as ca
 
     content = "陈玄扣住短刀。母亲看着药碗。她说：别逞强。他点头：我知道。门外有人压低声音：走。" * 60
@@ -1031,10 +1289,10 @@ def test_pipeline_rejects_last_valid_score_below_editor_pass(monkeypatch):
     assert result["ok"] is False
     assert "soft_pass" not in result
     assert result["content"] == content
-    assert calls == {"write": 1, "review": 1}
+    assert calls == {"write": 1, "review": 0}
 
 
-def test_pipeline_rejects_approved_but_score_below_editor_pass(monkeypatch):
+def test_pipeline_does_not_fabricate_editor_approval_or_score(monkeypatch):
     import services.chapter_agents as ca
 
     content = "陈玄扣住短刀。母亲看着药碗。她说：别逞强。他点头：我知道。门外有人压低声音：走。" * 60
@@ -1073,10 +1331,10 @@ def test_pipeline_rejects_approved_but_score_below_editor_pass(monkeypatch):
         )
     )
 
-    assert result["ok"] is False
-    assert result["review"]["approved"] is True
-    assert result["review"]["overall_score"] == 75
-    assert calls == {"write": 1, "review": 1}
+    assert result["ok"] is True
+    assert "approved" not in result["review"]
+    assert "overall_score" not in result["review"]
+    assert calls == {"write": 1, "review": 0}
 
 
 def test_finalize_reuses_below_90_cached_pipeline_without_rerun(monkeypatch):
@@ -1630,24 +1888,37 @@ def test_repair_truncated_tail_locally_keeps_original_when_repair_too_short():
     assert repaired == content
 
 
-@pytest.mark.parametrize("chars, expected_code", [(1200, "length.too_short"), (3100, "length.too_long")])
-def test_editor_skips_remote_call_for_local_length_failure(monkeypatch, chars, expected_code):
+@pytest.mark.parametrize("chars", [1200, 3100, 5000])
+def test_local_gates_allow_any_non_empty_content_length(chars):
     import services.chapter_agents as ca
+    import services.chapter_quality as cq
 
-    async def fail_remote_call(**kwargs):
-        raise AssertionError("纯长度硬失败不应调用远程 editor")
+    content = "文" * chars
+    deterministic = cq.run_deterministic_gate(content, {"chapter_number": 4})
+    local = ca._local_safety_review(content, {})
 
-    monkeypatch.setattr(ca, "_chat_completion", fail_remote_call)
-    review = _run(ca.review_chapter_with_editor_agent(
-        creation_pack={"chapter_task": {"chapter_number": 4}, "chapter_boundary": {}},
-        content="文" * chars + "。",
-        api_key="sk-real",
-    ))
 
-    assert review["approved"] is False
-    assert review["skipped_editor"] is True
-    assert review["skip_reason"] == "local_length_hard_failure"
-    assert expected_code in {item["code"] for item in review["local_safety"]["hard_failures"]}
+    assert deterministic["ok"] is True
+    assert deterministic["char_count"] == chars
+    assert deterministic["target"] == {"min": 2200, "ideal": 2500, "max": 3000}
+    assert all(not item["code"].startswith("length.") for item in deterministic["hard_failures"])
+    assert local["ok"] is True
+    assert local["char_count"] == chars
+    assert local["target"] == {"min": 2200, "ideal": 2500, "max": 3000}
+    assert all(not item["code"].startswith("length.") for item in local["hard_failures"])
+
+
+def test_local_gates_reject_empty_content():
+    import services.chapter_agents as ca
+    import services.chapter_quality as cq
+
+    deterministic = cq.run_deterministic_gate(" \n\t", {"chapter_number": 4})
+    local = ca._local_safety_review(" \n\t", {})
+
+    assert deterministic["ok"] is False
+    assert {item["code"] for item in deterministic["hard_failures"]} == {"content.empty"}
+    assert local["ok"] is False
+    assert {item["code"] for item in local["hard_failures"]} == {"content.empty"}
 
 
 def test_pipeline_can_skip_initial_editor_for_lightweight_adjustment(monkeypatch):
@@ -1690,6 +1961,79 @@ def test_pipeline_can_skip_initial_editor_for_lightweight_adjustment(monkeypatch
     assert result["ok"] is True
     assert result["attempts"] == 1
     assert len(writer_calls) == 1
-    assert len(editor_calls) == 1
+    assert len(editor_calls) == 0
     assert writer_calls[0]["previous_draft"] == initial
-    assert writer_calls[0]["editor_feedback"]
+    assert writer_calls[0]["editor_feedback"] is None
+
+
+@pytest.mark.parametrize(
+    ("chars", "finish_reason", "expected_ok"),
+    [
+        (1200, "stop", True),
+        (5000, "stop", True),
+        (3201, "length", False),
+        (0, "stop", False),
+    ],
+)
+def test_two_stage_pipeline_keeps_single_writer_call_without_length_gate(
+    monkeypatch,
+    chars,
+    finish_reason,
+    expected_ok,
+):
+    import services.chapter_agents as ca
+
+    writer_calls: list[dict] = []
+    editor_calls: list[dict] = []
+
+    async def fake_writer(**kwargs):
+        writer_calls.append(kwargs)
+        return {"content": "文" * chars, "finish_reason": finish_reason}
+
+    async def fake_editor(**kwargs):
+        editor_calls.append(kwargs)
+        raise AssertionError("两阶段流水线不得调用编辑 Agent")
+
+    monkeypatch.setattr(ca, "write_chapter_from_pack", fake_writer)
+    monkeypatch.setattr(ca, "review_chapter_with_editor_agent", fake_editor)
+
+    result = _run(ca.run_chapter_creation_pipeline(
+        story_context={"id": 1, "title": "测试"},
+        chapter_info={"chapter_number": 4},
+        api_key="test",
+        creation_pack={"chapter_task": {"chapter_number": 4}, "chapter_boundary": {}},
+    ))
+
+    assert result["ok"] is expected_ok
+    assert result["attempts"] == 1
+    assert len(writer_calls) == 1
+    assert len(editor_calls) == 0
+    deterministic = result["review"]["deterministic"]
+    local_safety = result["review"]["local_safety"]
+    assert all(not item["code"].startswith("length.") for item in deterministic["hard_failures"])
+    assert all(not item["code"].startswith("length.") for item in local_safety["hard_failures"])
+    if finish_reason == "length":
+        assert any(item["code"] == "generation.token_limit" for item in deterministic["hard_failures"])
+    if chars == 0:
+        assert any(item["code"] == "content.empty" for item in deterministic["hard_failures"])
+        assert any(item["code"] == "content.empty" for item in local_safety["hard_failures"])
+
+
+def test_expand_chapter_quality_error_detail_preserves_deterministic_failure_report():
+    import main
+    from services.chapter_quality import format_quality_gate_detail
+
+    review = {
+        "deterministic": {
+            "ok": False,
+            "char_count": 3301,
+            "hard_failures": [{"code": "boundary.future_event", "message": "写入后续章节事件", "severity": "hard"}],
+            "warnings": [],
+        },
+        "local_safety": {"ok": False},
+        "hard_failures": [],
+    }
+    detail = format_quality_gate_detail(main._build_chapter_pipeline_error_quality_gate(review))
+
+    assert detail["char_count"] == 3301
+    assert detail["hard_failures"][0]["code"] == "boundary.future_event"

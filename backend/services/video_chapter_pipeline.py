@@ -3148,7 +3148,7 @@ async def generate_workflow_screenplay(
             "response_format": {"type": "json_object"},
         }
 
-        async with deepseek_service.httpx.AsyncClient(timeout=600) as client:
+        async with deepseek_service.httpx.AsyncClient(timeout=None) as client:
             resp = await client.post(
                 f"{deepseek_service.runtime_base_url()}/chat/completions",
                 json=payload,

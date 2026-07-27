@@ -900,15 +900,10 @@ def _local_safety_review(content: str, chapter_scope: dict[str, Any] | None) -> 
     issues: list[dict[str, Any]] = []
     soft_warnings: list[dict[str, Any]] = []
     char_count = count_chapter_chars(content)
-    if char_count < LOCAL_MIN_CHARS:
+    if not (content or "").strip():
         issues.append({
-            "code": "length.too_short",
-            "message": f"正文字数低于 {LOCAL_MIN_CHARS} 字，当前约 {char_count} 字",
-        })
-    elif char_count > LOCAL_MAX_CHARS:
-        issues.append({
-            "code": "length.too_long",
-            "message": f"正文字数超过 {LOCAL_MAX_CHARS} 字，当前约 {char_count} 字",
+            "code": "content.empty",
+            "message": "正文为空，无法通过本地安全检查",
         })
     if chapter_scope:
         boundary_hits = _tail_boundary_hits(content)
@@ -2425,21 +2420,20 @@ async def run_chapter_creation_pipeline(
     max_revisions: int = 3,
     skip_initial_review: bool = False,
 ) -> dict[str, Any]:
-    """三角色链路：创作包 agent -> 正文 agent -> 编辑 agent 返修闭环。"""
+    """两阶段链路：构建或复用创作包，再由正文 Agent 单次生成。"""
     started_at = time.perf_counter()
     trace_id = uuid.uuid4().hex[:8]
-    revision_limit = max(0, max_revisions)
     logger.info(
-        "chapter_pipeline.start trace_id=%s story_id=%s story_title=%s chapter=%s max_revisions=%s has_initial_content=%s has_creation_pack=%s",
+        "chapter_pipeline.start trace_id=%s story_id=%s story_title=%s chapter=%s mode=two_stage has_initial_content=%s has_creation_pack=%s",
         trace_id,
         story_context.get("id") or story_context.get("story_id"),
         story_context.get("title") or story_context.get("name"),
         _chapter_label(chapter_info),
-        revision_limit,
         bool(initial_content),
         isinstance(creation_pack, dict) and bool(creation_pack),
     )
-    if isinstance(creation_pack, dict) and creation_pack:
+    pack_reused = isinstance(creation_pack, dict) and bool(creation_pack)
+    if pack_reused:
         creation_pack = _ensure_scene_budget(creation_pack)
         creation_pack = _ensure_completion_fields(creation_pack)
         logger.info(
@@ -2481,289 +2475,69 @@ async def run_chapter_creation_pipeline(
             _chapter_label(chapter_info),
             _compact_json(_pack_log_zh_summary(creation_pack), 12000),
         )
-    content = initial_content or ""
-    review: dict[str, Any] = {}
-    revisions = 0
-    finish_reason = None
-    best_candidate: dict[str, Any] | None = None
+    draft = await write_chapter_from_pack(
+        creation_pack=creation_pack,
+        api_key=api_key,
+        editor_feedback=None,
+        previous_draft=initial_content or "",
+        trace_id=trace_id,
+    )
+    content = str(draft.get("content") or "")
+    finish_reason = draft.get("finish_reason")
+    tail_repaired = False
+    if finish_reason == "length" and _content_looks_truncated(content):
+        content, tail_repaired = _repair_truncated_tail_locally(content)
 
-    if content and skip_initial_review:
-        local = _local_safety_review(content, creation_pack.get("chapter_boundary"))
-        if local["ok"]:
-            review = {
-                "approved": False,
-                "overall_score": 0,
-                "scores": {"overall": 0},
-                "findings": [],
-                "rewrite_brief": [
-                    "以上一版完整正文为底稿做轻量调整，保留有效主体，只修复调用方要求和明显表达问题。",
-                ],
-                "local_safety": local,
-                "skipped_editor": True,
-                "skip_reason": "lightweight_initial_review",
-            }
-        else:
-            review = _local_failure_review(local, skip_reason="lightweight_local_hard_failure")
-        logger.info(
-            "chapter_pipeline.initial_review.skipped trace_id=%s chapter=%s reason=%s summary=%s",
-            trace_id,
-            _chapter_label(chapter_info),
-            review.get("skip_reason"),
-            _review_log_summary(review),
-        )
-        best_candidate = _select_better_candidate(
-            best_candidate,
-            content=content,
-            review=review,
-            attempts=0,
-            finish_reason=finish_reason,
-            source="initial_local_review",
-        )
-    elif content:
-        logger.info(
-            "chapter_pipeline.initial_review.start trace_id=%s chapter=%s chars=%s",
-            trace_id,
-            _chapter_label(chapter_info),
-            count_chapter_chars(content),
-        )
-        review = await review_chapter_with_editor_agent(
-            creation_pack=creation_pack,
-            content=content,
-            api_key=api_key,
-            trace_id=trace_id,
-        )
-        logger.info(
-            "chapter_pipeline.initial_review.done trace_id=%s chapter=%s summary=%s",
-            trace_id,
-            _chapter_label(chapter_info),
-            _review_log_summary(review),
-        )
-        best_candidate = _select_better_candidate(
-            best_candidate,
-            content=content,
-            review=review,
-            attempts=0,
-            finish_reason=finish_reason,
-            source="initial_review",
-        )
-        if _review_is_hard_pass(review, content):
-            logger.info(
-                "chapter_pipeline.approved trace_id=%s chapter=%s attempts=%s score=%s chars=%s finish_reason=%s elapsed_ms=%s source=%s",
-                trace_id,
-                _chapter_label(chapter_info),
-                0,
-                review.get("overall_score"),
-                count_chapter_chars(content),
-                finish_reason,
-                _elapsed_ms(started_at),
-                "initial_content",
-            )
-            return {
-                "ok": True,
-                "content": content,
-                "creation_pack": creation_pack,
-                "review": review,
-                "attempts": 0,
-                "finish_reason": finish_reason,
-            }
+    from services.chapter_quality import run_deterministic_gate
 
-    while revisions < revision_limit:
-        feedback = _revision_feedback_for_writer(review, creation_pack, content)
-        attempt = revisions + 1
-        logger.info(
-            "chapter_pipeline.attempt.start trace_id=%s chapter=%s attempt=%s feedback_count=%s previous_chars=%s",
-            trace_id,
-            _chapter_label(chapter_info),
-            attempt,
-            _list_len(feedback),
-            count_chapter_chars(content),
-        )
-        draft = await write_chapter_from_pack(
-            creation_pack=creation_pack,
-            api_key=api_key,
-            editor_feedback=feedback,
-            previous_draft=content,
-            trace_id=trace_id,
-        )
-        previous_content = content
-        draft_content = str(draft.get("content") or "")
-        finish_reason = draft.get("finish_reason")
-        revisions += 1
-        if _looks_like_fragment_revision(previous_content, draft_content, bool(feedback)):
-            content = previous_content
-            review = _fragment_revision_review(content, creation_pack)
-            logger.info(
-                "chapter_pipeline.fragment_rejected trace_id=%s chapter=%s attempt=%s previous_chars=%s draft_chars=%s summary=%s",
-                trace_id,
-                _chapter_label(chapter_info),
-                revisions,
-                count_chapter_chars(previous_content),
-                count_chapter_chars(draft_content),
-                _review_log_summary(review),
-            )
-            logger.info(
-                "chapter_pipeline.attempt.review trace_id=%s chapter=%s attempt=%s summary=%s",
-                trace_id,
-                _chapter_label(chapter_info),
-                revisions,
-                _review_log_summary(review),
-            )
-            continue
-        content = draft_content
-        logger.info(
-            "chapter_pipeline.attempt.draft trace_id=%s chapter=%s attempt=%s finish_reason=%s chars=%s",
-            trace_id,
-            _chapter_label(chapter_info),
-            revisions,
-            finish_reason,
-            count_chapter_chars(content),
-        )
-        if finish_reason == "length" and _content_looks_truncated(content):
-            repaired_content, repaired = _repair_truncated_tail_locally(content)
-            if repaired:
-                logger.info(
-                    "chapter_pipeline.truncated_tail_repaired trace_id=%s chapter=%s attempt=%s before_chars=%s after_chars=%s",
-                    trace_id,
-                    _chapter_label(chapter_info),
-                    revisions,
-                    count_chapter_chars(content),
-                    count_chapter_chars(repaired_content),
-                )
-                content = repaired_content
-            else:
-                review = _truncated_generation_review(content, creation_pack, finish_reason)
-                logger.info(
-                    "chapter_pipeline.truncated_rejected trace_id=%s chapter=%s attempt=%s chars=%s summary=%s",
-                    trace_id,
-                    _chapter_label(chapter_info),
-                    revisions,
-                    count_chapter_chars(content),
-                    _review_log_summary(review),
-                )
-                logger.info(
-                    "chapter_pipeline.attempt.review trace_id=%s chapter=%s attempt=%s summary=%s",
-                    trace_id,
-                    _chapter_label(chapter_info),
-                    revisions,
-                    _review_log_summary(review),
-                )
-                continue
-        review = await review_chapter_with_editor_agent(
-            creation_pack=creation_pack,
-            content=content,
-            api_key=api_key,
-            trace_id=trace_id,
-        )
-        best_candidate = _select_better_candidate(
-            best_candidate,
-            content=content,
-            review=review,
-            attempts=revisions,
-            finish_reason=finish_reason,
-            source="editor_review",
-        )
-        if _review_is_hard_pass(review, content):
-            if finish_reason == "length":
-                logger.info(
-                    "chapter_pipeline.length_accepted trace_id=%s chapter=%s attempt=%s reason=%s chars=%s score=%s approved=%s",
-                    trace_id,
-                    _chapter_label(chapter_info),
-                    revisions,
-                    "editor_hard_pass",
-                    count_chapter_chars(content),
-                    review.get("overall_score"),
-                    review.get("approved"),
-                )
-            logger.info(
-                "chapter_pipeline.approved trace_id=%s chapter=%s attempts=%s score=%s chars=%s finish_reason=%s elapsed_ms=%s source=%s",
-                trace_id,
-                _chapter_label(chapter_info),
-                revisions,
-                review.get("overall_score"),
-                count_chapter_chars(content),
-                finish_reason,
-                _elapsed_ms(started_at),
-                "editor_hard_pass",
-            )
-            return {
-                "ok": True,
-                "content": content,
-                "creation_pack": creation_pack,
-                "review": review,
-                "attempts": revisions,
-                "finish_reason": finish_reason,
-            }
-        logger.info(
-            "chapter_pipeline.attempt.review trace_id=%s chapter=%s attempt=%s summary=%s",
-            trace_id,
-            _chapter_label(chapter_info),
-            revisions,
-            _review_log_summary(review),
-        )
-        if _review_is_hard_pass(review, content):
-            logger.info(
-                "chapter_pipeline.approved trace_id=%s chapter=%s attempts=%s score=%s chars=%s finish_reason=%s elapsed_ms=%s source=%s",
-                trace_id,
-                _chapter_label(chapter_info),
-                revisions,
-                review.get("overall_score"),
-                count_chapter_chars(content),
-                finish_reason,
-                _elapsed_ms(started_at),
-                "revision_loop",
-            )
-            return {
-                "ok": True,
-                "content": content,
-                "creation_pack": creation_pack,
-                "review": review,
-                "attempts": revisions,
-                "finish_reason": finish_reason,
-            }
-
-    if best_candidate and best_candidate.get("content") and best_candidate.get("content") != content:
-        best_review = best_candidate.get("review") if isinstance(best_candidate.get("review"), dict) else {}
-        best_content = str(best_candidate.get("content") or "")
-        logger.info(
-            "chapter_pipeline.failed_using_best_candidate trace_id=%s chapter=%s attempts=%s source=%s best_score=%s best_chars=%s current_score=%s current_chars=%s elapsed_ms=%s",
-            trace_id,
-            _chapter_label(chapter_info),
-            revisions,
-            best_candidate.get("source"),
-            best_review.get("overall_score"),
-            count_chapter_chars(best_content),
-            review.get("overall_score"),
-            count_chapter_chars(content),
-            _elapsed_ms(started_at),
-        )
-        return {
+    chapter_scope = creation_pack.get("chapter_boundary") if isinstance(creation_pack, dict) else None
+    deterministic = run_deterministic_gate(content, chapter_info, chapter_scope=chapter_scope)
+    local_safety = _local_safety_review(content, chapter_scope)
+    generation_hard_failures: list[dict[str, Any]] = []
+    if finish_reason == "length":
+        generation_hard_failures.append({
+            "code": "generation.token_limit",
+            "message": "正文生成达到模型 token 上限，可能存在内容截断",
+            "severity": "hard",
+        })
+        deterministic = {
+            **deterministic,
             "ok": False,
-            "content": best_content,
-            "creation_pack": creation_pack,
-            "review": best_review,
-            "attempts": best_candidate.get("attempts", revisions),
-            "finish_reason": best_candidate.get("finish_reason"),
-            "best_candidate_source": best_candidate.get("source"),
-            "fallback": True,
+            "hard_failures": [
+                *(deterministic.get("hard_failures") if isinstance(deterministic.get("hard_failures"), list) else []),
+                *generation_hard_failures,
+            ],
         }
-
+    ok = bool(deterministic.get("ok")) and bool(local_safety.get("ok"))
+    review = {
+        "skipped": True,
+        "reason": "editor_agent_removed",
+        "deterministic": deterministic,
+        "local_safety": local_safety,
+        "hard_failures": generation_hard_failures,
+    }
     logger.info(
-        "chapter_pipeline.failed trace_id=%s chapter=%s attempts=%s score=%s chars=%s finish_reason=%s elapsed_ms=%s summary=%s",
+        "chapter_pipeline.complete trace_id=%s chapter=%s ok=%s chars=%s finish_reason=%s elapsed_ms=%s editor_review_skipped=true",
         trace_id,
         _chapter_label(chapter_info),
-        revisions,
-        review.get("overall_score"),
+        ok,
         count_chapter_chars(content),
         finish_reason,
         _elapsed_ms(started_at),
-        _review_log_summary(review),
     )
     return {
-        "ok": False,
+        "ok": ok,
         "content": content,
         "creation_pack": creation_pack,
         "review": review,
-        "attempts": revisions,
+        "attempts": 1,
         "finish_reason": finish_reason,
-        "fallback": True,
+        "stages": {
+            "creation_pack": "reused" if pack_reused else "built",
+            "writer": "completed",
+            "deterministic_gate": "passed" if ok else "failed",
+            "editor_review": "skipped",
+        },
+        "editor_review_skipped": True,
+        "tail_repaired_locally": tail_repaired,
     }

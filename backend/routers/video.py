@@ -9819,7 +9819,7 @@ async def api_parse_chapter_shots(
             source_text=current_source_text,
             deepseek_api_key=deepseek_api_key,
             billing_ctx=billing_ctx,
-            timeout=600.0,
+            timeout=None,
             max_retries=1,
             quota_user_id=user.id,
             quota_feature_key="video.shot.split.monthly_limit",

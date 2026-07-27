@@ -76,8 +76,6 @@ def _resolve_cached_pipeline_result(
     deterministic: dict[str, Any],
 ) -> tuple[dict[str, Any] | None, str]:
     """命中刚完成的三角色结果时，终检直接复用审阅结论，避免重复远程编辑。"""
-    if not deterministic.get("ok"):
-        return None, "deterministic_failed"
     if not isinstance(story_context, dict):
         return None, "invalid_story_context"
     cached = story_context.get("_last_chapter_pipeline_result")
@@ -87,6 +85,8 @@ def _resolve_cached_pipeline_result(
         return None, "hash_mismatch"
     if cached.get("char_count") != deterministic.get("char_count"):
         return None, "char_count_mismatch"
+    if not deterministic.get("ok"):
+        return None, "deterministic_failed"
     return cached, "cache_hit"
 
 
@@ -138,9 +138,14 @@ def _cached_review_has_blocking_issue(review: dict[str, Any]) -> bool:
 
 def _cached_pipeline_is_acceptable(cached: dict[str, Any], deterministic: dict[str, Any]) -> tuple[bool, str]:
     review = cached.get("review") if isinstance(cached.get("review"), dict) else {}
-    score = _normalize_score(review.get("overall_score"))
     if not deterministic.get("ok") or _cached_review_has_local_hard_failure(review):
         return False, "hard_failure"
+    if review.get("skipped") is True and review.get("reason") == "editor_agent_removed":
+        cached_deterministic = review.get("deterministic") if isinstance(review.get("deterministic"), dict) else {}
+        if cached.get("ok") and deterministic.get("ok") and cached_deterministic.get("ok"):
+            return True, "deterministic_pass_editor_removed"
+        return False, "deterministic_failure_editor_removed"
+    score = _normalize_score(review.get("overall_score"))
     if _cached_review_has_blocking_issue(review):
         return False, "editor_blocking_issue"
     if cached.get("ok") and review.get("approved") and score >= 90:
@@ -229,10 +234,8 @@ def run_deterministic_gate(
     hard_failures: list[dict[str, Any]] = []
     warnings: list[dict[str, Any]] = []
 
-    if char_count < MIN_CHAPTER_CHARS:
-        hard_failures.append(_issue("length.too_short", f"正文字数低于 {MIN_CHAPTER_CHARS} 字，当前约 {char_count} 字"))
-    elif char_count > MAX_CHAPTER_CHARS:
-        hard_failures.append(_issue("length.too_long", f"正文字数超过 {MAX_CHAPTER_CHARS} 字，当前约 {char_count} 字"))
+    if not text.strip():
+        hard_failures.append(_issue("content.empty", "正文为空，无法通过质量门禁"))
 
     first_line = _first_non_empty_line(text)
     if WEAK_OPENING_PATTERN.search(first_line):
@@ -558,13 +561,14 @@ async def finalize_generated_chapter_content(
     existing_creation_pack: dict[str, Any] | None = None,
     allow_pipeline_rerun: bool = True,
 ) -> dict[str, Any]:
-    """生成后质量终检；由创作包、正文、编辑三角色循环完成返修。"""
+    """生成后质量终检；优先复用两阶段流水线的本地门禁结论。"""
     current = content or ""
     chapter_scope = _chapter_scope_from_story_context(story_context)
     deterministic = run_deterministic_gate(current, chapter_info, chapter_scope=chapter_scope)
     cached_pipeline, cache_reason = _resolve_cached_pipeline_result(story_context, current, deterministic)
     if cached_pipeline:
         cached_ok, reuse_reason = _cached_pipeline_is_acceptable(cached_pipeline, deterministic)
+        cached_review = cached_pipeline.get("review") if isinstance(cached_pipeline.get("review"), dict) else {}
         logger.info(
             "章节终检命中三角色缓存 source=%s chapter=%s chars=%s score=%s ok=%s reason=%s",
             source,
@@ -580,7 +584,7 @@ async def finalize_generated_chapter_content(
             "attempts": cached_pipeline.get("attempts", 0),
             "report": {
                 "deterministic": deterministic,
-                "review": cached_pipeline.get("review") if isinstance(cached_pipeline.get("review"), dict) else {},
+                "review": cached_review,
                 "creation_pack": cached_pipeline.get("creation_pack"),
                 "finish_reason": cached_pipeline.get("finish_reason"),
                 "reused_pipeline_result": True,
@@ -678,19 +682,17 @@ async def finalize_generated_chapter_content(
             max_revisions=max_attempts,
         )
     except Exception as exc:
-        logger.warning("三角色章节终检失败，降级为旧编辑审稿: %s", exc)
-        review = await review_chapter_for_qidian(
-            current,
-            story_context=story_context,
-            chapter_info=chapter_info,
-            api_key=api_key,
-            system_prompt=system_prompt,
-        )
+        logger.warning("两阶段章节终检失败，保留纯本地门禁结果: %s", exc)
         return {
-            "ok": deterministic["ok"] and review.get("ok", True),
+            "ok": deterministic["ok"],
             "content": current,
             "attempts": 0,
-            "report": {"deterministic": deterministic, "review": review, "pipeline_error": str(exc)},
+            "report": {
+                "deterministic": deterministic,
+                "review": {"skipped": True, "reason": "pipeline_error_no_remote_editor"},
+                "pipeline_error": str(exc),
+                "editor_review_skipped": True,
+            },
             "source": source,
         }
 
@@ -706,6 +708,8 @@ async def finalize_generated_chapter_content(
             "review": review,
             "creation_pack": pipeline.get("creation_pack"),
             "finish_reason": pipeline.get("finish_reason"),
+            "stages": pipeline.get("stages") if isinstance(pipeline.get("stages"), dict) else {},
+            "editor_review_skipped": bool(pipeline.get("editor_review_skipped")),
         },
         "source": source,
     }

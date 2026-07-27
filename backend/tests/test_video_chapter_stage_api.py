@@ -11,6 +11,7 @@
 """
 
 import asyncio
+import json
 import uuid
 from types import SimpleNamespace
 
@@ -68,6 +69,121 @@ def workflow_with_shots(workflow_db):
 
 
 # ── Fix 1: task_id 传递测试 ─────────────────────────────
+
+
+def test_shot_parse_text_request_has_no_application_timeout(monkeypatch):
+    """拆镜文本请求应持续等待上游返回，不设置应用侧总超时。"""
+    captured = {}
+
+    class FakeResponse:
+        text = json.dumps({
+            "choices": [{
+                "message": {
+                    "content": json.dumps({"shots": [{"shot_index": 1}]})
+                }
+            }]
+        })
+
+        def raise_for_status(self):
+            return None
+
+    class FakeAsyncClient:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def post(self, *_args, **_kwargs):
+            return FakeResponse()
+
+    monkeypatch.setattr(deepseek_service.httpx, "AsyncClient", FakeAsyncClient)
+    monkeypatch.setattr(deepseek_service, "runtime_base_url", lambda: "https://example.com/v1")
+    monkeypatch.setattr(deepseek_service, "runtime_model", lambda: "test-model")
+
+    result = asyncio.run(deepseek_service.parse_chapter_to_shots_lite("章节正文", api_key="test-key"))
+
+    assert result == [{"shot_index": 1}]
+    assert "timeout" in captured
+    assert captured["timeout"] is None
+
+
+def test_workflow_screenplay_text_request_has_no_application_timeout(monkeypatch):
+    """短剧剧本生成请求应持续等待上游返回，不设置应用侧总超时。"""
+    captured = {}
+    workflow = SimpleNamespace(
+        chapter_id=12,
+        chapter=SimpleNamespace(novel_content="章节正文"),
+        screenplay_text=None,
+        screenplay_json=None,
+        screenplay_status=None,
+        screenplay_version=0,
+        screenplay_updated_at=None,
+    )
+
+    class FakeDb:
+        def query(self, _model):
+            return self
+
+        def options(self, *_args):
+            return self
+
+        def filter(self, *_args):
+            return self
+
+        def first(self):
+            return workflow
+
+        def commit(self):
+            return None
+
+        def rollback(self):
+            return None
+
+        def close(self):
+            return None
+
+    class FakeResponse:
+        text = json.dumps({
+            "choices": [{
+                "message": {
+                    "content": json.dumps({"scenes": [{"scene_id": "1"}]})
+                }
+            }]
+        })
+
+        def raise_for_status(self):
+            return None
+
+    class FakeAsyncClient:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def post(self, *_args, **_kwargs):
+            return FakeResponse()
+
+    monkeypatch.setattr(video_chapter_pipeline, "SessionLocal", FakeDb)
+    monkeypatch.setattr(deepseek_service.httpx, "AsyncClient", FakeAsyncClient)
+    monkeypatch.setattr(deepseek_service, "runtime_base_url", lambda: "https://example.com/v1")
+    monkeypatch.setattr(deepseek_service, "runtime_model", lambda: "test-model")
+
+    result = asyncio.run(video_chapter_pipeline.generate_workflow_screenplay(
+        1,
+        deepseek_api_key="test-key",
+    ))
+
+    assert result == {"screenplay_status": "draft", "scene_count": 1}
+    assert "timeout" in captured
+    assert captured["timeout"] is None
 
 
 def test_stage_routes_pass_task_id(monkeypatch):
@@ -686,6 +802,7 @@ def test_parse_route_accepts_valid_workflow_id(monkeypatch):
     assert result["workflow_status"] == "parsing_shots"
     assert result["task_id"].startswith("chapter_video_99_stage_")
     assert captured["workflow_id"] == 99
+    assert captured["timeout"] is None
 
 
 # ── Fix 5: 单镜头重新生成路由 key 分离 ──────────────────
