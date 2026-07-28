@@ -41,6 +41,9 @@ class FakeDb:
     def commit(self):
         return None
 
+    def rollback(self):
+        return None
+
 
 @pytest.fixture
 def manga_workspace(tmp_path, monkeypatch):
@@ -135,13 +138,76 @@ def test_single_scene_update_is_persisted_and_can_be_rolled_back(manga_workspace
     )[1] == "第二格新脚本：角色转身看向门口"
     assert [change.type for change in tracker._changes] == ["scenes_file"]
 
-    rollback_db = SimpleNamespace(commit=lambda: None)
+    # 兼容文件即使丢失，撤回也必须依据数据库中的当前版本判断冲突。
+    agent_service_module._scenes_path(manga_workspace.id).unlink()
+
+    rollback_db = SimpleNamespace(
+        get=lambda model, record_id: manga_workspace
+        if model.__name__ == "Chapter" and record_id == manga_workspace.id
+        else None,
+        commit=lambda: None,
+    )
     rollback_result = tracker.rollback(rollback_db)
 
     assert rollback_result[0]["ok"] is True
     assert agent_service_module._parse_scenes_text(
         agent_service_module._scenes_path(manga_workspace.id).read_text(encoding="utf-8")
     ) == ["第一格旧脚本", "第二格旧脚本", "第三格旧脚本"]
+    assert manga_workspace.manga_storyboard_json["scenes"] == [
+        "第一格旧脚本",
+        "第二格旧脚本",
+        "第三格旧脚本",
+    ]
+
+
+def test_agent_scene_update_prefers_database_when_file_is_stale(manga_workspace):
+    manga_workspace.manga_storyboard_json = {
+        "schema_version": 1,
+        "scenes": ["数据库第一格", "数据库第二格", "数据库第三格"],
+        "sanitized_indices": [],
+    }
+    tracker, context_token = _set_manga_context()
+    try:
+        result = asyncio.run(agent_service_module.update_manga_storyboard_scene(
+            manga_workspace.id,
+            2,
+            "数据库第二格已更新",
+        ))
+    finally:
+        agent_service_module._AGENT_RUN_CONTEXT.reset(context_token)
+
+    assert result["ok"] is True
+    assert manga_workspace.manga_storyboard_json["scenes"] == [
+        "数据库第一格",
+        "数据库第二格已更新",
+        "数据库第三格",
+    ]
+    assert agent_service_module._parse_scenes_text(
+        agent_service_module._scenes_path(manga_workspace.id).read_text(encoding="utf-8")
+    ) == manga_workspace.manga_storyboard_json["scenes"]
+    assert tracker._changes[0].old_value == agent_service_module._render_scenes_text([
+        "数据库第一格",
+        "数据库第二格",
+        "数据库第三格",
+    ])
+
+
+def test_agent_database_failure_does_not_replace_compatibility_file(manga_workspace, monkeypatch):
+    class FailingCommitDb(FakeDb):
+        def commit(self):
+            raise RuntimeError("数据库提交失败")
+
+    original_text = agent_service_module._scenes_path(manga_workspace.id).read_text(encoding="utf-8")
+    monkeypatch.setattr(agent_service_module, "SessionLocal", lambda: FailingCommitDb([]))
+
+    result = agent_service_module._save_manga_storyboard_scenes(
+        manga_workspace.id,
+        ["失败后的第一格", "失败后的第二格", "失败后的第三格"],
+        expected_old_text=original_text,
+    )
+
+    assert "error" in result
+    assert agent_service_module._scenes_path(manga_workspace.id).read_text(encoding="utf-8") == original_text
 
 
 def test_batch_scene_update_writes_all_changes_once(manga_workspace):
@@ -245,14 +311,30 @@ class ImportQuery:
 
 
 class ImportDb:
-    def __init__(self, image_indices=None):
+    def __init__(self, image_indices=None, chapter=None):
         self.image_indices = list(image_indices or [])
+        self.chapter = chapter
+        self.commit_count = 0
 
     def query(self, entity):
         if getattr(entity, "key", None) == "image_number":
             rows = [SimpleNamespace(image_number=index) for index in self.image_indices]
             return ImportQuery(rows)
         return ImportQuery()
+
+    def get(self, model, record_id):
+        if model.__name__ == "Chapter" and self.chapter and self.chapter.id == record_id:
+            return self.chapter
+        return None
+
+    def add(self, _record):
+        return None
+
+    def commit(self):
+        self.commit_count += 1
+
+    def rollback(self):
+        return None
 
 
 def test_import_parser_requires_markers_for_plain_content():
@@ -330,14 +412,15 @@ def test_import_preview_and_same_count_commit_report_stale_images(tmp_path, monk
         f"{START_MARKER}\n旧第一格\n\n旧第二格\n{END_MARKER}"
     ))
     monkeypatch.setattr(main, "_require_chapter_for_user", lambda *_args: chapter)
-    db = ImportDb([1])
+    chapter.manga_storyboard_json = None
+    db = ImportDb([1], chapter)
     preview = asyncio.run(main.preview_manga_storyboard(
         chapter.id,
         MangaStoryboardImportPreviewIn(source_kind="chapter_content"),
         SimpleNamespace(),
         db,
     ))
-    main._write_scenes_file(chapter.id, preview["scenes"], [])
+    main._write_scenes_file(chapter.id, preview["scenes"], [], db=db, chapter=chapter)
     raw = (tmp_path / "manga_outputs" / "chapter_7" / "scenes.txt").read_text(encoding="utf-8")
     scenes = ["尸体位于走廊", "旧第二格"]
 
@@ -355,6 +438,75 @@ def test_import_preview_and_same_count_commit_report_stale_images(tmp_path, monk
     assert preview["scene_count"] == 2
     assert result["stale_image_indices"] == [1]
     assert "尸体" not in result["scenes"][0]
+    assert chapter.manga_storyboard_json["scenes"] == result["scenes"]
+    assert db.commit_count == 2
+
+    scenes_file = tmp_path / "manga_outputs" / "chapter_7" / "scenes.txt"
+    scenes_file.unlink()
+    loaded = asyncio.run(main.get_scenes_endpoint(chapter.id, SimpleNamespace(), db))
+
+    assert loaded["scenes"] == result["scenes"]
+    assert scenes_file.exists()
+
+
+def test_get_scenes_lazily_backfills_legacy_file_into_database(tmp_path, monkeypatch):
+    monkeypatch.setattr(main, "__file__", str(tmp_path / "main.py"))
+    monkeypatch.setattr(main, "_require_user", lambda *_args: SimpleNamespace(id=5))
+    chapter = SimpleNamespace(id=8, manga_storyboard_json=None)
+    monkeypatch.setattr(main, "_require_chapter_for_user", lambda *_args: chapter)
+    db = ImportDb([], chapter)
+    main.write_scenes_text_atomic(
+        tmp_path,
+        chapter.id,
+        main.render_scenes_text(["历史第一格", "历史第二格"]),
+    )
+
+    loaded = asyncio.run(main.get_scenes_endpoint(chapter.id, SimpleNamespace(), db))
+
+    assert loaded["scenes"] == ["历史第一格", "历史第二格"]
+    assert chapter.manga_storyboard_json["scenes"] == loaded["scenes"]
+    assert db.commit_count == 1
+
+
+def test_get_scenes_rejects_legacy_file_over_limit(tmp_path, monkeypatch):
+    monkeypatch.setattr(main, "__file__", str(tmp_path / "main.py"))
+    monkeypatch.setattr(main, "_require_user", lambda *_args: SimpleNamespace(id=5))
+    chapter = SimpleNamespace(id=10, manga_storyboard_json=None)
+    monkeypatch.setattr(main, "_require_chapter_for_user", lambda *_args: chapter)
+    db = ImportDb([], chapter)
+    main.write_scenes_text_atomic(
+        tmp_path,
+        chapter.id,
+        main.render_scenes_text([f"第 {index} 格" for index in range(1, 22)]),
+    )
+
+    with pytest.raises(main.HTTPException, match="历史分镜数量必须"):
+        asyncio.run(main.get_scenes_endpoint(chapter.id, SimpleNamespace(), db))
+
+    assert chapter.manga_storyboard_json is None
+    assert db.commit_count == 0
+
+
+def test_get_scenes_prefers_database_over_stale_file(tmp_path, monkeypatch):
+    monkeypatch.setattr(main, "__file__", str(tmp_path / "main.py"))
+    monkeypatch.setattr(main, "_require_user", lambda *_args: SimpleNamespace(id=5))
+    chapter = SimpleNamespace(
+        id=9,
+        manga_storyboard_json={
+            "schema_version": 1,
+            "scenes": ["数据库第一格", "数据库第二格"],
+            "sanitized_indices": [],
+        },
+    )
+    monkeypatch.setattr(main, "_require_chapter_for_user", lambda *_args: chapter)
+    db = ImportDb([], chapter)
+    main.write_scenes_text_atomic(tmp_path, chapter.id, main.render_scenes_text(["旧文件内容"]))
+
+    loaded = asyncio.run(main.get_scenes_endpoint(chapter.id, SimpleNamespace(), db))
+    mirrored = (tmp_path / "manga_outputs" / "chapter_9" / "scenes.txt").read_text(encoding="utf-8")
+
+    assert loaded["scenes"] == ["数据库第一格", "数据库第二格"]
+    assert main._parse_scenes_text(mirrored) == loaded["scenes"]
 
 
 def test_manga_context_rejects_sibling_chapter():

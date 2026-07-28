@@ -64,6 +64,7 @@ class Chapter(Base):
     quality_score: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     memory_summary: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     manga_asset_analysis_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    manga_storyboard_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     status: Mapped[str] = mapped_column(String(20), default="pending")
     video_style_preset_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("video_style_presets.id"), nullable=True)
     word_count: Mapped[int | None] = mapped_column(Integer, nullable=True)

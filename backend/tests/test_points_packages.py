@@ -268,6 +268,7 @@ def test_postgres_legacy_schema_upgrades_in_one_idempotent_run():
             conn.execute(text("ALTER TABLE agent_pending_changes DROP COLUMN run_id"))
             conn.execute(text("ALTER TABLE email_verification_codes DROP COLUMN attempt_count"))
             conn.execute(text("ALTER TABLE chapters DROP COLUMN manga_asset_analysis_json"))
+            conn.execute(text("ALTER TABLE chapters DROP COLUMN manga_storyboard_json"))
 
         database.init_db(
             bind_engine=legacy_engine,
@@ -313,6 +314,9 @@ def test_postgres_legacy_schema_upgrades_in_one_idempotent_run():
             index.get("name") == "ix_stories_owner_user_id"
             for index in inspector.get_indexes("stories")
         )
+        assert "manga_storyboard_json" in {
+            column["name"] for column in inspector.get_columns("chapters")
+        }
     finally:
         legacy_engine.dispose()
         with database.engine.begin() as conn:

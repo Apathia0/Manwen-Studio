@@ -859,8 +859,13 @@ class PendingChangesTracker:
                         results.append({"ok": True, "type": "video_workflow", "id": change.record_id, "field": change.field})
                 elif change.type == "scenes_file":
                     with _scenes_file_lock(change.record_id):
+                        chapter = db.get(Chapter, change.record_id)
                         scenes_path = _scenes_path(change.record_id)
-                        current_value = scenes_path.read_text(encoding="utf-8") if scenes_path.exists() else None
+                        current_value = (
+                            _chapter_storyboard_text(chapter)
+                            if chapter
+                            else (scenes_path.read_text(encoding="utf-8") if scenes_path.exists() else None)
+                        )
                         if current_value != change.new_value:
                             results.append({
                                 "ok": False,
@@ -871,10 +876,17 @@ class PendingChangesTracker:
                                 "error": "分镜已被再次修改，为避免覆盖新结果，本次未撤回",
                             })
                             continue
-                        if change.old_value:
-                            _write_scenes_text_atomic(change.record_id, str(change.old_value))
-                        elif scenes_path.exists():
-                            scenes_path.unlink()
+                        if chapter:
+                            restored_scenes = _parse_scenes_text(str(change.old_value or ""))
+                            _set_chapter_storyboard_scenes(chapter, restored_scenes)
+                            db.commit()
+                        try:
+                            if change.old_value:
+                                _write_scenes_text_atomic(change.record_id, str(change.old_value))
+                            elif scenes_path.exists():
+                                scenes_path.unlink()
+                        except OSError:
+                            logger.exception("Agent 撤回后写入分镜兼容文件失败 chapter_id=%s", change.record_id)
                         results.append({"ok": True, "type": "scenes_file", "id": change.record_id})
             except Exception as e:
                 results.append({"ok": False, "error": public_error_message(e, "助手工具执行失败，请稍后重试")})
@@ -1493,6 +1505,31 @@ def _render_scenes_text(scenes: list[str]) -> str:
     )
 
 
+def _chapter_storyboard_scenes(chapter: Chapter) -> list[str] | None:
+    payload = getattr(chapter, "manga_storyboard_json", None)
+    if not isinstance(payload, dict) or not isinstance(payload.get("scenes"), list):
+        return None
+    raw_scenes = payload["scenes"]
+    scenes = [str(scene).strip() for scene in raw_scenes if isinstance(scene, str) and scene.strip()]
+    return scenes if len(scenes) == len(raw_scenes) else None
+
+
+def _set_chapter_storyboard_scenes(chapter: Chapter, scenes: list[str]) -> None:
+    chapter.manga_storyboard_json = {
+        "schema_version": 1,
+        "scenes": [str(scene).strip() for scene in scenes],
+        "sanitized_indices": [],
+    }
+
+
+def _chapter_storyboard_text(chapter: Chapter) -> str:
+    stored_scenes = _chapter_storyboard_scenes(chapter)
+    if stored_scenes is not None:
+        return _render_scenes_text(stored_scenes) if stored_scenes else ""
+    scenes_path = _scenes_path(chapter.id)
+    return scenes_path.read_text(encoding="utf-8") if scenes_path.exists() else ""
+
+
 def _scenes_revision(content: str) -> str:
     return hashlib.sha256(content.encode("utf-8")).hexdigest()
 
@@ -1896,12 +1933,15 @@ async def get_story_bible(story_id: int) -> dict:
     },
 )
 async def get_scenes(chapter_id: int) -> dict:
-    """从文件读取章节分镜列表。"""
+    """从数据库读取章节分镜，并兼容历史文件。"""
     db = SessionLocal()
     try:
         chapter = _validate_chapter_ownership(db, chapter_id, _current_story_id())
         if not chapter:
             return {"error": "章节不存在或无权访问"}
+        stored_scenes = _chapter_storyboard_scenes(chapter)
+        if stored_scenes is not None:
+            return {"scenes": stored_scenes}
     finally:
         db.close()
     scenes_file = _scenes_path(chapter_id)
@@ -1938,9 +1978,14 @@ async def get_manga_storyboard(chapter_id: int) -> dict:
             MangaImage.chapter_id == chapter_id
         ).order_by(MangaImage.image_number).all()
         image_numbers = {image.image_number for image in images}
-        scenes_path = _scenes_path(chapter_id)
-        raw_text = scenes_path.read_text(encoding="utf-8") if scenes_path.exists() else ""
-        scenes = _parse_scenes_text(raw_text) if raw_text else []
+        stored_scenes = _chapter_storyboard_scenes(chapter)
+        if stored_scenes is not None:
+            scenes = stored_scenes
+            raw_text = _render_scenes_text(scenes) if scenes else ""
+        else:
+            scenes_path = _scenes_path(chapter_id)
+            raw_text = scenes_path.read_text(encoding="utf-8") if scenes_path.exists() else ""
+            scenes = _parse_scenes_text(raw_text) if raw_text else []
         return {
             "chapter_id": chapter_id,
             "chapter_title": chapter.title or f"第{chapter.chapter_number}章",
@@ -3491,7 +3536,10 @@ async def bulk_add_chapter_plans(story_id: int, chapters: list[dict]) -> dict:
     },
 )
 async def update_scenes(chapter_id: int, scenes: list[str]) -> dict:
-    """写入章节分镜文件。"""
+    """写入章节分镜数据库与兼容文件。"""
+    normalized_scenes = [str(scene or "").strip() for scene in scenes]
+    if not 1 <= len(normalized_scenes) <= 20 or any(not scene for scene in normalized_scenes):
+        return {"error": "每章分镜必须是 1-20 个非空字符串"}
     db = SessionLocal()
     try:
         chapter = _validate_chapter_ownership(db, chapter_id, _current_story_id())
@@ -3499,7 +3547,7 @@ async def update_scenes(chapter_id: int, scenes: list[str]) -> dict:
             return {"error": "章节不存在或无权访问"}
         # 记录旧分镜内容用于撤回
         if _current_pending_changes():
-            old_scenes_text = _scenes_path(chapter_id).read_text("utf-8") if _scenes_path(chapter_id).exists() else ""
+            old_scenes_text = _chapter_storyboard_text(chapter)
             _current_pending_changes().record(PendingChange(
                 type="scenes_file",
                 record_id=chapter_id,
@@ -3508,19 +3556,24 @@ async def update_scenes(chapter_id: int, scenes: list[str]) -> dict:
                 old_value=old_scenes_text,
                 new_value=None,
             ))
-    finally:
-        db.close()
-    try:
-        new_text = _render_scenes_text(scenes)
+        new_text = _render_scenes_text(normalized_scenes)
         if _current_pending_changes():
             _current_pending_changes().update_new_value("scenes_file", chapter_id, "scenes_file", new_text)
         with _scenes_file_lock(chapter_id):
-            _write_scenes_text_atomic(chapter_id, new_text)
-        logger.info("Agent tool=update_scenes story=%s chapter=%s scenes=%s", _current_story_id(), chapter_id, len(scenes))
-        return {"ok": True, "chapter_id": chapter_id, "scene_count": len(scenes)}
-    except OSError as exc:
-        logger.warning("写入分镜文件失败 chapter_id=%s: %s", chapter_id, exc)
-        return {"error": f"写入分镜文件失败: {exc}"}
+            _set_chapter_storyboard_scenes(chapter, normalized_scenes)
+            db.commit()
+            try:
+                _write_scenes_text_atomic(chapter_id, new_text)
+            except OSError:
+                logger.exception("Agent 写入分镜兼容文件失败 chapter_id=%s", chapter_id)
+        logger.info("Agent tool=update_scenes story=%s chapter=%s scenes=%s", _current_story_id(), chapter_id, len(normalized_scenes))
+        return {"ok": True, "chapter_id": chapter_id, "scene_count": len(normalized_scenes)}
+    except Exception as exc:
+        db.rollback()
+        logger.exception("Agent 写入分镜数据库失败 chapter_id=%s", chapter_id)
+        return {"error": public_error_message(exc, "写入分镜失败，请稍后重试")}
+    finally:
+        db.close()
 
 
 def _save_manga_storyboard_scenes(
@@ -3549,8 +3602,7 @@ def _save_manga_storyboard_scenes(
         if not chapter:
             return {"error": "章节不存在或无权访问"}
         with _scenes_file_lock(chapter_id):
-            scenes_path = _scenes_path(chapter_id)
-            old_text = scenes_path.read_text(encoding="utf-8") if scenes_path.exists() else ""
+            old_text = _chapter_storyboard_text(chapter)
             current_revision = _scenes_revision(old_text)
             if expected_old_text is not None and old_text != expected_old_text:
                 return {"error": "分镜脚本已被其他操作更新，请重新读取后再修改", "conflict": True}
@@ -3582,7 +3634,12 @@ def _save_manga_storyboard_scenes(
                 }
             _record_scenes_pending_change(chapter, old_text)
             _update_scenes_pending_new_value(chapter_id, new_text)
-            _write_scenes_text_atomic(chapter_id, new_text)
+            _set_chapter_storyboard_scenes(chapter, normalized_scenes)
+            db.commit()
+            try:
+                _write_scenes_text_atomic(chapter_id, new_text)
+            except OSError:
+                logger.exception("Agent 写入漫画分镜兼容文件失败 chapter_id=%s", chapter_id)
             return {
                 "ok": True,
                 "chapter_id": chapter_id,
@@ -3592,8 +3649,9 @@ def _save_manga_storyboard_scenes(
                 "generated_image_indices": sorted(generated_image_numbers),
                 "revision": _scenes_revision(new_text),
             }
-    except OSError as exc:
-        logger.warning("写入漫画分镜失败 chapter_id=%s: %s", chapter_id, exc)
+    except Exception as exc:
+        db.rollback()
+        logger.exception("写入漫画分镜数据库失败 chapter_id=%s", chapter_id)
         return {"error": public_error_message(exc, "写入漫画分镜失败，请稍后重试")}
     finally:
         db.close()
@@ -3620,10 +3678,9 @@ async def update_manga_storyboard_scene(chapter_id: int, scene_index: int, scrip
         chapter = _validate_chapter_ownership(db, chapter_id, _current_story_id())
         if not chapter:
             return {"error": "章节不存在或无权访问"}
+        old_text = _chapter_storyboard_text(chapter)
     finally:
         db.close()
-    scenes_path = _scenes_path(chapter_id)
-    old_text = scenes_path.read_text(encoding="utf-8") if scenes_path.exists() else ""
     scenes = _parse_scenes_text(old_text) if old_text else []
     if scene_index < 1 or scene_index > len(scenes):
         return {"error": f"格号超出范围，当前共有 {len(scenes)} 格"}
@@ -3669,10 +3726,9 @@ async def batch_update_manga_storyboard_scenes(chapter_id: int, updates: list[di
         chapter = _validate_chapter_ownership(db, chapter_id, _current_story_id())
         if not chapter:
             return {"error": "章节不存在或无权访问"}
+        old_text = _chapter_storyboard_text(chapter)
     finally:
         db.close()
-    scenes_path = _scenes_path(chapter_id)
-    old_text = scenes_path.read_text(encoding="utf-8") if scenes_path.exists() else ""
     scenes = _parse_scenes_text(old_text) if old_text else []
     normalized_updates: dict[int, str] = {}
     for update in updates:

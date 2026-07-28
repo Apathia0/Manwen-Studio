@@ -4676,13 +4676,107 @@ def _scene_meta_path(chapter_id: int) -> Path:
     return _chapter_dir(chapter_id) / "scenes_meta.json"
 
 
-def _write_scenes_file(chapter_id: int, scenes: list[str], sanitized_indices: list[int] | None = None) -> None:
+def _storyboard_payload(scenes: list[str], sanitized_indices: list[int] | None = None) -> dict:
+    normalized_scenes = [str(scene).strip() for scene in scenes if str(scene).strip()]
+    normalized_indices = sorted({
+        int(index)
+        for index in (sanitized_indices or [])
+        if isinstance(index, int) and not isinstance(index, bool) and 0 <= index < len(normalized_scenes)
+    })
+    return {
+        "schema_version": 1,
+        "scenes": normalized_scenes,
+        "sanitized_indices": normalized_indices,
+    }
+
+
+def _chapter_storyboard(chapter: Chapter) -> tuple[list[str], list[int]] | None:
+    payload = getattr(chapter, "manga_storyboard_json", None)
+    if not isinstance(payload, dict):
+        return None
+    raw_scenes = payload.get("scenes")
+    if not isinstance(raw_scenes, list):
+        return None
+    scenes = [str(scene).strip() for scene in raw_scenes if isinstance(scene, str) and scene.strip()]
+    if len(scenes) != len(raw_scenes) or len(scenes) > MAX_IMAGE_COUNT:
+        return None
+    raw_indices = payload.get("sanitized_indices")
+    sanitized_indices = sorted({
+        int(index)
+        for index in (raw_indices if isinstance(raw_indices, list) else [])
+        if isinstance(index, int) and not isinstance(index, bool) and 0 <= index < len(scenes)
+    })
+    return scenes, sanitized_indices
+
+
+def _persist_chapter_storyboard(
+    chapter_id: int,
+    scenes: list[str],
+    sanitized_indices: list[int] | None = None,
+    *,
+    db: Session | None = None,
+    chapter: Chapter | None = None,
+) -> None:
+    owns_session = db is None
+    write_db = db or SessionLocal()
+    try:
+        target = chapter or write_db.get(Chapter, chapter_id)
+        if target is None:
+            return
+        target.manga_storyboard_json = _storyboard_payload(scenes, sanitized_indices)
+        write_db.add(target)
+        write_db.commit()
+    except Exception:
+        write_db.rollback()
+        raise
+    finally:
+        if owns_session:
+            write_db.close()
+
+
+def _write_scenes_projection(
+    chapter_id: int,
+    scenes: list[str],
+    sanitized_indices: list[int] | None = None,
+) -> None:
     backend_dir = Path(__file__).resolve().parent
     with scenes_file_lock(backend_dir, chapter_id):
-        write_scenes_text_atomic(backend_dir, chapter_id, render_scenes_text(scenes))
-        meta_path = _scene_meta_path(chapter_id)
-        payload = {"sanitized_indices": sorted(set(sanitized_indices or []))}
-        atomic_write_text(meta_path, json.dumps(payload, ensure_ascii=False))
+        _write_scenes_projection_unlocked(chapter_id, scenes, sanitized_indices)
+
+
+def _write_scenes_projection_unlocked(
+    chapter_id: int,
+    scenes: list[str],
+    sanitized_indices: list[int] | None = None,
+) -> None:
+    backend_dir = Path(__file__).resolve().parent
+    write_scenes_text_atomic(backend_dir, chapter_id, render_scenes_text(scenes))
+    meta_path = _scene_meta_path(chapter_id)
+    payload = {"sanitized_indices": sorted(set(sanitized_indices or []))}
+    atomic_write_text(meta_path, json.dumps(payload, ensure_ascii=False))
+
+
+def _write_scenes_file(
+    chapter_id: int,
+    scenes: list[str],
+    sanitized_indices: list[int] | None = None,
+    *,
+    db: Session | None = None,
+    chapter: Chapter | None = None,
+) -> None:
+    backend_dir = Path(__file__).resolve().parent
+    with scenes_file_lock(backend_dir, chapter_id):
+        _persist_chapter_storyboard(
+            chapter_id,
+            scenes,
+            sanitized_indices,
+            db=db,
+            chapter=chapter,
+        )
+        try:
+            _write_scenes_projection_unlocked(chapter_id, scenes, sanitized_indices)
+        except OSError:
+            logger.exception("写入分镜兼容文件失败 chapter_id=%s", chapter_id)
 
 
 def _parse_scenes_text(raw: str) -> list[str]:
@@ -4713,6 +4807,7 @@ def _clear_chapter_manga_state(chapter: Chapter, db: Session) -> None:
             if img_path.exists():
                 _unlink_file(img_path, "manga image")
             db.delete(img)
+    chapter.manga_storyboard_json = _storyboard_payload([])
 
 
 def _clear_chapter_images_only(chapter: Chapter, db: Session) -> None:
@@ -8417,6 +8512,11 @@ def _load_image_count(chapter_id: int) -> int:
 
 
 def _effective_image_count(chapter_id: int, user_id: int, db: Session) -> int:
+    chapter = db.get(Chapter, chapter_id)
+    if chapter is not None:
+        stored_storyboard = _chapter_storyboard(chapter)
+        if stored_storyboard and stored_storyboard[0]:
+            return len(stored_storyboard[0])
     stored = _load_image_count(chapter_id)
     # 积分双轨无套餐限制，使用系统最大可用值
     return min(stored, MAX_IMAGE_COUNT)
@@ -8433,7 +8533,13 @@ def _chapter_has_scene_file(chapter_id: int) -> bool:
 
 
 def _chapter_is_blank(chapter: Chapter) -> bool:
-    return not chapter.messages and not chapter.images and not (chapter.novel_content or "").strip()
+    stored_storyboard = _chapter_storyboard(chapter)
+    return (
+        not chapter.messages
+        and not chapter.images
+        and not (chapter.novel_content or "").strip()
+        and not (stored_storyboard and stored_storyboard[0])
+    )
 
 
 @app.get("/api/chapters/{chapter_id}/image-count")
@@ -8508,31 +8614,47 @@ async def generate_scenes_endpoint(chapter_id: int, request: Request, db: Sessio
             with contextlib.suppress(asyncio.CancelledError):
                 await split_task
     sanitized_scenes, sanitized_indices = sanitize_scene_list(scenes)
-    _write_scenes_file(chapter_id, sanitized_scenes, sanitized_indices)
+    _write_scenes_file(chapter_id, sanitized_scenes, sanitized_indices, db=db, chapter=chapter)
     _check_and_consume_feature_quota(request, user.id, "scene.generate.monthly_limit", 1, db, deduct=True, provider_kind="text")
     return {"scenes": sanitized_scenes, "sanitized_indices": sanitized_indices}
 
 
 @app.get("/api/chapters/{chapter_id}/scenes")
 async def get_scenes_endpoint(chapter_id: int, request: Request, db: Session = Depends(get_db)):
-    """Load saved scene prompts from file."""
+    """从数据库加载分镜，并兼容回填历史文件数据。"""
     user = _require_user(request, db)
     chapter = _require_chapter_for_user(chapter_id, user, db)
+    stored_storyboard = _chapter_storyboard(chapter)
+    if stored_storyboard is not None:
+        stored_scenes, sanitized_indices = stored_storyboard
+        if stored_scenes:
+            try:
+                _write_scenes_projection(chapter_id, stored_scenes, sanitized_indices)
+                atomic_write_text(_image_count_path(chapter_id), str(len(stored_scenes)))
+            except OSError:
+                logger.exception("重建分镜兼容文件失败 chapter_id=%s", chapter_id)
+        return {"scenes": stored_scenes, "sanitized_indices": sanitized_indices}
     prompts_file = Path(__file__).resolve().parent / "manga_outputs" / f"chapter_{chapter_id}" / "scenes.txt"
     if not prompts_file.exists():
-        return {"scenes": [], "sanitized_indices": []}
-    if _chapter_is_blank(chapter):
-        _rmtree_best_effort(_chapter_dir(chapter_id), "stale blank chapter workspace")
         return {"scenes": [], "sanitized_indices": []}
     try:
         raw = prompts_file.read_text(encoding="utf-8")
         parts = _parse_scenes_text(raw)
         meta = _load_scene_meta(chapter_id)
         if parts:
-            _write_scenes_file(chapter_id, parts, meta.get("sanitized_indices", []))
+            if not MIN_IMAGE_COUNT <= len(parts) <= MAX_IMAGE_COUNT:
+                raise HTTPException(500, f"历史分镜数量必须为 {MIN_IMAGE_COUNT}-{MAX_IMAGE_COUNT} 格，请先修正分镜文件")
+            _write_scenes_file(
+                chapter_id,
+                parts,
+                meta.get("sanitized_indices", []),
+                db=db,
+                chapter=chapter,
+            )
         return {"scenes": parts, "sanitized_indices": meta.get("sanitized_indices", [])}
-    except Exception:
-        return {"scenes": [], "sanitized_indices": []}
+    except (OSError, UnicodeError, ValueError) as exc:
+        logger.exception("读取章节分镜失败 chapter_id=%s", chapter_id)
+        raise HTTPException(500, "分镜读取失败，请联系管理员检查存储状态") from exc
 
 
 @app.put("/api/chapters/{chapter_id}/scenes")
@@ -8546,21 +8668,35 @@ async def update_scenes_endpoint(chapter_id: int, body: dict, request: Request, 
     if not MIN_IMAGE_COUNT <= len(scenes) <= MAX_IMAGE_COUNT:
         raise HTTPException(400, f"每章分镜数量必须为 {MIN_IMAGE_COUNT}-{MAX_IMAGE_COUNT} 格")
     if getattr(chapter, "images", None):
-        path = scenes_path(Path(__file__).resolve().parent, chapter_id)
-        old_scenes = _parse_scenes_text(path.read_text(encoding="utf-8")) if path.exists() else []
+        stored_storyboard = _chapter_storyboard(chapter)
+        if stored_storyboard is not None:
+            old_scenes = stored_storyboard[0]
+        else:
+            path = scenes_path(Path(__file__).resolve().parent, chapter_id)
+            old_scenes = _parse_scenes_text(path.read_text(encoding="utf-8")) if path.exists() else []
         if len(old_scenes) != len(scenes):
             raise HTTPException(409, "当前章节已有漫画图片，改变分镜格数会导致图片错位")
 
-    # 自动对齐 image_count 和分镜数量
-    count_path = _image_count_path(chapter_id)
-    count_path.parent.mkdir(parents=True, exist_ok=True)
-    atomic_write_text(count_path, str(len(scenes)))
-
-    _write_scenes_file(chapter_id, scenes, [])
+    _write_scenes_file(chapter_id, scenes, [], db=db, chapter=chapter)
+    try:
+        atomic_write_text(_image_count_path(chapter_id), str(len(scenes)))
+    except OSError:
+        logger.exception("写入分镜数量兼容文件失败 chapter_id=%s", chapter_id)
     return {"ok": True, "image_count": len(scenes)}
 
 
 def _storyboard_import_state(chapter_id: int, db: Session) -> tuple[str, list[str], list[int]]:
+    chapter = db.get(Chapter, chapter_id)
+    if chapter is not None:
+        stored_storyboard = _chapter_storyboard(chapter)
+        if stored_storyboard is not None:
+            current_scenes, _sanitized_indices = stored_storyboard
+            raw = render_scenes_text(current_scenes) if current_scenes else ""
+            generated_indices = sorted({
+                int(row.image_number)
+                for row in db.query(MangaImage.image_number).filter(MangaImage.chapter_id == chapter_id).all()
+            })
+            return raw, current_scenes, generated_indices
     path = scenes_path(Path(__file__).resolve().parent, chapter_id)
     raw = path.read_text(encoding="utf-8") if path.exists() else ""
     current_scenes = _parse_scenes_text(raw)
@@ -8652,7 +8788,7 @@ async def commit_manga_storyboard_import(
     db: Session = Depends(get_db),
 ):
     user = _require_user(request, db)
-    _require_chapter_for_user(chapter_id, user, db)
+    chapter = _require_chapter_for_user(chapter_id, user, db)
     normalized_scenes = [scene.strip() for scene in body.scenes if isinstance(scene, str)]
     errors: list[str] = []
     if len(normalized_scenes) != len(body.scenes) or any(not scene for scene in normalized_scenes):
@@ -8722,13 +8858,23 @@ async def commit_manga_storyboard_import(
             warnings.append("部分已有图片对应的脚本已变化，建议重新生成这些图片")
         new_text = render_scenes_text(sanitized_scenes)
         changed = new_text != raw
+        _persist_chapter_storyboard(
+            chapter_id,
+            sanitized_scenes,
+            sanitized_zero_indices,
+            db=db,
+            chapter=chapter,
+        )
         if changed:
-            write_scenes_text_atomic(backend_dir, chapter_id, new_text)
-            atomic_write_text(_image_count_path(chapter_id), str(len(sanitized_scenes)))
-            atomic_write_text(
-                _scene_meta_path(chapter_id),
-                json.dumps({"sanitized_indices": sanitized_zero_indices}, ensure_ascii=False),
-            )
+            try:
+                write_scenes_text_atomic(backend_dir, chapter_id, new_text)
+                atomic_write_text(_image_count_path(chapter_id), str(len(sanitized_scenes)))
+                atomic_write_text(
+                    _scene_meta_path(chapter_id),
+                    json.dumps({"sanitized_indices": sanitized_zero_indices}, ensure_ascii=False),
+                )
+            except OSError:
+                logger.exception("导入分镜后写入兼容文件失败 chapter_id=%s", chapter_id)
         new_revision = content_revision(new_text if changed else raw)
 
     parsed = {
@@ -10019,17 +10165,29 @@ async def regenerate_single_image(chapter_id: int, image_number: int, body: dict
         style_ref_path or "",
     )
 
-    # Load all scenes for context
+    # 以数据库分镜为准，仅对尚未迁移的章节回退到兼容文件。
     prompts_file = Path(__file__).resolve().parent / "manga_outputs" / f"chapter_{chapter_id}" / "scenes.txt"
     all_scenes = None
-    if prompts_file.exists():
+    stored_storyboard = _chapter_storyboard(chapter)
+    sanitized_indices: list[int] = []
+    if stored_storyboard is not None:
+        parts, sanitized_indices = stored_storyboard
+    elif prompts_file.exists():
         raw = prompts_file.read_text(encoding="utf-8")
         parts = _parse_scenes_text(raw)
-        if len(parts) == image_count:
-            # Update the scene in file
-            parts[image_number - 1] = prompt
-            all_scenes = parts
-            _write_scenes_file(chapter_id, parts, _load_scene_meta(chapter_id).get("sanitized_indices", []))
+        sanitized_indices = _load_scene_meta(chapter_id).get("sanitized_indices", [])
+    else:
+        parts = []
+    if len(parts) == image_count:
+        parts[image_number - 1] = prompt
+        all_scenes = parts
+        _write_scenes_file(
+            chapter_id,
+            parts,
+            sanitized_indices,
+            db=db,
+            chapter=chapter,
+        )
 
     # Keep old DB/file intact until the new image is generated successfully.
     old_img = db.query(MangaImage).filter(

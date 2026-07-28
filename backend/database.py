@@ -279,6 +279,8 @@ def _migrate_unlocked(target_engine=None):
                 conn.execute(text("ALTER TABLE chapters ADD COLUMN memory_summary JSON"))
             if "manga_asset_analysis_json" not in cols:
                 conn.execute(text("ALTER TABLE chapters ADD COLUMN manga_asset_analysis_json JSON"))
+            if "manga_storyboard_json" not in cols:
+                conn.execute(text("ALTER TABLE chapters ADD COLUMN manga_storyboard_json JSON"))
             if "status" not in cols:
                 conn.execute(text("ALTER TABLE chapters ADD COLUMN status VARCHAR(20) DEFAULT 'pending'"))
             if "word_count" not in cols:

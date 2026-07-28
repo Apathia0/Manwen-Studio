@@ -20,8 +20,11 @@ from models import AgentConversation, AgentConversationMessage, AgentPendingChan
 from schemas import AgentChatIn, AgentConversationCreateIn, AgentConversationOut, AgentConversationSummaryOut
 from services.agent_service import (
     AgentPendingChangeKey,
+    _chapter_storyboard_text,
+    _parse_scenes_text,
     _scenes_file_lock,
     _scenes_path,
+    _set_chapter_storyboard_scenes,
     _write_scenes_text_atomic,
     agent_pending_change_store,
     agent_service,
@@ -1147,8 +1150,13 @@ async def rollback_changes(
                         results.append({"ok": True, "type": "video_workflow", "id": record.record_id, "field": record.field})
                 elif record.change_type == "scenes_file":
                     with _scenes_file_lock(record.record_id):
+                        chapter = db.get(Chapter, record.record_id)
                         scenes_path = _scenes_path(record.record_id)
-                        current_value = scenes_path.read_text(encoding="utf-8") if scenes_path.exists() else None
+                        current_value = (
+                            _chapter_storyboard_text(chapter)
+                            if chapter
+                            else (scenes_path.read_text(encoding="utf-8") if scenes_path.exists() else None)
+                        )
                         if current_value != record.new_value:
                             results.append({
                                 "ok": False,
@@ -1159,10 +1167,17 @@ async def rollback_changes(
                                 "error": "分镜已被再次修改，为避免覆盖新结果，本次未撤回",
                             })
                             continue
-                        if record.old_value:
-                            _write_scenes_text_atomic(record.record_id, str(record.old_value))
-                        elif scenes_path.exists():
-                            scenes_path.unlink()
+                        if chapter:
+                            restored_scenes = _parse_scenes_text(str(record.old_value or ""))
+                            _set_chapter_storyboard_scenes(chapter, restored_scenes)
+                            db.commit()
+                        try:
+                            if record.old_value:
+                                _write_scenes_text_atomic(record.record_id, str(record.old_value))
+                            elif scenes_path.exists():
+                                scenes_path.unlink()
+                        except OSError:
+                            logger.exception("撤回后写入分镜兼容文件失败 chapter_id=%s", record.record_id)
                         results.append({"ok": True, "type": "scenes_file", "id": record.record_id, "field": record.field})
             except Exception as e:
                 results.append({"ok": False, "error": public_error_message(e, "撤回修改失败，请稍后重试")})
