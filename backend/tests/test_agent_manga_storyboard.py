@@ -10,6 +10,10 @@ from services.manga_storyboard_import import END_MARKER, START_MARKER, parse_imp
 from services.manga_storyboard_storage import canonical_scenes_hash, content_revision
 
 
+def test_single_image_regeneration_uses_module_media_locator():
+    assert "ensure_local_media_path" not in main.regenerate_single_image.__code__.co_varnames
+
+
 class FakeQuery:
     def __init__(self, images=None):
         self.images = list(images or [])

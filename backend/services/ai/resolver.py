@@ -3,7 +3,7 @@ from __future__ import annotations
 import uuid
 import datetime
 from decimal import Decimal
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
@@ -45,6 +45,62 @@ def resolve_credential_mode(db: Session, user_id: int, requested: str | None) ->
     return "platform"
 
 
+ModelSelectionPolicy = Literal["fallback", "interactive_strict"]
+
+
+def _model_selection_error(modality: str, reason: str) -> HTTPException:
+    label = {"text": "文本", "image": "图片", "video": "视频"}.get(modality, modality)
+    messages = {
+        "missing": f"请先选择并保存默认{label}模型",
+        "deleted": f"已选择的{label}模型不存在，请重新选择",
+        "disabled": f"已选择的{label}模型已停用，请重新选择",
+        "hidden": f"已选择的{label}模型已下架，请重新选择",
+        "channel_disabled": f"已选择的{label}模型所属渠道已停用，请重新选择",
+        "modality_mismatch": f"已选择的模型不是{label}类型，请重新选择",
+    }
+    return HTTPException(
+        status_code=409,
+        detail={
+            "code": "AI_MODEL_SELECTION_REQUIRED",
+            "message": messages.get(reason, "请重新选择并保存默认模型"),
+            "modality": modality,
+            "reason": reason,
+            "action": {"type": "open_ai_settings", "tab": "models"},
+        },
+    )
+
+
+def _strict_visible_model(db: Session, model_id: int, modality: str) -> AiModel:
+    model = db.get(AiModel, model_id)
+    if not model:
+        raise _model_selection_error(modality, "deleted")
+    if model.modality != modality:
+        raise _model_selection_error(modality, "modality_mismatch")
+    if not model.enabled:
+        raise _model_selection_error(modality, "disabled")
+    if not model.user_visible:
+        raise _model_selection_error(modality, "hidden")
+    channel = db.get(AiChannel, model.channel_id)
+    if not channel or not channel.enabled:
+        raise _model_selection_error(modality, "channel_disabled")
+    return model
+
+
+def _has_selectable_model(db: Session, modality: str) -> bool:
+    return (
+        db.query(AiModel.id)
+        .join(AiChannel, AiChannel.id == AiModel.channel_id)
+        .filter(
+            AiModel.enabled.is_(True),
+            AiModel.user_visible.is_(True),
+            AiModel.modality == modality,
+            AiChannel.enabled.is_(True),
+        )
+        .first()
+        is not None
+    )
+
+
 def resolve_model(
     db: Session,
     user_id: int,
@@ -52,7 +108,14 @@ def resolve_model(
     modality: str,
     model_id: int | None = None,
     task_type: str | None = None,
+    selection_policy: ModelSelectionPolicy = "fallback",
 ) -> AiModel:
+    if selection_policy not in {"fallback", "interactive_strict"}:
+        raise ValueError(f"未知模型选择策略: {selection_policy}")
+
+    if selection_policy == "interactive_strict" and model_id is not None:
+        return _strict_visible_model(db, model_id, modality)
+
     if model_id:
         model = get_visible_model(db, model_id)
         if model.modality != modality:
@@ -60,19 +123,24 @@ def resolve_model(
         return model
 
     pref = _pref(db, user_id)
+    preference_model_id = None
     if pref:
-        mid = None
         if modality == "text":
-            mid = pref.default_text_model_id
+            preference_model_id = pref.default_text_model_id
         elif modality == "image":
-            mid = pref.default_image_model_id
+            preference_model_id = pref.default_image_model_id
         elif modality == "video":
-            mid = pref.default_video_model_id
-        if mid:
+            preference_model_id = pref.default_video_model_id
+        if preference_model_id:
+            if selection_policy == "interactive_strict":
+                return _strict_visible_model(db, preference_model_id, modality)
             try:
-                return get_visible_model(db, mid)
+                return get_visible_model(db, preference_model_id)
             except HTTPException:
                 pass
+
+    if selection_policy == "interactive_strict" and _has_selectable_model(db, modality):
+        raise _model_selection_error(modality, "missing")
 
     if task_type:
         td = db.query(AiTaskDefault).filter(AiTaskDefault.task_type == task_type, AiTaskDefault.enabled.is_(True)).first()

@@ -1,6 +1,15 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { normalizeErrorMessage, readResponseError } from './errors';
+import {
+  AI_MODEL_SELECTION_REQUIRED_EVENT,
+  normalizeErrorMessage,
+  readResponseError,
+  type AiModelSelectionRequiredDetail,
+} from './errors';
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
 
 describe('normalizeErrorMessage', () => {
   it('提取 FastAPI detail 而不是显示原始 JSON', () => {
@@ -40,5 +49,42 @@ describe('readResponseError', () => {
   it('根据空响应状态返回中文提示', async () => {
     const response = new Response('', { status: 503 });
     await expect(readResponseError(response)).resolves.toBe('服务暂时不可用或繁忙，请稍后重试');
+  });
+
+  it('模型选择失效时派发全局配置事件', async () => {
+    vi.stubGlobal('window', new EventTarget());
+    const listener = vi.fn();
+    window.addEventListener(AI_MODEL_SELECTION_REQUIRED_EVENT, listener as EventListener);
+    const response = new Response(JSON.stringify({
+      detail: {
+        code: 'AI_MODEL_SELECTION_REQUIRED',
+        message: '已选择的图片模型已下架，请重新选择',
+        modality: 'image',
+        reason: 'hidden',
+      },
+    }), { status: 409 });
+
+    const message = await readResponseError(response, '请求失败');
+
+    expect(message).toBe('已选择的图片模型已下架，请重新选择');
+    expect(listener).toHaveBeenCalledTimes(1);
+    const event = listener.mock.calls[0][0] as CustomEvent<AiModelSelectionRequiredDetail>;
+    expect(event.detail).toEqual({
+      code: 'AI_MODEL_SELECTION_REQUIRED',
+      message: '已选择的图片模型已下架，请重新选择',
+      modality: 'image',
+      reason: 'hidden',
+    });
+  });
+
+  it('普通冲突错误不会派发模型配置事件', async () => {
+    vi.stubGlobal('window', new EventTarget());
+    const listener = vi.fn();
+    window.addEventListener(AI_MODEL_SELECTION_REQUIRED_EVENT, listener as EventListener);
+    const response = new Response(JSON.stringify({ detail: '任务正在运行中' }), { status: 409 });
+
+    await readResponseError(response, '请求失败');
+
+    expect(listener).not.toHaveBeenCalled();
   });
 });

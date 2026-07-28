@@ -10,7 +10,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from database import Base
-from models import AiChannel, AiModel, AiModelPrice, AiUsageEvent, BackgroundTask, Chapter, MangaImage, PointsAccount, PointsLedgerEntry, Story, User
+from models import AiChannel, AiModel, AiModelPrice, AiUsageEvent, BackgroundTask, Chapter, MangaImage, PointsAccount, PointsLedgerEntry, Story, User, UserAiPreference
 from routers import points_ai
 from services.ai.bootstrap import ensure_default_channels_and_models, migrate_active_text_per_call_prices
 from services.ai.catalog import get_active_price, get_visible_model, list_user_visible_models, serialize_model_for_user
@@ -107,6 +107,98 @@ def test_disabled_channel_models_are_not_visible_or_selected_as_fallback():
     with pytest.raises(HTTPException) as fallback_error:
         resolve_model(db, user.id, modality="text")
     assert fallback_error.value.status_code == 400
+
+
+def _assert_model_selection_error(error: HTTPException, *, modality: str, reason: str) -> None:
+    assert error.status_code == 409
+    assert error.detail["code"] == "AI_MODEL_SELECTION_REQUIRED"
+    assert error.detail["modality"] == modality
+    assert error.detail["reason"] == reason
+    assert error.detail["action"] == {"type": "open_ai_settings", "tab": "models"}
+
+
+def test_strict_model_selection_requires_preference_even_when_fallback_exists():
+    db, user, _model = _billing_session()
+
+    with pytest.raises(HTTPException) as exc_info:
+        resolve_model(db, user.id, modality="text", selection_policy="interactive_strict")
+
+    _assert_model_selection_error(exc_info.value, modality="text", reason="missing")
+
+
+def test_strict_model_selection_accepts_valid_preference():
+    db, user, model = _billing_session()
+    db.add(UserAiPreference(user_id=user.id, default_text_model_id=model.id))
+    db.commit()
+
+    selected = resolve_model(db, user.id, modality="text", selection_policy="interactive_strict")
+
+    assert selected.id == model.id
+
+
+@pytest.mark.parametrize(
+    ("change_model", "reason"),
+    [
+        (lambda model: setattr(model, "enabled", False), "disabled"),
+        (lambda model: setattr(model, "user_visible", False), "hidden"),
+        (lambda model: setattr(model.channel, "enabled", False), "channel_disabled"),
+    ],
+)
+def test_strict_model_selection_classifies_unavailable_preference(change_model, reason):
+    db, user, model = _billing_session()
+    db.add(UserAiPreference(user_id=user.id, default_text_model_id=model.id))
+    change_model(model)
+    db.commit()
+
+    with pytest.raises(HTTPException) as exc_info:
+        resolve_model(db, user.id, modality="text", selection_policy="interactive_strict")
+
+    _assert_model_selection_error(exc_info.value, modality="text", reason=reason)
+
+
+def test_strict_model_selection_accepts_explicit_model_without_preference():
+    db, user, model = _billing_session()
+
+    selected = resolve_model(
+        db,
+        user.id,
+        modality="text",
+        model_id=model.id,
+        selection_policy="interactive_strict",
+    )
+
+    assert selected.id == model.id
+
+
+@pytest.mark.parametrize(("model_id", "reason"), [(999999, "deleted")])
+def test_strict_model_selection_classifies_invalid_explicit_model(model_id, reason):
+    db, user, _model = _billing_session()
+
+    with pytest.raises(HTTPException) as exc_info:
+        resolve_model(
+            db,
+            user.id,
+            modality="text",
+            model_id=model_id,
+            selection_policy="interactive_strict",
+        )
+
+    _assert_model_selection_error(exc_info.value, modality="text", reason=reason)
+
+
+def test_strict_model_selection_classifies_explicit_modality_mismatch():
+    db, user, model = _billing_session(modality="image")
+
+    with pytest.raises(HTTPException) as exc_info:
+        resolve_model(
+            db,
+            user.id,
+            modality="video",
+            model_id=model.id,
+            selection_policy="interactive_strict",
+        )
+
+    _assert_model_selection_error(exc_info.value, modality="video", reason="modality_mismatch")
 
 
 def test_reserved_call_failure_releases_all_points_once():

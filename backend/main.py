@@ -1138,7 +1138,14 @@ def _resolve_dual_track_runtime(request: Request, db: Session, *, modality: str)
         elif modality == "video":
             model_header = request.headers.get("x-ai-model-id") or request.headers.get("x-video-model-id")
         model_id = int(model_header) if model_header and str(model_header).isdigit() else None
-        model = resolve_model(db, user.id, modality=modality, model_id=model_id, task_type=None)
+        model = resolve_model(
+            db,
+            user.id,
+            modality=modality,
+            model_id=model_id,
+            task_type=None,
+            selection_policy="interactive_strict",
+        )
         channel = db.get(AiChannel, model.channel_id)
         if not channel or not channel.enabled:
             return None
@@ -9544,7 +9551,6 @@ async def generate_manga_stream(chapter_id: int, request: Request, db: Session =
     # 风格预设只允许使用参考图片，名称和文字模板不参与画风控制。
     style_ref_path = None
     if style_ref_url:
-        from services.media_locator import ensure_local_media_path
         style_ref_path = ensure_local_media_path(style_ref_url, "manga")
         if not style_ref_path:
             raise HTTPException(422, "自定义风格参考图无法读取，请重新上传")
@@ -9998,7 +10004,6 @@ async def regenerate_single_image(chapter_id: int, image_number: int, body: dict
     # 风格预设只允许使用参考图片，名称和文字模板不参与画风控制。
     style_ref_path = None
     if style_ref_url:
-        from services.media_locator import ensure_local_media_path
         style_ref_path = ensure_local_media_path(style_ref_url, "manga")
         if not style_ref_path:
             raise HTTPException(422, "自定义风格参考图无法读取，请重新上传")

@@ -450,7 +450,7 @@ async def test_custom_seedance_duration_is_validated_before_begin_ai_call(monkey
     class Db:
         def get(self, model_type, pk):
             if model_type.__name__ == "AiChannel" and pk == 3:
-                return SimpleNamespace(adapter_type="openai_video")
+                return SimpleNamespace(adapter_type="openai_video", enabled=True)
             if model_type.__name__ == "AiModel" and pk == 2:
                 return platform_model
             return None
@@ -1158,6 +1158,43 @@ def test_creation_studio_retry_reservation_preserves_original_runtime_snapshot(m
     assert job.parameters_json["_runtime"] == original_runtime
     assert job.model_id == 2
     assert job.model_key == "original-model"
+
+
+@pytest.mark.asyncio
+async def test_creation_studio_retry_returns_selection_required_for_stale_model(monkeypatch):
+    from routers import creation_studio as studio_router
+
+    user = SimpleNamespace(id=7)
+    source = SimpleNamespace(
+        id=10,
+        owner_user_id=7,
+        media_kind="video",
+        model_id=2,
+        status="failed",
+    )
+    expected_error = HTTPException(
+        status_code=409,
+        detail={
+            "code": "AI_MODEL_SELECTION_REQUIRED",
+            "message": "已选择的模型已下架，请重新选择",
+            "modality": "video",
+            "reason": "hidden",
+        },
+    )
+    monkeypatch.setattr(studio_router, "_require_user", lambda request, db: user)
+    monkeypatch.setattr(studio_router, "_owned_job", lambda db, user_id, job_id: source)
+
+    def reject_stale_model(*args, **kwargs):
+        assert kwargs["model_id"] == source.model_id
+        assert kwargs["selection_policy"] == "interactive_strict"
+        raise expected_error
+
+    monkeypatch.setattr(studio_router, "resolve_model", reject_stale_model)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await studio_router.retry_job(source.id, SimpleNamespace(), SimpleNamespace())
+
+    assert exc_info.value is expected_error
 
 
 @pytest.mark.asyncio

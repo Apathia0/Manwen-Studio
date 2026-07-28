@@ -1,5 +1,14 @@
 const DEFAULT_ERROR_MESSAGE = '操作失败，请稍后重试';
 
+export const AI_MODEL_SELECTION_REQUIRED_EVENT = 'storycanvas:ai-model-selection-required';
+
+export type AiModelSelectionRequiredDetail = {
+  code: 'AI_MODEL_SELECTION_REQUIRED';
+  message: string;
+  modality: 'text' | 'image' | 'video';
+  reason?: string;
+};
+
 const ERROR_RULES: Array<[RegExp, string]> = [
   [/\b402\b|payment required|insufficient (balance|credits?)|余额不足/i, '上游 AI 服务余额不足，请充值或更换可用渠道后重试'],
   [/\b401\b|unauthorized|invalid api[ _-]?key|authentication failed/i, '身份验证失败，请重新登录或检查 API Key'],
@@ -68,6 +77,27 @@ function parseErrorText(text: string): string {
   return text.replace(/^Error:\s*/i, '').trim();
 }
 
+function notifyModelSelectionRequired(payload: unknown): void {
+  if (!payload || typeof payload !== 'object' || typeof window === 'undefined') return;
+  const responsePayload = payload as Record<string, unknown>;
+  const rawDetail = responsePayload.detail;
+  if (!rawDetail || typeof rawDetail !== 'object') return;
+  const detail = rawDetail as Record<string, unknown>;
+  if (detail.code !== 'AI_MODEL_SELECTION_REQUIRED') return;
+  if (!['text', 'image', 'video'].includes(String(detail.modality || ''))) return;
+  const message = typeof detail.message === 'string' && detail.message.trim()
+    ? detail.message.trim()
+    : '默认模型未配置或已失效，请重新选择后再试。';
+  window.dispatchEvent(new CustomEvent<AiModelSelectionRequiredDetail>(AI_MODEL_SELECTION_REQUIRED_EVENT, {
+    detail: {
+      code: 'AI_MODEL_SELECTION_REQUIRED',
+      message,
+      modality: detail.modality as AiModelSelectionRequiredDetail['modality'],
+      reason: typeof detail.reason === 'string' ? detail.reason : undefined,
+    },
+  }));
+}
+
 export function normalizeErrorMessage(error: unknown, fallback = DEFAULT_ERROR_MESSAGE): string {
   const message = parseErrorText(rawErrorText(error));
   if (!message) return fallback;
@@ -92,6 +122,11 @@ export async function readResponseError(response: Response, fallback = DEFAULT_E
   const text = await response.text();
   if (!text) {
     return normalizeErrorMessage(`HTTP ${response.status}`, fallback);
+  }
+  try {
+    notifyModelSelectionRequired(JSON.parse(text));
+  } catch {
+    // 非 JSON 错误继续按普通文本处理。
   }
   return normalizeErrorMessage(text, fallback);
 }

@@ -1,6 +1,7 @@
 import { type KeyboardEvent, useCallback, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import {
+  AlertTriangle,
   CheckCircle2,
   ChevronRight,
   Coins,
@@ -48,7 +49,11 @@ import { toast } from '../lib/toast';
 import { Button, Input, Select } from './ui';
 
 type AccountTab = 'overview' | 'credential' | 'models' | 'ledger';
-type ModelModality = 'text' | 'image' | 'video';
+export type ModelModality = 'text' | 'image' | 'video';
+export type ModelConfigRequest = {
+  modality: ModelModality;
+  requestId: number;
+};
 type PlatformApiSettings = NonNullable<PublicPlatformSettings['api']>;
 
 const ACCOUNT_TABS = [
@@ -275,14 +280,18 @@ export function PointsAiAccountPanel({
   canOverrideApiKey = false,
   canOverrideApiUrl = false,
   platformApi,
+  modelConfigRequest,
+  onModelConfigRequestHandled,
 }: {
   canOverrideApiKey?: boolean;
   canOverrideApiUrl?: boolean;
   platformApi?: PlatformApiSettings;
+  modelConfigRequest?: ModelConfigRequest | null;
+  onModelConfigRequestHandled?: (requestId: number) => void;
 }) {
   const canUseOwnKey = canOverrideApiKey || canOverrideApiUrl;
-  const [activeTab, setActiveTab] = useState<AccountTab>('overview');
-  const [activeModality, setActiveModality] = useState<ModelModality>('text');
+  const [activeTab, setActiveTab] = useState<AccountTab>(modelConfigRequest ? 'models' : 'overview');
+  const [activeModality, setActiveModality] = useState<ModelModality>(modelConfigRequest?.modality || 'text');
   const [credentialModalOpen, setCredentialModalOpen] = useState(false);
   const [account, setAccount] = useState<PointsAccount | null>(null);
   const [ledger, setLedger] = useState<PointsLedgerItem[]>([]);
@@ -305,6 +314,15 @@ export function PointsAiAccountPanel({
   const [busy, setBusy] = useState(false);
   const [mode, setMode] = useState<CredentialMode>(getLocalCredentialMode());
   const credentialModalRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!modelConfigRequest) return;
+    // 配置请求来自全局 API 错误事件，需要同步切换已挂载的账户面板。
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setActiveTab('models');
+    setActiveModality(modelConfigRequest.modality);
+    onModelConfigRequestHandled?.(modelConfigRequest.requestId);
+  }, [modelConfigRequest, onModelConfigRequestHandled]);
 
   const reload = useCallback(async () => {
     const [a, c, pr, m, channelResult] = await Promise.all([
@@ -594,9 +612,21 @@ export function PointsAiAccountPanel({
   const customModel = apiSettings[upstreamFields.modelKey];
   const platformModel = platformApi?.[upstreamFields.platformModelKey] || '-';
   const availableModels = models.filter((item) => item.modality === activeModality);
-  const selectableModels = availableModels.filter((item) => mode === 'user_key' || item.price);
+  const selectableModelsForMode = models.filter((item) => mode === 'user_key' || item.price);
+  const selectableModels = selectableModelsForMode.filter((item) => item.modality === activeModality);
   const selectedModelId = prefs?.[modelConfig.preferenceKey] ?? null;
   const selectedModel = availableModels.find((item) => item.id === selectedModelId) || null;
+  const missingModelLabels = prefs
+    ? MODEL_TABS.filter((item) => {
+        const modalityModels = selectableModelsForMode.filter((model) => model.modality === item.key);
+        if (modalityModels.length === 0) return false;
+        const modelId = prefs[item.preferenceKey];
+        return !modelId || !modalityModels.some((model) => model.id === modelId);
+      }).map((item) => item.label)
+    : [];
+  const unavailableModelLabels = prefs
+    ? MODEL_TABS.filter((item) => !selectableModelsForMode.some((model) => model.modality === item.key)).map((item) => item.label)
+    : [];
   const activeUpstreamGuide = getModalityUpstreamGuide(
     activeModality,
     apiSettings,
@@ -955,6 +985,33 @@ export function PointsAiAccountPanel({
               <p className="mt-1 text-xs leading-5 text-slate-500">从管理员已上架的模型中选择，各类任务会优先使用对应的默认配置。</p>
             </div>
 
+            {missingModelLabels.length > 0 ? (
+              <div
+                className="mt-4 flex items-start gap-3 border-l-4 border-amber-400 bg-amber-50 px-4 py-3 text-amber-950"
+                role="alert"
+              >
+                <AlertTriangle size={19} className="mt-0.5 shrink-0 text-amber-600" aria-hidden="true" />
+                <div className="min-w-0">
+                  <p className="text-sm font-semibold">默认模型尚未配置完整</p>
+                  <p className="mt-1 text-xs leading-5 text-amber-800">
+                    需要处理：{missingModelLabels.join('、')}。这些配置尚未选择或已失效，请重新选择并确认保存。
+                  </p>
+                </div>
+              </div>
+            ) : null}
+
+            {unavailableModelLabels.length > 0 ? (
+              <div className="mt-4 flex items-start gap-3 border-l-4 border-red-400 bg-red-50 px-4 py-3 text-red-950" role="alert">
+                <AlertTriangle size={19} className="mt-0.5 shrink-0 text-red-600" aria-hidden="true" />
+                <div className="min-w-0">
+                  <p className="text-sm font-semibold">部分模型暂不可用</p>
+                  <p className="mt-1 text-xs leading-5 text-red-800">
+                    暂无可选择的{unavailableModelLabels.join('、')}，可能尚未上架或未完成定价，请联系管理员处理。
+                  </p>
+                </div>
+              </div>
+            ) : null}
+
             {canOverrideApiUrl ? (
               <div className="mt-5 border-y border-[#e5edf8] py-4">
                 <label className="block text-xs font-medium text-slate-600" htmlFor="custom-upstream-base-url">自定义上游 Base URL</label>
@@ -1056,8 +1113,6 @@ export function PointsAiAccountPanel({
                       {getPriceSummary(selectedModel, mode)}
                     </span>
                   </div>
-                ) : selectedModelId ? (
-                  <span className="text-amber-600">原默认模型已下架，请重新选择可用模型。</span>
                 ) : (
                   <span>选择后将作为{modelConfig.label}任务的默认模型。</span>
                 )}

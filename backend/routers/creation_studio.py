@@ -697,17 +697,6 @@ async def create_jobs(payload: CreationStudioJobCreate, request: Request, db: Se
         raise HTTPException(400, "视频画面比例无效")
     if payload.resolution not in {"480P", "720P", "1080P", "1K", "2K", "4K"}:
         raise HTTPException(400, "视频清晰度无效")
-    selected_model = None
-    if payload.model_id is not None:
-        selected_model = db.get(AiModel, payload.model_id)
-        if (
-            not selected_model
-            or not selected_model.enabled
-            or not selected_model.user_visible
-            or selected_model.modality != media_kind
-        ):
-            raise HTTPException(400, "所选模型不存在、不可用或类型不匹配")
-
     main_mod = _main()
     credential_mode = main_mod._request_credential_mode(request, db)
     custom_upstream = main_mod._resolve_user_upstream_override(
@@ -721,13 +710,14 @@ async def create_jobs(payload: CreationStudioJobCreate, request: Request, db: Se
     if credential_mode == "user_key" and not custom_upstream and not capabilities["can_override_api_key"]:
         raise HTTPException(403, "管理员未授权当前账号使用自定义 API Key")
 
-    if selected_model is None:
-        selected_model = resolve_model(
-            db,
-            user.id,
-            modality=media_kind,
-            task_type=f"creation_studio.{media_kind}",
-        )
+    selected_model = resolve_model(
+        db,
+        user.id,
+        modality=media_kind,
+        model_id=payload.model_id,
+        task_type=f"creation_studio.{media_kind}",
+        selection_policy="interactive_strict",
+    )
 
     assets = [_owned_asset(db, user.id, asset_id) for asset_id in dict.fromkeys(payload.asset_ids)]
     if any(asset.media_type != "image" for asset in assets):
@@ -912,14 +902,22 @@ async def retry_job(job_id: int, request: Request, db: Session = Depends(get_db)
     source = _owned_job(db, user.id, job_id)
     if source.status in ACTIVE_STATUSES:
         raise HTTPException(409, "任务仍在执行，不能重试")
+    selected_model = resolve_model(
+        db,
+        user.id,
+        modality=source.media_kind,
+        model_id=source.model_id,
+        task_type=f"creation_studio.{source.media_kind}",
+        selection_policy="interactive_strict",
+    )
     clone = CreationStudioJob(
         owner_user_id=source.owner_user_id,
         media_kind=source.media_kind,
         generation_mode=source.generation_mode,
         prompt=source.prompt,
         negative_prompt=source.negative_prompt,
-        model_id=source.model_id,
-        model_key=source.model_key,
+        model_id=selected_model.id,
+        model_key=selected_model.model_key,
         parameters_json=deepcopy(source.parameters_json or {}),
         status="queued",
         stage="queued",

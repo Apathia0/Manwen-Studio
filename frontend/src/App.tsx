@@ -16,6 +16,11 @@ import {
   X,
 } from 'lucide-react';
 import { toast } from './lib/toast';
+import { confirm } from './lib/confirm';
+import {
+  AI_MODEL_SELECTION_REQUIRED_EVENT,
+  type AiModelSelectionRequiredDetail,
+} from './lib/errors';
 import { LoadingOverlay } from './components/ui/LoadingOverlay';
 import { RouteLoadingFallback } from './components/ui/RouteLoadingFallback';
 import PublicLanding from './components/PublicLanding';
@@ -182,11 +187,45 @@ function App() {
     return localStorage.getItem('rightPanelTab') === 'manga' ? 'manga' : 'novel';
   });
   const [deconWorkId, setDeconWorkId] = useState<number>(0);
+  const [modelConfigRequest, setModelConfigRequest] = useState<{
+    modality: AiModelSelectionRequiredDetail['modality'];
+    requestId: number;
+  } | null>(null);
 
   const activeChapter = useMemo(
     () => chapters.find((chapter) => chapter.id === activeChapterId) ?? null,
     [chapters, activeChapterId],
   );
+
+  const handleModelConfigRequestHandled = useCallback((requestId: number) => {
+    setModelConfigRequest((current) => current?.requestId === requestId ? null : current);
+  }, []);
+
+  useEffect(() => {
+    let promptOpen = false;
+    const handleModelSelectionRequired = (event: Event) => {
+      if (promptOpen) return;
+      const detail = (event as CustomEvent<AiModelSelectionRequiredDetail>).detail;
+      if (!detail) return;
+      promptOpen = true;
+      const firstConfiguration = detail.reason === 'missing';
+      void confirm({
+        title: firstConfiguration ? '首次使用前请配置模型' : '需要重新配置模型',
+        message: firstConfiguration ? `使用 AI 功能前，${detail.message}。` : detail.message,
+        confirmText: '去配置模型',
+        cancelText: firstConfiguration ? '稍后配置' : '暂不配置',
+        danger: false,
+      }).then((accepted) => {
+        if (!accepted) return;
+        setModelConfigRequest({ modality: detail.modality, requestId: Date.now() });
+        setRoute('account');
+      }).finally(() => {
+        promptOpen = false;
+      });
+    };
+    window.addEventListener(AI_MODEL_SELECTION_REQUIRED_EVENT, handleModelSelectionRequired);
+    return () => window.removeEventListener(AI_MODEL_SELECTION_REQUIRED_EVENT, handleModelSelectionRequired);
+  }, []);
 
   useEffect(() => {
     localStorage.setItem(LS_WORKSPACE_MODE, workspaceMode);
@@ -726,6 +765,8 @@ function App() {
               onConfirmMockPayment={confirmPendingOrder}
               onCancelOrder={cancelPendingOrder}
               onRefreshOrders={refreshOrders}
+              modelConfigRequest={modelConfigRequest}
+              onModelConfigRequestHandled={handleModelConfigRequestHandled}
             />
           )}
           {route === 'points-ai-admin' && session.role === 'admin' && (

@@ -10,7 +10,7 @@ import {
   orderSourceLabel,
 } from '../lib/format';
 import { PasswordChangeForm } from './PasswordChangeForm';
-import { PointsAiAccountPanel } from './PointsAiAccountPanel';
+import { PointsAiAccountPanel, type ModelConfigRequest } from './PointsAiAccountPanel';
 
 export function UserAccountUsagePage({
   session,
@@ -20,6 +20,8 @@ export function UserAccountUsagePage({
   onConfirmMockPayment,
   onCancelOrder,
   onRefreshOrders,
+  modelConfigRequest,
+  onModelConfigRequestHandled,
 }: {
   session: AuthUser | null;
   platform: PublicPlatformSettings;
@@ -28,6 +30,8 @@ export function UserAccountUsagePage({
   onConfirmMockPayment: (orderNo: string) => void;
   onCancelOrder: (orderNo: string) => void;
   onRefreshOrders: () => void;
+  modelConfigRequest?: ModelConfigRequest | null;
+  onModelConfigRequestHandled?: (requestId: number) => void;
 }) {
   const pendingOrder = orders.find((order) => order.status === 'pending') || null;
   const canOverrideApiKey = Boolean(session?.can_override_api_key);
@@ -43,6 +47,8 @@ export function UserAccountUsagePage({
         canOverrideApiKey={canOverrideApiKey}
         canOverrideApiUrl={canOverrideApiUrl}
         platformApi={platform.api}
+        modelConfigRequest={modelConfigRequest}
+        onModelConfigRequestHandled={onModelConfigRequestHandled}
       />
 
       {pendingOrder ? (

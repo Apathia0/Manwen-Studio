@@ -17,6 +17,8 @@ MIGRATION_COMMAND="${MIGRATION_COMMAND:-python -c \"from database import init_db
 HEALTH_TIMEOUT_SECONDS="${HEALTH_TIMEOUT_SECONDS:-90}"
 BACKEND_IMAGE_REF="${BACKEND_IMAGE_REF:-}"
 WEB_IMAGE_REF="${WEB_IMAGE_REF:-}"
+IMAGE_RETENTION_COUNT="${IMAGE_RETENTION_COUNT:-3}"
+UPDATER_PREVIOUS_IMAGE_ID=""
 
 mkdir -p "$(dirname "$LOG_FILE")"
 LOCK_DIR="${LOCK_FILE}.d"
@@ -67,6 +69,102 @@ running_image_id_for() {
     return 0
   fi
   docker inspect -f '{{.Image}}' "$cid" 2>/dev/null || true
+}
+
+image_repository_for() {
+  local image_ref="${1%@*}"
+  if [[ "${image_ref##*/}" == *:* ]]; then
+    printf '%s\n' "${image_ref%:*}"
+  else
+    printf '%s\n' "$image_ref"
+  fi
+}
+
+is_managed_image_tag() {
+  [[ "$1" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+}
+
+running_image_ids() {
+  local cid
+  while IFS= read -r cid; do
+    [[ -n "$cid" ]] || continue
+    docker inspect -f '{{.Image}}' "$cid" 2>/dev/null || true
+  done < <(docker ps -aq 2>/dev/null || true)
+}
+
+prune_project_images() {
+  if [[ ! "$IMAGE_RETENTION_COUNT" =~ ^([1-9]|1[0-9]|20)$ ]]; then
+    log "invalid IMAGE_RETENTION_COUNT=${IMAGE_RETENTION_COUNT}; skipping project image cleanup"
+    return 0
+  fi
+
+  local protected_ids
+  protected_ids="$({
+    running_image_ids
+    printf '%s\n' \
+      "${BACKEND_PREVIOUS_IMAGE_ID:-}" \
+      "${WEB_PREVIOUS_IMAGE_ID:-}" \
+      "${UPDATER_PREVIOUS_IMAGE_ID:-}"
+  } | sed '/^$/d' | sort -u)"
+
+  local -A repository_uses=()
+  local -A visited_repositories=()
+  local service image_ref repository
+  for service in "$BACKEND_SERVICE" "$WEB_SERVICE" updater; do
+    image_ref="$(image_ref_for "$service")"
+    repository="$(image_repository_for "$image_ref")"
+    [[ -n "$repository" ]] || continue
+    repository_uses["$repository"]=$(( ${repository_uses["$repository"]:-0} + 1 ))
+  done
+
+  for service in "$BACKEND_SERVICE" "$WEB_SERVICE" updater; do
+    image_ref="$(image_ref_for "$service")"
+    repository="$(image_repository_for "$image_ref")"
+    if [[ -z "$repository" || -n "${visited_repositories[$repository]:-}" ]]; then
+      continue
+    fi
+    visited_repositories["$repository"]=1
+    if (( ${repository_uses["$repository"]:-0} > 1 )); then
+      log "skipping shared image repository ${repository}; cleanup requires one repository per service"
+      continue
+    fi
+
+    local -a records=()
+    local listed_repository tag details
+    while IFS='|' read -r listed_repository tag; do
+      [[ "$listed_repository" == "$repository" && -n "$tag" && "$tag" != "<none>" ]] || continue
+      is_managed_image_tag "$tag" || continue
+      details="$(docker image inspect --format '{{.Created}}|{{.Id}}' "${repository}:${tag}" 2>/dev/null || true)"
+      [[ -n "$details" ]] && records+=("${details}|${repository}:${tag}")
+    done < <(docker image ls "$repository" --format '{{.Repository}}|{{.Tag}}' 2>/dev/null || true)
+
+    local -A retained_ids=()
+    local retained_count=0 record created image_id tagged_ref
+    while IFS= read -r record; do
+      [[ -n "$record" ]] || continue
+      IFS='|' read -r created image_id tagged_ref <<<"$record"
+
+      if grep -Fxq "$image_id" <<<"$protected_ids"; then
+        if [[ -z "${retained_ids[$image_id]:-}" ]]; then
+          retained_ids["$image_id"]=1
+          ((retained_count += 1))
+        fi
+        continue
+      fi
+      if [[ -n "${retained_ids[$image_id]:-}" ]]; then
+        continue
+      fi
+      if (( retained_count < IMAGE_RETENTION_COUNT )); then
+        retained_ids["$image_id"]=1
+        ((retained_count += 1))
+        continue
+      fi
+
+      log "removing old project image tag ${tagged_ref}"
+      docker image rm "$tagged_ref" >/dev/null 2>&1 || \
+        log "unable to remove project image tag ${tagged_ref}; it may still be referenced"
+    done < <(printf '%s\n' "${records[@]}" | sort -r)
+  done
 }
 
 wait_for_health() {
@@ -143,6 +241,7 @@ main() {
   updater_before="$(running_image_id_for updater)"
   BACKEND_PREVIOUS_IMAGE_ID="$backend_before"
   WEB_PREVIOUS_IMAGE_ID="$web_before"
+  UPDATER_PREVIOUS_IMAGE_ID="$updater_before"
   BACKEND_IMAGE_REF="${BACKEND_IMAGE_REF:-$(image_ref_for "$BACKEND_SERVICE")}"
   WEB_IMAGE_REF="${WEB_IMAGE_REF:-$(image_ref_for "$WEB_SERVICE")}"
 
@@ -186,12 +285,6 @@ main() {
     fi
   fi
 
-  if [[ "${SKIP_IMAGE_PRUNE:-false}" == "true" ]]; then
-    log "skipping image prune"
-  else
-    docker image prune -f --filter "until=168h" >/dev/null || true
-  fi
-
   local updated_version
   updated_version="$(grep -oP '^APP_VERSION=\K.*' "$ENV_FILE" 2>/dev/null || true)"
   if [[ -n "$updated_version" ]]; then
@@ -225,6 +318,12 @@ EOF
       --entrypoint bash \
       "$updater_image" \
       -lc 'sleep 2; docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" up -d --no-deps updater >>"$LOG_FILE" 2>&1'
+  fi
+
+  if [[ "${SKIP_IMAGE_PRUNE:-false}" == "true" ]]; then
+    log "skipping image prune"
+  else
+    prune_project_images
   fi
 
   log "update completed"
