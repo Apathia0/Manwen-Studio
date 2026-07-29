@@ -28,6 +28,8 @@ import {
   redrawStoryRefImage,
   getColorMode,
   setColorMode,
+  getMangaAspectRatio,
+  setMangaAspectRatio,
   getImageCount,
   setImageCount,
   ALLOWED_IMAGE_COUNTS,
@@ -43,6 +45,7 @@ import {
   type Chapter,
   type MangaProgress,
   type ColorMode,
+  type MangaAspectRatio,
   type RefSource,
   type RefImage,
   type VideoStylePreset,
@@ -270,7 +273,7 @@ export default memo(function MangaPanel({
   const assetsLoading = false;
   const [colorMode, setColorModeState] = useState<ColorMode>('bw');
   const [imageCount, setImageCountState] = useState(DEFAULT_IMAGE_COUNT);
-const [aspectRatio, setAspectRatio] = useState<string>('9:16');
+  const [aspectRatio, setAspectRatio] = useState<MangaAspectRatio>('9:16');
   const [stylePresets, setStylePresets] = useState<VideoStylePreset[]>([]);
   const [selectedStylePresetName, setSelectedStylePresetName] = useState<string>('');
   const [styleReferenceImageUrl, setStyleReferenceImageUrl] = useState<string | null>(null);
@@ -377,6 +380,7 @@ const [aspectRatio, setAspectRatio] = useState<string>('9:16');
     setAutoAssetExtractionTypes(['character', 'scene', 'prop']);
     setColorModeState('bw');
     setImageCountState(DEFAULT_IMAGE_COUNT);
+    setAspectRatio('9:16');
     let persistedStyle: { presetName?: string; referenceUrl?: string | null } | null = null;
     if (chapter?.id) {
       try {
@@ -524,6 +528,9 @@ const [aspectRatio, setAspectRatio] = useState<string>('9:16');
       }).catch(() => {});
       getColorMode(chapter.id).then((m) => {
         if (chapterLoadRequestRef.current === requestId) setColorModeState(m);
+      }).catch(() => {});
+      getMangaAspectRatio(chapter.id).then((ratio) => {
+        if (chapterLoadRequestRef.current === requestId) setAspectRatio(ratio);
       }).catch(() => {});
       getImageCount(chapter.id).then((c) => {
         if (chapterLoadRequestRef.current === requestId) setImageCountState(c);
@@ -1092,6 +1099,18 @@ const [aspectRatio, setAspectRatio] = useState<string>('9:16');
     setColorModeState(mode);
   };
 
+  const handleSelectAspectRatio = async (ratio: MangaAspectRatio) => {
+    if (!chapter || ratio === aspectRatio) return;
+    const previousRatio = aspectRatio;
+    setAspectRatio(ratio);
+    try {
+      await setMangaAspectRatio(chapter.id, ratio);
+    } catch (err) {
+      setAspectRatio(previousRatio);
+      toast.error(normalizeErrorMessage(err, '保存漫画比例失败，请重试'));
+    }
+  };
+
   useEffect(() => {
     if (imageCount > maxImagesPerChapter) {
       setImageCountState(maxImagesPerChapter);
@@ -1548,7 +1567,7 @@ const [aspectRatio, setAspectRatio] = useState<string>('9:16');
             {/* 比例选择器 */}
             <select
               value={aspectRatio}
-              onChange={(e) => setAspectRatio(e.target.value)}
+              onChange={(e) => void handleSelectAspectRatio(e.target.value as MangaAspectRatio)}
               className="px-2 py-1.5 text-xs font-medium rounded-md border border-[#d9dfd7] bg-white text-slate-700 outline-none cursor-pointer focus:border-[#1f5f58]"
             >
               {ASPECT_RATIO_OPTIONS.map((opt) => (

@@ -1836,6 +1836,24 @@ export async function setColorMode(chapterId: number, mode: ColorMode): Promise<
   if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
 }
 
+export type MangaAspectRatio = '9:16' | '3:4' | '2:3' | '1:1' | '3:2' | '4:3' | '16:9';
+
+export async function getMangaAspectRatio(chapterId: number): Promise<MangaAspectRatio> {
+  const res = await fetch(`${BASE}/api/chapters/${chapterId}/manga-aspect-ratio`, { headers: apiHeaders() });
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
+  const data = await res.json();
+  return data.aspect_ratio || '9:16';
+}
+
+export async function setMangaAspectRatio(chapterId: number, ratio: MangaAspectRatio): Promise<void> {
+  const res = await fetch(`${BASE}/api/chapters/${chapterId}/manga-aspect-ratio`, {
+    method: 'PUT',
+    headers: apiHeaders(true),
+    body: JSON.stringify({ aspect_ratio: ratio }),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
+}
+
 // ─── Image Count ─────────────────────────────────────────────
 
 export const ALLOWED_IMAGE_COUNTS = Array.from({ length: 20 }, (_, index) => index + 1);

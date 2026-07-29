@@ -14,6 +14,55 @@ def test_single_image_regeneration_uses_module_media_locator():
     assert "ensure_local_media_path" not in main.regenerate_single_image.__code__.co_varnames
 
 
+def test_manga_aspect_ratio_is_persisted_on_chapter(monkeypatch):
+    class AspectRatioDb:
+        def __init__(self):
+            self.commit_count = 0
+
+        def commit(self):
+            self.commit_count += 1
+
+    chapter = SimpleNamespace(id=7, manga_aspect_ratio="9:16")
+    db = AspectRatioDb()
+    monkeypatch.setattr(main, "_require_user", lambda *_args: SimpleNamespace(id=1))
+    monkeypatch.setattr(main, "_require_chapter_for_user", lambda *_args: chapter)
+
+    saved = asyncio.run(main.set_manga_aspect_ratio(
+        chapter.id,
+        {"aspect_ratio": "16:9"},
+        SimpleNamespace(),
+        db,
+    ))
+    loaded = asyncio.run(main.get_manga_aspect_ratio(chapter.id, SimpleNamespace(), db))
+
+    assert saved == {"ok": True, "aspect_ratio": "16:9"}
+    assert loaded == {"aspect_ratio": "16:9"}
+    assert chapter.manga_aspect_ratio == "16:9"
+    assert db.commit_count == 1
+
+
+def test_manga_aspect_ratio_defaults_and_rejects_unknown_values(monkeypatch):
+    class AspectRatioDb:
+        def commit(self):
+            raise AssertionError("非法比例不应提交数据库")
+
+    chapter = SimpleNamespace(id=8, manga_aspect_ratio=None)
+    monkeypatch.setattr(main, "_require_user", lambda *_args: SimpleNamespace(id=1))
+    monkeypatch.setattr(main, "_require_chapter_for_user", lambda *_args: chapter)
+
+    loaded = asyncio.run(main.get_manga_aspect_ratio(chapter.id, SimpleNamespace(), AspectRatioDb()))
+
+    with pytest.raises(main.HTTPException, match="漫画比例不受支持"):
+        asyncio.run(main.set_manga_aspect_ratio(
+            chapter.id,
+            {"aspect_ratio": "5:7"},
+            SimpleNamespace(),
+            AspectRatioDb(),
+        ))
+
+    assert loaded == {"aspect_ratio": "9:16"}
+
+
 class FakeQuery:
     def __init__(self, images=None):
         self.images = list(images or [])

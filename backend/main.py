@@ -8437,6 +8437,36 @@ async def set_color_mode(chapter_id: int, body: dict, request: Request, db: Sess
     return {"ok": True}
 
 
+# ─── Manga Aspect Ratio ──────────────────────────────────────
+
+DEFAULT_MANGA_ASPECT_RATIO = "9:16"
+MANGA_ASPECT_RATIOS = {"9:16", "3:4", "2:3", "1:1", "3:2", "4:3", "16:9"}
+
+
+def _chapter_manga_aspect_ratio(chapter: Chapter) -> str:
+    ratio = getattr(chapter, "manga_aspect_ratio", None)
+    return ratio if ratio in MANGA_ASPECT_RATIOS else DEFAULT_MANGA_ASPECT_RATIO
+
+
+@app.get("/api/chapters/{chapter_id}/manga-aspect-ratio")
+async def get_manga_aspect_ratio(chapter_id: int, request: Request, db: Session = Depends(get_db)):
+    user = _require_user(request, db)
+    chapter = _require_chapter_for_user(chapter_id, user, db)
+    return {"aspect_ratio": _chapter_manga_aspect_ratio(chapter)}
+
+
+@app.put("/api/chapters/{chapter_id}/manga-aspect-ratio")
+async def set_manga_aspect_ratio(chapter_id: int, body: dict, request: Request, db: Session = Depends(get_db)):
+    user = _require_user(request, db)
+    chapter = _require_chapter_for_user(chapter_id, user, db)
+    ratio = body.get("aspect_ratio")
+    if not isinstance(ratio, str) or ratio not in MANGA_ASPECT_RATIOS:
+        raise HTTPException(400, "漫画比例不受支持")
+    chapter.manga_aspect_ratio = ratio
+    db.commit()
+    return {"ok": True, "aspect_ratio": ratio}
+
+
 # ─── Image Count ───────────────────────────────────────────
 
 DEFAULT_IMAGE_COUNT = 10
