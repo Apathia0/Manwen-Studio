@@ -1144,7 +1144,9 @@ function ChapterContextDashboard({ storyId }: { storyId: number }) {
   const [refreshMessage, setRefreshMessage] = useState('');
   const activeTaskRef = useRef<{ chapterNumber: number; missing: boolean } | null>(null);
   const selectedRef = useRef<ChapterContextSummary | null>(null);
-  selectedRef.current = selected;
+  useEffect(() => {
+    selectedRef.current = selected;
+  }, [selected]);
   const presentation = useMemo(() => parseCreationPack(value?.content || ''), [value?.content]);
   const draftContent = useMemo(() => draft ? serializeCreationPack(draft) : '', [draft]);
   const dirty = editing && draftContent !== draftBaseline;
