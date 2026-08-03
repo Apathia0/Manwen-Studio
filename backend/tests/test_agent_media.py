@@ -17,6 +17,7 @@ from database import Base
 from models import AgentAttachment
 from services import agent_service as agent_service_module
 from services.agent_media import _extract_document_text, _extract_document_text_safely, multimodal_content, resolve_attachments
+from services.errors import UpstreamServiceError
 from services.token_utils import emergency_compact_messages, estimate_messages_tokens, split_messages_for_compression
 from services.token_utils import should_compress_messages
 
@@ -185,6 +186,18 @@ class _FakeAgentToolProtocolErrorResponse(_FakeAgentContextErrorResponse):
         return b'{"error":{"type":"invalid_request_error","message":"Invalid tool_call_id in tool message"}}'
 
 
+class _FakeAgentPaymentRequiredResponse(_FakeAgentContextErrorResponse):
+    def __init__(self):
+        super().__init__()
+        self.status_code = 402
+
+    async def aread(self):
+        return b'{"error":{"type":"invalid_request_error","message":"insufficient balance"}}'
+
+    def raise_for_status(self):
+        raise AssertionError("402 应在响应体 invalid_request 分类前按状态码处理")
+
+
 def _agent_sse_response(
     content: str,
     finish_reason: str,
@@ -341,6 +354,23 @@ async def test_agent_compacts_short_oversized_history_before_request(monkeypatch
     assert len(payloads) == 1
     assert len(json.dumps(payloads[0]["messages"], ensure_ascii=False)) < len(oversized) * 2
     assert json.loads(next(event for event in events if event["event"] == "done")["data"])["content"] == "压缩后完成"
+
+
+@pytest.mark.asyncio
+async def test_agent_402_precedes_invalid_request_body_classification(monkeypatch):
+    _install_agent_stream_client(monkeypatch, [_FakeAgentPaymentRequiredResponse()])
+
+    with pytest.raises(UpstreamServiceError) as error:
+        async for _ in agent_service_module.AgentService().run_stream(
+            messages=[{"role": "user", "content": "继续执行框架优化"}],
+            story_context="测试上下文",
+            api_key="test-key",
+        ):
+            pass
+
+    assert error.value.code == "agent_upstream_payment_required"
+    assert error.value.status_code == 402
+    assert error.value.retryable is False
 
 
 @pytest.mark.asyncio
@@ -594,7 +624,7 @@ def test_execute_intent_distinguishes_confirmation_from_immediate_write():
     assert agent_service_module._has_chapter_content_write_intent("不是不写正文")
 
 
-def test_reasoning_content_is_counted_and_preserved_by_emergency_compaction():
+def test_reasoning_content_is_counted_and_removed_by_emergency_compaction():
     messages = [
         {"role": "system", "content": "系统"},
         {
@@ -615,7 +645,7 @@ def test_reasoning_content_is_counted_and_preserved_by_emergency_compaction():
     ])
     compacted = emergency_compact_messages(messages)
     assistant_message = next(message for message in compacted if message.get("role") == "assistant")
-    assert assistant_message["reasoning_content"] == "推理过程" * 20
+    assert "reasoning_content" not in assistant_message
 
 
 def test_history_compression_keeps_tool_exchange_atomic():
@@ -809,7 +839,7 @@ async def test_agent_done_contains_all_text_across_tool_iterations(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_execute_mode_waits_for_confirmation_without_write_correction(monkeypatch):
+async def test_agent_waits_for_confirmation_without_write_correction(monkeypatch):
     tool_call = [{
         "index": 0,
         "id": "call-framework-analysis",
@@ -849,7 +879,7 @@ async def test_execute_mode_waits_for_confirmation_without_write_correction(monk
 
 
 @pytest.mark.asyncio
-async def test_video_execute_mode_respects_confirmation_before_mutation(monkeypatch):
+async def test_video_agent_respects_confirmation_before_mutation(monkeypatch):
     prompt = "先分析分镜问题，等我确认后再调整"
     assert agent_service_module.has_video_mutation_intent(prompt)
     payloads = _install_agent_stream_client(
@@ -1155,7 +1185,7 @@ async def test_agent_skips_repeated_write_tool_id_across_iterations(monkeypatch)
 
 
 @pytest.mark.asyncio
-async def test_agent_allows_same_write_with_new_tool_id_across_iterations(monkeypatch):
+async def test_agent_skips_same_write_with_new_tool_id_across_iterations(monkeypatch):
     first_call = [{
         "index": 0,
         "id": "call-write-first",
@@ -1193,7 +1223,50 @@ async def test_agent_allows_same_write_with_new_tool_id_across_iterations(monkey
     ):
         pass
 
-    assert execute_count == 2
+    assert execute_count == 1
+
+
+@pytest.mark.asyncio
+async def test_agent_pauses_after_tool_group_budget_and_keeps_completed_writes(monkeypatch):
+    responses = []
+    for index in range(12):
+        responses.append(_agent_sse_response(
+            "",
+            "tool_calls",
+            tool_calls=[{
+                "index": 0,
+                "id": f"call-budget-{index}",
+                "function": {
+                    "name": "update_chapter_content",
+                    "arguments": json.dumps({"chapter_id": index + 1, "content": f"正文{index + 1}"}, ensure_ascii=False),
+                },
+            }],
+        ))
+    payloads = _install_agent_stream_client(monkeypatch, responses)
+    service = agent_service_module.AgentService()
+    execute_count = 0
+
+    async def fake_execute(_name, _args):
+        nonlocal execute_count
+        execute_count += 1
+        return '{"ok":true}'
+
+    monkeypatch.setattr(service.tool_registry, "execute", fake_execute)
+    monkeypatch.setattr(service.tool_registry, "is_write_tool", lambda name: name == "update_chapter_content")
+
+    events = [
+        event
+        async for event in service.run_stream(
+            messages=[{"role": "user", "content": "批量更新章节正文"}],
+            story_context="测试上下文",
+            api_key="test-key",
+        )
+    ]
+
+    done = json.loads(next(event for event in events if event["event"] == "done")["data"])
+    assert execute_count == 12
+    assert len(payloads) == 12
+    assert "已经写入的修改均已保留" in done["content"]
 
 
 @pytest.mark.asyncio
@@ -1272,7 +1345,7 @@ async def test_agent_run_stream_sets_token_limit_and_continues_after_length(monk
     ]
 
     assert len(payloads) == 2
-    assert all(payload["max_tokens"] == 4096 for payload in payloads)
+    assert [payload["max_tokens"] for payload in payloads] == [4096, 8192]
     assert all("max_completion_tokens" not in payload for payload in payloads)
     token_text = "".join(
         json.loads(event["data"])["content"]
@@ -1286,6 +1359,42 @@ async def test_agent_run_stream_sets_token_limit_and_continues_after_length(monk
     assert payloads[1]["messages"][-1]["role"] == "user"
     assert "[[agent_context nonce=" in payloads[1]["messages"][-1]["content"]
     assert sum(message.get("role") == "system" for message in payloads[1]["messages"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_agent_uses_learned_model_output_capability(monkeypatch):
+    payloads = _install_agent_stream_client(
+        monkeypatch,
+        [_agent_sse_response("已完成", "stop")],
+    )
+    service = agent_service_module.AgentService()
+    monkeypatch.setattr(service, "_build_system_prompt", lambda *_args, **_kwargs: "系统提示")
+    monkeypatch.setattr(
+        agent_service_module,
+        "load_model_capability",
+        lambda *_args, **_kwargs: {
+            "observed_context_limit": 30000,
+            "observed_output_limit": 2048,
+        },
+    )
+    monkeypatch.setattr(
+        agent_service_module,
+        "persist_model_capability_observation",
+        lambda *_args, **_kwargs: {},
+    )
+
+    events = [
+        event
+        async for event in service.run_stream(
+            messages=[{"role": "user", "content": "继续处理"}],
+            story_context="测试上下文",
+            api_key="test-key",
+            db=object(),
+        )
+    ]
+
+    assert payloads[0]["max_tokens"] == 2048
+    assert json.loads(next(event for event in events if event["event"] == "done")["data"])["content"] == "已完成"
 
 
 @pytest.mark.asyncio
@@ -1369,14 +1478,15 @@ async def test_agent_length_discards_incomplete_tool_call(monkeypatch):
     assert not any(event["event"] == "tool_call" for event in events)
     continuation_messages = payloads[1]["messages"]
     assert not any(message.get("tool_calls") for message in continuation_messages)
-    assert "从头完整重发整个工具调用" in continuation_messages[-1]["content"]
+    assert "把任务拆成更小调用" in continuation_messages[-1]["content"]
+    assert "每批最多 3 章" in continuation_messages[-1]["content"]
 
 
 @pytest.mark.asyncio
 async def test_agent_truncation_continuation_limit(monkeypatch):
     payloads = _install_agent_stream_client(
         monkeypatch,
-        [_agent_sse_response(f"片段{index}", "length") for index in range(9)],
+        [_agent_sse_response(f"片段{index}", "length") for index in range(3)],
     )
 
     with pytest.raises(agent_service_module.AgentTruncationContinuationLimitError) as exc_info:
@@ -1388,9 +1498,9 @@ async def test_agent_truncation_continuation_limit(monkeypatch):
         ):
             pass
 
-    assert len(payloads) == 9
+    assert len(payloads) == 3
     assert exc_info.value.code == "agent_truncation_continuation_limit"
-    assert "8 次安全上限" in str(exc_info.value)
+    assert "自动恢复已达到安全上限" in str(exc_info.value)
 
 
 @pytest.mark.asyncio
@@ -1401,9 +1511,9 @@ async def test_agent_truncation_limit_resets_after_successful_tool_response(monk
         "function": {"name": "get_story_overview", "arguments": "{}"},
     }]
     responses = (
-        [_agent_sse_response(f"前段{index}", "length") for index in range(8)]
+        [_agent_sse_response(f"前段{index}", "length") for index in range(2)]
         + [_agent_sse_response("", "tool_calls", tool_calls=complete_tool_call)]
-        + [_agent_sse_response(f"后段{index}", "length") for index in range(8)]
+        + [_agent_sse_response(f"后段{index}", "length") for index in range(2)]
         + [_agent_sse_response("完成", "stop")]
     )
     payloads = _install_agent_stream_client(monkeypatch, responses)
@@ -1424,7 +1534,7 @@ async def test_agent_truncation_limit_resets_after_successful_tool_response(monk
         )
     ]
 
-    assert len(payloads) == 18
+    assert len(payloads) == 6
     assert any(event["event"] == "tool_result" for event in events)
     assert json.loads(next(event for event in events if event["event"] == "done")["data"])["content"].endswith("完成")
 

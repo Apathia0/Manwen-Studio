@@ -24,6 +24,22 @@ def deep_merge_story_bible(existing: dict | None, update: dict | None) -> dict:
     return deep_merge_dict(existing, update)
 
 
+def has_active_writing_reference(story_bible: dict | None) -> bool:
+    """仅允许人工修订或仍有关联标记的写作参考进入创作上下文。"""
+    if not isinstance(story_bible, dict):
+        return False
+    profile = story_bible.get("reference_author_profile")
+    if isinstance(profile, dict) and profile.get("manual_override") is True:
+        return True
+    legacy_reference = story_bible.get("deconstruction")
+    if isinstance(legacy_reference, dict) and legacy_reference:
+        return True
+    return any(
+        key.startswith("deconstruction_") and isinstance(value, dict) and bool(value)
+        for key, value in story_bible.items()
+    )
+
+
 async def refresh_chapter_memory_for_content(
     *,
     chapter,
@@ -57,12 +73,14 @@ async def refresh_chapter_memory_for_content(
     chapter_summary = memory_payload.get("chapter_summary") if isinstance(memory_payload.get("chapter_summary"), dict) else {}
     chapter_handoff = memory_payload.get("chapter_handoff") if isinstance(memory_payload.get("chapter_handoff"), dict) else {}
     story_memory_update = memory_payload.get("story_memory_update") if isinstance(memory_payload.get("story_memory_update"), dict) else {}
+    fallback_meta = memory_payload.get("_fallback") if isinstance(memory_payload.get("_fallback"), dict) else None
 
     chapter.memory_summary = {
         "chapter_summary": chapter_summary,
         "chapter_handoff": chapter_handoff,
         "summary": chapter_summary.get("summary"),
         "ending_scene": chapter_summary.get("ending_scene"),
+        "fallback": fallback_meta,
     } if (chapter_summary or chapter_handoff) else None
 
     chapter.story.story_memory = merge_story_memory_func(
@@ -141,44 +159,44 @@ def build_story_bible_compact(story_bible: dict | None) -> dict[str, Any]:
         if value:
             compact[f"import_{key}"] = value
 
-    # 拆书引用数据：让 AI 可以参考已拆书作品的写作手法和剧情模式
-    learned_techniques = story_bible.get("learned_techniques")
-    if isinstance(learned_techniques, list) and learned_techniques:
-        compact["learned_techniques"] = learned_techniques
+    if has_active_writing_reference(story_bible):
+        # 拆书引用数据：仅在用户引用来源或人工确认后进入生成上下文
+        learned_techniques = story_bible.get("learned_techniques")
+        if isinstance(learned_techniques, list) and learned_techniques:
+            compact["learned_techniques"] = learned_techniques
 
-    reference_plots = story_bible.get("reference_plots")
-    if isinstance(reference_plots, list) and reference_plots:
-        compact["reference_plots"] = reference_plots
+        reference_plots = story_bible.get("reference_plots")
+        if isinstance(reference_plots, list) and reference_plots:
+            compact["reference_plots"] = reference_plots
 
-    reference_rhythm = story_bible.get("reference_rhythm")
-    if isinstance(reference_rhythm, dict) and reference_rhythm:
-        compact["reference_rhythm"] = reference_rhythm
+        reference_rhythm = story_bible.get("reference_rhythm")
+        if isinstance(reference_rhythm, dict) and reference_rhythm:
+            compact["reference_rhythm"] = reference_rhythm
 
-    reference_emotion_modules = story_bible.get("reference_emotion_modules")
-    if isinstance(reference_emotion_modules, dict) and reference_emotion_modules:
-        compact["reference_emotion_modules"] = reference_emotion_modules
+        reference_emotion_modules = story_bible.get("reference_emotion_modules")
+        if isinstance(reference_emotion_modules, dict) and reference_emotion_modules:
+            compact["reference_emotion_modules"] = reference_emotion_modules
 
-    reference_author_profile = story_bible.get("reference_author_profile")
-    if isinstance(reference_author_profile, dict) and reference_author_profile:
-        compact["reference_author_profile"] = reference_author_profile
+        reference_author_profile = story_bible.get("reference_author_profile")
+        if isinstance(reference_author_profile, dict) and reference_author_profile:
+            compact["reference_author_profile"] = reference_author_profile
 
-    reference_author_report = story_bible.get("reference_author_report")
-    if isinstance(reference_author_report, str) and reference_author_report.strip():
-        compact["reference_author_report"] = extract_report_highlights(reference_author_report)
+        reference_author_report = story_bible.get("reference_author_report") or story_bible.get("reference_report")
+        if isinstance(reference_author_report, str) and reference_author_report.strip():
+            compact["reference_author_report"] = extract_report_highlights(reference_author_report)
 
-    reference_style_samples = story_bible.get("reference_style_samples")
-    if isinstance(reference_style_samples, list) and reference_style_samples:
-        compact["reference_style_samples"] = reference_style_samples
+        reference_style_samples = story_bible.get("reference_style_samples")
+        if isinstance(reference_style_samples, list) and reference_style_samples:
+            compact["reference_style_samples"] = reference_style_samples
 
-    # 拆书作品概要（多个引用时合并）
-    decon_titles = []
-    for key, value in story_bible.items():
-        if key.startswith("deconstruction_") and isinstance(value, dict):
-            title = value.get("title")
-            if title:
-                decon_titles.append(title)
-    if decon_titles:
-        compact["referenced_deconstruction_works"] = decon_titles
+        decon_titles = []
+        for key, value in story_bible.items():
+            if key.startswith("deconstruction_") and isinstance(value, dict):
+                title = value.get("title")
+                if title:
+                    decon_titles.append(title)
+        if decon_titles:
+            compact["referenced_deconstruction_works"] = decon_titles
 
     return compact
 

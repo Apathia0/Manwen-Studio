@@ -23,6 +23,8 @@ _PUBLIC_ERROR_RULES: tuple[tuple[re.Pattern[str], str], ...] = (
 
 def public_error_message(error: object, fallback: str = "任务执行失败，请稍后重试") -> str:
     """将内部或上游异常转换为安全、可操作的中文提示。"""
+    if isinstance(error, TimeoutError):
+        return "任务执行超时，请稍后重试"
     user_message = str(getattr(error, "user_message", "") or "").strip()
     if user_message:
         return user_message
@@ -91,11 +93,64 @@ class UpstreamServiceError(RuntimeError):
         retryable: bool,
         provider: str = "",
         status_code: int | None = None,
+        code: str = "upstream_service_error",
+        suggestion: str = "",
+        diagnostics: dict | None = None,
     ):
         self.retryable = retryable
         self.provider = provider
         self.status_code = status_code
+        self.code = code
+        self.suggestion = suggestion
+        self.diagnostics = diagnostics or {}
         super().__init__(message)
+
+    def to_payload(self) -> dict:
+        payload = {
+            "code": self.code,
+            "message": str(self),
+            "retryable": self.retryable,
+            "provider": self.provider,
+        }
+        if self.status_code is not None:
+            payload["status_code"] = self.status_code
+        if self.suggestion:
+            payload["suggestion"] = self.suggestion
+        if self.diagnostics:
+            payload["diagnostics"] = self.diagnostics
+        return payload
+
+
+class WriterEmptyContentError(UpstreamServiceError):
+    """正文模型返回成功响应，但响应中没有可保存的正文。"""
+
+    def __init__(
+        self,
+        *,
+        finish_reason: object = None,
+        model: str = "",
+        max_tokens: int = 0,
+        reasoning_content_len: int = 0,
+        reasoning_tokens: object = None,
+        choices_count: int = 0,
+    ):
+        retryable = str(finish_reason or "").lower() in {"", "length", "max_tokens"}
+        super().__init__(
+            "正文模型未返回可用正文，系统已停止保存",
+            retryable=retryable,
+            provider="DeepSeek",
+            status_code=502,
+            code="writer_empty_content",
+            suggestion="请重试生成；若持续失败，请检查正文模型是否仍启用了思考模式",
+            diagnostics={
+                "finish_reason": finish_reason,
+                "model": model,
+                "max_tokens": max_tokens,
+                "reasoning_content_len": reasoning_content_len,
+                "reasoning_tokens": reasoning_tokens,
+                "choices_count": choices_count,
+            },
+        )
 
 
 class MangaImageGenerationError(RuntimeError):

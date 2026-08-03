@@ -21,7 +21,7 @@ venv/
 .venv/
 .venv-backend/
 .codegraph/
-
+test_*.py
 # ─── Node ───
 node_modules/
 frontend/node_modules/
@@ -72,6 +72,9 @@ backend/tests/*
 !backend/tests/test_agent_api_validation_pending_runs.py
 !backend/tests/test_agent_multimodal_errors.py
 !backend/tests/test_agent_policy_boundaries.py
+!backend/tests/test_story_knowledge.py
+!backend/tests/test_storyboard_presets.py
+!backend/tests/test_storyboard_user_presets.py
 !backend/tests/test_agent_video_mutations.py
 !backend/tests/test_points_ai_channel_delete.py
 !backend/tests/test_ai_price_sync.py

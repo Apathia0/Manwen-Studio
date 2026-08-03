@@ -2,7 +2,6 @@ import { Suspense, lazy, useCallback, useEffect, useState } from 'react';
 import { Image, Bot } from 'lucide-react';
 import { type Story, type Chapter } from '../api';
 import { RouteLoadingFallback } from './ui/RouteLoadingFallback';
-import StoryBibleSummaryCard from './StoryBibleSummaryCard';
 
 const FrameworkPanel = lazy(() => import('./FrameworkPanel'));
 const EditorPanel = lazy(() => import('./EditorPanel'));
@@ -49,15 +48,6 @@ export default function WorkspaceLayout({
 
   return (
     <div className="flex h-full min-h-0 flex-col gap-3 bg-[linear-gradient(180deg,_#f4f8ff_0%,_#eef4ff_100%)] p-4">
-      {story.story_bible && Object.keys(story.story_bible).length > 0 && (
-        <div className="shrink-0">
-          <StoryBibleSummaryCard
-            storyId={story.id}
-            storyBible={story.story_bible}
-            onUpdated={onContentUpdated}
-          />
-        </div>
-      )}
       <div className="flex min-h-0 flex-1 gap-4">
         {!mangaPreviewMode && (
         <div className="w-[320px] shrink-0 overflow-y-auto rounded-[24px] border border-[#d7e3f4] bg-[rgba(255,255,255,0.92)] shadow-[0_18px_42px_rgba(59,130,246,0.12)] backdrop-blur-xl">

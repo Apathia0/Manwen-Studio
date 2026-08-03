@@ -1,10 +1,11 @@
 import { memo, useCallback, useEffect, useRef, useState } from 'react';
-import { BookOpen, ChevronUp, ChevronDown, Download, ImageIcon, Loader2, Sparkles, Pencil, RefreshCw, Check, X, ImagePlus, Trash2, Square, Upload, MousePointer, Palette, Settings2, UserRound, MapPinned, Package } from 'lucide-react';
+import { BookOpen, ChevronUp, ChevronDown, Download, ImageIcon, Loader2, Sparkles, Pencil, RefreshCw, Check, X, ImagePlus, Trash2, Square, Upload, MousePointer, Palette, Settings2, UserRound, MapPinned, Package, FileText } from 'lucide-react';
 import { useMemo as useMemoValue } from 'react';
 import { createPortal } from 'react-dom';
 import { ImageRedrawModal } from './shared/ImageRedrawModal';
 import ImageZoomView from './shared/ImageZoomView';
 import StyleSelectorModal from './StyleSelectorModal';
+import StoryboardPresetModal from './StoryboardPresetModal';
 import MangaAssetManagementModal from './MangaAssetManagementModal';
 import MangaStoryboardImportModal from './MangaStoryboardImportModal';
 import {
@@ -34,6 +35,7 @@ import {
   setImageCount,
   ALLOWED_IMAGE_COUNTS,
   mangaImageUrl,
+  downloadChapterMangaZip,
   getMangaGenerationStatus,
   cancelMangaGeneration,
   uploadCharacterRefImage,
@@ -41,6 +43,7 @@ import {
   saveMangaAssetBindings,
   listStylePresets,
   uploadMangaStyleReference,
+  getStoryStoryboardPreset,
   type ImageRedrawMode,
   type Chapter,
   type MangaProgress,
@@ -55,6 +58,7 @@ import {
 import { genStore } from '../genStore';
 import { toast } from '../lib/toast';
 import { normalizeErrorMessage } from '../lib/errors';
+import { saveAs } from 'file-saver';
 
 interface Props {
   chapter: Chapter | null;
@@ -263,8 +267,9 @@ export default memo(function MangaPanel({
   const [refSource, setRefSource] = useState<RefSource>('none');
   const [refMax, setRefMax] = useState(4);
   const [refUploading, setRefUploading] = useState(false);
-  const [assetModalOpen, setAssetModalOpen] = useState(false);
-  const [storyboardImportOpen, setStoryboardImportOpen] = useState(false);
+const [assetModalOpen, setAssetModalOpen] = useState(false);
+const [storyboardImportOpen, setStoryboardImportOpen] = useState(false);
+const [downloadingAll, setDownloadingAll] = useState(false);
   // 仅保留历史引用图的兼容状态，旧垫图界面不再对用户开放。
   const [refModalOpen, setRefModalOpen] = useState(false);
   const [legacyReferenceUiEnabled] = useState(false);
@@ -278,6 +283,10 @@ export default memo(function MangaPanel({
   const [selectedStylePresetName, setSelectedStylePresetName] = useState<string>('');
   const [styleReferenceImageUrl, setStyleReferenceImageUrl] = useState<string | null>(null);
   const [styleSelectorOpen, setStyleSelectorOpen] = useState(false);
+  const [storyboardPresetOpen, setStoryboardPresetOpen] = useState(false);
+  const [storyboardPresetId, setStoryboardPresetId] = useState<number | null>(null);
+  const [storyboardPresetName, setStoryboardPresetName] = useState('');
+  const storyboardPresetLoadRef = useRef(0);
   const styleSelectionTouchedRef = useRef(false);
   const [showColorMenu, setShowColorMenu] = useState(false);
   const [assetConfigOpen, setAssetConfigOpen] = useState(false);
@@ -350,6 +359,7 @@ export default memo(function MangaPanel({
     charRefStreamRef.current?.abort();
     charRefStreamRef.current = null;
     chapterLoadRequestRef.current++;
+    storyboardPresetLoadRef.current++;
     setImages([]);
     // Don't downgrade phase if there's an ongoing generation for this new chapter;
     // the derived `generating` flag below will reflect it via genStore.
@@ -392,6 +402,9 @@ export default memo(function MangaPanel({
     }
     setSelectedStylePresetName(typeof persistedStyle?.presetName === 'string' ? persistedStyle.presetName : '');
     setStyleReferenceImageUrl(typeof persistedStyle?.referenceUrl === 'string' ? persistedStyle.referenceUrl : null);
+    setStoryboardPresetOpen(false);
+    setStoryboardPresetId(null);
+    setStoryboardPresetName('');
     styleSelectionTouchedRef.current = persistedStyle !== null;
     setShowColorMenu(false);
     setIgnorePersistedImages(false);
@@ -564,6 +577,16 @@ export default memo(function MangaPanel({
           }
         }
       }).catch(() => {});
+      const presetRequestId = ++storyboardPresetLoadRef.current;
+      getStoryStoryboardPreset(chapter.story_id).then((result) => {
+        if (chapterLoadRequestRef.current !== requestId || storyboardPresetLoadRef.current !== presetRequestId) return;
+        setStoryboardPresetId(result.preset_id);
+        setStoryboardPresetName(result.preset?.name ?? '');
+      }).catch(() => {
+        if (chapterLoadRequestRef.current !== requestId || storyboardPresetLoadRef.current !== presetRequestId) return;
+        setStoryboardPresetId(null);
+        setStoryboardPresetName('');
+      });
       getScenes(chapter.id).then((result) => {
         if (chapterLoadRequestRef.current !== requestId) return;
         if (result.scenes.length > 0) {
@@ -734,7 +757,7 @@ export default memo(function MangaPanel({
     setSanitizedSceneIdxs([]);
     setFailedSceneIdx(-1);
     try {
-      const result = await generateScenes(chapter.id, controller.signal);
+      const result = await generateScenes(chapter.id, controller.signal, storyboardPresetId ?? undefined);
       if (chapterLoadRequestRef.current !== requestId) return;
       if (hadImages) {
         // 分镜重生成后，旧图片已不再对应新脚本，必须从数据库和本地状态中一并清除。
@@ -782,6 +805,7 @@ export default memo(function MangaPanel({
       const result = await scenesFromSelection(chapter.id, {
         selected_text: selectedText,
         character_profiles: chapterContext?.characters,
+        preset_id: storyboardPresetId ?? undefined,
       });
       setScenes(result.scenes);
       setSanitizedSceneIdxs(result.sanitized_indices ?? []);
@@ -1370,6 +1394,23 @@ export default memo(function MangaPanel({
   const liveStatusMsg = isLiveGenerating ? liveGen!.statusMsg : statusMsg;
   const hasImages = displayImages.length > 0;
   const canChangeImageCount = !generating && (phase === 'idle' || phase === 'editing-scenes');
+
+  // 通过后端代理打包下载当前话全部漫画图片（规避 OSS 跨域 CORS 与浏览器多文件下载拦截）
+  const handleDownloadAll = async () => {
+    if (!hasImages || downloadingAll || !chapter) return;
+    setDownloadingAll(true);
+    try {
+      const blob = await downloadChapterMangaZip(chapter.id);
+      const dateStr = new Date().toISOString().slice(0, 10);
+      const zipName = `第${chapter.chapter_number ?? '?'}话_漫画图片_${dateStr}.zip`;
+      saveAs(blob, zipName);
+      toast.success(`已打包下载 ${displayImages.length} 张图片`);
+    } catch (err) {
+      toast.error(normalizeErrorMessage(err, '打包下载失败，请重试'));
+    } finally {
+      setDownloadingAll(false);
+    }
+  };
   const activeImageCount = liveProgress.total || imageCount;
   const completedImageCount = displayImages.length;
   const hasPartialImages = completedImageCount > 0 && completedImageCount < imageCount;
@@ -1479,19 +1520,14 @@ export default memo(function MangaPanel({
             )}
             {hasImages && (
               <button
-                onClick={() => {
-                  displayImages.forEach((img) => {
-                    const a = document.createElement('a');
-                    a.href = mangaImageUrl(img.image_path);
-                    a.download = `panel_${img.image_number.toString().padStart(2, '0')}.png`;
-                    a.click();
-                  });
-                }}
+                onClick={handleDownloadAll}
+                disabled={downloadingAll}
                 className="flex items-center gap-1 px-3 py-1.5 text-xs font-medium rounded-md
-                           bg-[#f3f5f0] hover:bg-[#e8ece6] text-slate-700 transition-colors"
+                           bg-[#f3f5f0] hover:bg-[#e8ece6] text-slate-700 transition-colors
+                           disabled:opacity-50 disabled:cursor-not-allowed"
               >
-                <Download size={13} />
-                下载
+                {downloadingAll ? <Loader2 size={13} className="animate-spin" /> : <Download size={13} />}
+                {downloadingAll ? '打包中...' : '下载'}
               </button>
             )}
             {!generating && (phase === 'idle' || phase === 'editing-scenes') && (
@@ -1503,6 +1539,16 @@ export default memo(function MangaPanel({
               >
                 <Upload size={13} />
                 导入分镜
+              </button>
+            )}
+            {!generating && (phase === 'idle' || phase === 'editing-scenes') && (
+              <button
+                type="button"
+                onClick={() => setStoryboardPresetOpen(true)}
+                className="flex items-center gap-1.5 rounded-md border border-[#d9dfd7] bg-white px-3 py-1.5 text-xs font-medium transition-colors hover:bg-slate-50"
+              >
+                <FileText size={14} className={storyboardPresetId != null ? 'text-blue-500' : 'text-slate-400'} />
+                <span className={storyboardPresetId != null ? 'text-slate-900' : 'text-slate-500'}>{storyboardPresetName || '默认分镜模板'}</span>
               </button>
             )}
             {!generating && (phase === 'idle' || phase === 'editing-scenes') && (
@@ -1577,7 +1623,7 @@ export default memo(function MangaPanel({
               ))}
             </select>
             {/* 风格预设选择器 */}
-            <button
+             <button
               onClick={() => setStyleSelectorOpen(true)}
               className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md border border-[#d9dfd7] bg-white hover:bg-slate-50 transition-colors"
             >
@@ -1588,8 +1634,8 @@ export default memo(function MangaPanel({
               {(selectedStylePresetName || styleReferenceImageUrl) && (
                 <span className="text-[10px] text-blue-500">(已选)</span>
               )}
-            </button>
-            {/* 自动资产提取配置 */}
+             </button>
+              {/* 自动资产提取配置 */}
             <div className="relative" ref={assetConfigRef}>
               <button
                 type="button"
@@ -2923,6 +2969,20 @@ export default memo(function MangaPanel({
         }}
       />,
       document.body
+    )}
+    {chapter && createPortal(
+      <StoryboardPresetModal
+        isOpen={storyboardPresetOpen}
+        onClose={() => setStoryboardPresetOpen(false)}
+        storyId={chapter.story_id}
+        currentPresetId={storyboardPresetId}
+        onPresetApplied={(presetId, presetName) => {
+          storyboardPresetLoadRef.current += 1;
+          setStoryboardPresetId(presetId);
+          setStoryboardPresetName(presetName === '默认分镜模板' ? '' : presetName);
+        }}
+      />,
+      document.body,
     )}
     </>
   );

@@ -12,11 +12,12 @@ import secrets
 import shutil
 import smtplib
 import uuid
+import zipfile
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from types import SimpleNamespace
 from email.message import EmailMessage
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from services.writing_utils import build_chapter_generation_prompt
 from services.framework_utils import (
@@ -40,16 +41,16 @@ from services.framework_utils import (
     validate_applied_framework_consistency,
     validate_framework_json,
 )
-from urllib.parse import parse_qsl
+from urllib.parse import parse_qsl, quote
 
 import httpx
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, File, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, JSONResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from PIL import Image
-from sqlalchemy import case, func, and_, or_, text
+from sqlalchemy import case, func, and_, or_, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 from sse_starlette.sse import EventSourceResponse
@@ -82,6 +83,11 @@ from models import (
     ScriptScene,
     ShotAssetBinding,
     Story,
+    StoryboardPromptPreset,
+    StoryKnowledgeEntity,
+    StoryKnowledgeFact,
+    StoryKnowledgeResource,
+    StoryPlotThread,
     StoryCharacterVersion,
     StoryTemplateBinding,
     TemplateLike,
@@ -92,12 +98,16 @@ from models import (
     VideoProject,
     VideoShot,
     VideoStylePreset,
+    StaleKnowledgeContextError,
+    reset_agent_knowledge_revision_guard,
+    set_agent_knowledge_revision_guard,
 )
 from schemas import (
     ChapterContentUpdate,
     ChapterOut,
     ChatMessageIn,
     ChatMessageOut,
+    ChapterCreationPackUpdate,
     CreativeBriefOut,
     FrameworkAnalyzeResponse,
     ImportChapterCreate,
@@ -113,6 +123,8 @@ from schemas import (
     OutlineChapterPlanUpdate,
     StoryBibleUpdate,
     StoryCreate,
+    StoryKnowledgeCategoryMutation,
+    StoryKnowledgeMutation,
     StoryOut,
     StoryUpdate,
 )
@@ -159,9 +171,16 @@ from services.deepseek import (
     split_scenes,
     summarize_chapter_memory,
 )
-from services.errors import MangaImageGenerationError, MissingApiKeyError, public_error_message, sanitize_public_error_detail
+from services.errors import (
+    MangaImageGenerationError,
+    MissingApiKeyError,
+    UpstreamServiceError,
+    public_error_message,
+    sanitize_public_error_detail,
+)
 from services.prompt_template import get_effective_prompt, get_system_prompt, set_system_prompt, get_template_story_length, SYSTEM_PROMPT_KEYS
 from services.chapter_quality import finalize_generated_chapter_content, format_quality_gate_detail
+from services.chapter_agents import chapter_creation_pack_fingerprint, reusable_chapter_creation_pack
 from services.image2 import edit_existing_image, generate_cover_image, generate_manga_image
 from services.media_locator import ensure_local_media_path
 from services.scene_safety import sanitize_scene_list
@@ -187,7 +206,38 @@ from services import deepseek as deepseek_service
 from services import image2 as image_service
 from services import license_checker
 from services.payment import init_gateways, get_gateway, get_gateway_by_provider, get_method_options
-from services.story_state import build_story_bible_compact, build_story_memory_compact, extract_author_profile_sections, extract_report_highlights
+from services.story_state import build_story_bible_compact, build_story_memory_compact, extract_author_profile_sections, extract_report_highlights, has_active_writing_reference
+from services.story_knowledge import (
+    StoryKnowledgeConflictError,
+    apply_chapter_context_pack,
+    create_story_knowledge_category,
+    create_story_knowledge_item,
+    delete_story_knowledge_category,
+    delete_story_knowledge_item,
+    list_story_knowledge,
+    normalize_knowledge_kind,
+    resolve_chapter_context_pack,
+    sync_story_knowledge_from_legacy,
+    update_story_knowledge_category,
+    update_story_knowledge_item,
+)
+from services.chapter_creation_pack import (
+    canonical_agent_pack,
+    creation_pack_source_hash,
+    render_ai_creation_pack,
+    render_creation_pack,
+)
+from services.creation_pack_ai import (
+    generate_ai_creation_brief,
+)
+from services.chapter_generation_runtime import (
+    CHAPTER_GENERATION_CONCURRENCY,
+    CHAPTER_GENERATION_SEMAPHORE,
+    ChapterGenerationBusyError,
+    acquire_chapter_generation_lease,
+    chapter_generation_guard,
+)
+from services.knowledge_ai_sync import sync_story_knowledge_with_ai
 from routers.video import router as video_router
 from routers.deconstruction import router as deconstruction_router
 from routers.deconstruct_library import router as deconstruct_library_router
@@ -201,6 +251,9 @@ ACTIVE_MANGA_GENERATIONS: set[int] = set()
 MONEY_QUANT = Decimal("0.01")
 AUTO_MANGA_ASSET_ANALYSIS_VERSION = 2
 AUTO_MANGA_ASSET_CONCURRENCY = max(1, min(4, int(os.getenv("AUTO_MANGA_ASSET_CONCURRENCY", "2") or "2")))
+_CHAPTER_GENERATION_SEMAPHORE = CHAPTER_GENERATION_SEMAPHORE
+_CHAPTER_GENERATION_INTERNAL_HEADER = "x-storycanvas-internal-generation"
+_CHAPTER_GENERATION_INTERNAL_SECRET = secrets.token_urlsafe(32)
 AUTO_MANGA_ASSET_START_INTERVAL_SECONDS = max(
     0,
     min(30, int(os.getenv("AUTO_MANGA_ASSET_START_INTERVAL_SECONDS", "3") or "3")),
@@ -3366,17 +3419,27 @@ def _build_framework_context(story: Story | None, chapter: Chapter | None = None
             + json.dumps(import_summary, ensure_ascii=False)
             + "。如与自由发挥冲突，优先遵守这些导入作品约束。"
         )
-    reference_author_profile = story_bible.get("reference_author_profile")
-    if isinstance(reference_author_profile, dict) and reference_author_profile:
-        profile_parts = extract_author_profile_sections(reference_author_profile)
-        parts.extend(profile_parts)
-    reference_author_report = story_bible.get("reference_author_report")
-    if isinstance(reference_author_report, str) and reference_author_report.strip():
-        highlights = extract_report_highlights(reference_author_report)
-        parts.append(f"作者画像参考报告（核心要点）:\n{highlights}")
-    reference_style_samples = story_bible.get("reference_style_samples")
-    if isinstance(reference_style_samples, list) and reference_style_samples:
-        parts.append(f"作者原文风格示例: {json.dumps(reference_style_samples, ensure_ascii=False)}")
+    if has_active_writing_reference(story_bible):
+        for key, label in (
+            ("learned_techniques", "参考写作手法"),
+            ("reference_plots", "参考剧情模式"),
+            ("reference_rhythm", "参考节奏控制"),
+            ("reference_emotion_modules", "参考情绪模块"),
+        ):
+            value = story_bible.get(key)
+            if value not in (None, "", [], {}):
+                parts.append(f"{label}: {json.dumps(value, ensure_ascii=False)}")
+        reference_author_profile = story_bible.get("reference_author_profile")
+        if isinstance(reference_author_profile, dict) and reference_author_profile:
+            profile_parts = extract_author_profile_sections(reference_author_profile)
+            parts.extend(profile_parts)
+        reference_author_report = story_bible.get("reference_author_report") or story_bible.get("reference_report")
+        if isinstance(reference_author_report, str) and reference_author_report.strip():
+            highlights = extract_report_highlights(reference_author_report)
+            parts.append(f"作者画像参考报告（核心要点）:\n{highlights}")
+        reference_style_samples = story_bible.get("reference_style_samples")
+        if isinstance(reference_style_samples, list) and reference_style_samples:
+            parts.append(f"作者原文风格示例: {json.dumps(reference_style_samples, ensure_ascii=False)}")
     story_memory = story.story_memory if isinstance(story.story_memory, dict) else {}
     if story_memory:
         memory_summary = build_story_memory_compact(story_memory)
@@ -3964,6 +4027,8 @@ def _build_framework_ai_context(story: Story, mode: str = "general", user_instru
     chapters = _extract_outline_chapters(outline)
     chapter_numbers = [item["chapter_number"] for item in chapters if isinstance(item.get("chapter_number"), int)]
     return {
+        "id": story.id,
+        "title": story.title or "",
         "description": story.description or "",
         "tags": story.tags,
         "characters": story.characters,
@@ -4315,35 +4380,50 @@ async def _refresh_chapter_memory(chapter: Chapter, request: Request, db: Sessio
     chapter_summary = memory_payload.get("chapter_summary") if isinstance(memory_payload.get("chapter_summary"), dict) else {}
     chapter_handoff = memory_payload.get("chapter_handoff") if isinstance(memory_payload.get("chapter_handoff"), dict) else {}
     story_memory_update = memory_payload.get("story_memory_update") if isinstance(memory_payload.get("story_memory_update"), dict) else {}
+    fallback_meta = memory_payload.get("_fallback") if isinstance(memory_payload.get("_fallback"), dict) else None
     chapter.memory_summary = {
         "chapter_summary": chapter_summary,
         "chapter_handoff": chapter_handoff,
         "summary": chapter_summary.get("summary"),
         "ending_scene": chapter_summary.get("ending_scene"),
+        "fallback": fallback_meta,
     } if (chapter_summary or chapter_handoff) else None
     chapter.story.story_memory = _merge_story_memory(chapter.story.story_memory, story_memory_update, chapter, chapter_summary)
+    sync_story_knowledge_from_legacy(
+        db,
+        story=chapter.story,
+        source_chapter_id=chapter.id,
+        commit=False,
+    )
 
 
 async def _background_refresh_chapter_memory(
-    chapter_id: int,
+    chapter_id_value: int,
     api_key: str,
     billing_ctx=None,
+    expected_content_fingerprint: str | None = None,
     *,
     task_id: str | None = None,
     story_id: int | None = None,
+    chapter_id: int | None = None,
     shot_id: int | None = None,
 ) -> None:
     """后台异步刷新章节记忆，不阻塞主请求响应。"""
-    del task_id, story_id, shot_id
+    del task_id, story_id, chapter_id, shot_id
     from services.deepseek import reset_usage_accumulator
 
     reset_usage_accumulator()
     db = SessionLocal()
     billing_finished = False
     try:
-        chapter = db.get(Chapter, chapter_id)
+        chapter = db.get(Chapter, chapter_id_value)
         if not chapter or not chapter.novel_content or not chapter.novel_content.strip():
             return
+        if expected_content_fingerprint:
+            current_fingerprint = hashlib.sha256(chapter.novel_content.encode("utf-8")).hexdigest()
+            if current_fingerprint != expected_content_fingerprint:
+                logger.info("跳过过期章节记忆任务 chapter=%s stage=before_model", chapter_id_value)
+                return
 
         chapter_info = {
             "chapter_number": chapter.chapter_number,
@@ -4355,39 +4435,52 @@ async def _background_refresh_chapter_memory(
         novel_content = chapter.novel_content
 
         _release_db_transaction(db)
-        try:
-            memory_payload = await summarize_chapter_memory(
-                story_context,
-                chapter_info,
-                novel_content,
-                api_key=api_key,
-            )
-        except Exception as exc:
-            logger.warning("后台刷新章节记忆失败 chapter=%s: %s", chapter_id, exc)
-            return
+        memory_payload = await summarize_chapter_memory(
+            story_context,
+            chapter_info,
+            novel_content,
+            api_key=api_key,
+        )
 
-        chapter = db.get(Chapter, chapter_id)
+        db.expire_all()
+        chapter = db.query(Chapter).filter(Chapter.id == chapter_id_value).with_for_update().one_or_none()
         if not chapter:
             return
+        if expected_content_fingerprint:
+            current_fingerprint = hashlib.sha256((chapter.novel_content or "").encode("utf-8")).hexdigest()
+            if current_fingerprint != expected_content_fingerprint:
+                logger.info("丢弃过期章节记忆结果 chapter=%s stage=before_commit", chapter_id_value)
+                db.rollback()
+                return
+        db.query(Story).filter(Story.id == chapter.story_id).with_for_update().one()
         chapter_summary = memory_payload.get("chapter_summary") if isinstance(memory_payload.get("chapter_summary"), dict) else {}
         chapter_handoff = memory_payload.get("chapter_handoff") if isinstance(memory_payload.get("chapter_handoff"), dict) else {}
         story_memory_update = memory_payload.get("story_memory_update") if isinstance(memory_payload.get("story_memory_update"), dict) else {}
+        fallback_meta = memory_payload.get("_fallback") if isinstance(memory_payload.get("_fallback"), dict) else None
         chapter.memory_summary = {
             "chapter_summary": chapter_summary,
             "chapter_handoff": chapter_handoff,
             "summary": chapter_summary.get("summary"),
             "ending_scene": chapter_summary.get("ending_scene"),
+            "fallback": fallback_meta,
         } if (chapter_summary or chapter_handoff) else None
         chapter.story.story_memory = _merge_story_memory(chapter.story.story_memory, story_memory_update, chapter, chapter_summary)
+        sync_story_knowledge_from_legacy(
+            db,
+            story=chapter.story,
+            source_chapter_id=chapter.id,
+            commit=False,
+        )
         db.commit()
         _finish_streaming_platform_points(billing_ctx, success=True)
         billing_finished = True
     except Exception as exc:
-        logger.warning("后台刷新章节记忆异常 chapter=%s: %s", chapter_id, exc, exc_info=True)
+        logger.warning("后台刷新章节记忆异常 chapter=%s: %s", chapter_id_value, exc, exc_info=True)
         try:
             db.rollback()
         except Exception:
             pass
+        raise
     finally:
         if billing_ctx is not None and not billing_finished:
             _finish_streaming_platform_points(
@@ -4396,6 +4489,31 @@ async def _background_refresh_chapter_memory(
                 error_code="chapter_memory_refresh_failed",
             )
         db.close()
+
+
+async def _submit_chapter_memory_refresh(
+    chapter: Chapter,
+    api_key: str,
+) -> str | None:
+    """提交带正文版本校验的后台记忆刷新任务。"""
+    content = chapter.novel_content or ""
+    if not content.strip() or not api_key:
+        return None
+    task_id = f"chapter_memory_{chapter.id}_{uuid.uuid4().hex[:10]}"
+    await task_manager.submit_task(
+        task_id,
+        "chapter_memory_refresh",
+        _background_refresh_chapter_memory,
+        chapter.id,
+        api_key,
+        None,
+        hashlib.sha256(content.encode("utf-8")).hexdigest(),
+        timeout=300,
+        max_retries=1,
+        story_id=chapter.story_id,
+        chapter_id=chapter.id,
+    )
+    return task_id
 
 
 def _merge_tags(existing, incoming):
@@ -4579,7 +4697,13 @@ def _build_chapter_runtime_context(
     context["current_chapter"] = {key: value for key, value in current_card.items() if value not in (None, "", [], {})}
     context["previous_chapter_handoff"] = previous_bridge.get("handoff") or {}
     context["recent_chapter_memories"] = recent_memories
-    return context
+    pack = resolve_chapter_context_pack(
+        db,
+        story=story,
+        chapter_info=chapter_info,
+        user_instruction=user_instruction,
+    )
+    return apply_chapter_context_pack(context, pack)
 
 
 def _build_chapter_continuity_context_text(story_context: dict[str, Any]) -> str:
@@ -4593,7 +4717,73 @@ def _build_chapter_continuity_context_text(story_context: dict[str, Any]) -> str
     recent_memories = story_context.get("recent_chapter_memories")
     if isinstance(recent_memories, list) and recent_memories:
         parts.append("近期章节记忆: " + json.dumps(recent_memories[-3:], ensure_ascii=False))
+    for key, label, limit in (
+        ("knowledge_entities", "本章相关实体", 12),
+        ("knowledge_facts", "本章有效事实", 20),
+        ("open_threads", "本章相关伏笔与剧情线", 12),
+    ):
+        value = story_context.get(key)
+        if isinstance(value, list) and value:
+            parts.append(f"{label}: " + json.dumps(value[:limit], ensure_ascii=False, default=str))
     return "\n".join(parts)
+
+
+def _chapter_context_snapshot(story_context: dict[str, Any]) -> dict[str, Any]:
+    pack = story_context.get("chapter_context_pack") if isinstance(story_context, dict) else None
+    if not isinstance(pack, dict):
+        return {}
+    return {
+        "receipt_id": pack.get("receipt_id"),
+        "knowledge_revision": pack.get("knowledge_revision"),
+        "context_hash": pack.get("context_hash"),
+        "chapter_number": pack.get("chapter_number"),
+    }
+
+
+def _commit_with_chapter_context_guard(
+    db: Session,
+    *,
+    story_id: int,
+    story_context: dict[str, Any],
+    prepare: Callable[[], None] | None = None,
+) -> None:
+    """使用章节知识版本原子提交，拒绝保存生成期间过期的正文。"""
+    snapshot = _chapter_context_snapshot(story_context)
+    expected = snapshot.get("knowledge_revision")
+    if not isinstance(expected, int):
+        db.commit()
+        return
+    with db.no_autoflush:
+        actual = db.query(Story.knowledge_revision).filter(Story.id == story_id).scalar()
+    if actual is None or int(actual) != expected:
+        db.rollback()
+        raise HTTPException(status_code=409, detail={
+            "code": "knowledge_revision_conflict",
+            "expected_revision": expected,
+            "actual_revision": int(actual or 0),
+            "retryable": True,
+            "message": "作品设定已更新，请重新生成本章正文",
+        })
+    guard_token = set_agent_knowledge_revision_guard(story_id, expected)
+    try:
+        if prepare is not None:
+            prepare()
+        db.commit()
+    except StaleKnowledgeContextError as exc:
+        db.rollback()
+        actual = db.query(Story.knowledge_revision).filter(Story.id == story_id).scalar()
+        raise HTTPException(status_code=409, detail={
+            "code": "knowledge_revision_conflict",
+            "expected_revision": expected,
+            "actual_revision": int(actual or 0),
+            "retryable": True,
+            "message": "作品设定已更新，请重新生成本章正文",
+        }) from exc
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        reset_agent_knowledge_revision_guard(guard_token)
 
 
 async def _ensure_generated_chapter_continuity(
@@ -6205,6 +6395,873 @@ def delete_story(story_id: int, request: Request, db: Session = Depends(get_db))
     return {"ok": True}
 
 
+@app.get("/api/stories/{story_id}/knowledge")
+def get_story_knowledge(story_id: int, request: Request, db: Session = Depends(get_db)):
+    """返回用户可维护的作品知识资源、实体、事实与剧情线。"""
+    user = _require_user(request, db)
+    story = _require_story_for_user(story_id, user, db)
+    response = list_story_knowledge(db, story=story)
+    latest_sync_task = db.query(BackgroundTask).filter(
+        BackgroundTask.story_id == story_id,
+        BackgroundTask.task_type == "knowledge_ai_sync",
+    ).order_by(BackgroundTask.created_at.desc()).first()
+    response["ai_sync_status"] = task_manager.get_task_status(latest_sync_task.task_id) if latest_sync_task else None
+    response["next_unwritten_chapter_number"] = _next_unwritten_chapter_number(story_id, db)
+    return response
+
+
+def _nonblank_novel_content_clause():
+    return func.length(func.trim(
+        func.replace(func.replace(func.replace(Chapter.novel_content, "\n", ""), "\r", ""), "\t", "")
+    )) > 0
+
+
+def _next_unwritten_chapter_number(story_id: int, db: Session) -> int:
+    """返回正文创作链唯一允许操作的下一章节号。
+
+    章节必须按顺序生成。只取最大章节号会跳过中间缺口（例如第 14 章为空、
+    第 15 章已有正文时错误返回第 16 章），因此这里查找第一个没有非空正文的
+    章节号，确保创作包不会越过未完成章节。
+    """
+    generated_numbers = {
+        int(chapter_number)
+        for (chapter_number,) in db.query(Chapter.chapter_number).filter(
+            Chapter.story_id == story_id,
+            Chapter.chapter_number.isnot(None),
+            Chapter.novel_content.isnot(None),
+            _nonblank_novel_content_clause(),
+        ).all()
+        if chapter_number is not None
+    }
+    candidate = 1
+    while candidate in generated_numbers:
+        candidate += 1
+    return candidate
+
+
+def _require_current_creation_pack_chapter(story_id: int, chapter_number: int, db: Session) -> int:
+    expected = _next_unwritten_chapter_number(story_id, db)
+    if int(chapter_number) != expected:
+        raise HTTPException(status_code=409, detail={
+            "code": "creation_pack_chapter_not_current",
+            "expected_chapter_number": expected,
+            "message": f"当前只能操作第{expected}章创作包，请刷新后重试",
+        })
+    return expected
+
+
+def _require_unwritten_chapter(story_id: int, chapter_number: int, db: Session) -> None:
+    """允许对任意未写正文的章节生成或编辑创作包；已写正文的章节创作包为只读。"""
+    chapter = db.query(Chapter).filter(
+        Chapter.story_id == story_id,
+        Chapter.chapter_number == int(chapter_number),
+    ).first()
+    if chapter is not None and str(chapter.novel_content or "").strip():
+        raise HTTPException(status_code=409, detail={
+            "code": "chapter_already_written",
+            "message": f"第{chapter_number}章已有正文，该章节创作包为只读",
+        })
+
+
+def _chapter_info_for_creation_pack(story: Story, chapter: Chapter | None, chapter_number: int) -> dict[str, Any]:
+    planned = next((
+        dict(item)
+        for item in _extract_outline_chapters(story.outline if isinstance(story.outline, dict) else {})
+        if item.get("chapter_number") == chapter_number
+    ), None)
+    if planned is not None:
+        return planned
+    return {
+        "chapter_number": chapter_number,
+        "title": chapter.title if chapter and chapter.title else f"第{chapter_number}章",
+        "act": chapter.act if chapter else "",
+        "key_events": chapter.key_events if chapter else [],
+    }
+
+
+def _resolve_creation_pack_source(
+    db: Session,
+    *,
+    story: Story,
+    chapter_info: dict[str, Any],
+    owner_user_id: int | None,
+) -> tuple[dict[str, Any], str]:
+    context_pack = resolve_chapter_context_pack(
+        db,
+        story=story,
+        chapter_info=chapter_info,
+        user_instruction="生成本章正文创作包",
+        owner_user_id=owner_user_id,
+    )
+    return context_pack, creation_pack_source_hash(context_pack)
+
+
+async def _render_creation_pack_with_ai(
+    db: Session,
+    *,
+    context_pack: dict[str, Any],
+    chapter_info: dict[str, Any],
+    api_key: str | None,
+) -> tuple[str, bool]:
+    """生成创作包正文，并返回内容及其是否确由 AI 成功生成。"""
+    brief = await generate_ai_creation_brief(context_pack, chapter_info, api_key, db=db)
+    if brief is not None:
+        return render_ai_creation_pack(brief, context_pack), True
+    return render_creation_pack(context_pack), False
+
+
+def _is_valid_ai_creation_pack(content: str) -> bool:
+    """识别旧版本通用模板，避免历史降级包继续阻断重新提取。"""
+    text = str(content or "")
+    return all(section in text for section in ("## 本章任务", "## 剧情推进", "## 连续性约束"))
+
+
+async def _ensure_chapter_creation_pack_ai(
+    db: Session,
+    *,
+    story: Story,
+    chapter_number: int,
+    owner_user_id: int | None,
+    api_key: str | None,
+    force: bool = False,
+    expected_version: int | None = None,
+) -> tuple[Chapter, dict[str, Any]]:
+    """AI 版创作包生成：先检索知识库，再由 AI 生成正文创作说明。
+
+    与同步版 _ensure_chapter_creation_pack 共用同一套 stale/并发保护逻辑，
+    但内容优先由 AI 生成，AI 失败回退固定模板。
+    """
+    chapter = db.query(Chapter).filter(
+        Chapter.story_id == story.id,
+        Chapter.chapter_number == chapter_number,
+    ).first()
+    chapter_info = _chapter_info_for_creation_pack(story, chapter, chapter_number)
+    context_pack, source_hash = _resolve_creation_pack_source(
+        db,
+        story=story,
+        chapter_info=chapter_info,
+        owner_user_id=owner_user_id,
+    )
+    if chapter is not None:
+        chapter = db.query(Chapter).filter(Chapter.id == chapter.id).with_for_update().populate_existing().one()
+        if expected_version is not None and int(chapter.creation_pack_version or 1) != expected_version:
+            db.rollback()
+            raise HTTPException(status_code=409, detail="创作包已在其他位置更新，请刷新后再重新提取")
+    if chapter is None:
+        chapter = Chapter(
+            story_id=story.id,
+            chapter_number=chapter_number,
+            title=str(chapter_info.get("title") or f"第{chapter_number}章"),
+            act=str(chapter_info.get("act") or "") or None,
+            key_events=chapter_info.get("key_events") if isinstance(chapter_info.get("key_events"), list) else [],
+            status="pending",
+        )
+        db.add(chapter)
+    has_content = bool(str(chapter.creation_pack_content or "").strip())
+    auto_stale = bool(
+        has_content
+        and not chapter.creation_pack_is_manual
+        and (
+            chapter.creation_pack_source_hash != source_hash
+            or not bool(chapter.creation_pack_ai_generated)
+            or not _is_valid_ai_creation_pack(str(chapter.creation_pack_content or ""))
+        )
+    )
+    if force or not has_content or auto_stale:
+        rendered_content, ai_generated = await _render_creation_pack_with_ai(
+            db,
+            context_pack=context_pack,
+            chapter_info=chapter_info,
+            api_key=api_key,
+        )
+        chapter.creation_pack_content = rendered_content
+        chapter.creation_pack_source_hash = source_hash
+        chapter.creation_pack_is_manual = False
+        chapter.creation_pack_ai_generated = ai_generated
+        chapter.creation_pack_updated_at = datetime.datetime.utcnow()
+        chapter.creation_pack_version = max(1, int(chapter.creation_pack_version or 1)) + (1 if (force or auto_stale) else 0)
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        chapter = db.query(Chapter).filter(
+            Chapter.story_id == story.id,
+            Chapter.chapter_number == chapter_number,
+        ).with_for_update().populate_existing().one()
+        if expected_version is not None and int(chapter.creation_pack_version or 1) != expected_version:
+            db.rollback()
+            raise HTTPException(status_code=409, detail="创作包已在其他位置更新，请刷新后再重新提取")
+        has_content = bool(str(chapter.creation_pack_content or "").strip())
+        auto_stale = bool(
+            has_content
+            and not chapter.creation_pack_is_manual
+            and (
+                chapter.creation_pack_source_hash != source_hash
+                or not bool(chapter.creation_pack_ai_generated)
+                or not _is_valid_ai_creation_pack(str(chapter.creation_pack_content or ""))
+            )
+        )
+        if force or not has_content or auto_stale:
+            rendered_content, ai_generated = await _render_creation_pack_with_ai(
+                db,
+                context_pack=context_pack,
+                chapter_info=chapter_info,
+                api_key=api_key,
+            )
+            chapter.creation_pack_content = rendered_content
+            chapter.creation_pack_source_hash = source_hash
+            chapter.creation_pack_is_manual = False
+            chapter.creation_pack_ai_generated = ai_generated
+            chapter.creation_pack_updated_at = datetime.datetime.utcnow()
+            chapter.creation_pack_version = max(1, int(chapter.creation_pack_version or 1)) + (1 if (force or auto_stale) else 0)
+            db.commit()
+    db.refresh(chapter)
+    return chapter, chapter_info
+
+
+def _ensure_chapter_creation_pack(
+    db: Session,
+    *,
+    story: Story,
+    chapter_number: int,
+    owner_user_id: int | None,
+    force: bool = False,
+    expected_version: int | None = None,
+) -> tuple[Chapter, dict[str, Any]]:
+    chapter = db.query(Chapter).filter(
+        Chapter.story_id == story.id,
+        Chapter.chapter_number == chapter_number,
+    ).first()
+    chapter_info = _chapter_info_for_creation_pack(story, chapter, chapter_number)
+    context_pack, source_hash = _resolve_creation_pack_source(
+        db,
+        story=story,
+        chapter_info=chapter_info,
+        owner_user_id=owner_user_id,
+    )
+    if chapter is not None:
+        chapter = db.query(Chapter).filter(Chapter.id == chapter.id).with_for_update().populate_existing().one()
+        if expected_version is not None and int(chapter.creation_pack_version or 1) != expected_version:
+            db.rollback()
+            raise HTTPException(status_code=409, detail="创作包已在其他位置更新，请刷新后再重新提取")
+    if chapter is None:
+        chapter = Chapter(
+            story_id=story.id,
+            chapter_number=chapter_number,
+            title=str(chapter_info.get("title") or f"第{chapter_number}章"),
+            act=str(chapter_info.get("act") or "") or None,
+            key_events=chapter_info.get("key_events") if isinstance(chapter_info.get("key_events"), list) else [],
+            status="pending",
+        )
+        db.add(chapter)
+    has_content = bool(str(chapter.creation_pack_content or "").strip())
+    auto_stale = bool(
+        has_content
+        and not chapter.creation_pack_is_manual
+        and chapter.creation_pack_source_hash != source_hash
+    )
+    if force or not has_content or auto_stale:
+        chapter.creation_pack_content = render_creation_pack(context_pack)
+        chapter.creation_pack_source_hash = source_hash
+        chapter.creation_pack_is_manual = False
+        chapter.creation_pack_updated_at = datetime.datetime.utcnow()
+        chapter.creation_pack_version = max(1, int(chapter.creation_pack_version or 1)) + (1 if (force or auto_stale) else 0)
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        chapter = db.query(Chapter).filter(
+            Chapter.story_id == story.id,
+            Chapter.chapter_number == chapter_number,
+        ).with_for_update().populate_existing().one()
+        if expected_version is not None and int(chapter.creation_pack_version or 1) != expected_version:
+            db.rollback()
+            raise HTTPException(status_code=409, detail="创作包已在其他位置更新，请刷新后再重新提取")
+        has_content = bool(str(chapter.creation_pack_content or "").strip())
+        auto_stale = bool(
+            has_content
+            and not chapter.creation_pack_is_manual
+            and chapter.creation_pack_source_hash != source_hash
+        )
+        if force or not has_content or auto_stale:
+            chapter.creation_pack_content = render_creation_pack(context_pack)
+            chapter.creation_pack_source_hash = source_hash
+            chapter.creation_pack_is_manual = False
+            chapter.creation_pack_updated_at = datetime.datetime.utcnow()
+            chapter.creation_pack_version = max(1, int(chapter.creation_pack_version or 1)) + (1 if (force or auto_stale) else 0)
+            db.commit()
+    db.refresh(chapter)
+    return chapter, chapter_info
+
+
+def _chapter_creation_pack_response(
+    db: Session,
+    *,
+    story: Story,
+    chapter: Chapter,
+    chapter_info: dict[str, Any],
+    owner_user_id: int | None,
+) -> dict[str, Any]:
+    _context_pack, current_source_hash = _resolve_creation_pack_source(
+        db,
+        story=story,
+        chapter_info=chapter_info,
+        owner_user_id=owner_user_id,
+    )
+    content = str(chapter.creation_pack_content or "")
+    return {
+        "schema_version": 2,
+        "story_id": story.id,
+        "chapter_id": chapter.id,
+        "chapter_number": chapter.chapter_number,
+        "chapter_title": str(chapter_info.get("title") or chapter.title or ""),
+        "content": content,
+        "version": int(chapter.creation_pack_version or 1),
+        "content_hash": hashlib.sha256(content.encode("utf-8")).hexdigest(),
+        "source_hash": chapter.creation_pack_source_hash,
+        "current_source_hash": current_source_hash,
+        "is_manual": bool(chapter.creation_pack_is_manual),
+        "ai_generated": bool(chapter.creation_pack_ai_generated) and _is_valid_ai_creation_pack(content),
+        "generation_source": (
+            "manual"
+            if chapter.creation_pack_is_manual
+            else "ai"
+            if bool(chapter.creation_pack_ai_generated) and _is_valid_ai_creation_pack(content)
+            else "fallback"
+        ),
+        "is_stale": bool(chapter.creation_pack_source_hash and chapter.creation_pack_source_hash != current_source_hash),
+        "updated_at": chapter.creation_pack_updated_at.isoformat() if chapter.creation_pack_updated_at else None,
+    }
+
+
+def _require_creation_pack_version(chapter: Chapter, expected_version: int) -> None:
+    """阻止过期创作包生成的正文覆盖用户刚保存的新版本。"""
+    if int(chapter.creation_pack_version or 1) != int(expected_version):
+        raise HTTPException(status_code=409, detail="生成期间创作包已更新，本次正文未保存，请使用最新版重新生成")
+
+
+def _chapter_context_summary(story: Story, chapter: Chapter | None, chapter_number: int, next_unwritten: int, refresh_task: dict | None = None) -> dict[str, Any]:
+    """生成列表页使用的单章节创作包摘要。"""
+    has_pack = bool(str(getattr(chapter, "creation_pack_content", None) or "").strip())
+    has_novel = bool(str(getattr(chapter, "novel_content", None) or "").strip())
+    title = str(chapter.title) if chapter is not None and chapter.title else ""
+    if not title:
+        planned = next((
+            dict(item)
+            for item in _extract_outline_chapters(story.outline if isinstance(story.outline, dict) else {})
+            if item.get("chapter_number") == chapter_number
+        ), None)
+        title = str((planned or {}).get("title") or "")
+    if not title:
+        title = f"第{chapter_number}章"
+    novel_text = str(getattr(chapter, "novel_content", None) or "")
+    return {
+        "chapter_id": chapter.id if chapter else None,
+        "chapter_number": chapter_number,
+        "title": title,
+        "has_pack": has_pack,
+        "has_novel": has_novel,
+        "is_manual": bool(getattr(chapter, "creation_pack_is_manual", False)) if chapter else False,
+        "is_current": int(chapter_number) == next_unwritten,
+        "version": int(getattr(chapter, "creation_pack_version", None) or 1) if chapter else 1,
+        "pack_updated_at": chapter.creation_pack_updated_at.isoformat() if chapter and chapter.creation_pack_updated_at else None,
+        "word_count": len(re.sub(r"\s", "", novel_text)) if novel_text else 0,
+        "refresh_task": refresh_task,
+    }
+
+
+def _chapter_context_summaries(story: Story, db: Session) -> tuple[list[dict[str, Any]], int]:
+    """合并大纲章节与数据库章节，返回按章节号升序的创作包摘要列表与下一个未写章节号。"""
+    next_unwritten = _next_unwritten_chapter_number(story.id, db)
+    outline_chapters = _extract_outline_chapters(story.outline if isinstance(story.outline, dict) else {})
+    db_chapters = db.query(Chapter).filter(Chapter.story_id == story.id).all()
+    by_number: dict[int, Chapter] = {}
+    for chapter in db_chapters:
+        if chapter.chapter_number is not None:
+            by_number[int(chapter.chapter_number)] = chapter
+    merged: dict[int, str | None] = {}
+    for planned in outline_chapters:
+        number = int(planned["chapter_number"])
+        title = str(planned.get("title") or "").strip()
+        if title:
+            merged[number] = title
+    for number, chapter in by_number.items():
+        if number not in merged and chapter.title:
+            merged[number] = str(chapter.title)
+    for number in by_number:
+        merged.setdefault(number, None)
+    active_tasks = db.query(BackgroundTask).filter(
+        BackgroundTask.story_id == story.id,
+        BackgroundTask.task_type == "chapter_creation_pack_refresh",
+        BackgroundTask.status.in_(["pending", "running", "retrying", "cancel_requested"]),
+    ).all()
+    task_by_chapter: dict[int, dict] = {}
+    for t in active_tasks:
+        try:
+            num = int(t.task_id.split("_")[3])  # creation_pack_{story_id}_{chapter_number}_...
+        except (IndexError, ValueError):
+            continue
+        task_by_chapter.setdefault(num, task_manager.get_task_status(t.task_id))
+    chapters = [
+        _chapter_context_summary(story, by_number.get(number), number, next_unwritten, refresh_task=task_by_chapter.get(number))
+        for number in sorted(merged)
+    ]
+    return chapters, next_unwritten
+
+
+@app.get("/api/stories/{story_id}/knowledge/chapter-contexts")
+def get_story_chapter_contexts(
+    story_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """返回作品全部章节的创作包状态列表，供设定中心挑选查看或生成。"""
+    user = _require_user(request, db)
+    story = _require_story_for_user(story_id, user, db)
+    chapters, next_unwritten = _chapter_context_summaries(story, db)
+    return {
+        "story_id": story.id,
+        "next_unwritten_chapter_number": next_unwritten,
+        "chapters": chapters,
+    }
+
+
+@app.get("/api/stories/{story_id}/knowledge/chapter-context")
+async def get_story_chapter_context(
+    story_id: int,
+    request: Request,
+    chapter_number: int | None = Query(None, ge=1),
+    db: Session = Depends(get_db),
+):
+    """返回设定中心与正文 Agent 共用的章节创作包原文。
+
+    不带章节号或传入当前未写章节号时自动确保创作包存在（AI 驱动生成，失败回退模板）；
+    传入其他章节号时纯读取，未生成过创作包的章节返回 404，由前端引导用户主动生成。
+    """
+    user = _require_user(request, db)
+    story = _require_story_for_user(story_id, user, db)
+    next_unwritten = _next_unwritten_chapter_number(story_id, db)
+    target_chapter_number = next_unwritten if chapter_number is None else int(chapter_number)
+    if chapter_number is None or int(chapter_number) == next_unwritten:
+        chapter, chapter_info = await _ensure_chapter_creation_pack_ai(
+            db,
+            story=story,
+            chapter_number=target_chapter_number,
+            owner_user_id=user.id,
+            api_key=_user_deepseek_api_key(request),
+        )
+    else:
+        chapter = db.query(Chapter).filter(
+            Chapter.story_id == story_id,
+            Chapter.chapter_number == target_chapter_number,
+        ).first()
+        if chapter is None or not str(chapter.creation_pack_content or "").strip():
+            raise HTTPException(status_code=404, detail=f"第{target_chapter_number}章尚未生成创作包")
+        chapter_info = _chapter_info_for_creation_pack(story, chapter, target_chapter_number)
+    response = _chapter_creation_pack_response(
+        db,
+        story=story,
+        chapter=chapter,
+        chapter_info=chapter_info,
+        owner_user_id=user.id,
+    )
+    latest_refresh_task = db.query(BackgroundTask).filter(
+        BackgroundTask.story_id == story_id,
+        BackgroundTask.task_type == "chapter_creation_pack_refresh",
+        BackgroundTask.task_id.like(f"creation_pack_{story_id}_{target_chapter_number}_%"),
+    ).order_by(BackgroundTask.created_at.desc()).first()
+    response["refresh_task"] = (
+        task_manager.get_task_status(latest_refresh_task.task_id)
+        if latest_refresh_task
+        else None
+    )
+    return response
+
+
+@app.put("/api/stories/{story_id}/knowledge/chapter-context")
+def update_story_chapter_context(
+    story_id: int,
+    payload: ChapterCreationPackUpdate,
+    request: Request,
+    chapter_number: int = Query(..., ge=1),
+    db: Session = Depends(get_db),
+):
+    """保存用户编辑后的创作包；保存文本会原样发送给正文 Agent。"""
+    user = _require_user(request, db)
+    story = _require_story_for_user(story_id, user, db)
+    _require_unwritten_chapter(story_id, chapter_number, db)
+    chapter, chapter_info = _ensure_chapter_creation_pack(
+        db,
+        story=story,
+        chapter_number=chapter_number,
+        owner_user_id=user.id,
+    )
+    locked_chapter = db.query(Chapter).filter(Chapter.id == chapter.id).with_for_update().populate_existing().one()
+    if int(locked_chapter.creation_pack_version or 1) != payload.expected_version:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="创作包已在其他位置更新，请刷新后再保存")
+    chapter = locked_chapter
+    chapter.creation_pack_content = payload.content
+    chapter.creation_pack_is_manual = True
+    chapter.creation_pack_updated_at = datetime.datetime.utcnow()
+    chapter.creation_pack_version = int(chapter.creation_pack_version or 1) + 1
+    db.commit()
+    db.refresh(chapter)
+    return _chapter_creation_pack_response(db, story=story, chapter=chapter, chapter_info=chapter_info, owner_user_id=user.id)
+
+
+async def _background_regenerate_chapter_creation_pack(
+    story_id_value: int,
+    chapter_number: int,
+    owner_user_id: int,
+    expected_version: int,
+    deepseek_api_key: str | None = None,
+    *,
+    task_id: str | None = None,
+    **_: Any,
+) -> dict[str, Any]:
+    db = SessionLocal()
+    try:
+        story = db.get(Story, story_id_value)
+        if story is None:
+            raise ValueError("作品不存在")
+        _require_unwritten_chapter(story_id_value, chapter_number, db)
+        task_manager.update_task_metadata(task_id, stage="extracting", message=f"正在重新提取第{chapter_number}章创作包")
+        chapter, chapter_info = await _ensure_chapter_creation_pack_ai(
+            db,
+            story=story,
+            chapter_number=chapter_number,
+            owner_user_id=owner_user_id,
+            api_key=deepseek_api_key,
+            force=True,
+            expected_version=expected_version,
+        )
+        return {
+            "status": "succeeded",
+            "message": f"第{chapter_number}章创作包已更新",
+            "story_id": story_id_value,
+            "chapter_id": chapter.id,
+            "chapter_number": chapter_number,
+            "version": int(chapter.creation_pack_version or 1),
+            "content_hash": hashlib.sha256(str(chapter.creation_pack_content or "").encode("utf-8")).hexdigest(),
+        }
+    finally:
+        db.close()
+
+
+@app.post("/api/stories/{story_id}/knowledge/chapter-context/regenerate", status_code=202)
+async def regenerate_story_chapter_context(
+    story_id: int,
+    request: Request,
+    chapter_number: int = Query(..., ge=1),
+    expected_version: int = Query(..., ge=1),
+    db: Session = Depends(get_db),
+):
+    """异步重新提取章节创作包，未写正文的章节均可生成。"""
+    user = _require_user(request, db)
+    story = _require_story_for_user(story_id, user, db)
+    _require_unwritten_chapter(story_id, chapter_number, db)
+    chapter = db.query(Chapter).filter(
+        Chapter.story_id == story_id,
+        Chapter.chapter_number == chapter_number,
+    ).first()
+    active = db.query(BackgroundTask).filter(
+        BackgroundTask.story_id == story_id,
+        BackgroundTask.task_type == "chapter_creation_pack_refresh",
+        BackgroundTask.task_id.like(f"creation_pack_{story_id}_{chapter_number}_%"),
+        BackgroundTask.status.in_(["pending", "running", "retrying", "cancel_requested"]),
+    ).order_by(BackgroundTask.created_at.desc()).first()
+    if active:
+        return {"task_id": active.task_id, "status": active.status, "message": "创作包更新任务正在进行"}
+    task_id = f"creation_pack_{story_id}_{chapter_number}_{uuid.uuid4().hex[:10]}"
+    try:
+        await task_manager.submit_task(
+            task_id,
+            "chapter_creation_pack_refresh",
+            _background_regenerate_chapter_creation_pack,
+            story_id,
+            chapter_number,
+            user.id,
+            expected_version,
+            _user_deepseek_api_key(request),
+            timeout=120,
+            max_retries=0,
+            story_id=story_id,
+            chapter_id=chapter.id if chapter is not None else None,
+            quota_user_id=user.id,
+            metadata={
+                "chapter_number": chapter_number,
+                "running_stage": "extracting",
+                "running_message": f"正在重新提取第{chapter_number}章创作包",
+            },
+        )
+    except IntegrityError:
+        # 数据库部分唯一索引是跨进程去重的最终保障；并发请求中未抢到锁的
+        # 请求返回已经提交的任务，而不是向用户暴露 500。
+        db.rollback()
+        active = db.query(BackgroundTask).filter(
+            BackgroundTask.story_id == story_id,
+            BackgroundTask.task_type == "chapter_creation_pack_refresh",
+            BackgroundTask.task_id.like(f"creation_pack_{story_id}_{chapter_number}_%"),
+            BackgroundTask.status.in_(
+                ["pending", "running", "retrying", "cancel_requested"]
+            ),
+        ).order_by(BackgroundTask.created_at.desc()).first()
+        if active:
+            return {
+                "task_id": active.task_id,
+                "status": active.status,
+                "message": "创作包更新任务正在进行",
+            }
+        raise
+    return {"task_id": task_id, "status": "pending", "message": "创作包更新任务已提交"}
+
+
+@app.post("/api/stories/{story_id}/knowledge/ai-sync", status_code=202)
+async def sync_story_knowledge_ai_route(story_id: int, request: Request, db: Session = Depends(get_db)):
+    """异步全量或定向同步人物主体、事实事件与伏笔剧情线。"""
+    user = _require_user(request, db)
+    _require_story_for_user(story_id, user, db)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    mode = str(body.get("mode") or "incremental").strip().lower() if isinstance(body, dict) else "incremental"
+    scope = str(body.get("scope") or "all").strip().lower() if isinstance(body, dict) else "all"
+    if mode not in {"incremental", "full"}:
+        raise HTTPException(status_code=422, detail="同步模式仅支持 incremental 或 full")
+    if scope not in {"all", "entities", "facts", "plot_threads"}:
+        raise HTTPException(status_code=422, detail="同步范围不受支持")
+    active = db.query(BackgroundTask).filter(
+        BackgroundTask.story_id == story_id,
+        BackgroundTask.task_type == "knowledge_ai_sync",
+        BackgroundTask.status.in_(["pending", "running", "retrying", "cancel_requested"]),
+    ).order_by(BackgroundTask.created_at.desc()).first()
+    if active:
+        active_metadata = active.metadata_json if isinstance(active.metadata_json, dict) else {}
+        return {
+            "task_id": active.task_id,
+            "status": active.status,
+            "scope": active_metadata.get("sync_scope") or "all",
+            "mode": active_metadata.get("sync_mode") or "incremental",
+            "message": "该作品已有同步任务正在进行",
+        }
+    task_id = f"knowledge_sync_{story_id}_{uuid.uuid4().hex[:10]}"
+    try:
+        await task_manager.submit_task(
+            task_id,
+            "knowledge_ai_sync",
+            sync_story_knowledge_with_ai,
+            story_id,
+            _user_deepseek_api_key(request),
+            sync_mode=mode,
+            sync_scope=scope,
+            timeout=900,
+            max_retries=1,
+            story_id=story_id,
+            quota_user_id=user.id,
+            metadata={
+                "sync_mode": mode,
+                "sync_scope": scope,
+                "running_stage": "scanning",
+                "running_message": "正在扫描全部作品资料" if mode == "full" else "正在定位发生变化的作品资料",
+            },
+        )
+    except IntegrityError:
+        db.rollback()
+        active = db.query(BackgroundTask).filter(
+            BackgroundTask.story_id == story_id,
+            BackgroundTask.task_type == "knowledge_ai_sync",
+            BackgroundTask.status.in_(
+                ["pending", "running", "retrying", "cancel_requested"]
+            ),
+        ).order_by(BackgroundTask.created_at.desc()).first()
+        if active:
+            active_metadata = active.metadata_json if isinstance(active.metadata_json, dict) else {}
+            return {
+                "task_id": active.task_id,
+                "status": active.status,
+                "scope": active_metadata.get("sync_scope") or "all",
+                "mode": active_metadata.get("sync_mode") or "incremental",
+                "message": "该作品已有同步任务正在进行",
+            }
+        raise
+    return {"task_id": task_id, "status": "pending", "scope": scope, "mode": mode, "message": "AI 同步任务已提交"}
+
+
+@app.post("/api/stories/{story_id}/knowledge/categories/{knowledge_kind}", status_code=201)
+def create_story_knowledge_category_route(
+    story_id: int,
+    knowledge_kind: str,
+    body: StoryKnowledgeCategoryMutation,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """创建作品知识分类。"""
+    user = _require_user(request, db)
+    story = _require_story_for_user(story_id, user, db)
+    try:
+        category = create_story_knowledge_category(
+            db,
+            story=story,
+            knowledge_kind=knowledge_kind,
+            payload=body.model_dump(exclude_unset=True),
+        )
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(409, "同类型分类名称已存在") from exc
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    return {"category": category, "knowledge_revision": int(story.knowledge_revision or 1)}
+
+
+@app.put("/api/stories/{story_id}/knowledge/categories/{category_id}")
+def update_story_knowledge_category_route(
+    story_id: int,
+    category_id: int,
+    body: StoryKnowledgeCategoryMutation,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """重命名或调整作品知识分类。"""
+    user = _require_user(request, db)
+    story = _require_story_for_user(story_id, user, db)
+    try:
+        category = update_story_knowledge_category(
+            db,
+            story=story,
+            category_id=category_id,
+            payload=body.model_dump(exclude_unset=True),
+        )
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(409, "同类型分类名称已存在") from exc
+    except StoryKnowledgeConflictError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    return {"category": category, "knowledge_revision": int(story.knowledge_revision or 1)}
+
+
+@app.delete("/api/stories/{story_id}/knowledge/categories/{category_id}")
+def delete_story_knowledge_category_route(
+    story_id: int,
+    category_id: int,
+    request: Request,
+    expected_version: int = Query(..., ge=1),
+    db: Session = Depends(get_db),
+):
+    """删除未被引用且非最后一个的作品知识分类。"""
+    user = _require_user(request, db)
+    story = _require_story_for_user(story_id, user, db)
+    try:
+        delete_story_knowledge_category(
+            db,
+            story=story,
+            category_id=category_id,
+            expected_version=expected_version,
+        )
+    except StoryKnowledgeConflictError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    return {"ok": True, "knowledge_revision": int(story.knowledge_revision or 1)}
+
+
+@app.post("/api/stories/{story_id}/knowledge/{kind}", status_code=201)
+def create_story_knowledge(
+    story_id: int,
+    kind: str,
+    body: StoryKnowledgeMutation,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """创建一条人工维护的作品知识。"""
+    user = _require_user(request, db)
+    story = _require_story_for_user(story_id, user, db)
+    try:
+        normalized = normalize_knowledge_kind(kind)
+        item = create_story_knowledge_item(
+            db,
+            story=story,
+            kind=normalized,
+            payload=body.model_dump(exclude_unset=True),
+        )
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(409, "同类型知识键已存在") from exc
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    return {"item": item, "knowledge_revision": int(story.knowledge_revision or 1)}
+
+
+@app.put("/api/stories/{story_id}/knowledge/{kind}/{item_id}")
+def update_story_knowledge(
+    story_id: int,
+    kind: str,
+    item_id: int,
+    body: StoryKnowledgeMutation,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """编辑一条作品知识并使旧 Agent 上下文失效。"""
+    user = _require_user(request, db)
+    story = _require_story_for_user(story_id, user, db)
+    try:
+        normalized = normalize_knowledge_kind(kind)
+        item = update_story_knowledge_item(
+            db,
+            story=story,
+            kind=normalized,
+            item_id=item_id,
+            payload=body.model_dump(exclude_unset=True),
+        )
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(409, "同类型知识键已存在") from exc
+    except StoryKnowledgeConflictError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    return {"item": item, "knowledge_revision": int(story.knowledge_revision or 1)}
+
+
+@app.delete("/api/stories/{story_id}/knowledge/{kind}/{item_id}")
+def delete_story_knowledge(
+    story_id: int,
+    kind: str,
+    item_id: int,
+    request: Request,
+    expected_version: int = Query(..., ge=1),
+    db: Session = Depends(get_db),
+):
+    """删除一条作品知识。"""
+    user = _require_user(request, db)
+    story = _require_story_for_user(story_id, user, db)
+    try:
+        normalized = normalize_knowledge_kind(kind)
+        delete_story_knowledge_item(
+            db,
+            story=story,
+            kind=normalized,
+            item_id=item_id,
+            expected_version=expected_version,
+        )
+    except StoryKnowledgeConflictError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    return {"ok": True, "knowledge_revision": int(story.knowledge_revision or 1)}
+
+
 @app.post("/api/stories/{story_id}/upload-cover")
 async def upload_story_cover(story_id: int, request: Request, db: Session = Depends(get_db)):
     user = _require_user(request, db)
@@ -6801,6 +7858,211 @@ async def chat(chapter_id: int, body: ChatMessageIn, request: Request, db: Sessi
 
 # ─── Generate Novel ─────────────────────────────────────────
 
+_GENERATION_FORWARD_HEADERS = (
+    "authorization",
+    "x-api-token",
+    "x-credential-mode",
+    "x-deepseek-api-key",
+    "x-deepseek-base-url",
+    "x-deepseek-model",
+)
+
+
+def _generation_forward_headers(request: Request) -> dict[str, str]:
+    """仅转发正文生成所需的认证与文本模型请求头。"""
+    return {
+        name: value
+        for name in _GENERATION_FORWARD_HEADERS
+        if (value := request.headers.get(name))
+    }
+
+
+def _is_internal_chapter_generation_request(request: Request) -> bool:
+    """校验后台正文任务的进程内签名，避免外部请求伪造内部调用。"""
+    token = request.headers.get(_CHAPTER_GENERATION_INTERNAL_HEADER)
+    return bool(token) and secrets.compare_digest(token, _CHAPTER_GENERATION_INTERNAL_SECRET)
+
+
+def _active_chapter_generation_task(chapter_id: int, db: Session) -> BackgroundTask | None:
+    """查询指定章节仍在活动状态的正文生成任务。"""
+    return db.query(BackgroundTask).filter(
+        BackgroundTask.chapter_id == chapter_id,
+        BackgroundTask.task_type == "chapter_generation",
+        BackgroundTask.status.in_(("pending", "running", "retrying", "cancel_requested")),
+    ).order_by(BackgroundTask.created_at.desc()).first()
+
+
+def _reject_external_chapter_generation_conflict(request: Request, chapter_id: int, db: Session) -> None:
+    """外部同步正文入口不能抢占或并发写入活动后台任务。"""
+    if _is_internal_chapter_generation_request(request):
+        return
+    active = _active_chapter_generation_task(chapter_id, db)
+    if active:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": "该章节已有正文后台任务正在运行，请等待任务完成或通过任务状态恢复进度",
+                "task_id": active.task_id,
+                "status": active.status,
+                "chapter_id": chapter_id,
+            },
+        )
+
+
+async def _acquire_external_chapter_generation_lease(
+    story_id: int,
+    chapter_number: int,
+):
+    """同步入口发现同章生成时立即返回，避免等待后重复调用模型。"""
+    try:
+        return await acquire_chapter_generation_lease(
+            story_id,
+            chapter_number,
+            wait_if_busy=False,
+        )
+    except ChapterGenerationBusyError as exc:
+        raise HTTPException(status_code=409, detail="该章节已有正文生成任务正在运行，请等待完成后再试") from exc
+
+
+async def _run_chapter_generation_request(
+    chapter_id_value: int,
+    path: str,
+    payload: dict[str, Any] | None,
+    headers: dict[str, str],
+    *,
+    task_id: str | None = None,
+    story_id: int | None = None,
+    chapter_id: int | None = None,
+    shot_id: int | None = None,
+) -> dict[str, Any]:
+    """在后台任务中复用现有正文接口，保持配额、门禁和 CAS 行为一致。"""
+    del chapter_id, shot_id
+    generation_story_id = int(story_id or 0)
+    generation_chapter_number = payload.get("chapter_number") if isinstance(payload, dict) else None
+    if not isinstance(generation_chapter_number, int) or generation_chapter_number <= 0 or generation_story_id <= 0:
+        lookup_db = SessionLocal()
+        try:
+            generation_chapter = lookup_db.get(Chapter, chapter_id_value)
+            if generation_chapter is not None:
+                generation_story_id = generation_chapter.story_id
+                generation_chapter_number = generation_chapter.chapter_number
+            elif generation_story_id > 0:
+                # 兼容无数据库上下文的内部传输测试；真实任务提交前章节一定已落库。
+                generation_chapter_number = chapter_id_value
+            else:
+                raise RuntimeError("待生成章节不存在")
+        finally:
+            lookup_db.close()
+    async with chapter_generation_guard(generation_story_id, generation_chapter_number):
+        if task_id:
+            task_manager.update_task_metadata(task_id, stage="generating", message="正在生成章节正文")
+        transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
+        internal_headers = {**headers, _CHAPTER_GENERATION_INTERNAL_HEADER: _CHAPTER_GENERATION_INTERNAL_SECRET}
+        async with httpx.AsyncClient(transport=transport, base_url="http://localhost", timeout=900) as client:
+            response = await client.post(path, json=payload, headers=internal_headers)
+        if response.status_code >= 400:
+            try:
+                error_payload = response.json()
+            except Exception:
+                error_payload = response.text
+            detail = error_payload.get("detail") if isinstance(error_payload, dict) else error_payload
+            if isinstance(detail, dict):
+                message = str(detail.get("message") or detail.get("code") or "正文生成失败")
+                if detail.get("code") or detail.get("retryable") is not None:
+                    raise UpstreamServiceError(
+                        message,
+                        retryable=bool(detail.get("retryable")),
+                        provider=str(detail.get("provider") or ""),
+                        status_code=int(detail.get("status_code") or response.status_code),
+                        code=str(detail.get("code") or "chapter_generation_failed"),
+                        suggestion=str(detail.get("suggestion") or ""),
+                        diagnostics=detail.get("diagnostics") if isinstance(detail.get("diagnostics"), dict) else None,
+                    )
+            else:
+                message = str(detail or "正文生成失败")
+            raise RuntimeError(message[:1000])
+        result = response.json()
+        if task_id:
+            task_manager.update_task_metadata(task_id, stage="saving", message="正文已生成，正在保存结果")
+        return {
+            "status": "succeeded",
+            "message": "章节正文生成完成",
+            "story_id": story_id,
+            "chapter_id": int(result.get("id") or chapter_id_value),
+            "chapter_number": result.get("chapter_number"),
+        }
+
+
+async def _enqueue_chapter_generation(
+    *,
+    chapter: Chapter,
+    user: User,
+    path: str,
+    payload: dict[str, Any] | None,
+    headers: dict[str, str],
+    db: Session,
+) -> dict[str, Any]:
+    active = _active_chapter_generation_task(chapter.id, db)
+    if active:
+        return {"task_id": active.task_id, "status": active.status, "chapter_id": chapter.id, "message": "该章节正在生成，已连接现有任务"}
+
+    task_id = f"chapter_gen_{chapter.id}_{uuid.uuid4().hex[:10]}"
+    try:
+        await task_manager.submit_task(
+            task_id,
+            "chapter_generation",
+            _run_chapter_generation_request,
+            chapter.id,
+            path,
+            payload,
+            headers,
+            timeout=900,
+            max_retries=0,
+            story_id=chapter.story_id,
+            chapter_id=chapter.id,
+            quota_user_id=user.id,
+            metadata={
+                "owner_user_id": user.id,
+                "stage": "queued",
+                "message": "正文生成任务已排队",
+            },
+        )
+    except IntegrityError:
+        active = _active_chapter_generation_task(chapter.id, db)
+        if active:
+            return {"task_id": active.task_id, "status": active.status, "chapter_id": chapter.id, "message": "该章节正在生成，已连接现有任务"}
+        raise
+    return {"task_id": task_id, "status": "pending", "chapter_id": chapter.id, "message": "正文生成任务已提交"}
+
+
+@app.post("/api/chapters/{chapter_id}/generation-task", status_code=202)
+async def submit_chapter_generation_task(chapter_id: int, request: Request, db: Session = Depends(get_db)):
+    """提交已有章节的正文生成或整章调整任务。"""
+    user = _require_user(request, db)
+    chapter = _require_chapter_for_user(chapter_id, user, db)
+    body = await request.json()
+    action = str(body.get("action") or "generate_novel").strip()
+    if action == "generate_novel":
+        path = f"/api/chapters/{chapter_id}/generate-novel"
+        payload = None
+    elif action == "adjust_content":
+        instruction = str(body.get("instruction") or "").strip()
+        if not instruction:
+            raise HTTPException(400, "调整要求不能为空")
+        path = f"/api/chapters/{chapter_id}/adjust-content"
+        payload = {"instruction": instruction}
+    else:
+        raise HTTPException(422, "不支持的章节生成任务类型")
+    return await _enqueue_chapter_generation(
+        chapter=chapter,
+        user=user,
+        path=path,
+        payload=payload,
+        headers=_generation_forward_headers(request),
+        db=db,
+    )
+
+
 @app.post("/api/chapters/{chapter_id}/generate-novel", response_model=ChapterOut)
 async def generate_novel_endpoint(chapter_id: int, request: Request, db: Session = Depends(get_db)):
     user = _require_user(request, db)
@@ -6812,74 +8074,104 @@ async def generate_novel_endpoint(chapter_id: int, request: Request, db: Session
     if not history:
         raise HTTPException(400, "没有对话历史可生成小说")
 
-    # 配额预检
-    user_id = user.id
-    _check_and_consume_advanced_text_quota(request, user_id, db, deduct=False)
+    internal_generation_request = _is_internal_chapter_generation_request(request)
+    generation_lease = None
+    if not internal_generation_request:
+        _reject_external_chapter_generation_conflict(request, chapter.id, db)
+        generation_lease = await _acquire_external_chapter_generation_lease(
+            chapter.story_id,
+            chapter.chapter_number,
+        )
+    try:
+        if not internal_generation_request:
+            _reject_external_chapter_generation_conflict(request, chapter.id, db)
 
-    chapter_info = {
-        "chapter_number": chapter.chapter_number,
-        "title": chapter.title or f"第{chapter.chapter_number}章",
-        "act": chapter.act or "",
-        "key_events": chapter.key_events or [],
-    }
-    chapter_runtime_context = _build_chapter_runtime_context(
-        chapter.story,
-        db,
-        chapter_info,
-        user_instruction="根据当前聊天记录生成完整正文",
-    )
-    framework_context = _build_framework_context(chapter.story, chapter)
-    continuity_context = _build_chapter_continuity_context_text(chapter_runtime_context)
-    if continuity_context:
-        framework_context = framework_context + "\n" + continuity_context if framework_context else continuity_context
-    deepseek_api_key = _user_deepseek_api_key(request)
-    template_ch_prompt = get_effective_prompt(chapter.story_id, "chapter", db)
-    existing_creation_pack = (
-        chapter.quality_score.get("creation_pack")
-        if isinstance(chapter.quality_score, dict) and isinstance(chapter.quality_score.get("creation_pack"), dict)
-        else None
-    )
-    _release_db_transaction(db)
-    novel_content = await generate_novel(
-        history,
-        api_key=deepseek_api_key,
-        framework_context=framework_context,
-        system_prompt=template_ch_prompt or None,
-    )
-    logger.info(
-        "generate_novel 跳过生成后连续性二次改写 chapter_id=%s chapter=%s reason=%s",
-        chapter_id,
-        chapter_info.get("chapter_number"),
-        "continuity_in_generation_context",
-    )
-    quality_gate = await finalize_generated_chapter_content(
-        content=novel_content,
-        story_context=chapter_runtime_context,
-        chapter_info=chapter_info,
-        api_key=deepseek_api_key,
-        system_prompt=template_ch_prompt or None,
-        source="generate_novel",
-        existing_creation_pack=existing_creation_pack,
-        allow_pipeline_rerun=False,
-    )
-    if not quality_gate.get("ok"):
-        raise HTTPException(status_code=422, detail=format_quality_gate_detail(quality_gate))
-    novel_content = quality_gate["content"]
-    chapter = _require_chapter(chapter_id, db)
-    _apply_chapter_content(chapter, novel_content, status="completed")
-    chapter.quality_score = quality_gate.get("report")
-    chapter.content_source = "chat"
-    await _refresh_chapter_memory(chapter, request, db)
+        # 配额预检
+        user_id = user.id
+        _check_and_consume_advanced_text_quota(request, user_id, db, deduct=False)
 
-    # Also save as assistant message
-    msg = ChatMessage(chapter_id=chapter_id, role="assistant", content=novel_content)
-    db.add(msg)
-    db.commit()
-    # 配额扣减
-    _check_and_consume_advanced_text_quota(request, user_id, db, deduct=True)
-    response_payload = ChapterOut.model_validate(chapter)
-    _release_db_transaction(db)
-    return response_payload
+        chapter_info = {
+            "chapter_number": chapter.chapter_number,
+            "title": chapter.title or f"第{chapter.chapter_number}章",
+            "act": chapter.act or "",
+            "key_events": chapter.key_events or [],
+        }
+        chapter_runtime_context = _build_chapter_runtime_context(
+            chapter.story,
+            db,
+            chapter_info,
+            user_instruction="根据当前聊天记录生成完整正文",
+        )
+        framework_context = _build_framework_context(chapter.story, chapter)
+        continuity_context = _build_chapter_continuity_context_text(chapter_runtime_context)
+        if continuity_context:
+            framework_context = framework_context + "\n" + continuity_context if framework_context else continuity_context
+        deepseek_api_key = _user_deepseek_api_key(request)
+        template_ch_prompt = get_effective_prompt(chapter.story_id, "chapter", db)
+        pack_chapter, _pack_chapter_info = await _ensure_chapter_creation_pack_ai(
+            db,
+            story=chapter.story,
+            chapter_number=chapter.chapter_number,
+            owner_user_id=user.id,
+            api_key=deepseek_api_key,
+        )
+        creation_pack_content = str(pack_chapter.creation_pack_content or "")
+        creation_pack_version = int(pack_chapter.creation_pack_version or 1)
+        existing_creation_pack = canonical_agent_pack(creation_pack_content, chapter_info)
+        _release_db_transaction(db)
+        novel_content = await generate_novel(
+            history,
+            api_key=deepseek_api_key,
+            framework_context=framework_context,
+            system_prompt=template_ch_prompt or None,
+            creation_pack_content=creation_pack_content,
+        )
+        logger.info(
+            "generate_novel 跳过生成后连续性二次改写 chapter_id=%s chapter=%s reason=%s",
+            chapter_id,
+            chapter_info.get("chapter_number"),
+            "continuity_in_generation_context",
+        )
+        quality_gate = await finalize_generated_chapter_content(
+            content=novel_content,
+            story_context=chapter_runtime_context,
+            chapter_info=chapter_info,
+            api_key=deepseek_api_key,
+            system_prompt=template_ch_prompt or None,
+            source="generate_novel",
+            existing_creation_pack=existing_creation_pack,
+            allow_pipeline_rerun=False,
+        )
+        if not quality_gate.get("ok"):
+            raise HTTPException(status_code=422, detail=format_quality_gate_detail(quality_gate))
+        novel_content = quality_gate["content"]
+        chapter = _require_chapter(chapter_id, db)
+        db.refresh(chapter, with_for_update=True)
+        _require_creation_pack_version(chapter, creation_pack_version)
+        _apply_chapter_content(chapter, novel_content, status="completed")
+        quality_report = dict(quality_gate.get("report") or {})
+        quality_report["context_snapshot"] = _chapter_context_snapshot(chapter_runtime_context)
+        chapter.quality_score = quality_report
+        chapter.content_source = "chat"
+
+        # 同步入口与后台入口共用保存路径，确保聊天消息和正文状态一致。
+        msg = ChatMessage(chapter_id=chapter_id, role="assistant", content=novel_content)
+        db.add(msg)
+        _commit_with_chapter_context_guard(
+            db,
+            story_id=chapter.story_id,
+            story_context=chapter_runtime_context,
+        )
+        await _submit_chapter_memory_refresh(chapter, deepseek_api_key)
+        db.refresh(chapter)
+        # 配额扣减
+        _check_and_consume_advanced_text_quota(request, user_id, db, deduct=True)
+        response_payload = ChapterOut.model_validate(chapter)
+        _release_db_transaction(db)
+        return response_payload
+    finally:
+        if generation_lease is not None:
+            await generation_lease.release()
 
 
 MAX_IMPORTED_NOVEL_CHARS = int(os.getenv("MAX_IMPORTED_NOVEL_CHARS", "50000"))
@@ -8604,9 +9896,24 @@ async def generate_scenes_endpoint(chapter_id: int, request: Request, db: Sessio
     """Generate scene prompts from chat history. Returns them for user review."""
     user = _require_user(request, db)
     chapter = _require_chapter_for_user(chapter_id, user, db)
+    try:
+        body = await request.json()
+        if not isinstance(body, dict):
+            body = {}
+    except Exception:
+        body = {}
     if not chapter.messages and not chapter.novel_content:
         raise HTTPException(400, "暂无聊天消息")
 
+    story = db.get(Story, chapter.story_id)
+    if not story:
+        raise HTTPException(404, "作品未找到")
+    preset_prompt_template, preset_system_prompt = _storyboard_prompt_snapshot_for_generation(
+        db,
+        story,
+        body.get("preset_id"),
+        preset_id_provided="preset_id" in body,
+    )
     image_count = _effective_image_count(chapter_id, user.id, db)
     if chapter.messages:
         chat_history = [{"role": m.role, "content": m.content} for m in chapter.messages]
@@ -8622,6 +9929,8 @@ async def generate_scenes_endpoint(chapter_id: int, request: Request, db: Sessio
             character_profiles=character_profiles,
             page_count=image_count,
             api_key=deepseek_api_key,
+            prompt_template=preset_prompt_template,
+            system_prompt=preset_system_prompt,
         )
     )
     try:
@@ -9624,6 +10933,54 @@ async def reset_manga_images(chapter_id: int, request: Request, db: Session = De
     _clear_chapter_images_only(chapter, db)
     db.commit()
     return {"ok": True}
+
+
+@app.get("/api/chapters/{chapter_id}/manga-images/zip")
+async def download_chapter_manga_zip(chapter_id: int, request: Request, db: Session = Depends(get_db)):
+    """将当前话的所有漫画图片打包为 ZIP 下载（后端代理下载，规避 OSS 跨域 CORS 限制）"""
+    user = _require_user(request, db)
+    chapter = _require_chapter_for_user(chapter_id, user, db)
+    images = (
+        db.query(MangaImage)
+        .filter(MangaImage.chapter_id == chapter_id)
+        .order_by(MangaImage.image_number)
+        .all()
+    )
+    if not images:
+        raise HTTPException(404, "此章节暂无漫画图片")
+
+    zip_buffer = io.BytesIO()
+    packed_count = 0
+    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
+        for img in images:
+            local_path = ensure_local_media_path(img.image_path, "manga")
+            if not local_path:
+                continue
+            try:
+                ext_match = re.search(r"\.(png|jpe?g|webp|gif|bmp)$", str(img.image_path or ""), re.IGNORECASE)
+                ext = ext_match.group(1).lower() if ext_match else "png"
+                arc_name = f"panel_{str(img.image_number).zfill(2)}.{ext}"
+                zip_file.write(local_path, arcname=arc_name)
+                packed_count += 1
+            except Exception as exc:
+                logger.warning("漫画图片打包失败 image_number=%s path=%s: %s", img.image_number, img.image_path, exc)
+    if packed_count == 0:
+        raise HTTPException(502, "漫画图片打包失败，图片文件不存在或无法访问")
+
+    zip_buffer.seek(0)
+    zip_bytes = zip_buffer.getvalue()
+    date_str = datetime.datetime.now().strftime("%Y-%m-%d")
+    filename = f"第{chapter.chapter_number}话_漫画图片_{date_str}.zip"
+    # RFC 5987 编码中文文件名，兼容所有浏览器
+    encoded_filename = quote(filename)
+    headers = {
+        "Content-Disposition": f"attachment; filename*=UTF-8''{encoded_filename}",
+    }
+    return StreamingResponse(
+        iter([zip_bytes]),
+        media_type="application/zip",
+        headers=headers,
+    )
 
 
 @app.post("/api/chapters/{chapter_id}/upload-style-reference")
@@ -10733,14 +12090,35 @@ async def update_story_bible(story_id: int, request: Request, db: Session = Depe
     user = _require_user(request, db)
     story = _require_story_for_user(story_id, user, db)
     body = await request.json()
+    # 串行化同一作品的圣经保存，确保版本校验与写入处于同一临界区。
+    story = db.execute(
+        select(Story)
+        .where(Story.id == story_id, Story.owner_user_id == user.id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    ).scalar_one()
     bible_update = body.get("story_bible", {})
+    expected_revision = body.get("expected_knowledge_revision")
+    if expected_revision is not None:
+        try:
+            revision_matches = int(expected_revision) == int(story.knowledge_revision or 1)
+        except (TypeError, ValueError):
+            raise HTTPException(400, "作品设定版本号无效")
+        if not revision_matches:
+            raise HTTPException(409, "作品设定已被其他页面更新，请刷新后再编辑")
     from services.story_state import deep_merge_story_bible
 
     current = deep_merge_story_bible(story.story_bible, bible_update)
     # world_setting 应完全替换而非递归合并，确保删除的字段被移除
-    if isinstance(bible_update.get("creative_brief"), dict) and "world_setting" in bible_update["creative_brief"]:
+    creative_update = bible_update.get("creative_brief")
+    if isinstance(creative_update, dict):
         if isinstance(current.get("creative_brief"), dict):
-            current["creative_brief"]["world_setting"] = bible_update["creative_brief"]["world_setting"]
+            for world_key in ("world_setting", "世界观设定"):
+                if world_key in creative_update:
+                    current["creative_brief"][world_key] = creative_update[world_key]
+    # 人工编辑的画像是一份完整表单，整块替换可清除无来源的历史残留规则。
+    if "reference_author_profile" in bible_update:
+        current["reference_author_profile"] = bible_update["reference_author_profile"]
     story.story_bible = current
     creative_brief = current.get("creative_brief") if isinstance(current.get("creative_brief"), dict) else {}
     next_description = str(creative_brief.get("one_line_premise") or "").strip()
@@ -10750,7 +12128,7 @@ async def update_story_bible(story_id: int, request: Request, db: Session = Depe
         story.description = next_description
     db.commit()
     db.refresh(story)
-    return {"story_bible": story.story_bible}
+    return {"story_bible": story.story_bible, "knowledge_revision": int(story.knowledge_revision or 1)}
 
 
 # ─── Framework (InkAI) ─────────────────────────────────────
@@ -11742,8 +13120,84 @@ def _build_chapter_pipeline_error_quality_gate(review: Any) -> dict[str, Any]:
     }
 
 
+@app.post("/api/stories/{story_id}/expand-chapter/task", status_code=202)
+async def submit_expand_chapter_task(story_id: int, request: Request, db: Session = Depends(get_db)):
+    """为大纲章节创建可查询、可去重的后台扩写任务。"""
+    user = _require_user(request, db)
+    story = _require_story_for_user(story_id, user, db)
+    body = await request.json()
+    chapter_number = body.get("chapter_number")
+    if not isinstance(chapter_number, int) or isinstance(chapter_number, bool) or chapter_number <= 0:
+        raise HTTPException(422, "章节号必须是正整数")
+    chapter = db.query(Chapter).filter(
+        Chapter.story_id == story_id,
+        Chapter.chapter_number == chapter_number,
+    ).first()
+    if chapter is None:
+        chapter = Chapter(
+            story_id=story_id,
+            chapter_number=chapter_number,
+            title=str(body.get("chapter_title") or f"第{chapter_number}章").strip(),
+            act=str(body.get("act") or "").strip() or None,
+            key_events=_normalize_key_events(body.get("key_events")),
+            status="pending",
+        )
+        db.add(chapter)
+        try:
+            db.commit()
+            db.refresh(chapter)
+        except IntegrityError:
+            db.rollback()
+            chapter = db.query(Chapter).filter(
+                Chapter.story_id == story_id,
+                Chapter.chapter_number == chapter_number,
+            ).one()
+    return await _enqueue_chapter_generation(
+        chapter=chapter,
+        user=user,
+        path=f"/api/stories/{story_id}/expand-chapter",
+        payload=body,
+        headers=_generation_forward_headers(request),
+        db=db,
+    )
+
+
 @app.post("/api/stories/{story_id}/expand-chapter", response_model=ChapterOut)
 async def expand_chapter_endpoint(story_id: int, request: Request, db: Session = Depends(get_db)):
+    user = _require_user(request, db)
+    _require_story_for_user(story_id, user, db)
+    body = await request.json()
+    chapter_number = body.get("chapter_number")
+    candidate = None
+    if isinstance(chapter_number, int) and chapter_number > 0:
+        candidate = db.query(Chapter).filter(
+            Chapter.story_id == story_id,
+            Chapter.chapter_number == chapter_number,
+        ).first()
+
+    if _is_internal_chapter_generation_request(request):
+        return await _expand_chapter_endpoint_impl(story_id, request, db)
+
+    if candidate:
+        _reject_external_chapter_generation_conflict(request, candidate.id, db)
+    generation_chapter_number = chapter_number
+    if not isinstance(generation_chapter_number, int) or generation_chapter_number <= 0:
+        max_number = db.query(func.max(Chapter.chapter_number)).filter(Chapter.story_id == story_id).scalar()
+        generation_chapter_number = int(max_number or 0) + 1
+    generation_lease = await _acquire_external_chapter_generation_lease(
+        story_id,
+        generation_chapter_number,
+    )
+    try:
+        if candidate:
+            db.expire(candidate)
+            _reject_external_chapter_generation_conflict(request, candidate.id, db)
+        return await _expand_chapter_endpoint_impl(story_id, request, db)
+    finally:
+        await generation_lease.release()
+
+
+async def _expand_chapter_endpoint_impl(story_id: int, request: Request, db: Session):
     user = _require_user(request, db)
     story = _require_story_for_user(story_id, user, db)
     body = await request.json()
@@ -11819,6 +13273,17 @@ async def expand_chapter_endpoint(story_id: int, request: Request, db: Session =
                 previous_chapter_summary = previous_chapter_summary[:2000]
 
     chapter_info["chapter_number"] = chapter_num_for_query
+    deepseek_api_key = _user_deepseek_api_key(request)
+    pack_chapter, _pack_chapter_info = await _ensure_chapter_creation_pack_ai(
+        db,
+        story=story,
+        chapter_number=chapter_num_for_query,
+        owner_user_id=user.id,
+        api_key=deepseek_api_key,
+    )
+    creation_pack_fingerprint = str(pack_chapter.creation_pack_source_hash or "")
+    creation_pack_version = int(pack_chapter.creation_pack_version or 1)
+    reusable_creation_pack = canonical_agent_pack(str(pack_chapter.creation_pack_content or ""), chapter_info)
     chapter_runtime_context = _build_chapter_runtime_context(
         story,
         db,
@@ -11828,10 +13293,9 @@ async def expand_chapter_endpoint(story_id: int, request: Request, db: Session =
     previous_bridge = _build_previous_chapter_bridge(story_id, chapter_num_for_query, db)
     if previous_bridge.get("summary_text"):
         previous_chapter_summary = str(previous_bridge["summary_text"])
-    deepseek_api_key = _user_deepseek_api_key(request)
 
-    _release_db_transaction(db)
     template_ch_prompt = get_effective_prompt(story_id, "chapter", db)
+    _release_db_transaction(db)
     try:
         novel_content = await expand_chapter_to_content(
             chapter_runtime_context,
@@ -11840,7 +13304,10 @@ async def expand_chapter_endpoint(story_id: int, request: Request, db: Session =
             previous_chapter_summary=previous_chapter_summary,
             system_prompt=template_ch_prompt or None,
             db=db,
+            creation_pack=reusable_creation_pack,
         )
+    except UpstreamServiceError as exc:
+        raise HTTPException(status_code=exc.status_code or 502, detail=exc.to_payload()) from exc
     except ChapterPipelineQualityError as exc:
         quality_gate = _build_chapter_pipeline_error_quality_gate(exc.review)
         raise HTTPException(status_code=422, detail=format_quality_gate_detail(quality_gate)) from exc
@@ -11857,6 +13324,7 @@ async def expand_chapter_endpoint(story_id: int, request: Request, db: Session =
             "pipeline_mode": "two_stage",
             "stages": pipeline_result.get("stages") if isinstance(pipeline_result, dict) else {},
             "editor_review_skipped": bool(pipeline_result.get("editor_review_skipped")) if isinstance(pipeline_result, dict) else True,
+            "creation_pack_fingerprint": creation_pack_fingerprint,
         },
     }
 
@@ -11875,21 +13343,36 @@ async def expand_chapter_endpoint(story_id: int, request: Request, db: Session =
     existing = (
         db.query(Chapter)
         .filter(Chapter.story_id == story_id, Chapter.chapter_number == chapter_num)
+        .with_for_update()
         .first()
     )
+    if existing is not None:
+        _require_creation_pack_version(existing, creation_pack_version)
     chapter = existing or Chapter(story_id=story_id, chapter_number=chapter_num)
     chapter.title = chapter_title.strip()
     chapter.content_source = "chat"
     chapter.act = act if isinstance(act, str) else None
     chapter.key_events = _normalize_key_events(body.get("key_events"))
     _apply_chapter_content(chapter, novel_content, status="completed")
-    chapter.quality_score = quality_gate.get("report")
+    quality_report = dict(quality_gate.get("report") or {})
+    quality_report["context_snapshot"] = _chapter_context_snapshot(chapter_runtime_context)
+    chapter.quality_score = quality_report
     if existing is None:
         db.add(chapter)
-        db.flush()
+
+    def prepare_chapter_write() -> None:
+        if existing is None:
+            db.flush()
+        db.add(ChatMessage(chapter_id=chapter.id, role="assistant", content=novel_content))
+
+    _commit_with_chapter_context_guard(
+        db,
+        story_id=story_id,
+        story_context=chapter_runtime_context,
+        prepare=prepare_chapter_write,
+    )
+    if existing is None:
         _initialize_empty_chapter_workspace(chapter.id)
-    db.add(ChatMessage(chapter_id=chapter.id, role="assistant", content=novel_content))
-    db.commit()
     _check_and_consume_feature_quota(request, user.id, "chapter.expand.monthly_limit", 1, db, deduct=True, provider_kind="text")
     db.refresh(chapter)
     memory_billing_ctx = _detach_pending_platform_points(
@@ -11905,6 +13388,7 @@ async def expand_chapter_endpoint(story_id: int, request: Request, db: Session =
             chapter.id,
             deepseek_api_key,
             memory_billing_ctx,
+            hashlib.sha256((chapter.novel_content or "").encode("utf-8")).hexdigest(),
             timeout=300,
             max_retries=1,
             chapter_id=chapter.id,
@@ -11974,56 +13458,85 @@ async def adjust_chapter_content_endpoint(chapter_id: int, request: Request, db:
     if not chapter.novel_content or not chapter.novel_content.strip():
         raise HTTPException(400, "章节没有小说内容可调整")
 
-    chapter_info = {
-        "title": chapter.title or f"第{chapter.chapter_number}话",
-        "act": chapter.act or "",
-        "chapter_number": chapter.chapter_number,
-        "key_events": chapter.key_events or [],
-    }
-    chapter_runtime_context = _build_chapter_runtime_context(
-        chapter.story,
-        db,
-        chapter_info,
-        user_instruction=instruction.strip(),
-    )
-    deepseek_api_key = _user_deepseek_api_key(request)
-    _check_and_consume_advanced_text_quota(request, user.id, db, deduct=False)
-    template_system = get_effective_prompt(chapter.story_id, "chapter", db)
-    existing_creation_pack = (
-        chapter.quality_score.get("creation_pack")
-        if isinstance(chapter.quality_score, dict) and isinstance(chapter.quality_score.get("creation_pack"), dict)
-        else None
-    )
-    _release_db_transaction(db)
-    updated_content = await adjust_chapter_content(
-        chapter_runtime_context,
-        chapter_info,
-        chapter.novel_content,
-        instruction.strip(),
-        api_key=deepseek_api_key,
-        system_prompt=template_system or None,
-    )
-    quality_gate = await finalize_generated_chapter_content(
-        content=updated_content,
-        story_context=chapter_runtime_context,
-        chapter_info=chapter_info,
-        api_key=deepseek_api_key,
-        system_prompt=template_system or None,
-        source="adjust_chapter_content",
-        existing_creation_pack=existing_creation_pack,
-        allow_pipeline_rerun=False,
-    )
-    if not quality_gate.get("ok"):
-        raise HTTPException(status_code=422, detail=format_quality_gate_detail(quality_gate))
-    updated_content = quality_gate["content"]
-    chapter = _require_chapter_for_user(chapter_id, user, db)
-    _apply_chapter_content(chapter, updated_content, status="completed")
-    chapter.quality_score = quality_gate.get("report")
-    await _refresh_chapter_memory(chapter, request, db)
-    db.commit()
-    _check_and_consume_advanced_text_quota(request, user.id, db, deduct=True)
-    db.refresh(chapter)
-    return chapter
+    internal_generation_request = _is_internal_chapter_generation_request(request)
+    generation_lease = None
+    if not internal_generation_request:
+        _reject_external_chapter_generation_conflict(request, chapter.id, db)
+        generation_lease = await _acquire_external_chapter_generation_lease(
+            chapter.story_id,
+            chapter.chapter_number,
+        )
+    try:
+        if not internal_generation_request:
+            _reject_external_chapter_generation_conflict(request, chapter.id, db)
+
+        chapter_info = {
+            "title": chapter.title or f"第{chapter.chapter_number}话",
+            "act": chapter.act or "",
+            "chapter_number": chapter.chapter_number,
+            "key_events": chapter.key_events or [],
+        }
+        chapter_runtime_context = _build_chapter_runtime_context(
+            chapter.story,
+            db,
+            chapter_info,
+            user_instruction=instruction.strip(),
+        )
+        deepseek_api_key = _user_deepseek_api_key(request)
+        _check_and_consume_advanced_text_quota(request, user.id, db, deduct=False)
+        template_system = get_effective_prompt(chapter.story_id, "chapter", db)
+        pack_chapter, _pack_chapter_info = await _ensure_chapter_creation_pack_ai(
+            db,
+            story=chapter.story,
+            chapter_number=chapter.chapter_number,
+            owner_user_id=user.id,
+            api_key=deepseek_api_key,
+        )
+        creation_pack_content = str(pack_chapter.creation_pack_content or "")
+        creation_pack_version = int(pack_chapter.creation_pack_version or 1)
+        existing_creation_pack = canonical_agent_pack(creation_pack_content, chapter_info)
+        _release_db_transaction(db)
+        updated_content = await adjust_chapter_content(
+            chapter_runtime_context,
+            chapter_info,
+            chapter.novel_content,
+            instruction.strip(),
+            api_key=deepseek_api_key,
+            system_prompt=template_system or None,
+            creation_pack_content=creation_pack_content,
+        )
+        quality_gate = await finalize_generated_chapter_content(
+            content=updated_content,
+            story_context=chapter_runtime_context,
+            chapter_info=chapter_info,
+            api_key=deepseek_api_key,
+            system_prompt=template_system or None,
+            source="adjust_chapter_content",
+            existing_creation_pack=existing_creation_pack,
+            allow_pipeline_rerun=False,
+        )
+        if not quality_gate.get("ok"):
+            raise HTTPException(status_code=422, detail=format_quality_gate_detail(quality_gate))
+        updated_content = quality_gate["content"]
+        chapter = _require_chapter_for_user(chapter_id, user, db)
+        db.refresh(chapter, with_for_update=True)
+        _require_creation_pack_version(chapter, creation_pack_version)
+        _apply_chapter_content(chapter, updated_content, status="completed")
+        quality_report = dict(quality_gate.get("report") or {})
+        quality_report["context_snapshot"] = _chapter_context_snapshot(chapter_runtime_context)
+        chapter.quality_score = quality_report
+        _commit_with_chapter_context_guard(
+            db,
+            story_id=chapter.story_id,
+            story_context=chapter_runtime_context,
+        )
+        await _submit_chapter_memory_refresh(chapter, deepseek_api_key)
+        _check_and_consume_advanced_text_quota(request, user.id, db, deduct=True)
+        db.refresh(chapter)
+        return chapter
+    finally:
+        if generation_lease is not None:
+            await generation_lease.release()
 
 
 @app.patch("/api/chapters/{chapter_id}/continuity-memory", response_model=ChapterOut)
@@ -12130,11 +13643,20 @@ async def quality_assess_endpoint(chapter_id: int, request: Request, db: Session
 @app.post("/api/chapters/{chapter_id}/scenes-from-selection")
 async def scenes_from_selection_endpoint(chapter_id: int, request: Request, db: Session = Depends(get_db)):
     user = _require_user(request, db)
-    _require_chapter_for_user(chapter_id, user, db)
+    chapter = _require_chapter_for_user(chapter_id, user, db)
     body = await request.json()
     selected_text = body.get("selected_text", "")
     character_profiles = body.get("character_profiles", body.get("characters", ""))
     page_count = body.get("page_count", 4)
+    story = db.get(Story, chapter.story_id)
+    if not story:
+        raise HTTPException(404, "作品未找到")
+    preset_prompt_template, preset_system_prompt = _storyboard_prompt_snapshot_for_generation(
+        db,
+        story,
+        body.get("preset_id"),
+        preset_id_provided="preset_id" in body,
+    )
 
     if not isinstance(selected_text, str) or not selected_text.strip():
         raise HTTPException(400, "选中文本必填")
@@ -12153,6 +13675,8 @@ async def scenes_from_selection_endpoint(chapter_id: int, request: Request, db: 
         character_profiles=character_profiles,
         page_count=page_count,
         api_key=deepseek_api_key,
+        prompt_template=preset_prompt_template,
+        system_prompt=preset_system_prompt,
     )
     _check_and_consume_feature_quota(request, user.id, "scene.generate.monthly_limit", 1, db, deduct=True, provider_kind="text")
     sanitized_scenes, sanitized_indices = sanitize_scene_list(scenes)
@@ -12529,6 +14053,331 @@ async def framework_analyze_endpoint(story_id: int, request: Request, db: Sessio
 
 
 # ─── 提示词模板系统 API ──────────────────────────────────
+
+# ─── 分镜脚本模板 API ────────────────────────────────────
+
+
+def _serialize_storyboard_preset(
+    preset: StoryboardPromptPreset,
+    current_user_id: int | None = None,
+) -> dict:
+    return {
+        "id": preset.id,
+        "name": preset.name,
+        "description": preset.description,
+        "prompt_template": preset.prompt_template,
+        "system_prompt": preset.system_prompt,
+        "preset_key": preset.preset_key,
+        "is_system": preset.is_system,
+        "story_id": preset.story_id,
+        "author_user_id": preset.author_user_id,
+        "scope": "system" if preset.is_system else "user",
+        "is_owner": bool(
+            not preset.is_system
+            and current_user_id is not None
+            and preset.author_user_id == current_user_id
+        ),
+        "sort_order": preset.sort_order,
+    }
+
+
+def _require_storyboard_story(
+    story_id: int,
+    user: User,
+    db: Session,
+) -> Story:
+    story = db.get(Story, story_id)
+    if not story:
+        raise HTTPException(404, "作品未找到")
+    if story.owner_user_id != user.id and user.role != "admin":
+        raise HTTPException(403, "作品访问被拒绝")
+    return story
+
+
+def _storyboard_prompt_snapshot_for_generation(
+    db: Session,
+    story: Story,
+    requested_preset_id: object,
+    *,
+    preset_id_provided: bool,
+) -> tuple[str, str]:
+    """从数据库解析分镜模板，并返回可安全跨事务使用的文本快照。"""
+    default_preset = (
+        db.query(StoryboardPromptPreset)
+        .filter(
+            StoryboardPromptPreset.is_system.is_(True),
+            StoryboardPromptPreset.preset_key == "default",
+        )
+        .order_by(StoryboardPromptPreset.id.asc())
+        .first()
+    )
+    if not default_preset:
+        raise HTTPException(503, "数据库未配置默认分镜模板，请联系管理员")
+
+    preset: StoryboardPromptPreset
+    if preset_id_provided:
+        if requested_preset_id is None:
+            preset = default_preset
+        else:
+            if not isinstance(requested_preset_id, int) or isinstance(requested_preset_id, bool):
+                raise HTTPException(400, "preset_id 无效")
+            requested_preset = db.get(StoryboardPromptPreset, requested_preset_id)
+            if not requested_preset:
+                raise HTTPException(404, "分镜模板不存在")
+            if not _storyboard_preset_available_for_story(requested_preset, story):
+                raise HTTPException(403, "无权使用该分镜模板")
+            preset = requested_preset
+    elif story.storyboard_preset_id is None:
+        preset = default_preset
+    else:
+        bound_preset = db.get(StoryboardPromptPreset, story.storyboard_preset_id)
+        if not bound_preset or not _storyboard_preset_available_for_story(bound_preset, story):
+            raise HTTPException(409, "作品绑定的分镜模板已失效，请重新选择模板")
+        preset = bound_preset
+
+    prompt_template = (preset.prompt_template or "").strip()
+    system_prompt = (preset.system_prompt or default_preset.system_prompt or "").strip()
+    if not prompt_template or not system_prompt:
+        raise HTTPException(503, "数据库中的分镜模板内容不完整，请联系管理员")
+    logger.info(
+        "Using database storyboard prompt preset story_id=%s preset_id=%s preset_key=%s",
+        story.id,
+        preset.id,
+        preset.preset_key,
+    )
+    return prompt_template, system_prompt
+
+
+def _storyboard_template_owner_id(story: Story, user: User) -> int:
+    """返回作品对应的用户模板库所有者。"""
+    return story.owner_user_id if story.owner_user_id is not None else user.id
+
+
+def _storyboard_preset_available_for_story(
+    preset: StoryboardPromptPreset,
+    story: Story,
+) -> bool:
+    """判断分镜模板是否允许绑定或用于指定作品。"""
+    if preset.is_system:
+        return True
+    if preset.author_user_id is not None:
+        return preset.author_user_id == story.owner_user_id
+    return preset.story_id == story.id
+
+
+@app.get("/api/storyboard-presets")
+def list_storyboard_presets(
+    request: Request,
+    story_id: int = Query(...),
+    db: Session = Depends(get_db),
+):
+    user = _require_user(request, db)
+    story = _require_storyboard_story(story_id, user, db)
+    template_owner_id = _storyboard_template_owner_id(story, user)
+    presets = (
+        db.query(StoryboardPromptPreset)
+        .filter(
+            or_(
+                StoryboardPromptPreset.is_system.is_(True),
+                StoryboardPromptPreset.author_user_id == template_owner_id,
+                and_(
+                    StoryboardPromptPreset.author_user_id.is_(None),
+                    StoryboardPromptPreset.story_id == story_id,
+                ),
+            )
+        )
+        .order_by(
+            StoryboardPromptPreset.sort_order.asc(),
+            StoryboardPromptPreset.id.asc(),
+        )
+        .all()
+    )
+    return {
+        "presets": [
+            _serialize_storyboard_preset(preset, current_user_id=user.id)
+            for preset in presets
+        ]
+    }
+
+
+@app.post("/api/storyboard-presets")
+def create_storyboard_preset(
+    body: dict,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    user = _require_user(request, db)
+    name = str(body.get("name") or "").strip()
+    prompt_template = str(body.get("prompt_template") or "").strip()
+    story_id = body.get("story_id")
+    if not name:
+        raise HTTPException(400, "模板名称不能为空")
+    if not prompt_template:
+        raise HTTPException(400, "提示词模板不能为空")
+    if not isinstance(story_id, int) or isinstance(story_id, bool):
+        raise HTTPException(400, "story_id 必填")
+    story = _require_storyboard_story(story_id, user, db)
+    template_owner_id = _storyboard_template_owner_id(story, user)
+    if template_owner_id != user.id:
+        raise HTTPException(403, "只能在自己的模板库中新建模板")
+    preset = StoryboardPromptPreset(
+        name=name[:100],
+        description=str(body.get("description") or "").strip() or None,
+        prompt_template=prompt_template,
+        system_prompt=str(body.get("system_prompt") or "").strip() or None,
+        is_system=False,
+        story_id=None,
+        author_user_id=template_owner_id,
+    )
+    db.add(preset)
+    db.commit()
+    db.refresh(preset)
+    return _serialize_storyboard_preset(preset, current_user_id=user.id)
+
+
+@app.put("/api/storyboard-presets/{preset_id}")
+def update_storyboard_preset(
+    preset_id: int,
+    body: dict,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    user = _require_user(request, db)
+    preset = db.get(StoryboardPromptPreset, preset_id)
+    if not preset:
+        raise HTTPException(404, "分镜模板不存在")
+    if preset.is_system:
+        raise HTTPException(403, "系统预设不允许编辑")
+    if preset.author_user_id != user.id:
+        raise HTTPException(403, "只能编辑自己的模板")
+    if "name" in body:
+        name = str(body.get("name") or "").strip()
+        if not name:
+            raise HTTPException(400, "模板名称不能为空")
+        preset.name = name[:100]
+    if "description" in body:
+        preset.description = str(body.get("description") or "").strip() or None
+    if "prompt_template" in body:
+        prompt_template = str(body.get("prompt_template") or "").strip()
+        if not prompt_template:
+            raise HTTPException(400, "提示词模板不能为空")
+        preset.prompt_template = prompt_template
+    if "system_prompt" in body:
+        preset.system_prompt = str(body.get("system_prompt") or "").strip() or None
+    db.commit()
+    db.refresh(preset)
+    return _serialize_storyboard_preset(preset, current_user_id=user.id)
+
+
+@app.delete("/api/storyboard-presets/{preset_id}")
+def delete_storyboard_preset(
+    preset_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    user = _require_user(request, db)
+    preset = db.get(StoryboardPromptPreset, preset_id)
+    if not preset:
+        raise HTTPException(404, "分镜模板不存在")
+    if preset.is_system:
+        raise HTTPException(403, "系统预设不允许删除")
+    if preset.author_user_id != user.id:
+        raise HTTPException(403, "只能删除自己的模板")
+    db.query(Story).filter(Story.storyboard_preset_id == preset_id).update(
+        {Story.storyboard_preset_id: None},
+        synchronize_session=False,
+    )
+    db.delete(preset)
+    db.commit()
+    return {"ok": True}
+
+
+@app.post("/api/storyboard-presets/{preset_id}/duplicate")
+def duplicate_storyboard_preset(
+    preset_id: int,
+    body: dict,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    user = _require_user(request, db)
+    source = db.get(StoryboardPromptPreset, preset_id)
+    if not source:
+        raise HTTPException(404, "分镜模板不存在")
+    story_id = body.get("story_id")
+    if not isinstance(story_id, int) or isinstance(story_id, bool):
+        raise HTTPException(400, "story_id 必填")
+    story = _require_storyboard_story(story_id, user, db)
+    if not _storyboard_preset_available_for_story(source, story):
+        raise HTTPException(403, "无权复制该分镜模板")
+    template_owner_id = _storyboard_template_owner_id(story, user)
+    if template_owner_id != user.id:
+        raise HTTPException(403, "只能复制到自己的模板库")
+    preset = StoryboardPromptPreset(
+        name=f"{source.name}（副本）"[:100],
+        description=source.description,
+        prompt_template=source.prompt_template,
+        system_prompt=source.system_prompt,
+        is_system=False,
+        story_id=None,
+        author_user_id=template_owner_id,
+        sort_order=source.sort_order,
+    )
+    db.add(preset)
+    db.commit()
+    db.refresh(preset)
+    return _serialize_storyboard_preset(preset, current_user_id=user.id)
+
+
+@app.get("/api/stories/{story_id}/storyboard-preset")
+def get_story_storyboard_preset(
+    story_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    user = _require_user(request, db)
+    story = _require_storyboard_story(story_id, user, db)
+    preset = (
+        db.get(StoryboardPromptPreset, story.storyboard_preset_id)
+        if story.storyboard_preset_id is not None
+        else None
+    )
+    if preset and not _storyboard_preset_available_for_story(preset, story):
+        preset = None
+    return {
+        "preset_id": story.storyboard_preset_id if preset else None,
+        "preset": (
+            _serialize_storyboard_preset(preset, current_user_id=user.id)
+            if preset
+            else None
+        ),
+    }
+
+
+@app.put("/api/stories/{story_id}/storyboard-preset")
+def bind_story_storyboard_preset(
+    story_id: int,
+    body: dict,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    user = _require_user(request, db)
+    story = _require_storyboard_story(story_id, user, db)
+    preset_id = body.get("preset_id")
+    if preset_id is None:
+        story.storyboard_preset_id = None
+        db.commit()
+        return {"preset_id": None, "preset": None}
+    if not isinstance(preset_id, int) or isinstance(preset_id, bool):
+        raise HTTPException(400, "preset_id 无效")
+    preset = db.get(StoryboardPromptPreset, preset_id)
+    if not preset or not _storyboard_preset_available_for_story(preset, story):
+        raise HTTPException(400, "分镜模板不可用于该作品")
+    story.storyboard_preset_id = preset.id
+    db.commit()
+    return {
+        "preset_id": preset.id,
+        "preset": _serialize_storyboard_preset(preset, current_user_id=user.id),
+    }
 
 def _serialize_template(template, current_user_id, db_session) -> dict:
     """将 PromptTemplate 序列化为字典"""

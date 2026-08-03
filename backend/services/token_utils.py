@@ -574,10 +574,32 @@ def emergency_compact_messages(
     for message in recent_messages:
         role = str(message.get("role") or "")
         max_chars = user_max_chars if role == "user" else assistant_max_chars if role == "assistant" else tool_max_chars
-        result.append({
+        compacted_message = {
             **message,
             "content": _emergency_compact_content(message.get("content", ""), max_chars=max_chars),
-        })
+        }
+        compacted_message.pop("reasoning_content", None)
+        if role == "assistant" and isinstance(compacted_message.get("tool_calls"), list):
+            compacted_calls: list[dict[str, Any]] = []
+            for tool_call in compacted_message["tool_calls"]:
+                if not isinstance(tool_call, dict):
+                    continue
+                copied_call = dict(tool_call)
+                function = dict(copied_call.get("function") or {})
+                arguments = str(function.get("arguments") or "")
+                if len(arguments) > tool_max_chars:
+                    function["arguments"] = json.dumps(
+                        {
+                            "_compacted": True,
+                            "original_argument_chars": len(arguments),
+                        },
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    )
+                copied_call["function"] = function
+                compacted_calls.append(copied_call)
+            compacted_message["tool_calls"] = compacted_calls
+        result.append(compacted_message)
     return result
 
 

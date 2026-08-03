@@ -1,9 +1,10 @@
 import datetime
+from contextvars import ContextVar, Token
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import Boolean, CheckConstraint, DateTime, ForeignKey, Index, Integer, JSON, Numeric, String, Text, UniqueConstraint, func, text
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy import Boolean, CheckConstraint, DateTime, ForeignKey, Index, Integer, JSON, Numeric, String, Text, UniqueConstraint, event, func, inspect, text, update
+from sqlalchemy.orm import Mapped, Session as OrmSession, attributes, mapped_column, relationship
 
 from database import Base
 
@@ -23,10 +24,12 @@ class Story(Base):
     characters: Mapped[list[dict[str, Any]] | None] = mapped_column(JSON, nullable=True)
     story_bible: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     story_memory: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    knowledge_revision: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
     onboarding_completed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     source_type: Mapped[str] = mapped_column(String(20), nullable=False, default="manual")
     import_context_completed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     video_style_preset_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("video_style_presets.id"), nullable=True)
+    storyboard_preset_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("storyboard_prompt_presets.id"), nullable=True, index=True)
     created_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now())
 
     chapters: Mapped[list["Chapter"]] = relationship("Chapter", back_populates="story", order_by="Chapter.chapter_number", cascade="all, delete-orphan")
@@ -63,6 +66,12 @@ class Chapter(Base):
     key_events: Mapped[list[Any] | None] = mapped_column(JSON, nullable=True)
     quality_score: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     memory_summary: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    creation_pack_content: Mapped[str | None] = mapped_column(Text, nullable=True)
+    creation_pack_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
+    creation_pack_source_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    creation_pack_is_manual: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    creation_pack_ai_generated: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    creation_pack_updated_at: Mapped[datetime.datetime | None] = mapped_column(DateTime, nullable=True)
     manga_asset_analysis_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     manga_storyboard_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     manga_aspect_ratio: Mapped[str] = mapped_column(String(10), nullable=False, default="9:16", server_default="9:16")
@@ -76,6 +85,161 @@ class Chapter(Base):
     messages: Mapped[list["ChatMessage"]] = relationship("ChatMessage", back_populates="chapter", order_by="ChatMessage.created_at", cascade="all, delete-orphan")
     images: Mapped[list["MangaImage"]] = relationship("MangaImage", back_populates="chapter", order_by="MangaImage.image_number", cascade="all, delete-orphan")
     script_scenes: Mapped[list["ScriptScene"]] = relationship("ScriptScene", back_populates="chapter", cascade="all, delete-orphan")
+
+
+class StoryKnowledgeCategory(Base):
+    __tablename__ = "story_knowledge_categories"
+    __table_args__ = (
+        UniqueConstraint("story_id", "knowledge_kind", "name", name="uq_story_knowledge_category_name"),
+        Index("ix_story_knowledge_category_kind", "story_id", "knowledge_kind", "sort_order"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    story_id: Mapped[int] = mapped_column(Integer, ForeignKey("stories.id", ondelete="CASCADE"), nullable=False, index=True)
+    knowledge_kind: Mapped[str] = mapped_column(String(30), nullable=False)
+    name: Mapped[str] = mapped_column(String(80), nullable=False)
+    color: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
+    created_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
+class StoryKnowledgeResource(Base):
+    __tablename__ = "story_knowledge_resources"
+    __table_args__ = (
+        UniqueConstraint("story_id", "resource_type", "resource_key", name="uq_story_knowledge_resource_key"),
+        Index("ix_story_knowledge_resource_lookup", "story_id", "resource_type", "status"),
+        Index("ix_story_knowledge_resource_active_rank", "story_id", "status", "importance", "updated_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    story_id: Mapped[int] = mapped_column(Integer, ForeignKey("stories.id", ondelete="CASCADE"), nullable=False, index=True)
+    resource_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    resource_key: Mapped[str] = mapped_column(String(160), nullable=False)
+    title: Mapped[str] = mapped_column(String(255), nullable=False, default="")
+    summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    content_json: Mapped[dict[str, Any] | list[Any] | None] = mapped_column(JSON, nullable=True)
+    content_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source_type: Mapped[str] = mapped_column(String(30), nullable=False, default="system", server_default="system")
+    source_id: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    importance: Mapped[int] = mapped_column(Integer, nullable=False, default=50, server_default="50")
+    valid_from_chapter: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    valid_to_chapter: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="active", server_default="active")
+    content_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
+class StoryKnowledgeEntity(Base):
+    __tablename__ = "story_knowledge_entities"
+    __table_args__ = (
+        UniqueConstraint("story_id", "entity_key", name="uq_story_knowledge_entity_key"),
+        Index("ix_story_knowledge_entity_type", "story_id", "entity_type", "status"),
+        Index("ix_story_knowledge_entity_active_rank", "story_id", "status", "importance", "id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    story_id: Mapped[int] = mapped_column(Integer, ForeignKey("stories.id", ondelete="CASCADE"), nullable=False, index=True)
+    entity_key: Mapped[str] = mapped_column(String(160), nullable=False)
+    entity_type: Mapped[str] = mapped_column(String(40), nullable=False)
+    canonical_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    aliases_json: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
+    profile_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    source_type: Mapped[str] = mapped_column(String(30), nullable=False, default="system", server_default="system")
+    source_id: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    first_chapter: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    last_chapter: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    importance: Mapped[int] = mapped_column(Integer, nullable=False, default=50, server_default="50")
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="active", server_default="active")
+    created_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
+class StoryKnowledgeFact(Base):
+    __tablename__ = "story_knowledge_facts"
+    __table_args__ = (
+        Index("ix_story_knowledge_fact_lookup", "story_id", "subject_key", "predicate", "status"),
+        Index("ix_story_knowledge_fact_chapter", "story_id", "valid_from_chapter", "valid_to_chapter"),
+        Index("ix_story_knowledge_fact_active_recent", "story_id", "status", "id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    story_id: Mapped[int] = mapped_column(Integer, ForeignKey("stories.id", ondelete="CASCADE"), nullable=False, index=True)
+    category_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("story_knowledge_categories.id", ondelete="SET NULL"), nullable=True, index=True)
+    subject_key: Mapped[str] = mapped_column(String(160), nullable=False)
+    predicate: Mapped[str] = mapped_column(String(100), nullable=False)
+    object_key: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    value_json: Mapped[Any | None] = mapped_column(JSON, nullable=True)
+    value_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    valid_from_chapter: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    valid_to_chapter: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    source_type: Mapped[str] = mapped_column(String(30), nullable=False, default="system", server_default="system")
+    source_id: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    source_chapter_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("chapters.id", ondelete="SET NULL"), nullable=True)
+    confidence: Mapped[Decimal] = mapped_column(Numeric(5, 4), nullable=False, default=Decimal("1.0"), server_default="1.0")
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="active", server_default="active")
+    supersedes_fact_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("story_knowledge_facts.id", ondelete="SET NULL"), nullable=True)
+    created_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+    category: Mapped["StoryKnowledgeCategory | None"] = relationship("StoryKnowledgeCategory", foreign_keys=[category_id])
+
+
+class StoryPlotThread(Base):
+    __tablename__ = "story_plot_threads"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    story_id: Mapped[int] = mapped_column(Integer, ForeignKey("stories.id", ondelete="CASCADE"), nullable=False, index=True)
+    category_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("story_knowledge_categories.id", ondelete="SET NULL"), nullable=True, index=True)
+    thread_key: Mapped[str] = mapped_column(String(160), nullable=False)
+    thread_type: Mapped[str] = mapped_column(String(30), nullable=False, default="foreshadow", server_default="foreshadow")
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    setup_chapter: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    expected_payoff_from: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    expected_payoff_to: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    actual_payoff_chapter: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    related_entity_keys: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
+    source_type: Mapped[str] = mapped_column(String(30), nullable=False, default="system", server_default="system")
+    source_id: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    priority: Mapped[int] = mapped_column(Integer, nullable=False, default=50, server_default="50")
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="open", server_default="open")
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
+    created_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+    category: Mapped["StoryKnowledgeCategory | None"] = relationship("StoryKnowledgeCategory", foreign_keys=[category_id])
+
+    __table_args__ = (
+        UniqueConstraint("story_id", "thread_key", name="uq_story_plot_thread_key"),
+        Index("ix_story_plot_thread_status", "story_id", "status", "priority"),
+        Index("ix_story_plot_thread_payoff", "story_id", "expected_payoff_from", "expected_payoff_to"),
+        Index("ix_story_plot_thread_active_payoff", "story_id", "status", "expected_payoff_from", "expected_payoff_to"),
+    )
+
+
+class AgentContextReceipt(Base):
+    __tablename__ = "agent_context_receipts"
+    __table_args__ = (
+        UniqueConstraint("receipt_id", name="uq_agent_context_receipt_id"),
+        Index("ix_agent_context_receipt_story", "story_id", "created_at"),
+        Index("ix_agent_context_receipt_run", "story_id", "run_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    receipt_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    story_id: Mapped[int] = mapped_column(Integer, ForeignKey("stories.id", ondelete="CASCADE"), nullable=False)
+    owner_user_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=True)
+    run_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    task_type: Mapped[str] = mapped_column(String(40), nullable=False)
+    chapter_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    knowledge_revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    resource_keys_json: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
+    context_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now())
 
 
 class ChatMessage(Base):
@@ -575,6 +739,26 @@ class VideoStylePreset(Base):
     sort_order: Mapped[int] = mapped_column(Integer, default=0)
 
 
+class StoryboardPromptPreset(Base):
+    __tablename__ = "storyboard_prompt_presets"
+    __table_args__ = (
+        Index("ix_storyboard_prompt_presets_user_order", "author_user_id", "sort_order", "id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    preset_key: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    prompt_template: Mapped[str] = mapped_column(Text, nullable=False)
+    system_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
+    is_system: Mapped[bool] = mapped_column(Boolean, default=False)
+    story_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("stories.id"), nullable=True, index=True)
+    author_user_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("users.id"), nullable=True, index=True)
+    sort_order: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
 class ScriptScene(Base):
     __tablename__ = "script_scenes"
 
@@ -748,6 +932,45 @@ class BackgroundTask(Base):
             ),
             sqlite_where=text(
                 "task_type = 'manga_generation' AND chapter_id IS NOT NULL "
+                "AND status IN ('pending', 'running', 'retrying', 'cancel_requested')"
+            ),
+        ),
+        Index(
+            "uq_background_tasks_active_chapter_generation",
+            "chapter_id",
+            unique=True,
+            postgresql_where=text(
+                "task_type = 'chapter_generation' AND chapter_id IS NOT NULL "
+                "AND status IN ('pending', 'running', 'retrying', 'cancel_requested')"
+            ),
+            sqlite_where=text(
+                "task_type = 'chapter_generation' AND chapter_id IS NOT NULL "
+                "AND status IN ('pending', 'running', 'retrying', 'cancel_requested')"
+            ),
+        ),
+        Index(
+            "uq_background_tasks_active_knowledge_sync",
+            "story_id",
+            unique=True,
+            postgresql_where=text(
+                "task_type = 'knowledge_ai_sync' AND story_id IS NOT NULL "
+                "AND status IN ('pending', 'running', 'retrying', 'cancel_requested')"
+            ),
+            sqlite_where=text(
+                "task_type = 'knowledge_ai_sync' AND story_id IS NOT NULL "
+                "AND status IN ('pending', 'running', 'retrying', 'cancel_requested')"
+            ),
+        ),
+        Index(
+            "uq_background_tasks_active_creation_pack_refresh",
+            "story_id",
+            unique=True,
+            postgresql_where=text(
+                "task_type = 'chapter_creation_pack_refresh' AND story_id IS NOT NULL "
+                "AND status IN ('pending', 'running', 'retrying', 'cancel_requested')"
+            ),
+            sqlite_where=text(
+                "task_type = 'chapter_creation_pack_refresh' AND story_id IS NOT NULL "
                 "AND status IN ('pending', 'running', 'retrying', 'cancel_requested')"
             ),
         ),
@@ -1330,3 +1553,125 @@ class PointsProduct(Base):
     sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     created_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
+_KNOWLEDGE_REVISION_STORY_IDS = "story_knowledge_revision_story_ids"
+_AGENT_KNOWLEDGE_REVISION_GUARD: ContextVar[dict[int, int] | None] = ContextVar(
+    "agent_knowledge_revision_guard",
+    default=None,
+)
+_AGENT_KNOWLEDGE_GUARD_STALE: ContextVar[bool] = ContextVar(
+    "agent_knowledge_guard_stale",
+    default=False,
+)
+_STORY_CONTEXT_FIELDS = {
+    "title",
+    "description",
+    "tags",
+    "outline",
+    "characters",
+    "story_bible",
+    "story_memory",
+}
+_CHAPTER_CONTEXT_FIELDS = {
+    "chapter_number",
+    "title",
+    "novel_content",
+    "act",
+    "key_events",
+    "memory_summary",
+    "manga_storyboard_json",
+    "status",
+}
+_NORMALIZED_KNOWLEDGE_MODELS = (
+    StoryKnowledgeCategory,
+    StoryKnowledgeResource,
+    StoryKnowledgeEntity,
+    StoryKnowledgeFact,
+    StoryPlotThread,
+)
+
+
+class StaleKnowledgeContextError(RuntimeError):
+    """Agent 写入时作品知识版本已经变化。"""
+
+
+def set_agent_knowledge_revision_guard(story_id: int, revision: int) -> tuple[Token, Token]:
+    """为当前 Agent 工具事务设置知识版本条件。"""
+    guards = dict(_AGENT_KNOWLEDGE_REVISION_GUARD.get() or {})
+    guards[int(story_id)] = int(revision)
+    guard_token = _AGENT_KNOWLEDGE_REVISION_GUARD.set(guards)
+    stale_token = _AGENT_KNOWLEDGE_GUARD_STALE.set(False)
+    return guard_token, stale_token
+
+
+def reset_agent_knowledge_revision_guard(token: tuple[Token, Token]) -> None:
+    """恢复当前执行上下文之前的知识版本条件。"""
+    guard_token, stale_token = token
+    _AGENT_KNOWLEDGE_GUARD_STALE.reset(stale_token)
+    _AGENT_KNOWLEDGE_REVISION_GUARD.reset(guard_token)
+
+
+def agent_knowledge_revision_guard_is_stale() -> bool:
+    """返回当前 Agent 工具是否因知识版本冲突发生过回滚。"""
+    return _AGENT_KNOWLEDGE_GUARD_STALE.get()
+
+
+@event.listens_for(OrmSession, "before_flush")
+def _collect_story_knowledge_revision_changes(session, _flush_context, _instances) -> None:
+    """收集本次事务中会改变作品创作上下文的作品 ID。"""
+    story_ids = set(session.info.get(_KNOWLEDGE_REVISION_STORY_IDS, ()))
+    changed_objects = set(session.new).union(session.dirty, session.deleted)
+    for item in changed_objects:
+        if isinstance(item, Story):
+            if item in session.new or item in session.deleted or not item.id:
+                continue
+            state = inspect(item)
+            if any(state.attrs[field].history.has_changes() for field in _STORY_CONTEXT_FIELDS):
+                story_ids.add(int(item.id))
+            continue
+        if isinstance(item, Chapter):
+            if item in session.dirty:
+                state = inspect(item)
+                if not any(state.attrs[field].history.has_changes() for field in _CHAPTER_CONTEXT_FIELDS):
+                    continue
+            if item.story_id:
+                story_ids.add(int(item.story_id))
+            continue
+        if isinstance(item, _NORMALIZED_KNOWLEDGE_MODELS) and item.story_id:
+            story_ids.add(int(item.story_id))
+    if story_ids:
+        session.info[_KNOWLEDGE_REVISION_STORY_IDS] = story_ids
+
+
+@event.listens_for(OrmSession, "after_flush_postexec")
+def _advance_story_knowledge_revisions(session, _flush_context) -> None:
+    """在业务写入的同一事务中原子推进作品知识版本。"""
+    story_ids = session.info.pop(_KNOWLEDGE_REVISION_STORY_IDS, None)
+    if not story_ids:
+        return
+    guards = _AGENT_KNOWLEDGE_REVISION_GUARD.get() or {}
+    rows = []
+    for story_id in story_ids:
+        statement = update(Story).where(Story.id == story_id)
+        if story_id in guards:
+            statement = statement.where(Story.knowledge_revision == guards[story_id])
+        row = session.connection().execute(
+            statement
+            .values(knowledge_revision=Story.knowledge_revision + 1)
+            .returning(Story.id, Story.knowledge_revision)
+        ).one_or_none()
+        if row is None:
+            _AGENT_KNOWLEDGE_GUARD_STALE.set(True)
+            raise StaleKnowledgeContextError("作品知识已更新，请重新读取上下文后再写入")
+        rows.append(row)
+    revisions = {int(story_id): int(revision) for story_id, revision in rows}
+    if guards:
+        # asyncio 子任务会复制 Context，但会共享其中的可变对象。原地推进版本，
+        # 可让同一批量工具的并发提交沿用前一项刚写入的新版本。
+        for story_id, revision in revisions.items():
+            if story_id in guards:
+                guards[story_id] = revision
+    for item in session.identity_map.values():
+        if isinstance(item, Story) and item.id in revisions:
+            attributes.set_committed_value(item, "knowledge_revision", revisions[item.id])

@@ -277,6 +277,21 @@ def _migrate_unlocked(target_engine=None):
                 conn.execute(text("ALTER TABLE chapters ADD COLUMN quality_score JSON"))
             if "memory_summary" not in cols:
                 conn.execute(text("ALTER TABLE chapters ADD COLUMN memory_summary JSON"))
+            if "creation_pack_content" not in cols:
+                conn.execute(text("ALTER TABLE chapters ADD COLUMN creation_pack_content TEXT"))
+            if "creation_pack_version" not in cols:
+                conn.execute(text("ALTER TABLE chapters ADD COLUMN creation_pack_version INTEGER DEFAULT 1"))
+                conn.execute(text("UPDATE chapters SET creation_pack_version = 1 WHERE creation_pack_version IS NULL"))
+            if "creation_pack_source_hash" not in cols:
+                conn.execute(text("ALTER TABLE chapters ADD COLUMN creation_pack_source_hash VARCHAR(64)"))
+            if "creation_pack_is_manual" not in cols:
+                conn.execute(text("ALTER TABLE chapters ADD COLUMN creation_pack_is_manual BOOLEAN DEFAULT FALSE"))
+                conn.execute(text("UPDATE chapters SET creation_pack_is_manual = FALSE WHERE creation_pack_is_manual IS NULL"))
+            if "creation_pack_ai_generated" not in cols:
+                conn.execute(text("ALTER TABLE chapters ADD COLUMN creation_pack_ai_generated BOOLEAN DEFAULT FALSE"))
+                conn.execute(text("UPDATE chapters SET creation_pack_ai_generated = FALSE WHERE creation_pack_ai_generated IS NULL"))
+            if "creation_pack_updated_at" not in cols:
+                conn.execute(text("ALTER TABLE chapters ADD COLUMN creation_pack_updated_at TIMESTAMP"))
             if "manga_asset_analysis_json" not in cols:
                 conn.execute(text("ALTER TABLE chapters ADD COLUMN manga_asset_analysis_json JSON"))
             if "manga_storyboard_json" not in cols:
@@ -506,16 +521,101 @@ def _migrate_unlocked(target_engine=None):
                   AND chapter_id IS NOT NULL
                   AND status IN ('pending', 'running', 'retrying', 'cancel_requested')
             """))
+            conn.execute(text("""
+                UPDATE background_tasks
+                SET status = 'failed',
+                    error_message = '检测到重复章节生成任务，系统已自动终结',
+                    completed_at = CURRENT_TIMESTAMP
+                WHERE id IN (
+                    SELECT id FROM (
+                        SELECT id,
+                               ROW_NUMBER() OVER (
+                                   PARTITION BY chapter_id
+                                   ORDER BY created_at DESC, id DESC
+                               ) AS duplicate_rank
+                        FROM background_tasks
+                        WHERE task_type = 'chapter_generation'
+                          AND chapter_id IS NOT NULL
+                          AND status IN ('pending', 'running', 'retrying', 'cancel_requested')
+                    ) ranked_tasks
+                    WHERE duplicate_rank > 1
+                )
+            """))
+            conn.execute(text("""
+                CREATE UNIQUE INDEX IF NOT EXISTS uq_background_tasks_active_chapter_generation
+                ON background_tasks (chapter_id)
+                WHERE task_type = 'chapter_generation'
+                  AND chapter_id IS NOT NULL
+                  AND status IN ('pending', 'running', 'retrying', 'cancel_requested')
+            """))
+            # 知识同步和创作包刷新也必须在数据库层跨进程去重。
+            # 先结束历史重复任务，再建立部分唯一索引，避免迁移因脏数据失败。
+            conn.execute(text("""
+                UPDATE background_tasks
+                SET status = 'failed',
+                    error_message = '检测到重复知识同步任务，系统已自动终结',
+                    completed_at = CURRENT_TIMESTAMP
+                WHERE id IN (
+                    SELECT id FROM (
+                        SELECT id,
+                               ROW_NUMBER() OVER (
+                                   PARTITION BY story_id
+                                   ORDER BY created_at DESC, id DESC
+                               ) AS duplicate_rank
+                        FROM background_tasks
+                        WHERE task_type = 'knowledge_ai_sync'
+                          AND story_id IS NOT NULL
+                          AND status IN ('pending', 'running', 'retrying', 'cancel_requested')
+                    ) ranked_tasks
+                    WHERE duplicate_rank > 1
+                )
+            """))
+            conn.execute(text("""
+                CREATE UNIQUE INDEX IF NOT EXISTS uq_background_tasks_active_knowledge_sync
+                ON background_tasks (story_id)
+                WHERE task_type = 'knowledge_ai_sync'
+                  AND story_id IS NOT NULL
+                  AND status IN ('pending', 'running', 'retrying', 'cancel_requested')
+            """))
+            conn.execute(text("""
+                UPDATE background_tasks
+                SET status = 'failed',
+                    error_message = '检测到重复创作包更新任务，系统已自动终结',
+                    completed_at = CURRENT_TIMESTAMP
+                WHERE id IN (
+                    SELECT id FROM (
+                        SELECT id,
+                               ROW_NUMBER() OVER (
+                                   PARTITION BY story_id
+                                   ORDER BY created_at DESC, id DESC
+                               ) AS duplicate_rank
+                        FROM background_tasks
+                        WHERE task_type = 'chapter_creation_pack_refresh'
+                          AND story_id IS NOT NULL
+                          AND status IN ('pending', 'running', 'retrying', 'cancel_requested')
+                    ) ranked_tasks
+                    WHERE duplicate_rank > 1
+                )
+            """))
+            conn.execute(text("""
+                CREATE UNIQUE INDEX IF NOT EXISTS uq_background_tasks_active_creation_pack_refresh
+                ON background_tasks (story_id)
+                WHERE task_type = 'chapter_creation_pack_refresh'
+                  AND story_id IS NOT NULL
+                  AND status IN ('pending', 'running', 'retrying', 'cancel_requested')
+            """))
     _migrate_legacy_video_channel_adapters(db_engine)
     _migrate_video_tables(db_engine)
     _migrate_video_character_tables(db_engine)
     _seed_video_style_presets(db_engine)
+    _migrate_storyboard_presets(db_engine)
     _normalize_video_style_names(db_engine)
     _migrate_money_columns(db_engine)
     _assert_no_duplicate_content(db_engine)
     _add_unique_constraints(db_engine)
     _migrate_prompt_templates(db_engine)
     _migrate_agent_pending_changes(db_engine)
+    _migrate_story_knowledge_tables(db_engine)
     if "deconstruction_results" in insp.get_table_names():
         res_cols = {c["name"] for c in insp.get_columns("deconstruction_results")}
         with db_engine.begin() as conn:
@@ -601,6 +701,116 @@ def _migrate_agent_pending_changes(target_engine=None):
             "CREATE INDEX IF NOT EXISTS agent_pending_changes_run_id_idx "
             "ON agent_pending_changes (run_id)"
         ))
+
+
+def _migrate_story_knowledge_tables(target_engine=None) -> None:
+    """创建数据库化作品知识表，并为作品补充知识版本号。"""
+    from sqlalchemy import inspect, text
+
+    db_engine = target_engine or engine
+    inspector = inspect(db_engine)
+    if "stories" in inspector.get_table_names():
+        story_columns = {column["name"] for column in inspector.get_columns("stories")}
+        if "knowledge_revision" not in story_columns:
+            with db_engine.begin() as conn:
+                _prepare_migration_conn(conn)
+                conn.execute(text(
+                    "ALTER TABLE stories ADD COLUMN knowledge_revision INTEGER DEFAULT 1 NOT NULL"
+                ))
+
+    for table_name in (
+        "story_knowledge_categories",
+        "story_knowledge_resources",
+        "story_knowledge_entities",
+        "story_knowledge_facts",
+        "story_plot_threads",
+        "agent_context_receipts",
+    ):
+        table = Base.metadata.tables.get(table_name)
+        if table is not None:
+            table.create(bind=db_engine, checkfirst=True)
+
+    knowledge_columns = {
+        "story_knowledge_entities": ("source_type", "source_id", "version"),
+        "story_knowledge_facts": ("source_id", "version", "category_id"),
+        "story_plot_threads": ("source_type", "source_id", "version", "category_id"),
+    }
+    for table_name, expected_columns in knowledge_columns.items():
+        inspector = inspect(db_engine)
+        if table_name not in inspector.get_table_names():
+            continue
+        existing = {column["name"] for column in inspector.get_columns(table_name)}
+        with db_engine.begin() as conn:
+            _prepare_migration_conn(conn)
+            if "source_type" in expected_columns and "source_type" not in existing:
+                conn.execute(text(
+                    f"ALTER TABLE {table_name} ADD COLUMN source_type VARCHAR(30) DEFAULT 'system' NOT NULL"
+                ))
+            if "source_id" in expected_columns and "source_id" not in existing:
+                conn.execute(text(f"ALTER TABLE {table_name} ADD COLUMN source_id VARCHAR(120)"))
+            if "version" in expected_columns and "version" not in existing:
+                conn.execute(text(
+                    f"ALTER TABLE {table_name} ADD COLUMN version INTEGER DEFAULT 1 NOT NULL"
+                ))
+            if "category_id" in expected_columns and "category_id" not in existing:
+                conn.execute(text(f"ALTER TABLE {table_name} ADD COLUMN category_id INTEGER"))
+
+    if db_engine.dialect.name == "postgresql":
+        with db_engine.begin() as conn:
+            _prepare_migration_conn(conn)
+            conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_story_knowledge_resource_active_rank "
+                "ON story_knowledge_resources (story_id, status, importance, updated_at)"
+            ))
+            conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_story_knowledge_entity_active_rank "
+                "ON story_knowledge_entities (story_id, status, importance, id)"
+            ))
+            conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_story_knowledge_fact_active_recent "
+                "ON story_knowledge_facts (story_id, status, id)"
+            ))
+            conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_story_plot_thread_active_payoff "
+                "ON story_plot_threads (story_id, status, expected_payoff_from, expected_payoff_to)"
+            ))
+            try:
+                with conn.begin_nested():
+                    conn.execute(text("CREATE EXTENSION IF NOT EXISTS pg_trgm"))
+            except Exception as exc:
+                logger.warning("数据库无权启用 pg_trgm，作品知识检索将继续使用普通索引: %s", exc)
+            has_pg_trgm = conn.execute(text(
+                "SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_trgm')"
+            )).scalar()
+            if has_pg_trgm:
+                conn.execute(text(
+                    "CREATE INDEX IF NOT EXISTS ix_story_knowledge_entity_search_trgm "
+                    "ON story_knowledge_entities USING gin (canonical_name gin_trgm_ops)"
+                ))
+                conn.execute(text(
+                    "CREATE INDEX IF NOT EXISTS ix_story_knowledge_fact_search_trgm "
+                    "ON story_knowledge_facts USING gin (value_text gin_trgm_ops)"
+                ))
+                conn.execute(text(
+                    "CREATE INDEX IF NOT EXISTS ix_story_plot_thread_search_trgm "
+                    "ON story_plot_threads USING gin (title gin_trgm_ops)"
+                ))
+                conn.execute(text(
+                    "CREATE INDEX IF NOT EXISTS ix_story_plot_thread_description_trgm "
+                    "ON story_plot_threads USING gin (description gin_trgm_ops)"
+                ))
+                conn.execute(text(
+                    "CREATE INDEX IF NOT EXISTS ix_story_knowledge_resource_search_trgm "
+                    "ON story_knowledge_resources USING gin (title gin_trgm_ops)"
+                ))
+                conn.execute(text(
+                    "CREATE INDEX IF NOT EXISTS ix_story_knowledge_resource_summary_trgm "
+                    "ON story_knowledge_resources USING gin (summary gin_trgm_ops)"
+                ))
+                conn.execute(text(
+                    "CREATE INDEX IF NOT EXISTS ix_story_knowledge_resource_content_trgm "
+                    "ON story_knowledge_resources USING gin (content_text gin_trgm_ops)"
+                ))
 
 
 def _migrate_money_columns(target_engine=None):
@@ -1133,6 +1343,205 @@ def _seed_video_style_presets(target_engine=None):
     except Exception as exc:
         logger.warning("Failed to seed video style presets: %s", exc)
         raise
+
+
+def _migrate_storyboard_presets(target_engine=None):
+    """创建漫画分镜提示词预设表并补充作品绑定字段。"""
+    from sqlalchemy import inspect, text
+
+    db_engine = target_engine or engine
+    insp = inspect(db_engine)
+    table_names = set(insp.get_table_names())
+    if "storyboard_prompt_presets" not in table_names:
+        with db_engine.begin() as conn:
+            _prepare_migration_conn(conn)
+            conn.execute(text("""
+                CREATE TABLE storyboard_prompt_presets (
+                    id SERIAL PRIMARY KEY,
+                    preset_key VARCHAR(64),
+                    name VARCHAR(100) NOT NULL,
+                    description TEXT,
+                    prompt_template TEXT NOT NULL,
+                    system_prompt TEXT,
+                    is_system BOOLEAN DEFAULT FALSE,
+                    story_id INTEGER REFERENCES stories(id),
+                    author_user_id INTEGER REFERENCES users(id),
+                    sort_order INTEGER DEFAULT 0,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """))
+
+    insp = inspect(db_engine)
+    table_names = set(insp.get_table_names())
+    preset_cols = {
+        column["name"]
+        for column in insp.get_columns("storyboard_prompt_presets")
+    } if "storyboard_prompt_presets" in table_names else set()
+    if "storyboard_prompt_presets" in table_names:
+        missing_preset_columns = {
+            "preset_key": "VARCHAR(64)",
+            "author_user_id": "INTEGER REFERENCES users(id)",
+            "story_id": "INTEGER REFERENCES stories(id)",
+            "sort_order": "INTEGER DEFAULT 0",
+        }
+        with db_engine.begin() as conn:
+            _prepare_migration_conn(conn)
+            for column_name, column_sql in missing_preset_columns.items():
+                if column_name not in preset_cols:
+                    conn.execute(text(
+                        f"ALTER TABLE storyboard_prompt_presets "
+                        f"ADD COLUMN {column_name} {column_sql}"
+                    ))
+
+        insp = inspect(db_engine)
+        preset_cols = {
+            column["name"]
+            for column in insp.get_columns("storyboard_prompt_presets")
+        }
+    stories_cols = {
+        column["name"] for column in insp.get_columns("stories")
+    } if "stories" in table_names else set()
+    if stories_cols and "storyboard_preset_id" not in stories_cols:
+        with db_engine.begin() as conn:
+            _prepare_migration_conn(conn)
+            conn.execute(text(
+                "ALTER TABLE stories ADD COLUMN storyboard_preset_id "
+                "INTEGER REFERENCES storyboard_prompt_presets(id)"
+            ))
+
+    # 将旧版作品级模板升级为用户级模板；无法确认作品所有者的数据继续保留旧归属。
+    if (
+        "storyboard_prompt_presets" in table_names
+        and "stories" in table_names
+        and "owner_user_id" in stories_cols
+    ):
+        with db_engine.begin() as conn:
+            _prepare_migration_conn(conn)
+            conn.execute(text("""
+                UPDATE storyboard_prompt_presets
+                SET author_user_id = (
+                    SELECT stories.owner_user_id
+                    FROM stories
+                    WHERE stories.id = storyboard_prompt_presets.story_id
+                )
+                WHERE is_system = FALSE
+                  AND story_id IS NOT NULL
+                  AND (
+                      SELECT stories.owner_user_id
+                      FROM stories
+                      WHERE stories.id = storyboard_prompt_presets.story_id
+                  ) IS NOT NULL
+            """))
+            conn.execute(text("""
+                UPDATE storyboard_prompt_presets
+                SET story_id = NULL
+                WHERE is_system = FALSE
+                  AND author_user_id IS NOT NULL
+                  AND story_id IS NOT NULL
+                  AND author_user_id = (
+                      SELECT stories.owner_user_id
+                      FROM stories
+                      WHERE stories.id = storyboard_prompt_presets.story_id
+                  )
+            """))
+
+    with db_engine.begin() as conn:
+        _prepare_migration_conn(conn)
+        conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS ix_storyboard_prompt_presets_author_user_id "
+            "ON storyboard_prompt_presets (author_user_id)"
+        ))
+        conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS ix_storyboard_prompt_presets_user_order "
+            "ON storyboard_prompt_presets (author_user_id, sort_order, id)"
+        ))
+        conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS ix_storyboard_prompt_presets_preset_key "
+            "ON storyboard_prompt_presets (preset_key)"
+        ))
+        if "stories" in table_names:
+            conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_stories_storyboard_preset_id "
+                "ON stories (storyboard_preset_id)"
+            ))
+
+    _seed_storyboard_presets(db_engine)
+
+
+def _seed_storyboard_presets(target_engine=None):
+    """从安装种子数据幂等写入系统分镜模板，运行时以数据库内容为准。"""
+    import json
+
+    from sqlalchemy import inspect, text
+
+    seed_path = BASE_DIR / "seed_data" / "storyboard_presets.json"
+    try:
+        system_presets = json.loads(seed_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"无法读取分镜模板数据库种子: {seed_path}") from exc
+    if not isinstance(system_presets, list):
+        raise RuntimeError("分镜模板数据库种子必须是数组")
+
+    db_engine = target_engine or engine
+    insp = inspect(db_engine)
+    if "storyboard_prompt_presets" not in insp.get_table_names():
+        return
+
+    with db_engine.begin() as conn:
+        for preset in system_presets:
+            if not isinstance(preset, dict):
+                raise RuntimeError("分镜模板数据库种子包含无效记录")
+            required_fields = ("preset_key", "name", "prompt_template", "system_prompt", "sort_order")
+            if any(not preset.get(field) for field in required_fields):
+                raise RuntimeError(f"分镜模板数据库种子字段不完整: {preset.get('preset_key') or 'unknown'}")
+            preset_exists = conn.execute(
+                text("""
+                    SELECT 1
+                    FROM storyboard_prompt_presets
+                    WHERE is_system = TRUE AND preset_key = :preset_key
+                    LIMIT 1
+                """),
+                {"preset_key": preset["preset_key"]},
+            ).scalar()
+            if preset_exists is not None:
+                continue
+            legacy_exists = conn.execute(
+                text("""
+                    SELECT 1
+                    FROM storyboard_prompt_presets
+                    WHERE is_system = TRUE
+                      AND preset_key IS NULL
+                      AND name = :name
+                    LIMIT 1
+                """),
+                {"name": preset["name"]},
+            ).scalar()
+            if legacy_exists is not None:
+                conn.execute(
+                    text("""
+                        UPDATE storyboard_prompt_presets
+                        SET preset_key = :preset_key
+                        WHERE is_system = TRUE
+                          AND preset_key IS NULL
+                          AND name = :name
+                    """),
+                    {"preset_key": preset["preset_key"], "name": preset["name"]},
+                )
+                continue
+            conn.execute(
+                text("""
+                    INSERT INTO storyboard_prompt_presets (
+                        preset_key, name, description, prompt_template,
+                        system_prompt, is_system, sort_order
+                    ) VALUES (
+                        :preset_key, :name, :description, :prompt_template,
+                        :system_prompt, TRUE, :sort_order
+                    )
+                """),
+                preset,
+            )
+            logger.info("Seeded system storyboard prompt preset: %s", preset["preset_key"])
 
 
 def _normalize_video_style_names(target_engine=None):

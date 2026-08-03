@@ -74,6 +74,54 @@ def decode_uploaded_text_file(raw_bytes: bytes) -> str:
     )
 
 
+def _build_reference_style_samples(db: Session, work: DeconstructionWork | None) -> list[dict]:
+    """提取当前引用作品的少量原文样本，避免保留已取消来源的数据。"""
+    if work is None:
+        return []
+    profile = work.author_style_profile if isinstance(work.author_style_profile, dict) else {}
+    sampled_chapter_nums = profile.get("sampled_chapters") or []
+    if not sampled_chapter_nums:
+        return []
+    sample_chapters = db.query(DeconstructionChapter).filter(
+        DeconstructionChapter.work_id == work.id,
+        DeconstructionChapter.chapter_number.in_(sampled_chapter_nums[:3]),
+        DeconstructionChapter.content.isnot(None),
+        DeconstructionChapter.content != "",
+    ).order_by(DeconstructionChapter.chapter_number).all()
+    return [
+        {"chapter": chapter.chapter_number, "snippet": (chapter.content or "")[:300].strip()}
+        for chapter in sample_chapters
+        if (chapter.content or "").strip()
+    ]
+
+
+def _refresh_library_reference_materials(
+    db: Session,
+    story_bible: dict,
+    work: DeconstructionWork | None,
+) -> None:
+    """按最新仍有效的拆书引用刷新派生材料，同时保护人工修订。"""
+    current_profile = story_bible.get("reference_author_profile")
+    has_manual_override = isinstance(current_profile, dict) and current_profile.get("manual_override") is True
+    if not has_manual_override:
+        profile = work.author_style_profile if work and isinstance(work.author_style_profile, dict) else None
+        report = (work.author_style_report_markdown or "").strip() if work else ""
+        if profile:
+            story_bible["reference_author_profile"] = profile
+        else:
+            story_bible.pop("reference_author_profile", None)
+        if report:
+            story_bible["reference_author_report"] = report
+        else:
+            story_bible.pop("reference_author_report", None)
+
+    style_samples = _build_reference_style_samples(db, work)
+    if style_samples:
+        story_bible["reference_style_samples"] = style_samples
+    else:
+        story_bible.pop("reference_style_samples", None)
+
+
 def split_imported_novel_text(text: str) -> list[dict[str, str | int]]:
     normalized = (text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
     if not normalized:
@@ -1417,7 +1465,7 @@ async def delete_deconstruction_work(
     work = db.query(DeconstructionWork).filter(
         DeconstructionWork.id == work_id,
         DeconstructionWork.owner_user_id == user.id,
-    ).first()
+    ).with_for_update().first()
     if not work:
         raise HTTPException(404, "拆书工作不存在")
 
@@ -1427,6 +1475,38 @@ async def delete_deconstruction_work(
             task_manager.cancel_task(work.task_id)
             refund_deconstruction_task(db, work.task_id, error_code="work_deleted")
 
+    affected_story_ids = sorted({
+        story_id
+        for (story_id,) in db.query(StoryDeconstructionRef.story_id).filter(
+            StoryDeconstructionRef.work_id == work_id,
+        ).all()
+    })
+    for story_id in affected_story_ids:
+        story = db.query(Story).filter(Story.id == story_id).with_for_update().one()
+        current_bible = dict(story.story_bible) if isinstance(story.story_bible, dict) else {}
+        current_bible.pop(f"deconstruction_{work_id}", None)
+        latest_remaining_ref = db.query(StoryDeconstructionRef).filter(
+            StoryDeconstructionRef.story_id == story_id,
+            StoryDeconstructionRef.work_id != work_id,
+        ).order_by(
+            StoryDeconstructionRef.applied_at.desc(),
+            StoryDeconstructionRef.id.desc(),
+        ).first()
+        latest_remaining_work = latest_remaining_ref.work if latest_remaining_ref else None
+        _refresh_library_reference_materials(db, current_bible, latest_remaining_work)
+        if latest_remaining_work is None and not (
+            isinstance(current_bible.get("deconstruction"), dict) and current_bible.get("deconstruction")
+        ):
+            current_bible.pop("learned_techniques", None)
+            current_bible.pop("reference_plots", None)
+            current_bible.pop("reference_rhythm", None)
+            current_bible.pop("reference_emotion_modules", None)
+        story.story_bible = current_bible
+        flag_modified(story, "story_bible")
+
+    db.query(StoryDeconstructionRef).filter(
+        StoryDeconstructionRef.work_id == work_id,
+    ).delete(synchronize_session=False)
     db.delete(work)
     db.commit()
 
@@ -1453,11 +1533,14 @@ async def add_deconstruction_ref(
     work = db.query(DeconstructionWork).filter(
         DeconstructionWork.id == work_id,
         DeconstructionWork.owner_user_id == user.id,
-    ).first()
+    ).with_for_update().first()
     if not work:
         raise HTTPException(404, "拆书工作不存在")
     if work.decon_status != "completed" and not (work.decon_status or "").startswith("paused_after_partial") and work.decon_status != "paused_after_stage1":
         raise HTTPException(400, "拆书尚未完成")
+
+    # 引用与删除统一按“拆书作品 -> 目标作品”加锁，避免并发留下孤儿来源标记。
+    story = db.query(Story).filter(Story.id == story.id).with_for_update().one()
 
     existing = db.query(StoryDeconstructionRef).filter(
         StoryDeconstructionRef.story_id == story_id,
@@ -1469,22 +1552,7 @@ async def add_deconstruction_ref(
     ref = StoryDeconstructionRef(story_id=story_id, work_id=work_id)
     db.add(ref)
 
-    author_style_report = (work.author_style_report_markdown or "").strip()
-
-    profile = work.author_style_profile if isinstance(work.author_style_profile, dict) else {}
-    sampled_chapter_nums = profile.get("sampled_chapters") or []
-    style_samples = []
-    if sampled_chapter_nums:
-        sample_chapters = db.query(DeconstructionChapter).filter(
-            DeconstructionChapter.work_id == work_id,
-            DeconstructionChapter.chapter_number.in_(sampled_chapter_nums[:3]),
-            DeconstructionChapter.content.isnot(None),
-            DeconstructionChapter.content != "",
-        ).order_by(DeconstructionChapter.chapter_number).all()
-        for ch in sample_chapters:
-            snippet = (ch.content or "")[:300].strip()
-            if snippet:
-                style_samples.append({"chapter": ch.chapter_number, "snippet": snippet})
+    current_bible = story.story_bible if isinstance(story.story_bible, dict) else {}
 
     decon_bible = {
         f"deconstruction_{work_id}": {
@@ -1494,14 +1562,10 @@ async def add_deconstruction_ref(
             "summary": work.summary,
             "applied_at": str(datetime.datetime.now(datetime.timezone.utc)),
         },
-        "reference_author_profile": work.author_style_profile,
-        "reference_author_report": author_style_report or None,
     }
-    if style_samples:
-        decon_bible["reference_style_samples"] = style_samples
 
-    current_bible = story.story_bible or {}
     current_bible.update(decon_bible)
+    _refresh_library_reference_materials(db, current_bible, work)
     story.story_bible = current_bible
     flag_modified(story, "story_bible")
     db.commit()
@@ -1546,6 +1610,7 @@ async def remove_deconstruction_ref(
     """取消引用拆书结果，同时清理 story_bible 中的残留画像数据"""
     user = _require_user(request, db)
     story = _require_story_for_user(story_id, user, db)
+    story = db.query(Story).filter(Story.id == story.id).with_for_update().one()
 
     ref = db.query(StoryDeconstructionRef).filter(
         StoryDeconstructionRef.id == ref_id,
@@ -1555,18 +1620,23 @@ async def remove_deconstruction_ref(
         raise HTTPException(404, "引用不存在")
 
     work_id = ref.work_id
-    db.delete(ref)
-
     current_bible = story.story_bible if isinstance(story.story_bible, dict) else {}
     current_bible.pop(f"deconstruction_{work_id}", None)
 
-    remaining_refs = db.query(StoryDeconstructionRef).filter(
+    latest_remaining_ref = db.query(StoryDeconstructionRef).filter(
         StoryDeconstructionRef.story_id == story_id,
-    ).count()
-    if remaining_refs == 0:
-        current_bible.pop("reference_author_profile", None)
-        current_bible.pop("reference_author_report", None)
-        current_bible.pop("reference_style_samples", None)
+        StoryDeconstructionRef.id != ref_id,
+    ).order_by(
+        StoryDeconstructionRef.applied_at.desc(),
+        StoryDeconstructionRef.id.desc(),
+    ).first()
+    latest_remaining_work = latest_remaining_ref.work if latest_remaining_ref else None
+    _refresh_library_reference_materials(db, current_bible, latest_remaining_work)
+
+    db.delete(ref)
+    if latest_remaining_work is None and not (
+        isinstance(current_bible.get("deconstruction"), dict) and current_bible.get("deconstruction")
+    ):
         current_bible.pop("learned_techniques", None)
         current_bible.pop("reference_plots", None)
         current_bible.pop("reference_rhythm", None)

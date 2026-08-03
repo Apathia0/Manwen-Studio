@@ -21,6 +21,77 @@ class StoryUpdate(BaseModel):
     characters: Optional[list[dict[str, Any]]] = None
 
 
+class StoryKnowledgeMutation(BaseModel):
+    """作品知识工作台的统一新增与编辑载荷。"""
+
+    category_id: Optional[int] = Field(default=None, ge=1)
+
+    resource_type: Optional[str] = Field(default=None, max_length=50)
+    resource_key: Optional[str] = Field(default=None, max_length=160)
+    title: Optional[str] = Field(default=None, max_length=255)
+    summary: Optional[str] = None
+    content_json: Any = None
+    content_text: Optional[str] = None
+    importance: Optional[int] = Field(default=None, ge=0, le=100)
+    valid_from_chapter: Optional[int] = Field(default=None, ge=1)
+    valid_to_chapter: Optional[int] = Field(default=None, ge=1)
+    status: Optional[str] = Field(default=None, max_length=20)
+
+    entity_key: Optional[str] = Field(default=None, max_length=160)
+    entity_type: Optional[str] = Field(default=None, max_length=40)
+    canonical_name: Optional[str] = Field(default=None, max_length=255)
+    aliases_json: Optional[list[str]] = None
+    profile_json: Optional[dict[str, Any]] = None
+    first_chapter: Optional[int] = Field(default=None, ge=1)
+    last_chapter: Optional[int] = Field(default=None, ge=1)
+
+    subject_key: Optional[str] = Field(default=None, max_length=160)
+    predicate: Optional[str] = Field(default=None, max_length=100)
+    object_key: Optional[str] = Field(default=None, max_length=160)
+    value_json: Any = None
+    value_text: Optional[str] = None
+    confidence: Optional[float] = Field(default=None, ge=0, le=1)
+
+    thread_key: Optional[str] = Field(default=None, max_length=160)
+    thread_type: Optional[str] = Field(default=None, max_length=30)
+    description: Optional[str] = None
+    setup_chapter: Optional[int] = Field(default=None, ge=1)
+    expected_payoff_from: Optional[int] = Field(default=None, ge=1)
+    expected_payoff_to: Optional[int] = Field(default=None, ge=1)
+    actual_payoff_chapter: Optional[int] = Field(default=None, ge=1)
+    related_entity_keys: Optional[list[str]] = None
+    priority: Optional[int] = Field(default=None, ge=0, le=100)
+    expected_version: Optional[int] = Field(default=None, ge=1)
+
+    model_config = {"extra": "forbid"}
+
+
+class StoryKnowledgeCategoryMutation(BaseModel):
+    """作品知识分类的新增与编辑载荷。"""
+
+    name: Optional[str] = Field(default=None, max_length=80)
+    color: Optional[str] = Field(default=None, max_length=20)
+    sort_order: Optional[int] = Field(default=None, ge=0)
+    expected_version: Optional[int] = Field(default=None, ge=1)
+
+    model_config = {"extra": "forbid"}
+
+
+class ChapterCreationPackUpdate(BaseModel):
+    """用户编辑后的章节创作包原文。"""
+
+    content: str = Field(min_length=1)
+    expected_version: int = Field(ge=1)
+
+    @model_validator(mode="after")
+    def validate_content(self):
+        if not self.content.strip():
+            raise ValueError("创作包不能为空")
+        return self
+
+    model_config = {"extra": "forbid"}
+
+
 class OutlineChapterPlanPayload(BaseModel):
     title: str
     summary: Optional[str] = None
@@ -116,7 +187,6 @@ class ChatMessageOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
-AgentMode = Literal["chat", "analyze", "execute"]
 AgentWorkflowType = Literal["novel", "manga", "video"]
 AgentSkillName = Literal[
     "chapter_writer",
@@ -133,7 +203,6 @@ class AgentChatIn(BaseModel):
     message: str
     chapter_id: Optional[int] = 0
     chapter_number: Optional[int] = 0
-    mode: AgentMode = "analyze"
     workflow_type: Optional[AgentWorkflowType] = None
     workflow_id: Optional[int] = Field(default=None, gt=0)
     shot_id: Optional[int] = None

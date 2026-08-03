@@ -507,6 +507,7 @@ async def apply_deconstruction_to_bible(
 
     decon_bible = {
         "deconstruction": {
+            "result_id": result.id,
             "source": result.summary,
             "applied_at": str(datetime.datetime.now(datetime.timezone.utc)),
         },
@@ -514,10 +515,13 @@ async def apply_deconstruction_to_bible(
         "reference_plots": result.plot_lines or [],
         "reference_rhythm": result.rhythm,
         "reference_emotion_modules": result.emotion_modules,
-        "reference_report": result.report_markdown,
     }
 
     current_bible = story.story_bible or {}
+    current_profile = current_bible.get("reference_author_profile")
+    has_manual_override = isinstance(current_profile, dict) and current_profile.get("manual_override") is True
+    if not has_manual_override:
+        decon_bible["reference_report"] = result.report_markdown
     current_bible.update(decon_bible)
     story.story_bible = current_bible
     flag_modified(story, "story_bible")

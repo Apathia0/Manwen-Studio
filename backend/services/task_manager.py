@@ -160,6 +160,8 @@ class TaskManager:
     ) -> None:
         """Update task retry state."""
         public_error = public_error_message(error)
+        error_code = str(getattr(error, "code", "") or "task_retry")
+        diagnostics = getattr(error, "diagnostics", None)
         db = SessionLocal()
         try:
             task = db.query(BackgroundTask).filter(
@@ -175,6 +177,8 @@ class TaskManager:
                         "stage": "retrying",
                         "message": f"上游服务暂时不可用，正在自动重试 ({retry_count}/{task.max_retries})...",
                         "last_error": public_error,
+                        "error_code": error_code,
+                        "diagnostics": diagnostics if isinstance(diagnostics, dict) else None,
                         "next_retry_at": _iso(next_retry_at),
                     },
                 )
@@ -188,6 +192,7 @@ class TaskManager:
         error_code = str(getattr(error, "code", "") or "task_failed")
         retryable = bool(getattr(error, "retryable", False))
         suggestion = str(getattr(error, "suggestion", "") or "").strip()
+        diagnostics = getattr(error, "diagnostics", None)
         db = SessionLocal()
         try:
             task = db.query(BackgroundTask).filter(
@@ -210,6 +215,7 @@ class TaskManager:
                         "error_code": error_code,
                         "retryable": retryable,
                         "suggestion": suggestion or None,
+                        "diagnostics": diagnostics if isinstance(diagnostics, dict) else None,
                         "next_retry_at": None,
                     },
                 )

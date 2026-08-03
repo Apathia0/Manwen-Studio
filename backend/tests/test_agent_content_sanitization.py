@@ -28,7 +28,6 @@ def _run_tool(monkeypatch, chapter: Chapter, coroutine):
     context = agent_service.AgentRunContext(
         story_id=chapter.story_id,
         api_key=None,
-        mode="execute",
         pending_changes=tracker,
     )
 

@@ -69,8 +69,8 @@ export default function TemplateBindingPanel({ storyId }: Props) {
   if (loading) return <span className="text-xs text-slate-400">加载中...</span>;
 
   return (
-    <div className="relative">
-      <div className="flex items-center gap-2">
+    <div className="relative min-w-0">
+      <div className="flex flex-wrap items-center gap-2">
         <span className="text-xs text-slate-400">提示词模板：</span>
         {currentTemplate ? (
           <>
@@ -91,7 +91,7 @@ export default function TemplateBindingPanel({ storyId }: Props) {
       </div>
 
       {showPicker && (
-        <div className="absolute right-0 top-8 z-50 w-96 rounded-2xl border border-[#e8edf2] bg-white p-4 shadow-xl">
+        <div className="absolute right-0 top-8 z-50 w-[min(24rem,calc(100vw-2rem))] rounded-lg border border-[#e8edf2] bg-white p-4 shadow-xl">
           <h4 className="mb-3 text-sm font-medium text-slate-800">选择提示词模板</h4>
           <div className="mb-2 text-xs font-medium text-slate-500">我的模板</div>
           <div className="mb-3 max-h-40 space-y-1 overflow-y-auto">

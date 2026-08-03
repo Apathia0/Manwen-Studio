@@ -6,7 +6,68 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.exc import IntegrityError
 from models import Base, BackgroundTask
-from services.errors import MangaImageGenerationError, sanitize_public_error_detail
+from services.errors import MangaImageGenerationError, WriterEmptyContentError, public_error_message, sanitize_public_error_detail
+from services.chapter_generation_runtime import (
+    ChapterGenerationBusyError,
+    acquire_chapter_generation_lease,
+)
+
+
+def test_same_chapter_rejects_duplicate_generation_without_waiting():
+    async def scenario() -> None:
+        first = await acquire_chapter_generation_lease(12, 7)
+        try:
+            with pytest.raises(ChapterGenerationBusyError):
+                await acquire_chapter_generation_lease(12, 7, wait_if_busy=False)
+        finally:
+            await first.release()
+
+    asyncio.run(scenario())
+
+
+def test_chapter_generation_lease_can_be_reacquired_after_release():
+    async def scenario() -> None:
+        first = await acquire_chapter_generation_lease(12, 8)
+        await first.release()
+        second = await acquire_chapter_generation_lease(12, 8, wait_if_busy=False)
+        await second.release()
+
+    asyncio.run(scenario())
+
+
+def test_same_chapter_waiter_does_not_occupy_another_global_slot():
+    async def scenario() -> None:
+        first = await acquire_chapter_generation_lease(12, 9)
+        waiter = asyncio.create_task(acquire_chapter_generation_lease(12, 9))
+        await asyncio.sleep(0)
+        other = await asyncio.wait_for(
+            acquire_chapter_generation_lease(12, 10),
+            timeout=0.2,
+        )
+        await other.release()
+        await first.release()
+        queued = await asyncio.wait_for(waiter, timeout=0.2)
+        await queued.release()
+
+    asyncio.run(scenario())
+
+
+def test_agent_memory_story_lock_is_removed_after_last_user():
+    from services import agent_service
+
+    async def scenario() -> None:
+        agent_service._AGENT_MEMORY_REFRESH_LOCKS.clear()
+        agent_service._AGENT_MEMORY_REFRESH_LOCK_REFS.clear()
+        async with agent_service._agent_memory_story_guard(991):
+            assert 991 in agent_service._AGENT_MEMORY_REFRESH_LOCKS
+        assert 991 not in agent_service._AGENT_MEMORY_REFRESH_LOCKS
+        assert 991 not in agent_service._AGENT_MEMORY_REFRESH_LOCK_REFS
+
+    asyncio.run(scenario())
+
+
+def test_timeout_error_has_actionable_public_message():
+    assert public_error_message(asyncio.TimeoutError()) == "任务执行超时，请稍后重试"
 
 
 @pytest.fixture
@@ -112,6 +173,41 @@ class TestBackgroundTaskUniqueConstraint:
 
         count = db_session.query(BackgroundTask).count()
         assert count == 2
+
+    def test_only_one_active_chapter_generation_per_chapter(self, db_session):
+        first = BackgroundTask(
+            task_id="chapter_gen_first",
+            task_type="chapter_generation",
+            chapter_id=23,
+            status="running",
+        )
+        db_session.add(first)
+        db_session.commit()
+
+        duplicate = BackgroundTask(
+            task_id="chapter_gen_duplicate",
+            task_type="chapter_generation",
+            chapter_id=23,
+            status="pending",
+        )
+        db_session.add(duplicate)
+        with pytest.raises(IntegrityError):
+            db_session.commit()
+
+    def test_terminal_chapter_generation_allows_next_task(self, db_session):
+        db_session.add(BackgroundTask(
+            task_id="chapter_gen_finished",
+            task_type="chapter_generation",
+            chapter_id=23,
+            status="succeeded",
+        ))
+        db_session.add(BackgroundTask(
+            task_id="chapter_gen_next",
+            task_type="chapter_generation",
+            chapter_id=23,
+            status="pending",
+        ))
+        db_session.commit()
 
 
 class TestBackgroundTaskJsonFields:
@@ -428,6 +524,39 @@ class TestTaskManager:
         assert saved.metadata_json["retryable"] is False
         assert saved.metadata_json["suggestion"] == "删除敏感描述后重新生成"
         assert "provider trace" not in str(saved.metadata_json)
+
+    def test_failed_writer_task_persists_structured_diagnostics(self, task_manager, db_session, monkeypatch):
+        """正文空响应需要保留可排查字段，但不能保存正文或思考内容。"""
+        import services.task_manager as tm
+
+        engine = getattr(db_session, "_test_engine", None)
+        monkeypatch.setattr(tm, "SessionLocal", sessionmaker(bind=engine))
+        task = BackgroundTask(task_id="writer-empty", task_type="chapter_generation")
+        db_session.add(task)
+        db_session.commit()
+        error = WriterEmptyContentError(
+            finish_reason="length",
+            model="deepseek-v4-flash",
+            max_tokens=8192,
+            reasoning_content_len=2048,
+            reasoning_tokens=8192,
+            choices_count=1,
+        )
+
+        task_manager._mark_task_failed("writer-empty", error)
+
+        saved = db_session.query(BackgroundTask).filter_by(task_id="writer-empty").first()
+        assert saved.error_message == "正文模型未返回可用正文，系统已停止保存"
+        assert saved.metadata_json["error_code"] == "writer_empty_content"
+        assert saved.metadata_json["retryable"] is True
+        assert saved.metadata_json["diagnostics"] == {
+            "finish_reason": "length",
+            "model": "deepseek-v4-flash",
+            "max_tokens": 8192,
+            "reasoning_content_len": 2048,
+            "reasoning_tokens": 8192,
+            "choices_count": 1,
+        }
 
     def test_with_retry_does_not_retry_value_error(self, task_manager):
         """参数/配置类错误不应进入自动重试"""

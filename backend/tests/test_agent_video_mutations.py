@@ -63,21 +63,18 @@ def test_video_mutation_intent_rejects_advice_and_negation(message: str):
     assert has_video_mutation_intent(message) is False
 
 
-def _video_tool_specs(mode: str = "execute") -> dict[str, dict]:
+def _video_tool_specs(mode: str = "agent") -> dict[str, dict]:
     return {
         spec["function"]["name"]: spec["function"]
         for spec in tool_registry.get_tool_specs(mode=mode, workflow_type="video")
     }
 
 
-def test_video_write_tools_only_available_in_execute_mode():
-    execute_specs = _video_tool_specs("execute")
-    analyze_specs = _video_tool_specs("analyze")
+def test_video_write_tools_are_available_to_single_agent():
+    agent_specs = _video_tool_specs()
 
-    assert "update_shot_prompts" in execute_specs
-    assert "batch_update_shot_fields" in execute_specs
-    assert "update_shot_prompts" not in analyze_specs
-    assert "batch_update_shot_fields" not in analyze_specs
+    assert "update_shot_prompts" in agent_specs
+    assert "batch_update_shot_fields" in agent_specs
 
 
 def test_video_shot_field_whitelist_contains_business_fields_only():
@@ -149,7 +146,6 @@ async def test_business_field_change_invalidates_protected_storyboard_prompt(mon
     context = agent_service_module.AgentRunContext(
         story_id=1,
         api_key=None,
-        mode="execute",
         pending_changes=tracker,
         workflow_type="video",
         workflow_id=1,
@@ -193,7 +189,6 @@ async def test_storyboard_regeneration_conflict_skips_entire_shot_rollback(monke
     context = agent_service_module.AgentRunContext(
         story_id=1,
         api_key=None,
-        mode="execute",
         pending_changes=tracker,
         workflow_type="video",
         workflow_id=1,
@@ -239,7 +234,6 @@ async def test_initial_empty_storyboard_prompt_still_creates_regeneration_guard(
     context = agent_service_module.AgentRunContext(
         story_id=1,
         api_key=None,
-        mode="execute",
         pending_changes=tracker,
         workflow_type="video",
         workflow_id=1,
@@ -299,7 +293,6 @@ async def test_batch_business_field_change_keeps_prompt_and_marks_stale(monkeypa
     context = agent_service_module.AgentRunContext(
         story_id=1,
         api_key=None,
-        mode="execute",
         pending_changes=tracker,
         workflow_type="video",
         workflow_id=1,
@@ -336,7 +329,6 @@ async def test_business_change_records_regeneration_guard_when_prompt_already_st
     context = agent_service_module.AgentRunContext(
         story_id=1,
         api_key=None,
-        mode="execute",
         pending_changes=tracker,
         workflow_type="video",
         workflow_id=1,
@@ -378,7 +370,6 @@ async def test_business_change_marks_neighbor_storyboard_prompts_stale(monkeypat
     context = agent_service_module.AgentRunContext(
         story_id=1,
         api_key=None,
-        mode="execute",
         pending_changes=tracker,
         workflow_type="video",
         workflow_id=4,
@@ -411,7 +402,6 @@ async def test_screenplay_change_marks_all_workflow_storyboards_stale(monkeypatc
     context = agent_service_module.AgentRunContext(
         story_id=1,
         api_key=None,
-        mode="execute",
         pending_changes=tracker,
         workflow_type="video",
         workflow_id=8,

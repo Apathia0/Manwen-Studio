@@ -28,13 +28,13 @@ from services.agent_service import (
     _write_scenes_text_atomic,
     agent_pending_change_store,
     agent_service,
-    normalize_agent_mode,
 )
 from services.agent_media import _extract_video_frames, _probe_video
 from services.errors import public_error_message
 from services.redaction import redact_sensitive_text
 from services.agent_media import multimodal_content, resolve_attachments, save_attachment
 from services.media_locator import ensure_local_media_path
+from services.story_knowledge import build_agent_story_manifest
 
 logger = logging.getLogger("agent_router")
 
@@ -51,7 +51,6 @@ _release_db_transaction = _main._release_db_transaction
 _check_and_consume_advanced_text_quota = _main._check_and_consume_advanced_text_quota
 _detach_pending_platform_points = _main._detach_pending_platform_points
 _finish_streaming_platform_points = _main._finish_streaming_platform_points
-_build_framework_context = _main._build_framework_context
 
 
 @router.post("/attachments")
@@ -569,7 +568,6 @@ async def agent_chat(
 
     conversation_id = int(body.conversation_id or 0)
     content = str(body.message or "").strip()
-    agent_mode = normalize_agent_mode(body.mode)
     if not conversation_id:
         raise HTTPException(400, "对话 ID 必填")
     if not content and not body.attachment_ids:
@@ -607,7 +605,7 @@ async def agent_chat(
     if current_chapter:
         conversation.chapter_id = current_chapter.id
 
-    story_context = _build_framework_context(story, current_chapter)
+    story_context = build_agent_story_manifest(story, current_chapter)
     if current_chapter:
         story_context += (
             "\n\n## 当前用户正在查看的章节\n"
@@ -833,7 +831,6 @@ async def agent_chat(
                 story_context=story_context,
                 api_key=deepseek_api_key,
                 story_id=story_id,
-                mode=agent_mode,
                 pending_change_key=pending_change_key,
                 workflow_type=workflow_type,
                 workflow_id=workflow_id,

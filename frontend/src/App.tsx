@@ -132,7 +132,6 @@ const USER_NAV: NavItem[] = [
   { key: 'workspace', label: '作品工作台', icon: Brush },
   { key: 'deconstruction-library', label: '拆书库', icon: BookOpen },
   { key: 'account', label: '账户与积分', icon: UserCircle2 },
-  { key: 'templates', label: '提示词模板', icon: Library },
   { key: 'pricing', label: '积分套餐', icon: CreditCard },
 ];
 

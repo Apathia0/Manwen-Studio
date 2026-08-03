@@ -1,3 +1,5 @@
+import copy
+import hashlib
 import json
 import logging
 import re
@@ -6,6 +8,9 @@ import uuid
 from typing import Any
 
 import httpx
+
+from services.chapter_creation_pack import canonical_pack_content
+from services.errors import UpstreamServiceError, WriterEmptyContentError
 
 
 logger = logging.getLogger(__name__)
@@ -21,7 +26,9 @@ LOCAL_SOFT_MAX_CHARS = LOCAL_MAX_CHARS
 SCENE_BUDGET_IDEAL_TOTAL = 2100
 SCENE_BUDGET_SOFT_MAX_TOTAL = 2200
 SCENE_BUDGET_HARD_MAX_TOTAL = 2480
-WRITER_MAX_TOKENS = 4096
+# 正文 Writer 明确关闭思考模式，全部输出预算用于章节正文。
+WRITER_MAX_TOKENS = 8192
+WRITER_EMPTY_CONTENT_RETRIES = 1
 PLOT_BEATS_MAX = 8
 PLOT_BEATS_MIN = 6
 
@@ -71,6 +78,90 @@ def _first_present(context: dict[str, Any], keys: tuple[str, ...]) -> Any:
     return None
 
 
+def chapter_creation_pack_fingerprint(
+    story_context: dict[str, Any],
+    chapter_info: dict[str, Any],
+    system_rules: str | None,
+    previous_chapter_summary: str = "",
+) -> str:
+    """计算创作包全部有效输入的稳定指纹。"""
+    context_pack = story_context.get("chapter_context_pack")
+    if not isinstance(context_pack, dict):
+        context_pack = {}
+    payload = {
+        "story_meta": {
+            "id": story_context.get("id") or story_context.get("story_id"),
+            "title": story_context.get("title") or story_context.get("name"),
+            "genre": story_context.get("genre"),
+            "description": story_context.get("description"),
+            "tags": story_context.get("tags"),
+        },
+        "outline": story_context.get("outline"),
+        "story_bible": story_context.get("story_bible"),
+        "story_memory": _first_present(
+            story_context,
+            ("story_memory_compact", "story_memory", "memory", "continuity_memory"),
+        ),
+        "characters": story_context.get("characters"),
+        "reference_takeaways": story_context.get("reference_takeaways"),
+        "deconstruction_report": story_context.get("deconstruction_report"),
+        "chapter": {
+            key: chapter_info.get(key)
+            for key in (
+                "chapter_number", "title", "act", "key_events", "summary",
+                "goal", "conflict", "hook", "payoff", "highlight", "user_instruction",
+            )
+        },
+        "knowledge": {
+            "revision": context_pack.get("knowledge_revision") or story_context.get("knowledge_revision"),
+            "context_hash": context_pack.get("context_hash"),
+        },
+        "previous_chapter_summary": previous_chapter_summary,
+        "system_rules": system_rules or "",
+    }
+    serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def reusable_chapter_creation_pack(
+    quality_score: Any,
+    *,
+    expected_fingerprint: str,
+    instruction: str = "",
+) -> dict[str, Any] | None:
+    """仅在全部输入一致时复用持久化创作包。"""
+    if not isinstance(quality_score, dict):
+        return None
+    creation_pack = quality_score.get("creation_pack")
+    if not isinstance(creation_pack, dict) or not creation_pack:
+        return None
+    stored_fingerprint = str(quality_score.get("creation_pack_fingerprint") or "").strip()
+    if not stored_fingerprint or stored_fingerprint != expected_fingerprint:
+        return None
+
+    reusable = copy.deepcopy(creation_pack)
+    normalized_instruction = str(instruction or "").strip()
+    if not normalized_instruction:
+        return reusable
+    chapter_task = reusable.get("chapter_task")
+    if not isinstance(chapter_task, dict):
+        chapter_task = {}
+        reusable["chapter_task"] = chapter_task
+    previous_instruction = str(chapter_task.get("user_instruction") or "").strip()
+    chapter_task["user_instruction"] = normalized_instruction
+
+    requirements = reusable.get("hard_requirements")
+    if not isinstance(requirements, list):
+        requirements = []
+    normalized_requirements = [
+        str(item).strip()
+        for item in requirements
+        if str(item).strip() and str(item).strip() != previous_instruction
+    ]
+    reusable["hard_requirements"] = [normalized_instruction, *normalized_requirements][:6]
+    return reusable
+
+
 def _build_creation_pack_source_digest(
     *,
     story_context: dict[str, Any],
@@ -106,6 +197,9 @@ def _build_creation_pack_source_digest(
         "story_bible": _first_present(context, ("story_bible_compact", "story_bible", "bible", "world_bible")),
         "outline_or_plan": _first_present(context, ("chapter_plan", "chapter_planning", "outline_summary", "outline")),
         "characters": context.get("characters"),
+        "knowledge_entities": context.get("knowledge_entities"),
+        "knowledge_facts": context.get("knowledge_facts"),
+        "open_threads": context.get("open_threads"),
         "reference_takeaways_source": _first_present(
             context,
             (
@@ -129,6 +223,9 @@ def _build_creation_pack_source_digest(
         "story_bible": 1500,
         "outline_or_plan": 1800,
         "characters": 1400,
+        "knowledge_entities": 1800,
+        "knowledge_facts": 2400,
+        "open_threads": 1800,
         "reference_takeaways_source": 1000,
         "future_chapters_for_boundary_only": 1200,
         "system_rules_digest": 1200,
@@ -142,6 +239,7 @@ def _build_creation_pack_source_digest(
         budget[key] = size
     digest["digest_policy"] = (
         "仅保留当前章节创作必需信息；后续章节用于判断伏笔上限和兑现边界；"
+        "knowledge_facts 是连续性硬约束，knowledge_entities 是人物当前状态，open_threads 按 urgency 决定推进强度；"
         "正文可以保留一句以内模糊钩子，但不得把 future_chapters_for_boundary_only 写成当前章完整行动。"
     )
     budget["total"] = len(json.dumps(digest, ensure_ascii=False, default=str))
@@ -527,6 +625,16 @@ def _compact_items(value: Any, *, item_limit: int = 220, list_limit: int = 14) -
 
 
 def _pack_log_detail(pack: dict[str, Any]) -> dict[str, Any]:
+    canonical_content = canonical_pack_content(pack)
+    if canonical_content is not None:
+        section_titles = re.findall(r"^##\s+(.+?)\s*$", canonical_content, flags=re.MULTILINE)
+        return {
+            "schema_version": pack.get("schema_version"),
+            "chapter_task": pack.get("chapter_task"),
+            "canonical_content_chars": len(canonical_content),
+            "canonical_content_sha256": hashlib.sha256(canonical_content.encode("utf-8")).hexdigest(),
+            "canonical_sections": section_titles[:20],
+        }
     boundary = pack.get("chapter_boundary") if isinstance(pack.get("chapter_boundary"), dict) else {}
     current_card = boundary.get("current_chapter_card") if isinstance(boundary.get("current_chapter_card"), dict) else {}
     future_cards = boundary.get("future_chapters_for_boundary_only")
@@ -588,6 +696,14 @@ def _agent_pack_view(pack: dict[str, Any]) -> dict[str, Any]:
         ]
     view["chapter_boundary"] = boundary
     return view
+
+
+def _creation_pack_prompt_text(pack: dict[str, Any], legacy_limit: int) -> str:
+    """规范创作包始终原样发送；旧格式仅保留兼容期裁剪。"""
+    canonical_content = canonical_pack_content(pack)
+    if canonical_content is not None:
+        return canonical_content
+    return _compact_json(_agent_pack_view(pack), legacy_limit)
 
 
 def _default_completion_contract() -> dict[str, Any]:
@@ -750,6 +866,61 @@ def _ensure_completion_fields(pack: dict[str, Any]) -> dict[str, Any]:
         if len(normalized) >= 10:
             break
     pack["acceptance_checklist"] = normalized[:10]
+    return pack
+
+
+def _inject_resolved_knowledge_constraints(
+    pack: dict[str, Any],
+    story_context: dict[str, Any],
+) -> dict[str, Any]:
+    """把已检索知识确定性注入创作合同，避免前置 Agent 遗漏。"""
+    facts = story_context.get("knowledge_facts") if isinstance(story_context, dict) else []
+    entities = story_context.get("knowledge_entities") if isinstance(story_context, dict) else []
+    threads = story_context.get("open_threads") if isinstance(story_context, dict) else []
+
+    continuity = _normalize_contract_list(pack.get("continuity"), limit=8)
+    must_keep = _normalize_contract_list(pack.get("must_keep"), limit=10)
+    for item in facts[:8] if isinstance(facts, list) else []:
+        if not isinstance(item, dict):
+            continue
+        value = item.get("value")
+        value_text = _clip_value(value, 100) if value not in (None, "", [], {}) else ""
+        statement = " ".join(str(part).strip() for part in (
+            item.get("subject"), item.get("predicate"), item.get("object"), value_text
+        ) if str(part or "").strip())
+        if statement and statement not in continuity:
+            continuity.append(statement[:180])
+        if statement and statement not in must_keep:
+            must_keep.append(f"连续性事实：{statement[:150]}")
+
+    character_states = _normalize_contract_list(pack.get("character_states"), limit=8)
+    for item in entities[:6] if isinstance(entities, list) else []:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or item.get("key") or "").strip()
+        profile = _clip_value(item.get("profile"), 120)
+        state = f"{name}：{profile}" if name and profile else name
+        if state and state not in character_states:
+            character_states.append(state[:180])
+
+    review_focus = _normalize_contract_list(pack.get("review_focus"), limit=8)
+    for item in threads[:8] if isinstance(threads, list) else []:
+        if not isinstance(item, dict):
+            continue
+        urgency = str(item.get("urgency") or "background")
+        if urgency not in {"due", "overdue", "approaching"}:
+            continue
+        title = str(item.get("title") or item.get("key") or "未命名伏笔").strip()
+        instruction = f"伏笔{title}已{ {'due': '进入回收窗口', 'overdue': '逾期', 'approaching': '临近回收'}.get(urgency) }，本章需推进或明确延后"
+        if instruction not in review_focus:
+            review_focus.append(instruction[:180])
+        if urgency in {"due", "overdue"} and instruction not in must_keep:
+            must_keep.append(instruction[:180])
+
+    pack["continuity"] = continuity[:8]
+    pack["must_keep"] = must_keep[:10]
+    pack["character_states"] = character_states[:8]
+    pack["review_focus"] = review_focus[:8]
     return pack
 
 
@@ -1075,6 +1246,7 @@ async def _chat_completion(
     api_key: str | None,
     max_tokens: int,
     response_format: dict[str, str] | None = None,
+    _empty_content_retry: int = 0,
 ) -> tuple[str, str | None]:
     from services import deepseek as deepseek_service
 
@@ -1087,17 +1259,114 @@ async def _chat_completion(
     if response_format:
         payload["response_format"] = response_format
     payload = deepseek_service._apply_runtime_params(payload)
+    payload["thinking"] = {"type": "disabled"}
 
-    async with httpx.AsyncClient(timeout=600) as client:
-        resp = await client.post(
-            f"{deepseek_service.runtime_base_url()}/chat/completions",
-            json=payload,
-            headers=deepseek_service._deepseek_auth_headers(api_key),
+    try:
+        async with httpx.AsyncClient(timeout=600) as client:
+            resp = await client.post(
+                f"{deepseek_service.runtime_base_url()}/chat/completions",
+                json=payload,
+                headers=deepseek_service._deepseek_auth_headers(api_key),
+            )
+        resp.raise_for_status()
+        data = deepseek_service._response_json(resp, context="DeepSeek")
+    except httpx.TimeoutException as exc:
+        raise UpstreamServiceError(
+            "正文模型响应超时，请稍后重试",
+            retryable=True,
+            provider="DeepSeek",
+            status_code=504,
+            code="writer_upstream_timeout",
+        ) from exc
+    except httpx.HTTPStatusError as exc:
+        status_code = int(exc.response.status_code)
+        raise UpstreamServiceError(
+            "正文模型暂时不可用，请稍后重试",
+            retryable=status_code in {408, 409, 425, 429, 500, 502, 503, 504},
+            provider="DeepSeek",
+            status_code=status_code,
+            code="writer_upstream_http_error",
+            diagnostics={"upstream_status_code": status_code},
+        ) from exc
+    except httpx.RequestError as exc:
+        raise UpstreamServiceError(
+            "正文模型网络连接失败，请稍后重试",
+            retryable=True,
+            provider="DeepSeek",
+            status_code=502,
+            code="writer_upstream_network_error",
+        ) from exc
+    except ValueError as exc:
+        raise UpstreamServiceError(
+            "正文模型响应格式异常，请稍后重试",
+            retryable=True,
+            provider="DeepSeek",
+            status_code=502,
+            code="writer_invalid_response",
+        ) from exc
+    choices = data.get("choices")
+    if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+        if _empty_content_retry < WRITER_EMPTY_CONTENT_RETRIES:
+            logger.warning(
+                "chapter_pipeline.writer.invalid_choices_retry model=%s choices_count=%s attempt=%s",
+                deepseek_service.runtime_model(),
+                len(choices) if isinstance(choices, list) else 0,
+                _empty_content_retry + 1,
+            )
+            return await _chat_completion(
+                messages=messages,
+                api_key=api_key,
+                max_tokens=max_tokens,
+                response_format=response_format,
+                _empty_content_retry=_empty_content_retry + 1,
+            )
+        raise WriterEmptyContentError(
+            model=deepseek_service.runtime_model(),
+            max_tokens=max_tokens,
+            choices_count=len(choices) if isinstance(choices, list) else 0,
         )
-    resp.raise_for_status()
-    data = deepseek_service._response_json(resp, context="DeepSeek")
-    choice = data["choices"][0]
-    return choice["message"]["content"], choice.get("finish_reason")
+    choice = choices[0]
+    message = choice.get("message") or {}
+    content = message.get("content")
+    finish_reason = choice.get("finish_reason")
+    reasoning_content = message.get("reasoning_content") or ""
+    # 读取 usage 中的 reasoning_tokens（若存在），供后续诊断推理模型思考消耗
+    usage = data.get("usage") or {}
+    usage_details = usage.get("completion_tokens_details") or {}
+    reasoning_tokens = usage_details.get("reasoning_tokens")
+    if reasoning_tokens is not None:
+        logger.debug(
+            "chapter_pipeline.chat_completion usage reasoning_tokens=%s finish_reason=%s content_len=%s",
+            reasoning_tokens,
+            finish_reason,
+            len(content or ""),
+        )
+    if not isinstance(content, str) or not content.strip():
+        if _empty_content_retry < WRITER_EMPTY_CONTENT_RETRIES:
+            logger.warning(
+                "chapter_pipeline.writer.empty_content_retry model=%s finish_reason=%s reasoning_content_len=%s reasoning_tokens=%s attempt=%s",
+                deepseek_service.runtime_model(),
+                finish_reason,
+                len(reasoning_content),
+                reasoning_tokens,
+                _empty_content_retry + 1,
+            )
+            return await _chat_completion(
+                messages=messages,
+                api_key=api_key,
+                max_tokens=max_tokens,
+                response_format=response_format,
+                _empty_content_retry=_empty_content_retry + 1,
+            )
+        raise WriterEmptyContentError(
+            finish_reason=finish_reason,
+            model=deepseek_service.runtime_model(),
+            max_tokens=max_tokens,
+            reasoning_content_len=len(reasoning_content),
+            reasoning_tokens=reasoning_tokens,
+            choices_count=len(choices),
+        )
+    return content, finish_reason
 
 
 def _fallback_creation_pack(
@@ -1743,6 +2012,7 @@ async def build_chapter_creation_pack(
             chapter_info=chapter_info,
             previous_chapter_summary=previous_chapter_summary,
         )
+        pack = _inject_resolved_knowledge_constraints(pack, story_context)
         logger.info(
             "chapter_pipeline.pack.fallback trace_id=%s chapter=%s elapsed_ms=%s reason=test_api_key summary=%s",
             trace,
@@ -1875,7 +2145,7 @@ async def build_chapter_creation_pack(
             {"role": "user", "content": user_prompt},
         ],
         api_key=api_key,
-        max_tokens=4096,
+        max_tokens=8192,
         response_format={"type": "json_object"},
     )
     try:
@@ -1916,7 +2186,7 @@ do_not_write, chapter_boundary, target, review_focus。"""
                         {"role": "user", "content": retry_prompt},
                     ],
                     api_key=api_key,
-                    max_tokens=4096,
+                    max_tokens=8192,
                     response_format={"type": "json_object"},
                 )
                 pack = deepseek_service._extract_json_object(retry_content)
@@ -1942,6 +2212,7 @@ do_not_write, chapter_boundary, target, review_focus。"""
                 chapter_info=chapter_info,
                 previous_chapter_summary=previous_chapter_summary,
             )
+            pack = _inject_resolved_knowledge_constraints(pack, story_context)
             logger.info(
                 "chapter_pipeline.pack.fallback trace_id=%s chapter=%s elapsed_ms=%s reason=parse_failed summary=%s",
                 trace,
@@ -1983,6 +2254,7 @@ do_not_write, chapter_boundary, target, review_focus。"""
     pack.setdefault("target", {"min": LOCAL_MIN_CHARS, "ideal": LOCAL_IDEAL_CHARS, "max": LOCAL_MAX_CHARS})
     pack = _ensure_scene_budget(pack)
     pack = _ensure_completion_fields(pack)
+    pack = _inject_resolved_knowledge_constraints(pack, story_context)
     pack.setdefault(
         "writing_rules",
         [
@@ -2094,27 +2366,32 @@ async def write_chapter_from_pack(
     if previous_draft:
         label = "上一版超长正文（只供删减取材，不要扩写）" if previous_char_count > LOCAL_MAX_CHARS else "上一版正文（只用于按编辑意见返修，不要机械复述）"
         previous_block = f"\n## {label}\n" + _clip_text(previous_draft, 11000)
-    scene_budget = _normalize_scene_budget(creation_pack)
+    canonical_content = canonical_pack_content(creation_pack)
+    scene_budget = [] if canonical_content is not None else _normalize_scene_budget(creation_pack)
     scene_budget_lines = [
         f"- {item['scene']}：目标约 {item['target_chars']} 字，上限 {item['max_chars']} 字；{item.get('purpose') or '只完成本场景功能'}"
         for item in scene_budget
     ]
-    scene_budget_block = "\n## 场景字数预算\n" + "\n".join(scene_budget_lines)
+    scene_budget_block = "\n## 场景字数预算\n" + "\n".join(scene_budget_lines) if scene_budget_lines else ""
+    pack_prompt = _creation_pack_prompt_text(creation_pack, 14000)
+    canonical_requirements = "" if canonical_content is not None else (
+        "- 写完前必须在内部按 completion_contract 和 acceptance_checklist 自检一遍，但不要把自检过程输出。\n"
+        "- 动笔前先读取 hard_requirements、closure_requirements、writer_execution_order、missing_if_absent；正文必须逐项完成这些硬合同。\n"
+        "- 核心冲突、战斗、交锋或胜负结束不等于章节完成；只有回报结算、处理动作、当前事件余波都写完才算完成。\n"
+        "- closure_requirements 里的采集、清理、撤离、归置、清点、确认安全等动作必须用正文显性动作写出来，不能只用心理判断、总结句或一句“处理完毕”代替。"
+    )
 
     user_prompt = f"""你只需要根据“创作包”写出当前章节正文。
 
 ## 创作包
-{_compact_json(_agent_pack_view(creation_pack), 14000)}
+{pack_prompt}
 {scene_budget_block}
 {feedback_block}
 {previous_block}
 
 ## 输出要求
 - 直接输出正文，不要标题、Markdown、说明、JSON、字数统计。
-- 写完前必须在内部按 completion_contract 和 acceptance_checklist 自检一遍，但不要把自检过程输出。
-- 动笔前先读取 hard_requirements、closure_requirements、writer_execution_order、missing_if_absent；正文必须逐项完成这些硬合同。
-- 核心冲突、战斗、交锋或胜负结束不等于章节完成；只有回报结算、处理动作、当前事件余波都写完才算完成。
-- closure_requirements 里的采集、清理、撤离、归置、清点、确认安全等动作必须用正文显性动作写出来，不能只用心理判断、总结句或一句“处理完毕”代替。
+{canonical_requirements}
 - 自检未通过时直接在本轮正文内修完，不要把问题留给编辑 agent；尤其不能缺剧情闭环、结算和章尾余波。
 - 如果这是返修轮，仍然输出完整章节全文；禁止只输出新增段落、差异片段、修改说明或续写尾巴。
 - 如果编辑反馈写着“无需修改”“直接通过”“只补一句”“微调”，请直接以上一版正文为底稿输出完整全文，只做对应最小修复。
@@ -2286,7 +2563,7 @@ async def review_chapter_with_editor_agent(
 {_compact_json(local, 2400)}
 
 ## 创作包
-{_compact_json(_agent_pack_view(creation_pack), 10000)}
+{_creation_pack_prompt_text(creation_pack, 10000)}
 
 ## 正文
 {_clip_text(content, 16000)}
@@ -2312,7 +2589,7 @@ async def review_chapter_with_editor_agent(
             {"role": "user", "content": user_prompt},
         ],
         api_key=api_key,
-        max_tokens=2048,
+        max_tokens=3072,
         response_format={"type": "json_object"},
     )
     from services import deepseek as deepseek_service
@@ -2340,7 +2617,7 @@ async def review_chapter_with_editor_agent(
 {_compact_json(local, 1600)}
 
 ## 创作包简版
-{_compact_json(_agent_pack_view(creation_pack), 5200)}
+{_creation_pack_prompt_text(creation_pack, 5200)}
 
 ## 正文
 {_clip_text(content, 10000)}
@@ -2355,7 +2632,7 @@ blocking_issues, keep, fill, cut, forbid, rewrite_targets, revision_plan, rewrit
                     {"role": "user", "content": retry_prompt},
                 ],
                 api_key=api_key,
-                max_tokens=1536,
+                max_tokens=2048,
                 response_format={"type": "json_object"},
             )
             parsed = deepseek_service._extract_json_object(retry_content)
@@ -2434,8 +2711,9 @@ async def run_chapter_creation_pipeline(
     )
     pack_reused = isinstance(creation_pack, dict) and bool(creation_pack)
     if pack_reused:
-        creation_pack = _ensure_scene_budget(creation_pack)
-        creation_pack = _ensure_completion_fields(creation_pack)
+        if canonical_pack_content(creation_pack) is None:
+            creation_pack = _ensure_scene_budget(creation_pack)
+            creation_pack = _ensure_completion_fields(creation_pack)
         logger.info(
             "chapter_pipeline.pack.reused trace_id=%s chapter=%s summary=%s",
             trace_id,
@@ -2475,10 +2753,13 @@ async def run_chapter_creation_pipeline(
             _chapter_label(chapter_info),
             _compact_json(_pack_log_zh_summary(creation_pack), 12000),
         )
+    direct_feedback = None
+    if initial_content and str(chapter_info.get("user_instruction") or "").strip():
+        direct_feedback = [str(chapter_info["user_instruction"]).strip()]
     draft = await write_chapter_from_pack(
         creation_pack=creation_pack,
         api_key=api_key,
-        editor_feedback=None,
+        editor_feedback=direct_feedback,
         previous_draft=initial_content or "",
         trace_id=trace_id,
     )
@@ -2508,7 +2789,8 @@ async def run_chapter_creation_pipeline(
                 *generation_hard_failures,
             ],
         }
-    ok = bool(deterministic.get("ok")) and bool(local_safety.get("ok"))
+    # 字数和表达问题只作为写作提示；空正文、截断和章节越界才阻止保存。
+    ok = bool(deterministic.get("ok")) and finish_reason != "length"
     review = {
         "skipped": True,
         "reason": "editor_agent_removed",

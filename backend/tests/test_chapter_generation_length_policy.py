@@ -34,6 +34,108 @@ def _run(coro):
     return asyncio.run(coro)
 
 
+def test_writer_disables_thinking_mode(monkeypatch):
+    import services.chapter_agents as ca
+    import services.deepseek as ds
+
+    captured_payloads = []
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url, json, headers):
+            captured_payloads.append(json)
+            return _FakeResponse("有效正文")
+
+    monkeypatch.setattr(ca.httpx, "AsyncClient", FakeClient)
+    monkeypatch.setattr(ds, "runtime_base_url", lambda: "https://example.invalid/v1")
+    monkeypatch.setattr(ds, "runtime_model", lambda: "deepseek-v4-flash")
+
+    content, finish_reason = _run(ca._chat_completion(
+        messages=[{"role": "user", "content": "写正文"}],
+        api_key="sk-test",
+        max_tokens=8192,
+    ))
+
+    assert content == "有效正文"
+    assert finish_reason == "stop"
+    assert len(captured_payloads) == 1
+    assert captured_payloads[0]["thinking"] == {"type": "disabled"}
+
+
+def test_writer_retries_empty_content_once_then_raises_structured_error(monkeypatch):
+    import services.chapter_agents as ca
+    import services.deepseek as ds
+    from services.errors import WriterEmptyContentError
+
+    calls = []
+
+    class EmptyResponse(_FakeResponse):
+        def json(self):
+            return {
+                "choices": [{
+                    "finish_reason": "length",
+                    "message": {"content": "", "reasoning_content": "思考" * 20},
+                }],
+                "usage": {"completion_tokens_details": {"reasoning_tokens": 8192}},
+            }
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url, json, headers):
+            calls.append(json)
+            return EmptyResponse("", "length")
+
+    monkeypatch.setattr(ca.httpx, "AsyncClient", FakeClient)
+    monkeypatch.setattr(ds, "runtime_base_url", lambda: "https://example.invalid/v1")
+    monkeypatch.setattr(ds, "runtime_model", lambda: "deepseek-v4-flash")
+
+    with pytest.raises(WriterEmptyContentError) as exc_info:
+        _run(ca._chat_completion(
+            messages=[{"role": "user", "content": "写正文"}],
+            api_key="sk-test",
+            max_tokens=8192,
+        ))
+
+    assert len(calls) == 2
+    assert all(item["thinking"] == {"type": "disabled"} for item in calls)
+    assert exc_info.value.code == "writer_empty_content"
+    assert exc_info.value.retryable is True
+    assert exc_info.value.diagnostics["finish_reason"] == "length"
+    assert exc_info.value.diagnostics["reasoning_tokens"] == 8192
+
+
+def test_canonical_creation_pack_log_uses_content_summary():
+    import services.chapter_agents as ca
+
+    content = "# 第14章创作包\n\n## 本章任务\n\n正文要求\n\n## 连续性约束\n\n承接上一章"
+    detail = ca._pack_log_detail({
+        "schema_version": 2,
+        "canonical_content": content,
+        "chapter_task": {"chapter_number": 14},
+    })
+
+    assert detail["canonical_content_chars"] == len(content)
+    assert detail["canonical_content_sha256"] == hashlib.sha256(content.encode("utf-8")).hexdigest()
+    assert detail["canonical_sections"] == ["本章任务", "连续性约束"]
+    assert "plot_beats" not in detail
+
+
 def test_length_policy_constants_are_aligned():
     deepseek_text = (BACKEND_DIR / "services" / "deepseek.py").read_text(encoding="utf-8")
     main_text = (BACKEND_DIR / "main.py").read_text(encoding="utf-8")
@@ -47,7 +149,7 @@ def test_length_policy_constants_are_aligned():
     assert "CHAPTER_TARGET_IDEAL_CHARS = 2500" in deepseek_text
     assert "CHAPTER_FIRST_PASS_MIN_CHARS = 2300" in deepseek_text
     assert "CHAPTER_FIRST_PASS_MAX_CHARS = 2700" in deepseek_text
-    assert "CHAPTER_COMPLETION_MAX_TOKENS = 3072" in deepseek_text
+    assert "CHAPTER_COMPLETION_MAX_TOKENS = 8192" in deepseek_text
     assert "MIN_CHAPTER_CHARS = 2200" in chapter_quality_text
     assert "MAX_CHAPTER_CHARS = 3000" in chapter_quality_text
     assert "IDEAL_CHAPTER_CHARS = 2500" in chapter_quality_text
@@ -120,7 +222,8 @@ def test_expand_chapter_prefers_multi_agent_pipeline(monkeypatch):
     assert calls[0]["chapter_info"]["chapter_number"] == 1
 
 
-def test_expand_chapter_rejects_failed_two_stage_pipeline(monkeypatch):
+def test_expand_chapter_rejects_hard_gate_failure_even_with_content(monkeypatch):
+    """流水线硬门禁失败时不得保存截断或越界正文。"""
     import services.deepseek as ds
     import services.chapter_agents as ca
 
@@ -138,8 +241,10 @@ def test_expand_chapter_rejects_failed_two_stage_pipeline(monkeypatch):
     monkeypatch.setattr(ca, "run_chapter_creation_pipeline", failed_pipeline)
     story_context = {"title": "测试故事"}
 
-    with pytest.raises(ds.ChapterPipelineQualityError):
+    with pytest.raises(ds.ChapterPipelineQualityError) as exc_info:
         _run(ds.expand_chapter_to_content(story_context, {"chapter_number": 1}, api_key="sk-test"))
+
+    assert exc_info.value.review["reason"] == "pipeline_hard_gate_failed"
 
     cached = story_context["_last_chapter_pipeline_result"]
     assert cached["ok"] is False
@@ -147,6 +252,28 @@ def test_expand_chapter_rejects_failed_two_stage_pipeline(monkeypatch):
     assert cached["finish_reason"] == "length"
     assert cached["editor_review_skipped"] is True
     assert "fallback" not in cached
+
+
+def test_expand_chapter_raises_when_pipeline_content_empty(monkeypatch):
+    """正文完全为空（如 DeepSeek 返回空 content）时才抛错。"""
+    import services.deepseek as ds
+    import services.chapter_agents as ca
+
+    async def empty_pipeline(**kwargs):
+        return {
+            "ok": False,
+            "content": "",
+            "review": {"approved": False, "reason": "empty_content"},
+            "creation_pack": {"writer_brief": "测试"},
+            "attempts": 3,
+            "finish_reason": "length",
+            "editor_review_skipped": True,
+        }
+
+    monkeypatch.setattr(ca, "run_chapter_creation_pipeline", empty_pipeline)
+
+    with pytest.raises(ds.ChapterPipelineQualityError):
+        _run(ds.expand_chapter_to_content({"title": "测试故事"}, {"chapter_number": 1}, api_key="sk-test"))
 
 
 def test_expand_chapter_pipeline_exception_never_enters_legacy_generator(monkeypatch):
@@ -504,6 +631,42 @@ def test_creation_pack_source_digest_limits_input_and_keeps_current_scope():
     assert "伏笔上限" in digest["digest_policy"]
 
 
+def test_creation_pack_consumes_resolved_facts_entities_and_due_threads():
+    import services.chapter_agents as ca
+
+    story_context = {
+        "knowledge_entities": [
+            {"key": "character:lin-yue", "name": "林月", "profile": {"location": "灰市", "state": "负伤"}},
+        ],
+        "knowledge_facts": [
+            {"subject": "character:lin-yue", "predicate": "持有", "object": "item:jade", "value": "裂纹玉佩"},
+        ],
+        "open_threads": [
+            {"key": "thread:jade", "title": "玉佩来历", "urgency": "due", "description": "本章进入回收窗口"},
+        ],
+        "current_chapter": {"chapter_number": 5, "title": "灰市追查"},
+    }
+    digest, _ = ca._build_creation_pack_source_digest(
+        story_context=story_context,
+        chapter_info={"chapter_number": 5, "title": "灰市追查", "goal": "查明玉佩来历"},
+        previous_chapter_summary="",
+        chapter_scope={},
+        system_rules=None,
+    )
+    pack = asyncio.run(ca.build_chapter_creation_pack(
+        story_context=story_context,
+        chapter_info={"chapter_number": 5, "title": "灰市追查", "goal": "查明玉佩来历"},
+        api_key="test",
+    ))
+
+    assert "裂纹玉佩" in digest["knowledge_facts"]
+    assert "林月" in digest["knowledge_entities"]
+    assert "玉佩来历" in digest["open_threads"]
+    assert any("裂纹玉佩" in item for item in pack["continuity"])
+    assert any("林月" in item and "负伤" in item for item in pack["character_states"])
+    assert any("玉佩来历" in item and "回收窗口" in item for item in pack["review_focus"])
+
+
 def test_creation_pack_boundary_filters_rules_checklist_and_scene_budget():
     import services.chapter_agents as ca
 
@@ -824,6 +987,222 @@ def test_pipeline_builds_pack_once_and_reused_pack_skips_pack_agent(monkeypatch)
     assert reused["stages"]["creation_pack"] == "reused"
 
 
+def test_creation_pack_fingerprint_covers_long_form_context_changes():
+    import services.chapter_agents as ca
+
+    story_context = {
+        "id": 12,
+        "title": "测试故事",
+        "story_memory": {"open_loops": ["玉佩来历未知"]},
+        "chapter_context_pack": {
+            "knowledge_revision": 7,
+            "context_hash": "context-v7",
+        },
+    }
+    chapter_info = {
+        "chapter_number": 5,
+        "title": "灰市追查",
+        "goal": "查明玉佩来历",
+        "conflict": "掮客拒绝透露消息",
+    }
+    baseline = ca.chapter_creation_pack_fingerprint(
+        story_context,
+        chapter_info,
+        "保持短句",
+        "上一章停在灰市入口",
+    )
+
+    variants = [
+        ({**story_context, "story_memory": {"open_loops": ["玉佩已经确认来自林家"]}}, chapter_info, "保持短句", "上一章停在灰市入口"),
+        ({**story_context, "chapter_context_pack": {"knowledge_revision": 8, "context_hash": "context-v8"}}, chapter_info, "保持短句", "上一章停在灰市入口"),
+        (story_context, {**chapter_info, "goal": "销毁玉佩"}, "保持短句", "上一章停在灰市入口"),
+        (story_context, chapter_info, "增加对白", "上一章停在灰市入口"),
+        (story_context, chapter_info, "保持短句", "上一章停在林家祠堂"),
+    ]
+
+    assert all(
+        ca.chapter_creation_pack_fingerprint(context, chapter, rules, previous) != baseline
+        for context, chapter, rules, previous in variants
+    )
+
+
+def test_reusable_creation_pack_requires_exact_fingerprint_and_preserves_cache():
+    import services.chapter_agents as ca
+
+    cached_pack = {
+        "chapter_task": {"chapter_number": 5},
+        "hard_requirements": ["查明玉佩来历"],
+    }
+    quality_score = {
+        "creation_pack": cached_pack,
+        "creation_pack_fingerprint": "fingerprint-v1",
+    }
+
+    assert ca.reusable_chapter_creation_pack(
+        quality_score,
+        expected_fingerprint="stale",
+    ) is None
+    reusable = ca.reusable_chapter_creation_pack(
+        quality_score,
+        expected_fingerprint="fingerprint-v1",
+    )
+
+    assert reusable == cached_pack
+    assert reusable is not cached_pack
+
+
+def test_memory_refresh_submission_accepts_task_manager_metadata(monkeypatch):
+    import inspect
+    from types import SimpleNamespace
+    import main
+
+    submitted = {}
+
+    async def fake_submit_task(*args, **kwargs):
+        submitted["args"] = args
+        submitted["kwargs"] = kwargs
+        return args[0]
+
+    monkeypatch.setattr(main.task_manager, "submit_task", fake_submit_task)
+    chapter = SimpleNamespace(
+        id=23,
+        story_id=12,
+        novel_content="陈玄推门进入灰市。",
+    )
+
+    task_id = _run(main._submit_chapter_memory_refresh(chapter, "sk-test"))
+    fingerprint = hashlib.sha256(chapter.novel_content.encode("utf-8")).hexdigest()
+    assert task_id and task_id.startswith("chapter_memory_23_")
+    assert submitted["args"][3] == 23
+    assert submitted["args"][6] == fingerprint
+    assert submitted["kwargs"]["chapter_id"] == 23
+
+    inspect.signature(main._background_refresh_chapter_memory).bind(
+        23,
+        "sk-test",
+        None,
+        fingerprint,
+        task_id=task_id,
+        story_id=12,
+        chapter_id=23,
+        shot_id=None,
+    )
+
+
+def test_chapter_memory_disables_thinking_and_retries_invalid_json(monkeypatch):
+    import json
+    import services.deepseek as ds
+
+    responses = [
+        {"choices": [{"finish_reason": "stop", "message": {"content": "这不是 JSON"}}]},
+        {
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {
+                    "content": json.dumps({
+                        "chapter_summary": {"summary": "陈玄完成炼体", "ending_scene": "陈玄离开灰市"},
+                        "chapter_handoff": {"opening_must_continue": "承接灰市交易"},
+                        "story_memory_update": {"story_state": "交易网络初建"},
+                    }, ensure_ascii=False),
+                },
+            }],
+        },
+    ]
+    payloads = []
+
+    class FakeResponse:
+        def __init__(self, value):
+            self.value = value
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self.value
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url, json, headers):
+            payloads.append(json)
+            return FakeResponse(responses.pop(0))
+
+    monkeypatch.setattr(ds.httpx, "AsyncClient", FakeClient)
+    monkeypatch.setattr(ds, "runtime_base_url", lambda: "https://example.invalid/v1")
+    monkeypatch.setattr(ds, "runtime_model", lambda: "deepseek-v4-flash")
+
+    result = _run(ds.summarize_chapter_memory(
+        {},
+        {"chapter_number": 14, "title": "精血炼骨"},
+        "陈玄完成炼体，随后前往灰市完成交易。",
+        api_key="sk-test",
+    ))
+
+    assert len(payloads) == 2
+    assert all(payload["thinking"] == {"type": "disabled"} for payload in payloads)
+    assert result["chapter_summary"]["summary"] == "陈玄完成炼体"
+    assert result["chapter_handoff"]["opening_must_continue"] == "承接灰市交易"
+
+
+def test_chapter_memory_uses_content_fallback_after_two_invalid_responses(monkeypatch):
+    import services.deepseek as ds
+
+    call_count = 0
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"choices": [{"finish_reason": "stop", "message": {"content": "仍然不是 JSON"}}]}
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url, json, headers):
+            nonlocal call_count
+            call_count += 1
+            return FakeResponse()
+
+    monkeypatch.setattr(ds.httpx, "AsyncClient", FakeClient)
+    monkeypatch.setattr(ds, "runtime_base_url", lambda: "https://example.invalid/v1")
+    monkeypatch.setattr(ds, "runtime_model", lambda: "deepseek-v4-flash")
+    chapter_content = "陈玄压住突破冲动。\n魏山在巷口问他药渣从何而来。"
+
+    result = _run(ds.summarize_chapter_memory(
+        {},
+        {
+            "chapter_number": 14,
+            "goal": "建立交易网络",
+            "conflict": "药方可能暴露",
+            "hook": "黑瘴谷的药引线索",
+            "key_events": ["完成炼体", "与魏山交易"],
+        },
+        chapter_content,
+        api_key="sk-test",
+    ))
+
+    assert call_count == 2
+    assert result["_fallback"]["used"] is True
+    assert result["chapter_summary"]["ending_scene"] == chapter_content
+    assert result["chapter_handoff"]["opening_must_continue"].endswith("魏山在巷口问他药渣从何而来。")
+    assert result["story_memory_update"]["current_arc_focus"] == "建立交易网络"
+
+
 def test_finalize_pipeline_error_never_calls_legacy_remote_editor(monkeypatch):
     import services.chapter_agents as ca
     import services.chapter_quality as cq
@@ -903,6 +1282,116 @@ def test_writer_prompt_includes_scene_budget_and_execution_contract(monkeypatch)
     assert "closure_requirements" in captured["prompt"]
     assert "missing_if_absent" in captured["prompt"]
     assert "核心冲突、战斗、交锋或胜负结束不等于章节完成" in captured["prompt"]
+
+
+def test_writer_receives_canonical_creation_pack_without_compaction_or_completion_rewrite(monkeypatch):
+    import services.chapter_agents as ca
+
+    captured: dict[str, str] = {}
+
+    async def fake_chat_completion(**kwargs):
+        captured["prompt"] = kwargs["messages"][1]["content"]
+        return "正" * 2400, "stop"
+
+    monkeypatch.setattr(ca, "_chat_completion", fake_chat_completion)
+    original = "# 第8章创作包\n\n## 本章任务\n保留这一段原文，含末尾标记：END-OF-PACK"
+    pack = {"schema_version": 2, "canonical_content": original, "chapter_task": {"chapter_number": 8}}
+
+    result = _run(ca.write_chapter_from_pack(creation_pack=pack, api_key="sk-real"))
+
+    assert result["finish_reason"] == "stop"
+    assert original in captured["prompt"]
+    assert "END-OF-PACK" in captured["prompt"]
+    assert "## 场景字数预算" not in captured["prompt"]
+    assert "completion_contract" not in captured["prompt"]
+
+
+def test_creation_pack_update_rejects_whitespace_only_content():
+    import pytest
+    from pydantic import ValidationError
+    from schemas import ChapterCreationPackUpdate
+
+    with pytest.raises(ValidationError, match="创作包不能为空"):
+        ChapterCreationPackUpdate(content=" \n\t", expected_version=1)
+
+
+def test_render_creation_pack_uses_readable_chinese_field_labels():
+    from services.chapter_creation_pack import render_creation_pack
+
+    content = render_creation_pack({
+        "chapter_number": 1,
+        "chapter_title": "仙草落凡",
+        "sections": {
+            "characters": [
+                {"name": "陈玄", "role": "protagonist", "entity_type": "character"},
+            ],
+        },
+    })
+
+    assert "姓名：陈玄" in content
+    assert "身份：主角" in content
+    assert "对象类型：人物" in content
+    assert "- name：" not in content
+
+
+def test_render_creation_pack_hides_internal_keys_and_labels_writing_rules():
+    from services.chapter_creation_pack import render_creation_pack
+
+    content = render_creation_pack({
+        "chapter_number": 1,
+        "chapter_title": "仙尊落凡",
+        "sections": {
+            "style_profile": {"writing_guidance": {"opening": "冲突前置"}},
+            "facts": [{
+                "subject": "legacy:character:secret",
+                "subject_name": "陈玄",
+                "predicate": "母子",
+                "object": "legacy:character:mother",
+                "object_name": "陈母",
+                "value": "陈玄与陈母是母子",
+                "source_chapter_id": 38,
+                "relevance_score": 155,
+            }],
+            "open_threads": [{
+                "key": "memory:loop:secret",
+                "title": "药费倒计时",
+                "payoff_window": [1, 2],
+                "expected_payoff_from": 1,
+                "expected_payoff_to": 2,
+                "related_entities": ["legacy:character:secret"],
+                "related_entity_names": ["陈玄"],
+            }],
+        },
+    })
+
+    assert "写作指导" in content
+    assert "主体：陈玄" in content
+    assert "关联对象：陈母" in content
+    assert "预计回收起始章：1" in content
+    assert "预计回收截止章：2" in content
+    assert "legacy:" not in content
+    assert "memory:loop:" not in content
+    assert "source chapter id" not in content
+    assert "本章相关度" not in content
+
+
+def test_render_creation_pack_maps_all_supported_knowledge_enums_to_chinese():
+    from services.chapter_creation_pack import render_creation_pack
+
+    english_values = [
+        "acquired", "consumed", "continuity", "equipped", "has_money", "improved",
+        "informed", "learned_from", "located_at", "possesses", "purchased_from",
+        "sold_to", "traded_with", "foreshadow", "world_concept", "world_rule", "archived",
+    ]
+    content = render_creation_pack({
+        "chapter_number": 2,
+        "sections": {"facts": [{"predicate": value} for value in english_values]},
+    })
+
+    for value in english_values:
+        assert f"：{value}" not in content
+    for label in ("获得", "消耗", "连续性", "装备", "持有资金", "提升", "伏笔", "世界概念", "世界规则", "已归档"):
+        assert label in content
 
 
 def test_length_finish_reason_inside_range_forces_revision_when_editor_not_passed():
@@ -999,11 +1488,11 @@ def test_writer_local_sanitize_removes_zero_tolerance_terms():
 def test_writer_revision_uses_safe_budget_for_complete_full_text():
     import services.chapter_agents as ca
 
-    assert ca.WRITER_MAX_TOKENS == 4096
-    assert ca._writer_max_tokens(0, False) == 4096
-    assert ca._writer_max_tokens(2494, True) == 4096
-    assert ca._writer_max_tokens(1800, True) == 4096
-    assert ca._writer_max_tokens(3100, True) == 4096
+    assert ca.WRITER_MAX_TOKENS == 8192
+    assert ca._writer_max_tokens(0, False) == 8192
+    assert ca._writer_max_tokens(2494, True) == 8192
+    assert ca._writer_max_tokens(1800, True) == 8192
+    assert ca._writer_max_tokens(3100, True) == 8192
 
 
 def test_scene_budget_is_tight_enough_for_first_draft():

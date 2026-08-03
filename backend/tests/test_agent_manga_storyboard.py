@@ -117,7 +117,6 @@ def _set_manga_context():
     context = agent_service_module.AgentRunContext(
         story_id=1,
         api_key=None,
-        mode="execute",
         pending_changes=tracker,
         workflow_type="manga",
         chapter_id=7,
@@ -126,18 +125,11 @@ def _set_manga_context():
     return tracker, token
 
 
-def test_manga_workflow_only_exposes_safe_storyboard_writes():
-    execute_names = {
+def test_manga_workflow_exposes_safe_storyboard_tools_to_single_agent():
+    agent_names = {
         spec["function"]["name"]
         for spec in agent_service_module.tool_registry.get_tool_specs(
-            mode="execute",
-            workflow_type="manga",
-        )
-    }
-    analyze_names = {
-        spec["function"]["name"]
-        for spec in agent_service_module.tool_registry.get_tool_specs(
-            mode="analyze",
+            mode="agent",
             workflow_type="manga",
         )
     }
@@ -147,11 +139,9 @@ def test_manga_workflow_only_exposes_safe_storyboard_writes():
         "update_manga_storyboard_scene",
         "batch_update_manga_storyboard_scenes",
         "replace_manga_storyboard",
-    } <= execute_names
-    assert "get_manga_storyboard" in analyze_names
-    assert "update_manga_storyboard_scene" not in analyze_names
-    assert "update_chapter_content" not in execute_names
-    assert "update_shot_fields" not in execute_names
+    } <= agent_names
+    assert "update_chapter_content" not in agent_names
+    assert "update_shot_fields" not in agent_names
 
 
 def test_get_manga_storyboard_returns_scripts_and_image_state(manga_workspace):
@@ -639,13 +629,13 @@ def test_manga_execute_blocks_non_manga_write_tool():
     assert tracker.get_summary() == []
 
 
-def test_manga_analyze_prompt_does_not_require_writes():
+def test_manga_prompt_describes_single_agent_write_boundary():
     prompt = agent_service_module.agent_service._build_system_prompt(
         "测试上下文",
         story_id=1,
         workflow_type="manga",
-        mode="analyze",
+        mode="agent",
     )
 
-    assert "当前是只读分析模式" in prompt
-    assert "禁止调用或声称调用任何写入工具" in prompt
+    assert "系统采用单一 Agent" in prompt
+    assert "用户明确要求修改时才允许调用对应写入工具" in prompt

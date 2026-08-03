@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 
 from services.writing_utils import build_chapter_generation_prompt
 from services.framework_utils import _extract_outline_chapters, validate_framework_json
-from services.story_state import build_story_bible_compact, build_story_memory_compact, extract_author_profile_sections, extract_report_highlights
+from services.story_state import build_story_bible_compact, build_story_memory_compact, extract_author_profile_sections, extract_report_highlights, has_active_writing_reference
 from services.token_utils import estimate_tokens, TOKEN_COMPRESS_THRESHOLD, compress_context_parts_if_needed
 
 # 默认值会被 router 层从 PlatformSetting 数据库动态覆盖
@@ -38,7 +38,9 @@ CHAPTER_TARGET_MAX_CHARS = 3000
 CHAPTER_TARGET_IDEAL_CHARS = 2500
 CHAPTER_FIRST_PASS_MIN_CHARS = 2300
 CHAPTER_FIRST_PASS_MAX_CHARS = 2700
-CHAPTER_COMPLETION_MAX_TOKENS = 3072
+# 该常量在上游章节生成/补全链路（expand fallback 等）使用；因 deepseek-v4-flash 推理模式思考会吃掉大量 token，
+# 原 3072 不足以输出完整正文（finish_reason=length / content 空），提到 8192 留足思考+输出缓冲。
+CHAPTER_COMPLETION_MAX_TOKENS = 8192
 
 _RUNTIME_TEMPERATURE: float | None = None
 _RUNTIME_TOP_P: float | None = None
@@ -521,68 +523,6 @@ def _extract_scenes_payload(raw: str) -> list[str]:
 
     raise ValueError("场景分割响应必须是字符串 JSON 数组")
 
-def _scene_split_prompt(page_count: int = 10) -> str:
-    return f"""你是一位专业漫画分镜师。请将小说内容拆分为恰好{page_count}页漫画。
-
-## ★★★ 最高原则：叙事完整性优先 ★★★
-你的首要任务是**完整覆盖原文所有关键事件**，不能遗漏任何重要情节。
-分镜的目的是让读者通过漫画获得与原文等价的故事体验，而非展示画技。
-
-## 两阶段工作流程（必须严格执行）
-
-### 第一步：提取关键事件（内心完成，不输出）
-在脑中列出原文的每一个关键事件，包括：
-- 推动剧情的动作和决定
-- 重要对话和信息揭示
-- 冲突升级和转折点
-- 角色的关键反应和情绪变化
-按时间顺序排列，标注每个事件的重要程度（核心/重要/辅助）。
-
-### 第二步：分配到 {page_count} 页
-- 将第一步的事件**均匀分配**到 {page_count} 页中
-- **核心事件**必须占据更多格数（2-3格），**辅助事件**可以压缩（1格）
-- 每页的主题应明确，不能把不相关的事件混在一页
-- 宁可每页信息密度高，也不能用氛围格凑数导致事件遗漏
-
-## 分镜格类型与优先级
-
-每页 4-5 格，按以下优先级分配格数：
-
-| 格类型 | 作用 | 优先级 | 每页上限 |
-|--------|------|--------|----------|
-| 对话格 | 推进剧情、揭示信息 | ★★★ 最高 | 2-3格 |
-| 动作格 | 关键动作、事件、冲突 | ★★★ 最高 | 2-3格 |
-| 反应格 | 角色情绪反应、心理变化 | ★★ 中等 | 1格 |
-| 氛围格 | 环境、气氛、过渡 | ★ 最低 | 每页最多1格 |
-
-**严禁用多个格子展示同一瞬间的不同角度**——这是最常见的叙事浪费。
-
-## 每页格式要求
-- 4-5 个分镜格，用【第1格】【第2格】…标记
-- 每格描述：构图类型（大宽格/中景/窄格/特写）+ 画面内容
-- 对话气泡：用「」标记，每页 2-4 条
-- 音效字：仅在动作/情绪转折场景使用，不要每格都加
-- 景别交替：远景→中景→特写，避免连续 3 格相同景别
-
-## 格式示例
-"第1页：【第1格（大宽格）】场景环境全貌。【第2格（中景）】角色A和B面对面对话。对话气泡：「A的台词。」【第3格（窄格）】角色B的反应和动作。对话气泡：「B的回应。」【第4格（大宽格）】关键事件发生的动态画面。音效：动作音效。"
-
-视觉风格由后续生成阶段的参考图决定；本分镜只负责构图、镜头和叙事信息。
-
-## 禁止事项
-1. 禁止用氛围格/特写格凑数——每格都必须有叙事功能
-2. 禁止用多个格子展示同一瞬间的不同角度
-3. 禁止遗漏原文中的核心事件和关键对话
-4. 禁止在每格都加音效字——只在关键动作/转折处使用
-
-请输出JSON数组，不要输出其他任何内容：
-[
-  "第1页：【第1格...】...【第2格...】...【第3格...】...【第4格...】...",
-  "第2页：【第1格...】...【第2格...】...【第3格...】...【第4格...】...",
-  ...
-  "第{page_count}页：【第1格...】...【第2格...】...【第3格...】...【第4格...】..."
-]"""
-
 
 async def chat_stream(messages: list[dict], api_key: str | None = None, framework_context: str = "", system_prompt: str | None = None) -> AsyncGenerator[str, None]:
     """Stream chat response from DeepSeek."""
@@ -625,12 +565,23 @@ async def chat_stream(messages: list[dict], api_key: str | None = None, framewor
                     continue
 
 
-async def generate_novel(messages: list[dict], api_key: str | None = None, framework_context: str = "", system_prompt: str | None = None) -> str:
+async def generate_novel(
+    messages: list[dict],
+    api_key: str | None = None,
+    framework_context: str = "",
+    system_prompt: str | None = None,
+    creation_pack_content: str = "",
+) -> str:
     """非流式生成一章完整小说正文。"""
     system_content = system_prompt or ""
-    if framework_context:
+    if framework_context and not creation_pack_content:
         system_content += "\n\n## 故事框架约束\n" + framework_context
-    full_messages = [{"role": "system", "content": system_content}] + messages
+    if creation_pack_content:
+        system_content += "\n\n首条用户消息是设定中心保存的本章创作包原文，必须完整执行，不得自行压缩或改写其中设定。"
+    full_messages = [{"role": "system", "content": system_content}]
+    if creation_pack_content:
+        full_messages.append({"role": "user", "content": creation_pack_content})
+    full_messages.extend(messages)
     full_messages.append({
         "role": "user",
         "content": (
@@ -717,9 +668,21 @@ async def generate_novel(messages: list[dict], api_key: str | None = None, frame
     return content
 
 
-async def split_scenes(chat_messages: list[dict], character_profiles: str = "", page_count: int = 10, api_key: str | None = None) -> list[str]:
+async def split_scenes(
+    chat_messages: list[dict],
+    character_profiles: str = "",
+    page_count: int = 10,
+    api_key: str | None = None,
+    prompt_template: str | None = None,
+    system_prompt: str | None = None,
+) -> list[str]:
     """Use DeepSeek to split chat novel content into manga page descriptions."""
-    scene_prompt = _scene_split_prompt(page_count)
+    if not prompt_template or not prompt_template.strip():
+        raise ValueError("分镜正文模板未配置，生成调用必须先从数据库解析模板")
+    if not system_prompt or not system_prompt.strip():
+        raise ValueError("分镜 System Prompt 未配置，生成调用必须先从数据库解析模板")
+    scene_prompt = prompt_template.strip().replace("{page_count}", str(page_count))
+    effective_system_prompt = system_prompt.strip().replace("{page_count}", str(page_count))
     if character_profiles:
         scene_prompt += f"\n\n以下是角色外貌设定，分镜描述中必须严格匹配这些外貌特征：\n{character_profiles}"
 
@@ -745,14 +708,7 @@ async def split_scenes(chat_messages: list[dict], character_profiles: str = "", 
             "messages": [
                 {
                     "role": "system",
-                    "content": (
-                        f"你是漫画分镜专家，首要任务是确保叙事完整性——覆盖原文所有关键事件。"
-                        f'只输出一个有效JSON对象，格式必须是 {{"scenes": ["...", "..."]}}。'
-                        f"scenes 必须恰好有 {page_count} 个字符串元素。"
-                        f"每个元素代表一整页漫画，每页包含4-5个分镜格。"
-                        f"严禁遗漏核心事件，严禁用氛围格凑数。"
-                        f"不要输出 Markdown、解释、前后缀或任何非 JSON 文本。"
-                    ),
+                    "content": effective_system_prompt,
                 },
             ] + messages,
             "stream": False,
@@ -1248,30 +1204,31 @@ def _build_story_snapshot(story_context: dict) -> str:
         import_guidance = story_bible.get("import_guidance")
         if isinstance(import_guidance, dict) and import_guidance:
             parts.append(f"导入作品作者约束: {json.dumps(import_guidance, ensure_ascii=False)}")
-        # 拆书引用数据（模型支持 1M token，不再截断）
-        learned_techniques = story_bible.get("learned_techniques")
-        if isinstance(learned_techniques, list) and learned_techniques:
-            parts.append(f"参考写作手法: {json.dumps(learned_techniques, ensure_ascii=False)}")
-        reference_plots = story_bible.get("reference_plots")
-        if isinstance(reference_plots, list) and reference_plots:
-            parts.append(f"参考剧情模式: {json.dumps(reference_plots, ensure_ascii=False)}")
-        reference_rhythm = story_bible.get("reference_rhythm")
-        if isinstance(reference_rhythm, dict) and reference_rhythm:
-            parts.append(f"参考节奏控制: {json.dumps(reference_rhythm, ensure_ascii=False)}")
-        reference_emotion_modules = story_bible.get("reference_emotion_modules")
-        if isinstance(reference_emotion_modules, dict) and reference_emotion_modules:
-            parts.append(f"参考情绪模块: {json.dumps(reference_emotion_modules, ensure_ascii=False)}")
-        reference_author_profile = story_bible.get("reference_author_profile")
-        if isinstance(reference_author_profile, dict) and reference_author_profile:
-            profile_parts = extract_author_profile_sections(reference_author_profile)
-            parts.extend(profile_parts)
-        reference_author_report = story_bible.get("reference_author_report")
-        if isinstance(reference_author_report, str) and reference_author_report.strip():
-            highlights = extract_report_highlights(reference_author_report)
-            parts.append(f"作者画像参考报告（核心要点）:\n{highlights}")
-        reference_style_samples = story_bible.get("reference_style_samples")
-        if isinstance(reference_style_samples, list) and reference_style_samples:
-            parts.append(f"作者原文风格示例: {json.dumps(reference_style_samples, ensure_ascii=False)}")
+        if has_active_writing_reference(story_bible):
+            # 只有用户主动引用或人工确认的写作参考才能进入生成提示词。
+            learned_techniques = story_bible.get("learned_techniques")
+            if isinstance(learned_techniques, list) and learned_techniques:
+                parts.append(f"参考写作手法: {json.dumps(learned_techniques, ensure_ascii=False)}")
+            reference_plots = story_bible.get("reference_plots")
+            if isinstance(reference_plots, list) and reference_plots:
+                parts.append(f"参考剧情模式: {json.dumps(reference_plots, ensure_ascii=False)}")
+            reference_rhythm = story_bible.get("reference_rhythm")
+            if isinstance(reference_rhythm, dict) and reference_rhythm:
+                parts.append(f"参考节奏控制: {json.dumps(reference_rhythm, ensure_ascii=False)}")
+            reference_emotion_modules = story_bible.get("reference_emotion_modules")
+            if isinstance(reference_emotion_modules, dict) and reference_emotion_modules:
+                parts.append(f"参考情绪模块: {json.dumps(reference_emotion_modules, ensure_ascii=False)}")
+            reference_author_profile = story_bible.get("reference_author_profile")
+            if isinstance(reference_author_profile, dict) and reference_author_profile:
+                profile_parts = extract_author_profile_sections(reference_author_profile)
+                parts.extend(profile_parts)
+            reference_author_report = story_bible.get("reference_author_report") or story_bible.get("reference_report")
+            if isinstance(reference_author_report, str) and reference_author_report.strip():
+                highlights = extract_report_highlights(reference_author_report)
+                parts.append(f"作者画像参考报告（核心要点）:\n{highlights}")
+            reference_style_samples = story_bible.get("reference_style_samples")
+            if isinstance(reference_style_samples, list) and reference_style_samples:
+                parts.append(f"作者原文风格示例: {json.dumps(reference_style_samples, ensure_ascii=False)}")
     if story_context.get("tags"):
         parts.append(f"现有标签: {json.dumps(story_context['tags'], ensure_ascii=False)}")
     if story_context.get("characters"):
@@ -2292,6 +2249,73 @@ async def continue_framework_with_chat(
         return plan
 
 
+def _fallback_chapter_memory(
+    chapter_info: dict,
+    chapter_content: str,
+    *,
+    reason: str,
+) -> dict:
+    """模型未返回合法 JSON 时，从正文原文构造最低可用的章节交接记忆。"""
+    compact = re.sub(r"\s+", "", chapter_content or "")
+    ending_excerpt = (chapter_content or "")[-500:].strip()
+    key_events = chapter_info.get("key_events") if isinstance(chapter_info, dict) else []
+    if not isinstance(key_events, list):
+        key_events = []
+    summary = compact[:220]
+    opening_continuity = re.sub(r"\s+", " ", ending_excerpt)[-220:]
+    return {
+        "chapter_summary": {
+            "summary": summary,
+            "major_events": [str(item)[:180] for item in key_events[:8] if str(item).strip()],
+            "character_changes": [],
+            "new_facts": [],
+            "open_loops": [],
+            "resolved_loops": [],
+            "ending_scene": ending_excerpt[-320:],
+        },
+        "chapter_handoff": {
+            "ending_location": "",
+            "active_conflict": str(chapter_info.get("conflict") or "")[:180],
+            "active_characters": [],
+            "character_states": [],
+            "immediate_open_loops": [],
+            "opening_must_continue": f"承接上一章正文结尾：{opening_continuity}" if opening_continuity else "",
+        },
+        "story_memory_update": {
+            "story_state": summary,
+            "current_arc_focus": str(chapter_info.get("goal") or chapter_info.get("summary") or "")[:180],
+            "current_tone": "",
+            "next_payoff_target": str(chapter_info.get("hook") or "")[:180],
+            "continuity_facts": [],
+            "open_loops": [],
+            "resolved_loops": [],
+        },
+        "_fallback": {
+            "used": True,
+            "reason": reason,
+        },
+    }
+
+
+def _normalize_chapter_memory_payload(value: object) -> dict:
+    data = value if isinstance(value, dict) else {}
+    for wrapper_key in ("data", "result", "memory"):
+        wrapped = data.get(wrapper_key)
+        if isinstance(wrapped, dict) and any(
+            key in wrapped for key in ("chapter_summary", "chapter_handoff", "story_memory_update")
+        ):
+            data = wrapped
+            break
+    normalized = {
+        "chapter_summary": data.get("chapter_summary") if isinstance(data.get("chapter_summary"), dict) else {},
+        "chapter_handoff": data.get("chapter_handoff") if isinstance(data.get("chapter_handoff"), dict) else {},
+        "story_memory_update": data.get("story_memory_update") if isinstance(data.get("story_memory_update"), dict) else {},
+    }
+    if not normalized["chapter_summary"] and not normalized["chapter_handoff"]:
+        raise ValueError("响应缺少 chapter_summary 和 chapter_handoff")
+    return normalized
+
+
 async def summarize_chapter_memory(
     story_context: dict,
     chapter_info: dict,
@@ -2370,22 +2394,51 @@ async def summarize_chapter_memory(
         "stream": False,
         "max_tokens": 4096,
         "response_format": {"type": "json_object"},
+        "thinking": {"type": "disabled"},
     }
 
-    async with httpx.AsyncClient(timeout=300) as client:
-        resp = await client.post(
-            f"{runtime_base_url()}/chat/completions",
-            json=payload,
-            headers=_deepseek_auth_headers(api_key),
-        )
-        resp.raise_for_status()
-        data = _response_json(resp, context="DeepSeek")
-        content = data["choices"][0]["message"]["content"]
+    last_parse_error = "响应未包含 JSON 对象"
+    for attempt in range(2):
+        async with httpx.AsyncClient(timeout=300) as client:
+            resp = await client.post(
+                f"{runtime_base_url()}/chat/completions",
+                json=payload,
+                headers=_deepseek_auth_headers(api_key),
+            )
+            resp.raise_for_status()
+            data = _response_json(resp, context="DeepSeek")
+        choices = data.get("choices") if isinstance(data, dict) else None
+        message = choices[0].get("message") if isinstance(choices, list) and choices and isinstance(choices[0], dict) else None
+        content = message.get("content") if isinstance(message, dict) else ""
+        try:
+            if not isinstance(content, str) or not content.strip():
+                raise ValueError("正文记忆响应为空")
+            return _normalize_chapter_memory_payload(_extract_json_object(content))
+        except ValueError as exc:
+            last_parse_error = str(exc)
+            logger.warning(
+                "chapter_memory.invalid_json attempt=%s content_len=%s finish_reason=%s error=%s",
+                attempt + 1,
+                len(content) if isinstance(content, str) else 0,
+                choices[0].get("finish_reason") if isinstance(choices, list) and choices and isinstance(choices[0], dict) else None,
+                last_parse_error,
+            )
+            if attempt == 0:
+                payload["messages"] = [
+                    *payload["messages"],
+                    {"role": "assistant", "content": content[:1500] if isinstance(content, str) else ""},
+                    {
+                        "role": "user",
+                        "content": "上一响应无法解析。请重新提取，只返回一个完整 JSON 对象，必须包含 chapter_summary、chapter_handoff、story_memory_update。",
+                    },
+                ]
 
-    try:
-        return _extract_json_object(content)
-    except ValueError as e:
-        raise ValueError(f"Chapter memory summarization failed: {e}")
+    logger.warning(
+        "chapter_memory.fallback chapter=%s reason=%s",
+        chapter_info.get("chapter_number") if isinstance(chapter_info, dict) else None,
+        last_parse_error,
+    )
+    return _fallback_chapter_memory(chapter_info, chapter_content, reason=last_parse_error)
 
 
 _SETTING_KEYWORDS = (
@@ -2529,6 +2582,7 @@ async def expand_chapter_to_content(
     previous_chapter_summary: str = "",
     system_prompt: str | None = None,
     db=None,
+    creation_pack: dict[str, Any] | None = None,
     _retry_count: int = 0,
     _retry_reason: str | None = None,
     _previous_content: str = "",
@@ -2549,6 +2603,7 @@ async def expand_chapter_to_content(
                 api_key=api_key,
                 previous_chapter_summary=previous_chapter_summary,
                 system_rules=_get_chapter_system_prompt(db=db) if not system_prompt else system_prompt,
+                creation_pack=creation_pack,
                 max_revisions=3,
             )
             if isinstance(story_context, dict) and isinstance(pipeline_result.get("creation_pack"), dict):
@@ -2566,11 +2621,17 @@ async def expand_chapter_to_content(
                     "stages": pipeline_result.get("stages") if isinstance(pipeline_result.get("stages"), dict) else {},
                     "editor_review_skipped": bool(pipeline_result.get("editor_review_skipped")),
                 }
-            if pipeline_result.get("content") and pipeline_result.get("ok"):
+            if pipeline_result.get("content"):
+                if not pipeline_result.get("ok"):
+                    review = pipeline_result.get("review") if isinstance(pipeline_result.get("review"), dict) else {}
+                    raise ChapterPipelineQualityError({
+                        **review,
+                        "reason": review.get("reason") or "pipeline_hard_gate_failed",
+                        "finish_reason": pipeline_result.get("finish_reason"),
+                    })
                 return str(pipeline_result["content"])
             review = pipeline_result.get("review") if isinstance(pipeline_result.get("review"), dict) else {}
-            if not pipeline_result.get("content"):
-                review = {**review, "reason": review.get("reason") or "pipeline_empty_content"}
+            review = {**review, "reason": review.get("reason") or "pipeline_empty_content"}
             raise ChapterPipelineQualityError(review)
         except ChapterPipelineQualityError:
             raise
@@ -2975,15 +3036,16 @@ async def adjust_chapter_content(
     instruction: str,
     api_key: str | None = None,
     system_prompt: str | None = None,
+    creation_pack_content: str = "",
 ) -> str:
     """Adjust the full chapter content according to a user instruction."""
-    snapshot = _build_story_snapshot_tiered(story_context, "auto")
-    boundary_scope = _chapter_scope_from_context(story_context)
-    chapter_details = json.dumps(chapter_info, ensure_ascii=False)
+    snapshot = creation_pack_content or _build_story_snapshot_tiered(story_context, "auto")
+    boundary_scope = {} if creation_pack_content else _chapter_scope_from_context(story_context)
+    chapter_details = "" if creation_pack_content else json.dumps(chapter_info, ensure_ascii=False)
 
     # 提取章节任务卡结构（对标 expand_chapter_to_content）
     hook_info = ""
-    if isinstance(chapter_info, dict):
+    if isinstance(chapter_info, dict) and not creation_pack_content:
         parts = []
         for key, label in [("goal", "本章叙事目标"), ("conflict", "核心冲突"),
                            ("hook", "开篇钩子"), ("payoff", "本章回报/高潮"),
@@ -3341,7 +3403,14 @@ JSON 顶层必须包含：
         raise ValueError(f"Import material analysis failed: {e}")
 
 
-async def scenes_from_selection(selected_text: str, character_profiles: str = "", page_count: int = 4, api_key: str | None = None) -> list[str]:
+async def scenes_from_selection(
+    selected_text: str,
+    character_profiles: str = "",
+    page_count: int = 4,
+    api_key: str | None = None,
+    prompt_template: str | None = None,
+    system_prompt: str | None = None,
+) -> list[str]:
     """Generate manga scene descriptions from selected novel text.
     
     Reuses the existing split_scenes pattern but focused on the selected text only.
@@ -3352,6 +3421,8 @@ async def scenes_from_selection(selected_text: str, character_profiles: str = ""
         character_profiles=character_profiles,
         page_count=page_count,
         api_key=api_key,
+        prompt_template=prompt_template,
+        system_prompt=system_prompt,
     )
 
 

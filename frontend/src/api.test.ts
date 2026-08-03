@@ -1,6 +1,6 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 
-import { analyzeChapterMangaAssets, apiHeaders, coverImageUrl, createAdminAiChannel, deleteAdminAiChannel, generateMangaAsset, generateMangaAssetsBatch, generateMangaStream, generateStoryCharRefStream, getAiChannels, getAiCredentials, getApiKeySettings, getAuthorStyleResult, getAuthorStyleStatus, getBackgroundTaskStatus, getLocalCredentialMode, getMangaAssetAnalysis, login, previewAdminAiChannelPrices, redrawMangaAsset, regenerateVideoAsset, retryVideoJob, saveAiModalityCredential, saveApiKeySettings, saveMangaAssetAnalysis, setLocalCredentialMode, startAuthorStyleAnalysis, syncAdminAiChannelPrices, testAiModalityCredential, toPublicMangaAssetUrl, toPublicVideoAssetUrl, updateAdminAiChannel, updateAuthorStyleReport, updateDeconstructionReport } from './api';
+import { adjustChapterContent, analyzeChapterMangaAssets, apiHeaders, coverImageUrl, createAdminAiChannel, createStoryKnowledge, createStoryKnowledgeCategory, deleteAdminAiChannel, deleteStoryKnowledge, deleteStoryKnowledgeCategory, expandChapter, generateMangaAsset, generateMangaAssetsBatch, generateMangaStream, generateNovel, generateScenes, generateStoryCharRefStream, getAiChannels, getAiCredentials, getApiKeySettings, getAuthorStyleResult, getAuthorStyleStatus, getBackgroundTaskStatus, getLocalCredentialMode, getMangaAssetAnalysis, getStoryKnowledge, login, previewAdminAiChannelPrices, redrawMangaAsset, regenerateStoryChapterContext, regenerateVideoAsset, retryVideoJob, saveAiModalityCredential, saveApiKeySettings, saveMangaAssetAnalysis, setLocalCredentialMode, startAuthorStyleAnalysis, syncAdminAiChannelPrices, syncStoryKnowledgeWithAI, testAiModalityCredential, toPublicMangaAssetUrl, toPublicVideoAssetUrl, updateAdminAiChannel, updateAuthorStyleReport, updateDeconstructionReport, updateStoryBible, updateStoryChapterContext, updateStoryKnowledge, updateStoryKnowledgeCategory } from './api';
 import { shouldShowAuthorStyleEntry } from './components/DeconstructionWorkPage';
 
 describe('coverImageUrl', () => {
@@ -12,6 +12,172 @@ describe('coverImageUrl', () => {
 
   it('将本地相对路径转换为静态资源路径', () => {
     expect(coverImageUrl('manga_outputs/covers/cover_114_test.png')).toBe('/static/manga/covers/cover_114_test.png');
+  });
+});
+
+describe('作品知识 API', () => {
+  beforeEach(() => {
+    vi.stubGlobal('localStorage', {
+      getItem: vi.fn(() => null),
+      setItem: vi.fn(),
+      removeItem: vi.fn(),
+    });
+  });
+
+  it('读取作品的四类知识集合', async () => {
+    const payload = { story_id: 12, knowledge_revision: 3, resources: [], entities: [], facts: [], plot_threads: [] };
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(payload), { status: 200 })));
+
+    await expect(getStoryKnowledge(12)).resolves.toEqual(payload);
+    expect(fetch).toHaveBeenCalledWith('/api/stories/12/knowledge', expect.any(Object));
+  });
+
+  it('新增、编辑和删除均使用作品与知识类型作用域', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ ok: true, item: {}, knowledge_revision: 4 }), { status: 200 })));
+
+    await createStoryKnowledge(12, 'fact', { subject_key: 'character:a', predicate: 'location' });
+    await updateStoryKnowledge(12, 'fact', 9, { value_text: '位于灰市' });
+    await deleteStoryKnowledge(12, 'fact', 9, 3);
+
+    expect(fetch).toHaveBeenNthCalledWith(1, '/api/stories/12/knowledge/fact', expect.objectContaining({ method: 'POST' }));
+    expect(fetch).toHaveBeenNthCalledWith(2, '/api/stories/12/knowledge/fact/9', expect.objectContaining({ method: 'PUT' }));
+    expect(fetch).toHaveBeenNthCalledWith(3, '/api/stories/12/knowledge/fact/9?expected_version=3', expect.objectContaining({ method: 'DELETE' }));
+  });
+
+  it('保存和重新提取创作包时携带当前版本', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ content: '原文', version: 5 }), { status: 200 })));
+
+    await updateStoryChapterContext(12, 8, '完整创作包原文', 4);
+    await regenerateStoryChapterContext(12, 8, 5);
+
+    expect(fetch).toHaveBeenNthCalledWith(1, '/api/stories/12/knowledge/chapter-context?chapter_number=8', expect.objectContaining({
+      method: 'PUT',
+      body: JSON.stringify({ content: '完整创作包原文', expected_version: 4 }),
+    }));
+    expect(fetch).toHaveBeenNthCalledWith(2, '/api/stories/12/knowledge/chapter-context/regenerate?chapter_number=8&expected_version=5', expect.objectContaining({ method: 'POST' }));
+  });
+
+  it('管理知识分类时使用统一分类端点和版本号', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ ok: true, category: { id: 7 }, knowledge_revision: 5 }), { status: 200 })));
+
+    await createStoryKnowledgeCategory(12, { knowledge_kind: 'fact', name: '身份', color: '#2563eb', sort_order: 1 });
+    await updateStoryKnowledgeCategory(12, 7, { name: '身份关系', expected_version: 2 });
+    await deleteStoryKnowledgeCategory(12, 7, 3);
+
+    expect(fetch).toHaveBeenNthCalledWith(1, '/api/stories/12/knowledge/categories/fact', expect.objectContaining({ method: 'POST' }));
+    expect(fetch).toHaveBeenNthCalledWith(2, '/api/stories/12/knowledge/categories/7', expect.objectContaining({ method: 'PUT' }));
+    expect(fetch).toHaveBeenNthCalledWith(3, '/api/stories/12/knowledge/categories/7?expected_version=3', expect.objectContaining({ method: 'DELETE' }));
+  });
+
+  it('更新作品圣经时携带当前知识版本', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ story_bible: {}, knowledge_revision: 8 }), { status: 200 })));
+
+    await updateStoryBible(12, { creative_brief: { genre: '高武' } as any }, 7);
+
+    expect(fetch).toHaveBeenCalledWith('/api/stories/12/story-bible', expect.objectContaining({
+      method: 'PATCH',
+      body: JSON.stringify({ story_bible: { creative_brief: { genre: '高武' } }, expected_knowledge_revision: 7 }),
+    }));
+  });
+
+  it('提交全量和定向知识同步时携带模式与范围', async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({ task_id: 'knowledge_sync_12_test', status: 'pending', message: '已提交' }), { status: 202 }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await syncStoryKnowledgeWithAI(12, { mode: 'full', scope: 'facts' });
+
+    expect(fetchMock).toHaveBeenCalledWith('/api/stories/12/knowledge/ai-sync', expect.objectContaining({
+      method: 'POST',
+      body: JSON.stringify({ mode: 'full', scope: 'facts' }),
+    }));
+  });
+});
+
+describe('章节正文后台任务 API', () => {
+  beforeEach(() => {
+    const store = new Map<string, string>();
+    vi.stubGlobal('localStorage', {
+      getItem: vi.fn((key: string) => store.get(key) ?? null),
+      setItem: vi.fn((key: string, value: string) => { store.set(key, value); }),
+      removeItem: vi.fn((key: string) => { store.delete(key); }),
+    });
+  });
+
+  it('生成正文时提交任务、查询状态并读取最终章节', async () => {
+    const chapter = { id: 23, story_id: 12, chapter_number: 5, title: '灰市追查' };
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ task_id: 'chapter_gen_23_test', status: 'pending', chapter_id: 23, message: '已提交' }), { status: 202 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ task_id: 'chapter_gen_23_test', task_type: 'chapter_generation', status: 'succeeded', result_json: { chapter_id: 23 } }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(chapter), { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(generateNovel(23)).resolves.toEqual(chapter);
+    expect(fetchMock).toHaveBeenNthCalledWith(1, '/api/chapters/23/generation-task', expect.objectContaining({
+      method: 'POST',
+      body: JSON.stringify({ action: 'generate_novel' }),
+    }));
+    expect(fetchMock).toHaveBeenNthCalledWith(2, '/api/tasks/chapter_gen_23_test', expect.any(Object));
+    expect(fetchMock).toHaveBeenNthCalledWith(3, '/api/chapters/23', expect.any(Object));
+    expect(localStorage.setItem).toHaveBeenCalledWith(
+      'storycanvas.chapterGenerationTasks',
+      expect.stringContaining('chapter_gen_23_test'),
+    );
+  });
+
+  it('刷新后再次生成优先恢复本地记录的活动任务', async () => {
+    localStorage.setItem('storycanvas.chapterGenerationTasks', JSON.stringify({
+      23: { task_id: 'chapter_gen_23_saved', chapter_id: 23, action: 'generate_novel', updated_at: Date.now() },
+    }));
+    const chapter = { id: 23, story_id: 12, chapter_number: 5, title: '灰市追查' };
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ task_id: 'chapter_gen_23_saved', task_type: 'chapter_generation', status: 'succeeded', result_json: { chapter_id: 23 } }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(chapter), { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(generateNovel(23)).resolves.toEqual(chapter);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock).not.toHaveBeenCalledWith('/api/chapters/23/generation-task', expect.any(Object));
+    expect(localStorage.removeItem).not.toHaveBeenCalled();
+    expect(localStorage.setItem).toHaveBeenLastCalledWith('storycanvas.chapterGenerationTasks', '{}');
+  });
+
+  it('轮询遇到临时网络错误后继续等待后台任务', async () => {
+    vi.useFakeTimers();
+    const chapter = { id: 23, story_id: 12, chapter_number: 5, title: '灰市追查' };
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ task_id: 'chapter_gen_23_retry', status: 'pending', chapter_id: 23, message: '已提交' }), { status: 202 }))
+      .mockRejectedValueOnce(new TypeError('Failed to fetch'))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ task_id: 'chapter_gen_23_retry', task_type: 'chapter_generation', status: 'succeeded', result_json: { chapter_id: 23 } }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(chapter), { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const promise = generateNovel(23);
+    await vi.advanceTimersByTimeAsync(2000);
+    await expect(promise).resolves.toEqual(chapter);
+    vi.useRealTimers();
+  });
+
+  it('框架扩写和整章调整提交对应的后台任务动作', async () => {
+    const chapter = { id: 23, story_id: 12, chapter_number: 5, title: '灰市追查' };
+    const responses = [
+      { task_id: 'expand', status: 'pending', chapter_id: 23, message: '已提交' },
+      { task_id: 'expand', task_type: 'chapter_generation', status: 'succeeded', result_json: { chapter_id: 23 } },
+      chapter,
+      { task_id: 'adjust', status: 'pending', chapter_id: 23, message: '已提交' },
+      { task_id: 'adjust', task_type: 'chapter_generation', status: 'succeeded', result_json: { chapter_id: 23 } },
+      chapter,
+    ];
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify(responses.shift()), { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expandChapter(12, { act: '第一幕', chapter_number: 5, chapter_title: '灰市追查' });
+    await adjustChapterContent(23, '加强冲突');
+
+    expect(fetchMock).toHaveBeenNthCalledWith(1, '/api/stories/12/expand-chapter/task', expect.objectContaining({ method: 'POST' }));
+    expect(fetchMock).toHaveBeenNthCalledWith(4, '/api/chapters/23/generation-task', expect.objectContaining({
+      method: 'POST',
+      body: JSON.stringify({ action: 'adjust_content', instruction: '加强冲突' }),
+    }));
   });
 });
 
@@ -367,6 +533,30 @@ describe('AI 渠道 API', () => {
 });
 
 describe('manga asset analysis API', () => {
+  it('分镜生成在绑定模板时携带预设 ID，未绑定时保持无请求体', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ scenes: [] }), { status: 200 })));
+
+    await generateScenes(12, undefined, 7);
+    await generateScenes(12);
+
+    expect(fetch).toHaveBeenNthCalledWith(
+      1,
+      '/api/chapters/12/generate-scenes',
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({ preset_id: 7 }),
+      }),
+    );
+    expect(fetch).toHaveBeenNthCalledWith(
+      2,
+      '/api/chapters/12/generate-scenes',
+      expect.objectContaining({
+        method: 'POST',
+        body: undefined,
+      }),
+    );
+  });
+
   it('漫画 SSE 空响应体会返回中文错误终态', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => new Response(null, { status: 200 })));
     const onEvent = vi.fn();

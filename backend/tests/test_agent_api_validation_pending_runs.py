@@ -13,10 +13,12 @@ from routers import agent_router
 from schemas import AgentChatIn, AgentConversationCreateIn
 
 
-@pytest.mark.parametrize("mode", ["invalid", "EXECUTE", "", None, 1])
-def test_agent_chat_rejects_invalid_mode(mode):
-    with pytest.raises(ValidationError):
-        AgentChatIn(conversation_id=1, message="测试", mode=mode)
+@pytest.mark.parametrize("mode", ["chat", "analyze", "execute", "invalid", None, 1])
+def test_agent_chat_discards_legacy_mode(mode):
+    body = AgentChatIn(conversation_id=1, message="测试", mode=mode)
+
+    assert "mode" not in body.model_dump()
+    assert not hasattr(body, "mode")
 
 
 @pytest.mark.parametrize("workflow_type", ["comic", "VIDEO", "", 1])
@@ -34,10 +36,10 @@ def test_agent_chat_rejects_unknown_enabled_skill():
         )
 
 
-def test_agent_chat_defaults_to_read_only_analyze_mode():
+def test_agent_chat_uses_single_agent_input_contract():
     body = AgentChatIn(conversation_id=1, message="请分析当前内容")
 
-    assert body.mode == "analyze"
+    assert "mode" not in body.model_dump()
 
 
 def test_agent_response_settlement_prefers_complete_streamed_content():

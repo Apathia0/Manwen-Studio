@@ -9,7 +9,6 @@ import {
   listAgentConversations,
   uploadAgentAttachments,
   type AgentConversationSummary,
-  type AgentMode,
   type AgentWorkflowType,
 } from '../../api';
 import AgentMessage from './AgentMessage';
@@ -120,7 +119,6 @@ export default function AgentPanel({
 }: AgentPanelProps) {
   const [input, setInput] = useState('');
   const [attachments, setAttachments] = useState<File[]>([]);
-  const [agentMode, setAgentMode] = useState<AgentMode>('analyze');
   const [messages, setMessages] = useState<AgentMessageData[]>([]);
   const [streaming, setStreaming] = useState(false);
   const [streamContent, setStreamContent] = useState('');
@@ -396,7 +394,7 @@ export default function AgentPanel({
       let accumulated = '';
       const toolCallMap = new Map<string, ToolCallInfo>();
 
-      abortRef.current = agentChatStream(storyId, conversationId, content, chapterId, agentMode, workflowType, workflowId, shotId, undefined, attachmentIds, {
+      abortRef.current = agentChatStream(storyId, conversationId, content, chapterId, workflowType, workflowId, shotId, undefined, attachmentIds, {
         onToken: (token: string) => {
           accumulated += token;
           setStreamContent(accumulated);
@@ -477,7 +475,7 @@ export default function AgentPanel({
         },
       });
     },
-    [activeConversationId, agentMode, attachments, chapterId, generateId, input, onContentUpdated, storyId, streaming, syncAfterStream, workflowType, workflowId, shotId],
+    [activeConversationId, attachments, chapterId, generateId, input, onContentUpdated, storyId, streaming, syncAfterStream, workflowType, workflowId, shotId],
   );
 
   const handleAbort = useCallback(() => {
@@ -720,8 +718,6 @@ export default function AgentPanel({
               onSend={() => void handleSend()}
               attachments={attachments}
               onAttachmentsChange={setAttachments}
-              mode={agentMode}
-              onModeChange={setAgentMode}
               disabled={loadingMessages}
               placeholder="输入你的问题，AI 助手会保留在当前历史会话里"
             />

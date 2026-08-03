@@ -31,6 +31,7 @@ const LS_VIDEO_MODEL = 'storycanvas.videoModel';
 const LS_AUTH_TOKEN = 'storycanvas.authToken';
 const LS_AUTH_USER_ID = 'storycanvas.authUserId';
 const LS_CREDENTIAL_MODE = 'storycanvas_credential_mode';
+const LS_CHAPTER_GENERATION_TASKS = 'storycanvas.chapterGenerationTasks';
 const LEGACY_API_SETTING_KEYS = [
   LS_DEEPSEEK_API_KEY,
   LS_UPSTREAM_BASE_URL,
@@ -521,6 +522,118 @@ export interface Story {
   created_at: string;
 }
 
+export type StoryKnowledgeKind = 'resource' | 'entity' | 'fact' | 'plot_thread';
+
+export interface StoryKnowledgeCategory {
+  id: number;
+  story_id: number;
+  knowledge_kind: StoryKnowledgeKind;
+  name: string;
+  color?: string | null;
+  sort_order?: number | null;
+  version?: number | null;
+}
+
+export interface StoryKnowledgeItem {
+  id: number;
+  story_id: number;
+  kind: StoryKnowledgeKind;
+  category_id?: number | null;
+  category_name?: string | null;
+  resource_type?: string | null;
+  resource_key?: string | null;
+  title?: string | null;
+  summary?: string | null;
+  content_json?: unknown;
+  content_text?: string | null;
+  importance?: number | null;
+  valid_from_chapter?: number | null;
+  valid_to_chapter?: number | null;
+  status?: string | null;
+  source_type?: string | null;
+  source_id?: string | null;
+  version?: number | null;
+  entity_key?: string | null;
+  entity_type?: string | null;
+  canonical_name?: string | null;
+  aliases_json?: string[] | null;
+  profile_json?: Record<string, unknown> | null;
+  first_chapter?: number | null;
+  last_chapter?: number | null;
+  subject_key?: string | null;
+  predicate?: string | null;
+  object_key?: string | null;
+  value_json?: unknown;
+  value_text?: string | null;
+  confidence?: number | null;
+  thread_key?: string | null;
+  thread_type?: string | null;
+  description?: string | null;
+  setup_chapter?: number | null;
+  expected_payoff_from?: number | null;
+  expected_payoff_to?: number | null;
+  actual_payoff_chapter?: number | null;
+  related_entity_keys?: string[] | null;
+  priority?: number | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+}
+
+export type StoryKnowledgeMutation = Partial<Omit<StoryKnowledgeItem, 'id' | 'story_id' | 'kind' | 'created_at' | 'updated_at' | 'source_type' | 'version'>> & {
+  expected_version?: number;
+};
+
+export interface StoryKnowledgeResponse {
+  story_id: number;
+  knowledge_revision: number;
+  story_bible?: StoryBible;
+  categories?: StoryKnowledgeCategory[];
+  counts?: Partial<Record<StoryKnowledgeKind | 'story_bible', number>>;
+  resources: StoryKnowledgeItem[];
+  entities: StoryKnowledgeItem[];
+  facts: StoryKnowledgeItem[];
+  plot_threads: StoryKnowledgeItem[];
+  ai_sync_status?: BackgroundTaskStatus | null;
+  next_unwritten_chapter_number?: number;
+}
+
+export interface ChapterContextPack {
+  schema_version: number;
+  story_id: number;
+  chapter_id: number;
+  chapter_number: number;
+  chapter_title?: string;
+  content: string;
+  version: number;
+  content_hash: string;
+  source_hash?: string | null;
+  current_source_hash?: string | null;
+  is_manual: boolean;
+  is_stale: boolean;
+  updated_at?: string | null;
+  refresh_task?: BackgroundTaskStatus | null;
+}
+
+export interface ChapterContextSummary {
+  chapter_id: number | null;
+  chapter_number: number;
+  title: string;
+  has_pack: boolean;
+  has_novel: boolean;
+  is_manual: boolean;
+  is_current: boolean;
+  version: number;
+  pack_updated_at?: string | null;
+  word_count: number;
+  refresh_task?: BackgroundTaskStatus | null;
+}
+
+export interface ChapterContextListResponse {
+  story_id: number;
+  next_unwritten_chapter_number: number;
+  chapters: ChapterContextSummary[];
+}
+
 export interface AdminReviewStory {
   id: number;
   title: string;
@@ -587,8 +700,6 @@ export interface AgentConversation {
   updated_at: string;
   messages: AgentConversationMessage[];
 }
-
-export type AgentMode = 'chat' | 'analyze' | 'execute';
 
 export type AgentWorkflowType = 'novel' | 'manga' | 'video';
 
@@ -1334,6 +1445,161 @@ export async function deleteStory(storyId: number): Promise<void> {
   if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
 }
 
+export async function getStoryKnowledge(storyId: number): Promise<StoryKnowledgeResponse> {
+  const res = await fetch(`${BASE}/api/stories/${storyId}/knowledge`, { headers: apiHeaders() });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '加载作品知识失败'));
+  return res.json();
+}
+
+export async function getStoryChapterContexts(storyId: number): Promise<ChapterContextListResponse> {
+  const res = await fetch(`${BASE}/api/stories/${storyId}/knowledge/chapter-contexts`, { headers: apiHeaders() });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '加载章节创作包列表失败'));
+  return res.json();
+}
+
+export async function getStoryChapterContext(storyId: number, chapterNumber?: number): Promise<ChapterContextPack> {
+  const params = new URLSearchParams();
+  if (chapterNumber != null) params.set('chapter_number', String(chapterNumber));
+  const suffix = params.size > 0 ? `?${params}` : '';
+  const res = await fetch(`${BASE}/api/stories/${storyId}/knowledge/chapter-context${suffix}`, { headers: apiHeaders() });
+  if (!res.ok) {
+    const message = await readErrorMessage(res, '加载本章创作包失败');
+    const error = new Error(message) as Error & { status?: number };
+    error.status = res.status;
+    throw error;
+  }
+  return res.json();
+}
+
+export async function updateStoryChapterContext(storyId: number, chapterNumber: number, content: string, expectedVersion: number): Promise<ChapterContextPack> {
+  const params = new URLSearchParams({ chapter_number: String(chapterNumber) });
+  const res = await fetch(`${BASE}/api/stories/${storyId}/knowledge/chapter-context?${params}`, {
+    method: 'PUT',
+    headers: apiHeaders(true),
+    body: JSON.stringify({ content, expected_version: expectedVersion }),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '保存本章创作包失败'));
+  return res.json();
+}
+
+export async function regenerateStoryChapterContext(storyId: number, chapterNumber: number, expectedVersion: number): Promise<KnowledgeTaskSubmitResult> {
+  const params = new URLSearchParams({ chapter_number: String(chapterNumber), expected_version: String(expectedVersion) });
+  const res = await fetch(`${BASE}/api/stories/${storyId}/knowledge/chapter-context/regenerate?${params}`, {
+    method: 'POST',
+    headers: apiHeaders(true),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '重新提取本章创作包失败'));
+  return res.json();
+}
+
+export type StoryKnowledgeSyncScope = 'all' | 'entities' | 'facts' | 'plot_threads';
+export type StoryKnowledgeSyncMode = 'incremental' | 'full';
+
+export interface KnowledgeTaskSubmitResult {
+  task_id: string;
+  status: string;
+  message: string;
+  scope?: StoryKnowledgeSyncScope;
+  mode?: StoryKnowledgeSyncMode;
+}
+
+export async function syncStoryKnowledgeWithAI(
+  storyId: number,
+  options: { mode?: StoryKnowledgeSyncMode; scope?: StoryKnowledgeSyncScope } = {},
+): Promise<KnowledgeTaskSubmitResult> {
+  const res = await fetch(`${BASE}/api/stories/${storyId}/knowledge/ai-sync`, {
+    method: 'POST',
+    headers: apiHeaders(true),
+    body: JSON.stringify({ mode: options.mode || 'incremental', scope: options.scope || 'all' }),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '提交 AI 同步任务失败'));
+  return res.json();
+}
+
+export async function createStoryKnowledge(
+  storyId: number,
+  kind: StoryKnowledgeKind,
+  payload: StoryKnowledgeMutation,
+): Promise<{ item: StoryKnowledgeItem; knowledge_revision: number }> {
+  const res = await fetch(`${BASE}/api/stories/${storyId}/knowledge/${kind}`, {
+    method: 'POST',
+    headers: apiHeaders(true),
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '新增作品知识失败'));
+  return res.json();
+}
+
+export async function updateStoryKnowledge(
+  storyId: number,
+  kind: StoryKnowledgeKind,
+  itemId: number,
+  payload: StoryKnowledgeMutation,
+): Promise<{ item: StoryKnowledgeItem; knowledge_revision: number }> {
+  const res = await fetch(`${BASE}/api/stories/${storyId}/knowledge/${kind}/${itemId}`, {
+    method: 'PUT',
+    headers: apiHeaders(true),
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '更新作品知识失败'));
+  return res.json();
+}
+
+export async function deleteStoryKnowledge(
+  storyId: number,
+  kind: StoryKnowledgeKind,
+  itemId: number,
+  expectedVersion: number,
+): Promise<{ ok: boolean; knowledge_revision: number }> {
+  const res = await fetch(`${BASE}/api/stories/${storyId}/knowledge/${kind}/${itemId}?expected_version=${expectedVersion}`, {
+    method: 'DELETE',
+    headers: apiHeaders(),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '删除作品知识失败'));
+  return res.json();
+}
+
+export async function createStoryKnowledgeCategory(
+  storyId: number,
+  payload: Pick<StoryKnowledgeCategory, 'knowledge_kind' | 'name'> & Partial<Pick<StoryKnowledgeCategory, 'color' | 'sort_order'>>,
+): Promise<{ category: StoryKnowledgeCategory; knowledge_revision?: number }> {
+  const { knowledge_kind: knowledgeKind, ...body } = payload;
+  const res = await fetch(`${BASE}/api/stories/${storyId}/knowledge/categories/${knowledgeKind}`, {
+    method: 'POST',
+    headers: apiHeaders(true),
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '新增知识分类失败'));
+  return res.json();
+}
+
+export async function updateStoryKnowledgeCategory(
+  storyId: number,
+  categoryId: number,
+  payload: Partial<Pick<StoryKnowledgeCategory, 'name' | 'color' | 'sort_order'>> & { expected_version?: number },
+): Promise<{ category: StoryKnowledgeCategory; knowledge_revision?: number }> {
+  const res = await fetch(`${BASE}/api/stories/${storyId}/knowledge/categories/${categoryId}`, {
+    method: 'PUT',
+    headers: apiHeaders(true),
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '更新知识分类失败'));
+  return res.json();
+}
+
+export async function deleteStoryKnowledgeCategory(
+  storyId: number,
+  categoryId: number,
+  expectedVersion: number,
+): Promise<{ ok: boolean; knowledge_revision?: number }> {
+  const res = await fetch(`${BASE}/api/stories/${storyId}/knowledge/categories/${categoryId}?expected_version=${expectedVersion}`, {
+    method: 'DELETE',
+    headers: apiHeaders(),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '删除知识分类失败'));
+  return res.json();
+}
+
 export async function uploadStoryCover(storyId: number, base64: string): Promise<string> {
   const res = await fetch(`${BASE}/api/stories/${storyId}/upload-cover`, {
     method: 'POST',
@@ -1515,13 +1781,152 @@ export function chatStream(
 
 // ─── Generate Novel ─────────────────────────────────────────
 
+export interface ChapterGenerationTaskSubmitResult {
+  task_id: string;
+  status: string;
+  chapter_id: number;
+  message: string;
+}
+
+type ChapterGenerationAction = 'generate_novel' | 'adjust_content' | 'expand_chapter';
+
+interface TrackedChapterGenerationTask {
+  task_id: string;
+  chapter_id: number;
+  action: ChapterGenerationAction;
+  updated_at: number;
+}
+
+function readTrackedChapterGenerationTasks(): Record<string, TrackedChapterGenerationTask> {
+  try {
+    const raw = localStorage.getItem(LS_CHAPTER_GENERATION_TASKS);
+    const parsed = raw ? JSON.parse(raw) : {};
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeTrackedChapterGenerationTasks(tasks: Record<string, TrackedChapterGenerationTask>): void {
+  try {
+    localStorage.setItem(LS_CHAPTER_GENERATION_TASKS, JSON.stringify(tasks));
+  } catch {
+    // localStorage 不可用时仅影响刷新恢复，当前轮询仍继续。
+  }
+}
+
+function trackChapterGenerationTask(task: ChapterGenerationTaskSubmitResult, action: ChapterGenerationAction): void {
+  const tasks = readTrackedChapterGenerationTasks();
+  tasks[String(task.chapter_id)] = {
+    task_id: task.task_id,
+    chapter_id: task.chapter_id,
+    action,
+    updated_at: Date.now(),
+  };
+  writeTrackedChapterGenerationTasks(tasks);
+}
+
+function clearTrackedChapterGenerationTask(chapterId: number, taskId?: string): void {
+  const tasks = readTrackedChapterGenerationTasks();
+  const key = String(chapterId);
+  if (!tasks[key]) return;
+  if (taskId && tasks[key].task_id !== taskId) return;
+  delete tasks[key];
+  writeTrackedChapterGenerationTasks(tasks);
+}
+
+function isActiveChapterGenerationStatus(status: string): boolean {
+  return ['pending', 'running', 'retrying', 'cancel_requested'].includes(status);
+}
+
+function isTransientTaskPollingError(error: unknown): boolean {
+  const status = typeof error === 'object' && error !== null && 'status' in error
+    ? Number((error as { status?: number }).status)
+    : 0;
+  if (status === 408 || status === 429 || status >= 500) return true;
+  const message = normalizeErrorMessage(error, '');
+  return /网络|连接|超时|暂时|稍后|Failed to fetch|NetworkError/i.test(message);
+}
+
+async function restoreTrackedChapterGeneration(chapterId: number): Promise<Chapter | null> {
+  const tracked = readTrackedChapterGenerationTasks()[String(chapterId)];
+  if (!tracked?.task_id) return null;
+  try {
+    const status = await getBackgroundTaskStatus(tracked.task_id);
+    if (status.status === 'succeeded') {
+      clearTrackedChapterGenerationTask(chapterId, tracked.task_id);
+      const resultChapterId = Number(status.result_json?.chapter_id || tracked.chapter_id || chapterId);
+      return getChapter(resultChapterId);
+    }
+    if (status.status === 'failed' || status.status === 'cancelled') {
+      clearTrackedChapterGenerationTask(chapterId, tracked.task_id);
+      return null;
+    }
+    if (isActiveChapterGenerationStatus(status.status)) {
+      return waitForChapterGeneration({
+        task_id: tracked.task_id,
+        status: status.status,
+        chapter_id: tracked.chapter_id || chapterId,
+        message: status.message || '正在恢复章节正文生成任务',
+      }, tracked.action);
+    }
+    clearTrackedChapterGenerationTask(chapterId, tracked.task_id);
+    return null;
+  } catch (error) {
+    if (isTransientTaskPollingError(error)) {
+      return waitForChapterGeneration({
+        task_id: tracked.task_id,
+        status: 'running',
+        chapter_id: tracked.chapter_id || chapterId,
+        message: '正在恢复章节正文生成任务',
+      }, tracked.action);
+    }
+    clearTrackedChapterGenerationTask(chapterId, tracked.task_id);
+    return null;
+  }
+}
+
+async function waitForChapterGeneration(
+  task: ChapterGenerationTaskSubmitResult,
+  action: ChapterGenerationAction = 'generate_novel',
+): Promise<Chapter> {
+  const deadline = Date.now() + 15 * 60 * 1000;
+  trackChapterGenerationTask(task, action);
+  while (Date.now() < deadline) {
+    let status: BackgroundTaskStatus;
+    try {
+      status = await getBackgroundTaskStatus(task.task_id);
+    } catch (error) {
+      if (isTransientTaskPollingError(error)) {
+        await new Promise((resolve) => globalThis.setTimeout(resolve, 2000));
+        continue;
+      }
+      throw error;
+    }
+    if (status.status === 'succeeded') {
+      const resultChapterId = Number(status.result_json?.chapter_id || task.chapter_id);
+      clearTrackedChapterGenerationTask(task.chapter_id, task.task_id);
+      return getChapter(resultChapterId);
+    }
+    if (status.status === 'failed' || status.status === 'cancelled') {
+      clearTrackedChapterGenerationTask(task.chapter_id, task.task_id);
+      throw new Error(status.error_message || status.message || '章节正文生成失败');
+    }
+    await new Promise((resolve) => globalThis.setTimeout(resolve, 1200));
+  }
+  throw new Error(`章节正文生成等待超时，任务 ${task.task_id} 仍在后台运行；后续再次调用会优先恢复该任务`);
+}
+
 export async function generateNovel(chapterId: number): Promise<Chapter> {
-  const res = await fetch(`${BASE}/api/chapters/${chapterId}/generate-novel`, {
+  const restored = await restoreTrackedChapterGeneration(chapterId);
+  if (restored) return restored;
+  const res = await fetch(`${BASE}/api/chapters/${chapterId}/generation-task`, {
     method: 'POST',
-    headers: apiHeaders(),
+    headers: apiHeaders(true),
+    body: JSON.stringify({ action: 'generate_novel' }),
   });
   if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
-  return res.json();
+  return waitForChapterGeneration(await res.json(), 'generate_novel');
 }
 
 export async function importNovel(chapterId: number, content: string): Promise<Chapter> {
@@ -1545,13 +1950,15 @@ export async function saveChapterContent(chapterId: number, content: string): Pr
 }
 
 export async function adjustChapterContent(chapterId: number, instruction: string): Promise<Chapter> {
-  const res = await fetch(`${BASE}/api/chapters/${chapterId}/adjust-content`, {
+  const restored = await restoreTrackedChapterGeneration(chapterId);
+  if (restored) return restored;
+  const res = await fetch(`${BASE}/api/chapters/${chapterId}/generation-task`, {
     method: 'POST',
     headers: apiHeaders(true),
-    body: JSON.stringify({ instruction }),
+    body: JSON.stringify({ action: 'adjust_content', instruction }),
   });
   if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
-  return res.json();
+  return waitForChapterGeneration(await res.json(), 'adjust_content');
 }
 
 export async function saveContinuityMemory(
@@ -1592,8 +1999,14 @@ export interface MangaStoryboardImportResult {
   can_commit: boolean;
 }
 
-export async function generateScenes(chapterId: number, signal?: AbortSignal): Promise<ScenesPayload> {
-  const res = await fetch(`${BASE}/api/chapters/${chapterId}/generate-scenes`, { method: 'POST', headers: apiHeaders(), signal });
+export async function generateScenes(chapterId: number, signal?: AbortSignal, presetId?: number): Promise<ScenesPayload> {
+  const hasPreset = presetId != null;
+  const res = await fetch(`${BASE}/api/chapters/${chapterId}/generate-scenes`, {
+    method: 'POST',
+    headers: apiHeaders(hasPreset),
+    body: hasPreset ? JSON.stringify({ preset_id: presetId }) : undefined,
+    signal,
+  });
   if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   return res.json();
 }
@@ -2235,11 +2648,11 @@ export async function getStoryBible(storyId: number): Promise<{ story_bible: Sto
   return res.json();
 }
 
-export async function updateStoryBible(storyId: number, storyBible: Partial<StoryBible>): Promise<{ story_bible: StoryBible }> {
+export async function updateStoryBible(storyId: number, storyBible: Partial<StoryBible>, expectedKnowledgeRevision?: number): Promise<{ story_bible: StoryBible; knowledge_revision?: number }> {
   const res = await fetch(`${BASE}/api/stories/${storyId}/story-bible`, {
     method: 'PATCH',
     headers: apiHeaders(true),
-    body: JSON.stringify({ story_bible: storyBible }),
+    body: JSON.stringify({ story_bible: storyBible, expected_knowledge_revision: expectedKnowledgeRevision }),
   });
   if (!res.ok) throw new Error(await readErrorMessage(res, '更新作品圣经失败'));
   return res.json();
@@ -2423,13 +2836,13 @@ export async function expandChapter(
     highlight?: string;
   },
 ): Promise<Chapter> {
-  const res = await fetch(`${BASE}/api/stories/${storyId}/expand-chapter`, {
+  const res = await fetch(`${BASE}/api/stories/${storyId}/expand-chapter/task`, {
     method: 'POST',
     headers: apiHeaders(true),
     body: JSON.stringify(data),
   });
   if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
-  return res.json();
+  return waitForChapterGeneration(await res.json(), 'expand_chapter');
 }
 
 export async function rewriteSelection(
@@ -2459,7 +2872,7 @@ export async function assessQuality(chapterId: number): Promise<QualityScore> {
 
 export async function scenesFromSelection(
   chapterId: number,
-  data: { selected_text: string; character_profiles?: any[]; page_count?: number },
+  data: { selected_text: string; character_profiles?: any[]; page_count?: number; preset_id?: number },
 ): Promise<ScenesPayload & { page_count?: number }> {
   const res = await fetch(`${BASE}/api/chapters/${chapterId}/scenes-from-selection`, {
     method: 'POST',
@@ -2477,12 +2890,23 @@ export function mangaImageUrl(imagePath: string, cacheBust?: number): string {
   return `${url}${separator}v=${encodeURIComponent(String(cacheBust))}`;
 }
 
+/**
+ * 通过后端代理下载指定章节的全部漫画图片（ZIP 打包）。
+ * 后端从 OSS 拉取图片，规避浏览器跨域 CORS 限制。
+ */
+export async function downloadChapterMangaZip(chapterId: number): Promise<Blob> {
+  const res = await fetch(`${BASE}/api/chapters/${chapterId}/manga-images/zip`, {
+    headers: apiHeaders(true),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '漫画图片打包下载失败'));
+  return res.blob();
+}
+
 export function agentChatStream(
   storyId: number,
   conversationId: number,
   content: string,
   chapterId?: number,
-  mode: AgentMode = 'analyze',
   workflowType?: string,
   workflowId?: number,
   shotId?: number,
@@ -2502,7 +2926,7 @@ export function agentChatStream(
   fetch(`${BASE}/api/stories/${storyId}/agent/chat`, {
     method: 'POST',
     headers: apiHeaders(true),
-    body: JSON.stringify({ conversation_id: conversationId, message: content, chapter_id: chapterId, mode, workflow_type: workflowType, workflow_id: workflowId, shot_id: shotId, enabled_skills: enabledSkills, attachment_ids: attachmentIds }),
+    body: JSON.stringify({ conversation_id: conversationId, message: content, chapter_id: chapterId, workflow_type: workflowType, workflow_id: workflowId, shot_id: shotId, enabled_skills: enabledSkills, attachment_ids: attachmentIds }),
     signal: controller.signal,
   })
     .then(async (res) => {
@@ -3600,6 +4024,23 @@ export interface BackgroundTaskStatus {
   error_message?: string | null;
   result_json?: {
     status?: string;
+    message?: string;
+    story_id?: number;
+    chapter_id?: number;
+    chapter_number?: number;
+    version?: number;
+    content_hash?: string;
+    sync_mode?: StoryKnowledgeSyncMode;
+    sync_scope?: StoryKnowledgeSyncScope;
+    changed_sources?: number;
+    successful_sources?: number;
+    failed_sources?: number;
+    counts?: {
+      entities?: number;
+      facts?: number;
+      plot_threads?: number;
+      archived_facts?: number;
+    };
     total?: number;
     completed?: number;
     failed?: number;
@@ -3628,7 +4069,11 @@ export async function generateMangaAssetsBatch(
 
 export async function getBackgroundTaskStatus(taskId: string): Promise<BackgroundTaskStatus> {
   const res = await fetch(`${BASE}/api/tasks/${encodeURIComponent(taskId)}`, { headers: apiHeaders() });
-  if (!res.ok) throw new Error(await readErrorMessage(res, '查询后台任务状态失败'));
+  if (!res.ok) {
+    const error = new Error(await readErrorMessage(res, '查询后台任务状态失败')) as Error & { status?: number };
+    error.status = res.status;
+    throw error;
+  }
   return res.json();
 }
 
@@ -4005,6 +4450,98 @@ export interface VideoStylePreset {
   image_style_params?: Record<string, unknown> | null;
   video_style_params?: Record<string, unknown> | null;
   sort_order: number;
+}
+
+export interface StoryboardPromptPreset {
+  id: number;
+  preset_key: string | null;
+  name: string;
+  description: string | null;
+  prompt_template: string;
+  system_prompt: string | null;
+  is_system: boolean;
+  story_id: number | null;
+  author_user_id: number | null;
+  scope: 'system' | 'user';
+  is_owner: boolean;
+  sort_order: number;
+}
+
+export async function listStoryboardPresets(storyId: number): Promise<{ presets: StoryboardPromptPreset[] }> {
+  const res = await fetch(`${BASE}/api/storyboard-presets?story_id=${storyId}`, {
+    headers: apiHeaders(),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
+  return res.json();
+}
+
+export async function createStoryboardPreset(data: {
+  name: string;
+  description?: string;
+  prompt_template: string;
+  system_prompt?: string;
+  story_id: number;
+}): Promise<StoryboardPromptPreset> {
+  const res = await fetch(`${BASE}/api/storyboard-presets`, {
+    method: 'POST',
+    headers: apiHeaders(true),
+    body: JSON.stringify(data),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
+  return res.json();
+}
+
+export async function updateStoryboardPreset(
+  presetId: number,
+  data: Partial<{ name: string; description: string; prompt_template: string; system_prompt: string }>,
+): Promise<StoryboardPromptPreset> {
+  const res = await fetch(`${BASE}/api/storyboard-presets/${presetId}`, {
+    method: 'PUT',
+    headers: apiHeaders(true),
+    body: JSON.stringify(data),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
+  return res.json();
+}
+
+export async function deleteStoryboardPreset(presetId: number): Promise<{ ok: boolean }> {
+  const res = await fetch(`${BASE}/api/storyboard-presets/${presetId}`, {
+    method: 'DELETE',
+    headers: apiHeaders(),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
+  return res.json();
+}
+
+export async function duplicateStoryboardPreset(presetId: number, storyId: number): Promise<StoryboardPromptPreset> {
+  const res = await fetch(`${BASE}/api/storyboard-presets/${presetId}/duplicate`, {
+    method: 'POST',
+    headers: apiHeaders(true),
+    body: JSON.stringify({ story_id: storyId }),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
+  return res.json();
+}
+
+export async function getStoryStoryboardPreset(storyId: number): Promise<{ preset_id: number | null; preset: StoryboardPromptPreset | null }> {
+  const res = await fetch(`${BASE}/api/stories/${storyId}/storyboard-preset`, {
+    headers: apiHeaders(),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
+  return res.json();
+}
+
+export async function setStoryStoryboardPreset(
+  storyId: number,
+  presetId: number | null,
+): Promise<{ preset_id: number | null; preset: StoryboardPromptPreset | null }> {
+  const res = await fetch(`${BASE}/api/stories/${storyId}/storyboard-preset`, {
+    method: 'PUT',
+    headers: apiHeaders(true),
+    body: JSON.stringify({ preset_id: presetId }),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
+  return res.json();
 }
 
 export async function getStoryVideoStylePreset(storyId: number): Promise<{ story_id: number; style_preset_id: number | null; style_preset: VideoStylePreset | null }> {
