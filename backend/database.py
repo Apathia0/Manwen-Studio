@@ -783,34 +783,48 @@ def _migrate_story_knowledge_tables(target_engine=None) -> None:
                 "SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_trgm')"
             )).scalar()
             if has_pg_trgm:
-                conn.execute(text(
-                    "CREATE INDEX IF NOT EXISTS ix_story_knowledge_entity_search_trgm "
-                    "ON story_knowledge_entities USING gin (canonical_name gin_trgm_ops)"
-                ))
-                conn.execute(text(
-                    "CREATE INDEX IF NOT EXISTS ix_story_knowledge_fact_search_trgm "
-                    "ON story_knowledge_facts USING gin (value_text gin_trgm_ops)"
-                ))
-                conn.execute(text(
-                    "CREATE INDEX IF NOT EXISTS ix_story_plot_thread_search_trgm "
-                    "ON story_plot_threads USING gin (title gin_trgm_ops)"
-                ))
-                conn.execute(text(
-                    "CREATE INDEX IF NOT EXISTS ix_story_plot_thread_description_trgm "
-                    "ON story_plot_threads USING gin (description gin_trgm_ops)"
-                ))
-                conn.execute(text(
-                    "CREATE INDEX IF NOT EXISTS ix_story_knowledge_resource_search_trgm "
-                    "ON story_knowledge_resources USING gin (title gin_trgm_ops)"
-                ))
-                conn.execute(text(
-                    "CREATE INDEX IF NOT EXISTS ix_story_knowledge_resource_summary_trgm "
-                    "ON story_knowledge_resources USING gin (summary gin_trgm_ops)"
-                ))
-                conn.execute(text(
-                    "CREATE INDEX IF NOT EXISTS ix_story_knowledge_resource_content_trgm "
-                    "ON story_knowledge_resources USING gin (content_text gin_trgm_ops)"
-                ))
+                # gin_trgm_ops 操作符类可能位于非默认 schema（如扩展安装在 public 而当前
+                # search_path 仅指向私有 schema），动态解析其实际 schema 并用限定名创建索引，
+                # 避免 "operator class gin_trgm_ops does not exist" 的解析错误。
+                trgm_opclass_schema = conn.execute(text(
+                    "SELECT n.nspname FROM pg_opclass oc "
+                    "JOIN pg_namespace n ON n.oid = oc.opcnamespace "
+                    "WHERE oc.opcname = 'gin_trgm_ops' "
+                    "ORDER BY (n.nspname = 'public') DESC, n.nspname "
+                    "LIMIT 1"
+                )).scalar()
+                if not trgm_opclass_schema:
+                    logger.warning("pg_trgm 已启用但找不到 gin_trgm_ops 操作符类，跳过模糊检索索引")
+                else:
+                    quoted_ops = f'"{trgm_opclass_schema}".gin_trgm_ops'
+                    conn.execute(text(
+                        "CREATE INDEX IF NOT EXISTS ix_story_knowledge_entity_search_trgm "
+                        f"ON story_knowledge_entities USING gin (canonical_name {quoted_ops})"
+                    ))
+                    conn.execute(text(
+                        "CREATE INDEX IF NOT EXISTS ix_story_knowledge_fact_search_trgm "
+                        f"ON story_knowledge_facts USING gin (value_text {quoted_ops})"
+                    ))
+                    conn.execute(text(
+                        "CREATE INDEX IF NOT EXISTS ix_story_plot_thread_search_trgm "
+                        f"ON story_plot_threads USING gin (title {quoted_ops})"
+                    ))
+                    conn.execute(text(
+                        "CREATE INDEX IF NOT EXISTS ix_story_plot_thread_description_trgm "
+                        f"ON story_plot_threads USING gin (description {quoted_ops})"
+                    ))
+                    conn.execute(text(
+                        "CREATE INDEX IF NOT EXISTS ix_story_knowledge_resource_search_trgm "
+                        f"ON story_knowledge_resources USING gin (title {quoted_ops})"
+                    ))
+                    conn.execute(text(
+                        "CREATE INDEX IF NOT EXISTS ix_story_knowledge_resource_summary_trgm "
+                        f"ON story_knowledge_resources USING gin (summary {quoted_ops})"
+                    ))
+                    conn.execute(text(
+                        "CREATE INDEX IF NOT EXISTS ix_story_knowledge_resource_content_trgm "
+                        f"ON story_knowledge_resources USING gin (content_text {quoted_ops})"
+                    ))
 
 
 def _migrate_money_columns(target_engine=None):
