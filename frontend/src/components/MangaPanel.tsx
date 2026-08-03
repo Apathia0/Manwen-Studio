@@ -35,7 +35,7 @@ import {
   setImageCount,
   ALLOWED_IMAGE_COUNTS,
   mangaImageUrl,
-  downloadChapterMangaZip,
+  requestMangaZipTicket,
   getMangaGenerationStatus,
   cancelMangaGeneration,
   uploadCharacterRefImage,
@@ -58,7 +58,6 @@ import {
 import { genStore } from '../genStore';
 import { toast } from '../lib/toast';
 import { normalizeErrorMessage } from '../lib/errors';
-import { saveAs } from 'file-saver';
 
 interface Props {
   chapter: Chapter | null;
@@ -1395,16 +1394,20 @@ const [downloadingAll, setDownloadingAll] = useState(false);
   const hasImages = displayImages.length > 0;
   const canChangeImageCount = !generating && (phase === 'idle' || phase === 'editing-scenes');
 
-  // 通过后端代理打包下载当前话全部漫画图片（规避 OSS 跨域 CORS 与浏览器多文件下载拦截）
+  // 通过后端短时签名链接触发浏览器原生下载：后端并发下载图片并流式打包，
+  // 浏览器流式写盘（自带进度条、不占前端内存），规避 OSS 跨域与多文件下载拦截
   const handleDownloadAll = async () => {
     if (!hasImages || downloadingAll || !chapter) return;
     setDownloadingAll(true);
     try {
-      const blob = await downloadChapterMangaZip(chapter.id);
-      const dateStr = new Date().toISOString().slice(0, 10);
-      const zipName = `第${chapter.chapter_number ?? '?'}话_漫画图片_${dateStr}.zip`;
-      saveAs(blob, zipName);
-      toast.success(`已打包下载 ${displayImages.length} 张图片`);
+      const { url } = await requestMangaZipTicket(chapter.id);
+      const a = document.createElement('a');
+      a.href = url;
+      a.rel = 'noopener';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      toast.success(`已开始下载 ${displayImages.length} 张图片（后端打包中）`);
     } catch (err) {
       toast.error(normalizeErrorMessage(err, '打包下载失败，请重试'));
     } finally {

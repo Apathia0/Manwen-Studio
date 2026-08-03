@@ -2890,16 +2890,22 @@ export function mangaImageUrl(imagePath: string, cacheBust?: number): string {
   return `${url}${separator}v=${encodeURIComponent(String(cacheBust))}`;
 }
 
+export interface MangaZipTicket {
+  url: string;
+  expires_in: number;
+}
+
 /**
- * 通过后端代理下载指定章节的全部漫画图片（ZIP 打包）。
- * 后端从 OSS 拉取图片，规避浏览器跨域 CORS 限制。
+ * 获取漫画章节图片打包下载的短时授权链接（后端签发签名 URL）。
+ * 拿到后交给浏览器原生下载：流式写盘、自带进度条，避免整包进前端内存。
  */
-export async function downloadChapterMangaZip(chapterId: number): Promise<Blob> {
-  const res = await fetch(`${BASE}/api/chapters/${chapterId}/manga-images/zip`, {
+export async function requestMangaZipTicket(chapterId: number): Promise<MangaZipTicket> {
+  const res = await fetch(`${BASE}/api/chapters/${chapterId}/manga-images/zip-ticket`, {
+    method: 'POST',
     headers: apiHeaders(true),
   });
-  if (!res.ok) throw new Error(await readErrorMessage(res, '漫画图片打包下载失败'));
-  return res.blob();
+  if (!res.ok) throw new Error(await readErrorMessage(res, '打包下载链接获取失败'));
+  return res.json();
 }
 
 export function agentChatStream(
