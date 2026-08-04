@@ -3,7 +3,6 @@ import calendar
 import contextlib
 import datetime
 import hashlib
-import hmac
 import io
 import json
 import logging
@@ -12,10 +11,8 @@ import re
 import secrets
 import shutil
 import smtplib
-import tempfile
 import time
 import uuid
-import zipfile
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from types import SimpleNamespace
 from email.message import EmailMessage
@@ -44,13 +41,13 @@ from services.framework_utils import (
     validate_applied_framework_consistency,
     validate_framework_json,
 )
-from urllib.parse import parse_qsl, quote
+from urllib.parse import parse_qsl, unquote, urlsplit
 
 import httpx
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, File, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from PIL import Image
 from sqlalchemy import case, func, and_, or_, select, text
@@ -259,7 +256,6 @@ AUTO_MANGA_ASSET_CONCURRENCY = max(1, min(4, int(os.getenv("AUTO_MANGA_ASSET_CON
 _CHAPTER_GENERATION_SEMAPHORE = CHAPTER_GENERATION_SEMAPHORE
 _CHAPTER_GENERATION_INTERNAL_HEADER = "x-storycanvas-internal-generation"
 _CHAPTER_GENERATION_INTERNAL_SECRET = secrets.token_urlsafe(32)
-_MANGA_ZIP_TICKET_TTL_SECONDS = 60
 AUTO_MANGA_ASSET_START_INTERVAL_SECONDS = max(
     0,
     min(30, int(os.getenv("AUTO_MANGA_ASSET_START_INTERVAL_SECONDS", "3") or "3")),
@@ -390,14 +386,12 @@ def _is_public_runtime_api_path(path: str) -> bool:
     return _is_install_api_path(path) or path == HEALTH_API_PATH
 
 
-def _is_manga_zip_download_request(request: Request) -> bool:
-    """识别由漫画下载端点负责最终验签的精确请求。"""
-    if request.method != "GET":
+def _is_retired_manga_zip_request(request: Request) -> bool:
+    """识别固定返回 410 的旧漫画 ZIP 请求。"""
+    if request.method not in {"GET", "POST"}:
         return False
-    match = re.fullmatch(r"/api/chapters/(\d+)/manga-images/zip", request.url.path)
-    if not match:
-        return False
-    return bool(request.query_params.get("dl_token", ""))
+    suffix = "zip" if request.method == "GET" else "zip-ticket"
+    return bool(re.fullmatch(rf"/api/chapters/\d+/manga-images/{suffix}", request.url.path))
 
 
 def _refresh_install_status() -> dict[str, Any]:
@@ -626,7 +620,7 @@ async def require_api_token(request: Request, call_next):
         API_TOKEN
         and request.url.path.startswith("/api")
         and not _is_public_runtime_api_path(request.url.path)
-        and not _is_manga_zip_download_request(request)
+        and not _is_retired_manga_zip_request(request)
         and request.method != "OPTIONS"
     ):
         supplied = request.headers.get("x-api-token", "").strip()
@@ -11034,183 +11028,120 @@ async def reset_manga_images(chapter_id: int, request: Request, db: Session = De
     return {"ok": True}
 
 
-_MANGA_ZIP_SECRET_SETTING_KEY = "internal.manga_zip_signing_secret"
-
-
-def _manga_zip_ticket_secret() -> str:
-    """读取数据库权威密钥，首次缺失时用有效环境密钥或随机值播种。"""
-    environment_secret = ""
-    for name in (
-        "STORYCANVAS_DOWNLOAD_SECRET",
-        "AI_CREDENTIAL_SECRET",
-        "SECRET_KEY",
-        "JWT_SECRET",
-    ):
-        candidate = str(os.environ.get(name) or "").strip()
-        if len(candidate) >= 32 and not candidate.lower().startswith("change-this"):
-            environment_secret = candidate
-            break
-
-    session = SessionLocal()
+def _parse_https_export_base(value: str):
+    """解析可用于漫画导出的 HTTPS 基础地址。"""
     try:
-        row = session.query(PlatformSetting).filter(
-            PlatformSetting.setting_key == _MANGA_ZIP_SECRET_SETTING_KEY
-        ).with_for_update().first()
-        stored_secret = str((row.value_json or {}).get("value") or "").strip() if row else ""
-        if len(stored_secret) >= 32:
-            return stored_secret
-
-        generated_secret = environment_secret or secrets.token_urlsafe(48)
-        if row:
-            row.value_json = {"value": generated_secret}
-        else:
-            session.add(PlatformSetting(
-                setting_key=_MANGA_ZIP_SECRET_SETTING_KEY,
-                value_json={"value": generated_secret},
-            ))
-        try:
-            session.commit()
-            return generated_secret
-        except IntegrityError:
-            session.rollback()
-            winner = session.query(PlatformSetting).filter(
-                PlatformSetting.setting_key == _MANGA_ZIP_SECRET_SETTING_KEY
-            ).with_for_update().first()
-            winner_secret = str((winner.value_json or {}).get("value") or "").strip() if winner else ""
-            if len(winner_secret) >= 32:
-                return winner_secret
-            raise HTTPException(503, "漫画下载签名密钥初始化失败，请稍后重试")
-    except HTTPException:
-        raise
-    except Exception as exc:
-        session.rollback()
-        logger.warning("漫画下载签名密钥读取失败: %s", exc)
-        raise HTTPException(503, "漫画下载签名服务暂时不可用，请稍后重试") from exc
-    finally:
-        session.close()
-
-
-def _issue_manga_zip_ticket(
-    chapter_id: int,
-    user_id: int,
-    *,
-    now: int | None = None,
-) -> str:
-    """签发绑定章节和用户的短时漫画下载令牌。"""
-    expires_at = int(now if now is not None else time.time()) + _MANGA_ZIP_TICKET_TTL_SECONDS
-    payload = f"{int(chapter_id)}:{int(user_id)}:{expires_at}"
-    signature = hmac.new(
-        _manga_zip_ticket_secret().encode("utf-8"),
-        payload.encode("utf-8"),
-        hashlib.sha256,
-    ).hexdigest()
-    return f"{payload}.{signature}"
-
-
-def _verify_manga_zip_ticket(
-    chapter_id: int,
-    token: str,
-    *,
-    user_id: int | None = None,
-    now: int | None = None,
-) -> bool:
-    """校验下载令牌的格式、章节、有效期和签名。"""
-    try:
-        payload, signature = str(token or "").rsplit(".", 1)
-        chapter_text, user_text, expires_text = payload.split(":")
-        token_chapter_id = int(chapter_text)
-        token_user_id = int(user_text)
-        expires_at = int(expires_text)
-    except (TypeError, ValueError):
-        return False
-    current_time = int(now if now is not None else time.time())
-    if (
-        token_chapter_id != int(chapter_id)
-        or (user_id is not None and token_user_id != int(user_id))
-        or current_time > expires_at
-    ):
-        return False
-    expected = hmac.new(
-        _manga_zip_ticket_secret().encode("utf-8"),
-        payload.encode("utf-8"),
-        hashlib.sha256,
-    ).hexdigest()
-    return hmac.compare_digest(expected, signature)
-
-
-def _remove_manga_zip_temp_file(path: str) -> None:
-    """响应完成后删除临时 ZIP 文件。"""
-    try:
-        os.unlink(path)
-    except OSError:
-        pass
-
-
-class _TemporaryMangaZipResponse(FileResponse):
-    """无论发送完成或中断，都删除对应的临时漫画 ZIP。"""
-
-    async def __call__(self, scope, receive, send) -> None:
-        try:
-            await super().__call__(scope, receive, send)
-        finally:
-            _remove_manga_zip_temp_file(str(self.path))
-
-
-def _write_manga_zip_file(
-    archive_path: str,
-    image_rows: list[MangaImage],
-    resolved_paths: list[str | None],
-) -> int:
-    """以免压缩模式写入漫画 ZIP，返回成功写入的图片数量。"""
-    packed_count = 0
-    with zipfile.ZipFile(archive_path, "w", zipfile.ZIP_STORED) as archive:
-        for image, local_path in zip(image_rows, resolved_paths):
-            if not local_path:
-                continue
-            suffix = Path(str(local_path)).suffix.lower().lstrip(".")
-            extension = suffix if suffix in {"png", "jpg", "jpeg", "webp", "gif", "bmp"} else "png"
-            archive.write(
-                local_path,
-                arcname=f"panel_{str(image.image_number).zfill(2)}.{extension}",
-            )
-            packed_count += 1
-    return packed_count
-
-
-@app.post("/api/chapters/{chapter_id}/manga-images/zip-ticket")
-async def create_manga_zip_ticket(chapter_id: int, request: Request, db: Session = Depends(get_db)):
-    """签发当前用户可用的短时漫画 ZIP 下载地址。"""
-    user = _require_user(request, db)
-    _require_chapter_for_user(chapter_id, user, db)
-    has_image = db.query(MangaImage.id).filter(MangaImage.chapter_id == chapter_id).first()
-    if not has_image:
-        raise HTTPException(404, "此章节暂无漫画图片")
-    token = _issue_manga_zip_ticket(chapter_id, user.id)
-    return {
-        "url": f"/api/chapters/{chapter_id}/manga-images/zip?dl_token={token}",
-        "expires_in": _MANGA_ZIP_TICKET_TTL_SECONDS,
-    }
-
-
-@app.get("/api/chapters/{chapter_id}/manga-images/zip")
-async def download_chapter_manga_zip(chapter_id: int, request: Request, db: Session = Depends(get_db)):
-    """并发读取漫画图片并通过临时文件流式返回 ZIP。"""
-    download_token = request.query_params.get("dl_token")
-    if download_token:
-        chapter = db.get(Chapter, chapter_id)
-        if not chapter:
-            raise HTTPException(404, "章节未找到")
-        owner_user_id = chapter.story.owner_user_id if chapter.story else None
-        if owner_user_id is None or not _verify_manga_zip_ticket(
-            chapter_id,
-            download_token,
-            user_id=owner_user_id,
+        parsed = urlsplit(str(value or "").strip())
+        if (
+            parsed.scheme.lower() != "https"
+            or not parsed.hostname
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.query
+            or parsed.fragment
         ):
-            raise HTTPException(403, "下载链接无效或已过期")
-    else:
-        user = _require_user(request, db)
-        chapter = _require_chapter_for_user(chapter_id, user, db)
+            return None
+        parsed.port
+        return parsed
+    except ValueError:
+        return None
 
+
+def _manga_export_allowed_bases(db: Session) -> list:
+    """根据当前平台配置构建允许导出的 OSS HTTPS 基础地址。"""
+    bases = []
+    public_url_base = str(_get_platform_setting("oss.public_url_base", db, "") or "").strip()
+    public_base = _parse_https_export_base(public_url_base)
+    if public_base:
+        bases.append(public_base)
+
+    bucket = str(_get_platform_setting("oss.bucket", db, "") or "").strip()
+    endpoint = str(_get_platform_setting("oss.endpoint", db, "") or "").strip()
+    if bucket and endpoint and re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9.-]{0,61}[A-Za-z0-9])?", bucket):
+        try:
+            endpoint_url = endpoint if "://" in endpoint else f"https://{endpoint}"
+            endpoint_parts = urlsplit(endpoint_url)
+            if (
+                endpoint_parts.scheme.lower() in {"http", "https"}
+                and endpoint_parts.hostname
+                and endpoint_parts.username is None
+                and endpoint_parts.password is None
+                and endpoint_parts.path in {"", "/"}
+                and not endpoint_parts.query
+                and not endpoint_parts.fragment
+            ):
+                port = endpoint_parts.port
+                port_text = f":{port}" if port is not None else ""
+                endpoint_host = endpoint_parts.hostname
+                oss_host = (
+                    endpoint_host
+                    if endpoint_host.lower().startswith(f"{bucket.lower()}.")
+                    else f"{bucket}.{endpoint_host}"
+                )
+                oss_base = _parse_https_export_base(
+                    f"https://{oss_host}{port_text}"
+                )
+                if oss_base:
+                    bases.append(oss_base)
+        except ValueError:
+            pass
+    return bases
+
+
+def _manga_export_object_key(image_url: str, allowed_bases: list) -> str | None:
+    """验证图片 URL 属于允许的 OSS 地址，并返回规范对象键。"""
+    try:
+        target = urlsplit(str(image_url or "").strip())
+        if (
+            target.scheme.lower() != "https"
+            or not target.hostname
+            or target.username is not None
+            or target.password is not None
+            or target.fragment
+        ):
+            return None
+        target_port = target.port
+    except ValueError:
+        return None
+
+    target_path = unquote(target.path)
+    for base in allowed_bases:
+        try:
+            if target.hostname.lower() != base.hostname.lower() or target_port != base.port:
+                continue
+        except (AttributeError, ValueError):
+            continue
+        base_path = unquote(base.path).rstrip("/")
+        if base_path:
+            prefix = f"{base_path}/"
+            if not target_path.startswith(prefix):
+                continue
+            object_key = target_path[len(prefix):]
+        else:
+            object_key = target_path.lstrip("/")
+        segments = object_key.split("/")
+        if (
+            object_key.startswith("manga_outputs/")
+            and "\\" not in object_key
+            and all(segment not in {"", ".", ".."} for segment in segments)
+        ):
+            return object_key
+    return None
+
+
+def _manga_export_filename(image_number: int, object_key: str) -> str:
+    """生成不受远端对象名称影响的 ZIP 内文件名。"""
+    basename = object_key.rsplit("/", 1)[-1]
+    suffix = basename.rsplit(".", 1)[-1].lower() if "." in basename else ""
+    extension = suffix if suffix in {"png", "jpg", "jpeg", "webp", "gif", "bmp"} else "png"
+    return f"panel_{str(image_number).zfill(2)}.{extension}"
+
+
+@app.get("/api/chapters/{chapter_id}/manga-images/export-manifest")
+async def get_manga_export_manifest(chapter_id: int, request: Request, db: Session = Depends(get_db)):
+    """返回仅允许浏览器直连当前 OSS 下载的漫画导出清单。"""
+    user = _require_user(request, db)
+    chapter = _require_chapter_for_user(chapter_id, user, db)
     images = (
         db.query(MangaImage)
         .filter(MangaImage.chapter_id == chapter_id)
@@ -11218,36 +11149,55 @@ async def download_chapter_manga_zip(chapter_id: int, request: Request, db: Sess
         .all()
     )
     if not images:
-        raise HTTPException(404, "此章节暂无漫画图片")
+        raise HTTPException(409, "此章节暂无可导出的漫画图片，请先完成全部页面生成")
 
-    try:
-        resolved_paths = await asyncio.gather(
-            *(run_blocking(ensure_local_media_path, image.image_path, "manga") for image in images)
-        )
-    except Exception as exc:
-        logger.warning("漫画图片下载准备失败 chapter=%s: %s", chapter_id, exc)
-        raise HTTPException(502, "漫画图片读取失败，请稍后重试") from exc
-    file_descriptor, archive_path = tempfile.mkstemp(suffix=".zip", prefix="storycanvas_manga_")
-    os.close(file_descriptor)
-    try:
-        packed_count = await run_blocking(_write_manga_zip_file, archive_path, images, resolved_paths)
-        if packed_count != len(images):
-            raise HTTPException(502, f"漫画图片打包不完整，成功 {packed_count}/{len(images)} 张，请稍后重试")
-    except (HTTPException, asyncio.CancelledError):
-        _remove_manga_zip_temp_file(archive_path)
-        raise
-    except Exception as exc:
-        _remove_manga_zip_temp_file(archive_path)
-        logger.warning("漫画图片打包失败 chapter=%s: %s", chapter_id, exc)
-        raise HTTPException(502, "漫画图片打包失败，请稍后重试") from exc
-
-    date_text = datetime.datetime.now().strftime("%Y-%m-%d")
-    filename = f"第{chapter.chapter_number}话_漫画图片_{date_text}.zip"
-    return _TemporaryMangaZipResponse(
-        archive_path,
-        media_type="application/zip",
-        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}"},
+    actual_numbers = [image.image_number for image in images]
+    stored_storyboard = _chapter_storyboard(chapter)
+    expected_count = (
+        len(stored_storyboard[0])
+        if stored_storyboard and stored_storyboard[0]
+        else max(actual_numbers)
     )
+    expected_numbers = list(range(1, expected_count + 1))
+    if actual_numbers != expected_numbers:
+        actual_number_set = set(actual_numbers)
+        missing_number = next(
+            (number for number in expected_numbers if number not in actual_number_set),
+            1,
+        )
+        raise HTTPException(409, f"漫画图片缺少第 {missing_number} 页，请补齐后再导出")
+
+    allowed_bases = _manga_export_allowed_bases(db)
+    if not allowed_bases:
+        raise HTTPException(409, "平台未配置可用于浏览器导出的 HTTPS OSS 地址")
+
+    manifest_images = []
+    for image in images:
+        download_url = str(image.image_path or "").strip()
+        object_key = _manga_export_object_key(download_url, allowed_bases)
+        if not object_key:
+            raise HTTPException(
+                409,
+                f"第 {image.image_number} 页图片不是当前平台配置的 manga_outputs OSS 资源，无法导出",
+            )
+        manifest_images.append({
+            "image_number": image.image_number,
+            "filename": _manga_export_filename(image.image_number, object_key),
+            "download_url": download_url,
+        })
+    return {"images": manifest_images}
+
+
+@app.post("/api/chapters/{chapter_id}/manga-images/zip-ticket")
+async def create_manga_zip_ticket(chapter_id: int):
+    """旧服务端 ZIP 接口已永久停用。"""
+    raise HTTPException(410, "服务端漫画 ZIP 导出已停用，请升级客户端后重试")
+
+
+@app.get("/api/chapters/{chapter_id}/manga-images/zip")
+async def download_chapter_manga_zip(chapter_id: int):
+    """旧服务端 ZIP 接口已永久停用。"""
+    raise HTTPException(410, "服务端漫画 ZIP 导出已停用，请升级客户端后重试")
 
 
 @app.post("/api/chapters/{chapter_id}/upload-style-reference")

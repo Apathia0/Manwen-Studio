@@ -718,6 +718,16 @@ export interface MangaImage {
   created_at: string;
 }
 
+export interface MangaExportManifestImage {
+  image_number: number;
+  filename: string;
+  download_url: string;
+}
+
+export interface MangaExportManifest {
+  images: MangaExportManifestImage[];
+}
+
 export interface Chapter {
   id: number;
   story_id: number;
@@ -2890,19 +2900,13 @@ export function mangaImageUrl(imagePath: string, cacheBust?: number): string {
   return `${url}${separator}v=${encodeURIComponent(String(cacheBust))}`;
 }
 
-export interface MangaZipTicket {
-  url: string;
-  expires_in: number;
-}
-
-/** 获取漫画图片打包下载的短时授权地址。 */
-export async function requestMangaZipTicket(chapterId: number): Promise<MangaZipTicket> {
-  const res = await fetch(`${BASE}/api/chapters/${chapterId}/manga-images/zip-ticket`, {
-    method: 'POST',
-    headers: apiHeaders(true),
+/** 获取仅包含当前平台 OSS 图片的浏览器导出清单。 */
+export async function getMangaExportManifest(chapterId: number): Promise<MangaExportManifest> {
+  const res = await fetch(`${BASE}/api/chapters/${chapterId}/manga-images/export-manifest`, {
+    headers: apiHeaders(),
   });
   if (!res.ok) {
-    const error = new Error(await readErrorMessage(res, '打包下载链接获取失败')) as Error & { status?: number };
+    const error = new Error(await readErrorMessage(res, '漫画导出清单获取失败')) as Error & { status?: number };
     error.status = res.status;
     throw error;
   }

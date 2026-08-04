@@ -1,6 +1,6 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 
-import { adjustChapterContent, analyzeChapterMangaAssets, apiHeaders, coverImageUrl, createAdminAiChannel, createStoryKnowledge, createStoryKnowledgeCategory, deleteAdminAiChannel, deleteStoryKnowledge, deleteStoryKnowledgeCategory, expandChapter, generateMangaAsset, generateMangaAssetsBatch, generateMangaStream, generateNovel, generateScenes, generateStoryCharRefStream, getAiChannels, getAiCredentials, getApiKeySettings, getAuthorStyleResult, getAuthorStyleStatus, getBackgroundTaskStatus, getLocalCredentialMode, getMangaAssetAnalysis, getStoryKnowledge, login, previewAdminAiChannelPrices, redrawMangaAsset, regenerateStoryChapterContext, regenerateVideoAsset, requestMangaZipTicket, retryVideoJob, saveAiModalityCredential, saveApiKeySettings, saveMangaAssetAnalysis, setLocalCredentialMode, startAuthorStyleAnalysis, syncAdminAiChannelPrices, syncStoryKnowledgeWithAI, testAiModalityCredential, toPublicMangaAssetUrl, toPublicVideoAssetUrl, updateAdminAiChannel, updateAuthorStyleReport, updateDeconstructionReport, updateStoryBible, updateStoryChapterContext, updateStoryKnowledge, updateStoryKnowledgeCategory } from './api';
+import { adjustChapterContent, analyzeChapterMangaAssets, apiHeaders, coverImageUrl, createAdminAiChannel, createStoryKnowledge, createStoryKnowledgeCategory, deleteAdminAiChannel, deleteStoryKnowledge, deleteStoryKnowledgeCategory, expandChapter, generateMangaAsset, generateMangaAssetsBatch, generateMangaStream, generateNovel, generateScenes, generateStoryCharRefStream, getAiChannels, getAiCredentials, getApiKeySettings, getAuthorStyleResult, getAuthorStyleStatus, getBackgroundTaskStatus, getLocalCredentialMode, getMangaAssetAnalysis, getMangaExportManifest, getStoryKnowledge, login, previewAdminAiChannelPrices, redrawMangaAsset, regenerateStoryChapterContext, regenerateVideoAsset, retryVideoJob, saveAiModalityCredential, saveApiKeySettings, saveMangaAssetAnalysis, setLocalCredentialMode, startAuthorStyleAnalysis, syncAdminAiChannelPrices, syncStoryKnowledgeWithAI, testAiModalityCredential, toPublicMangaAssetUrl, toPublicVideoAssetUrl, updateAdminAiChannel, updateAuthorStyleReport, updateDeconstructionReport, updateStoryBible, updateStoryChapterContext, updateStoryKnowledge, updateStoryKnowledgeCategory } from './api';
 import { shouldShowAuthorStyleEntry } from './components/DeconstructionWorkPage';
 
 describe('coverImageUrl', () => {
@@ -15,7 +15,7 @@ describe('coverImageUrl', () => {
   });
 });
 
-describe('漫画图片打包下载 API', () => {
+describe('漫画图片浏览器导出 API', () => {
   beforeEach(() => {
     vi.stubGlobal('localStorage', {
       getItem: vi.fn(() => 'test-token'),
@@ -24,27 +24,33 @@ describe('漫画图片打包下载 API', () => {
     });
   });
 
-  it('通过 POST 获取短时下载地址', async () => {
+  it('通过 GET 获取 OSS 导出清单', async () => {
     const payload = {
-      url: '/api/chapters/764/manga-images/zip?dl_token=signed',
-      expires_in: 60,
+      images: [{
+        image_number: 1,
+        filename: 'panel_01.png',
+        download_url: 'https://cdn.example.com/manga_outputs/764/1.png',
+      }],
     };
     vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(payload), { status: 200 })));
 
-    await expect(requestMangaZipTicket(764)).resolves.toEqual(payload);
+    await expect(getMangaExportManifest(764)).resolves.toEqual(payload);
     expect(fetch).toHaveBeenCalledWith(
-      '/api/chapters/764/manga-images/zip-ticket',
-      expect.objectContaining({ method: 'POST' }),
+      '/api/chapters/764/manga-images/export-manifest',
+      expect.objectContaining({ headers: expect.any(Object) }),
     );
   });
 
-  it('保留 404 状态供旧后端兼容回退判断', async () => {
+  it('保留 409 状态和后端错误信息', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => new Response(
-      JSON.stringify({ detail: 'Not Found' }),
-      { status: 404 },
+      JSON.stringify({ detail: '第 2 页图片不是当前平台配置的 OSS 资源' }),
+      { status: 409 },
     )));
 
-    await expect(requestMangaZipTicket(764)).rejects.toMatchObject({ status: 404 });
+    await expect(getMangaExportManifest(764)).rejects.toMatchObject({
+      status: 409,
+      message: '第 2 页图片不是当前平台配置的 OSS 资源',
+    });
   });
 });
 

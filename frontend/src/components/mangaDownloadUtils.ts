@@ -1,18 +1,19 @@
-export interface MangaDownloadSource {
-  image_path: string;
-}
-
-/** 判断图片是否为可由浏览器直接请求的 HTTP/HTTPS 远程资源。 */
-export function isRemoteMangaImagePath(imagePath: string): boolean {
-  try {
-    const url = new URL(String(imagePath || '').trim());
-    return url.protocol === 'http:' || url.protocol === 'https:';
-  } catch {
-    return false;
+function errorDetail(cause: unknown): string {
+  let detail = '未知错误';
+  if (cause instanceof Error && cause.message.trim()) {
+    detail = cause.message.trim();
+  } else if (typeof cause === 'string' && cause.trim()) {
+    detail = cause.trim();
   }
+  return detail;
 }
 
-/** 只有全部图片均为远程资源时才使用浏览器本地打包。 */
-export function shouldUseBrowserMangaZip(images: MangaDownloadSource[]): boolean {
-  return images.length > 0 && images.every((image) => isRemoteMangaImagePath(image.image_path));
+/** 生成包含准确页号的漫画下载错误。 */
+export function createMangaPageDownloadError(imageNumber: number, cause: unknown): Error {
+  return new Error(`漫画第 ${imageNumber} 页下载失败：${errorDetail(cause)}`);
+}
+
+/** 生成包含总页数的漫画压缩包错误。 */
+export function createMangaArchiveError(pageCount: number, cause: unknown): Error {
+  return new Error(`共 ${pageCount} 页漫画的压缩包生成失败：${errorDetail(cause)}`);
 }
