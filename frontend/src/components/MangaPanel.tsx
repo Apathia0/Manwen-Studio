@@ -58,7 +58,11 @@ import {
 import { genStore } from '../genStore';
 import { toast } from '../lib/toast';
 import { normalizeErrorMessage } from '../lib/errors';
-import { createMangaArchiveError, createMangaPageDownloadError } from './mangaDownloadUtils';
+import {
+  createMangaArchiveError,
+  createMangaExportDownloadUrl,
+  createMangaPageDownloadError,
+} from './mangaDownloadUtils';
 
 interface Props {
   chapter: Chapter | null;
@@ -1414,13 +1418,19 @@ const [downloadStatus, setDownloadStatus] = useState('');
       setDownloadStatus(`下载 0/${manifest.images.length}`);
       let completedCount = 0;
       const batchSize = 4;
+      const exportRequestId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
       for (let start = 0; start < manifest.images.length; start += batchSize) {
         const batch = manifest.images.slice(start, start + batchSize);
         const downloaded = await Promise.all(batch.map(async (item) => {
           try {
-            const response = await fetch(item.download_url, {
+            const downloadUrl = createMangaExportDownloadUrl(
+              item.download_url,
+              `${exportRequestId}-${item.image_number}`,
+            );
+            const response = await fetch(downloadUrl, {
               mode: 'cors',
               credentials: 'omit',
+              cache: 'no-store',
             });
             if (!response.ok) {
               throw new Error(`HTTP ${response.status}`);
