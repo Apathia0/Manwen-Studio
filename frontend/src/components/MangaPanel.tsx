@@ -62,6 +62,7 @@ import {
   createMangaArchiveError,
   createMangaExportDownloadUrl,
   createMangaPageDownloadError,
+  mapWithConcurrency,
 } from './mangaDownloadUtils';
 
 interface Props {
@@ -306,6 +307,7 @@ const [downloadStatus, setDownloadStatus] = useState('');
   const chapterLoadRequestRef = useRef(0);
   const sceneAbortRef = useRef<AbortController | null>(null);
   const charRefStreamRef = useRef<AbortController | null>(null);
+  const exportAbortRef = useRef<AbortController | null>(null);
   const [selectionLoading, setSelectionLoading] = useState(false);
   const [scenesFromSelectionFlag, setScenesFromSelectionFlag] = useState(false);
   const [ignorePersistedImages, setIgnorePersistedImages] = useState(false);
@@ -356,6 +358,11 @@ const [downloadStatus, setDownloadStatus] = useState('');
   const liveGen = chapter ? genStore.get(chapter.id) : undefined;
   const isLiveGenerating = !!(liveGen && liveGen.active);
 
+  useEffect(() => () => {
+    exportAbortRef.current?.abort();
+    exportAbortRef.current = null;
+  }, [chapter?.id]);
+
   // Reset state when chapter changes
   useEffect(() => {
     // Abort any in-flight scene generation when switching chapters
@@ -363,6 +370,8 @@ const [downloadStatus, setDownloadStatus] = useState('');
     sceneAbortRef.current = null;
     charRefStreamRef.current?.abort();
     charRefStreamRef.current = null;
+    setDownloadingAll(false);
+    setDownloadStatus('');
     chapterLoadRequestRef.current++;
     storyboardPresetLoadRef.current++;
     setImages([]);
@@ -1403,10 +1412,18 @@ const [downloadStatus, setDownloadStatus] = useState('');
   // 导出只使用后端校验后的 OSS 清单，图片内容始终由浏览器直连下载。
   const handleDownloadAll = async () => {
     if (!hasImages || downloadingAll || !chapter) return;
+    exportAbortRef.current?.abort();
+    const abortController = new AbortController();
+    exportAbortRef.current = abortController;
+    const isCurrentExport = () => (
+      exportAbortRef.current === abortController && !abortController.signal.aborted
+    );
+    let downloadFailed = false;
     setDownloadingAll(true);
     setDownloadStatus('正在准备导出');
     try {
       const manifest = await getMangaExportManifest(chapter.id);
+      if (!isCurrentExport()) return;
       if (manifest.images.length === 0) {
         throw new Error('导出清单中没有漫画图片');
       }
@@ -1414,14 +1431,16 @@ const [downloadStatus, setDownloadStatus] = useState('');
         import('jszip'),
         import('file-saver'),
       ]);
+      if (!isCurrentExport()) return;
       const zip = new JSZip();
       setDownloadStatus(`下载 0/${manifest.images.length}`);
       let completedCount = 0;
-      const batchSize = 4;
+      const downloadConcurrency = 6;
       const exportRequestId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-      for (let start = 0; start < manifest.images.length; start += batchSize) {
-        const batch = manifest.images.slice(start, start + batchSize);
-        const downloaded = await Promise.all(batch.map(async (item) => {
+      const downloaded = await mapWithConcurrency(
+        manifest.images,
+        downloadConcurrency,
+        async (item) => {
           try {
             const downloadUrl = createMangaExportDownloadUrl(
               item.download_url,
@@ -1431,21 +1450,29 @@ const [downloadStatus, setDownloadStatus] = useState('');
               mode: 'cors',
               credentials: 'omit',
               cache: 'no-store',
+              signal: abortController.signal,
             });
             if (!response.ok) {
               throw new Error(`HTTP ${response.status}`);
             }
             const blob = await response.blob();
             completedCount += 1;
-            setDownloadStatus(`下载 ${completedCount}/${manifest.images.length}`);
+            if (isCurrentExport()) {
+              setDownloadStatus(`下载 ${completedCount}/${manifest.images.length}`);
+            }
             return { item, blob };
           } catch (error) {
+            if (!abortController.signal.aborted) {
+              downloadFailed = true;
+            }
+            abortController.abort();
             throw createMangaPageDownloadError(item.image_number, error);
           }
-        }));
-        for (const { item, blob } of downloaded) {
-          zip.file(item.filename, blob);
-        }
+        },
+      );
+      if (!isCurrentExport()) return;
+      for (const { item, blob } of downloaded) {
+        zip.file(item.filename, blob);
       }
       setDownloadStatus('正在生成压缩包');
       let blob: Blob;
@@ -1458,14 +1485,20 @@ const [downloadStatus, setDownloadStatus] = useState('');
       } catch (error) {
         throw createMangaArchiveError(manifest.images.length, error);
       }
+      if (!isCurrentExport()) return;
       const dateStr = new Date().toISOString().slice(0, 10);
       saveAs(blob, `第${chapter.chapter_number}话_漫画图片_${dateStr}.zip`);
       toast.success(`已下载 ${manifest.images.length} 张图片`);
     } catch (err) {
+      if (exportAbortRef.current !== abortController) return;
+      if (abortController.signal.aborted && !downloadFailed) return;
       toast.error(normalizeErrorMessage(err, '打包下载失败，请重试'));
     } finally {
-      setDownloadingAll(false);
-      setDownloadStatus('');
+      if (exportAbortRef.current === abortController) {
+        exportAbortRef.current = null;
+        setDownloadingAll(false);
+        setDownloadStatus('');
+      }
     }
   };
   const activeImageCount = liveProgress.total || imageCount;

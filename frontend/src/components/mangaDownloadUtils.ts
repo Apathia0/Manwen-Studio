@@ -24,3 +24,32 @@ export function createMangaExportDownloadUrl(downloadUrl: string, requestId: str
   url.searchParams.set('_storycanvas_export', requestId);
   return url.toString();
 }
+
+/** 使用固定数量的常驻 worker 并发处理任务，并保持结果顺序不变。 */
+export async function mapWithConcurrency<T, R>(
+  items: T[],
+  concurrency: number,
+  mapper: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  if (items.length === 0) return [];
+  const workerCount = Math.min(items.length, Math.max(1, Math.floor(concurrency)));
+  const results = new Array<R>(items.length);
+  let nextIndex = 0;
+  let stopped = false;
+
+  const worker = async () => {
+    while (!stopped && nextIndex < items.length) {
+      const index = nextIndex;
+      nextIndex += 1;
+      try {
+        results[index] = await mapper(items[index], index);
+      } catch (error) {
+        stopped = true;
+        throw error;
+      }
+    }
+  };
+
+  await Promise.all(Array.from({ length: workerCount }, () => worker()));
+  return results;
+}

@@ -4,6 +4,7 @@ import {
   createMangaArchiveError,
   createMangaExportDownloadUrl,
   createMangaPageDownloadError,
+  mapWithConcurrency,
 } from './mangaDownloadUtils';
 
 describe('漫画导出错误', () => {
@@ -34,5 +35,57 @@ describe('漫画导出错误', () => {
     expect(url).toBe(
       'https://bucket.example/manga_outputs/chapter/1.png?version=2&_storycanvas_export=export-123-1',
     );
+  });
+
+  it('按指定并发数持续补位并保持结果顺序', async () => {
+    let active = 0;
+    let maxActive = 0;
+    const releaseQueue: Array<() => void> = [];
+    const task = mapWithConcurrency([1, 2, 3, 4], 2, async (value) => {
+      active += 1;
+      maxActive = Math.max(maxActive, active);
+      await new Promise<void>((resolve) => releaseQueue.push(resolve));
+      active -= 1;
+      return value * 10;
+    });
+
+    await Promise.resolve();
+    expect(active).toBe(2);
+    releaseQueue.shift()?.();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(active).toBe(2);
+    while (releaseQueue.length > 0) {
+      releaseQueue.shift()?.();
+      await Promise.resolve();
+      await Promise.resolve();
+    }
+
+    await expect(task).resolves.toEqual([10, 20, 30, 40]);
+    expect(maxActive).toBe(2);
+  });
+
+  it('任一任务失败后不再领取尚未开始的任务', async () => {
+    const started: number[] = [];
+    let rejectFirst: ((reason?: unknown) => void) | undefined;
+    let releaseSecond: (() => void) | undefined;
+    const task = mapWithConcurrency([1, 2, 3, 4], 2, async (value) => {
+      started.push(value);
+      if (value === 1) {
+        await new Promise<void>((_resolve, reject) => { rejectFirst = reject; });
+      } else if (value === 2) {
+        await new Promise<void>((resolve) => { releaseSecond = resolve; });
+      }
+      return value;
+    });
+
+    await Promise.resolve();
+    expect(started).toEqual([1, 2]);
+    rejectFirst?.(new Error('下载失败'));
+    await expect(task).rejects.toThrow('下载失败');
+    releaseSecond?.();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(started).toEqual([1, 2]);
   });
 });
