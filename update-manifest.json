@@ -2,6 +2,6 @@
   "channel": "stable",
   "latest_version": "v4.3.4",
   "min_supported_version": "v1.0.0",
-  "release_notes": "fix: 漫画 ZIP ticket 单元测试补齐 APP_ENV=test，避免 CI 生产密钥校验误伤",
-  "published_at": "2026-08-04T13:00:00Z"
+  "release_notes": "",
+  "published_at": "2026-08-04T04:16:20Z"
 }
