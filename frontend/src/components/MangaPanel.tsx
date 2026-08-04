@@ -35,7 +35,7 @@ import {
   setImageCount,
   ALLOWED_IMAGE_COUNTS,
   mangaImageUrl,
-  requestMangaZipTicket,
+  getMangaExportManifest,
   getMangaGenerationStatus,
   cancelMangaGeneration,
   uploadCharacterRefImage,
@@ -58,9 +58,7 @@ import {
 import { genStore } from '../genStore';
 import { toast } from '../lib/toast';
 import { normalizeErrorMessage } from '../lib/errors';
-import { shouldUseBrowserMangaZip } from './mangaDownloadUtils';
-import JSZip from 'jszip';
-import { saveAs } from 'file-saver';
+import { createMangaArchiveError, createMangaPageDownloadError } from './mangaDownloadUtils';
 
 interface Props {
   chapter: Chapter | null;
@@ -272,6 +270,7 @@ export default memo(function MangaPanel({
 const [assetModalOpen, setAssetModalOpen] = useState(false);
 const [storyboardImportOpen, setStoryboardImportOpen] = useState(false);
 const [downloadingAll, setDownloadingAll] = useState(false);
+const [downloadStatus, setDownloadStatus] = useState('');
   // 仅保留历史引用图的兼容状态，旧垫图界面不再对用户开放。
   const [refModalOpen, setRefModalOpen] = useState(false);
   const [legacyReferenceUiEnabled] = useState(false);
@@ -1397,74 +1396,66 @@ const [downloadingAll, setDownloadingAll] = useState(false);
   const hasImages = displayImages.length > 0;
   const canChangeImageCount = !generating && (phase === 'idle' || phase === 'editing-scenes');
 
-  // OSS 图片优先由浏览器直接拉取并本地打包；本地或混合来源交给后端处理。
+  // 导出只使用后端校验后的 OSS 清单，图片内容始终由浏览器直连下载。
   const handleDownloadAll = async () => {
     if (!hasImages || downloadingAll || !chapter) return;
-    const items = displayImages
-      .slice()
-      .sort((a, b) => a.image_number - b.image_number)
-      .map((img) => ({
-        number: img.image_number,
-        sourcePath: img.image_path,
-        url: mangaImageUrl(img.image_path) || '',
-      }))
-      .filter((item) => item.url);
-    if (items.length === 0) {
-      toast.error('没有可下载的漫画图片');
-      return;
-    }
     setDownloadingAll(true);
+    setDownloadStatus('正在准备导出');
     try {
-      const startServerDownload = async () => {
-        const ticket = await requestMangaZipTicket(chapter.id);
-        const link = document.createElement('a');
-        link.href = ticket.url;
-        link.rel = 'noopener';
-        document.body.appendChild(link);
-        link.click();
-        link.remove();
-        toast.success(`已开始打包下载 ${items.length} 张图片`);
-      };
-
-      const canPackageInBrowser = items.length === displayImages.length
-        && shouldUseBrowserMangaZip(items.map((item) => ({ image_path: item.sourcePath })));
-      if (canPackageInBrowser) {
-        try {
-          const zip = new JSZip();
-          // 分批并发拉取，避免一次性请求过多触发浏览器或 OSS 限流。
-          const batchSize = 4;
-          for (let i = 0; i < items.length; i += batchSize) {
-            const batch = items.slice(i, i + batchSize);
-            await Promise.all(
-              batch.map(async (item) => {
-                const res = await fetch(item.url, { mode: 'cors' });
-                if (!res.ok) throw new Error(`HTTP ${res.status}`);
-                const blob = await res.blob();
-                const extMatch = item.url.match(/\.(png|jpe?g|webp|gif|bmp)(?:$|[?#])/i);
-                const ext = extMatch ? extMatch[1].toLowerCase() : 'png';
-                zip.file(`panel_${String(item.number).padStart(2, '0')}.${ext}`, blob);
-              }),
-            );
+      const manifest = await getMangaExportManifest(chapter.id);
+      if (manifest.images.length === 0) {
+        throw new Error('导出清单中没有漫画图片');
+      }
+      const [{ default: JSZip }, { saveAs }] = await Promise.all([
+        import('jszip'),
+        import('file-saver'),
+      ]);
+      const zip = new JSZip();
+      setDownloadStatus(`下载 0/${manifest.images.length}`);
+      let completedCount = 0;
+      const batchSize = 4;
+      for (let start = 0; start < manifest.images.length; start += batchSize) {
+        const batch = manifest.images.slice(start, start + batchSize);
+        const downloaded = await Promise.all(batch.map(async (item) => {
+          try {
+            const response = await fetch(item.download_url, {
+              mode: 'cors',
+              credentials: 'omit',
+            });
+            if (!response.ok) {
+              throw new Error(`HTTP ${response.status}`);
+            }
+            const blob = await response.blob();
+            completedCount += 1;
+            setDownloadStatus(`下载 ${completedCount}/${manifest.images.length}`);
+            return { item, blob };
+          } catch (error) {
+            throw createMangaPageDownloadError(item.image_number, error);
           }
-          const blob = await zip.generateAsync({
-            type: 'blob',
-            compression: 'STORE',
-            compressionOptions: { level: 0 },
-          });
-          const dateStr = new Date().toISOString().slice(0, 10);
-          saveAs(blob, `第${chapter.chapter_number}话_漫画图片_${dateStr}.zip`);
-          toast.success(`已下载 ${items.length} 张图片`);
-          return;
-        } catch (browserError) {
-          console.warn('OSS 图片浏览器打包失败，切换服务端下载', browserError);
+        }));
+        for (const { item, blob } of downloaded) {
+          zip.file(item.filename, blob);
         }
       }
-
-      await startServerDownload();
+      setDownloadStatus('正在生成压缩包');
+      let blob: Blob;
+      try {
+        blob = await zip.generateAsync({
+          type: 'blob',
+          compression: 'STORE',
+          compressionOptions: { level: 0 },
+        });
+      } catch (error) {
+        throw createMangaArchiveError(manifest.images.length, error);
+      }
+      const dateStr = new Date().toISOString().slice(0, 10);
+      saveAs(blob, `第${chapter.chapter_number}话_漫画图片_${dateStr}.zip`);
+      toast.success(`已下载 ${manifest.images.length} 张图片`);
     } catch (err) {
       toast.error(normalizeErrorMessage(err, '打包下载失败，请重试'));
     } finally {
       setDownloadingAll(false);
+      setDownloadStatus('');
     }
   };
   const activeImageCount = liveProgress.total || imageCount;
@@ -1578,12 +1569,12 @@ const [downloadingAll, setDownloadingAll] = useState(false);
               <button
                 onClick={handleDownloadAll}
                 disabled={downloadingAll}
-                className="flex items-center gap-1 px-3 py-1.5 text-xs font-medium rounded-md
+                className="flex min-w-[8.5rem] items-center justify-center gap-1 px-3 py-1.5 text-xs font-medium rounded-md
                            bg-[#f3f5f0] hover:bg-[#e8ece6] text-slate-700 transition-colors
                            disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 {downloadingAll ? <Loader2 size={13} className="animate-spin" /> : <Download size={13} />}
-                {downloadingAll ? '打包中...' : '下载'}
+                {downloadingAll ? downloadStatus : '下载'}
               </button>
             )}
             {!generating && (phase === 'idle' || phase === 'editing-scenes') && (
