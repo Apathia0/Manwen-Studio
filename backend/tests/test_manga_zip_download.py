@@ -14,7 +14,7 @@ from sqlalchemy.pool import StaticPool
 
 import main
 from database import Base, get_db
-from models import Chapter, MangaImage, Story, User
+from models import Chapter, MangaImage, PlatformSetting, Story, User
 
 
 @pytest.fixture
@@ -27,7 +27,7 @@ def manga_zip_context(monkeypatch, tmp_path: Path):
         {"installed": True, "requires_restart": False},
     )
     monkeypatch.setattr(main.license_checker, "check_domain", lambda _hostname: True)
-    monkeypatch.setenv("STORYCANVAS_DOWNLOAD_SECRET", "manga-zip-test-secret")
+    monkeypatch.setenv("STORYCANVAS_DOWNLOAD_SECRET", "manga-zip-test-secret-at-least-32-characters")
 
     engine = create_engine(
         "sqlite:///:memory:",
@@ -36,6 +36,7 @@ def manga_zip_context(monkeypatch, tmp_path: Path):
     )
     Base.metadata.create_all(engine)
     test_session = sessionmaker(bind=engine, expire_on_commit=False)
+    monkeypatch.setattr(main, "SessionLocal", test_session)
     db = test_session()
     user = User(
         email="manga@example.com",
@@ -92,6 +93,7 @@ def manga_zip_context(monkeypatch, tmp_path: Path):
             story=story,
             chapter=chapter,
             empty_chapter=empty_chapter,
+            session_factory=test_session,
         )
     finally:
         main.app.dependency_overrides.clear()
@@ -100,9 +102,12 @@ def manga_zip_context(monkeypatch, tmp_path: Path):
         engine.dispose()
 
 
-def test_manga_zip_ticket_rejects_expired_tampered_and_cross_chapter_tokens(monkeypatch):
+def test_manga_zip_ticket_rejects_expired_tampered_and_cross_chapter_tokens(
+    manga_zip_context,
+    monkeypatch,
+):
     monkeypatch.setenv("APP_ENV", "test")
-    monkeypatch.setenv("STORYCANVAS_DOWNLOAD_SECRET", "manga-zip-test-secret")
+    monkeypatch.setenv("STORYCANVAS_DOWNLOAD_SECRET", "manga-zip-test-secret-at-least-32-characters")
     token = main._issue_manga_zip_ticket(12, 7, now=100)
 
     assert main._verify_manga_zip_ticket(12, token, now=160) is True
@@ -113,8 +118,11 @@ def test_manga_zip_ticket_rejects_expired_tampered_and_cross_chapter_tokens(monk
     assert main._verify_manga_zip_ticket(12, f"{token[:-1]}0", now=100) is False
 
 
-def test_manga_zip_ticket_requires_strong_server_secret_in_production(monkeypatch):
-    monkeypatch.setenv("APP_ENV", "production")
+def test_manga_zip_ticket_persists_database_secret_when_environment_is_missing(
+    manga_zip_context,
+    monkeypatch,
+):
+    ctx = manga_zip_context
     for name in (
         "STORYCANVAS_DOWNLOAD_SECRET",
         "AI_CREDENTIAL_SECRET",
@@ -123,26 +131,22 @@ def test_manga_zip_ticket_requires_strong_server_secret_in_production(monkeypatc
     ):
         monkeypatch.delenv(name, raising=False)
 
-    with pytest.raises(main.HTTPException) as exc_info:
-        main._issue_manga_zip_ticket(12, 7, now=100)
-
-    assert exc_info.value.status_code == 503
-
-
-def test_manga_zip_ticket_rejects_weak_default_when_environment_is_unspecified(monkeypatch):
-    monkeypatch.delenv("APP_ENV", raising=False)
-    for name in (
+    monkeypatch.setattr(main, "SessionLocal", ctx.session_factory)
+    first_secret = main._manga_zip_ticket_secret()
+    monkeypatch.setenv(
         "STORYCANVAS_DOWNLOAD_SECRET",
-        "AI_CREDENTIAL_SECRET",
-        "SECRET_KEY",
-        "JWT_SECRET",
-    ):
-        monkeypatch.delenv(name, raising=False)
+        "later-environment-secret-must-not-split-existing-database-key",
+    )
+    second_secret = main._manga_zip_ticket_secret()
+    ctx.db.expire_all()
+    rows = ctx.db.query(PlatformSetting).filter(
+        PlatformSetting.setting_key == main._MANGA_ZIP_SECRET_SETTING_KEY
+    ).all()
 
-    with pytest.raises(main.HTTPException) as exc_info:
-        main._issue_manga_zip_ticket(12, 7, now=100)
-
-    assert exc_info.value.status_code == 503
+    assert len(first_secret) >= 32
+    assert second_secret == first_secret
+    assert len(rows) == 1
+    assert rows[0].value_json == {"value": first_secret}
 
 
 @pytest.mark.asyncio

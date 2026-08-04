@@ -390,20 +390,14 @@ def _is_public_runtime_api_path(path: str) -> bool:
     return _is_install_api_path(path) or path == HEALTH_API_PATH
 
 
-def _is_signed_manga_zip_download_request(request: Request) -> bool:
-    """判断请求是否携带有效的漫画 ZIP 短时签名。"""
+def _is_manga_zip_download_request(request: Request) -> bool:
+    """识别由漫画下载端点负责最终验签的精确请求。"""
     if request.method != "GET":
         return False
     match = re.fullmatch(r"/api/chapters/(\d+)/manga-images/zip", request.url.path)
     if not match:
         return False
-    token = request.query_params.get("dl_token", "")
-    if not token:
-        return False
-    try:
-        return _verify_manga_zip_ticket(int(match.group(1)), token)
-    except HTTPException:
-        return False
+    return bool(request.query_params.get("dl_token", ""))
 
 
 def _refresh_install_status() -> dict[str, Any]:
@@ -632,7 +626,7 @@ async def require_api_token(request: Request, call_next):
         API_TOKEN
         and request.url.path.startswith("/api")
         and not _is_public_runtime_api_path(request.url.path)
-        and not _is_signed_manga_zip_download_request(request)
+        and not _is_manga_zip_download_request(request)
         and request.method != "OPTIONS"
     ):
         supplied = request.headers.get("x-api-token", "").strip()
@@ -11040,24 +11034,68 @@ async def reset_manga_images(chapter_id: int, request: Request, db: Session = De
     return {"ok": True}
 
 
+_MANGA_ZIP_SECRET_SETTING_KEY = "internal.manga_zip_signing_secret"
+
+
 def _manga_zip_ticket_secret() -> str:
-    """返回仅服务端可见且跨副本稳定的下载签名密钥。"""
-    app_env = (os.environ.get("APP_ENV") or "").strip().lower()
-    secret = (
-        os.environ.get("STORYCANVAS_DOWNLOAD_SECRET")
-        or os.environ.get("AI_CREDENTIAL_SECRET")
-        or os.environ.get("SECRET_KEY")
-        or os.environ.get("JWT_SECRET")
-    )
-    secret = str(secret or "").strip()
-    if app_env in {"development", "dev", "test"}:
-        return secret or "storycanvas-dev-manga-download-secret"
-    if len(secret) < 32 or secret.lower().startswith("change-this"):
-        raise HTTPException(503, "服务端尚未配置有效的漫画下载签名密钥")
-    return secret
+    """读取数据库权威密钥，首次缺失时用有效环境密钥或随机值播种。"""
+    environment_secret = ""
+    for name in (
+        "STORYCANVAS_DOWNLOAD_SECRET",
+        "AI_CREDENTIAL_SECRET",
+        "SECRET_KEY",
+        "JWT_SECRET",
+    ):
+        candidate = str(os.environ.get(name) or "").strip()
+        if len(candidate) >= 32 and not candidate.lower().startswith("change-this"):
+            environment_secret = candidate
+            break
+
+    session = SessionLocal()
+    try:
+        row = session.query(PlatformSetting).filter(
+            PlatformSetting.setting_key == _MANGA_ZIP_SECRET_SETTING_KEY
+        ).with_for_update().first()
+        stored_secret = str((row.value_json or {}).get("value") or "").strip() if row else ""
+        if len(stored_secret) >= 32:
+            return stored_secret
+
+        generated_secret = environment_secret or secrets.token_urlsafe(48)
+        if row:
+            row.value_json = {"value": generated_secret}
+        else:
+            session.add(PlatformSetting(
+                setting_key=_MANGA_ZIP_SECRET_SETTING_KEY,
+                value_json={"value": generated_secret},
+            ))
+        try:
+            session.commit()
+            return generated_secret
+        except IntegrityError:
+            session.rollback()
+            winner = session.query(PlatformSetting).filter(
+                PlatformSetting.setting_key == _MANGA_ZIP_SECRET_SETTING_KEY
+            ).with_for_update().first()
+            winner_secret = str((winner.value_json or {}).get("value") or "").strip() if winner else ""
+            if len(winner_secret) >= 32:
+                return winner_secret
+            raise HTTPException(503, "漫画下载签名密钥初始化失败，请稍后重试")
+    except HTTPException:
+        raise
+    except Exception as exc:
+        session.rollback()
+        logger.warning("漫画下载签名密钥读取失败: %s", exc)
+        raise HTTPException(503, "漫画下载签名服务暂时不可用，请稍后重试") from exc
+    finally:
+        session.close()
 
 
-def _issue_manga_zip_ticket(chapter_id: int, user_id: int, *, now: int | None = None) -> str:
+def _issue_manga_zip_ticket(
+    chapter_id: int,
+    user_id: int,
+    *,
+    now: int | None = None,
+) -> str:
     """签发绑定章节和用户的短时漫画下载令牌。"""
     expires_at = int(now if now is not None else time.time()) + _MANGA_ZIP_TICKET_TTL_SECONDS
     payload = f"{int(chapter_id)}:{int(user_id)}:{expires_at}"
