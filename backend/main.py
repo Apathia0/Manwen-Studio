@@ -61,9 +61,11 @@ from starlette.background import BackgroundTask as ResponseBackgroundTask
 
 from database import SessionLocal, get_db, init_db, engine as database_engine
 from models import (
+    AgentAttachment,
     AgentConversation,
     AgentConversationMessage,
     AgentPendingChange,
+    AiUsageEvent,
     AuditLog,
     BackgroundTask,
     BillingOrder,
@@ -6336,6 +6338,14 @@ def delete_story(story_id: int, request: Request, db: Session = Depends(get_db))
         db.query(VideoGenerationJob).filter(
             VideoGenerationJob.shot_id.in_(shot_ids_subq)
         ).delete(synchronize_session=False)
+        # VideoAsset 可能仅通过 scene_id/shot_id 引用（chapter_id 为空），必须在 VideoShot/ScriptScene 前删除
+        db.query(VideoAsset).filter(
+            or_(
+                VideoAsset.chapter_id.in_(chapter_ids),
+                VideoAsset.scene_id.in_(scene_ids_subq),
+                VideoAsset.shot_id.in_(shot_ids_subq),
+            )
+        ).delete(synchronize_session=False)
         db.query(VideoShot).filter(
             VideoShot.scene_id.in_(scene_ids_subq)
         ).delete(synchronize_session=False)
@@ -6348,7 +6358,8 @@ def delete_story(story_id: int, request: Request, db: Session = Depends(get_db))
         )).delete(synchronize_session=False)
         db.query(ChapterVideoWorkflow).filter(ChapterVideoWorkflow.chapter_id.in_(chapter_ids)).delete(synchronize_session=False)
         db.query(VideoProject).filter(VideoProject.chapter_id.in_(chapter_ids)).delete(synchronize_session=False)
-        db.query(VideoAsset).filter(VideoAsset.chapter_id.in_(chapter_ids)).delete(synchronize_session=False)
+        # AiUsageEvent.chapter_id 引用 chapters.id（默认 RESTRICT），必须在删除 Chapter 之前清理
+        db.query(AiUsageEvent).filter(AiUsageEvent.chapter_id.in_(chapter_ids)).delete(synchronize_session=False)
     # 删除章节及其 cascade 数据
     for chapter in story.chapters:
         chapter_dir = Path(__file__).resolve().parent / "manga_outputs" / f"chapter_{chapter.id}"
@@ -6368,6 +6379,7 @@ def delete_story(story_id: int, request: Request, db: Session = Depends(get_db))
         db.query(ChatMessage).filter(ChatMessage.chapter_id.in_(chapter_ids)).delete(synchronize_session=False)
     # AgentConversation 及其子表必须在 Chapter 之前删除（chapter_id FK 引用 chapters.id，默认 RESTRICT）
     db.query(AgentPendingChange).filter(AgentPendingChange.story_id == story_id).delete(synchronize_session=False)
+    db.query(AgentAttachment).filter(AgentAttachment.story_id == story_id).delete(synchronize_session=False)
     db.query(AgentConversationMessage).filter(AgentConversationMessage.conversation_id.in_(
         db.query(AgentConversation.id).filter(AgentConversation.story_id == story_id)
     )).delete(synchronize_session=False)
@@ -6395,6 +6407,8 @@ def delete_story(story_id: int, request: Request, db: Session = Depends(get_db))
     db.query(FrameworkSnapshot).filter(FrameworkSnapshot.story_id == story_id).delete(synchronize_session=False)
     db.query(NovelSource).filter(NovelSource.story_id == story_id).delete(synchronize_session=False)
     db.query(BackgroundTask).filter(BackgroundTask.story_id == story_id).delete(synchronize_session=False)
+    db.query(AiUsageEvent).filter(AiUsageEvent.story_id == story_id).delete(synchronize_session=False)
+    db.query(StoryboardPromptPreset).filter(StoryboardPromptPreset.story_id == story_id).delete(synchronize_session=False)
     db.delete(story)
     db.commit()
     return {"ok": True}
@@ -7451,13 +7465,78 @@ def delete_chapter(chapter_id: int, request: Request, db: Session = Depends(get_
     chapter_dir = Path(__file__).resolve().parent / "manga_outputs" / f"chapter_{chapter_id}"
     _rmtree_best_effort(chapter_dir, "chapter directory")
 
+    # 分镜/镜头链子表（均无 CASCADE，须按依赖顺序显式删除）
+    scene_ids_subq = db.query(ScriptScene.id).filter(
+        ScriptScene.chapter_id == chapter.id
+    ).subquery()
+    shot_ids_subq = db.query(VideoShot.id).filter(
+        VideoShot.scene_id.in_(scene_ids_subq)
+    ).subquery()
+    db.query(ShotAssetBinding).filter(
+        ShotAssetBinding.shot_id.in_(shot_ids_subq)
+    ).delete(synchronize_session=False)
+    db.query(RenderedClip).filter(
+        RenderedClip.shot_id.in_(shot_ids_subq)
+    ).delete(synchronize_session=False)
+    db.query(VideoGenerationJob).filter(
+        VideoGenerationJob.shot_id.in_(shot_ids_subq)
+    ).delete(synchronize_session=False)
+    # VideoAsset 可能仅通过 scene_id/shot_id 引用（chapter_id 为空），必须在 VideoShot/ScriptScene 前删除
+    db.query(VideoAsset).filter(
+        or_(
+            VideoAsset.chapter_id == chapter.id,
+            VideoAsset.scene_id.in_(scene_ids_subq),
+            VideoAsset.shot_id.in_(shot_ids_subq),
+        )
+    ).delete(synchronize_session=False)
+    db.query(VideoShot).filter(
+        VideoShot.scene_id.in_(scene_ids_subq)
+    ).delete(synchronize_session=False)
+    db.query(ScriptScene).filter(
+        ScriptScene.chapter_id == chapter.id
+    ).delete(synchronize_session=False)
+
+    # 视频工作流链（无 CASCADE）
+    workflow_ids_subq = db.query(ChapterVideoWorkflow.id).filter(
+        ChapterVideoWorkflow.chapter_id == chapter.id
+    ).subquery()
+    db.query(ChapterVideoShot).filter(
+        ChapterVideoShot.workflow_id.in_(workflow_ids_subq)
+    ).delete(synchronize_session=False)
+    db.query(ChapterVideoWorkflow).filter(
+        ChapterVideoWorkflow.chapter_id == chapter.id
+    ).delete(synchronize_session=False)
+    db.query(VideoProject).filter(
+        VideoProject.chapter_id == chapter.id
+    ).delete(synchronize_session=False)
+
+    # AI 用量事件（chapter_id 默认 RESTRICT）
+    db.query(AiUsageEvent).filter(
+        AiUsageEvent.chapter_id == chapter.id
+    ).delete(synchronize_session=False)
+
+    # Agent 会话链（子表引用 agent_conversations.id，须先删子表）
+    conversation_ids_subq = db.query(AgentConversation.id).filter(
+        AgentConversation.chapter_id == chapter.id
+    ).subquery()
+    db.query(AgentPendingChange).filter(
+        AgentPendingChange.conversation_id.in_(conversation_ids_subq)
+    ).delete(synchronize_session=False)
+    db.query(AgentAttachment).filter(
+        AgentAttachment.conversation_id.in_(conversation_ids_subq)
+    ).delete(synchronize_session=False)
+    db.query(AgentConversationMessage).filter(
+        AgentConversationMessage.conversation_id.in_(conversation_ids_subq)
+    ).delete(synchronize_session=False)
+    db.query(AgentConversation).filter(
+        AgentConversation.chapter_id == chapter.id
+    ).delete(synchronize_session=False)
+
     # Delete DB records (messages + images cascade via relationship, or manually)
     for img in chapter.images:
         db.delete(img)
     for msg in chapter.messages:
         db.delete(msg)
-    for asset in db.query(VideoAsset).filter(VideoAsset.chapter_id == chapter.id):
-        db.delete(asset)
     manga_asset_ids_subq = db.query(MangaAsset.id).filter(MangaAsset.chapter_id == chapter.id).subquery()
     db.query(MangaAssetBinding).filter(
         or_(

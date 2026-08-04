@@ -1621,6 +1621,12 @@ def agent_knowledge_revision_guard_is_stale() -> bool:
 def _collect_story_knowledge_revision_changes(session, _flush_context, _instances) -> None:
     """收集本次事务中会改变作品创作上下文的作品 ID。"""
     story_ids = set(session.info.get(_KNOWLEDGE_REVISION_STORY_IDS, ()))
+    # 本次事务中正在被删除的作品：其关联对象删除不应触发知识版本推进
+    deleting_story_ids = {
+        int(item.id)
+        for item in session.deleted
+        if isinstance(item, Story) and item.id
+    }
     changed_objects = set(session.new).union(session.dirty, session.deleted)
     for item in changed_objects:
         if isinstance(item, Story):
@@ -1635,10 +1641,14 @@ def _collect_story_knowledge_revision_changes(session, _flush_context, _instance
                 state = inspect(item)
                 if not any(state.attrs[field].history.has_changes() for field in _CHAPTER_CONTEXT_FIELDS):
                     continue
-            if item.story_id:
+            if item.story_id and int(item.story_id) not in deleting_story_ids:
                 story_ids.add(int(item.story_id))
             continue
-        if isinstance(item, _NORMALIZED_KNOWLEDGE_MODELS) and item.story_id:
+        if (
+            isinstance(item, _NORMALIZED_KNOWLEDGE_MODELS)
+            and item.story_id
+            and int(item.story_id) not in deleting_story_ids
+        ):
             story_ids.add(int(item.story_id))
     if story_ids:
         session.info[_KNOWLEDGE_REVISION_STORY_IDS] = story_ids
