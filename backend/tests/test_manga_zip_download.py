@@ -101,6 +101,7 @@ def manga_zip_context(monkeypatch, tmp_path: Path):
 
 
 def test_manga_zip_ticket_rejects_expired_tampered_and_cross_chapter_tokens(monkeypatch):
+    monkeypatch.setenv("APP_ENV", "test")
     monkeypatch.setenv("STORYCANVAS_DOWNLOAD_SECRET", "manga-zip-test-secret")
     token = main._issue_manga_zip_ticket(12, 7, now=100)
 
