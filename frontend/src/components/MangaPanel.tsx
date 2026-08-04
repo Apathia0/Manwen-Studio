@@ -58,6 +58,7 @@ import {
 import { genStore } from '../genStore';
 import { toast } from '../lib/toast';
 import { normalizeErrorMessage } from '../lib/errors';
+import { shouldUseBrowserMangaZip } from './mangaDownloadUtils';
 import JSZip from 'jszip';
 import { saveAs } from 'file-saver';
 
@@ -1396,7 +1397,7 @@ const [downloadingAll, setDownloadingAll] = useState(false);
   const hasImages = displayImages.length > 0;
   const canChangeImageCount = !generating && (phase === 'idle' || phase === 'editing-scenes');
 
-  // 默认由后端流式打包，避免 OSS 跨域和浏览器内存峰值；滚动部署到旧后端时回退浏览器打包。
+  // OSS 图片优先由浏览器直接拉取并本地打包；本地或混合来源交给后端处理。
   const handleDownloadAll = async () => {
     if (!hasImages || downloadingAll || !chapter) return;
     const items = displayImages
@@ -1404,6 +1405,7 @@ const [downloadingAll, setDownloadingAll] = useState(false);
       .sort((a, b) => a.image_number - b.image_number)
       .map((img) => ({
         number: img.image_number,
+        sourcePath: img.image_path,
         url: mangaImageUrl(img.image_path) || '',
       }))
       .filter((item) => item.url);
@@ -1413,7 +1415,7 @@ const [downloadingAll, setDownloadingAll] = useState(false);
     }
     setDownloadingAll(true);
     try {
-      try {
+      const startServerDownload = async () => {
         const ticket = await requestMangaZipTicket(chapter.id);
         const link = document.createElement('a');
         link.href = ticket.url;
@@ -1422,49 +1424,43 @@ const [downloadingAll, setDownloadingAll] = useState(false);
         link.click();
         link.remove();
         toast.success(`已开始打包下载 ${items.length} 张图片`);
-        return;
-      } catch (ticketError) {
-        const status = (ticketError as Error & { status?: number }).status;
-        if (status !== 404 && status !== 405) throw ticketError;
+      };
+
+      const canPackageInBrowser = items.length === displayImages.length
+        && shouldUseBrowserMangaZip(items.map((item) => ({ image_path: item.sourcePath })));
+      if (canPackageInBrowser) {
+        try {
+          const zip = new JSZip();
+          // 分批并发拉取，避免一次性请求过多触发浏览器或 OSS 限流。
+          const batchSize = 4;
+          for (let i = 0; i < items.length; i += batchSize) {
+            const batch = items.slice(i, i + batchSize);
+            await Promise.all(
+              batch.map(async (item) => {
+                const res = await fetch(item.url, { mode: 'cors' });
+                if (!res.ok) throw new Error(`HTTP ${res.status}`);
+                const blob = await res.blob();
+                const extMatch = item.url.match(/\.(png|jpe?g|webp|gif|bmp)(?:$|[?#])/i);
+                const ext = extMatch ? extMatch[1].toLowerCase() : 'png';
+                zip.file(`panel_${String(item.number).padStart(2, '0')}.${ext}`, blob);
+              }),
+            );
+          }
+          const blob = await zip.generateAsync({
+            type: 'blob',
+            compression: 'STORE',
+            compressionOptions: { level: 0 },
+          });
+          const dateStr = new Date().toISOString().slice(0, 10);
+          saveAs(blob, `第${chapter.chapter_number}话_漫画图片_${dateStr}.zip`);
+          toast.success(`已下载 ${items.length} 张图片`);
+          return;
+        } catch (browserError) {
+          console.warn('OSS 图片浏览器打包失败，切换服务端下载', browserError);
+        }
       }
 
-      const zip = new JSZip();
-      let failed = 0;
-      // 分批并发拉取（每批 4 张），避免一次性发起过多请求被浏览器限流
-      const BATCH = 4;
-      for (let i = 0; i < items.length; i += BATCH) {
-        const batch = items.slice(i, i + BATCH);
-        await Promise.all(
-          batch.map(async (item) => {
-            try {
-              const res = await fetch(item.url, { mode: 'cors' });
-              if (!res.ok) throw new Error(`HTTP ${res.status}`);
-              const blob = await res.blob();
-              const extMatch = item.url.match(/\.(png|jpe?g|webp|gif|bmp)(?:$|[?#])/i);
-              const ext = extMatch ? extMatch[1].toLowerCase() : 'png';
-              zip.file(`panel_${String(item.number).padStart(2, '0')}.${ext}`, blob);
-            } catch (err) {
-              failed += 1;
-              console.warn('漫画图片拉取失败', item.url, err);
-            }
-          }),
-        );
-      }
-      if (failed === items.length) {
-        throw new Error('所有图片拉取失败，请检查图片地址是否可访问');
-      }
-      const blob = await zip.generateAsync({
-        type: 'blob',
-        compression: 'STORE',
-        compressionOptions: { level: 0 },
-      });
-      const dateStr = new Date().toISOString().slice(0, 10);
-      saveAs(blob, `第${chapter.chapter_number}话_漫画图片_${dateStr}.zip`);
-      toast.success(
-        failed > 0
-          ? `已下载 ${items.length - failed}/${items.length} 张图片${failed > 0 ? `（${failed} 张拉取失败）` : ''}`
-          : `已下载 ${items.length} 张图片`,
-      );
+      await startServerDownload();
     } catch (err) {
       toast.error(normalizeErrorMessage(err, '打包下载失败，请重试'));
     } finally {
