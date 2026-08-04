@@ -2890,6 +2890,25 @@ export function mangaImageUrl(imagePath: string, cacheBust?: number): string {
   return `${url}${separator}v=${encodeURIComponent(String(cacheBust))}`;
 }
 
+export interface MangaZipTicket {
+  url: string;
+  expires_in: number;
+}
+
+/** 获取漫画图片打包下载的短时授权地址。 */
+export async function requestMangaZipTicket(chapterId: number): Promise<MangaZipTicket> {
+  const res = await fetch(`${BASE}/api/chapters/${chapterId}/manga-images/zip-ticket`, {
+    method: 'POST',
+    headers: apiHeaders(true),
+  });
+  if (!res.ok) {
+    const error = new Error(await readErrorMessage(res, '打包下载链接获取失败')) as Error & { status?: number };
+    error.status = res.status;
+    throw error;
+  }
+  return res.json();
+}
+
 export function agentChatStream(
   storyId: number,
   conversationId: number,

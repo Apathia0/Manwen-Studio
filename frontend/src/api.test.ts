@@ -1,6 +1,6 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 
-import { adjustChapterContent, analyzeChapterMangaAssets, apiHeaders, coverImageUrl, createAdminAiChannel, createStoryKnowledge, createStoryKnowledgeCategory, deleteAdminAiChannel, deleteStoryKnowledge, deleteStoryKnowledgeCategory, expandChapter, generateMangaAsset, generateMangaAssetsBatch, generateMangaStream, generateNovel, generateScenes, generateStoryCharRefStream, getAiChannels, getAiCredentials, getApiKeySettings, getAuthorStyleResult, getAuthorStyleStatus, getBackgroundTaskStatus, getLocalCredentialMode, getMangaAssetAnalysis, getStoryKnowledge, login, previewAdminAiChannelPrices, redrawMangaAsset, regenerateStoryChapterContext, regenerateVideoAsset, retryVideoJob, saveAiModalityCredential, saveApiKeySettings, saveMangaAssetAnalysis, setLocalCredentialMode, startAuthorStyleAnalysis, syncAdminAiChannelPrices, syncStoryKnowledgeWithAI, testAiModalityCredential, toPublicMangaAssetUrl, toPublicVideoAssetUrl, updateAdminAiChannel, updateAuthorStyleReport, updateDeconstructionReport, updateStoryBible, updateStoryChapterContext, updateStoryKnowledge, updateStoryKnowledgeCategory } from './api';
+import { adjustChapterContent, analyzeChapterMangaAssets, apiHeaders, coverImageUrl, createAdminAiChannel, createStoryKnowledge, createStoryKnowledgeCategory, deleteAdminAiChannel, deleteStoryKnowledge, deleteStoryKnowledgeCategory, expandChapter, generateMangaAsset, generateMangaAssetsBatch, generateMangaStream, generateNovel, generateScenes, generateStoryCharRefStream, getAiChannels, getAiCredentials, getApiKeySettings, getAuthorStyleResult, getAuthorStyleStatus, getBackgroundTaskStatus, getLocalCredentialMode, getMangaAssetAnalysis, getStoryKnowledge, login, previewAdminAiChannelPrices, redrawMangaAsset, regenerateStoryChapterContext, regenerateVideoAsset, requestMangaZipTicket, retryVideoJob, saveAiModalityCredential, saveApiKeySettings, saveMangaAssetAnalysis, setLocalCredentialMode, startAuthorStyleAnalysis, syncAdminAiChannelPrices, syncStoryKnowledgeWithAI, testAiModalityCredential, toPublicMangaAssetUrl, toPublicVideoAssetUrl, updateAdminAiChannel, updateAuthorStyleReport, updateDeconstructionReport, updateStoryBible, updateStoryChapterContext, updateStoryKnowledge, updateStoryKnowledgeCategory } from './api';
 import { shouldShowAuthorStyleEntry } from './components/DeconstructionWorkPage';
 
 describe('coverImageUrl', () => {
@@ -12,6 +12,39 @@ describe('coverImageUrl', () => {
 
   it('将本地相对路径转换为静态资源路径', () => {
     expect(coverImageUrl('manga_outputs/covers/cover_114_test.png')).toBe('/static/manga/covers/cover_114_test.png');
+  });
+});
+
+describe('漫画图片打包下载 API', () => {
+  beforeEach(() => {
+    vi.stubGlobal('localStorage', {
+      getItem: vi.fn(() => 'test-token'),
+      setItem: vi.fn(),
+      removeItem: vi.fn(),
+    });
+  });
+
+  it('通过 POST 获取短时下载地址', async () => {
+    const payload = {
+      url: '/api/chapters/764/manga-images/zip?dl_token=signed',
+      expires_in: 60,
+    };
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(payload), { status: 200 })));
+
+    await expect(requestMangaZipTicket(764)).resolves.toEqual(payload);
+    expect(fetch).toHaveBeenCalledWith(
+      '/api/chapters/764/manga-images/zip-ticket',
+      expect.objectContaining({ method: 'POST' }),
+    );
+  });
+
+  it('保留 404 状态供旧后端兼容回退判断', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(
+      JSON.stringify({ detail: 'Not Found' }),
+      { status: 404 },
+    )));
+
+    await expect(requestMangaZipTicket(764)).rejects.toMatchObject({ status: 404 });
   });
 });
 

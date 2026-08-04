@@ -1,7 +1,7 @@
 {
   "channel": "stable",
-  "latest_version": "v4.3.2",
+  "latest_version": "v4.3.3",
   "min_supported_version": "v1.0.0",
-  "release_notes": "",
-  "published_at": "2026-08-04T03:10:22Z"
+  "release_notes": "漫画下载：后端流式打包优先，浏览器 JSZip 兼容回退；加固下载签名密钥配置",
+  "published_at": "2026-08-04T12:00:00Z"
 }

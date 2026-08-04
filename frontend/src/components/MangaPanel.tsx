@@ -35,6 +35,7 @@ import {
   setImageCount,
   ALLOWED_IMAGE_COUNTS,
   mangaImageUrl,
+  requestMangaZipTicket,
   getMangaGenerationStatus,
   cancelMangaGeneration,
   uploadCharacterRefImage,
@@ -1395,8 +1396,7 @@ const [downloadingAll, setDownloadingAll] = useState(false);
   const hasImages = displayImages.length > 0;
   const canChangeImageCount = !generating && (phase === 'idle' || phase === 'editing-scenes');
 
-  // 浏览器端打包下载：前端并发拉取图片（OSS 直链）→ JSZip 打包 → 浏览器保存，
-  // 服务器零参与（不转发图片字节、不做 ZIP），下载流量走 OSS/CDN
+  // 默认由后端流式打包，避免 OSS 跨域和浏览器内存峰值；滚动部署到旧后端时回退浏览器打包。
   const handleDownloadAll = async () => {
     if (!hasImages || downloadingAll || !chapter) return;
     const items = displayImages
@@ -1413,6 +1413,21 @@ const [downloadingAll, setDownloadingAll] = useState(false);
     }
     setDownloadingAll(true);
     try {
+      try {
+        const ticket = await requestMangaZipTicket(chapter.id);
+        const link = document.createElement('a');
+        link.href = ticket.url;
+        link.rel = 'noopener';
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        toast.success(`已开始打包下载 ${items.length} 张图片`);
+        return;
+      } catch (ticketError) {
+        const status = (ticketError as Error & { status?: number }).status;
+        if (status !== 404 && status !== 405) throw ticketError;
+      }
+
       const zip = new JSZip();
       let failed = 0;
       // 分批并发拉取（每批 4 张），避免一次性发起过多请求被浏览器限流
