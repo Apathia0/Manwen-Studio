@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { createPortal } from 'react-dom';
-import { X, Upload, Trash2, Edit3, Save, Loader2, Image, User, MapPin, Film } from 'lucide-react';
+import { X, Upload, Trash2, Edit3, Save, Loader2, Image, User, MapPin, Film, Download } from 'lucide-react';
 import { 
   listVideoAssets, 
   createVideoAsset,
@@ -10,6 +10,9 @@ import {
   toPublicVideoAssetUrl,
   type VideoAsset 
 } from '../api';
+import { toast } from '../lib/toast';
+import { normalizeErrorMessage } from '../lib/errors';
+import { downloadImagesAsZip, sanitizeFilename } from '../lib/zipDownload';
 
 interface AssetManagementModalProps {
   chapterId: number;
@@ -18,6 +21,13 @@ interface AssetManagementModalProps {
 }
 
 type AssetTab = 'all' | 'character_reference' | 'scene_reference' | 'storyboard_frame' | 'prop_reference';
+
+const assetTypeLabel: Record<string, string> = {
+  character_reference: '角色',
+  scene_reference: '场景',
+  storyboard_frame: '故事版',
+  prop_reference: '道具',
+};
 
 const tabs: { key: AssetTab; label: string; icon: React.ReactNode }[] = [
   { key: 'all', label: '全部', icon: <Image size={14} /> },
@@ -125,6 +135,9 @@ export default function AssetManagementModal({ chapterId, onClose, onAssetsChang
   const [uploadType, setUploadType] = useState<string>('character_reference');
   const [uploadPreview, setUploadPreview] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const [downloadingAll, setDownloadingAll] = useState(false);
+  const [downloadStatus, setDownloadStatus] = useState('');
+  const exportAbortRef = useRef<AbortController | null>(null);
 
   const loadAssets = useCallback(async () => {
     setLoading(true);
@@ -213,6 +226,70 @@ export default function AssetManagementModal({ chapterId, onClose, onAssetsChang
     }
   };
 
+  const assetUrl = (asset: VideoAsset): string => {
+    const url = toPublicVideoAssetUrl(asset.file_path);
+    if (!url || typeof asset.revision !== 'number' || asset.revision <= 0) return url || '';
+    return `${url}${url.includes('?') ? '&' : '?'}v=${encodeURIComponent(String(asset.revision))}`;
+  };
+
+  const assetFileExtension = (filePath: string): string => {
+    const match = /\.([a-zA-Z0-9]+)(?:\?|$)/.exec(filePath || '');
+    const ext = match ? match[1].toLowerCase() : '';
+    return ['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp'].includes(ext) ? ext : 'png';
+  };
+
+  // 复用公共下载工具，将当前筛选的资产图片打包为 ZIP 导出。
+  const handleDownloadAll = async () => {
+    const items = filteredAssets
+      .map((asset) => ({ asset, url: assetUrl(asset) }))
+      .filter((entry): entry is { asset: VideoAsset; url: string } => Boolean(entry.url))
+      .map(({ asset, url }) => ({
+        filename: `${assetTypeLabel[asset.asset_type] || '资产'}_${sanitizeFilename(asset.name)}.${assetFileExtension(asset.file_path)}`,
+        url,
+      }));
+    if (items.length === 0) {
+      toast.error('当前没有可下载的资产图片');
+      return;
+    }
+    if (downloadingAll) return;
+    exportAbortRef.current?.abort();
+    const abortController = new AbortController();
+    exportAbortRef.current = abortController;
+    const isCurrentExport = () => (
+      exportAbortRef.current === abortController && !abortController.signal.aborted
+    );
+    setDownloadingAll(true);
+    setDownloadStatus('正在准备导出');
+    try {
+      const dateStr = new Date().toISOString().slice(0, 10);
+      await downloadImagesAsZip(items, {
+        zipName: `视频资产_${dateStr}.zip`,
+        signal: abortController.signal,
+        onStage: (stage) => {
+          if (!isCurrentExport()) return;
+          if (stage === 'preparing') setDownloadStatus('正在准备导出');
+          if (stage === 'downloading') setDownloadStatus(`下载 0/${items.length}`);
+          if (stage === 'archiving') setDownloadStatus('正在生成压缩包');
+        },
+        onProgress: (completed, total) => {
+          if (isCurrentExport()) setDownloadStatus(`下载 ${completed}/${total}`);
+        },
+      });
+      if (!isCurrentExport()) return;
+      toast.success(`已下载 ${items.length} 张资产图片`);
+    } catch (err) {
+      if (exportAbortRef.current !== abortController) return;
+      if (abortController.signal.aborted) return;
+      toast.error(normalizeErrorMessage(err, '资产打包下载失败，请重试'));
+    } finally {
+      if (exportAbortRef.current === abortController) {
+        exportAbortRef.current = null;
+        setDownloadingAll(false);
+        setDownloadStatus('');
+      }
+    }
+  };
+
   return createPortal(
     <div className="fixed inset-0 z-[75] flex items-center justify-center bg-black/50 backdrop-blur-sm p-4" onClick={onClose}>
       <div className="flex flex-col w-[min(1000px,95vw)] h-[85vh] rounded-2xl bg-white shadow-2xl overflow-hidden" onClick={e => e.stopPropagation()}>
@@ -228,6 +305,14 @@ export default function AssetManagementModal({ chapterId, onClose, onAssetsChang
             >
               <Upload size={14} />
               上传资产
+            </button>
+            <button
+              onClick={() => void handleDownloadAll()}
+              disabled={downloadingAll || filteredAssets.length === 0}
+              className="flex items-center gap-1.5 px-4 py-2 border border-slate-300 bg-white text-slate-700 text-sm font-medium rounded-lg hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50 transition-colors"
+            >
+              {downloadingAll ? <Loader2 size={14} className="animate-spin" /> : <Download size={14} />}
+              {downloadingAll ? downloadStatus : '下载导出'}
             </button>
             <button onClick={onClose} className="p-2 rounded-full hover:bg-slate-100">
               <X size={18} />

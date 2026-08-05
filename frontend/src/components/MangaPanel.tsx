@@ -58,12 +58,7 @@ import {
 import { genStore } from '../genStore';
 import { toast } from '../lib/toast';
 import { normalizeErrorMessage } from '../lib/errors';
-import {
-  createMangaArchiveError,
-  createMangaExportDownloadUrl,
-  createMangaPageDownloadError,
-  mapWithConcurrency,
-} from './mangaDownloadUtils';
+import { downloadImagesAsZip } from '../lib/zipDownload';
 
 interface Props {
   chapter: Chapter | null;
@@ -1418,7 +1413,6 @@ const [downloadStatus, setDownloadStatus] = useState('');
     const isCurrentExport = () => (
       exportAbortRef.current === abortController && !abortController.signal.aborted
     );
-    let downloadFailed = false;
     setDownloadingAll(true);
     setDownloadStatus('正在准备导出');
     try {
@@ -1427,71 +1421,29 @@ const [downloadStatus, setDownloadStatus] = useState('');
       if (manifest.images.length === 0) {
         throw new Error('导出清单中没有漫画图片');
       }
-      const [{ default: JSZip }, { saveAs }] = await Promise.all([
-        import('jszip'),
-        import('file-saver'),
-      ]);
-      if (!isCurrentExport()) return;
-      const zip = new JSZip();
-      setDownloadStatus(`下载 0/${manifest.images.length}`);
-      let completedCount = 0;
-      const downloadConcurrency = 6;
-      const exportRequestId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-      const downloaded = await mapWithConcurrency(
-        manifest.images,
-        downloadConcurrency,
-        async (item) => {
-          try {
-            const downloadUrl = createMangaExportDownloadUrl(
-              item.download_url,
-              `${exportRequestId}-${item.image_number}`,
-            );
-            const response = await fetch(downloadUrl, {
-              mode: 'cors',
-              credentials: 'omit',
-              cache: 'no-store',
-              signal: abortController.signal,
-            });
-            if (!response.ok) {
-              throw new Error(`HTTP ${response.status}`);
-            }
-            const blob = await response.blob();
-            completedCount += 1;
-            if (isCurrentExport()) {
-              setDownloadStatus(`下载 ${completedCount}/${manifest.images.length}`);
-            }
-            return { item, blob };
-          } catch (error) {
-            if (!abortController.signal.aborted) {
-              downloadFailed = true;
-            }
-            abortController.abort();
-            throw createMangaPageDownloadError(item.image_number, error);
-          }
+      const dateStr = new Date().toISOString().slice(0, 10);
+      await downloadImagesAsZip(
+        manifest.images.map((item) => ({ filename: item.filename, url: item.download_url })),
+        {
+          zipName: `第${chapter.chapter_number}话_漫画图片_${dateStr}.zip`,
+          signal: abortController.signal,
+          onStage: (stage) => {
+            if (!isCurrentExport()) return;
+            if (stage === 'preparing') setDownloadStatus('正在准备导出');
+            if (stage === 'downloading') setDownloadStatus('下载 0/' + manifest.images.length);
+            if (stage === 'archiving') setDownloadStatus('正在生成压缩包');
+          },
+          onProgress: (completed, total) => {
+            if (isCurrentExport()) setDownloadStatus(`下载 ${completed}/${total}`);
+          },
+          itemLabel: (_, index) => `漫画第 ${manifest.images[index].image_number} 页`,
         },
       );
       if (!isCurrentExport()) return;
-      for (const { item, blob } of downloaded) {
-        zip.file(item.filename, blob);
-      }
-      setDownloadStatus('正在生成压缩包');
-      let blob: Blob;
-      try {
-        blob = await zip.generateAsync({
-          type: 'blob',
-          compression: 'STORE',
-          compressionOptions: { level: 0 },
-        });
-      } catch (error) {
-        throw createMangaArchiveError(manifest.images.length, error);
-      }
-      if (!isCurrentExport()) return;
-      const dateStr = new Date().toISOString().slice(0, 10);
-      saveAs(blob, `第${chapter.chapter_number}话_漫画图片_${dateStr}.zip`);
       toast.success(`已下载 ${manifest.images.length} 张图片`);
     } catch (err) {
       if (exportAbortRef.current !== abortController) return;
-      if (abortController.signal.aborted && !downloadFailed) return;
+      if (abortController.signal.aborted) return;
       toast.error(normalizeErrorMessage(err, '打包下载失败，请重试'));
     } finally {
       if (exportAbortRef.current === abortController) {

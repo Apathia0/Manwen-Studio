@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { Check, ChevronDown, ChevronUp, Edit3, Image as ImageIcon, Loader2, MapPin, Package, Palette, Pin, Save, Sparkles, Trash2, Upload, User, X } from 'lucide-react';
+import { Check, ChevronDown, ChevronUp, Download, Edit3, Image as ImageIcon, Loader2, MapPin, Package, Palette, Pin, Save, Sparkles, Trash2, Upload, User, X } from 'lucide-react';
 import {
   analyzeChapterMangaAssets,
   deleteMangaAsset,
@@ -24,6 +24,8 @@ import {
 } from '../api';
 import { confirm } from '../lib/confirm';
 import { toast } from '../lib/toast';
+import { normalizeErrorMessage } from '../lib/errors';
+import { downloadImagesAsZip, sanitizeFilename } from '../lib/zipDownload';
 import { getTrackedMangaAssetBatch, subscribeMangaAssetBatch, trackMangaAssetBatch } from '../mangaAssetBatchMonitor';
 import { ImageRedrawModal } from './shared/ImageRedrawModal';
 
@@ -72,6 +74,12 @@ function assetImageUrl(asset: MangaAsset): string {
   return `${url}${url.includes('?') ? '&' : '?'}v=${encodeURIComponent(String(revision))}`;
 }
 
+function assetFileExtension(storagePath: string): string {
+  const match = /\.([a-zA-Z0-9]+)(?:\?|$)/.exec(storagePath || '');
+  const ext = match ? match[1].toLowerCase() : '';
+  return ['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp'].includes(ext) ? ext : 'png';
+}
+
 const terminalTaskStatuses = new Set(['succeeded', 'failed', 'cancelled', 'canceled']);
 
 export default function MangaAssetManagementModal({ storyId, chapterId, onClose, onAssetsChanged }: Props) {
@@ -103,6 +111,9 @@ export default function MangaAssetManagementModal({ storyId, chapterId, onClose,
   const [bindingBusy, setBindingBusy] = useState(false);
   const [workbenchAsset, setWorkbenchAsset] = useState<MangaAsset | null>(null);
   const [redrawingAssetId, setRedrawingAssetId] = useState<number | null>(null);
+  const [downloadingAll, setDownloadingAll] = useState(false);
+  const [downloadStatus, setDownloadStatus] = useState('');
+  const exportAbortRef = useRef<AbortController | null>(null);
   const bindingsRef = useRef<MangaAssetBinding[]>([]);
   const bindingBusyRef = useRef(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -477,6 +488,58 @@ export default function MangaAssetManagementModal({ storyId, chapterId, onClose,
     }
   };
 
+  // 复用公共下载工具，将当前筛选的资产图片打包为 ZIP 导出。
+  const handleDownloadAll = async () => {
+    const items = filteredAssets
+      .map((asset) => ({ asset, url: assetImageUrl(asset) }))
+      .filter((entry): entry is { asset: MangaAsset; url: string } => Boolean(entry.url))
+      .map(({ asset, url }) => ({
+        filename: `${assetTypeLabel[asset.asset_type]}_${sanitizeFilename(asset.name)}.${assetFileExtension(asset.storage_path)}`,
+        url,
+      }));
+    if (items.length === 0) {
+      toast.error('当前没有可下载的资产图片');
+      return;
+    }
+    if (downloadingAll) return;
+    exportAbortRef.current?.abort();
+    const abortController = new AbortController();
+    exportAbortRef.current = abortController;
+    const isCurrentExport = () => (
+      exportAbortRef.current === abortController && !abortController.signal.aborted
+    );
+    setDownloadingAll(true);
+    setDownloadStatus('正在准备导出');
+    try {
+      const dateStr = new Date().toISOString().slice(0, 10);
+      await downloadImagesAsZip(items, {
+        zipName: `漫画资产_${dateStr}.zip`,
+        signal: abortController.signal,
+        onStage: (stage) => {
+          if (!isCurrentExport()) return;
+          if (stage === 'preparing') setDownloadStatus('正在准备导出');
+          if (stage === 'downloading') setDownloadStatus(`下载 0/${items.length}`);
+          if (stage === 'archiving') setDownloadStatus('正在生成压缩包');
+        },
+        onProgress: (completed, total) => {
+          if (isCurrentExport()) setDownloadStatus(`下载 ${completed}/${total}`);
+        },
+      });
+      if (!isCurrentExport()) return;
+      toast.success(`已下载 ${items.length} 张资产图片`);
+    } catch (err) {
+      if (exportAbortRef.current !== abortController) return;
+      if (abortController.signal.aborted) return;
+      toast.error(normalizeErrorMessage(err, '资产打包下载失败，请重试'));
+    } finally {
+      if (exportAbortRef.current === abortController) {
+        exportAbortRef.current = null;
+        setDownloadingAll(false);
+        setDownloadStatus('');
+      }
+    }
+  };
+
   return createPortal(
     <div className="fixed inset-0 z-[75] flex items-center justify-center bg-black/50 p-4 backdrop-blur-sm" onClick={onClose}>
       <section className="flex h-[85vh] w-[min(1100px,95vw)] flex-col overflow-hidden rounded-2xl bg-white shadow-2xl" onClick={(event) => event.stopPropagation()} aria-modal="true" role="dialog" aria-label="漫画资产管理">
@@ -491,6 +554,10 @@ export default function MangaAssetManagementModal({ storyId, chapterId, onClose,
             </button>
             <button type="button" onClick={() => setUploadOpen(true)} className="inline-flex items-center gap-1.5 rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-indigo-700">
               <Upload size={15} />上传资产
+            </button>
+            <button type="button" onClick={() => void handleDownloadAll()} disabled={downloadingAll || filteredAssets.length === 0} className="inline-flex items-center gap-1.5 rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 transition-colors hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50">
+              {downloadingAll ? <Loader2 size={15} className="animate-spin" /> : <Download size={15} />}
+              {downloadingAll ? downloadStatus : '下载导出'}
             </button>
             <button type="button" onClick={onClose} className="rounded-full p-2 text-slate-500 transition-colors hover:bg-slate-100 hover:text-slate-800" title="关闭">
               <X size={18} />
