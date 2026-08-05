@@ -46,9 +46,34 @@ describe('normalizeErrorMessage', () => {
 });
 
 describe('readResponseError', () => {
-  it('根据空响应状态返回中文提示', async () => {
+  it('网关空响应返回后端服务提示（而非上游 AI 不可用）', async () => {
+    const response = new Response('', { status: 502 });
+    await expect(readResponseError(response)).resolves.toBe(
+      '后端服务暂不可用或正在重启，请稍后重试，必要时联系管理员检查服务状态',
+    );
+  });
+
+  it('网关 HTML 错误页同样判定为后端服务错误（含 502 字样不误判 AI 上游）', async () => {
+    const response = new Response(
+      '<html><body>502 Bad Gateway</body></html>',
+      { status: 502, headers: { 'content-type': 'text/html' } },
+    );
+    await expect(readResponseError(response)).resolves.toBe(
+      '后端服务暂不可用或正在重启，请稍后重试，必要时联系管理员检查服务状态',
+    );
+  });
+
+  it('后端返回的 JSON AI 上游错误保持原语义（真 AI 上游不可用）', async () => {
+    const response = new Response(
+      JSON.stringify({ detail: 'Bad Gateway from upstream AI' }),
+      { status: 502, headers: { 'content-type': 'application/json' } },
+    );
+    await expect(readResponseError(response)).resolves.toBe('上游 AI 服务暂时不可用，请稍后重试');
+  });
+
+  it('503 空响应属于网关/服务繁忙提示', async () => {
     const response = new Response('', { status: 503 });
-    await expect(readResponseError(response)).resolves.toBe('服务暂时不可用或繁忙，请稍后重试');
+    await expect(readResponseError(response)).resolves.toBe('后端服务繁忙或正在初始化，请稍后重试');
   });
 
   it('模型选择失效时派发全局配置事件', async () => {

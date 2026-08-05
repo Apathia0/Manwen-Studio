@@ -15,6 +15,23 @@ const rules: Array<[RegExp, string]> = [
   [/request:fail|network error|connection (refused|reset|error)/i, '网络连接失败，请检查网络后重试'],
 ]
 
+// 网关/网络层错误（后端未启动、不可达）的通俗提示。
+// 匹配到的既有文本如 "502 Bad Gateway"、"request:fail" 等，说明是反向代理或网络层
+// 连不上后端服务，而非 AI 上游故障——避免误报「上游 AI 服务不可用」。
+const gatewayPatterns: Array<[RegExp, string]> = [
+  [/\b502\b/i, '后端服务暂不可用或正在重启，请稍后重试，必要时联系管理员检查服务状态'],
+  [/\b504\b|\btimeout\b/i, '后端服务响应超时，请稍后重试'],
+  [/\b503\b/i, '后端服务繁忙或正在初始化，请稍后重试'],
+  [/\brequest:fail|\bnetwork error\b|connection (refused|reset)/i, '无法连接到后端服务，请确认网络或服务状态后重试'],
+]
+
+function gatewayStatusMessage(message: string): string | undefined {
+  for (const [pattern, translated] of gatewayPatterns) {
+    if (pattern.test(message)) return translated
+  }
+  return undefined
+}
+
 function extractMessage(value: unknown): string {
   if (typeof value === 'string') return value.trim()
   if (!value || typeof value !== 'object') return ''
@@ -30,8 +47,11 @@ function extractMessage(value: unknown): string {
 export function normalizeErrorMessage(error: unknown, fallback = '操作失败，请稍后重试'): string {
   const message = error instanceof Error ? error.message.trim() : extractMessage(error)
   if (!message) return fallback
+  const gatewayMessage = gatewayStatusMessage(message)
+  if (gatewayMessage) return gatewayMessage
+  const text = message.toLowerCase()
   for (const [pattern, translated] of rules) {
-    if (pattern.test(message)) return translated
+    if (pattern.test(text)) return translated
   }
   return /[一-鿿]/.test(message) ? message.slice(0, 300) : fallback
 }

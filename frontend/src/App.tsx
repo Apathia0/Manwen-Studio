@@ -76,6 +76,7 @@ import {
   updateStory,
   deleteStory,
   getInstallStatus,
+  checkHealth,
   type AdminOrderItem,
   type AuthUser,
   type BillingCheckout,
@@ -273,9 +274,16 @@ function App() {
       void refreshPlatformSettings();
       await bootstrapSession();
     } catch {
+      // getInstallStatus 失败：探测后端健康状态，给用户明确的故障归属提示。
       clearAuthToken();
       setSession(null);
       setRoute('landing');
+      const health = await checkHealth();
+      if (health === null) {
+        toast.error('无法连接到后端服务，请确认后端已启动后刷新页面');
+      } else if (!health.ready) {
+        toast.error('后端服务正在初始化或数据库未就绪，请稍后刷新页面');
+      }
     } finally {
       setBootstrapping(false);
     }

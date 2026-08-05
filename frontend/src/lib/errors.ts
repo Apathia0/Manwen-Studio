@@ -1,5 +1,9 @@
 const DEFAULT_ERROR_MESSAGE = '操作失败，请稍后重试';
 
+// 网关/代理层状态码：这些状态码可能来自反向代理（Nginx/Vite）在【后端服务未启动或不可达】时返回，
+// 也可能是后端转发 AI 上游失败时返回。必须结合响应体判断，才能区分故障归属。
+const GATEWAY_STATUS_CODES = new Set([502, 503, 504, 521, 522, 523, 524]);
+
 export const AI_MODEL_SELECTION_REQUIRED_EVENT = 'storycanvas:ai-model-selection-required';
 
 export type AiModelSelectionRequiredDetail = {
@@ -77,6 +81,39 @@ function parseErrorText(text: string): string {
   return text.replace(/^Error:\s*/i, '').trim();
 }
 
+// 判断一个 HTTP 状态码是否属于网关/代理层错误。
+function isGatewayStatus(status: number): boolean {
+  return GATEWAY_STATUS_CODES.has(status);
+}
+
+// 网关错误对应的通俗用户提示。
+// 网关状态码 + 空响应体/HTML 响应体，说明是反向代理（Nginx/Vite）连不上后端服务，
+// 而不是 AI 上游故障——必须用「后端服务不可用」而非「上游 AI 服务不可用」来解释。
+function gatewayErrorMessage(status: number, fallback: string): string {
+  switch (status) {
+    case 502:
+    case 521:
+    case 522:
+    case 524:
+      return '后端服务暂不可用或正在重启，请稍后重试，必要时联系管理员检查服务状态';
+    case 503:
+      return '后端服务繁忙或正在初始化，请稍后重试';
+    case 504:
+      return '后端服务响应超时，请稍后重试';
+    default:
+      return fallback;
+  }
+}
+
+// 判断响应体是否看起来像「网关错误页」（Nginx/Vite 返回的 HTML 或空响应）。
+// 后端正常的业务错误（含 AI 上游失败）几乎总是返回 JSON body，因此非 JSON
+// 的响应体配合网关状态码，即可判定为后端服务未就绪而非 AI 上游故障。
+export function isGatewayErrorResponse(response: Response): boolean {
+  if (!isGatewayStatus(response.status)) return false;
+  const contentType = response.headers.get('content-type') || '';
+  return !contentType.toLowerCase().includes('application/json');
+}
+
 function notifyModelSelectionRequired(payload: unknown): void {
   if (!payload || typeof payload !== 'object' || typeof window === 'undefined') return;
   const responsePayload = payload as Record<string, unknown>;
@@ -119,6 +156,11 @@ export function normalizeErrorMessage(error: unknown, fallback = DEFAULT_ERROR_M
 }
 
 export async function readResponseError(response: Response, fallback = DEFAULT_ERROR_MESSAGE): Promise<string> {
+  // 网关状态码 + 非 JSON 响应体（空或 HTML 错误页）= 反向代理连不上后端服务，
+  // 与 AI 上游失败无关，直接给后端服务可操作提示，避免误报「上游 AI 服务不可用」。
+  if (isGatewayErrorResponse(response)) {
+    return gatewayErrorMessage(response.status, normalizeErrorMessage(`HTTP ${response.status}`, fallback));
+  }
   const text = await response.text();
   if (!text) {
     return normalizeErrorMessage(`HTTP ${response.status}`, fallback);

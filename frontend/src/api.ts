@@ -1042,6 +1042,43 @@ export async function getInstallStatus(): Promise<InstallStatus> {
   return res.json();
 }
 
+export interface HealthStatus {
+  ok: boolean;
+  ready: boolean;
+  installed: boolean;
+  system_ready?: boolean;
+  database_reachable?: boolean | null;
+}
+
+/**
+ * 探测后端服务是否存活。
+ *
+ * `/api/health` 不依赖 AI 上游，仅反映后端进程与数据库是否就绪，因此是
+ * 区分「后端未启动/不可达」与「AI 上游故障」的可靠探针。返回 null 表示后端不可达。
+ */
+export async function checkHealth(): Promise<HealthStatus | null> {
+  try {
+    const res = await fetch(`${BASE}/api/health`);
+    if (!res.ok) {
+      // 后端返回错误本身已说明「后端响应了但未就绪」。
+      return { ok: false, ready: false, installed: false, system_ready: false, database_reachable: null };
+    }
+    const body = await res.json().catch(() => null);
+    if (!body) return { ok: false, ready: false, installed: false, system_ready: false, database_reachable: null };
+    const ready = Boolean(body.ready ?? body.system_ready);
+    return {
+      ok: Boolean(body.ok),
+      ready,
+      installed: Boolean(body.installed),
+      system_ready: Boolean(body.system_ready),
+      database_reachable: body.database_reachable ?? null,
+    };
+  } catch {
+    // fetch 抛错（超时、连接被拒、网关 502 HTML 页）视为后端不可达。
+    return null;
+  }
+}
+
 export async function testInstallDatabase(payload: InstallDatabaseConfig): Promise<InstallTestResponse> {
   const res = await fetch(`${BASE}/api/install/test-database`, {
     method: 'POST',
