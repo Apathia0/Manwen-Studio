@@ -1,5 +1,5 @@
 import { memo, useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
-import { ChevronDown, Edit3, Loader2, MessageSquare, Sparkles, Wand2 } from 'lucide-react';
+import { ChevronDown, ChevronRight, Database, Edit3, Loader2, MessageSquare, Sparkles, Wand2 } from 'lucide-react';
 import {
   adjustFramework,
   continueFramework,
@@ -28,6 +28,7 @@ interface Props {
   chapters: Chapter[];
   onChapterSelect: (chapterNumber: number) => void;
   onFrameworkUpdate: () => void | Promise<void>;
+  onOpenKnowledge?: () => void;
 }
 
 type SectionKey = 'tags' | 'characters' | 'outline' | 'chapters';
@@ -39,7 +40,7 @@ const SECTION_LABELS: Record<SectionKey, string> = {
   chapters: '章节列表',
 };
 
-export default memo(function FrameworkPanel({ story, chapters, onChapterSelect, onFrameworkUpdate }: Props) {
+export default memo(function FrameworkPanel({ story, chapters, onChapterSelect, onFrameworkUpdate, onOpenKnowledge }: Props) {
   const [chatInput, setChatInput] = useState('');
   const [chatLoading, setChatLoading] = useState(false);
   const [continueLoading, setContinueLoading] = useState(false);
@@ -391,6 +392,23 @@ export default memo(function FrameworkPanel({ story, chapters, onChapterSelect, 
               </p>
             </div>
           </div>
+
+          {onOpenKnowledge ? (
+            <button
+              type="button"
+              onClick={onOpenKnowledge}
+              className="group flex w-full items-center gap-3 rounded-xl border border-blue-200 bg-blue-50 px-3 py-3 text-left text-blue-800 transition hover:border-blue-300 hover:bg-blue-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+            >
+              <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-blue-600 text-white shadow-sm">
+                <Database size={15} aria-hidden="true" />
+              </span>
+              <span className="min-w-0 flex-1">
+                <span className="block text-xs font-semibold">作品设定中心</span>
+                <span className="mt-0.5 block truncate text-[10px] text-blue-600">统一管理作品圣经、人物、事件与伏笔</span>
+              </span>
+              <ChevronRight size={16} className="shrink-0 text-blue-500 transition-transform group-hover:translate-x-0.5" aria-hidden="true" />
+            </button>
+          ) : null}
         </div>
 
         <div className="border-t border-[#d9dfd7]">

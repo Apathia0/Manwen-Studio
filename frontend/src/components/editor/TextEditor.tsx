@@ -83,13 +83,15 @@ export default function TextEditor({
   if (editing) {
     return (
       <div className="flex-1 min-h-0 bg-[#fbfcf8] relative">
-        <textarea
-          value={draftContent}
-          onChange={(e) => onDraftChange?.(e.target.value)}
-          className="w-full h-full resize-none bg-transparent px-6 md:px-10 py-8 text-base leading-8 text-slate-800
-                     whitespace-pre-wrap font-['Lora',Georgia,serif] outline-none"
-          placeholder="输入或编辑正文内容..."
-        />
+        <div className="mx-auto h-full w-full max-w-[1120px]">
+          <textarea
+            value={draftContent}
+            onChange={(e) => onDraftChange?.(e.target.value)}
+            className="h-full w-full resize-none bg-transparent px-6 py-8 text-base leading-8 text-slate-800
+                       whitespace-pre-wrap font-['Lora',Georgia,serif] outline-none md:px-10"
+            placeholder="输入或编辑正文内容..."
+          />
+        </div>
         {saving && (
           <div className="absolute top-4 right-4 inline-flex items-center gap-2 rounded-full bg-white/95 border border-[#d9dfd7] px-3 py-1.5 text-xs text-blue-600">
             <Loader2 size={13} className="animate-spin" />
@@ -137,7 +139,7 @@ export default function TextEditor({
       onMouseUp={handleMouseUp}
     >
       <div
-        className="max-w-3xl mx-auto px-6 md:px-10 py-8 text-base leading-8 text-slate-800 whitespace-pre-wrap font-['Lora',Georgia,serif] selection:bg-blue-200"
+        className="mx-auto w-full max-w-[1120px] px-6 py-8 text-base leading-8 text-slate-800 whitespace-pre-wrap font-['Lora',Georgia,serif] selection:bg-blue-200 md:px-10"
         style={{ fontVariantLigatures: 'common' }}
       >
         {content}

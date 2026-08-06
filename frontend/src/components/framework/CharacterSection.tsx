@@ -1,51 +1,12 @@
 import { useState } from 'react';
 import { ChevronDown, ChevronRight, RefreshCw, Sparkles, Users } from 'lucide-react';
 import { regenerateCharacters } from '../../api';
-import type { BigFiveScores, Character } from '../../api';
-import { BIG_FIVE_COLORS, BIG_FIVE_LABELS } from './types';
+import type { Character } from '../../api';
 
 interface Props {
   characters: Character[] | null;
   storyId: number;
   onUpdate: () => void | Promise<void>;
-}
-
-function normalizeBigFiveValue(value?: number): number | undefined {
-  if (value === undefined || value === null || Number.isNaN(value)) return undefined;
-  const numeric = Number(value);
-  if (numeric <= 10) return Math.max(0, Math.min(100, numeric * 10));
-  return Math.max(0, Math.min(100, numeric));
-}
-
-function getBigFiveValue(scores: BigFiveScores | undefined, trait: 'O' | 'C' | 'E' | 'A' | 'N'): number | undefined {
-  if (!scores) return undefined;
-  const direct = scores[trait];
-  if (direct !== undefined) return normalizeBigFiveValue(direct);
-
-  const aliasMap = {
-    O: scores.openness,
-    C: scores.conscientiousness,
-    E: scores.extraversion,
-    A: scores.agreeableness,
-    N: scores.neuroticism,
-  };
-  return normalizeBigFiveValue(aliasMap[trait]);
-}
-
-function BigFiveBar({ label, value, colorClass }: { label: string; value?: number; colorClass: string }) {
-  const pct = value !== undefined ? Math.max(0, Math.min(100, value)) : undefined;
-  return (
-    <div className="flex items-center gap-2 group">
-      <span className="text-[11px] font-medium text-slate-500 w-6 shrink-0 text-center">{label}</span>
-      <div className="flex-1 h-2 bg-slate-100 rounded-full overflow-hidden">
-        <div
-          className={`h-full rounded-full transition-all duration-500 ${colorClass}`}
-          style={{ width: `${pct ?? 0}%`, opacity: pct === undefined ? 0.25 : 1 }}
-        />
-      </div>
-      <span className="text-[10px] text-slate-500 w-7 text-right tabular-nums">{pct ?? '--'}</span>
-    </div>
-  );
 }
 
 function CharacterCard({ character, defaultOpen }: { character: Character; defaultOpen: boolean }) {
@@ -80,26 +41,6 @@ function CharacterCard({ character, defaultOpen }: { character: Character; defau
 
       {expanded && (
         <div className="px-3 pb-3 pt-1 space-y-2.5 border-t border-slate-200">
-          {character.big_five && (
-            <div className="space-y-1">
-              <span className="text-[10px] font-medium text-slate-500 uppercase tracking-wider">大五人格</span>
-              <div className="space-y-0.5">
-                <BigFiveBar label="O" value={getBigFiveValue(character.big_five, 'O')} colorClass={BIG_FIVE_COLORS.O} />
-                <BigFiveBar label="C" value={getBigFiveValue(character.big_five, 'C')} colorClass={BIG_FIVE_COLORS.C} />
-                <BigFiveBar label="E" value={getBigFiveValue(character.big_five, 'E')} colorClass={BIG_FIVE_COLORS.E} />
-                <BigFiveBar label="A" value={getBigFiveValue(character.big_five, 'A')} colorClass={BIG_FIVE_COLORS.A} />
-                <BigFiveBar label="N" value={getBigFiveValue(character.big_five, 'N')} colorClass={BIG_FIVE_COLORS.N} />
-              </div>
-              <div className="flex flex-wrap gap-x-3 gap-y-0.5 pt-0.5">
-                {Object.entries(BIG_FIVE_LABELS).map(([key, label]) => (
-                  <span key={key} className="text-[10px] text-slate-500">
-                    {key}={label}
-                  </span>
-                ))}
-              </div>
-            </div>
-          )}
-
           {character.arc && (
             <div className="space-y-1.5">
               {typeof character.arc.motivation === 'string' && character.arc.motivation && (

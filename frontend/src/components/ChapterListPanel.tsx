@@ -44,7 +44,7 @@ export default function ChapterListPanel({
   }
 
   return (
-    <div className={`w-[160px] shrink-0 flex flex-col overflow-hidden rounded-[24px] border border-[#d7e3f4] bg-[rgba(255,255,255,0.92)] shadow-[0_18px_42px_rgba(59,130,246,0.12)] backdrop-blur-xl ${className}`}>
+    <div className={`w-[160px] shrink-0 flex flex-col overflow-hidden border-r border-[#d7e3f4] bg-white ${className}`}>
       {/* 标题栏 */}
       <div className="flex items-center justify-between px-4 py-3 border-b border-[#e5edf8]">
         <h3 className="text-sm font-semibold text-slate-900">章节选择</h3>

@@ -61,14 +61,11 @@ export function WorkspacePage({
       </div>
     );
   }
-  const activeWorkspaceTab = WORKSPACE_TABS.find((tab) => tab.key === workspaceMode) || WORKSPACE_TABS[0];
-  const ActiveWorkspaceIcon = activeWorkspaceTab.icon;
-
   return (
-    <div className="flex h-[calc(100vh-120px)] flex-col overflow-hidden rounded-md border border-[#d9dfd7] bg-white">
-      <div className="border-b border-[#e8edf2] bg-[#fbfdff] px-4 py-3">
-        <div className="flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
-          <div className="grid w-full grid-cols-3 gap-2 xl:max-w-2xl" role="group" aria-label="作品工作台">
+    <div className="flex h-full min-h-0 flex-col overflow-hidden bg-white">
+      <div className="shrink-0 border-b border-[#dce8f8] bg-[#fbfdff] px-3 py-2">
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+          <div className="grid w-full grid-cols-3 gap-1 rounded-lg bg-slate-100 p-1 sm:max-w-[520px]" role="group" aria-label="作品工作台">
             {WORKSPACE_TABS.map((tab) => {
               const Icon = tab.icon;
               const selected = workspaceMode === tab.key;
@@ -78,41 +75,29 @@ export function WorkspacePage({
                   type="button"
                   aria-pressed={selected}
                   onClick={() => onWorkspaceModeChange(tab.key)}
-                  className={`flex min-w-0 items-center gap-2 rounded-lg border px-3 py-2 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 ${
+                  className={`flex h-9 min-w-0 items-center justify-center gap-2 rounded-md px-3 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 ${
                     selected
-                      ? 'border-blue-300 bg-[#eaf3ff] text-[#1558b0] shadow-sm'
-                      : 'border-transparent bg-white text-slate-600 hover:border-[#cdddf2] hover:bg-[#f4f8ff]'
+                      ? 'bg-white text-[#1558b0] shadow-sm'
+                      : 'text-slate-600 hover:bg-white/70'
                   }`}
                 >
-                  <span className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-md ${selected ? 'bg-blue-600 text-white' : 'bg-slate-100 text-slate-500'}`}>
-                    <Icon size={16} aria-hidden="true" />
-                  </span>
-                  <span className="min-w-0">
-                    <span className="block truncate text-sm font-semibold">{tab.label}</span>
-                    <span className="hidden truncate text-xs text-slate-500 sm:block">{tab.description}</span>
-                  </span>
+                  <Icon size={15} className={selected ? 'text-blue-600' : 'text-slate-400'} aria-hidden="true" />
+                  <span className="truncate text-sm font-semibold">{tab.label}</span>
                 </button>
               );
             })}
           </div>
-          <div className="flex min-w-0 flex-wrap items-center gap-2 xl:justify-end">
+          <div className={`flex min-w-0 flex-wrap items-center gap-2 ${workspaceMode === 'novel' ? 'xl:hidden' : ''}`}>
             <button
               type="button"
               onClick={() => setKnowledgeOpen(true)}
-              className="inline-flex items-center gap-1 rounded-lg border border-[#d7e3f4] px-2.5 py-1 text-xs text-slate-600 transition hover:bg-[#eef5ff] hover:text-[#1d4ed8]"
+              className="inline-flex h-9 items-center gap-1.5 rounded-md border border-[#d7e3f4] bg-white px-3 text-xs font-medium text-slate-600 transition hover:bg-[#eef5ff] hover:text-[#1d4ed8]"
             >
               <Database size={13} />
               作品设定中心
             </button>
           </div>
         </div>
-      </div>
-
-      <div className="flex shrink-0 items-center gap-2 border-b border-[#dce8f8] bg-[#f4f8ff] px-4 py-2 text-xs text-slate-600">
-        <ActiveWorkspaceIcon size={15} className="shrink-0 text-[#2563eb]" aria-hidden="true" />
-        <span className="font-semibold text-slate-800">当前在{activeWorkspaceTab.label}</span>
-        <span className="hidden text-slate-400 sm:inline">|</span>
-        <span className="hidden sm:inline">{activeWorkspaceTab.description}</span>
       </div>
 
       <div className="min-h-0 flex-1">
@@ -126,6 +111,7 @@ export function WorkspacePage({
               workspaceDomain="novel"
               onChapterChange={onChapterChange}
               onContentUpdated={onContentUpdated}
+              onOpenKnowledge={() => setKnowledgeOpen(true)}
             />
           </div>
         ) : null}

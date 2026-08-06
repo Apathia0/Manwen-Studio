@@ -43,7 +43,7 @@ export default function MangaWorkspaceLayout({
   }, [currentChapter?.id]);
 
   return (
-    <div className="flex h-full min-h-0 flex-col gap-4 bg-[linear-gradient(180deg,_#f4f8ff_0%,_#eef4ff_100%)] p-4 sm:flex-row">
+    <div className="flex h-full min-h-0 flex-col bg-white sm:flex-row">
       <ChapterListPanel
         chapters={chapterInfos}
         selectedChapterId={currentChapter?.id ?? null}
@@ -53,7 +53,7 @@ export default function MangaWorkspaceLayout({
         onToggleCollapse={() => setLeftCollapsed((value) => !value)}
       />
 
-      <section className="min-w-0 flex-1 overflow-hidden rounded-[24px] border border-[#d7e3f4] bg-[rgba(255,255,255,0.92)] shadow-[0_18px_42px_rgba(59,130,246,0.12)] backdrop-blur-xl">
+      <section className="min-w-0 flex-1 overflow-hidden bg-white">
         <div className="h-full min-h-0 overflow-hidden">
           <Suspense fallback={<RouteLoadingFallback />}>
             <MangaPanel
@@ -68,7 +68,7 @@ export default function MangaWorkspaceLayout({
       </section>
 
       {agentOpen ? (
-        <aside className="flex min-h-0 w-[380px] shrink-0 flex-col overflow-hidden rounded-[24px] border border-[#d7e3f4] bg-white shadow-[0_18px_42px_rgba(59,130,246,0.12)] max-lg:absolute max-lg:inset-4 max-lg:z-40">
+        <aside className="flex min-h-0 w-[380px] shrink-0 flex-col overflow-hidden border-l border-[#d7e3f4] bg-white max-lg:absolute max-lg:inset-4 max-lg:z-40">
           <header className="flex shrink-0 items-center justify-between border-b border-[#d7e3f4] px-4 py-3 text-sm font-semibold text-slate-800">
             <span className="flex items-center gap-2"><Bot size={16} className="text-blue-600" />漫画创作助手</span>
             <button type="button" onClick={() => setAgentOpen(false)} className="rounded-md p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-700" title="关闭 AI 助手"><X size={16} /></button>

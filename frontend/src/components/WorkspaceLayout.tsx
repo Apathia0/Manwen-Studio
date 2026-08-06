@@ -1,5 +1,5 @@
 import { Suspense, lazy, useCallback, useEffect, useState } from 'react';
-import { Image, Bot } from 'lucide-react';
+import { Image, Bot, PanelRightClose, PanelRightOpen } from 'lucide-react';
 import { type Story, type Chapter } from '../api';
 import { RouteLoadingFallback } from './ui/RouteLoadingFallback';
 
@@ -16,6 +16,7 @@ interface Props {
   workspaceDomain: 'novel' | 'manga';
   onChapterChange: (chapter: Chapter) => void;
   onContentUpdated: () => void | Promise<void>;
+  onOpenKnowledge: () => void;
 }
 
 export default function WorkspaceLayout({
@@ -26,10 +27,12 @@ export default function WorkspaceLayout({
   workspaceDomain,
   onChapterChange,
   onContentUpdated,
+  onOpenKnowledge,
 }: Props) {
   const [selectedText, setSelectedText] = useState('');
   const [chapterContext, setChapterContext] = useState<object | undefined>(undefined);
   const [mangaPreviewMode, setMangaPreviewMode] = useState(false);
+  const [agentCollapsed, setAgentCollapsed] = useState(false);
   const resolvedChapter = currentChapter ? mergeChapterWithFramework(story, currentChapter) : null;
 
   useEffect(() => {
@@ -47,23 +50,24 @@ export default function WorkspaceLayout({
   );
 
   return (
-    <div className="flex h-full min-h-0 flex-col gap-3 bg-[linear-gradient(180deg,_#f4f8ff_0%,_#eef4ff_100%)] p-4">
-      <div className="flex min-h-0 flex-1 gap-4">
+    <div className="flex h-full min-h-0 flex-col bg-white">
+      <div className="flex min-h-0 flex-1 flex-col md:flex-row">
         {!mangaPreviewMode && (
-        <div className="w-[320px] shrink-0 overflow-y-auto rounded-[24px] border border-[#d7e3f4] bg-[rgba(255,255,255,0.92)] shadow-[0_18px_42px_rgba(59,130,246,0.12)] backdrop-blur-xl">
+        <div className="hidden w-[300px] shrink-0 overflow-y-auto border-r border-[#d7e3f4] bg-white xl:block">
           <Suspense fallback={<RouteLoadingFallback />}>
             <FrameworkPanel
               story={story}
               chapters={chapters}
               onChapterSelect={handleChapterSelect}
               onFrameworkUpdate={onContentUpdated}
+              onOpenKnowledge={onOpenKnowledge}
             />
           </Suspense>
         </div>
         )}
 
         {!mangaPreviewMode && (
-        <div className="flex-1 min-w-0 overflow-hidden rounded-[24px] border border-[#d7e3f4] bg-[rgba(255,255,255,0.92)] shadow-[0_18px_42px_rgba(59,130,246,0.12)] backdrop-blur-xl">
+        <div className="min-h-0 min-w-0 flex-1 overflow-hidden border-b border-[#d7e3f4] bg-white md:border-b-0 md:border-r">
           <Suspense fallback={<RouteLoadingFallback />}>
             <EditorPanel
               story={story}
@@ -80,16 +84,24 @@ export default function WorkspaceLayout({
         </div>
         )}
 
-        <div className={`${mangaPreviewMode ? 'flex-1' : 'w-[400px] shrink-0'} min-w-0 overflow-hidden rounded-[24px] border border-[#d7e3f4] bg-[rgba(255,255,255,0.92)] shadow-[0_18px_42px_rgba(59,130,246,0.12)] backdrop-blur-xl`}>
+        <div className={`${mangaPreviewMode ? 'flex-1' : agentCollapsed ? 'h-11 w-full shrink-0 md:h-auto md:w-[48px]' : 'h-[45%] w-full shrink-0 md:h-auto md:w-[390px]'} min-h-0 min-w-0 overflow-hidden bg-white transition-[width,height] duration-200`}>
           <div className="flex flex-col h-full">
-            <div className="shrink-0 flex items-center gap-2 border-b border-[#d7e3f4] px-4 py-2.5 text-sm font-semibold text-slate-800">
+            <div className={`shrink-0 flex h-11 items-center border-b border-[#d7e3f4] text-sm font-semibold text-slate-800 ${agentCollapsed ? 'justify-center px-1' : 'gap-2 px-3'}`}>
               {workspaceDomain === 'manga' ? <Image size={16} className="text-blue-600" aria-hidden="true" /> : <Bot size={16} className="text-blue-600" aria-hidden="true" />}
-              <span>{workspaceDomain === 'manga' ? '漫画生成' : 'AI 写作助手'}</span>
-              <span className="ml-auto text-xs font-normal text-slate-400">
-                {workspaceDomain === 'manga' ? '基于当前章节生成画面' : '围绕当前章节协助创作'}
-              </span>
+              {!agentCollapsed ? <span>{workspaceDomain === 'manga' ? '漫画生成' : 'AI 写作助手'}</span> : null}
+              {!mangaPreviewMode ? (
+                <button
+                  type="button"
+                  onClick={() => setAgentCollapsed((value) => !value)}
+                  className={`${agentCollapsed ? '' : 'ml-auto'} rounded-md p-1.5 text-slate-400 transition hover:bg-slate-100 hover:text-slate-700`}
+                  title={agentCollapsed ? '展开 AI 写作助手' : '收起 AI 写作助手'}
+                  aria-label={agentCollapsed ? '展开 AI 写作助手' : '收起 AI 写作助手'}
+                >
+                  {agentCollapsed ? <PanelRightOpen size={16} /> : <PanelRightClose size={16} />}
+                </button>
+              ) : null}
             </div>
-            <div className="flex-1 min-h-0 overflow-hidden">
+            <div className={`flex-1 min-h-0 overflow-hidden ${agentCollapsed ? 'hidden' : ''}`}>
               <Suspense fallback={<RouteLoadingFallback />}>
               {workspaceDomain === 'manga' ? (
                 <MangaPanel

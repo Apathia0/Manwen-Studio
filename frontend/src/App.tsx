@@ -14,6 +14,8 @@ import {
   ShieldCheck,
   UserCircle2,
   X,
+  PanelLeftClose,
+  PanelLeftOpen,
 } from 'lucide-react';
 import { toast } from './lib/toast';
 import { confirm } from './lib/confirm';
@@ -125,6 +127,7 @@ const DEFAULT_SITE_NAME = 'StoryCanvas';
 const DEFAULT_SITE_SLOGAN = 'AI 小说与漫画创作平台';
 const DEFAULT_ICON_URL = '/brand-mark.svg';
 const LS_WORKSPACE_MODE = 'storycanvas.workspaceMode';
+const LS_NAV_COLLAPSED = 'storycanvas.navCollapsed';
 
 const USER_NAV: NavItem[] = [
   { key: 'stories', label: '作品', icon: Home },
@@ -186,6 +189,7 @@ function App() {
     if (savedMode === 'novel' || savedMode === 'manga' || savedMode === 'video') return savedMode;
     return localStorage.getItem('rightPanelTab') === 'manga' ? 'manga' : 'novel';
   });
+  const [navCollapsed, setNavCollapsed] = useState(() => localStorage.getItem(LS_NAV_COLLAPSED) === 'true');
   const [deconWorkId, setDeconWorkId] = useState<number>(0);
   const [modelConfigRequest, setModelConfigRequest] = useState<{
     modality: AiModelSelectionRequiredDetail['modality'];
@@ -230,7 +234,11 @@ function App() {
   useEffect(() => {
     localStorage.setItem(LS_WORKSPACE_MODE, workspaceMode);
   }, [workspaceMode]);
-  const isWorkspaceRoute = route === 'workspace' || route === 'creation-studio';
+
+  useEffect(() => {
+    localStorage.setItem(LS_NAV_COLLAPSED, String(navCollapsed));
+  }, [navCollapsed]);
+  const isWorkspaceRoute = route === 'workspace';
 
   useEffect(() => {
     void bootstrapApp();
@@ -637,9 +645,20 @@ function App() {
         </div>
       </header>
 
-      <div className="grid h-[calc(100vh-56px)] overflow-hidden grid-cols-1 lg:grid-cols-[220px_minmax(0,1fr)]">
-        <aside className="overflow-y-auto border-r border-[#d7e3f4] bg-[linear-gradient(180deg,_rgba(248,251,255,0.94)_0%,_rgba(238,244,255,0.92)_100%)] px-4 py-5 backdrop-blur-xl">
-          <div className="mb-4 px-2 text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">应用菜单</div>
+      <div className={`grid h-[calc(100vh-56px)] overflow-hidden grid-cols-[68px_minmax(0,1fr)] ${navCollapsed ? 'lg:grid-cols-[68px_minmax(0,1fr)]' : 'lg:grid-cols-[220px_minmax(0,1fr)]'}`}>
+        <aside className={`overflow-y-auto border-r border-[#d7e3f4] bg-[linear-gradient(180deg,_rgba(248,251,255,0.94)_0%,_rgba(238,244,255,0.92)_100%)] px-2 py-4 backdrop-blur-xl ${navCollapsed ? '' : 'lg:px-4'}`}>
+          <div className={`mb-4 flex items-center justify-center ${navCollapsed ? '' : 'lg:justify-between lg:px-2'}`}>
+            {!navCollapsed ? <div className="hidden text-xs font-semibold uppercase tracking-[0.18em] text-slate-400 lg:block">应用菜单</div> : null}
+            <button
+              type="button"
+              onClick={() => setNavCollapsed((value) => !value)}
+              className="rounded-lg p-2 text-slate-400 transition hover:bg-white/80 hover:text-slate-700"
+              title={navCollapsed ? '展开菜单' : '收起菜单'}
+              aria-label={navCollapsed ? '展开菜单' : '收起菜单'}
+            >
+              {navCollapsed ? <PanelLeftOpen size={17} /> : <PanelLeftClose size={17} />}
+            </button>
+          </div>
           <nav className="space-y-1.5">
             {USER_NAV.map((item) => {
               const Icon = item.icon;
@@ -651,14 +670,16 @@ function App() {
                     if (item.key === 'deconstruction-library') setDeconWorkId(0);
                     setRoute(item.key);
                   }}
-                  className={`flex w-full items-center gap-2 rounded-2xl px-3 py-2.5 text-left text-sm transition ${
+                  title={navCollapsed ? item.label : undefined}
+                  aria-label={item.label}
+                  className={`flex w-full items-center justify-center rounded-xl px-2 py-2.5 text-left text-sm transition ${navCollapsed ? '' : 'lg:justify-start lg:gap-2 lg:px-3'} ${
                     active
                       ? 'bg-[linear-gradient(180deg,_#fafdff_0%,_#e8f1ff_100%)] text-[#1d4ed8] shadow-[0_10px_24px_rgba(59,130,246,0.14)]'
                       : 'text-slate-700 hover:bg-white/80'
                   }`}
                 >
                   <Icon size={16} />
-                  {item.label}
+                  <span className={navCollapsed ? 'hidden' : 'hidden lg:inline'}>{item.label}</span>
                 </button>
               );
             })}
@@ -666,7 +687,9 @@ function App() {
 
           {session.role === 'admin' && (
             <>
-              <div className="mb-3 mt-6 px-2 text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">运营配置</div>
+              <div className={`mb-3 mt-6 border-t border-[#d7e3f4] ${navCollapsed ? '' : 'lg:border-t-0 lg:px-2 lg:text-xs lg:font-semibold lg:uppercase lg:tracking-[0.18em] lg:text-slate-400'}`}>
+                {!navCollapsed ? <span className="hidden lg:inline">运营配置</span> : null}
+              </div>
               <nav className="space-y-1.5">
                 {ADMIN_NAV.map((item) => {
                   const Icon = item.icon;
@@ -675,14 +698,16 @@ function App() {
                     <button
                       key={item.key}
                       onClick={() => setRoute(item.key)}
-                      className={`flex w-full items-center gap-2 rounded-2xl px-3 py-2.5 text-left text-sm transition ${
+                      title={navCollapsed ? item.label : undefined}
+                      aria-label={item.label}
+                      className={`flex w-full items-center justify-center rounded-xl px-2 py-2.5 text-left text-sm transition ${navCollapsed ? '' : 'lg:justify-start lg:gap-2 lg:px-3'} ${
                         active
                           ? 'bg-[linear-gradient(180deg,_#fafdff_0%,_#e8f1ff_100%)] text-[#1d4ed8] shadow-[0_10px_24px_rgba(59,130,246,0.14)]'
                           : 'text-slate-700 hover:bg-white/80'
                       }`}
                     >
                       <Icon size={16} />
-                      {item.label}
+                      <span className={navCollapsed ? 'hidden' : 'hidden lg:inline'}>{item.label}</span>
                     </button>
                   );
                 })}
@@ -691,7 +716,7 @@ function App() {
           )}
         </aside>
 
-        <main className={`min-h-0 overflow-y-auto bg-transparent ${isWorkspaceRoute ? 'p-2 lg:p-3' : 'p-5 lg:p-7'}`}>
+        <main className={`min-h-0 overflow-y-auto bg-transparent ${isWorkspaceRoute ? 'p-0' : 'p-5 lg:p-7'}`}>
           <Suspense fallback={<RouteLoadingFallback />}>
           {route === 'stories' && (
             <StoryLibraryPage

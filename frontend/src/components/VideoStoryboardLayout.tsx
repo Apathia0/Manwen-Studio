@@ -751,7 +751,7 @@ export default function VideoStoryboardLayout({
   }
 
   return (
-    <div className="flex h-full min-h-0 gap-4 bg-[linear-gradient(180deg,_#f4f8ff_0%,_#eef4ff_100%)] p-4">
+    <div className="flex h-full min-h-0 bg-white">
       <ChapterListPanel
         chapters={chapterInfos}
         selectedChapterId={resolvedChapter?.id ?? null}
@@ -766,8 +766,8 @@ export default function VideoStoryboardLayout({
         onToggleCollapse={() => setLeftCollapsed((value) => !value)}
       />
 
-      <div className="flex-1 flex min-w-0 gap-4">
-        <div className={`flex-1 min-w-0 overflow-hidden rounded-[24px] border border-[#d7e3f4] bg-[rgba(255,255,255,0.92)] shadow-[0_18px_42px_rgba(59,130,246,0.12)] backdrop-blur-xl`}>
+      <div className="flex min-w-0 flex-1">
+        <div className="min-w-0 flex-1 overflow-hidden bg-white">
           <ChapterVideoWorkflowPanel
           workflow={workflow}
           workflowLoading={workflowLoading}
@@ -826,7 +826,7 @@ export default function VideoStoryboardLayout({
 
       {/* AI 视频工作流助手 — 内嵌面板 */}
       {videoAgentOpen && workflow && (
-        <div className="w-[400px] shrink-0 overflow-hidden rounded-[24px] border border-[#d7e3f4] bg-[rgba(255,255,255,0.92)] shadow-[0_18px_42px_rgba(59,130,246,0.12)] backdrop-blur-xl flex flex-col">
+        <div className="flex w-[400px] shrink-0 flex-col overflow-hidden border-l border-[#d7e3f4] bg-white">
           <div className="flex items-center justify-between px-4 py-3 border-b border-[#d7e3f4] shrink-0">
             <span className="text-sm font-semibold text-slate-700">AI 视频工作流助手</span>
             <button onClick={handleCloseAgentPanel} className="text-slate-400 hover:text-slate-600 text-lg leading-none">&times;</button>
