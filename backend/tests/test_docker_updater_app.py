@@ -3,6 +3,7 @@ import os
 import shutil
 import subprocess
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -30,6 +31,15 @@ def test_update_script_prunes_only_old_project_images():
     assert "running_image_ids" in script
     assert 'grep -Fxq "$image_id"' in script
     assert "docker image prune" not in script
+
+
+def test_update_script_does_not_restart_updater_before_terminal_state_is_written():
+    script_path = Path(__file__).resolve().parents[2] / "deploy" / "docker" / "update-lorevista.sh"
+    script = script_path.read_text(encoding="utf-8")
+
+    assert "lorevista-updater-replacer" not in script
+    assert "restarting updater with new image" not in script
+    assert 'curl -fs "$url" >/dev/null 2>&1' in script
 
 
 def test_project_image_cleanup_protects_container_and_rollback_images(tmp_path):
@@ -159,6 +169,7 @@ def test_successful_update_does_not_replace_remote_manifest(tmp_path, monkeypatc
     monkeypatch.setattr(updater_app, "_set_state", lambda **kwargs: kwargs)
     monkeypatch.setattr(updater_app, "_read_state", lambda: {})
     monkeypatch.setattr(updater_app, "_write_state", lambda state: None)
+    monkeypatch.setattr(updater_app, "_schedule_updater_restart", lambda target: (True, "scheduled"))
 
     class SuccessfulProcess:
         stdout = []
@@ -172,6 +183,108 @@ def test_successful_update_does_not_replace_remote_manifest(tmp_path, monkeypatc
     updater_app._run_update(None)
 
     assert env_path.read_text(encoding="utf-8") == f"UPDATE_MANIFEST_URL={manifest_url}\n"
+
+
+def test_successful_update_persists_terminal_state_before_scheduling_restart(tmp_path, monkeypatch):
+    updater_app = _load_updater_app()
+    monkeypatch.setattr(updater_app, "APP_DIR", tmp_path)
+    monkeypatch.setattr(updater_app, "ENV_FILE", tmp_path / ".env")
+    monkeypatch.setattr(updater_app, "UPDATE_COMMAND", "ignored")
+    monkeypatch.setattr(updater_app, "_read_state", lambda: {})
+    monkeypatch.setattr(updater_app, "_write_state", lambda state: None)
+    events: list[str] = []
+
+    def record_state(**updates):
+        if updates.get("status") == "succeeded":
+            events.append("succeeded")
+        return updates
+
+    monkeypatch.setattr(updater_app, "_set_state", record_state)
+    def schedule_restart(target):
+        events.append("restart")
+        return True, "scheduled"
+
+    monkeypatch.setattr(updater_app, "_schedule_updater_restart", schedule_restart)
+
+    class SuccessfulProcess:
+        stdout = []
+
+        @staticmethod
+        def wait():
+            return 0
+
+    monkeypatch.setattr(updater_app.subprocess, "Popen", lambda *args, **kwargs: SuccessfulProcess())
+
+    updater_app._run_update("v9.9.9")
+
+    assert events == ["succeeded", "restart"]
+
+
+def test_status_reports_stale_run_without_mutating_state(monkeypatch):
+    updater_app = _load_updater_app()
+    persisted = {
+        "status": "running",
+        "message": "Update started.",
+        "started_at": "2026-01-01T00:00:00+00:00",
+    }
+    monkeypatch.setattr(updater_app, "_read_state", lambda: dict(persisted))
+    monkeypatch.setattr(updater_app, "_state_is_stale", lambda state: True)
+    monkeypatch.setattr(
+        updater_app,
+        "_write_state",
+        lambda state: pytest.fail("GET /status 不应写入状态文件"),
+    )
+
+    result = updater_app.status(None)
+
+    assert result["status"] == "interrupted"
+    assert result["running"] is False
+    assert persisted["status"] == "running"
+
+
+def test_stale_detection_uses_recent_heartbeat_instead_of_start_time(monkeypatch):
+    updater_app = _load_updater_app()
+    monkeypatch.setattr(updater_app, "_process", None)
+    state = {
+        "status": "running",
+        "started_at": "2020-01-01T00:00:00+00:00",
+        "heartbeat_at": datetime.now(UTC).isoformat(),
+    }
+
+    assert updater_app._state_is_stale(state) is False
+
+
+def test_updater_restart_is_scheduled_with_target_image(tmp_path, monkeypatch):
+    updater_app = _load_updater_app()
+    env_path = tmp_path / ".env"
+    compose_path = tmp_path / "docker-compose.yml"
+    monkeypatch.setattr(updater_app, "APP_DIR", tmp_path)
+    monkeypatch.setattr(updater_app, "ENV_FILE", env_path)
+    monkeypatch.setattr(updater_app, "COMPOSE_FILE", compose_path)
+    captured = {}
+
+    class Result:
+        returncode = 0
+        stdout = "helper-id"
+        stderr = ""
+
+    def fake_run(command, **kwargs):
+        captured["command"] = command
+        captured["kwargs"] = kwargs
+        return Result()
+
+    monkeypatch.setattr(updater_app.subprocess, "run", fake_run)
+
+    scheduled, message = updater_app._schedule_updater_restart("v9.9.9")
+
+    assert scheduled is True
+    assert message == "Updater restart scheduled."
+    command = captured["command"]
+    assert command[:3] == ["docker", "run", "--rm"]
+    assert "ghcr.io/dream619/manwen-studio/updater:v9.9.9" in command
+    assert f"ENV_FILE={env_path}" in command
+    assert f"COMPOSE_FILE={compose_path}" in command
+    assert captured["kwargs"]["timeout"] == 30
 
 
 def test_manifest_redirect_strips_credentials_across_origins():

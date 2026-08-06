@@ -1319,13 +1319,14 @@ function updateStatusLabel(status: string) {
   if (status === 'running') return '更新中';
   if (status === 'succeeded') return '已完成';
   if (status === 'failed') return '失败';
+  if (status === 'interrupted') return '已中断';
   return status || '未知';
 }
 
 function updateStatusClass(status: string) {
   if (status === 'running' || status === 'queued') return 'bg-amber-50 text-amber-700 ring-amber-200';
   if (status === 'succeeded') return 'bg-emerald-50 text-emerald-700 ring-emerald-200';
-  if (status === 'failed') return 'bg-rose-50 text-rose-700 ring-rose-200';
+  if (status === 'failed' || status === 'interrupted') return 'bg-rose-50 text-rose-700 ring-rose-200';
   return 'bg-slate-50 text-slate-700 ring-slate-200';
 }
 

@@ -6,6 +6,7 @@ import os
 import re
 import subprocess
 import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -58,7 +59,7 @@ def _now() -> str:
 
 
 def _state_age_seconds(state: dict[str, Any]) -> float:
-    value = state.get("started_at") or state.get("queued_at")
+    value = state.get("heartbeat_at") or state.get("started_at") or state.get("queued_at")
     if not value:
         return 0
     try:
@@ -439,6 +440,38 @@ def _append_log(state: dict[str, Any], line: str) -> None:
     tail = list(state.get("log_tail") or [])
     tail.append(_redact_line(line.rstrip()))
     state["log_tail"] = tail[-200:]
+    state["heartbeat_at"] = _now()
+
+
+def _schedule_updater_restart(target_version: str | None) -> tuple[bool, str]:
+    """在成功状态落盘后，通过独立 helper 容器替换 updater。"""
+    version = (target_version or _read_env_value("APP_VERSION") or "").strip()
+    if not version:
+        return False, "APP_VERSION is not configured; updater restart was skipped."
+
+    updater_image = _get_image_ref("updater", version)
+    helper_name = f"lorevista-updater-replacer-{int(time.time())}-{os.getpid()}"
+    command = [
+        "docker", "run", "--rm", "-d",
+        "--name", helper_name,
+        "-v", "/var/run/docker.sock:/var/run/docker.sock",
+        "-v", f"{APP_DIR}:{APP_DIR}",
+        "-e", f"ENV_FILE={ENV_FILE}",
+        "-e", f"COMPOSE_FILE={COMPOSE_FILE}",
+        "--entrypoint", "bash",
+        updater_image,
+        "-lc",
+        'sleep 2; docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" '
+        'up -d --no-deps updater >/dev/null 2>&1',
+    ]
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, timeout=30)
+    except Exception as exc:
+        return False, f"Unable to schedule updater restart: {exc}"
+    if result.returncode != 0:
+        detail = _redact_line((result.stderr or result.stdout or "unknown error").strip())
+        return False, f"Unable to schedule updater restart: {detail}"
+    return True, "Updater restart scheduled."
 
 
 def _run_update(target_version: str | None) -> None:
@@ -450,8 +483,11 @@ def _run_update(target_version: str | None) -> None:
         message="Update started.",
         target_version=target_version,
         started_at=_now(),
+        heartbeat_at=_now(),
         finished_at=None,
         exit_code=None,
+        updater_restart=None,
+        updater_restart_message=None,
         log_tail=[],
     )
     try:
@@ -481,19 +517,27 @@ def _run_update(target_version: str | None) -> None:
                 _append_log(state, line)
                 _write_state(state)
         exit_code = proc.wait()
-        _process = None
         if exit_code == 0:
             _set_state(status="succeeded", message="Update completed.", finished_at=_now(), exit_code=exit_code)
+            _process = None
+            restart_scheduled, restart_message = _schedule_updater_restart(target_version)
+            if not restart_scheduled:
+                _set_state(
+                    updater_restart="failed",
+                    updater_restart_message=restart_message,
+                    message="Update completed, but the updater restart could not be scheduled.",
+                )
         else:
             if target_version:
                 _restore_env(previous_env_content, env_existed)
             _set_state(status="failed", message=f"Update failed with exit code {exit_code}.", finished_at=_now(), exit_code=exit_code)
+            _process = None
     except Exception as exc:
-        _process = None
         if target_version:
             with contextlib.suppress(Exception):
                 _restore_env(previous_env_content, env_existed)
         _set_state(status="failed", message=f"Update failed: {exc}", finished_at=_now(), exit_code=None)
+        _process = None
 
 
 @app.get("/health")
@@ -524,10 +568,12 @@ def write_env(body: EnvUpdateRequest, _: None = Depends(_auth)):
 def status(_: None = Depends(_auth)):
     state = _read_state()
     if _state_is_stale(state):
-        state["status"] = "failed"
-        state["message"] = "Updater process is not running. The previous update may have been interrupted."
-        state["finished_at"] = state.get("finished_at") or _now()
-        _write_state(state)
+        state = {
+            **state,
+            "status": "interrupted",
+            "message": "Updater process is not running. The previous update may have been interrupted.",
+            "finished_at": state.get("finished_at") or _now(),
+        }
     state["running"] = _process is not None
     return state
 

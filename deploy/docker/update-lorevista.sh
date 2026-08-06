@@ -171,7 +171,7 @@ wait_for_health() {
   local url="$1"
   local deadline=$((SECONDS + HEALTH_TIMEOUT_SECONDS))
   while (( SECONDS < deadline )); do
-    if curl -fsS "$url" >/dev/null; then
+    if curl -fs "$url" >/dev/null 2>&1; then
       return 0
     fi
     sleep 3
@@ -300,24 +300,6 @@ main() {
 }
 EOF
     log "updated local manifest to ${updated_version}"
-  fi
-
-  if [[ "$updater_before" != "$updater_pulled" ]]; then
-    log "restarting updater with new image"
-    # 使用独立 helper 容器替换 updater，避免当前容器停止时终止 Compose 进程。
-    local updater_image helper_name
-    updater_image="$(image_ref_for updater)"
-    helper_name="lorevista-updater-replacer-$(date +%s)-${RANDOM}"
-    docker run --rm -d \
-      --name "$helper_name" \
-      -v /var/run/docker.sock:/var/run/docker.sock \
-      -v "$APP_DIR:$APP_DIR" \
-      -e ENV_FILE="$ENV_FILE" \
-      -e COMPOSE_FILE="$COMPOSE_FILE" \
-      -e LOG_FILE="$LOG_FILE" \
-      --entrypoint bash \
-      "$updater_image" \
-      -lc 'sleep 2; docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" up -d --no-deps updater >>"$LOG_FILE" 2>&1'
   fi
 
   if [[ "${SKIP_IMAGE_PRUNE:-false}" == "true" ]]; then
