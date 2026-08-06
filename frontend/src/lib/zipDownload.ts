@@ -53,9 +53,39 @@ export function sanitizeFilename(value: string): string {
   return value.replace(/[\\/:*?"<>|]/g, '_');
 }
 
+/** 为 ZIP 条目生成大小写不敏感的唯一文件名。 */
+function createUniqueZipFilename(filename: string, usedNames: Set<string>): string {
+  const original = String(filename);
+  const extensionIndex = original.lastIndexOf('.');
+  const hasExtension = extensionIndex > 0 && extensionIndex < original.length - 1;
+  const stem = hasExtension ? original.slice(0, extensionIndex) : original;
+  const extension = hasExtension ? original.slice(extensionIndex) : '';
+  let candidate = original;
+  let suffix = 2;
+
+  while (usedNames.has(candidate.toLowerCase())) {
+    candidate = `${stem} (${suffix})${extension}`;
+    suffix += 1;
+  }
+
+  usedNames.add(candidate.toLowerCase());
+  return candidate;
+}
+
+/** 将本地相对媒体地址解析为当前站点地址，确保浏览器可以直接请求。 */
+export function resolveBrowserDownloadUrl(downloadUrl: string): string {
+  const raw = String(downloadUrl || '').trim();
+  if (!raw) return '';
+  if (/^(https?:|blob:|data:)/i.test(raw)) return raw;
+  const origin = typeof window !== 'undefined' && window.location.origin && window.location.origin !== 'null'
+    ? window.location.origin
+    : 'http://localhost';
+  return new URL(raw, origin).toString();
+}
+
 /** 为导出请求附加一次性参数，避免复用普通图片标签留下的无 CORS 缓存。 */
 export function createExportDownloadUrl(downloadUrl: string, requestId: string): string {
-  const url = new URL(downloadUrl);
+  const url = new URL(resolveBrowserDownloadUrl(downloadUrl));
   url.searchParams.set('_storycanvas_export', requestId);
   return url.toString();
 }
@@ -144,8 +174,9 @@ export async function downloadImagesAsZip(
   });
 
   onStage?.('archiving');
+  const usedZipNames = new Set<string>();
   for (const { item, blob } of downloaded) {
-    zip.file(item.filename, blob);
+    zip.file(createUniqueZipFilename(item.filename, usedZipNames), blob);
   }
 
   let blob: Blob;
