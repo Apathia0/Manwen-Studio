@@ -897,16 +897,31 @@ async def upload_manga_asset(
     await run_blocking(target_dir.mkdir, parents=True, exist_ok=True)
     await run_blocking(target_path.write_bytes, content)
 
+    # 优先上传 OSS，只有 OSS 未启用或上传失败时才保留本地文件作为兜底。
+    from services import oss as oss_service
+    _configure_oss_from_db(db)
+    oss_url = await run_blocking(oss_service.upload_file, str(target_path)) if oss_service.is_enabled() else None
+    if oss_url:
+        try:
+            target_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+        storage_path = oss_url
+        storage_provider = "oss"
+    else:
+        storage_path = f"manga_outputs/{relative_dir.as_posix()}/{filename}"
+        storage_provider = "local"
+
     asset = MangaAsset(
         owner_user_id=user.id,
         story_id=story_id,
         chapter_id=chapter_id,
         asset_type=asset_type,
         name=asset_name,
-        storage_path=f"manga_outputs/{relative_dir.as_posix()}/{filename}",
+        storage_path=storage_path,
         source_type="upload",
         status="active",
-        metadata_json={"mime_type": file.content_type, "original_filename": file.filename or filename},
+        metadata_json={"mime_type": file.content_type, "original_filename": file.filename or filename, "storage_provider": storage_provider},
     )
     try:
         db.add(asset)
@@ -945,7 +960,7 @@ async def upload_manga_asset(
 
 @router.delete("/api/manga-assets/{asset_id}/managed")
 async def delete_managed_manga_asset(asset_id: int, request: Request, db: Session = Depends(get_db)):
-    """删除漫画资产记录、章节绑定及受控上传目录内的本地文件。"""
+    """删除漫画资产记录、章节绑定及对应的 OSS 或本地文件。"""
     user = _require_user(request, db)
     asset = db.get(MangaAsset, asset_id)
     if not asset:
@@ -967,6 +982,10 @@ async def delete_managed_manga_asset(asset_id: int, request: Request, db: Sessio
     db.commit()
     if local_file and local_file.exists():
         await run_blocking(local_file.unlink)
+    elif storage_path.startswith(("http://", "https://")):
+        from services import oss as oss_service
+        _configure_oss_from_db(db)
+        await run_blocking(oss_service.delete_by_url, storage_path)
     return {"ok": True}
 
 
