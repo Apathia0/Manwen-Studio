@@ -79,7 +79,7 @@ def _read_state() -> dict[str, Any]:
     if not STATE_FILE.exists():
         return {
             "status": "idle",
-            "message": "No update has been run yet.",
+            "message": "尚未执行过更新。",
             "log_tail": [],
         }
     try:
@@ -87,7 +87,7 @@ def _read_state() -> dict[str, Any]:
     except Exception:
         return {
             "status": "unknown",
-            "message": "State file is not readable.",
+            "message": "更新状态文件无法读取。",
             "log_tail": [],
         }
 
@@ -467,11 +467,55 @@ def _schedule_updater_restart(target_version: str | None) -> tuple[bool, str]:
     try:
         result = subprocess.run(command, capture_output=True, text=True, timeout=30)
     except Exception as exc:
-        return False, f"Unable to schedule updater restart: {exc}"
+        return False, f"无法调度 updater 重启：{exc}"
     if result.returncode != 0:
         detail = _redact_line((result.stderr or result.stdout or "unknown error").strip())
-        return False, f"Unable to schedule updater restart: {detail}"
-    return True, "Updater restart scheduled."
+        return False, f"无法调度 updater 重启：{detail}"
+    return True, "updater 重启已调度。"
+
+
+def _service_matches_target(service: str, target_version: str) -> bool:
+    """确认 Compose 服务正在运行目标版本镜像。"""
+    expected_image = _get_image_ref(service, target_version)
+    try:
+        ps = subprocess.run(
+            ["docker", "compose", "--env-file", str(ENV_FILE), "-f", str(COMPOSE_FILE), "ps", "-q", service],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        container_id = ps.stdout.strip().splitlines()[0] if ps.returncode == 0 and ps.stdout.strip() else ""
+        if not container_id:
+            return False
+        inspected = subprocess.run(
+            ["docker", "inspect", "-f", "{{.Config.Image}}|{{.State.Status}}", container_id],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if inspected.returncode != 0:
+            return False
+        image, separator, state = inspected.stdout.strip().partition("|")
+        return separator == "|" and image == expected_image and state == "running"
+    except Exception:
+        return False
+
+
+def _deployed_target_is_healthy(target_version: str | None) -> bool:
+    """识别旧 updater 自重启后已经完成的应用更新。"""
+    target = (target_version or "").strip()
+    if not target or (_read_env_value("APP_VERSION") or "").strip() != target:
+        return False
+    if not all(_service_matches_target(service, target) for service in ("backend", "web", "updater")):
+        return False
+    try:
+        with urllib.request.urlopen("http://backend:8000/api/health", timeout=5) as response:
+            if response.status != 200:
+                return False
+        with urllib.request.urlopen("http://web/", timeout=5) as response:
+            return response.status == 200
+    except Exception:
+        return False
 
 
 def _run_update(target_version: str | None) -> None:
@@ -480,7 +524,7 @@ def _run_update(target_version: str | None) -> None:
     previous_env_content = ENV_FILE.read_text(encoding="utf-8") if env_existed else None
     state = _set_state(
         status="running",
-        message="Update started.",
+        message="更新已开始。",
         target_version=target_version,
         started_at=_now(),
         heartbeat_at=_now(),
@@ -518,25 +562,25 @@ def _run_update(target_version: str | None) -> None:
                 _write_state(state)
         exit_code = proc.wait()
         if exit_code == 0:
-            _set_state(status="succeeded", message="Update completed.", finished_at=_now(), exit_code=exit_code)
+            _set_state(status="succeeded", message="更新已完成。", finished_at=_now(), exit_code=exit_code)
             _process = None
             restart_scheduled, restart_message = _schedule_updater_restart(target_version)
             if not restart_scheduled:
                 _set_state(
                     updater_restart="failed",
                     updater_restart_message=restart_message,
-                    message="Update completed, but the updater restart could not be scheduled.",
+                    message="应用已更新，但 updater 重启调度失败。",
                 )
         else:
             if target_version:
                 _restore_env(previous_env_content, env_existed)
-            _set_state(status="failed", message=f"Update failed with exit code {exit_code}.", finished_at=_now(), exit_code=exit_code)
+            _set_state(status="failed", message=f"更新失败，退出码：{exit_code}。", finished_at=_now(), exit_code=exit_code)
             _process = None
     except Exception as exc:
         if target_version:
             with contextlib.suppress(Exception):
                 _restore_env(previous_env_content, env_existed)
-        _set_state(status="failed", message=f"Update failed: {exc}", finished_at=_now(), exit_code=None)
+        _set_state(status="failed", message=f"更新失败：{exc}", finished_at=_now(), exit_code=None)
         _process = None
 
 
@@ -568,12 +612,22 @@ def write_env(body: EnvUpdateRequest, _: None = Depends(_auth)):
 def status(_: None = Depends(_auth)):
     state = _read_state()
     if _state_is_stale(state):
-        state = {
-            **state,
-            "status": "interrupted",
-            "message": "Updater process is not running. The previous update may have been interrupted.",
-            "finished_at": state.get("finished_at") or _now(),
-        }
+        if _deployed_target_is_healthy(state.get("target_version")):
+            state = {
+                **state,
+                "status": "succeeded",
+                "message": "更新已完成，系统已从 updater 重启中恢复。",
+                "finished_at": state.get("finished_at") or _now(),
+                "exit_code": 0,
+                "recovered": True,
+            }
+        else:
+            state = {
+                **state,
+                "status": "interrupted",
+                "message": "更新进程已中断，请检查容器状态后重试。",
+                "finished_at": state.get("finished_at") or _now(),
+            }
     state["running"] = _process is not None
     return state
 
@@ -626,7 +680,7 @@ def check_update(_: None = Depends(_auth)):
         "min_supported_version": _string_field(manifest, "min_supported_version") or None,
         "channel": _string_field(manifest, "channel") or None,
         "manifest_url": _redact_manifest_url(UPDATE_MANIFEST_URL),
-        "message": "A new version is available." if update_available else "Already on the latest version.",
+        "message": "检测到新版本。" if update_available else "当前已经是最新版本。",
     }
 
 
@@ -635,15 +689,15 @@ def start_update(payload: UpdateRequest, _: None = Depends(_auth)):
     global _process
     with _lock:
         if _process is not None:
-            raise HTTPException(409, "Update is already running")
+            raise HTTPException(409, "更新已经在执行中")
         current = _read_state()
         if current.get("status") in {"queued", "running"}:
             if _process is not None or not _state_is_stale(current):
-                raise HTTPException(409, "Update is already running")
+                raise HTTPException(409, "更新已经在执行中")
             current = {
                 **current,
                 "status": "failed",
-                "message": "Updater process is not running. The previous update may have been interrupted.",
+                "message": "更新进程已中断，请检查容器状态后重试。",
                 "finished_at": current.get("finished_at") or _now(),
             }
         if payload.target_version and not VERSION_RE.match(payload.target_version):
@@ -653,7 +707,7 @@ def start_update(payload: UpdateRequest, _: None = Depends(_auth)):
         _write_state({
             **current,
             "status": "queued",
-            "message": "Update queued.",
+            "message": "更新已排队。",
             "target_version": payload.target_version,
             "queued_at": _now(),
         })

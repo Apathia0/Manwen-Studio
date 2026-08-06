@@ -229,6 +229,7 @@ def test_status_reports_stale_run_without_mutating_state(monkeypatch):
     }
     monkeypatch.setattr(updater_app, "_read_state", lambda: dict(persisted))
     monkeypatch.setattr(updater_app, "_state_is_stale", lambda state: True)
+    monkeypatch.setattr(updater_app, "_deployed_target_is_healthy", lambda target: False)
     monkeypatch.setattr(
         updater_app,
         "_write_state",
@@ -240,6 +241,29 @@ def test_status_reports_stale_run_without_mutating_state(monkeypatch):
     assert result["status"] == "interrupted"
     assert result["running"] is False
     assert persisted["status"] == "running"
+
+
+def test_status_recovers_stale_run_when_target_deployment_is_healthy(monkeypatch):
+    updater_app = _load_updater_app()
+    persisted = {
+        "status": "running",
+        "target_version": "v4.3.11",
+        "started_at": "2026-01-01T00:00:00+00:00",
+    }
+    monkeypatch.setattr(updater_app, "_read_state", lambda: dict(persisted))
+    monkeypatch.setattr(updater_app, "_state_is_stale", lambda state: True)
+    monkeypatch.setattr(updater_app, "_deployed_target_is_healthy", lambda target: target == "v4.3.11")
+    monkeypatch.setattr(
+        updater_app,
+        "_write_state",
+        lambda state: pytest.fail("GET /status 不应写入状态文件"),
+    )
+
+    result = updater_app.status(None)
+
+    assert result["status"] == "succeeded"
+    assert result["message"] == "更新已完成，系统已从 updater 重启中恢复。"
+    assert result["recovered"] is True
 
 
 def test_stale_detection_uses_recent_heartbeat_instead_of_start_time(monkeypatch):
@@ -278,7 +302,7 @@ def test_updater_restart_is_scheduled_with_target_image(tmp_path, monkeypatch):
     scheduled, message = updater_app._schedule_updater_restart("v9.9.9")
 
     assert scheduled is True
-    assert message == "Updater restart scheduled."
+    assert message == "updater 重启已调度。"
     command = captured["command"]
     assert command[:3] == ["docker", "run", "--rm"]
     assert "ghcr.io/dream619/manwen-studio/updater:v9.9.9" in command
