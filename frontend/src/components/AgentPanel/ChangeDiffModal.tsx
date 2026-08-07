@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { X, Loader2, Check, Undo2, FileText, Tags, Users, BookOpen, Film, ChevronRight, ChevronsUpDown } from 'lucide-react';
+import { X, Loader2, Check, Undo2, FileText, Tags, Users, BookOpen, Film, ImageIcon, ChevronRight, ChevronsUpDown } from 'lucide-react';
 import { lineDiff, type DiffLine } from '../../utils/diff';
 import { apiHeaders } from '../../api';
 import { toast } from '../../lib/toast';
@@ -10,8 +10,8 @@ export interface FullChangeData {
   record_id: number;
   display_name: string;
   field: string;
-  old_value: string;
-  new_value: string;
+  old_value: unknown;
+  new_value: unknown;
 }
 
 interface Props {
@@ -31,6 +31,7 @@ const 字段图标: Record<string, React.ReactNode> = {
   characters: <Users size={14} />,
   outline: <BookOpen size={14} />,
   scenes_file: <Film size={14} />,
+  manga_asset_analysis_json: <ImageIcon size={14} />,
   screenplay_text: <FileText size={14} />,
   screenplay_json: <FileText size={14} />,
   storyboard_prompt: <Film size={14} />,
@@ -56,6 +57,7 @@ const 字段中文: Record<string, string> = {
   characters: '角色设定',
   outline: '大纲',
   scenes_file: '分镜',
+  manga_asset_analysis_json: '资产提示词',
   screenplay_text: '剧本文本',
   screenplay_json: '剧本结构',
   storyboard_prompt: '故事版提示词',
@@ -84,6 +86,16 @@ const 类型色: Record<string, string> = {
   video_shot: 'border-l-violet-400',
   video_workflow: 'border-l-indigo-400',
 };
+
+function formatChangeValue(value: unknown): string {
+  if (value === null || value === undefined) return '';
+  if (typeof value === 'string') return value;
+  try {
+    return JSON.stringify(value, null, 2) ?? String(value);
+  } catch {
+    return String(value);
+  }
+}
 
 function DiffBlock({ lines }: { lines: DiffLine[] }) {
   const added = lines.filter((l) => l.type === 'add').length;
@@ -128,7 +140,9 @@ function DiffBlock({ lines }: { lines: DiffLine[] }) {
 function FieldSection({ change, defaultCollapsed = false }: { change: FullChangeData; defaultCollapsed?: boolean }) {
   const [mode, setMode] = useState<'diff' | 'old' | 'new'>('diff');
   const [collapsed, setCollapsed] = useState(defaultCollapsed);
-  const diff = lineDiff(change.old_value, change.new_value);
+  const oldValue = formatChangeValue(change.old_value);
+  const newValue = formatChangeValue(change.new_value);
+  const diff = lineDiff(oldValue, newValue);
   const added = diff.filter((l) => l.type === 'add').length;
   const removed = diff.filter((l) => l.type === 'remove').length;
 
@@ -180,12 +194,12 @@ function FieldSection({ change, defaultCollapsed = false }: { change: FullChange
           {mode === 'diff' && <DiffBlock lines={diff} />}
           {mode === 'old' && (
             <div className="rounded-lg border border-gray-200 bg-gray-50 p-3 text-xs font-mono text-gray-600 leading-5 whitespace-pre-wrap [overflow-wrap:anywhere]">
-              {change.old_value || '(空)'}
+              {oldValue || '(空)'}
             </div>
           )}
           {mode === 'new' && (
             <div className="rounded-lg border border-emerald-200 bg-emerald-50/50 p-3 text-xs font-mono text-emerald-700 leading-5 whitespace-pre-wrap [overflow-wrap:anywhere]">
-              {change.new_value || '(空)'}
+              {newValue || '(空)'}
             </div>
           )}
         </div>

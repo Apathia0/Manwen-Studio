@@ -27,6 +27,10 @@ import { toast } from '../lib/toast';
 import { normalizeErrorMessage } from '../lib/errors';
 import { downloadImagesAsZip, sanitizeFilename } from '../lib/zipDownload';
 import { getTrackedMangaAssetBatch, subscribeMangaAssetBatch, trackMangaAssetBatch } from '../mangaAssetBatchMonitor';
+import {
+  resolveMangaAssetWorkbenchPrompt,
+  subscribeMangaAssetAnalysisChanged,
+} from '../mangaAssetAnalysisSync';
 import { ImageRedrawModal } from './shared/ImageRedrawModal';
 
 interface Props {
@@ -59,12 +63,6 @@ function bindingRole(type: MangaAssetType): string {
 
 function suggestionKey(suggestion: MangaAssetAnalysisSuggestion, index: number): string {
   return `${suggestion.asset_type}-${suggestion.name}-${index}`;
-}
-
-function assetPrompt(asset: MangaAsset): string {
-  const prompt = asset.metadata?.prompt;
-  if (typeof prompt === 'string' && prompt.trim()) return prompt;
-  return `保持“${asset.name}”的核心造型、材质、配色和画面风格一致，按我的要求重新绘制。`;
 }
 
 function assetImageUrl(asset: MangaAsset): string {
@@ -101,6 +99,7 @@ export default function MangaAssetManagementModal({ storyId, chapterId, onClose,
   const [uploadPreview, setUploadPreview] = useState<string | null>(null);
   const [analyzing, setAnalyzing] = useState(false);
   const [suggestions, setSuggestions] = useState<MangaAssetAnalysisSuggestion[]>([]);
+  const [analysisRevision, setAnalysisRevision] = useState<string | null>(null);
   const [suggestionsCollapsed, setSuggestionsCollapsed] = useState(false);
   const [suggestionsDirty, setSuggestionsDirty] = useState(false);
   const [savingSuggestions, setSavingSuggestions] = useState(false);
@@ -117,23 +116,18 @@ export default function MangaAssetManagementModal({ storyId, chapterId, onClose,
   const bindingsRef = useRef<MangaAssetBinding[]>([]);
   const bindingBusyRef = useRef(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const analysisRequestIdRef = useRef(0);
 
-  const loadAssets = useCallback(async (includeAnalysis = false) => {
+  const loadAssets = useCallback(async () => {
     setLoading(true);
     try {
-      const [assetResult, bindingResult, analysisResult] = await Promise.all([
+      const [assetResult, bindingResult] = await Promise.all([
         listMangaAssets(storyId),
         listMangaAssetBindings(chapterId),
-        includeAnalysis ? getMangaAssetAnalysis(chapterId) : Promise.resolve(null),
       ]);
       setAssets(assetResult.assets);
       setBindings(bindingResult.bindings);
       bindingsRef.current = bindingResult.bindings;
-      if (analysisResult) {
-        setSuggestions(analysisResult.suggestions);
-        setSuggestionsDirty(false);
-        setSelectedSuggestionKeys(new Set(analysisResult.suggestions.map((suggestion, index) => suggestionKey(suggestion, index))));
-      }
     } catch (error) {
       toast.error(error instanceof Error ? error.message : '加载漫画资产失败');
     } finally {
@@ -141,7 +135,31 @@ export default function MangaAssetManagementModal({ storyId, chapterId, onClose,
     }
   }, [chapterId, storyId]);
 
-  useEffect(() => { void loadAssets(true); }, [loadAssets]);
+  const refreshAnalysis = useCallback(async () => {
+    const requestId = ++analysisRequestIdRef.current;
+    const result = await getMangaAssetAnalysis(chapterId);
+    if (requestId !== analysisRequestIdRef.current) return;
+    setSuggestions(result.suggestions);
+    setAnalysisRevision(result.revision);
+    setSuggestionsDirty(false);
+    setSelectedSuggestionKeys(new Set(
+      result.suggestions.map((suggestion, index) => suggestionKey(suggestion, index)),
+    ));
+  }, [chapterId]);
+
+  useEffect(() => {
+    void loadAssets();
+    void refreshAnalysis().catch((error) => {
+      toast.error(error instanceof Error ? error.message : '加载漫画资产提示词失败');
+    });
+  }, [loadAssets, refreshAnalysis]);
+
+  useEffect(() => subscribeMangaAssetAnalysisChanged((changedChapterId) => {
+    if (changedChapterId !== chapterId) return;
+    void refreshAnalysis().catch((error) => {
+        toast.error(error instanceof Error ? error.message : '刷新漫画资产提示词失败');
+      });
+  }), [chapterId, refreshAnalysis]);
 
   useEffect(() => {
     setBatchTask(getTrackedMangaAssetBatch(chapterId));
@@ -258,8 +276,11 @@ export default function MangaAssetManagementModal({ storyId, chapterId, onClose,
   const analyzeCurrentChapter = async () => {
     setAnalyzing(true);
     try {
+      const requestId = ++analysisRequestIdRef.current;
       const result = await analyzeChapterMangaAssets(chapterId);
+      if (requestId !== analysisRequestIdRef.current) return;
       setSuggestions(result.suggestions);
+      setAnalysisRevision(result.revision);
       setSuggestionsCollapsed(false);
       setSuggestionsDirty(false);
       setSelectedSuggestionKeys(new Set(result.suggestions.map((suggestion, index) => suggestionKey(suggestion, index))));
@@ -286,15 +307,23 @@ export default function MangaAssetManagementModal({ storyId, chapterId, onClose,
   };
 
   const persistSuggestions = async (showSuccess = true) => {
+    if (!analysisRevision) {
+      toast.error('资产提示词版本尚未加载，请刷新后重试');
+      return null;
+    }
     setSavingSuggestions(true);
     try {
-      const result = await saveMangaAssetAnalysis(chapterId, suggestions);
+      const requestId = ++analysisRequestIdRef.current;
+      const result = await saveMangaAssetAnalysis(chapterId, suggestions, analysisRevision);
+      if (requestId !== analysisRequestIdRef.current) return null;
       setSuggestions(result.suggestions);
+      setAnalysisRevision(result.revision);
       setSuggestionsDirty(false);
       if (showSuccess) toast.success('资产提示词已保存');
       return result.suggestions;
     } catch (error) {
       toast.error(error instanceof Error ? error.message : '保存漫画资产提示词失败');
+      void refreshAnalysis().catch(() => undefined);
       return null;
     } finally {
       setSavingSuggestions(false);
@@ -476,8 +505,18 @@ export default function MangaAssetManagementModal({ storyId, chapterId, onClose,
     if (!workbenchAsset) return;
     setRedrawingAssetId(workbenchAsset.id);
     try {
-      const updated = await redrawMangaAsset(workbenchAsset.id, payload);
+      const currentBinding = bindingsRef.current.find(
+        (binding) => binding.asset_id === workbenchAsset.id,
+      );
+      const analysisName = currentBinding?.label?.trim() || workbenchAsset.name;
+      const updated = await redrawMangaAsset(workbenchAsset.id, {
+        ...payload,
+        // 只有当前章节已绑定该资产时，才允许将重绘提示词回写到本章分析建议。
+        ...(currentBinding ? { chapter_id: chapterId } : {}),
+        analysis_name: analysisName,
+      });
       setAssets((current) => current.map((asset) => asset.id === updated.id ? updated : asset));
+      await refreshAnalysis();
       setWorkbenchAsset(null);
       onAssetsChanged?.();
       toast.success('漫画资产重绘完成');
@@ -633,7 +672,10 @@ export default function MangaAssetManagementModal({ storyId, chapterId, onClose,
       {workbenchAsset && <ImageRedrawModal
         imageSrc={assetImageUrl(workbenchAsset)}
         title={`${workbenchAsset.name} · 图片工作台`}
-        prompt={assetPrompt(workbenchAsset)}
+        prompt={resolveMangaAssetWorkbenchPrompt({
+          ...workbenchAsset,
+          analysis_name: getBinding(workbenchAsset.id)?.label,
+        }, suggestions)}
         busy={redrawingAssetId === workbenchAsset.id}
         onClose={() => setWorkbenchAsset(null)}
         onSubmit={handleAssetRedraw}

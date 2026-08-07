@@ -3989,6 +3989,12 @@ export interface MangaAssetAnalysisSuggestion {
   candidates: Array<Pick<MangaAsset, 'id' | 'name' | 'asset_type' | 'storage_path'> & { match_score: number; match_reason: string }>;
 }
 
+export interface MangaAssetAnalysisResult {
+  chapter_id: number;
+  suggestions: MangaAssetAnalysisSuggestion[];
+  revision: string;
+}
+
 export async function listMangaAssets(storyId: number): Promise<{ assets: MangaAsset[] }> {
   const res = await fetch(`${BASE}/api/stories/${storyId}/manga-assets`, { headers: apiHeaders() });
   if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
@@ -4014,7 +4020,7 @@ export async function listMangaAssetBindings(chapterId: number): Promise<{ bindi
   return res.json();
 }
 
-export async function analyzeChapterMangaAssets(chapterId: number): Promise<{ chapter_id: number; suggestions: MangaAssetAnalysisSuggestion[] }> {
+export async function analyzeChapterMangaAssets(chapterId: number): Promise<MangaAssetAnalysisResult> {
   const res = await fetch(`${BASE}/api/chapters/${chapterId}/manga-assets/analyze`, {
     method: 'POST',
     headers: apiHeaders(true),
@@ -4024,7 +4030,7 @@ export async function analyzeChapterMangaAssets(chapterId: number): Promise<{ ch
   return res.json();
 }
 
-export async function getMangaAssetAnalysis(chapterId: number): Promise<{ chapter_id: number; suggestions: MangaAssetAnalysisSuggestion[] }> {
+export async function getMangaAssetAnalysis(chapterId: number): Promise<MangaAssetAnalysisResult> {
   const res = await fetch(`${BASE}/api/chapters/${chapterId}/manga-assets/analysis`, {
     headers: apiHeaders(),
   });
@@ -4035,11 +4041,12 @@ export async function getMangaAssetAnalysis(chapterId: number): Promise<{ chapte
 export async function saveMangaAssetAnalysis(
   chapterId: number,
   suggestions: MangaAssetAnalysisSuggestion[],
-): Promise<{ chapter_id: number; suggestions: MangaAssetAnalysisSuggestion[] }> {
+  expectedRevision: string,
+): Promise<MangaAssetAnalysisResult> {
   const res = await fetch(`${BASE}/api/chapters/${chapterId}/manga-assets/analysis`, {
     method: 'PUT',
     headers: apiHeaders(true),
-    body: JSON.stringify({ suggestions }),
+    body: JSON.stringify({ suggestions, expected_revision: expectedRevision }),
   });
   if (!res.ok) throw new Error(await readErrorMessage(res, '保存漫画资产提示词失败'));
   return res.json();
@@ -4163,7 +4170,7 @@ export async function updateMangaAsset(assetId: number, payload: Partial<Pick<Ma
 
 export async function redrawMangaAsset(
   assetId: number,
-  payload: { prompt: string; mode: ImageRedrawMode; mask?: string },
+  payload: { prompt: string; mode: ImageRedrawMode; mask?: string; chapter_id?: number; analysis_name?: string },
 ): Promise<MangaAsset> {
   const res = await fetch(`${BASE}/api/manga-assets/${assetId}/redraw`, {
     method: 'POST',

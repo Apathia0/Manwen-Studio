@@ -1,4 +1,5 @@
 import asyncio
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -136,9 +137,11 @@ def test_manga_workflow_exposes_safe_storyboard_tools_to_single_agent():
 
     assert {
         "get_manga_storyboard",
+        "get_manga_asset_prompts",
         "update_manga_storyboard_scene",
         "batch_update_manga_storyboard_scenes",
         "replace_manga_storyboard",
+        "update_manga_asset_prompts",
     } <= agent_names
     assert "update_chapter_content" not in agent_names
     assert "update_shot_fields" not in agent_names
@@ -156,6 +159,362 @@ def test_get_manga_storyboard_returns_scripts_and_image_state(manga_workspace):
         "第三格旧脚本",
     ]
     assert [scene["has_generated_image"] for scene in result["scenes"]] == [True, False, True]
+
+
+class AssetPromptDb:
+    def __init__(self, chapter, *, fail_commit=False):
+        self.chapter = chapter
+        self.fail_commit = fail_commit
+        self.commit_count = 0
+        self.rollback_count = 0
+        self.get_calls = []
+        self.ownership_calls = []
+        self._committed_payload = agent_service_module.copy.deepcopy(chapter.manga_asset_analysis_json)
+
+    def get(self, model, record_id, **_kwargs):
+        self.get_calls.append((model.__name__, record_id, _kwargs))
+        if model.__name__ == "Chapter" and self.chapter.id == record_id:
+            return self.chapter
+        return None
+
+    def commit(self):
+        self.commit_count += 1
+        if self.fail_commit:
+            raise RuntimeError("模拟提交失败")
+        self._committed_payload = agent_service_module.copy.deepcopy(self.chapter.manga_asset_analysis_json)
+
+    def rollback(self):
+        self.rollback_count += 1
+        self.chapter.manga_asset_analysis_json = agent_service_module.copy.deepcopy(self._committed_payload)
+
+    def close(self):
+        return None
+
+
+@pytest.fixture
+def manga_asset_workspace(monkeypatch):
+    chapter = SimpleNamespace(
+        id=7,
+        story_id=1,
+        chapter_number=2,
+        title="雨夜追踪",
+        manga_asset_analysis_json={
+            "version": 3,
+            "status": "ready",
+            "input_hash": "输入版本",
+            "suggestions": [
+                {
+                    "asset_type": "character_reference",
+                    "name": "陈玄",
+                    "description": "黑衣青年",
+                    "evidence": "第二段出现",
+                    "prompt": "旧角色提示词",
+                    "candidates": [{"id": 11, "url": "/static/character.png"}],
+                },
+                {
+                    "asset_type": "scene_reference",
+                    "name": "雨巷",
+                    "description": "石板路与昏黄路灯",
+                    "evidence": "开场地点",
+                    "prompt": "旧场景提示词",
+                    "candidates": [],
+                },
+                {
+                    "asset_type": "prop_reference",
+                    "name": "铜钥匙",
+                    "description": "磨损的旧钥匙",
+                    "evidence": "角色手中",
+                    "prompt": "旧道具提示词",
+                    "candidates": [{"id": 12}],
+                },
+            ],
+            "extra": {"保留字段": True},
+        },
+    )
+    db = AssetPromptDb(chapter)
+    monkeypatch.setattr(agent_service_module, "SessionLocal", lambda: db)
+    def validate_ownership(_db, chapter_id, _story_id, **kwargs):
+        _db.ownership_calls.append(kwargs)
+        return chapter if chapter_id == chapter.id else None
+
+    monkeypatch.setattr(agent_service_module, "_validate_chapter_ownership", validate_ownership)
+    return chapter, db
+
+
+def test_get_manga_asset_prompts_returns_stable_indices_and_revision(manga_asset_workspace):
+    chapter, _db = manga_asset_workspace
+
+    result = asyncio.run(agent_service_module.get_manga_asset_prompts(chapter.id))
+
+    assert len(result["revision"]) == 64
+    assert result["revision"] == agent_service_module._manga_asset_analysis_revision(
+        chapter.manga_asset_analysis_json
+    )
+    assert result["suggestions"] == [
+        {
+            "suggestion_index": 1,
+            "asset_type": "character_reference",
+            "name": "陈玄",
+            "description": "黑衣青年",
+            "prompt": "旧角色提示词",
+        },
+        {
+            "suggestion_index": 2,
+            "asset_type": "scene_reference",
+            "name": "雨巷",
+            "description": "石板路与昏黄路灯",
+            "prompt": "旧场景提示词",
+        },
+        {
+            "suggestion_index": 3,
+            "asset_type": "prop_reference",
+            "name": "铜钥匙",
+            "description": "磨损的旧钥匙",
+            "prompt": "旧道具提示词",
+        },
+    ]
+
+
+def test_get_manga_asset_prompts_returns_readable_empty_result(manga_asset_workspace):
+    chapter, _db = manga_asset_workspace
+    chapter.manga_asset_analysis_json = None
+
+    result = asyncio.run(agent_service_module.get_manga_asset_prompts(chapter.id))
+
+    assert result["suggestions"] == []
+    assert len(result["revision"]) == 64
+    assert "尚无资产分析提示词" in result["message"]
+
+
+def test_update_manga_asset_prompts_batches_and_preserves_metadata(manga_asset_workspace):
+    chapter, db = manga_asset_workspace
+    current = asyncio.run(agent_service_module.get_manga_asset_prompts(chapter.id))
+    tracker, context_token = _set_manga_context()
+    try:
+        result = asyncio.run(agent_service_module.update_manga_asset_prompts(
+            chapter.id,
+            [
+                {"suggestion_index": 1, "prompt": "  新角色提示词  "},
+                {"suggestion_index": 3, "prompt": "新道具提示词"},
+            ],
+            current["revision"],
+        ))
+    finally:
+        agent_service_module._AGENT_RUN_CONTEXT.reset(context_token)
+
+    assert result["ok"] is True
+    assert result["changed"] is True
+    assert result["updated_suggestion_indices"] == [1, 3]
+    assert [item["name"] for item in result["updated_assets"]] == ["陈玄", "铜钥匙"]
+    assert db.commit_count == 1
+    assert {"with_for_update": True} in db.ownership_calls
+    suggestions = chapter.manga_asset_analysis_json["suggestions"]
+    assert [item["prompt"] for item in suggestions] == [
+        "新角色提示词",
+        "旧场景提示词",
+        "新道具提示词",
+    ]
+    assert suggestions[0]["evidence"] == "第二段出现"
+    assert suggestions[0]["candidates"] == [{"id": 11, "url": "/static/character.png"}]
+    assert chapter.manga_asset_analysis_json["extra"] == {"保留字段": True}
+    assert len(tracker._changes) == 1
+    change = tracker._changes[0]
+    assert change.field == "manga_asset_analysis_json"
+    assert change.old_value["suggestions"][0]["prompt"] == "旧角色提示词"
+    assert change.new_value["suggestions"][0]["prompt"] == "新角色提示词"
+
+
+def test_manga_asset_prompt_update_can_be_rolled_back(manga_asset_workspace):
+    chapter, db = manga_asset_workspace
+    original = agent_service_module.copy.deepcopy(chapter.manga_asset_analysis_json)
+    revision = agent_service_module._manga_asset_analysis_revision(original)
+    tracker, context_token = _set_manga_context()
+    try:
+        result = asyncio.run(agent_service_module.update_manga_asset_prompts(
+            chapter.id,
+            [{"suggestion_index": 2, "prompt": "修改后的雨巷提示词"}],
+            revision,
+        ))
+    finally:
+        agent_service_module._AGENT_RUN_CONTEXT.reset(context_token)
+
+    rollback_result = tracker.rollback(db)
+
+    assert result["changed"] is True
+    assert rollback_result == [{
+        "ok": True,
+        "type": "chapter",
+        "id": chapter.id,
+        "field": "manga_asset_analysis_json",
+    }]
+    assert chapter.manga_asset_analysis_json == original
+
+
+def test_manga_asset_prompt_noop_does_not_commit_or_record_pending(manga_asset_workspace):
+    chapter, db = manga_asset_workspace
+    revision = agent_service_module._manga_asset_analysis_revision(chapter.manga_asset_analysis_json)
+    tracker, context_token = _set_manga_context()
+    try:
+        result = asyncio.run(agent_service_module.update_manga_asset_prompts(
+            chapter.id,
+            [{"suggestion_index": 1, "prompt": "  旧角色提示词  "}],
+            revision,
+        ))
+    finally:
+        agent_service_module._AGENT_RUN_CONTEXT.reset(context_token)
+
+    assert result["ok"] is True
+    assert result["changed"] is False
+    assert result["updated_suggestion_indices"] == []
+    assert db.commit_count == 0
+    assert tracker.get_summary() == []
+
+
+def test_update_manga_asset_prompts_rejects_revision_conflict_without_writing(manga_asset_workspace):
+    chapter, db = manga_asset_workspace
+    original = agent_service_module.copy.deepcopy(chapter.manga_asset_analysis_json)
+
+    result = asyncio.run(agent_service_module.update_manga_asset_prompts(
+        chapter.id,
+        [{"suggestion_index": 1, "prompt": "不应写入"}],
+        "0" * 64,
+    ))
+
+    assert result["conflict"] is True
+    assert result["current_revision"] == agent_service_module._manga_asset_analysis_revision(original)
+    assert chapter.manga_asset_analysis_json == original
+    assert db.commit_count == 0
+
+
+def test_update_manga_asset_prompts_rejects_out_of_range_index(manga_asset_workspace):
+    chapter, db = manga_asset_workspace
+    revision = agent_service_module._manga_asset_analysis_revision(chapter.manga_asset_analysis_json)
+
+    result = asyncio.run(agent_service_module.update_manga_asset_prompts(
+        chapter.id,
+        [{"suggestion_index": 4, "prompt": "不存在的资产"}],
+        revision,
+    ))
+
+    assert "超出范围" in result["error"]
+    assert db.commit_count == 0
+
+
+def test_manga_asset_prompt_tools_only_expose_supported_asset_types(manga_asset_workspace):
+    chapter, db = manga_asset_workspace
+    chapter.manga_asset_analysis_json["suggestions"].append({
+        "asset_type": "style_reference",
+        "name": "不应暴露的风格图",
+        "prompt": "不应修改",
+    })
+    revision = agent_service_module._manga_asset_analysis_revision(chapter.manga_asset_analysis_json)
+
+    read_result = asyncio.run(agent_service_module.get_manga_asset_prompts(chapter.id))
+    write_result = asyncio.run(agent_service_module.update_manga_asset_prompts(
+        chapter.id,
+        [{"suggestion_index": 4, "prompt": "不应写入"}],
+        revision,
+    ))
+
+    assert [item["name"] for item in read_result["suggestions"]] == ["陈玄", "雨巷", "铜钥匙"]
+    assert "不是可修改的角色、场景或道具资产" in write_result["error"]
+    assert db.commit_count == 0
+
+
+def test_manga_asset_prompt_write_tool_uses_its_own_revision_guard(manga_asset_workspace):
+    chapter, _db = manga_asset_workspace
+    revision = agent_service_module._manga_asset_analysis_revision(chapter.manga_asset_analysis_json)
+    tracker = agent_service_module.PendingChangesTracker()
+    context = agent_service_module.AgentRunContext(
+        story_id=1,
+        api_key=None,
+        pending_changes=tracker,
+        workflow_type="manga",
+        chapter_id=chapter.id,
+        enabled_skills=["manga_workflow"],
+        run_id="asset-prompt-run",
+    )
+    context_token = agent_service_module._AGENT_RUN_CONTEXT.set(context)
+    try:
+        result = json.loads(asyncio.run(agent_service_module.tool_registry.execute(
+            "update_manga_asset_prompts",
+            {
+                "chapter_id": chapter.id,
+                "updates": [{"suggestion_index": 2, "prompt": "新场景提示词"}],
+                "expected_revision": revision,
+            },
+        )))
+    finally:
+        agent_service_module._AGENT_RUN_CONTEXT.reset(context_token)
+
+    assert result["ok"] is True
+    assert result["updated_suggestion_indices"] == [2]
+    assert chapter.manga_asset_analysis_json["suggestions"][1]["prompt"] == "新场景提示词"
+
+
+@pytest.mark.parametrize(
+    ("updates", "revision", "error_fragment"),
+    [
+        ([], "0" * 64, "非空数组"),
+        ([{"suggestion_index": 1, "prompt": "a"}, {"suggestion_index": 1, "prompt": "b"}], "0" * 64, "重复"),
+        ([{"suggestion_index": 1, "prompt": "   "}], "0" * 64, "不能为空"),
+        ([{"suggestion_index": 1, "prompt": "x" * 24001}], "0" * 64, "24000"),
+        ([{"suggestion_index": 1, "prompt": "有效"}], "非法版本", "expected_revision"),
+    ],
+)
+def test_update_manga_asset_prompts_rejects_invalid_input(
+    manga_asset_workspace,
+    updates,
+    revision,
+    error_fragment,
+):
+    _chapter, db = manga_asset_workspace
+
+    result = asyncio.run(agent_service_module.update_manga_asset_prompts(7, updates, revision))
+
+    assert error_fragment in result["error"]
+    assert db.commit_count == 0
+
+
+def test_manga_asset_prompt_tools_reject_sibling_chapter(manga_asset_workspace):
+    _chapter, db = manga_asset_workspace
+
+    read_result = asyncio.run(agent_service_module.get_manga_asset_prompts(8))
+    write_result = asyncio.run(agent_service_module.update_manga_asset_prompts(
+        8,
+        [{"suggestion_index": 1, "prompt": "越权修改"}],
+        "0" * 64,
+    ))
+
+    assert read_result == {"error": "章节不存在或无权访问"}
+    assert write_result == {"error": "章节不存在或无权访问"}
+    assert db.commit_count == 0
+
+
+def test_manga_asset_prompt_commit_failure_restores_pending_snapshot(
+    manga_asset_workspace,
+    monkeypatch,
+):
+    chapter, _db = manga_asset_workspace
+    failing_db = AssetPromptDb(chapter, fail_commit=True)
+    monkeypatch.setattr(agent_service_module, "SessionLocal", lambda: failing_db)
+    revision = agent_service_module._manga_asset_analysis_revision(chapter.manga_asset_analysis_json)
+    original = agent_service_module.copy.deepcopy(chapter.manga_asset_analysis_json)
+    tracker, context_token = _set_manga_context()
+    try:
+        result = asyncio.run(agent_service_module.update_manga_asset_prompts(
+            chapter.id,
+            [{"suggestion_index": 2, "prompt": "提交失败的新提示词"}],
+            revision,
+        ))
+    finally:
+        agent_service_module._AGENT_RUN_CONTEXT.reset(context_token)
+
+    assert "模拟提交失败" in result["error"]
+    assert failing_db.rollback_count == 1
+    assert chapter.manga_asset_analysis_json == original
+    assert tracker.get_summary() == []
+    assert tracker._changes == []
 
 
 def test_single_scene_update_is_persisted_and_can_be_rolled_back(manga_workspace):
@@ -571,6 +930,11 @@ def test_manga_context_rejects_sibling_chapter():
         "在第3格后新增一格",
         "我已经修改了第1格，现在请删除第2格",
         "已经优化后的分镜，现在把第2格改成夜景",
+        "把角色提示词改成黑色长风衣并保存",
+        "请优化当前章节的场景提示词并保持与角色画风一致",
+        "直接修改道具提示词中的材质描述",
+        "更新资产提示词并写入",
+        "把设定图提示词改得更适合正面全身立绘",
     ],
 )
 def test_manga_mutation_intent_accepts_explicit_commands(message):
@@ -589,6 +953,7 @@ def test_manga_mutation_intent_accepts_explicit_commands(message):
         "先不要新增画格",
         "不要对漫画分镜第2格进行删除",
         "请不要对第2格做任何形式的修改",
+        "请优化当前章节的场景提示词",
     ],
 )
 def test_manga_mutation_intent_rejects_advice(message):
@@ -612,7 +977,7 @@ def test_replace_storyboard_rejects_invalid_revision(manga_workspace, revision):
     assert "expected_revision" in result["error"]
     assert agent_service_module._manga_write_result_changed(
         '{"ok": true, "changed": false, "updated_scene_indices": []}'
-    ) is True
+    ) is False
 
 
 def test_manga_execute_blocks_non_manga_write_tool():
@@ -639,3 +1004,6 @@ def test_manga_prompt_describes_single_agent_write_boundary():
 
     assert "系统采用单一 Agent" in prompt
     assert "用户明确要求修改时才允许调用对应写入工具" in prompt
+    assert "get_manga_asset_prompts" in prompt
+    assert "update_manga_asset_prompts" in prompt
+    assert "必须先读取当前资产提示词" in prompt

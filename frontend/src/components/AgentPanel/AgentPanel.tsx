@@ -18,6 +18,7 @@ import QuickActions from './QuickActions';
 import ChangesBanner from './ChangesBanner';
 import type { PendingChangeItem } from './ChangesBanner';
 import { toast } from '../../lib/toast';
+import { notifyMangaAssetAnalysisChanges } from '../../mangaAssetAnalysisSync';
 
 export interface ToolCallInfo {
   id: string;
@@ -320,7 +321,10 @@ export default function AgentPanel({
             );
             return serverIsBehindOptimisticReply ? currentMessages : serverMessages;
           });
-          setPendingChanges(pending.changes ?? []);
+          const changes = pending.changes ?? [];
+          setPendingChanges(changes);
+          // Agent 写入已经提交；待用户确认前也要让已打开的资产工作台读取最新提示词。
+          notifyMangaAssetAnalysisChanges(changes);
           setPendingRunId(null);
         }
       } catch {
@@ -507,16 +511,18 @@ export default function AgentPanel({
   }, [activeConversationId, streamContent, syncAfterStream]);
 
   const handleConfirmChanges = useCallback(() => {
+    notifyMangaAssetAnalysisChanges(pendingChanges);
     setPendingChanges([]);
     setPendingRunId(null);
     onContentUpdated?.();
-  }, [onContentUpdated]);
+  }, [onContentUpdated, pendingChanges]);
 
   const handleRollbackChanges = useCallback(() => {
+    notifyMangaAssetAnalysisChanges(pendingChanges);
     setPendingChanges([]);
     setPendingRunId(null);
     onContentUpdated?.();
-  }, [onContentUpdated]);
+  }, [onContentUpdated, pendingChanges]);
 
   return (
     <div className="flex h-full min-h-0 bg-white/90 backdrop-blur-xl">

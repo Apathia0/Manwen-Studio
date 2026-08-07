@@ -111,10 +111,10 @@ class AgentVideoMutationNotExecutedError(RuntimeError):
 
 
 class AgentMangaMutationNotExecutedError(RuntimeError):
-    """漫画分镜修改指令未触发有效写入时使用的可识别错误。"""
+    """漫画分镜或资产提示词修改指令未触发有效写入时使用的可识别错误。"""
 
     code = "agent_manga_mutation_not_executed"
-    user_message = "AI 助手未能写入漫画分镜，请重试或切换支持工具调用的文本模型。"
+    user_message = "AI 助手未能写入漫画分镜或资产提示词，请重试或切换支持工具调用的文本模型。"
 
     def __init__(self) -> None:
         super().__init__(self.user_message)
@@ -757,14 +757,15 @@ def has_video_mutation_intent(message: str) -> bool:
 
 
 _MANGA_MUTATION_TARGET_PATTERN = re.compile(
-    r"分镜|故事版|漫画脚本|画格|格子|第\d+格|第[一二三四五六七八九十百]+格",
+    r"分镜|故事版|漫画脚本|画格|格子|第\d+格|第[一二三四五六七八九十百]+格|"
+    r"资产提示词|设定图提示词|角色提示词|场景提示词|道具提示词",
     re.IGNORECASE,
 )
 _MANGA_MUTATION_ACTION_PATTERN = re.compile(
-    r"修改|优化|重写|改写|调整|润色|完善|修订|更新|写入|保存|改成|替换|删除|新增|插入|移除|合并|拆分|交换|调换|移动"
+    r"修改|优化|重写|改写|调整|润色|完善|修订|更新|写入|保存|改成|改得|替换|删除|新增|插入|移除|合并|拆分|交换|调换|移动"
 )
 def has_manga_storyboard_mutation_intent(message: str) -> bool:
-    """判断用户是否明确要求修改漫画分镜脚本。"""
+    """判断用户是否明确要求修改漫画分镜脚本或资产提示词。"""
     text = re.sub(r"\s+", "", str(message or "")).strip()
     if not text or not _MANGA_MUTATION_ACTION_PATTERN.search(text) or not _MANGA_MUTATION_TARGET_PATTERN.search(text):
         return False
@@ -786,6 +787,13 @@ def has_manga_storyboard_mutation_intent(message: str) -> bool:
         return False
     if _VIDEO_MUTATION_ADVICE_PATTERN.search(text) and not imperative:
         return False
+    # 仅提出“优化/润色/完善”而未给出执行信号或具体约束时，遵循全局规则先给方案并等待确认。
+    action_words = {match.group(0) for match in action_matches}
+    if action_words <= {"优化", "润色", "完善"}:
+        has_execution_signal = bool(re.search(r"写入|保存|直接|立即|马上|更新", text))
+        has_concrete_constraint = bool(re.search(r"要求|保持|统一|一致|改为|按照|依据|采用", text))
+        if not has_execution_signal and not has_concrete_constraint:
+            return False
     return True
 
 
@@ -814,12 +822,17 @@ def _video_write_result_changed(result_text: str) -> bool:
 
 
 def _manga_write_result_changed(result_text: str) -> bool:
-    """判断漫画分镜写工具是否完成了真实内容变更。"""
+    """判断漫画写工具是否完成了真实内容变更。"""
     try:
         result = json.loads(result_text)
     except (TypeError, json.JSONDecodeError):
         return False
-    return bool(isinstance(result, dict) and result.get("ok") and not result.get("error"))
+    return bool(
+        isinstance(result, dict)
+        and result.get("ok")
+        and result.get("changed") is True
+        and not result.get("error")
+    )
 
 
 # ── 待确认修改追踪 ──────────────────────────────────────
@@ -1222,19 +1235,21 @@ skill_registry.register(SkillDef(
 skill_registry.register(SkillDef(
     name="manga_workflow",
     display_name="漫画分镜",
-    description="读取和修改漫画章节的分镜脚本，不直接改动已生成图片或图片提示词",
+    description="读取和修改漫画章节的分镜脚本及资产管理中的角色、场景、道具设定图提示词",
     icon="🎨",
     tool_names=[
         "get_manga_storyboard",
+        "get_manga_asset_prompts",
         "update_manga_storyboard_scene",
         "batch_update_manga_storyboard_scenes",
         "replace_manga_storyboard",
+        "update_manga_asset_prompts",
     ],
-    system_prompt_fragment="""你是一位专业的漫画分镜编剧。修改漫画分镜时必须先读取当前分镜，再根据用户要求写入。
+    system_prompt_fragment="""你是一位专业的漫画工作流编剧。修改漫画分镜时必须先读取当前分镜，再根据用户要求写入；修改资产管理中的角色、场景或道具设定图提示词时，必须先读取当前资产提示词，再按用户要求写入。
 
 漫画分镜脚本以章节为单位，每一格是一段完整的绘图场景描述。你可以修改单格、批量修改多格，或在确实需要增删和重排时替换整份分镜。
 
-已生成漫画图片、图片路径和图片生成提示词属于受保护结果。分镜脚本修改不会自动删除、覆盖或重绘已有图片；完成修改后应提醒用户重新生成受影响的格子。""",
+资产提示词修改只替换资产分析建议中的 prompt，不改动名称、类型、描述、证据、候选图等元数据。已生成漫画图片和图片路径属于受保护结果；分镜脚本或资产提示词修改不会自动删除、覆盖或重绘已有图片。""",
 ))
 
 # Skill 4: 质量审查
@@ -1729,9 +1744,16 @@ BATCH_CONCURRENCY_LIMIT = 3
 
 _MANGA_WORKFLOW_TOOL_NAMES = {
     "get_manga_storyboard",
+    "get_manga_asset_prompts",
     "update_manga_storyboard_scene",
     "batch_update_manga_storyboard_scenes",
     "replace_manga_storyboard",
+    "update_manga_asset_prompts",
+}
+_MANGA_ASSET_PROMPT_TYPES = {
+    "character_reference",
+    "scene_reference",
+    "prop_reference",
 }
 _MANGA_WORKFLOW_READ_TOOL_NAMES = {
     "get_chapter_full",
@@ -1819,6 +1841,18 @@ def _chapter_storyboard_text(chapter: Chapter) -> str:
 
 def _scenes_revision(content: str) -> str:
     return hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+
+def _manga_asset_analysis_revision(payload: Any) -> str:
+    """对完整资产分析数据计算稳定版本值。"""
+    canonical = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def _scenes_file_lock(chapter_id: int):
@@ -2109,14 +2143,24 @@ class ToolRegistry:
 
 # ── 所有权校验辅助 ──────────────────────────────────────────
 
-def _validate_chapter_ownership(db: Session, chapter_id: int, expected_story_id: int | None) -> Chapter | None:
+def _validate_chapter_ownership(
+    db: Session,
+    chapter_id: int,
+    expected_story_id: int | None,
+    *,
+    with_for_update: bool = False,
+) -> Chapter | None:
     """校验章节是否属于指定故事。返回章节对象，失败返回 None。"""
     if expected_story_id is None:
         return None
     context = _current_run_context()
     if context and context.workflow_type == "manga" and context.chapter_id != chapter_id:
         return None
-    chapter = db.get(Chapter, chapter_id)
+    chapter = (
+        db.get(Chapter, chapter_id, with_for_update=True)
+        if with_for_update
+        else db.get(Chapter, chapter_id)
+    )
     if not chapter:
         return None
     if chapter.story_id != expected_story_id:
@@ -2528,6 +2572,220 @@ async def get_manga_storyboard(chapter_id: int) -> dict:
     except OSError as exc:
         logger.warning("读取漫画分镜失败 chapter_id=%s: %s", chapter_id, exc)
         return {"error": public_error_message(exc, "读取漫画分镜失败，请稍后重试")}
+    finally:
+        db.close()
+
+
+@tool_registry.register(
+    name="get_manga_asset_prompts",
+    description="读取当前漫画章节资产管理中的角色、场景、道具设定图提示词及版本值。",
+    parameters={
+        "type": "object",
+        "properties": {
+            "chapter_id": {"type": "integer", "description": "当前漫画章节 ID"},
+        },
+        "required": ["chapter_id"],
+    },
+    workflow_types=["manga"],
+)
+async def get_manga_asset_prompts(chapter_id: int) -> dict:
+    """读取当前漫画章节的资产分析提示词。"""
+    db = SessionLocal()
+    try:
+        chapter = _validate_chapter_ownership(db, chapter_id, _current_story_id())
+        if not chapter:
+            return {"error": "章节不存在或无权访问"}
+        payload = copy.deepcopy(getattr(chapter, "manga_asset_analysis_json", None))
+        raw_suggestions = payload.get("suggestions") if isinstance(payload, dict) else None
+        suggestions = [
+            {
+                "suggestion_index": index,
+                "asset_type": str(item.get("asset_type") or ""),
+                "name": str(item.get("name") or ""),
+                "description": str(item.get("description") or ""),
+                "prompt": str(item.get("prompt") or ""),
+            }
+            for index, item in enumerate(raw_suggestions or [], start=1)
+            if (
+                isinstance(item, dict)
+                and str(item.get("asset_type") or "") in _MANGA_ASSET_PROMPT_TYPES
+                and str(item.get("name") or "").strip()
+            )
+        ]
+        result = {
+            "chapter_id": chapter_id,
+            "chapter_title": chapter.title or f"第{chapter.chapter_number}章",
+            "revision": _manga_asset_analysis_revision(payload),
+            "suggestions": suggestions,
+        }
+        if not suggestions:
+            result["message"] = "当前章节尚无资产分析提示词，请先在资产管理中完成章节资产分析。"
+        return result
+    except Exception as exc:
+        logger.exception("读取漫画资产提示词失败 chapter_id=%s", chapter_id)
+        return {"error": public_error_message(exc, "读取漫画资产提示词失败，请稍后重试")}
+    finally:
+        db.close()
+
+
+@tool_registry.register(
+    name="update_manga_asset_prompts",
+    description="批量修改当前漫画章节资产管理中的角色、场景、道具设定图提示词，不改动已生成图片。",
+    is_write=True,
+    parameters={
+        "type": "object",
+        "properties": {
+            "chapter_id": {"type": "integer", "description": "当前漫画章节 ID"},
+            "updates": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 18,
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "suggestion_index": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "description": "get_manga_asset_prompts 返回的资产序号",
+                        },
+                        "prompt": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 24000,
+                            "description": "完整的新设定图提示词",
+                        },
+                    },
+                    "required": ["suggestion_index", "prompt"],
+                },
+            },
+            "expected_revision": {
+                "type": "string",
+                "description": "get_manga_asset_prompts 返回的 revision，用于防止覆盖其他修改",
+            },
+        },
+        "required": ["chapter_id", "updates", "expected_revision"],
+    },
+    workflow_types=["manga"],
+)
+async def update_manga_asset_prompts(
+    chapter_id: int,
+    updates: list[dict],
+    expected_revision: str,
+) -> dict:
+    """按资产序号批量替换提示词，并保留资产分析中的其他数据。"""
+    if not isinstance(expected_revision, str) or re.fullmatch(r"[0-9a-fA-F]{64}", expected_revision) is None:
+        return {"error": "expected_revision 必须是读取资产提示词时返回的 64 位十六进制版本值"}
+    if not isinstance(updates, list) or not updates:
+        return {"error": "updates 必须是非空数组"}
+    if len(updates) > 18:
+        return {"error": "一次最多修改 18 项资产提示词"}
+
+    normalized_updates: dict[int, str] = {}
+    for update in updates:
+        if not isinstance(update, dict):
+            return {"error": "每项更新都必须是包含 suggestion_index 和 prompt 的对象"}
+        suggestion_index = update.get("suggestion_index")
+        if not isinstance(suggestion_index, int) or isinstance(suggestion_index, bool) or suggestion_index < 1:
+            return {"error": "每项更新都必须包含从 1 开始的有效 suggestion_index"}
+        if suggestion_index in normalized_updates:
+            return {"error": f"suggestion_index {suggestion_index} 重复"}
+        prompt = update.get("prompt")
+        if not isinstance(prompt, str):
+            return {"error": f"第 {suggestion_index} 项 prompt 必须是字符串"}
+        normalized_prompt = prompt.strip()
+        if not normalized_prompt:
+            return {"error": f"第 {suggestion_index} 项资产提示词不能为空"}
+        if len(normalized_prompt) > 24000:
+            return {"error": f"第 {suggestion_index} 项资产提示词不能超过 24000 个字符"}
+        normalized_updates[suggestion_index] = normalized_prompt
+
+    db = SessionLocal()
+    tracker = _current_pending_changes()
+    tracker_checkpoint = tracker.checkpoint() if tracker else None
+    try:
+        chapter = _validate_chapter_ownership(
+            db,
+            chapter_id,
+            _current_story_id(),
+            with_for_update=True,
+        )
+        if not chapter:
+            return {"error": "章节不存在或无权访问"}
+        old_payload = copy.deepcopy(getattr(chapter, "manga_asset_analysis_json", None))
+        current_revision = _manga_asset_analysis_revision(old_payload)
+        if current_revision != expected_revision.lower():
+            return {
+                "error": "资产提示词版本已变化，请重新读取后再修改",
+                "conflict": True,
+                "current_revision": current_revision,
+            }
+        if not isinstance(old_payload, dict) or not isinstance(old_payload.get("suggestions"), list):
+            return {"error": "当前章节尚无可修改的资产分析提示词"}
+
+        new_payload = copy.deepcopy(old_payload)
+        suggestions = new_payload["suggestions"]
+        updated_assets: list[dict[str, Any]] = []
+        for suggestion_index, prompt in normalized_updates.items():
+            if suggestion_index > len(suggestions) or not isinstance(suggestions[suggestion_index - 1], dict):
+                return {"error": f"资产序号 {suggestion_index} 超出范围或对应数据无效"}
+            suggestion = suggestions[suggestion_index - 1]
+            if str(suggestion.get("asset_type") or "") not in _MANGA_ASSET_PROMPT_TYPES:
+                return {"error": f"资产序号 {suggestion_index} 不是可修改的角色、场景或道具资产"}
+            if suggestion.get("prompt") == prompt:
+                continue
+            suggestion["prompt"] = prompt
+            updated_assets.append({
+                "suggestion_index": suggestion_index,
+                "asset_type": str(suggestion.get("asset_type") or ""),
+                "name": str(suggestion.get("name") or ""),
+                "prompt": prompt,
+            })
+
+        if not updated_assets:
+            return {
+                "ok": True,
+                "changed": False,
+                "chapter_id": chapter_id,
+                "revision": current_revision,
+                "updated_suggestion_indices": [],
+                "updated_assets": [],
+                "images_preserved": True,
+            }
+
+        if tracker:
+            display = f"第{chapter.chapter_number}章" + (f" · {chapter.title}" if chapter.title else "")
+            tracker.record(PendingChange(
+                type="chapter",
+                record_id=chapter.id,
+                display_name=display,
+                field="manga_asset_analysis_json",
+                old_value=copy.deepcopy(old_payload),
+                new_value=None,
+            ))
+            tracker.update_new_value(
+                "chapter",
+                chapter.id,
+                "manga_asset_analysis_json",
+                copy.deepcopy(new_payload),
+            )
+        chapter.manga_asset_analysis_json = new_payload
+        db.commit()
+        updated_indices = sorted(asset["suggestion_index"] for asset in updated_assets)
+        return {
+            "ok": True,
+            "changed": True,
+            "chapter_id": chapter_id,
+            "revision": _manga_asset_analysis_revision(new_payload),
+            "updated_suggestion_indices": updated_indices,
+            "updated_assets": sorted(updated_assets, key=lambda asset: asset["suggestion_index"]),
+            "images_preserved": True,
+        }
+    except Exception as exc:
+        db.rollback()
+        if tracker and tracker_checkpoint is not None:
+            tracker.restore(tracker_checkpoint)
+        logger.exception("写入漫画资产提示词失败 chapter_id=%s", chapter_id)
+        return {"error": public_error_message(exc, "写入漫画资产提示词失败，请稍后重试")}
     finally:
         db.close()
 
@@ -5375,21 +5633,25 @@ class AgentService:
 
 ---
 
-## 漫画分镜助手模式
+## 漫画工作流助手模式
 
-你正在漫画工作流中运行，只能修改当前作品章节的漫画分镜脚本。
+你正在漫画工作流中运行，只能修改当前作品当前章节的漫画分镜脚本和资产管理中的设定图提示词。
 
 ### 可用能力
 - `get_manga_storyboard`：读取当前章节的完整分镜脚本和已有图片状态
+- `get_manga_asset_prompts`：读取当前章节角色、场景、道具资产提示词及 revision
 - `update_manga_storyboard_scene`：修改单格分镜
 - `batch_update_manga_storyboard_scenes`：批量修改多格分镜
 - `replace_manga_storyboard`：增格、删格或重排时替换整份分镜，必须传入读取结果中的 revision
+- `update_manga_asset_prompts`：按 suggestion_index 批量修改资产提示词，必须传入读取结果中的 revision
 
 ### 强制规则
 {manga_mode_rule}
 - 用户明确要求修改分镜时，必须先读取当前分镜，再调用漫画分镜写入工具实际保存；整表替换必须原样传递最新 revision
+- 用户明确要求修改角色、场景或道具设定图提示词时，必须先读取当前资产提示词，再调用资产提示词写入工具实际保存并原样传递最新 revision
 - 修改多格时优先使用批量工具；只有增删或重排才替换整份分镜
 - 禁止调用小说正文、框架和视频工作流写入工具
+- 资产提示词修改只更新 manga_asset_analysis_json.suggestions 中对应项的 prompt，不修改资产元数据
 - 禁止直接修改或清空 MangaImage.prompt、图片路径及已生成图片
 - 写入完成后说明受影响的格号，并提醒已有图片需要按需重新生成
 """
@@ -5888,7 +6150,10 @@ class AgentService:
             video_correction_attempts = 0
             manga_write_succeeded = False
             manga_correction_attempts = 0
-            _MANGA_WRITE_TOOLS = _MANGA_WORKFLOW_TOOL_NAMES - {"get_manga_storyboard"}
+            _MANGA_WRITE_TOOLS = _MANGA_WORKFLOW_TOOL_NAMES - {
+                "get_manga_storyboard",
+                "get_manga_asset_prompts",
+            }
             VIDEO_CORRECTION_MAX_ATTEMPTS = 2
             if _has_video_mutation_intent or _has_manga_mutation_intent:
                 SAFETY_MAX_ITERATIONS = min(SAFETY_MAX_ITERATIONS, 12)
@@ -6427,20 +6692,21 @@ class AgentService:
                         raise AgentMangaMutationNotExecutedError()
                     manga_correction_attempts += 1
                     logger.warning(
-                        "漫画 Agent 收到分镜修改命令但未完成有效写入 story=%s iter=%s correction=%s",
+                        "漫画 Agent 收到分镜或资产提示词修改命令但未完成有效写入 story=%s iter=%s correction=%s",
                         story_id, iteration_count, manga_correction_attempts,
                     )
                     all_messages.append({
                         "role": "system",
                         "content": (
-                            "用户明确要求修改漫画分镜，但你尚未完成有效写入。"
-                            "请先调用 get_manga_storyboard 读取当前章节分镜，再立即调用 "
+                            "用户明确要求修改漫画分镜或资产提示词，但你尚未完成有效写入。"
+                            "修改分镜时，请先调用 get_manga_storyboard 读取当前章节分镜，再立即调用 "
                             "update_manga_storyboard_scene、batch_update_manga_storyboard_scenes 或 "
-                            "replace_manga_storyboard 保存修改。不要只给建议或修改示例，"
-                            "不要改动已有漫画图片、图片路径或图片生成提示词。"
+                            "replace_manga_storyboard 保存修改；修改资产提示词时，请先调用 "
+                            "get_manga_asset_prompts，再调用 update_manga_asset_prompts 保存修改。"
+                            "不要只给建议或修改示例，不要改动已有漫画图片或图片路径。"
                         ),
                     })
-                    correction_notice = "\n\n[系统提示：检测到漫画分镜尚未写入，正在重新执行...]\n"
+                    correction_notice = "\n\n[系统提示：检测到漫画分镜或资产提示词尚未写入，正在重新执行...]\n"
                     full_response_content += correction_notice
                     yield {"event": "token", "data": json.dumps({"content": correction_notice}, ensure_ascii=False)}
                     continue

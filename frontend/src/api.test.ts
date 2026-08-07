@@ -679,7 +679,7 @@ describe('manga asset analysis API', () => {
   });
 
   it('analyzes assets from the current chapter endpoint', async () => {
-    const response = { chapter_id: 12, suggestions: [] };
+    const response = { chapter_id: 12, suggestions: [], revision: 'a'.repeat(64) };
     vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(response), { status: 200 })));
 
     await expect(analyzeChapterMangaAssets(12)).resolves.toEqual(response);
@@ -690,7 +690,7 @@ describe('manga asset analysis API', () => {
   });
 
   it('读取当前章节已保存的资产分析', async () => {
-    const response = { chapter_id: 12, suggestions: [] };
+    const response = { chapter_id: 12, suggestions: [], revision: 'b'.repeat(64) };
     vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(response), { status: 200 })));
 
     await expect(getMangaAssetAnalysis(12)).resolves.toEqual(response);
@@ -709,13 +709,14 @@ describe('manga asset analysis API', () => {
       prompt: '编辑后的提示词',
       candidates: [],
     }];
-    const response = { chapter_id: 12, suggestions };
+    const revision = 'c'.repeat(64);
+    const response = { chapter_id: 12, suggestions, revision };
     vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(response), { status: 200 })));
 
-    await expect(saveMangaAssetAnalysis(12, suggestions)).resolves.toEqual(response);
+    await expect(saveMangaAssetAnalysis(12, suggestions, revision)).resolves.toEqual(response);
     expect(fetch).toHaveBeenCalledWith(
       '/api/chapters/12/manga-assets/analysis',
-      expect.objectContaining({ method: 'PUT', body: JSON.stringify({ suggestions }) }),
+      expect.objectContaining({ method: 'PUT', body: JSON.stringify({ suggestions, expected_revision: revision }) }),
     );
   });
 

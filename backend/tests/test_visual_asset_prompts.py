@@ -98,8 +98,12 @@ class _Request:
 
 
 class _AnalysisRequest:
+    def __init__(self, expected_revision):
+        self.expected_revision = expected_revision
+
     async def json(self):
         return {
+            "expected_revision": self.expected_revision,
             "suggestions": [{
                 "asset_type": "character_reference",
                 "name": "陈玄",
@@ -116,6 +120,7 @@ class _RedrawRequest:
         return {
             "prompt": "保留角色特征，调整服装纹样",
             "mode": "full",
+            "chapter_id": 12,
         }
 
 
@@ -164,7 +169,18 @@ class _Db:
 @pytest.mark.asyncio
 async def test_generate_chapter_manga_asset_creates_asset_and_binding(monkeypatch, tmp_path):
     user = SimpleNamespace(id=7)
-    chapter = SimpleNamespace(id=12, story_id=3)
+    chapter = SimpleNamespace(
+        id=12,
+        story_id=3,
+        manga_asset_analysis_json={
+            "version": 1,
+            "suggestions": [{
+                "asset_type": "character_reference",
+                "name": "陈玄",
+                "prompt": "Agent 更新后的角色提示词",
+            }],
+        },
+    )
     db = _Db()
     quota_deductions = []
 
@@ -191,7 +207,7 @@ async def test_generate_chapter_manga_asset_creates_asset_and_binding(monkeypatc
     binding = next(value for value in db.added if isinstance(value, MangaAssetBinding))
     assert result["id"] == 101
     assert result["storage_path"].startswith("manga_outputs/story_3/assets/asset_")
-    assert asset.metadata_json == {"prompt": "完整角色设定图提示词", "provider": "image2"}
+    assert asset.metadata_json == {"prompt": "Agent 更新后的角色提示词", "provider": "image2"}
     assert binding.asset_id == 101
     assert binding.chapter_id == 12
     assert quota_deductions == [False, True]
@@ -216,15 +232,40 @@ async def test_redraw_managed_manga_asset_replaces_image_after_success(monkeypat
         status="active",
         metadata_json={"prompt": "旧提示词", "revision": 2},
     )
+    chapter = SimpleNamespace(
+        id=12,
+        story_id=3,
+        manga_asset_analysis_json={
+            "version": 3,
+            "status": "ready",
+            "suggestions": [{
+                "asset_type": "character_reference",
+                "name": "陈玄",
+                "description": "角色描述",
+                "evidence": "正文依据",
+                "prompt": "Agent 更新后的角色提示词",
+                "candidates": [],
+            }, {
+                "asset_type": "prop_reference",
+                "name": "铜钥匙",
+                "prompt": "旧道具提示词",
+            }],
+        },
+    )
 
     class _RedrawDb(_Db):
-        def get(self, model, asset_id):
-            return asset if model is MangaAsset and asset_id == asset.id else None
+        def get(self, model, record_id, **_kwargs):
+            if model is MangaAsset and record_id == asset.id:
+                return asset
+            if model.__name__ == "Chapter" and record_id == chapter.id:
+                return chapter
+            return None
 
     db = _RedrawDb()
     quota_deductions = []
     monkeypatch.setattr(video, "_MANGA_OUTPUTS_DIR", tmp_path)
     monkeypatch.setattr(video, "_require_user", lambda request, current_db: user)
+    monkeypatch.setattr(video, "_require_chapter_for_user", lambda *_args: chapter)
     monkeypatch.setattr(video, "_user_image_api_key", lambda request: "image-key")
     monkeypatch.setattr(video, "_configure_image_service_from_db", lambda *_args: None)
     monkeypatch.setattr(
@@ -235,6 +276,7 @@ async def test_redraw_managed_manga_asset_replaces_image_after_success(monkeypat
 
     async def fake_edit_existing_image(*, source_image_path, output_path, **_kwargs):
         assert source_image_path == source_path
+        chapter.manga_asset_analysis_json["suggestions"][1]["prompt"] = "并发更新后的道具提示词"
         output_path.write_bytes(b"redrawn")
         return str(output_path)
 
@@ -246,24 +288,69 @@ async def test_redraw_managed_manga_asset_replaces_image_after_success(monkeypat
     assert result["metadata"]["prompt"] == "保留角色特征，调整服装纹样"
     assert result["metadata"]["revision"] == 3
     assert result["metadata"]["redraw_mode"] == "full"
+    assert chapter.manga_asset_analysis_json["version"] == 3
+    assert chapter.manga_asset_analysis_json["status"] == "ready"
+    assert chapter.manga_asset_analysis_json["suggestions"][0]["prompt"] == "保留角色特征，调整服装纹样"
+    assert chapter.manga_asset_analysis_json["suggestions"][1]["prompt"] == "并发更新后的道具提示词"
     assert quota_deductions == [False, True]
     assert not source_path.exists()
     assert (tmp_path / result["storage_path"].removeprefix("manga_outputs/")).read_bytes() == b"redrawn"
 
 
 @pytest.mark.asyncio
-async def test_save_and_get_chapter_manga_asset_analysis(monkeypatch):
+async def test_redraw_managed_manga_asset_rejects_another_chapters_asset(monkeypatch):
     user = SimpleNamespace(id=7)
-    chapter = SimpleNamespace(id=12, story_id=3, manga_asset_analysis_json=None)
-    db = _Db()
+    asset = SimpleNamespace(id=21, owner_user_id=7, story_id=3, chapter_id=13)
+    chapter = SimpleNamespace(id=12, story_id=3)
+
+    class _RedrawDb(_Db):
+        def get(self, model, record_id, **_kwargs):
+            return asset if model is MangaAsset and record_id == asset.id else None
+
     monkeypatch.setattr(video, "_require_user", lambda request, current_db: user)
     monkeypatch.setattr(video, "_require_chapter_for_user", lambda *_args: chapter)
 
-    saved = await video.save_chapter_manga_asset_analysis(12, _AnalysisRequest(), db)
+    with pytest.raises(HTTPException) as exc_info:
+        await video.redraw_managed_manga_asset(asset.id, _RedrawRequest(), _RedrawDb())
+
+    assert exc_info.value.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_save_and_get_chapter_manga_asset_analysis(monkeypatch):
+    user = SimpleNamespace(id=7)
+    chapter = SimpleNamespace(
+        id=12,
+        story_id=3,
+        manga_asset_analysis_json={
+            "version": 3,
+            "status": "ready",
+            "input_hash": "保留的输入版本",
+            "suggestions": [],
+        },
+    )
+    class _AnalysisDb(_Db):
+        def get(self, model, record_id, **_kwargs):
+            if model.__name__ == "Chapter" and record_id == chapter.id:
+                return chapter
+            return None
+
+    db = _AnalysisDb()
+    monkeypatch.setattr(video, "_require_user", lambda request, current_db: user)
+    monkeypatch.setattr(video, "_require_chapter_for_user", lambda *_args: chapter)
+
+    current_revision = video._manga_asset_analysis_revision(chapter.manga_asset_analysis_json)
+    saved = await video.save_chapter_manga_asset_analysis(12, _AnalysisRequest(current_revision), db)
     loaded = await video.get_chapter_manga_asset_analysis(12, SimpleNamespace(), db)
 
     assert saved["suggestions"][0]["prompt"] == "编辑后的提示词"
-    assert chapter.manga_asset_analysis_json == {"version": 1, "suggestions": saved["suggestions"]}
+    assert chapter.manga_asset_analysis_json == {
+        "version": 3,
+        "status": "ready",
+        "input_hash": "保留的输入版本",
+        "suggestions": saved["suggestions"],
+    }
+    assert len(saved["revision"]) == 64
     assert loaded == saved
 
 
@@ -314,6 +401,7 @@ def test_manga_asset_analysis_normalization_rejects_invalid_entries():
     suggestions = video._normalize_manga_asset_analysis_suggestions([
         {"asset_type": "style_reference", "name": "风格", "prompt": "提示词"},
         {"asset_type": "scene_reference", "name": "出租屋", "prompt": "场景提示词", "candidates": []},
+        {"asset_type": "scene_reference", "name": "出 租屋", "prompt": "重复场景提示词", "candidates": []},
     ])
 
     assert suggestions == [{
@@ -324,6 +412,51 @@ def test_manga_asset_analysis_normalization_rejects_invalid_entries():
         "prompt": "场景提示词",
         "candidates": [],
     }]
+
+
+@pytest.mark.asyncio
+async def test_save_manga_asset_analysis_rejects_stale_revision_and_preserves_payload(monkeypatch):
+    user = SimpleNamespace(id=7)
+    chapter = SimpleNamespace(
+        id=12,
+        story_id=3,
+        manga_asset_analysis_json={
+            "version": 3,
+            "status": "ready",
+            "input_hash": "最新输入",
+            "suggestions": [{
+                "asset_type": "character_reference",
+                "name": "陈玄",
+                "prompt": "Agent 最新提示词",
+            }],
+        },
+    )
+
+    class _AnalysisDb(_Db):
+        def get(self, model, record_id, **_kwargs):
+            return chapter if model.__name__ == "Chapter" and record_id == chapter.id else None
+
+    class _StaleRequest:
+        async def json(self):
+            return {
+                "expected_revision": "0" * 64,
+                "suggestions": [{
+                    "asset_type": "character_reference",
+                    "name": "陈玄",
+                    "prompt": "旧弹窗提示词",
+                }],
+            }
+
+    original = dict(chapter.manga_asset_analysis_json)
+    db = _AnalysisDb()
+    monkeypatch.setattr(video, "_require_user", lambda request, current_db: user)
+    monkeypatch.setattr(video, "_require_chapter_for_user", lambda *_args: chapter)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await video.save_chapter_manga_asset_analysis(12, _StaleRequest(), db)
+
+    assert exc_info.value.status_code == 409
+    assert chapter.manga_asset_analysis_json == original
 
 
 class _BatchDb:
@@ -347,6 +480,26 @@ def test_validate_manga_asset_generation_item_rejects_invalid_payload():
         })
 
     assert getattr(exc_info.value, "status_code", None) == 422
+
+
+def test_resolve_manga_asset_generation_item_uses_current_analysis_prompt():
+    chapter = SimpleNamespace(
+        manga_asset_analysis_json={
+            "suggestions": [{
+                "asset_type": "prop_reference",
+                "name": "铜 钥匙",
+                "prompt": "Agent 更新后的黄铜钥匙提示词",
+            }],
+        },
+    )
+
+    result = video._resolve_chapter_manga_asset_generation_item(chapter, {
+        "asset_type": "prop_reference",
+        "name": "铜钥匙",
+        "prompt": "旧页面提交的提示词",
+    })
+
+    assert result["prompt"] == "Agent 更新后的黄铜钥匙提示词"
 
 
 @pytest.mark.asyncio

@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import datetime
+import hashlib
 from io import BytesIO
 import json
 import logging
@@ -1031,6 +1032,28 @@ async def redraw_managed_manga_asset(asset_id: int, request: Request, db: Sessio
     body = await request.json()
     if not isinstance(body, dict):
         raise HTTPException(422, "请求体必须是对象")
+    analysis_chapter_id = None
+    raw_chapter_id = body.get("chapter_id")
+    if raw_chapter_id is not None:
+        if not isinstance(raw_chapter_id, int) or isinstance(raw_chapter_id, bool) or raw_chapter_id <= 0:
+            raise HTTPException(422, "chapter_id 必须是正整数")
+        analysis_chapter = _require_chapter_for_user(raw_chapter_id, user, db)
+        if analysis_chapter.story_id != asset.story_id:
+            raise HTTPException(403, "漫画资产不属于当前章节作品")
+        if asset.chapter_id is not None and asset.chapter_id != analysis_chapter.id:
+            raise HTTPException(403, "漫画资产不属于当前章节")
+        if asset.chapter_id is None:
+            current_binding = db.query(MangaAssetBinding.id).filter(
+                MangaAssetBinding.asset_id == asset.id,
+                MangaAssetBinding.chapter_id == analysis_chapter.id,
+                MangaAssetBinding.story_id == analysis_chapter.story_id,
+            ).first()
+            if not current_binding:
+                raise HTTPException(403, "漫画资产未绑定到当前章节")
+        analysis_chapter_id = analysis_chapter.id
+    analysis_name = str(body.get("analysis_name") or asset.name).strip()
+    if len(analysis_name) > 255:
+        raise HTTPException(422, "analysis_name 不能超过 255 个字符")
     prompt = str(body.get("prompt") or "").strip()
     if not prompt:
         raise HTTPException(422, "重绘提示词不能为空")
@@ -1108,6 +1131,21 @@ async def redraw_managed_manga_asset(asset_id: int, request: Request, db: Sessio
     })
     asset.metadata_json = metadata
     asset.source_type = "generated"
+    if analysis_chapter_id:
+        analysis_chapter = db.get(
+            Chapter,
+            analysis_chapter_id,
+            populate_existing=True,
+            with_for_update=True,
+        )
+        if not analysis_chapter or analysis_chapter.story_id != asset.story_id:
+            raise HTTPException(409, "章节资产分析已变化，请刷新后重试")
+        _sync_chapter_manga_asset_analysis_prompt(
+            analysis_chapter,
+            asset_type=asset.asset_type,
+            name=analysis_name,
+            prompt=prompt,
+        )
     db.commit()
     db.refresh(asset)
 
@@ -1133,13 +1171,16 @@ def _normalize_manga_asset_analysis_suggestions(raw_suggestions: object) -> list
     if not isinstance(raw_suggestions, list):
         return []
     normalized: list[dict[str, object]] = []
+    seen: set[tuple[str, str]] = set()
     for item in raw_suggestions[:18]:
         if not isinstance(item, dict):
             continue
         asset_type = str(item.get("asset_type") or "").strip()
         name = str(item.get("name") or "").strip()[:255]
-        if asset_type not in _MANGA_ASSET_ANALYSIS_TYPES or not name:
+        identity = (asset_type, _canonical_manga_asset_identity(name))
+        if asset_type not in _MANGA_ASSET_ANALYSIS_TYPES or not identity[1] or identity in seen:
             continue
+        seen.add(identity)
         candidates: list[dict[str, object]] = []
         raw_candidates = item.get("candidates")
         if isinstance(raw_candidates, list):
@@ -1177,10 +1218,76 @@ def _normalize_manga_asset_analysis_suggestions(raw_suggestions: object) -> list
 
 
 def _stored_manga_asset_analysis_suggestions(chapter: Chapter) -> list[dict[str, object]]:
-    payload = chapter.manga_asset_analysis_json
+    payload = getattr(chapter, "manga_asset_analysis_json", None)
     if isinstance(payload, dict):
         return _normalize_manga_asset_analysis_suggestions(payload.get("suggestions"))
     return []
+
+
+def _manga_asset_analysis_revision(payload: object) -> str:
+    canonical = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _canonical_manga_asset_identity(value: object) -> str:
+    return re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", str(value or "").strip().lower())
+
+
+def _resolve_chapter_manga_asset_generation_item(
+    chapter: Chapter,
+    item: dict[str, str],
+) -> dict[str, str]:
+    """以当前章节资产分析提示词校准生成参数，防止旧页面覆盖新建议。"""
+    identity = _canonical_manga_asset_identity(item["name"])
+    for suggestion in _stored_manga_asset_analysis_suggestions(chapter):
+        if suggestion.get("asset_type") != item["asset_type"]:
+            continue
+        if _canonical_manga_asset_identity(suggestion.get("name")) != identity:
+            continue
+        prompt = str(suggestion.get("prompt") or "").strip()
+        if prompt:
+            return {**item, "prompt": prompt}
+    return item
+
+
+def _sync_chapter_manga_asset_analysis_prompt(
+    chapter: Chapter,
+    *,
+    asset_type: str,
+    name: str,
+    prompt: str,
+) -> bool:
+    """将工作台重绘提示词同步回当前章节对应的资产分析建议。"""
+    payload = chapter.manga_asset_analysis_json
+    raw_suggestions = payload.get("suggestions") if isinstance(payload, dict) else None
+    if not isinstance(raw_suggestions, list):
+        return False
+    identity = _canonical_manga_asset_identity(name)
+    next_suggestions: list[object] = []
+    changed = False
+    for raw_suggestion in raw_suggestions:
+        if not isinstance(raw_suggestion, dict):
+            next_suggestions.append(raw_suggestion)
+            continue
+        suggestion = dict(raw_suggestion)
+        if (
+            not changed
+            and suggestion.get("asset_type") == asset_type
+            and _canonical_manga_asset_identity(suggestion.get("name")) == identity
+            and suggestion.get("prompt") != prompt
+        ):
+            suggestion["prompt"] = prompt
+            changed = True
+        next_suggestions.append(suggestion)
+    if changed:
+        chapter.manga_asset_analysis_json = {**payload, "suggestions": next_suggestions}
+    return changed
 
 
 @router.get("/api/chapters/{chapter_id}/manga-assets/analysis")
@@ -1192,7 +1299,11 @@ async def get_chapter_manga_asset_analysis(
     """读取当前章节已保存的漫画资产分析。"""
     user = _require_user(request, db)
     chapter = _require_chapter_for_user(chapter_id, user, db)
-    return {"chapter_id": chapter.id, "suggestions": _stored_manga_asset_analysis_suggestions(chapter)}
+    return {
+        "chapter_id": chapter.id,
+        "suggestions": _stored_manga_asset_analysis_suggestions(chapter),
+        "revision": _manga_asset_analysis_revision(chapter.manga_asset_analysis_json),
+    }
 
 
 @router.put("/api/chapters/{chapter_id}/manga-assets/analysis")
@@ -1207,10 +1318,25 @@ async def save_chapter_manga_asset_analysis(
     body = await request.json()
     if not isinstance(body, dict) or not isinstance(body.get("suggestions"), list):
         raise HTTPException(422, "suggestions 必须是数组")
+    expected_revision = body.get("expected_revision")
+    if not isinstance(expected_revision, str) or re.fullmatch(r"[0-9a-fA-F]{64}", expected_revision) is None:
+        raise HTTPException(422, "expected_revision 必须是 64 位十六进制版本值")
+    locked_chapter = db.get(Chapter, chapter.id, populate_existing=True, with_for_update=True)
+    if not locked_chapter or locked_chapter.story_id != chapter.story_id:
+        raise HTTPException(404, "章节未找到")
+    current_payload = locked_chapter.manga_asset_analysis_json
+    current_revision = _manga_asset_analysis_revision(current_payload)
+    if expected_revision.lower() != current_revision:
+        raise HTTPException(409, "资产提示词已被其他操作更新，请刷新后再保存")
     suggestions = _normalize_manga_asset_analysis_suggestions(body["suggestions"])
-    chapter.manga_asset_analysis_json = {"version": 1, "suggestions": suggestions}
+    payload = current_payload if isinstance(current_payload, dict) else {}
+    locked_chapter.manga_asset_analysis_json = {**payload, "version": payload.get("version", 1), "suggestions": suggestions}
     db.commit()
-    return {"chapter_id": chapter.id, "suggestions": suggestions}
+    return {
+        "chapter_id": locked_chapter.id,
+        "suggestions": suggestions,
+        "revision": _manga_asset_analysis_revision(locked_chapter.manga_asset_analysis_json),
+    }
 
 
 @router.post("/api/chapters/{chapter_id}/manga-assets/analyze")
@@ -1325,7 +1451,11 @@ async def analyze_chapter_manga_assets(chapter_id: int, request: Request, db: Se
         provider_kind="text",
     )
     db.commit()
-    return {"chapter_id": chapter.id, "suggestions": normalized}
+    return {
+        "chapter_id": chapter.id,
+        "suggestions": normalized,
+        "revision": _manga_asset_analysis_revision(chapter.manga_asset_analysis_json),
+    }
 
 
 def _validate_manga_asset_generation_item(body: object) -> dict[str, str]:
@@ -1563,7 +1693,10 @@ async def generate_chapter_manga_asset(
     """根据可编辑提示词生成漫画资产并自动绑定到当前章节。"""
     user = _require_user(request, db)
     chapter = _require_chapter_for_user(chapter_id, user, db)
-    item = _validate_manga_asset_generation_item(await request.json())
+    item = _resolve_chapter_manga_asset_generation_item(
+        chapter,
+        _validate_manga_asset_generation_item(await request.json()),
+    )
     _check_and_consume_quota_wrapper(
         user.id,
         "manga.image.generate.monthly_limit",
@@ -1613,7 +1746,13 @@ async def generate_chapter_manga_assets_batch(
         raise HTTPException(422, "请至少选择一个待生成资产")
     if len(raw_items) > MANGA_ASSET_BATCH_MAX_ITEMS:
         raise HTTPException(422, f"单次最多生成 {MANGA_ASSET_BATCH_MAX_ITEMS} 个资产")
-    items = [_validate_manga_asset_generation_item(item) for item in raw_items]
+    items = [
+        _resolve_chapter_manga_asset_generation_item(
+            chapter,
+            _validate_manga_asset_generation_item(item),
+        )
+        for item in raw_items
+    ]
 
     quota_result = _check_and_consume_quota_wrapper(
         user.id,
