@@ -1,5 +1,6 @@
 import asyncio
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -137,6 +138,8 @@ def test_manga_workflow_exposes_safe_storyboard_tools_to_single_agent():
 
     assert {
         "get_manga_storyboard",
+        "get_manga_storyboard_guideline",
+        "get_chapter_full",
         "get_manga_asset_prompts",
         "update_manga_storyboard_scene",
         "batch_update_manga_storyboard_scenes",
@@ -145,6 +148,117 @@ def test_manga_workflow_exposes_safe_storyboard_tools_to_single_agent():
     } <= agent_names
     assert "update_chapter_content" not in agent_names
     assert "update_shot_fields" not in agent_names
+
+
+def test_manga_workflow_keeps_chapter_content_tool_after_skill_filtering():
+    agent_names = {
+        spec["function"]["name"]
+        for spec in agent_service_module.tool_registry.get_tool_specs(
+            mode="agent",
+            workflow_type="manga",
+            enabled_skills=["manga_workflow"],
+        )
+    }
+
+    assert "get_chapter_full" in agent_names
+    assert "get_manga_storyboard_guideline" in agent_names
+    assert "update_chapter_content" not in agent_names
+
+
+def test_manga_storyboard_template_validation_rejects_wrong_grid_and_analysis_labels():
+    preset = SimpleNamespace(
+        id=9,
+        preset_key="default",
+        name="漫画成片模板",
+        description="测试模板",
+        prompt_template="每页 4-5 格，使用【第N格】标记。",
+        system_prompt="不得输出视觉焦点。",
+    )
+    guideline = agent_service_module._manga_storyboard_guideline(preset)
+
+    issues = agent_service_module._validate_manga_storyboard_template(
+        guideline,
+        ["【第1格】出租屋。【第2格】陈玄起身。视觉焦点：手机。"],
+    )
+
+    assert guideline["validation"]["min_frames_per_page"] == 4
+    assert {issue["rule"] for issue in issues} == {
+        "每页必须包含 4-5 个分镜格",
+        "不得输出分析标签：视觉焦点",
+    }
+
+
+def test_manga_storyboard_template_validation_accepts_compact_visual_script():
+    preset = SimpleNamespace(
+        id=9,
+        preset_key="default",
+        name="漫画成片模板",
+        description="测试模板",
+        prompt_template="每页 4-5 格，使用【第N格】标记。",
+        system_prompt="不得输出视觉焦点。",
+    )
+    guideline = agent_service_module._manga_storyboard_guideline(preset)
+
+    issues = agent_service_module._validate_manga_storyboard_template(
+        guideline,
+        [
+            "【第1格】深夜出租屋，裂屏手机照亮床沿。"
+            "【第2格】陈玄闭目调息。"
+            "【第3格】他睁眼看向旧抽屉。"
+            "【第4格】一张欠条压在抽屉底。"
+        ],
+    )
+
+    assert issues == []
+
+
+def test_manga_storyboard_template_validation_covers_builtin_layout_presets():
+    seed_path = Path(__file__).resolve().parents[1] / "seed_data" / "storyboard_presets.json"
+    presets = {item["preset_key"]: item for item in json.loads(seed_path.read_text(encoding="utf-8"))}
+
+    four_panel = SimpleNamespace(**presets["four_panel_no_bubble"], id=3)
+    single_panel = SimpleNamespace(**presets["single_panel"], id=2)
+    four_guideline = agent_service_module._manga_storyboard_guideline(four_panel)
+    single_guideline = agent_service_module._manga_storyboard_guideline(single_panel)
+
+    four_issues = agent_service_module._validate_manga_storyboard_template(
+        four_guideline,
+        ["【第1格】雨巷。 【第2格】陈玄抬头。 【第3格】灯光闪烁。 「快走！」"],
+    )
+    single_issues = agent_service_module._validate_manga_storyboard_template(
+        single_guideline,
+        ["【第1格】天台。 【第2格】少年转身。"],
+    )
+
+    assert four_guideline["validation"]["min_frames_per_page"] == 4
+    assert four_guideline["validation"]["forbid_dialogue_bubbles"] is True
+    assert {issue["rule"] for issue in four_issues} == {"每页必须包含 4-4 个分镜格", "不得使用对话气泡"}
+    assert single_guideline["validation"]["min_frames_per_page"] == 1
+    assert {issue["rule"] for issue in single_issues} == {"每页必须包含 1-1 个分镜格"}
+
+
+def test_manga_storyboard_template_validation_uses_default_effective_prompt():
+    seed_path = Path(__file__).resolve().parents[1] / "seed_data" / "storyboard_presets.json"
+    default_payload = next(item for item in json.loads(seed_path.read_text(encoding="utf-8")) if item["preset_key"] == "default")
+    default_payload = dict(default_payload)
+    default_payload["prompt_template"] = default_payload["effective_prompt_template"]
+    default_payload["system_prompt"] = default_payload["effective_system_prompt"]
+    guideline = agent_service_module._manga_storyboard_guideline(SimpleNamespace(**default_payload, id=1))
+
+    issues = agent_service_module._validate_manga_storyboard_template(
+        guideline,
+        ["页首承接：深夜。核心旁白：前世陨落。【第1格】出租屋。【第2格】陈玄睁眼。"],
+    )
+
+    assert guideline["validation"]["min_frames_per_page"] == 4
+    assert guideline["validation"]["forbidden_analysis_labels"] == [
+        "页首承接", "核心旁白", "视觉焦点", "叙事作用", "页尾转场",
+    ]
+    assert {issue["rule"] for issue in issues} == {
+        "每页必须包含 4-5 个分镜格",
+        "不得输出分析标签：页首承接",
+        "不得输出分析标签：核心旁白",
+    }
 
 
 def test_get_manga_storyboard_returns_scripts_and_image_state(manga_workspace):

@@ -28,6 +28,7 @@ from models import (
     MangaImage,
     StaleKnowledgeContextError,
     Story,
+    StoryboardPromptPreset,
     VideoAsset,
     agent_knowledge_revision_guard_is_stale,
     reset_agent_knowledge_revision_guard,
@@ -1238,14 +1239,18 @@ skill_registry.register(SkillDef(
     description="读取和修改漫画章节的分镜脚本及资产管理中的角色、场景、道具设定图提示词",
     icon="🎨",
     tool_names=[
+        "get_chapter_full",
         "get_manga_storyboard",
+        "get_manga_storyboard_guideline",
         "get_manga_asset_prompts",
         "update_manga_storyboard_scene",
         "batch_update_manga_storyboard_scenes",
         "replace_manga_storyboard",
         "update_manga_asset_prompts",
     ],
-    system_prompt_fragment="""你是一位专业的漫画工作流编剧。修改漫画分镜时必须先读取当前分镜，再根据用户要求写入；修改资产管理中的角色、场景或道具设定图提示词时，必须先读取当前资产提示词，再按用户要求写入。
+    system_prompt_fragment="""你是一位专业的漫画工作流编剧。涉及剧情、环境、转场、旁白或人物行为的分镜调整时，必须依次读取当前章节正文（get_chapter_full）、当前分镜（get_manga_storyboard）和当前模板规范（get_manga_storyboard_guideline），不得凭空补写原文没有的关键信息。写入前先根据正文与模板完成自检；写入工具返回模板违规时，必须按违规项修正后重试。
+
+修改漫画分镜时必须先读取当前分镜，再根据用户要求写入；修改资产管理中的角色、场景或道具设定图提示词时，必须先读取当前资产提示词，再按用户要求写入。
 
 漫画分镜脚本以章节为单位，每一格是一段完整的绘图场景描述。你可以修改单格、批量修改多格，或在确实需要增删和重排时替换整份分镜。
 
@@ -1744,6 +1749,7 @@ BATCH_CONCURRENCY_LIMIT = 3
 
 _MANGA_WORKFLOW_TOOL_NAMES = {
     "get_manga_storyboard",
+    "get_manga_storyboard_guideline",
     "get_manga_asset_prompts",
     "update_manga_storyboard_scene",
     "batch_update_manga_storyboard_scenes",
@@ -1841,6 +1847,169 @@ def _chapter_storyboard_text(chapter: Chapter) -> str:
 
 def _scenes_revision(content: str) -> str:
     return hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+
+_STORYBOARD_GRID_RANGE_PATTERN = re.compile(
+    r"(?:每页|每一页).{0,12}?(\d+)\s*(?:-|~|至|到)\s*(\d+)\s*格"
+)
+_STORYBOARD_GRID_EXACT_PATTERN = re.compile(
+    r"(?:每页|每一页).{0,18}?(?:恰好|严格(?:包含)?|只(?:绘制|有|包含)?|仅(?:包含)?|只有)?\s*(\d+)\s*(?:个)?[^。；;\n]{0,20}?格"
+)
+_STORYBOARD_FRAME_MARKER_PATTERN = re.compile(r"【第\s*[0-9一二三四五六七八九十百]+\s*格")
+_STORYBOARD_ANALYSIS_LABELS = ("页首承接", "核心旁白", "视觉焦点", "叙事作用", "页尾转场")
+
+
+def _active_manga_storyboard_preset(db: Session, story: Story) -> StoryboardPromptPreset | None:
+    """解析作品当前生效的漫画分镜模板，并在未绑定时回退系统默认模板。"""
+    get_record = getattr(db, "get", None)
+    if not callable(get_record):
+        return None
+    default_preset = (
+        db.query(StoryboardPromptPreset)
+        .filter(
+            StoryboardPromptPreset.is_system.is_(True),
+            StoryboardPromptPreset.preset_key == "default",
+        )
+        .order_by(StoryboardPromptPreset.id.asc())
+        .first()
+    )
+    preset = get_record(StoryboardPromptPreset, story.storyboard_preset_id) if story.storyboard_preset_id else None
+    if preset is not None and (
+        bool(getattr(preset, "is_system", False))
+        or getattr(preset, "author_user_id", None) == getattr(story, "owner_user_id", None)
+        or (
+            getattr(preset, "author_user_id", None) is None
+            and getattr(preset, "story_id", None) == story.id
+        )
+    ):
+        return preset
+    return default_preset
+
+
+def _manga_storyboard_guideline(
+    preset: StoryboardPromptPreset | None,
+    default_system_prompt: str = "",
+) -> dict[str, Any]:
+    """将自由文本模板提取为可展示、可确定性校验的规则。"""
+    if preset is None:
+        return {
+            "preset_id": None,
+            "name": "未配置模板",
+            "rules": [],
+            "validation": {"enabled": False},
+        }
+    effective_system_prompt = preset.system_prompt or default_system_prompt
+    prompt_text = "\n".join(filter(None, (preset.prompt_template, effective_system_prompt)))
+    grid_match = _STORYBOARD_GRID_RANGE_PATTERN.search(prompt_text)
+    min_frames = max_frames = None
+    if grid_match:
+        min_frames, max_frames = sorted((int(grid_match.group(1)), int(grid_match.group(2))))
+    else:
+        exact_match = _STORYBOARD_GRID_EXACT_PATTERN.search(prompt_text)
+        if exact_match:
+            min_frames = max_frames = int(exact_match.group(1))
+    requires_frame_markers = bool(re.search(r"【第\s*(?:N|\d+|一)\s*格", prompt_text))
+    forbidden_labels = []
+    forbidden_match = re.search(r"(?:不得|禁止)输出([^。；;\n]+?)(?:等)?(?:分析)?标签", prompt_text)
+    if forbidden_match:
+        forbidden_labels = [label for label in _STORYBOARD_ANALYSIS_LABELS if label in forbidden_match.group(1)]
+    forbidden_labels.extend(
+        label for label in _STORYBOARD_ANALYSIS_LABELS
+        if re.search(rf"(?:不得|禁止)输出\s*{re.escape(label)}", prompt_text)
+        and label not in forbidden_labels
+    )
+    forbid_bubbles = "禁止对话气泡" in prompt_text or "禁止出现对话气泡" in prompt_text
+    rules: list[str] = []
+    if min_frames is not None:
+        rules.append(f"每页必须包含 {min_frames}-{max_frames} 个分镜格")
+    if requires_frame_markers:
+        rules.append("每页必须使用【第N格】标记分镜格")
+    if forbidden_labels:
+        rules.append(f"不得输出分析标签：{'、'.join(forbidden_labels)}")
+    if forbid_bubbles:
+        rules.append("不得使用对话气泡")
+    return {
+        "preset_id": preset.id,
+        "preset_key": preset.preset_key,
+        "name": preset.name,
+        "description": preset.description or "",
+        "rules": rules,
+        "validation": {
+            "enabled": bool(rules),
+            "min_frames_per_page": min_frames,
+            "max_frames_per_page": max_frames,
+            "requires_frame_markers": requires_frame_markers,
+            "forbidden_analysis_labels": forbidden_labels,
+            "forbid_dialogue_bubbles": forbid_bubbles,
+        },
+        "prompt_template": preset.prompt_template,
+        "system_prompt": effective_system_prompt,
+    }
+
+
+def _validate_manga_storyboard_template(
+    guideline: dict[str, Any],
+    scenes: list[str],
+) -> list[dict[str, Any]]:
+    """校验候选整章分镜是否满足当前模板中可确定判断的结构规则。"""
+    validation = guideline.get("validation") if isinstance(guideline, dict) else {}
+    if not isinstance(validation, dict) or not validation.get("enabled"):
+        return []
+    issues: list[dict[str, Any]] = []
+    min_frames = validation.get("min_frames_per_page")
+    max_frames = validation.get("max_frames_per_page")
+    requires_markers = bool(validation.get("requires_frame_markers"))
+    forbidden_labels = validation.get("forbidden_analysis_labels") or []
+    forbid_bubbles = bool(validation.get("forbid_dialogue_bubbles"))
+    for scene_index, scene in enumerate(scenes, start=1):
+        marker_count = len(_STORYBOARD_FRAME_MARKER_PATTERN.findall(scene))
+        if min_frames is not None and max_frames is not None and (requires_markers or marker_count):
+            if marker_count < min_frames or marker_count > max_frames:
+                issues.append({
+                    "scene_index": scene_index,
+                    "rule": f"每页必须包含 {min_frames}-{max_frames} 个分镜格",
+                    "actual": f"检测到 {marker_count} 个【第N格】标记",
+                })
+        elif requires_markers and marker_count == 0:
+            issues.append({
+                "scene_index": scene_index,
+                "rule": "每页必须使用【第N格】标记分镜格",
+                "actual": "未检测到分镜格标记",
+            })
+        for label in forbidden_labels:
+            if re.search(rf"{re.escape(label)}\s*：", scene):
+                issues.append({
+                    "scene_index": scene_index,
+                    "rule": f"不得输出分析标签：{label}",
+                    "actual": f"检测到“{label}”",
+                })
+        if forbid_bubbles and ("对话气泡" in scene or "「" in scene or "」" in scene):
+            issues.append({
+                "scene_index": scene_index,
+                "rule": "不得使用对话气泡",
+                "actual": "检测到对话气泡标记",
+            })
+    return issues
+
+
+def _manga_storyboard_guideline_for_chapter(db: Session, chapter: Chapter) -> dict[str, Any]:
+    """返回当前章节所属作品绑定的模板规范。"""
+    get_record = getattr(db, "get", None)
+    story = get_record(Story, chapter.story_id) if callable(get_record) else None
+    preset = _active_manga_storyboard_preset(db, story) if story is not None else None
+    default_system_prompt = ""
+    if preset is not None and not preset.system_prompt:
+        default_preset = (
+            db.query(StoryboardPromptPreset)
+            .filter(
+                StoryboardPromptPreset.is_system.is_(True),
+                StoryboardPromptPreset.preset_key == "default",
+            )
+            .order_by(StoryboardPromptPreset.id.asc())
+            .first()
+        )
+        default_system_prompt = (default_preset.system_prompt or "") if default_preset else ""
+    return _manga_storyboard_guideline(preset, default_system_prompt)
 
 
 def _manga_asset_analysis_revision(payload: Any) -> str:
@@ -2555,11 +2724,14 @@ async def get_manga_storyboard(chapter_id: int) -> dict:
             scenes_path = _scenes_path(chapter_id)
             raw_text = scenes_path.read_text(encoding="utf-8") if scenes_path.exists() else ""
             scenes = _parse_scenes_text(raw_text) if raw_text else []
+        guideline = _manga_storyboard_guideline_for_chapter(db, chapter)
         return {
             "chapter_id": chapter_id,
             "chapter_title": chapter.title or f"第{chapter.chapter_number}章",
             "scene_count": len(scenes),
             "revision": _scenes_revision(raw_text),
+            "template_guideline": guideline,
+            "template_issues": _validate_manga_storyboard_template(guideline, scenes),
             "scenes": [
                 {
                     "scene_index": index,
@@ -2572,6 +2744,33 @@ async def get_manga_storyboard(chapter_id: int) -> dict:
     except OSError as exc:
         logger.warning("读取漫画分镜失败 chapter_id=%s: %s", chapter_id, exc)
         return {"error": public_error_message(exc, "读取漫画分镜失败，请稍后重试")}
+    finally:
+        db.close()
+
+
+@tool_registry.register(
+    name="get_manga_storyboard_guideline",
+    description="读取当前作品选用的漫画分镜模板规范及可确定校验规则。",
+    parameters={
+        "type": "object",
+        "properties": {
+            "chapter_id": {"type": "integer", "description": "当前漫画章节 ID"},
+        },
+        "required": ["chapter_id"],
+    },
+    workflow_types=["manga"],
+)
+async def get_manga_storyboard_guideline(chapter_id: int) -> dict:
+    db = SessionLocal()
+    try:
+        chapter = _validate_chapter_ownership(db, chapter_id, _current_story_id())
+        if not chapter:
+            return {"error": "章节不存在或无权访问"}
+        return {
+            "chapter_id": chapter_id,
+            "chapter_title": chapter.title or f"第{chapter.chapter_number}章",
+            "template_guideline": _manga_storyboard_guideline_for_chapter(db, chapter),
+        }
     finally:
         db.close()
 
@@ -4476,6 +4675,15 @@ def _save_manga_storyboard_scenes(
                     "changed": False,
                     "images_preserved": True,
                     "revision": current_revision,
+                }
+            guideline = _manga_storyboard_guideline_for_chapter(db, chapter)
+            template_issues = _validate_manga_storyboard_template(guideline, normalized_scenes)
+            if template_issues:
+                return {
+                    "error": f"分镜不符合当前模板「{guideline.get('name') or '未命名模板'}」规范",
+                    "template_validation_failed": True,
+                    "template_guideline": guideline,
+                    "template_issues": template_issues,
                 }
             generated_image_numbers = {
                 row.image_number
