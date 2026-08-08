@@ -39,7 +39,13 @@ def _mock_async_client(response_content: str, captured_payloads: list[dict]) -> 
 def _storyboard_seed_by_key() -> dict[str, dict]:
     seed_path = Path(__file__).resolve().parents[1] / "seed_data" / "storyboard_presets.json"
     presets = json.loads(seed_path.read_text(encoding="utf-8"))
-    return {preset["preset_key"]: preset for preset in presets}
+    normalized = []
+    for preset in presets:
+        item = dict(preset)
+        item["prompt_template"] = item.get("effective_prompt_template", item["prompt_template"])
+        item["system_prompt"] = item.get("effective_system_prompt", item["system_prompt"])
+        normalized.append(item)
+    return {preset["preset_key"]: preset for preset in normalized}
 
 
 def test_storyboard_runtime_has_no_embedded_layout_prompt_constants():
@@ -73,6 +79,35 @@ async def test_split_scenes_uses_custom_prompts_and_replaces_page_count(monkeypa
     payload = captured_payloads[0]
     assert payload["messages"][0]["content"] == "自定义系统，共 2 页"
     assert payload["messages"][-1]["content"] == "自定义正文，共 2 页"
+
+
+@pytest.mark.asyncio
+async def test_split_scenes_compacts_default_manga_storyboard_output(monkeypatch):
+    """默认漫画模板必须要求短旁白成片脚本，而非输出分析字段。"""
+    captured_payloads = []
+    default_seed = _storyboard_seed_by_key()["default"]
+    monkeypatch.setattr("services.deepseek.DEEPSEEK_BASE_URL", "https://example.test")
+    monkeypatch.setattr("services.deepseek.DEEPSEEK_MODEL", "test-model")
+
+    with patch(
+        "services.deepseek.httpx.AsyncClient",
+        _mock_async_client(
+            json.dumps({"scenes": ["第一页"]}, ensure_ascii=False),
+            captured_payloads,
+        ),
+    ):
+        await split_scenes(
+            [{"role": "user", "content": "原文"}],
+            page_count=1,
+            api_key="test-key",
+            prompt_template=default_seed["prompt_template"],
+            system_prompt=default_seed["system_prompt"],
+        )
+
+    prompt = captured_payloads[0]["messages"][-1]["content"]
+    assert "画面先行，读者一眼看懂" in prompt
+    assert "每页4-5格" in prompt
+    assert "不要出现“视觉焦点”“叙事作用”“环境分析”等元标签" in prompt
 
 
 @pytest.mark.asyncio
@@ -173,7 +208,7 @@ def test_storyboard_preset_migration_seeds_system_layout_presets_idempotently():
 
 
 def test_storyboard_preset_migration_preserves_existing_custom_presets():
-    """已有数据库（含自定义预设）再次迁移时，只补系统预设，不动自定义数据。"""
+    """已有数据库再次迁移时同步系统预设，但不改动自定义数据。"""
     from database import _migrate_storyboard_presets
 
     engine = create_engine("sqlite:///:memory:")
@@ -207,6 +242,97 @@ def test_storyboard_preset_migration_preserves_existing_custom_presets():
     custom_row = [row for row in rows if row[0] == "我的模板"][0]
     assert bool(custom_row[1]) is False
     assert custom_row[2] == 99
+
+
+def test_storyboard_preset_migration_refreshes_existing_system_presets():
+    """已有系统分镜模板应同步到最新种子，用户自定义模板必须保持原样。"""
+    from database import _migrate_storyboard_presets
+
+    engine = create_engine("sqlite:///:memory:")
+    with engine.begin() as conn:
+        conn.execute(text("CREATE TABLE users (id INTEGER PRIMARY KEY)"))
+        conn.execute(text("CREATE TABLE stories (id INTEGER PRIMARY KEY)"))
+
+    _migrate_storyboard_presets(engine)
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                "UPDATE storyboard_prompt_presets SET prompt_template = :prompt, "
+                "system_prompt = :system_prompt, description = :description, sort_order = :sort_order "
+                "WHERE is_system = TRUE AND preset_key = 'default'"
+            ),
+            {
+                "prompt": "旧版系统提示词",
+                "system_prompt": "旧版系统规则",
+                "description": "旧版说明",
+                "sort_order": 99,
+            },
+        )
+        conn.execute(
+            text(
+                "INSERT INTO storyboard_prompt_presets "
+                "(name, prompt_template, is_system, sort_order) "
+                "VALUES (:name, :prompt, FALSE, 99)"
+            ),
+            {"name": "用户保留模板", "prompt": "用户自定义提示词"},
+        )
+
+    _migrate_storyboard_presets(engine)
+
+    with engine.connect() as conn:
+        default_preset = conn.execute(
+            text(
+                "SELECT prompt_template, system_prompt, description, sort_order "
+                "FROM storyboard_prompt_presets "
+                "WHERE is_system = TRUE AND preset_key = 'default'"
+            )
+        ).mappings().one()
+        custom_prompt = conn.execute(
+            text(
+                "SELECT prompt_template FROM storyboard_prompt_presets "
+                "WHERE name = '用户保留模板'"
+            )
+        ).scalar()
+
+    default_seed = _storyboard_seed_by_key()["default"]
+    assert default_preset["prompt_template"] == default_seed["prompt_template"]
+    assert default_preset["system_prompt"] == default_seed["system_prompt"]
+    assert default_preset["description"] == default_seed["description"]
+    assert default_preset["sort_order"] == default_seed["sort_order"]
+    assert custom_prompt == "用户自定义提示词"
+
+
+def test_storyboard_preset_migration_refreshes_legacy_default_preset():
+    """旧版无 preset_key 的默认系统模板应升级并同步最新种子。"""
+    from database import _migrate_storyboard_presets
+
+    engine = create_engine("sqlite:///:memory:")
+    with engine.begin() as conn:
+        conn.execute(text("CREATE TABLE users (id INTEGER PRIMARY KEY)"))
+        conn.execute(text("CREATE TABLE stories (id INTEGER PRIMARY KEY)"))
+
+    _migrate_storyboard_presets(engine)
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                "UPDATE storyboard_prompt_presets SET preset_key = NULL, "
+                "prompt_template = :prompt WHERE is_system = TRUE AND preset_key = 'default'"
+            ),
+            {"prompt": "旧版默认模板"},
+        )
+
+    _migrate_storyboard_presets(engine)
+
+    with engine.connect() as conn:
+        row = conn.execute(
+            text(
+                "SELECT preset_key, prompt_template FROM storyboard_prompt_presets "
+                "WHERE is_system = TRUE AND name = '默认分镜模板'"
+            )
+        ).mappings().one()
+
+    assert row["preset_key"] == "default"
+    assert row["prompt_template"] == _storyboard_seed_by_key()["default"]["prompt_template"]
 
 
 @pytest.fixture

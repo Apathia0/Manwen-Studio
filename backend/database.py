@@ -1506,6 +1506,12 @@ def _seed_storyboard_presets(target_engine=None):
         for preset in system_presets:
             if not isinstance(preset, dict):
                 raise RuntimeError("分镜模板数据库种子包含无效记录")
+            preset = dict(preset)
+            # 默认模板保留旧字段以兼容历史种子，但运行时始终使用新版简洁成片脚本。
+            if preset.get("effective_prompt_template"):
+                preset["prompt_template"] = str(preset.pop("effective_prompt_template"))
+            if preset.get("effective_system_prompt"):
+                preset["system_prompt"] = str(preset.pop("effective_system_prompt"))
             required_fields = ("preset_key", "name", "prompt_template", "system_prompt", "sort_order")
             if any(not preset.get(field) for field in required_fields):
                 raise RuntimeError(f"分镜模板数据库种子字段不完整: {preset.get('preset_key') or 'unknown'}")
@@ -1519,6 +1525,21 @@ def _seed_storyboard_presets(target_engine=None):
                 {"preset_key": preset["preset_key"]},
             ).scalar()
             if preset_exists is not None:
+                if preset["preset_key"] != "default":
+                    continue
+                conn.execute(
+                    text("""
+                        UPDATE storyboard_prompt_presets
+                        SET name = :name,
+                            description = :description,
+                            prompt_template = :prompt_template,
+                            system_prompt = :system_prompt,
+                            sort_order = :sort_order
+                        WHERE is_system = TRUE AND preset_key = :preset_key
+                    """),
+                    preset,
+                )
+                logger.info("Synced system storyboard prompt preset: %s", preset["preset_key"])
                 continue
             legacy_exists = conn.execute(
                 text("""
@@ -1532,16 +1553,23 @@ def _seed_storyboard_presets(target_engine=None):
                 {"name": preset["name"]},
             ).scalar()
             if legacy_exists is not None:
+                if preset["preset_key"] != "default":
+                    continue
                 conn.execute(
                     text("""
                         UPDATE storyboard_prompt_presets
-                        SET preset_key = :preset_key
+                        SET preset_key = :preset_key,
+                            description = :description,
+                            prompt_template = :prompt_template,
+                            system_prompt = :system_prompt,
+                            sort_order = :sort_order
                         WHERE is_system = TRUE
                           AND preset_key IS NULL
                           AND name = :name
                     """),
-                    {"preset_key": preset["preset_key"], "name": preset["name"]},
+                    preset,
                 )
+                logger.info("Synced legacy system storyboard prompt preset: %s", preset["preset_key"])
                 continue
             conn.execute(
                 text("""

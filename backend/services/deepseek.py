@@ -686,6 +686,20 @@ async def split_scenes(
     if character_profiles:
         scene_prompt += f"\n\n以下是角色外貌设定，分镜描述中必须严格匹配这些外貌特征：\n{character_profiles}"
 
+    # 默认漫画模板需要先分析、后压缩输出，避免把策划字段直接带入绘图提示词。
+    if (
+        "严格包含4-5个分镜格" in effective_system_prompt
+        or "每页包含4-5个分镜格" in effective_system_prompt
+    ):
+        scene_prompt += (
+            "\n\n【最终成片脚本压缩规则】以上环境、转场、旁白和视觉焦点只在分析阶段使用，"
+            "最终 scenes 字符串不得输出‘页首承接’‘核心旁白’‘视觉焦点’‘叙事作用’‘页尾转场’等分析标签。"
+            "每页只保留4-5个连续画格的可视化描述，句子短而有画面感；环境和时间通过画面细节交代，"
+            "转场通过人物动作、视线、道具或构图承接表达。每页最多3条旁白/字幕，每条不超过18个汉字，"
+            "只保留时间跳跃、身份关系、关键因果或不可视化信息；没有必要旁白就不写。对白只保留推动剧情的关键一句，"
+            "禁止解释性长段落、参数清单和重复描述，确保文本适合直接交给漫画生图模型。"
+        )
+
     # 计算上下文总长度，如果过长则在提示词前加入聚焦指令
     total_content_len = sum(len(str(m.get("content") or "")) for m in chat_messages)
     if total_content_len > 3000:
