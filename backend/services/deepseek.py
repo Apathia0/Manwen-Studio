@@ -42,6 +42,12 @@ CHAPTER_FIRST_PASS_MAX_CHARS = 2700
 # 原 3072 不足以输出完整正文（finish_reason=length / content 空），提到 8192 留足思考+输出缓冲。
 CHAPTER_COMPLETION_MAX_TOKENS = 8192
 
+# 漫画分镜生成（split_scenes）的 DeepSeek 请求超时配置：
+# 长 context + 大输出 JSON（page_count 可达 10-20 页）推理耗时长，
+# 120 秒短超时在服务端慢响应时直接 ReadTimeout 中断整次生成，故放宽至 300 秒并做退避重试。
+_SCENE_SPLIT_TIMEOUT_SECONDS = 300
+_SCENE_SPLIT_TIMEOUT_RETRIES = 2
+
 _RUNTIME_TEMPERATURE: float | None = None
 _RUNTIME_TOP_P: float | None = None
 
@@ -729,15 +735,34 @@ async def split_scenes(
             "response_format": {"type": "json_object"},
         }
 
-        async with httpx.AsyncClient(timeout=120) as client:
-            resp = await client.post(
-                f"{runtime_base_url()}/chat/completions",
-                json=payload,
-                headers=_deepseek_auth_headers(api_key),
-            )
-            resp.raise_for_status()
-            data = _response_json(resp, context="DeepSeek")
-            return data["choices"][0]["message"]["content"]
+        # 超时重试：DeepSeek 服务端偶发慢响应（长 context + 大输出 JSON 推理耗时长），
+        # 单次超时直接失败会中断整次分镜生成。此处退避重试，耗尽后抛 httpx.TimeoutException
+        # 交由上层转换为友好错误，与 JSON 解析失败（ValueError）的错误路径区分开。
+        last_exc: httpx.RequestError | None = None
+        for attempt in range(_SCENE_SPLIT_TIMEOUT_RETRIES + 1):
+            try:
+                async with httpx.AsyncClient(timeout=_SCENE_SPLIT_TIMEOUT_SECONDS) as client:
+                    resp = await client.post(
+                        f"{runtime_base_url()}/chat/completions",
+                        json=payload,
+                        headers=_deepseek_auth_headers(api_key),
+                    )
+                    resp.raise_for_status()
+                    data = _response_json(resp, context="DeepSeek")
+                    return data["choices"][0]["message"]["content"]
+            except (httpx.TimeoutException, httpx.ConnectError) as exc:
+                last_exc = exc
+                if attempt < _SCENE_SPLIT_TIMEOUT_RETRIES:
+                    logger.warning(
+                        "分镜生成 DeepSeek 请求超时，第 %d/%d 次重试: %s",
+                        attempt + 1,
+                        _SCENE_SPLIT_TIMEOUT_RETRIES,
+                        exc,
+                    )
+                    await asyncio.sleep(2 * (attempt + 1))
+                    continue
+                break
+        raise httpx.TimeoutException(f"分镜生成 DeepSeek 请求持续超时：{last_exc}") from last_exc
 
     raw = ""
     last_error: Exception | None = None

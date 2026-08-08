@@ -10038,6 +10038,12 @@ async def generate_scenes_endpoint(chapter_id: int, request: Request, db: Sessio
     except ValueError as exc:
         logger.warning("Failed to parse scene split response for chapter %s: %s", chapter_id, exc)
         raise HTTPException(502, "AI 返回无效的场景 JSON，请重试生成场景")
+    except httpx.TimeoutException as exc:
+        logger.warning("Scene split DeepSeek timeout for chapter %s: %s", chapter_id, exc)
+        raise HTTPException(502, "AI 分镜服务响应超时，请稍后重试")
+    except httpx.RequestError as exc:
+        logger.warning("Scene split DeepSeek request error for chapter %s: %s", chapter_id, exc)
+        raise HTTPException(502, "AI 分镜服务暂时不可用，请稍后重试")
     except asyncio.CancelledError:
         raise HTTPException(499, "场景生成已取消")
     finally:

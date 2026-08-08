@@ -3,6 +3,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, inspect, text
@@ -131,6 +132,86 @@ async def test_split_scenes_rejects_calls_without_database_prompts(monkeypatch):
             )
 
     assert captured_payloads == []
+
+
+@pytest.mark.asyncio
+async def test_split_scenes_retries_on_timeout_then_succeeds(monkeypatch):
+    """DeepSeek 超时后应退避重试，最终成功返回分镜。"""
+    captured_payloads = []
+    monkeypatch.setattr("services.deepseek.DEEPSEEK_BASE_URL", "https://example.test")
+    monkeypatch.setattr("services.deepseek.DEEPSEEK_MODEL", "test-model")
+    monkeypatch.setattr("services.deepseek.asyncio.sleep", AsyncMock())  # 避免真实等待退避
+
+    responses = [
+        httpx.ReadTimeout("first timeout"),
+        httpx.ReadTimeout("second timeout"),
+        json.dumps(
+            {
+                "choices": [
+                    {"message": {"content": json.dumps({"scenes": ["第一页", "第二页"]}, ensure_ascii=False)}}
+                ]
+            },
+            ensure_ascii=False,
+        ),
+    ]
+    call_count = 0
+
+    async def post(*_args, **kwargs):
+        nonlocal call_count
+        captured_payloads.append(kwargs["json"])
+        result = responses[call_count]
+        call_count += 1
+        if isinstance(result, Exception):
+            raise result
+        response = MagicMock()
+        response.text = result
+        response.status_code = 200
+        return response
+
+    client = MagicMock()
+    client.post = AsyncMock(side_effect=post)
+    client_class = MagicMock()
+    client_class.return_value.__aenter__ = AsyncMock(return_value=client)
+    client_class.return_value.__aexit__ = AsyncMock(return_value=False)
+
+    with patch("services.deepseek.httpx.AsyncClient", client_class):
+        scenes = await split_scenes(
+            [{"role": "user", "content": "原文"}],
+            page_count=2,
+            api_key="test-key",
+            prompt_template="正文 {page_count} 页",
+            system_prompt="系统 {page_count} 页",
+        )
+
+    assert scenes == ["第一页", "第二页"]
+    assert call_count == 3  # 2 次超时重试 + 1 次成功
+
+
+@pytest.mark.asyncio
+async def test_split_scenes_raises_timeout_after_retries_exhausted(monkeypatch):
+    """超时重试耗尽后应抛出 httpx.TimeoutException（而非 ValueError），由上层转 502 友好错误。"""
+    monkeypatch.setattr("services.deepseek.DEEPSEEK_BASE_URL", "https://example.test")
+    monkeypatch.setattr("services.deepseek.DEEPSEEK_MODEL", "test-model")
+    monkeypatch.setattr("services.deepseek.asyncio.sleep", AsyncMock())
+
+    async def post(*_args, **_kwargs):
+        raise httpx.ReadTimeout("always timeout")
+
+    client = MagicMock()
+    client.post = AsyncMock(side_effect=post)
+    client_class = MagicMock()
+    client_class.return_value.__aenter__ = AsyncMock(return_value=client)
+    client_class.return_value.__aexit__ = AsyncMock(return_value=False)
+
+    with patch("services.deepseek.httpx.AsyncClient", client_class):
+        with pytest.raises(httpx.TimeoutException):
+            await split_scenes(
+                [{"role": "user", "content": "原文"}],
+                page_count=2,
+                api_key="test-key",
+                prompt_template="正文 {page_count} 页",
+                system_prompt="系统 {page_count} 页",
+            )
 
 
 def test_storyboard_preset_migration_creates_table_column_and_default_seed():
