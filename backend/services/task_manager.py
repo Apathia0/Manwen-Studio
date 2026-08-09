@@ -373,6 +373,43 @@ class TaskManager:
     def _finalize_failed_task_billing(self, task: BackgroundTask, db) -> None:
         """失败任务有部分漫画产物时按实际数量结算，否则释放原预扣。"""
         metadata = task.metadata_json if isinstance(task.metadata_json, dict) else {}
+        if task.task_type == "video_canvas_run":
+            from models import VideoCanvasRun, VideoCanvasRunNode
+            from services.ai.resolver import complete_ai_call_by_usage_event
+
+            canvas_nodes = db.query(VideoCanvasRunNode).filter(
+                VideoCanvasRunNode.task_id == task.task_id,
+            ).all()
+            run_ids = {node.run_id for node in canvas_nodes}
+            for node in canvas_nodes:
+                if node.billing_usage_event_id:
+                    complete_ai_call_by_usage_event(
+                        db,
+                        node.billing_usage_event_id,
+                        success=False,
+                        error_code="video_canvas_task_interrupted",
+                        usage_source="database_recovery",
+                        commit=False,
+                    )
+                    node.billing_usage_event_id = None
+                if node.status == "running":
+                    node.status = "failed"
+                    node.error_message = "画布任务中断"
+                    node.completed_at = _now_naive()
+                elif node.status in {"queued", "awaiting_approval"}:
+                    node.status = "blocked"
+                    node.error_message = "画布任务中断，未执行"
+                    node.completed_at = _now_naive()
+            if run_ids:
+                active_runs = db.query(VideoCanvasRun).filter(
+                    VideoCanvasRun.id.in_(run_ids),
+                    VideoCanvasRun.status.in_(["queued", "running", "cancel_requested"]),
+                ).all()
+                for run in active_runs:
+                    run.status = "failed"
+                    run.error_message = "画布任务中断，未完成节点已终止"
+                    run.completed_at = _now_naive()
+
         analysis_usage_event_id = int(metadata.get("analysis_billing_usage_event_id") or 0)
         if task.task_type == "manga_generation" and analysis_usage_event_id:
             from models import Chapter

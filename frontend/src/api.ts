@@ -720,7 +720,7 @@ export interface AgentConversation {
   messages: AgentConversationMessage[];
 }
 
-export type AgentWorkflowType = 'novel' | 'manga' | 'video';
+export type AgentWorkflowType = 'novel' | 'manga' | 'video' | 'video_canvas';
 
 export interface AgentWorkflowContext {
   workflow_type?: AgentWorkflowType | null;
@@ -3459,6 +3459,204 @@ export interface ChapterVideoWorkflowStatus {
   retry_count?: number;
   max_retries?: number;
   next_retry_at?: string | null;
+}
+
+export interface VideoCanvasPort {
+  key: string;
+  type: string;
+  required?: boolean;
+  multiple?: boolean;
+}
+
+export interface VideoCanvasNodeCatalogItem {
+  type: string;
+  label: string;
+  category: string;
+  icon?: string;
+  inputs: VideoCanvasPort[];
+  outputs: VideoCanvasPort[];
+  executable?: boolean;
+}
+
+export interface VideoCanvasGraphNode {
+  id: string;
+  type: string;
+  position: { x: number; y: number };
+  data: {
+    label?: string;
+    config?: Record<string, unknown>;
+    origin?: Record<string, unknown>;
+    [key: string]: unknown;
+  };
+}
+
+export interface VideoCanvasGraphEdge {
+  id: string;
+  source: string;
+  target: string;
+  sourceHandle?: string | null;
+  targetHandle?: string | null;
+  data?: Record<string, unknown>;
+}
+
+export interface VideoCanvasGraph {
+  schema_version: number;
+  nodes: VideoCanvasGraphNode[];
+  edges: VideoCanvasGraphEdge[];
+  groups?: unknown[];
+  metadata?: Record<string, unknown>;
+}
+
+export interface VideoCanvasRunNode {
+  id: number;
+  node_id: string;
+  node_type: string;
+  attempt: number;
+  status: string;
+  input_snapshot?: Record<string, unknown> | null;
+  output_snapshot?: Record<string, unknown> | null;
+  error_message?: string | null;
+}
+
+export interface VideoCanvasRun {
+  id: number;
+  canvas_id: number;
+  canvas_version_id: number;
+  status: string;
+  scope: Record<string, unknown>;
+  plan: { topological_order?: string[]; warnings?: Array<{ message?: string }> };
+  error_message?: string | null;
+  created_at: string;
+  completed_at?: string | null;
+  nodes: VideoCanvasRunNode[];
+}
+
+export interface VideoCanvas {
+  id: number;
+  story_id: number;
+  default_chapter_id?: number | null;
+  name: string;
+  description?: string | null;
+  status: 'draft' | 'archived';
+  definition_revision: number;
+  layout_revision: number;
+  created_at: string;
+  updated_at: string;
+  version: { id: number; version_no: number; graph: VideoCanvasGraph; source: string };
+  layout: { nodes?: Record<string, { x: number; y: number }>; viewport?: { x: number; y: number; zoom: number } };
+  runs?: VideoCanvasRun[];
+}
+
+export async function listVideoCanvasNodeCatalog(): Promise<{ node_types: VideoCanvasNodeCatalogItem[] }> {
+  const res = await fetch(`${BASE}/api/video-canvas/node-catalog`, { headers: apiHeaders() });
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
+  return res.json();
+}
+
+export async function createVideoCanvas(payload: {
+  story_id: number;
+  default_chapter_id?: number | null;
+  name?: string;
+  description?: string | null;
+  idempotency_key?: string;
+}): Promise<VideoCanvas> {
+  const res = await fetch(`${BASE}/api/video-canvas/canvases`, {
+    method: 'POST', headers: apiHeaders(true), body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
+  return res.json();
+}
+
+export async function listVideoCanvases(storyId: number, chapterId?: number): Promise<{ canvases: VideoCanvas[] }> {
+  const params = chapterId ? `?chapter_id=${chapterId}` : '';
+  const res = await fetch(`${BASE}/api/video-canvas/stories/${storyId}/canvases${params}`, { headers: apiHeaders() });
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
+  return res.json();
+}
+
+export async function getVideoCanvas(canvasId: number): Promise<VideoCanvas> {
+  const res = await fetch(`${BASE}/api/video-canvas/canvases/${canvasId}`, { headers: apiHeaders() });
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
+  return res.json();
+}
+
+export async function saveVideoCanvasGraph(canvasId: number, payload: {
+  graph: VideoCanvasGraph;
+  expected_definition_revision: number;
+  change_summary?: string;
+  source?: 'manual' | 'import' | 'agent';
+}): Promise<VideoCanvas & { validation?: { warnings?: Array<{ message?: string }> } }> {
+  const res = await fetch(`${BASE}/api/video-canvas/canvases/${canvasId}/graph`, {
+    method: 'PUT', headers: apiHeaders(true), body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
+  return res.json();
+}
+
+export async function saveVideoCanvasLayout(canvasId: number, payload: {
+  layout: VideoCanvas['layout'];
+  expected_layout_revision: number;
+}): Promise<{ layout: VideoCanvas['layout']; layout_revision: number }> {
+  const res = await fetch(`${BASE}/api/video-canvas/canvases/${canvasId}/layout`, {
+    method: 'PUT', headers: apiHeaders(true), body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
+  return res.json();
+}
+
+export async function importVideoCanvasListWorkflow(canvasId: number, payload: {
+  source_workflow_id: number;
+  mode: 'preview' | 'merge';
+  expected_definition_revision?: number;
+  idempotency_key?: string;
+}): Promise<{ canvas?: VideoCanvas; result?: { added_node_count: number; added_edge_count: number }; graph?: VideoCanvasGraph; node_count?: number; edge_count?: number }> {
+  const res = await fetch(`${BASE}/api/video-canvas/canvases/${canvasId}/imports/list-workflow`, {
+    method: 'POST', headers: apiHeaders(true), body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
+  return res.json();
+}
+
+export async function validateVideoCanvas(canvasId: number): Promise<{ valid: boolean; errors: Array<{ message: string }>; warnings: Array<{ message: string }> }> {
+  const res = await fetch(`${BASE}/api/video-canvas/canvases/${canvasId}/validate`, {
+    method: 'POST', headers: apiHeaders(true),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
+  return res.json();
+}
+
+export async function runVideoCanvas(canvasId: number, payload: {
+  target_node_ids: string[];
+  expected_definition_revision: number;
+  idempotency_key?: string;
+}): Promise<{ idempotent?: boolean; run: VideoCanvasRun; validation: { warnings?: Array<{ message?: string }> } }> {
+  const res = await fetch(`${BASE}/api/video-canvas/canvases/${canvasId}/runs`, {
+    method: 'POST', headers: apiHeaders(true), body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
+  return res.json();
+}
+
+export async function confirmVideoCanvasRun(canvasId: number, runId: number): Promise<{ run: VideoCanvasRun }> {
+  const res = await fetch(`${BASE}/api/video-canvas/canvases/${canvasId}/runs/${runId}/confirm`, {
+    method: 'POST', headers: apiHeaders(true), body: JSON.stringify({ confirmed: true }),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
+  return res.json();
+}
+
+export async function cancelVideoCanvasRun(canvasId: number, runId: number): Promise<{ run: VideoCanvasRun }> {
+  const res = await fetch(`${BASE}/api/video-canvas/canvases/${canvasId}/runs/${runId}/cancel`, {
+    method: 'POST', headers: apiHeaders(true),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
+  return res.json();
+}
+
+export async function getVideoCanvasRun(canvasId: number, runId: number): Promise<{ run: VideoCanvasRun }> {
+  const res = await fetch(`${BASE}/api/video-canvas/canvases/${canvasId}/runs/${runId}`, { headers: apiHeaders() });
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
+  return res.json();
 }
 
 export async function generateScreenplay(chapterId: number, payload: {

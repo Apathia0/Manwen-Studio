@@ -32,6 +32,8 @@ from models import (
     Story,
     StoryboardPromptPreset,
     VideoAsset,
+    VideoCanvas,
+    VideoCanvasVersion,
     agent_knowledge_revision_guard_is_stale,
     reset_agent_knowledge_revision_guard,
     set_agent_knowledge_revision_guard,
@@ -1236,6 +1238,23 @@ skill_registry.register(SkillDef(
     required_resource_types=("章节任务卡", "上章交接", "人物状态", "相关事实", "待推进伏笔"),
 ))
 
+skill_registry.register(SkillDef(
+    name="video_canvas_workflow",
+    display_name="视频无限画布",
+    description="读取画布图与节点目录，辅助提出可审阅的创作编排方案",
+    icon="🧩",
+    tool_names=[
+        "get_canvas_graph", "get_canvas_node_catalog",
+        "get_chapter_full", "get_all_chapters_summary", "get_story_bible",
+        "get_character_profiles", "get_scenes", "resolve_story_context", "search_story_knowledge",
+    ],
+    system_prompt_fragment="""你是视频无限画布创作助手。画布是独立于列表分镜的自由 DAG：
+- 先读取当前图和节点目录，再提出节点、连线、资产或风格调整建议。
+- 对图修改只输出可审阅的结构化提案，必须包含 expected_definition_revision；由用户在画布中确认应用。
+- 严禁直接运行图像、视频或拼接节点，涉及费用时先说明预计影响并等待用户确认。
+- 不得把画布节点 ID 当作列表镜头 ID，不得隐式回写列表分镜工作流。""",
+))
+
 # Skill 2: 框架设计
 skill_registry.register(SkillDef(
     name="framework_designer",
@@ -1590,6 +1609,8 @@ def infer_agent_skills(
         return ["manga_workflow"]
     if workflow_type == "video":
         return ["video_workflow"]
+    if workflow_type == "video_canvas":
+        return ["video_canvas_workflow"]
     text = str(user_text or "")
     if re.search(r"大纲|框架|章节规划|任务卡|续写.{0,8}章|新增.{0,8}章", text):
         return ["framework_designer"]
@@ -1865,6 +1886,20 @@ _VIDEO_WORKFLOW_TOOL_NAMES = {
     "update_video_asset_prompts",
 }
 _VIDEO_WORKFLOW_READ_TOOL_NAMES = {
+    "get_chapter_full",
+    "get_all_chapters_summary",
+    "get_framework_detail",
+    "get_story_bible",
+    "get_character_profiles",
+    "get_scenes",
+    "resolve_story_context",
+    "search_story_knowledge",
+}
+_VIDEO_CANVAS_WORKFLOW_TOOL_NAMES = {
+    "get_canvas_graph",
+    "get_canvas_node_catalog",
+}
+_VIDEO_CANVAS_WORKFLOW_READ_TOOL_NAMES = {
     "get_chapter_full",
     "get_all_chapters_summary",
     "get_framework_detail",
@@ -2268,6 +2303,8 @@ class ToolRegistry:
             allowed = _MANGA_WORKFLOW_TOOL_NAMES | _MANGA_WORKFLOW_READ_TOOL_NAMES
         elif workflow_type == "video":
             allowed = _VIDEO_WORKFLOW_TOOL_NAMES | _VIDEO_WORKFLOW_READ_TOOL_NAMES
+        elif workflow_type == "video_canvas":
+            allowed = _VIDEO_CANVAS_WORKFLOW_TOOL_NAMES | _VIDEO_CANVAS_WORKFLOW_READ_TOOL_NAMES
         else:
             return set()
 
@@ -2475,6 +2512,17 @@ def _require_current_video_workflow(db: Session, workflow_id: int) -> ChapterVid
     if context.chapter_id is not None and workflow.chapter_id != context.chapter_id:
         return None
     return workflow
+
+
+def _require_current_video_canvas(db: Session, canvas_id: int) -> VideoCanvas | None:
+    """校验画布只可由其所属的 Agent 上下文读取。"""
+    context = _current_run_context()
+    if not context or context.workflow_type != "video_canvas" or context.workflow_id != canvas_id:
+        return None
+    canvas = db.get(VideoCanvas, canvas_id)
+    if not canvas or canvas.story_id != context.story_id:
+        return None
+    return canvas
 
 
 def _require_current_video_shot(db: Session, shot_id: int) -> ChapterVideoShot | None:
@@ -5171,6 +5219,55 @@ async def replace_manga_storyboard(chapter_id: int, scenes: list[str], expected_
 # ────────────────────────────────────────────────────────────
 # 视频工作流工具 - 读取
 # ────────────────────────────────────────────────────────────
+
+
+@tool_registry.register(
+    name="get_canvas_graph",
+    description="读取当前无限画布的最新定义快照、节点和连线。仅可读取当前 Agent 上下文中的画布。",
+    parameters={
+        "type": "object",
+        "properties": {"canvas_id": {"type": "integer", "description": "当前画布 ID"}},
+        "required": ["canvas_id"],
+    },
+    workflow_types=["video_canvas"],
+)
+async def get_canvas_graph(canvas_id: int) -> dict:
+    db = SessionLocal()
+    try:
+        canvas = _require_current_video_canvas(db, canvas_id)
+        if not canvas:
+            return {"error": "视频画布不存在或无权访问"}
+        version = (
+            db.query(VideoCanvasVersion)
+            .filter(VideoCanvasVersion.canvas_id == canvas.id)
+            .order_by(VideoCanvasVersion.version_no.desc())
+            .first()
+        )
+        graph = version.graph_json if version else {"nodes": [], "edges": []}
+        return {
+            "id": canvas.id,
+            "name": canvas.name,
+            "definition_revision": canvas.definition_revision,
+            "graph": graph,
+            "write_contract": {
+                "mode": "proposal_only",
+                "expected_definition_revision": canvas.definition_revision,
+                "message": "请返回可审阅的图变更方案；生成节点必须由用户在画布中确认执行。",
+            },
+        }
+    finally:
+        db.close()
+
+
+@tool_registry.register(
+    name="get_canvas_node_catalog",
+    description="读取无限画布支持的节点类型、输入输出端口及连线约束。",
+    parameters={"type": "object", "properties": {}},
+    workflow_types=["video_canvas"],
+)
+async def get_canvas_node_catalog() -> dict:
+    from routers.video_canvas import NODE_CATALOG
+    return {"node_types": [{"type": name, **spec} for name, spec in NODE_CATALOG.items()]}
 
 
 @tool_registry.register(

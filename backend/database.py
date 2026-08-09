@@ -606,6 +606,7 @@ def _migrate_unlocked(target_engine=None):
             """))
     _migrate_legacy_video_channel_adapters(db_engine)
     _migrate_video_tables(db_engine)
+    _migrate_video_canvas_tables(db_engine)
     _migrate_video_character_tables(db_engine)
     _seed_video_style_presets(db_engine)
     _migrate_storyboard_presets(db_engine)
@@ -1093,6 +1094,59 @@ def _add_unique_constraints(target_engine=None):
                 ADD CONSTRAINT uq_manga_images_chapter_number
                 UNIQUE (chapter_id, image_number)
             """))
+
+
+def _migrate_video_canvas_tables(target_engine=None) -> None:
+    """创建独立视频无限画布表，不触碰既有章节视频工作流数据。"""
+    db_engine = target_engine or engine
+    canvas_table_names = (
+        "video_canvases",
+        "video_canvas_versions",
+        "video_canvas_layouts",
+        "video_canvas_sync_records",
+        "video_canvas_runs",
+        "video_canvas_run_nodes",
+    )
+    for table_name in canvas_table_names:
+        table = Base.metadata.tables.get(table_name)
+        if table is not None:
+            table.create(bind=db_engine, checkfirst=True)
+    from sqlalchemy import inspect, text
+    inspector = inspect(db_engine)
+    table_names = set(inspector.get_table_names())
+    if "video_canvas_runs" not in table_names:
+        return
+    canvas_columns = (
+        {column["name"] for column in inspector.get_columns("video_canvases")}
+        if "video_canvases" in table_names
+        else set()
+    )
+    columns = {column["name"] for column in inspector.get_columns("video_canvas_runs")}
+    run_node_columns = (
+        {column["name"] for column in inspector.get_columns("video_canvas_run_nodes")}
+        if "video_canvas_run_nodes" in table_names
+        else set()
+    )
+    with db_engine.begin() as conn:
+        _prepare_migration_conn(conn)
+        if "creation_idempotency_key" not in canvas_columns:
+            conn.execute(text("ALTER TABLE video_canvases ADD COLUMN creation_idempotency_key VARCHAR(100)"))
+        conn.execute(text(
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_video_canvas_creation_idempotency "
+            "ON video_canvases (owner_user_id, creation_idempotency_key)"
+        ))
+        if "idempotency_key" not in columns:
+            conn.execute(text("ALTER TABLE video_canvas_runs ADD COLUMN idempotency_key VARCHAR(100)"))
+        if "billing_usage_event_id" not in run_node_columns:
+            conn.execute(text("ALTER TABLE video_canvas_run_nodes ADD COLUMN billing_usage_event_id INTEGER"))
+        conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS ix_video_canvas_run_nodes_billing_usage "
+            "ON video_canvas_run_nodes (billing_usage_event_id)"
+        ))
+        conn.execute(text(
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_video_canvas_run_idempotency "
+            "ON video_canvas_runs (canvas_id, idempotency_key)"
+        ))
 
 
 def _migrate_video_tables(target_engine=None):

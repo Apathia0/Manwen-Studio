@@ -189,13 +189,14 @@ class ChatMessageOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
-AgentWorkflowType = Literal["novel", "manga", "video"]
+AgentWorkflowType = Literal["novel", "manga", "video", "video_canvas"]
 AgentSkillName = Literal[
     "chapter_writer",
     "framework_designer",
     "manga_workflow",
     "quality_reviewer",
     "video_workflow",
+    "video_canvas_workflow",
     "deconstruction_reader",
 ]
 
@@ -216,6 +217,8 @@ class AgentChatIn(BaseModel):
     def validate_workflow_context(self):
         if self.workflow_type == "video" and (self.workflow_id is None or not self.chapter_id):
             raise ValueError("视频工作流必须提供 workflow_id 和 chapter_id")
+        if self.workflow_type == "video_canvas" and self.workflow_id is None:
+            raise ValueError("视频画布必须提供 workflow_id")
         if self.workflow_type == "manga" and not self.chapter_id:
             raise ValueError("漫画工作流必须提供 chapter_id")
         return self
@@ -232,6 +235,8 @@ class AgentConversationCreateIn(BaseModel):
     def validate_workflow_context(self):
         if self.workflow_type == "video" and (self.workflow_id is None or self.chapter_id is None):
             raise ValueError("视频工作流必须提供 workflow_id 和 chapter_id")
+        if self.workflow_type == "video_canvas" and self.workflow_id is None:
+            raise ValueError("视频画布必须提供 workflow_id")
         if self.workflow_type == "manga" and self.chapter_id is None:
             raise ValueError("漫画工作流必须提供 chapter_id")
         return self
@@ -1165,6 +1170,53 @@ class ChapterVideoWorkflowStatusOut(BaseModel):
     retry_count: int = 0
     max_retries: int = 0
     next_retry_at: str | None = None
+
+
+# ─── 视频无限画布 Schemas ────────────────────────────────
+
+
+class VideoCanvasCreate(BaseModel):
+    story_id: int
+    default_chapter_id: int | None = None
+    name: str = Field(default="未命名画布", min_length=1, max_length=255)
+    description: str | None = Field(default=None, max_length=2000)
+    idempotency_key: str | None = Field(default=None, min_length=8, max_length=100)
+
+
+class VideoCanvasUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=255)
+    description: str | None = Field(default=None, max_length=2000)
+    status: Literal["draft", "archived"] | None = None
+
+
+class VideoCanvasGraphSave(BaseModel):
+    graph: dict[str, Any]
+    expected_definition_revision: int = Field(ge=1)
+    change_summary: str | None = Field(default=None, max_length=500)
+    source: Literal["manual", "import", "agent"] = "manual"
+
+
+class VideoCanvasLayoutSave(BaseModel):
+    layout: dict[str, Any]
+    expected_layout_revision: int = Field(ge=1)
+
+
+class VideoCanvasImportRequest(BaseModel):
+    source_workflow_id: int
+    mode: Literal["preview", "merge"] = "merge"
+    expected_definition_revision: int | None = Field(default=None, ge=1)
+    idempotency_key: str | None = Field(default=None, min_length=8, max_length=100)
+
+
+class VideoCanvasRunRequest(BaseModel):
+    target_node_ids: list[str] = Field(default_factory=list, max_length=100)
+    expected_definition_revision: int = Field(ge=1)
+    idempotency_key: str | None = Field(default=None, min_length=8, max_length=100)
+
+
+class VideoCanvasRunConfirmRequest(BaseModel):
+    """确认画布运行计划；生成节点在此步骤后才允许派发。"""
+    confirmed: Literal[True] = True
 
 
 class ChapterWorkflowStageActionRequest(BaseModel):

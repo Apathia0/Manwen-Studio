@@ -113,8 +113,10 @@ lorevista-mobile/dist/
 *.md
 !README.md
 !AGENTS.md
+!THIRD_PARTY_NOTICES.md
 !deploy/docker/RELEASE_AND_UPDATE.md
 !deploy/docker/FAQ.md
+!docs/video-canvas-workflow-development.md
 !docs/superpowers/**/*.md
 !backend/references/writing/*.md
 

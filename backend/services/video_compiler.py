@@ -86,6 +86,7 @@ async def compile_project(
     burn_subtitle: bool = True,
     subtitle_data: list[dict[str, Any]] | None = None,
     bgm_path: str | None = None,
+    strict: bool = False,
 ) -> dict[str, Any]:
     """Compile video project from clips using ffmpeg.
 
@@ -115,6 +116,8 @@ async def compile_project(
             logger.warning("Clip video file not found, skipping: %s", video_path)
 
     if not valid_clips:
+        if strict:
+            raise RuntimeError("没有可用于拼接的视频片段")
         logger.warning("No valid clips to compile, creating placeholder")
         with open(output_path, "w") as f:
             f.write(f"# Compiled video (no clips)\n# Resolution: {resolution}\n")
@@ -178,6 +181,9 @@ async def compile_project(
             error_msg = stderr.decode("utf-8", errors="replace")[-500:] if stderr else "Unknown error"
             logger.error("ffmpeg compilation failed: %s", error_msg)
 
+            if strict:
+                raise RuntimeError(f"ffmpeg 拼接失败: {error_msg}")
+
             if valid_clips:
                 import shutil
                 shutil.copy2(valid_clips[0], output_path)
@@ -214,6 +220,8 @@ async def compile_project(
         }
 
     except FileNotFoundError:
+        if strict:
+            raise RuntimeError("服务器未安装 ffmpeg，无法拼接视频")
         logger.warning("ffmpeg not found on system, using mock compilation")
         with open(output_path, "w") as f:
             f.write(f"# ffmpeg not found - mock compilation\n# Clips: {len(valid_clips)}\n")

@@ -243,6 +243,7 @@ from services.chapter_generation_runtime import (
 from services.knowledge_ai_sync import sync_story_knowledge_with_ai
 from services.creation_studio import _public_media_url
 from routers.video import router as video_router, _to_video_url
+from routers.video_canvas import router as video_canvas_router
 from routers.deconstruction import router as deconstruction_router
 from routers.deconstruct_library import router as deconstruct_library_router
 
@@ -15397,6 +15398,7 @@ from routers.points_ai import router as points_ai_router
 from routers.creation_studio import router as creation_studio_router
 
 app.include_router(video_router)
+app.include_router(video_canvas_router)
 app.include_router(agent_router)
 app.include_router(deconstruction_router)
 app.include_router(deconstruct_library_router)

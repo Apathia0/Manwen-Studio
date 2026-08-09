@@ -16,7 +16,7 @@ from sse_starlette.sse import EventSourceResponse
 from starlette.background import BackgroundTask as ResponseBackgroundTask
 
 from database import SessionLocal, get_db
-from models import AgentConversation, AgentConversationMessage, AgentPendingChange, Chapter, ChapterVideoShot, ChapterVideoWorkflow, MangaAsset, MangaImage, Story, VideoAsset
+from models import AgentConversation, AgentConversationMessage, AgentPendingChange, Chapter, ChapterVideoShot, ChapterVideoWorkflow, MangaAsset, MangaImage, Story, VideoAsset, VideoCanvas, VideoCanvasVersion
 from schemas import AgentChatIn, AgentConversationCreateIn, AgentConversationOut, AgentConversationSummaryOut
 from services.agent_service import (
     AgentPendingChangeKey,
@@ -520,6 +520,10 @@ def create_conversation(
         workflow = db.get(ChapterVideoWorkflow, body.workflow_id)
         if not workflow or workflow.story_id != story_id:
             raise HTTPException(422, "视频工作流不存在或不属于当前作品")
+    if body.workflow_type == "video_canvas":
+        canvas = db.get(VideoCanvas, body.workflow_id)
+        if not canvas or canvas.story_id != story_id or canvas.owner_user_id != user.id:
+            raise HTTPException(422, "视频画布不存在或不属于当前作品")
 
     conversation = AgentConversation(
         story_id=story_id,
@@ -627,6 +631,40 @@ async def agent_chat(
     workflow_type = body.workflow_type
     workflow_id = body.workflow_id
     shot_id = body.shot_id
+
+    if workflow_type == "video_canvas" and workflow_id:
+        canvas = db.get(VideoCanvas, workflow_id)
+        if not canvas or canvas.story_id != story_id or canvas.owner_user_id != user.id:
+            raise HTTPException(422, "视频画布不存在或不属于当前作品")
+        version = (
+            db.query(VideoCanvasVersion)
+            .filter(VideoCanvasVersion.canvas_id == canvas.id)
+            .order_by(VideoCanvasVersion.version_no.desc())
+            .first()
+        )
+        graph = version.graph_json if version else {"nodes": [], "edges": []}
+        nodes = graph.get("nodes") if isinstance(graph, dict) else []
+        edges = graph.get("edges") if isinstance(graph, dict) else []
+        node_summary = [
+            {
+                "id": node.get("id"),
+                "type": node.get("type"),
+                "label": (node.get("data") or {}).get("label"),
+            }
+            for node in nodes[:80]
+            if isinstance(node, dict)
+        ]
+        story_context += (
+            "\n\n## 当前视频无限画布\n"
+            f"画布 ID: {canvas.id}\n"
+            f"名称: {canvas.name}\n"
+            f"定义版本: {canvas.definition_revision}\n"
+            f"节点数: {len(nodes) if isinstance(nodes, list) else 0}\n"
+            f"连线数: {len(edges) if isinstance(edges, list) else 0}\n"
+            f"节点摘要: {json.dumps(node_summary, ensure_ascii=False)}\n"
+            "该画布与列表分镜工作流独立。可以给出节点、连线、资产和风格建议；"
+            "涉及画布修改时必须先给出可审阅的变更方案，禁止直接执行生成或扣费。"
+        )
 
     # 漫画工作流自动附带当前章节的已生成图片，用户无需重复上传即可让视觉模型检查画面。
     context_image_attachments: list[dict[str, Any]] = []
