@@ -1,0 +1,45 @@
+{
+  "name": "StoryCanvas - AI 小说与漫画创作平台",
+  "short_name": "StoryCanvas",
+  "description": "AI 驱动的创作平台：小说创作、自动分镜、漫画图片生成和视频制作",
+  "lang": "zh-CN",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#0f172a",
+  "theme_color": "#1d4ed8",
+  "categories": ["productivity", "entertainment", "art"],
+  "icons": [
+    {
+      "src": "/pwa-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/pwa-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/pwa-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ],
+  "shortcuts": [
+    {
+      "name": "作品库",
+      "url": "/stories",
+      "description": "查看我的全部作品"
+    },
+    {
+      "name": "资产中心",
+      "url": "/assets",
+      "description": "跨作品查看图片与视频资产"
+    }
+  ]
+}

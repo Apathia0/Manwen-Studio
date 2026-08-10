@@ -1484,7 +1484,7 @@ const [downloadStatus, setDownloadStatus] = useState('');
               <button
                 type="button"
                 onClick={onOpenSourceViewer}
-                className="flex items-center gap-1.5 rounded-md border border-blue-200 bg-blue-50 px-3 py-1.5 text-xs font-medium text-blue-700 transition-colors hover:bg-blue-100"
+                className="flex items-center gap-1.5 rounded-md border border-blue-200 bg-blue-50 px-3 py-1.5 text-xs font-medium text-blue-700 transition-colors hover:bg-blue-100 max-md:min-h-[44px]"
               >
                 <BookOpen size={13} />
                 查看正文与分镜脚本
@@ -1522,7 +1522,7 @@ const [downloadStatus, setDownloadStatus] = useState('');
               <button
                 onClick={() => setAssetModalOpen(true)}
                 disabled={!chapter}
-                className={`flex items-center gap-1 px-3 py-1.5 text-xs font-medium rounded-md transition-colors
+                className={`flex items-center gap-1 px-3 py-1.5 text-xs font-medium rounded-md transition-colors max-md:min-h-[44px]
                   ${refImages.length > 0
                     ? 'bg-emerald-900/50 hover:bg-emerald-800 text-emerald-300 border border-emerald-700'
                     : 'bg-[#f3f5f0] hover:bg-[#e8ece6] text-slate-700'
@@ -1552,7 +1552,7 @@ const [downloadStatus, setDownloadStatus] = useState('');
                   }
                 }}
                 disabled={!canChangeImageCount}
-                className="px-2 py-1.5 text-xs font-medium rounded-md bg-[#f3f5f0] text-slate-700 border border-[#d9dfd7] outline-none focus:border-[#1f5f58] transition-colors disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
+                className="px-2 py-1.5 text-xs font-medium rounded-md bg-[#f3f5f0] text-slate-700 border border-[#d9dfd7] outline-none focus:border-[#1f5f58] transition-colors disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer max-md:min-h-[44px]"
                 title={canChangeImageCount ? '生成张数，下次生成分镜时生效' : '生成中暂不能修改生成张数'}
               >
                 {selectableImageCounts.map((n) => (
@@ -1564,7 +1564,7 @@ const [downloadStatus, setDownloadStatus] = useState('');
               <button
                 onClick={handleDownloadAll}
                 disabled={downloadingAll}
-                className="flex min-w-[8.5rem] items-center justify-center gap-1 px-3 py-1.5 text-xs font-medium rounded-md
+                className="flex min-w-[8.5rem] items-center justify-center gap-1 px-3 py-1.5 text-xs font-medium rounded-md max-md:min-h-[44px]
                            bg-[#f3f5f0] hover:bg-[#e8ece6] text-slate-700 transition-colors
                            disabled:opacity-50 disabled:cursor-not-allowed"
               >
@@ -1577,7 +1577,7 @@ const [downloadStatus, setDownloadStatus] = useState('');
                 type="button"
                 onClick={() => setStoryboardImportOpen(true)}
                 disabled={!chapter}
-                className="flex items-center gap-1.5 rounded-md border border-blue-200 bg-blue-50 px-3 py-1.5 text-xs font-medium text-blue-700 transition-colors hover:bg-blue-100 disabled:cursor-not-allowed disabled:opacity-40"
+                className="flex items-center gap-1.5 rounded-md border border-blue-200 bg-blue-50 px-3 py-1.5 text-xs font-medium text-blue-700 transition-colors hover:bg-blue-100 disabled:cursor-not-allowed disabled:opacity-40 max-md:min-h-[44px]"
               >
                 <Upload size={13} />
                 导入分镜
@@ -1587,7 +1587,7 @@ const [downloadStatus, setDownloadStatus] = useState('');
               <button
                 type="button"
                 onClick={() => setStoryboardPresetOpen(true)}
-                className="flex items-center gap-1.5 rounded-md border border-[#d9dfd7] bg-white px-3 py-1.5 text-xs font-medium transition-colors hover:bg-slate-50"
+                className="flex items-center gap-1.5 rounded-md border border-[#d9dfd7] bg-white px-3 py-1.5 text-xs font-medium transition-colors hover:bg-slate-50 max-md:min-h-[44px]"
               >
                 <FileText size={14} className={storyboardPresetId != null ? 'text-blue-500' : 'text-slate-400'} />
                 <span className={storyboardPresetId != null ? 'text-slate-900' : 'text-slate-500'}>{storyboardPresetName || '默认分镜模板'}</span>
@@ -1597,7 +1597,7 @@ const [downloadStatus, setDownloadStatus] = useState('');
               <button
                 onClick={handleGenerateScenes}
                 disabled={!chapter || (!chapter?.messages?.length && !chapter?.novel_content)}
-                className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md
+                className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md max-md:min-h-[44px]
                            bg-[#1f5f58] hover:bg-[#184c46] text-white disabled:opacity-40
                            disabled:cursor-not-allowed transition-colors"
               >
@@ -1616,7 +1616,7 @@ const [downloadStatus, setDownloadStatus] = useState('');
             <div className="relative" ref={colorMenuRef}>
               <button
                 onClick={() => setShowColorMenu((v) => !v)}
-                className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md transition-colors
+                className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md transition-colors max-md:min-h-[44px]
                   ${colorMode === 'color'
                     ? 'bg-pink-900/50 hover:bg-pink-800 text-pink-300 border border-pink-700'
                     : 'bg-[#f3f5f0] hover:bg-[#e8ece6] text-slate-700'}`}
@@ -1630,7 +1630,7 @@ const [downloadStatus, setDownloadStatus] = useState('');
                 <ChevronDown size={11} className={`transition-transform ${showColorMenu ? 'rotate-180' : ''}`} />
               </button>
               {showColorMenu && (
-                <div className="absolute right-0 top-full mt-1 w-40 rounded-lg border border-[#d9dfd7] bg-white shadow-xl z-50 overflow-hidden">
+                <div className="absolute right-0 top-full mt-1 w-40 rounded-lg border border-[#d9dfd7] bg-white shadow-xl z-50 overflow-hidden max-md:left-0 max-md:right-auto">
                   <button
                     onClick={() => handleSelectColorMode('bw')}
                     className={`w-full flex items-center gap-2 px-3 py-2.5 text-xs transition-colors hover:bg-[#f3f5f0]
@@ -1656,7 +1656,7 @@ const [downloadStatus, setDownloadStatus] = useState('');
             <select
               value={aspectRatio}
               onChange={(e) => void handleSelectAspectRatio(e.target.value as MangaAspectRatio)}
-              className="px-2 py-1.5 text-xs font-medium rounded-md border border-[#d9dfd7] bg-white text-slate-700 outline-none cursor-pointer focus:border-[#1f5f58]"
+              className="px-2 py-1.5 text-xs font-medium rounded-md border border-[#d9dfd7] bg-white text-slate-700 outline-none cursor-pointer focus:border-[#1f5f58] max-md:min-h-[44px]"
             >
               {ASPECT_RATIO_OPTIONS.map((opt) => (
                 <option key={opt.label} value={opt.label}>
@@ -1667,7 +1667,7 @@ const [downloadStatus, setDownloadStatus] = useState('');
             {/* 风格预设选择器 */}
              <button
               onClick={() => setStyleSelectorOpen(true)}
-              className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md border border-[#d9dfd7] bg-white hover:bg-slate-50 transition-colors"
+              className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md border border-[#d9dfd7] bg-white hover:bg-slate-50 transition-colors max-md:min-h-[44px]"
             >
               <Palette size={14} className={selectedStylePresetName || styleReferenceImageUrl ? 'text-blue-500' : 'text-slate-400'} />
               <span className={selectedStylePresetName || styleReferenceImageUrl ? 'text-slate-900' : 'text-slate-500'}>
@@ -1682,7 +1682,7 @@ const [downloadStatus, setDownloadStatus] = useState('');
               <button
                 type="button"
                 onClick={() => setAssetConfigOpen((value) => !value)}
-                className={`flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-xs font-medium transition-colors ${autoAssetExtractionEnabled ? 'border-blue-200 bg-blue-50 text-blue-700' : 'border-[#d9dfd7] bg-white text-slate-500'}`}
+                className={`flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-xs font-medium transition-colors max-md:min-h-[44px] ${autoAssetExtractionEnabled ? 'border-blue-200 bg-blue-50 text-blue-700' : 'border-[#d9dfd7] bg-white text-slate-500'}`}
                 aria-expanded={assetConfigOpen}
               >
                 <Settings2 size={13} />
@@ -1694,7 +1694,7 @@ const [downloadStatus, setDownloadStatus] = useState('');
                 <ChevronDown size={11} className={`transition-transform ${assetConfigOpen ? 'rotate-180' : ''}`} />
               </button>
               {assetConfigOpen && (
-                <div className="absolute right-0 top-full z-50 mt-1 w-56 rounded-lg border border-slate-200 bg-white p-3 shadow-xl">
+                <div className="absolute right-0 top-full z-50 mt-1 w-56 rounded-lg border border-slate-200 bg-white p-3 shadow-xl max-md:left-0 max-md:right-auto">
                   <label className="flex cursor-pointer items-center gap-2 border-b border-slate-100 pb-2 text-xs font-semibold text-slate-700">
                     <input
                       type="checkbox"
@@ -1742,7 +1742,7 @@ const [downloadStatus, setDownloadStatus] = useState('');
             <button
               onClick={handleGenerateImages}
               disabled={!sceneCountMatchesImageCount}
-              className="flex items-center gap-1.5 px-4 py-1.5 text-xs font-medium rounded-md
+              className="flex items-center gap-1.5 px-4 py-1.5 text-xs font-medium rounded-md max-md:min-h-[44px]
                          bg-amber-500 hover:bg-amber-400 text-slate-900 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
               title={sceneCountMatchesImageCount ? undefined : '当前分镜数与生成张数不一致，请先重新生成分镜'}
             >
@@ -1753,7 +1753,7 @@ const [downloadStatus, setDownloadStatus] = useState('');
               <button
                 onClick={handleRestartManga}
                 disabled={!sceneCountMatchesImageCount}
-                className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md
+                className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md max-md:min-h-[44px]
                            bg-[#f3f5f0] hover:bg-[#e8ece6] text-slate-800 border border-[#d9dfd7] transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
                 title="清空已生成图片，从第 1 张重新开始"
               >
@@ -1772,7 +1772,7 @@ const [downloadStatus, setDownloadStatus] = useState('');
               </span>
               <button
                 onClick={handleAbortScenes}
-                className="flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium rounded-md
+                className="flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium rounded-md max-md:min-h-[44px]
                            bg-red-900/50 hover:bg-red-800 text-red-300 border border-red-700 transition-colors"
                 title="停止生成分镜"
               >
@@ -1803,7 +1803,7 @@ const [downloadStatus, setDownloadStatus] = useState('');
             <div className="flex items-center gap-2 shrink-0">
               <button
                 onClick={handleAbortManga}
-                className="flex items-center gap-1 px-2.5 py-1 text-[11px] font-medium rounded-md
+                className="flex items-center gap-1 px-2.5 py-1 text-[11px] font-medium rounded-md max-md:min-h-[44px]
                            bg-red-900/50 hover:bg-red-800 text-red-300 border border-red-700 transition-colors"
                 title="停止生成漫画"
               >
@@ -1857,7 +1857,7 @@ const [downloadStatus, setDownloadStatus] = useState('');
               <button
                 onClick={handleGenerateFromSelection}
                 disabled={selectionLoading}
-                className="shrink-0 flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md
+                className="shrink-0 flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md max-md:min-h-[44px]
                            bg-amber-600 hover:bg-amber-500 text-white disabled:opacity-40
                            disabled:cursor-not-allowed transition-colors whitespace-nowrap"
               >
@@ -2091,7 +2091,7 @@ const [downloadStatus, setDownloadStatus] = useState('');
                                     <div className="flex items-center gap-3 pt-1">
                                       <button
                                         onClick={() => openCharacterRefModal(card.name)}
-                                        className="flex items-center gap-1 text-xs text-blue-400 hover:text-blue-300 transition-colors"
+                                        className="flex items-center gap-1 text-xs text-blue-400 hover:text-blue-300 transition-colors max-md:py-1.5"
                                       >
                                         <Upload size={11} />
                                         上传参考图
@@ -2099,7 +2099,7 @@ const [downloadStatus, setDownloadStatus] = useState('');
                                       <button
                                         onClick={() => handleGenerateCharacterRefImage(card.name, !!refImage)}
                                         disabled={!!charRefGeneratingKey}
-                                        className="flex items-center gap-1 text-xs text-amber-400 hover:text-amber-300 disabled:opacity-40 transition-colors"
+                                        className="flex items-center gap-1 text-xs text-amber-400 hover:text-amber-300 disabled:opacity-40 transition-colors max-md:py-1.5"
                                       >
                                         {generatingRef ? <Loader2 size={11} className="animate-spin" /> : <ImageIcon size={11} />}
                                         {generatingRef ? '生成中...' : refImage ? '重生成参考图' : '生成参考图'}
@@ -2107,7 +2107,7 @@ const [downloadStatus, setDownloadStatus] = useState('');
                                       {refImage && (
                                         <button
                                           onClick={() => setAssetModalOpen(true)}
-                                          className="flex items-center gap-1 text-xs text-emerald-400 hover:text-emerald-300 transition-colors"
+                                          className="flex items-center gap-1 text-xs text-emerald-400 hover:text-emerald-300 transition-colors max-md:py-1.5"
                                         >
                                           <ImagePlus size={11} />
                                           查看垫图
@@ -2140,7 +2140,7 @@ const [downloadStatus, setDownloadStatus] = useState('');
                             }
                           }}
                           disabled={charGenerating || charSaving}
-                          className="flex items-center gap-1 text-xs text-amber-400 hover:text-amber-300 disabled:opacity-40 transition-colors"
+                          className="flex items-center gap-1 text-xs text-amber-400 hover:text-amber-300 disabled:opacity-40 transition-colors max-md:py-1.5"
                         ><Sparkles size={11} /> {charGenerating ? '生成中...' : '根据角色设定重生成'}</button>
                       )}
                           {chapter && parsedCharacterCards.length > 0 && (
@@ -2174,7 +2174,7 @@ const [downloadStatus, setDownloadStatus] = useState('');
                                 );
                               }}
                               disabled={!!charRefGeneratingKey}
-                          className="flex items-center gap-1 text-xs text-emerald-400 hover:text-emerald-300 disabled:opacity-40 transition-colors"
+                          className="flex items-center gap-1 text-xs text-emerald-400 hover:text-emerald-300 disabled:opacity-40 transition-colors max-md:py-1.5"
                         >
                           {charRefGeneratingKey === '__all__' ? <Loader2 size={11} className="animate-spin" /> : <ImagePlus size={11} />}
                           {charRefGeneratingKey === '__all__' ? '生成中...' : '生成全部参考图'}
@@ -2182,7 +2182,7 @@ const [downloadStatus, setDownloadStatus] = useState('');
                       )}
                       <button
                         onClick={() => { setCharDraft(charText); setCharEditing(true); }}
-                        className="flex items-center gap-1 text-xs text-[#1f5f58] hover:text-[#1f5f58] transition-colors"
+                        className="flex items-center gap-1 text-xs text-[#1f5f58] hover:text-[#1f5f58] transition-colors max-md:py-1.5"
                       ><Pencil size={11} /> 编辑</button>
                       {charSource === 'chapter' && (
                         <button
@@ -2197,7 +2197,7 @@ const [downloadStatus, setDownloadStatus] = useState('');
                               setErrorMsg(err.message);
                             }
                           }}
-                          className="flex items-center gap-1 text-xs text-blue-400 hover:text-blue-300 transition-colors"
+                          className="flex items-center gap-1 text-xs text-blue-400 hover:text-blue-300 transition-colors max-md:py-1.5"
                         ><RefreshCw size={11} /> 恢复全局设定</button>
                       )}
                     </div>
@@ -2248,7 +2248,7 @@ const [downloadStatus, setDownloadStatus] = useState('');
               <button
                 type="button"
                 onClick={onOpenSourceViewer}
-                className="inline-flex shrink-0 items-center gap-1 rounded-md border border-emerald-300 bg-white px-2.5 py-1.5 font-medium text-emerald-700 transition hover:bg-emerald-100"
+                className="inline-flex shrink-0 items-center gap-1 rounded-md border border-emerald-300 bg-white px-2.5 py-1.5 font-medium text-emerald-700 transition hover:bg-emerald-100 max-md:min-h-[44px]"
               >
                 <BookOpen size={13} />
                 打开查看器
@@ -2360,7 +2360,7 @@ const [downloadStatus, setDownloadStatus] = useState('');
                     key={`generating-scene-${idx}`}
                     type="button"
                     onClick={() => scrollToSceneDetail(idx)}
-                    className={`min-w-[68px] flex-[0_0_auto] rounded-lg border px-2 py-1.5 text-left transition-colors ${
+                    className={`min-w-[68px] flex-[0_0_auto] rounded-lg border px-2 py-1.5 text-left transition-colors max-md:min-h-[44px] ${
                       failedSceneIdx === idx
                         ? 'border-red-200 bg-red-50'
                         : isCurrent
@@ -2485,7 +2485,7 @@ const [downloadStatus, setDownloadStatus] = useState('');
                       <button
                         onClick={() => handleGeneratePanel(image_number)}
                         disabled={panelGenLoading.includes(image_number)}
-                        className={`mt-1 flex items-center gap-1 px-3 py-1.5 text-xs font-medium rounded-md transition-colors ${
+                        className={`mt-1 flex items-center gap-1 px-3 py-1.5 text-xs font-medium rounded-md transition-colors max-md:min-h-[44px] ${
                           panelGenLoading.includes(image_number)
                             ? 'bg-amber-300 text-amber-700 cursor-wait'
                             : 'bg-amber-500 hover:bg-amber-400 text-slate-900'
@@ -2509,7 +2509,7 @@ const [downloadStatus, setDownloadStatus] = useState('');
                       failedSceneIdx === sceneIdx ? 'border-red-700 bg-red-950/20' : 'border-[#d9dfd7] bg-[#fbfcf8]'
                     }`}
                   >
-                    <div className="flex items-start gap-2">
+                    <div className="flex flex-col items-stretch gap-2 sm:flex-row sm:items-start">
                       {isEditing ? (
                         <textarea
                           value={editText}
@@ -2527,7 +2527,7 @@ const [downloadStatus, setDownloadStatus] = useState('');
                           {scene}
                         </p>
                       )}
-                      <div className="shrink-0 flex items-center gap-1">
+                      <div className="shrink-0 flex items-center gap-1 max-sm:justify-end">
                         {isSanitized && !isEditing && (
                           <span className="px-2 py-1 rounded bg-amber-50 text-[10px] text-amber-700 border border-amber-200">
                             已自动降敏
@@ -2535,25 +2535,25 @@ const [downloadStatus, setDownloadStatus] = useState('');
                         )}
                         {isEditing ? (
                           <>
-                            <button onClick={() => handleSceneSave(sceneIdx)} className="p-1 rounded hover:bg-[#e8ece6] text-emerald-600 transition-colors" title="保存"><Check size={13} /></button>
-                            <button onClick={() => setEditingIdx(-1)} className="p-1 rounded hover:bg-[#e8ece6] text-slate-500 transition-colors" title="取消"><X size={13} /></button>
+                            <button onClick={() => handleSceneSave(sceneIdx)} className="p-1 max-sm:p-2 rounded hover:bg-[#e8ece6] text-emerald-600 transition-colors" title="保存"><Check size={13} /></button>
+                            <button onClick={() => setEditingIdx(-1)} className="p-1 max-sm:p-2 rounded hover:bg-[#e8ece6] text-slate-500 transition-colors" title="取消"><X size={13} /></button>
                           </>
                         ) : (
                           <>
                             {failedSceneIdx === sceneIdx && (
                               <button
                                 onClick={() => handleOptimizeFailedScene(sceneIdx)}
-                                className="px-2 py-1 rounded bg-red-50 hover:bg-red-100 text-[10px] text-red-700 border border-red-200 transition-colors"
+                                className="px-2 py-1 rounded bg-red-50 hover:bg-red-100 text-[10px] text-red-700 border border-red-200 transition-colors max-sm:min-h-[36px]"
                                 title="重新修改并优化当前失败分镜"
                               >
                                 优化降敏
                               </button>
                             )}
-                            <button onClick={() => handleSceneEdit(sceneIdx)} className="p-1 rounded hover:bg-[#e8ece6] text-slate-500 hover:text-slate-700 transition-colors" title="编辑分镜"><Pencil size={12} /></button>
+                            <button onClick={() => handleSceneEdit(sceneIdx)} className="p-1 max-sm:p-2 rounded hover:bg-[#e8ece6] text-slate-500 hover:text-slate-700 transition-colors" title="编辑分镜"><Pencil size={12} /></button>
                             <button
                               onClick={() => openMangaRedraw(image_number)}
                               disabled={isRegenerating || generating}
-                              className="p-1 rounded hover:bg-[#e8ece6] text-slate-500 hover:text-blue-600 disabled:opacity-30 transition-colors"
+                              className="p-1 max-sm:p-2 rounded hover:bg-[#e8ece6] text-slate-500 hover:text-blue-600 disabled:opacity-30 transition-colors"
                               title="局部重绘 / 整图重绘"
                             >
                               <ImageIcon size={12} />
@@ -2561,7 +2561,7 @@ const [downloadStatus, setDownloadStatus] = useState('');
                             <button
                               onClick={() => handleRegenImage(image_number)}
                               disabled={isRegenerating || generating}
-                              className="p-1 rounded hover:bg-[#e8ece6] text-slate-500 hover:text-amber-400 disabled:opacity-30 transition-colors"
+                              className="p-1 max-sm:p-2 rounded hover:bg-[#e8ece6] text-slate-500 hover:text-amber-400 disabled:opacity-30 transition-colors"
                               title="重新生成此图"
                             >
                               <RefreshCw size={12} />
@@ -2783,7 +2783,7 @@ const [downloadStatus, setDownloadStatus] = useState('');
                 </div>
               )}
             </div>
-            <div className="px-5 py-3 border-t border-[#d9dfd7] flex items-center justify-between gap-2">
+            <div className="px-5 py-3 border-t border-[#d9dfd7] flex flex-wrap items-center justify-between gap-2">
               <span className="text-xs text-slate-500">
                 {refSource === 'chapter'
                   ? '本话自定义垫图（覆盖全局）'
@@ -2961,14 +2961,14 @@ const [downloadStatus, setDownloadStatus] = useState('');
                 <button
                   onClick={() => charRefFileRef.current?.click()}
                   disabled={charRefModalUploading}
-                  className="flex-1 px-4 py-2 bg-[#1d4ed8] text-white rounded-lg hover:bg-[#1e40af] disabled:opacity-50"
+                  className="flex-1 px-4 py-2 bg-[#1d4ed8] text-white rounded-lg hover:bg-[#1e40af] disabled:opacity-50 max-md:min-h-[44px]"
                 >
                   {charRefModalUploading ? '上传中...' : '上传参考图'}
                 </button>
                 {charRefModalImage && (
                   <button
                     onClick={handleDeleteCharacterRef}
-                    className="px-4 py-2 bg-red-500 text-white rounded-lg hover:bg-red-600"
+                    className="px-4 py-2 bg-red-500 text-white rounded-lg hover:bg-red-600 max-md:min-h-[44px]"
                   >
                     删除
                   </button>
@@ -3057,7 +3057,7 @@ function RefPreviewModal({
         className="flex h-[88vh] w-[min(1400px,94vw)] flex-col overflow-hidden rounded-[30px] border border-[#d7e3f4] bg-white shadow-[0_30px_90px_rgba(15,23,42,0.28)]"
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="flex items-center justify-between border-b border-[#e5edf8] px-6 py-4">
+        <div className="flex items-center justify-between border-b border-[#e5edf8] px-6 py-4 max-md:px-4">
           <div>
             <div className="text-lg font-semibold text-slate-900">{target.title}</div>
             <div className="mt-1 text-sm text-slate-500">左侧查看角色大图，右侧查看人物提示词并决定是否进入重绘。</div>
@@ -3075,7 +3075,7 @@ function RefPreviewModal({
                 <span>滚轮缩放 · 拖拽平移</span>
               </div>
             </div>
-            <div className="mx-auto flex h-[62vh] w-full items-center justify-center rounded-[24px] border border-white/10 bg-black/20 p-4">
+            <div className="mx-auto flex h-[62vh] w-full items-center justify-center rounded-[24px] border border-white/10 bg-black/20 p-4 max-md:h-[45vh]">
               {ready ? (
                 <ImageZoomView
                   src={imageSrc}
@@ -3083,7 +3083,7 @@ function RefPreviewModal({
                   className="h-full w-full rounded-xl"
                 />
               ) : (
-                <div className="flex min-h-[420px] min-w-[320px] items-center justify-center rounded-xl bg-[linear-gradient(180deg,_#08111d_0%,_#111827_100%)] text-white/70">
+                <div className="flex min-h-[420px] min-w-[320px] items-center justify-center rounded-xl bg-[linear-gradient(180deg,_#08111d_0%,_#111827_100%)] text-white/70 max-md:min-h-0 max-md:min-w-0">
                   <Loader2 size={24} className="animate-spin" />
                 </div>
               )}
@@ -3104,7 +3104,7 @@ function RefPreviewModal({
               <div className="rounded-2xl border border-[#d7e3f4] bg-white p-4">
                 <div className="text-sm font-medium text-slate-800">后续操作</div>
                 <div className="mt-1 text-xs leading-5 text-slate-500">如果只想查看，直接关闭即可；如果要修改角色图，点击下方按钮进入整图/局部重绘。</div>
-                <div className="mt-4 flex gap-3">
+                <div className="mt-4 flex flex-wrap gap-3">
                   <button
                     type="button"
                     disabled={busy}

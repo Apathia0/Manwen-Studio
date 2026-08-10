@@ -20,7 +20,12 @@ export interface GenState {
 const states = new Map<number, GenState>();
 const listeners = new Set<() => void>();
 
+// 快照缓存：useSyncExternalStore 要求 getSnapshot 每次渲染返回同一引用，
+// 否则 React 会判定 store 持续变化导致无限重渲染。状态变更时（emit）失效重建。
+let snapshotCache: Map<number, GenState> | null = null;
+
 function emit() {
+  snapshotCache = null;
   listeners.forEach((fn) => fn());
 }
 
@@ -73,6 +78,11 @@ export const genStore = {
   },
   clear(chapterId: number) {
     if (states.delete(chapterId)) emit();
+  },
+  /** 返回当前全部漫画生成状态的快照（任务中心聚合用）。已缓存映射，变更时自动失效 */
+  snapshot(): Map<number, GenState> {
+    if (!snapshotCache) snapshotCache = new Map(states);
+    return snapshotCache;
   },
   subscribe(fn: () => void): () => void {
     listeners.add(fn);

@@ -125,7 +125,7 @@ export function ModelCatalogPage() {
           <h2 className="mt-2 text-2xl font-semibold text-slate-950">模型能力与定价</h2>
           <p className="mt-1 text-sm text-slate-500">浏览平台已上架模型的介绍、能力参数与积分价格。</p>
         </div>
-        <Button type="button" variant="secondary" icon={<RefreshCw size={14} />} loading={loading} onClick={() => void loadCatalog()}>
+        <Button type="button" variant="secondary" className="max-md:min-h-[44px]" icon={<RefreshCw size={14} />} loading={loading} onClick={() => void loadCatalog()}>
           刷新
         </Button>
       </div>
@@ -141,7 +141,7 @@ export function ModelCatalogPage() {
               role="tab"
               aria-selected={active}
               onClick={() => setActiveModality(item.key)}
-              className={`inline-flex h-10 items-center gap-2 rounded-md border px-4 text-sm font-medium transition-colors ${active ? 'border-blue-600 bg-blue-600 text-white' : 'border-slate-200 bg-white text-slate-600 hover:border-blue-200 hover:text-blue-700'}`}
+              className={`max-md:min-h-[44px] inline-flex h-10 items-center gap-2 rounded-md border px-4 text-sm font-medium transition-colors ${active ? 'border-blue-600 bg-blue-600 text-white' : 'border-slate-200 bg-white text-slate-600 hover:border-blue-200 hover:text-blue-700'}`}
             >
               <Icon size={16} aria-hidden="true" />
               {item.label}

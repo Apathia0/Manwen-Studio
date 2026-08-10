@@ -224,7 +224,7 @@ export default function DeconstructionWorkPage({ workId, onBack }: Props) {
     return (
       <div className="flex flex-1 flex-col space-y-3 rounded-lg border border-violet-200 bg-white p-4 text-left shadow-sm">
         <div className="flex items-start justify-between rounded-lg bg-violet-50 p-3">
-          <div>
+          <div className="min-w-0">
             <h4 className="font-semibold text-violet-800">作者风格画像</h4>
             <p className="mt-1 text-xs text-violet-600">基于抽样章节生成，适合提取写法和套路。</p>
           </div>
@@ -433,17 +433,17 @@ export default function DeconstructionWorkPage({ workId, onBack }: Props) {
   // 顶部标题栏
   const header = (
     <div className="flex items-center justify-between border-b border-slate-200 px-4 py-3">
-      <div className="flex items-center gap-3">
+      <div className="flex min-w-0 items-center gap-3">
         <button
           onClick={onBack}
-          className="flex items-center gap-1 rounded p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-600"
+          className="flex shrink-0 items-center gap-1 rounded p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-600"
         >
           <ArrowLeft className="h-4 w-4" />
           <span className="text-sm">返回库</span>
         </button>
         {work && (
-          <div className="flex items-center gap-2">
-            <span className="text-sm font-semibold text-slate-700">
+          <div className="flex min-w-0 items-center gap-2">
+            <span className="min-w-0 truncate text-sm font-semibold text-slate-700">
               {work.title}
             </span>
             {work.author && (
@@ -463,16 +463,16 @@ export default function DeconstructionWorkPage({ workId, onBack }: Props) {
         <div className="flex items-center justify-between border-b border-slate-200 px-4 py-3">
           <button
             onClick={handleCancelEditAuthorStyle}
-            className="flex items-center gap-1 rounded-lg border border-slate-200 bg-white px-4 py-1.5 text-sm font-medium text-slate-600 hover:bg-slate-50"
+            className="flex items-center gap-1 rounded-lg border border-slate-200 bg-white px-4 py-1.5 text-sm font-medium text-slate-600 hover:bg-slate-50 max-md:px-2"
           >
             <ArrowLeft className="h-4 w-4" />
             取消
           </button>
-          <h3 className="text-sm font-semibold text-slate-700">编辑作者画像报告</h3>
+          <h3 className="text-sm font-semibold text-slate-700 max-md:min-w-0 max-md:truncate">编辑作者画像报告</h3>
           <button
             onClick={handleSaveAuthorStyle}
             disabled={savingAuthorStyle || !hasChanges}
-            className="rounded-lg bg-blue-600 px-4 py-1.5 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50"
+            className="rounded-lg bg-blue-600 px-4 py-1.5 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50 max-md:px-2"
           >
             {savingAuthorStyle ? '保存中...' : '保存更改'}
           </button>
@@ -738,7 +738,7 @@ export default function DeconstructionWorkPage({ workId, onBack }: Props) {
                       key={book.book_id}
                       className="rounded-lg border border-slate-200 p-3 hover:border-blue-300"
                     >
-                      <div className="flex items-start justify-between">
+                      <div className="flex items-start justify-between max-md:flex-col max-md:gap-2">
                         <div className="flex-1 min-w-0">
                           <h4 className="font-semibold text-slate-800 truncate">
                             {book.title}
@@ -763,7 +763,7 @@ export default function DeconstructionWorkPage({ workId, onBack }: Props) {
                           <button
                             onClick={() => handleCreate(book)}
                             disabled={creating}
-                            className="ml-2 flex shrink-0 items-center gap-1 rounded-lg bg-green-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-green-700 disabled:opacity-50"
+                            className="ml-2 flex shrink-0 items-center gap-1 rounded-lg bg-green-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-green-700 disabled:opacity-50 max-md:ml-0 max-md:self-start"
                           >
                             {creating ? (
                               <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -773,14 +773,14 @@ export default function DeconstructionWorkPage({ workId, onBack }: Props) {
                             爬取并提取
                           </button>
                         ) : (
-                          <span className="ml-2 inline-flex flex-col items-end gap-1">
+                          <span className="ml-2 inline-flex flex-col items-end gap-1 max-md:ml-0 max-md:items-start">
                             <button
                               onClick={() => { setShowUploadForm(true); setError(null); }}
                               className="rounded-lg bg-amber-50 px-3 py-1.5 text-xs font-medium text-amber-700 hover:bg-amber-100"
                             >
                               上传原文
                             </button>
-                            <span className="text-xs text-amber-500 whitespace-nowrap">
+                            <span className="text-xs text-amber-500 whitespace-nowrap max-md:whitespace-normal">
                               {CRAWL_UNSUPPORTED_MESSAGE[book.platform] || '暂不支持自动爬取'}
                             </span>
                           </span>
@@ -886,16 +886,16 @@ export default function DeconstructionWorkPage({ workId, onBack }: Props) {
           <div className="flex items-center justify-between border-b border-slate-200 px-4 py-3">
             <button
               onClick={handleCancelEditAuthorStyle}
-              className="flex items-center gap-1 rounded-lg border border-slate-200 bg-white px-4 py-1.5 text-sm font-medium text-slate-600 hover:bg-slate-50"
+              className="flex items-center gap-1 rounded-lg border border-slate-200 bg-white px-4 py-1.5 text-sm font-medium text-slate-600 hover:bg-slate-50 max-md:px-2"
             >
               <ArrowLeft className="h-4 w-4" />
               取消
             </button>
-            <h3 className="text-sm font-semibold text-slate-700">编辑作者画像报告</h3>
+            <h3 className="text-sm font-semibold text-slate-700 max-md:min-w-0 max-md:truncate">编辑作者画像报告</h3>
             <button
               onClick={handleSaveAuthorStyle}
               disabled={savingAuthorStyle || !hasChanges}
-              className="rounded-lg bg-blue-600 px-4 py-1.5 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50"
+              className="rounded-lg bg-blue-600 px-4 py-1.5 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50 max-md:px-2"
             >
               {savingAuthorStyle ? '保存中...' : '保存更改'}
             </button>
@@ -914,7 +914,7 @@ export default function DeconstructionWorkPage({ workId, onBack }: Props) {
     return (
       <div className="flex h-full flex-col">
         {header}
-        <div className="flex flex-1 flex-col gap-4 overflow-auto p-6">
+        <div className="flex flex-1 flex-col gap-4 overflow-auto p-6 max-md:p-4">
           <div className="flex items-center gap-3">
             <CheckCircle2 className="h-8 w-8 text-green-500" />
             <div>

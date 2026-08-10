@@ -4001,6 +4001,57 @@ export async function listMangaAssets(storyId: number): Promise<{ assets: MangaA
   return res.json();
 }
 
+// ── 跨作品资产中心 API ──────────────────────────────────────
+
+/** 跨作品资产类型：漫画图片 / 漫画素材 / 视频素材 / 视频分镜 / 视频成片 */
+export type CrossStoryAssetKind =
+  | 'manga_image'
+  | 'manga_asset'
+  | 'video_asset'
+  | 'video_storyboard'
+  | 'video_shot';
+
+/** 跨作品资产的媒体类型 */
+export type CrossStoryAssetMediaType = 'image' | 'video';
+
+/** 跨作品资产中心中的单个资产项（url 可直接用于 <img>/<video> 的 src） */
+export interface CrossStoryAsset {
+  id: number;
+  kind: CrossStoryAssetKind;
+  media_type: CrossStoryAssetMediaType;
+  story_id: number;
+  chapter_id: number | null;
+  name: string;
+  url: string;
+  created_at: string;
+  meta: Record<string, unknown>;
+}
+
+/** 跨作品资产中心响应：作品列表（用于筛选下拉）+ 资产列表 + 总数 */
+export interface CrossStoryAssetList {
+  stories: { id: number; title: string }[];
+  assets: CrossStoryAsset[];
+  total: number;
+}
+
+/**
+ * 分页查询跨作品资产列表。
+ * 支持按类型 kind / 作品 story_id 过滤，limit/offset 分页。
+ */
+export async function listAssets(params?: { kind?: string; story_id?: number; limit?: number; offset?: number }): Promise<CrossStoryAssetList> {
+  const query = new URLSearchParams();
+  if (params?.kind) query.set('kind', params.kind);
+  if (params?.story_id != null) query.set('story_id', String(params.story_id));
+  if (params?.limit != null) query.set('limit', String(params.limit));
+  if (params?.offset != null) query.set('offset', String(params.offset));
+  const queryString = query.toString();
+  const res = await fetch(`${BASE}/api/assets${queryString ? `?${queryString}` : ''}`, {
+    headers: apiHeaders(),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
+  return res.json();
+}
+
 export async function createChapterWorkflowShot(
   workflowId: number,
   payload: ChapterVideoShotCreate,

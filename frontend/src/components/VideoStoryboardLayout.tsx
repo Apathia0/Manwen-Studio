@@ -751,11 +751,12 @@ export default function VideoStoryboardLayout({
   }
 
   return (
-    <div className="flex h-full min-h-0 bg-white">
+    <div className="relative flex h-full min-h-0 flex-col bg-white sm:flex-row">
       <ChapterListPanel
         chapters={chapterInfos}
         selectedChapterId={resolvedChapter?.id ?? null}
         collapsed={leftCollapsed}
+        className="max-sm:h-[132px] max-sm:w-full"
         onSelect={(chapter) => {
           onChapterChange(chapter);
           setWorkflow(null);
@@ -824,10 +825,10 @@ export default function VideoStoryboardLayout({
         />
       </div>
 
-      {/* AI 视频工作流助手 — 内嵌面板 */}
+      {/* AI 视频工作流助手 — 桌面内嵌右栏，移动端全屏抽屉 */}
       {videoAgentOpen && workflow && (
-        <div className="flex w-[400px] shrink-0 flex-col overflow-hidden border-l border-[#d7e3f4] bg-white">
-          <div className="flex items-center justify-between px-4 py-3 border-b border-[#d7e3f4] shrink-0">
+        <div className="flex w-[400px] shrink-0 flex-col overflow-hidden border-l border-[#d7e3f4] bg-white max-sm:fixed max-sm:inset-0 max-sm:z-40 max-sm:w-full max-sm:border-l-0">
+          <div className="flex items-center justify-between px-4 py-3 border-b border-[#d7e3f4] shrink-0" style={{ paddingTop: 'calc(env(safe-area-inset-top, 0px) + 12px)' }}>
             <span className="text-sm font-semibold text-slate-700">AI 视频工作流助手</span>
             <button onClick={handleCloseAgentPanel} className="text-slate-400 hover:text-slate-600 text-lg leading-none">&times;</button>
           </div>

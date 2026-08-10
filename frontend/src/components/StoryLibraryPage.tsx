@@ -1,9 +1,11 @@
 import { useState } from 'react';
-import { Check, ImageIcon, Pencil, Plus, ScrollText, Trash2, X } from 'lucide-react';
+import { Check, ImageIcon, MoreHorizontal, Pencil, Plus, ScrollText, Trash2, Upload, X } from 'lucide-react';
 import { coverImageUrl, listChapters, type Story } from '../api';
 import { exportStoryAsZip } from '../lib/exportStory';
 import { confirm } from '../lib/confirm';
+import { showActionSheet } from './mobile/MobileActionSheet';
 import NovelCoverEditModal from './NovelCoverEditModal';
+import ImportDialog from './ImportDialog';
 import MediaImage from './shared/MediaImage';
 
 interface Props {
@@ -15,6 +17,8 @@ interface Props {
   onUpdateStory: (storyId: number, payload: { title?: string; description?: string }) => Promise<Story>;
   onDeleteStory: (story: Story) => Promise<void>;
   onOpen: (story: Story) => Promise<void>;
+  /** 作品导入完成回调（storyId 为新建作品 ID） */
+  onImportComplete: (storyId: number) => void;
   loadingWorkspace: boolean;
 }
 
@@ -27,9 +31,11 @@ export default function StoryLibraryPage({
   onUpdateStory,
   onDeleteStory,
   onOpen,
+  onImportComplete,
   loadingWorkspace,
 }: Props) {
   const [showCreateForm, setShowCreateForm] = useState(false);
+  const [showImportDialog, setShowImportDialog] = useState(false);
   const [draftTitle, setDraftTitle] = useState('');
   const [draftDescription, setDraftDescription] = useState('');
   const [editingId, setEditingId] = useState<number | null>(null);
@@ -109,9 +115,47 @@ export default function StoryLibraryPage({
     }
   };
 
+  const openStoryActions = (story: Story) => {
+    const isBusy = savingId !== null || deletingId !== null;
+    showActionSheet({
+      title: story.title,
+      actions: [
+        {
+          key: 'export',
+          label: '导出作品',
+          icon: ScrollText,
+          disabled: isBusy || exportingStoryId === story.id,
+          onClick: () => void handleExport(story),
+        },
+        {
+          key: 'cover',
+          label: '封面编辑',
+          icon: ImageIcon,
+          disabled: isBusy,
+          onClick: () => setCoverEditorStoryId(story.id),
+        },
+        {
+          key: 'edit',
+          label: '编辑信息',
+          icon: Pencil,
+          disabled: isBusy,
+          onClick: () => startEdit(story),
+        },
+        {
+          key: 'delete',
+          label: '删除作品',
+          icon: Trash2,
+          danger: true,
+          disabled: isBusy,
+          onClick: () => void handleDelete(story),
+        },
+      ],
+    });
+  };
+
   return (
     <div>
-      <div className="mb-4 flex items-center justify-between">
+      <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
         <div>
           <h2 className="text-xl font-semibold">作品首页</h2>
           <p className="text-sm text-slate-600">管理你的小说项目，并从这里进入创作工作台。</p>
@@ -122,6 +166,13 @@ export default function StoryLibraryPage({
             className="rounded-md border border-[#d9dfd7] bg-white px-3 py-2 text-sm"
           >
             刷新
+          </button>
+          <button
+            onClick={() => setShowImportDialog(true)}
+            className="inline-flex items-center gap-1 rounded-md border border-[#d9dfd7] bg-white px-3 py-2 text-sm text-slate-700"
+          >
+            <Upload size={14} />
+            导入
           </button>
           <button
             onClick={() => {
@@ -232,77 +283,91 @@ export default function StoryLibraryPage({
                   </div>
                 ) : (
                   <>
-                    <div
-                      onClick={() => void onOpen(story)}
-                      className="group/book relative block w-full cursor-pointer overflow-hidden rounded-lg border border-[#e2e8f0] bg-gradient-to-br from-slate-50 to-slate-100 shadow-sm transition-all hover:shadow-md"
-                    >
-                      {story.cover_image ? (
-                        <div className="relative aspect-[2/3] w-full overflow-hidden bg-slate-100">
-                          <MediaImage
-                            src={coverImageUrl(story.cover_image) || ''}
-                            alt={story.title}
-                            className="h-full w-full object-cover"
-                            priority
-                          />
-                        </div>
-                      ) : (
-                        <div className="flex aspect-[2/3] w-full items-center justify-center bg-gradient-to-br from-blue-50 to-indigo-50 p-4">
-                          <span className="text-4xl font-bold text-blue-200/80 select-none">
-                            {story.title.charAt(0)}
-                          </span>
-                        </div>
-                      )}
-                      
-                      <div className="absolute inset-0 flex items-end justify-center bg-gradient-to-t from-black/60 via-transparent to-transparent p-3 opacity-0 transition-opacity group-hover/book:opacity-100">
-                        <div className="flex gap-1.5">
-                          <span
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              if (isExporting || savingId !== null || deletingId !== null) return;
-                              void handleExport(story);
-                            }}
-                            className={`rounded-md px-2 py-1.5 text-xs font-medium backdrop-blur-sm transition hover:bg-white ${isExporting || savingId !== null || deletingId !== null ? 'cursor-not-allowed opacity-60' : 'cursor-pointer'} bg-white/90 text-slate-700`}
-                            title="导出"
-                          >
-                            <ScrollText size={14} />
-                          </span>
-                          <span
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              if (savingId !== null || deletingId !== null) return;
-                              setCoverEditorStoryId(story.id);
-                            }}
-                            className={`rounded-md px-2 py-1.5 text-xs font-medium backdrop-blur-sm transition hover:bg-white ${savingId !== null || deletingId !== null ? 'cursor-not-allowed opacity-60' : 'cursor-pointer'} bg-white/90 text-[#1d4ed8]`}
-                            title="封面编辑"
-                          >
-                            <ImageIcon size={14} />
-                          </span>
-                          <span
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              if (savingId !== null || deletingId !== null) return;
-                              startEdit(story);
-                            }}
-                            className={`rounded-md px-2 py-1.5 text-xs font-medium backdrop-blur-sm transition hover:bg-white ${savingId !== null || deletingId !== null ? 'cursor-not-allowed opacity-60' : 'cursor-pointer'} bg-white/90 text-slate-700`}
-                            title="编辑"
-                          >
-                            <Pencil size={14} />
-                          </span>
-                          <span
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              if (savingId !== null || deletingId !== null) return;
-                              void handleDelete(story);
-                            }}
-                            className={`rounded-md px-2 py-1.5 text-xs font-medium backdrop-blur-sm transition hover:bg-white ${savingId !== null || deletingId !== null ? 'cursor-not-allowed opacity-60' : 'cursor-pointer'} bg-white/90 text-rose-600`}
-                            title="删除"
-                          >
-                            <Trash2 size={14} />
-                          </span>
+                    <div className="relative">
+                      <div
+                        onClick={() => void onOpen(story)}
+                        className="group/book relative block w-full cursor-pointer overflow-hidden rounded-lg border border-[#e2e8f0] bg-gradient-to-br from-slate-50 to-slate-100 shadow-sm transition-all hover:shadow-md"
+                      >
+                        {story.cover_image ? (
+                          <div className="relative aspect-[2/3] w-full overflow-hidden bg-slate-100">
+                            <MediaImage
+                              src={coverImageUrl(story.cover_image) || ''}
+                              alt={story.title}
+                              className="h-full w-full object-cover"
+                              priority
+                            />
+                          </div>
+                        ) : (
+                          <div className="flex aspect-[2/3] w-full items-center justify-center bg-gradient-to-br from-blue-50 to-indigo-50 p-4">
+                            <span className="text-4xl font-bold text-blue-200/80 select-none">
+                              {story.title.charAt(0)}
+                            </span>
+                          </div>
+                        )}
+
+                        <div className="absolute inset-0 flex items-end justify-center bg-gradient-to-t from-black/60 via-transparent to-transparent p-3 opacity-0 transition-opacity group-hover/book:opacity-100">
+                          <div className="flex gap-1.5">
+                            <span
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                if (isExporting || savingId !== null || deletingId !== null) return;
+                                void handleExport(story);
+                              }}
+                              className={`rounded-md px-2 py-1.5 text-xs font-medium backdrop-blur-sm transition hover:bg-white ${isExporting || savingId !== null || deletingId !== null ? 'cursor-not-allowed opacity-60' : 'cursor-pointer'} bg-white/90 text-slate-700`}
+                              title="导出"
+                            >
+                              <ScrollText size={14} />
+                            </span>
+                            <span
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                if (savingId !== null || deletingId !== null) return;
+                                setCoverEditorStoryId(story.id);
+                              }}
+                              className={`rounded-md px-2 py-1.5 text-xs font-medium backdrop-blur-sm transition hover:bg-white ${savingId !== null || deletingId !== null ? 'cursor-not-allowed opacity-60' : 'cursor-pointer'} bg-white/90 text-[#1d4ed8]`}
+                              title="封面编辑"
+                            >
+                              <ImageIcon size={14} />
+                            </span>
+                            <span
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                if (savingId !== null || deletingId !== null) return;
+                                startEdit(story);
+                              }}
+                              className={`rounded-md px-2 py-1.5 text-xs font-medium backdrop-blur-sm transition hover:bg-white ${savingId !== null || deletingId !== null ? 'cursor-not-allowed opacity-60' : 'cursor-pointer'} bg-white/90 text-slate-700`}
+                              title="编辑"
+                            >
+                              <Pencil size={14} />
+                            </span>
+                            <span
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                if (savingId !== null || deletingId !== null) return;
+                                void handleDelete(story);
+                              }}
+                              className={`rounded-md px-2 py-1.5 text-xs font-medium backdrop-blur-sm transition hover:bg-white ${savingId !== null || deletingId !== null ? 'cursor-not-allowed opacity-60' : 'cursor-pointer'} bg-white/90 text-rose-600`}
+                              title="删除"
+                            >
+                              <Trash2 size={14} />
+                            </span>
+                          </div>
                         </div>
                       </div>
+                      {/* 移动端显式"更多"按钮：触摸设备无 hover，必须提供明确操作入口 */}
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          openStoryActions(story);
+                        }}
+                        className="absolute right-1.5 top-1.5 flex h-8 w-8 items-center justify-center rounded-full bg-black/35 text-white backdrop-blur-sm transition active:bg-black/55 md:hidden"
+                        aria-label={`${story.title} 更多操作`}
+                      >
+                        <MoreHorizontal size={16} />
+                      </button>
                     </div>
-                    
+
                     <div className="mt-2 px-0.5">
                       <div className="truncate text-sm font-medium text-slate-800" title={story.title}>
                         {story.title}
@@ -333,6 +398,15 @@ export default function StoryLibraryPage({
           onUpdated={onRefresh}
         />
       )}
+
+      <ImportDialog
+        open={showImportDialog}
+        onClose={() => setShowImportDialog(false)}
+        onImportComplete={(storyId) => {
+          setShowImportDialog(false);
+          onImportComplete(storyId);
+        }}
+      />
     </div>
   );
 }

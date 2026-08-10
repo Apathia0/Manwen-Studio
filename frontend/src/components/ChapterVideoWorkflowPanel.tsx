@@ -487,12 +487,12 @@ onOpenAssetManagement,
   return (
     <div className="flex h-full flex-col">
       {/* ── 顶部：阶段操作工具栏 ── */}
-      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#d7e3f4] bg-white/80 px-4 py-2.5 backdrop-blur">
-        <div className="flex items-center gap-2">
+      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#d7e3f4] bg-white/80 px-4 py-2.5 backdrop-blur max-md:flex-col max-md:items-stretch">
+        <div className="flex items-center gap-2 max-md:flex-wrap">
           <span className="mr-1 text-sm font-medium text-slate-900">电影分镜流水线</span>
           <button
             onClick={() => onOpenStyleSelector?.()}
-            className="inline-flex items-center gap-1.5 rounded-lg border border-[#d7e3f4] bg-white px-2.5 py-1.5 text-xs text-slate-600 hover:bg-slate-50"
+            className="inline-flex items-center gap-1.5 rounded-lg border border-[#d7e3f4] bg-white px-2.5 py-1.5 text-xs text-slate-600 hover:bg-slate-50 max-md:min-h-[44px]"
           >
             <Palette size={14} /> {selectedStyle || '选择风格'}
             {styleReferenceImageUrl && <span className="text-blue-500">(自定义)</span>}
@@ -500,20 +500,20 @@ onOpenAssetManagement,
           {onOpenAssetManagement && (
             <button
               onClick={onOpenAssetManagement}
-              className="inline-flex items-center gap-1.5 rounded-lg border border-indigo-200 bg-indigo-50 px-2.5 py-1.5 text-xs font-medium text-indigo-700 hover:bg-indigo-100"
+              className="inline-flex items-center gap-1.5 rounded-lg border border-indigo-200 bg-indigo-50 px-2.5 py-1.5 text-xs font-medium text-indigo-700 hover:bg-indigo-100 max-md:min-h-[44px]"
             >
               <Package size={14} /> 资产管理
             </button>
           )}
         </div>
 
-        <div className="flex items-center gap-1.5">
+        <div className="flex items-center gap-1.5 max-md:flex-wrap max-md:w-full">
           {renderAiAssistantButton}
           {!workflow ? (
             <button
               onClick={() => void onCreateAndGenerateScreenplay()}
               disabled={workflowRunning || screenplayGenerating}
-              className="inline-flex items-center gap-1 rounded-lg bg-blue-600 px-3 py-1.5 text-xs text-white hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed shadow-sm"
+              className="inline-flex items-center gap-1 rounded-lg bg-blue-600 px-3 py-1.5 text-xs text-white hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed shadow-sm max-md:flex-1 max-md:justify-center max-md:min-h-[44px]"
             >
               {screenplayGenerating ? <Loader2 size={12} className="animate-spin" /> : <Send size={12} />}
               {screenplayGenerating ? '正在创建并生成剧本...' : '创建并生成剧本'}
@@ -522,7 +522,7 @@ onOpenAssetManagement,
             <button
               onClick={handleGenerateScreenplay}
               disabled={screenplayBusy || workflowRunning}
-              className="inline-flex items-center gap-1 rounded-lg bg-blue-600 px-3 py-1.5 text-xs text-white hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed shadow-sm"
+              className="inline-flex items-center gap-1 rounded-lg bg-blue-600 px-3 py-1.5 text-xs text-white hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed shadow-sm max-md:flex-1 max-md:justify-center max-md:min-h-[44px]"
             >
               {screenplayBusy ? <Loader2 size={12} className="animate-spin" /> : <Send size={12} />}
               {screenplayGenerating ? '正在生成剧本...' : '生成剧本'}
@@ -532,7 +532,7 @@ onOpenAssetManagement,
               onClick={() => void onParseShots()}
               disabled={!canParse}
               title="阶段1：从已批准的剧本拆解为镜头列表"
-              className="inline-flex items-center gap-1 rounded-lg bg-indigo-600 px-3 py-1.5 text-xs text-white hover:bg-indigo-700 disabled:opacity-40 disabled:cursor-not-allowed shadow-sm"
+              className="inline-flex items-center gap-1 rounded-lg bg-indigo-600 px-3 py-1.5 text-xs text-white hover:bg-indigo-700 disabled:opacity-40 disabled:cursor-not-allowed shadow-sm max-md:flex-1 max-md:justify-center max-md:min-h-[44px]"
             >
               {parsing ? <Loader2 size={12} className="animate-spin" /> : <StepForward size={12} />}
               {parsing ? '拆镜中...' : '从剧本拆镜'}
@@ -542,7 +542,7 @@ onOpenAssetManagement,
             onClick={() => setConcatModalOpen(true)}
             disabled={!canConcat}
             title="阶段4：拼接已完成视频为整章成片"
-            className="inline-flex items-center gap-1 rounded-lg border border-[#d7e3f4] px-2.5 py-1.5 text-xs text-slate-600 hover:bg-slate-50 disabled:opacity-40 disabled:cursor-not-allowed"
+            className="inline-flex items-center gap-1 rounded-lg border border-[#d7e3f4] px-2.5 py-1.5 text-xs text-slate-600 hover:bg-slate-50 disabled:opacity-40 disabled:cursor-not-allowed max-md:min-h-[44px]"
           >
             <PanelBottomOpen size={12} />
             拼接
@@ -550,7 +550,7 @@ onOpenAssetManagement,
           <button
             onClick={() => void onRefreshWorkflow()}
             disabled={workflowRunning}
-            className="inline-flex items-center gap-1 rounded-lg border border-[#d7e3f4] px-2.5 py-1.5 text-xs text-slate-600 hover:bg-white disabled:opacity-50"
+            className="inline-flex items-center gap-1 rounded-lg border border-[#d7e3f4] px-2.5 py-1.5 text-xs text-slate-600 hover:bg-white disabled:opacity-50 max-md:min-h-[44px]"
           >
             <RefreshCcw size={12} />
             刷新
@@ -562,7 +562,7 @@ onOpenAssetManagement,
                   void onResetWorkflow();
                 }
               }}
-              className="inline-flex items-center gap-1 rounded-lg border border-rose-200 px-2.5 py-1.5 text-xs text-rose-600 hover:bg-rose-50"
+              className="inline-flex items-center gap-1 rounded-lg border border-rose-200 px-2.5 py-1.5 text-xs text-rose-600 hover:bg-rose-50 max-md:min-h-[44px]"
             >
               <Trash2 size={12} />
               重置
@@ -575,10 +575,10 @@ onOpenAssetManagement,
       {workflow && (
         <>
           {/* ── 剧本审核区 ── */}
-          <div className={!screenplayApproved ? "flex flex-1 min-h-0 overflow-hidden px-4 py-4" : "mx-4 mt-3"}>
-            <div className={`flex rounded-2xl border border-[#d7e3f4] bg-white shadow-sm overflow-hidden ${!screenplayApproved ? "flex-1 flex-row" : ""} ${!screenplayApproved || screenplayCollapsed ? '' : 'max-h-[45vh]'}`}>
+          <div className={!screenplayApproved ? "flex flex-1 min-h-0 overflow-hidden px-4 py-4 max-md:flex-col" : "mx-4 mt-3"}>
+            <div className={`flex rounded-2xl border border-[#d7e3f4] bg-white shadow-sm overflow-hidden ${!screenplayApproved ? "flex-1 flex-row max-md:flex-col max-md:min-h-0" : ""} ${!screenplayApproved || screenplayCollapsed ? '' : 'max-h-[45vh]'}`}>
               {/* ── 左侧：原始小说正文（只读） ── */}
-              <div className={`flex flex-col bg-slate-50/60 ${!screenplayApproved ? "w-[40%] min-w-[260px] border-r border-[#d7e3f4]" : "hidden"}`}>
+              <div className={`flex flex-col bg-slate-50/60 ${!screenplayApproved ? "w-[40%] min-w-[260px] border-r border-[#d7e3f4] max-md:w-full max-md:min-w-0 max-md:max-h-[40%] max-md:border-r-0 max-md:border-b" : "hidden"}`}>
                 <div className="flex items-center gap-2 px-3 py-2 border-b border-[#d7e3f4] bg-white/70">
                   <BookOpen size={14} className="text-slate-500" />
                   <span className="text-xs font-medium text-slate-600">章节正文</span>
@@ -593,8 +593,8 @@ onOpenAssetManagement,
               {/* ── 右侧：解析后的剧本 ── */}
               <div className="flex-1 flex flex-col min-w-0">
                 {/* 顶部操作栏 */}
-                <div className="flex items-center justify-between px-3 py-2 border-b border-[#d7e3f4] bg-white/70 shrink-0">
-                  <div className="flex items-center gap-2">
+                <div className="flex items-center justify-between px-3 py-2 border-b border-[#d7e3f4] bg-white/70 shrink-0 max-md:flex-wrap max-md:gap-2">
+                  <div className="flex items-center gap-2 max-md:flex-wrap">
                     <FileText size={16} className="text-slate-500" />
                     <span className="text-sm font-medium text-slate-900">剧本审核</span>
                     {workflow.screenplay_status === 'approved' ? (
@@ -620,11 +620,11 @@ onOpenAssetManagement,
                       </button>
                     )}
                   </div>
-                  <div className="flex items-center gap-1.5">
+                  <div className="flex items-center gap-1.5 max-md:flex-wrap">
                     <button
                       onClick={handleSaveScreenplay}
                       disabled={screenplayLoading || !screenplayText.trim()}
-                      className="inline-flex items-center gap-1 rounded-lg border border-[#d7e3f4] px-2.5 py-1.5 text-xs text-slate-600 hover:bg-slate-50 disabled:opacity-40 disabled:cursor-not-allowed"
+                      className="inline-flex items-center gap-1 rounded-lg border border-[#d7e3f4] px-2.5 py-1.5 text-xs text-slate-600 hover:bg-slate-50 disabled:opacity-40 disabled:cursor-not-allowed max-md:min-h-[44px]"
                     >
                       <Save size={12} />
                       保存
@@ -632,7 +632,7 @@ onOpenAssetManagement,
                     <button
                       onClick={handleRegenerateScreenplay}
                       disabled={screenplayLoading || !workflow.screenplay_text || workflowRunning}
-                      className="inline-flex items-center gap-1 rounded-lg border border-amber-200 px-2.5 py-1.5 text-xs text-amber-700 hover:bg-amber-50 disabled:opacity-40 disabled:cursor-not-allowed"
+                      className="inline-flex items-center gap-1 rounded-lg border border-amber-200 px-2.5 py-1.5 text-xs text-amber-700 hover:bg-amber-50 disabled:opacity-40 disabled:cursor-not-allowed max-md:min-h-[44px]"
                     >
                       <RefreshCcw size={12} />
                       重新生成
@@ -641,7 +641,7 @@ onOpenAssetManagement,
                       <button
                         onClick={handleApproveScreenplay}
                         disabled={screenplayLoading}
-                        className="inline-flex items-center gap-1 rounded-lg bg-emerald-600 px-2.5 py-1.5 text-xs text-white hover:bg-emerald-700 disabled:opacity-40 disabled:cursor-not-allowed"
+                        className="inline-flex items-center gap-1 rounded-lg bg-emerald-600 px-2.5 py-1.5 text-xs text-white hover:bg-emerald-700 disabled:opacity-40 disabled:cursor-not-allowed max-md:min-h-[44px]"
                       >
                         <ThumbsUp size={12} />
                         批准剧本
@@ -662,7 +662,7 @@ onOpenAssetManagement,
                             {/* 场景卡片头部 */}
                             <div
                               onClick={() => toggleSceneExpand(scene.scene_id)}
-                              className="flex items-center justify-between w-full px-3 py-2.5 hover:bg-slate-50/50 transition-colors cursor-pointer"
+                              className="flex items-center justify-between w-full px-3 py-2.5 hover:bg-slate-50/50 transition-colors cursor-pointer max-md:flex-wrap max-md:gap-y-1.5"
                             >
                               <div className="flex items-center gap-2 min-w-0 flex-1">
                                 <span
@@ -1207,7 +1207,7 @@ const typeConfig: Record<string, { label: string; icon: React.ReactNode; color: 
                   {sortedShots.length > 0 && (
                     <button
                       onClick={onSelectAllShots}
-                      className="inline-flex items-center gap-1 rounded-lg border border-[#d7e3f4] px-2.5 py-1 text-xs text-slate-600 hover:bg-slate-50"
+                      className="inline-flex items-center gap-1 rounded-lg border border-[#d7e3f4] px-2.5 py-1 text-xs text-slate-600 hover:bg-slate-50 max-md:min-h-[44px]"
                     >
                       <SquarePen size={11} />
                       {selectedShotIds.size === workflow.shots.length ? '取消全选' : '全选镜头'}
@@ -1217,7 +1217,7 @@ const typeConfig: Record<string, { label: string; icon: React.ReactNode; color: 
                     type="button"
                     onClick={() => setCreateShotOpen(true)}
                     disabled={workflowRunning || parsing}
-                    className="inline-flex items-center gap-1 rounded-lg bg-slate-900 px-2.5 py-1 text-xs text-white hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-40"
+                    className="inline-flex items-center gap-1 rounded-lg bg-slate-900 px-2.5 py-1 text-xs text-white hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-40 max-md:min-h-[44px]"
                   >
                     <Plus size={12} />
                     添加镜头
@@ -1231,7 +1231,7 @@ const typeConfig: Record<string, { label: string; icon: React.ReactNode; color: 
                   {activeShotIds.length > 0 && canStoryboard && (
                     <button
                       onClick={() => void onGenerateStoryboards(activeShotIds)}
-                      className="rounded-lg bg-blue-600 px-2.5 py-1 text-xs text-white hover:bg-blue-700"
+                      className="rounded-lg bg-blue-600 px-2.5 py-1 text-xs text-white hover:bg-blue-700 max-md:min-h-[44px]"
                     >
                       为选中生成故事版
                     </button>
@@ -1239,7 +1239,7 @@ const typeConfig: Record<string, { label: string; icon: React.ReactNode; color: 
                   {activeShotIds.length > 0 && canVideo && (
                     <button
                       onClick={() => void onGenerateVideos(activeShotIds)}
-                      className="rounded-lg bg-blue-600 px-2.5 py-1 text-xs text-white hover:bg-blue-700"
+                      className="rounded-lg bg-blue-600 px-2.5 py-1 text-xs text-white hover:bg-blue-700 max-md:min-h-[44px]"
                     >
                       为选中生成视频
                     </button>
@@ -1302,7 +1302,7 @@ const typeConfig: Record<string, { label: string; icon: React.ReactNode; color: 
                             </span>
                           )}
                         </div>
-                        <div className="mt-2 grid grid-cols-2 gap-x-4 gap-y-1">
+                        <div className="mt-2 grid grid-cols-2 gap-x-4 gap-y-1 max-md:grid-cols-1">
                           <p className="text-sm text-slate-700">情节：{shot.story_summary || '暂无'}</p>
                           {shot.continuity_notes && (
                             <p className="text-xs text-slate-500">连续性：{shot.continuity_notes}</p>
@@ -1319,11 +1319,11 @@ const typeConfig: Record<string, { label: string; icon: React.ReactNode; color: 
                         </div>
 
                       {/* 右侧：故事版/视频预览 */}
-                      <div className="grid shrink grid-cols-4 gap-3">
+                      <div className="grid shrink grid-cols-4 gap-3 max-md:grid-cols-2">
                         <button
                           type="button"
                           onClick={() => { setVideoWorkbench({ shotId: shot.id, type: 'character', assetId: undefined }); onAgentShotChange?.(shot.id); }}
-                          className="w-[160px] rounded-xl border border-[#e5edf8] bg-slate-50 p-2 text-left transition hover:border-blue-300 hover:bg-white"
+                          className="w-[160px] rounded-xl border border-[#e5edf8] bg-slate-50 p-2 text-left transition hover:border-blue-300 hover:bg-white max-md:w-full"
                         >
                           <div className="mb-2 flex items-center gap-1 text-xs font-medium text-slate-600">
                             <UserRound size={12} /> 角色资产
@@ -1374,7 +1374,7 @@ const typeConfig: Record<string, { label: string; icon: React.ReactNode; color: 
                         <button
                           type="button"
                           onClick={() => { setVideoWorkbench({ shotId: shot.id, type: 'scene' }); onAgentShotChange?.(shot.id); }}
-                          className="w-[160px] rounded-xl border border-[#e5edf8] bg-slate-50 p-2 text-left transition hover:border-blue-300 hover:bg-white"
+                          className="w-[160px] rounded-xl border border-[#e5edf8] bg-slate-50 p-2 text-left transition hover:border-blue-300 hover:bg-white max-md:w-full"
                         >
                           <div className="mb-2 flex items-center gap-1 text-xs font-medium text-slate-600">
                             <Home size={14} /> 场景 & 道具
@@ -1403,7 +1403,7 @@ const typeConfig: Record<string, { label: string; icon: React.ReactNode; color: 
                         <button
                           type="button"
                           onClick={() => { setVideoWorkbench({ shotId: shot.id, type: 'storyboard' }); onAgentShotChange?.(shot.id); }}
-                          className="w-[160px] rounded-xl border border-[#e5edf8] bg-slate-50 p-2 text-left transition hover:border-blue-300 hover:bg-white"
+                          className="w-[160px] rounded-xl border border-[#e5edf8] bg-slate-50 p-2 text-left transition hover:border-blue-300 hover:bg-white max-md:w-full"
                         >
                           <div className="mb-2 flex items-center gap-1 text-xs font-medium text-slate-600">
                             <ImageIcon size={12} /> 故事版
@@ -1441,7 +1441,7 @@ const typeConfig: Record<string, { label: string; icon: React.ReactNode; color: 
                         <button
                           type="button"
                           onClick={() => { setVideoWorkbench({ shotId: shot.id, type: 'video' }); onAgentShotChange?.(shot.id); }}
-                          className="w-[160px] rounded-xl border border-[#e5edf8] bg-slate-50 p-2 text-left transition hover:border-blue-300 hover:bg-white"
+                          className="w-[160px] rounded-xl border border-[#e5edf8] bg-slate-50 p-2 text-left transition hover:border-blue-300 hover:bg-white max-md:w-full"
                         >
                           <div className="mb-2 flex items-center gap-1 text-xs font-medium text-slate-600">
                             <Film size={12} /> 视频
@@ -1490,7 +1490,7 @@ const typeConfig: Record<string, { label: string; icon: React.ReactNode; color: 
                        <button
                          onClick={() => void onReanalyzePrompt([shot.id])}
                          disabled={workflowRunning}
-                         className="inline-flex items-center gap-1 rounded-lg border border-amber-200 px-3 py-1.5 text-xs text-amber-700 hover:bg-amber-50 disabled:opacity-50"
+                         className="inline-flex items-center gap-1 rounded-lg border border-amber-200 px-3 py-1.5 text-xs text-amber-700 hover:bg-amber-50 disabled:opacity-50 max-md:min-h-[44px]"
                        >
                          <Sparkles size={12} /> {shot.storyboard_prompt ? '重新分析提示词' : '分析提示词'}
                        </button>
@@ -1499,7 +1499,7 @@ const typeConfig: Record<string, { label: string; icon: React.ReactNode; color: 
                            {!skippedShotIds.has(shot.id) && (
                             <button
                               onClick={() => void onSkipShot(shot.id)}
-                              className="inline-flex items-center gap-1 rounded-lg border border-slate-200 px-3 py-1.5 text-xs text-slate-500 hover:bg-slate-50"
+                              className="inline-flex items-center gap-1 rounded-lg border border-slate-200 px-3 py-1.5 text-xs text-slate-500 hover:bg-slate-50 max-md:min-h-[44px]"
                             >
                               <SkipForward size={12} /> 跳过此镜头
                             </button>
@@ -1514,7 +1514,7 @@ const typeConfig: Record<string, { label: string; icon: React.ReactNode; color: 
                       {hasStoryboard && !hasVideo && (
                         <button
                           onClick={() => void onRegenerateStoryboard(shot.id)}
-                          className="inline-flex items-center gap-1 rounded-lg border border-[#d7e3f4] px-3 py-1.5 text-xs text-slate-600 hover:bg-slate-50"
+                          className="inline-flex items-center gap-1 rounded-lg border border-[#d7e3f4] px-3 py-1.5 text-xs text-slate-600 hover:bg-slate-50 max-md:min-h-[44px]"
                         >
                           <Sparkles size={12} /> 重生故事版
                         </button>
@@ -1523,7 +1523,7 @@ const typeConfig: Record<string, { label: string; icon: React.ReactNode; color: 
                         <>
                           <button
                             onClick={() => void onRegenerateVideo(shot.id, undefined, videoAspectRatio)}
-                            className="inline-flex items-center gap-1 rounded-lg border border-[#d7e3f4] px-3 py-1.5 text-xs text-slate-600 hover:bg-slate-50"
+                            className="inline-flex items-center gap-1 rounded-lg border border-[#d7e3f4] px-3 py-1.5 text-xs text-slate-600 hover:bg-slate-50 max-md:min-h-[44px]"
                           >
                             <Wand2 size={12} /> 重生视频
                           </button>
@@ -1531,7 +1531,7 @@ const typeConfig: Record<string, { label: string; icon: React.ReactNode; color: 
                             href={toAssetUrl(shot.video_url)}
                             target="_blank"
                             rel="noreferrer"
-                            className="inline-flex items-center gap-1 rounded-lg bg-emerald-600 px-3 py-1.5 text-xs text-white hover:bg-emerald-700"
+                            className="inline-flex items-center gap-1 rounded-lg bg-emerald-600 px-3 py-1.5 text-xs text-white hover:bg-emerald-700 max-md:min-h-[44px]"
                           >
                             <CheckCircle2 size={12} /> 打开视频
                           </a>

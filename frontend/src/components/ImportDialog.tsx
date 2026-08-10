@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type ChangeEvent, type DragEvent } from 'react';
-import { AlertCircle, Check, ChevronDown, FileText, Loader2, Upload, X } from 'lucide-react';
+import { AlertCircle, Check, ChevronDown, FileText, Loader2, Upload } from 'lucide-react';
 import { createImportStory, parseImportFile, type ImportChapterInfo, type ImportParseResponse } from '../api';
+import { FullScreenDialog } from './mobile/FullScreenDialog';
 
 interface ImportDialogProps {
   open: boolean;
@@ -148,24 +149,57 @@ export default function ImportDialog({ open, onClose, onImportComplete }: Import
 
   if (!open) return null;
 
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4" onClick={onClose}>
-      <div
-        className="w-full max-w-3xl bg-white rounded-2xl border border-slate-200 shadow-[0_24px_60px_rgba(15,23,42,0.18)]"
-        onClick={(event) => event.stopPropagation()}
-      >
-        <div className="flex items-center justify-between px-6 py-4 border-b border-slate-200">
-          <div>
-            <h2 className="text-base font-semibold text-slate-900">导入小说</h2>
-            <p className="text-xs text-slate-500">支持章节文稿导入，并可选自动分析框架。</p>
-          </div>
-          <button onClick={onClose} className="p-1 text-slate-400 hover:text-slate-600 transition-colors rounded-lg hover:bg-slate-100">
-            <X size={18} />
+  const renderFooter = () => {
+    if (step === 'select') {
+      return (
+        <div className="flex justify-end gap-2">
+          <button
+            type="button"
+            onClick={onClose}
+            className="flex h-11 items-center rounded-lg px-5 text-sm text-slate-600 transition hover:bg-slate-100 active:bg-slate-200"
+          >
+            取消
+          </button>
+          <button
+            type="button"
+            onClick={() => void handleParse()}
+            disabled={!file}
+            className="flex h-11 items-center rounded-lg bg-blue-600 px-6 text-sm font-medium text-white transition hover:bg-blue-500 disabled:cursor-not-allowed disabled:bg-slate-200 disabled:text-slate-400"
+          >
+            开始解析
           </button>
         </div>
+      );
+    }
+    if (step === 'preview') {
+      return (
+        <div className="flex justify-end gap-2">
+          <button
+            type="button"
+            onClick={() => setStep('select')}
+            className="flex h-11 items-center rounded-lg px-5 text-sm text-slate-600 transition hover:bg-slate-100 active:bg-slate-200"
+          >
+            返回
+          </button>
+          <button
+            type="button"
+            onClick={() => void handleCreate()}
+            disabled={chapters.length === 0 || !storyTitle.trim()}
+            className="flex h-11 items-center rounded-lg bg-blue-600 px-6 text-sm font-medium text-white transition hover:bg-blue-500 disabled:cursor-not-allowed disabled:bg-slate-200 disabled:text-slate-400"
+          >
+            确认导入
+          </button>
+        </div>
+      );
+    }
+    return null;
+  };
 
+  return (
+    <FullScreenDialog open={open} onClose={onClose} title="导入小说" footer={renderFooter()}>
+      <div className="p-4 sm:p-6">
         {step === 'select' && (
-          <div className="p-6 space-y-4">
+          <div className="space-y-4">
             <div
               onDragOver={handleDragOver}
               onDragLeave={handleDragLeave}
@@ -193,18 +227,6 @@ export default function ImportDialog({ open, onClose, onImportComplete }: Import
                 <span>{error}</span>
               </div>
             )}
-            <div className="flex justify-end gap-2">
-              <button onClick={onClose} className="px-4 py-2 text-sm text-slate-500 hover:text-slate-700 transition-colors">
-                取消
-              </button>
-              <button
-                onClick={() => void handleParse()}
-                disabled={!file}
-                className="px-5 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-sm font-medium disabled:bg-slate-200 disabled:text-slate-400 disabled:cursor-not-allowed transition-colors"
-              >
-                开始解析
-              </button>
-            </div>
           </div>
         )}
 
@@ -220,7 +242,7 @@ export default function ImportDialog({ open, onClose, onImportComplete }: Import
         )}
 
         {step === 'preview' && (
-          <div className="p-6 space-y-4">
+          <div className="space-y-4">
             <div className="grid gap-4 md:grid-cols-[1.4fr,0.8fr]">
               <div className="space-y-2">
                 <label className="text-xs font-medium text-slate-600">作品名</label>
@@ -240,7 +262,7 @@ export default function ImportDialog({ open, onClose, onImportComplete }: Import
               当前导入会强制接入 AI 分析原文，并自动生成标签、角色、大纲与章节规划，不再按本地规则直接拆章。
             </div>
 
-            <div className="max-h-[360px] overflow-y-auto rounded-2xl border border-slate-200">
+            <div className="overflow-y-auto rounded-2xl border border-slate-200 md:max-h-[360px]">
               {chapters.map((chapter) => (
                 <details key={chapter.chapter_number} className="border-b border-slate-100 last:border-b-0" open={chapter.chapter_number <= 2}>
                   <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-4 py-3 text-sm text-slate-800">
@@ -265,22 +287,6 @@ export default function ImportDialog({ open, onClose, onImportComplete }: Import
             </div>
 
             {error && <p className="text-sm text-red-600">{error}</p>}
-
-            <div className="flex justify-end gap-2">
-              <button
-                onClick={() => setStep('select')}
-                className="px-4 py-2 text-sm text-slate-500 hover:text-slate-700 transition-colors"
-              >
-                返回
-              </button>
-              <button
-                onClick={() => void handleCreate()}
-                disabled={chapters.length === 0 || !storyTitle.trim()}
-                className="px-5 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-sm font-medium disabled:bg-slate-200 disabled:text-slate-400 disabled:cursor-not-allowed transition-colors"
-              >
-                确认导入
-              </button>
-            </div>
           </div>
         )}
 
@@ -301,6 +307,6 @@ export default function ImportDialog({ open, onClose, onImportComplete }: Import
           </div>
         )}
       </div>
-    </div>
+    </FullScreenDialog>
   );
 }

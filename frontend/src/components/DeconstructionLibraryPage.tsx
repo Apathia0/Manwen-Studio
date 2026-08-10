@@ -176,7 +176,7 @@ export default function DeconstructionLibraryPage({ onNavigate }: Props) {
   // 列表
   return (
     <div className="flex h-full flex-col">
-      <div className="flex items-center justify-between border-b border-slate-200 px-6 py-4">
+      <div className="flex items-center justify-between border-b border-slate-200 px-6 py-4 max-md:px-4">
         <div>
           <h2 className="text-lg font-semibold text-slate-800">拆书库</h2>
           <p className="text-xs text-slate-500 mt-0.5">
@@ -198,7 +198,7 @@ export default function DeconstructionLibraryPage({ onNavigate }: Props) {
         </div>
       )}
 
-      <div className="flex-1 overflow-auto p-6">
+      <div className="flex-1 overflow-auto p-6 max-md:p-4">
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
           {works.map((work) => (
             <div
@@ -216,7 +216,7 @@ export default function DeconstructionLibraryPage({ onNavigate }: Props) {
                     handleDelete(work.id);
                   }}
                   disabled={deleting === work.id}
-                  className="absolute right-3 top-3 rounded p-1 text-slate-300 opacity-0 transition-opacity hover:bg-red-50 hover:text-red-500 group-hover:opacity-100 disabled:opacity-100"
+                  className="absolute right-3 top-3 rounded p-1 text-slate-300 opacity-0 transition-opacity hover:bg-red-50 hover:text-red-500 group-hover:opacity-100 disabled:opacity-100 max-md:opacity-100"
                   title="删除"
                 >
                   {deleting === work.id ? (
@@ -228,7 +228,7 @@ export default function DeconstructionLibraryPage({ onNavigate }: Props) {
               </div>
 
               {/* 作者/平台信息 */}
-              <div className="mt-1.5 flex items-center gap-2 text-xs text-slate-500">
+              <div className="mt-1.5 flex flex-wrap items-center gap-2 text-xs text-slate-500">
                 {work.author && <span>{work.author}</span>}
                 {work.genre && (
                   <span className="rounded bg-slate-100 px-1.5 py-0.5 text-xs text-slate-500">
@@ -241,7 +241,7 @@ export default function DeconstructionLibraryPage({ onNavigate }: Props) {
               </div>
 
               {/* 章节/字数 */}
-              <div className="mt-2 flex items-center gap-3 text-xs text-slate-400">
+              <div className="mt-2 flex flex-wrap items-center gap-3 text-xs text-slate-400">
                 <span>
                   章节：{work.total_chapters ?? '--'}
                 </span>

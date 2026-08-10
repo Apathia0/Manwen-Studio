@@ -1,10 +1,43 @@
 @import "tailwindcss";
 
+:root {
+  /* 安全区（iPhone 刘海屏 / 底部横条） */
+  --safe-area-top: env(safe-area-inset-top, 0px);
+  --safe-area-right: env(safe-area-inset-right, 0px);
+  --safe-area-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-area-left: env(safe-area-inset-left, 0px);
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
 body {
   margin: 0;
   font-family: "IBM Plex Sans", "Source Han Sans SC", "PingFang SC", "Noto Sans CJK SC", "Segoe UI", sans-serif;
   background: linear-gradient(180deg, #f4f8ff 0%, #eef4ff 42%, #f8fbff 100%);
   color: #0f172a;
+  /* 禁止 iOS 点击高亮，触摸目标反馈交给组件 */
+  -webkit-tap-highlight-color: transparent;
+  /* 防止 iOS 橡皮筋滚动破坏固定布局（App 内部滚动由容器控制） */
+  overscroll-behavior-y: none;
+}
+
+/* 文本放大后布局不破 */
+input,
+select,
+textarea,
+button {
+  font-size: 16px;
+}
+@media (max-width: 767px) {
+  input,
+  select,
+  textarea {
+    font-size: 16px;
+  }
 }
 
 /* Custom scrollbar */
@@ -31,4 +64,11 @@ body {
 @keyframes barbershop {
   0% { background-position: 0 0; }
   100% { background-position: 32px 0; }
+}
+
+/* 触摸设备上隐藏仅 hover 可发现的操作（如滚动条 hover 态） */
+@media (hover: none) {
+  ::-webkit-scrollbar-thumb:hover {
+    background: #bfd0ea;
+  }
 }

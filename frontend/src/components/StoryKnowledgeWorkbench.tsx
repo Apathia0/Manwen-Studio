@@ -603,9 +603,9 @@ export default function StoryKnowledgeWorkbench({ storyId, storyTitle, onClose, 
   }
 
   const modal = (
-    <div className="fixed inset-0 z-[90] flex items-center justify-center bg-slate-950/55 p-3 backdrop-blur-sm sm:p-5" onMouseDown={onClose}>
-      <div ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby="story-knowledge-title" className="relative flex h-[min(900px,94vh)] w-full max-w-7xl flex-col overflow-hidden rounded-lg border border-slate-200 bg-white shadow-2xl" onMouseDown={(event) => event.stopPropagation()}>
-        <header className="flex shrink-0 items-center gap-3 border-b border-slate-200 px-4 py-4 sm:px-5">
+    <div className="fixed inset-0 z-[90] flex items-end justify-center bg-slate-950/55 backdrop-blur-sm md:items-center md:p-5" onMouseDown={onClose}>
+      <div ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby="story-knowledge-title" className="relative flex h-[100dvh] w-full flex-col overflow-hidden rounded-none border-0 bg-white shadow-2xl md:h-[min(900px,94vh)] md:max-w-7xl md:rounded-lg md:border md:border-slate-200" onMouseDown={(event) => event.stopPropagation()}>
+        <header className="flex shrink-0 items-center gap-3 border-b border-slate-200 px-4 py-4 max-md:pt-[calc(1rem+env(safe-area-inset-top))] md:px-5">
           <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-md bg-blue-600 text-white">
             <Database size={20} aria-hidden="true" />
           </span>
@@ -616,11 +616,12 @@ export default function StoryKnowledgeWorkbench({ storyId, storyTitle, onClose, 
           <Button
             size="sm"
             variant="secondary"
+            className="max-md:min-h-11"
             icon={aiSyncing && aiSyncScope === 'all' ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}
             disabled={aiSyncing}
             onClick={() => void handleAISync('all', 'full')}
           >{aiSyncing && aiSyncScope === 'all' ? '全量同步中' : '一键全量同步'}</Button>
-          <button ref={closeButtonRef} type="button" title="关闭" aria-label="关闭作品设定中心" onClick={onClose} className="ml-auto flex h-9 w-9 items-center justify-center rounded-md text-slate-500 hover:bg-slate-100 hover:text-slate-800">
+          <button ref={closeButtonRef} type="button" title="关闭" aria-label="关闭作品设定中心" onClick={onClose} className="ml-auto flex h-9 w-9 items-center justify-center rounded-md text-slate-500 hover:bg-slate-100 hover:text-slate-800 max-md:h-11 max-md:w-11">
             <X size={18} />
           </button>
         </header>
@@ -635,12 +636,12 @@ export default function StoryKnowledgeWorkbench({ storyId, storyTitle, onClose, 
                   key={tab.key}
                   type="button"
                   onClick={() => { setActiveView(tab.key); setEditing(null); setCreatingKind(null); setBibleEditing(false); resetFilters(); }}
-                  className={`flex min-w-[190px] items-center gap-3 rounded-md px-3 py-2.5 text-left md:min-w-0 ${selected ? 'bg-blue-600 text-white' : 'text-slate-700 hover:bg-white'}`}
+                  className={`flex min-w-[170px] items-center gap-3 rounded-md px-3 py-2.5 text-left max-md:min-h-11 md:min-w-0 ${selected ? 'bg-blue-600 text-white' : 'text-slate-700 hover:bg-white'}`}
                 >
                   <Icon size={17} className="shrink-0" />
                   <span className="min-w-0 flex-1">
                     <span className="block text-sm font-semibold">{tab.label}</span>
-                    <span className={`block truncate text-xs ${selected ? 'text-blue-100' : 'text-slate-400'}`}>{tab.description}</span>
+                    <span className={`block truncate text-xs max-md:hidden ${selected ? 'text-blue-100' : 'text-slate-400'}`}>{tab.description}</span>
                   </span>
                   {tab.key !== 'chapter_context' ? (
                     <span className={`text-xs ${selected ? 'text-white' : 'text-slate-400'}`}>
@@ -652,7 +653,7 @@ export default function StoryKnowledgeWorkbench({ storyId, storyTitle, onClose, 
             })}
           </nav>
 
-          <main className="flex min-h-0 flex-col">
+          <main className="flex min-h-0 flex-col max-md:pb-[env(safe-area-inset-bottom)]">
             {aiSyncNotice ? (
               <div
                 role={aiSyncNotice.tone === 'error' ? 'alert' : 'status'}
@@ -663,8 +664,8 @@ export default function StoryKnowledgeWorkbench({ storyId, storyTitle, onClose, 
                   <p className="font-medium">{aiSyncNotice.message}</p>
                   {aiSyncNotice.details ? <p className="mt-0.5 opacity-80">{aiSyncNotice.details}</p> : null}
                 </div>
-                <button type="button" onClick={() => setAiSyncNotice(null)} className="flex h-6 w-6 shrink-0 items-center justify-center rounded text-current opacity-60 hover:bg-white/70 hover:opacity-100" title="关闭同步结果" aria-label="关闭同步结果">
-                  <X size={13} />
+                <button type="button" onClick={() => setAiSyncNotice(null)} className="flex h-11 w-11 shrink-0 items-center justify-center rounded text-current opacity-60 hover:bg-white/70 hover:opacity-100" title="关闭同步结果" aria-label="关闭同步结果">
+                  <X size={14} />
                 </button>
               </div>
             ) : null}
@@ -803,8 +804,8 @@ function ResourceModeBar({ value, onChange }: { value: ResourceView; onChange: (
   return (
     <div className="shrink-0 border-b border-slate-200 px-4 py-3 sm:px-6">
       <div className="inline-flex rounded-md bg-slate-100 p-1" role="tablist" aria-label="资料视图">
-        <button type="button" role="tab" aria-selected={value === 'reference'} onClick={() => onChange('reference')} className={`rounded px-3 py-1.5 text-xs font-medium ${value === 'reference' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500 hover:text-slate-800'}`}>写作参考</button>
-        <button type="button" role="tab" aria-selected={value === 'library'} onClick={() => onChange('library')} className={`rounded px-3 py-1.5 text-xs font-medium ${value === 'library' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500 hover:text-slate-800'}`}>自定义资料</button>
+        <button type="button" role="tab" aria-selected={value === 'reference'} onClick={() => onChange('reference')} className={`rounded px-4 py-2.5 text-xs font-medium max-md:min-h-11 ${value === 'reference' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500 hover:text-slate-800'}`}>写作参考</button>
+        <button type="button" role="tab" aria-selected={value === 'library'} onClick={() => onChange('library')} className={`rounded px-4 py-2.5 text-xs font-medium max-md:min-h-11 ${value === 'library' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500 hover:text-slate-800'}`}>自定义资料</button>
       </div>
     </div>
   );
@@ -858,35 +859,35 @@ function FilterBar({
   const label = VIEW_TABS.find((tab) => tab.key === kind)?.label || '设定';
   return (
     <div className="shrink-0 border-b border-slate-200 px-4 py-3">
-      <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-[minmax(150px,1fr)_repeat(3,120px)_100px_auto_auto_auto]">
+      <div className="grid grid-cols-1 gap-2 md:grid-cols-2 xl:grid-cols-[minmax(150px,1fr)_repeat(3,120px)_100px_auto_auto_auto]">
         <label className="relative min-w-0">
           <Search size={15} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
-          <Input value={search} onChange={(event) => onSearch(event.target.value)} placeholder={`搜索${label}`} className="rounded-md pl-9" />
+          <Input value={search} onChange={(event) => onSearch(event.target.value)} placeholder={`搜索${label}`} className="rounded-md pl-9 max-md:min-h-11" />
         </label>
         {kind === 'entity' ? (
-          <Select value={entityTypeFilter} onChange={(event) => onEntityType(event.target.value)} className="rounded-md">
+          <Select value={entityTypeFilter} onChange={(event) => onEntityType(event.target.value)} className="rounded-md max-md:min-h-11">
             <option value="">全部类型</option>
             {ENTITY_TYPE_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
           </Select>
         ) : (
-          <Select value={categoryFilter} onChange={(event) => onCategory(event.target.value)} className="rounded-md">
+          <Select value={categoryFilter} onChange={(event) => onCategory(event.target.value)} className="rounded-md max-md:min-h-11">
             <option value="">全部分类</option>
             {categories.map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}
           </Select>
         )}
-        <Select value={statusFilter} onChange={(event) => onStatus(event.target.value)} className="rounded-md">
+        <Select value={statusFilter} onChange={(event) => onStatus(event.target.value)} className="rounded-md max-md:min-h-11">
           <option value="">全部状态</option>
           {STATUS_OPTIONS[kind].map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
         </Select>
-        <Select value={sourceFilter} onChange={(event) => onSource(event.target.value)} className="rounded-md">
+        <Select value={sourceFilter} onChange={(event) => onSource(event.target.value)} className="rounded-md max-md:min-h-11">
           <option value="">全部来源</option>
           {SOURCE_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
         </Select>
-        <Input value={chapterFilter} onChange={(event) => onChapter(event.target.value)} type="number" min={1} placeholder="章节" className="rounded-md" />
+        <Input value={chapterFilter} onChange={(event) => onChapter(event.target.value)} type="number" min={1} placeholder="章节" className="rounded-md max-md:min-h-11" />
         {displayMode && onDisplayMode ? <KnowledgeViewToggle kind={kind} value={displayMode} onChange={onDisplayMode} /> : null}
-        {onSync ? <Button variant="secondary" size="sm" icon={syncing ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />} disabled={syncing} onClick={onSync}>{syncing ? syncMessage || '同步中' : '同步本类'}</Button> : null}
-        <Button variant="secondary" size="sm" icon={<SlidersHorizontal size={14} />} onClick={onClear}>清除筛选</Button>
-        <Button size="sm" icon={<Plus size={15} />} onClick={onCreate}>新增</Button>
+        {onSync ? <Button variant="secondary" size="sm" className="max-md:min-h-11" icon={syncing ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />} disabled={syncing} onClick={onSync}>{syncing ? syncMessage || '同步中' : '同步本类'}</Button> : null}
+        <Button variant="secondary" size="sm" className="max-md:min-h-11" icon={<SlidersHorizontal size={14} />} onClick={onClear}>清除筛选</Button>
+        <Button size="sm" className="max-md:min-h-11" icon={<Plus size={15} />} onClick={onCreate}>新增</Button>
       </div>
     </div>
   );
@@ -896,9 +897,9 @@ function KnowledgeViewToggle({ kind, value, onChange }: { kind: StoryKnowledgeKi
   const visualLabel = kind === 'entity' ? '图谱' : '时间轴';
   const VisualIcon = kind === 'entity' ? Network : ChartNoAxesGantt;
   return (
-    <div className="inline-flex h-9 shrink-0 rounded-md border border-slate-200 bg-slate-50 p-0.5" role="group" aria-label="查看方式">
-      <button type="button" title="列表查看" aria-pressed={value === 'list'} onClick={() => onChange('list')} className={`flex h-8 items-center gap-1 rounded px-2 text-xs font-medium ${value === 'list' ? 'bg-white text-blue-700 shadow-sm' : 'text-slate-500 hover:text-slate-800'}`}><List size={13} />列表</button>
-      <button type="button" title={`${visualLabel}查看`} aria-pressed={value === 'visual'} onClick={() => onChange('visual')} className={`flex h-8 items-center gap-1 rounded px-2 text-xs font-medium ${value === 'visual' ? 'bg-white text-blue-700 shadow-sm' : 'text-slate-500 hover:text-slate-800'}`}><VisualIcon size={13} />{visualLabel}</button>
+    <div className="inline-flex h-11 shrink-0 rounded-md border border-slate-200 bg-slate-50 p-0.5" role="group" aria-label="查看方式">
+      <button type="button" title="列表查看" aria-pressed={value === 'list'} onClick={() => onChange('list')} className={`flex h-10 items-center gap-1 rounded px-3 text-xs font-medium max-md:min-h-11 ${value === 'list' ? 'bg-white text-blue-700 shadow-sm' : 'text-slate-500 hover:text-slate-800'}`}><List size={13} />列表</button>
+      <button type="button" title={`${visualLabel}查看`} aria-pressed={value === 'visual'} onClick={() => onChange('visual')} className={`flex h-10 items-center gap-1 rounded px-3 text-xs font-medium max-md:min-h-11 ${value === 'visual' ? 'bg-white text-blue-700 shadow-sm' : 'text-slate-500 hover:text-slate-800'}`}><VisualIcon size={13} />{visualLabel}</button>
     </div>
   );
 }
@@ -959,16 +960,16 @@ function CategoryManager({ storyId, kind, categories, onChanged }: { storyId: nu
           {categories.length === 0 ? <span className="text-xs text-slate-400">暂无分类</span> : null}
           {categories.map((category) => (
             <span key={category.id} className="inline-flex items-center gap-1 rounded-full border border-slate-200 bg-white px-2.5 py-1 text-xs text-slate-600">
-              <span className="h-2 w-2 rounded-full" style={{ backgroundColor: category.color || '#2563eb' }} />
-              {category.name}
-              <button type="button" disabled={busyId === category.id} onClick={() => void renameCategory(category)} className="ml-1 text-slate-400 hover:text-blue-600" title="改名"><Pencil size={12} /></button>
-              <button type="button" disabled={busyId === category.id} onClick={() => void removeCategory(category)} className="text-slate-400 hover:text-red-600" title="删除"><Trash2 size={12} /></button>
+              <span className="h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: category.color || '#2563eb' }} />
+              <span className="max-w-[10rem] truncate">{category.name}</span>
+              <button type="button" disabled={busyId === category.id} onClick={() => void renameCategory(category)} className="flex h-11 w-11 items-center justify-center rounded-full text-slate-400 hover:text-blue-600 max-md:-m-1" title="改名"><Pencil size={13} /></button>
+              <button type="button" disabled={busyId === category.id} onClick={() => void removeCategory(category)} className="flex h-11 w-11 items-center justify-center rounded-full text-slate-400 hover:text-red-600 max-md:-m-1" title="删除"><Trash2 size={13} /></button>
             </span>
           ))}
         </div>
         <div className="flex min-w-0 gap-2 sm:ml-auto">
-          <Input value={name} onChange={(event) => setName(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') void createCategory(); }} placeholder="新分类名称" className="h-8 rounded-md text-xs" />
-          <Button size="sm" variant="secondary" onClick={() => void createCategory()}>新增分类</Button>
+          <Input value={name} onChange={(event) => setName(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') void createCategory(); }} placeholder="新分类名称" className="h-11 rounded-md text-xs max-md:min-w-0" />
+          <Button size="sm" variant="secondary" className="max-md:min-h-11 shrink-0" onClick={() => void createCategory()}>新增分类</Button>
         </div>
       </div>
     </div>
@@ -997,7 +998,7 @@ function KnowledgeList({ loading, kind, items, entities, onEdit, onDelete }: { l
             <div className="flex items-start gap-3">
               <div className="min-w-0 flex-1">
                 <div className="flex flex-wrap items-center gap-2">
-                  <h3 className="text-sm font-semibold text-slate-900">{displayItemTitle(item, entities)}</h3>
+                  <h3 className="min-w-0 break-words text-sm font-semibold leading-6 text-slate-900">{displayItemTitle(item, entities)}</h3>
                   {item.category_name ? <span className="rounded bg-blue-50 px-1.5 py-0.5 text-[11px] text-blue-700">{item.category_name}</span> : null}
                   <span className={`rounded px-1.5 py-0.5 text-[11px] ${isActiveStatus(item.status) ? 'bg-emerald-50 text-emerald-700' : 'bg-slate-100 text-slate-500'}`}>{statusLabel(kind, item.status)}</span>
                 </div>
@@ -1009,9 +1010,9 @@ function KnowledgeList({ loading, kind, items, entities, onEdit, onDelete }: { l
                 </div>
               </div>
               <div className="flex shrink-0 gap-1">
-                <button type="button" title="编辑" onClick={() => onEdit(item)} className="flex h-8 w-8 items-center justify-center rounded-md text-slate-500 hover:bg-blue-100 hover:text-blue-700"><Pencil size={14} /></button>
+                <button type="button" title="编辑" onClick={() => onEdit(item)} className="flex h-11 w-11 items-center justify-center rounded-md text-slate-500 hover:bg-blue-100 hover:text-blue-700"><Pencil size={14} /></button>
                 {item.source_type === 'manual' ? (
-                  <button type="button" title="删除" onClick={() => void onDelete(item)} className="flex h-8 w-8 items-center justify-center rounded-md text-slate-500 hover:bg-red-100 hover:text-red-600"><Trash2 size={14} /></button>
+                  <button type="button" title="删除" onClick={() => void onDelete(item)} className="flex h-11 w-11 items-center justify-center rounded-md text-slate-500 hover:bg-red-100 hover:text-red-600"><Trash2 size={14} /></button>
                 ) : null}
               </div>
             </div>
@@ -1045,13 +1046,16 @@ function KnowledgeEditor({ kind, item, categories, entities, onCancel, onSave }:
   }
 
   return (
-    <div className="absolute inset-y-0 right-0 z-10 flex w-full max-w-xl flex-col border-l border-slate-200 bg-white shadow-2xl">
-      <div className="flex items-center border-b border-slate-200 px-5 py-4">
-        <div>
+    <div className="absolute inset-0 z-10 flex w-full flex-col bg-white shadow-2xl md:inset-y-0 md:right-0 md:max-w-xl md:border-l md:border-slate-200">
+      <div className="flex items-center border-b border-slate-200 px-5 py-4 max-md:pt-[calc(1rem+env(safe-area-inset-top))]">
+        <div className="min-w-0 flex-1">
           <h3 className="text-sm font-semibold text-slate-900">{item ? '编辑' : '新增'}{title}</h3>
           <p className="mt-0.5 text-xs text-slate-400">保存后会立即更新 AI 可读取的作品设定。</p>
         </div>
-        <button type="button" title="关闭编辑" onClick={onCancel} className="ml-auto flex h-8 w-8 items-center justify-center rounded-md text-slate-500 hover:bg-slate-100"><X size={16} /></button>
+        <button type="button" title="返回" aria-label="返回列表" onClick={onCancel} className="flex h-11 w-11 shrink-0 items-center justify-center rounded-md text-slate-500 hover:bg-slate-100 md:hidden">
+          <ArrowLeft size={18} />
+        </button>
+        <button type="button" title="关闭编辑" onClick={onCancel} className="flex h-11 w-11 shrink-0 items-center justify-center rounded-md text-slate-500 hover:bg-slate-100"><X size={16} /></button>
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
@@ -1070,9 +1074,9 @@ function KnowledgeEditor({ kind, item, categories, entities, onCancel, onSave }:
           ))}
         </div>
       </div>
-      <div className="flex justify-end gap-2 border-t border-slate-200 px-5 py-3">
-        <Button variant="secondary" onClick={onCancel}>取消</Button>
-        <Button loading={saving} onClick={() => void submit()}>保存</Button>
+      <div className="flex justify-end gap-2 border-t border-slate-200 px-5 pt-3 pb-[calc(0.75rem+env(safe-area-inset-bottom))]">
+        <Button variant="secondary" className="max-md:min-h-11" onClick={onCancel}>取消</Button>
+        <Button className="max-md:min-h-11" loading={saving} onClick={() => void submit()}>保存</Button>
       </div>
     </div>
   );
@@ -1082,7 +1086,7 @@ function KnowledgeField({ kind, field, value, rows, categories, entities, onChan
   const id = `knowledge-${String(field.key)}`;
   const common = { id, value, placeholder: field.placeholder, onChange: (event: ChangeEvent<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>) => onChange(event.target.value) };
   return (
-    <label htmlFor={id} className={field.type === 'textarea' || field.type === 'object' || field.type === 'list' ? 'sm:col-span-2' : ''}>
+    <label htmlFor={id} className={`block min-w-0 ${field.type === 'textarea' || field.type === 'object' || field.type === 'list' ? 'sm:col-span-2' : ''}`}>
       <span className="mb-1.5 block text-xs font-medium text-slate-700">{field.label}{field.required ? <span className="ml-1 text-red-500">*</span> : null}</span>
       {field.type === 'textarea' ? (
         <TextArea {...common} rows={3} className="rounded-md text-xs leading-5" />
@@ -1091,24 +1095,24 @@ function KnowledgeField({ kind, field, value, rows, categories, entities, onChan
       ) : field.type === 'list' ? (
         <TextArea {...common} rows={4} className="rounded-md text-xs leading-5" />
       ) : field.type === 'status' ? (
-        <Select {...common} className="rounded-md">
+        <Select {...common} className="rounded-md max-md:min-h-11">
           <option value="">使用默认状态</option>
           {STATUS_OPTIONS[kind].map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
         </Select>
       ) : field.type === 'category' ? (
-        <Select {...common} className="rounded-md">
+        <Select {...common} className="rounded-md max-md:min-h-11">
           <option value="">不归入分类</option>
           {categories.map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}
         </Select>
       ) : field.type === 'resource_type' ? (
-        <Select {...common} className="rounded-md">
+        <Select {...common} className="rounded-md max-md:min-h-11">
           <option value="manual_note">通用资料</option>
           <option value="world_rule">世界规则</option>
           <option value="style_profile">写作风格</option>
           <option value="character_rule">人物规则</option>
         </Select>
       ) : field.type === 'entity_type' ? (
-        <Select {...common} className="rounded-md">
+        <Select {...common} className="rounded-md max-md:min-h-11">
           <option value="character">人物</option>
           <option value="location">地点</option>
           <option value="faction">势力</option>
@@ -1116,12 +1120,12 @@ function KnowledgeField({ kind, field, value, rows, categories, entities, onChan
           <option value="concept">概念</option>
         </Select>
       ) : field.type === 'entity_ref' ? (
-        <Select {...common} className="rounded-md">
+        <Select {...common} className="rounded-md max-md:min-h-11">
           <option value="">{field.key === 'subject_key' ? '全书设定（不生成关系线）' : '无明确关联对象'}</option>
           {entities.filter((entity) => entity.status !== 'archived').map((entity) => <option key={entity.id} value={entity.entity_key || entity.canonical_name || ''}>{entity.canonical_name || entity.title || '未命名对象'}</option>)}
         </Select>
       ) : (
-        <Input {...common} type={field.type === 'number' ? 'number' : 'text'} step={field.key === 'confidence' ? '0.01' : '1'} className="rounded-md" />
+        <Input {...common} type={field.type === 'number' ? 'number' : 'text'} step={field.key === 'confidence' ? '0.01' : '1'} className="rounded-md max-md:min-h-11" />
       )}
     </label>
   );
@@ -1338,7 +1342,7 @@ function ChapterContextDashboard({ storyId }: { storyId: number }) {
   return (
     <div className="flex min-h-0 flex-1 flex-col bg-slate-50/60">
       <div className="flex flex-wrap items-center gap-3 border-b border-slate-200 bg-white px-4 py-3">
-        <button type="button" onClick={backToList} className="flex h-8 items-center gap-1 rounded-md px-2 text-xs font-medium text-slate-500 hover:bg-slate-100 hover:text-slate-800">
+        <button type="button" onClick={backToList} className="flex h-11 items-center gap-1 rounded-md px-2 text-xs font-medium text-slate-500 hover:bg-slate-100 hover:text-slate-800">
           <ArrowLeft size={15} />返回列表
         </button>
         <span className="h-5 w-px bg-slate-200" />
@@ -1351,21 +1355,21 @@ function ChapterContextDashboard({ storyId }: { storyId: number }) {
         {missing ? <span className="rounded border border-amber-200 bg-amber-50 px-2 py-1 text-xs text-amber-700">尚未生成创作包</span> : null}
         {value?.is_manual ? <span className="rounded border border-blue-200 bg-blue-50 px-2 py-1 text-xs text-blue-700">已手动调整</span> : null}
         {value?.is_stale ? <span className="rounded border border-amber-200 bg-amber-50 px-2 py-1 text-xs text-amber-700">作品设定已有更新</span> : null}
-        {!editing && !missing && value ? <div className="flex h-8 items-center rounded-md border border-slate-200 bg-slate-100 p-0.5" role="group" aria-label="创作包查看模式">
-          <button type="button" onClick={() => setPreviewMode('readable')} className={`h-7 px-3 text-xs font-medium transition-colors ${previewMode === 'readable' ? 'rounded bg-white text-blue-700 shadow-sm' : 'text-slate-500 hover:text-slate-800'}`}>易读视图</button>
-          <button type="button" onClick={() => setPreviewMode('source')} className={`h-7 px-3 text-xs font-medium transition-colors ${previewMode === 'source' ? 'rounded bg-white text-blue-700 shadow-sm' : 'text-slate-500 hover:text-slate-800'}`}>原文核对</button>
+        {!editing && !missing && value ? <div className="flex h-11 items-center rounded-md border border-slate-200 bg-slate-100 p-0.5" role="group" aria-label="创作包查看模式">
+          <button type="button" onClick={() => setPreviewMode('readable')} className={`h-10 px-3 text-xs font-medium transition-colors max-md:min-h-11 ${previewMode === 'readable' ? 'rounded bg-white text-blue-700 shadow-sm' : 'text-slate-500 hover:text-slate-800'}`}>易读视图</button>
+          <button type="button" onClick={() => setPreviewMode('source')} className={`h-10 px-3 text-xs font-medium transition-colors max-md:min-h-11 ${previewMode === 'source' ? 'rounded bg-white text-blue-700 shadow-sm' : 'text-slate-500 hover:text-slate-800'}`}>原文核对</button>
         </div> : null}
-        <div className="ml-auto flex items-center gap-2">
+        <div className="ml-auto flex flex-wrap items-center gap-2">
           {loading || refreshTaskId ? <span className="inline-flex max-w-[260px] items-center gap-1.5 truncate text-xs text-blue-700"><Loader2 size={13} className="shrink-0 animate-spin" />{refreshMessage || '正在提取'}</span> : null}
           {missing ? (
-            <Button size="sm" icon={refreshTaskId ? <Loader2 size={14} className="animate-spin" /> : <Sparkles size={14} />} disabled={saving || loading || Boolean(refreshTaskId)} onClick={() => void generateForMissing()}>生成创作包</Button>
+            <Button size="sm" className="max-md:min-h-11" icon={refreshTaskId ? <Loader2 size={14} className="animate-spin" /> : <Sparkles size={14} />} disabled={saving || loading || Boolean(refreshTaskId)} onClick={() => void generateForMissing()}>生成创作包</Button>
           ) : readOnly ? null : (
             <>
-              <Button size="sm" variant="secondary" icon={refreshTaskId ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />} disabled={saving || loading || Boolean(refreshTaskId)} onClick={() => void regenerate()}>手动更新同步</Button>
+              <Button size="sm" variant="secondary" className="max-md:min-h-11" icon={refreshTaskId ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />} disabled={saving || loading || Boolean(refreshTaskId)} onClick={() => void regenerate()}>手动更新同步</Button>
               {editing ? <>
-                <Button size="sm" variant="secondary" disabled={saving} onClick={() => { resetDraft(value?.content || ''); setEditing(false); }}>取消</Button>
-                <Button size="sm" icon={saving ? <Loader2 size={14} className="animate-spin" /> : <Save size={14} />} disabled={saving || !dirty} onClick={() => void save()}>保存</Button>
-              </> : <Button size="sm" icon={<Pencil size={14} />} disabled={!value || loading} onClick={() => { resetDraft(value?.content || ''); setEditing(true); }}>编辑创作包</Button>}
+                <Button size="sm" variant="secondary" className="max-md:min-h-11" disabled={saving} onClick={() => { resetDraft(value?.content || ''); setEditing(false); }}>取消</Button>
+                <Button size="sm" className="max-md:min-h-11" icon={saving ? <Loader2 size={14} className="animate-spin" /> : <Save size={14} />} disabled={saving || !dirty} onClick={() => void save()}>保存</Button>
+              </> : <Button size="sm" className="max-md:min-h-11" icon={<Pencil size={14} />} disabled={!value || loading} onClick={() => { resetDraft(value?.content || ''); setEditing(true); }}>编辑创作包</Button>}
             </>
           )}
         </div>
@@ -1376,7 +1380,7 @@ function ChapterContextDashboard({ storyId }: { storyId: number }) {
           <Boxes size={30} className="text-slate-300" />
           <p className="text-sm font-medium text-slate-600">第{selected.chapter_number}章尚未生成创作包</p>
           <p className="max-w-md text-xs leading-5 text-slate-400">生成后可在本页查看、编辑正文 Agent 实际读取的设定内容。</p>
-          <Button size="sm" icon={refreshTaskId ? <Loader2 size={14} className="animate-spin" /> : <Sparkles size={14} />} disabled={saving || Boolean(refreshTaskId)} onClick={() => void generateForMissing()}>生成创作包</Button>
+          <Button size="sm" className="max-md:min-h-11" icon={refreshTaskId ? <Loader2 size={14} className="animate-spin" /> : <Sparkles size={14} />} disabled={saving || Boolean(refreshTaskId)} onClick={() => void generateForMissing()}>生成创作包</Button>
         </div>
       ) : !value && loading ? null : !value ? (
         <div className="p-10 text-center text-sm text-slate-400">暂无本章创作包</div>
@@ -1430,7 +1434,7 @@ function ChapterContextListView({ loading, error, chapters, onRetry, onOpen }: {
       <div className="flex h-full min-h-52 flex-col items-center justify-center gap-3 p-6 text-center text-slate-400">
         <CircleAlert size={30} />
         <p className="text-sm font-medium text-slate-600">{error}</p>
-        <Button size="sm" variant="secondary" icon={<RefreshCw size={14} />} onClick={onRetry}>重试</Button>
+        <Button size="sm" variant="secondary" className="max-md:min-h-11" icon={<RefreshCw size={14} />} onClick={onRetry}>重试</Button>
       </div>
     );
   }
@@ -1485,13 +1489,13 @@ function ChapterContextListView({ loading, error, chapters, onRetry, onOpen }: {
         </div>
         {totalPages > 1 && (
           <div className="mt-4 flex flex-wrap items-center justify-between gap-3 border-t border-slate-200 pt-3">
-            <div className="flex items-center gap-1.5">
-              <Button size="sm" variant="secondary" icon={<ChevronsLeft size={14} />} onClick={() => setCurrentPage(1)} disabled={currentPage === 1}>首页</Button>
-              <Button size="sm" variant="secondary" icon={<ChevronLeft size={14} />} onClick={() => setCurrentPage(currentPage - 1)} disabled={currentPage === 1}>上一页</Button>
-              <Button size="sm" variant="secondary" onClick={() => setCurrentPage(currentPage + 1)} disabled={currentPage === totalPages}>下一页<ChevronRight size={14} /></Button>
-              <Button size="sm" variant="secondary" onClick={() => setCurrentPage(totalPages)} disabled={currentPage === totalPages}>末页<ChevronsRight size={14} /></Button>
+            <div className="flex flex-wrap items-center gap-1.5">
+              <Button size="sm" variant="secondary" className="max-md:min-h-11" icon={<ChevronsLeft size={14} />} onClick={() => setCurrentPage(1)} disabled={currentPage === 1}>首页</Button>
+              <Button size="sm" variant="secondary" className="max-md:min-h-11" icon={<ChevronLeft size={14} />} onClick={() => setCurrentPage(currentPage - 1)} disabled={currentPage === 1}>上一页</Button>
+              <Button size="sm" variant="secondary" className="max-md:min-h-11" onClick={() => setCurrentPage(currentPage + 1)} disabled={currentPage === totalPages}>下一页<ChevronRight size={14} /></Button>
+              <Button size="sm" variant="secondary" className="max-md:min-h-11" onClick={() => setCurrentPage(totalPages)} disabled={currentPage === totalPages}>末页<ChevronsRight size={14} /></Button>
             </div>
-            <div className="flex items-center gap-1.5">
+            <div className="flex flex-wrap items-center gap-1.5">
               <span className="text-xs text-slate-500">第</span>
               <Input
                 type="number"
@@ -1500,10 +1504,10 @@ function ChapterContextListView({ loading, error, chapters, onRetry, onOpen }: {
                 value={pageInput}
                 onChange={(e) => setPageInput(e.target.value)}
                 onKeyDown={(e) => { if (e.key === 'Enter') goToPage(); }}
-                className="w-16 rounded-md px-2 py-1 text-center text-xs"
+                className="w-16 rounded-md px-2 py-1 text-center text-xs max-md:min-h-11"
               />
               <span className="text-xs text-slate-500">/ {totalPages} 页</span>
-              <Button size="sm" variant="secondary" onClick={goToPage} disabled={!pageInput}>跳转</Button>
+              <Button size="sm" variant="secondary" className="max-md:min-h-11" onClick={goToPage} disabled={!pageInput}>跳转</Button>
             </div>
           </div>
         )}
@@ -1560,7 +1564,7 @@ function CreationPackCardEditor({ value, onChange }: { value: CreationPackPresen
               <h4 className="text-sm font-semibold text-slate-900">{section.title}</h4>
               <span className="text-xs text-slate-400">{section.items.length} 项</span>
               {REPEATABLE_CREATION_PACK_SECTIONS.has(section.title) ? (
-                <Button size="sm" variant="secondary" icon={<Plus size={13} />} className="ml-auto" onClick={() => addItem(sectionIndex)}>新增卡片</Button>
+                <Button size="sm" variant="secondary" icon={<Plus size={13} />} className="ml-auto max-md:min-h-11" onClick={() => addItem(sectionIndex)}>新增卡片</Button>
               ) : null}
             </div>
             {section.items.length > 0 ? (
@@ -1592,9 +1596,9 @@ function CreationPackEditableItem({ item, canRemove, onChange, onRemove }: { ite
             value={item.title}
             placeholder="卡片标题"
             onChange={(event) => onChange({ ...item, title: event.target.value })}
-            className="h-8 rounded-md border-0 bg-slate-50 px-2 font-semibold"
+            className="h-11 rounded-md border-0 bg-slate-50 px-2 font-semibold"
         /> : <span className="min-w-0 flex-1 truncate text-sm font-semibold text-slate-800">{item.fields.find((field) => ['姓名', '标题', '主体'].includes(field.label))?.value || '内容卡片'}</span>}
-        {canRemove ? <Button size="sm" variant="secondary" icon={<Trash2 size={14} />} aria-label="删除卡片" title="删除卡片" onClick={onRemove} /> : null}
+        {canRemove ? <Button size="sm" variant="secondary" className="max-md:min-h-11 shrink-0" icon={<Trash2 size={14} />} aria-label="删除卡片" title="删除卡片" onClick={onRemove} /> : null}
       </div> : null}
       <div className="space-y-3">
         {item.fields.map((field, fieldIndex) => (
@@ -1692,7 +1696,7 @@ function StoryBiblePanel({ storyBible, editing, saving, onEdit, onCancel, onSave
           <h3 className="text-base font-semibold text-slate-900">作品圣经</h3>
           <p className="mt-1 text-xs text-slate-500">集中维护故事定位、世界规则、写作约束和长期状态。</p>
         </div>
-        <Button size="sm" icon={<Pencil size={14} />} onClick={onEdit}>编辑作品圣经</Button>
+        <Button size="sm" className="max-md:min-h-11" icon={<Pencil size={14} />} onClick={onEdit}>编辑作品圣经</Button>
       </div>
       {sections.length === 0 ? (
         <div className="rounded-md border border-dashed border-slate-300 p-8 text-center text-sm text-slate-400">暂无作品圣经内容</div>
@@ -1768,8 +1772,8 @@ function StoryBibleEditor({ storyBible, saving, onCancel, onSave }: { storyBible
           <p className="mt-1 text-xs text-slate-500">参考作者画像、分析报告和风格样本已归入资料页，保存核心设定不会改动这些内容。</p>
         </div>
         <div className="flex gap-2">
-          <Button variant="secondary" size="sm" onClick={onCancel}>取消</Button>
-          <Button size="sm" loading={saving} onClick={submit}>保存</Button>
+          <Button variant="secondary" size="sm" className="max-md:min-h-11" onClick={onCancel}>取消</Button>
+          <Button size="sm" className="max-md:min-h-11" loading={saving} onClick={submit}>保存</Button>
         </div>
       </div>
       <div className="grid items-start gap-4 lg:grid-cols-2">
@@ -1836,12 +1840,12 @@ function BibleEditSection({ title, fullWidth = false, children }: { title: strin
 
 function SimpleField({ label, value, onChange, multiline = false, rows = 3 }: { label: string; value: string; onChange: (value: string) => void; multiline?: boolean; rows?: number }) {
   return (
-    <label className={multiline ? 'sm:col-span-2' : ''}>
+    <label className={`block min-w-0 ${multiline ? 'sm:col-span-2' : ''}`}>
       <span className="mb-1.5 block text-xs font-medium text-slate-700">{label}</span>
       {multiline ? (
         <TextArea value={value} onChange={(event) => onChange(event.target.value)} rows={rows} className="rounded-md text-xs leading-5" />
       ) : (
-        <Input value={value} onChange={(event) => onChange(event.target.value)} className="rounded-md" />
+        <Input value={value} onChange={(event) => onChange(event.target.value)} className="rounded-md max-md:min-h-11" />
       )}
     </label>
   );
@@ -1858,14 +1862,14 @@ function KeyValueRows({ rows, onChange }: { rows: KeyValueRow[]; onChange: (rows
     <div className="space-y-2">
       {rows.map((row) => (
         <div key={row.id} className="grid gap-2 sm:grid-cols-[minmax(120px,0.45fr)_minmax(160px,1fr)_auto]">
-          <Input value={PROFILE_FIELD_LABELS[row.key] || row.key} onChange={(event) => update(row.id, { key: Object.entries(PROFILE_FIELD_LABELS).find(([, label]) => label === event.target.value)?.[0] || event.target.value })} placeholder="字段名称" className="rounded-md text-xs" />
-          <Input value={formatProfileValue(row.key, row.value)} onChange={(event) => update(row.id, { value: event.target.value })} placeholder="字段内容" className="rounded-md text-xs" />
-          <button type="button" title="删除字段" onClick={() => remove(row.id)} className="flex h-9 w-9 items-center justify-center rounded-md text-slate-400 hover:bg-red-50 hover:text-red-600">
+          <Input value={PROFILE_FIELD_LABELS[row.key] || row.key} onChange={(event) => update(row.id, { key: Object.entries(PROFILE_FIELD_LABELS).find(([, label]) => label === event.target.value)?.[0] || event.target.value })} placeholder="字段名称" className="rounded-md text-xs max-md:min-h-11" />
+          <Input value={formatProfileValue(row.key, row.value)} onChange={(event) => update(row.id, { value: event.target.value })} placeholder="字段内容" className="rounded-md text-xs max-md:min-h-11" />
+          <button type="button" title="删除字段" onClick={() => remove(row.id)} className="flex h-11 w-11 items-center justify-center rounded-md text-slate-400 hover:bg-red-50 hover:text-red-600">
             <Trash2 size={14} />
           </button>
         </div>
       ))}
-      <Button type="button" variant="secondary" size="sm" icon={<Plus size={14} />} onClick={() => onChange([...rows, { id: cryptoId(), key: '', value: '' }])}>新增字段</Button>
+      <Button type="button" variant="secondary" size="sm" className="max-md:min-h-11" icon={<Plus size={14} />} onClick={() => onChange([...rows, { id: cryptoId(), key: '', value: '' }])}>新增字段</Button>
     </div>
   );
 }

@@ -155,7 +155,7 @@ export function UserPricingPage({
                   }
                   void onBuy(p.id);
                 }}
-                className="mt-5 w-full rounded-2xl bg-[#1d4ed8] py-2.5 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-60"
+                className="mt-5 max-md:min-h-[44px] w-full rounded-2xl bg-[#1d4ed8] py-2.5 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-60"
               >
                 {onPrimary ? '注册后购买' : busyId === p.id ? '处理中...' : '购买积分套餐'}
               </button>

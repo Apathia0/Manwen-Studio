@@ -68,8 +68,8 @@ export default function MangaWorkspaceLayout({
       </section>
 
       {agentOpen ? (
-        <aside className="flex min-h-0 w-[380px] shrink-0 flex-col overflow-hidden border-l border-[#d7e3f4] bg-white max-lg:absolute max-lg:inset-4 max-lg:z-40">
-          <header className="flex shrink-0 items-center justify-between border-b border-[#d7e3f4] px-4 py-3 text-sm font-semibold text-slate-800">
+        <aside className="flex min-h-0 w-[380px] shrink-0 flex-col overflow-hidden border-l border-[#d7e3f4] bg-white max-lg:fixed max-lg:inset-0 max-lg:z-40 max-lg:w-full max-lg:border-l-0">
+          <header className="flex shrink-0 items-center justify-between border-b border-[#d7e3f4] px-4 py-3 text-sm font-semibold text-slate-800" style={{ paddingTop: 'calc(env(safe-area-inset-top, 0px) + 12px)' }}>
             <span className="flex items-center gap-2"><Bot size={16} className="text-blue-600" />漫画创作助手</span>
             <button type="button" onClick={() => setAgentOpen(false)} className="rounded-md p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-700" title="关闭 AI 助手"><X size={16} /></button>
           </header>

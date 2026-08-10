@@ -240,7 +240,8 @@ from services.chapter_generation_runtime import (
     chapter_generation_guard,
 )
 from services.knowledge_ai_sync import sync_story_knowledge_with_ai
-from routers.video import router as video_router
+from services.creation_studio import _public_media_url
+from routers.video import router as video_router, _to_video_url
 from routers.deconstruction import router as deconstruction_router
 from routers.deconstruct_library import router as deconstruct_library_router
 
@@ -12547,6 +12548,172 @@ async def list_tasks(
         "total": total,
         "limit": limit,
         "offset": offset,
+    }
+
+
+_ASSET_KINDS = {"manga_image", "manga_asset", "video_asset", "video_storyboard", "video_shot"}
+_ASSET_SOURCE_LIMIT = 200
+
+
+@app.get("/api/assets")
+async def list_assets(
+    request: Request,
+    db: Session = Depends(get_db),
+    kind: str | None = None,
+    story_id: int | None = None,
+    limit: int = 200,
+    offset: int = 0,
+):
+    """跨作品资产中心：聚合当前用户所有作品下的漫画图、漫画素材、视频素材、视频分镜与视频片段
+
+    - kind：按资产类型过滤（manga_image / manga_asset / video_asset / video_storyboard / video_shot）
+    - story_id：按作品过滤
+    - limit / offset：分页参数（limit 上限 500）
+    """
+    user = _require_user(request, db)
+    limit = max(1, min(limit, 500))
+    offset = max(0, offset)
+
+    if kind is not None and kind not in _ASSET_KINDS:
+        raise HTTPException(400, "无效的资产类型")
+
+    # 管理员可见全部作品，普通用户仅可见自己拥有的作品
+    if user.role == "admin":
+        owned_story_ids = db.query(Story.id)
+    else:
+        owned_story_ids = db.query(Story.id).filter(Story.owner_user_id == user.id)
+
+    # 作品列表（id + title）
+    stories = [
+        {"id": s.id, "title": s.title}
+        for s in db.query(Story).filter(Story.id.in_(owned_story_ids)).order_by(Story.id.asc()).all()
+    ]
+
+    assets: list[dict] = []
+
+    # 1. 漫画图片（manga_images 表，通过章节关联到作品）
+    if kind in (None, "manga_image"):
+        rows = (
+            db.query(MangaImage, Chapter.story_id)
+            .join(Chapter, Chapter.id == MangaImage.chapter_id)
+            .filter(Chapter.story_id.in_(owned_story_ids))
+        )
+        if story_id is not None:
+            rows = rows.filter(Chapter.story_id == story_id)
+        for img, sid in rows.order_by(MangaImage.created_at.desc()).limit(_ASSET_SOURCE_LIMIT).all():
+            assets.append({
+                "id": img.id,
+                "kind": "manga_image",
+                "media_type": "image",
+                "story_id": sid,
+                "chapter_id": img.chapter_id,
+                "name": f"漫画图 {img.image_number}",
+                "url": _public_media_url(img.image_path, "image"),
+                "created_at": img.created_at.isoformat() if img.created_at else None,
+                "meta": {"image_number": img.image_number, "prompt": img.prompt},
+            })
+
+    # 2. 漫画素材（manga_assets 表，按用户直接过滤）
+    if kind in (None, "manga_asset"):
+        rows = db.query(MangaAsset).filter(MangaAsset.status == "active")
+        if user.role != "admin":
+            rows = rows.filter(MangaAsset.owner_user_id == user.id)
+        if story_id is not None:
+            rows = rows.filter(MangaAsset.story_id == story_id)
+        for asset in rows.order_by(MangaAsset.created_at.desc()).limit(_ASSET_SOURCE_LIMIT).all():
+            assets.append({
+                "id": asset.id,
+                "kind": "manga_asset",
+                "media_type": "image",
+                "story_id": asset.story_id,
+                "chapter_id": asset.chapter_id,
+                "name": asset.name,
+                "url": _public_media_url(asset.storage_path, "image"),
+                "created_at": asset.created_at.isoformat() if asset.created_at else None,
+                "meta": {"asset_type": asset.asset_type, "source_type": asset.source_type},
+            })
+
+    # 3. 视频素材（video_assets 表，file_path 为图片）
+    if kind in (None, "video_asset"):
+        rows = db.query(VideoAsset).filter(
+            VideoAsset.status == "active",
+            VideoAsset.story_id.in_(owned_story_ids),
+        )
+        if story_id is not None:
+            rows = rows.filter(VideoAsset.story_id == story_id)
+        for asset in rows.order_by(VideoAsset.created_at.desc()).limit(_ASSET_SOURCE_LIMIT).all():
+            assets.append({
+                "id": asset.id,
+                "kind": "video_asset",
+                "media_type": "image",
+                "story_id": asset.story_id,
+                "chapter_id": asset.chapter_id,
+                "name": asset.name,
+                "url": _to_video_url(asset.file_path),
+                "created_at": asset.created_at.isoformat() if asset.created_at else None,
+                "meta": {"asset_type": asset.asset_type, "provider": asset.provider, "prompt": asset.prompt},
+            })
+
+    # 4/5. 视频分镜与视频片段（chapter_video_shots 表，通过 workflow → 章节 → 作品关联）
+    shot_rows = (
+        db.query(ChapterVideoShot, Story.id, Chapter.id)
+        .join(ChapterVideoWorkflow, ChapterVideoWorkflow.id == ChapterVideoShot.workflow_id)
+        .join(Chapter, Chapter.id == ChapterVideoWorkflow.chapter_id)
+        .join(Story, Story.id == Chapter.story_id)
+        .filter(Story.id.in_(owned_story_ids))
+    )
+    if story_id is not None:
+        shot_rows = shot_rows.filter(Story.id == story_id)
+
+    # 4. 视频分镜（有故事版图、尚无成片）
+    if kind in (None, "video_storyboard"):
+        rows = shot_rows.filter(
+            ChapterVideoShot.storyboard_image_url.isnot(None),
+            ChapterVideoShot.storyboard_image_url != "",
+            or_(ChapterVideoShot.video_url.is_(None), ChapterVideoShot.video_url == ""),
+        )
+        for shot, sid, cid in rows.order_by(ChapterVideoShot.created_at.desc()).limit(_ASSET_SOURCE_LIMIT).all():
+            prompt = (shot.storyboard_prompt or "").strip()
+            assets.append({
+                "id": shot.id,
+                "kind": "video_storyboard",
+                "media_type": "image",
+                "story_id": sid,
+                "chapter_id": cid,
+                "name": f"分镜 {prompt[:20]}" if prompt else "分镜图",
+                "url": _to_video_url(shot.storyboard_image_url or ""),
+                "created_at": shot.created_at.isoformat() if shot.created_at else None,
+                "meta": {"duration_seconds": shot.duration_seconds, "status": shot.status},
+            })
+
+    # 5. 视频片段（已有成片）
+    if kind in (None, "video_shot"):
+        rows = shot_rows.filter(
+            ChapterVideoShot.video_url.isnot(None),
+            ChapterVideoShot.video_url != "",
+        )
+        for shot, sid, cid in rows.order_by(ChapterVideoShot.created_at.desc()).limit(_ASSET_SOURCE_LIMIT).all():
+            assets.append({
+                "id": shot.id,
+                "kind": "video_shot",
+                "media_type": "video",
+                "story_id": sid,
+                "chapter_id": cid,
+                "name": getattr(shot, "title", None) or "视频片段",
+                "url": _to_video_url(shot.video_url or ""),
+                "created_at": shot.created_at.isoformat() if shot.created_at else None,
+                "meta": {"duration_seconds": shot.duration_seconds, "status": shot.status},
+            })
+
+    # 全局按创建时间倒序合并（每个来源已各自封顶 200 条）
+    assets.sort(key=lambda a: a["created_at"] or "", reverse=True)
+    total = len(assets)
+    assets = assets[offset:offset + limit]
+
+    return {
+        "stories": stories,
+        "assets": assets,
+        "total": total,
     }
 
 

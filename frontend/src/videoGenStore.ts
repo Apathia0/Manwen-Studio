@@ -57,7 +57,12 @@ function persistStates(states: Map<string, VideoGenState>): void {
 const states = loadPersistedStates();
 const listeners = new Set<() => void>();
 
+// 快照缓存：useSyncExternalStore 要求 getSnapshot 每次渲染返回同一引用，
+// 否则 React 会判定 store 持续变化导致无限重渲染。状态变更时（emit）失效重建。
+let snapshotCache: Map<string, VideoGenState> | null = null;
+
 function emit() {
+  snapshotCache = null;
   listeners.forEach((fn) => fn());
 }
 
@@ -159,6 +164,12 @@ export const videoGenStore = {
       persistStates(states);
       emit();
     }
+  },
+
+  /** 返回当前全部视频类生成状态的快照（任务中心聚合用）。已缓存映射，变更时自动失效 */
+  snapshot(): Map<string, VideoGenState> {
+    if (!snapshotCache) snapshotCache = new Map(states);
+    return snapshotCache;
   },
 
   subscribe(fn: () => void): () => void {

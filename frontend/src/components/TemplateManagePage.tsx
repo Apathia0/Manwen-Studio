@@ -112,15 +112,15 @@ export default function TemplateManagePage() {
   };
 
   return (
-    <div className="mx-auto max-w-4xl px-6 py-8">
-      <div className="mb-6 flex items-center justify-between">
+    <div className="mx-auto max-w-4xl px-4 py-6 md:px-6 md:py-8">
+      <div className="mb-6 flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
         <div>
           <h1 className="text-2xl font-bold text-slate-900">提示词模板</h1>
           <p className="mt-1 text-sm text-slate-500">管理你的创作模板，或从社区发现优秀模板</p>
         </div>
         <button
           onClick={() => { setEditingTemplate(null); setShowEditor(true); }}
-          className="rounded-xl bg-[#2563eb] px-4 py-2 text-sm font-medium text-white shadow-[0_4px_10px_rgba(37,99,235,0.18)] transition hover:bg-[#1d4ed8]"
+          className="max-md:min-h-[44px] rounded-xl bg-[#2563eb] px-4 py-2 text-sm font-medium text-white shadow-[0_4px_10px_rgba(37,99,235,0.18)] transition hover:bg-[#1d4ed8]"
         >
           创建模板
         </button>
@@ -130,13 +130,13 @@ export default function TemplateManagePage() {
       <div className="mb-6 flex gap-1 border-b border-[#e8edf2]">
         <button
           onClick={() => setActiveTab('my')}
-          className={`rounded-t-lg px-4 py-2 text-sm font-medium transition ${
+          className={`max-md:min-h-[44px] rounded-t-lg px-4 py-2 text-sm font-medium transition ${
             activeTab === 'my' ? 'border-b-2 border-[#2563eb] text-[#2563eb]' : 'text-slate-400 hover:text-slate-600'
           }`}
         >我的模板</button>
         <button
           onClick={() => setActiveTab('market')}
-          className={`rounded-t-lg px-4 py-2 text-sm font-medium transition ${
+          className={`max-md:min-h-[44px] rounded-t-lg px-4 py-2 text-sm font-medium transition ${
             activeTab === 'market' ? 'border-b-2 border-[#2563eb] text-[#2563eb]' : 'text-slate-400 hover:text-slate-600'
           }`}
         >模板广场</button>
@@ -164,7 +164,7 @@ export default function TemplateManagePage() {
           )}
           {myTemplates.map(tpl => (
             <div key={tpl.id} className="rounded-2xl border border-[#e8edf2] bg-white p-4">
-              <div className="flex items-start justify-between">
+              <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
                 <div className="flex-1">
                   <div className="flex items-center gap-2">
                     <h3 className="font-medium text-slate-900">{tpl.name}</h3>
@@ -184,20 +184,20 @@ export default function TemplateManagePage() {
                   )}
                   <p className="mt-1 text-xs text-slate-400">使用 {tpl.usage_count} 次 · {tpl.updated_at.slice(0, 10)}</p>
                 </div>
-                <div className="ml-4 flex shrink-0 gap-1">
+                <div className="flex shrink-0 gap-1 md:ml-4">
                   <button
                     onClick={() => { setEditingTemplate(tpl); setShowEditor(true); }}
-                    className="rounded-lg px-2 py-1 text-xs text-slate-500 hover:bg-slate-100"
+                    className="max-md:min-h-[44px] rounded-lg px-2 py-1 text-xs text-slate-500 hover:bg-slate-100"
                   >编辑</button>
                   {tpl.status === 'draft' && (
                     <button
                       onClick={() => handleSubmitReview(tpl.id)}
-                      className="rounded-lg px-2 py-1 text-xs text-blue-600 hover:bg-blue-50"
+                      className="max-md:min-h-[44px] rounded-lg px-2 py-1 text-xs text-blue-600 hover:bg-blue-50"
                     >申请公开</button>
                   )}
                   <button
                     onClick={() => handleDelete(tpl.id)}
-                    className="rounded-lg px-2 py-1 text-xs text-rose-500 hover:bg-rose-50"
+                    className="max-md:min-h-[44px] rounded-lg px-2 py-1 text-xs text-rose-500 hover:bg-rose-50"
                   >删除</button>
                 </div>
               </div>
@@ -206,9 +206,9 @@ export default function TemplateManagePage() {
         </div>
       ) : (
         /* 模板广场 */
-        <div className="grid grid-cols-2 gap-4">
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
           {marketTemplates.length === 0 && (
-            <div className="col-span-2 py-12 text-center text-sm text-slate-400">暂无可用的公开模板</div>
+            <div className="col-span-full py-12 text-center text-sm text-slate-400">暂无可用的公开模板</div>
           )}
           {marketTemplates.map(tpl => (
             <div key={tpl.id} className="rounded-2xl border border-[#e8edf2] bg-white p-4">

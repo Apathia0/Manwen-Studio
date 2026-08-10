@@ -68,7 +68,7 @@ function SectionCard({
   children: React.ReactNode;
 }) {
   return (
-    <section className="rounded-3xl border border-[#d7e3f4] bg-white/90 p-5 shadow-[0_14px_34px_rgba(59,130,246,0.08)]">
+    <section className="rounded-3xl border border-[#d7e3f4] bg-white/90 p-4 shadow-[0_14px_34px_rgba(59,130,246,0.08)] md:p-5">
       <div className="mb-4">
         <h2 className="text-lg font-semibold text-slate-900">{title}</h2>
         {description ? <p className="mt-1 text-sm text-slate-500">{description}</p> : null}
@@ -94,7 +94,7 @@ function PrimaryButton({
       onClick={onClick}
       disabled={disabled}
       className={cn(
-        'rounded-2xl bg-[#1d4ed8] px-4 py-2 text-sm font-medium text-white transition hover:bg-[#1e40af] disabled:cursor-not-allowed disabled:opacity-50',
+        'min-h-11 rounded-2xl bg-[#1d4ed8] px-4 py-2.5 text-sm font-medium text-white transition hover:bg-[#1e40af] disabled:cursor-not-allowed disabled:opacity-50 md:min-h-0 md:py-2',
         className,
       )}
     >
@@ -119,7 +119,7 @@ function SecondaryButton({
       onClick={onClick}
       disabled={disabled}
       className={cn(
-        'rounded-2xl border border-[#d7e3f4] bg-white px-4 py-2 text-sm font-medium text-slate-700 transition hover:bg-[#eff6ff] disabled:cursor-not-allowed disabled:opacity-50',
+        'min-h-11 rounded-2xl border border-[#d7e3f4] bg-white px-4 py-2.5 text-sm font-medium text-slate-700 transition hover:bg-[#eff6ff] disabled:cursor-not-allowed disabled:opacity-50 md:min-h-0 md:py-2',
         className,
       )}
     >
@@ -133,7 +133,7 @@ function TextInput(props: React.InputHTMLAttributes<HTMLInputElement>) {
     <input
       {...props}
       className={cn(
-        'w-full rounded-2xl border border-[#d7e3f4] px-3 py-2 text-sm outline-none transition focus:border-[#60a5fa] focus:ring-2 focus:ring-[#bfdbfe]',
+        'w-full rounded-2xl border border-[#d7e3f4] px-3 py-2.5 text-sm outline-none transition focus:border-[#60a5fa] focus:ring-2 focus:ring-[#bfdbfe] md:py-2',
         props.className,
       )}
     />
@@ -145,7 +145,7 @@ function TextArea(props: React.TextareaHTMLAttributes<HTMLTextAreaElement>) {
     <textarea
       {...props}
       className={cn(
-        'w-full rounded-2xl border border-[#d7e3f4] px-3 py-2 text-sm outline-none transition focus:border-[#60a5fa] focus:ring-2 focus:ring-[#bfdbfe]',
+        'w-full rounded-2xl border border-[#d7e3f4] px-3 py-2.5 text-sm outline-none transition focus:border-[#60a5fa] focus:ring-2 focus:ring-[#bfdbfe] md:py-2',
         props.className,
       )}
     />
@@ -157,7 +157,7 @@ function Select(props: React.SelectHTMLAttributes<HTMLSelectElement>) {
     <select
       {...props}
       className={cn(
-        'w-full rounded-2xl border border-[#d7e3f4] px-3 py-2 text-sm outline-none transition focus:border-[#60a5fa] focus:ring-2 focus:ring-[#bfdbfe]',
+        'w-full rounded-2xl border border-[#d7e3f4] px-3 py-2.5 text-sm outline-none transition focus:border-[#60a5fa] focus:ring-2 focus:ring-[#bfdbfe] md:py-2',
         props.className,
       )}
     />
@@ -330,6 +330,7 @@ export function AdminUserManagementPage({ onError }: { onError: (message: string
               </div>
               <div className="mt-3">
                 <PrimaryButton
+                  className="w-full md:w-auto"
                   disabled={busy}
                   onClick={() =>
                     void run(async () => {
@@ -387,6 +388,7 @@ export function AdminUserManagementPage({ onError }: { onError: (message: string
                   </div>
                   <div className="mt-3 flex flex-wrap gap-2">
                     <PrimaryButton
+                      className="w-full md:w-auto"
                       disabled={busy}
                       onClick={() =>
                         void run(async () => {
@@ -408,6 +410,7 @@ export function AdminUserManagementPage({ onError }: { onError: (message: string
                       保存账号信息
                     </PrimaryButton>
                     <SecondaryButton
+                      className="w-full md:w-auto"
                       disabled={busy}
                       onClick={() =>
                         void run(async () => {
@@ -449,6 +452,7 @@ export function AdminUserManagementPage({ onError }: { onError: (message: string
                   </div>
                   <div className="mt-3">
                     <PrimaryButton
+                      className="w-full md:w-auto"
                       disabled={busy || !(Number(pointsGrant.amount) > 0)}
                       onClick={() =>
                         void run(async () => {
@@ -653,7 +657,7 @@ export function AdminAnnouncementPage({ onError }: { onError: (message: string) 
             </div>
           </div>
           <div>
-            <PrimaryButton disabled={saving} onClick={() => void handleSave()}>
+            <PrimaryButton className="w-full md:w-auto" disabled={saving} onClick={() => void handleSave()}>
               {saving ? '保存中...' : '保存公告'}
             </PrimaryButton>
           </div>
@@ -710,12 +714,13 @@ export function AdminPlatformSettingsPage({
 
   return (
     <div className="space-y-5">
-      <div className="flex flex-wrap gap-1 rounded-2xl border border-[#e5edf8] bg-[#f8fbff] p-1">
+      {/* 平台配置子 Tab：移动端横向可滚动，桌面端自动换行 */}
+      <div className="flex items-center gap-1 overflow-x-auto whitespace-nowrap rounded-2xl border border-[#e5edf8] bg-[#f8fbff] p-1 scrollbar-none md:flex-wrap">
         {PLATFORM_SETTINGS_TABS.map((tab) => (
           <button
             key={tab.key}
             onClick={() => setActiveTab(tab.key)}
-            className={`rounded-xl px-4 py-2 text-sm font-medium transition ${
+            className={`shrink-0 rounded-xl px-4 py-2.5 text-sm font-medium transition md:py-2 ${
               activeTab === tab.key
                 ? 'bg-white text-slate-900 shadow-[0_1px_3px_rgba(0,0,0,0.08)]'
                 : 'text-slate-500 hover:text-slate-700'
@@ -1183,6 +1188,7 @@ export function AdminPlatformSettingsPage({
 
       <div className="flex justify-start">
         <PrimaryButton
+          className="w-full md:w-auto"
           disabled={busy}
           onClick={() =>
             void run(async () => {
@@ -1196,6 +1202,37 @@ export function AdminPlatformSettingsPage({
           保存平台配置
         </PrimaryButton>
       </div>
+    </div>
+  );
+}
+
+/** 审计日志移动端卡片：主字段为标题，其余字段为小字键值（替代表格） */
+function AuditLogCard({ item }: { item: AdminAuditLogItem }) {
+  return (
+    <div className="rounded-2xl border border-[#e5edf8] bg-white p-4">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="font-medium text-slate-900">{item.actor_name || '系统'}</div>
+          <div className="mt-0.5 text-xs text-slate-500">
+            {item.actor_user_id ? `#${item.actor_user_id}` : '-'} · {new Date(item.created_at).toLocaleString('zh-CN')}
+          </div>
+        </div>
+        <span className="shrink-0 rounded-full bg-[#eff6ff] px-2 py-1 text-xs text-[#1d4ed8]">{item.action}</span>
+      </div>
+      <div className="mt-3 grid grid-cols-2 gap-2 text-xs text-slate-600">
+        <div className="min-w-0">
+          <div className="text-slate-400">目标</div>
+          <div className="mt-0.5 truncate text-slate-700">{item.target_type}</div>
+          <div className="truncate text-slate-500">{item.target_id || '-'}</div>
+        </div>
+        <div className="min-w-0">
+          <div className="text-slate-400">摘要</div>
+          <div className="mt-0.5 line-clamp-2 text-slate-700">{item.summary || '-'}</div>
+        </div>
+      </div>
+      <pre className="mt-3 max-h-40 overflow-auto rounded-xl bg-[#f8fbff] p-2 text-xs text-slate-600">
+        {JSON.stringify(item.detail || {}, null, 2)}
+      </pre>
     </div>
   );
 }
@@ -1251,6 +1288,7 @@ export function AdminAuditLogsPage({ onError }: { onError: (message: string) => 
           </Select>
           <div className="flex gap-2">
             <PrimaryButton
+              className="w-full md:w-auto"
               disabled={busy}
               onClick={() =>
                 void run(async () => {
@@ -1263,7 +1301,8 @@ export function AdminAuditLogsPage({ onError }: { onError: (message: string) => 
           </div>
         </div>
 
-        <div className="overflow-hidden rounded-2xl border border-[#e5edf8]">
+        {/* 桌面端表格（md 及以上显示） */}
+        <div className="hidden overflow-hidden rounded-2xl border border-[#e5edf8] md:block">
           <table className="w-full text-left text-sm">
             <thead className="bg-[#f8fbff] text-slate-500">
               <tr>
@@ -1307,6 +1346,18 @@ export function AdminAuditLogsPage({ onError }: { onError: (message: string) => 
               ) : null}
             </tbody>
           </table>
+        </div>
+
+        {/* 移动端卡片列表（替代表格，仅 md 以下显示） */}
+        <div className="space-y-3 md:hidden">
+          {filteredLogs.map((item) => (
+            <AuditLogCard key={item.id} item={item} />
+          ))}
+          {filteredLogs.length === 0 ? (
+            <div className="rounded-2xl border border-dashed border-[#d7e3f4] bg-white px-4 py-8 text-center text-sm text-slate-500">
+              暂无匹配的审计记录
+            </div>
+          ) : null}
         </div>
       </SectionCard>
     </div>
@@ -1578,17 +1629,17 @@ export function AdminSystemPromptsPage({ onError }: { onError: (message: string)
 
   return (
     <div className="space-y-5">
-      {/* Tab 切换 */}
-      <div className="flex gap-1 border-b border-slate-200">
+      {/* Tab 切换：移动端横向可滚动，桌面端保持原布局 */}
+      <div className="flex gap-1 overflow-x-auto whitespace-nowrap border-b border-slate-200 scrollbar-none">
         <button
           onClick={() => setActiveTab('prompts')}
-          className={`px-4 py-2 text-sm font-medium border-b-2 -mb-px transition-colors ${activeTab === 'prompts' ? 'border-blue-600 text-blue-600' : 'border-transparent text-slate-500 hover:text-slate-700'}`}
+          className={`shrink-0 px-4 py-2.5 text-sm font-medium border-b-2 -mb-px transition-colors md:py-2 ${activeTab === 'prompts' ? 'border-blue-600 text-blue-600' : 'border-transparent text-slate-500 hover:text-slate-700'}`}
         >
           系统提示词
         </button>
         <button
           onClick={() => setActiveTab('methodology')}
-          className={`px-4 py-2 text-sm font-medium border-b-2 -mb-px transition-colors ${activeTab === 'methodology' ? 'border-blue-600 text-blue-600' : 'border-transparent text-slate-500 hover:text-slate-700'}`}
+          className={`shrink-0 px-4 py-2.5 text-sm font-medium border-b-2 -mb-px transition-colors md:py-2 ${activeTab === 'methodology' ? 'border-blue-600 text-blue-600' : 'border-transparent text-slate-500 hover:text-slate-700'}`}
         >
           写作方法论
         </button>
@@ -1614,6 +1665,7 @@ export function AdminSystemPromptsPage({ onError }: { onError: (message: string)
                   />
                   <div className="mt-2 flex justify-end">
                     <PrimaryButton
+                      className="w-full md:w-auto"
                       disabled={busy || saving[fullKey] || value === (prompts.find((p) => p.key === fullKey)?.content ?? '')}
                       onClick={() => void handleSave(fullKey)}
                     >
@@ -1629,12 +1681,12 @@ export function AdminSystemPromptsPage({ onError }: { onError: (message: string)
 
       {activeTab === 'methodology' && (
         <SectionCard title="写作方法论" description="管理章节写作的系统方法论（兜底规则）。修改后重启服务生效。">
-          <div className="flex gap-1 border-b border-slate-200 mb-4">
+          <div className="mb-4 flex gap-1 overflow-x-auto whitespace-nowrap border-b border-slate-200 scrollbar-none">
             {METHODOLOGY_TABS.map((tab) => (
               <button
                 key={tab.key}
                 onClick={() => setMethodologySubTab(tab.key)}
-                className={`px-3 py-1.5 text-xs font-medium border-b-2 -mb-px transition-colors ${methodologySubTab === tab.key ? 'border-blue-600 text-blue-600' : 'border-transparent text-slate-500 hover:text-slate-700'}`}
+                className={`shrink-0 px-3 py-2.5 text-xs font-medium border-b-2 -mb-px transition-colors md:py-1.5 ${methodologySubTab === tab.key ? 'border-blue-600 text-blue-600' : 'border-transparent text-slate-500 hover:text-slate-700'}`}
               >
                 {tab.label}
               </button>
@@ -1658,6 +1710,7 @@ export function AdminSystemPromptsPage({ onError }: { onError: (message: string)
             />
             <div className="flex justify-end">
               <PrimaryButton
+                className="w-full md:w-auto"
                 disabled={busy || methodologySaving[methodologySubTab] || (methodologyEdit[methodologySubTab] ?? '') === (methodology[methodologySubTab] ?? '')}
                 onClick={() => void handleMethodologySave(methodologySubTab)}
               >

@@ -1,5 +1,5 @@
 import { Suspense, lazy, useCallback, useEffect, useState } from 'react';
-import { Image, Bot, PanelRightClose, PanelRightOpen } from 'lucide-react';
+import { Bot, ChevronLeft, Image, ListTree, PanelRightClose, PanelRightOpen, X } from 'lucide-react';
 import { type Story, type Chapter } from '../api';
 import { RouteLoadingFallback } from './ui/RouteLoadingFallback';
 
@@ -33,6 +33,8 @@ export default function WorkspaceLayout({
   const [chapterContext, setChapterContext] = useState<object | undefined>(undefined);
   const [mangaPreviewMode, setMangaPreviewMode] = useState(false);
   const [agentCollapsed, setAgentCollapsed] = useState(false);
+  const [mobileChapterOpen, setMobileChapterOpen] = useState(false);
+  const [mobileAgentOpen, setMobileAgentOpen] = useState(false);
   const resolvedChapter = currentChapter ? mergeChapterWithFramework(story, currentChapter) : null;
 
   useEffect(() => {
@@ -51,6 +53,28 @@ export default function WorkspaceLayout({
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-white">
+      {/* 移动端工具条：章节列表与 AI 助手入口（桌面端隐藏） */}
+      <div className="flex shrink-0 items-center gap-2 border-b border-[#d7e3f4] bg-white px-3 py-2 md:hidden">
+        {!mangaPreviewMode && (
+          <button
+            type="button"
+            onClick={() => setMobileChapterOpen(true)}
+            className="inline-flex h-9 items-center gap-1.5 rounded-lg border border-[#d7e3f4] bg-white px-3 text-xs font-medium text-slate-700 transition hover:bg-slate-50 active:bg-slate-100"
+          >
+            <ListTree size={15} className="text-blue-600" aria-hidden="true" />
+            章节
+          </button>
+        )}
+        <button
+          type="button"
+          onClick={() => setMobileAgentOpen(true)}
+          className="inline-flex h-9 items-center gap-1.5 rounded-lg border border-[#d7e3f4] bg-white px-3 text-xs font-medium text-slate-700 transition hover:bg-slate-50 active:bg-slate-100"
+        >
+          {workspaceDomain === 'manga' ? <Image size={15} className="text-blue-600" aria-hidden="true" /> : <Bot size={15} className="text-blue-600" aria-hidden="true" />}
+          {workspaceDomain === 'manga' ? '漫画生成' : 'AI 助手'}
+        </button>
+      </div>
+
       <div className="flex min-h-0 flex-1 flex-col md:flex-row">
         {!mangaPreviewMode && (
         <div className="hidden w-[300px] shrink-0 overflow-y-auto border-r border-[#d7e3f4] bg-white xl:block">
@@ -84,7 +108,8 @@ export default function WorkspaceLayout({
         </div>
         )}
 
-        <div className={`${mangaPreviewMode ? 'flex-1' : agentCollapsed ? 'h-11 w-full shrink-0 md:h-auto md:w-[48px]' : 'h-[45%] w-full shrink-0 md:h-auto md:w-[390px]'} min-h-0 min-w-0 overflow-hidden bg-white transition-[width,height] duration-200`}>
+        {/* 桌面端 AI 助手右栏（移动端隐藏，见下方抽屉） */}
+        <div className={`${mangaPreviewMode ? 'flex-1' : agentCollapsed ? 'h-11 w-full shrink-0 md:h-auto md:w-[48px]' : 'h-[45%] w-full shrink-0 md:h-auto md:w-[390px]'} hidden min-h-0 min-w-0 overflow-hidden bg-white transition-[width,height] duration-200 md:flex`}>
           <div className="flex flex-col h-full">
             <div className={`shrink-0 flex h-11 items-center border-b border-[#d7e3f4] text-sm font-semibold text-slate-800 ${agentCollapsed ? 'justify-center px-1' : 'gap-2 px-3'}`}>
               {workspaceDomain === 'manga' ? <Image size={16} className="text-blue-600" aria-hidden="true" /> : <Bot size={16} className="text-blue-600" aria-hidden="true" />}
@@ -132,6 +157,98 @@ export default function WorkspaceLayout({
           </div>
         </div>
       </div>
+
+      {/* 移动端章节列表抽屉 */}
+      {mobileChapterOpen && !mangaPreviewMode ? (
+        <div className="fixed inset-0 z-40 flex md:hidden">
+          <div className="absolute inset-0 bg-slate-950/40" onClick={() => setMobileChapterOpen(false)} aria-hidden="true" />
+          <div className="relative flex h-full w-[86%] max-w-[340px] flex-col overflow-hidden bg-white shadow-2xl">
+            <header className="flex h-12 shrink-0 items-center gap-2 border-b border-[#d7e3f4] bg-white px-3">
+              <button
+                type="button"
+                onClick={() => setMobileChapterOpen(false)}
+                className="rounded-lg p-1.5 text-slate-500 transition hover:bg-slate-100"
+                aria-label="关闭章节列表"
+              >
+                <ChevronLeft size={20} />
+              </button>
+              <span className="text-sm font-semibold text-slate-800">章节与框架</span>
+            </header>
+            <div className="min-h-0 flex-1 overflow-y-auto">
+              <Suspense fallback={<RouteLoadingFallback />}>
+                <FrameworkPanel
+                  story={story}
+                  chapters={chapters}
+                  onChapterSelect={(chapterNumber) => {
+                    handleChapterSelect(chapterNumber);
+                    setMobileChapterOpen(false);
+                  }}
+                  onFrameworkUpdate={onContentUpdated}
+                  onOpenKnowledge={() => {
+                    setMobileChapterOpen(false);
+                    onOpenKnowledge();
+                  }}
+                />
+              </Suspense>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {/* 移动端 AI 助手全屏抽屉 */}
+      {mobileAgentOpen ? (
+        <div className="fixed inset-0 z-40 flex flex-col bg-white md:hidden">
+          <header className="flex h-12 shrink-0 items-center gap-2 border-b border-[#d7e3f4] bg-white px-3" style={{ paddingTop: 'env(safe-area-inset-top, 0px)' }}>
+            <button
+              type="button"
+              onClick={() => setMobileAgentOpen(false)}
+              className="rounded-lg p-1.5 text-slate-500 transition hover:bg-slate-100"
+              aria-label="关闭助手"
+            >
+              <ChevronLeft size={20} />
+            </button>
+            <span className="text-sm font-semibold text-slate-800">
+              {workspaceDomain === 'manga' ? '漫画生成' : 'AI 写作助手'}
+            </span>
+            <button
+              type="button"
+              onClick={() => setMobileAgentOpen(false)}
+              className="ml-auto rounded-lg p-1.5 text-slate-400 transition hover:bg-slate-100"
+              aria-label="关闭助手"
+            >
+              <X size={18} />
+            </button>
+          </header>
+          <div className="min-h-0 flex-1">
+            <Suspense fallback={<RouteLoadingFallback />}>
+              {workspaceDomain === 'manga' ? (
+                <MangaPanel
+                  chapter={resolvedChapter}
+                  entitlements={entitlements}
+                  onChapterRefresh={onContentUpdated}
+                  selectedText={selectedText}
+                  chapterContext={chapterContext as { characters?: any[] } | undefined}
+                  isWorkspacePreviewMode={mangaPreviewMode}
+                  onWorkspacePreviewModeChange={setMangaPreviewMode}
+                  onClearSelection={() => {
+                    setSelectedText('');
+                    setChapterContext(undefined);
+                  }}
+                />
+              ) : (
+                <AgentPanel
+                  storyId={story.id}
+                  chapterId={resolvedChapter?.id}
+                  chapterNumber={resolvedChapter?.chapter_number}
+                  storyTitle={story.title}
+                  chapterTitle={resolvedChapter?.title || undefined}
+                  onContentUpdated={onContentUpdated}
+                />
+              )}
+            </Suspense>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }

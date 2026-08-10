@@ -5,8 +5,8 @@ import {
   Brush,
   CreditCard,
   Home,
+  Images,
   Library,
-  LogOut,
   MessageSquareQuote,
   Cpu,
   Sparkles,
@@ -14,15 +14,25 @@ import {
   ShieldCheck,
   UserCircle2,
   X,
-  PanelLeftClose,
-  PanelLeftOpen,
 } from 'lucide-react';
+import { useLocation, useNavigate, Navigate } from 'react-router-dom';
 import { toast } from './lib/toast';
 import { confirm } from './lib/confirm';
 import {
   AI_MODEL_SELECTION_REQUIRED_EVENT,
   type AiModelSelectionRequiredDetail,
 } from './lib/errors';
+import { useDeviceMode } from './lib/useMediaQuery';
+import {
+  ADMIN_ROUTES,
+  PUBLIC_ROUTES,
+  parseDeconstructionWorkId,
+  parseWorkspaceStoryId,
+  pathToRouteKey,
+  routeToPath,
+  type RouteKey,
+} from './router';
+import { WorkspaceProvider } from './context/WorkspaceContext';
 import { LoadingOverlay } from './components/ui/LoadingOverlay';
 import { RouteLoadingFallback } from './components/ui/RouteLoadingFallback';
 import PublicLanding from './components/PublicLanding';
@@ -55,6 +65,12 @@ import { UserAccountUsagePage } from './components/UserAccountUsagePage';
 import { PointsAiAdminPage } from './components/admin/PointsAiAdminPage';
 import { CreationStudioPage } from './components/CreationStudioPage';
 import { ModelCatalogPage } from './components/ModelCatalogPage';
+import { TasksPage } from './components/TasksPage';
+import AssetsPage from './components/AssetsPage';
+import { DesktopAppShell, type ShellNavItem } from './components/shell/DesktopAppShell';
+import { TabletAppShell } from './components/shell/TabletAppShell';
+import { MobileAppShell, DEFAULT_BOTTOM_NAV } from './components/shell/MobileAppShell';
+import type { BottomNavItem } from './components/mobile/MobileBottomNav';
 import {
   cancelMyOrder,
   clearAuthToken,
@@ -88,50 +104,16 @@ import {
   type Story,
 } from './api';
 
-type RouteKey =
-  | 'install'
-  | 'landing'
-  | 'login'
-  | 'register'
-  | 'pricing'
-  | 'stories'
-  | 'creation-studio'
-  | 'model-catalog'
-  | 'onboarding'
-  | 'import-guidance'
-  | 'workspace'
-  | 'account'
-  | 'templates'
-  | 'template-review'
-  | 'forgot-password'
-  | 'plan-config'
-  | 'quota-rules'
-  | 'entitlements'
-  | 'orders'
-  | 'revenue'
-  | 'audit-logs'
-  | 'announcement'
-  | 'system-update'
-  | 'system-prompts'
-  | 'style-presets'
-  | 'deconstruction-library'
-  | 'points-ai-admin';
-
-type NavItem = {
-  key: RouteKey;
-  label: string;
-  icon: React.ComponentType<{ size?: number; className?: string }>;
-};
-
 const DEFAULT_SITE_NAME = 'StoryCanvas';
 const DEFAULT_SITE_SLOGAN = 'AI 小说与漫画创作平台';
 const DEFAULT_ICON_URL = '/brand-mark.svg';
 const LS_WORKSPACE_MODE = 'storycanvas.workspaceMode';
 const LS_NAV_COLLAPSED = 'storycanvas.navCollapsed';
 
-const USER_NAV: NavItem[] = [
+const USER_NAV: ShellNavItem[] = [
   { key: 'stories', label: '作品', icon: Home },
   { key: 'creation-studio', label: '创作台', icon: Sparkles },
+  { key: 'assets', label: '资产', icon: Images },
   { key: 'model-catalog', label: '模型广场', icon: Cpu },
   { key: 'workspace', label: '作品工作台', icon: Brush },
   { key: 'deconstruction-library', label: '拆书库', icon: BookOpen },
@@ -139,7 +121,10 @@ const USER_NAV: NavItem[] = [
   { key: 'pricing', label: '积分套餐', icon: CreditCard },
 ];
 
-const ADMIN_NAV: NavItem[] = [
+/** 移动端底部导航：默认 5 项 + 资产中心（grid-cols-6 对应 6 项） */
+const MOBILE_NAV_ITEMS: BottomNavItem[] = [...DEFAULT_BOTTOM_NAV, { key: 'assets', label: '资产', icon: Images }];
+
+const ADMIN_NAV: ShellNavItem[] = [
   { key: 'points-ai-admin', label: '积分与 AI 渠道', icon: CreditCard },
   { key: 'quota-rules', label: '平台配置', icon: Settings2 },
   { key: 'entitlements', label: '用户管理', icon: ShieldCheck },
@@ -152,9 +137,27 @@ const ADMIN_NAV: NavItem[] = [
   { key: 'system-update', label: '系统更新', icon: Settings2 },
 ];
 
+/** 已登录用户访问这些公开路由时重定向到作品库 */
+const LOGGED_IN_REDIRECT_ROUTES: RouteKey[] = ['landing', 'login', 'register', 'forgot-password'];
+
 function App() {
+  const location = useLocation();
+  const navigate = useNavigate();
+  const deviceMode = useDeviceMode();
+
+  const route: RouteKey = useMemo(() => pathToRouteKey(location.pathname), [location.pathname]);
+  const deconWorkId = useMemo(() => parseDeconstructionWorkId(location.pathname), [location.pathname]);
+  const workspaceStoryId = useMemo(() => parseWorkspaceStoryId(location.pathname), [location.pathname]);
+
+  const setRoute = useCallback((key: RouteKey) => {
+    navigate(routeToPath(key));
+  }, [navigate]);
+
+  const setDeconWorkId = useCallback((workId: number) => {
+    navigate(workId > 0 ? `/deconstruction/${workId}` : '/deconstruction');
+  }, [navigate]);
+
   const [session, setSession] = useState<AuthUser | null>(null);
-  const [route, setRoute] = useState<RouteKey>('landing');
   const [bootstrapping, setBootstrapping] = useState(true);
   const [stories, setStories] = useState<Story[]>([]);
   const [activeStory, setActiveStory] = useState<Story | null>(null);
@@ -190,7 +193,6 @@ function App() {
     return localStorage.getItem('rightPanelTab') === 'manga' ? 'manga' : 'novel';
   });
   const [navCollapsed, setNavCollapsed] = useState(() => localStorage.getItem(LS_NAV_COLLAPSED) === 'true');
-  const [deconWorkId, setDeconWorkId] = useState<number>(0);
   const [modelConfigRequest, setModelConfigRequest] = useState<{
     modality: AiModelSelectionRequiredDetail['modality'];
     requestId: number;
@@ -201,9 +203,44 @@ function App() {
     [chapters, activeChapterId],
   );
 
+  const workspaceContextValue = useMemo(
+    () => ({
+      activeStory,
+      chapters,
+      activeChapterId,
+      activeChapter,
+      workspaceMode,
+      setActiveStory,
+      setChapters,
+      setActiveChapterId,
+      setWorkspaceMode,
+    }),
+    [activeStory, chapters, activeChapterId, activeChapter, workspaceMode],
+  );
+
+  const isWorkspaceRoute = route === 'workspace';
+
   const handleModelConfigRequestHandled = useCallback((requestId: number) => {
     setModelConfigRequest((current) => current?.requestId === requestId ? null : current);
   }, []);
+
+  /** 统一导航入口：移动底部导航 / 桌面侧栏 / 页面内跳转共用 */
+  const handleNavigate = useCallback((key: string) => {
+    const routeKey = key as RouteKey;
+    if (routeKey === 'workspace' && !activeStory) {
+      navigate('/stories');
+      return;
+    }
+    if (routeKey === 'deconstruction-library') {
+      navigate('/deconstruction');
+      return;
+    }
+    if (routeKey === 'tasks') {
+      navigate('/tasks');
+      return;
+    }
+    navigate(routeToPath(routeKey));
+  }, [activeStory, navigate]);
 
   useEffect(() => {
     let promptOpen = false;
@@ -229,7 +266,7 @@ function App() {
     };
     window.addEventListener(AI_MODEL_SELECTION_REQUIRED_EVENT, handleModelSelectionRequired);
     return () => window.removeEventListener(AI_MODEL_SELECTION_REQUIRED_EVENT, handleModelSelectionRequired);
-  }, []);
+  }, [setRoute]);
 
   useEffect(() => {
     localStorage.setItem(LS_WORKSPACE_MODE, workspaceMode);
@@ -238,10 +275,10 @@ function App() {
   useEffect(() => {
     localStorage.setItem(LS_NAV_COLLAPSED, String(navCollapsed));
   }, [navCollapsed]);
-  const isWorkspaceRoute = route === 'workspace';
 
   useEffect(() => {
     void bootstrapApp();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
@@ -266,7 +303,40 @@ function App() {
     if (!session) return;
     void refreshStories();
     void refreshOrders();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session]);
+
+  /** 深链支持：/workspace/:storyId 直接定位作品工作台 */
+  useEffect(() => {
+    if (!session) return;
+    if (workspaceStoryId == null) return;
+    if (activeStory?.id === workspaceStoryId) return;
+    setLoadingWorkspace(true);
+    void (async () => {
+      try {
+        const [detail, chapterList] = await Promise.all([getStory(workspaceStoryId), listChapters(workspaceStoryId)]);
+        if (needsImportGuidance(detail)) {
+          setImportGuidanceStory(detail);
+          navigate('/import-guidance');
+          return;
+        }
+        if (!detail.onboarding_completed) {
+          setOnboardingStory(detail);
+          navigate('/onboarding');
+          return;
+        }
+        setActiveStory(detail);
+        setChapters(chapterList);
+        setActiveChapterId(chapterList[0]?.id ?? null);
+      } catch (error: any) {
+        toast.error(error.message || '加载作品失败');
+        navigate('/stories');
+      } finally {
+        setLoadingWorkspace(false);
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [workspaceStoryId, session]);
 
   async function bootstrapApp() {
     try {
@@ -275,17 +345,16 @@ function App() {
         clearAuthToken();
         setSession(null);
         setInstallRequired(true);
-        setRoute('install');
+        navigate('/install');
         return;
       }
       setInstallRequired(false);
       void refreshPlatformSettings();
       await bootstrapSession();
     } catch {
-      // getInstallStatus 失败：探测后端健康状态，给用户明确的故障归属提示。
       clearAuthToken();
       setSession(null);
-      setRoute('landing');
+      navigate('/');
       const health = await checkHealth();
       if (health === null) {
         toast.error('无法连接到后端服务，请确认后端已启动后刷新页面');
@@ -301,12 +370,14 @@ function App() {
     try {
       const user = await me();
       setSession(user);
-      setRoute('stories');
+      if (PUBLIC_ROUTES.includes(route)) {
+        navigate('/stories');
+      }
       void fetchAnnouncement();
     } catch {
       clearAuthToken();
       setSession(null);
-      setRoute('landing');
+      if (route !== 'install') navigate('/');
     }
   }
 
@@ -328,18 +399,18 @@ function App() {
       const [detail, chapterList] = await Promise.all([getStory(story.id), listChapters(story.id)]);
       if (needsImportGuidance(detail)) {
         setImportGuidanceStory(detail);
-        setRoute('import-guidance');
+        navigate('/import-guidance');
         return;
       }
       if (!detail.onboarding_completed) {
         setOnboardingStory(detail);
-        setRoute('onboarding');
+        navigate('/onboarding');
         return;
       }
       setActiveStory(detail);
       setChapters(chapterList);
       setActiveChapterId(chapterList[0]?.id ?? null);
-      setRoute('workspace');
+      navigate(`/workspace/${detail.id}`);
     } catch (error: any) {
       toast.error(error.message || '进入工作台失败');
     } finally {
@@ -367,7 +438,7 @@ function App() {
       const next = await createStory(`新故事 ${stories.length + 1}`, '从这里开始你的下一段创作旅程');
       setStories((prev) => [next, ...prev]);
       setOnboardingStory(next);
-      setRoute('onboarding');
+      navigate('/onboarding');
     } catch (error: any) {
       toast.error(error.message || '新建作品失败');
     }
@@ -409,7 +480,7 @@ function App() {
     if (activeStory?.id === story.id) {
       setChapters([]);
       setActiveChapterId(null);
-      setRoute('stories');
+      navigate('/stories');
     }
     toast.success('作品已删除');
   }
@@ -419,7 +490,7 @@ function App() {
       const result = await login({ email, password, verification_code: verificationCode });
       setAuthToken(result.token);
       setSession(result.user);
-      setRoute('stories');
+      navigate('/stories');
       void fetchAnnouncement();
     } catch (error: any) {
       clearAuthToken();
@@ -433,7 +504,7 @@ function App() {
       const result = await register({ name, email, password, verification_code: verificationCode });
       setAuthToken(result.token);
       setSession(result.user);
-      setRoute('stories');
+      navigate('/stories');
       void fetchAnnouncement();
     } catch (error: any) {
       clearAuthToken();
@@ -465,7 +536,7 @@ function App() {
       setActiveStory(null);
       setChapters([]);
       setActiveChapterId(null);
-      setRoute('landing');
+      navigate('/');
     }
   }
 
@@ -479,7 +550,7 @@ function App() {
   async function doResetPassword(email: string, verificationCode: string, newPassword: string) {
     const result = await resetPasswordApi(email, verificationCode, newPassword);
     toast.success(result.message || '密码已重置，请使用新密码登录。');
-    setRoute('login');
+    navigate('/login');
   }
 
   async function refreshOrders() {
@@ -517,7 +588,7 @@ function App() {
       await refreshOrders();
       setActiveCheckout((prev) => (prev?.orderNo === orderNo ? null : prev));
       toast.success('支付成功，积分已到账。');
-      setRoute('account');
+      navigate('/account');
     } catch (error: any) {
       toast.error(error.message || '确认支付失败');
     } finally {
@@ -557,13 +628,13 @@ function App() {
         <LoginPage
           title={platform.site_name}
           subtitle={platform.site_slogan}
-          onBack={() => setRoute('landing')}
+          onBack={() => navigate('/')}
           onLogin={doLogin}
           onSendCode={doSendAuthCode}
           requireEmailCode={Boolean(platform.auth?.require_email_code_for_login)}
           codeExpireMinutes={platform.auth?.email_code_expire_minutes || 10}
-          toRegister={() => setRoute('register')}
-          toForgotPassword={() => setRoute('forgot-password')}
+          toRegister={() => navigate('/register')}
+          toForgotPassword={() => navigate('/forgot-password')}
           error={null}
         />
     );
@@ -573,7 +644,7 @@ function App() {
       <ForgotPasswordPage
         title={platform.site_name}
         subtitle={platform.site_slogan}
-        onBack={() => setRoute('login')}
+        onBack={() => navigate('/login')}
         onSendCode={doSendResetEmailCode}
         onResetPassword={doResetPassword}
         error={null}
@@ -585,269 +656,229 @@ function App() {
         <RegisterPage
           title={platform.site_name}
           subtitle={platform.site_slogan}
-          onBack={() => setRoute('landing')}
+          onBack={() => navigate('/')}
           onRegister={doRegister}
           onSendCode={doSendAuthCode}
           requireEmailCode={Boolean(platform.auth?.require_email_code_for_register)}
           codeExpireMinutes={platform.auth?.email_code_expire_minutes || 10}
-          toLogin={() => setRoute('login')}
+          toLogin={() => navigate('/login')}
           error={null}
         />
     );
   }
     if (!session && route === 'pricing') {
-      return <PricingPublicPage onBack={() => setRoute('landing')} onRegister={() => setRoute('register')} />;
+      return <PricingPublicPage onBack={() => navigate('/')} onRegister={() => navigate('/register')} />;
     }
   if (!session) {
-    return (
-      <PublicSite
-        platform={platform}
-        onLogin={() => setRoute('login')}
-        onRegister={() => setRoute('register')}
-        onPricing={() => setRoute('pricing')}
-      />
-    );
+    if (PUBLIC_ROUTES.includes(route)) {
+      return (
+        <PublicSite
+          platform={platform}
+          onLogin={() => navigate('/login')}
+          onRegister={() => navigate('/register')}
+          onPricing={() => navigate('/pricing')}
+        />
+      );
+    }
+    return <Navigate to="/" replace />;
   }
 
-  return (
-    <div className="h-screen overflow-hidden bg-[radial-gradient(circle_at_top_left,_rgba(96,165,250,0.18),_transparent_22%),linear-gradient(180deg,_#f4f8ff_0%,_#eef4ff_46%,_#f8fbff_100%)] text-slate-900">
-      <LoadingOverlay visible={bootstrapping} message="正在加载..." />
-      <header className="sticky top-0 z-20 border-b border-[#d7e3f4] bg-[rgba(248,251,255,0.82)] backdrop-blur-xl">
-        <div className="flex h-14 items-center justify-between px-5 lg:px-8">
-          <button
-            type="button"
-            onClick={() => setRoute('stories')}
-            className="flex items-center gap-3 text-left transition hover:opacity-90"
-          >
-            <img
-              src={platform.icon_url || DEFAULT_ICON_URL}
-              alt={`${platform.site_name || DEFAULT_SITE_NAME} logo`}
-              className="h-9 w-9 rounded-2xl shadow-[0_10px_24px_rgba(59,130,246,0.14)]"
-            />
-            <div>
-              <div className="text-sm font-semibold tracking-wide">{platform.site_name || DEFAULT_SITE_NAME}</div>
-              <div className="text-[11px] text-slate-500">{platform.site_slogan || 'AI 小说与漫画创作平台'}</div>
-            </div>
-          </button>
-          <div className="flex items-center gap-3 text-sm">
-            <span className="rounded-full border border-[#d7e3f4] bg-white/90 px-3 py-1 text-xs font-medium text-slate-600 shadow-[0_6px_18px_rgba(59,130,246,0.08)]">
-              {session.role === 'admin' ? '管理员' : '用户'}
-            </span>
-            <span>{session.name}</span>
-            <button
-              onClick={() => void doLogout()}
-              className="inline-flex items-center gap-1 rounded-full border border-[#d7e3f4] bg-white/90 px-3 py-1.5 text-xs text-slate-700 shadow-[0_6px_18px_rgba(59,130,246,0.08)] transition hover:bg-[#eef5ff]"
-            >
-              <LogOut size={14} />
-              退出
-            </button>
-          </div>
+  if (LOGGED_IN_REDIRECT_ROUTES.includes(route)) {
+    return <Navigate to="/stories" replace />;
+  }
+  if (route === 'workspace' && !activeStory) {
+    return <Navigate to="/stories" replace />;
+  }
+  if ((route === 'onboarding' || route === 'import-guidance') && !onboardingStory && !importGuidanceStory) {
+    return <Navigate to="/stories" replace />;
+  }
+
+  const renderContent = () => (
+    <Suspense fallback={<RouteLoadingFallback />}>
+      {route === 'stories' && (
+        <StoryLibraryPage
+          stories={stories}
+          loading={loadingStories}
+          onRefresh={refreshStories}
+          onCreate={createNewStory}
+          onCreateDraft={createStoryDraft}
+          onUpdateStory={updateStoryDraft}
+          onDeleteStory={deleteStoryDraft}
+          onOpen={openWorkspace}
+          onImportComplete={(storyId) => {
+            void refreshStories();
+            navigate(`/workspace/${storyId}`);
+          }}
+          loadingWorkspace={loadingWorkspace}
+        />
+      )}
+      {route === 'deconstruction-library' && deconWorkId !== 0 ? (
+        <DeconstructionWorkPage
+          workId={deconWorkId}
+          onBack={() => setDeconWorkId(0)}
+        />
+      ) : route === 'deconstruction-library' ? (
+        <DeconstructionLibraryPage
+          onNavigate={(r, workId) => {
+            if (r === 'deconstruction-work' && workId) {
+              setDeconWorkId(workId);
+            } else if (r === 'deconstruction-work' && !workId) {
+              setDeconWorkId(-1);
+            } else if (r === 'stories') {
+              navigate('/stories');
+              setDeconWorkId(0);
+            }
+          }}
+        />
+      ) : null}
+      {route === 'onboarding' && onboardingStory && (
+        <OnboardingPage
+          story={onboardingStory}
+          onComplete={handleOnboardingComplete}
+          onBack={() => {
+            setOnboardingStory(null);
+            navigate('/stories');
+          }}
+        />
+      )}
+      {route === 'import-guidance' && importGuidanceStory && (
+        <ImportGuidancePage
+          story={importGuidanceStory}
+          onComplete={handleImportGuidanceComplete}
+          onBack={() => {
+            setImportGuidanceStory(null);
+            navigate('/stories');
+          }}
+        />
+      )}
+      {route === 'workspace' && activeStory && (
+        <WorkspacePage
+          story={activeStory}
+          chapters={chapters}
+          currentChapter={activeChapter}
+          entitlements={null}
+          workspaceMode={workspaceMode}
+          onChapterChange={handleChapterChange}
+          onContentUpdated={refreshWorkspaceData}
+          onWorkspaceModeChange={setWorkspaceMode}
+        />
+      )}
+      {route === 'tasks' && (
+        <TasksPage
+          onOpenWorkspace={(mode) => {
+            setWorkspaceMode(mode);
+            if (activeStory) navigate(`/workspace/${activeStory.id}`);
+            else navigate('/stories');
+          }}
+        />
+      )}
+      {route === 'template-review' && (
+        <AdminTemplateReview />
+      )}
+      {route === 'templates' && (
+        <TemplateManagePage />
+      )}
+      {route === 'account' && (
+        <UserAccountUsagePage
+          session={session}
+          platform={platform}
+          orders={myOrders}
+          actioningOrderNo={actioningOrderNo}
+          onConfirmMockPayment={confirmPendingOrder}
+          onCancelOrder={cancelPendingOrder}
+          onRefreshOrders={refreshOrders}
+          modelConfigRequest={modelConfigRequest}
+          onModelConfigRequestHandled={handleModelConfigRequestHandled}
+        />
+      )}
+      {route === 'points-ai-admin' && session.role === 'admin' && (
+        <PointsAiAdminPage />
+      )}
+      {route === 'pricing' && (
+        <UserPricingPage
+          onCheckout={(checkout) => {
+            setActiveCheckout(checkout);
+            void refreshOrders();
+          }}
+        />
+      )}
+      {route === 'creation-studio' && (
+        <CreationStudioPage
+          storyId={activeStory?.id}
+          chapterId={activeChapter?.id}
+          storyTitle={activeStory?.title}
+          chapterTitle={activeChapter?.title || undefined}
+        />
+      )}
+      {route === 'model-catalog' && <ModelCatalogPage />}
+      {route === 'assets' && <AssetsPage />}
+      {route === 'quota-rules' && session.role === 'admin' && (
+        <AdminPlatformSettingsPage
+          onError={(message) => toast.error(message)}
+          onSaved={() => {
+            void refreshPlatformSettings();
+          }}
+        />
+      )}
+      {route === 'entitlements' && session.role === 'admin' && (
+        <AdminUserManagementPage onError={(message) => toast.error(message)} />
+      )}
+      {route === 'revenue' && session.role === 'admin' && <AdminRevenueDashboardPage onError={(message) => toast.error(message)} />}
+      {route === 'audit-logs' && session.role === 'admin' && (
+        <AdminAuditLogsPage onError={(message: string) => toast.error(message)} />
+      )}
+      {route === 'announcement' && session.role === 'admin' && (
+        <AdminAnnouncementPage onError={(message) => toast.error(message)} />
+      )}
+      {route === 'style-presets' && session.role === 'admin' && <StylePresetManager />}
+      {route === 'system-prompts' && session.role === 'admin' && (
+        <AdminSystemPromptsPage onError={(message: string) => toast.error(message)} />
+      )}
+      {route === 'system-update' && session.role === 'admin' && (
+        <AdminSystemUpdatePage onError={(message: string) => toast.error(message)} />
+      )}
+      {ADMIN_ROUTES.includes(route) && session.role !== 'admin' && (
+        <div className="flex flex-col items-center justify-center py-20 text-center">
+          <ShieldCheck size={36} className="mb-3 text-slate-300" />
+          <div className="text-sm font-medium text-slate-600">该页面仅管理员可访问</div>
         </div>
-      </header>
+      )}
+    </Suspense>
+  );
 
-      <div className={`grid h-[calc(100vh-56px)] overflow-hidden grid-cols-[68px_minmax(0,1fr)] ${navCollapsed ? 'lg:grid-cols-[68px_minmax(0,1fr)]' : 'lg:grid-cols-[220px_minmax(0,1fr)]'}`}>
-        <aside className={`overflow-y-auto border-r border-[#d7e3f4] bg-[linear-gradient(180deg,_rgba(248,251,255,0.94)_0%,_rgba(238,244,255,0.92)_100%)] px-2 py-4 backdrop-blur-xl ${navCollapsed ? '' : 'lg:px-4'}`}>
-          <div className={`mb-4 flex items-center justify-center ${navCollapsed ? '' : 'lg:justify-between lg:px-2'}`}>
-            {!navCollapsed ? <div className="hidden text-xs font-semibold uppercase tracking-[0.18em] text-slate-400 lg:block">应用菜单</div> : null}
-            <button
-              type="button"
-              onClick={() => setNavCollapsed((value) => !value)}
-              className="rounded-lg p-2 text-slate-400 transition hover:bg-white/80 hover:text-slate-700"
-              title={navCollapsed ? '展开菜单' : '收起菜单'}
-              aria-label={navCollapsed ? '展开菜单' : '收起菜单'}
-            >
-              {navCollapsed ? <PanelLeftOpen size={17} /> : <PanelLeftClose size={17} />}
-            </button>
-          </div>
-          <nav className="space-y-1.5">
-            {USER_NAV.map((item) => {
-              const Icon = item.icon;
-              const active = route === item.key;
-              return (
-                <button
-                  key={item.key}
-                  onClick={() => {
-                    if (item.key === 'deconstruction-library') setDeconWorkId(0);
-                    setRoute(item.key);
-                  }}
-                  title={navCollapsed ? item.label : undefined}
-                  aria-label={item.label}
-                  className={`flex w-full items-center justify-center rounded-xl px-2 py-2.5 text-left text-sm transition ${navCollapsed ? '' : 'lg:justify-start lg:gap-2 lg:px-3'} ${
-                    active
-                      ? 'bg-[linear-gradient(180deg,_#fafdff_0%,_#e8f1ff_100%)] text-[#1d4ed8] shadow-[0_10px_24px_rgba(59,130,246,0.14)]'
-                      : 'text-slate-700 hover:bg-white/80'
-                  }`}
-                >
-                  <Icon size={16} />
-                  <span className={navCollapsed ? 'hidden' : 'hidden lg:inline'}>{item.label}</span>
-                </button>
-              );
-            })}
-          </nav>
+  const shellProps = {
+    platform,
+    session,
+    isAdmin: session.role === 'admin',
+    navItems: USER_NAV,
+    adminNavItems: ADMIN_NAV,
+    activeKey: route,
+    onNavigate: handleNavigate,
+    onLogout: () => void doLogout(),
+    onLogoClick: () => navigate('/stories'),
+    onDeconstructionClick: () => setDeconWorkId(0),
+  };
 
-          {session.role === 'admin' && (
-            <>
-              <div className={`mb-3 mt-6 border-t border-[#d7e3f4] ${navCollapsed ? '' : 'lg:border-t-0 lg:px-2 lg:text-xs lg:font-semibold lg:uppercase lg:tracking-[0.18em] lg:text-slate-400'}`}>
-                {!navCollapsed ? <span className="hidden lg:inline">运营配置</span> : null}
-              </div>
-              <nav className="space-y-1.5">
-                {ADMIN_NAV.map((item) => {
-                  const Icon = item.icon;
-                  const active = route === item.key;
-                  return (
-                    <button
-                      key={item.key}
-                      onClick={() => setRoute(item.key)}
-                      title={navCollapsed ? item.label : undefined}
-                      aria-label={item.label}
-                      className={`flex w-full items-center justify-center rounded-xl px-2 py-2.5 text-left text-sm transition ${navCollapsed ? '' : 'lg:justify-start lg:gap-2 lg:px-3'} ${
-                        active
-                          ? 'bg-[linear-gradient(180deg,_#fafdff_0%,_#e8f1ff_100%)] text-[#1d4ed8] shadow-[0_10px_24px_rgba(59,130,246,0.14)]'
-                          : 'text-slate-700 hover:bg-white/80'
-                      }`}
-                    >
-                      <Icon size={16} />
-                      <span className={navCollapsed ? 'hidden' : 'hidden lg:inline'}>{item.label}</span>
-                    </button>
-                  );
-                })}
-              </nav>
-            </>
-          )}
-        </aside>
+  const shell =
+    deviceMode === 'mobile' ? (
+      <MobileAppShell {...shellProps} bottomNavItems={MOBILE_NAV_ITEMS} onLogoClick={() => navigate('/stories')}>
+        <div className={isWorkspaceRoute ? 'h-full min-h-0 overflow-hidden' : 'p-4 lg:p-7'}>{renderContent()}</div>
+      </MobileAppShell>
+    ) : deviceMode === 'tablet' ? (
+      <TabletAppShell {...shellProps}>
+        <div className={isWorkspaceRoute ? 'h-full min-h-0 overflow-hidden' : 'p-4 lg:p-7'}>{renderContent()}</div>
+      </TabletAppShell>
+    ) : (
+      <DesktopAppShell {...shellProps} navCollapsed={navCollapsed} onToggleNav={() => setNavCollapsed((value) => !value)}>
+        <div className={isWorkspaceRoute ? 'h-full min-h-0 overflow-hidden' : 'p-5 lg:p-7'}>{renderContent()}</div>
+      </DesktopAppShell>
+    );
 
-        <main className={`min-h-0 overflow-y-auto bg-transparent ${isWorkspaceRoute ? 'p-0' : 'p-5 lg:p-7'}`}>
-          <Suspense fallback={<RouteLoadingFallback />}>
-          {route === 'stories' && (
-            <StoryLibraryPage
-              stories={stories}
-              loading={loadingStories}
-              onRefresh={refreshStories}
-              onCreate={createNewStory}
-              onCreateDraft={createStoryDraft}
-              onUpdateStory={updateStoryDraft}
-              onDeleteStory={deleteStoryDraft}
-              onOpen={openWorkspace}
-              loadingWorkspace={loadingWorkspace}
-            />
-          )}
-          {route === 'deconstruction-library' && deconWorkId !== 0 ? (
-            <DeconstructionWorkPage
-              workId={deconWorkId}
-              onBack={() => { setDeconWorkId(0); }}
-            />
-          ) : route === 'deconstruction-library' ? (
-            <DeconstructionLibraryPage
-              onNavigate={(r, workId) => {
-                if (r === 'deconstruction-work' && workId) {
-                  setDeconWorkId(workId);
-                } else if (r === 'deconstruction-work' && !workId) {
-                  setDeconWorkId(-1);
-                } else if (r === 'stories') {
-                  setRoute('stories');
-                  setDeconWorkId(0);
-                }
-              }}
-            />
-          ) : null}
-          {route === 'onboarding' && onboardingStory && (
-            <OnboardingPage
-              story={onboardingStory}
-              onComplete={handleOnboardingComplete}
-              onBack={() => {
-                setOnboardingStory(null);
-                setRoute('stories');
-              }}
-            />
-          )}
-          {route === 'import-guidance' && importGuidanceStory && (
-            <ImportGuidancePage
-              story={importGuidanceStory}
-              onComplete={handleImportGuidanceComplete}
-              onBack={() => {
-                setImportGuidanceStory(null);
-                setRoute('stories');
-              }}
-            />
-          )}
-          {route === 'workspace' && (
-            <WorkspacePage
-              story={activeStory}
-              chapters={chapters}
-              currentChapter={activeChapter}
-              entitlements={null}
-              workspaceMode={workspaceMode}
-              onChapterChange={handleChapterChange}
-              onContentUpdated={refreshWorkspaceData}
-              onWorkspaceModeChange={setWorkspaceMode}
-            />
-          )}
-          {route === 'template-review' && (
-            <AdminTemplateReview />
-          )}
-          {route === 'templates' && (
-            <TemplateManagePage />
-          )}
-          {route === 'account' && (
-            <UserAccountUsagePage
-              session={session}
-              platform={platform}
-              orders={myOrders}
-              actioningOrderNo={actioningOrderNo}
-              onConfirmMockPayment={confirmPendingOrder}
-              onCancelOrder={cancelPendingOrder}
-              onRefreshOrders={refreshOrders}
-              modelConfigRequest={modelConfigRequest}
-              onModelConfigRequestHandled={handleModelConfigRequestHandled}
-            />
-          )}
-          {route === 'points-ai-admin' && session.role === 'admin' && (
-            <PointsAiAdminPage />
-          )}
-          {route === 'pricing' && (
-            <UserPricingPage
-              onCheckout={(checkout) => {
-                setActiveCheckout(checkout);
-                void refreshOrders();
-              }}
-            />
-          )}
-          {route === 'creation-studio' && (
-            <CreationStudioPage
-              storyId={activeStory?.id}
-              chapterId={activeChapter?.id}
-              storyTitle={activeStory?.title}
-              chapterTitle={activeChapter?.title || undefined}
-            />
-          )}
-          {route === 'model-catalog' && <ModelCatalogPage />}
-          {route === 'quota-rules' && session.role === 'admin' && (
-            <AdminPlatformSettingsPage
-              onError={(message) => toast.error(message)}
-              onSaved={() => {
-                void refreshPlatformSettings();
-              }}
-            />
-          )}
-          {route === 'entitlements' && session.role === 'admin' && (
-            <AdminUserManagementPage onError={(message) => toast.error(message)} />
-          )}
-          {route === 'revenue' && session.role === 'admin' && <AdminRevenueDashboardPage onError={(message) => toast.error(message)} />}
-          {route === 'audit-logs' && session.role === 'admin' && (
-            <AdminAuditLogsPage onError={(message: string) => toast.error(message)} />
-          )}
-          {route === 'announcement' && session.role === 'admin' && (
-            <AdminAnnouncementPage onError={(message) => toast.error(message)} />
-          )}
-          {route === 'style-presets' && session.role === 'admin' && <StylePresetManager />}
-          {route === 'system-prompts' && session.role === 'admin' && (
-            <AdminSystemPromptsPage onError={(message: string) => toast.error(message)} />
-          )}
-          {route === 'system-update' && session.role === 'admin' && (
-            <AdminSystemUpdatePage onError={(message: string) => toast.error(message)} />
-          )}
-          </Suspense>
-        </main>
+  return (
+    <WorkspaceProvider value={workspaceContextValue}>
+      <div className="h-dvh overflow-hidden bg-[radial-gradient(circle_at_top_left,_rgba(96,165,250,0.18),_transparent_22%),linear-gradient(180deg,_#f4f8ff_0%,_#eef4ff_46%,_#f8fbff_100%)] text-slate-900">
+        <LoadingOverlay visible={bootstrapping} message="正在加载..." />
+        {shell}
       </div>
       {announcement && !announcementDismissed && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/40 p-4">
@@ -889,7 +920,7 @@ function App() {
               const currentOrder = orders.find((o) => o.order_no === orderNo);
               if (currentOrder && currentOrder.status === 'paid') {
                 await refreshOrders();
-                setRoute('account');
+                navigate('/account');
                 toast.success('支付成功，积分已到账。');
               }
             } catch {
@@ -899,12 +930,12 @@ function App() {
         }}
         onSuccess={(message) => {
           setActiveCheckout(null);
-          setRoute('account');
+          navigate('/account');
           void refreshOrders();
           toast.success(message);
         }}
       />
-    </div>
+    </WorkspaceProvider>
   );
 }
 

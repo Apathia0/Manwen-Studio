@@ -303,6 +303,8 @@ type RouteKey = 'landing' | 'login' | 'stories' | 'workspace' | 'templates' | ..
 
 ## 移动端（`storycanvas-mobile/`）
 
+> **⚠️ 已冻结（2026-08）**：旧 H5 不再新增功能、不修复缺陷、不构建发布（正式切换后），仅保留回退。React Web 已响应式覆盖移动端并具备 PWA。详见 `storycanvas-mobile/README.md`。
+
 - Vue 3 + uni-app
 - 独立构建，共享后端 API
 - CSS variables + Tailwind 替代方案

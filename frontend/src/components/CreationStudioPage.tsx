@@ -220,7 +220,7 @@ const HistoryPanel = memo(function HistoryPanel({ jobs, selectedJobId, onSelect,
           type="button"
           onClick={onNew}
           title="新建创作"
-          className="grid h-8 w-8 place-items-center rounded-lg border border-[#c8d8ef] bg-white text-slate-600 transition hover:border-[#8fb2e8] hover:text-[#1d4ed8]"
+          className="grid h-8 w-8 max-md:h-11 max-md:w-11 place-items-center rounded-lg border border-[#c8d8ef] bg-white text-slate-600 transition hover:border-[#8fb2e8] hover:text-[#1d4ed8]"
         >
           <Plus size={16} />
         </button>
@@ -271,7 +271,7 @@ const HistoryPanel = memo(function HistoryPanel({ jobs, selectedJobId, onSelect,
                       type="button"
                       title="删除记录"
                       onClick={() => onDelete(job)}
-                      className="absolute right-2 top-2 grid h-7 w-7 place-items-center rounded-lg text-slate-300 opacity-0 transition hover:bg-red-50 hover:text-red-500 group-hover:opacity-100 focus:opacity-100"
+                      className="absolute right-2 top-2 grid h-7 w-7 place-items-center rounded-lg text-slate-300 opacity-0 transition hover:bg-red-50 hover:text-red-500 group-hover:opacity-100 focus:opacity-100 max-md:h-9 max-md:w-9 max-md:opacity-100 max-md:text-slate-400"
                     >
                       <Trash2 size={13} />
                     </button>
@@ -335,34 +335,34 @@ const ResultPanel = memo(function ResultPanel({ mediaKind, job, onCancel, onRetr
   }, [reloadOutput]);
   return (
     <section className="flex h-full min-h-0 flex-col border border-[#d7e3f4] bg-[rgba(255,255,255,0.78)] shadow-[0_16px_36px_rgba(59,130,246,0.09)] backdrop-blur-xl xl:rounded-lg">
-      <div className="flex h-[57px] items-center justify-between border-b border-[#d7e3f4] px-4">
+      <div className="flex h-[57px] items-center justify-between border-b border-[#d7e3f4] px-4 max-md:h-auto max-md:flex-col max-md:items-stretch max-md:gap-2 max-md:py-2.5">
         <div>
           <h2 className="text-sm font-semibold text-slate-900">生成结果</h2>
           {job ? <div className="mt-0.5 text-[11px] text-slate-400">任务 #{job.id} · {job.model_display_name || job.model_key || '自动模型'}</div> : null}
         </div>
-        <div className="flex flex-wrap items-center justify-end gap-2">
+        <div className="flex flex-wrap items-center justify-end gap-2 max-md:justify-start">
           {active && job ? (
-            <button type="button" onClick={() => onCancel(job)} className="rounded-lg border border-[#d7e3f4] bg-white px-3 py-1.5 text-xs text-slate-600 transition hover:border-red-200 hover:text-red-500">
+            <button type="button" onClick={() => onCancel(job)} className="rounded-lg border border-[#d7e3f4] bg-white px-3 py-1.5 text-xs text-slate-600 transition hover:border-red-200 hover:text-red-500 max-md:min-h-11">
               取消
             </button>
           ) : null}
           {job && ['failed', 'cancelled'].includes(job.status) ? (
-            <button type="button" onClick={() => onRetry(job)} className="inline-flex items-center gap-1.5 rounded-lg border border-[#bfd2ec] bg-white px-3 py-1.5 text-xs text-[#1d4ed8] transition hover:bg-[#edf5ff]">
+            <button type="button" onClick={() => onRetry(job)} className="inline-flex items-center gap-1.5 rounded-lg border border-[#bfd2ec] bg-white px-3 py-1.5 text-xs text-[#1d4ed8] transition hover:bg-[#edf5ff] max-md:min-h-11">
               <RefreshCw size={12} /> 重试
             </button>
           ) : null}
           {job?.status === 'succeeded' && job.media_kind === 'image' && job.output ? (
-            <button type="button" onClick={() => onRedraw(job)} className="inline-flex items-center gap-1.5 rounded-lg border border-[#bfd2ec] bg-white px-3 py-1.5 text-xs font-medium text-[#1d4ed8] transition hover:bg-[#edf5ff]">
+            <button type="button" onClick={() => onRedraw(job)} className="inline-flex items-center gap-1.5 rounded-lg border border-[#bfd2ec] bg-white px-3 py-1.5 text-xs font-medium text-[#1d4ed8] transition hover:bg-[#edf5ff] max-md:min-h-11">
               <RefreshCw size={12} /> 以此图重绘
             </button>
           ) : null}
           {job?.status === 'succeeded' && job.media_kind === 'video' && outputUrl ? (
-            <button type="button" onClick={() => void toggleVideoPlayback()} className="inline-flex items-center gap-1.5 rounded-lg border border-[#bfd2ec] bg-white px-3 py-1.5 text-xs font-medium text-[#1d4ed8] transition hover:bg-[#edf5ff]">
+            <button type="button" onClick={() => void toggleVideoPlayback()} className="inline-flex items-center gap-1.5 rounded-lg border border-[#bfd2ec] bg-white px-3 py-1.5 text-xs font-medium text-[#1d4ed8] transition hover:bg-[#edf5ff] max-md:min-h-11">
               {videoPlaying ? <Pause size={12} /> : <Play size={12} />} {videoPlaying ? '暂停' : '播放'}
             </button>
           ) : null}
           {outputUrl ? (
-            <a href={outputUrl} download target="_blank" rel="noreferrer" className="inline-flex items-center gap-1.5 rounded-lg bg-[#1d4ed8] px-3 py-1.5 text-xs font-medium text-white transition hover:bg-[#1e40af]">
+            <a href={outputUrl} download target="_blank" rel="noreferrer" className="inline-flex items-center gap-1.5 rounded-lg bg-[#1d4ed8] px-3 py-1.5 text-xs font-medium text-white transition hover:bg-[#1e40af] max-md:min-h-11">
               <Download size={12} /> 下载
             </a>
           ) : null}
@@ -388,7 +388,7 @@ const ResultPanel = memo(function ResultPanel({ mediaKind, job, onCancel, onRetr
           <div className="flex h-[clamp(360px,62vh,640px)] max-h-[640px] min-h-[360px] flex-col items-center justify-center rounded-lg border border-dashed border-amber-200 bg-amber-50/50 px-8 text-center">
             <AlertCircle size={28} className="text-amber-500" />
             <div className="mt-4 text-sm font-medium text-slate-700">{job.media_kind === 'video' ? '视频预览加载失败' : '图片预览加载失败'}</div>
-            <button type="button" onClick={handleReloadOutput} className="mt-4 inline-flex items-center gap-1.5 rounded-lg border border-amber-300 bg-white px-3 py-1.5 text-xs font-medium text-amber-700 transition hover:bg-amber-50">
+            <button type="button" onClick={handleReloadOutput} className="mt-4 inline-flex items-center gap-1.5 rounded-lg border border-amber-300 bg-white px-3 py-1.5 text-xs font-medium text-amber-700 transition hover:bg-amber-50 max-md:min-h-11">
               <RefreshCw size={12} /> 重新加载
             </button>
           </div>
@@ -859,7 +859,7 @@ export function CreationStudioPage({ storyId, chapterId, storyTitle, chapterTitl
 
   return (
     <div className="relative flex h-full min-h-[520px] flex-col overflow-hidden rounded-lg border border-[#d7e3f4] bg-[rgba(245,249,255,0.72)] shadow-[0_18px_42px_rgba(59,130,246,0.08)] backdrop-blur-xl xl:min-h-[620px]">
-      <div className="flex min-h-14 items-center justify-between gap-3 border-b border-[#d7e3f4] bg-white/72 px-3 sm:px-4">
+      <div className="flex min-h-14 items-center justify-between gap-3 border-b border-[#d7e3f4] bg-white/72 px-3 sm:px-4 max-md:flex-wrap max-md:gap-y-2">
         <div className="flex items-center gap-3">
           <div className="grid h-9 w-9 place-items-center rounded-lg bg-[linear-gradient(145deg,#1d4ed8,#3b82f6)] text-white shadow-[0_8px_18px_rgba(37,99,235,0.24)]">
             <Sparkles size={17} />
@@ -877,7 +877,7 @@ export function CreationStudioPage({ storyId, chapterId, storyTitle, chapterTitl
             <Video size={14} /> 视频
           </button>
         </div>
-        <button type="button" disabled={!storyId} onClick={() => setAssistantOpen((value) => !value)} className={`inline-flex h-8 items-center gap-1.5 rounded-lg border px-2.5 text-xs font-medium transition ${assistantOpen ? 'border-blue-300 bg-blue-50 text-blue-700' : 'border-[#c8d8ef] bg-white text-slate-600 hover:border-blue-300 hover:text-blue-700'} disabled:cursor-not-allowed disabled:opacity-50`} title={storyId ? '打开创作台 AI 助手' : '独立创作无需绑定作品'}>
+        <button type="button" disabled={!storyId} onClick={() => setAssistantOpen((value) => !value)} className={`inline-flex h-8 items-center gap-1.5 rounded-lg border px-2.5 text-xs font-medium transition max-md:min-h-11 ${assistantOpen ? 'border-blue-300 bg-blue-50 text-blue-700' : 'border-[#c8d8ef] bg-white text-slate-600 hover:border-blue-300 hover:text-blue-700'} disabled:cursor-not-allowed disabled:opacity-50`} title={storyId ? '打开创作台 AI 助手' : '独立创作无需绑定作品'}>
           <Bot size={14} /> AI 助手
         </button>
       </div>
@@ -888,7 +888,7 @@ export function CreationStudioPage({ storyId, chapterId, storyTitle, chapterTitl
           ['result', '结果'],
           ['history', '记录'],
         ] as const).map(([key, label]) => (
-          <button key={key} type="button" onClick={() => setMobilePane(key)} className={`h-10 text-xs font-medium focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[#2563eb] ${mobilePane === key ? 'border-b-2 border-[#2563eb] text-[#1d4ed8]' : 'text-slate-500'}`}>
+          <button key={key} type="button" onClick={() => setMobilePane(key)} className={`h-10 max-md:min-h-11 text-xs font-medium focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[#2563eb] ${mobilePane === key ? 'border-b-2 border-[#2563eb] text-[#1d4ed8]' : 'text-slate-500'}`}>
             {label}
           </button>
         ))}
@@ -923,8 +923,8 @@ export function CreationStudioPage({ storyId, chapterId, storyTitle, chapterTitl
               <div className="mb-2 flex items-center justify-between">
                 <label className="text-xs font-semibold text-slate-700">参考图片 <span className="font-normal text-slate-400">{selectedAssetIds.length}/{mediaKind === 'video' ? (videoParametersConfigured ? (videoLimits?.max_reference_images ?? 0) : 0) : 9}</span></label>
                 <div className="flex gap-1.5">
-                  <button type="button" disabled={uploading || (mediaKind === 'video' && !videoParametersConfigured)} title="从剪贴板读取图片" onClick={() => void handleClipboard()} className="grid h-7 w-7 place-items-center rounded-lg border border-[#c8d8ef] bg-white text-slate-500 transition hover:text-[#1d4ed8] disabled:cursor-not-allowed disabled:opacity-50"><Clipboard size={13} /></button>
-                  <button type="button" disabled={uploading || (mediaKind === 'video' && !videoParametersConfigured)} title="上传参考图片" onClick={() => fileInputRef.current?.click()} className="grid h-7 w-7 place-items-center rounded-lg border border-[#c8d8ef] bg-white text-slate-500 transition hover:text-[#1d4ed8] disabled:cursor-not-allowed disabled:opacity-50"><Upload size={13} /></button>
+                  <button type="button" disabled={uploading || (mediaKind === 'video' && !videoParametersConfigured)} title="从剪贴板读取图片" onClick={() => void handleClipboard()} className="grid h-7 w-7 max-md:h-11 max-md:w-11 place-items-center rounded-lg border border-[#c8d8ef] bg-white text-slate-500 transition hover:text-[#1d4ed8] disabled:cursor-not-allowed disabled:opacity-50"><Clipboard size={13} /></button>
+                  <button type="button" disabled={uploading || (mediaKind === 'video' && !videoParametersConfigured)} title="上传参考图片" onClick={() => fileInputRef.current?.click()} className="grid h-7 w-7 max-md:h-11 max-md:w-11 place-items-center rounded-lg border border-[#c8d8ef] bg-white text-slate-500 transition hover:text-[#1d4ed8] disabled:cursor-not-allowed disabled:opacity-50"><Upload size={13} /></button>
                 </div>
               </div>
               <input ref={fileInputRef} type="file" accept="image/png,image/jpeg,image/webp" multiple className="hidden" onChange={(event) => { void handleFiles(Array.from(event.target.files || [])); event.currentTarget.value = ''; }} />
@@ -932,7 +932,7 @@ export function CreationStudioPage({ storyId, chapterId, storyTitle, chapterTitl
                 {uploading ? <><Loader2 size={15} className="mr-2 animate-spin" /> 上传中...</> : <><Images size={16} className="mr-2" /> 添加或拖入参考图片</>}
               </button>
               {selectedAssets.length ? (
-                <div className="mt-2 grid grid-cols-5 gap-2">
+                <div className="mt-2 grid grid-cols-5 gap-2 max-md:grid-cols-4">
                   {selectedAssets.map((asset) => {
                     const selected = true;
                     return (
@@ -949,14 +949,14 @@ export function CreationStudioPage({ storyId, chapterId, storyTitle, chapterTitl
                 </div>
               ) : null}
               {mediaKind === 'image' && selectedAssetIds.length ? (
-                <button type="button" disabled={analyzingAssets} onClick={() => void handleAnalyzeAssets()} className="mt-2 inline-flex items-center gap-1.5 rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-xs font-medium text-blue-700 hover:bg-blue-100 disabled:cursor-not-allowed disabled:opacity-50">
+                <button type="button" disabled={analyzingAssets} onClick={() => void handleAnalyzeAssets()} className="mt-2 inline-flex items-center gap-1.5 rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-xs font-medium text-blue-700 hover:bg-blue-100 disabled:cursor-not-allowed disabled:opacity-50 max-md:w-full max-md:justify-center max-md:min-h-11">
                   {analyzingAssets ? <Loader2 size={13} className="animate-spin" /> : <Sparkles size={13} />}
                   {analyzingAssets ? '正在分析参考图...' : 'AI 反推提示词'}
                 </button>
               ) : null}
               {mediaKind === 'image' && selectedAssetIds.length ? (
                 <div className="mt-2 flex gap-2">
-                  {(['character', 'style'] as const).map((mode) => <button key={mode} type="button" onClick={() => setReferenceMode(mode)} className={`flex-1 rounded-lg border px-2 py-1.5 text-xs ${referenceMode === mode ? 'border-[#8fb2e8] bg-[#edf5ff] text-[#1d4ed8]' : 'border-[#d7e3f4] bg-white text-slate-500'}`}>{mode === 'character' ? '角色一致性' : '风格参考'}</button>)}
+                  {(['character', 'style'] as const).map((mode) => <button key={mode} type="button" onClick={() => setReferenceMode(mode)} className={`flex-1 rounded-lg border px-2 py-1.5 text-xs max-md:min-h-11 ${referenceMode === mode ? 'border-[#8fb2e8] bg-[#edf5ff] text-[#1d4ed8]' : 'border-[#d7e3f4] bg-white text-slate-500'}`}>{mode === 'character' ? '角色一致性' : '风格参考'}</button>)}
                 </div>
               ) : null}
             </div>
@@ -976,7 +976,7 @@ export function CreationStudioPage({ storyId, chapterId, storyTitle, chapterTitl
                 <div>
                   <div className="mb-2 text-xs font-semibold text-slate-700">质量</div>
                   <div className="grid grid-cols-4 gap-2">
-                    {imageQualities.map((item) => <button key={item} type="button" onClick={() => setQuality(item)} className={`rounded-lg border py-2 text-xs ${quality === item ? 'border-[#6c9ee6] bg-[#edf5ff] font-medium text-[#1d4ed8]' : 'border-[#d7e3f4] bg-white text-slate-500'}`}>{({ auto: '自动', high: '高', medium: '中', low: '低' })[item]}</button>)}
+                    {imageQualities.map((item) => <button key={item} type="button" onClick={() => setQuality(item)} className={`rounded-lg border py-2 text-xs max-md:min-h-11 ${quality === item ? 'border-[#6c9ee6] bg-[#edf5ff] font-medium text-[#1d4ed8]' : 'border-[#d7e3f4] bg-white text-slate-500'}`}>{({ auto: '自动', high: '高', medium: '中', low: '低' })[item]}</button>)}
                   </div>
                 </div>
                 <div>
@@ -1013,7 +1013,7 @@ export function CreationStudioPage({ storyId, chapterId, storyTitle, chapterTitl
               <>
                 <div>
                   <div className="mb-2 text-xs font-semibold text-slate-700">画面比例</div>
-                  <div className="grid grid-cols-5 gap-2">{videoRatios.map((ratio) => <button key={ratio} type="button" onClick={() => setAspectRatio(ratio)} className={`rounded-lg border py-2 text-[11px] ${aspectRatio === ratio ? 'border-[#e5b967] bg-[#fff7e8] text-[#9a5a06]' : 'border-[#d7e3f4] bg-white text-slate-500'}`}>{ratio}</button>)}</div>
+                  <div className="grid grid-cols-5 gap-2 max-md:grid-cols-3">{videoRatios.map((ratio) => <button key={ratio} type="button" onClick={() => setAspectRatio(ratio)} className={`rounded-lg border py-2 text-[11px] max-md:min-h-11 ${aspectRatio === ratio ? 'border-[#e5b967] bg-[#fff7e8] text-[#9a5a06]' : 'border-[#d7e3f4] bg-white text-slate-500'}`}>{ratio}</button>)}</div>
                 </div>
                 <div className="grid grid-cols-2 gap-3">
                   <div>
