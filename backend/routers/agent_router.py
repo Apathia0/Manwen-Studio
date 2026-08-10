@@ -16,7 +16,7 @@ from sse_starlette.sse import EventSourceResponse
 from starlette.background import BackgroundTask as ResponseBackgroundTask
 
 from database import SessionLocal, get_db
-from models import AgentConversation, AgentConversationMessage, AgentPendingChange, Chapter, ChapterVideoShot, ChapterVideoWorkflow, MangaImage, Story
+from models import AgentConversation, AgentConversationMessage, AgentPendingChange, Chapter, ChapterVideoShot, ChapterVideoWorkflow, MangaAsset, MangaImage, Story, VideoAsset
 from schemas import AgentChatIn, AgentConversationCreateIn, AgentConversationOut, AgentConversationSummaryOut
 from services.agent_service import (
     AgentPendingChangeKey,
@@ -340,6 +340,12 @@ def _load_owned_pending_target(
         if workflow and not isinstance(workflow, ChapterVideoWorkflow) and not hasattr(workflow, "story_id"):
             return shot
         return shot if workflow and getattr(workflow, "story_id", None) == story_id else None
+    if change_type == "manga_asset":
+        asset = db.get(MangaAsset, record_id, **get_options)
+        return asset if asset and asset.story_id == story_id else None
+    if change_type == "video_asset":
+        asset = db.get(VideoAsset, record_id, **get_options)
+        return asset if asset and asset.story_id == story_id else None
     return None
 
 

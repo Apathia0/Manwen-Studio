@@ -25,6 +25,8 @@ from models import (
     ChapterVideoShot,
     ChapterVideoWorkflow,
     DeconstructionResult,
+    MangaAsset,
+    MangaAssetBinding,
     MangaImage,
     StaleKnowledgeContextError,
     Story,
@@ -960,6 +962,10 @@ class PendingChangesTracker:
                 obj = db.get(ChapterVideoShot, change.record_id, with_for_update=True)
             elif change.type == "video_workflow":
                 obj = db.get(ChapterVideoWorkflow, change.record_id, with_for_update=True)
+            elif change.type == "manga_asset":
+                obj = db.get(MangaAsset, change.record_id, with_for_update=True)
+            elif change.type == "video_asset":
+                obj = db.get(VideoAsset, change.record_id, with_for_update=True)
             elif change.type == "scenes_file":
                 continue
 
@@ -984,6 +990,21 @@ class PendingChangesTracker:
                     "id": change.record_id,
                     "field": change.field,
                     "error": "新建章节已被继续编辑，为避免误删，本次未撤回",
+                })
+                continue
+            if change.type in ("manga_asset", "video_asset") and change.field == "__created__":
+                # 资产已由用户上传/生成图片则不允许撤回删除
+                storage_value = getattr(obj, "storage_path", None) if change.type == "manga_asset" else getattr(obj, "file_path", None)
+                if not (storage_value or "").strip():
+                    continue
+                conflicted_changes.add((change.type, change.record_id, change.field))
+                results.append({
+                    "ok": False,
+                    "conflict": True,
+                    "type": change.type,
+                    "id": change.record_id,
+                    "field": change.field,
+                    "error": "资产已有图片，为避免误删，本次未撤回",
                 })
                 continue
             if not obj or getattr(obj, change.field, None) == change.new_value:
@@ -1052,6 +1073,23 @@ class PendingChangesTracker:
                     if obj:
                         setattr(obj, change.field, change.old_value)
                         results.append({"ok": True, "type": "video_workflow", "id": change.record_id, "field": change.field})
+                elif change.type == "manga_asset":
+                    obj = db.get(MangaAsset, change.record_id)
+                    if obj:
+                        if change.field == "__created__":
+                            db.query(MangaAssetBinding).filter(MangaAssetBinding.asset_id == obj.id).delete(synchronize_session=False)
+                            db.delete(obj)
+                        else:
+                            setattr(obj, change.field, change.old_value)
+                        results.append({"ok": True, "type": "manga_asset", "id": change.record_id, "field": change.field})
+                elif change.type == "video_asset":
+                    obj = db.get(VideoAsset, change.record_id)
+                    if obj:
+                        if change.field == "__created__":
+                            db.delete(obj)
+                        else:
+                            setattr(obj, change.field, change.old_value)
+                        results.append({"ok": True, "type": "video_asset", "id": change.record_id, "field": change.field})
                 elif change.type == "scenes_file":
                     with _scenes_file_lock(change.record_id):
                         chapter = db.get(Chapter, change.record_id)
@@ -1755,6 +1793,7 @@ _MANGA_WORKFLOW_TOOL_NAMES = {
     "batch_update_manga_storyboard_scenes",
     "replace_manga_storyboard",
     "update_manga_asset_prompts",
+    "create_manga_asset",
 }
 _MANGA_ASSET_PROMPT_TYPES = {
     "character_reference",
@@ -1782,6 +1821,8 @@ _VIDEO_WORKFLOW_TOOL_NAMES = {
     "update_screenplay",
     "batch_update_shot_prompts",
     "batch_update_shot_fields",
+    "create_video_asset",
+    "update_video_asset_prompts",
 }
 _VIDEO_WORKFLOW_READ_TOOL_NAMES = {
     "get_chapter_full",
@@ -2985,6 +3026,146 @@ async def update_manga_asset_prompts(
             tracker.restore(tracker_checkpoint)
         logger.exception("写入漫画资产提示词失败 chapter_id=%s", chapter_id)
         return {"error": public_error_message(exc, "写入漫画资产提示词失败，请稍后重试")}
+    finally:
+        db.close()
+
+
+# 可创建的漫画资产类型（前端资产管理弹窗的分类）
+_MANGA_CREATABLE_ASSET_TYPES = frozenset({
+    "character_reference",
+    "scene_reference",
+    "prop_reference",
+    "style_reference",
+})
+
+# 漫画资产类型 → 章节绑定角色
+_MANGA_ASSET_TYPE_TO_ROLE = {
+    "character_reference": "character",
+    "scene_reference": "scene",
+    "prop_reference": "prop",
+    "style_reference": "style",
+}
+
+
+@tool_registry.register(
+    name="create_manga_asset",
+    description=(
+        "在当前漫画章节的资产管理中新增一个空白资产条目（角色/场景/道具/风格设定图占位），"
+        "并自动绑定到当前章节。资产无图片，用户后续可在资产管理弹窗中上传或生成图片。"
+    ),
+    is_write=True,
+    parameters={
+        "type": "object",
+        "properties": {
+            "chapter_id": {"type": "integer", "description": "当前漫画章节 ID"},
+            "name": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 255,
+                "description": "资产名称，例如：林晚秋正面设定图",
+            },
+            "asset_type": {
+                "type": "string",
+                "enum": sorted(_MANGA_CREATABLE_ASSET_TYPES),
+                "description": "资产类型：角色 / 场景 / 道具 / 风格设定图",
+            },
+        },
+        "required": ["chapter_id", "name", "asset_type"],
+    },
+    workflow_types=["manga"],
+)
+async def create_manga_asset(chapter_id: int, name: str, asset_type: str) -> dict:
+    """在漫画章节资产管理中新增一个空白资产条目并绑定到当前章节。"""
+    normalized_name = str(name or "").strip()
+    normalized_type = str(asset_type or "").strip()
+    if not normalized_name:
+        return {"error": "资产名称不能为空"}
+    if len(normalized_name) > 255:
+        return {"error": "资产名称不能超过 255 个字符"}
+    if normalized_type not in _MANGA_CREATABLE_ASSET_TYPES:
+        return {"error": f"asset_type 必须是 {sorted(_MANGA_CREATABLE_ASSET_TYPES)} 之一"}
+
+    db = SessionLocal()
+    tracker = _current_pending_changes()
+    tracker_checkpoint = tracker.checkpoint() if tracker else None
+    try:
+        chapter = _validate_chapter_ownership(
+            db,
+            chapter_id,
+            _current_story_id(),
+            with_for_update=True,
+        )
+        if not chapter:
+            return {"error": "章节不存在或无权访问"}
+        context = _current_run_context()
+        owner_user_id = (
+            context.pending_change_key.user_id
+            if context and context.pending_change_key
+            else chapter.story.owner_user_id
+        )
+        if not owner_user_id:
+            return {"error": "无法确定当前用户，请重新发起对话后再试"}
+
+        asset = MangaAsset(
+            owner_user_id=owner_user_id,
+            story_id=chapter.story_id,
+            chapter_id=chapter.id,
+            asset_type=normalized_type,
+            name=normalized_name,
+            storage_path="",  # 空白资产占位，图片后续由用户上传/生成
+            source_type="agent",
+            status="active",
+        )
+        db.add(asset)
+        db.flush()
+        binding = MangaAssetBinding(
+            asset_id=asset.id,
+            story_id=chapter.story_id,
+            chapter_id=chapter.id,
+            binding_role=_MANGA_ASSET_TYPE_TO_ROLE.get(normalized_type, "character"),
+            label=normalized_name,
+            priority=0,
+            is_required=False,
+        )
+        db.add(binding)
+        if tracker:
+            display = f"第{chapter.chapter_number}章" + (f" · {chapter.title}" if chapter.title else "")
+            tracker.record(PendingChange(
+                type="manga_asset",
+                record_id=asset.id,
+                display_name=f"{display} · 资产「{normalized_name}」",
+                field="__created__",
+                old_value=None,
+                new_value={
+                    "asset_id": asset.id,
+                    "story_id": chapter.story_id,
+                    "chapter_id": chapter.id,
+                    "asset_type": normalized_type,
+                    "name": normalized_name,
+                },
+            ))
+        db.commit()
+        db.refresh(asset)
+        logger.info(
+            "Agent tool=create_manga_asset story=%s chapter=%s asset=%s type=%s",
+            _current_story_id(), chapter_id, asset.id, normalized_type,
+        )
+        return {
+            "ok": True,
+            "asset_id": asset.id,
+            "story_id": asset.story_id,
+            "chapter_id": asset.chapter_id,
+            "asset_type": asset.asset_type,
+            "name": asset.name,
+            "storage_path": asset.storage_path,
+            "message": f"已新增空白资产「{normalized_name}」，可在资产管理弹窗中上传或生成图片",
+        }
+    except Exception as exc:
+        db.rollback()
+        if tracker and tracker_checkpoint is not None:
+            tracker.restore(tracker_checkpoint)
+        logger.exception("新增漫画资产失败 chapter_id=%s", chapter_id)
+        return {"error": public_error_message(exc, "新增漫画资产失败，请稍后重试")}
     finally:
         db.close()
 
@@ -5037,6 +5218,270 @@ async def get_video_assets(chapter_id: int) -> dict:
             ],
             "total": len(assets),
         }
+    finally:
+        db.close()
+
+
+# 可创建的视频资产类型（前端视频资产管理弹窗的分类）
+_VIDEO_CREATABLE_ASSET_TYPES = frozenset({
+    "character_reference",
+    "scene_reference",
+    "storyboard_frame",
+    "prop_reference",
+})
+
+
+@tool_registry.register(
+    name="create_video_asset",
+    description=(
+        "在当前视频工作流章节的资产列表中新增一个空白资产条目（角色/场景/道具/故事版参考图占位）。"
+        "资产无图片，用户后续可在视频资产管理中上传或生成图片。"
+    ),
+    is_write=True,
+    parameters={
+        "type": "object",
+        "properties": {
+            "chapter_id": {"type": "integer", "description": "当前章节 ID（须属于当前视频工作流）"},
+            "name": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 255,
+                "description": "资产名称，例如：林晚秋角色参考图",
+            },
+            "asset_type": {
+                "type": "string",
+                "enum": sorted(_VIDEO_CREATABLE_ASSET_TYPES),
+                "description": "资产类型：角色 / 场景 / 道具 / 故事版参考图",
+            },
+        },
+        "required": ["chapter_id", "name", "asset_type"],
+    },
+    workflow_types=["video"],
+)
+async def create_video_asset(chapter_id: int, name: str, asset_type: str) -> dict:
+    """在视频工作流章节的资产列表中新增一个空白资产条目。"""
+    normalized_name = str(name or "").strip()
+    normalized_type = str(asset_type or "").strip()
+    if not normalized_name:
+        return {"error": "资产名称不能为空"}
+    if len(normalized_name) > 255:
+        return {"error": "资产名称不能超过 255 个字符"}
+    if normalized_type not in _VIDEO_CREATABLE_ASSET_TYPES:
+        return {"error": f"asset_type 必须是 {sorted(_VIDEO_CREATABLE_ASSET_TYPES)} 之一"}
+
+    db = SessionLocal()
+    tracker = _current_pending_changes()
+    tracker_checkpoint = tracker.checkpoint() if tracker else None
+    try:
+        context = _current_run_context()
+        chapter = _validate_chapter_ownership(db, chapter_id, _current_story_id())
+        workflow = (
+            _require_current_video_workflow(db, context.workflow_id)
+            if context and context.workflow_id
+            else None
+        )
+        if not chapter or not workflow or workflow.chapter_id != chapter_id:
+            return {"error": "章节不存在、无权访问或不属于当前视频工作流"}
+
+        asset = VideoAsset(
+            story_id=chapter.story_id,
+            chapter_id=chapter.id,
+            scene_id=None,
+            shot_id=None,
+            asset_type=normalized_type,
+            name=normalized_name,
+            file_path="",  # 空白资产占位，图片后续由用户上传/生成
+            provider="",
+            prompt="",
+            status="active",
+            locked=False,
+            usage_scope="shot_only",
+            source_type="agent",
+        )
+        db.add(asset)
+        db.flush()
+        if tracker:
+            display = f"第{chapter.chapter_number}章" + (f" · {chapter.title}" if chapter.title else "")
+            tracker.record(PendingChange(
+                type="video_asset",
+                record_id=asset.id,
+                display_name=f"{display} · 资产「{normalized_name}」",
+                field="__created__",
+                old_value=None,
+                new_value={
+                    "asset_id": asset.id,
+                    "story_id": chapter.story_id,
+                    "chapter_id": chapter.id,
+                    "asset_type": normalized_type,
+                    "name": normalized_name,
+                },
+            ))
+        db.commit()
+        db.refresh(asset)
+        logger.info(
+            "Agent tool=create_video_asset story=%s chapter=%s asset=%s workflow=%s type=%s",
+            _current_story_id(), chapter_id, asset.id,
+            workflow.id if workflow else None, normalized_type,
+        )
+        return {
+            "ok": True,
+            "asset_id": asset.id,
+            "story_id": asset.story_id,
+            "chapter_id": asset.chapter_id,
+            "asset_type": asset.asset_type,
+            "name": asset.name,
+            "file_path": asset.file_path,
+            "message": f"已新增空白资产「{normalized_name}」，可在视频资产管理中上传或生成图片",
+        }
+    except Exception as exc:
+        db.rollback()
+        if tracker and tracker_checkpoint is not None:
+            tracker.restore(tracker_checkpoint)
+        logger.exception("新增视频资产失败 chapter_id=%s", chapter_id)
+        return {"error": public_error_message(exc, "新增视频资产失败，请稍后重试")}
+    finally:
+        db.close()
+
+
+@tool_registry.register(
+    name="update_video_asset_prompts",
+    description=(
+        "批量修改当前视频工作流章节中现有资产的提示词（如角色、场景、道具、故事版参考图的生成提示词），"
+        "不影响已生成图片。可结合 create_video_asset 与 get_video_assets 使用。"
+    ),
+    is_write=True,
+    parameters={
+        "type": "object",
+        "properties": {
+            "chapter_id": {"type": "integer", "description": "当前章节 ID（须属于当前视频工作流）"},
+            "updates": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 30,
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "asset_id": {
+                            "type": "integer",
+                            "description": "get_video_assets 返回的资产 ID",
+                        },
+                        "prompt": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 24000,
+                            "description": "完整的新提示词",
+                        },
+                    },
+                    "required": ["asset_id", "prompt"],
+                },
+            },
+        },
+        "required": ["chapter_id", "updates"],
+    },
+    workflow_types=["video"],
+)
+async def update_video_asset_prompts(chapter_id: int, updates: list[dict]) -> dict:
+    """批量修改视频资产生成提示词，并记录可撤回的变更。"""
+    if not isinstance(updates, list) or not updates:
+        return {"error": "updates 必须是非空数组"}
+    if len(updates) > 30:
+        return {"error": "一次最多修改 30 个资产提示词"}
+
+    normalized_updates: dict[int, str] = {}
+    for update in updates:
+        if not isinstance(update, dict):
+            return {"error": "每项更新都必须是包含 asset_id 和 prompt 的对象"}
+        asset_id = update.get("asset_id")
+        if not isinstance(asset_id, int) or isinstance(asset_id, bool) or asset_id < 1:
+            return {"error": "每项更新都必须包含有效的资产 ID"}
+        if asset_id in normalized_updates:
+            return {"error": f"asset_id {asset_id} 重复"}
+        prompt = update.get("prompt")
+        if not isinstance(prompt, str):
+            return {"error": f"资产 {asset_id} 的 prompt 必须是字符串"}
+        normalized_prompt = prompt.strip()
+        if not normalized_prompt:
+            return {"error": f"资产 {asset_id} 的提示词不能为空"}
+        if len(normalized_prompt) > 24000:
+            return {"error": f"资产 {asset_id} 的提示词不能超过 24000 个字符"}
+        normalized_updates[asset_id] = normalized_prompt
+
+    db = SessionLocal()
+    tracker = _current_pending_changes()
+    tracker_checkpoint = tracker.checkpoint() if tracker else None
+    try:
+        context = _current_run_context()
+        chapter = _validate_chapter_ownership(db, chapter_id, _current_story_id())
+        workflow = (
+            _require_current_video_workflow(db, context.workflow_id)
+            if context and context.workflow_id
+            else None
+        )
+        if not chapter or not workflow or workflow.chapter_id != chapter_id:
+            return {"error": "章节不存在、无权访问或不属于当前视频工作流"}
+
+        asset_ids = sorted(normalized_updates)
+        assets = (
+            db.query(VideoAsset)
+            .filter(
+                VideoAsset.id.in_(asset_ids),
+                VideoAsset.chapter_id == chapter_id,
+                (VideoAsset.story_id == chapter.story_id) | (VideoAsset.story_id.is_(None)),
+            )
+            .order_by(VideoAsset.id)
+            .with_for_update()
+            .all()
+        )
+        assets_by_id = {asset.id: asset for asset in assets}
+        missing = [aid for aid in asset_ids if aid not in assets_by_id]
+        if missing:
+            return {"error": f"资产 {missing} 不存在或不属于当前章节的视频资产"}
+
+        display = f"第{chapter.chapter_number}章" + (f" · {chapter.title}" if chapter.title else "")
+        updated_assets: list[dict[str, Any]] = []
+        for asset_id in asset_ids:
+            asset = assets_by_id[asset_id]
+            new_prompt = normalized_updates[asset_id]
+            if asset.prompt == new_prompt:
+                continue
+            if tracker:
+                tracker.record(PendingChange(
+                    type="video_asset",
+                    record_id=asset.id,
+                    display_name=f"{display} · 资产「{asset.name}」",
+                    field="prompt",
+                    old_value=asset.prompt or "",
+                    new_value=new_prompt,
+                ))
+            asset.prompt = new_prompt
+            updated_assets.append({
+                "asset_id": asset.id,
+                "asset_type": asset.asset_type,
+                "name": asset.name,
+                "prompt": new_prompt,
+            })
+
+        if not updated_assets:
+            return {"ok": True, "changed": False, "updated_assets": []}
+
+        db.commit()
+        logger.info(
+            "Agent tool=update_video_asset_prompts story=%s chapter=%s assets=%s",
+            _current_story_id(), chapter_id, [a["asset_id"] for a in updated_assets],
+        )
+        return {
+            "ok": True,
+            "changed": True,
+            "updated_assets": updated_assets,
+            "images_preserved": True,
+            "message": f"已更新 {len(updated_assets)} 个资产提示词",
+        }
+    except Exception as exc:
+        db.rollback()
+        if tracker and tracker_checkpoint is not None:
+            tracker.restore(tracker_checkpoint)
+        logger.exception("写入视频资产提示词失败 chapter_id=%s", chapter_id)
+        return {"error": public_error_message(exc, "写入视频资产提示词失败，请稍后重试")}
     finally:
         db.close()
 

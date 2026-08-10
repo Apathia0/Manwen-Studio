@@ -28,6 +28,7 @@ const 工具标签映射: Record<string, string> = {
   batch_update_manga_storyboard_scenes: '正在批量修改漫画分镜…',
   replace_manga_storyboard: '正在替换完整漫画分镜…',
   update_manga_asset_prompts: '正在更新漫画资产提示词…',
+  create_manga_asset: '正在新增漫画资产…',
   // ── 视频读取工具 ──
   get_video_workflow: '正在读取视频工作流…',
   get_workflow_shots: '正在读取镜头列表…',
@@ -38,6 +39,8 @@ const 工具标签映射: Record<string, string> = {
   update_shot_prompts: '正在更新镜头提示词…',
   update_shot_fields: '正在更新镜头字段…',
   update_screenplay: '正在更新剧本内容…',
+  create_video_asset: '正在新增视频资产…',
+  update_video_asset_prompts: '正在更新视频资产提示词…',
 };
 
 interface 工具状态属性 {
