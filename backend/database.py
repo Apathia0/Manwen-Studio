@@ -1103,6 +1103,7 @@ def _migrate_video_canvas_tables(target_engine=None) -> None:
         "video_canvases",
         "video_canvas_versions",
         "video_canvas_layouts",
+        "video_canvas_plans",
         "video_canvas_sync_records",
         "video_canvas_runs",
         "video_canvas_run_nodes",
@@ -1129,6 +1130,21 @@ def _migrate_video_canvas_tables(target_engine=None) -> None:
     )
     with db_engine.begin() as conn:
         _prepare_migration_conn(conn)
+        plan_columns = (
+            {column["name"] for column in inspector.get_columns("video_canvas_plans")}
+            if "video_canvas_plans" in table_names
+            else set()
+        )
+        if "workflow_id" not in plan_columns:
+            conn.execute(text("ALTER TABLE video_canvas_plans ADD COLUMN workflow_id INTEGER"))
+        if "applied_canvas_revision" not in plan_columns:
+            conn.execute(text("ALTER TABLE video_canvas_plans ADD COLUMN applied_canvas_revision INTEGER"))
+        if "workflow_sync_revision" not in plan_columns:
+            conn.execute(text("ALTER TABLE video_canvas_plans ADD COLUMN workflow_sync_revision INTEGER"))
+        conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS ix_video_canvas_plans_workflow_id "
+            "ON video_canvas_plans (workflow_id)"
+        ))
         if "creation_idempotency_key" not in canvas_columns:
             conn.execute(text("ALTER TABLE video_canvases ADD COLUMN creation_idempotency_key VARCHAR(100)"))
         conn.execute(text(

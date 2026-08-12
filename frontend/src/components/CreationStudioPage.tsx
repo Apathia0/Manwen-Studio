@@ -43,6 +43,7 @@ import {
 import { toast } from '../lib/toast';
 import { normalizeErrorMessage } from '../lib/errors';
 import ImageZoomView from './shared/ImageZoomView';
+import MediaImage from './shared/MediaImage';
 
 const AgentPanel = lazy(() => import('./AgentPanel/AgentPanel'));
 
@@ -184,7 +185,7 @@ function useAssetMediaUrl(publicUrl: string, mediaType: CreationStudioMediaKind)
 function AssetThumbnail({ asset }: { asset: CreationStudioAsset }) {
   const [src] = useAssetMediaUrl(asset.public_url, 'image');
   return src
-    ? <img src={src} alt={asset.original_name || '参考图片'} className="h-full w-full object-cover" />
+    ? <MediaImage src={src} alt={asset.original_name || '参考图片'} className="h-full w-full object-cover" />
     : <span className="grid h-full w-full place-items-center text-slate-300"><Loader2 size={14} className="animate-spin" /></span>;
 }
 

@@ -9,9 +9,11 @@ from pathlib import Path
 from typing import Any
 
 from database import SessionLocal
-from models import VideoAsset, VideoCanvas, VideoCanvasRun, VideoCanvasRunNode, VideoCanvasVersion
+from models import AiModel, ChapterVideoShot, ChapterVideoWorkflow, VideoAsset, VideoCanvas, VideoCanvasRun, VideoCanvasRunNode, VideoCanvasVersion
 from services import image2 as image2_service
+from services import video_api as video_api_service
 from services.ai.resolver import begin_ai_call, complete_ai_call
+from services.media_locator import ensure_local_media_path
 from services.task_manager import task_manager
 from services.video_compiler import compile_project
 from services.video_generation import fetch_job_result, query_job_status, submit_video_job
@@ -23,6 +25,7 @@ VIDEO_OUTPUTS = BACKEND_DIR / "video_outputs"
 GENERATION_TYPES = {"image", "video", "image_generation", "storyboard", "video_generation", "concat"}
 IMAGE_ASSET_TYPES = {"storyboard_frame", "character_reference", "scene_reference", "prop_reference", "style_reference", "image"}
 VIDEO_ASSET_TYPES = {"video_clip", "video", "compiled_video", "final_video"}
+AUDIO_ASSET_TYPES = {"audio"}
 
 
 def _now() -> datetime.datetime:
@@ -42,6 +45,38 @@ def _static_url(path: str, root: Path, prefix: str) -> str:
         return path
     relative = _relative_path(path, root)
     return f"{prefix}/{relative}" if not relative.startswith(("http://", "https://")) else relative
+
+
+def _asset_static_url(path: str) -> str:
+    """根据实际存储目录生成资产的静态地址，兼容画布生成和手动上传。"""
+    raw_value = str(path or "").strip().replace("\\", "/")
+    if raw_value.startswith(("http://", "https://", "/static/")):
+        return raw_value
+    backend_root = MANGA_OUTPUTS.parent
+    if raw_value.startswith("manga_outputs/"):
+        relative = raw_value[len("manga_outputs/"):]
+        try:
+            if (backend_root / raw_value).resolve().is_file():
+                return _static_url(relative, MANGA_OUTPUTS, "/static/manga")
+        except OSError:
+            pass
+    if raw_value.startswith("video_outputs/"):
+        relative = raw_value[len("video_outputs/"):]
+        try:
+            if (backend_root / raw_value).resolve().is_file():
+                return _static_url(relative, VIDEO_OUTPUTS, "/static/video")
+        except OSError:
+            pass
+    for root, prefix, relative in (
+        (MANGA_OUTPUTS, "/static/manga", raw_value),
+        (VIDEO_OUTPUTS, "/static/video", raw_value),
+    ):
+        try:
+            if (root / relative).resolve().is_file():
+                return _static_url(relative, root, prefix)
+        except OSError:
+            continue
+    return _static_url(raw_value, VIDEO_OUTPUTS, "/static/video")
 
 
 def _node_output_path(root: Path, canvas_id: int, run_id: int, node_id: str, suffix: str) -> Path:
@@ -82,9 +117,33 @@ def _asset_media_kind(asset: VideoAsset) -> str | None:
     suffix = Path(str(asset.file_path or "")).suffix.lower()
     if asset_type in VIDEO_ASSET_TYPES or suffix in {".mp4", ".mov", ".webm", ".mkv"}:
         return "video"
+    if asset_type in AUDIO_ASSET_TYPES or suffix in {".mp3", ".wav", ".m4a", ".aac", ".ogg"}:
+        return "audio"
     if asset_type in IMAGE_ASSET_TYPES or suffix in {".png", ".jpg", ".jpeg", ".webp", ".gif"}:
         return "image"
     return None
+
+
+def _video_model_capabilities(config: dict[str, Any], db) -> dict[str, Any] | None:
+    """读取画布节点选中模型的受控视频提交能力配置。"""
+    model_id = config.get("model_id")
+    if not isinstance(model_id, int):
+        return None
+    model = db.get(AiModel, model_id)
+    raw_capabilities = model.capabilities_json if model else None
+    video_capabilities = raw_capabilities.get("video") if isinstance(raw_capabilities, dict) else None
+    return dict(video_capabilities) if isinstance(video_capabilities, dict) else None
+
+
+def _resolved_video_model(config: dict[str, Any], db, fallback_model: str) -> str:
+    """从受控模型目录解析提交模型，防止模型名与计费模型脱钩。"""
+    model_id = config.get("model_id")
+    if not isinstance(model_id, int):
+        return fallback_model
+    model = db.get(AiModel, model_id)
+    if not model or model.modality != "video" or not model.enabled:
+        raise RuntimeError("视频节点选择的模型不可用")
+    return model.model_key
 
 
 def _require_canvas_asset(db, canvas: VideoCanvas, asset_id: int, media_kind: str) -> VideoAsset:
@@ -97,17 +156,68 @@ def _require_canvas_asset(db, canvas: VideoCanvas, asset_id: int, media_kind: st
     return asset
 
 
+def _reusable_image_asset(config: dict[str, Any], canvas: VideoCanvas, db) -> VideoAsset | None:
+    """解析图片节点可直接复用的资产，并兼容早期仅保存参考资产的配置。"""
+    asset_id = config.get("asset_id")
+    if isinstance(asset_id, int):
+        return _require_canvas_asset(db, canvas, asset_id, "image")
+
+    prompt = str(config.get("prompt") or config.get("storyboard_prompt") or "").strip()
+    raw_ids = config.get("reference_asset_ids")
+    if prompt or not isinstance(raw_ids, list):
+        return None
+    asset_ids = [asset_id for asset_id in raw_ids if isinstance(asset_id, int)]
+    if len(asset_ids) != 1:
+        return None
+    return _require_canvas_asset(db, canvas, asset_ids[0], "image")
+
+
+def _trusted_import_media(node: dict[str, Any], canvas: VideoCanvas, db, media_kind: str) -> str | None:
+    """只复用由章节工作流导入且仍与来源记录完全匹配的媒体。"""
+    data = node.get("data") if isinstance(node.get("data"), dict) else {}
+    config = data.get("config") if isinstance(data.get("config"), dict) else {}
+    origin = data.get("origin") if isinstance(data.get("origin"), dict) else {}
+    expected_type = "chapter_video_shot_storyboard" if media_kind == "image" else "chapter_video_shot_video"
+    if origin.get("source_type") != expected_type:
+        return None
+    shot_id = origin.get("source_id")
+    workflow_id = origin.get("source_workflow_id")
+    source_url = config.get("trusted_import_media_url")
+    if not isinstance(shot_id, int) or not isinstance(workflow_id, int) or not isinstance(source_url, str) or not source_url.strip():
+        return None
+    workflow = db.get(ChapterVideoWorkflow, workflow_id)
+    shot = db.get(ChapterVideoShot, shot_id)
+    if not workflow or not shot or shot.workflow_id != workflow.id or workflow.story_id != canvas.story_id:
+        return None
+    actual_url = shot.storyboard_image_url if media_kind == "image" else shot.video_url
+    return actual_url if isinstance(actual_url, str) and actual_url == source_url else None
+
+
 def _configured_reference_inputs(config: dict[str, Any], canvas: VideoCanvas, db) -> list[dict[str, Any]]:
     """将节点编辑器显式选择的资产转换为受作品归属约束的运行输入。"""
     raw_ids = config.get("reference_asset_ids") or []
     if not isinstance(raw_ids, list):
-        return []
+        raw_ids = []
+    style_reference_id = config.get("style_reference_asset_id")
+    if isinstance(style_reference_id, int) and style_reference_id not in raw_ids:
+        raw_ids = [*raw_ids, style_reference_id]
     inputs: list[dict[str, Any]] = []
     for raw_id in raw_ids:
         if not isinstance(raw_id, int):
             continue
-        asset = _require_canvas_asset(db, canvas, raw_id, "image")
-        inputs.append({"asset_id": asset.id, "file_path": asset.file_path, "url": asset.file_path})
+        asset = db.get(VideoAsset, raw_id)
+        if not asset or asset.story_id != canvas.story_id or asset.status != "active" or not asset.file_path:
+            raise RuntimeError("参考资产不存在或不属于当前作品")
+        media_kind = _asset_media_kind(asset)
+        if media_kind != "image":
+            raise RuntimeError("当前视频生成服务仅支持图片参考素材")
+        inputs.append({"asset_id": asset.id, "file_path": asset.file_path, "url": asset.file_path, "media_kind": media_kind})
+    style_snapshot = config.get("style_snapshot")
+    style_image_url = style_snapshot.get("image_url") if isinstance(style_snapshot, dict) else None
+    if isinstance(style_image_url, str) and style_image_url.strip():
+        normalized_url = style_image_url.strip()
+        if not any(str(item.get("url") or "") == normalized_url for item in inputs):
+            inputs.append({"url": normalized_url, "media_kind": "image", "style_snapshot": style_snapshot})
     return inputs
 
 
@@ -148,33 +258,80 @@ def _first_input_text(inputs: list[dict[str, Any]], keys: tuple[str, ...]) -> st
 
 
 def _reference_urls(inputs: list[dict[str, Any]], canvas: VideoCanvas, db) -> list[str]:
+    """将图片参考资产转换为可由视频提交层上传 OSS 的受控路径。"""
     urls: list[str] = []
     for value in inputs:
         asset_id = value.get("asset_id")
         if isinstance(asset_id, int):
             asset = db.get(VideoAsset, asset_id)
             if asset and asset.story_id == canvas.story_id and asset.status == "active" and _asset_media_kind(asset) == "image":
-                urls.append(asset.file_path)
+                urls.append(_asset_static_url(asset.file_path))
         reused_url = str(value.get("_media_url") or "").strip()
         if reused_url:
             urls.append(reused_url)
+        configured_url = str(value.get("url") or "").strip()
+        if configured_url.startswith("/static/"):
+            configured_url = _asset_static_url(configured_url)
+        if configured_url and configured_url.lower().startswith(("http://", "https://")):
+            urls.append(configured_url)
     return list(dict.fromkeys(urls))
 
 
+async def _external_video_reference_urls(inputs: list[dict[str, Any]], canvas: VideoCanvas, db) -> list[str]:
+    """将画布视频参考图统一转换为上游可访问的 OSS 外链。"""
+    urls = _reference_urls(inputs, canvas, db)
+    external_urls = await video_api_service.prepare_video_reference_urls(urls)
+    if any(not url.lower().startswith(("http://", "https://")) for url in external_urls):
+        raise RuntimeError("视频参考素材未能转换为 OSS 公网地址")
+    return external_urls
+
+
 def _local_reference_paths(inputs: list[dict[str, Any]], canvas: VideoCanvas, db) -> list[str]:
-    """只把当前作品中可安全访问的本地图片传给 Image2。"""
+    """将图片参考资源本地化，供 Image2 以 multipart 方式读取。"""
     paths: list[str] = []
     for value in inputs:
         asset_id = value.get("asset_id")
         asset = db.get(VideoAsset, asset_id) if isinstance(asset_id, int) else None
+        configured_url = str(value.get("url") or "").strip()
+        if asset is None and configured_url.lower().startswith(("http://", "https://")):
+            local_path = ensure_local_media_path(configured_url, "manga")
+            if local_path:
+                paths.append(local_path)
+                continue
+            raise RuntimeError("风格参考图 OSS 外链下载失败，无法提交图片生成任务")
         if not asset or asset.story_id != canvas.story_id or asset.status != "active" or _asset_media_kind(asset) != "image":
             continue
-        raw_path = Path(asset.file_path)
-        candidate = raw_path if raw_path.is_absolute() else MANGA_OUTPUTS / raw_path
+        raw_value = str(asset.file_path or "").strip().replace("\\", "/")
+        if not raw_value:
+            continue
+        if raw_value.lower().startswith(("http://", "https://")):
+            local_path = ensure_local_media_path(raw_value, "manga")
+            if local_path:
+                paths.append(local_path)
+            else:
+                raise RuntimeError("参考图片 OSS 外链下载失败，无法提交图片生成任务")
+            continue
+        raw_path = Path(raw_value)
+        backend_root = MANGA_OUTPUTS.parent
+        candidates = [raw_path] if raw_path.is_absolute() else [
+            MANGA_OUTPUTS / raw_path,
+            VIDEO_OUTPUTS / raw_path,
+            backend_root / raw_path,
+        ]
+        if raw_value.startswith("/static/manga/"):
+            candidates.insert(0, MANGA_OUTPUTS / raw_value[len("/static/manga/"):])
+        elif raw_value.startswith("/static/video/"):
+            candidates.insert(0, VIDEO_OUTPUTS / raw_value[len("/static/video/"):])
+        elif raw_value.startswith("manga_outputs/"):
+            candidates.insert(0, backend_root / raw_value)
+        elif raw_value.startswith("video_outputs/"):
+            candidates.insert(0, backend_root / raw_value)
         try:
-            resolved = candidate.resolve()
-            if resolved.is_file() and resolved.is_relative_to(MANGA_OUTPUTS.resolve()):
-                paths.append(str(resolved))
+            for candidate in candidates:
+                resolved = candidate.resolve()
+                if resolved.is_file() and (resolved.is_relative_to(MANGA_OUTPUTS.resolve()) or resolved.is_relative_to(VIDEO_OUTPUTS.resolve())):
+                    paths.append(str(resolved))
+                    break
         except OSError:
             continue
     return list(dict.fromkeys(paths))
@@ -232,6 +389,9 @@ async def execute_canvas_run(
         node_map = {str(node.get("id")): node for node in graph.get("nodes") or [] if isinstance(node, dict)}
         run_nodes = {item.node_id: item for item in db.query(VideoCanvasRunNode).filter(VideoCanvasRunNode.run_id == run.id).all()}
         order = list((run.plan_json or {}).get("topological_order") or [])
+        run_chapter_id = (run.plan_json or {}).get("chapter_id")
+        if not isinstance(run_chapter_id, int):
+            run_chapter_id = canvas.default_chapter_id
         outputs: dict[str, dict[str, Any]] = {}
         if _run_cancelled_in_database(db, run):
             return _finish_cancelled_run(db, run)
@@ -257,7 +417,15 @@ async def execute_canvas_run(
             billing_ctx = None
             try:
                 node_type = str(node.get("type") or "")
-                is_reused = node_type in {"image", "video", "image_generation", "storyboard", "video_generation"} and bool(str(config.get("existing_url") or "").strip())
+                trusted_import_url = (
+                    _trusted_import_media(node, canvas, db, "video" if node_type in {"video", "video_generation"} else "image")
+                    if node_type in {"image", "video", "image_generation", "storyboard", "video_generation"}
+                    else None
+                )
+                is_reused = bool(trusted_import_url) or (
+                    node_type in {"image", "video", "image_generation", "storyboard", "video_generation"}
+                    and isinstance(config.get("asset_id"), int)
+                )
                 if node_type in {"image", "video", "image_generation", "storyboard", "video_generation"} and not is_reused:
                     modality = "video" if node_type in {"video", "video_generation"} else "image"
                     estimate = (
@@ -273,7 +441,7 @@ async def execute_canvas_run(
                         model_id=config.get("model_id") if isinstance(config.get("model_id"), int) else None,
                         request_id=f"canvas:{run.id}:node:{run_node.id}:a:{run_node.attempt}",
                         story_id=canvas.story_id,
-                        chapter_id=canvas.default_chapter_id,
+                        chapter_id=run_chapter_id,
                         estimate_kwargs=estimate,
                     )
                     run_node.input_snapshot_json = {
@@ -311,11 +479,9 @@ async def execute_canvas_run(
                         if node_type == "shot":
                             output["shot"] = dict(output)
                 elif node_type in {"image", "image_generation", "storyboard"}:
-                    existing_url = str(config.get("existing_url") or "").strip()
-                    if existing_url:
-                        output = {"url": existing_url, "file_path": existing_url, "_media_url": existing_url, "reused": True}
-                    elif isinstance(config.get("asset_id"), int):
-                        asset = _require_canvas_asset(db, canvas, config["asset_id"], "image")
+                    if trusted_import_url:
+                        output = {"url": trusted_import_url, "_media_url": trusted_import_url, "reused": True}
+                    elif asset := _reusable_image_asset(config, canvas, db):
                         output = {"asset_id": asset.id, "file_path": asset.file_path, "url": _static_url(asset.file_path, MANGA_OUTPUTS, "/static/manga"), "reused": True}
                     else:
                         prompt = str(config.get("prompt") or config.get("storyboard_prompt") or "").strip()
@@ -334,25 +500,41 @@ async def execute_canvas_run(
                             ref_type="storyboard" if node_type in {"image", "storyboard"} else "character",
                         )
                         stored_path = _relative_path(str(saved_path), MANGA_OUTPUTS)
-                        asset = VideoAsset(story_id=canvas.story_id, chapter_id=canvas.default_chapter_id, asset_type="storyboard_frame", name=f"画布 {canvas.name} - {node_id}", file_path=stored_path, provider="image2", prompt=prompt, meta_json={"canvas_id": canvas.id, "run_id": run.id, "node_id": node_id}, usage_scope="story_shared")
+                        asset = VideoAsset(story_id=canvas.story_id, chapter_id=run_chapter_id, asset_type="storyboard_frame", name=f"画布 {canvas.name} - {node_id}", file_path=stored_path, provider="image2", prompt=prompt, meta_json={"canvas_id": canvas.id, "run_id": run.id, "node_id": node_id}, usage_scope="story_shared")
                         db.add(asset)
                         db.flush()
                         output = {"asset_id": asset.id, "file_path": stored_path, "url": _static_url(stored_path, MANGA_OUTPUTS, "/static/manga")}
                 elif node_type in {"video", "video_generation"}:
-                    existing_url = str(config.get("existing_url") or "").strip()
-                    if existing_url:
-                        output = {"url": existing_url, "file_path": existing_url, "_media_url": existing_url, "reused": True}
+                    if trusted_import_url:
+                        output = {"url": trusted_import_url, "_media_url": trusted_import_url, "reused": True, "duration_seconds": config.get("duration_seconds")}
+                    elif isinstance(config.get("asset_id"), int):
+                        asset = _require_canvas_asset(db, canvas, config["asset_id"], "video")
+                        output = {"asset_id": asset.id, "file_path": asset.file_path, "url": _static_url(asset.file_path, VIDEO_OUTPUTS, "/static/video"), "reused": True}
                     else:
+                        resolved_video_model = _resolved_video_model(config, db, video_model)
                         prompt = str(config.get("prompt") or "").strip() or _first_input_text(inputs, ("video_prompt", "text", "content", "storyboard_prompt", "prompt", "screenplay"))
                         prompt = _apply_style_prompt(prompt, config, inputs)
                         if not prompt or not video_api_key:
                             raise RuntimeError("视频节点缺少提示词或 Video API Key")
-                        submission = await submit_video_job(shot_id=run_node.id, provider="canvas", model=str(config.get("model") or video_model), prompt=prompt, negative_prompt=str(config.get("negative_prompt") or ""), duration_seconds=int(config.get("duration_seconds") or 15), aspect_ratio=str(config.get("aspect_ratio") or "16:9"), reference_images=_reference_urls(inputs, canvas, db), api_key=video_api_key, base_url=video_base_url)
+                        submission = await submit_video_job(
+                            shot_id=run_node.id,
+                            provider="canvas",
+                            model=resolved_video_model,
+                            prompt=prompt,
+                            negative_prompt=str(config.get("negative_prompt") or ""),
+                            duration_seconds=int(config.get("duration_seconds") or 15),
+                            aspect_ratio=str(config.get("aspect_ratio") or "16:9"),
+                            size=str(config.get("size") or "720P"),
+                            reference_images=await _external_video_reference_urls(inputs, canvas, db),
+                            api_key=video_api_key,
+                            base_url=video_base_url,
+                            video_capabilities=_video_model_capabilities(config, db),
+                        )
                         provider_job_id = submission["provider_job_id"]
                         for _ in range(120):
                             if task_manager.is_cancellation_requested(task_id) or _run_cancelled_in_database(db, run):
                                 raise asyncio.CancelledError()
-                            status = await query_job_status("canvas", provider_job_id, api_key=video_api_key, base_url=video_base_url, model=str(config.get("model") or video_model))
+                            status = await query_job_status("canvas", provider_job_id, api_key=video_api_key, base_url=video_base_url, model=resolved_video_model)
                             if status["status"] == "succeeded":
                                 break
                             if status["status"] in {"failed", "cancelled"}:
@@ -360,12 +542,12 @@ async def execute_canvas_run(
                             await asyncio.sleep(5)
                         else:
                             raise RuntimeError("视频生成超时")
-                        result = await fetch_job_result("canvas", provider_job_id, run_node.id, api_key=video_api_key, base_url=video_base_url, model=str(config.get("model") or video_model))
+                        result = await fetch_job_result("canvas", provider_job_id, run_node.id, api_key=video_api_key, base_url=video_base_url, model=resolved_video_model)
                         video_path = str(result.get("video_path") or "")
                         if not video_path:
                             raise RuntimeError("视频服务未返回可用文件")
                         stored_path = _relative_path(video_path, VIDEO_OUTPUTS)
-                        asset = VideoAsset(story_id=canvas.story_id, chapter_id=canvas.default_chapter_id, asset_type="video_clip", name=f"画布 {canvas.name} - {node_id}", file_path=stored_path, provider="canvas", prompt=prompt, meta_json={"canvas_id": canvas.id, "run_id": run.id, "node_id": node_id, "provider_job_id": provider_job_id}, usage_scope="story_shared")
+                        asset = VideoAsset(story_id=canvas.story_id, chapter_id=run_chapter_id, asset_type="video_clip", name=f"画布 {canvas.name} - {node_id}", file_path=stored_path, provider="canvas", prompt=prompt, meta_json={"canvas_id": canvas.id, "run_id": run.id, "node_id": node_id, "provider_job_id": provider_job_id}, usage_scope="story_shared")
                         db.add(asset)
                         db.flush()
                         output = {"asset_id": asset.id, "file_path": stored_path, "url": _static_url(stored_path, VIDEO_OUTPUTS, "/static/video"), "duration_seconds": result.get("duration_seconds") or config.get("duration_seconds")}
@@ -379,6 +561,8 @@ async def execute_canvas_run(
                     result = await compile_project(str(output_path), clips, burn_subtitle=False, strict=True)
                     stored_path = _relative_path(str(result["output_path"]), VIDEO_OUTPUTS)
                     output = {"file_path": stored_path, "url": _static_url(stored_path, VIDEO_OUTPUTS, "/static/video"), "duration_seconds": result.get("duration_seconds")}
+                if task_manager.is_cancellation_requested(task_id) or _run_cancelled_in_database(db, run):
+                    raise asyncio.CancelledError()
                 outputs[node_id] = output
                 if billing_ctx:
                     complete_ai_call(
@@ -417,7 +601,10 @@ async def execute_canvas_run(
                 _mark_remaining_nodes(db, run, status="blocked", reason="上游节点执行失败")
                 db.commit()
                 raise
-        run.status = "succeeded"
+        if task_manager.is_cancellation_requested(task_id) or _run_cancelled_in_database(db, run):
+            run.status = "cancelled"
+        else:
+            run.status = "succeeded"
         run.completed_at = _now()
         db.commit()
         return {"run_id": run.id, "status": run.status}

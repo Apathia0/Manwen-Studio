@@ -13,7 +13,9 @@ from __future__ import annotations
 import logging
 import os
 import tempfile
+import time
 from pathlib import Path
+from typing import Any
 
 from .ai.channels import validate_remote_media_url
 from .media_logging import safe_media_url_for_log
@@ -94,7 +96,6 @@ def upload_file(
     if not is_enabled():
         logger.debug("OSS 未启用，跳过上传: %s", local_path)
         return None
-
     local_path = Path(local_path)
     if not local_path.exists():
         logger.warning("OSS 上传失败，文件不存在: %s", local_path)
@@ -123,6 +124,46 @@ def upload_file(
         return url
     except Exception as exc:
         logger.error("OSS 上传失败 %s: %s", local_path, exc)
+        return None
+
+
+def create_browser_upload_signature(
+    object_key: str,
+    *,
+    expires_seconds: int = 900,
+) -> dict[str, Any] | None:
+    """为浏览器生成一次受限的 OSS PUT 上传地址。"""
+    if not is_enabled() or not _is_safe_object_key(object_key):
+        return None
+    try:
+        expires_seconds = max(60, min(int(expires_seconds), 3600))
+        upload_url = _get_client().sign_url("PUT", object_key, expires_seconds, slash_safe=True)
+        return {
+            "object_key": object_key,
+            "upload_url": upload_url,
+            "public_url": _build_public_url(object_key),
+            "expires_at": int(time.time()) + expires_seconds,
+        }
+    except Exception as exc:
+        logger.warning("生成浏览器直传签名失败: %s", type(exc).__name__)
+        return None
+
+
+def get_object_metadata(object_key: str) -> dict[str, Any] | None:
+    """读取已直传对象的受控元数据，供业务接口在落库前确认。"""
+    if not is_enabled() or not _is_safe_object_key(object_key):
+        return None
+    try:
+        response = _get_client().get_object_meta(object_key)
+        headers = response.headers
+        return {
+            "content_length": int(headers.get("Content-Length") or 0),
+            "content_type": str(headers.get("Content-Type") or ""),
+            "etag": str(headers.get("ETag") or "").strip('"'),
+            "public_url": _build_public_url(object_key),
+        }
+    except Exception as exc:
+        logger.warning("读取直传对象元数据失败: %s", type(exc).__name__)
         return None
 
 
@@ -218,6 +259,12 @@ def _default_remote_key(local_path: Path) -> str:
         return rel.as_posix()
     except ValueError:
         return local_path.name
+
+
+def _is_safe_object_key(object_key: str) -> bool:
+    """拒绝路径穿越和绝对路径，避免签名被用于范围外对象。"""
+    key = str(object_key or "").replace("\\", "/")
+    return bool(key and not key.startswith("/") and ".." not in key.split("/"))
 
 
 def _build_public_url(remote_key: str) -> str:

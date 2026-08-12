@@ -3547,6 +3547,26 @@ export interface VideoCanvas {
   runs?: VideoCanvasRun[];
 }
 
+export interface VideoCanvasPlan {
+  id: number;
+  canvas_id: number;
+  story_id: number;
+  chapter_id?: number | null;
+  status: 'draft' | 'ready' | 'approved' | 'applied';
+  revision: number;
+  source_snapshot: Record<string, unknown>;
+  screenplay: Record<string, unknown>;
+  shots: Record<string, unknown>;
+  assets: Record<string, unknown>;
+  canvas: Record<string, unknown>;
+  execution: Record<string, unknown>;
+  workflow_id?: number | null;
+  applied_canvas_revision?: number | null;
+  workflow_sync_revision?: number | null;
+  created_at: string;
+  updated_at: string;
+}
+
 export async function listVideoCanvasNodeCatalog(): Promise<{ node_types: VideoCanvasNodeCatalogItem[] }> {
   const res = await fetch(`${BASE}/api/video-canvas/node-catalog`, { headers: apiHeaders() });
   if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
@@ -3576,6 +3596,82 @@ export async function listVideoCanvases(storyId: number, chapterId?: number): Pr
 
 export async function getVideoCanvas(canvasId: number): Promise<VideoCanvas> {
   const res = await fetch(`${BASE}/api/video-canvas/canvases/${canvasId}`, { headers: apiHeaders() });
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
+  return res.json();
+}
+
+export async function deleteVideoCanvas(canvasId: number): Promise<{ ok: boolean; canvas_id: number }> {
+  const res = await fetch(`${BASE}/api/video-canvas/canvases/${canvasId}`, {
+    method: 'DELETE', headers: apiHeaders(true),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
+  return res.json();
+}
+
+export async function updateVideoCanvas(canvasId: number, payload: { name?: string; description?: string | null }): Promise<VideoCanvas> {
+  const res = await fetch(`${BASE}/api/video-canvas/canvases/${canvasId}`, {
+    method: 'PATCH', headers: apiHeaders(true), body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
+  return res.json();
+}
+
+export async function listVideoCanvasPlans(canvasId: number): Promise<{ plans: VideoCanvasPlan[] }> {
+  const res = await fetch(`${BASE}/api/video-canvas/canvases/${canvasId}/plans`, { headers: apiHeaders() });
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
+  return res.json();
+}
+
+export async function getVideoCanvasPlan(canvasId: number, planId: number): Promise<VideoCanvasPlan> {
+  const res = await fetch(`${BASE}/api/video-canvas/canvases/${canvasId}/plans/${planId}`, { headers: apiHeaders() });
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
+  return res.json();
+}
+
+export async function updateVideoCanvasPlan(canvasId: number, planId: number, payload: {
+  expected_revision: number;
+  status?: 'draft' | 'ready';
+  source_snapshot_json?: Record<string, unknown>;
+  screenplay_json?: Record<string, unknown>;
+  shot_json?: Record<string, unknown>;
+  asset_json?: Record<string, unknown>;
+  canvas_json?: Record<string, unknown>;
+  execution_json?: Record<string, unknown>;
+}): Promise<VideoCanvasPlan> {
+  const res = await fetch(`${BASE}/api/video-canvas/canvases/${canvasId}/plans/${planId}`, {
+    method: 'PUT', headers: apiHeaders(true), body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
+  return res.json();
+}
+
+export async function confirmVideoCanvasPlan(canvasId: number, planId: number, expectedRevision: number): Promise<VideoCanvasPlan> {
+  const res = await fetch(`${BASE}/api/video-canvas/canvases/${canvasId}/plans/${planId}/confirm`, {
+    method: 'POST', headers: apiHeaders(true), body: JSON.stringify({ confirmed: true, expected_revision: expectedRevision }),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
+  return res.json();
+}
+
+export async function applyVideoCanvasPlan(canvasId: number, planId: number, payload: {
+  expected_plan_revision: number;
+  expected_definition_revision: number;
+}): Promise<{ canvas: VideoCanvas; plan: VideoCanvasPlan; validation: { warnings?: Array<{ message?: string }> } }> {
+  const res = await fetch(`${BASE}/api/video-canvas/canvases/${canvasId}/plans/${planId}/apply`, {
+    method: 'POST', headers: apiHeaders(true), body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
+  return res.json();
+}
+
+export async function syncVideoCanvasPlanWorkflow(canvasId: number, planId: number, expectedPlanRevision: number): Promise<{
+  plan: VideoCanvasPlan;
+  workflow_id: number;
+  shot_count: number;
+}> {
+  const res = await fetch(`${BASE}/api/video-canvas/canvases/${canvasId}/plans/${planId}/sync-workflow`, {
+    method: 'POST', headers: apiHeaders(true), body: JSON.stringify({ expected_plan_revision: expectedPlanRevision }),
+  });
   if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   return res.json();
 }
@@ -4572,6 +4668,27 @@ export async function resetChapterWorkflow(workflowId: number): Promise<{ ok: bo
 }
 
 export async function replaceVideoAsset(assetId: number, file: File): Promise<{ ok: boolean; asset: { id: number; file_path: string; revision: number } }> {
+  let direct: { object_key: string; url: string } | null = null;
+  try {
+    direct = await uploadMediaDirectly(file, 'video_asset');
+  } catch (error) {
+    // 本地开发常因 OSS 未配置 CORS 而无法直传，此时退回后端 multipart 上传。
+    console.warn('浏览器直传不可用，已改用服务端上传', error);
+  }
+  if (direct) {
+    try {
+      const res = await fetch(`${BASE}/api/video-assets/${assetId}/replace`, {
+        method: 'POST',
+        headers: apiHeaders(true),
+        body: JSON.stringify({ object_key: direct.object_key, filename: file.name }),
+      });
+      if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
+      return res.json();
+    } catch (error) {
+      // 直传对象已完成但绑定失败时，同样回退到服务端 multipart 上传。
+      console.warn('直传资产绑定失败，已改用服务端上传', error);
+    }
+  }
   const formData = new FormData();
   formData.append('file', file);
   const res = await fetch(`${BASE}/api/video-assets/${assetId}/replace`, {
@@ -4581,6 +4698,31 @@ export async function replaceVideoAsset(assetId: number, file: File): Promise<{ 
   });
   if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   return res.json();
+}
+
+type DirectUploadScope = 'video_asset' | 'manga_asset' | 'style_reference' | 'storyboard' | 'video' | 'creation_studio';
+
+async function uploadMediaDirectly(file: File, scope: DirectUploadScope): Promise<{ object_key: string; url: string } | null> {
+  const intent = await fetch(`${BASE}/api/media-uploads/presign`, {
+    method: 'POST',
+    headers: apiHeaders(true),
+    body: JSON.stringify({ scope, filename: file.name, content_type: file.type, size: file.size }),
+  });
+  // 兼容尚未部署直传路由的后端，继续使用原有服务端 multipart 上传。
+  if (intent.status === 404) return null;
+  if (!intent.ok) throw new Error(await readErrorMessage(intent, '获取直传凭证失败'));
+  const data = await intent.json() as { mode: 'direct' | 'server'; object_key?: string; upload_url?: string };
+  if (data.mode !== 'direct' || !data.object_key || !data.upload_url) return null;
+  const upload = await fetch(data.upload_url, { method: 'PUT', body: file });
+  if (!upload.ok) throw new Error('文件直传对象存储失败');
+  const complete = await fetch(`${BASE}/api/media-uploads/complete`, {
+    method: 'POST',
+    headers: apiHeaders(true),
+    body: JSON.stringify({ scope, object_key: data.object_key }),
+  });
+  if (!complete.ok) throw new Error(await readErrorMessage(complete, '确认直传文件失败'));
+  const result = await complete.json() as { object_key: string; public_url: string };
+  return { object_key: result.object_key, url: result.public_url };
 }
 
 export async function regenerateVideoAsset(assetId: number, prompt?: string, mask?: string, stylePreset?: string): Promise<{ ok: boolean; asset: { id: number; file_path: string; revision: number; style_preset?: string | null } }> {

@@ -820,6 +820,7 @@ export default function VideoStoryboardLayout({
               stylePresets={stylePresets}
               onDirtyChange={setCanvasDirty}
               onAssetsChanged={() => resolvedChapter ? void loadChapterAssets(resolvedChapter.id) : undefined}
+              onOpenAssetManagement={() => setAssetManagementOpen(true)}
             />
           ) : (
           <ChapterVideoWorkflowPanel

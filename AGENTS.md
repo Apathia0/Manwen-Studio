@@ -298,6 +298,7 @@ type RouteKey = 'landing' | 'login' | 'stories' | 'workspace' | 'templates' | ..
 - **UI 组件**：`Button.tsx`, `Input.tsx`, `ToastContainer.tsx`, `ConfirmDialog.tsx`
 - **Toast / ConfirmDialog**：模块级发布订阅 + Portal 到 `<div id="root">` 同级
 - **无路径别名**：全部使用相对路径
+- **⚠️ 图片回显规范（强制）**：所有渲染**用户生成图片**（漫画图、故事版、画布节点结果、角色卡、资产、封面、风格预设等）的回显必须使用 `frontend/src/components/shared/MediaImage.tsx` 统一组件，禁止裸 `<img>` 直接渲染。`MediaImage` 内部实现 `img.decode()` 门控——**图片解码完成后才整体渲染（opacity 淡入），禁止浏览器渐进式一帧一帧渲染**；失败时保持隐藏并显示灰色占位。替换裸 `<img>` 时要删除原 `onLoad/onError/loading/decoding` 属性和 `opacity-*` 过渡类（组件内部处理），保留 `className` 布局/尺寸类与 `onClick`。若原 `<img>` 绑定 `ref`（如画布缩放需要 `syncCanvasSize`）无法使用组件时，必须补 `img.decode()` 门控（参考 `ImageRedrawModal.tsx` 的 onLoad 写法），不得留下裸加载。
 
 ---
 
@@ -840,6 +841,28 @@ regenerate_shot_video() / generate_videos_for_shots()
 
 ---
 
+## 媒体上传规范（强制）
+
+用户上传的持久化图片、视频和音频资源必须优先使用“浏览器直传 OSS → 服务端确认 → 业务资源绑定”的流程，避免媒体文件经业务后端重复中转。
+
+```text
+浏览器申请短期上传签名
+  → 浏览器 PUT 到 OSS
+  → 服务端 HEAD 校验对象
+  → 业务接口校验资源归属并写入对象 URL
+```
+
+- 禁止向客户端下发 OSS AccessKey Secret；只允许服务端签发精确对象 key 的短期预签名 PUT/POST。
+- 对象 key 必须由服务端生成并按用户、用途隔离；客户端不得提交任意 URL、路径或其他用户的对象 key 作为业务资源。
+- 直传完成后，服务端必须校验对象存在、长度、MIME 和用途的大小限制；绑定接口仍须执行作品、章节、镜头或资产的所有权校验。
+- OSS 未启用、签名失效、平台不支持直传时，必须保留并自动回退已有 multipart 上传，不得阻断用户创作。
+- 图生视频提交必须使用已确认的公网 HTTPS URL；继续使用 `input_reference` 管道符格式。
+- 文档导入、Agent 附件、创作工作室素材等需要服务端解析、内容安全检查、抽帧或去重的上传，第一阶段必须继续经过服务端；后续如改直传，必须采用“隔离暂存对象 → 服务端消费与校验 → 正式绑定”流程。
+- 新增媒体上传入口前，先复用统一直传协议；不得新增“浏览器 → 后端落盘 → 后端再次上传 OSS”的默认路径。
+- OSS CORS 必须仅允许受信任的 Web 域名，限制为 PUT/POST/HEAD 所需方法与请求头，并暴露 ETag；不得开放任意 Origin、LIST 或 DELETE。
+
+---
+
 ## 常见陷阱
 
 ### 1. 后台任务取消不彻底
@@ -1049,9 +1072,44 @@ NOVEL_PROMPT_SEED（模块常量）
 
 **涉及文件**：`backend/services/writing_utils.py`
 
+### 20. ⚠️ 图片回显必须整体渲染（decode 门控，反复出问题，必须遵守）
+
+渲染**用户生成图片**（漫画图、故事版、画布节点结果、角色卡、资产、封面、风格预设等）时禁止裸 `<img>` 直接显示——浏览器会渐进式一帧一帧渲染，图片加载过程出现闪烁/撕裂感。
+
+**正确处理（二选一）**：
+
+```tsx
+// ✅ 首选：统一组件 MediaImage（src/alt/className/priority/onClick）
+import MediaImage from './shared/MediaImage';
+<MediaImage src={url} alt={label} className="h-full w-full object-cover" />
+
+// ✅ 必须绑定 ref 时（画布缩放需 syncCanvasSize）：补 decode 门控
+<img ref={imageRef} src={imageSrc} alt={title}
+  onLoad={(event) => {
+    const image = event.currentTarget;
+    const finish = () => { setImageLoaded(true); syncCanvasSize(); };
+    if (typeof image.decode === 'function') void image.decode().catch(() => undefined).finally(finish); else finish();
+  }}
+  className={`... ${imageLoaded ? 'opacity-100' : 'opacity-0'}`}
+/>
+```
+
+**替换裸 `<img>` 为 `MediaImage` 时必须检查的清单**：
+
+| 检查项 | 说明 |
+|--------|------|
+| ✅ 导入组件 | 相对路径按文件位置计算（`./shared/MediaImage` 或 `../shared/MediaImage`） |
+| ✅ 删除 `decoding`/`loading`/`onLoad`/`onError` 属性 | `MediaImage` 内部已实现 decode 门控 + 失败灰占位 + lazy 加载 |
+| ✅ 删除 `opacity-*` 过渡类 | 组件内部自动控制淡入；保留其余 `className` 布局/尺寸类 |
+| ✅ 保留 `onClick` | 传给 `MediaImage` 的 `onClick` prop |
+| ✅ ref 场景补 decode | 无法用组件时，onLoad 必须走 `img.decode()` 后再置可见（参考 `ImageRedrawModal.tsx`） |
+| ✅ 上传预览不替换 | 本地 blob/`uploadPreview`/二维码/品牌 logo 不属于用户生成图片，可保留原生 `<img>` |
+
+**涉及文件**：`frontend/src/components/shared/MediaImage.tsx`（统一组件）
+
+**验证方法**：生成图片回显时打开浏览器控制台 Network 观察，或断网重试——图片应整体淡入，不会出现从上到下/分块逐步渲染。
+
 ---
-
-
 
 ## ⚠️ 已修复 Bug 记录（2026-06-12 批次）
 

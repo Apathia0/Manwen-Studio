@@ -26,6 +26,7 @@ from models import (
     VideoAsset,
     VideoCanvas,
     VideoCanvasLayout,
+    VideoCanvasPlan,
     VideoCanvasRun,
     VideoCanvasRunNode,
     VideoCanvasSyncRecord,
@@ -36,6 +37,11 @@ from schemas import (
     VideoCanvasGraphSave,
     VideoCanvasImportRequest,
     VideoCanvasLayoutSave,
+    VideoCanvasPlanConfirmRequest,
+    VideoCanvasPlanCreate,
+    VideoCanvasPlanApplyRequest,
+    VideoCanvasPlanWorkflowSyncRequest,
+    VideoCanvasPlanUpdate,
     VideoCanvasRunRequest,
     VideoCanvasRunConfirmRequest,
     VideoCanvasUpdate,
@@ -164,6 +170,19 @@ def _require_canvas(canvas_id: int, user: User, db: Session) -> VideoCanvas:
     return canvas
 
 
+def _lock_canvas(canvas_id: int, user: User, db: Session) -> VideoCanvas:
+    """锁定画布定义行，保证版本比较与写入在同一事务内完成。"""
+    canvas = (
+        db.query(VideoCanvas)
+        .filter(VideoCanvas.id == canvas_id, VideoCanvas.owner_user_id == user.id)
+        .with_for_update()
+        .first()
+    )
+    if not canvas:
+        raise HTTPException(404, "画布不存在")
+    return canvas
+
+
 def _require_story(story_id: int, user: User, db: Session) -> Story:
     story = db.get(Story, story_id)
     if not story:
@@ -250,6 +269,253 @@ def _serialize_run(run: VideoCanvasRun, db: Session) -> dict[str, Any]:
             for node in nodes
         ],
     }
+
+
+def _run_target_chapter_id(canvas: VideoCanvas, version: VideoCanvasVersion, db: Session) -> int | None:
+    """从已应用计划的冻结图解析运行章节，手工画布回退到默认章节。"""
+    metadata = (version.graph_json or {}).get("metadata") or {}
+    plan_id = metadata.get("compiled_from_plan_id") if isinstance(metadata, dict) else None
+    if not isinstance(plan_id, int):
+        return canvas.default_chapter_id
+    plan = db.get(VideoCanvasPlan, plan_id)
+    if not plan or plan.canvas_id != canvas.id or plan.story_id != canvas.story_id:
+        return canvas.default_chapter_id
+    return plan.chapter_id if plan.chapter_id is not None else canvas.default_chapter_id
+
+
+def _serialize_plan(plan: VideoCanvasPlan) -> dict[str, Any]:
+    """序列化可审阅的画布创作计划，不泄露其他用户或画布数据。"""
+    return {
+        "id": plan.id,
+        "canvas_id": plan.canvas_id,
+        "story_id": plan.story_id,
+        "chapter_id": plan.chapter_id,
+        "status": plan.status,
+        "revision": plan.revision,
+        "source_snapshot": plan.source_snapshot_json or {},
+        "screenplay": plan.screenplay_json or {},
+        "shots": plan.shot_json or {},
+        "assets": plan.asset_json or {},
+        "canvas": plan.canvas_json or {},
+        "execution": plan.execution_json or {},
+        "workflow_id": plan.workflow_id,
+        "applied_canvas_revision": plan.applied_canvas_revision,
+        "workflow_sync_revision": plan.workflow_sync_revision,
+        "created_at": plan.created_at,
+        "updated_at": plan.updated_at,
+    }
+
+
+def _plan_ready_errors(plan: VideoCanvasPlan) -> list[str]:
+    """确认前检查计划是否具备完整的可审阅内容。"""
+    required = {
+        "来源快照": plan.source_snapshot_json,
+        "剧本计划": plan.screenplay_json,
+        "镜头计划": plan.shot_json,
+        "资产计划": plan.asset_json,
+        "画布计划": plan.canvas_json,
+        "执行计划": plan.execution_json,
+    }
+    errors = [f"缺少{name}" for name, value in required.items() if not value]
+    source = plan.source_snapshot_json or {}
+    if source and str(source.get("source_type") or "") not in {"chapter", "chat", "text_node"}:
+        errors.append("来源快照的 source_type 必须为 chapter、chat 或 text_node")
+    if source and not str(source.get("source_hash") or "").strip():
+        errors.append("来源快照缺少 source_hash")
+    screenplay = plan.screenplay_json or {}
+    if screenplay and not isinstance(screenplay.get("scenes"), list):
+        errors.append("剧本计划缺少 scenes 数组")
+    shots = plan.shot_json or {}
+    if shots and (not isinstance(shots.get("shots"), list) or not shots["shots"]):
+        errors.append("镜头计划缺少非空 shots 数组")
+    canvas = plan.canvas_json or {}
+    graph = canvas.get("graph") if isinstance(canvas, dict) else None
+    if graph is not None and not isinstance(graph, dict):
+        errors.append("画布计划的 graph 必须是对象")
+    elif isinstance(graph, dict):
+        validation = _validate_graph(graph)
+        errors.extend(f"画布图：{item['message']}" for item in validation["errors"])
+    execution = plan.execution_json or {}
+    if execution and not isinstance(execution.get("batches"), list):
+        errors.append("执行计划缺少 batches 数组")
+    return errors
+
+
+def _plan_graph(plan: VideoCanvasPlan, db: Session) -> dict[str, Any]:
+    """从已审阅镜头与资产计划确定性编译可执行画布图。"""
+    return _compile_plan_graph(plan, _plan_shots(plan, db))
+
+
+_PLAN_SHOT_FIELDS = {
+    "shot_index", "source_text_span", "scene_location", "time_of_day", "characters",
+    "story_summary", "dialogue_or_narration", "camera_plan", "motion_plan", "emotion_plan",
+    "continuity_notes", "screenplay_scene_id", "screenplay_beat_id", "narrative_purpose",
+    "beat_density", "transition_to_next", "continuity_json", "storyboard_prompt", "video_prompt",
+    "character_prompts_json", "scene_prompt", "prop_prompts_json", "key_props_json",
+    "scene_asset_candidates_json", "character_reference_ids", "scene_reference_ids",
+    "prop_reference_ids", "storyboard_json", "duration_seconds",
+}
+
+
+def _is_image_reference_asset(asset: VideoAsset) -> bool:
+    """判断计划引用是否可作为故事板和视频节点的图片参考。"""
+    asset_type = str(asset.asset_type or "").lower()
+    suffix = str(asset.file_path or "").rsplit(".", 1)[-1].lower() if "." in str(asset.file_path or "") else ""
+    return asset_type in {"storyboard_frame", "character_reference", "scene_reference", "prop_reference", "style_reference", "image"} or suffix in {"png", "jpg", "jpeg", "webp", "gif"}
+
+
+def _plan_shots(plan: VideoCanvasPlan, db: Session) -> list[dict[str, Any]]:
+    """解析并校验计划镜头，拒绝未知字段和不属于当前章节的资产引用。"""
+    section = plan.shot_json or {}
+    raw_shots = section.get("shots") if isinstance(section, dict) else None
+    if not isinstance(raw_shots, list) or not raw_shots:
+        raise HTTPException(422, "计划缺少 shots.shots，无法同步到视频工作流")
+    if len(raw_shots) > 200:
+        raise HTTPException(422, "单个计划最多同步 200 个镜头")
+    asset_ids: set[int] = set()
+    normalized: list[dict[str, Any]] = []
+    for index, item in enumerate(raw_shots, start=1):
+        if not isinstance(item, dict):
+            raise HTTPException(422, f"第 {index} 个镜头格式无效")
+        unknown = set(item) - _PLAN_SHOT_FIELDS
+        if unknown:
+            raise HTTPException(422, f"第 {index} 个镜头含不支持字段：{', '.join(sorted(unknown))}")
+        shot = {key: value for key, value in item.items() if key in _PLAN_SHOT_FIELDS}
+        shot_index = shot.get("shot_index")
+        if not isinstance(shot_index, int) or isinstance(shot_index, bool) or shot_index <= 0:
+            raise HTTPException(422, f"第 {index} 个镜头的 shot_index 必须为正整数")
+        shot.setdefault("source_text_span", f"（第 {shot_index} 镜）")
+        shot.setdefault("story_summary", f"镜头 {shot_index}")
+        duration_seconds = shot.get("duration_seconds", 15)
+        if not isinstance(duration_seconds, int) or isinstance(duration_seconds, bool) or not 1 <= duration_seconds <= 60:
+            raise HTTPException(422, f"第 {index} 个镜头的 duration_seconds 必须是 1 到 60 的整数")
+        shot["duration_seconds"] = duration_seconds
+        for field in ("character_reference_ids", "scene_reference_ids", "prop_reference_ids"):
+            values = shot.get(field)
+            if values is None:
+                continue
+            if not isinstance(values, list) or any(isinstance(value, bool) or not isinstance(value, int) or value <= 0 for value in values):
+                raise HTTPException(422, f"第 {index} 个镜头的 {field} 必须是正整数数组")
+            asset_ids.update(values)
+        normalized.append(shot)
+    if len({item["shot_index"] for item in normalized}) != len(normalized):
+        raise HTTPException(422, "镜头 shot_index 不能重复")
+    if asset_ids:
+        assets = db.query(VideoAsset).filter(
+                VideoAsset.id.in_(asset_ids),
+                VideoAsset.story_id == plan.story_id,
+                VideoAsset.chapter_id == plan.chapter_id,
+            ).all()
+        valid_ids = {asset.id for asset in assets if _is_image_reference_asset(asset)}
+        missing = asset_ids - valid_ids
+        if missing:
+            raise HTTPException(422, f"计划引用了无效、非图片或不属于当前章节的资产：{', '.join(map(str, sorted(missing)))}")
+    return sorted(normalized, key=lambda item: item["shot_index"])
+
+
+def _plan_node_id(prefix: str, value: Any) -> str:
+    """将计划中的任意稳定标识转换为画布允许的 ASCII 节点 ID。"""
+    digest = hashlib.sha256(str(value).encode("utf-8")).hexdigest()[:12]
+    return f"{prefix}-{digest}"
+
+
+def _plan_text(value: Any, fallback: str = "") -> str:
+    """收敛计划文本，避免缺失字段导致无法生成可审阅节点。"""
+    text = str(value or "").strip()
+    return text or fallback
+
+
+def _plan_asset_items(plan: VideoCanvasPlan) -> list[dict[str, Any]]:
+    """兼容资产计划的列表写法，只接纳对象项用于确定性画布编译。"""
+    section = plan.asset_json or {}
+    items = section.get("assets") if isinstance(section, dict) else None
+    return [item for item in items if isinstance(item, dict)] if isinstance(items, list) else []
+
+
+def _compile_plan_graph(plan: VideoCanvasPlan, normalized_shots: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    """把已审阅的来源、剧本、镜头与资产计划编译为固定拓扑的画布图。"""
+    shots = normalized_shots if normalized_shots is not None else (plan.shot_json or {}).get("shots") or []
+    graph = _empty_graph()
+    graph["metadata"] = {"compiled_from_plan_id": plan.id, "compiler": "video_canvas_plan_v1"}
+    source = plan.source_snapshot_json or {}
+    screenplay = plan.screenplay_json or {}
+    source_id = "source"
+    screenplay_id = "screenplay"
+    source_content = _plan_text(source.get("content") or source.get("text"), "待补充创作来源")
+    graph["nodes"].append({
+        "id": source_id, "type": "text", "position": {"x": 80, "y": 120},
+        "data": {"label": "创作来源", "config": {"content": source_content, "source_type": source.get("source_type"), "source_hash": source.get("source_hash")}},
+    })
+    screenplay_content = _plan_text(screenplay.get("text") or screenplay.get("screenplay_text"), "结构化剧本")
+    graph["nodes"].append({
+        "id": screenplay_id, "type": "text", "position": {"x": 380, "y": 120},
+        "data": {"label": "视频剧本", "config": {"content": screenplay_content, "scenes": screenplay.get("scenes") or []}},
+    })
+    graph["edges"].append({"id": "edge-source-screenplay", "source": source_id, "sourceHandle": "text", "target": screenplay_id, "targetHandle": "source"})
+
+    asset_nodes: dict[int, str] = {}
+    for shot in shots:
+        if not isinstance(shot, dict):
+            continue
+        for field in ("character_reference_ids", "scene_reference_ids", "prop_reference_ids"):
+            for asset_id in shot.get(field) or []:
+                if not isinstance(asset_id, int) or asset_id in asset_nodes:
+                    continue
+                node_id = _plan_node_id("asset", asset_id)
+                asset_nodes[asset_id] = node_id
+                graph["nodes"].append({
+                    "id": node_id, "type": "image", "position": {"x": 80, "y": 350 + len(asset_nodes) * 180},
+                    "data": {"label": f"已有关联资产 {asset_id}", "config": {"asset_id": asset_id, "reference_asset_ids": [asset_id]}},
+                })
+
+    planned_assets: list[tuple[str, dict[str, Any]]] = []
+    for index, asset in enumerate(_plan_asset_items(plan), start=1):
+        asset_id = asset.get("asset_id")
+        if isinstance(asset_id, int) and asset_id in asset_nodes:
+            continue
+        identity = asset_id if isinstance(asset_id, int) else asset.get("asset_key") or asset.get("key") or asset.get("name") or index
+        node_id = _plan_node_id("planned-asset", identity)
+        config = {"prompt": _plan_text(asset.get("prompt") or asset.get("description") or asset.get("name"), f"计划资产 {index}"), "asset_role": asset.get("role") or asset.get("asset_type")}
+        if isinstance(asset_id, int):
+            config = {"asset_id": asset_id, "reference_asset_ids": [asset_id], "asset_role": config["asset_role"]}
+        graph["nodes"].append({
+            "id": node_id, "type": "image", "position": {"x": 80, "y": 350 + (len(asset_nodes) + index) * 180},
+            "data": {"label": _plan_text(asset.get("name"), f"计划资产 {index}"), "config": config},
+        })
+        planned_assets.append((node_id, asset))
+
+    for order, shot in enumerate(sorted((item for item in shots if isinstance(item, dict)), key=lambda item: item.get("shot_index", 0)), start=1):
+        shot_index = shot.get("shot_index") if isinstance(shot.get("shot_index"), int) else order
+        shot_id = f"shot-{shot_index}"
+        board_id = f"board-{shot_index}"
+        video_id = f"video-{shot_index}"
+        x = 720 + (order - 1) * 400
+        shot_config = {key: value for key, value in shot.items() if key in _PLAN_SHOT_FIELDS}
+        graph["nodes"].append({"id": shot_id, "type": "text", "position": {"x": x, "y": 120}, "data": {"label": f"分镜 {shot_index}", "config": {"content": _plan_text(shot.get("story_summary")), **shot_config}}})
+        graph["nodes"].append({"id": board_id, "type": "image", "position": {"x": x, "y": 390}, "data": {"label": f"分镜 {shot_index} 故事板", "config": {"prompt": _plan_text(shot.get("storyboard_prompt") or shot.get("scene_prompt"), _plan_text(shot.get("story_summary"))), "reference_asset_ids": [asset_id for field in ("character_reference_ids", "scene_reference_ids", "prop_reference_ids") for asset_id in shot.get(field) or [] if isinstance(asset_id, int)]}}})
+        graph["nodes"].append({"id": video_id, "type": "video", "position": {"x": x, "y": 680}, "data": {"label": f"分镜 {shot_index} 视频", "config": {"prompt": _plan_text(shot.get("video_prompt"), _plan_text(shot.get("story_summary"))), "duration_seconds": shot.get("duration_seconds", 15)}}})
+        graph["edges"].extend([
+            {"id": f"edge-screenplay-shot-{shot_index}", "source": screenplay_id, "sourceHandle": "text", "target": shot_id, "targetHandle": "source"},
+            {"id": f"edge-shot-board-{shot_index}", "source": shot_id, "sourceHandle": "text", "target": board_id, "targetHandle": "prompt"},
+            {"id": f"edge-shot-video-{shot_index}", "source": shot_id, "sourceHandle": "text", "target": video_id, "targetHandle": "prompt"},
+            {"id": f"edge-board-video-{shot_index}", "source": board_id, "sourceHandle": "image", "target": video_id, "targetHandle": "image"},
+        ])
+        referenced_ids = {asset_id for field in ("character_reference_ids", "scene_reference_ids", "prop_reference_ids") for asset_id in shot.get(field) or [] if isinstance(asset_id, int)}
+        for asset_id in referenced_ids:
+            node_id = asset_nodes.get(asset_id)
+            if node_id:
+                graph["edges"].extend([
+                    {"id": f"edge-asset-board-{asset_id}-{shot_index}", "source": node_id, "sourceHandle": "image", "target": board_id, "targetHandle": "references"},
+                    {"id": f"edge-asset-video-{asset_id}-{shot_index}", "source": node_id, "sourceHandle": "image", "target": video_id, "targetHandle": "image"},
+                ])
+        for node_id, asset in planned_assets:
+            indexes = asset.get("used_by_shot_indexes") or asset.get("shot_indexes") or []
+            if isinstance(indexes, list) and shot_index in indexes:
+                graph["edges"].extend([
+                    {"id": f"edge-planned-board-{node_id}-{shot_index}", "source": node_id, "sourceHandle": "image", "target": board_id, "targetHandle": "references"},
+                    {"id": f"edge-planned-video-{node_id}-{shot_index}", "source": node_id, "sourceHandle": "image", "target": video_id, "targetHandle": "image"},
+                ])
+    return graph
 
 
 def _port_map(spec: dict[str, Any], key: str, direction: str) -> dict[str, Any] | None:
@@ -359,6 +625,81 @@ def _source_hash(value: Any) -> str:
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
+def _canvas_source_hash(source_type: str, source_id: Any, content: str) -> str:
+    """与 Agent 来源冻结协议一致地计算可追溯内容哈希。"""
+    return _source_hash({"source_type": source_type, "source_id": source_id, "content": content})
+
+
+def _resolve_plan_source_snapshot(
+    canvas: VideoCanvas,
+    source_snapshot: dict[str, Any] | None,
+    db: Session,
+) -> dict[str, Any] | None:
+    """为 REST 计划入口重读可验证来源，拒绝客户端伪造正文。"""
+    if source_snapshot is None:
+        return None
+    source_type = str(source_snapshot.get("source_type") or "").strip()
+    source_id = source_snapshot.get("source_id")
+    if source_type == "chapter":
+        chapter = db.get(Chapter, source_id) if isinstance(source_id, int) else None
+        if not chapter or chapter.story_id != canvas.story_id:
+            raise HTTPException(422, "计划来源章节不存在或不属于当前作品")
+        content = str(chapter.novel_content or "").strip()
+        if not content:
+            raise HTTPException(422, "计划来源章节正文为空")
+        return {
+            "source_type": "chapter",
+            "source_id": chapter.id,
+            "chapter_id": chapter.id,
+            "title": chapter.title or "未命名章节",
+            "content": content,
+            "source_hash": _canvas_source_hash("chapter", chapter.id, content),
+        }
+    if source_type == "text_node":
+        node_id = str(source_id or "").strip()
+        graph = _latest_version(canvas.id, db).graph_json or {}
+        node = next((item for item in graph.get("nodes") or [] if isinstance(item, dict) and str(item.get("id") or "") == node_id), None)
+        if not node or node.get("type") != "text":
+            raise HTTPException(422, "计划来源文本节点不存在或类型不正确")
+        config = (node.get("data") or {}).get("config") or {}
+        content = str(config.get("content") or config.get("text") or "").strip()
+        if not content:
+            raise HTTPException(422, "计划来源文本节点为空")
+        return {
+            "source_type": "text_node",
+            "source_id": node_id,
+            "node_label": str((node.get("data") or {}).get("label") or node_id),
+            "content": content,
+            "source_hash": _canvas_source_hash("text_node", node_id, content),
+        }
+    if source_type == "chat":
+        raise HTTPException(422, "聊天剧本必须通过画布 Agent 创建计划")
+    raise HTTPException(422, "source_type 仅支持 chapter 或 text_node")
+
+
+def _plan_source_stale_error(plan: VideoCanvasPlan, db: Session) -> str | None:
+    """确认前检测章节或文本节点来源是否已变更，避免旧草案覆盖新创作。"""
+    source = plan.source_snapshot_json or {}
+    source_type = str(source.get("source_type") or "")
+    source_id = source.get("source_id")
+    expected_hash = str(source.get("source_hash") or "")
+    if source_type == "chapter" and isinstance(source_id, int):
+        chapter = db.get(Chapter, source_id)
+        if not chapter or chapter.story_id != plan.story_id:
+            return "计划来源章节已不存在或不再属于当前作品"
+        actual_hash = _canvas_source_hash("chapter", chapter.id, str(chapter.novel_content or "").strip())
+        return "章节正文已更新，请重新生成创作计划" if actual_hash != expected_hash else None
+    if source_type == "text_node" and source_id:
+        graph = _latest_version(plan.canvas_id, db).graph_json or {}
+        node = next((item for item in graph.get("nodes") or [] if isinstance(item, dict) and str(item.get("id") or "") == str(source_id)), None)
+        if not node or node.get("type") != "text":
+            return "计划来源文本节点已不存在或已变更类型"
+        config = (node.get("data") or {}).get("config") or {}
+        actual_hash = _canvas_source_hash("text_node", str(source_id), str(config.get("content") or config.get("text") or "").strip())
+        return "文本节点内容已更新，请重新生成创作计划" if actual_hash != expected_hash else None
+    return None
+
+
 def _origin(source_type: str, source_id: int, workflow_id: int, config: dict[str, Any]) -> dict[str, Any]:
     """构造可用于显式同步的来源快照，不保存用户本地布局。"""
     return {
@@ -435,7 +776,6 @@ def _import_graph(workflow: ChapterVideoWorkflow, db: Session) -> dict[str, Any]
             "file_path": asset.file_path,
             "roles": sorted(asset_roles.get(asset.id, set())),
             "source_shot_ids": sorted(asset_shots.get(asset.id, set())),
-            "existing_url": asset.file_path,
         }
         graph["nodes"].append({
             "id": asset_node_id, "type": "image", "position": {"x": 80, "y": 360 + index * 150},
@@ -483,11 +823,11 @@ def _import_graph(workflow: ChapterVideoWorkflow, db: Session) -> dict[str, Any]
         board_id: str | None = None
         # 即使故事版或视频尚未生成，也创建占位媒体节点，保证列表详情同步后能继续在画布中创作。
         board_id = _node_id("image")
-        board_config = {"shot_id": shot.id, "prompt": shot.storyboard_prompt or "", "existing_url": shot.storyboard_image_url or "", "storyboard": shot.storyboard_json or {}}
+        board_config = {"shot_id": shot.id, "prompt": shot.storyboard_prompt or "", "storyboard": shot.storyboard_json or {}, "trusted_import_media_url": shot.storyboard_image_url or ""}
         graph["nodes"].append({"id": board_id, "type": "image", "position": {"x": x, "y": 390}, "data": {"label": f"分镜 {shot.shot_index} 画面", "config": board_config, "origin": _origin("chapter_video_shot_storyboard", shot.id, workflow.id, board_config)}})
         shot_image_nodes.append(board_id)
         video_id = _node_id("video")
-        video_config = {"shot_id": shot.id, "prompt": shot.video_prompt or "", "existing_url": shot.video_url or "", "duration_seconds": shot.duration_seconds or 15}
+        video_config = {"shot_id": shot.id, "prompt": shot.video_prompt or "", "duration_seconds": shot.duration_seconds or 15, "trusted_import_media_url": shot.video_url or ""}
         graph["nodes"].append({"id": video_id, "type": "video", "position": {"x": x, "y": 650}, "data": {"label": f"分镜 {shot.shot_index} 视频", "config": video_config, "origin": _origin("chapter_video_shot_video", shot.id, workflow.id, video_config)}})
         graph["edges"].append({"id": _node_id("edge"), "source": shot_id, "sourceHandle": "text", "target": video_id, "targetHandle": "prompt"})
         for image_id in dict.fromkeys(shot_image_nodes):
@@ -639,6 +979,8 @@ def _run_scope_node_ids(graph: dict[str, Any], target_node_ids: set[str]) -> set
     for edge in graph.get("edges") or []:
         if not isinstance(edge, dict):
             continue
+        if isinstance(edge.get("data"), dict) and edge["data"].get("disabled"):
+            continue
         source = str(edge.get("source") or "")
         target = str(edge.get("target") or "")
         if source and target:
@@ -758,10 +1100,292 @@ async def update_video_canvas(canvas_id: int, body: VideoCanvasUpdate, request: 
     return _serialize_canvas(canvas, db)
 
 
+@router.delete("/api/video-canvas/canvases/{canvas_id}")
+async def delete_video_canvas(canvas_id: int, request: Request, db: Session = Depends(get_db)):
+    """归档画布，保留历史版本、运行记录和用户生成媒体。"""
+    user = _require_user(request, db)
+    canvas = _require_canvas(canvas_id, user, db)
+    canvas.status = "archived"
+    db.commit()
+    return {"ok": True, "canvas_id": canvas_id}
+
+
+@router.get("/api/video-canvas/canvases/{canvas_id}/plans")
+async def list_video_canvas_plans(canvas_id: int, request: Request, db: Session = Depends(get_db)):
+    user = _require_user(request, db)
+    canvas = _require_canvas(canvas_id, user, db)
+    plans = (
+        db.query(VideoCanvasPlan)
+        .filter(VideoCanvasPlan.canvas_id == canvas.id, VideoCanvasPlan.owner_user_id == user.id)
+        .order_by(VideoCanvasPlan.updated_at.desc(), VideoCanvasPlan.id.desc())
+        .limit(30)
+        .all()
+    )
+    return {"plans": [_serialize_plan(plan) for plan in plans]}
+
+
+@router.post("/api/video-canvas/canvases/{canvas_id}/plans")
+async def create_video_canvas_plan(
+    canvas_id: int,
+    body: VideoCanvasPlanCreate,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """保存 Agent 或用户提出的创作草案，草案本身不会修改画布或触发生成。"""
+    user = _require_user(request, db)
+    canvas = _require_canvas(canvas_id, user, db)
+    source_snapshot = _resolve_plan_source_snapshot(canvas, body.source_snapshot_json, db)
+    source_chapter_id = source_snapshot.get("chapter_id") if isinstance(source_snapshot, dict) else None
+    chapter_id = body.chapter_id if body.chapter_id is not None else source_chapter_id if isinstance(source_chapter_id, int) else canvas.default_chapter_id
+    if chapter_id is not None:
+        chapter = db.get(Chapter, chapter_id)
+        if not chapter or chapter.story_id != canvas.story_id:
+            raise HTTPException(422, "计划章节不属于当前画布作品")
+    plan = VideoCanvasPlan(
+        owner_user_id=user.id,
+        canvas_id=canvas.id,
+        story_id=canvas.story_id,
+        chapter_id=chapter_id,
+        source_snapshot_json=source_snapshot,
+        screenplay_json=body.screenplay_json,
+        shot_json=body.shot_json,
+        asset_json=body.asset_json,
+        canvas_json=body.canvas_json,
+        execution_json=body.execution_json,
+    )
+    db.add(plan)
+    db.commit()
+    db.refresh(plan)
+    return _serialize_plan(plan)
+
+
+@router.get("/api/video-canvas/canvases/{canvas_id}/plans/{plan_id}")
+async def get_video_canvas_plan(canvas_id: int, plan_id: int, request: Request, db: Session = Depends(get_db)):
+    user = _require_user(request, db)
+    canvas = _require_canvas(canvas_id, user, db)
+    plan = db.get(VideoCanvasPlan, plan_id)
+    if not plan or plan.canvas_id != canvas_id or plan.owner_user_id != user.id:
+        raise HTTPException(404, "画布计划不存在")
+    return _serialize_plan(plan)
+
+
+@router.put("/api/video-canvas/canvases/{canvas_id}/plans/{plan_id}")
+async def update_video_canvas_plan(
+    canvas_id: int,
+    plan_id: int,
+    body: VideoCanvasPlanUpdate,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    user = _require_user(request, db)
+    canvas = _require_canvas(canvas_id, user, db)
+    plan = db.query(VideoCanvasPlan).filter(
+        VideoCanvasPlan.id == plan_id,
+        VideoCanvasPlan.canvas_id == canvas.id,
+        VideoCanvasPlan.owner_user_id == user.id,
+    ).with_for_update().first()
+    if not plan or plan.canvas_id != canvas_id or plan.owner_user_id != user.id:
+        raise HTTPException(404, "画布计划不存在")
+    if plan.status not in {"draft", "ready"}:
+        raise HTTPException(409, "已确认的计划不能再编辑，请创建新草案")
+    if plan.revision != body.expected_revision:
+        raise HTTPException(409, {"message": "计划已更新，请刷新后再保存", "revision": plan.revision})
+    updates = body.model_dump(exclude_unset=True, exclude={"expected_revision", "source_snapshot_json"})
+    for field, value in updates.items():
+        setattr(plan, field, value)
+    if body.source_snapshot_json is not None:
+        plan.source_snapshot_json = _resolve_plan_source_snapshot(canvas, body.source_snapshot_json, db)
+        source_chapter_id = plan.source_snapshot_json.get("chapter_id") if isinstance(plan.source_snapshot_json, dict) else None
+        if isinstance(source_chapter_id, int):
+            plan.chapter_id = source_chapter_id
+    if body.status == "ready":
+        errors = _plan_ready_errors(plan)
+        if errors:
+            raise HTTPException(422, "；".join(errors))
+    plan.revision += 1
+    db.commit()
+    db.refresh(plan)
+    return _serialize_plan(plan)
+
+
+@router.post("/api/video-canvas/canvases/{canvas_id}/plans/{plan_id}/confirm")
+async def confirm_video_canvas_plan(
+    canvas_id: int,
+    plan_id: int,
+    body: VideoCanvasPlanConfirmRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """确认计划内容；生成和画布应用仍需走各自的独立确认步骤。"""
+    user = _require_user(request, db)
+    _require_canvas(canvas_id, user, db)
+    plan = db.get(VideoCanvasPlan, plan_id)
+    if not plan or plan.canvas_id != canvas_id or plan.owner_user_id != user.id:
+        raise HTTPException(404, "画布计划不存在")
+    if plan.revision != body.expected_revision:
+        raise HTTPException(409, {"message": "计划已更新，请刷新后再确认", "revision": plan.revision})
+    if plan.status != "ready":
+        raise HTTPException(422, "只有已就绪的计划可以确认")
+    if stale_error := _plan_source_stale_error(plan, db):
+        raise HTTPException(409, stale_error)
+    plan.status = "approved"
+    plan.revision += 1
+    db.commit()
+    db.refresh(plan)
+    return _serialize_plan(plan)
+
+
+@router.post("/api/video-canvas/canvases/{canvas_id}/plans/{plan_id}/apply")
+async def apply_video_canvas_plan(
+    canvas_id: int,
+    plan_id: int,
+    body: VideoCanvasPlanApplyRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """将已确认计划的图定义原子写入画布，生成执行仍需另行确认。"""
+    user = _require_user(request, db)
+    canvas = _lock_canvas(canvas_id, user, db)
+    plan = db.query(VideoCanvasPlan).filter(
+        VideoCanvasPlan.id == plan_id,
+        VideoCanvasPlan.canvas_id == canvas.id,
+        VideoCanvasPlan.owner_user_id == user.id,
+    ).with_for_update().first()
+    if not plan or plan.canvas_id != canvas.id or plan.owner_user_id != user.id:
+        raise HTTPException(404, "画布计划不存在")
+    if plan.status != "approved":
+        raise HTTPException(422, "请先确认创作计划")
+    if stale_error := _plan_source_stale_error(plan, db):
+        raise HTTPException(409, stale_error)
+    if plan.revision != body.expected_plan_revision:
+        raise HTTPException(409, {"message": "计划已更新，请刷新后再应用", "revision": plan.revision})
+    if canvas.definition_revision != body.expected_definition_revision:
+        raise HTTPException(409, {"message": "画布定义已更新，请刷新后再应用", "definition_revision": canvas.definition_revision})
+    graph = _plan_graph(plan, db)
+    validation = _validate_graph(graph)
+    if validation["errors"]:
+        raise HTTPException(422, {"message": "计划画布校验失败", **validation})
+    next_revision = canvas.definition_revision + 1
+    db.add(VideoCanvasVersion(
+        canvas_id=canvas.id,
+        version_no=next_revision,
+        graph_json=graph,
+        source="agent",
+        change_summary=f"应用创作计划 {plan.id}",
+        created_by_user_id=user.id,
+    ))
+    canvas.definition_revision = next_revision
+    plan.status = "applied"
+    plan.applied_canvas_revision = next_revision
+    plan.revision += 1
+    db.commit()
+    db.refresh(canvas)
+    db.refresh(plan)
+    return {"canvas": _serialize_canvas(canvas, db), "plan": _serialize_plan(plan), "validation": validation}
+
+
+@router.post("/api/video-canvas/canvases/{canvas_id}/plans/{plan_id}/sync-workflow")
+async def sync_video_canvas_plan_to_workflow(
+    canvas_id: int,
+    plan_id: int,
+    body: VideoCanvasPlanWorkflowSyncRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """把已确认计划写入新章节视频工作流，作为后续分镜、故事板和视频的事实源。"""
+    user = _require_user(request, db)
+    canvas = _require_canvas(canvas_id, user, db)
+    plan = db.query(VideoCanvasPlan).filter(
+        VideoCanvasPlan.id == plan_id,
+        VideoCanvasPlan.canvas_id == canvas.id,
+        VideoCanvasPlan.owner_user_id == user.id,
+    ).with_for_update().first()
+    if not plan or plan.canvas_id != canvas.id or plan.owner_user_id != user.id:
+        raise HTTPException(404, "画布计划不存在")
+    if plan.status not in {"approved", "applied"}:
+        raise HTTPException(422, "请先确认创作计划")
+    if stale_error := _plan_source_stale_error(plan, db):
+        raise HTTPException(409, stale_error)
+    if plan.revision != body.expected_plan_revision:
+        raise HTTPException(409, {"message": "计划已更新，请刷新后再同步", "revision": plan.revision})
+    if plan.chapter_id is None:
+        raise HTTPException(422, "画布计划未绑定章节，不能同步章节视频工作流")
+    chapter = db.get(Chapter, plan.chapter_id)
+    if not chapter or chapter.story_id != canvas.story_id:
+        raise HTTPException(422, "计划章节不属于当前作品")
+    if plan.workflow_id is not None:
+        raise HTTPException(409, "此计划已同步到章节视频工作流，请创建新计划以避免覆盖既有镜头")
+    shots = _plan_shots(plan, db)
+    screenplay = plan.screenplay_json or {}
+    screenplay_text = str(screenplay.get("text") or screenplay.get("screenplay_text") or "").strip()
+    screenplay_json = screenplay.get("json") if isinstance(screenplay.get("json"), dict) else screenplay
+    if not screenplay_text and not screenplay_json:
+        raise HTTPException(422, "计划缺少可同步剧本")
+    source = plan.source_snapshot_json or {}
+    source_text = str(source.get("content") or source.get("text") or chapter.novel_content or "")
+    workflow = ChapterVideoWorkflow(
+        chapter_id=chapter.id,
+        story_id=canvas.story_id,
+        source_text=source_text,
+        workflow_status="shots_ready",
+        video_style=str((plan.execution_json or {}).get("video_style") or "") or None,
+        duration_per_shot=15,
+        screenplay_text=screenplay_text or json.dumps(screenplay_json, ensure_ascii=False),
+        screenplay_json=screenplay_json,
+        screenplay_status="approved",
+        screenplay_updated_at=datetime.datetime.now(datetime.timezone.utc),
+        screenplay_approved_at=datetime.datetime.now(datetime.timezone.utc),
+        screenplay_version=1,
+        total_shots=len(shots),
+    )
+    db.add(workflow)
+    db.flush()
+    for shot_data in shots:
+        db.add(ChapterVideoShot(
+            workflow_id=workflow.id,
+            shot_index=shot_data["shot_index"],
+            source_text_span=shot_data.get("source_text_span"),
+            scene_location=shot_data.get("scene_location"),
+            time_of_day=shot_data.get("time_of_day"),
+            characters=shot_data.get("characters"),
+            story_summary=shot_data.get("story_summary"),
+            dialogue_or_narration=shot_data.get("dialogue_or_narration"),
+            camera_plan=shot_data.get("camera_plan"),
+            motion_plan=shot_data.get("motion_plan"),
+            emotion_plan=shot_data.get("emotion_plan"),
+            continuity_notes=shot_data.get("continuity_notes"),
+            screenplay_scene_id=shot_data.get("screenplay_scene_id"),
+            screenplay_beat_id=shot_data.get("screenplay_beat_id"),
+            narrative_purpose=shot_data.get("narrative_purpose"),
+            beat_density=shot_data.get("beat_density"),
+            transition_to_next=shot_data.get("transition_to_next"),
+            continuity_json=shot_data.get("continuity_json"),
+            storyboard_prompt=shot_data.get("storyboard_prompt") or "",
+            video_prompt=shot_data.get("video_prompt") or "",
+            character_prompts_json=shot_data.get("character_prompts_json"),
+            scene_prompt=shot_data.get("scene_prompt"),
+            prop_prompts_json=shot_data.get("prop_prompts_json"),
+            key_props_json=shot_data.get("key_props_json"),
+            scene_asset_candidates_json=shot_data.get("scene_asset_candidates_json"),
+            character_reference_ids=shot_data.get("character_reference_ids") or [],
+            scene_reference_ids=shot_data.get("scene_reference_ids") or [],
+            prop_reference_ids=shot_data.get("prop_reference_ids") or [],
+            storyboard_json=shot_data.get("storyboard_json"),
+            duration_seconds=shot_data.get("duration_seconds") or 15,
+            status="pending",
+        ))
+    plan.workflow_id = workflow.id
+    plan.workflow_sync_revision = plan.revision + 1
+    plan.revision += 1
+    db.commit()
+    db.refresh(plan)
+    return {"plan": _serialize_plan(plan), "workflow_id": workflow.id, "shot_count": len(shots)}
+
+
 @router.put("/api/video-canvas/canvases/{canvas_id}/graph")
 async def save_video_canvas_graph(canvas_id: int, body: VideoCanvasGraphSave, request: Request, db: Session = Depends(get_db)):
     user = _require_user(request, db)
-    canvas = _require_canvas(canvas_id, user, db)
+    canvas = _lock_canvas(canvas_id, user, db)
     if canvas.definition_revision != body.expected_definition_revision:
         raise HTTPException(409, {"message": "画布定义已更新，请刷新后再保存", "definition_revision": canvas.definition_revision})
     validation = _validate_graph(body.graph)
@@ -803,7 +1427,7 @@ async def validate_video_canvas(canvas_id: int, request: Request, db: Session = 
 @router.post("/api/video-canvas/canvases/{canvas_id}/imports/list-workflow")
 async def import_list_workflow(canvas_id: int, body: VideoCanvasImportRequest, request: Request, db: Session = Depends(get_db)):
     user = _require_user(request, db)
-    canvas = _require_canvas(canvas_id, user, db)
+    canvas = _lock_canvas(canvas_id, user, db)
     workflow = db.get(ChapterVideoWorkflow, body.source_workflow_id)
     if not workflow or workflow.story_id != canvas.story_id or (canvas.default_chapter_id is not None and workflow.chapter_id != canvas.default_chapter_id):
         raise HTTPException(404, "未找到可导入的列表工作流")
@@ -844,6 +1468,11 @@ async def create_video_canvas_run(canvas_id: int, body: VideoCanvasRunRequest, r
     validation = _validate_graph(version.graph_json)
     if validation["errors"]:
         raise HTTPException(422, {"message": "画布校验失败", **validation})
+    target_chapter_id = _run_target_chapter_id(canvas, version, db)
+    if target_chapter_id is not None:
+        chapter = db.get(Chapter, target_chapter_id)
+        if not chapter or chapter.story_id != canvas.story_id:
+            raise HTTPException(422, "画布运行章节不属于当前作品")
     selected = set(body.target_node_ids)
     all_nodes = {node["id"]: node for node in version.graph_json.get("nodes", [])}
     unknown = selected - set(all_nodes)
@@ -868,7 +1497,7 @@ async def create_video_canvas_run(canvas_id: int, body: VideoCanvasRunRequest, r
         idempotency_key=body.idempotency_key,
         status="queued",
         scope_json={"target_node_ids": sorted(selected), "resolved_node_ids": ordered_node_ids},
-        plan_json={"topological_order": ordered_node_ids, "warnings": validation["warnings"]},
+        plan_json={"topological_order": ordered_node_ids, "warnings": validation["warnings"], "chapter_id": target_chapter_id},
         requested_by_user_id=user.id,
     )
     db.add(run)
@@ -901,7 +1530,7 @@ async def confirm_video_canvas_run(
 ):
     """确认包含生成节点的运行计划，作为执行器派发的唯一入口。"""
     user = _require_user(request, db)
-    _require_canvas(canvas_id, user, db)
+    canvas = _require_canvas(canvas_id, user, db)
     run = db.query(VideoCanvasRun).filter(
         VideoCanvasRun.id == run_id,
         VideoCanvasRun.canvas_id == canvas_id,
@@ -950,7 +1579,7 @@ async def confirm_video_canvas_run(
                 timeout=1800.0,
                 max_retries=0,
                 story_id=canvas.story_id,
-                chapter_id=canvas.default_chapter_id,
+                chapter_id=(run.plan_json or {}).get("chapter_id") if isinstance((run.plan_json or {}).get("chapter_id"), int) else canvas.default_chapter_id,
                 metadata={"canvas_id": canvas.id, "run_id": run.id, "message": "视频画布正在执行..."},
             )
         except Exception:

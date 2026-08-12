@@ -43,6 +43,7 @@ import { toast } from '../lib/toast';
 import { normalizeErrorMessage } from '../lib/errors';
 
 import VideoCardWorkbench from './VideoCardWorkbench';
+import MediaImage from './shared/MediaImage';
 import { videoGenStore } from '../videoGenStore';
 import {
   buildCharacterWorkbenchResources,
@@ -1347,7 +1348,7 @@ const typeConfig: Record<string, { label: string; icon: React.ReactNode; color: 
                                     {thumbnails.slice(0, 2).map((thumb) => (
                                       <div key={thumb.name} className="flex flex-col items-center">
                                         {thumb.thumbnailUrl ? (
-                                          <img
+                                          <MediaImage
                                             src={toAssetUrl(thumb.thumbnailUrl)}
                                             alt={thumb.name}
                                             className="h-10 w-10 rounded object-cover"
@@ -1423,7 +1424,7 @@ const typeConfig: Record<string, { label: string; icon: React.ReactNode; color: 
                             }
                             if (hasStoryboard) {
                               return (
-                                <img
+                                <MediaImage
                                   src={toAssetUrl(shot.storyboard_image_url)}
                                   alt={`镜头 ${shot.shot_index} 故事版`}
                                   className="h-24 w-full rounded-lg object-cover"

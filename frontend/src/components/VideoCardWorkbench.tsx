@@ -4,6 +4,7 @@ import { RotateCcw, Upload, Trash2, Wand2, X, Loader2, CheckSquare, MousePointer
 import { ImageRedrawModal } from './shared/ImageRedrawModal';
 import ImageZoomView from './shared/ImageZoomView';
 import AssetReferenceSelector from './AssetReferenceSelector';
+import MediaImage from './shared/MediaImage';
 import { videoGenStore, type AssetType } from '../videoGenStore';
 
 import { previewVideoPrompt } from '../api';
@@ -486,7 +487,7 @@ export default function VideoCardWorkbench({ type, shotId, assetId, displayShotI
                     >
                        <div className="text-xs font-medium text-slate-800 truncate">{res.label || res.prompt || `资产 #${res.id}`}</div>
                        {res.url ? (
-                         <img
+                         <MediaImage
                            src={res.url}
                            alt=""
                            className="mt-2 h-16 w-full rounded-lg object-cover"

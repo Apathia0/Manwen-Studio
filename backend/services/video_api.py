@@ -157,10 +157,12 @@ ALLOWED_SIZES = ["720P", "1080P", "1K", "2K", "4K"]
 VIDEO_PAYLOAD_PROFILE_LEGACY = "legacy_lingdong"
 VIDEO_PAYLOAD_PROFILE_SEEDANCE_FAST = "seedance_fast"
 VIDEO_PAYLOAD_PROFILE_SORA_V2 = "sora_v2"
+VIDEO_PAYLOAD_PROFILE_CUSTOM = "custom"
 _VIDEO_PAYLOAD_PROFILES = {
     VIDEO_PAYLOAD_PROFILE_LEGACY,
     VIDEO_PAYLOAD_PROFILE_SEEDANCE_FAST,
     VIDEO_PAYLOAD_PROFILE_SORA_V2,
+    VIDEO_PAYLOAD_PROFILE_CUSTOM,
 }
 
 
@@ -547,15 +549,26 @@ async def create_video_job(
         if resolution_field is None:
             payload["size"] = "large"
         else:
-            payload[resolution_field] = size
+            resolution_case = wire.get("resolution_case", "preserve")
+            payload[resolution_field] = size.lower() if resolution_case == "lower" else size
 
-        ratio_field = (
-            _wire_field(capabilities, "ratio_field", "orientation", {"ratio", "orientation"})
-            if "ratio_field" in wire
-            else None
-        )
+        if payload_profile == VIDEO_PAYLOAD_PROFILE_CUSTOM:
+            ratio_field = _wire_field(
+                capabilities,
+                "ratio_field",
+                "orientation",
+                {"ratio", "orientation", "aspect_ratio"},
+            )
+        else:
+            ratio_field = (
+                _wire_field(capabilities, "ratio_field", "orientation", {"ratio", "orientation"})
+                if "ratio_field" in wire
+                else None
+            )
         if ratio_field == "ratio":
             payload["ratio"] = aspect_ratio
+        elif ratio_field == "aspect_ratio":
+            payload["aspect_ratio"] = aspect_ratio
         else:
             payload["orientation"] = _aspect_to_orientation(aspect_ratio)
 
@@ -609,23 +622,26 @@ async def create_video_job(
                 capabilities,
                 "reference_field",
                 "input_reference",
-                {"input_reference"},
+                {"input_reference", "reference_images", "reference_videos", "reference_video_urls", "reference_audio_urls"},
             )
-            payload[reference_field] = "|".join(oss_urls)
+            payload[reference_field] = oss_urls if reference_field != "input_reference" else "|".join(oss_urls)
             ref_log = "|".join(safe_media_url_for_log(item) for item in oss_urls)
             logger.info("[video] 参考图 %d 张: %s",
                          len(oss_urls), ref_log[:120])
         else:
             logger.warning("[video] 所有参考图均为本地路径且 OSS 上传失败，本次任务无参考图")
 
+    reference_payload = payload.get("reference_images") or payload.get("input_reference") or ""
+    reference_values = reference_payload if isinstance(reference_payload, list) else str(reference_payload).split("|")
     ref_preview = "|".join(
         safe_media_url_for_log(item)
-        for item in str(payload.get("input_reference") or "").split("|")
+        for item in reference_values
         if item
     )[:120]
-    logger.info("[video] 提交任务 payload: model=%s prompt_len=%d duration=%s input_reference=%s url=%s",
+    logger.info("[video] 提交任务 payload: model=%s prompt_len=%d duration=%s reference=%s url=%s",
                  model, len(prompt), payload.get("duration"), ref_preview, safe_media_url_for_log(url))
     last_err: Exception | None = None
+    ratio_field_fallback_used = False
     for attempt in range(1, MAX_RETRIES + 1):
         try:
             async with httpx.AsyncClient(timeout=_timeout(connect=30, read=300, write=30)) as client:
@@ -640,6 +656,21 @@ async def create_video_job(
             status = response.status_code
             body_text = _sanitize_upstream_error(response.text, api_key)
             logger.warning("[video] 提交失败 HTTP %s: %s", status, body_text)
+
+            # 不同上游版本对画面比例字段的命名可能不一致；仅针对明确的未知字段错误做一次协议回退。
+            if status == 400 and not ratio_field_fallback_used:
+                unknown_ratio_field = None
+                if 'unknown field' in body_text and 'ratio' in body_text:
+                    unknown_ratio_field = "ratio"
+                elif 'unknown field' in body_text and 'orientation' in body_text:
+                    unknown_ratio_field = "orientation"
+                if unknown_ratio_field and unknown_ratio_field in payload:
+                    fallback_field = "orientation" if unknown_ratio_field == "ratio" else "ratio"
+                    payload[fallback_field] = _aspect_to_orientation(aspect_ratio) if fallback_field == "orientation" else aspect_ratio
+                    payload.pop(unknown_ratio_field, None)
+                    ratio_field_fallback_used = True
+                    logger.warning("[video] 上游拒绝字段 %s，回退使用字段 %s 后重试", unknown_ratio_field, fallback_field)
+                    continue
 
             if status == 401:
                 raise MissingApiKeyError("Video API Key 无效或未配置")

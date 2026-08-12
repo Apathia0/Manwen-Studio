@@ -32,6 +32,7 @@ import {
   subscribeMangaAssetAnalysisChanged,
 } from '../mangaAssetAnalysisSync';
 import { ImageRedrawModal } from './shared/ImageRedrawModal';
+import MediaImage from './shared/MediaImage';
 
 interface Props {
   storyId: number;
@@ -640,7 +641,7 @@ export default function MangaAssetManagementModal({ storyId, chapterId, onClose,
               const isEditing = editingId === asset.id;
               return <article key={asset.id} className={`group relative overflow-hidden rounded-xl border bg-white transition-shadow hover:shadow-md ${binding ? 'border-indigo-300 ring-1 ring-indigo-100' : 'border-slate-200'}`}>
                 <div className="relative aspect-square bg-slate-100">
-                  {imageUrl ? <button type="button" onClick={() => setWorkbenchAsset(asset)} className="block h-full w-full cursor-zoom-in" aria-label={`打开${asset.name}图片工作台`} title="查看与重绘"><img src={imageUrl} alt={asset.name} className="h-full w-full object-cover" loading="lazy" /></button> : <div className="flex h-full items-center justify-center text-slate-300"><ImageIcon size={32} /></div>}
+                  {imageUrl ? <button type="button" onClick={() => setWorkbenchAsset(asset)} className="block h-full w-full cursor-zoom-in" aria-label={`打开${asset.name}图片工作台`} title="查看与重绘"><MediaImage src={imageUrl} alt={asset.name} className="h-full w-full object-cover" /></button> : <div className="flex h-full items-center justify-center text-slate-300"><ImageIcon size={32} /></div>}
                   <div className="pointer-events-none absolute inset-0 flex items-center justify-center gap-2 bg-black/0 opacity-0 transition group-hover:bg-black/40 group-hover:opacity-100">
                     <button type="button" onClick={() => { setEditingId(asset.id); setEditingName(asset.name); setEditingLabel(binding?.label ?? asset.name); }} className="pointer-events-auto rounded-full bg-white p-2 text-slate-700 shadow-lg hover:bg-slate-100" title="编辑"><Edit3 size={14} /></button>
                     <button type="button" onClick={() => void removeAsset(asset)} disabled={deleting === asset.id} className="pointer-events-auto rounded-full bg-white p-2 text-red-600 shadow-lg hover:bg-red-50 disabled:opacity-50" title="删除">{deleting === asset.id ? <Loader2 size={14} className="animate-spin" /> : <Trash2 size={14} />}</button>

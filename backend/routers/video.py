@@ -29,6 +29,20 @@ from starlette.background import BackgroundTask as ResponseBackgroundTask
 from database import SessionLocal, get_db, init_db
 _VIDEO_OUTPUTS_DIR = Path(__file__).resolve().parent.parent / "video_outputs"
 _MANGA_OUTPUTS_DIR = Path(__file__).resolve().parent.parent / "manga_outputs"
+MAX_VIDEO_ASSET_UPLOAD_BYTES = max(1, int(os.getenv("MAX_VIDEO_ASSET_UPLOAD_BYTES", str(200 * 1024 * 1024))))
+_VIDEO_ASSET_UPLOAD_TYPES = {
+    "image": {".png", ".jpg", ".jpeg", ".webp", ".gif"},
+    "video": {".mp4", ".mov", ".webm", ".mkv"},
+    "audio": {".mp3", ".wav", ".m4a", ".aac", ".ogg"},
+}
+DIRECT_UPLOAD_SCOPES = {
+    "video_asset": 200 * 1024 * 1024,
+    "manga_asset": 10 * 1024 * 1024,
+    "style_reference": 15 * 1024 * 1024,
+    "storyboard": 30 * 1024 * 1024,
+    "video": 200 * 1024 * 1024,
+    "creation_studio": 15 * 1024 * 1024,
+}
 
 SHOT_TYPES = [
     "全景 (Wide Shot)", "中景 (Medium Shot)", "近景 (Close-up)",
@@ -740,6 +754,58 @@ def _configure_oss_from_db(db: Session) -> None:
         bucket=bucket,
         public_url_base=public_url_base,
     )
+
+
+def _direct_upload_prefix(user_id: int, scope: str) -> str:
+    """构造用户隔离的浏览器直传对象前缀。"""
+    return f"browser-uploads/user_{user_id}/{scope}/"
+
+
+@router.post("/api/media-uploads/presign")
+async def create_media_upload_signature(request: Request, db: Session = Depends(get_db)):
+    """申请浏览器直传 OSS 的短期 PUT 签名；未启用 OSS 时返回服务端上传降级标记。"""
+    user = _require_user(request, db)
+    body = await request.json()
+    scope = str(body.get("scope") or "").strip()
+    filename = str(body.get("filename") or "").strip()
+    content_type = str(body.get("content_type") or "").strip().lower()
+    size = int(body.get("size") or 0)
+    max_size = DIRECT_UPLOAD_SCOPES.get(scope)
+    if not max_size or not filename or not content_type or size <= 0 or size > max_size:
+        raise HTTPException(422, "直传文件参数无效或超过大小限制")
+    extension = Path(filename).suffix.lower()
+    category = next((kind for kind, extensions in _VIDEO_ASSET_UPLOAD_TYPES.items() if extension in extensions), None)
+    if not category or not content_type.startswith(f"{category}/"):
+        raise HTTPException(422, "文件类型不受支持")
+    if scope in {"manga_asset", "style_reference", "storyboard", "creation_studio"} and category != "image":
+        raise HTTPException(422, "该上传类型仅支持图片")
+
+    from services import oss as oss_service
+    _configure_oss_from_db(db)
+    prefix = _direct_upload_prefix(user.id, scope)
+    object_key = f"{prefix}{uuid.uuid4().hex}{extension}"
+    signature = oss_service.create_browser_upload_signature(object_key)
+    if not signature:
+        return {"mode": "server", "max_size": max_size}
+    return {"mode": "direct", "max_size": max_size, **signature}
+
+
+@router.post("/api/media-uploads/complete")
+async def complete_media_upload(request: Request, db: Session = Depends(get_db)):
+    """确认浏览器已上传的对象，校验用户前缀和大小后返回可持久化的公网 URL。"""
+    user = _require_user(request, db)
+    body = await request.json()
+    scope = str(body.get("scope") or "").strip()
+    object_key = str(body.get("object_key") or "").strip()
+    max_size = DIRECT_UPLOAD_SCOPES.get(scope)
+    if not max_size or not object_key.startswith(_direct_upload_prefix(user.id, scope)):
+        raise HTTPException(403, "无权确认该直传对象")
+    from services import oss as oss_service
+    _configure_oss_from_db(db)
+    metadata = oss_service.get_object_metadata(object_key)
+    if not metadata or not metadata["content_length"] or metadata["content_length"] > max_size:
+        raise HTTPException(422, "直传对象不存在、为空或超过大小限制")
+    return {"object_key": object_key, **metadata}
 
 
 def _resolve_video_provider(request_provider: str | None, db: Session | None) -> str:
@@ -5181,38 +5247,63 @@ async def replace_video_asset(asset_id: int, request: Request, db: Session = Dep
     asset = _require_video_asset_for_user(asset_id, user, db)
 
     content_type = request.headers.get("content-type", "")
-    if "multipart/form-data" not in content_type:
-        raise HTTPException(400, "Expected multipart/form-data upload")
+    if "application/json" in content_type:
+        body = await request.json()
+        object_key = str(body.get("object_key") or "")
+        filename = str(body.get("filename") or "")
+        if not object_key.startswith(_direct_upload_prefix(user.id, "video_asset")):
+            raise HTTPException(403, "无权使用该直传对象")
+        extension = Path(filename).suffix.lower()
+        category = next((kind for kind, extensions in _VIDEO_ASSET_UPLOAD_TYPES.items() if extension in extensions), None)
+        if not category:
+            raise HTTPException(422, "仅支持上传图片、视频或音频文件")
+        from services import oss as oss_service
+        _configure_oss_from_db(db)
+        metadata = oss_service.get_object_metadata(object_key)
+        if not metadata or not metadata["content_length"] or metadata["content_length"] > MAX_VIDEO_ASSET_UPLOAD_BYTES:
+            raise HTTPException(422, "直传对象不存在、为空或超过大小限制")
+        rel_path = str(metadata["public_url"])
+    elif "multipart/form-data" in content_type:
+        form = await request.form()
+        uploaded = form.get("file")
+        if uploaded is None or not hasattr(uploaded, "filename"):
+            raise HTTPException(400, "No file uploaded")
 
-    form = await request.form()
-    uploaded = form.get("file")
-    if uploaded is None or not hasattr(uploaded, "filename"):
-        raise HTTPException(400, "No file uploaded")
-
-    filename = getattr(uploaded, "filename", "") or "replaced.png"
-    data = await uploaded.read()
-
-    asset_dir = _VIDEO_OUTPUTS_DIR / f"asset_{asset_id}"
-    asset_dir.mkdir(parents=True, exist_ok=True)
-    ext = Path(filename).suffix or ".png"
-    output_path = asset_dir / f"replaced_{datetime.datetime.utcnow().strftime('%Y%m%d_%H%M%S')}{ext}"
-    await run_blocking(output_path.write_bytes, data)
-
-    # OSS 上传（如已配置）
-    from services import oss as oss_service
-    _configure_oss_from_db(db)
-    oss_url = await run_blocking(oss_service.upload_file, str(output_path)) if oss_service.is_enabled() else None
-    if oss_url:
-        try:
-            output_path.unlink(missing_ok=True)
-        except Exception:
-            pass
-        rel_path = oss_url
     else:
-        rel_path = str(output_path.relative_to(_VIDEO_OUTPUTS_DIR.resolve()))
+        raise HTTPException(400, "Expected multipart/form-data or direct-upload JSON")
+
+    if "multipart/form-data" in content_type:
+        filename = getattr(uploaded, "filename", "") or "replaced.png"
+        extension = Path(filename).suffix.lower()
+        category = next((kind for kind, extensions in _VIDEO_ASSET_UPLOAD_TYPES.items() if extension in extensions), None)
+        declared_type = str(getattr(uploaded, "content_type", "") or "")
+        if not category or not declared_type.startswith(f"{category}/"):
+            raise HTTPException(400, "仅支持上传图片、视频或音频文件")
+        data = await uploaded.read()
+        if not data or len(data) > MAX_VIDEO_ASSET_UPLOAD_BYTES:
+            raise HTTPException(413, f"上传文件不能为空且不得超过 {MAX_VIDEO_ASSET_UPLOAD_BYTES // (1024 * 1024)}MB")
+        if category == "image":
+            try:
+                with Image.open(BytesIO(data)) as image:
+                    image.verify()
+            except (UnidentifiedImageError, OSError, ValueError) as exc:
+                raise HTTPException(400, "图片文件内容无效") from exc
+        asset_dir = _VIDEO_OUTPUTS_DIR / f"asset_{asset_id}"
+        asset_dir.mkdir(parents=True, exist_ok=True)
+        output_path = asset_dir / f"replaced_{datetime.datetime.utcnow().strftime('%Y%m%d_%H%M%S')}{extension}"
+        await run_blocking(output_path.write_bytes, data)
+        from services import oss as oss_service
+        _configure_oss_from_db(db)
+        oss_url = await run_blocking(oss_service.upload_file, str(output_path)) if oss_service.is_enabled() else None
+        if oss_url:
+            output_path.unlink(missing_ok=True)
+            rel_path = oss_url
+        else:
+            rel_path = str(output_path.relative_to(_VIDEO_OUTPUTS_DIR.resolve()))
 
     asset.file_path = rel_path
     asset.name = filename
+    asset.asset_type = category
     asset.revision = (asset.revision or 0) + 1
     db.commit()
     db.refresh(asset)

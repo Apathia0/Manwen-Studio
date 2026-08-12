@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { Palette, User, Image, Film, X } from 'lucide-react';
 import { listChapterShotFrames, apiHeaders, toPublicVideoAssetUrl, type ChapterShotFramesResponse } from '../api';
+import MediaImage from './shared/MediaImage';
 
 interface AssetPanelProps {
   chapter: any;
@@ -218,7 +219,7 @@ const AssetManagementPanel: React.FC<AssetPanelProps> = ({
               >
                 <div className="w-20 h-20 bg-gray-100 rounded flex-shrink-0 overflow-hidden">
                   {asset.file_path ? (
-                    <img
+                    <MediaImage
                       src={getAssetFileUrl(asset.file_path)}
                       alt={asset.name}
                       className="w-full h-full object-cover cursor-pointer"
@@ -276,7 +277,7 @@ const AssetManagementPanel: React.FC<AssetPanelProps> = ({
                 <div className="flex items-start gap-3">
                   <div className="w-24 h-16 bg-gray-100 rounded flex-shrink-0 overflow-hidden">
                     {sceneArt?.file_path ? (
-                      <img
+                      <MediaImage
                         src={getAssetFileUrl(sceneArt.file_path)}
                         alt={scene.title}
                         className="w-full h-full object-cover"
@@ -366,7 +367,7 @@ const AssetManagementPanel: React.FC<AssetPanelProps> = ({
                 <div>
                   <div className="text-xs text-gray-500 mb-1">首帧</div>
                   {shot.frames.first_frames.length > 0 ? (
-                    <img
+                    <MediaImage
                       src={getAssetFileUrl(shot.frames.first_frames[0].file_path)}
                       alt="首帧"
                       className="w-full h-24 object-cover rounded border cursor-pointer hover:ring-2 hover:ring-indigo-400"
@@ -381,7 +382,7 @@ const AssetManagementPanel: React.FC<AssetPanelProps> = ({
                 <div>
                   <div className="text-xs text-gray-500 mb-1">末帧</div>
                   {shot.frames.last_frames.length > 0 ? (
-                    <img
+                    <MediaImage
                       src={getAssetFileUrl(shot.frames.last_frames[0].file_path)}
                       alt="末帧"
                       className="w-full h-24 object-cover rounded border cursor-pointer hover:ring-2 hover:ring-indigo-400"
@@ -444,7 +445,7 @@ const AssetManagementPanel: React.FC<AssetPanelProps> = ({
             {/* Left: image */}
             <div className="flex-1 bg-gray-900 flex items-center justify-center p-4 min-h-[300px]">
               {getAssetFileUrl(previewAsset.file_path) ? (
-                <img
+                <MediaImage
                   src={getAssetFileUrl(previewAsset.file_path)}
                   alt={previewAsset.name}
                   className="max-w-full max-h-[65vh] object-contain rounded-lg"

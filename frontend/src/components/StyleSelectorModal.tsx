@@ -2,6 +2,7 @@ import { useEffect, useState, useRef } from 'react';
 import { X, Upload, Check, Loader2, Film } from 'lucide-react';
 import type { VideoStylePreset } from '../api';
 import { uploadStyleReferenceImage } from '../api';
+import MediaImage from './shared/MediaImage';
 
 interface StyleSelectorModalProps {
   isOpen: boolean;
@@ -167,7 +168,7 @@ export default function StyleSelectorModal({
             >
               {localReferenceUrl ? (
                 <div className="flex items-center gap-4">
-                  <img
+                  <MediaImage
                     src={toStyleImageUrl(localReferenceUrl)}
                     alt="风格参考"
                     className="h-24 w-24 rounded-lg object-cover"
@@ -232,7 +233,7 @@ export default function StyleSelectorModal({
                     {/* 预览图 */}
                     <div className="aspect-[4/3] overflow-hidden bg-slate-100">
                       {preset.image_url ? (
-                        <img
+                        <MediaImage
                           src={toStyleImageUrl(preset.image_url)}
                           alt={preset.name}
                           className="h-full w-full object-cover"

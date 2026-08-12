@@ -1,4 +1,4 @@
-import { CircleHelp, Focus, ImagePlus, MoreHorizontal, MousePointer2, Redo2, RotateCcw, Settings2, Trash2, Type, Undo2, Upload, Video, Volume2, ZoomIn, ZoomOut } from 'lucide-react';
+import { Box, CircleHelp, Focus, ImagePlus, LayoutTemplate, MousePointer2, Redo2, RotateCcw, Type, Undo2, Video, Volume2, ZoomIn, ZoomOut } from 'lucide-react';
 import { useState, type ReactNode } from 'react';
 
 interface Props {
@@ -8,7 +8,9 @@ interface Props {
   onFit: () => void;
   onUndo: () => void;
   onRedo: () => void;
-  onDelete: () => void;
+  onAutoLayout: () => void;
+  onOpenAssetManagement: () => void;
+  isAssetManagementDisabled?: boolean;
   supportsAudio?: boolean;
   onTool: (tool: string) => void;
 }
@@ -17,7 +19,7 @@ function ToolButton({ title, onClick, active, disabled, children }: { title: str
   return <button type="button" title={title} aria-label={title} disabled={disabled} onClick={onClick} className={`flex h-9 w-9 items-center justify-center rounded-lg transition-colors disabled:cursor-not-allowed disabled:opacity-30 ${active ? 'bg-[#423e3a] text-white' : 'text-[#948d87] hover:bg-[#35312e] hover:text-[#eee9e4]'}`}>{children}</button>;
 }
 
-export default function CanvasBottomToolbar({ scale, onScaleChange, onReset, onFit, onUndo, onRedo, onDelete, supportsAudio = false, onTool }: Props) {
+export default function CanvasBottomToolbar({ scale, onScaleChange, onReset, onFit, onUndo, onRedo, onAutoLayout, onOpenAssetManagement, isAssetManagementDisabled = false, supportsAudio = false, onTool }: Props) {
   const [activeTool, setActiveTool] = useState('select');
   const chooseTool = (tool: string) => { setActiveTool(tool); onTool(tool); };
   return <>
@@ -40,10 +42,8 @@ export default function CanvasBottomToolbar({ scale, onScaleChange, onReset, onF
       <ToolButton title="图片节点" active={activeTool === 'image'} onClick={() => chooseTool('image')}><ImagePlus className="h-4 w-4" /></ToolButton>
       <ToolButton title="视频节点" active={activeTool === 'video'} onClick={() => chooseTool('video')}><Video className="h-4 w-4" /></ToolButton>
       <ToolButton title={supportsAudio ? '音频节点' : '当前工作流暂不支持音频节点'} active={activeTool === 'audio'} disabled={!supportsAudio} onClick={() => chooseTool('audio')}><Volume2 className="h-4 w-4" /></ToolButton>
-      <ToolButton title="打开素材节点库" onClick={() => chooseTool('upload')}><Upload className="h-4 w-4" /></ToolButton>
-      <ToolButton title="画布 AI 助手" onClick={() => chooseTool('settings')}><Settings2 className="h-4 w-4" /></ToolButton>
-      <ToolButton title="删除选中节点" onClick={onDelete}><Trash2 className="h-4 w-4" /></ToolButton>
-      <ToolButton title="更多节点" onClick={() => chooseTool('more')}><MoreHorizontal className="h-4 w-4" /></ToolButton>
+      <ToolButton title="自动整理画布" onClick={onAutoLayout}><LayoutTemplate className="h-4 w-4" /></ToolButton>
+      <ToolButton title="资产管理" disabled={isAssetManagementDisabled} onClick={onOpenAssetManagement}><Box className="h-4 w-4" /></ToolButton>
     </div>
   </>;
 }

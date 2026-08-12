@@ -33,7 +33,10 @@ from models import (
     StoryboardPromptPreset,
     VideoAsset,
     VideoCanvas,
+    VideoCanvasPlan,
     VideoCanvasVersion,
+    AgentConversation,
+    AgentConversationMessage,
     agent_knowledge_revision_guard_is_stale,
     reset_agent_knowledge_revision_guard,
     set_agent_knowledge_revision_guard,
@@ -1010,6 +1013,24 @@ class PendingChangesTracker:
                     "error": "资产已有图片，为避免误删，本次未撤回",
                 })
                 continue
+            if change.type == "video_canvas_graph":
+                latest_version = (
+                    db.query(VideoCanvasVersion)
+                    .filter(VideoCanvasVersion.canvas_id == change.record_id)
+                    .order_by(VideoCanvasVersion.version_no.desc())
+                    .first()
+                )
+                if not latest_version or latest_version.graph_json != change.new_value:
+                    conflicted_changes.add((change.type, change.record_id, change.field))
+                    results.append({
+                        "ok": False,
+                        "conflict": True,
+                        "type": change.type,
+                        "id": change.record_id,
+                        "field": change.field,
+                        "error": "画布已被再次修改，为避免覆盖新结果，本次未撤回",
+                    })
+                continue
             if not obj or getattr(obj, change.field, None) == change.new_value:
                 continue
             if change.type == "video_shot" and change.field == "storyboard_prompt_stale":
@@ -1093,6 +1114,25 @@ class PendingChangesTracker:
                         else:
                             setattr(obj, change.field, change.old_value)
                         results.append({"ok": True, "type": "video_asset", "id": change.record_id, "field": change.field})
+                elif change.type == "video_canvas_graph":
+                    canvas = db.get(VideoCanvas, change.record_id)
+                    if canvas:
+                        latest_version = (
+                            db.query(VideoCanvasVersion)
+                            .filter(VideoCanvasVersion.canvas_id == change.record_id)
+                            .order_by(VideoCanvasVersion.version_no.desc())
+                            .first()
+                        )
+                        restore_no = (latest_version.version_no + 1) if latest_version else canvas.definition_revision + 1
+                        db.add(VideoCanvasVersion(
+                            canvas_id=canvas.id,
+                            version_no=restore_no,
+                            graph_json=change.old_value,
+                            source="agent_rollback",
+                            change_summary="撤回画布助手修改",
+                        ))
+                        canvas.definition_revision = restore_no
+                        results.append({"ok": True, "type": "video_canvas_graph", "id": change.record_id, "field": change.field})
                 elif change.type == "scenes_file":
                     with _scenes_file_lock(change.record_id):
                         chapter = db.get(Chapter, change.record_id)
@@ -1241,18 +1281,64 @@ skill_registry.register(SkillDef(
 skill_registry.register(SkillDef(
     name="video_canvas_workflow",
     display_name="视频无限画布",
-    description="读取画布图与节点目录，辅助提出可审阅的创作编排方案",
+    description="读取画布图与节点目录，辅助完成轻量节点编辑",
     icon="🧩",
     tool_names=[
-        "get_canvas_graph", "get_canvas_node_catalog",
+        "get_canvas_graph", "get_canvas_node_catalog", "apply_canvas_ops",
         "get_chapter_full", "get_all_chapters_summary", "get_story_bible",
         "get_character_profiles", "get_scenes", "resolve_story_context", "search_story_knowledge",
     ],
     system_prompt_fragment="""你是视频无限画布创作助手。画布是独立于列表分镜的自由 DAG：
-- 先读取当前图和节点目录，再提出节点、连线、资产或风格调整建议。
-- 对图修改只输出可审阅的结构化提案，必须包含 expected_definition_revision；由用户在画布中确认应用。
+- 先调用 get_canvas_graph 读取当前图（节点、连线、definition_revision）和 get_canvas_node_catalog 读取节点类型与端口。
+- 用户要求增删改节点、连线或节点内容/配置时，直接用 apply_canvas_ops 执行，必须传入最新的 expected_definition_revision。
+- apply_canvas_ops 会立即创建新的画布版本，同时保留可撤回记录；不要声称修改尚未写入，也不要重复执行相同操作。
+- apply_canvas_ops 每次调用只传 1-3 个 operations，分多批完成；新增节点后连线用 "$add.N" 引用；一次塞入过多操作容易导致输出截断而失败。
+- 连接节点前确认端口兼容（输出端口 → 输入端口，且数据类型一致）。
 - 严禁直接运行图像、视频或拼接节点，涉及费用时先说明预计影响并等待用户确认。
 - 不得把画布节点 ID 当作列表镜头 ID，不得隐式回写列表分镜工作流。""",
+))
+
+# 画布技能保持细粒度：模型负责读取、规划与预览，破坏性或付费操作必须由确认后的服务端流程执行。
+skill_registry.register(SkillDef(
+    name="canvas_source_director",
+    display_name="画布素材导演",
+    description="从章节正文、故事设定和画布文本节点建立可追溯的创作来源",
+    icon="📖",
+    tool_names=["get_canvas_graph", "resolve_canvas_source", "create_canvas_plan", "get_canvas_plans", "update_canvas_plan", "get_chapter_full", "get_all_chapters_summary", "get_story_bible", "get_character_profiles", "get_scenes", "resolve_story_context", "search_story_knowledge"],
+    system_prompt_fragment="先读取画布和相关章节/故事上下文，再明确采用章节正文、用户对话剧本或文本节点作为来源。不得把未读取的故事事实写入计划。",
+    context_profile="video_canvas",
+    required_resource_types=("章节正文", "故事设定", "角色档案"),
+))
+
+skill_registry.register(SkillDef(
+    name="canvas_screenplay_director",
+    display_name="剧本与分镜导演",
+    description="将已冻结来源整理为可审阅的剧本、镜头和连续性计划",
+    icon="🎬",
+    tool_names=["get_canvas_graph", "create_canvas_plan", "get_canvas_plans", "update_canvas_plan", "get_chapter_full", "get_story_bible", "get_character_profiles", "get_scenes", "resolve_story_context", "search_story_knowledge"],
+    system_prompt_fragment="输出场景、节拍、镜头目的、角色状态、景别运镜、动作、情绪、转场和连续性风险。只提出结构化草案，不得擅自触发拆镜重建或付费生成。",
+    context_profile="video_canvas",
+    required_resource_types=("章节正文", "故事设定", "角色档案", "场景资料"),
+))
+
+skill_registry.register(SkillDef(
+    name="canvas_asset_director",
+    display_name="资产导演",
+    description="从镜头计划提取角色、场景、道具和风格资产，并规划复用关系",
+    icon="🖼️",
+    tool_names=["get_canvas_graph", "create_canvas_plan", "get_canvas_plans", "update_canvas_plan", "get_chapter_full", "get_character_profiles", "get_scenes", "resolve_story_context", "search_story_knowledge"],
+    system_prompt_fragment="为每个镜头区分角色、场景、道具和风格参考，先提出复用或新增建议以及绑定理由。未确认前不得创建资产、改动引用或生成图片。",
+    context_profile="video_canvas",
+    required_resource_types=("角色档案", "场景资料", "章节正文"),
+))
+
+skill_registry.register(SkillDef(
+    name="canvas_graph_compiler",
+    display_name="画布编译器",
+    description="把已确认的剧本、镜头和资产计划编译为可审阅的画布节点与连线",
+    icon="🧩",
+    tool_names=["get_canvas_graph", "get_canvas_node_catalog", "create_canvas_plan", "get_canvas_plans", "update_canvas_plan"],
+    system_prompt_fragment="先读取最新图和节点目录，再保存来源、剧本、镜头、资产和执行计划。画布图会由服务端根据已审阅的镜头与资产确定性编译；可选 canvas.graph 仅用于用户明确要求的手工布局预览。不得直接调用 apply_canvas_ops，用户会分别确认计划和应用图定义。",
 ))
 
 # Skill 2: 框架设计
@@ -1610,7 +1696,12 @@ def infer_agent_skills(
     if workflow_type == "video":
         return ["video_workflow"]
     if workflow_type == "video_canvas":
-        return ["video_canvas_workflow"]
+        return [
+            "canvas_source_director",
+            "canvas_screenplay_director",
+            "canvas_asset_director",
+            "canvas_graph_compiler",
+        ]
     text = str(user_text or "")
     if re.search(r"大纲|框架|章节规划|任务卡|续写.{0,8}章|新增.{0,8}章", text):
         return ["framework_designer"]
@@ -1898,6 +1989,11 @@ _VIDEO_WORKFLOW_READ_TOOL_NAMES = {
 _VIDEO_CANVAS_WORKFLOW_TOOL_NAMES = {
     "get_canvas_graph",
     "get_canvas_node_catalog",
+    "apply_canvas_ops",
+    "resolve_canvas_source",
+    "create_canvas_plan",
+    "get_canvas_plans",
+    "update_canvas_plan",
 }
 _VIDEO_CANVAS_WORKFLOW_READ_TOOL_NAMES = {
     "get_chapter_full",
@@ -5250,9 +5346,9 @@ async def get_canvas_graph(canvas_id: int) -> dict:
             "definition_revision": canvas.definition_revision,
             "graph": graph,
             "write_contract": {
-                "mode": "proposal_only",
+                "mode": "direct_ops",
                 "expected_definition_revision": canvas.definition_revision,
-                "message": "请返回可审阅的图变更方案；生成节点必须由用户在画布中确认执行。",
+                "message": "使用 apply_canvas_ops 直接执行节点与连线的增删改，传入当前 expected_definition_revision；修改会创建独立版本并保留撤回记录。",
             },
         }
     finally:
@@ -5268,6 +5364,602 @@ async def get_canvas_graph(canvas_id: int) -> dict:
 async def get_canvas_node_catalog() -> dict:
     from routers.video_canvas import NODE_CATALOG
     return {"node_types": [{"type": name, **spec} for name, spec in NODE_CATALOG.items()]}
+
+
+def _canvas_new_node_id(node_type: str, existing: set[str]) -> str:
+    while True:
+        candidate = f"{node_type}-{uuid.uuid4().hex[:16]}"
+        if candidate not in existing:
+            return candidate
+
+
+def _parse_tool_arguments_lenient(raw_args_str: str) -> dict | None:
+    """宽松解析 DeepSeek 工具调用参数：strict=False → 缺逗号/尾逗号 → 截断补齐。
+
+    返回解析成功的 dict；无法可靠修复时返回 None（调用方应通知 AI 重试）。
+    修复链路每一步都以 json.loads 验证通过为准，绝不静默采用修复结果。
+    """
+    text = raw_args_str.strip()
+    if not text:
+        return {}
+    try:
+        parsed = json.loads(text, strict=False)
+        if isinstance(parsed, dict):
+            return parsed
+        return None
+    except (json.JSONDecodeError, ValueError):
+        pass
+    from services.deepseek import _repair_missing_commas, _repair_trailing_commas, _repair_truncated_json
+    for candidate in (
+        _repair_missing_commas(text),
+        _repair_trailing_commas(text),
+        _repair_truncated_json(text),
+    ):
+        try:
+            parsed = json.loads(candidate, strict=False)
+            if isinstance(parsed, dict):
+                return parsed
+        except (json.JSONDecodeError, ValueError):
+            continue
+    return None
+
+
+def _apply_canvas_ops_to_graph(graph: dict, operations: list, catalog: dict) -> tuple[dict, list[str]]:
+    """在 graph 副本上执行画布编辑操作，返回 (新图, 错误列表)。
+
+    add_edge 的 source/target 支持用 "$add.N" 引用本批第 N 个 add_node
+    操作创建的节点 id（N 从 0 开始），便于新增节点后立即连线。
+    """
+    errors: list[str] = []
+    nodes = graph.setdefault("nodes", [])
+    edges = graph.setdefault("edges", [])
+    node_ids: set[str] = {str(node.get("id")) for node in nodes}
+    edge_ids: set[str] = {str(edge.get("id")) for edge in edges}
+    created_node_ids: list[str] = []
+
+    def resolve_node_ref(value: str) -> str | None:
+        """解析节点引用：$add.N 返回本批新增节点 id，其余原样返回。"""
+        if isinstance(value, str) and value.startswith("$add."):
+            try:
+                position = int(value[len("$add."):])
+                if 0 <= position < len(created_node_ids):
+                    return created_node_ids[position]
+            except ValueError:
+                pass
+            return None
+        return value
+
+    for index, op in enumerate(operations):
+        if not isinstance(op, dict):
+            errors.append(f"操作 {index} 格式无效")
+            continue
+        op_name = str(op.get("op") or "").strip()
+        if op_name == "add_node":
+            node_spec = op.get("node")
+            if not isinstance(node_spec, dict):
+                errors.append(f"add_node 操作 {index} 缺少 node 对象")
+                continue
+            node_type = str(node_spec.get("type") or "").strip()
+            if node_type not in catalog:
+                errors.append(f"add_node 操作 {index} 的节点类型 {node_type!r} 不受支持")
+                continue
+            node_id = str(node_spec.get("id") or "").strip() or _canvas_new_node_id(node_type, node_ids)
+            if node_id in node_ids:
+                errors.append(f"add_node 操作 {index} 的节点 id {node_id!r} 已存在")
+                continue
+            position = node_spec.get("position") if isinstance(node_spec.get("position"), dict) else {"x": 0, "y": 0}
+            data = node_spec.get("data") if isinstance(node_spec.get("data"), dict) else {}
+            node_ids.add(node_id)
+            created_node_ids.append(node_id)
+            nodes.append({
+                "id": node_id,
+                "type": node_type,
+                "position": {"x": float(position.get("x", 0)), "y": float(position.get("y", 0))},
+                "data": copy.deepcopy(data),
+            })
+        elif op_name == "update_node":
+            node_id = str(op.get("node_id") or "").strip()
+            node = next((item for item in nodes if str(item.get("id")) == node_id), None)
+            if node is None:
+                errors.append(f"update_node 操作 {index} 的节点 {node_id!r} 不存在")
+                continue
+            data_patch = op.get("data") if isinstance(op.get("data"), dict) else {}
+            config_patch = op.get("config") if isinstance(op.get("config"), dict) else None
+            node_data = node.setdefault("data", {})
+            for key, value in data_patch.items():
+                node_data[key] = copy.deepcopy(value)
+            if config_patch is not None:
+                current_config = node_data.get("config")
+                if not isinstance(current_config, dict):
+                    current_config = {}
+                node_data["config"] = {**current_config, **copy.deepcopy(config_patch)}
+        elif op_name == "delete_node":
+            node_id = str(op.get("node_id") or "").strip()
+            if node_id not in node_ids:
+                errors.append(f"delete_node 操作 {index} 的节点 {node_id!r} 不存在")
+                continue
+            nodes[:] = [item for item in nodes if str(item.get("id")) != node_id]
+            node_ids.discard(node_id)
+            edges[:] = [item for item in edges if str(item.get("source")) != node_id and str(item.get("target")) != node_id]
+            edge_ids = {str(edge.get("id")) for edge in edges}
+        elif op_name == "add_edge":
+            edge_spec = op.get("edge")
+            if not isinstance(edge_spec, dict):
+                errors.append(f"add_edge 操作 {index} 缺少 edge 对象")
+                continue
+            source = resolve_node_ref(str(edge_spec.get("source") or "").strip())
+            target = resolve_node_ref(str(edge_spec.get("target") or "").strip())
+            if source is None or target is None:
+                errors.append(f"add_edge 操作 {index} 的 $add.N 引用越界")
+                continue
+            if source not in node_ids or target not in node_ids:
+                errors.append(f"add_edge 操作 {index} 引用了不存在的节点")
+                continue
+            edge_id = str(edge_spec.get("id") or "").strip() or f"edge-{uuid.uuid4().hex[:16]}"
+            if edge_id in edge_ids:
+                errors.append(f"add_edge 操作 {index} 的连线 id {edge_id!r} 已存在")
+                continue
+            edge_ids.add(edge_id)
+            edges.append({
+                "id": edge_id,
+                "source": source,
+                "target": target,
+                "sourceHandle": str(edge_spec.get("sourceHandle") or "").strip() or None,
+                "targetHandle": str(edge_spec.get("targetHandle") or "").strip() or None,
+            })
+        elif op_name == "delete_edge":
+            edge_id = str(op.get("edge_id") or "").strip()
+            if edge_id not in edge_ids:
+                errors.append(f"delete_edge 操作 {index} 的连线 {edge_id!r} 不存在")
+                continue
+            edges[:] = [item for item in edges if str(item.get("id")) != edge_id]
+            edge_ids.discard(edge_id)
+        else:
+            errors.append(f"操作 {index} 的 op {op_name!r} 不受支持")
+    return graph, errors
+
+
+@tool_registry.register(
+    name="apply_canvas_ops",
+    description="直接编辑视频无限画布：新增/更新/删除节点，新增/删除连线，修改节点内容与配置。适合你已经明确要改什么的场景（如'把这两个节点连起来'、'新增一个图片节点并填入提示词'、'删除某节点'）。调用前必须先通过 get_canvas_graph 读取最新 definition_revision 传入 expected_definition_revision 防止覆盖。修改会创建新版本并保留撤回记录。",    is_write=True,
+    parameters={
+        "type": "object",
+        "properties": {
+            "canvas_id": {"type": "integer", "description": "当前画布 ID"},
+            "operations": {
+                "type": "array",
+                "description": "编辑操作列表，每项格式: {\"op\": \"add_node\", \"node\": {\"type\": \"text|image|video\", \"position\": {\"x\": 0, \"y\": 0}, \"data\": {\"label\": \"标题\", \"config\": {\"prompt\": \"...\"}}}}；{\"op\": \"update_node\", \"node_id\": \"...\", \"data\": {\"label\": \"...\"}, \"config\": {\"prompt\": \"...\"}}（config 与现有配置合并，不会覆盖未提及字段）；{\"op\": \"delete_node\", \"node_id\": \"...\"}（同时删除关联连线）；{\"op\": \"add_edge\", \"edge\": {\"source\": \"...\", \"sourceHandle\": \"...\", \"target\": \"...\", \"targetHandle\": \"...\"}}——source/target 可写 \"$add.N\" 引用本批第 N 个 add_node 创建的节点（N 从 0 开始）；{\"op\": \"delete_edge\", \"edge_id\": \"...\"}",
+                "items": {"type": "object"},
+            },
+            "expected_definition_revision": {"type": "integer", "description": "画布当前定义版本（get_canvas_graph 返回的 definition_revision），用于防覆盖校验"},
+            "dry_run": {
+                "type": "boolean",
+                "description": "为 true 时只校验不执行，返回预览结果而不写入数据库（默认 false）",
+            },
+        },
+        "required": ["canvas_id", "operations", "expected_definition_revision"],
+    },
+    workflow_types=["video_canvas"],
+)
+async def apply_canvas_ops(canvas_id: int, operations: list, expected_definition_revision: int, dry_run: bool = False) -> dict:
+    """直接应用画布编辑操作，不调用 AI。"""
+    db = SessionLocal()
+    try:
+        from routers.video_canvas import NODE_CATALOG, _validate_graph, _latest_version
+
+        context = _current_run_context()
+        canvas = (
+            db.query(VideoCanvas)
+            .filter(VideoCanvas.id == canvas_id)
+            .with_for_update()
+            .first()
+        )
+        if not context or context.workflow_type != "video_canvas" or context.workflow_id != canvas_id or not canvas or canvas.story_id != context.story_id:
+            canvas = None
+        if not canvas:
+            return {"error": "视频画布不存在或无权访问"}
+        if canvas.definition_revision != expected_definition_revision:
+            return {
+                "error": "画布定义已更新，请重新调用 get_canvas_graph 获取最新 definition_revision 后重试",
+                "conflict": True,
+                "definition_revision": canvas.definition_revision,
+            }
+        if not isinstance(operations, list) or not operations:
+            return {"error": "operations 不能为空"}
+
+        version = _latest_version(canvas.id, db)
+        graph = copy.deepcopy(version.graph_json)
+        merged_graph, apply_errors = _apply_canvas_ops_to_graph(graph, operations, NODE_CATALOG)
+        if apply_errors:
+            return {"error": "；".join(apply_errors)}
+
+        validation = _validate_graph(merged_graph)
+        if validation["errors"]:
+            return {"error": "；".join(item["message"] for item in validation["errors"]), "validation": validation}
+
+        if dry_run:
+            return {
+                "ok": True,
+                "dry_run": True,
+                "graph": merged_graph,
+                "validation": validation,
+            }
+
+        if _current_pending_changes():
+            _current_pending_changes().record(PendingChange(
+                type="video_canvas_graph",
+                record_id=canvas.id,
+                display_name=canvas.name,
+                field="graph_json",
+                old_value=version.graph_json,
+                new_value=None,
+            ))
+
+        next_revision = canvas.definition_revision + 1
+        db.add(VideoCanvasVersion(
+            canvas_id=canvas.id,
+            version_no=next_revision,
+            graph_json=merged_graph,
+            source="agent",
+            change_summary="画布助手直接编辑",
+            created_by_user_id=_current_run_context().pending_change_key.user_id if _current_run_context() and _current_run_context().pending_change_key else None,
+        ))
+        canvas.definition_revision = next_revision
+
+        if _current_pending_changes():
+            _current_pending_changes().update_new_value("video_canvas_graph", canvas.id, "graph_json", merged_graph)
+        db.commit()
+        logger.info("Agent tool=apply_canvas_ops canvas=%s ops=%s", canvas_id, len(operations))
+        return {
+            "ok": True,
+            "definition_revision": next_revision,
+            "graph": merged_graph,
+            "validation": validation,
+            "applied_operations": len(operations),
+        }
+    finally:
+        db.close()
+
+
+def _serialize_canvas_plan_for_agent(plan: VideoCanvasPlan) -> dict[str, Any]:
+    """向 Agent 返回可审阅计划的完整内容。"""
+    return {
+        "id": plan.id,
+        "canvas_id": plan.canvas_id,
+        "chapter_id": plan.chapter_id,
+        "status": plan.status,
+        "revision": plan.revision,
+        "source_snapshot": plan.source_snapshot_json or {},
+        "screenplay": plan.screenplay_json or {},
+        "shots": plan.shot_json or {},
+        "assets": plan.asset_json or {},
+        "canvas": plan.canvas_json or {},
+        "execution": plan.execution_json or {},
+        "updated_at": plan.updated_at.isoformat() if plan.updated_at else None,
+    }
+
+
+def _canvas_plan_section(value: Any, name: str) -> dict[str, Any] | None:
+    """限制计划分段大小，避免异常工具调用占满数据库 JSON 字段。"""
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ValueError(f"{name} 必须是对象")
+    if len(json.dumps(value, ensure_ascii=False, default=str)) > 120_000:
+        raise ValueError(f"{name} 过大，请拆分后再保存")
+    return value
+
+
+def _canvas_source_hash(source_type: str, source_id: Any, content: str) -> str:
+    """计算服务端来源快照哈希，供计划审阅与后续追溯使用。"""
+    payload = json.dumps(
+        {"source_type": source_type, "source_id": source_id, "content": content},
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _resolve_canvas_source_snapshot(
+    db: Session,
+    canvas: VideoCanvas,
+    source_type: str,
+    source_id: Any | None = None,
+) -> dict[str, Any]:
+    """从当前授权范围读取计划来源，拒绝由模型伪造正文或画布文本。"""
+    context = _current_run_context()
+    normalized_type = str(source_type or "").strip()
+    if normalized_type == "chapter":
+        chapter_id = source_id if isinstance(source_id, int) else (context.chapter_id if context else None) or canvas.default_chapter_id
+        chapter = db.get(Chapter, chapter_id) if isinstance(chapter_id, int) else None
+        if not chapter or chapter.story_id != canvas.story_id:
+            raise ValueError("章节来源不存在或不属于当前画布作品")
+        content = str(chapter.novel_content or "").strip()
+        if not content:
+            raise ValueError("章节正文为空，不能作为视频创作来源")
+        return {
+            "source_type": "chapter",
+            "source_id": chapter.id,
+            "chapter_id": chapter.id,
+            "title": chapter.title or "未命名章节",
+            "content": content,
+            "source_hash": _canvas_source_hash("chapter", chapter.id, content),
+        }
+    if normalized_type == "text_node":
+        node_id = str(source_id or "").strip()
+        if not node_id:
+            raise ValueError("文本节点来源必须提供 source_id")
+        from routers.video_canvas import _latest_version
+
+        graph = _latest_version(canvas.id, db).graph_json or {}
+        node = next((item for item in graph.get("nodes") or [] if isinstance(item, dict) and str(item.get("id") or "") == node_id), None)
+        if not node or node.get("type") != "text":
+            raise ValueError("文本节点来源不存在或不是文本节点")
+        config = (node.get("data") or {}).get("config") or {}
+        content = str(config.get("content") or config.get("text") or "").strip()
+        if not content:
+            raise ValueError("文本节点内容为空，不能作为视频创作来源")
+        return {
+            "source_type": "text_node",
+            "source_id": node_id,
+            "node_label": str((node.get("data") or {}).get("label") or node_id),
+            "content": content,
+            "source_hash": _canvas_source_hash("text_node", node_id, content),
+        }
+    if normalized_type == "chat":
+        if not context or not context.pending_change_key:
+            raise ValueError("当前对话上下文不可用，不能读取聊天剧本")
+        conversation = db.get(AgentConversation, context.pending_change_key.conversation_id)
+        if not conversation or conversation.story_id != canvas.story_id or conversation.owner_user_id != canvas.owner_user_id:
+            raise ValueError("聊天来源不存在或无权访问")
+        messages = (
+            db.query(AgentConversationMessage)
+            .filter(AgentConversationMessage.conversation_id == conversation.id, AgentConversationMessage.role == "user")
+            .order_by(AgentConversationMessage.id.desc())
+            .limit(12)
+            .all()
+        )
+        content = "\n\n".join(reversed([str(message.content or "").strip() for message in messages if str(message.content or "").strip()]))
+        if not content:
+            raise ValueError("当前对话没有可用的用户剧本内容")
+        return {
+            "source_type": "chat",
+            "source_id": conversation.id,
+            "conversation_id": conversation.id,
+            "content": content,
+            "source_hash": _canvas_source_hash("chat", conversation.id, content),
+        }
+    raise ValueError("source_type 仅支持 chapter、chat 或 text_node")
+
+
+@tool_registry.register(
+    name="resolve_canvas_source",
+    description="从当前授权范围读取并冻结画布创作来源。章节正文、当前对话中的用户剧本、或画布文本节点只能通过此工具取得；返回内容和 source_hash 应原样用于 create_canvas_plan。",
+    parameters={
+        "type": "object",
+        "properties": {
+            "canvas_id": {"type": "integer", "description": "当前画布 ID"},
+            "source_type": {"type": "string", "enum": ["chapter", "chat", "text_node"], "description": "来源类型"},
+            "source_id": {"description": "章节 ID、文本节点 ID；chat 来源无需提供"},
+        },
+        "required": ["canvas_id", "source_type"],
+    },
+    workflow_types=["video_canvas"],
+)
+async def resolve_canvas_source(canvas_id: int, source_type: str, source_id: Any | None = None) -> dict:
+    """读取可信来源并返回可审阅快照，不会写入计划或修改画布。"""
+    db = SessionLocal()
+    try:
+        canvas = _require_current_video_canvas(db, canvas_id)
+        if not canvas:
+            return {"error": "画布不存在或无权访问"}
+        return {"ok": True, "source_snapshot": _resolve_canvas_source_snapshot(db, canvas, source_type, source_id)}
+    except ValueError as exc:
+        return {"error": str(exc)}
+    finally:
+        db.close()
+
+
+def _canvas_plan_ready_errors(plan: VideoCanvasPlan) -> list[str]:
+    """确保 Agent 不会把不完整草案标记为可确认。"""
+    required = {
+        "来源快照": plan.source_snapshot_json,
+        "剧本计划": plan.screenplay_json,
+        "镜头计划": plan.shot_json,
+        "资产计划": plan.asset_json,
+        "画布计划": plan.canvas_json,
+        "执行计划": plan.execution_json,
+    }
+    errors = [f"缺少{name}" for name, value in required.items() if not value]
+    source = plan.source_snapshot_json or {}
+    if source and str(source.get("source_type") or "") not in {"chapter", "chat", "text_node"}:
+        errors.append("来源快照的 source_type 必须为 chapter、chat 或 text_node")
+    if source and not str(source.get("source_hash") or "").strip():
+        errors.append("来源快照缺少 source_hash")
+    screenplay = plan.screenplay_json or {}
+    if screenplay and not isinstance(screenplay.get("scenes"), list):
+        errors.append("剧本计划缺少 scenes 数组")
+    shots = plan.shot_json or {}
+    if shots and (not isinstance(shots.get("shots"), list) or not shots["shots"]):
+        errors.append("镜头计划缺少非空 shots 数组")
+    canvas = plan.canvas_json or {}
+    graph = canvas.get("graph") if isinstance(canvas, dict) else None
+    if graph is not None and not isinstance(graph, dict):
+        errors.append("画布计划的 graph 必须是对象")
+    execution = plan.execution_json or {}
+    if execution and not isinstance(execution.get("batches"), list):
+        errors.append("执行计划缺少 batches 数组")
+    return errors
+
+
+@tool_registry.register(
+    name="create_canvas_plan",
+    description="保存视频画布的结构化创作草案。草案可包含来源快照、剧本、镜头、资产、画布和执行计划；不会修改画布、列表分镜或触发生成。",
+    is_write=True,
+    parameters={
+        "type": "object",
+        "properties": {
+            "canvas_id": {"type": "integer", "description": "当前画布 ID"},
+            "source_snapshot": {"type": "object", "description": "来源类型、来源 ID、内容摘要与 source_hash"},
+            "screenplay": {"type": "object", "description": "结构化剧本草案，建议包含 scenes"},
+            "shots": {"type": "object", "description": "镜头计划，建议包含 shots 数组"},
+            "assets": {"type": "object", "description": "资产需求、复用建议和镜头绑定计划"},
+            "canvas": {"type": "object", "description": "画布布局与编译偏好；不必手写 graph，服务端会按镜头和资产计划编译"},
+            "execution": {"type": "object", "description": "模型、时长、批次和费用预估，仅供用户审阅"},
+        },
+        "required": ["canvas_id", "source_snapshot"],
+    },
+    workflow_types=["video_canvas"],
+)
+async def create_canvas_plan(
+    canvas_id: int,
+    source_snapshot: dict,
+    screenplay: dict | None = None,
+    shots: dict | None = None,
+    assets: dict | None = None,
+    canvas: dict | None = None,
+    execution: dict | None = None,
+) -> dict:
+    db = SessionLocal()
+    try:
+        target = _require_current_video_canvas(db, canvas_id)
+        context = _current_run_context()
+        if not target or not context:
+            return {"error": "画布不存在或无权访问"}
+        source_type = str(source_snapshot.get("source_type") or "")
+        trusted_source = _resolve_canvas_source_snapshot(
+            db,
+            target,
+            source_type,
+            source_snapshot.get("source_id"),
+        )
+        plan = VideoCanvasPlan(
+            owner_user_id=target.owner_user_id,
+            canvas_id=target.id,
+            story_id=target.story_id,
+            chapter_id=trusted_source.get("chapter_id") if isinstance(trusted_source.get("chapter_id"), int) else target.default_chapter_id,
+            source_snapshot_json=trusted_source,
+            screenplay_json=_canvas_plan_section(screenplay, "screenplay"),
+            shot_json=_canvas_plan_section(shots, "shots"),
+            asset_json=_canvas_plan_section(assets, "assets"),
+            canvas_json=_canvas_plan_section(canvas, "canvas"),
+            execution_json=_canvas_plan_section(execution, "execution"),
+        )
+        db.add(plan)
+        db.commit()
+        db.refresh(plan)
+        return {"ok": True, "plan": _serialize_canvas_plan_for_agent(plan), "message": "创作草案已保存，等待用户审阅后再标记为就绪。"}
+    except ValueError as exc:
+        return {"error": str(exc)}
+    finally:
+        db.close()
+
+
+@tool_registry.register(
+    name="get_canvas_plans",
+    description="读取当前画布最近的创作计划，用于继续编辑、比较版本或向用户说明待确认内容。",
+    parameters={"type": "object", "properties": {"canvas_id": {"type": "integer", "description": "当前画布 ID"}} , "required": ["canvas_id"]},
+    workflow_types=["video_canvas"],
+)
+async def get_canvas_plans(canvas_id: int) -> dict:
+    db = SessionLocal()
+    try:
+        target = _require_current_video_canvas(db, canvas_id)
+        if not target:
+            return {"error": "画布不存在或无权访问"}
+        plans = (
+            db.query(VideoCanvasPlan)
+            .filter(VideoCanvasPlan.canvas_id == target.id, VideoCanvasPlan.owner_user_id == target.owner_user_id)
+            .order_by(VideoCanvasPlan.updated_at.desc(), VideoCanvasPlan.id.desc())
+            .limit(10)
+            .all()
+        )
+        return {"plans": [_serialize_canvas_plan_for_agent(plan) for plan in plans]}
+    finally:
+        db.close()
+
+
+@tool_registry.register(
+    name="update_canvas_plan",
+    description="更新尚未确认的画布创作草案。调用前应读取计划并携带最新 revision；只有所有内容已补齐时才可将 status 设为 ready。",
+    is_write=True,
+    parameters={
+        "type": "object",
+        "properties": {
+            "canvas_id": {"type": "integer", "description": "当前画布 ID"},
+            "plan_id": {"type": "integer", "description": "计划 ID"},
+            "expected_revision": {"type": "integer", "description": "读取计划时返回的 revision"},
+            "status": {"type": "string", "enum": ["draft", "ready"]},
+            "source_snapshot": {"type": "object"},
+            "screenplay": {"type": "object"},
+            "shots": {"type": "object"},
+            "assets": {"type": "object"},
+            "canvas": {"type": "object"},
+            "execution": {"type": "object"},
+        },
+        "required": ["canvas_id", "plan_id", "expected_revision"],
+    },
+    workflow_types=["video_canvas"],
+)
+async def update_canvas_plan(
+    canvas_id: int,
+    plan_id: int,
+    expected_revision: int,
+    status: str | None = None,
+    source_snapshot: dict | None = None,
+    screenplay: dict | None = None,
+    shots: dict | None = None,
+    assets: dict | None = None,
+    canvas: dict | None = None,
+    execution: dict | None = None,
+) -> dict:
+    db = SessionLocal()
+    try:
+        target = _require_current_video_canvas(db, canvas_id)
+        if not target:
+            return {"error": "画布不存在或无权访问"}
+        plan = db.get(VideoCanvasPlan, plan_id)
+        if not plan or plan.canvas_id != target.id or plan.owner_user_id != target.owner_user_id:
+            return {"error": "画布计划不存在或无权访问"}
+        if plan.status not in {"draft", "ready"}:
+            return {"error": "已确认计划不能编辑，请创建新草案"}
+        if plan.revision != expected_revision:
+            return {"error": "计划已更新，请重新读取后再修改", "conflict": True, "revision": plan.revision}
+        if status is not None and status not in {"draft", "ready"}:
+            return {"error": "status 仅支持 draft 或 ready"}
+        updates = {
+            "screenplay_json": (screenplay, "screenplay"),
+            "shot_json": (shots, "shots"),
+            "asset_json": (assets, "assets"),
+            "canvas_json": (canvas, "canvas"),
+            "execution_json": (execution, "execution"),
+        }
+        if source_snapshot is not None:
+            source_type = str(source_snapshot.get("source_type") or "") if isinstance(source_snapshot, dict) else ""
+            plan.source_snapshot_json = _resolve_canvas_source_snapshot(
+                db,
+                target,
+                source_type,
+                source_snapshot.get("source_id") if isinstance(source_snapshot, dict) else None,
+            )
+        for field, (value, name) in updates.items():
+            if value is not None:
+                setattr(plan, field, _canvas_plan_section(value, name))
+        if status is not None:
+            plan.status = status
+        if plan.status == "ready":
+            errors = _canvas_plan_ready_errors(plan)
+            if errors:
+                return {"error": "；".join(errors)}
+        plan.revision += 1
+        db.commit()
+        db.refresh(plan)
+        return {"ok": True, "plan": _serialize_canvas_plan_for_agent(plan)}
+    except ValueError as exc:
+        return {"error": str(exc)}
+    finally:
+        db.close()
 
 
 @tool_registry.register(
@@ -6733,6 +7425,29 @@ class AgentService:
 - 调整分镜脚本时必须使用 `update_shot_fields` / `batch_update_shot_fields` 修改 `story_summary`、`dialogue_or_narration`、`camera_plan`、`motion_plan`、`emotion_plan`、`continuity_notes`、`narrative_purpose`、`beat_density`、`transition_to_next` 等业务字段；系统会保留旧提示词、标记为待重新分析，并在下次生成时套用固定五区模板
 - 如果需要修改小说内容，请退出视频工作流模式后再操作
 """
+        canvas_section = ""
+        if workflow_type == "video_canvas":
+            canvas_section = """
+
+---
+
+## 视频无限画布 Agent 模式
+
+你正在协作搭建“来源 -> 剧本 -> 分镜 -> 资产 -> 画布 -> 视频”的创作计划。默认不是直接生成视频，也不能把用户的描述当作已读取的作品事实。
+
+### 计划创作顺序
+1. 先调用 `get_canvas_graph` 了解当前图；如需章节、对话剧本或文本节点来源，必须调用 `resolve_canvas_source` 冻结可信来源。
+2. 根据来源输出包含 `scenes` 的剧本、包含 `shots` 的镜头计划、资产复用/新增计划和执行批次；镜头必须有正整数 `shot_index`，时长使用 1-60 秒整数。
+3. 使用 `create_canvas_plan` 保存草案。来源对象只传 `source_type` 和 `source_id`，服务端会重新读取内容与哈希，不能伪造 `content` 或 `source_hash`。
+4. 草案缺字段时，先 `get_canvas_plans` 读取 revision，再用 `update_canvas_plan` 补齐；只有完整后才能设为 `ready`。
+5. 用户将在界面确认计划，再选择“应用画布”或“同步分镜”。这两步和视频生成都不是你可以自动执行的动作。
+
+### 画布与资产边界
+- 画布计划默认由服务端按镜头和资产确定性编译为文本、图片、视频节点及连线；不要手写大图或调用 `apply_canvas_ops` 来替代计划。
+- `apply_canvas_ops` 仅用于用户明确要求的少量手动节点编辑，先读取最新 definition_revision；它不是付费生成入口。
+- 资产只在计划中提出复用或新增建议。不得创建资产、生成图片或视频；实际运行必须由用户单独确认。
+- 若来源正文或文本节点已变化，旧计划会被拒绝应用或同步，应重新冻结来源并更新计划。
+"""
         skills_section = ""
         if enabled_skills:
             skills_fragment = skill_registry.build_fragment(enabled_skills, db=db)
@@ -6762,7 +7477,7 @@ class AgentService:
             else self._build_tool_guidance(workflow_type, enabled_skills)
         )
         permission_description = "系统采用单一 Agent：仅查询或讨论时只读；用户明确要求修改时才允许调用对应写入工具。"
-        return f"""你是 Manwen-Studio 的 AI 创作助手。{permission_description}{story_id_line}{manga_section}{video_section}
+        return f"""你是 Manwen-Studio 的 AI 创作助手。{permission_description}{story_id_line}{manga_section}{video_section}{canvas_section}
 
 **你的工作方式**：每次收到用户输入，先理解用户真正想要什么，再决定怎么做。不是每次都需要调用工具；但回答依赖当前作品的人物、设定、大纲、章节状态或伏笔时，必须先调用 `resolve_story_context` 按需读取，不能凭初始清单猜测。
 
@@ -7551,11 +8266,8 @@ class AgentService:
                             continue
                         name = tc["function"]["name"]
                         raw_args_str = tc["function"]["arguments"].strip()
-                        try:
-                            args = json.loads(raw_args_str) if raw_args_str else {}
-                            if not isinstance(args, dict):
-                                raise ValueError("工具参数必须是 JSON 对象")
-                        except (json.JSONDecodeError, ValueError):
+                        args = _parse_tool_arguments_lenient(raw_args_str)
+                        if args is None:
                             logger.warning("Agent 工具 %s 参数JSON解析失败，通知AI重试", name)
                             result_str = json.dumps({"error": f"参数JSON格式解析失败，请重新调用 {name} 并确保输出合法的JSON"})
                             yield {"event": "tool_call", "data": json.dumps({"name": name, "arguments": {}}, ensure_ascii=False)}

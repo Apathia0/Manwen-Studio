@@ -13,6 +13,7 @@ import {
 import { toast } from '../lib/toast';
 import { normalizeErrorMessage } from '../lib/errors';
 import { downloadImagesAsZip, sanitizeFilename } from '../lib/zipDownload';
+import MediaImage from './shared/MediaImage';
 
 interface AssetManagementModalProps {
   chapterId: number;
@@ -65,7 +66,7 @@ function AssetCard({
       
       <div className="aspect-square bg-slate-100 relative">
         {imageUrl ? (
-          <img src={imageUrl} alt={asset.name} className="w-full h-full object-cover" />
+          <MediaImage src={imageUrl} alt={asset.name} className="w-full h-full object-cover" />
         ) : (
           <div className="flex items-center justify-center h-full text-slate-300">
             <Image size={32} />

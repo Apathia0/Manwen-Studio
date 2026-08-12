@@ -244,7 +244,11 @@ export function ImageRedrawModal({
                     ref={imageRef}
                     src={imageSrc}
                     alt={title}
-                    onLoad={() => { setImageLoaded(true); syncCanvasSize(); }}
+                    onLoad={(event) => {
+                      const image = event.currentTarget;
+                      const finish = () => { setImageLoaded(true); syncCanvasSize(); };
+                      if (typeof image.decode === 'function') void image.decode().catch(() => undefined).finally(finish); else finish();
+                    }}
                     draggable={false}
                     loading="lazy"
                     decoding="async"

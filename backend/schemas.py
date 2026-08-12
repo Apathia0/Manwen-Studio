@@ -1201,6 +1201,41 @@ class VideoCanvasLayoutSave(BaseModel):
     expected_layout_revision: int = Field(ge=1)
 
 
+class VideoCanvasPlanCreate(BaseModel):
+    chapter_id: int | None = None
+    source_snapshot_json: dict[str, Any] | None = None
+    screenplay_json: dict[str, Any] | None = None
+    shot_json: dict[str, Any] | None = None
+    asset_json: dict[str, Any] | None = None
+    canvas_json: dict[str, Any] | None = None
+    execution_json: dict[str, Any] | None = None
+
+
+class VideoCanvasPlanUpdate(BaseModel):
+    status: Literal["draft", "ready"] | None = None
+    source_snapshot_json: dict[str, Any] | None = None
+    screenplay_json: dict[str, Any] | None = None
+    shot_json: dict[str, Any] | None = None
+    asset_json: dict[str, Any] | None = None
+    canvas_json: dict[str, Any] | None = None
+    execution_json: dict[str, Any] | None = None
+    expected_revision: int = Field(ge=1)
+
+
+class VideoCanvasPlanConfirmRequest(BaseModel):
+    confirmed: Literal[True] = True
+    expected_revision: int = Field(ge=1)
+
+
+class VideoCanvasPlanApplyRequest(BaseModel):
+    expected_plan_revision: int = Field(ge=1)
+    expected_definition_revision: int = Field(ge=1)
+
+
+class VideoCanvasPlanWorkflowSyncRequest(BaseModel):
+    expected_plan_revision: int = Field(ge=1)
+
+
 class VideoCanvasImportRequest(BaseModel):
     source_workflow_id: int
     mode: Literal["preview", "merge"] = "merge"

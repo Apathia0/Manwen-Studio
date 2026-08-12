@@ -108,6 +108,7 @@ export default function AssetReferenceSelector({
     scene: availableAssets.filter(a => (a.asset_type === 'scene_reference' || a.asset_type === 'scene' || a.asset_type === 'background')),
     props: availableAssets.filter(a => a.asset_type === 'prop_reference'),
     frames: availableAssets.filter(a => a.asset_type === 'first_frame' || a.asset_type === 'last_frame'),
+    uploads: availableAssets.filter(a => ['image', 'video', 'audio'].includes(a.asset_type)),
   };
 
   return (
@@ -155,6 +156,7 @@ export default function AssetReferenceSelector({
             ['人物图 (角色参考)', categorized.characters],
             ['场景图', categorized.scene],
             ['道具图', categorized.props],
+            ['本地上传媒体', categorized.uploads],
           ] as const).map(([label, items]) => {
             const visible = items.filter(a => !failedImages.has(a.id) && toAssetUrl(a.file_path));
             if (visible.length === 0) {
@@ -177,12 +179,11 @@ export default function AssetReferenceSelector({
                         }`}
                     >
                       <div className="w-24 h-24 relative">
-                        <img
-                          src={toAssetUrl(a.file_path)}
-                          alt={a.name}
-                          className="w-full h-full object-cover"
-                          onError={() => setFailedImages(prev => new Set(prev).add(a.id))}
-                        />
+                        {a.asset_type === 'audio'
+                          ? <div className="flex h-full items-center justify-center bg-slate-800 text-xs font-medium text-white">音频</div>
+                          : a.asset_type === 'video'
+                            ? <video src={toAssetUrl(a.file_path)} className="w-full h-full object-cover" muted preload="metadata" onError={() => setFailedImages(prev => new Set(prev).add(a.id))} />
+                            : <img src={toAssetUrl(a.file_path)} alt={a.name} className="w-full h-full object-cover" onError={() => setFailedImages(prev => new Set(prev).add(a.id))} />}
                         <div className="absolute inset-0 bg-black/0 group-hover:bg-black/10 transition-colors" />
                       </div>
                       {checked.has(a.id) && (

@@ -974,6 +974,44 @@ class VideoCanvasLayout(Base):
     updated_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
 
 
+class VideoCanvasPlan(Base):
+    """视频画布计划的可确认执行快照。"""
+    __tablename__ = "video_canvas_plans"
+    __table_args__ = (
+        Index("ix_video_canvas_plans_canvas_status_updated", "canvas_id", "status", "updated_at"),
+        Index("ix_video_canvas_plans_owner_status_created", "owner_user_id", "status", "created_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    owner_user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    canvas_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("video_canvases.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    story_id: Mapped[int] = mapped_column(Integer, ForeignKey("stories.id"), nullable=False, index=True)
+    chapter_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("chapters.id"), nullable=True, index=True)
+    status: Mapped[str] = mapped_column(String(30), nullable=False, default="draft")
+    source_snapshot_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    screenplay_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    shot_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    asset_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    canvas_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    execution_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    workflow_id: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey("chapter_video_workflows.id"),
+        nullable=True,
+        index=True,
+    )
+    applied_canvas_revision: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    workflow_sync_revision: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    revision: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    created_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
 class VideoCanvasSyncRecord(Base):
     """列表工作流导入与后续拉取更新的审计记录。"""
     __tablename__ = "video_canvas_sync_records"

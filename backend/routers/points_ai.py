@@ -280,7 +280,7 @@ def _validate_lingdong_video_capabilities(video: dict[str, Any]) -> None:
     if set(video) - allowed_video_fields:
         raise HTTPException(400, "Lingdong 视频模型包含不受支持的能力字段")
     profile = video.get("payload_profile", "legacy_lingdong")
-    if not isinstance(profile, str) or profile not in {"legacy_lingdong", "seedance_fast", "sora_v2"}:
+    if not isinstance(profile, str) or profile not in {"legacy_lingdong", "seedance_fast", "sora_v2", "custom"}:
         raise HTTPException(400, "视频模型 payload_profile 不受支持")
     input_modes = video.get("input_modes")
     if input_modes is not None and (
@@ -359,13 +359,17 @@ def _validate_lingdong_video_capabilities(video: dict[str, Any]) -> None:
             "reference_field",
             "resolution_field",
             "ratio_field",
+            "resolution_case",
             "size_by_resolution_aspect",
         }
         if set(wire) - allowed_wire_fields:
             raise HTTPException(400, "Lingdong 视频模型 wire 包含不受支持的字段")
         reference_field = wire.get("reference_field", "input_reference")
-        if reference_field != "input_reference":
-            raise HTTPException(400, "Lingdong reference_field 仅支持 input_reference")
+        allowed_reference_fields = {"input_reference"}
+        if profile == "custom":
+            allowed_reference_fields |= {"reference_images", "reference_videos", "reference_video_urls", "reference_audio_urls"}
+        if reference_field not in allowed_reference_fields:
+            raise HTTPException(400, "Lingdong reference_field 必须是受支持的参考素材字段")
         duration_field = wire.get("duration_field")
         if duration_field is not None and duration_field not in {"duration", "seconds"}:
             raise HTTPException(400, "Lingdong duration_field 仅支持 duration 或 seconds")
@@ -375,9 +379,15 @@ def _validate_lingdong_video_capabilities(video: dict[str, Any]) -> None:
         resolution_field = wire.get("resolution_field")
         if resolution_field is not None and resolution_field not in {"resolution", "size"}:
             raise HTTPException(400, "Lingdong resolution_field 仅支持 resolution 或 size")
+        resolution_case = wire.get("resolution_case")
+        if resolution_case is not None and resolution_case not in {"preserve", "lower"}:
+            raise HTTPException(400, "Lingdong resolution_case 仅支持 preserve 或 lower")
         ratio_field = wire.get("ratio_field")
-        if ratio_field is not None and ratio_field not in {"ratio", "orientation"}:
-            raise HTTPException(400, "Lingdong ratio_field 仅支持 ratio 或 orientation")
+        allowed_ratio_fields = {"ratio", "orientation"}
+        if profile == "custom":
+            allowed_ratio_fields.add("aspect_ratio")
+        if ratio_field is not None and ratio_field not in allowed_ratio_fields:
+            raise HTTPException(400, "Lingdong ratio_field 仅支持 ratio、orientation 或 aspect_ratio")
         mapping = wire.get("size_by_resolution_aspect")
         if mapping is not None and (
             not isinstance(mapping, dict)

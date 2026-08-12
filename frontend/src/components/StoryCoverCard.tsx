@@ -1,5 +1,6 @@
 import { ImagePlus, Loader2, Sparkles, Upload } from 'lucide-react';
 import { memo, useRef, useState } from 'react';
+import MediaImage from './shared/MediaImage';
 import {
   adjustStoryCover,
   coverImageUrl,
@@ -96,7 +97,7 @@ export default memo(function StoryCoverCard({ story, onUpdated }: Props) {
       <div className="mt-3 grid gap-4 lg:grid-cols-[220px,minmax(0,1fr)]">
         <div className="overflow-hidden rounded-2xl border border-[#d7e3f4] bg-[#eef4ff]">
           {coverUrl ? (
-            <img src={coverUrl} alt={story.title} className="h-[300px] w-full object-cover" />
+            <MediaImage src={coverUrl} alt={story.title} className="h-[300px] w-full object-cover" />
           ) : (
             <div className="flex h-[300px] items-center justify-center px-6 text-center text-sm text-slate-400">
               还没有封面。可以根据作品摘要一键生成，也可以手动上传。
