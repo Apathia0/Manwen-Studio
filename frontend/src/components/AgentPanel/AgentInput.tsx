@@ -75,7 +75,7 @@ export default function AgentInput({
   return (
     <div className="bg-white rounded-xl px-3 py-2 border border-[#d7e3f4] focus-within:border-blue-400 transition-all">
       {attachments.length > 0 ? <div className="mb-2 flex flex-wrap gap-1">{attachments.map((file, index) => <span key={`${file.name}-${index}`} className="inline-flex items-center gap-1 rounded bg-blue-50 px-2 py-1 text-[11px] text-blue-700">{file.name}<button type="button" onClick={() => onAttachmentsChange?.(attachments.filter((_, i) => i !== index))} title="移除附件"><X size={12} /></button></span>)}</div> : null}
-      <div className="flex items-end gap-2">
+      <div className="flex min-w-0 items-end gap-2">
         <label className="flex h-8 w-8 shrink-0 cursor-pointer items-center justify-center rounded-lg text-gray-500 hover:bg-blue-50 hover:text-blue-600" title="添加图片或视频">
           <Paperclip size={16} />
           <input type="file" accept="image/*,video/mp4,video/webm,video/quicktime,text/plain,text/markdown,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document" multiple className="hidden" disabled={disabled} onChange={(e) => { onAttachmentsChange?.([...attachments, ...Array.from(e.target.files || [])].slice(0, 5)); e.currentTarget.value = ''; }} />
@@ -92,7 +92,7 @@ export default function AgentInput({
           placeholder={placeholder}
           disabled={disabled}
           rows={1}
-          className="flex-1 bg-transparent text-sm text-gray-700 placeholder-gray-400 resize-none outline-none disabled:opacity-50"
+          className="min-w-0 flex-1 bg-transparent text-sm text-gray-700 placeholder-gray-400 resize-none outline-none disabled:opacity-50"
           style={{ maxHeight: '160px', overflow: 'auto' }}
         />
         <button

@@ -109,8 +109,8 @@ export default function WorkspaceLayout({
         )}
 
         {/* 桌面端 AI 助手右栏（移动端隐藏，见下方抽屉） */}
-        <div className={`${mangaPreviewMode ? 'flex-1' : agentCollapsed ? 'h-11 w-full shrink-0 md:h-auto md:w-[48px]' : 'h-[45%] w-full shrink-0 md:h-auto md:w-[390px]'} hidden min-h-0 min-w-0 overflow-hidden bg-white transition-[width,height] duration-200 md:flex`}>
-          <div className="flex flex-col h-full">
+        <div className={`${mangaPreviewMode ? 'flex-1' : agentCollapsed ? 'h-11 w-full shrink-0 md:h-auto md:w-[48px]' : 'h-[45%] w-full shrink-0 md:h-auto md:w-[390px]'} hidden min-h-0 min-w-0 max-w-full overflow-hidden bg-white transition-[width,height] duration-200 md:flex`}>
+          <div className="flex h-full min-h-0 min-w-0 flex-col">
             <div className={`shrink-0 flex h-11 items-center border-b border-[#d7e3f4] text-sm font-semibold text-slate-800 ${agentCollapsed ? 'justify-center px-1' : 'gap-2 px-3'}`}>
               {workspaceDomain === 'manga' ? <Image size={16} className="text-blue-600" aria-hidden="true" /> : <Bot size={16} className="text-blue-600" aria-hidden="true" />}
               {!agentCollapsed ? <span>{workspaceDomain === 'manga' ? '漫画生成' : 'AI 写作助手'}</span> : null}
@@ -126,7 +126,7 @@ export default function WorkspaceLayout({
                 </button>
               ) : null}
             </div>
-            <div className={`flex-1 min-h-0 overflow-hidden ${agentCollapsed ? 'hidden' : ''}`}>
+            <div className={`min-h-0 min-w-0 flex-1 overflow-hidden ${agentCollapsed ? 'hidden' : ''}`}>
               <Suspense fallback={<RouteLoadingFallback />}>
               {workspaceDomain === 'manga' ? (
                 <MangaPanel

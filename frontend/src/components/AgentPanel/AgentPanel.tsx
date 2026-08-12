@@ -525,7 +525,7 @@ export default function AgentPanel({
   }, [onContentUpdated, pendingChanges]);
 
   return (
-    <div className="flex h-full min-h-0 bg-white/90 backdrop-blur-xl">
+    <div className="flex h-full min-h-0 min-w-0 max-w-full overflow-hidden bg-white/90 backdrop-blur-xl">
       <aside
         className={`flex shrink-0 flex-col border-r border-[#d7e3f4] bg-[rgba(244,248,255,0.75)] transition-all duration-200 ${
           sidebarCollapsed ? 'w-[52px]' : 'w-[156px]'
@@ -636,7 +636,7 @@ export default function AgentPanel({
         )}
       </aside>
 
-      <div className="flex min-w-0 flex-1 flex-col">
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
         <div className="flex items-center gap-2 border-b border-[#d7e3f4] px-5 py-3 shrink-0">
           <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-blue-100">
             <Bot size={16} className="text-blue-600" />
@@ -646,7 +646,7 @@ export default function AgentPanel({
 
         </div>
 
-        <div ref={scrollContainerRef} className="flex-1 overflow-y-auto px-5 py-4 space-y-4">
+        <div ref={scrollContainerRef} className="min-h-0 flex-1 overflow-y-auto px-3 py-4 space-y-4 sm:px-5">
           {loadingMessages ? (
             <div className="flex h-full items-center justify-center text-sm text-gray-400">正在加载对话...</div>
           ) : messages.length === 0 && !streaming ? (
