@@ -132,7 +132,8 @@ def persist_model_capability_observation(
             if output_limit:
                 payload["observed_output_limit"] = output_limit
 
-            payload["supports_reasoning"] = True
+            # Agent 当前统一关闭 thinking；该字段仅表示观测结果，不再作为启用依据。
+            payload["supports_reasoning"] = False
             payload["last_verified_at"] = datetime.datetime.utcnow().isoformat()
             if row is None:
                 db.add(PlatformSetting(setting_key=key, value_json=payload))

@@ -91,6 +91,8 @@ def _maybe_configure_temperature_top_p_from_db(db=None):
 
 
 def _apply_runtime_params(payload: dict) -> dict:
+    # 全局关闭模型思考模式，保证工具调用和结构化输出协议稳定。
+    payload["thinking"] = {"type": "disabled"}
     if _RUNTIME_TEMPERATURE is not None:
         payload["temperature"] = _RUNTIME_TEMPERATURE
     if _RUNTIME_TOP_P is not None:
@@ -3833,21 +3835,31 @@ async def build_story_bible(
         "response_format": {"type": "json_object"},
     }
 
+    last_error: Exception | None = None
     async with httpx.AsyncClient(timeout=180) as client:
-        resp = await client.post(
-            f"{runtime_base_url()}/chat/completions",
-            json=payload,
-            headers=_deepseek_auth_headers(api_key),
-        )
-        resp.raise_for_status()
-        data = _response_json(resp, context="DeepSeek")
-        content = data["choices"][0]["message"]["content"]
-
-    try:
-        result = _extract_json_object(content)
-        return result.get("story_bible", result)
-    except ValueError as e:
-        raise ValueError(f"Story Bible generation failed: {e}")
+        for attempt in range(2):
+            if attempt:
+                payload["messages"] = [
+                    {"role": "system", "content": "请修复上一轮输出，只返回一个完整、有效的 JSON 对象，顶层必须包含 story_bible。不要 Markdown、解释或前后缀。"},
+                    {"role": "user", "content": str(content)[:24000]},
+                ]
+            resp = await client.post(
+                f"{runtime_base_url()}/chat/completions",
+                json=payload,
+                headers=_deepseek_auth_headers(api_key),
+            )
+            resp.raise_for_status()
+            data = _response_json(resp, context="DeepSeek")
+            content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+            try:
+                result = _extract_json_object(str(content))
+                bible = result.get("story_bible", result)
+                if isinstance(bible, dict):
+                    return bible
+                raise ValueError("Story Bible 顶层结果不是 JSON 对象")
+            except (ValueError, TypeError, AttributeError) as exc:
+                last_error = exc
+    raise ValueError(f"Story Bible generation failed: {last_error}")
 
 
 # ─── 章节视频工作流：正文 → 10s 镜头解析 ────────────────

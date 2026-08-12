@@ -1565,7 +1565,9 @@ def infer_agent_skills(
 ) -> list[str] | None:
     """根据当前任务自动裁剪工具；用户显式选择技能时保持其选择。"""
     if explicit_skills is not None:
-        return explicit_skills
+        # 前端空数组通常表示“未选择”，不应把全部工具误过滤掉。
+        known = [name for name in explicit_skills if skill_registry.get(name)]
+        return known or None
     if workflow_type == "manga":
         return ["manga_workflow"]
     if workflow_type == "video":
@@ -2301,6 +2303,36 @@ class ToolRegistry:
                     )
                     if not receipt_ok:
                         break
+                # 模型偶尔会直接尝试写入而漏掉 resolve_story_context。由服务端
+                # 补齐一次当前任务凭证，避免无效重试耗尽 Agent 预算。
+                if not receipt_ok and receipt_reason in {
+                    "context_not_resolved",
+                    "context_stale",
+                    "missing",
+                    "not_found",
+                    "expired",
+                }:
+                    get_story = getattr(receipt_db, "get", None)
+                    story = get_story(Story, story_id or 0) if callable(get_story) else None
+                    if story is not None and required_profiles:
+                        for chapter_number in targets:
+                            resolve_story_context_bundle(
+                                receipt_db,
+                                story=story,
+                                task_type=required_profiles[0],
+                                chapter_number=chapter_number,
+                                owner_user_id=owner_user_id,
+                                run_id=context.run_id if context else None,
+                                token_budget=6000,
+                            )
+                        receipt_ok, receipt_reason = validate_context_receipt(
+                            receipt_db,
+                            story_id=story_id or 0,
+                            run_id=context.run_id if context else None,
+                            owner_user_id=owner_user_id,
+                            task_types=required_profiles,
+                            chapter_number=targets[0],
+                        )
                 get_story = getattr(receipt_db, "get", None)
                 guarded_story = get_story(Story, story_id or 0) if callable(get_story) else None
                 if receipt_ok and guarded_story:
@@ -6870,7 +6902,8 @@ class AgentService:
                     "stream": True,
                     "stream_options": {"include_usage": True},
                     "tools": tool_specs,
-                    "thinking": {"type": "enabled"},
+                    # Agent 工具调用要求稳定的多轮 JSON 协议，统一关闭模型思考模式。
+                    "thinking": {"type": "disabled"},
                 }
                 if output_token_field:
                     payload[output_token_field] = output_token_limit
@@ -7007,7 +7040,7 @@ class AgentService:
                                         full_response_content += content
                                         yield {"event": "token", "data": json.dumps({"content": content}, ensure_ascii=False)}
 
-                                # DeepSeek thinking 模式要求下一轮原样回传推理字段。
+                                # 兼容上游偶尔返回的推理字段，但不会主动开启思考模式。
                                 reasoning_content = delta.get("reasoning_content", "")
                                 if reasoning_content:
                                     collected_reasoning_content += str(reasoning_content)
