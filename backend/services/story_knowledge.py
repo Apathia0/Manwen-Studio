@@ -1219,7 +1219,6 @@ def _legacy_sections(
     profile: str,
 ) -> dict[str, Any]:
     sections: dict[str, Any] = {}
-    immediate_previous_number: int | None = None
     nonblank_chapter_content = func.length(func.trim(
         func.replace(func.replace(func.replace(Chapter.novel_content, "\n", ""), "\r", ""), "\t", "")
     )) > 0
@@ -1289,7 +1288,6 @@ def _legacy_sections(
             .first()
         )
         if previous is not None:
-            immediate_previous_number = previous.chapter_number
             memory = previous.memory_summary if isinstance(previous.memory_summary, dict) else {}
             chapter_summary = memory.get("chapter_summary") if isinstance(memory.get("chapter_summary"), dict) else {}
             handoff = memory.get("chapter_handoff") if isinstance(memory.get("chapter_handoff"), dict) else {}
@@ -1316,11 +1314,9 @@ def _legacy_sections(
         )
         if chapter_number:
             query = query.filter(Chapter.chapter_number < chapter_number)
-        chapters = query.order_by(Chapter.chapter_number.desc()).limit(4).all()
-        if immediate_previous_number is not None and len(chapters) > 1:
-            chapters = [item for item in chapters if item.chapter_number != immediate_previous_number][:3]
-        else:
-            chapters = chapters[:3]
+        # 只取上一章 1 条：创作包不需要把所有历史章节都提取出来，
+        # 上一章之前的上下文由 previous_chapter 分区覆盖
+        chapters = query.order_by(Chapter.chapter_number.desc()).limit(1).all()
         sections["recent_chapters"] = [
             {
                 "chapter_number": item.chapter_number,
@@ -1328,7 +1324,7 @@ def _legacy_sections(
                 "memory_summary": item.memory_summary or {},
                 "ending_excerpt": (item.novel_content or "")[-800:],
             }
-            for item in reversed(chapters)
+            for item in chapters
         ]
     return sections
 

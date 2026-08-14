@@ -365,4 +365,23 @@ def render_ai_creation_pack(brief: dict[str, Any], context_pack: dict[str, Any])
         if not rendered:
             continue
         lines.extend(("", f"## {AI_SECTION_LABELS.get(str(key), str(key))}", "", rendered))
+    sections_raw = context_pack.get("sections")
+    sections = sections_raw if isinstance(sections_raw, dict) else {}
+    prev = sections.get("previous_chapter")
+    prev_handoff = {}
+    if isinstance(prev, dict):
+        raw_handoff = prev.get("chapter_handoff")
+        if isinstance(raw_handoff, dict):
+            prev_handoff = raw_handoff
+    bridge_lines = []
+    for key, label in (
+        ("opening_must_continue", "上一章必须承接"),
+        ("ending_location", "当前开场位置"),
+        ("active_conflict", "即时冲突"),
+    ):
+        value = str(prev_handoff.get(key) or "").strip()
+        if value:
+            bridge_lines.append(f"- {label}：{value}")
+    if bridge_lines:
+        lines.extend(("", f"## {SECTION_LABELS['previous_chapter']}", "", "\n".join(bridge_lines)))
     return "\n".join(lines).strip()

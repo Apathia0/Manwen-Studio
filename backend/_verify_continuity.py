@@ -309,7 +309,7 @@ big_compact = build_story_memory_compact(big_memory)
 check("open_loops 上限 12 项", len(big_compact.get("open_loops", [])) <= 12)
 check("continuity_facts 上限 12 项", len(big_compact.get("continuity_facts", [])) <= 12)
 check("resolved_loops 上限 12 项", len(big_compact.get("resolved_loops", [])) <= 12)
-check("recent summaries 上限 8 条", len(big_compact.get("recent_chapter_summaries", [])) <= 8)
+check("recent summaries 上限 1 条", len(big_compact.get("recent_chapter_summaries", [])) <= 1)
 
 # 10d: merge_story_memory 去重
 dup_update = {

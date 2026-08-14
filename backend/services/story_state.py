@@ -202,7 +202,12 @@ def build_story_bible_compact(story_bible: dict | None) -> dict[str, Any]:
 
 
 def build_story_memory_compact(story_memory: dict | None) -> dict[str, Any]:
-    """构建连续性记忆的精简版，保留 recent_chapter_summaries。与原 main._build_story_memory_compact 行为完全一致。"""
+    """构建连续性记忆的精简版。
+
+    与原 main._build_story_memory_compact 行为基本一致，但 recent_chapter_summaries
+    只保留最近 1 条（上一章）：创作包/正文 prompt 不需要把所有历史章节摘要都带进来，
+    上一章之前的上下文由 previous_chapter 分区覆盖，避免上下文冗余。
+    """
     if not isinstance(story_memory, dict):
         return {}
     compact: dict[str, Any] = {}
@@ -221,7 +226,7 @@ def build_story_memory_compact(story_memory: dict | None) -> dict[str, Any]:
         compact["recent_chapter_summaries"] = [
             item for item in recent_chapter_summaries
             if isinstance(item, dict)
-        ]
+        ][-1:]
     long_term = story_memory.get("long_term_foreshadowing")
     if isinstance(long_term, list) and long_term:
         compact["long_term_foreshadowing"] = long_term

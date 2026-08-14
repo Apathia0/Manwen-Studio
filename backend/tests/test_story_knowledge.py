@@ -996,12 +996,13 @@ def test_chapter_creation_pack_canonical_includes_recent_continuity_and_user_ins
     assert "林月交出半枚玉佩" in content
     assert "开头必须承接：必须先处理牙人封路，才能转场" in content
     assert "前文章节" in content
-    assert "陈玄取得残卷" in content
-    assert "林月在巷口呼救" in content
     assert "灰市牙人盯上陈玄" in content
     assert "故事记忆" in content
     assert "陈玄持有残卷" in content
     assert "用户要求" in content
+    # 只保留创作章的上一章：更早章节的连续性摘要不再被提取（用户需求）
+    assert "陈玄取得残卷" not in content
+    assert "林月在巷口呼救" not in content
     assert "强化林月与旧神契约的关联" in content
     expected_hash = hashlib.sha256(
         json.dumps(pack["sections"], ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
@@ -1174,7 +1175,7 @@ def test_chapter_writer_keeps_immediate_previous_chapter_under_tight_budget():
     assert previous["chapter_number"] == 8
     assert "第8章唯一结尾标记" in previous["ending_excerpt"]
     assert previous["chapter_handoff"]["opening_must_continue"] == "承接第8章即时冲突"
-    assert pack["sections"]["recent_chapters"][-1]["chapter_number"] == 7
+    assert pack["sections"]["recent_chapters"][-1]["chapter_number"] == 8
     assert pack["context_chars"] <= 2100
 
     db.add(Chapter(
@@ -1192,7 +1193,7 @@ def test_chapter_writer_keeps_immediate_previous_chapter_under_tight_budget():
         token_budget=700,
     )
     assert next_pack["sections"]["previous_chapter"]["chapter_number"] == 8
-    assert next_pack["sections"]["recent_chapters"][-1]["chapter_number"] == 7
+    assert next_pack["sections"]["recent_chapters"][-1]["chapter_number"] == 8
 
 
 def test_creation_pack_target_is_first_unwritten_chapter_and_rejects_future_chapters():
