@@ -1219,7 +1219,7 @@ function ChapterContextDashboard({ storyId }: { storyId: number }) {
       const response = await updateStoryChapterContext(storyId, selected.chapter_number, draftContent, value?.version || 1);
       setValue(response);
       setEditing(false);
-      toast.success('创作包已保存，正文 Agent 将原样读取');
+      toast.success(hasNovel ? '创作包已保存。本章已有正文，修改不会自动同步到正文，如需生效请重新生成该章正文' : '创作包已保存，正文 Agent 将原样读取');
       void loadList();
     } catch (error) {
       toast.error(normalizeErrorMessage(error, '保存本章创作包失败'));
@@ -1338,7 +1338,7 @@ function ChapterContextDashboard({ storyId }: { storyId: number }) {
     return <ChapterContextListView loading={listLoading} error={listError} chapters={list || []} onRetry={() => void loadList()} onOpen={(item) => void openChapter(item)} />;
   }
 
-  const readOnly = selected.has_novel;
+  const hasNovel = selected.has_novel;
   return (
     <div className="flex min-h-0 flex-1 flex-col bg-slate-50/60">
       <div className="flex flex-wrap items-center gap-3 border-b border-slate-200 bg-white px-4 py-3">
@@ -1351,7 +1351,7 @@ function ChapterContextDashboard({ storyId }: { storyId: number }) {
           <span className="rounded-md border border-slate-200 bg-slate-50 px-2.5 py-1.5 text-sm font-semibold text-slate-800">第{selected.chapter_number}章</span>
         </label>
         {selected.title ? <span className="max-w-[200px] truncate text-xs text-slate-500">{selected.title}</span> : null}
-        {readOnly ? <span className="rounded border border-slate-200 bg-slate-100 px-2 py-1 text-xs text-slate-600">已写正文 · 只读</span> : selected.is_current ? <span className="rounded border border-blue-200 bg-blue-50 px-2 py-1 text-xs text-blue-700">当前创作章节</span> : null}
+        {hasNovel ? <span className="rounded border border-slate-200 bg-slate-100 px-2 py-1 text-xs text-slate-600">已写正文</span> : selected.is_current ? <span className="rounded border border-blue-200 bg-blue-50 px-2 py-1 text-xs text-blue-700">当前创作章节</span> : null}
         {missing ? <span className="rounded border border-amber-200 bg-amber-50 px-2 py-1 text-xs text-amber-700">尚未生成创作包</span> : null}
         {value?.is_manual ? <span className="rounded border border-blue-200 bg-blue-50 px-2 py-1 text-xs text-blue-700">已手动调整</span> : null}
         {value?.is_stale ? <span className="rounded border border-amber-200 bg-amber-50 px-2 py-1 text-xs text-amber-700">作品设定已有更新</span> : null}
@@ -1363,7 +1363,7 @@ function ChapterContextDashboard({ storyId }: { storyId: number }) {
           {loading || refreshTaskId ? <span className="inline-flex max-w-[260px] items-center gap-1.5 truncate text-xs text-blue-700"><Loader2 size={13} className="shrink-0 animate-spin" />{refreshMessage || '正在提取'}</span> : null}
           {missing ? (
             <Button size="sm" className="max-md:min-h-11" icon={refreshTaskId ? <Loader2 size={14} className="animate-spin" /> : <Sparkles size={14} />} disabled={saving || loading || Boolean(refreshTaskId)} onClick={() => void generateForMissing()}>生成创作包</Button>
-          ) : readOnly ? null : (
+          ) : (
             <>
               <Button size="sm" variant="secondary" className="max-md:min-h-11" icon={refreshTaskId ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />} disabled={saving || loading || Boolean(refreshTaskId)} onClick={() => void regenerate()}>手动更新同步</Button>
               {editing ? <>

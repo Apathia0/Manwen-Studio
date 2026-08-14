@@ -25,7 +25,7 @@ CONTEXT_PROFILES: dict[str, tuple[str, ...]] = {
     "general": ("story_core", "story_bible", "characters", "story_memory", "book_outline"),
     "framework_designer": ("story_core", "story_bible", "characters", "book_outline", "entities", "facts", "open_threads"),
     "chapter_planner": ("story_core", "chapter_plan", "story_memory", "previous_chapter", "recent_chapters", "entities", "facts", "open_threads"),
-    "chapter_writer": ("chapter_plan", "previous_chapter", "recent_chapters", "user_instruction", "entities", "facts", "open_threads", "style_profile"),
+    "chapter_writer": ("chapter_plan", "story_memory", "previous_chapter", "recent_chapters", "user_instruction", "entities", "facts", "open_threads", "style_profile"),
     "quality_reviewer": ("chapter_plan", "story_memory", "recent_chapters", "characters", "entities", "facts", "open_threads"),
 }
 

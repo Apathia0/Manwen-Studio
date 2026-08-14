@@ -811,7 +811,9 @@ def test_resolver_combines_legacy_projection_and_database_knowledge():
     assert result["sections"]["chapter_plan"]["current"]["title"] == "试探"
     assert set(result["sections"]["chapter_plan"]) == {"current"}
     assert "characters" not in result["sections"]
-    assert "story_memory" not in result["sections"]
+    # 正文写作必须携带连续性记忆，保证章节开头衔接上一章（修复：chapter_writer 补上 story_memory 分区）
+    assert "story_memory" in result["sections"]
+    assert result["sections"]["story_memory"]["continuity_facts"] == ["陈玄持有残卷"]
     assert result["sections"]["recent_chapters"][0]["chapter_number"] == 1
     assert result["sections"]["entities"][0]["key"] == "character:chen-xuan"
     assert any(item["predicate"] == "owns" for item in result["sections"]["facts"])
@@ -997,6 +999,8 @@ def test_chapter_creation_pack_canonical_includes_recent_continuity_and_user_ins
     assert "陈玄取得残卷" in content
     assert "林月在巷口呼救" in content
     assert "灰市牙人盯上陈玄" in content
+    assert "故事记忆" in content
+    assert "陈玄持有残卷" in content
     assert "用户要求" in content
     assert "强化林月与旧神契约的关联" in content
     expected_hash = hashlib.sha256(
@@ -1358,31 +1362,61 @@ def test_chapter_context_summaries_refresh_task_null_without_active_task(monkeyp
     assert by_number[2]["refresh_task"] is None
 
 
-def test_require_unwritten_chapter_allows_unwritten_or_missing_chapters():
+def test_update_story_chapter_context_allows_written_chapter(monkeypatch):
     import main as main_module
-
-    db = _session()
-    story = _story(db)
-    db.add(Chapter(story_id=story.id, chapter_number=3, title="第三章", novel_content=" \n\t", status="pending"))
-    db.commit()
-
-    main_module._require_unwritten_chapter(story.id, 99, db)
-    main_module._require_unwritten_chapter(story.id, 3, db)
-
-
-def test_require_unwritten_chapter_rejects_written_chapter():
-    import main as main_module
-    from fastapi import HTTPException
+    from types import SimpleNamespace
 
     db = _session()
     story = _story(db)
     chapter_one = db.query(Chapter).filter_by(story_id=story.id).one()
     assert chapter_one.novel_content.strip()
 
-    with pytest.raises(HTTPException) as exc_info:
-        main_module._require_unwritten_chapter(story.id, 1, db)
-    assert exc_info.value.status_code == 409
-    assert exc_info.value.detail["code"] == "chapter_already_written"
+    user = SimpleNamespace(id=1)
+    monkeypatch.setattr(main_module, "_require_user", lambda request, db: user)
+    monkeypatch.setattr(main_module, "_require_story_for_user", lambda story_id, user, db: story)
+
+    response = main_module.update_story_chapter_context(
+        story_id=story.id,
+        payload=SimpleNamespace(content="全新创作包内容", expected_version=1),
+        request=SimpleNamespace(),
+        chapter_number=1,
+        db=db,
+    )
+    assert response["content"] == "全新创作包内容"
+    assert response["is_manual"] is True
+    assert response["version"] == 2
+
+
+def test_background_regenerate_allows_written_chapter(monkeypatch):
+    import main as main_module
+    from types import SimpleNamespace
+
+    db = _session()
+    story = _story(db)
+    chapter_one = db.query(Chapter).filter_by(story_id=story.id).one()
+    assert chapter_one.novel_content.strip()
+
+    captured: dict = {}
+
+    async def fake_ensure(db, *, story, chapter_number, owner_user_id, api_key, force, expected_version):
+        chapter = db.query(Chapter).filter_by(story_id=story.id, chapter_number=chapter_number).one()
+        captured["called"] = True
+        captured["force"] = force
+        return chapter, {}
+
+    monkeypatch.setattr(main_module, "_ensure_chapter_creation_pack_ai", fake_ensure)
+    monkeypatch.setattr(main_module, "task_manager", SimpleNamespace(update_task_metadata=lambda *a, **k: None))
+    monkeypatch.setattr(main_module, "SessionLocal", lambda: db)
+
+    asyncio.run(main_module._background_regenerate_chapter_creation_pack(
+        story_id_value=story.id,
+        chapter_number=1,
+        owner_user_id=1,
+        expected_version=1,
+        deepseek_api_key="test-key",
+    ))
+    assert captured.get("called") is True
+    assert captured["force"] is True
 
 
 def test_ai_sync_fact_fallback_never_reuses_static_fact_for_a_chapter():

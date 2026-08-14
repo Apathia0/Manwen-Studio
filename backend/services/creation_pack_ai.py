@@ -115,6 +115,7 @@ def _compact_sections(sections: dict[str, Any], max_chars: int = MAX_INPUT_CHARS
         return {}
     priority = [
         "chapter_plan",
+        "story_memory",
         "previous_chapter",
         "open_threads",
         "facts",

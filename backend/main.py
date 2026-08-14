@@ -6479,19 +6479,6 @@ def _require_current_creation_pack_chapter(story_id: int, chapter_number: int, d
     return expected
 
 
-def _require_unwritten_chapter(story_id: int, chapter_number: int, db: Session) -> None:
-    """允许对任意未写正文的章节生成或编辑创作包；已写正文的章节创作包为只读。"""
-    chapter = db.query(Chapter).filter(
-        Chapter.story_id == story_id,
-        Chapter.chapter_number == int(chapter_number),
-    ).first()
-    if chapter is not None and str(chapter.novel_content or "").strip():
-        raise HTTPException(status_code=409, detail={
-            "code": "chapter_already_written",
-            "message": f"第{chapter_number}章已有正文，该章节创作包为只读",
-        })
-
-
 def _chapter_info_for_creation_pack(story: Story, chapter: Chapter | None, chapter_number: int) -> dict[str, Any]:
     planned = next((
         dict(item)
@@ -6918,7 +6905,6 @@ def update_story_chapter_context(
     """保存用户编辑后的创作包；保存文本会原样发送给正文 Agent。"""
     user = _require_user(request, db)
     story = _require_story_for_user(story_id, user, db)
-    _require_unwritten_chapter(story_id, chapter_number, db)
     chapter, chapter_info = _ensure_chapter_creation_pack(
         db,
         story=story,
@@ -6954,7 +6940,6 @@ async def _background_regenerate_chapter_creation_pack(
         story = db.get(Story, story_id_value)
         if story is None:
             raise ValueError("作品不存在")
-        _require_unwritten_chapter(story_id_value, chapter_number, db)
         task_manager.update_task_metadata(task_id, stage="extracting", message=f"正在重新提取第{chapter_number}章创作包")
         chapter, chapter_info = await _ensure_chapter_creation_pack_ai(
             db,
@@ -6986,10 +6971,9 @@ async def regenerate_story_chapter_context(
     expected_version: int = Query(..., ge=1),
     db: Session = Depends(get_db),
 ):
-    """异步重新提取章节创作包，未写正文的章节均可生成。"""
+    """异步重新提取章节创作包；已写正文的章节同样支持重新提取以调整设定。"""
     user = _require_user(request, db)
     story = _require_story_for_user(story_id, user, db)
-    _require_unwritten_chapter(story_id, chapter_number, db)
     chapter = db.query(Chapter).filter(
         Chapter.story_id == story_id,
         Chapter.chapter_number == chapter_number,
