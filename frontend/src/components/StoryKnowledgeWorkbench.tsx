@@ -1233,9 +1233,9 @@ function ChapterContextDashboard({ storyId }: { storyId: number }) {
     try {
       const submitted = await regenerateStoryChapterContext(storyId, summary.chapter_number, expectedVersion);
       setRefreshTaskId(submitted.task_id);
-      setRefreshMessage(missingPack ? `正在生成第${summary.chapter_number}章创作包` : '任务已提交，正在提取最新创作包');
+      setRefreshMessage(missingPack ? `正在生成第${summary.chapter_number}章创作包` : '任务已提交，正在重新生成创作包');
       activeTaskRef.current = { chapterNumber: summary.chapter_number, missing: missingPack };
-      toast.success('创作包提取任务已提交');
+      toast.success(missingPack ? '创作包生成任务已提交' : '创作包重新生成任务已提交');
     } catch (error) {
       toast.error(normalizeErrorMessage(error, '生成创作包失败'));
     } finally {
@@ -1245,7 +1245,7 @@ function ChapterContextDashboard({ storyId }: { storyId: number }) {
 
   const regenerate = async () => {
     if (!selected) return;
-    const accepted = await confirm({ title: '重新提取创作包', message: '将按当前作品设定覆盖本章创作包，现有手动修改会丢失。', confirmText: '重新提取', danger: true });
+    const accepted = await confirm({ title: '重新生成创作包', message: '将按当前作品设定重新提取本章创作包，覆盖现有内容（含手动修改），是否继续？', confirmText: '重新生成', danger: true });
     if (!accepted) return;
     await startRegenerate(selected, value?.version || 1, false);
   };
@@ -1365,7 +1365,7 @@ function ChapterContextDashboard({ storyId }: { storyId: number }) {
             <Button size="sm" className="max-md:min-h-11" icon={refreshTaskId ? <Loader2 size={14} className="animate-spin" /> : <Sparkles size={14} />} disabled={saving || loading || Boolean(refreshTaskId)} onClick={() => void generateForMissing()}>生成创作包</Button>
           ) : (
             <>
-              <Button size="sm" variant="secondary" className="max-md:min-h-11" icon={refreshTaskId ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />} disabled={saving || loading || Boolean(refreshTaskId)} onClick={() => void regenerate()}>手动更新同步</Button>
+              <Button size="sm" variant="secondary" className="max-md:min-h-11" icon={refreshTaskId ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />} disabled={saving || loading || Boolean(refreshTaskId)} onClick={() => void regenerate()}>重新生成创作包</Button>
               {editing ? <>
                 <Button size="sm" variant="secondary" className="max-md:min-h-11" disabled={saving} onClick={() => { resetDraft(value?.content || ''); setEditing(false); }}>取消</Button>
                 <Button size="sm" className="max-md:min-h-11" icon={saving ? <Loader2 size={14} className="animate-spin" /> : <Save size={14} />} disabled={saving || !dirty} onClick={() => void save()}>保存</Button>
