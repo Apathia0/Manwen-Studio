@@ -1221,7 +1221,9 @@ skill_registry.register(SkillDef(
     icon="✍️",
     tool_names=[
         "get_chapter_full", "get_all_chapters_summary",
+        "get_chapter_creation_pack",
         "update_chapter_content", "batch_update_chapters",
+        "update_chapter_creation_pack",
         "adjust_chapter_by_instruction", "rewrite_text_segment",
         "add_chapter_plan", "bulk_add_chapter_plans",
         "batch_adjust_chapters",
@@ -2100,6 +2102,7 @@ def _update_scenes_pending_new_value(chapter_id: int, new_text: str) -> None:
 _STORY_KNOWLEDGE_MUTATION_TOOLS = {
     "create_chapter",
     "update_chapter_content",
+    "update_chapter_creation_pack",
     "batch_update_chapters",
     "adjust_chapter_by_instruction",
     "rewrite_text_segment",
@@ -2121,6 +2124,7 @@ _STORY_KNOWLEDGE_MUTATION_TOOLS = {
 _STORY_KNOWLEDGE_CONTEXT_PROFILES = {
     "create_chapter": ("chapter_writer",),
     "update_chapter_content": ("chapter_writer",),
+    "update_chapter_creation_pack": ("chapter_writer",),
     "batch_update_chapters": ("chapter_writer",),
     "adjust_chapter_by_instruction": ("chapter_writer",),
     "rewrite_text_segment": ("chapter_writer",),
@@ -2671,6 +2675,41 @@ async def get_all_chapters_summary(story_id: int) -> dict:
                 }
                 for ch in chapters
             ]
+        }
+    finally:
+        db.close()
+
+
+@tool_registry.register(
+    name="get_chapter_creation_pack",
+    description="读取指定章节的创作包（正文生成的设定依据）。返回创作包原文、版本号、是否手动编辑、来源哈希。",
+    parameters={
+        "type": "object",
+        "properties": {
+            "chapter_id": {"type": "integer", "description": "章节 ID"},
+        },
+        "required": ["chapter_id"],
+    },
+)
+async def get_chapter_creation_pack(chapter_id: int) -> dict:
+    """读取章节创作包。"""
+    db = SessionLocal()
+    try:
+        chapter = _validate_chapter_ownership(db, chapter_id, _current_story_id())
+        if not chapter:
+            return {"error": "章节不存在或无权访问"}
+        content = str(chapter.creation_pack_content or "").strip()
+        return {
+            "ok": True,
+            "chapter_id": chapter.id,
+            "chapter_number": chapter.chapter_number,
+            "title": chapter.title or "",
+            "has_creation_pack": bool(content),
+            "creation_pack_content": content,
+            "creation_pack_version": int(chapter.creation_pack_version or 1),
+            "is_manual": bool(chapter.creation_pack_is_manual),
+            "source_hash": chapter.creation_pack_source_hash or "",
+            "updated_at": chapter.creation_pack_updated_at.isoformat() if chapter.creation_pack_updated_at else None,
         }
     finally:
         db.close()
@@ -3499,6 +3538,91 @@ async def update_chapter_content(chapter_id: int, content: str) -> dict:
 
 
 @tool_registry.register(
+    name="update_chapter_creation_pack",
+    description="保存/更新章节创作包（正文生成的设定依据），保存后标记为手动编辑。适用于用户要求调整创作包设定。注意：修改创作包后正文不会自动同步，用户需确认后通过重新生成正文使改动生效。",
+    is_write=True,
+    parameters={
+        "type": "object",
+        "properties": {
+            "chapter_id": {"type": "integer", "description": "章节 ID"},
+            "content": {"type": "string", "description": "新的创作包全文"},
+            "expected_version": {"type": "integer", "description": "期望的当前版本号（可选）。传了且不匹配时返回版本冲突错误。"},
+        },
+        "required": ["chapter_id", "content"],
+    },
+)
+async def update_chapter_creation_pack(
+    chapter_id: int,
+    content: str,
+    expected_version: int | None = None,
+) -> dict:
+    """保存章节创作包（is_manual=True），语义与设定中心手动保存一致。"""
+    db = SessionLocal()
+    try:
+        chapter = _validate_chapter_ownership(
+            db,
+            chapter_id,
+            _current_story_id(),
+            with_for_update=True,
+        )
+        if not chapter:
+            return {"error": "章节不存在或无权访问"}
+        current_version = int(chapter.creation_pack_version or 1)
+        if expected_version is not None and current_version != expected_version:
+            db.rollback()
+            return {
+                "error": "创作包已在其他位置更新，请重新读取后再保存",
+                "version_conflict": True,
+                "current_version": current_version,
+            }
+        if _current_pending_changes():
+            _current_pending_changes().record_chapter_field(chapter, "creation_pack_content")
+        chapter.creation_pack_content = content
+        chapter.creation_pack_is_manual = True
+        chapter.creation_pack_updated_at = datetime.datetime.utcnow()
+        chapter.creation_pack_version = current_version + 1
+        if _current_pending_changes():
+            _current_pending_changes().update_new_value(
+                "chapter", chapter.id, "creation_pack_content", content
+            )
+        db.commit()
+        logger.info(
+            "Agent tool=update_chapter_creation_pack story=%s chapter=%s version=%s",
+            _current_story_id(),
+            chapter_id,
+            chapter.creation_pack_version,
+        )
+        return {
+            "ok": True,
+            "chapter_id": chapter_id,
+            "creation_pack_version": chapter.creation_pack_version,
+            "is_manual": True,
+            "note": "创作包已更新，正文不会自动同步；用户确认后需重新生成正文使改动生效",
+        }
+    finally:
+        db.close()
+
+
+def _inject_user_instruction_into_pack(creation_pack: dict, instruction: str) -> dict:
+    """把用户指令注入创作包文本，使「创作包为基础、用户要求为增量」进入写手 agent 硬合同。"""
+    instruction = str(instruction or "").strip()
+    if not instruction:
+        return creation_pack
+    pack = copy.deepcopy(creation_pack)
+    canonical = str(pack.get("canonical_content") or "").strip()
+    if canonical:
+        if "## 用户要求" in canonical:
+            canonical = canonical.split("## 用户要求")[0].rstrip()
+        pack["canonical_content"] = f"{canonical}\n\n## 用户要求\n{instruction}".strip()
+    chapter_task = pack.get("chapter_task")
+    if not isinstance(chapter_task, dict):
+        chapter_task = {}
+        pack["chapter_task"] = chapter_task
+    chapter_task["user_instruction"] = instruction
+    return pack
+
+
+@tool_registry.register(
     name="create_chapter",
     description="在数据库中创建一个新的章节记录并返回其ID。创建后可以用 generate_chapter_content 委托框架引擎生成正文。"
                "通常先通过 get_framework_detail 查看现有章节的最大编号，确认下一章编号后再调用此工具。"
@@ -3689,65 +3813,7 @@ async def generate_chapter_content(story_id: int, chapter_number: int, instructi
         if not api_key:
             return {"error": "DeepSeek API Key 未配置，请在设置中填写"}
 
-        previous_chapter_summary = ""
-        if isinstance(chapter_number, int) and chapter_number > 1:
-            prev_chapter = (
-                db.query(Chapter)
-                .filter(
-                    Chapter.story_id == story_id,
-                    Chapter.chapter_number < chapter_number,
-                    Chapter.novel_content.isnot(None),
-                    Chapter.status.in_(["completed", "draft", "reviewed"]),
-                )
-                .order_by(Chapter.chapter_number.desc())
-                .first()
-            )
-            if prev_chapter:
-                prev_title = prev_chapter.title or f"第{prev_chapter.chapter_number}章"
-                memory_summary = prev_chapter.memory_summary if isinstance(prev_chapter.memory_summary, dict) else {}
-                chapter_summary = memory_summary.get("chapter_summary") if isinstance(memory_summary.get("chapter_summary"), dict) else {}
-                handoff = memory_summary.get("chapter_handoff") if isinstance(memory_summary.get("chapter_handoff"), dict) else {}
-                ending_scene = str(chapter_summary.get("ending_scene") or memory_summary.get("ending_scene") or "").strip()
-                summary_text = str(chapter_summary.get("summary") or memory_summary.get("summary") or "").strip()
-                fallback_tail = (prev_chapter.novel_content or "")[-800:].strip()
-
-                bridge_parts = [f"上一章《第{prev_chapter.chapter_number}章：{prev_title}》"]
-                if summary_text:
-                    bridge_parts.append(f"章节摘要：{summary_text}")
-                if ending_scene:
-                    bridge_parts.append(f"结尾场景：{ending_scene}")
-                if fallback_tail and not ending_scene:
-                    bridge_parts.append(f"正文结尾片段：\n{fallback_tail}")
-                if handoff.get("opening_must_continue"):
-                    bridge_parts.append(f"下一章必须承接：{handoff['opening_must_continue']}")
-                if handoff.get("active_conflict"):
-                    bridge_parts.append(f"即时冲突：{handoff['active_conflict']}")
-                previous_chapter_summary = "\n".join(bridge_parts)[:2400]
-
-        recent_chapter_memories_text = ""
-        if isinstance(chapter_number, int) and chapter_number > 1:
-            recent_candidates = (
-                db.query(Chapter)
-                .filter(
-                    Chapter.story_id == story_id,
-                    Chapter.chapter_number < chapter_number,
-                )
-                .order_by(Chapter.chapter_number.desc())
-                .limit(3)
-                .all()
-            )
-            recent_compact = []
-            for item in reversed(recent_candidates):
-                item_ms = item.memory_summary if isinstance(item.memory_summary, dict) else {}
-                item_cs = item_ms.get("chapter_summary") if isinstance(item_ms.get("chapter_summary"), dict) else {}
-                item_summary = str(item_cs.get("summary") or item_ms.get("summary") or "").strip()
-                if item_summary:
-                    recent_compact.append(f"第{item.chapter_number}章：{item_summary}")
-            if recent_compact:
-                recent_chapter_memories_text = "近期章节摘要：\n" + "\n".join(recent_compact)
-
-        if recent_chapter_memories_text:
-            previous_chapter_summary = (previous_chapter_summary + "\n\n" + recent_chapter_memories_text).strip()
+        previous_chapter_summary = _build_previous_chapter_summary_text(db, story_id, chapter_number)
 
         system_prompt = get_effective_prompt(story_id, "chapter", db)
 
@@ -3961,17 +4027,19 @@ async def adjust_chapter_by_instruction(chapter_id: int, instruction: str) -> di
             chapter_info=chapter_info,
             instruction=instruction,
         )
+        reusable_creation_pack = _inject_user_instruction_into_pack(reusable_creation_pack, instruction)
         creation_pack_fingerprint = str(chapter.creation_pack_source_hash or "")
         creation_pack_version = int(chapter.creation_pack_version or 1)
 
         from services.chapter_agents import run_chapter_creation_pipeline
 
         chapter_info["user_instruction"] = instruction
+        previous_chapter_summary = _build_previous_chapter_summary_text(db, chapter.story_id, chapter.chapter_number)
         pipeline_result = await run_chapter_creation_pipeline(
             story_context=story_context,
             chapter_info=chapter_info,
             api_key=api_key,
-            previous_chapter_summary="",
+            previous_chapter_summary=previous_chapter_summary,
             system_rules=system_rules,
             max_revisions=1,
             initial_content=chapter_content,
@@ -4497,11 +4565,12 @@ async def batch_adjust_chapters(chapters: list[dict]) -> dict:
             from services.chapter_agents import run_chapter_creation_pipeline
 
             chapter_info["user_instruction"] = instruction
+            previous_chapter_summary = _build_previous_chapter_summary_text(db, chapter.story_id, chapter.chapter_number)
             pipeline_result = await run_chapter_creation_pipeline(
                 story_context=story_context,
                 chapter_info=chapter_info,
                 api_key=api_key,
-                previous_chapter_summary="",
+                previous_chapter_summary=previous_chapter_summary,
                 system_rules=system_rules,
                 max_revisions=1,
                 initial_content=chapter_content,
@@ -6216,6 +6285,70 @@ async def check_ai_flavor(chapter_id: int) -> dict:
 # ── 内部辅助 ──────────────────────────────────────────────
 
 
+def _build_previous_chapter_summary_text(db, story_id: int, chapter_number: int | None) -> str:
+    """构建上一章衔接摘要：章节摘要 + 结尾场景 + 手递接要求 + 近期章节摘要。"""
+    previous_chapter_summary = ""
+    if isinstance(chapter_number, int) and chapter_number > 1:
+        prev_chapter = (
+            db.query(Chapter)
+            .filter(
+                Chapter.story_id == story_id,
+                Chapter.chapter_number < chapter_number,
+                Chapter.novel_content.isnot(None),
+                Chapter.status.in_(["completed", "draft", "reviewed"]),
+            )
+            .order_by(Chapter.chapter_number.desc())
+            .first()
+        )
+        if prev_chapter:
+            prev_title = prev_chapter.title or f"第{prev_chapter.chapter_number}章"
+            memory_summary = prev_chapter.memory_summary if isinstance(prev_chapter.memory_summary, dict) else {}
+            chapter_summary = memory_summary.get("chapter_summary") if isinstance(memory_summary.get("chapter_summary"), dict) else {}
+            handoff = memory_summary.get("chapter_handoff") if isinstance(memory_summary.get("chapter_handoff"), dict) else {}
+            ending_scene = str(chapter_summary.get("ending_scene") or memory_summary.get("ending_scene") or "").strip()
+            summary_text = str(chapter_summary.get("summary") or memory_summary.get("summary") or "").strip()
+            fallback_tail = (prev_chapter.novel_content or "")[-800:].strip()
+
+            bridge_parts = [f"上一章《第{prev_chapter.chapter_number}章：{prev_title}》"]
+            if summary_text:
+                bridge_parts.append(f"章节摘要：{summary_text}")
+            if ending_scene:
+                bridge_parts.append(f"结尾场景：{ending_scene}")
+            if fallback_tail and not ending_scene:
+                bridge_parts.append(f"正文结尾片段：\n{fallback_tail}")
+            if handoff.get("opening_must_continue"):
+                bridge_parts.append(f"下一章必须承接：{handoff['opening_must_continue']}")
+            if handoff.get("active_conflict"):
+                bridge_parts.append(f"即时冲突：{handoff['active_conflict']}")
+            previous_chapter_summary = "\n".join(bridge_parts)[:2400]
+
+    recent_chapter_memories_text = ""
+    if isinstance(chapter_number, int) and chapter_number > 1:
+        recent_candidates = (
+            db.query(Chapter)
+            .filter(
+                Chapter.story_id == story_id,
+                Chapter.chapter_number < chapter_number,
+            )
+            .order_by(Chapter.chapter_number.desc())
+            .limit(3)
+            .all()
+        )
+        recent_compact = []
+        for item in reversed(recent_candidates):
+            item_ms = item.memory_summary if isinstance(item.memory_summary, dict) else {}
+            item_cs = item_ms.get("chapter_summary") if isinstance(item_ms.get("chapter_summary"), dict) else {}
+            item_summary = str(item_cs.get("summary") or item_ms.get("summary") or "").strip()
+            if item_summary:
+                recent_compact.append(f"第{item.chapter_number}章：{item_summary}")
+        if recent_compact:
+            recent_chapter_memories_text = "近期章节摘要：\n" + "\n".join(recent_compact)
+
+    if recent_chapter_memories_text:
+        previous_chapter_summary = (previous_chapter_summary + "\n\n" + recent_chapter_memories_text).strip()
+    return previous_chapter_summary
+
+
 def _build_story_context_dict(story: Story, user_instruction: str = "") -> dict:
     """构建 story_context 字典，与 main._build_framework_ai_context 对齐。"""
     outline = story.outline if isinstance(story.outline, dict) else {}
@@ -6264,9 +6397,10 @@ class AgentService:
             "## ✍️ 正文写作参考规范\n\n"
             "正文方法论、3000 字上限和质量门禁由章节流水线执行，此处只负责选择正确工具：\n"
             "- 首次生成完整章节使用 `generate_chapter_content`。\n"
-            "- 根据指令整体重写已有正文使用 `adjust_chapter_by_instruction`。\n"
+            "- 根据指令整体重写已有正文（调整风格、补充内容、大篇幅重写）使用 `adjust_chapter_by_instruction`，会自动以创作包为基础再按用户要求修改。\n"
             "- 用户提供了完整成稿时才使用 `update_chapter_content`。\n"
-            "- 用户只要求替换明确段落时使用 `rewrite_text_segment`。\n"
+            "- 用户只要求替换明确段落（精准局部修改）时使用 `rewrite_text_segment`，直接替换不涉及创作包。\n"
+            "- 用户要求调整创作包设定时：先 `get_chapter_creation_pack` 读取当前创作包，再 `update_chapter_creation_pack` 保存修改；保存后提醒用户正文不会自动同步，需重新生成正文使改动生效。\n"
             "不要在 Agent 回复中自行生成整章正文，也不要重复复述章节流水线的写作规则。"
         )
 
@@ -6436,6 +6570,7 @@ class AgentService:
 ### 读取工具（用于分析 / 查询）
 - `get_chapter_full` — 读取某章节的完整正文内容
 - `get_all_chapters_summary` — 列出所有章节（编号/标题/字数/状态）
+- `get_chapter_creation_pack` — 读取某章节的创作包（正文生成的设定依据，含版本号/是否手动编辑）
 - `get_framework_detail` — 读取标签、角色设定、故事大纲
 - `get_story_bible` — 读取作品圣经（创意简报/写作指导）
 - `get_scenes` — 读取分镜列表
@@ -6444,7 +6579,8 @@ class AgentService:
 ### 写入工具（用于执行修改）
 - `generate_chapter_content` — **🎯 生成章节正文的首选工具**。委托框架创作引擎生成（与框架直出质量完全一致，含字数铁律/场景经济性/对话铁律/章末钩子/AI禁令）。适用于用户要求「写出」「生成」「创作」「写」某章正文时。需先确保章节规划完整（含任务卡）。
 - `update_chapter_content` — 直接保存整章正文（仅当用户已给出完整改写文本时用。如果需要 AI 生成正文，请使用 `generate_chapter_content`）
-- `rewrite_text_segment` — 查找并替换章节中的特定段落（精确匹配替换）
+- `update_chapter_creation_pack` — 保存/更新章节创作包（标记为手动编辑）。修改创作包后正文不会自动同步，需提醒用户重新生成正文使改动生效
+- `rewrite_text_segment` — 查找并替换章节中的特定段落（精确匹配替换，不涉及创作包）
 - `adjust_chapter_by_instruction` — 根据用户指令让 AI 重写整章（消耗高级配额，仅用于已有正文章节的重写/调整风格，不用于初版生成。初版生成请用 `generate_chapter_content`）
 - `update_story_info` — 修改标题/描述/标签
 - `update_story_bible` — 更新作品圣经（世界观设定/创意简报/写作指导），支持部分更新。用户要求调整世界观、修改核心设定时用此工具
@@ -6465,8 +6601,9 @@ class AgentService:
 | "帮我分析一下故事结构/框架/节奏/伏笔" | 调 `get_framework_detail` + `get_all_chapters_summary`（需要时加 `get_chapter_full`）→ 给出分析 → 等待用户反馈 |
 | "帮我检查这一章写得怎么样" | 调 `get_chapter_full` 读取本章 → 给出评价/问题/建议 → 等待用户反馈 |
 | "提出优化建议" | 调读取工具获取数据 → 输出具体优化方案列表 → 等用户选定后执行 |
-| "把这段改成……"（附具体文本） | 调 `rewrite_text_segment` 或 `update_chapter_content` 直接执行 |
-| "帮我重写这一章，改成……风格"（无具体文本） | 当前章节 ID 已明确时直接调 `adjust_chapter_by_instruction`；只有章节不明确时才先读取确认 |
+| "把这段改成……"（附具体文本） | 调 `rewrite_text_segment` 或 `update_chapter_content` 直接执行（精准局部修改，不涉及创作包） |
+| "帮我重写这一章，改成……风格"（无具体文本） | 当前章节 ID 已明确时直接调 `adjust_chapter_by_instruction`（自动以创作包为基础再按用户要求修改）；只有章节不明确时才先读取确认 |
+| "帮我调整这章的创作包/设定" | 调 `get_chapter_creation_pack` 读取当前创作包 → 结合用户要求给出修改方案 → 待确认后调 `update_chapter_creation_pack` 保存 → 提醒用户重新生成正文使改动生效 |
 | "帮我修改角色设定" | 调 `get_framework_detail` 查看当前角色 → 给出修改方案 → 待确认后调 `update_characters` |
 | "帮我调整世界观/修改核心设定/改作品圣经" | 调 `get_story_bible` 查看当前圣经 → 给出调整方案 → 待确认后调 `update_story_bible` |
 | **用户在对话中详细描述了世界观设定**（如力量体系、势力分布、等级划分、世界历史等具体内容） | **主动调用 `update_story_bible`** 将讨论确认的内容保存到 world_setting 中。不要等用户说出"改作品圣经"才保存。world_setting 是 `creative_brief` 下的嵌套 JSON，建议包含 power_system（力量体系）、society_structure（社会结构）、key_locations（关键地点）、world_history（世界历史）、hidden_truths（隐藏真相）等子字段，也接受任意其他键名。保存后说明存入了哪些设定模块 |

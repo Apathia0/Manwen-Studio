@@ -2292,6 +2292,7 @@ async def write_chapter_from_pack(
     api_key: str | None = None,
     editor_feedback: list[str] | None = None,
     previous_draft: str = "",
+    previous_chapter_summary: str = "",
     trace_id: str | None = None,
 ) -> dict[str, Any]:
     """正文 agent：只基于创作包写正文或返修。"""
@@ -2366,6 +2367,9 @@ async def write_chapter_from_pack(
     if previous_draft:
         label = "上一版超长正文（只供删减取材，不要扩写）" if previous_char_count > LOCAL_MAX_CHARS else "上一版正文（只用于按编辑意见返修，不要机械复述）"
         previous_block = f"\n## {label}\n" + _clip_text(previous_draft, 11000)
+    previous_chapter_block = ""
+    if previous_chapter_summary and str(previous_chapter_summary).strip():
+        previous_chapter_block = f"\n## 上一章衔接（本章开头必须承接，禁止与上一章内容重复或断档）\n{str(previous_chapter_summary).strip()[:2000]}"
     canonical_content = canonical_pack_content(creation_pack)
     scene_budget = [] if canonical_content is not None else _normalize_scene_budget(creation_pack)
     scene_budget_lines = [
@@ -2388,6 +2392,7 @@ async def write_chapter_from_pack(
 {scene_budget_block}
 {feedback_block}
 {previous_block}
+{previous_chapter_block}
 
 ## 输出要求
 - 直接输出正文，不要标题、Markdown、说明、JSON、字数统计。
@@ -2761,6 +2766,7 @@ async def run_chapter_creation_pipeline(
         api_key=api_key,
         editor_feedback=direct_feedback,
         previous_draft=initial_content or "",
+        previous_chapter_summary=previous_chapter_summary,
         trace_id=trace_id,
     )
     content = str(draft.get("content") or "")

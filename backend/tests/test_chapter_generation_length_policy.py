@@ -1306,6 +1306,62 @@ def test_writer_receives_canonical_creation_pack_without_compaction_or_completio
     assert "completion_contract" not in captured["prompt"]
 
 
+def test_writer_injects_previous_chapter_summary_into_prompt(monkeypatch):
+    import services.chapter_agents as ca
+
+    captured: dict[str, str] = {}
+
+    async def fake_chat_completion(**kwargs):
+        captured["prompt"] = kwargs["messages"][1]["content"]
+        return "正" * 2400, "stop"
+
+    monkeypatch.setattr(ca, "_chat_completion", fake_chat_completion)
+
+    pack = ca._ensure_completion_fields(ca._ensure_scene_budget({
+        "chapter_task": {"chapter_number": 6, "title": "异兽初猎，技术制胜"},
+        "chapter_boundary": {},
+        "plot_beats": ["观察", "交锋", "采集"],
+        "hard_requirements": ["猎杀獠牙野猪", "采集精血、獠牙和兽骨"],
+        "closure_requirements": ["清理现场并撤离", "返回出租屋清点收获"],
+        "missing_if_absent": ["缺少獠牙/兽骨采集必须打回", "缺少返回清点必须打回"],
+        "do_not_write": [],
+    }))
+
+    result = _run(ca.write_chapter_from_pack(
+        creation_pack=pack,
+        api_key="sk-real",
+        previous_chapter_summary="上一章《第5章：初入灰市》章节摘要：陈玄在灰市打探到残卷下落。结尾场景：他站在拍卖行门口。",
+    ))
+
+    assert result["finish_reason"] == "stop"
+    assert "上一章《第5章：初入灰市》" in captured["prompt"]
+    assert "他站在拍卖行门口" in captured["prompt"]
+
+
+def test_pipeline_reused_pack_forwards_previous_chapter_summary_to_writer(monkeypatch):
+    import services.chapter_agents as ca
+
+    captured: dict[str, str] = {}
+    content = "陈玄扣住短刀，沿着石壁逼近洞口。" * 150
+
+    async def fake_writer(**kwargs):
+        captured["previous_chapter_summary"] = kwargs.get("previous_chapter_summary", "")
+        return {"content": content, "finish_reason": "stop"}
+
+    monkeypatch.setattr(ca, "write_chapter_from_pack", fake_writer)
+
+    result = _run(ca.run_chapter_creation_pipeline(
+        story_context={"title": "测试故事"},
+        chapter_info={"chapter_number": 6},
+        api_key="sk-test",
+        previous_chapter_summary="上一章《第5章》摘要：陈玄取得残卷。",
+        creation_pack={"chapter_task": {"chapter_number": 6}, "chapter_boundary": {}},
+    ))
+
+    assert result["ok"] is True
+    assert captured["previous_chapter_summary"] == "上一章《第5章》摘要：陈玄取得残卷。"
+
+
 def test_creation_pack_update_rejects_whitespace_only_content():
     import pytest
     from pydantic import ValidationError
