@@ -199,6 +199,7 @@ def _build_creation_pack_source_digest(
         "characters": context.get("characters"),
         "knowledge_entities": context.get("knowledge_entities"),
         "knowledge_facts": context.get("knowledge_facts"),
+        "knowledge_resources": context.get("knowledge_resources"),
         "open_threads": context.get("open_threads"),
         "reference_takeaways_source": _first_present(
             context,
@@ -225,6 +226,7 @@ def _build_creation_pack_source_digest(
         "characters": 1400,
         "knowledge_entities": 1800,
         "knowledge_facts": 2400,
+        "knowledge_resources": 2000,
         "open_threads": 1800,
         "reference_takeaways_source": 1000,
         "future_chapters_for_boundary_only": 1200,
@@ -876,6 +878,7 @@ def _inject_resolved_knowledge_constraints(
     """把已检索知识确定性注入创作合同，避免前置 Agent 遗漏。"""
     facts = story_context.get("knowledge_facts") if isinstance(story_context, dict) else []
     entities = story_context.get("knowledge_entities") if isinstance(story_context, dict) else []
+    resources = story_context.get("knowledge_resources") if isinstance(story_context, dict) else []
     threads = story_context.get("open_threads") if isinstance(story_context, dict) else []
 
     continuity = _normalize_contract_list(pack.get("continuity"), limit=8)
@@ -892,6 +895,17 @@ def _inject_resolved_knowledge_constraints(
             continuity.append(statement[:180])
         if statement and statement not in must_keep:
             must_keep.append(f"连续性事实：{statement[:150]}")
+
+    for item in resources[:5] if isinstance(resources, list) else []:
+        if not isinstance(item, dict):
+            continue
+        title = str(item.get("title") or "").strip()
+        body = str(item.get("summary") or item.get("content") or "").strip()
+        if not title:
+            continue
+        rule_text = f"{title}：{body}" if body else title
+        if rule_text not in must_keep:
+            must_keep.append(f"设定资料：{rule_text[:160]}")
 
     character_states = _normalize_contract_list(pack.get("character_states"), limit=8)
     for item in entities[:6] if isinstance(entities, list) else []:

@@ -731,6 +731,7 @@ def _migrate_story_knowledge_tables(target_engine=None) -> None:
             table.create(bind=db_engine, checkfirst=True)
 
     knowledge_columns = {
+        "story_knowledge_resources": ("triggers_json", "is_constant"),
         "story_knowledge_entities": ("source_type", "source_id", "version"),
         "story_knowledge_facts": ("source_id", "version", "category_id"),
         "story_plot_threads": ("source_type", "source_id", "version", "category_id"),
@@ -754,6 +755,12 @@ def _migrate_story_knowledge_tables(target_engine=None) -> None:
                 ))
             if "category_id" in expected_columns and "category_id" not in existing:
                 conn.execute(text(f"ALTER TABLE {table_name} ADD COLUMN category_id INTEGER"))
+            if "triggers_json" in expected_columns and "triggers_json" not in existing:
+                conn.execute(text(f"ALTER TABLE {table_name} ADD COLUMN triggers_json JSON"))
+            if "is_constant" in expected_columns and "is_constant" not in existing:
+                conn.execute(text(
+                    f"ALTER TABLE {table_name} ADD COLUMN is_constant BOOLEAN DEFAULT FALSE NOT NULL"
+                ))
 
     if db_engine.dialect.name == "postgresql":
         with db_engine.begin() as conn:

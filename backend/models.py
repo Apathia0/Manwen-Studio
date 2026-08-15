@@ -126,6 +126,8 @@ class StoryKnowledgeResource(Base):
     importance: Mapped[int] = mapped_column(Integer, nullable=False, default=50, server_default="50")
     valid_from_chapter: Mapped[int | None] = mapped_column(Integer, nullable=True)
     valid_to_chapter: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    triggers_json: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
+    is_constant: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="active", server_default="active")
     content_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)

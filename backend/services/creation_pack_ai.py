@@ -120,6 +120,7 @@ def _compact_sections(sections: dict[str, Any], max_chars: int = MAX_INPUT_CHARS
         "open_threads",
         "facts",
         "entities",
+        "resources",
         "recent_chapters",
         "style_profile",
         "user_instruction",

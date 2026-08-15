@@ -54,7 +54,7 @@ KNOWLEDGE_KIND_MODELS = {
 KNOWLEDGE_KIND_FIELDS = {
     "resource": {
         "resource_type", "resource_key", "title", "summary", "content_json", "content_text",
-        "importance", "valid_from_chapter", "valid_to_chapter", "status",
+        "importance", "valid_from_chapter", "valid_to_chapter", "triggers_json", "is_constant", "status",
     },
     "entity": {
         "entity_key", "entity_type", "canonical_name", "aliases_json", "profile_json",
@@ -79,7 +79,7 @@ KNOWLEDGE_KIND_REQUIRED = {
 }
 
 KNOWLEDGE_KIND_DEFAULTS = {
-    "resource": {"resource_type": "manual_note", "importance": 50, "status": "active", "source_type": "manual"},
+    "resource": {"resource_type": "manual_note", "importance": 50, "status": "active", "source_type": "manual", "is_constant": False},
     "entity": {"entity_type": "note", "importance": 50, "status": "active", "source_type": "manual"},
     "fact": {"confidence": Decimal("1.0"), "status": "active", "source_type": "manual"},
     "plot_thread": {"thread_type": "foreshadow", "priority": 50, "status": "open", "source_type": "manual"},
@@ -1079,6 +1079,38 @@ def _source_authority(source_type: str | None) -> int:
     return 8
 
 
+def _rank_resources_for_chapter(resources: list[StoryKnowledgeResource], focus_text: str) -> list[StoryKnowledgeResource]:
+    """按章节相关性给设定资料排序：常驻条目最优先，触发器命中次之，其余按重要度。
+
+    返回排序后的列表，保留全部已召回条目，由后续预算裁剪决定取舍。
+    """
+    focus_lower = str(focus_text or "").strip().casefold()
+    trigger_hits: dict[int, int] = {}
+    for resource in resources:
+        triggers = resource.triggers_json if isinstance(resource.triggers_json, list) else []
+        if not triggers:
+            continue
+        matched = sum(
+            1
+            for trigger in triggers
+            if str(trigger or "").strip() and str(trigger).strip().casefold() in focus_lower
+        )
+        if matched:
+            trigger_hits[resource.id] = matched
+
+    def sort_key(resource: StoryKnowledgeResource) -> tuple[int, int, int]:
+        base = int(getattr(resource, "importance", 50) or 50)
+        if bool(getattr(resource, "is_constant", False)):
+            return (3, trigger_hits.get(resource.id, 0), base)
+        if resource.id in trigger_hits:
+            return (2, trigger_hits[resource.id], base)
+        if _text_relevance(focus_lower, (), resource.title, resource.summary, resource.content_text) > 0:
+            return (1, 0, base)
+        return (0, 0, base)
+
+    return sorted(resources, key=sort_key, reverse=True)
+
+
 def _chapter_number_by_id(db: Session, story_id: int) -> dict[int, int]:
     return {
         int(chapter_id): int(chapter_number)
@@ -1395,6 +1427,7 @@ def resolve_story_context(
                 StoryKnowledgeResource.updated_at.desc(),
             ).limit(100).all(),
         )
+    resources = _rank_resources_for_chapter(resources, focus_text)
     for resource in resources:
         section_key = resource.resource_type if resource.resource_type in requested else "resources"
         sections.setdefault(section_key, [])
@@ -1910,6 +1943,7 @@ def apply_chapter_context_pack(base_context: dict[str, Any], pack: dict[str, Any
     context["knowledge_revision"] = pack.get("knowledge_revision")
     context["knowledge_entities"] = sections.get("entities") or []
     context["knowledge_facts"] = sections.get("facts") or []
+    context["knowledge_resources"] = sections.get("resources") or []
     context["open_threads"] = sections.get("open_threads") or []
     context["resolved_recent_chapters"] = sections.get("recent_chapters") or []
     if sections.get("chapter_plan"):

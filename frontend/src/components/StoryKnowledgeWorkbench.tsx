@@ -104,7 +104,7 @@ export function buildAISyncNotice(task?: BackgroundTaskStatus | null): AISyncNot
 type ViewKey = 'chapter_context' | 'story_bible' | StoryKnowledgeKind;
 type ResourceView = 'reference' | 'library';
 type KnowledgeDisplayMode = 'list' | 'visual';
-type FieldType = 'text' | 'textarea' | 'number' | 'object' | 'list' | 'status' | 'category' | 'resource_type' | 'entity_type' | 'entity_ref';
+type FieldType = 'text' | 'textarea' | 'number' | 'object' | 'list' | 'status' | 'category' | 'resource_type' | 'entity_type' | 'entity_ref' | 'boolean';
 
 interface FieldDefinition {
   key: keyof StoryKnowledgeMutation;
@@ -138,6 +138,8 @@ const FIELD_DEFINITIONS: Record<StoryKnowledgeKind, FieldDefinition[]> = {
     { key: 'summary', label: '摘要', type: 'textarea' },
     { key: 'content_text', label: '正文内容', type: 'textarea' },
     { key: 'content_json', label: '结构化补充', type: 'object' },
+    { key: 'triggers_json', label: '触发关键词', type: 'list', placeholder: '每行一个关键词，章节大纲或指令命中时自动注入。例如：火球术、斗气' },
+    { key: 'is_constant', label: '每章常驻', type: 'boolean', placeholder: '开启后每章创作必带此资料（适合世界观总纲、核心规则）' },
     { key: 'importance', label: '重要度', type: 'number' },
     { key: 'valid_from_chapter', label: '起始章节', type: 'number' },
     { key: 'valid_to_chapter', label: '结束章节', type: 'number' },
@@ -1124,6 +1126,11 @@ function KnowledgeField({ kind, field, value, rows, categories, entities, onChan
           <option value="">{field.key === 'subject_key' ? '全书设定（不生成关系线）' : '无明确关联对象'}</option>
           {entities.filter((entity) => entity.status !== 'archived').map((entity) => <option key={entity.id} value={entity.entity_key || entity.canonical_name || ''}>{entity.canonical_name || entity.title || '未命名对象'}</option>)}
         </Select>
+      ) : field.type === 'boolean' ? (
+        <label htmlFor={id} className="flex cursor-pointer items-center gap-2 rounded-md border border-slate-200 px-3 py-2.5">
+          <input id={id} type="checkbox" checked={value === 'true'} onChange={(event) => onChange(event.target.checked ? 'true' : 'false')} className="h-4 w-4 rounded border-slate-300 accent-slate-900" />
+          <span className="text-xs text-slate-600">{field.placeholder || field.label}</span>
+        </label>
       ) : (
         <Input {...common} type={field.type === 'number' ? 'number' : 'text'} step={field.key === 'confidence' ? '0.01' : '1'} className="rounded-md max-md:min-h-11" />
       )}
@@ -1888,6 +1895,7 @@ function buildInitialValues(definitions: FieldDefinition[], item: StoryKnowledge
       continue;
     }
     if (field.type === 'list' && Array.isArray(value)) values[String(field.key)] = value.join('\n');
+    else if (field.type === 'boolean') values[String(field.key)] = value ? 'true' : 'false';
     else values[String(field.key)] = value == null ? '' : String(value);
   }
   return values;
@@ -1911,6 +1919,7 @@ function buildPayload(kind: StoryKnowledgeKind, definitions: FieldDefinition[], 
     if (field.type === 'status' && !raw) continue;
     if (field.type === 'object') payload[key] = worldSettingRowsToObject(objects[key] || []);
     else if (field.type === 'list') payload[key] = lineList(raw);
+    else if (field.type === 'boolean') payload[key] = raw === 'true';
     else if (field.type === 'number' || field.type === 'category') payload[key] = raw ? Number(raw) : null;
     else payload[key] = raw || null;
   }

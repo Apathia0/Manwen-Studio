@@ -549,6 +549,8 @@ export interface StoryKnowledgeItem {
   importance?: number | null;
   valid_from_chapter?: number | null;
   valid_to_chapter?: number | null;
+  triggers_json?: string[] | null;
+  is_constant?: boolean | null;
   status?: string | null;
   source_type?: string | null;
   source_id?: string | null;

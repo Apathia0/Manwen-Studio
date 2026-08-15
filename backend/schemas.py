@@ -35,6 +35,8 @@ class StoryKnowledgeMutation(BaseModel):
     importance: Optional[int] = Field(default=None, ge=0, le=100)
     valid_from_chapter: Optional[int] = Field(default=None, ge=1)
     valid_to_chapter: Optional[int] = Field(default=None, ge=1)
+    triggers_json: Optional[list[str]] = None
+    is_constant: Optional[bool] = None
     status: Optional[str] = Field(default=None, max_length=20)
 
     entity_key: Optional[str] = Field(default=None, max_length=160)
