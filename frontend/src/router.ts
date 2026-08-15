@@ -26,8 +26,7 @@ export type RouteKey =
   | 'style-presets'
   | 'deconstruction-library'
   | 'points-ai-admin'
-  | 'tasks'
-  | 'assets';
+  | 'tasks';
 
 /** RouteKey → URL path 映射（react-router 正式路由） */
 export const ROUTE_PATHS: Record<RouteKey, string> = {
@@ -59,7 +58,6 @@ export const ROUTE_PATHS: Record<RouteKey, string> = {
   'deconstruction-library': '/deconstruction',
   'points-ai-admin': '/admin/points-ai-admin',
   tasks: '/tasks',
-  assets: '/assets',
 };
 
 const PATH_TO_ROUTE: Record<string, RouteKey> = Object.fromEntries(

@@ -5,7 +5,6 @@ import {
   Brush,
   CreditCard,
   Home,
-  Images,
   Library,
   MessageSquareQuote,
   Cpu,
@@ -66,7 +65,6 @@ import { PointsAiAdminPage } from './components/admin/PointsAiAdminPage';
 import { CreationStudioPage } from './components/CreationStudioPage';
 import { ModelCatalogPage } from './components/ModelCatalogPage';
 import { TasksPage } from './components/TasksPage';
-import AssetsPage from './components/AssetsPage';
 import { DesktopAppShell, type ShellNavItem } from './components/shell/DesktopAppShell';
 import { TabletAppShell } from './components/shell/TabletAppShell';
 import { MobileAppShell, DEFAULT_BOTTOM_NAV } from './components/shell/MobileAppShell';
@@ -113,7 +111,6 @@ const LS_NAV_COLLAPSED = 'storycanvas.navCollapsed';
 const USER_NAV: ShellNavItem[] = [
   { key: 'stories', label: '作品', icon: Home },
   { key: 'creation-studio', label: '创作台', icon: Sparkles },
-  { key: 'assets', label: '资产', icon: Images },
   { key: 'model-catalog', label: '模型广场', icon: Cpu },
   { key: 'workspace', label: '作品工作台', icon: Brush },
   { key: 'deconstruction-library', label: '拆书库', icon: BookOpen },
@@ -121,8 +118,7 @@ const USER_NAV: ShellNavItem[] = [
   { key: 'pricing', label: '积分套餐', icon: CreditCard },
 ];
 
-/** 移动端底部导航：默认 5 项 + 资产中心（grid-cols-6 对应 6 项） */
-const MOBILE_NAV_ITEMS: BottomNavItem[] = [...DEFAULT_BOTTOM_NAV, { key: 'assets', label: '资产', icon: Images }];
+const MOBILE_NAV_ITEMS: BottomNavItem[] = DEFAULT_BOTTOM_NAV;
 
 const ADMIN_NAV: ShellNavItem[] = [
   { key: 'points-ai-admin', label: '积分与 AI 渠道', icon: CreditCard },
@@ -811,7 +807,6 @@ function App() {
         />
       )}
       {route === 'model-catalog' && <ModelCatalogPage />}
-      {route === 'assets' && <AssetsPage />}
       {route === 'quota-rules' && session.role === 'admin' && (
         <AdminPlatformSettingsPage
           onError={(message) => toast.error(message)}
