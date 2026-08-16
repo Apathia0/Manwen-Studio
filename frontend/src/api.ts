@@ -443,6 +443,7 @@ export interface OnboardingChatMessage {
   role: 'user' | 'assistant';
   content: string;
   creative_brief?: CreativeBrief;  // 分析卡（仅 assistant 消息）
+  decision?: OnboardingDecision;
 }
 
 export interface Understanding {
@@ -453,14 +454,30 @@ export interface Understanding {
   synthesis: string;
 }
 
+export interface OnboardingDecisionOption {
+  id: string;
+  label: string;
+  value: string;
+  reason?: string;
+}
+
+export interface OnboardingDecision {
+  field: keyof Understanding;
+  question: string;
+  options: OnboardingDecisionOption[];
+}
+
 export interface OnboardingMessageOut {
   reply: string;
   // 新字段
   understanding: Understanding;
   understanding_depth: number;
-  phase: 'extracting';
+  phase: 'extracting' | 'refining' | 'deciding' | 'synthesizing';
   has_brief: boolean;
   creative_brief?: CreativeBrief;
+  active_field?: keyof Understanding;
+  incomplete_fields: (keyof Understanding)[];
+  decision?: OnboardingDecision;
   // 保留兼容字段
   collected_info: Record<string, string>;
   step: number;
@@ -2624,7 +2641,8 @@ export async function confirmOnboarding(
   creativeBrief?: CreativeBrief,
 ): Promise<OnboardingConfirmResponse> {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 300_000);
+  // Story Bible 与开书框架会串行生成，超时需覆盖后端最慢的合法执行窗口。
+  const timer = setTimeout(() => controller.abort(), 1_200_000);
   let res: Response;
   try {
     res = await fetch(`${BASE}/api/stories/${storyId}/onboarding/confirm`, {

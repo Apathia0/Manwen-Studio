@@ -3472,6 +3472,424 @@ async def scenes_from_selection(
 # ONBOARDING_SYSTEM_PROMPT 种子数据已移至 main.py _seed_system_prompts
 
 
+_ONBOARDING_UNDERSTANDING_FIELDS = (
+    "concept",
+    "setting",
+    "tone",
+    "goals",
+    "synthesis",
+)
+
+_ONBOARDING_FALLBACK_QUESTIONS = {
+    "concept": "作品属于什么类型？主角的身份和开篇核心冲突是什么？",
+    "setting": "这个故事的世界观核心规则是什么？力量从何而来，又受到什么限制？",
+    "tone": "你希望作品呈现哪些风格标签？请给出 3 到 5 个关键词。",
+    "goals": "你计划写多长，主要面向哪类读者？",
+    "synthesis": "最后请描述主角的姓名、核心人设和人物成长方向。",
+}
+
+_ONBOARDING_FIELD_LABELS = {
+    "concept": "故事概念",
+    "setting": "世界观与规则",
+    "tone": "风格标签",
+    "goals": "创作目标",
+    "synthesis": "主角设定",
+}
+
+_ONBOARDING_INCOMPLETE_MARKERS = (
+    "待定",
+    "待补充",
+    "未定",
+    "未确定",
+    "你定",
+    "你决定",
+    "都可以",
+    "随便",
+    "未知",
+    "暂无",
+    "不清楚",
+    "没想好",
+)
+
+_ONBOARDING_DECISION_FALLBACKS = {
+    "tone": [
+        {"label": "热血升级", "value": "热血、爽文、升级、群像", "reason": "突出战斗成长和阶段回报"},
+        {"label": "悬疑高武", "value": "高武、悬疑、克制、反转", "reason": "强化世界秘密和调查感"},
+        {"label": "轻松智斗", "value": "轻松、智斗、成长、反套路", "reason": "降低压抑感并突出主角判断力"},
+    ],
+    "goals": [
+        {"label": "中篇快节奏", "value": "中篇连载，面向喜欢快节奏升级与强情节反转的网文读者", "reason": "结构紧凑，较快形成完整主线"},
+        {"label": "长篇成长线", "value": "长篇连载，面向喜欢体系升级、势力经营和群像成长的男频读者", "reason": "适合持续扩展世界与角色关系"},
+        {"label": "短篇强反转", "value": "短篇故事，面向偏爱高概念设定和结局反转的泛悬疑读者", "reason": "聚焦单一冲突，完成度更可控"},
+    ],
+    "synthesis": [
+        {"label": "冷静分析型", "value": "林默，出身普通但观察敏锐，习惯先分析再行动；他将从只求自保成长为敢于承担责任的团队核心", "reason": "适合智斗与规则破解"},
+        {"label": "热血行动型", "value": "周野，性格直率坚韧，擅长在绝境中寻找突破口；他将从冲动独行成长为懂得信任同伴的领队", "reason": "战斗推动力强，人物弧线明确"},
+        {"label": "灰度调查型", "value": "沈砚，曾因一次失败任务失去搭档，理性克制却不再轻信权威；他将在追查真相时重新建立信念与关系", "reason": "适合悬疑和阵营冲突"},
+    ],
+}
+
+
+def _normalize_onboarding_understanding(value: Any) -> dict[str, str]:
+    """将理解状态规范为固定五字段，非字符串值按空值处理。"""
+    source = value if isinstance(value, dict) else {}
+    return {
+        field: source[field].strip()
+        if isinstance(source.get(field), str)
+        else ""
+        for field in _ONBOARDING_UNDERSTANDING_FIELDS
+    }
+
+
+def _is_onboarding_delegation_request(text: str) -> bool:
+    """识别希望 AI 提供建议并代为决策的表达。"""
+    normalized = re.sub(r"[\s，。！？!?,；;、~～]+", "", (text or "").lower())
+    if not normalized or len(normalized) > 48:
+        return False
+    markers = (
+        "你定",
+        "你来定",
+        "你决定",
+        "帮我定",
+        "帮我决定",
+        "帮我选",
+        "给我建议",
+        "你建议",
+        "推荐",
+        "都可以",
+        "听你的",
+        "随便",
+        "没想好",
+    )
+    return any(marker in normalized for marker in markers)
+
+
+def _onboarding_field_is_complete(field: str, value: str) -> bool:
+    """按字段语义判断设定卡是否足以进入下一步。"""
+    text = str(value or "").strip()
+    compact = re.sub(r"\s+", "", text)
+    if not compact or any(marker in compact for marker in _ONBOARDING_INCOMPLETE_MARKERS):
+        return False
+    if field == "concept":
+        return len(compact) >= 10
+    if field == "setting":
+        return len(compact) >= 8
+    if field == "tone":
+        tags = [item.strip() for item in re.split(r"[,，、/|；;\s]+", text) if item.strip()]
+        return len(tags) >= 3
+    if field == "goals":
+        has_length = any(marker in compact for marker in ("短篇", "中篇", "长篇", "连载", "章", "字"))
+        has_audience = any(
+            marker in compact
+            for marker in ("读者", "受众", "面向", "男频", "女频", "轻小说", "青少年", "成年")
+        )
+        return has_length and has_audience
+    if field == "synthesis":
+        return len(compact) >= 10
+    return False
+
+
+def _build_onboarding_gap_question(field: str, value: str) -> str:
+    """引用已记录内容，并且只追问当前设定卡仍缺少的信息。"""
+    text = str(value or "").strip()
+    if not text:
+        return _ONBOARDING_FALLBACK_QUESTIONS[field]
+    display_value = text if len(text) <= 80 else f"{text[:77]}..."
+    recorded = f"已记录{_ONBOARDING_FIELD_LABELS[field]}为“{display_value}”。"
+
+    if field == "concept":
+        return f"{recorded}还需要补充主角身份和开篇核心事件：主角是谁，故事从什么变故开始？"
+    if field == "setting":
+        return f"{recorded}还需要补充一项关键规则：力量来源、使用限制或社会结构中，你想先明确哪一项？"
+    if field == "tone":
+        tags = [item.strip() for item in re.split(r"[,，、/|；;\s]+", text) if item.strip()]
+        missing_count = max(1, 3 - len(tags))
+        return f"{recorded}还需要至少 {missing_count} 个风格关键词，例如节奏、情绪或叙事风格。"
+    if field == "goals":
+        compact = re.sub(r"\s+", "", text)
+        has_length = any(marker in compact for marker in ("短篇", "中篇", "长篇", "连载", "章", "字"))
+        has_audience = any(
+            marker in compact
+            for marker in ("读者", "受众", "面向", "男频", "女频", "轻小说", "青少年", "成年")
+        )
+        if has_length and not has_audience:
+            return (
+                f"{recorded}篇幅信息已经明确，还需要明确主要读者："
+                "更偏男频升级、女频成长、轻小说，还是悬疑读者？"
+            )
+        if has_audience and not has_length:
+            return f"{recorded}读者方向已经明确，还需要确定篇幅：短篇、中篇还是长篇？"
+        return f"{recorded}还需要明确目标篇幅和主要读者。"
+    if field == "synthesis":
+        return f"{recorded}还需要补充主角的姓名、核心人设和成长方向。"
+    return _ONBOARDING_FALLBACK_QUESTIONS[field]
+
+
+def _onboarding_incomplete_fields(understanding: dict[str, str]) -> list[str]:
+    return [
+        field
+        for field in _ONBOARDING_UNDERSTANDING_FIELDS
+        if not _onboarding_field_is_complete(field, understanding.get(field, ""))
+    ]
+
+
+def _fallback_onboarding_decision(field: str, understanding: dict[str, str]) -> dict[str, Any]:
+    concept = str(understanding.get("concept") or "").strip()
+    topic = re.split(r"[，,；;。]", concept, maxsplit=1)[0].strip()
+    topic = re.sub(r"(待定|待补充|未定|未确定|你定|你决定)", "", topic).strip() or "当前题材"
+    options_source: list[dict[str, str]]
+    if field == "concept":
+        options_source = [
+            {
+                "label": "普通人卷入危机",
+                "value": f"{topic}，主角是意外卷入核心事件的普通人，从一次打破日常秩序的突发危机切入",
+                "reason": "代入门槛低，开篇冲突直接",
+            },
+            {
+                "label": "行业新人调查",
+                "value": f"{topic}，主角是背负秘密的行业新人，从调查一桩与自身过去相关的异常事件切入",
+                "reason": "便于同时展开职业线和悬念线",
+            },
+            {
+                "label": "边缘人物逆袭",
+                "value": f"{topic}，主角是长期被低估的边缘人物，从一次迫使其公开隐藏能力的事件切入",
+                "reason": "人物目标明确，成长回报稳定",
+            },
+        ]
+    elif field == "setting":
+        options_source = [
+            {
+                "label": "公开秩序体系",
+                "value": f"在{topic}中，核心力量向社会公开并由学校、行业组织和官方机构分级管理，越级使用力量会造成明确代价",
+                "reason": "规则直观，适合稳定升级和势力竞争",
+            },
+            {
+                "label": "隐秘双层世界",
+                "value": f"在{topic}中，异常力量隐藏于日常社会之下，通过特殊资格获得并伴随反噬，官方机构负责封锁真相",
+                "reason": "悬念感强，适合逐层揭密",
+            },
+            {
+                "label": "灾变资源体系",
+                "value": f"在{topic}中，周期性灾变产生稀缺强化资源，各方势力围绕资源分配竞争，力量越强越容易受到污染",
+                "reason": "冲突密度高，便于长线扩展",
+            },
+        ]
+    else:
+        options_source = _ONBOARDING_DECISION_FALLBACKS[field]
+    return {
+        "field": field,
+        "question": f"当前{_ONBOARDING_FIELD_LABELS[field]}还不完整，请选择一个方向：",
+        "options": [
+            {"id": chr(65 + index), **option}
+            for index, option in enumerate(options_source)
+        ],
+    }
+
+
+def _normalize_onboarding_decision(value: Any, active_field: str | None) -> dict[str, Any] | None:
+    if not active_field or not isinstance(value, dict) or value.get("field") != active_field:
+        return None
+    options_raw = value.get("options")
+    if not isinstance(options_raw, list):
+        return None
+    options: list[dict[str, str]] = []
+    for index, item in enumerate(options_raw[:3]):
+        if not isinstance(item, dict):
+            continue
+        label = str(item.get("label") or "").strip()
+        option_value = str(item.get("value") or "").strip()
+        reason = str(item.get("reason") or "").strip()
+        if not label or not _onboarding_field_is_complete(active_field, option_value):
+            continue
+        options.append({
+            "id": str(item.get("id") or chr(65 + index)).strip(),
+            "label": label,
+            "value": option_value,
+            "reason": reason,
+        })
+    if len(options) < 2:
+        return None
+    question = str(value.get("question") or "").strip()
+    return {
+        "field": active_field,
+        "question": question or f"请选择一个{_ONBOARDING_FIELD_LABELS[active_field]}方向：",
+        "options": options,
+    }
+
+
+def _latest_onboarding_user_text(messages: list[dict]) -> str:
+    for message in reversed(messages):
+        if isinstance(message, dict) and message.get("role") == "user":
+            content = message.get("content")
+            if isinstance(content, str) and content.strip():
+                return content.strip()
+    return ""
+
+
+def _normalize_onboarding_comparison_text(value: str) -> str:
+    """忽略常见标点和空白，判断模型是否只是回显上一轮设定。"""
+    return re.sub(
+        r"[\s，。！？!?,；;、~～：:“”\"'（）()【】\[\]{}]+",
+        "",
+        str(value or "").lower(),
+    )
+
+
+def _is_onboarding_generation_request(text: str) -> bool:
+    """识别要求直接生成内容的控制指令，避免将其写入理解字段。"""
+    normalized = re.sub(r"[\s，。！？!?,；;、~～]+", "", (text or "").lower())
+    if not normalized or len(normalized) > 32:
+        return False
+    generation_markers = (
+        "生成",
+        "开始写",
+        "直接写",
+        "写正文",
+        "写框架",
+        "写大纲",
+        "开始创作",
+        "继续创作",
+        "创建框架",
+        "创建大纲",
+    )
+    return normalized in {"写吧", "开始吧", "继续吧"} or any(
+        marker in normalized for marker in generation_markers
+    )
+
+
+def _extract_partial_onboarding_understanding(raw_content: str) -> dict[str, str]:
+    """从截断 JSON 中尽可能提取已经闭合的五字段字符串。"""
+    extracted: dict[str, str] = {}
+    for field in _ONBOARDING_UNDERSTANDING_FIELDS:
+        match = re.search(
+            rf'"{field}"\s*:\s*"((?:[^"\\]|\\.)*)"',
+            raw_content or "",
+        )
+        if not match:
+            continue
+        try:
+            value = json.loads(f'"{match.group(1)}"')
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, str) and value.strip():
+            extracted[field] = value.strip()
+    return extracted
+
+
+def _build_normalized_onboarding_response(
+    raw_content: str,
+    parsed_result: dict[str, Any] | None,
+    messages: list[dict],
+    previous_understanding: dict[str, str] | None,
+) -> dict:
+    """合并 AI 提取结果与确定性回退，并由服务端推导完成状态。"""
+    previous = _normalize_onboarding_understanding(previous_understanding)
+    merged = dict(previous)
+    previous_incomplete_fields = _onboarding_incomplete_fields(previous)
+    active_field = previous_incomplete_fields[0] if previous_incomplete_fields else None
+    latest_user_text = _latest_onboarding_user_text(messages)
+    is_delegation_request = _is_onboarding_delegation_request(latest_user_text)
+    ai_understanding = (
+        parsed_result.get("understanding") if isinstance(parsed_result, dict) else None
+    )
+    newly_extracted = {
+        field: value
+        for field, value in _normalize_onboarding_understanding(ai_understanding).items()
+        if value
+    }
+    if parsed_result is None:
+        newly_extracted.update(_extract_partial_onboarding_understanding(raw_content))
+    newly_extracted = {
+        field: value
+        for field, value in newly_extracted.items()
+        if not _is_onboarding_delegation_request(value)
+    }
+    if is_delegation_request:
+        newly_extracted = {}
+    for field, value in newly_extracted.items():
+        previous_value = merged.get(field, "")
+        if (
+            field == active_field
+            and field == "goals"
+            and previous_value
+            and value != previous_value
+            and not _onboarding_field_is_complete(field, previous_value)
+            and not _onboarding_field_is_complete(field, value)
+        ):
+            combined_value = (
+                previous_value
+                if value in previous_value
+                else f"{previous_value}；{value}"
+            )
+            merged[field] = combined_value
+        else:
+            merged[field] = value
+
+    is_generation_request = _is_onboarding_generation_request(latest_user_text)
+    active_extracted_value = newly_extracted.get(active_field, "") if active_field else ""
+    model_kept_previous_active_value = bool(
+        active_field
+        and active_extracted_value
+        and _normalize_onboarding_comparison_text(active_extracted_value)
+        == _normalize_onboarding_comparison_text(previous.get(active_field, ""))
+    )
+    if (
+        active_field
+        and not _onboarding_field_is_complete(active_field, merged.get(active_field, ""))
+        and (not active_extracted_value or model_kept_previous_active_value)
+        and latest_user_text
+        and not _is_brief_confirmation(latest_user_text)
+        and not is_generation_request
+        and not is_delegation_request
+    ):
+        previous_value = merged.get(active_field, "")
+        if _onboarding_field_is_complete(active_field, latest_user_text) or not previous_value:
+            merged[active_field] = latest_user_text
+        elif latest_user_text not in previous_value:
+            merged[active_field] = f"{previous_value}；{latest_user_text}"
+
+    incomplete_fields = _onboarding_incomplete_fields(merged)
+    completed_count = len(_ONBOARDING_UNDERSTANDING_FIELDS) - len(incomplete_fields)
+    has_brief = completed_count == len(_ONBOARDING_UNDERSTANDING_FIELDS)
+    decision = None
+    if is_delegation_request and active_field:
+        raw_decision = parsed_result.get("decision") if isinstance(parsed_result, dict) else None
+        decision = _normalize_onboarding_decision(raw_decision, active_field)
+        if decision is None:
+            decision = _fallback_onboarding_decision(active_field, merged)
+    if has_brief:
+        reply = "提取完毕，准备生成。"
+        phase = "synthesizing"
+    elif decision:
+        reply = decision["question"]
+        phase = "deciding"
+    else:
+        next_field = incomplete_fields[0]
+        candidate_reply = parsed_result.get("reply") if isinstance(parsed_result, dict) else ""
+        next_value = merged.get(next_field, "")
+        if next_value:
+            reply = _build_onboarding_gap_question(next_field, next_value)
+        elif next_field != active_field:
+            reply = _ONBOARDING_FALLBACK_QUESTIONS[next_field]
+        elif is_generation_request or not isinstance(candidate_reply, str) or not candidate_reply.strip():
+            reply = _ONBOARDING_FALLBACK_QUESTIONS[next_field]
+        else:
+            reply = candidate_reply.strip()
+        phase = "refining" if completed_count >= 2 else "extracting"
+
+    return {
+        "reply": reply,
+        "understanding": merged,
+        "understanding_depth": completed_count * 20,
+        "phase": phase,
+        "has_brief": has_brief,
+        "creative_brief": None,
+        "active_field": incomplete_fields[0] if incomplete_fields else None,
+        "incomplete_fields": incomplete_fields,
+        "decision": decision,
+    }
+
+
 async def generate_onboarding_response(
     messages: list[dict],
     understanding: dict[str, str] | None = None,
@@ -3481,12 +3899,25 @@ async def generate_onboarding_response(
 ) -> dict:
     """生成引导建书对话中 AI 的下一轮回复，含自动重试韧性"""
     last_error: Exception | None = None
-    understanding_snapshot = json.dumps(understanding or {}, ensure_ascii=False)
+    normalized_understanding = _normalize_onboarding_understanding(understanding)
+    understanding_snapshot = json.dumps(normalized_understanding, ensure_ascii=False)
+    incomplete_fields = _onboarding_incomplete_fields(normalized_understanding)
+    active_field = incomplete_fields[0] if incomplete_fields else None
     onboarding_state_hint = (
         "\n\n## 当前已确认理解\n"
         f"- current_understanding: {understanding_snapshot}\n"
+        f"- incomplete_fields: {json.dumps(incomplete_fields, ensure_ascii=False)}\n"
+        f"- active_field: {active_field or 'none'}\n"
         "更新 understanding 时遵守：对于「是的/嗯/对」这类确认回答，"
-        "保留上一轮已判断出的内容，不要清空。"
+        "保留上一轮已判断出的内容，不要清空。\n"
+        "必须先补齐 active_field，不得因为字段非空就跳过其中的‘待定/待补充’内容。\n"
+        "用户说「你定」「推荐」「都可以」「帮我选」时，先读取 current_understanding，"
+        "不要把这些原话写入 understanding，也不要直接替用户决定。"
+        "请返回 decision={field,question,options}，field 必须等于 active_field，"
+        "options 提供 2-3 项，每项包含 label、value、reason；value 必须信息完整且可直接写入该设定卡。\n"
+        "用户选择某个方案后，才把方案的完整 value 写入 active_field。\n"
+        "用户说「生成」「开始写」「写正文」「写框架」时，这只是推进引导的控制指令；"
+        "禁止生成框架、正文、大纲或样章，只能返回规定的 JSON 对象并继续补齐缺失字段。"
     )
 
     for attempt in range(max_retries + 1):
@@ -3498,8 +3929,10 @@ async def generate_onboarding_response(
                     *messages,
                 ],
                 "stream": False,
-                "max_tokens": 500,
+                "max_tokens": 2048,
+                "response_format": {"type": "json_object"},
             }
+            payload = _apply_runtime_params(payload)
 
             async with httpx.AsyncClient(timeout=120) as client:
                 resp = await client.post(
@@ -3514,49 +3947,14 @@ async def generate_onboarding_response(
             try:
                 result = _extract_json_object(content)
             except ValueError:
-                # 尝试从可能不完整的JSON中提取reply字段
-                reply_match = re.search(r'"reply"\s*:\s*"((?:[^"\\]|\\.)*)"', content)
-                if reply_match:
-                    reply_text = reply_match.group(1).replace('\\"', '"').replace('\\n', '\n')
-                    return {
-                        "reply": reply_text,
-                        "understanding": understanding or {},
-                        "understanding_depth": 0,
-                        "phase": "extracting",
-                        "has_brief": False,
-                        "creative_brief": None,
-                    }
-                # fallback：返回纯文本内容
-                return {
-                    "reply": content.strip(),
-                    "understanding": understanding or {},
-                    "understanding_depth": 0,
-                    "phase": "extracting",
-                    "has_brief": False,
-                    "creative_brief": None,
-                }
+                result = None
 
-            # 验证必要字段
-            reply = result.get("reply", "")
-            if not reply.strip():
-                raise ValueError("AI 返回空回复")
-
-            # 提取 understanding
-            ai_understanding = result.get("understanding", {})
-            if not isinstance(ai_understanding, dict):
-                ai_understanding = {}
-
-            # 合并：AI 输出的 understanding 覆盖旧值
-            merged_understanding = {**(understanding or {}), **ai_understanding}
-
-            return {
-                "reply": reply,
-                "understanding": merged_understanding,
-                "understanding_depth": int(result.get("understanding_depth", 0)),
-                "phase": str(result.get("phase", "extracting")),
-                "has_brief": bool(result.get("has_brief", False)),
-                "creative_brief": None,  # 后端 confirm 时自动构建，AI 不输出
-            }
+            return _build_normalized_onboarding_response(
+                content,
+                result,
+                messages,
+                normalized_understanding,
+            )
 
         except (httpx.HTTPError, json.JSONDecodeError, ValueError, KeyError) as e:
             last_error = e

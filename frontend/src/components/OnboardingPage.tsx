@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ArrowLeft,
+  Check,
   Cpu,
   Loader2,
   MessageSquare,
@@ -13,6 +14,7 @@ import {
   skipOnboarding,
   type CreativeBrief,
   type OnboardingChatMessage,
+  type OnboardingDecision,
   type Story,
   type Understanding,
 } from '../api';
@@ -36,6 +38,8 @@ export default function OnboardingPage({ story, onComplete, onBack }: Props) {
   const [understandingDepth, setUnderstandingDepth] = useState(0);
   const [showBrief, setShowBrief] = useState(false);
   const [creativeBrief, setCreativeBrief] = useState<CreativeBrief | null>(null);
+  const [incompleteFields, setIncompleteFields] = useState<(keyof Understanding)[]>([]);
+  const [resolvedDecisions, setResolvedDecisions] = useState<Record<number, string>>({});
   const [error, setError] = useState('');
   type OnboardingPhase = 'chatting' | 'confirming' | 'ready' | 'error';
   const [phase, setPhase] = useState<OnboardingPhase>('chatting');
@@ -53,8 +57,8 @@ export default function OnboardingPage({ story, onComplete, onBack }: Props) {
     }
   }, [loading]);
 
-  const handleSend = useCallback(async () => {
-    const text = input.trim();
+  const handleSend = useCallback(async (suggestedText?: string, decisionIndex?: number) => {
+    const text = (suggestedText ?? input).trim();
     if (!text || loading) return;
 
     setInput('');
@@ -70,6 +74,10 @@ export default function OnboardingPage({ story, onComplete, onBack }: Props) {
 
       setUnderstanding(result.understanding || {});
       setUnderstandingDepth(result.understanding_depth || 0);
+      setIncompleteFields(result.incomplete_fields || []);
+      if (decisionIndex !== undefined) {
+        setResolvedDecisions((previous) => ({ ...previous, [decisionIndex]: text }));
+      }
 
       if (result.has_brief && result.creative_brief) {
         setCreativeBrief(result.creative_brief);
@@ -84,11 +92,12 @@ export default function OnboardingPage({ story, onComplete, onBack }: Props) {
         const assistantMsg: OnboardingChatMessage = {
           role: 'assistant',
           content: result.reply,
+          decision: result.decision,
         };
         setMessages((prev) => [...prev, assistantMsg]);
       }
-    } catch (err: any) {
-      setError(err.message || '对话失败，请重试');
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : '对话失败，请重试');
     } finally {
       setLoading(false);
     }
@@ -106,10 +115,18 @@ export default function OnboardingPage({ story, onComplete, onBack }: Props) {
     setPhase('confirming');
     setConfirmError('');
     try {
-      await confirmOnboarding(story.id, understanding as Record<string, string>, messages, creativeBrief ?? undefined);
+      const result = await confirmOnboarding(
+        story.id,
+        understanding as Record<string, string>,
+        messages,
+        creativeBrief ?? undefined,
+      );
+      if (!result.framework) {
+        throw new Error('故事框架尚未生成完成，请重试');
+      }
       setPhase('ready');
-    } catch (err: any) {
-      setConfirmError(err.message || '确认失败');
+    } catch (err: unknown) {
+      setConfirmError(err instanceof Error ? err.message : '确认失败');
       setPhase('error');
     } finally {
       setLoading(false);
@@ -128,8 +145,8 @@ export default function OnboardingPage({ story, onComplete, onBack }: Props) {
     try {
       await skipOnboarding(story.id);
       onComplete(story.id);
-    } catch (err: any) {
-      setError(err.message || '跳过引导失败，请重试');
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : '跳过引导失败，请重试');
     } finally {
       setLoading(false);
     }
@@ -164,7 +181,7 @@ export default function OnboardingPage({ story, onComplete, onBack }: Props) {
               style={{ width: `${understandingDepth}%` }}
             />
           </div>
-          <span>{Object.values(understanding).filter(Boolean).length}/5</span>
+          <span>{Math.round(understandingDepth / 20)}/5</span>
         </div>
       </div>
 
@@ -188,6 +205,13 @@ export default function OnboardingPage({ story, onComplete, onBack }: Props) {
                     brief={msg.creative_brief}
                     onConfirm={() => void handleConfirm()}
                     onContinue={handleContinueEdit}
+                  />
+                ) : msg.role === 'assistant' && msg.decision ? (
+                  <DecisionCardInline
+                    decision={msg.decision}
+                    disabled={loading || resolvedDecisions[idx] !== undefined}
+                    selectedValue={resolvedDecisions[idx]}
+                    onSelect={(value) => void handleSend(value, idx)}
                   />
                 ) : (
                   <div
@@ -340,7 +364,7 @@ export default function OnboardingPage({ story, onComplete, onBack }: Props) {
           <div className="mt-3 space-y-3">
             {understanding.concept ? (
               <div className="rounded-2xl border border-[#d7e3f4] bg-white p-3">
-                <div className="text-[11px] font-medium text-[#2563eb]">💡 核心概念</div>
+                <UnderstandingCardTitle label="💡 核心概念" incomplete={incompleteFields.includes('concept')} />
                 <div className="mt-1 text-xs leading-5 text-slate-600 line-clamp-4">
                   {understanding.concept}
                 </div>
@@ -348,7 +372,7 @@ export default function OnboardingPage({ story, onComplete, onBack }: Props) {
             ) : null}
             {understanding.setting ? (
               <div className="rounded-2xl border border-[#d7e3f4] bg-white p-3">
-                <div className="text-[11px] font-medium text-[#2563eb]">🌍 世界观与规则</div>
+                <UnderstandingCardTitle label="🌍 世界观与规则" incomplete={incompleteFields.includes('setting')} />
                 <div className="mt-1 text-xs leading-5 text-slate-600">
                   {understanding.setting}
                 </div>
@@ -356,7 +380,7 @@ export default function OnboardingPage({ story, onComplete, onBack }: Props) {
             ) : null}
             {understanding.tone ? (
               <div className="rounded-2xl border border-[#d7e3f4] bg-white p-3">
-                <div className="text-[11px] font-medium text-[#2563eb]">🏷️ 风格标签</div>
+                <UnderstandingCardTitle label="🏷️ 风格标签" incomplete={incompleteFields.includes('tone')} />
                 <div className="mt-1 text-xs leading-5 text-slate-600">
                   {understanding.tone}
                 </div>
@@ -364,7 +388,7 @@ export default function OnboardingPage({ story, onComplete, onBack }: Props) {
             ) : null}
             {understanding.goals ? (
               <div className="rounded-2xl border border-[#d7e3f4] bg-white p-3">
-                <div className="text-[11px] font-medium text-[#2563eb]">🎯 创作目标</div>
+                <UnderstandingCardTitle label="🎯 创作目标" incomplete={incompleteFields.includes('goals')} />
                 <div className="mt-1 text-xs leading-5 text-slate-600">
                   {understanding.goals}
                 </div>
@@ -372,7 +396,7 @@ export default function OnboardingPage({ story, onComplete, onBack }: Props) {
             ) : null}
             {understanding.synthesis ? (
               <div className="rounded-2xl border border-[#d7e3f4] bg-[#eff6ff] p-3">
-                <div className="text-[11px] font-medium text-[#2563eb]">👤 主角设定</div>
+                <UnderstandingCardTitle label="👤 主角设定" incomplete={incompleteFields.includes('synthesis')} />
                 <div className="mt-1 text-xs leading-5 text-slate-600">
                   {understanding.synthesis}
                 </div>
@@ -399,6 +423,66 @@ function BriefField({ label, value }: { label: string; value?: string }) {
     <div className="rounded-2xl border border-[#d7e3f4] bg-white p-3">
       <div className="text-xs font-medium text-[#2563eb]">{label}</div>
       <div className="mt-1 text-sm text-slate-700">{value}</div>
+    </div>
+  );
+}
+
+function UnderstandingCardTitle({ label, incomplete }: { label: string; incomplete: boolean }) {
+  return (
+    <div className="flex items-center justify-between gap-2 text-[11px] font-medium text-[#2563eb]">
+      <span>{label}</span>
+      {incomplete ? <span className="text-amber-600">待补充</span> : null}
+    </div>
+  );
+}
+
+function DecisionCardInline({
+  decision,
+  disabled,
+  selectedValue,
+  onSelect,
+}: {
+  decision: OnboardingDecision;
+  disabled: boolean;
+  selectedValue?: string;
+  onSelect: (value: string) => void;
+}) {
+  return (
+    <div className="w-full max-w-[85%] rounded-2xl border border-[#bfdbfe] bg-[#f0f7ff] p-4">
+      <div className="flex items-center gap-2 text-sm font-semibold text-[#1d4ed8]">
+        <Sparkles size={14} />
+        AI 建议方案
+      </div>
+      <p className="mt-1 text-sm leading-6 text-slate-700">{decision.question}</p>
+      <div className="mt-3 grid gap-2">
+        {decision.options.map((option) => {
+          const selected = selectedValue === option.value;
+          return (
+            <button
+              key={`${decision.field}-${option.id}`}
+              type="button"
+              disabled={disabled}
+              onClick={() => onSelect(option.value)}
+              className={`group flex w-full items-start gap-3 rounded-xl border px-3 py-3 text-left transition disabled:cursor-not-allowed ${
+                selected
+                  ? 'border-[#60a5fa] bg-[#eff6ff]'
+                  : 'border-[#d7e3f4] bg-white hover:border-[#93c5fd] hover:bg-[#f8fbff] disabled:opacity-60'
+              }`}
+            >
+              <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-[#eff6ff] text-xs font-semibold text-[#2563eb]">
+                {selected ? <Check size={14} /> : option.id}
+              </span>
+              <span className="min-w-0">
+                <span className="block text-sm font-medium text-slate-800">{option.label}</span>
+                <span className="mt-0.5 block text-xs leading-5 text-slate-600">{option.value}</span>
+                {option.reason ? (
+                  <span className="mt-1 block text-[11px] leading-4 text-slate-400">{option.reason}</span>
+                ) : null}
+              </span>
+            </button>
+          );
+        })}
+      </div>
     </div>
   );
 }

@@ -437,6 +437,9 @@ class OnboardingMessageOut(BaseModel):
     phase: str = "exploring"  # exploring | refining | synthesizing
     has_brief: bool = False
     creative_brief: dict[str, Any] | None = None
+    active_field: str | None = None
+    incomplete_fields: list[str] = Field(default_factory=list)
+    decision: dict[str, Any] | None = None
     # 保留兼容字段
     collected_info: dict[str, Any] = {}
     step: int = 1

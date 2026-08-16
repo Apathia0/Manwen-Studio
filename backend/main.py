@@ -163,6 +163,7 @@ from services.deepseek import (
     generate_framework,
     generate_import_guidance_response,
     generate_onboarding_response,
+    _onboarding_incomplete_fields,
     generate_novel,
     quality_assess,
     regenerate_characters_with_variance,
@@ -2156,15 +2157,21 @@ ONBOARDING_PROMPT_SEED = """你是小说创意提取专家。任务：从对话�
 "已记录：都市诡异题材，程序员主角。接下来描述世界观：力量体系的核心规则是什么？比如契约、寄生还是道具？"{"reply":"已记录：都市诡异题材，程序员主角。接下来描述世界观：力量体系的核心规则是什么？比如契约、寄生还是道具？","understanding":{"concept":"都市诡异题材，程序员主角","setting":"","tone":"","goals":"","synthesis":""},"understanding_depth":20,"phase":"extracting","has_brief":false,"creative_brief":null}
 
 ## 模糊回答处理
-用户说"你定/推荐/都可以"时：基于已有信息给出 2 个简洁选项（一行一个），不要展开描述。
-用户选择后填入当前字段，继续下一字段。
+用户说"你定/推荐/都可以/帮我选"时：
+1. 先读取 current_understanding 和 incomplete_fields，确认 active_field 缺少什么。
+2. 不得把"你定"等原话写入 understanding，也不得直接替用户落卡。
+3. 返回 decision 对象，给出 2-3 个与已有设定一致的候选方案；每个方案的 value 必须信息完整，可直接写入 active_field。
+4. 用户选择后才把对应 value 写入 active_field，继续检查下一张设定卡。
 
 ## 填充完成条件
-当 concept 和 goals 都非空 + 至少还有 1 个字段非空 → has_brief=true，reply 写"提取完毕，准备生成。"
+仅当 concept、setting、tone、goals、synthesis 五个字段全部非空时，has_brief=true，reply 写"提取完毕，准备生成。"
 此时不再提问，用户点击确认后后端自动构建框架。
 
 ## 输出格式（所有回复必须以此格式结尾）
-{"reply":"提问或确认（≤150字）","understanding":{"concept":"","setting":"","tone":"","goals":"","synthesis":""},"understanding_depth":0,"phase":"extracting","has_brief":false,"creative_brief":null}"""
+{"reply":"提问、确认或选择提示（≤150字）","understanding":{"concept":"","setting":"","tone":"","goals":"","synthesis":""},"understanding_depth":0,"phase":"extracting","has_brief":false,"creative_brief":null,"decision":null}
+
+需要用户选择时，decision 格式：
+{"field":"setting","question":"请选择一个世界观方向","options":[{"id":"A","label":"公开武道秩序","value":"可直接写入设定卡的完整内容","reason":"推荐理由"}]}"""
 
 IMPORT_CONTEXT_PROMPT_SEED = """你是一位职业网文策划编辑，正在帮助作者补充"导入作品"的创作上下文。
 
@@ -3845,7 +3852,12 @@ def _infer_story_bible_min_chapters(story_bible: dict | None) -> int | None:
     return requested
 
 
-def _infer_story_length_from_story(story: Story, description: str = "", messages: list | None = None) -> str | None:
+def _infer_story_length_from_story(
+    story: Story,
+    description: str = "",
+    messages: list | None = None,
+    story_bible_override: dict | None = None,
+) -> str | None:
     """从 Story 对象中推断篇幅类型 short/medium/long，返回 None 表示无法推断。
 
     Args:
@@ -3854,11 +3866,16 @@ def _infer_story_length_from_story(story: Story, description: str = "", messages
         messages: 对话消息列表，用于从用户聊天中提取篇幅信息。
     """
     from services.deepseek import _infer_story_length
-    context = {"story_bible": story.story_bible}
+    story_bible = (
+        story_bible_override
+        if isinstance(story_bible_override, dict)
+        else story.story_bible
+    )
+    context = {"story_bible": story_bible}
     length = _infer_story_length(context, description=description, messages=messages)
     # 如果推断结果仍为 long（默认值），且没有任何有效数据，返回 None 让调用方使用默认行为
     if length == "long":
-        story_bible = story.story_bible if isinstance(story.story_bible, dict) else {}
+        story_bible = story_bible if isinstance(story_bible, dict) else {}
         creative_brief = story_bible.get("creative_brief") if isinstance(story_bible, dict) else None
         raw_input = story_bible.get("raw_input") if isinstance(story_bible, dict) else None
         has_target = (isinstance(creative_brief, dict) and str(creative_brief.get("serial_length_target") or "").strip()) or \
@@ -3913,8 +3930,15 @@ def _build_creative_brief_from_understanding(understanding: dict) -> dict:
     }
 
 
-def _build_framework_seed_description(story: Story) -> str:
-    story_bible = story.story_bible if isinstance(story.story_bible, dict) else {}
+def _build_framework_seed_description(
+    story: Story,
+    story_bible_override: dict | None = None,
+) -> str:
+    story_bible = (
+        story_bible_override
+        if isinstance(story_bible_override, dict)
+        else story.story_bible if isinstance(story.story_bible, dict) else {}
+    )
     creative_brief = story_bible.get("creative_brief") if isinstance(story_bible.get("creative_brief"), dict) else {}
     raw_input = story_bible.get("raw_input") if isinstance(story_bible.get("raw_input"), dict) else {}
 
@@ -4039,19 +4063,30 @@ def _build_framework_seed_description(story: Story) -> str:
 #     return compact
 
 
-def _build_framework_ai_context(story: Story, mode: str = "general", user_instruction: str = "") -> dict:
+def _build_framework_ai_context(
+    story: Story,
+    mode: str = "general",
+    user_instruction: str = "",
+    story_bible_override: dict | None = None,
+    description_override: str | None = None,
+) -> dict:
     outline = story.outline if isinstance(story.outline, dict) else {}
     chapters = _extract_outline_chapters(outline)
     chapter_numbers = [item["chapter_number"] for item in chapters if isinstance(item.get("chapter_number"), int)]
+    story_bible = (
+        story_bible_override
+        if isinstance(story_bible_override, dict)
+        else story.story_bible
+    )
     return {
         "id": story.id,
         "title": story.title or "",
-        "description": story.description or "",
+        "description": description_override if description_override is not None else story.description or "",
         "tags": story.tags,
         "characters": story.characters,
         "outline": outline,
-        "story_bible": story.story_bible,
-        "story_bible_compact": build_story_bible_compact(story.story_bible),
+        "story_bible": story_bible,
+        "story_bible_compact": build_story_bible_compact(story_bible),
         "story_memory": story.story_memory,
         "story_memory_compact": build_story_memory_compact(story.story_memory),
         "outline_compact": _build_outline_compact(outline),
@@ -11978,6 +12013,9 @@ async def onboarding_send_message(story_id: int, request: Request, db: Session =
         phase=str(result.get("phase", "exploring")),
         has_brief=bool(result.get("has_brief", False)),
         creative_brief=creative_brief,
+        active_field=result.get("active_field"),
+        incomplete_fields=result.get("incomplete_fields", []),
+        decision=result.get("decision"),
         collected_info=collected_info,
         step=1,
         total_steps=5,
@@ -11994,6 +12032,10 @@ async def onboarding_confirm(story_id: int, request: Request, db: Session = Depe
     understanding = body.get("understanding", {})
     creative_brief_input = body.get("creative_brief", {})
     messages_raw = body.get("messages", [])
+    if not isinstance(understanding, dict):
+        raise HTTPException(422, "提取结果格式无效")
+    if _onboarding_incomplete_fields(understanding):
+        raise HTTPException(422, "设定提取尚未完成，请先补全五个核心字段")
 
     # 从 understanding 构建 raw_input
     raw_input = {
@@ -12038,65 +12080,131 @@ async def onboarding_confirm(story_id: int, request: Request, db: Session = Depe
             raw_input,
             api_key=deepseek_api_key,
         )
+        if not isinstance(story_bible, dict) or not isinstance(story_bible.get("creative_brief"), dict):
+            raise ValueError("AI 返回的 Story Bible 结构不完整")
     except Exception as e:
         raise HTTPException(502, f"Story Bible 生成失败: {e}")
 
+    # 框架必须达到与工作台手动生成相同的质量门槛，成功后再一次性标记引导完成。
     story = _require_story_for_user(story_id, user, db)
-    story.story_bible = story_bible
-    story.description = story_bible.get("creative_brief", {}).get("one_line_premise", story.description or "")
-    story.onboarding_completed = True
-    db.commit()
-    _check_and_consume_advanced_text_quota(request, user.id, db, deduct=True)
+    resolved_description = _build_framework_seed_description(
+        story,
+        story_bible_override=story_bible,
+    )
+    if not resolved_description:
+        raise HTTPException(422, "提取结果缺少可用于生成框架的故事描述")
+    story_context = _build_framework_ai_context(
+        story,
+        mode="initial_generate",
+        user_instruction=resolved_description,
+        story_bible_override=story_bible,
+        description_override=resolved_description,
+    )
+    template_fw_prompt = get_effective_prompt(story_id, "framework", db)
+    template_story_length = get_template_story_length(story_id, db)
+    story_length = template_story_length or _infer_story_length_from_story(
+        story,
+        description=resolved_description,
+        story_bible_override=story_bible,
+    )
+    requested_min_chapters = _infer_story_bible_min_chapters(story_bible)
+    _release_db_transaction(db)
 
-    # --- 新增：自动生成故事框架 ---
-    framework_result = None
     try:
-        description = _build_framework_seed_description(story)
-        if description.strip():
-            story_context = _build_framework_ai_context(story, mode="initial_generate")
-            template_fw_prompt = get_effective_prompt(story_id, "framework", db)
-            # 释放 DB 事务，避免 AI 调用期间长连接占用
-            _release_db_transaction(db)
-
+        framework = await generate_framework(
+            resolved_description,
+            api_key=deepseek_api_key,
+            required_min_chapters=requested_min_chapters,
+            story_bible=story_bible,
+            story_context=story_context,
+            launch_ready_required=True,
+            system_prompt=template_fw_prompt or None,
+            story_length=story_length,
+        )
+        framework = await _complete_framework_payload(
+            framework,
+            resolved_description,
+            api_key=deepseek_api_key,
+            story_bible=story_bible,
+            require_launch_ready=True,
+            story_length=story_length,
+        )
+        length_defaults = {"short": 5, "medium": 8}
+        expected_min = max(requested_min_chapters or 0, length_defaults.get(story_length or "", 10))
+        quality_issues = _framework_launch_quality_issues(
+            framework,
+            expected_min_chapters=expected_min,
+        )
+        if quality_issues:
             framework = await generate_framework(
-                description.strip(),
+                resolved_description,
                 api_key=deepseek_api_key,
+                required_min_chapters=expected_min,
                 story_bible=story_bible,
                 story_context=story_context,
                 launch_ready_required=True,
+                quality_feedback=quality_issues,
                 system_prompt=template_fw_prompt or None,
+                story_length=story_length,
             )
-
-            story = _require_story_for_user(story_id, user, db)
-            story.tags = framework.get("tags") if isinstance(framework.get("tags"), dict) else story.tags
-            story.characters = _normalize_characters_payload(framework.get("characters"))
-            story.outline = _merge_framework_outline({}, framework.get("outline"), framework.get("chapters"))
-            db.commit()
-
-            _save_framework_snapshot(
-                story_id=story.id,
-                snapshot_data=_build_current_snapshot_data(story),
-                source="initial_generate",
-                reply_summary="引导生成初始框架",
-                db=db,
+            framework = await _complete_framework_payload(
+                framework,
+                resolved_description,
+                api_key=deepseek_api_key,
+                story_bible=story_bible,
+                require_launch_ready=True,
+                story_length=story_length,
             )
-            _enforce_framework_snapshot_limit(story.id, max_count=20, db=db)
-            db.commit()
-
-            # 配额扣减
-            _check_and_consume_feature_quota(request, user.id, "framework.generate.monthly_limit", 2, db, deduct=True, provider_kind="text")
-
-            framework_result = {
-                "tags": story.tags,
-                "characters": story.characters,
-                "outline": story.outline,
-            }
+            quality_issues = _framework_launch_quality_issues(
+                framework,
+                expected_min_chapters=expected_min,
+            )
+        if quality_issues:
+            raise ValueError("；".join(quality_issues))
     except Exception as e:
-        logger.warning(f"[onboarding] 自动框架生成失败，优雅降级: {e}")
-        framework_result = None
-    # --- 新增结束 ---
+        db.rollback()
+        logger.warning("[onboarding] 自动框架生成失败: %s", e, exc_info=True)
+        raise HTTPException(502, f"故事框架生成失败：{e}") from e
 
-    db.refresh(story)
+    story = _require_story_for_user(story_id, user, db)
+    story.story_bible = story_bible
+    story.onboarding_completed = True
+    if not str(story.description or "").strip():
+        story.description = str(story_bible["creative_brief"].get("one_line_premise") or "")
+    _apply_generated_framework_to_story(
+        story=story,
+        framework=framework,
+        raw_description=None,
+        resolved_description=resolved_description,
+    )
+    db.commit()
+
+    _save_framework_snapshot(
+        story_id=story.id,
+        snapshot_data=_build_current_snapshot_data(story),
+        source="initial_generate",
+        reply_summary="引导生成初始框架",
+        db=db,
+    )
+    _enforce_framework_snapshot_limit(story.id, max_count=20, db=db)
+    db.commit()
+
+    _check_and_consume_advanced_text_quota(request, user.id, db, deduct=True)
+    _check_and_consume_feature_quota(
+        request,
+        user.id,
+        "framework.generate.monthly_limit",
+        2,
+        db,
+        deduct=True,
+        provider_kind="text",
+    )
+
+    framework_result = {
+        "tags": story.tags,
+        "characters": story.characters,
+        "outline": story.outline,
+    }
 
     return {
         "story_id": story.id,
