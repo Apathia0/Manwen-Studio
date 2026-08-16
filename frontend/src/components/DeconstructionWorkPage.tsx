@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import {
   BookOpen, Search, Loader2, CheckCircle2, XCircle, ArrowLeft, ExternalLink,
-  FileText, Palette, Globe, Upload, Edit3,
+  FileText, Palette, Upload, Edit3, Info,
 } from 'lucide-react';
 import type {
   DeconstructionWorkItem, NovelSearchResult, CrawlStatus,
@@ -43,7 +43,6 @@ export default function DeconstructionWorkPage({ workId, onBack }: Props) {
   const [searchResults, setSearchResults] = useState<NovelSearchResult[]>([]);
   const [searching, setSearching] = useState(false);
   const [creating, setCreating] = useState(false);
-  const [searchPlatform, setSearchPlatform] = useState('all');
   const [showUploadForm, setShowUploadForm] = useState(false);
   const [uploadTitle, setUploadTitle] = useState('');
   const [uploadAuthor, setUploadAuthor] = useState('');
@@ -54,27 +53,11 @@ export default function DeconstructionWorkPage({ workId, onBack }: Props) {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const selectedFileRef = useRef<File | null>(null);
 
-  // 仅 qidian 支持稳定远程爬取
+  // 仅起点支持稳定远程爬取，其他平台暂不支持在线爬取正文
   const REMOTE_CRAWL_SUPPORTED = ['qidian'];
-  const CRAWL_UNSUPPORTED_MESSAGE: Record<string, string> = {
-    fanqie: '番茄小说爬取不稳定，建议上传原文',
-    qimao: '七猫暂不支持自动爬取，请上传原文',
-    zongheng: '纵横暂不支持自动爬取，请上传原文',
-  };
-
-  const PLATFORM_OPTIONS = [
-    { value: 'all', label: '全网', icon: Globe },
-    { value: 'qidian', label: '起点' },
-    { value: 'fanqie', label: '番茄小说' },
-    { value: 'qimao', label: '七猫' },
-    { value: 'zongheng', label: '纵横' },
-  ] as const;
 
   const PLATFORM_BADGES: Record<string, { label: string; className: string }> = {
     qidian: { label: '起点', className: 'bg-blue-100 text-blue-700' },
-    fanqie: { label: '番茄小说', className: 'bg-orange-100 text-orange-700' },
-    qimao: { label: '七猫', className: 'bg-green-100 text-green-700' },
-    zongheng: { label: '纵横', className: 'bg-purple-100 text-purple-700' },
   };
 
   // 爬取状态
@@ -303,7 +286,7 @@ export default function DeconstructionWorkPage({ workId, onBack }: Props) {
     setSearching(true);
     setError(null);
     try {
-      const data = await searchDeconstructNovels(keyword.trim(), searchPlatform);
+      const data = await searchDeconstructNovels(keyword.trim(), 'qidian');
       setSearchResults(data.results);
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : '搜索失败';
@@ -668,7 +651,7 @@ export default function DeconstructionWorkPage({ workId, onBack }: Props) {
             <BookOpen className="mx-auto h-12 w-12 text-slate-300" />
             <h3 className="mt-3 text-lg font-semibold text-slate-700">搜索网络小说</h3>
             <p className="mt-1 text-sm text-slate-500">
-              全网搜索小说，自动爬取免费章节进行深度拆解
+              搜索起点中文网小说，自动爬取免费章节进行深度拆解
             </p>
           </div>
 
@@ -691,25 +674,9 @@ export default function DeconstructionWorkPage({ workId, onBack }: Props) {
                 搜索
               </button>
             </div>
-            <div className="flex flex-wrap gap-1.5">
-              {PLATFORM_OPTIONS.map((opt) => {
-                const active = searchPlatform === opt.value;
-                const Icon = 'icon' in opt ? opt.icon : null;
-                return (
-                  <button
-                    key={opt.value}
-                    onClick={() => setSearchPlatform(opt.value)}
-                    className={`inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-xs font-medium transition-colors ${
-                      active
-                        ? 'bg-blue-600 text-white'
-                        : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
-                    }`}
-                  >
-                    {Icon && <Icon className="h-3 w-3" />}
-                    {opt.label}
-                  </button>
-                );
-              })}
+            <div className="flex items-start gap-1.5 rounded-lg bg-blue-50 px-3 py-2 text-xs text-blue-600">
+              <Info className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+              <span>当前仅支持搜索起点中文网，其他平台暂不支持在线爬取正文，可点击"上传原文"手动导入。</span>
             </div>
           </div>
 
@@ -781,7 +748,7 @@ export default function DeconstructionWorkPage({ workId, onBack }: Props) {
                               上传原文
                             </button>
                             <span className="text-xs text-amber-500 whitespace-nowrap max-md:whitespace-normal">
-                              {CRAWL_UNSUPPORTED_MESSAGE[book.platform] || '暂不支持自动爬取'}
+                              暂不支持自动爬取
                             </span>
                           </span>
                         )}
@@ -795,7 +762,7 @@ export default function DeconstructionWorkPage({ workId, onBack }: Props) {
             {searchResults.length === 0 && !searching && (
               <div className="flex flex-1 flex-col items-center justify-center gap-4">
                 <p className="text-sm text-slate-400">
-                  跨平台搜索网络小说，系统将自动爬取免费章节内容并深度拆解
+                  搜索起点中文网小说，系统将自动爬取免费章节内容并深度拆解
                 </p>
                 <button
                   onClick={() => { setShowUploadForm(true); setError(null); }}

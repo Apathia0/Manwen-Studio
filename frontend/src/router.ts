@@ -64,15 +64,16 @@ const PATH_TO_ROUTE: Record<string, RouteKey> = Object.fromEntries(
   (Object.entries(ROUTE_PATHS) as [RouteKey, string][]).map(([key, path]) => [path, key]),
 );
 
-/** URL path → RouteKey（未知路径回退到 landing；支持 /deconstruction/:id、/workspace/:storyId 动态段） */
+/** URL path → RouteKey（未知路径回退到 landing；支持 /deconstruction/:id、/deconstruction/new、/workspace/:storyId 动态段） */
 export function pathToRouteKey(pathname: string): RouteKey {
-  if (/^\/deconstruction\/\d+$/.test(pathname)) return 'deconstruction-library';
+  if (/^\/deconstruction\/(\d+|new)$/.test(pathname)) return 'deconstruction-library';
   if (/^\/workspace\/\d+$/.test(pathname)) return 'workspace';
   return PATH_TO_ROUTE[pathname] ?? 'landing';
 }
 
-/** 从 /deconstruction/:id 解析拆书工作 ID（无匹配返回 0 = 列表页） */
+/** 从 /deconstruction/:id 解析拆书工作 ID；/deconstruction/new 返回 -1（新建模式）；无匹配返回 0 = 列表页 */
 export function parseDeconstructionWorkId(pathname: string): number {
+  if (pathname === '/deconstruction/new') return -1;
   const match = pathname.match(/^\/deconstruction\/(\d+)$/);
   return match ? Number(match[1]) : 0;
 }

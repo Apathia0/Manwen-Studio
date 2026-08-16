@@ -150,7 +150,7 @@ function App() {
   }, [navigate]);
 
   const setDeconWorkId = useCallback((workId: number) => {
-    navigate(workId > 0 ? `/deconstruction/${workId}` : '/deconstruction');
+    navigate(workId === -1 ? '/deconstruction/new' : workId > 0 ? `/deconstruction/${workId}` : '/deconstruction');
   }, [navigate]);
 
   const [session, setSession] = useState<AuthUser | null>(null);
