@@ -1222,13 +1222,15 @@ skill_registry.register(SkillDef(
     tool_names=[
         "get_chapter_full", "get_all_chapters_summary",
         "get_chapter_creation_pack",
+        "get_framework_detail",
+        "create_chapter", "generate_chapter_content",
         "update_chapter_content", "batch_update_chapters",
         "update_chapter_creation_pack",
         "adjust_chapter_by_instruction", "rewrite_text_segment",
         "add_chapter_plan", "bulk_add_chapter_plans",
         "batch_adjust_chapters",
     ],
-    system_prompt_fragment="你是一位专业的小说章节写手。使用提供的工具完成章节的读取、修改、重写和批量调整操作。遵循用户指示，严格按照下方写作方法论输出高质量内容。",
+    system_prompt_fragment="你是一位专业的小说章节写手。使用提供的工具完成章节的读取、创建、生成、修改、重写和批量调整操作。遵循用户指示，严格按照下方写作方法论输出高质量内容。",
     context_profile="chapter_writer",
     required_resource_types=("章节任务卡", "上章交接", "人物状态", "相关事实", "待推进伏笔"),
 ))
@@ -1242,6 +1244,7 @@ skill_registry.register(SkillDef(
     tool_names=[
         "get_framework_detail", "get_story_bible",
         "get_character_profiles", "get_scenes", "get_all_chapters_summary",
+        "create_chapter", "generate_chapter_content",
         "update_story_info", "update_story_bible",
         "update_characters", "adjust_framework",
         "apply_framework_ops", "update_scenes",
@@ -1279,7 +1282,9 @@ skill_registry.register(SkillDef(
     description="读取和修改漫画章节的分镜脚本及资产管理中的角色、场景、道具设定图提示词",
     icon="🎨",
     tool_names=[
-        "get_chapter_full",
+        "get_chapter_full", "get_all_chapters_summary",
+        "get_framework_detail", "get_story_bible",
+        "get_character_profiles", "get_scenes",
         "get_manga_storyboard",
         "get_manga_storyboard_guideline",
         "get_manga_asset_prompts",
@@ -1287,6 +1292,7 @@ skill_registry.register(SkillDef(
         "batch_update_manga_storyboard_scenes",
         "replace_manga_storyboard",
         "update_manga_asset_prompts",
+        "create_manga_asset",
     ],
     system_prompt_fragment="""你是一位专业的漫画工作流编剧。涉及剧情、环境、转场、旁白或人物行为的分镜调整时，必须依次读取当前章节正文（get_chapter_full）、当前分镜（get_manga_storyboard）和当前模板规范（get_manga_storyboard_guideline），不得凭空补写原文没有的关键信息。写入前先根据正文与模板完成自检；写入工具返回模板违规时，必须按违规项修正后重试。
 
@@ -1308,6 +1314,9 @@ skill_registry.register(SkillDef(
         "get_framework_detail", "get_story_bible",
         "get_scenes", "get_character_profiles",
         "check_ai_flavor",
+        "update_chapter_content", "batch_update_chapters",
+        "adjust_chapter_by_instruction", "rewrite_text_segment",
+        "batch_adjust_chapters",
     ],
     system_prompt_fragment="""你是一位专业的网文质量审查员。审查时遵循以下标准：
 
@@ -1360,6 +1369,7 @@ skill_registry.register(SkillDef(
         "get_screenplay", "update_shot_prompts",
         "update_shot_fields", "update_screenplay",
         "batch_update_shot_prompts", "batch_update_shot_fields",
+        "create_video_asset", "update_video_asset_prompts",
     ],
     system_prompt_fragment="""你是一位专业的视频工作流制作人。操作视频工作流时遵循以下原则：
 
@@ -1567,9 +1577,14 @@ def infer_agent_skills(
 ) -> list[str] | None:
     """根据当前任务自动裁剪工具；用户显式选择技能时保持其选择。"""
     if explicit_skills is not None:
-        # 前端空数组通常表示“未选择”，不应把全部工具误过滤掉。
+        # 前端空数组表示“未选择”，不应把全部工具误过滤掉。
+        if not explicit_skills:
+            return None
+        # 显式技能全部未知 → 拒绝全部工具（fail-closed），与 _effective_tool_names 语义一致
         known = [name for name in explicit_skills if skill_registry.get(name)]
-        return known or None
+        if not known:
+            return []
+        return known
     if workflow_type == "manga":
         return ["manga_workflow"]
     if workflow_type == "video":
@@ -1577,9 +1592,29 @@ def infer_agent_skills(
     text = str(user_text or "")
     if re.search(r"大纲|框架|章节规划|任务卡|续写.{0,8}章|新增.{0,8}章", text):
         return ["framework_designer"]
-    if re.search(r"正文|扩写|改写|重写|润色|章节内容", text):
+    # 检测类意图：命中审查/检查/质量/AI味等关键词
+    is_review = bool(re.search(r"审查|评审|检查|质量|AI味|一致性|节奏", text, re.IGNORECASE))
+    # 修改类意图：命中正文写作关键词或明确的修改动作词
+    is_modify = bool(re.search(
+        r"正文|扩写|改写|重写|润色|章节内容|修改|调整|处理|优化|去AI味|去AI|清理|消除|修复",
+        text,
+        re.IGNORECASE,
+    ))
+    # 框架修改类意图：角色/人物/设定/世界观/标签/分镜等框架对象的修改，需路由到框架设计技能
+    is_framework_modify = is_modify and bool(re.search(
+        r"角色|人物|设定|世界观|标签|分镜|大纲|章节规划",
+        text,
+        re.IGNORECASE,
+    ))
+    # 检测 + 修改组合（如"检查AI味并修改正文"）→ 审查与写作技能同时启用，允许检测后直接修改
+    if is_review and is_modify:
+        return ["quality_reviewer", "chapter_writer"]
+    # 框架修改 + 正文修改可能同时发生（如"修改角色设定并调整对应章节"）→ 两个技能都启用
+    if is_framework_modify:
+        return ["framework_designer", "chapter_writer"]
+    if is_modify:
         return ["chapter_writer"]
-    if re.search(r"审查|评审|检查|质量|AI味|一致性|节奏", text, re.IGNORECASE):
+    if is_review:
         return ["quality_reviewer"]
     return None
 
@@ -6381,6 +6416,57 @@ def _build_story_context_dict(story: Story, user_instruction: str = "") -> dict:
 # 统一使用 build_story_bible_compact / build_story_memory_compact
 
 
+# 无技能过滤（小说模式）时的完整工具选择指南，供 _build_system_prompt 使用。
+# 有技能过滤或工作流模式时，_build_tool_guidance() 会按实际可用工具动态生成。
+_FULL_TOOL_GUIDANCE = """## 🔧 第二步：根据意图选择合适的工具
+
+### 读取工具（用于分析 / 查询）
+- `get_chapter_full` — 读取某章节的完整正文内容
+- `get_all_chapters_summary` — 列出所有章节（编号/标题/字数/状态）
+- `get_chapter_creation_pack` — 读取某章节的创作包（正文生成的设定依据，含版本号/是否手动编辑）
+- `get_framework_detail` — 读取标签、角色设定、故事大纲
+- `get_story_bible` — 读取作品圣经（创意简报/写作指导）
+- `get_scenes` — 读取分镜列表
+- `get_character_profiles` — 读取角色外貌设定
+
+### 写入工具（用于执行修改）
+- `generate_chapter_content` — **🎯 生成章节正文的首选工具**。委托框架创作引擎生成（与框架直出质量完全一致，含字数铁律/场景经济性/对话铁律/章末钩子/AI禁令）。适用于用户要求「写出」「生成」「创作」「写」某章正文时。需先确保章节规划完整（含任务卡）。
+- `update_chapter_content` — 直接保存整章正文（仅当用户已给出完整改写文本时用。如果需要 AI 生成正文，请使用 `generate_chapter_content`）
+- `update_chapter_creation_pack` — 保存/更新章节创作包（标记为手动编辑）。修改创作包后正文不会自动同步，需提醒用户重新生成正文使改动生效
+- `rewrite_text_segment` — 查找并替换章节中的特定段落（精确匹配替换，不涉及创作包）
+- `adjust_chapter_by_instruction` — 根据用户指令让 AI 重写整章（消耗高级配额，仅用于已有正文章节的重写/调整风格，不用于初版生成。初版生成请用 `generate_chapter_content`）
+- `update_story_info` — 修改标题/描述/标签
+- `update_story_bible` — 更新作品圣经（世界观设定/创意简报/写作指导），支持部分更新。用户要求调整世界观、修改核心设定时用此工具
+- `update_characters` — 替换角色设定列表
+- `apply_framework_ops` — **直接执行框架编辑操作**，不调用 AI，适合明确的增删改（如"把主角改名"、"加个反派"、"改章节标题"）
+- `adjust_framework` — 根据指令调整故事框架/大纲，**适合需要 AI 创作的场景**（如"帮我重新设计第二幕"、"让故事更悬疑"）。消耗高级配额。如果改动明确请优先用 apply_framework_ops
+- `add_chapter_plan` — 在大纲中添加新的章节计划
+- `bulk_add_chapter_plans` — **批量添加多个章节规划**（用户给出明确章节列表时用，比多次调 add_chapter_plan 更高效）
+- `update_scenes` — 更新分镜列表
+
+---
+
+## 📋 第三步：场景 → 行动对照表
+
+| 用户说 | 你应该 |
+|--------|--------|
+| "你觉得……怎么样"、"我在想……"、"这样会不会……"、"我有个想法" | **直接对话讨论**。基于故事上下文给出见解和思路，不需要调用任何工具 |
+| "帮我分析一下故事结构/框架/节奏/伏笔" | 调 `get_framework_detail` + `get_all_chapters_summary`（需要时加 `get_chapter_full`）→ 给出分析 → 等待用户反馈 |
+| "帮我检查这一章写得怎么样" | 调 `get_chapter_full` 读取本章 → 给出评价/问题/建议 → 等待用户反馈 |
+| "提出优化建议" | 调读取工具获取数据 → 输出具体优化方案列表 → 等用户选定后执行 |
+| "把这段改成……"（附具体文本） | 调 `rewrite_text_segment` 或 `update_chapter_content` 直接执行（精准局部修改，不涉及创作包） |
+| "帮我重写这一章，改成……风格"（无具体文本） | 当前章节 ID 已明确时直接调 `adjust_chapter_by_instruction`（自动以创作包为基础再按用户要求修改）；只有章节不明确时才先读取确认 |
+| "帮我调整这章的创作包/设定" | 调 `get_chapter_creation_pack` 读取当前创作包 → 结合用户要求给出修改方案 → 待确认后调 `update_chapter_creation_pack` 保存 → 提醒用户重新生成正文使改动生效 |
+| "帮我修改角色设定" | 调 `get_framework_detail` 查看当前角色 → 给出修改方案 → 待确认后调 `update_characters` |
+| "帮我调整世界观/修改核心设定/改作品圣经" | 调 `get_story_bible` 查看当前圣经 → 给出调整方案 → 待确认后调 `update_story_bible` |
+| **用户在对话中详细描述了世界观设定**（如力量体系、势力分布、等级划分、世界历史等具体内容） | **主动调用 `update_story_bible`** 将讨论确认的内容保存到 world_setting 中。不要等用户说出"改作品圣经"才保存。world_setting 是 `creative_brief` 下的嵌套 JSON，建议包含 power_system（力量体系）、society_structure（社会结构）、key_locations（关键地点）、world_history（世界历史）、hidden_truths（隐藏真相）等子字段，也接受任意其他键名。保存后说明存入了哪些设定模块 |
+| "帮我调整大纲/结构" | 调 `get_framework_detail` 查看当前大纲 → 给出调整方案 → 待确认后调 `apply_framework_ops`（明确改动）或 `adjust_framework`（需要 AI 创作） |
+| "添加一个新章节" | 调 `get_framework_detail` 查看现有章节 → 给出新章节建议位置 → 待确认后调 `add_chapter_plan` |
+| "写/生成/创作第X章正文" | ① 调 `get_framework_detail` 确认大纲中有该章规划且任务卡完整 → ② 调 `create_chapter` 创建章节行（如果尚未创建）→ ③ 调 `generate_chapter_content` 委托框架引擎生成正文 ★ **不要用 `update_chapter_content` 代替 `generate_chapter_content`，前者用于保存用户提供的现成文本，后者才调用 AI 生成** |
+| "看看这一章写了什么" | 调 `get_chapter_full` → 总结/展示内容 |
+| "有哪些章节，进展如何" | 调 `get_all_chapters_summary` → 呈现概览 |"""
+
+
 # ── Agent 服务 ─────────────────────────────────────────────
 
 
@@ -6389,6 +6475,45 @@ class AgentService:
 
     def __init__(self):
         self.tool_registry = tool_registry
+
+    def _build_tool_guidance(
+        self,
+        workflow_type: str | None,
+        enabled_skills: list[str] | None,
+    ) -> str:
+        """生成按当前权限裁剪的工具选择指南，与 tool_specs/execute 的过滤一致。"""
+        specs = self.tool_registry.get_tool_specs(
+            workflow_type=workflow_type,
+            enabled_skills=enabled_skills,
+        )
+        read_names: list[str] = []
+        write_names: list[str] = []
+        for spec in specs:
+            func = spec.get("function") or {}
+            name = str(func.get("name") or "")
+            if not name:
+                continue
+            if self.tool_registry.is_write_tool(name):
+                write_names.append(name)
+            else:
+                read_names.append(name)
+        lines = ["## 🔧 第二步：根据意图选择合适的工具", ""]
+        lines.append("### 当前可用的读取工具（用于分析 / 查询）")
+        lines.append("")
+        lines.extend([f"- `{name}`" for name in read_names] or ["- （当前没有可用的读取工具）"])
+        lines.append("")
+        lines.append("### 当前可用的写入工具（用于执行修改）")
+        lines.append("")
+        lines.extend([f"- `{name}`" for name in write_names] or ["- （当前没有可用的写入工具）"])
+        lines.append("")
+        lines.append("### 使用规则")
+        lines.append("- 需要修改时必须先读取确认现状，再进行修改，避免覆盖已有内容")
+        lines.append("- 分析/评估模式下禁止调用任何写入工具，输出建议后等待用户明确确认再执行")
+        lines.append("- 所有修改必须通过工具调用实际写入数据库，文字回复不能代替工具调用")
+        lines.append("- 工具调用失败时如实告知用户，不要声称修改成功")
+        lines.append("- 模糊创作需求（无具体修改文本）：先读数据 → 出方案 → 等确认 → 再执行")
+        lines.append("- 明确修改命令必须执行：用户明确要求修改时，先用读取工具获取数据，再调用写入工具实际保存；不要只给建议或等待二次确认")
+        return "\n".join(lines)
 
     def _build_writing_quality_section(self, db=None) -> str:
         """构建正文工具的精简路由说明，完整方法论由章节流水线负责。"""
@@ -6532,6 +6657,12 @@ class AgentService:
             if "chapter_writer" in (enabled_skills or [])
             else ""
         )
+        # 无技能过滤（小说模式）时展示完整工具清单；有过滤或工作流模式时按实际可用工具动态生成
+        tool_guidance = (
+            _FULL_TOOL_GUIDANCE
+            if enabled_skills is None and workflow_type not in ("manga", "video")
+            else self._build_tool_guidance(workflow_type, enabled_skills)
+        )
         permission_description = "系统采用单一 Agent：仅查询或讨论时只读；用户明确要求修改时才允许调用对应写入工具。"
         return f"""你是 Manwen-Studio 的 AI 创作助手。{permission_description}{story_id_line}{manga_section}{video_section}
 
@@ -6565,53 +6696,7 @@ class AgentService:
 
 ---
 
-## 🔧 第二步：根据意图选择合适的工具
-
-### 读取工具（用于分析 / 查询）
-- `get_chapter_full` — 读取某章节的完整正文内容
-- `get_all_chapters_summary` — 列出所有章节（编号/标题/字数/状态）
-- `get_chapter_creation_pack` — 读取某章节的创作包（正文生成的设定依据，含版本号/是否手动编辑）
-- `get_framework_detail` — 读取标签、角色设定、故事大纲
-- `get_story_bible` — 读取作品圣经（创意简报/写作指导）
-- `get_scenes` — 读取分镜列表
-- `get_character_profiles` — 读取角色外貌设定
-
-### 写入工具（用于执行修改）
-- `generate_chapter_content` — **🎯 生成章节正文的首选工具**。委托框架创作引擎生成（与框架直出质量完全一致，含字数铁律/场景经济性/对话铁律/章末钩子/AI禁令）。适用于用户要求「写出」「生成」「创作」「写」某章正文时。需先确保章节规划完整（含任务卡）。
-- `update_chapter_content` — 直接保存整章正文（仅当用户已给出完整改写文本时用。如果需要 AI 生成正文，请使用 `generate_chapter_content`）
-- `update_chapter_creation_pack` — 保存/更新章节创作包（标记为手动编辑）。修改创作包后正文不会自动同步，需提醒用户重新生成正文使改动生效
-- `rewrite_text_segment` — 查找并替换章节中的特定段落（精确匹配替换，不涉及创作包）
-- `adjust_chapter_by_instruction` — 根据用户指令让 AI 重写整章（消耗高级配额，仅用于已有正文章节的重写/调整风格，不用于初版生成。初版生成请用 `generate_chapter_content`）
-- `update_story_info` — 修改标题/描述/标签
-- `update_story_bible` — 更新作品圣经（世界观设定/创意简报/写作指导），支持部分更新。用户要求调整世界观、修改核心设定时用此工具
-- `update_characters` — 替换角色设定列表
-- `apply_framework_ops` — **直接执行框架编辑操作**，不调用 AI，适合明确的增删改（如"把主角改名"、"加个反派"、"改章节标题"）
-- `adjust_framework` — 根据指令调整故事框架/大纲，**适合需要 AI 创作的场景**（如"帮我重新设计第二幕"、"让故事更悬疑"）。消耗高级配额。如果改动明确请优先用 apply_framework_ops
-- `add_chapter_plan` — 在大纲中添加新的章节计划
-- `bulk_add_chapter_plans` — **批量添加多个章节规划**（用户给出明确章节列表时用，比多次调 add_chapter_plan 更高效）
-- `update_scenes` — 更新分镜列表
-
----
-
-## 📋 第三步：场景 → 行动对照表
-
-| 用户说 | 你应该 |
-|--------|--------|
-| "你觉得……怎么样"、"我在想……"、"这样会不会……"、"我有个想法" | **直接对话讨论**。基于故事上下文给出见解和思路，不需要调用任何工具 |
-| "帮我分析一下故事结构/框架/节奏/伏笔" | 调 `get_framework_detail` + `get_all_chapters_summary`（需要时加 `get_chapter_full`）→ 给出分析 → 等待用户反馈 |
-| "帮我检查这一章写得怎么样" | 调 `get_chapter_full` 读取本章 → 给出评价/问题/建议 → 等待用户反馈 |
-| "提出优化建议" | 调读取工具获取数据 → 输出具体优化方案列表 → 等用户选定后执行 |
-| "把这段改成……"（附具体文本） | 调 `rewrite_text_segment` 或 `update_chapter_content` 直接执行（精准局部修改，不涉及创作包） |
-| "帮我重写这一章，改成……风格"（无具体文本） | 当前章节 ID 已明确时直接调 `adjust_chapter_by_instruction`（自动以创作包为基础再按用户要求修改）；只有章节不明确时才先读取确认 |
-| "帮我调整这章的创作包/设定" | 调 `get_chapter_creation_pack` 读取当前创作包 → 结合用户要求给出修改方案 → 待确认后调 `update_chapter_creation_pack` 保存 → 提醒用户重新生成正文使改动生效 |
-| "帮我修改角色设定" | 调 `get_framework_detail` 查看当前角色 → 给出修改方案 → 待确认后调 `update_characters` |
-| "帮我调整世界观/修改核心设定/改作品圣经" | 调 `get_story_bible` 查看当前圣经 → 给出调整方案 → 待确认后调 `update_story_bible` |
-| **用户在对话中详细描述了世界观设定**（如力量体系、势力分布、等级划分、世界历史等具体内容） | **主动调用 `update_story_bible`** 将讨论确认的内容保存到 world_setting 中。不要等用户说出"改作品圣经"才保存。world_setting 是 `creative_brief` 下的嵌套 JSON，建议包含 power_system（力量体系）、society_structure（社会结构）、key_locations（关键地点）、world_history（世界历史）、hidden_truths（隐藏真相）等子字段，也接受任意其他键名。保存后说明存入了哪些设定模块 |
-| "帮我调整大纲/结构" | 调 `get_framework_detail` 查看当前大纲 → 给出调整方案 → 待确认后调 `apply_framework_ops`（明确改动）或 `adjust_framework`（需要 AI 创作） |
-| "添加一个新章节" | 调 `get_framework_detail` 查看现有章节 → 给出新章节建议位置 → 待确认后调 `add_chapter_plan` |
-| "写/生成/创作第X章正文" | ① 调 `get_framework_detail` 确认大纲中有该章规划且任务卡完整 → ② 调 `create_chapter` 创建章节行（如果尚未创建）→ ③ 调 `generate_chapter_content` 委托框架引擎生成正文 ★ **不要用 `update_chapter_content` 代替 `generate_chapter_content`，前者用于保存用户提供的现成文本，后者才调用 AI 生成** |
-| "看看这一章写了什么" | 调 `get_chapter_full` → 总结/展示内容 |
-| "有哪些章节，进展如何" | 调 `get_all_chapters_summary` → 呈现概览 |
+{tool_guidance}
 
 ---
 

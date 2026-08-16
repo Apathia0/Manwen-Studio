@@ -469,3 +469,189 @@ def test_memory_refresh_final_check_locks_story_and_chapter_rows():
 
     assert content == "最新正文"
     assert lock_count == 2
+
+
+def test_infer_agent_skills_combines_review_and_write_intents():
+    assert agent_service.infer_agent_skills(
+        "检查这章的AI味并修改正文",
+        workflow_type=None,
+        explicit_skills=None,
+    ) == ["quality_reviewer", "chapter_writer"]
+    assert agent_service.infer_agent_skills(
+        "去AI味处理",
+        workflow_type=None,
+        explicit_skills=None,
+    ) == ["quality_reviewer", "chapter_writer"]
+    assert agent_service.infer_agent_skills(
+        "重写第三章",
+        workflow_type=None,
+        explicit_skills=None,
+    ) == ["chapter_writer"]
+    assert agent_service.infer_agent_skills(
+        "检查这章的AI味",
+        workflow_type=None,
+        explicit_skills=None,
+    ) == ["quality_reviewer"]
+
+
+def test_quality_reviewer_skill_includes_chapter_write_tools():
+    from services.agent_service import skill_registry
+
+    review_tools = skill_registry.get_tool_set(["quality_reviewer"])
+
+    assert "get_chapter_full" in review_tools
+    assert "check_ai_flavor" in review_tools
+    assert "update_chapter_content" in review_tools
+    assert "adjust_chapter_by_instruction" in review_tools
+    assert "rewrite_text_segment" in review_tools
+    assert "batch_update_chapters" in review_tools
+
+
+def test_review_and_write_combo_exposes_write_tools_in_execution():
+    from services.agent_service import tool_registry
+
+    allowed = tool_registry._effective_tool_names(
+        workflow_type=None,
+        enabled_skills=["quality_reviewer", "chapter_writer"],
+    )
+
+    assert "update_chapter_content" in allowed
+    assert "check_ai_flavor" in allowed
+    assert "get_chapter_full" in allowed
+
+
+def test_chapter_writer_skill_includes_chapter_creation_tools():
+    from services.agent_service import skill_registry
+
+    writer_tools = skill_registry.get_tool_set(["chapter_writer"])
+
+    assert "create_chapter" in writer_tools
+    assert "generate_chapter_content" in writer_tools
+    assert "get_framework_detail" in writer_tools
+    assert "update_chapter_content" in writer_tools
+
+
+def test_framework_designer_skill_includes_chapter_creation_tools():
+    from services.agent_service import skill_registry
+
+    designer_tools = skill_registry.get_tool_set(["framework_designer"])
+
+    assert "create_chapter" in designer_tools
+    assert "generate_chapter_content" in designer_tools
+    assert "update_characters" in designer_tools
+    assert "update_story_bible" in designer_tools
+
+
+def test_write_new_chapter_exposes_creation_tools_in_execution():
+    from services.agent_service import tool_registry
+
+    allowed = tool_registry._effective_tool_names(
+        workflow_type=None,
+        enabled_skills=["chapter_writer"],
+    )
+
+    assert "create_chapter" in allowed
+    assert "generate_chapter_content" in allowed
+    assert "get_framework_detail" in allowed
+
+
+def test_character_modification_routes_to_framework_designer():
+    assert agent_service.infer_agent_skills(
+        "修改角色设定",
+        workflow_type=None,
+        explicit_skills=None,
+    ) == ["framework_designer", "chapter_writer"]
+    assert agent_service.infer_agent_skills(
+        "调整世界观",
+        workflow_type=None,
+        explicit_skills=None,
+    ) == ["framework_designer", "chapter_writer"]
+
+    from services.agent_service import tool_registry
+    allowed = tool_registry._effective_tool_names(
+        workflow_type=None,
+        enabled_skills=["framework_designer", "chapter_writer"],
+    )
+    assert "update_characters" in allowed
+    assert "update_story_bible" in allowed
+    assert "update_scenes" in allowed
+
+
+def test_system_prompt_tool_guidance_filters_by_enabled_skills():
+    service = agent_service.AgentService()
+
+    filtered_prompt = service._build_system_prompt(
+        "测试上下文",
+        story_id=1,
+        enabled_skills=["chapter_writer"],
+    )
+
+    guidance = filtered_prompt.split("## 📌 核心行为准则")[0]
+    assert "## 🔧 第二步" in guidance
+    assert "create_chapter" in guidance
+    assert "generate_chapter_content" in guidance
+    assert "update_story_bible" not in guidance
+
+
+def test_system_prompt_full_guidance_without_skill_filter():
+    service = agent_service.AgentService()
+
+    full_prompt = service._build_system_prompt(
+        "测试上下文",
+        story_id=1,
+        enabled_skills=None,
+    )
+
+    assert "生成章节正文的首选工具" in full_prompt
+    assert "update_story_bible" in full_prompt
+    assert "## 📋 第三步：场景 → 行动对照表" in full_prompt
+
+
+def test_infer_agent_skills_unknown_skills_fail_closed():
+    assert agent_service.infer_agent_skills(
+        "随便聊聊",
+        workflow_type=None,
+        explicit_skills=["unknown_skill"],
+    ) == []
+    assert agent_service.infer_agent_skills(
+        "随便聊聊",
+        workflow_type=None,
+        explicit_skills=[],
+    ) is None
+
+
+def test_manga_workflow_skill_covers_workflow_whitelist():
+    from services.agent_service import skill_registry, tool_registry
+
+    manga_tools = skill_registry.get_tool_set(["manga_workflow"])
+    whitelist = (
+        agent_service._MANGA_WORKFLOW_TOOL_NAMES
+        | agent_service._MANGA_WORKFLOW_READ_TOOL_NAMES
+    )
+
+    assert whitelist <= manga_tools
+    allowed = tool_registry._effective_tool_names(
+        workflow_type="manga",
+        enabled_skills=["manga_workflow"],
+    )
+    assert "create_manga_asset" in allowed
+    assert "get_framework_detail" in allowed
+    assert "get_all_chapters_summary" in allowed
+
+
+def test_video_workflow_skill_covers_workflow_whitelist():
+    from services.agent_service import skill_registry, tool_registry
+
+    video_tools = skill_registry.get_tool_set(["video_workflow"])
+    whitelist = (
+        agent_service._VIDEO_WORKFLOW_TOOL_NAMES
+        | agent_service._VIDEO_WORKFLOW_READ_TOOL_NAMES
+    )
+
+    assert whitelist <= video_tools
+    allowed = tool_registry._effective_tool_names(
+        workflow_type="video",
+        enabled_skills=["video_workflow"],
+    )
+    assert "create_video_asset" in allowed
+    assert "update_video_asset_prompts" in allowed
