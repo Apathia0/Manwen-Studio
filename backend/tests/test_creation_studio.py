@@ -108,6 +108,79 @@ def test_media_access_token_is_scoped_to_asset_and_user():
 
 
 @pytest.mark.asyncio
+async def test_remote_asset_content_preserves_raw_encoding_and_range(monkeypatch):
+    from routers import creation_studio as studio_router
+
+    captured: dict[str, object] = {}
+
+    class FakeUpstream:
+        status_code = 206
+        headers = {
+            "content-type": "image/png",
+            "content-length": "6",
+            "content-range": "bytes 0-5/12",
+            "accept-ranges": "bytes",
+            "content-encoding": "gzip",
+            "etag": '"asset-etag"',
+        }
+
+        async def aiter_raw(self):
+            yield b"zipdat"
+
+        async def aiter_bytes(self):
+            pytest.fail("远程素材代理不得使用自动解压后的字节流")
+            yield b""
+
+        async def aclose(self):
+            captured["upstream_closed"] = True
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            captured["client_kwargs"] = kwargs
+
+        def build_request(self, method, url, headers):
+            captured["request"] = {"method": method, "url": url, "headers": headers}
+            return object()
+
+        async def send(self, request, stream):
+            captured["stream"] = stream
+            return FakeUpstream()
+
+        async def aclose(self):
+            captured["client_closed"] = True
+
+    asset = SimpleNamespace(
+        id=7,
+        media_type="image",
+        mime_type="image/png",
+        storage_path="https://media.example.com/generated.png",
+    )
+    request = SimpleNamespace(headers={"range": "bytes=0-5"})
+    monkeypatch.setattr(studio_router, "_require_user", lambda *_args: SimpleNamespace(id=3))
+    monkeypatch.setattr(studio_router, "_owned_asset", lambda *_args: asset)
+    monkeypatch.setattr(studio_router, "validate_remote_media_url", lambda value: value)
+    monkeypatch.setattr(studio_router.httpx, "AsyncClient", FakeClient)
+
+    response = await studio_router.get_asset_content(7, request, db=SimpleNamespace())
+    body = b"".join([chunk async for chunk in response.body_iterator])
+
+    assert body == b"zipdat"
+    assert response.status_code == 206
+    assert response.headers["content-length"] == "6"
+    assert response.headers["content-encoding"] == "gzip"
+    assert response.headers["content-range"] == "bytes 0-5/12"
+    assert response.headers["x-accel-buffering"] == "no"
+    assert captured["request"] == {
+        "method": "GET",
+        "url": "https://media.example.com/generated.png",
+        "headers": {"Accept-Encoding": "identity", "Range": "bytes=0-5"},
+    }
+    assert captured["stream"] is True
+    assert captured["upstream_closed"] is True
+    assert captured["client_closed"] is True
+
+
+@pytest.mark.asyncio
 async def test_analyze_assets_settles_provider_tokens(monkeypatch, tmp_path):
     from routers import creation_studio as studio_router
 

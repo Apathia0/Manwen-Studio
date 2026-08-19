@@ -620,7 +620,7 @@ async def get_asset_content(
         return FileResponse(path, media_type=asset.mime_type or None)
 
     remote_url = validate_remote_media_url(value)
-    forwarded_headers = {}
+    forwarded_headers = {"Accept-Encoding": "identity"}
     if request.headers.get("range"):
         forwarded_headers["Range"] = request.headers["range"]
     client = httpx.AsyncClient(timeout=httpx.Timeout(connect=15, read=600, write=30, pool=30), follow_redirects=False)
@@ -635,7 +635,9 @@ async def get_asset_content(
 
     async def stream_remote():
         try:
-            async for chunk in upstream.aiter_bytes():
+            # 必须透传原始字节。aiter_bytes() 会自动解压响应，若继续转发上游
+            # Content-Length，会导致 HTTP/2 响应长度不一致并中断图片加载。
+            async for chunk in upstream.aiter_raw():
                 yield chunk
         finally:
             await upstream.aclose()
@@ -643,9 +645,18 @@ async def get_asset_content(
 
     response_headers = {
         key: upstream.headers[key]
-        for key in ("content-length", "content-range", "accept-ranges")
+        for key in (
+            "content-length",
+            "content-range",
+            "accept-ranges",
+            "content-encoding",
+            "cache-control",
+            "etag",
+            "last-modified",
+        )
         if key in upstream.headers
     }
+    response_headers["X-Accel-Buffering"] = "no"
     return StreamingResponse(
         stream_remote(),
         status_code=upstream.status_code,
