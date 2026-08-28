@@ -50,7 +50,7 @@ interface SceneNodeBeat {
   transition_to_next?: string;
 }
 
-interface SceneNodeConfig {
+export interface SceneNodeConfig {
   scene_id?: string | number;
   title?: string;
   location?: string;
@@ -70,6 +70,8 @@ export interface SceneNodeViewProps {
   onChange: (partial: Record<string, unknown>) => void;
   /** 批准 / 撤销批准 */
   onToggleApproved?: () => void;
+  /** 在聚合审核节点内使用时隐藏单场景批准按钮（审批统一在聚合层） */
+  hideApproval?: boolean;
 }
 
 /** dialogue 渲染为行数组：兼容 string / string[] / {character,line}[] */
@@ -96,7 +98,7 @@ function dialogueToEditingText(dialogue: unknown): string {
   return renderDialogueLines(dialogue).join('\n');
 }
 
-export default function SceneNodeView({ config, onChange, onToggleApproved }: SceneNodeViewProps) {
+export default function SceneNodeView({ config, onChange, onToggleApproved, hideApproval }: SceneNodeViewProps) {
   const { editingField, setEditingField, makeInputProps, makeTextareaProps } = useFieldEditing();
   const [expanded, setExpanded] = useState(!config.approved);
 
@@ -445,8 +447,8 @@ export default function SceneNodeView({ config, onChange, onToggleApproved }: Sc
             </div>
           )}
 
-          {/* ── 批准操作 ── */}
-          <div className="mt-3 pt-2 border-t border-dashed border-[#d7e3f4]">
+          {/* ── 批准操作（聚合节点内隐藏） ── */}
+          <div className={hideApproval ? 'hidden' : 'mt-3 pt-2 border-t border-dashed border-[#d7e3f4]'}>
             {approved ? (
               <button
                 onClick={() => onToggleApproved?.()}

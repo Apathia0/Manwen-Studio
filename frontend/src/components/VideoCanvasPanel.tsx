@@ -57,7 +57,7 @@ import CanvasCreateMenu from './video-canvas/CanvasCreateMenu';
 import CanvasNodePropertyPanel from './video-canvas/CanvasNodePropertyPanel';
 import CanvasBottomToolbar from './video-canvas/CanvasBottomToolbar';
 import ChapterImportDialog from './video-canvas/ChapterImportDialog';
-import SceneNodeView from './video-canvas/SceneNodeView';
+import SceneListNodeView from './video-canvas/SceneListNodeView';
 import AssetReferenceSelector from './AssetReferenceSelector';
 import StyleSelectorModal from './StyleSelectorModal';
 
@@ -917,53 +917,60 @@ export default function VideoCanvasPanel({ storyId, chapterId, workflow = null, 
       captureHistory();
       const baseX = sourceNode.position.x + 380;
       const baseY = sourceNode.position.y;
-      // v3 流程：拆分产物为「场景审核节点」，用户逐场景批准后再编译为视频节点
-      const newNodes: CanvasNode[] = result.units.map((unit, index) => ({
-        id: `split-${nodeId}-${unit.unit_index}-${Math.random().toString(36).slice(2, 8)}`,
-        type: 'scene',
-        position: { x: baseX + Math.floor(index / 4) * 380, y: baseY + (index % 4) * 270 },
-        data: {
-          label: unit.title || `场景 ${unit.unit_index}`,
-          nodeType: 'scene',
-          config: {
-            scene_id: unit.unit_index,
-            title: unit.title || `场景 ${unit.unit_index}`,
-            location: unit.scene_location || '',
-            time_of_day: unit.time_of_day || '',
-            characters: Array.isArray(unit.characters) ? unit.characters.filter((c) => typeof c === 'string') : [],
-            scene_purpose: unit.summary || '',
+      // v3.1 流程：拆分产物为单个「场景审核聚合节点」，全部场次垂直排列统一审批
+      const scenes = result.units.map((unit) => ({
+        scene_id: unit.unit_index,
+        title: unit.title || `场景 ${unit.unit_index}`,
+        location: unit.scene_location || '',
+        time_of_day: unit.time_of_day || '',
+        characters: Array.isArray(unit.characters) ? unit.characters.filter((c) => typeof c === 'string') : [],
+        scene_purpose: unit.summary || '',
+        importance: 'medium',
+        approved: false,
+        duration_seconds: unit.duration_seconds,
+        duration_reason: unit.duration_reason || '',
+        duration_requested: unit.duration_requested ?? null,
+        beats: [
+          {
+            beat_id: 1,
+            type: 'action',
             importance: 'medium',
+            emotion_shift: '',
+            action: unit.video_prompt || unit.summary || '',
+            dialogue: unit.dialogue_or_narration ?? [],
+            transition_to_next: unit.transition_to_next || '',
+          },
+        ],
+      }));
+      const sceneNode: CanvasNode = {
+        id: `split-${nodeId}-${Math.random().toString(36).slice(2, 8)}`,
+        type: 'scene',
+        position: { x: baseX, y: baseY },
+        data: {
+          label: `场景审核（${scenes.length} 场）`,
+          nodeType: 'scene',
+          ui: { width: 760, height: 640 },
+          config: {
+            scenes,
             approved: false,
-            duration_seconds: unit.duration_seconds,
-            duration_reason: unit.duration_reason || '',
-            duration_requested: unit.duration_requested ?? null,
+            scene_count: scenes.length,
             source_screenplay_node: nodeId,
-            beats: [
-              {
-                beat_id: 1,
-                type: 'action',
-                importance: 'medium',
-                emotion_shift: '',
-                action: unit.video_prompt || unit.summary || '',
-                dialogue: unit.dialogue_or_narration ?? [],
-                transition_to_next: unit.transition_to_next || '',
-              },
-            ],
           },
         },
-      }));
-      const newEdges: CanvasEdge[] = newNodes.map((node) => ({
-        id: `e-${nodeId}-${node.id}`,
+      };
+      const newNodes: CanvasNode[] = [sceneNode];
+      const newEdges: CanvasEdge[] = [{
+        id: `e-${nodeId}-${sceneNode.id}`,
         source: nodeId,
         sourceHandle: 'screenplay',
-        target: node.id,
+        target: sceneNode.id,
         targetHandle: 'screenplay',
-      }));
+      }];
       setNodes((current) => [...current, ...newNodes]);
       setEdges((current) => [...current, ...newEdges]);
       setDirty(true);
       if (result.stale_detected) toast.warning('剧本内容自上次拆分后已被修改，本次按最新内容拆分');
-      toast.success(`拆分完成：${result.unit_count} 个场景待审核${result.truncated ? `（超过上限已截断到 ${SCREENPLAY_SPLIT_MAX_UNITS} 个）` : ''}。批准场景后可编译为视频节点`);
+      toast.success(`拆分完成：${result.unit_count} 个场景已放入审核节点${result.truncated ? `（超过上限已截断到 ${SCREENPLAY_SPLIT_MAX_UNITS} 个）` : ''}。统一审批通过后可编译为视频节点`);
     } catch (error) {
       toast.error(normalizeErrorMessage(error, '剧本拆分失败'));
     } finally {
@@ -1002,17 +1009,19 @@ export default function VideoCanvasPanel({ storyId, chapterId, workflow = null, 
     setCompilingNodeId(nodeId);
     try {
       const result = await compileScenes(canvas.id, [nodeId]);
-      const compiledItem = result.compiled[0];
-      if (!compiledItem) {
+      if (!result.compiled.length) {
         const reason = result.skipped[0]?.reason || '未知原因';
         toast.error(`编译失败：${reason}`);
         return;
       }
       captureHistory();
-      const videoNode: CanvasNode = {
-        id: `compiled-${nodeId}-${Math.random().toString(36).slice(2, 8)}`,
+      // 多个视频节点按 4 列网格排在场景节点右侧
+      const baseX = sceneNode.position.x + 800;
+      const baseY = sceneNode.position.y;
+      const newNodes: CanvasNode[] = result.compiled.map((compiledItem, index) => ({
+        id: `compiled-${nodeId}-${compiledItem.scene_node_id}-${index}-${Math.random().toString(36).slice(2, 6)}`,
         type: 'video',
-        position: { x: sceneNode.position.x + 380, y: sceneNode.position.y },
+        position: { x: baseX + (index % 4) * 380, y: baseY + Math.floor(index / 4) * 270 },
         data: {
           label: compiledItem.title,
           nodeType: 'video',
@@ -1023,12 +1032,19 @@ export default function VideoCanvasPanel({ storyId, chapterId, workflow = null, 
             source_scene_node: nodeId,
           },
         },
-      };
-      const edge: CanvasEdge = { id: `e-${nodeId}-${videoNode.id}`, source: nodeId, sourceHandle: 'shot', target: videoNode.id, targetHandle: 'prompt' };
-      setNodes((current) => [...current, videoNode]);
-      setEdges((current) => [...current, edge]);
+      }));
+      const newEdges: CanvasEdge[] = newNodes.map((videoNode) => ({
+        id: `e-${nodeId}-${videoNode.id}`,
+        source: nodeId,
+        sourceHandle: 'shot',
+        target: videoNode.id,
+        targetHandle: 'prompt',
+      }));
+      setNodes((current) => [...current, ...newNodes]);
+      setEdges((current) => [...current, ...newEdges]);
       setDirty(true);
-      toast.success(`场景已编译为视频节点（${compiledItem.duration_seconds} 秒${compiledItem.duration_requested && compiledItem.duration_requested !== compiledItem.duration_seconds ? `，由建议 ${compiledItem.duration_requested}s 归一` : ''}）`);
+      const normalizedCount = result.compiled.filter((item) => item.duration_requested != null && item.duration_requested !== item.duration_seconds).length;
+      toast.success(`已编译 ${result.compiled.length} 个视频节点${normalizedCount ? `（${normalizedCount} 个时长经档位归一）` : ''}${result.skipped.length ? `，跳过 ${result.skipped.length} 个` : ''}`);
     } catch (error) {
       toast.error(normalizeErrorMessage(error, '场景编译失败'));
     } finally {
@@ -1045,8 +1061,8 @@ export default function VideoCanvasPanel({ storyId, chapterId, workflow = null, 
       {interaction.state.selectionBox && (() => { const box = interaction.state.selectionBox; const left = Math.min(box.startWorldX, box.currentWorldX); const top = Math.min(box.startWorldY, box.currentWorldY); return <div className="pointer-events-none absolute rounded-lg border-2 border-[#2f80ff]/80 bg-[#2f80ff]/10" style={{ left, top, width: Math.abs(box.currentWorldX - box.startWorldX), height: Math.abs(box.currentWorldY - box.startWorldY) }} />; })()}
       {nodes.map((node) => <CanvasNodeView key={node.id} node={node as CanvasSceneNode} catalogItem={catalog.find((item) => item.type === node.type) || catalog[0]} selected={selectedNodeIds.includes(node.id)} connecting={interaction.state.connecting} connectionTargetNodeId={interaction.state.connectionTargetNodeId} scale={editorViewport.scale} handlers={interaction.handlers} onResize={handleNodeResize} onResizeEnd={handleNodeResizeEnd} onNodeContextMenu={(event, nodeId) => { event.preventDefault(); event.stopPropagation(); setNodeMenu({ x: event.clientX, y: event.clientY, nodeId }); }} renderContent={(nodeView) => { const result = nodeView.data.result as (Record<string, unknown> & { url?: string }) | undefined; const resultUrl = result?.url; const runStatus = nodeRunStatuses.get(nodeView.id); const isBusy = submittingNodeId === nodeView.id || ['awaiting_approval', 'queued', 'running', 'cancel_requested'].includes(String(runStatus || '')); if (resultUrl) return <NodeResultPreview url={resultUrl} isVideo={nodeView.type === 'video'} />; if (isBusy) return <div className="flex h-full w-full items-center justify-center bg-[#202226]" aria-label="生成中"><Loader2 className="h-8 w-8 animate-spin text-[#73a7ff]" /></div>; if (nodeView.type === 'scene') { const config = (nodeView.data.config || {}) as Record<string, unknown>; return (
   <div className="flex h-full w-full flex-col gap-1.5" onPointerDown={(event) => event.stopPropagation()}>
-    <div className="min-h-0 flex-1 overflow-y-auto">
-      <SceneNodeView
+    <div className="min-h-0 flex-1 overflow-hidden">
+      <SceneListNodeView
         config={config}
         onChange={(partial) => updateSceneNodeConfig(nodeView.id, partial)}
         onToggleApproved={() => updateSceneNodeConfig(nodeView.id, { approved: !config.approved })}
@@ -1058,13 +1074,13 @@ export default function VideoCanvasPanel({ storyId, chapterId, workflow = null, 
         disabled={compilingNodeId === nodeView.id}
         onPointerDown={(event) => event.stopPropagation()}
         onClick={(event) => { event.stopPropagation(); void compileSceneNode(nodeView.id); }}
-        className="inline-flex w-full items-center justify-center gap-1.5 rounded-lg bg-emerald-600 px-2 py-1.5 text-[11px] font-medium text-white hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-50"
+        className="inline-flex w-full shrink-0 items-center justify-center gap-1.5 rounded-lg bg-emerald-600 px-2 py-1.5 text-[11px] font-medium text-white hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-50"
       >
         {compilingNodeId === nodeView.id ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <SplitSquareHorizontal className="h-3.5 w-3.5" />}
-        {compilingNodeId === nodeView.id ? '编译中…' : '编译为视频节点'}
+        {compilingNodeId === nodeView.id ? '编译中…' : `编译为视频节点组（${Array.isArray(config.scenes) ? config.scenes.length : 0} 个）`}
       </button>
     ) : (
-      <p className="px-1 text-center text-[10px] text-slate-500">批准本场景后可编译为视频节点</p>
+      <p className="shrink-0 px-1 text-center text-[10px] text-slate-500">统一审批通过后可编译为视频节点组</p>
     )}
   </div>
 ); }

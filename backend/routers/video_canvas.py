@@ -1562,37 +1562,46 @@ async def compile_scenes(canvas_id: int, body: VideoCanvasCompileScenesRequest, 
         if not config.get("approved"):
             skipped.append({"node_id": scene_node_id, "reason": "场景未批准"})
             continue
-        requested = config.get("duration_seconds")
-        model_name = str(config.get("model_id") or "")
-        normalized = normalize_video_duration(
-            requested if isinstance(requested, (int, float)) else None,
-            model=model_name,
-            default_seconds=5,
-        )
-        prompt_body = _merge_beats_to_video_prompt(config)
-        video_prompt = str(config.get("video_prompt") or "").strip()
-        if not video_prompt:
-            location = str(config.get("location") or "").strip()
-            time_of_day = str(config.get("time_of_day") or "").strip()
-            header_parts = []
-            if location:
-                header_parts.append(f"场景：{location}")
-            if time_of_day:
-                header_parts.append(f"时间：{time_of_day}")
-            if header_parts:
-                video_prompt = "；".join(header_parts) + "\n" + prompt_body
-            else:
-                video_prompt = prompt_body
-        compiled.append(
-            {
-                "scene_node_id": scene_node_id,
-                "title": str(config.get("title") or f"场景 {scene_node_id}"),
-                "video_prompt": video_prompt,
-                "duration_seconds": normalized,
-                "duration_requested": requested if isinstance(requested, (int, float)) else None,
-                "characters": config.get("characters") or [],
-            }
-        )
+        # 聚合结构：config.scenes 为场景列表（统一审批作用整个节点）；
+        # 兼容旧单场景形态（config 本身即场景）
+        raw_scenes = config.get("scenes")
+        scene_items = raw_scenes if isinstance(raw_scenes, list) and raw_scenes else [config]
+        for scene_index, scene in enumerate(scene_items, start=1):
+            if not isinstance(scene, dict):
+                continue
+            requested = scene.get("duration_seconds")
+            if not isinstance(requested, (int, float)):
+                requested = config.get("duration_seconds")
+            model_name = str(scene.get("model_id") or config.get("model_id") or "")
+            normalized = normalize_video_duration(
+                requested if isinstance(requested, (int, float)) else None,
+                model=model_name,
+                default_seconds=5,
+            )
+            prompt_body = _merge_beats_to_video_prompt(scene if scene is not config else config)
+            video_prompt = str(scene.get("video_prompt") or "").strip()
+            if not video_prompt:
+                location = str(scene.get("location") or "").strip()
+                time_of_day = str(scene.get("time_of_day") or "").strip()
+                header_parts = []
+                if location:
+                    header_parts.append(f"场景：{location}")
+                if time_of_day:
+                    header_parts.append(f"时间：{time_of_day}")
+                if header_parts:
+                    video_prompt = "；".join(header_parts) + "\n" + prompt_body
+                else:
+                    video_prompt = prompt_body
+            compiled.append(
+                {
+                    "scene_node_id": f"{scene_node_id}#{scene_index}",
+                    "title": str(scene.get("title") or f"场景 {scene_index}"),
+                    "video_prompt": video_prompt,
+                    "duration_seconds": normalized,
+                    "duration_requested": requested if isinstance(requested, (int, float)) else None,
+                    "characters": scene.get("characters") or [],
+                }
+            )
     if not compiled:
         raise HTTPException(422, {"message": "没有可编译的场景：所选场景均未批准或不存在", "skipped": skipped})
     return {"ok": True, "compiled_count": len(compiled), "skipped": skipped, "compiled": compiled}
