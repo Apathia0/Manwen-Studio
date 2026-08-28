@@ -125,6 +125,7 @@ class StoryOut(BaseModel):
     story_memory: Optional[dict[str, Any]] = None
     onboarding_completed: bool = False
     source_type: str = "manual"
+    story_type: str = "novel"
     import_context_completed: bool = True
     has_character_profiles: bool = False
     has_ref_image: bool = False
@@ -1173,6 +1174,14 @@ class ChapterVideoWorkflowStatusOut(BaseModel):
 
 
 # ─── 视频无限画布 Schemas ────────────────────────────────
+
+
+class MangaDramaProjectCreate(BaseModel):
+    """漫剧创作项目：story_type=video 的作品 + 初始空白画布一次创建。"""
+    title: str = Field(default="未命名漫剧", min_length=1, max_length=255)
+    description: str | None = Field(default=None, max_length=2000)
+    canvas_name: str = Field(default="主画布", min_length=1, max_length=255)
+    idempotency_key: str | None = Field(default=None, min_length=8, max_length=100)
 
 
 class VideoCanvasCreate(BaseModel):

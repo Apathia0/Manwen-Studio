@@ -3573,6 +3573,36 @@ export async function listVideoCanvasNodeCatalog(): Promise<{ node_types: VideoC
   return res.json();
 }
 
+/* ─── 漫剧创作项目（story_type=video） ─── */
+
+export interface MangaDramaProject {
+  story_id: number;
+  title: string;
+  description?: string | null;
+  cover_image?: string | null;
+  created_at?: string | null;
+  canvases: VideoCanvas[];
+}
+
+export async function listMangaDramaProjects(): Promise<{ projects: MangaDramaProject[] }> {
+  const res = await fetch(`${BASE}/api/manga-drama/projects`, { headers: apiHeaders() });
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
+  return res.json();
+}
+
+export async function createMangaDramaProject(payload: {
+  title?: string;
+  description?: string | null;
+  canvas_name?: string;
+  idempotency_key?: string;
+}): Promise<{ story_id: number; story_title: string; canvas: VideoCanvas }> {
+  const res = await fetch(`${BASE}/api/manga-drama/projects`, {
+    method: 'POST', headers: apiHeaders(true), body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
+  return res.json();
+}
+
 export async function createVideoCanvas(payload: {
   story_id: number;
   default_chapter_id?: number | null;

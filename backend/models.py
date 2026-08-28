@@ -27,6 +27,8 @@ class Story(Base):
     knowledge_revision: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
     onboarding_completed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     source_type: Mapped[str] = mapped_column(String(20), nullable=False, default="manual")
+    # 作品类型：novel=小说（默认）；video=漫剧创作项目（画布工作台）
+    story_type: Mapped[str] = mapped_column(String(20), nullable=False, default="novel", server_default="novel")
     import_context_completed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     video_style_preset_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("video_style_presets.id"), nullable=True)
     storyboard_preset_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("storyboard_prompt_presets.id"), nullable=True, index=True)

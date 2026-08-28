@@ -62,9 +62,9 @@ const AgentPanel = lazy(() => import('./AgentPanel/AgentPanel'));
 interface Props {
   storyId: number;
   chapterId?: number;
-  workflow: ChapterVideoWorkflow | null;
-  assets: VideoAsset[];
-  stylePresets: VideoStylePreset[];
+  workflow?: ChapterVideoWorkflow | null;
+  assets?: VideoAsset[];
+  stylePresets?: VideoStylePreset[];
   onDirtyChange?: (dirty: boolean) => void;
   onAssetsChanged?: () => void;
   onOpenAssetManagement?: () => void;
@@ -176,7 +176,7 @@ function projectLegacyGraph(graph: VideoCanvasGraph): VideoCanvasGraph {
 
 
 
-export default function VideoCanvasPanel({ storyId, chapterId, workflow, assets, stylePresets, onDirtyChange, onAssetsChanged, onOpenAssetManagement }: Props) {
+export default function VideoCanvasPanel({ storyId, chapterId, workflow = null, assets = [], stylePresets = [], onDirtyChange, onAssetsChanged, onOpenAssetManagement }: Props) {
   const [catalog, setCatalog] = useState<VideoCanvasNodeCatalogItem[]>([]);
   const [models, setModels] = useState<AiModelItem[]>([]);
   const [canvas, setCanvas] = useState<VideoCanvas | null>(null);

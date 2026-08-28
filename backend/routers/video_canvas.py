@@ -33,6 +33,7 @@ from models import (
     VideoCanvasVersion,
 )
 from schemas import (
+    MangaDramaProjectCreate,
     VideoCanvasCreate,
     VideoCanvasGraphSave,
     VideoCanvasImportRequest,
@@ -1000,6 +1001,84 @@ def _run_scope_node_ids(graph: dict[str, Any], target_node_ids: set[str]) -> set
 async def get_video_canvas_node_catalog(request: Request, db: Session = Depends(get_db)):
     _require_user(request, db)
     return {"node_types": [{"type": key, **value} for key, value in NODE_CATALOG.items()]}
+
+
+@router.get("/api/manga-drama/projects")
+async def list_manga_drama_projects(request: Request, db: Session = Depends(get_db)):
+    """漫剧创作项目列表：当前用户 story_type='video' 的作品及其画布。"""
+    user = _require_user(request, db)
+    stories = (
+        db.query(Story)
+        .filter(Story.owner_user_id == user.id, Story.story_type == "video")
+        .order_by(Story.created_at.desc())
+        .all()
+    )
+    items: list[dict[str, Any]] = []
+    for story in stories:
+        canvases = (
+            db.query(VideoCanvas)
+            .filter(VideoCanvas.owner_user_id == user.id, VideoCanvas.story_id == story.id)
+            .order_by(VideoCanvas.id.desc())
+            .all()
+        )
+        items.append(
+            {
+                "story_id": story.id,
+                "title": story.title,
+                "description": story.description,
+                "cover_image": story.cover_image,
+                "created_at": story.created_at.isoformat() if story.created_at else None,
+                "canvases": [_serialize_canvas(c, db) for c in canvases],
+            }
+        )
+    return {"projects": items}
+
+
+@router.post("/api/manga-drama/projects", status_code=201)
+async def create_manga_drama_project(body: MangaDramaProjectCreate, request: Request, db: Session = Depends(get_db)):
+    """新建漫剧项目：创建 story_type='video' 的作品 + 初始空白画布，一次完成。"""
+    user = _require_user(request, db)
+    if body.idempotency_key:
+        existing_canvas = db.query(VideoCanvas).filter(
+            VideoCanvas.owner_user_id == user.id,
+            VideoCanvas.creation_idempotency_key == body.idempotency_key,
+        ).first()
+        if existing_canvas:
+            story = db.get(Story, existing_canvas.story_id)
+            return {"story_id": existing_canvas.story_id, "canvas": _serialize_canvas(existing_canvas, db), "story_title": story.title if story else body.title}
+
+    story = Story(
+        owner_user_id=user.id,
+        title=body.title.strip(),
+        description=body.description,
+        story_type="video",
+    )
+    db.add(story)
+    try:
+        db.flush()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(422, "漫剧项目创建失败，请重试")
+
+    canvas = VideoCanvas(
+        owner_user_id=user.id,
+        story_id=story.id,
+        name=body.canvas_name.strip(),
+        description=body.description,
+        creation_idempotency_key=body.idempotency_key,
+    )
+    db.add(canvas)
+    try:
+        db.flush()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(422, "漫剧画布创建失败，请重试")
+    db.add(VideoCanvasVersion(canvas_id=canvas.id, version_no=1, graph_json=_empty_graph(), source="manual", created_by_user_id=user.id, change_summary="创建漫剧项目空白画布"))
+    db.add(VideoCanvasLayout(canvas_id=canvas.id, layout_json={"nodes": {}, "viewport": {"x": 0, "y": 0, "zoom": 1}}, revision=1))
+    db.commit()
+    db.refresh(canvas)
+    db.refresh(story)
+    return {"story_id": story.id, "story_title": story.title, "canvas": _serialize_canvas(canvas, db)}
 
 
 @router.post("/api/video-canvas/canvases")

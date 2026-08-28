@@ -259,6 +259,10 @@ def _migrate_unlocked(target_engine=None):
             if "import_context_completed" not in cols:
                 conn.execute(text("ALTER TABLE stories ADD COLUMN import_context_completed BOOLEAN DEFAULT TRUE"))
                 conn.execute(text("UPDATE stories SET import_context_completed = TRUE WHERE import_context_completed IS NULL"))
+            if "story_type" not in cols:
+                conn.execute(text("ALTER TABLE stories ADD COLUMN story_type VARCHAR(20) DEFAULT 'novel'"))
+                conn.execute(text("UPDATE stories SET story_type = 'novel' WHERE story_type IS NULL"))
+                conn.execute(text("CREATE INDEX IF NOT EXISTS ix_stories_story_type ON stories (story_type)"))
     _ensure_story_owner_integrity(db_engine)
 
     if "chapters" in insp.get_table_names():

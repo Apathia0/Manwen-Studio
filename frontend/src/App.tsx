@@ -3,6 +3,7 @@ import {
   BarChart3,
   BookOpen,
   Brush,
+  Clapperboard,
   CreditCard,
   Home,
   Library,
@@ -26,6 +27,7 @@ import {
   ADMIN_ROUTES,
   PUBLIC_ROUTES,
   parseDeconstructionWorkId,
+  parseMangaDramaStoryId,
   parseWorkspaceStoryId,
   pathToRouteKey,
   routeToPath,
@@ -36,6 +38,8 @@ import { LoadingOverlay } from './components/ui/LoadingOverlay';
 import { RouteLoadingFallback } from './components/ui/RouteLoadingFallback';
 import PublicLanding from './components/PublicLanding';
 import StoryLibraryPage from './components/StoryLibraryPage';
+import MangaDramaListPage from './components/MangaDramaListPage';
+import MangaDramaWorkspacePage from './components/MangaDramaWorkspacePage';
 import ImportGuidancePage from './components/ImportGuidancePage';
 import OnboardingPage from './components/OnboardingPage';
 import TemplateManagePage from './components/TemplateManagePage';
@@ -110,6 +114,7 @@ const LS_NAV_COLLAPSED = 'storycanvas.navCollapsed';
 
 const USER_NAV: ShellNavItem[] = [
   { key: 'stories', label: '作品', icon: Home },
+  { key: 'manga-drama', label: '漫剧创作', icon: Clapperboard },
   { key: 'creation-studio', label: '创作台', icon: Sparkles },
   { key: 'model-catalog', label: '模型广场', icon: Cpu },
   { key: 'workspace', label: '作品工作台', icon: Brush },
@@ -144,6 +149,7 @@ function App() {
   const route: RouteKey = useMemo(() => pathToRouteKey(location.pathname), [location.pathname]);
   const deconWorkId = useMemo(() => parseDeconstructionWorkId(location.pathname), [location.pathname]);
   const workspaceStoryId = useMemo(() => parseWorkspaceStoryId(location.pathname), [location.pathname]);
+  const mangaDramaStoryId = useMemo(() => parseMangaDramaStoryId(location.pathname), [location.pathname]);
 
   const setRoute = useCallback((key: RouteKey) => {
     navigate(routeToPath(key));
@@ -707,6 +713,12 @@ function App() {
           }}
           loadingWorkspace={loadingWorkspace}
         />
+      )}
+      {route === 'manga-drama' && (
+        <MangaDramaListPage onOpenProject={(storyId) => navigate(`/manga-drama/workspace/${storyId}`)} />
+      )}
+      {route === 'manga-drama-workspace' && mangaDramaStoryId && (
+        <MangaDramaWorkspacePage storyId={mangaDramaStoryId} onBack={() => navigate('/manga-drama')} />
       )}
       {route === 'deconstruction-library' && deconWorkId !== 0 ? (
         <DeconstructionWorkPage
