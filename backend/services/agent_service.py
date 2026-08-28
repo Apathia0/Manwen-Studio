@@ -40,6 +40,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import flag_modified
 from services import deepseek as _deepseek_service
 from services.agent_model_capabilities import (
+    _THINKING_BOOST_MAX as _MAX_PROBE_OUTPUT_TOKENS,
     dynamic_output_limit,
     dynamic_prompt_budget,
     load_model_capability,
@@ -7320,9 +7321,9 @@ class AgentService:
                     truncation_content = combined_content if not tool_calls_acc else ""
                     if (
                         not model_capability.get("observed_output_limit")
-                        and output_token_limit < 8_192
+                        and output_token_limit < _MAX_PROBE_OUTPUT_TOKENS
                     ):
-                        output_token_limit = min(8_192, output_token_limit * 2)
+                        output_token_limit = min(_MAX_PROBE_OUTPUT_TOKENS, output_token_limit * 2)
                         agent_prompt_token_budget = dynamic_prompt_budget(
                             model_capability,
                             reserved_output_tokens=output_token_limit,

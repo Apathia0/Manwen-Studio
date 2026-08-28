@@ -29,7 +29,9 @@ SCENE_BUDGET_IDEAL_TOTAL = 2100
 SCENE_BUDGET_SOFT_MAX_TOTAL = 2200
 SCENE_BUDGET_HARD_MAX_TOTAL = 2480
 # 正文 Writer 明确关闭思考模式，全部输出预算用于章节正文。
-WRITER_MAX_TOKENS = 8192
+# 线上思考型模型（glm-5.3-flash 等）经网关调用时会忽略 thinking=disabled，
+# reasoning 最多消耗 1 万+ token，8192 预算会被思考吃光导致空正文，因此默认放大到 16384。
+WRITER_MAX_TOKENS = 16384
 WRITER_EMPTY_CONTENT_RETRIES = 1
 # 思考型模型忽略 thinking=disabled 时，reasoning 可能吃光输出预算；
 # 检测到该情况后按倍数上调 max_tokens 重试，最多上调 WRITER_THINKING_BUDGET_BOOSTS 次。
@@ -2320,7 +2322,7 @@ async def build_chapter_creation_pack(
             {"role": "user", "content": user_prompt},
         ],
         api_key=api_key,
-        max_tokens=8192,
+        max_tokens=WRITER_MAX_TOKENS,
         response_format={"type": "json_object"},
     )
     try:
@@ -2361,7 +2363,7 @@ do_not_write, chapter_boundary, target, review_focus。"""
                         {"role": "user", "content": retry_prompt},
                     ],
                     api_key=api_key,
-                    max_tokens=8192,
+                    max_tokens=WRITER_MAX_TOKENS,
                     response_format={"type": "json_object"},
                 )
                 pack = deepseek_service._extract_json_object(retry_content)

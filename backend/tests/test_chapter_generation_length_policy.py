@@ -157,7 +157,7 @@ def test_length_policy_constants_are_aligned():
     assert "CHAPTER_TARGET_IDEAL_CHARS = 2500" in deepseek_text
     assert "CHAPTER_FIRST_PASS_MIN_CHARS = 2300" in deepseek_text
     assert "CHAPTER_FIRST_PASS_MAX_CHARS = 2700" in deepseek_text
-    assert "CHAPTER_COMPLETION_MAX_TOKENS = 8192" in deepseek_text
+    assert "CHAPTER_COMPLETION_MAX_TOKENS = 16384" in deepseek_text
     assert "MIN_CHAPTER_CHARS = 2200" in chapter_quality_text
     assert "MAX_CHAPTER_CHARS = 3000" in chapter_quality_text
     assert "IDEAL_CHAPTER_CHARS = 2500" in chapter_quality_text
@@ -1552,11 +1552,13 @@ def test_writer_local_sanitize_removes_zero_tolerance_terms():
 def test_writer_revision_uses_safe_budget_for_complete_full_text():
     import services.chapter_agents as ca
 
-    assert ca.WRITER_MAX_TOKENS == 8192
-    assert ca._writer_max_tokens(0, False) == 8192
-    assert ca._writer_max_tokens(2494, True) == 8192
-    assert ca._writer_max_tokens(1800, True) == 8192
-    assert ca._writer_max_tokens(3100, True) == 8192
+    # 思考型模型经网关调用会忽略 thinking=disabled，reasoning 可达 1 万+ token，
+    # 8192 会被吃光导致空正文，因此默认预算放大到 16384。
+    assert ca.WRITER_MAX_TOKENS == 16384
+    assert ca._writer_max_tokens(0, False) == 16384
+    assert ca._writer_max_tokens(2494, True) == 16384
+    assert ca._writer_max_tokens(1800, True) == 16384
+    assert ca._writer_max_tokens(3100, True) == 16384
 
 
 def test_scene_budget_is_tight_enough_for_first_draft():

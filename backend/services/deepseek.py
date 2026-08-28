@@ -39,8 +39,9 @@ CHAPTER_TARGET_IDEAL_CHARS = 2500
 CHAPTER_FIRST_PASS_MIN_CHARS = 2300
 CHAPTER_FIRST_PASS_MAX_CHARS = 2700
 # 该常量在上游章节生成/补全链路（expand fallback 等）使用；因 deepseek-v4-flash 推理模式思考会吃掉大量 token，
-# 原 3072 不足以输出完整正文（finish_reason=length / content 空），提到 8192 留足思考+输出缓冲。
-CHAPTER_COMPLETION_MAX_TOKENS = 8192
+# 原 3072 不足以输出完整正文（finish_reason=length / content 空），提到 8192 后线上 glm-5.3-flash 仍出现
+# reasoning 8161 token 吃光预算的空正文，进一步提到 16384 留足思考+输出缓冲。
+CHAPTER_COMPLETION_MAX_TOKENS = 16384
 
 # 漫画分镜生成（split_scenes）的 DeepSeek 请求超时配置：
 # 长 context + 大输出 JSON（page_count 可达 10-20 页）推理耗时长，

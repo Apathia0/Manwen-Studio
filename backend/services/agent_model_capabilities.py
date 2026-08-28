@@ -15,7 +15,11 @@ from sqlalchemy.exc import IntegrityError
 _SETTING_PREFIX = "agent.model_capability."
 _UNKNOWN_CONTEXT_WINDOW = 96_000
 _DEFAULT_OUTPUT_TOKENS = 4_096
-_MAX_OPTIMISTIC_OUTPUT_TOKENS = 8_192
+_MAX_OPTIMISTIC_OUTPUT_TOKENS = 16_384
+# 思考型模型忽略 thinking=disabled 时，reasoning 与正文共享输出预算；
+# 已学习的 thinking_budget_boost 按倍数放大输出上限，避免思考把 token 占完导致空响应。
+_THINKING_BOOST_FACTOR = 2
+_THINKING_BOOST_MAX = 32_768
 
 
 def _positive_int(value: Any) -> int | None:
@@ -51,8 +55,13 @@ def dynamic_output_limit(capability: dict[str, Any] | None) -> int:
     observed_max = _positive_int(capability.get("observed_output_limit"))
     accepted_request = _positive_int(capability.get("largest_accepted_output_request"))
     if observed_max is None and accepted_request is None:
-        return _DEFAULT_OUTPUT_TOKENS
-    return max(1_024, min(_MAX_OPTIMISTIC_OUTPUT_TOKENS, observed_max or accepted_request or _DEFAULT_OUTPUT_TOKENS))
+        base = _DEFAULT_OUTPUT_TOKENS
+    else:
+        base = max(1_024, min(_MAX_OPTIMISTIC_OUTPUT_TOKENS, observed_max or accepted_request or _DEFAULT_OUTPUT_TOKENS))
+    boost = _positive_int(capability.get("thinking_budget_boost")) if capability else None
+    if boost:
+        base = min(_THINKING_BOOST_MAX, base * (_THINKING_BOOST_FACTOR ** boost))
+    return base
 
 
 def dynamic_prompt_budget(
