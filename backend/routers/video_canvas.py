@@ -15,6 +15,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from database import get_db
+from services.errors import UpstreamServiceError
 from services.task_manager import task_manager
 from services.video_canvas_runtime import execute_canvas_run
 from models import (
@@ -179,6 +180,15 @@ def _canvas_deepseek_api_key(request: Request, db: Session) -> str | None:
     """画布文本 AI 调用前的运行时注入（AGENTS.md 陷阱 15：必须先 configure 再调用）。"""
     from routers.video import _user_deepseek_api_key
     return _user_deepseek_api_key(request, db)
+
+
+def _translate_upstream_error(exc: "UpstreamServiceError") -> HTTPException:
+    """把上游 AI 错误转成带友好信息的 HTTP 状态码，避免漏成裸 500。"""
+    status = int(exc.status_code or 502)
+    if status < 400:
+        status = 502
+    payload = exc.to_payload()
+    return HTTPException(status, {"message": str(exc), **payload})
 
 
 def _screenplay_node_from_graph(graph: dict[str, Any], node_id: str) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
@@ -1611,7 +1621,10 @@ async def screenplay_split(canvas_id: int, body: VideoCanvasScreenplaySplitReque
     from services import deepseek as deepseek_service
 
     api_key = _canvas_deepseek_api_key(request, db)
-    shots = await deepseek_service.parse_chapter_to_shots_lite(content, api_key=api_key)
+    try:
+        shots = await deepseek_service.parse_chapter_to_shots_lite(content, api_key=api_key)
+    except UpstreamServiceError as exc:
+        raise _translate_upstream_error(exc)
     if not isinstance(shots, list):
         shots = []
     truncated = len(shots) > SCREENPLAY_SPLIT_MAX_UNITS
@@ -1728,7 +1741,10 @@ async def import_screenplay(canvas_id: int, body: VideoCanvasScreenplayImportReq
     from services.screenplay_adapt import adapt_novel_to_screenplay
 
     api_key = _canvas_deepseek_api_key(request, db)
-    result = await adapt_novel_to_screenplay(chapters=resolved, api_key=api_key)
+    try:
+        result = await adapt_novel_to_screenplay(chapters=resolved, api_key=api_key)
+    except UpstreamServiceError as exc:
+        raise _translate_upstream_error(exc)
     return {
         "ok": True,
         "screenplay_text": result["screenplay_text"],
