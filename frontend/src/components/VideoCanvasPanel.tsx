@@ -185,6 +185,9 @@ function projectLegacyGraph(graph: VideoCanvasGraph): VideoCanvasGraph {
 
 export default function VideoCanvasPanel({ storyId, chapterId, workflow = null, assets = [], stylePresets = [], onDirtyChange, onAssetsChanged, onOpenAssetManagement }: Props) {
   const [catalog, setCatalog] = useState<VideoCanvasNodeCatalogItem[]>([]);
+  const [splittingNodeId, setSplittingNodeId] = useState<string | null>(null);
+  const [importDialogOpen, setImportDialogOpen] = useState(false);
+  const [compilingNodeId, setCompilingNodeId] = useState<string | null>(null);
   const [models, setModels] = useState<AiModelItem[]>([]);
   const [canvas, setCanvas] = useState<VideoCanvas | null>(null);
   const [canvasList, setCanvasList] = useState<VideoCanvas[]>([]);
@@ -896,8 +899,6 @@ export default function VideoCanvasPanel({ storyId, chapterId, workflow = null, 
     toast.success('画布节点已自动整理');
   };
   const addNodeFromTool = (type: string) => { const item = catalog.find((entry) => entry.type === type); if (!item) { toast.info('当前画布仅支持文本、图片、视频节点'); return; } captureHistory(); addCatalogNode(item); };
-  const [splittingNodeId, setSplittingNodeId] = useState<string | null>(null);
-  const [importDialogOpen, setImportDialogOpen] = useState(false);
   // 剧本节点拆分：调用后端，把视频单元组以网格布局落到画布（可撤销，保存走既有确认流）
   const splitScreenplayNode = async (nodeId: string) => {
     if (!canvas || splittingNodeId) return;
@@ -987,7 +988,6 @@ export default function VideoCanvasPanel({ storyId, chapterId, workflow = null, 
     setDirty(true);
   };
   // 已批准场景 → 编译为视频节点（落在该场景右侧）
-  const [compilingNodeId, setCompilingNodeId] = useState<string | null>(null);
   const compileSceneNode = async (nodeId: string) => {
     if (!canvas || compilingNodeId) return;
     const sceneNode = nodes.find((node) => node.id === nodeId);
