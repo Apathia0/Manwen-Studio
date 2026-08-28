@@ -906,7 +906,14 @@ export default function VideoCanvasPanel({ storyId, chapterId, workflow = null, 
     if (!sourceNode) return;
     setSplittingNodeId(nodeId);
     try {
-      const result = await screenplaySplit(canvas.id, nodeId);
+      // 后端按已保存的图定位剧本节点：拆分前先静默保存当前画布（含未保存的导入/编辑内容）
+      let targetCanvas = canvas;
+      if (dirty) {
+        const saved = await saveCanvas(false);
+        if (!saved) return;
+        targetCanvas = saved;
+      }
+      const result = await screenplaySplit(targetCanvas.id, nodeId);
       captureHistory();
       const baseX = sourceNode.position.x + 380;
       const baseY = sourceNode.position.y;
