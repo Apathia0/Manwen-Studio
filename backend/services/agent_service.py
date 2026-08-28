@@ -1313,10 +1313,14 @@ skill_registry.register(SkillDef(
 skill_registry.register(SkillDef(
     name="canvas_screenplay_director",
     display_name="剧本与分镜导演",
-    description="将已冻结来源整理为可审阅的剧本、镜头和连续性计划",
+    description="将已冻结来源整理为可审阅的剧本、镜头和连续性计划；支持对话式创作漫剧剧本草稿",
     icon="🎬",
-    tool_names=["get_canvas_graph", "create_canvas_plan", "get_canvas_plans", "update_canvas_plan", "get_chapter_full", "get_story_bible", "get_character_profiles", "get_scenes", "resolve_story_context", "search_story_knowledge"],
-    system_prompt_fragment="输出场景、节拍、镜头目的、角色状态、景别运镜、动作、情绪、转场和连续性风险。只提出结构化草案，不得擅自触发拆镜重建或付费生成。",
+    tool_names=["get_canvas_graph", "resolve_canvas_source", "draft_screenplay", "create_canvas_plan", "get_canvas_plans", "update_canvas_plan", "get_chapter_full", "get_story_bible", "get_character_profiles", "get_scenes", "resolve_story_context", "search_story_knowledge"],
+    system_prompt_fragment=(
+        "输出场景、节拍、镜头目的、角色状态、景别运镜、动作、情绪、转场和连续性风险。只提出结构化草案，不得擅自触发拆镜重建或付费生成。"
+        "对话创作剧本时：用户描述故事想法后直接撰写完整剧本（场景头/动作行/对白体裁），调用 draft_screenplay 规范化后展示给用户；"
+        "用户确认后用 apply_canvas_ops 写入剧本节点。用户要求改编小说章节时，先用 resolve_canvas_source(novel_chapter) 读取正文再创作。"
+    ),
     context_profile="video_canvas",
     required_resource_types=("章节正文", "故事设定", "角色档案", "场景资料"),
 ))
@@ -5670,6 +5674,35 @@ def _resolve_canvas_source_snapshot(
     """从当前授权范围读取计划来源，拒绝由模型伪造正文或画布文本。"""
     context = _current_run_context()
     normalized_type = str(source_type or "").strip()
+    if normalized_type == "novel_chapter":
+        # 漫剧画布跨作品只读导入：仅允许当前用户名下小说作品的章节，一次性读取语义，不写回原作品
+        source_ref = source_id if isinstance(source_id, dict) else {}
+        story_id = source_ref.get("story_id")
+        chapter_id = source_ref.get("chapter_id")
+        if not isinstance(story_id, int) or not isinstance(chapter_id, int):
+            raise ValueError("novel_chapter 来源必须提供 {story_id, chapter_id}")
+        source_story = db.get(Story, story_id)
+        if not source_story:
+            raise ValueError("来源作品不存在")
+        requester_user_id = context.pending_change_key.user_id if context and context.pending_change_key else None
+        if requester_user_id is not None and source_story.owner_user_id != requester_user_id:
+            raise ValueError("来源作品不属于当前用户")
+        if str(getattr(source_story, "story_type", "novel") or "novel") != "novel":
+            raise ValueError("来源作品不是小说类型，不能作为剧本素材")
+        chapter = db.get(Chapter, chapter_id)
+        if not chapter or chapter.story_id != story_id:
+            raise ValueError("章节不存在或不属于来源作品")
+        content = str(chapter.novel_content or "").strip()
+        if not content:
+            raise ValueError("章节正文为空，不能作为剧本素材")
+        return {
+            "source_type": "novel_chapter",
+            "source_id": {"story_id": story_id, "chapter_id": chapter_id},
+            "title": chapter.title or f"第{chapter.chapter_number}章",
+            "source_story_title": source_story.title,
+            "content": content,
+            "source_hash": _canvas_source_hash("novel_chapter", chapter_id, content),
+        }
     if normalized_type == "chapter":
         chapter_id = source_id if isinstance(source_id, int) else (context.chapter_id if context else None) or canvas.default_chapter_id
         chapter = db.get(Chapter, chapter_id) if isinstance(chapter_id, int) else None
@@ -5730,18 +5763,54 @@ def _resolve_canvas_source_snapshot(
             "content": content,
             "source_hash": _canvas_source_hash("chat", conversation.id, content),
         }
-    raise ValueError("source_type 仅支持 chapter、chat 或 text_node")
+    raise ValueError("source_type 仅支持 chapter、chat、text_node 或 novel_chapter")
 
 
 @tool_registry.register(
-    name="resolve_canvas_source",
-    description="从当前授权范围读取并冻结画布创作来源。章节正文、当前对话中的用户剧本、或画布文本节点只能通过此工具取得；返回内容和 source_hash 应原样用于 create_canvas_plan。",
+    name="draft_screenplay",
+    description="漫剧剧本创作工具：把已构思好的剧本全文按漫剧短剧体裁规范化后返回草稿。不直接写画布；用户确认后应使用 apply_canvas_ops 创建/更新 type=screenplay 节点（config.content=全文）。",
     parameters={
         "type": "object",
         "properties": {
             "canvas_id": {"type": "integer", "description": "当前画布 ID"},
-            "source_type": {"type": "string", "enum": ["chapter", "chat", "text_node"], "description": "来源类型"},
-            "source_id": {"description": "章节 ID、文本节点 ID；chat 来源无需提供"},
+            "title": {"type": "string", "description": "剧本标题"},
+            "screenplay_text": {"type": "string", "description": "完整剧本文本，以场景头开始（场景N：地点 / 时间 / 内外景），含动作行与角色对白"},
+            "logline": {"type": "string", "description": "一句话故事梗概（可选）"},
+        },
+        "required": ["canvas_id", "title", "screenplay_text"],
+    },
+    workflow_types=["video_canvas"],
+)
+async def draft_screenplay(canvas_id: int, title: str, screenplay_text: str, logline: str = "") -> dict:
+    """规范化并校验 Agent 撰写的剧本草稿，返回结构化结果供确认后写入画布。"""
+    canvas = _require_current_video_canvas(SessionLocal(), canvas_id)
+    text = str(screenplay_text or "").strip()
+    if not text:
+        return {"error": "剧本正文为空，请先完成创作再调用本工具"}
+    if len(text) < 200:
+        return {"error": "剧本正文过短（少于 200 字），请补全场景、动作与对白后再提交"}
+    if "——" in text:
+        return {"error": "剧本包含破折号（——），漫剧剧本禁止使用破折号，请改用逗号、句号或冒号后重新提交"}
+    logger.info("Agent tool=draft_screenplay canvas=%s title=%s chars=%s", canvas_id, title, len(text))
+    return {
+        "ok": True,
+        "title": str(title or "未命名剧本").strip()[:100],
+        "logline": str(logline or "").strip()[:300],
+        "draft_chars": len(text),
+        "screenplay_text": text,
+        "next_step": "向用户展示剧本草稿；用户确认后，使用 apply_canvas_ops 创建 type=screenplay 节点（data.label=标题, data.config.content=全文, data.config.content_hash 留空），一次 add_node 即可。",
+    }
+
+
+@tool_registry.register(
+    name="resolve_canvas_source",
+    description="从当前授权范围读取并冻结画布创作来源。章节正文、当前对话中的用户剧本、画布文本节点、或用户名下其他小说作品的章节（novel_chapter，只读一次性导入）只能通过此工具取得；返回内容和 source_hash 应原样用于 create_canvas_plan。",
+    parameters={
+        "type": "object",
+        "properties": {
+            "canvas_id": {"type": "integer", "description": "当前画布 ID"},
+            "source_type": {"type": "string", "enum": ["chapter", "chat", "text_node", "novel_chapter"], "description": "来源类型；novel_chapter 用于从用户名下其他小说作品导入章节作为剧本素材（只读，不写回原作品）"},
+            "source_id": {"description": "章节 ID、文本节点 ID、或 novel_chapter 时的 {story_id, chapter_id}；chat 来源无需提供"},
         },
         "required": ["canvas_id", "source_type"],
     },
@@ -7447,6 +7516,12 @@ class AgentService:
 - `apply_canvas_ops` 仅用于用户明确要求的少量手动节点编辑，先读取最新 definition_revision；它不是付费生成入口。
 - 资产只在计划中提出复用或新增建议。不得创建资产、生成图片或视频；实际运行必须由用户单独确认。
 - 若来源正文或文本节点已变化，旧计划会被拒绝应用或同步，应重新冻结来源并更新计划。
+
+### 对话式剧本创作（漫剧）
+- 用户在对话中描述故事想法时，直接撰写完整漫剧剧本并调用 `draft_screenplay` 规范化后展示；用户确认后再用 `apply_canvas_ops` 写入剧本节点。
+- 用户要求把某部小说的章节改编成剧本时，先用 `resolve_canvas_source(source_type="novel_chapter", source_id={"story_id":..., "chapter_id":...})` 读取正文（只读一次性导入，不写回原作品）。
+- 剧本体裁：场景头（场景N：地点 / 时间 / 内外景）、动作行（现在时、可拍摄）、对白（角色名：台词）、必要的旁白；三幕式节奏，开篇场景必须直接进入事件或冲突。
+- 写作红线：全文禁止破折号（——）；禁止"突然/瞬间/心中涌起"等模板化表达；对白口语化且各角色声线有区分；心理描写转化为动作与对白；宁短勿水，不为凑篇幅添加空镜。
 """
         skills_section = ""
         if enabled_skills:
