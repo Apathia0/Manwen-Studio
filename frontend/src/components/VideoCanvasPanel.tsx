@@ -947,14 +947,19 @@ export default function VideoCanvasPanel({ storyId, chapterId, workflow = null, 
         type: 'scene',
         position: { x: baseX, y: baseY },
         data: {
-          label: `场景审核（${scenes.length} 场）`,
+          label: `剧本审核（${scenes.length} 场）`,
           nodeType: 'scene',
-          ui: { width: 760, height: 640 },
+          ui: { width: 1100, height: 680 },
           config: {
             scenes,
             approved: false,
             scene_count: scenes.length,
             source_screenplay_node: nodeId,
+            // 左栏对照用：拆分时的剧本全文（截断保护，避免图 JSON 过大）
+            source_content: (() => {
+              const raw = String((sourceNode.data.config || {}).content ?? (sourceNode.data.config || {}).screenplay ?? '');
+              return raw.length > 30000 ? `${raw.slice(0, 30000)}\n\n[内容过长已截断]` : raw;
+            })(),
           },
         },
       };
