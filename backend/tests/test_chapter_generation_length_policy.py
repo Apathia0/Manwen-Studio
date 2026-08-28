@@ -71,6 +71,7 @@ def test_writer_disables_thinking_mode(monkeypatch):
 
 
 def test_writer_retries_empty_content_once_then_raises_structured_error(monkeypatch):
+    """reasoning 吃光输出预算时，先放大 max_tokens 重试，仍失败则抛结构化错误。"""
     import services.chapter_agents as ca
     import services.deepseek as ds
     from services.errors import WriterEmptyContentError
@@ -104,6 +105,8 @@ def test_writer_retries_empty_content_once_then_raises_structured_error(monkeypa
     monkeypatch.setattr(ca.httpx, "AsyncClient", FakeClient)
     monkeypatch.setattr(ds, "runtime_base_url", lambda: "https://example.invalid/v1")
     monkeypatch.setattr(ds, "runtime_model", lambda: "deepseek-v4-flash")
+    monkeypatch.setattr(ca, "persist_model_capability_observation", lambda *a, **k: {})
+    monkeypatch.setattr(ca, "load_model_capability", lambda *a, **k: {})
 
     with pytest.raises(WriterEmptyContentError) as exc_info:
         _run(ca._chat_completion(
@@ -112,7 +115,12 @@ def test_writer_retries_empty_content_once_then_raises_structured_error(monkeypa
             max_tokens=8192,
         ))
 
-    assert len(calls) == 2
+    # 8192 预算被 8192 reasoning token 吃光 → 升级到 16384；上游 reasoning_tokens 未随预算增长，
+    # 第二轮不再判定为思考吃预算，走原有空正文重试（维持 16384）后仍空 → 抛错。
+    assert len(calls) == 3
+    assert calls[0]["max_tokens"] == 8192
+    assert calls[1]["max_tokens"] == 16384
+    assert calls[2]["max_tokens"] == 16384
     assert all(item["thinking"] == {"type": "disabled"} for item in calls)
     assert exc_info.value.code == "writer_empty_content"
     assert exc_info.value.retryable is True

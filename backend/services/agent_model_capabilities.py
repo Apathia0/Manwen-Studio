@@ -100,6 +100,7 @@ def persist_model_capability_observation(
     finish_reason: str | None = None,
     context_error: str | None = None,
     output_error: str | None = None,
+    thinking_budget_boost: bool = False,
 ) -> dict[str, Any]:
     """把成功用量或上游边界错误合并到内部能力缓存。"""
     db = SessionLocal()
@@ -131,6 +132,12 @@ def persist_model_capability_observation(
             output_limit = _extract_token_limit(output_error or "")
             if output_limit:
                 payload["observed_output_limit"] = output_limit
+            if thinking_budget_boost:
+                # 思考型模型忽略 thinking=disabled：记录升级次数，供正文管线放大输出预算。
+                payload["thinking_budget_boost"] = max(
+                    _positive_int(payload.get("thinking_budget_boost")) or 0,
+                    1,
+                )
 
             # Agent 当前统一关闭 thinking；该字段仅表示观测结果，不再作为启用依据。
             payload["supports_reasoning"] = False

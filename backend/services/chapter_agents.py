@@ -1,3 +1,4 @@
+import asyncio
 import copy
 import hashlib
 import json
@@ -9,6 +10,7 @@ from typing import Any
 
 import httpx
 
+from services.agent_model_capabilities import load_model_capability, persist_model_capability_observation
 from services.chapter_creation_pack import canonical_pack_content
 from services.errors import UpstreamServiceError, WriterEmptyContentError
 
@@ -29,6 +31,13 @@ SCENE_BUDGET_HARD_MAX_TOTAL = 2480
 # 正文 Writer 明确关闭思考模式，全部输出预算用于章节正文。
 WRITER_MAX_TOKENS = 8192
 WRITER_EMPTY_CONTENT_RETRIES = 1
+# 思考型模型忽略 thinking=disabled 时，reasoning 可能吃光输出预算；
+# 检测到该情况后按倍数上调 max_tokens 重试，最多上调 WRITER_THINKING_BUDGET_BOOSTS 次。
+WRITER_THINKING_BUDGET_BOOSTS = 2
+WRITER_THINKING_BUDGET_BOOST_FACTOR = 2.0
+WRITER_THINKING_BUDGET_MAX_TOKENS = 32768
+# reasoning 消耗占输出预算的比例达到该阈值时，判定为"思考吃掉预算"。
+WRITER_THINKING_BUDGET_RATIO = 0.6
 PLOT_BEATS_MAX = 8
 PLOT_BEATS_MIN = 6
 
@@ -1254,6 +1263,73 @@ def _truncated_generation_review(content: str, creation_pack: dict[str, Any], fi
     }
 
 
+def _response_fallback_text(exc: httpx.HTTPStatusError) -> str:
+    try:
+        return exc.response.text
+    except Exception:
+        return ""
+
+
+async def _record_writer_model_observation(**observation: Any) -> None:
+    """章节管线的能力学习是旁路优化，失败不影响正文生成主链路。"""
+    try:
+        from services import deepseek as deepseek_service
+
+        await asyncio.to_thread(
+            persist_model_capability_observation,
+            deepseek_service.runtime_base_url(),
+            deepseek_service.runtime_model(),
+            **observation,
+        )
+    except Exception as exc:
+        logger.warning("chapter_pipeline.model_observation_failed error=%s", exc)
+
+
+def _writer_effective_max_tokens(model: str, base_url: str, requested: int) -> int:
+    """按已学习的模型能力放大输出预算；思考不可关闭的模型需要更大预算容纳 reasoning。"""
+    try:
+        capability = load_model_capability(base_url, model)
+    except Exception as exc:
+        logger.warning("chapter_pipeline.model_capability_load_failed error=%s", exc)
+        return requested
+    boost = capability.get("thinking_budget_boost") if isinstance(capability, dict) else None
+    boost = boost if isinstance(boost, int) and boost > 0 else 0
+    if not boost:
+        return requested
+    effective = min(
+        WRITER_THINKING_BUDGET_MAX_TOKENS,
+        int(requested * (WRITER_THINKING_BUDGET_BOOST_FACTOR ** boost)),
+    )
+    if effective > requested:
+        logger.info(
+            "chapter_pipeline.writer.boosted_max_tokens model=%s requested=%s effective=%s boost=%s",
+            model,
+            requested,
+            effective,
+            boost,
+        )
+    return effective
+
+
+def _thinking_ate_budget(
+    *,
+    content: str | None,
+    finish_reason: Any,
+    reasoning_content: str,
+    reasoning_tokens: Any,
+    max_tokens: int,
+) -> bool:
+    """判断这次空正文是否因模型思考消耗掉输出预算导致（finish_reason=length）。"""
+    if isinstance(content, str) and content.strip():
+        return False
+    if str(finish_reason or "").lower() != "length":
+        return False
+    if isinstance(reasoning_tokens, int) and reasoning_tokens > 0:
+        return reasoning_tokens >= max_tokens * WRITER_THINKING_BUDGET_RATIO
+    # 上游未报告 reasoning_tokens 时，用 reasoning_content 长度粗估（约 4 字符/token）。
+    return len(reasoning_content or "") >= max_tokens * 4 * WRITER_THINKING_BUDGET_RATIO
+
+
 async def _chat_completion(
     *,
     messages: list[dict[str, str]],
@@ -1261,14 +1337,21 @@ async def _chat_completion(
     max_tokens: int,
     response_format: dict[str, str] | None = None,
     _empty_content_retry: int = 0,
+    _thinking_boost_count: int = 0,
 ) -> tuple[str, str | None]:
     from services import deepseek as deepseek_service
+
+    effective_max_tokens = _writer_effective_max_tokens(
+        deepseek_service.runtime_model(),
+        deepseek_service.runtime_base_url(),
+        max_tokens,
+    )
 
     payload: dict[str, Any] = {
         "model": deepseek_service.runtime_model(),
         "messages": messages,
         "stream": False,
-        "max_tokens": max_tokens,
+        "max_tokens": effective_max_tokens,
     }
     if response_format:
         payload["response_format"] = response_format
@@ -1294,6 +1377,27 @@ async def _chat_completion(
         ) from exc
     except httpx.HTTPStatusError as exc:
         status_code = int(exc.response.status_code)
+        # 输出预算放大后可能超过模型真实上限，缩回上一档再试一次。
+        if (
+            status_code in {400, 422}
+            and effective_max_tokens > max_tokens
+            and _thinking_boost_count > 0
+        ):
+            logger.warning(
+                "chapter_pipeline.writer.boosted_budget_rejected model=%s effective_max_tokens=%s status=%s",
+                deepseek_service.runtime_model(),
+                effective_max_tokens,
+                status_code,
+            )
+            await _record_writer_model_observation(output_error=_response_fallback_text(exc) or "")
+            return await _chat_completion(
+                messages=messages,
+                api_key=api_key,
+                max_tokens=max_tokens,
+                response_format=response_format,
+                _empty_content_retry=_empty_content_retry,
+                _thinking_boost_count=0,
+            )
         raise UpstreamServiceError(
             "正文模型暂时不可用，请稍后重试",
             retryable=status_code in {408, 409, 425, 429, 500, 502, 503, 504},
@@ -1356,6 +1460,62 @@ async def _chat_completion(
             len(content or ""),
         )
     if not isinstance(content, str) or not content.strip():
+        thinking_ate_budget = _thinking_ate_budget(
+            content=content,
+            finish_reason=finish_reason,
+            reasoning_content=reasoning_content,
+            reasoning_tokens=reasoning_tokens,
+            max_tokens=effective_max_tokens,
+        )
+        if thinking_ate_budget and _thinking_boost_count < WRITER_THINKING_BUDGET_BOOSTS:
+            boosted = min(
+                WRITER_THINKING_BUDGET_MAX_TOKENS,
+                int(effective_max_tokens * WRITER_THINKING_BUDGET_BOOST_FACTOR),
+            )
+            await _record_writer_model_observation(
+                completion_tokens=reasoning_tokens if isinstance(reasoning_tokens, int) else None,
+                requested_output_tokens=boosted,
+                finish_reason=str(finish_reason),
+            )
+            logger.warning(
+                "chapter_pipeline.writer.thinking_budget_escalation model=%s finish_reason=%s "
+                "reasoning_tokens=%s reasoning_content_len=%s max_tokens=%s boosted_max_tokens=%s attempt=%s",
+                deepseek_service.runtime_model(),
+                finish_reason,
+                reasoning_tokens,
+                len(reasoning_content),
+                effective_max_tokens,
+                boosted,
+                _thinking_boost_count + 1,
+            )
+            return await _chat_completion(
+                messages=messages,
+                api_key=api_key,
+                max_tokens=boosted,
+                response_format=response_format,
+                _empty_content_retry=_empty_content_retry,
+                _thinking_boost_count=_thinking_boost_count + 1,
+            )
+        if thinking_ate_budget and _thinking_boost_count >= WRITER_THINKING_BUDGET_BOOSTS:
+            # 预算已升级到上限仍空正文，说明思考消耗随预算同步膨胀，原样重发必然复现，直接终止。
+            await _record_writer_model_observation(thinking_budget_boost=True)
+            logger.error(
+                "chapter_pipeline.writer.thinking_budget_exhausted model=%s finish_reason=%s "
+                "reasoning_tokens=%s max_tokens=%s boosts=%s",
+                deepseek_service.runtime_model(),
+                finish_reason,
+                reasoning_tokens,
+                effective_max_tokens,
+                _thinking_boost_count,
+            )
+            raise WriterEmptyContentError(
+                finish_reason=finish_reason,
+                model=deepseek_service.runtime_model(),
+                max_tokens=effective_max_tokens,
+                reasoning_content_len=len(reasoning_content),
+                reasoning_tokens=reasoning_tokens,
+                choices_count=len(choices),
+            )
         if _empty_content_retry < WRITER_EMPTY_CONTENT_RETRIES:
             logger.warning(
                 "chapter_pipeline.writer.empty_content_retry model=%s finish_reason=%s reasoning_content_len=%s reasoning_tokens=%s attempt=%s",
@@ -1371,6 +1531,7 @@ async def _chat_completion(
                 max_tokens=max_tokens,
                 response_format=response_format,
                 _empty_content_retry=_empty_content_retry + 1,
+                _thinking_boost_count=_thinking_boost_count,
             )
         raise WriterEmptyContentError(
             finish_reason=finish_reason,
