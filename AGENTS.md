@@ -1257,6 +1257,39 @@ import MediaImage from './shared/MediaImage';
 
 ---
 
+---
+
+## ⚠️ 漫剧创作画布（2026-08-28 新增，codex/video-canvas-three-node 分支）
+
+### 功能架构（合并 pro 前的模块地图）
+
+- **独立菜单**：顶部导航「漫剧创作」（`manga-drama` 路由），项目 = `stories.story_type='video'`；新建项目一键创建作品+空白画布
+- **画布流程**：剧本（screenplay 节点，可编辑/章节导入）→ AI 拆分（scene 审核节点组）→ 逐场景批准 → compile-scenes 编译为 video 节点 → 生成 → concat 合片
+- **关键端点**（均在 `routers/video_canvas.py`）：
+  - `POST .../screenplay-split`：拆分剧本节点，返回视频单元（上限 30），带 content_hash 变更检测
+  - `POST .../compile-scenes`：仅接受 `approved=true` 的 scene 节点，beats 合并成三段式 prompt，时长经归一化
+  - `POST .../import-screenplay`：跨作品章节导入（服务端重读正文+校验所有权，只读原作品）
+  - `GET /api/manga-drama/projects`、`POST /api/manga-drama/projects`：漫剧项目
+- **动态时长**：`services/video_duration.py: normalize_video_duration()`——拆分 prompt 已去掉"固定 15 秒"硬约束（改为 3-15s 密度建议），提交前必须归一化；Seedance 1.x ≤12s
+
+### 新增陷阱
+
+#### 20. ⚠️ 画布拆分/编译链路的时长与节点类型约束
+| 检查项 | 说明 |
+|--------|------|
+| ✅ 拆分产物是 scene 节点不是 video 节点 | v3 流程：拆分→场景审核（approved=false）→批准→编译；直接产 video 节点会跳过审核环节 |
+| ✅ compile-scenes 只接受 approved=true | 未批准场景必须进 skipped，不静默编译 |
+| ✅ 视频提交前必须 normalize_video_duration | AI 建议时长可能超上游档位；归一化在 `video_canvas_runtime` 提交前生效 |
+| ✅ scene/beats 结构改动需同步三处 | NODE_CATALOG（后端校验）、SceneNodeView（前端渲染）、compile-scenes（prompt 合并） |
+| ✅ 剧本节点 content_hash 变更要标记下游过期 | 剧本改了旧拆分作废；hash 在 split 时比对，前端提示"按最新内容拆分" |
+| ✅ 章节导入绝不回写原作品 | import-screenplay/novel_chapter 来源都是只读一次性导入；改剧本只改画布剧本节点 |
+
+#### 21. ⚠️ 分镜列表已下线（feature flag）
+- `VITE_ENABLE_SHOT_LIST=true` 才显示列表/画布双 Tab；默认仅画布
+- `ChapterVideoWorkflowPanel` 与全部 `/api/video/chapter-workflows/*` 端点保留（旧项目兼容），删除前先确认无旧项目依赖
+
+---
+
 ## Sisyphus Agent 工作文件
 
 `.sisyphus/` 目录包含部署记录和修复报告：
