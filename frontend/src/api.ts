@@ -3635,6 +3635,26 @@ export async function screenplaySplit(canvasId: number, nodeId: string): Promise
   return res.json();
 }
 
+export async function compileScenes(canvasId: number, sceneNodeIds: string[]): Promise<{
+  ok: boolean;
+  compiled_count: number;
+  skipped: { node_id: string; reason: string }[];
+  compiled: {
+    scene_node_id: string;
+    title: string;
+    video_prompt: string;
+    duration_seconds: number;
+    duration_requested?: number | null;
+    characters?: unknown[];
+  }[];
+}> {
+  const res = await fetch(`${BASE}/api/video-canvas/canvases/${canvasId}/compile-scenes`, {
+    method: 'POST', headers: apiHeaders(true), body: JSON.stringify({ scene_node_ids: sceneNodeIds }),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
+  return res.json();
+}
+
 export interface ImportableNovelChapter {
   chapter_id: number;
   chapter_number: number;

@@ -34,6 +34,7 @@ from models import (
 )
 from schemas import (
     MangaDramaProjectCreate,
+    VideoCanvasCompileScenesRequest,
     VideoCanvasCreate,
     VideoCanvasGraphSave,
     VideoCanvasImportRequest,
@@ -139,6 +140,11 @@ NODE_CATALOG: dict[str, dict[str, Any]] = {
         "label": "剧本", "category": "内容", "icon": "FileText",
         "inputs": [{"key": "source", "type": "any", "multiple": True, "required": False}],
         "outputs": [{"key": "screenplay", "type": "any"}],
+    },
+    "scene": {
+        "label": "场景", "category": "内容", "icon": "Clapperboard",
+        "inputs": [{"key": "screenplay", "type": "any", "multiple": True, "required": False}],
+        "outputs": [{"key": "shot", "type": "any"}],
     },
     "image": {
         "label": "图片", "category": "媒体", "icon": "Image",
@@ -1486,6 +1492,100 @@ async def sync_video_canvas_plan_to_workflow(
 
 
 SCREENPLAY_SPLIT_MAX_UNITS = 30
+
+
+def _merge_beats_to_video_prompt(config: dict[str, Any]) -> str:
+    """把场景节点的节拍列表合并成三段式视频 prompt 主体。"""
+    beats = config.get("beats")
+    parts: list[str] = []
+    if isinstance(beats, list):
+        for beat in beats:
+            if not isinstance(beat, dict):
+                continue
+            action = str(beat.get("action") or "").strip()
+            if action:
+                parts.append(action)
+            dialogue = beat.get("dialogue")
+            if isinstance(dialogue, list) and dialogue:
+                lines = []
+                for item in dialogue:
+                    if isinstance(item, dict):
+                        lines.append(f"{item.get('character', '')}：{item.get('line', '')}".strip("："))
+                    elif isinstance(item, str) and item.strip():
+                        lines.append(item.strip())
+                if lines:
+                    parts.append("对白：" + "；".join(lines))
+            elif isinstance(dialogue, str) and dialogue.strip():
+                parts.append(f"对白：{dialogue.strip()}")
+    if not parts:
+        parts.append(str(config.get("scene_purpose") or config.get("title") or ""))
+    return "\n".join(parts)
+
+
+@router.post("/api/video-canvas/canvases/{canvas_id}/compile-scenes")
+async def compile_scenes(canvas_id: int, body: VideoCanvasCompileScenesRequest, request: Request, db: Session = Depends(get_db)):
+    """把已批准的场景节点编译为视频节点组（pending 形态返回，前端确认后保存画布）。
+
+    每个 approved=true 的场景节点 → 1 个视频节点：节拍合并为三段式 prompt，
+    时长经档位归一化（Seedance 1.x ≤12 等规则）。
+    """
+    user = _require_user(request, db)
+    canvas = _require_canvas(canvas_id, user, db)
+    graph = _latest_version(canvas.id, db).graph_json or {}
+    node_map = {str(node.get("id") or ""): node for node in graph.get("nodes") or [] if isinstance(node, dict)}
+
+    from services.video_duration import normalize_video_duration
+
+    compiled: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    seen_scene_ids: set[str] = set()
+    for scene_node_id in body.scene_node_ids:
+        node = node_map.get(scene_node_id)
+        if not node or str(node.get("type") or "") != "scene":
+            skipped.append({"node_id": scene_node_id, "reason": "场景节点不存在或类型不正确"})
+            continue
+        if scene_node_id in seen_scene_ids:
+            skipped.append({"node_id": scene_node_id, "reason": "重复提交"})
+            continue
+        seen_scene_ids.add(scene_node_id)
+        config = dict((node.get("data") or {}).get("config") or {})
+        if not config.get("approved"):
+            skipped.append({"node_id": scene_node_id, "reason": "场景未批准"})
+            continue
+        requested = config.get("duration_seconds")
+        model_name = str(config.get("model_id") or "")
+        normalized = normalize_video_duration(
+            requested if isinstance(requested, (int, float)) else None,
+            model=model_name,
+            default_seconds=5,
+        )
+        prompt_body = _merge_beats_to_video_prompt(config)
+        video_prompt = str(config.get("video_prompt") or "").strip()
+        if not video_prompt:
+            location = str(config.get("location") or "").strip()
+            time_of_day = str(config.get("time_of_day") or "").strip()
+            header_parts = []
+            if location:
+                header_parts.append(f"场景：{location}")
+            if time_of_day:
+                header_parts.append(f"时间：{time_of_day}")
+            if header_parts:
+                video_prompt = "；".join(header_parts) + "\n" + prompt_body
+            else:
+                video_prompt = prompt_body
+        compiled.append(
+            {
+                "scene_node_id": scene_node_id,
+                "title": str(config.get("title") or f"场景 {scene_node_id}"),
+                "video_prompt": video_prompt,
+                "duration_seconds": normalized,
+                "duration_requested": requested if isinstance(requested, (int, float)) else None,
+                "characters": config.get("characters") or [],
+            }
+        )
+    if not compiled:
+        raise HTTPException(422, {"message": "没有可编译的场景：所选场景均未批准或不存在", "skipped": skipped})
+    return {"ok": True, "compiled_count": len(compiled), "skipped": skipped, "compiled": compiled}
 
 
 @router.post("/api/video-canvas/canvases/{canvas_id}/screenplay-split")

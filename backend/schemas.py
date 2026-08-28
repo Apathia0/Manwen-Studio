@@ -1184,6 +1184,11 @@ class MangaDramaProjectCreate(BaseModel):
     idempotency_key: str | None = Field(default=None, min_length=8, max_length=100)
 
 
+class VideoCanvasCompileScenesRequest(BaseModel):
+    """已批准场景节点 → 视频节点组编译请求。"""
+    scene_node_ids: list[str] = Field(min_length=1, max_length=60)
+
+
 class VideoCanvasScreenplaySplitRequest(BaseModel):
     """剧本节点 AI 拆分请求：读取节点当前内容，返回视频单元列表（不直接写图）。"""
     node_id: str = Field(min_length=1, max_length=64)
