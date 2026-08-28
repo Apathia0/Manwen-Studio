@@ -57,7 +57,7 @@ export interface SceneNodeConfig {
   time_of_day?: string;
   characters?: string[];
   scene_purpose?: string;
-  visual_anchors?: string;
+  visual_anchors?: unknown;
   importance?: string;
   approved?: boolean;
   beats?: SceneNodeBeat[];
@@ -98,6 +98,65 @@ function dialogueToEditingText(dialogue: unknown): string {
   return renderDialogueLines(dialogue).join('\n');
 }
 
+/** 解析视觉锚点：兼容 [{type,description}] / 字符串列表 / Python 字典字符串 / 纯文本行 */
+export function parseVisualAnchors(value: unknown): { type: string; description: string }[] {
+  const items: { type: string; description: string }[] = [];
+  const push = (type: unknown, description: unknown) => {
+    const desc = String(description ?? '').trim();
+    if (!desc) return;
+    items.push({ type: String(type ?? '细节').trim() || '细节', description: desc });
+  };
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      if (item && typeof item === 'object') {
+        const rec = item as Record<string, unknown>;
+        push(rec.type, rec.description);
+      } else if (typeof item === 'string' && item.trim()) {
+        const match = item.match(/['"]?type['"]?\s*[:：]\s*['"]?([\w-]+)['"]?[,，]?\s*['"]?description['"]?\s*[:：]\s*['"]?(.+?)['"]?\s*$/);
+        if (match) push(match[1], match[2]);
+        else push('细节', item);
+      }
+    }
+    return items;
+  }
+  const text = String(value ?? '').trim();
+  if (!text) return items;
+  // 尝试 JSON 解析（兼容 Python 单引号字典字符串）
+  let parsed: unknown = null;
+  try { parsed = JSON.parse(text); } catch { try { parsed = JSON.parse(text.replace(/'/g, '"')); } catch { parsed = null; } }
+  if (Array.isArray(parsed)) return parseVisualAnchors(parsed);
+  for (const line of text.split(/\n+/)) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    const match = trimmed.match(/^['"]?type['"]?\s*[:：]\s*['"]?([\w-]+)['"]?[,，]\s*['"]?description['"]?\s*[:：]\s*['"]?(.+?)['"]?\s*$/);
+    if (match) push(match[1], match[2]);
+    else {
+      const colon = trimmed.match(/^([\w一-龥-]+)\s*[:：]\s*(.+)$/);
+      if (colon) push(colon[1], colon[2]);
+      else push('细节', trimmed);
+    }
+  }
+  return items;
+}
+
+/** 锚点列表 → 编辑文本（每行 "类型：描述"） */
+export function visualAnchorsToEditingText(value: unknown): string {
+  return parseVisualAnchors(value).map((item) => `${item.type}：${item.description}`).join('\n');
+}
+
+/** 编辑文本 → 结构化锚点列表 */
+export function editingTextToVisualAnchors(text: string): { type: string; description: string }[] {
+  const items: { type: string; description: string }[] = [];
+  for (const line of String(text || '').split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    const colon = trimmed.match(/^([\w一-龥-]+)\s*[:：]\s*(.+)$/);
+    if (colon) items.push({ type: colon[1].trim(), description: colon[2].trim() });
+    else items.push({ type: '细节', description: trimmed });
+  }
+  return items;
+}
+
 export default function SceneNodeView({ config, onChange, onToggleApproved, hideApproval }: SceneNodeViewProps) {
   const { editingField, setEditingField, makeInputProps, makeTextareaProps } = useFieldEditing();
   const [expanded, setExpanded] = useState(!config.approved);
@@ -130,7 +189,7 @@ export default function SceneNodeView({ config, onChange, onToggleApproved, hide
   };
 
   return (
-    <div className="w-[320px] max-h-[420px] rounded-xl border border-[#3a3f45] bg-[#202226] shadow-sm overflow-hidden flex flex-col">
+    <div className="w-full max-h-[420px] rounded-xl border border-[#3a3f45] bg-[#202226] shadow-sm overflow-hidden flex flex-col">
       {/* ── 卡片头部：点击整体展开/收起 ── */}
       <div
         onClick={() => setExpanded((prev) => !prev)}
@@ -272,25 +331,38 @@ export default function SceneNodeView({ config, onChange, onToggleApproved, hide
             )}
           </div>
 
-          {/* 视觉锚点 — 点击编辑（纯文本，JSON 字符串原样展示） */}
+          {/* 视觉锚点 — 结构化展示（类型标签 + 描述），编辑为每行"类型：描述" */}
           <div className="mt-2">
             <div className="flex items-center gap-1 mb-1.5">
               <span className="text-[11px] font-medium text-[#8b93a1]">视觉锚点</span>
             </div>
             {isEditing(fieldKey('visual_anchors')) ? (
               <textarea
-                {...makeTextareaProps(fieldKey('visual_anchors'), (v) => commitTextarea({ visual_anchors: v }), config.visual_anchors || '')}
-                className="w-full text-xs text-[#b3bac6] border border-[#73a7ff]/60 rounded px-2 py-1 bg-[#2a2e33] outline-none resize-none"
-                rows={2}
-                placeholder="视觉锚点描述..."
+                {...makeTextareaProps(fieldKey('visual_anchors'), (v) => commitTextarea({ visual_anchors: editingTextToVisualAnchors(v) }), visualAnchorsToEditingText(config.visual_anchors))}
+                className="w-full text-xs text-[#b3bac6] border border-[#73a7ff]/60 rounded px-2 py-1 bg-[#2a2e33] outline-none resize-none leading-relaxed"
+                rows={4}
+                placeholder={'每行一条：类型：描述\n如 光线：昏黄路灯被窗帘挡住'}
               />
             ) : (
               <span
                 onClick={() => setEditingField(fieldKey('visual_anchors'))}
-                className={`text-xs cursor-pointer hover:text-[#73a7ff] hover:bg-[#2a2e33] rounded px-1 -mx-1 transition-colors ${config.visual_anchors ? 'text-[#b3bac6]' : 'text-[#78818f]'}`}
+                className={`block w-full cursor-pointer rounded px-1 -mx-1 py-0.5 transition-colors hover:text-[#73a7ff] hover:bg-[#2a2e33] ${config.visual_anchors ? '' : 'text-[#78818f]'}`}
                 title="点击编辑视觉锚点"
               >
-                {config.visual_anchors || '点击编辑添加视觉锚点'}
+                {(() => {
+                  const anchors = parseVisualAnchors(config.visual_anchors);
+                  if (!anchors.length) return '点击编辑添加视觉锚点';
+                  return (
+                    <span className="block w-full space-y-1">
+                      {anchors.map((anchor, anchorIndex) => (
+                        <span key={anchorIndex} className="flex w-full items-start gap-1.5">
+                          <span className="shrink-0 rounded px-1 py-px text-[10px] font-medium bg-sky-500/15 text-sky-300">{anchor.type}</span>
+                          <span className="min-w-0 flex-1 text-xs text-[#b3bac6]">{anchor.description}</span>
+                        </span>
+                      ))}
+                    </span>
+                  );
+                })()}
               </span>
             )}
           </div>

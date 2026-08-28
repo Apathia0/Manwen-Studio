@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import re
 from typing import Any
 
 import httpx
@@ -222,6 +223,57 @@ async def adapt_novel_to_screenplay(
     }
 
 
+def _normalize_visual_anchors(value: Any) -> list[dict[str, str]]:
+    """视觉锚点归一为 [{type, description}] 列表。
+
+    兼容：list[dict] / list[str] / Python 字典字符串 / JSON 字符串 / 纯文本行。
+    """
+    items: list[dict[str, str]] = []
+
+    def push(type_value: Any, description_value: Any) -> None:
+        desc = str(description_value or "").strip().strip("\"'")
+        if not desc:
+            return
+        items.append({"type": str(type_value or "细节").strip() or "细节", "description": desc})
+
+    if isinstance(value, list):
+        for item in value:
+            if isinstance(item, dict):
+                push(item.get("type"), item.get("description"))
+            elif str(item or "").strip():
+                push("细节", item)
+        return items
+
+    text = str(value or "").strip()
+    if not text:
+        return items
+    parsed: Any = None
+    import json as _json
+    try:
+        parsed = _json.loads(text)
+    except Exception:
+        try:
+            parsed = _json.loads(text.replace("'", '"'))
+        except Exception:
+            parsed = None
+    if isinstance(parsed, list):
+        return _normalize_visual_anchors(parsed)
+    for line in text.splitlines():
+        line = line.strip().strip(",")
+        if not line:
+            continue
+        match = re.match(r"^['\"]?type['\"]?\s*[:：]\s*['\"]?([\w-]+)['\"]?[,，]\s*['\"]?description['\"]?\s*[:：]\s*['\"]?(.+?)['\"]?\s*$", line)
+        if match:
+            push(match.group(1), match.group(2))
+            continue
+        colon = re.match(r"^([\w一-龥-]+)\s*[:：]\s*(.+)$", line)
+        if colon:
+            push(colon.group(1), colon.group(2))
+        else:
+            push("细节", line)
+    return items
+
+
 async def generate_structured_screenplay(
     *,
     content: str,
@@ -382,6 +434,7 @@ async def generate_structured_screenplay(
                         "transition_to_next": str(raw_beat.get("transition_to_next") or ""),
                     }
                 )
+        anchors = _normalize_visual_anchors(raw_scene.get("visual_anchors"))
         beat_count = max(1, len(beats))
         # 动态时长：按节拍数估算，上限 15 秒（归一化在视频提交前再做）
         duration = min(15, max(3, beat_count * 4))
@@ -393,7 +446,7 @@ async def generate_structured_screenplay(
                 "time_of_day": str(raw_scene.get("time_of_day") or ""),
                 "characters": [str(c) for c in (raw_scene.get("characters") or []) if str(c).strip()],
                 "scene_purpose": str(raw_scene.get("scene_purpose") or ""),
-                "visual_anchors": str(raw_scene.get("visual_anchors") or ""),
+                "visual_anchors": anchors,
                 "beats": beats,
                 "transition_to_next_scene": str(raw_scene.get("transition_to_next_scene") or ""),
                 "duration_seconds": duration,
