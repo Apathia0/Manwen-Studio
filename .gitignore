@@ -68,6 +68,7 @@ backend/tests/
 !backend/tests/
 backend/tests/*
 !backend/tests/test_chapter_generation_length_policy.py
+!backend/tests/test_video_duration_normalization.py
 !backend/tests/test_onboarding.py
 !backend/tests/test_agent_content_sanitization.py
 !backend/tests/test_agent_api_validation_pending_runs.py
