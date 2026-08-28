@@ -10027,7 +10027,13 @@ async def generate_scenes_endpoint(chapter_id: int, request: Request, db: Sessio
         body.get("preset_id"),
         preset_id_provided="preset_id" in body,
     )
-    image_count = _effective_image_count(chapter_id, user.id, db)
+    # 优先使用前端传过来的分镜数量，回退到本地存储的张数
+    user_specified_count = body.get("image_count_hint")
+    if isinstance(user_specified_count, int) and MIN_IMAGE_COUNT <= user_specified_count <= MAX_IMAGE_COUNT:
+        image_count = user_specified_count
+        logger.info("generate-scenes user override page_count=%s chapter_id=%s", image_count, chapter_id)
+    else:
+        image_count = _effective_image_count(chapter_id, user.id, db)
     if chapter.messages:
         chat_history = [{"role": m.role, "content": m.content} for m in chapter.messages]
     else:

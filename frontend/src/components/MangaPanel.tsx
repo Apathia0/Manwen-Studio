@@ -766,7 +766,7 @@ const [downloadStatus, setDownloadStatus] = useState('');
     setSanitizedSceneIdxs([]);
     setFailedSceneIdx(-1);
     try {
-      const result = await generateScenes(chapter.id, controller.signal, storyboardPresetId ?? undefined);
+      const result = await generateScenes(chapter.id, controller.signal, storyboardPresetId ?? undefined, imageCount);
       if (chapterLoadRequestRef.current !== requestId) return;
       if (hadImages) {
         // 分镜重生成后，旧图片已不再对应新脚本，必须从数据库和本地状态中一并清除。

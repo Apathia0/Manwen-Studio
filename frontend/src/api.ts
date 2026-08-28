@@ -2065,12 +2065,21 @@ export interface MangaStoryboardImportResult {
   can_commit: boolean;
 }
 
-export async function generateScenes(chapterId: number, signal?: AbortSignal, presetId?: number): Promise<ScenesPayload> {
+export async function generateScenes(
+  chapterId: number,
+  signal?: AbortSignal,
+  presetId?: number,
+  imageCountHint?: number,
+): Promise<ScenesPayload> {
   const hasPreset = presetId != null;
+  const body = hasPreset || imageCountHint != null ? JSON.stringify({
+    ...(hasPreset ? { preset_id: presetId } : {}),
+    ...(imageCountHint != null ? { image_count_hint: imageCountHint } : {}),
+  }) : undefined;
   const res = await fetch(`${BASE}/api/chapters/${chapterId}/generate-scenes`, {
     method: 'POST',
-    headers: apiHeaders(hasPreset),
-    body: hasPreset ? JSON.stringify({ preset_id: presetId }) : undefined,
+    headers: apiHeaders(hasPreset || imageCountHint != null),
+    body,
     signal,
   });
   if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
