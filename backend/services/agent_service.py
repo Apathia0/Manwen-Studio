@@ -7024,6 +7024,7 @@ class AgentService:
             output_field_retry_count = 0
             output_limit_retry_count = 0
             tool_protocol_retry_count = 0
+            channel_retry_count = 0
             generic_write_correction_attempts = 0
             output_token_field: str | None = "max_tokens"
             executed_write_tool_results: dict[tuple[str, str], str] = {}
@@ -7235,6 +7236,31 @@ class AgentService:
                                 continue
                             if error_code == "invalid_request_error" or error_type == "invalid_request_error":
                                 raise AgentUpstreamInvalidRequestError()
+                            if (
+                                error_code == "bad_response_status_code"
+                                or error_type == "bad_response_status_code"
+                            ):
+                                # NewAPI 网关中继格式：网关背后的渠道对请求返回了错误状态。
+                                # 该错误与请求内容无关（空会话也会出现），属渠道侧瞬态故障，
+                                # 有界重试渡过渠道抖动；重试耗尽后给出明确的用户可操作错误。
+                                if channel_retry_count < 2:
+                                    channel_retry_count += 1
+                                    iteration_count -= 1
+                                    await asyncio.sleep(2 * channel_retry_count)
+                                    logger.warning(
+                                        "Agent 上游渠道错误，自动重试 attempt=%s status=%s model=%s",
+                                        channel_retry_count,
+                                        response.status_code,
+                                        _deepseek_service.runtime_model(),
+                                    )
+                                    continue
+                                raise UpstreamServiceError(
+                                    "上游 AI 渠道暂时不可用，请稍后重试或切换其他模型",
+                                    retryable=True,
+                                    provider="DeepSeek",
+                                    status_code=response.status_code or 502,
+                                    code="agent_upstream_channel_error",
+                                )
                         response.raise_for_status()
                         async for line in response.aiter_lines():
                             if not line.startswith("data: "):
