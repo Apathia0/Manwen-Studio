@@ -1,7 +1,7 @@
 # 漫剧创作画布化改造开发文档
 
 > 分支：`codex/video-canvas-three-node`（在 codex 分支开发，测试通过后合入 `pro`）
-> 状态：**v2 待审查** — v1 已获口头确认（Q1-Q5 按默认方案），v2 新增"小说章节导入剧本 + 编辑后拆分"能力（§3.7、§4 阶段 3.5）
+> 状态：**v3 待审查** — v2 已确认；v3 新增"剧本审核节点化"：现有剧本审核交互模块在画布中以场景/节拍卡片节点形式保留（§3.8）
 > 日期：2026-08-28
 
 ---
@@ -65,6 +65,7 @@
 | G6 | 分镜列表入口未下线 | 需 feature flag 控制 |
 | G7 | 剧本无"用户可自由编辑"环节 | 现有 plan 流是 AI 生成→用户确认，缺"用户改完剧本再拆分"的回路（v2 新增需求核心） |
 | G8 | 章节来源被锁死在画布所属作品 | `_resolve_canvas_source_snapshot` 强制 `chapter.story_id == canvas.story_id`，无法选**其他**小说作品的章节正文作为剧本来源（v2 新增需求核心） |
+| G9 | 剧本审核交互（Scene/Beat 卡片式逐字段编辑）只存在于分镜列表工作流 | 用户要求该交互在画布模式**继续可用**：以画布节点形式渲染场景与节拍卡片，支持同样的点选编辑体验（v3 新增需求核心） |
 
 ---
 
@@ -294,6 +295,115 @@ screenplay-split（复用现有拆分模块 + 动态时长，见 §3.3/§3.4）
 - `source_refs` 中的章节被原作者删除/清空后，画布剧本节点不受影响（内容已落盘，溯源仅展示用）
 - 计费：改写按文本 AI 调用计费（复用 begin_ai_call 埋点，modality=text）
 
+### 3.8 【v3 新增】剧本审核节点化：Scene/Beat 卡片在画布中的保留与呈现
+
+#### 3.8.1 需求
+
+用户反馈：现有视频工作流的**剧本审核**交互模块很好用（`ChapterVideoWorkflowPanel.tsx` 的「剧本审核区」），要求在画布模式下**保留同等交互能力**——通过画布节点渲染，呈现同样的卡片式视觉效果。
+
+现有模块的核心交互（须在画布中 1:1 保留）：
+
+| 交互 | 现有实现 | 画布对应 |
+|------|---------|---------|
+| 场景卡片：序号徽标 + 标题 + 地点 + 时间 + 重要性标签，点头部展开/收起 | `ScreenplayScene` 渲染 | 场景节点卡片 |
+| 点选即编辑：标题/地点/时间/场景目的/视觉锚点/转场 全部 click-to-edit（input/textarea 行内替换，Enter 确认 Esc 取消） | `editingField` 状态机 | 同款交互，写回节点 config |
+| 角色标签组（蓝色圆角 pill，可编辑） | characters 渲染 | 同款 |
+| 节拍卡片：类型 pill（动作/对白/情绪…彩色）+ 重要性 + 情绪（紫色 pill）+ 动作描述 + 对白行 | `ScreenplayBeat` 渲染 | 场景节点内的 beats 子卡片区 |
+| 批准状态流转：未生成/待批准/已批准 徽章 + 批准按钮 + 收起已批准剧本 | screenplay_status | 节点级 approved 状态 + 连线解锁语义 |
+
+数据协议直接沿用现有类型（`api.ts:3188 ScriptScene` + 面板内 `ScreenplayScene`/`ScreenplayBeat`），不新造格式。
+
+#### 3.8.2 节点模型：screenplay（剧本文本）→ scene（场景卡片）两级节点
+
+```
+[剧本节点 screenplay]                      ← §3.4 已定义：content + source_refs + content_hash
+   │ （剧本就绪后「展开场景」）
+   ├── [场景节点 scene #1] ──┐
+   │     config: {           │
+   │       scene_id, title, location, time_of_day,
+   │       characters[], scene_purpose, visual_anchors,
+   │       importance, approved: false,
+   │       beats: [ {beat_id, type, importance, emotion_shift,
+   │                action, dialogue[], transition_to_next} ]
+   │     }                   │
+   ├── [场景节点 scene #2] ──┤  横向时间序自动布局
+   ├── ...                   │  （复用 §3.4 网格布局函数）
+   └── [场景节点 scene #N] ──┘
+```
+
+**设计决策：beats 不拆成独立节点，作为场景节点 config 内的子卡片渲染。**
+理由：
+1. beats 与 scene 是 1:N 强归属关系，拆开会让画布节点数爆炸（10 场景 × 5 beats = 50+ 节点），连线和布局噪音远大于收益
+2. 现有交互中 beats 本来就是场景卡片展开区的子列表，视觉层级一致
+3. 节点协议改动最小：NODE_CATALOG 只新增 `scene` 一个类型，`beats` 是它的 config 字段
+
+#### 3.8.3 与拆分流程的衔接（更新 §3.4 流程）
+
+```
+剧本节点「拆分」
+   │  AI 拆分（动态时长）
+   ▼
+生成场景节点组（scene 节点，含 beats 子卡片）── 用户审核/逐字段编辑
+   │  场景卡片上「批准」按钮逐个批，或顶部「全部批准」
+   ▼
+批准后「生成视频节点组」：
+   每个已批准的 scene 节点 → 对应 1 个 video 节点
+   （场景内 beats 合并成该视频的三段式 prompt；时长取场景内 beats
+     时长之和或场景级 duration_seconds，经 §3.3 档位归一化）
+   │
+   ▼
+video 节点组 → 生成 → 合片（concat）→ 输出
+```
+
+即：**拆分产物从 v2 的"直接生成 video 节点组"细化为"先生成 scene 审核节点组，批准后再编译为 video 节点组"**。多出的一层正是用户要求的"剧本审核"环节，编辑发生在 scene 节点上（比在纯文本剧本上改更结构化）。
+
+剧本变更联动（与 §3.7 编辑回路一致）：
+- 剧本节点 `content_hash` 变更 → 所有下游 scene 节点标记"剧本已更新"（节点角标警示，不清除内容）
+- scene 节点被编辑 → 关联 video 节点未生成前无影响；已生成则 video 节点标记过期
+
+#### 3.8.4 视觉规格（对照截图，1:1 复刻现有卡片样式）
+
+场景节点卡片（画布内 DOM 渲染，宽度固定 320px，画布缩放跟随）：
+
+```
+┌─────────────────────────────────────────────┐
+│ [1] 场景标题（点击编辑）              📍地点 🕐时间 │  ← 头部：序号蓝徽标 + 点选编辑字段
+├─────────────────────────────────────────────┤  ← 点头部展开/收起
+│ 👤 [角色A] [角色B] [＋]                        │  ← 蓝色 pill 角色标签，可编辑
+│ 场景目的：…（点击编辑 textarea）                │
+│ 视觉锚点：…（点击编辑）                        │
+│ ┌─ 节拍 1 ─────────────────────────────┐    │
+│ │ [动作] [重要] [情绪↑]                  │    │  ← 类型彩色 pill / 重要性 / 紫色情绪 pill
+│ │ 动作描述…（点击编辑）                   │    │
+│ │ 对白：角色："台词"（点击编辑）           │    │
+│ └──────────────────────────────────┘    │
+│ ┌─ 节拍 2 …                            ┐    │
+│ 转场：…（点击编辑）                       │    │
+│ [批准本场景]                              │    │  ← 绿色按钮，批准后头部出现 ✓已批准 徽章
+└─────────────────────────────────────────────┘
+```
+
+- 配色沿用现有 Tailwind 类：`#d7e3f4` 边框 / `blue-50` 徽标 / `emerald` 批准态 / `violet-50` 情绪 pill / importance 彩色映射（`importanceColors`、`beatTypeColors` 直接 import 复用）
+- 节点内滚动：场景卡片固定高度上限（如 420px）内部滚动，避免画布节点无限增高
+
+#### 3.8.5 技术落点
+
+| # | 改动 | 文件 | 说明 |
+|---|------|------|------|
+| U1 | NODE_CATALOG 新增 `scene` 类型（inputs: screenplay；outputs: shot）| `routers/video_canvas.py` | `_validate_graph` 自动获得类型校验 |
+| U2 | 拆分端点产出 scene 节点组（含 beats）而非直接 video 节点组 | `routers/video_canvas.py` screenplay-split | |
+| U3 | 「批准→编译 video 节点组」端点：`POST .../compile-scenes`，输入已批准 scene 节点集合，输出 video 节点组 pending-change | `routers/video_canvas.py` | beats 合并 prompt 逻辑复用现有 video prompt 模板 |
+| U4 | `SceneNodeView` 组件：复刻剧本审核卡片视觉与 click-to-edit 交互 | `components/video-canvas/` 新文件 | 编辑字段状态机可从 `ChapterVideoWorkflowPanel.tsx` 抽出为共享 hook `useFieldEditing`，两处共用 |
+| U5 | 场景节点画布布局：横向时间序， approved 状态徽章 | `useCanvasInteractions.ts` 布局函数扩展 | |
+| U6 | hash 联动标记：剧本变更 → scene 节点警示角标；scene 变更 → video 节点过期角标 | 前端 + graph 校验 | |
+| U7 | 测试：scene 节点图协议校验、compile-scenes 只接受 approved、beats→prompt 合并正确性 | `tests/` | |
+
+#### 3.8.6 边界与承诺
+
+- 旧分镜列表中的剧本审核模块**原样保留**（feature flag 下线的是整个列表 Tab，不是这个模块的代码）；画布内是新实现（共享交互 hook，不共享 DOM）
+- scene 节点的编辑**不回写**剧本节点文本（两个层级独立；剧本节点改了会触发 scene 过期警示，反向不触发）——避免双向同步复杂度
+- 单画布场景节点上限沿用拆分单元上限 30 个（§8.1 Q4）
+
 ---
 
 ## 4. 实施计划（6 个阶段，每阶段独立可验证）
@@ -368,6 +478,27 @@ screenplay-split（复用现有拆分模块 + 动态时长，见 §3.3/§3.4）
 3. 安全校验：构造请求选**他人**作品的章节 → 422 拒绝；
 4. 原小说作品章节正文零改动（DB 前后对比）。
 
+### 阶段 3.6：【v3 新增】剧本审核节点化（2.5 天）
+
+> 依赖阶段 3 的剧本节点与拆分端点。对应设计 §3.8。
+
+| 任务 | 文件 |
+|------|------|
+| NODE_CATALOG 新增 `scene` 类型 + 图协议校验 | `routers/video_canvas.py` |
+| screenplay-split 产出 scene 节点组（含 beats）替代直接产出 video 节点组 | `routers/video_canvas.py` |
+| `POST .../compile-scenes`：approved 场景 → video 节点组（beats 合并 prompt + 时长归一化） | `routers/video_canvas.py` |
+| `useFieldEditing` 共享 hook（从 ChapterVideoWorkflowPanel 抽出 click-to-edit 状态机） | 新 util，两处共用 |
+| `SceneNodeView` 组件：1:1 复刻剧本审核卡片视觉（场景头部/角色 pill/节拍子卡/批准按钮） | `components/video-canvas/` |
+| 场景节点横向时间序布局 + approved 徽章 + 过期警示角标 | `useCanvasInteractions.ts` |
+| hash 联动：剧本变更→scene 警示；scene 变更→video 过期 | 前端 + 校验 |
+| 测试：scene 图协议、compile-scenes 只收 approved、beats→prompt 合并、hash 联动 | `tests/` |
+
+**验收**：
+1. 拆分后画布出现场景卡片节点，视觉与现有剧本审核区一致（序号蓝徽标、彩色 pill、点选即编辑、展开收起）；
+2. 每个字段的点选编辑（标题/地点/时间/角色/场景目的/视觉锚点/节拍类型/重要性/情绪/动作/对白/转场）全部可用，Enter/Esc 行为一致；
+3. 场景逐个批准 → compile → 生成对应 video 节点组；未批准场景不产出视频节点；
+4. 修改剧本节点 → 场景节点出现"剧本已更新"角标；修改已编译的场景 → 对应 video 节点标记过期。
+
 ### 阶段 4：画布 Agent 对话创作剧本（2 天）
 
 | 任务 | 文件 |
@@ -396,7 +527,7 @@ screenplay-split（复用现有拆分模块 + 动态时长，见 §3.3/§3.4）
 - 版本 manifest bump；codex 分支推送
 - **合并 pro 前 checklist**：全量 pytest、build、手动冒烟（阶段 5 验收单）、用户确认
 
-**总工期估算：约 11 个工作日**（含阶段 3.5 的 2 天，不含用户审查等待）
+**总工期估算：约 13.5 个工作日**（含阶段 3.5 章节导入 2 天 + 阶段 3.6 剧本审核节点化 2.5 天，不含用户审查等待）
 
 ---
 
@@ -406,7 +537,8 @@ screenplay-split（复用现有拆分模块 + 动态时长，见 §3.3/§3.4）
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| POST | `/api/video-canvas/canvases/{canvas_id}/screenplay-split` | 剧本节点拆分，返回视频单元列表（pending-change，不直接写图） |
+| POST | `/api/video-canvas/canvases/{canvas_id}/screenplay-split` | 剧本节点拆分，产出 scene 审核节点组（v3 起不再直接产出 video 节点组） |
+| POST | `/api/video-canvas/canvases/{canvas_id}/compile-scenes` | 【v3】已批准 scene 节点 → video 节点组（beats 合并 prompt + 时长归一化），pending-change |
 | POST | `/api/video-canvas/canvases/{canvas_id}/import-screenplay` | 【v2】导入小说章节 → AI 改写为剧本 → pending-change（§3.7） |
 | GET | `/api/manga-drama/importable-stories` | 【v2】用户名下可作为剧本素材的小说作品列表 |
 | POST | `/api/manga-drama/projects` | 新建漫剧项目（story_type='video' + 初始画布） |
@@ -419,6 +551,7 @@ screenplay-split（复用现有拆分模块 + 动态时长，见 §3.3/§3.4）
 | 位置 | 变更 |
 |------|------|
 | `NODE_CATALOG` | `screenplay` 从 legacy 提回公开目录 |
+| `NODE_CATALOG` | 【v3】新增 `scene` 类型（beats 子结构 + approved 状态） |
 | 剧本节点 config | 【v2】新增 `source_refs` / `content_hash` 字段 |
 | 拆分 prompt | 固定 15 秒 → 动态时长协议 |
 | `video_capabilities` | 新增时长档位配置项（管理后台可配） |
@@ -446,18 +579,21 @@ screenplay-split（复用现有拆分模块 + 动态时长，见 §3.3/§3.4）
 | R7 | 【v2】长章节（万字级）改写超出单次 AI 输出限制 | 中 | `adapt_novel_to_screenplay` 按章节分批调用后拼接；单章超 8000 字再切段，沿用 `_repair_truncated_json` 兜底（陷阱 17） |
 | R8 | 【v2】用户导入后原章节更新，画布剧本与原著脱节 | 低 | 设计使然：导入即解耦，剧本节点是唯一事实源；属性面板展示来源章节供用户自行回查 |
 | R9 | 【v2】改写质量不稳定（小说节奏≠剧本节奏） | 中 | 改写 prompt 给出剧本体裁硬规范（场景头/动作行/对白占比）；输出走剧本编辑回路由用户终审，AI 只出草稿 |
+| R10 | 【v3】场景卡片节点数量多 + 节点内滚动，画布渲染性能 | 中 | 节点固定宽度/高度上限；折叠态（头部行）不渲染 beats DOM；单画布 30 场景上限复用 |
+| R11 | 【v3】click-to-edit 交互在画布拖拽语义下冲突（点击编辑 vs 拖动节点） | 中 | 沿用画布既有规则：节点头部/拖拽手柄区拖动，字段区域点击编辑；拖动阈值 4px 内视为点击（与 infinite-canvas 一致） |
 
 ---
 
 ## 7. 验收总单（合并 pro 前必须全过）
 
-- [ ] 阶段 0-6 全部验收项通过（含 3.5 章节导入与编辑回路）
-- [ ] `pytest` 全绿（含新增动态时长/拆分协议/归一化/跨作品导入校验用例）
+- [ ] 阶段 0-6 全部验收项通过（含 3.5 章节导入与编辑回路、3.6 剧本审核节点化）
+- [ ] `pytest` 全绿（含新增动态时长/拆分协议/归一化/跨作品导入校验/compile-scenes 用例）
 - [ ] `npm run build`（tsc 严格模式）零错误
 - [ ] 漫剧全流程冒烟：
-  - [ ] 路径 A：新建→对话剧本→拆分→动态时长生成→合片→导出
-  - [ ] 路径 B：新建→导入小说章节→改写剧本→手动编辑→再拆分→生成→合片
-- [ ] 旧视频项目回归：打开/合片/导出正常
+  - [ ] 路径 A：新建→对话剧本→拆分→场景审核批准→动态时长生成→合片→导出
+  - [ ] 路径 B：新建→导入小说章节→改写剧本→手动编辑→再拆分→场景审核→生成→合片
+- [ ] 【v3】场景卡片节点交互 1:1 回归：点选编辑全部字段、展开收起、批准流转、与现有剧本审核区视觉一致
+- [ ] 旧视频项目回归：打开/合片/导出正常（剧本审核模块在旧列表中不受影响）
 - [ ] 画布 18 项交互回归
 - [ ] 【v2】原小说作品数据零改动验证（导入前后 DB 对比）
 - [ ] AGENTS.md 已更新
@@ -484,3 +620,9 @@ screenplay-split（复用现有拆分模块 + 动态时长，见 §3.3/§3.4）
 | N1 | 创建画布时可选用户已有小说作品章节正文作为剧本来源 | §3.7 章节导入流程（跨作品只读、一次性导入解耦） |
 | N2 | 剧本拆分必须复用现有漫剧工作流的剧本拆分模块 | §3.3/§3.4：`screenplay-split` 直接复用 `split_scenes` + 动态时长 prompt，不另造拆分器 |
 | N3 | 拆分前可自由修改剧本内容，按审批调整后的剧本拆分 | §3.7.3 剧本编辑回路：节点行内编辑 + Agent 改写，hash 比对保证拆分永远基于最新剧本 |
+
+### 8.3 v3 新增需求（用户 2026-08-28 补充，附交互截图）
+
+| # | 需求 | 设计回应 |
+|---|------|---------|
+| N4 | 现有剧本审核交互模块（Scene/Beat 卡片式逐字段点选编辑）在画布模式保留可用，以文本表单节点渲染，视觉 1:1 | §3.8 剧本审核节点化：新增 scene 节点类型承载场景卡片（beats 为节点内子卡片区），`SceneNodeView` 复刻现有视觉与 `useFieldEditing` 共享交互 hook；拆分产物改为 scene 审核节点组，批准后编译为 video 节点组 |
