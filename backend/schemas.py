@@ -1184,6 +1184,21 @@ class MangaDramaProjectCreate(BaseModel):
     idempotency_key: str | None = Field(default=None, min_length=8, max_length=100)
 
 
+class VideoCanvasScreenplaySplitRequest(BaseModel):
+    """剧本节点 AI 拆分请求：读取节点当前内容，返回视频单元列表（不直接写图）。"""
+    node_id: str = Field(min_length=1, max_length=64)
+
+
+class VideoCanvasScreenplayImportSource(BaseModel):
+    story_id: int
+    chapter_id: int
+
+
+class VideoCanvasScreenplayImportRequest(BaseModel):
+    """小说章节导入：多选章节 → AI 改写为剧本草稿（只读原作品）。"""
+    sources: list[VideoCanvasScreenplayImportSource] = Field(min_length=1, max_length=10)
+
+
 class VideoCanvasCreate(BaseModel):
     story_id: int
     default_chapter_id: int | None = None

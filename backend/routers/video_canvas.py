@@ -42,6 +42,8 @@ from schemas import (
     VideoCanvasPlanCreate,
     VideoCanvasPlanApplyRequest,
     VideoCanvasPlanWorkflowSyncRequest,
+    VideoCanvasScreenplayImportRequest,
+    VideoCanvasScreenplaySplitRequest,
     VideoCanvasPlanUpdate,
     VideoCanvasRunRequest,
     VideoCanvasRunConfirmRequest,
@@ -125,13 +127,18 @@ _LEGACY_NODE_CATALOG: dict[str, dict[str, Any]] = {
     },
 }
 
-# 用户画布协议只暴露三种媒体语义节点。旧注册表仅用于读取已经保存的历史图，
+# 用户画布协议只暴露的媒体语义节点。旧注册表仅用于读取已经保存的历史图，
 # 防止升级后旧画布无法校验；新建和导入的图不会再生成这些技术节点。
 NODE_CATALOG: dict[str, dict[str, Any]] = {
     "text": {
         "label": "文本", "category": "内容", "icon": "Type",
         "inputs": [{"key": "source", "type": "any", "multiple": True, "required": False}],
         "outputs": [{"key": "text", "type": "any"}],
+    },
+    "screenplay": {
+        "label": "剧本", "category": "内容", "icon": "FileText",
+        "inputs": [{"key": "source", "type": "any", "multiple": True, "required": False}],
+        "outputs": [{"key": "screenplay", "type": "any"}],
     },
     "image": {
         "label": "图片", "category": "媒体", "icon": "Image",
@@ -160,6 +167,23 @@ def _node_spec(node_type: str) -> dict[str, Any] | None:
 def _require_user(request: Request, db: Session) -> User:
     import main as main_mod
     return main_mod._require_user(request, db)
+
+
+def _canvas_deepseek_api_key(request: Request, db: Session) -> str | None:
+    """画布文本 AI 调用前的运行时注入（AGENTS.md 陷阱 15：必须先 configure 再调用）。"""
+    from routers.video import _user_deepseek_api_key
+    return _user_deepseek_api_key(request, db)
+
+
+def _screenplay_node_from_graph(graph: dict[str, Any], node_id: str) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """从画布图中定位剧本节点，返回 (node, config)。"""
+    for node in graph.get("nodes") or []:
+        if not isinstance(node, dict) or str(node.get("id") or "") != node_id:
+            continue
+        if str(node.get("type") or "") != "screenplay":
+            return None, None
+        return node, dict((node.get("data") or {}).get("config") or {})
+    return None, None
 
 
 def _require_canvas(canvas_id: int, user: User, db: Session) -> VideoCanvas:
@@ -1459,6 +1483,159 @@ async def sync_video_canvas_plan_to_workflow(
     db.commit()
     db.refresh(plan)
     return {"plan": _serialize_plan(plan), "workflow_id": workflow.id, "shot_count": len(shots)}
+
+
+SCREENPLAY_SPLIT_MAX_UNITS = 30
+
+
+@router.post("/api/video-canvas/canvases/{canvas_id}/screenplay-split")
+async def screenplay_split(canvas_id: int, body: VideoCanvasScreenplaySplitRequest, request: Request, db: Session = Depends(get_db)):
+    """剧本节点 AI 拆分：读取节点当前内容，复用现有轻量拆镜模块输出视频单元列表。
+
+    不直接写图；前端把单元列表组装成节点组后走 pending-change/图保存确认流。
+    """
+    user = _require_user(request, db)
+    canvas = _require_canvas(canvas_id, user, db)
+    graph = _latest_version(canvas.id, db).graph_json or {}
+    node, config = _screenplay_node_from_graph(graph, body.node_id)
+    if node is None:
+        raise HTTPException(422, "剧本节点不存在或类型不正确")
+    content = str(config.get("content") or config.get("screenplay") or "").strip()
+    if not content:
+        raise HTTPException(422, "剧本节点内容为空，无法拆分")
+
+    content_hash = _canvas_source_hash("screenplay_node", body.node_id, content)
+    previous_hash = str(config.get("content_hash") or "").strip()
+    stale_detected = bool(previous_hash) and previous_hash != content_hash
+
+    from services import deepseek as deepseek_service
+
+    api_key = _canvas_deepseek_api_key(request, db)
+    shots = await deepseek_service.parse_chapter_to_shots_lite(content, api_key=api_key)
+    if not isinstance(shots, list):
+        shots = []
+    truncated = len(shots) > SCREENPLAY_SPLIT_MAX_UNITS
+    if truncated:
+        shots = shots[:SCREENPLAY_SPLIT_MAX_UNITS]
+
+    units: list[dict[str, Any]] = []
+    for index, shot in enumerate(shots, start=1):
+        if not isinstance(shot, dict):
+            continue
+        units.append(
+            {
+                "unit_index": index,
+                "shot_index": shot.get("shot_index") or index,
+                "title": str(shot.get("story_summary") or f"视频单元 {index}")[:60],
+                "summary": str(shot.get("story_summary") or ""),
+                "video_prompt": str(shot.get("camera_plan") or shot.get("motion_plan") or ""),
+                "scene_location": shot.get("scene_location"),
+                "time_of_day": shot.get("time_of_day"),
+                "characters": shot.get("characters") or [],
+                "dialogue_or_narration": shot.get("dialogue_or_narration"),
+                "duration_seconds": int(shot.get("duration_seconds") or 5),
+                "duration_requested": shot.get("duration_requested"),
+                "duration_reason": str(shot.get("beat_density") or shot.get("duration_reason") or ""),
+                "transition_to_next": shot.get("transition_to_next"),
+            }
+        )
+    if not units:
+        raise HTTPException(502, "拆分未返回可用视频单元，请稍后重试或更换文本模型")
+
+    return {
+        "ok": True,
+        "node_id": body.node_id,
+        "content_hash": content_hash,
+        "stale_detected": stale_detected,
+        "unit_count": len(units),
+        "truncated": truncated,
+        "units": units,
+    }
+
+
+@router.get("/api/manga-drama/importable-stories")
+async def list_importable_novel_stories(request: Request, db: Session = Depends(get_db)):
+    """用户名下可作为剧本素材的小说作品（story_type='novel'）及其章节摘要。"""
+    user = _require_user(request, db)
+    stories = (
+        db.query(Story)
+        .filter(Story.owner_user_id == user.id, Story.story_type == "novel")
+        .order_by(Story.created_at.desc())
+        .all()
+    )
+    items: list[dict[str, Any]] = []
+    for story in stories:
+        chapters = (
+            db.query(Chapter)
+            .filter(Chapter.story_id == story.id)
+            .order_by(Chapter.chapter_number.asc())
+            .all()
+        )
+        items.append(
+            {
+                "story_id": story.id,
+                "title": story.title,
+                "chapter_count": len(chapters),
+                "chapters": [
+                    {
+                        "chapter_id": chapter.id,
+                        "chapter_number": chapter.chapter_number,
+                        "title": chapter.title,
+                        "content_chars": len((chapter.novel_content or "").strip()),
+                        "has_content": bool((chapter.novel_content or "").strip()),
+                    }
+                    for chapter in chapters
+                ],
+            }
+        )
+    return {"stories": items}
+
+
+@router.post("/api/video-canvas/canvases/{canvas_id}/import-screenplay")
+async def import_screenplay(canvas_id: int, body: VideoCanvasScreenplayImportRequest, request: Request, db: Session = Depends(get_db)):
+    """导入小说章节 → AI 改写为漫剧剧本草稿。
+
+    只读原作品：此处重新校验章节所有权并重读正文（不信任客户端内容），
+    返回 pending-change 形态的剧本文本草稿，由前端走画布保存确认流。
+    """
+    user = _require_user(request, db)
+    canvas = _require_canvas(canvas_id, user, db)
+
+    resolved: list[dict[str, Any]] = []
+    seen_chapter_ids: set[int] = set()
+    for source in body.sources:
+        chapter = db.get(Chapter, source.chapter_id)
+        if not chapter or chapter.story_id != source.story_id:
+            raise HTTPException(422, f"章节 {source.chapter_id} 不存在或不属于指定作品")
+        story = db.get(Story, source.story_id)
+        if not story or story.owner_user_id != user.id:
+            raise HTTPException(403, f"作品 {source.story_id} 不属于当前用户")
+        content = (chapter.novel_content or "").strip()
+        if not content:
+            raise HTTPException(422, f"章节「{chapter.title or source.chapter_id}」正文为空，无法导入")
+        if chapter.id in seen_chapter_ids:
+            raise HTTPException(422, f"章节「{chapter.title or chapter.id}」重复选择")
+        seen_chapter_ids.add(chapter.id)
+        resolved.append(
+            {
+                "story_id": chapter.story_id,
+                "chapter_id": chapter.id,
+                "title": chapter.title or f"第{chapter.chapter_number}章",
+                "content": content,
+            }
+        )
+
+    from services.screenplay_adapt import adapt_novel_to_screenplay
+
+    api_key = _canvas_deepseek_api_key(request, db)
+    result = await adapt_novel_to_screenplay(chapters=resolved, api_key=api_key)
+    return {
+        "ok": True,
+        "screenplay_text": result["screenplay_text"],
+        "source_refs": result["source_refs"],
+        "batch_count": result["batch_count"],
+        "content_chars": len(result["screenplay_text"]),
+    }
 
 
 @router.put("/api/video-canvas/canvases/{canvas_id}/graph")
