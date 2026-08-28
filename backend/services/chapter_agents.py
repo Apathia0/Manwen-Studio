@@ -38,8 +38,10 @@ WRITER_EMPTY_CONTENT_RETRIES = 1
 WRITER_THINKING_BUDGET_BOOSTS = 2
 WRITER_THINKING_BUDGET_BOOST_FACTOR = 2.0
 WRITER_THINKING_BUDGET_MAX_TOKENS = 32768
-# reasoning 消耗占输出预算的比例达到该阈值时，判定为"思考吃掉预算"。
-WRITER_THINKING_BUDGET_RATIO = 0.6
+# 网关侧瞬态故障（502/503/504、网络中断）在 writer 层自动重试；
+# 章节生成后台任务 max_retries=0，不在这里兜底用户就只能整章重跑。
+WRITER_UPSTREAM_RETRIES = 1
+WRITER_UPSTREAM_RETRY_DELAY_SECONDS = 5.0
 PLOT_BEATS_MAX = 8
 PLOT_BEATS_MIN = 6
 
@@ -1265,13 +1267,6 @@ def _truncated_generation_review(content: str, creation_pack: dict[str, Any], fi
     }
 
 
-def _response_fallback_text(exc: httpx.HTTPStatusError) -> str:
-    try:
-        return exc.response.text
-    except Exception:
-        return ""
-
-
 async def _record_writer_model_observation(**observation: Any) -> None:
     """章节管线的能力学习是旁路优化，失败不影响正文生成主链路。"""
     try:
@@ -1321,15 +1316,15 @@ def _thinking_ate_budget(
     reasoning_tokens: Any,
     max_tokens: int,
 ) -> bool:
-    """判断这次空正文是否因模型思考消耗掉输出预算导致（finish_reason=length）。"""
+    """判断这次空正文是否因模型思考消耗掉输出预算导致（finish_reason=length）。
+
+    对齐 opencode 的治理经验：网关可能重建 usage、reasoning 计入口径不一
+    （有的网关把 reasoning 算进普通 output，tokens.reasoning 读出来是 0），
+    因此不依赖 token 计数阈值；"length + 空 content"即视为预算被思考耗尽。
+    """
     if isinstance(content, str) and content.strip():
         return False
-    if str(finish_reason or "").lower() != "length":
-        return False
-    if isinstance(reasoning_tokens, int) and reasoning_tokens > 0:
-        return reasoning_tokens >= max_tokens * WRITER_THINKING_BUDGET_RATIO
-    # 上游未报告 reasoning_tokens 时，用 reasoning_content 长度粗估（约 4 字符/token）。
-    return len(reasoning_content or "") >= max_tokens * 4 * WRITER_THINKING_BUDGET_RATIO
+    return str(finish_reason or "").lower() == "length"
 
 
 async def _chat_completion(
@@ -1340,6 +1335,7 @@ async def _chat_completion(
     response_format: dict[str, str] | None = None,
     _empty_content_retry: int = 0,
     _thinking_boost_count: int = 0,
+    _upstream_retry: int = 0,
 ) -> tuple[str, str | None]:
     from services import deepseek as deepseek_service
 
@@ -1369,46 +1365,52 @@ async def _chat_completion(
             )
         resp.raise_for_status()
         data = deepseek_service._response_json(resp, context="DeepSeek")
-    except httpx.TimeoutException as exc:
-        raise UpstreamServiceError(
-            "正文模型响应超时，请稍后重试",
-            retryable=True,
-            provider="DeepSeek",
-            status_code=504,
-            code="writer_upstream_timeout",
-        ) from exc
-    except httpx.HTTPStatusError as exc:
-        status_code = int(exc.response.status_code)
-        # 输出预算放大后可能超过模型真实上限，缩回上一档再试一次。
-        if (
-            status_code in {400, 422}
-            and effective_max_tokens > max_tokens
-            and _thinking_boost_count > 0
-        ):
+    except (httpx.TimeoutException, httpx.HTTPStatusError, httpx.RequestError) as exc:
+        status_code = (
+            int(exc.response.status_code)
+            if isinstance(exc, httpx.HTTPStatusError)
+            else (504 if isinstance(exc, httpx.TimeoutException) else 502)
+        )
+        # 网关瞬态故障（超时/5xx/网络中断）：writer 层兜底重试一次，避免整章任务直接失败。
+        transient = (
+            isinstance(exc, (httpx.TimeoutException, httpx.RequestError))
+            or status_code in {408, 429, 500, 502, 503, 504}
+        )
+        if transient and _upstream_retry < WRITER_UPSTREAM_RETRIES:
             logger.warning(
-                "chapter_pipeline.writer.boosted_budget_rejected model=%s effective_max_tokens=%s status=%s",
+                "chapter_pipeline.writer.upstream_retry model=%s status=%s type=%s attempt=%s",
                 deepseek_service.runtime_model(),
-                effective_max_tokens,
                 status_code,
+                type(exc).__name__,
+                _upstream_retry + 1,
             )
-            await _record_writer_model_observation(output_error=_response_fallback_text(exc) or "")
+            await asyncio.sleep(WRITER_UPSTREAM_RETRY_DELAY_SECONDS)
             return await _chat_completion(
                 messages=messages,
                 api_key=api_key,
                 max_tokens=max_tokens,
                 response_format=response_format,
                 _empty_content_retry=_empty_content_retry,
-                _thinking_boost_count=0,
+                _thinking_boost_count=_thinking_boost_count,
+                _upstream_retry=_upstream_retry + 1,
             )
-        raise UpstreamServiceError(
-            "正文模型暂时不可用，请稍后重试",
-            retryable=status_code in {408, 409, 425, 429, 500, 502, 503, 504},
-            provider="DeepSeek",
-            status_code=status_code,
-            code="writer_upstream_http_error",
-            diagnostics={"upstream_status_code": status_code},
-        ) from exc
-    except httpx.RequestError as exc:
+        if isinstance(exc, httpx.TimeoutException):
+            raise UpstreamServiceError(
+                "正文模型响应超时，请稍后重试",
+                retryable=True,
+                provider="DeepSeek",
+                status_code=504,
+                code="writer_upstream_timeout",
+            ) from exc
+        if isinstance(exc, httpx.HTTPStatusError):
+            raise UpstreamServiceError(
+                "正文模型暂时不可用，请稍后重试",
+                retryable=status_code in {408, 409, 425, 429, 500, 502, 503, 504},
+                provider="DeepSeek",
+                status_code=status_code,
+                code="writer_upstream_http_error",
+                diagnostics={"upstream_status_code": status_code},
+            ) from exc
         raise UpstreamServiceError(
             "正文模型网络连接失败，请稍后重试",
             retryable=True,
@@ -1439,6 +1441,8 @@ async def _chat_completion(
                 max_tokens=max_tokens,
                 response_format=response_format,
                 _empty_content_retry=_empty_content_retry + 1,
+                _thinking_boost_count=_thinking_boost_count,
+                _upstream_retry=_upstream_retry,
             )
         raise WriterEmptyContentError(
             model=deepseek_service.runtime_model(),

@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from typing import Any
 
 import httpx
@@ -36,6 +37,15 @@ MAX_INPUT_CHARS = 14000
 REQUEST_TIMEOUT = 300
 MAX_OUTPUT_CHARS = 5000
 AI_CREATION_PACK_VERSION = 1
+# 思考型模型经网关调用会忽略 thinking=disabled，reasoning 与正文共享输出预算。
+# 初始预算放大留足思考+输出缓冲；空 content 时按倍数升级重试。
+CREATION_PACK_MAX_TOKENS = 16384
+_CREATION_PACK_BOOST_FACTOR = 2
+_CREATION_PACK_BOOST_MAX_TOKENS = 32768
+
+
+class _BoostRetry(Exception):
+    """内部控制流：思考吃掉输出预算，需要放大 max_tokens 后立即重试。"""
 
 
 SYSTEM_PROMPT = """你是资深中文网文编辑。根据提供的「本章知识库检索结果」和「章节大纲」，生成一份可直接指导正文 Agent 写作的「正文创作说明」。
@@ -171,26 +181,33 @@ async def _call_creation_pack_ai(
     system_prompt: str,
     user_prompt: str,
 ) -> dict[str, Any]:
-    """调用 DeepSeek 获取 JSON；关闭思考模式，失败时仅做一次受控重试。"""
+    """调用 DeepSeek 获取 JSON；关闭思考模式，失败时仅做一次受控重试。
+
+    思考型模型（glm-5.3-flash 等）经网关调用会忽略 thinking=disabled，
+    reasoning 吃光输出预算时 HTTP 200 但 content 为空；检测到该情况
+    （finish_reason=length + reasoning_tokens 占比超阈值）时放大 max_tokens 重试。
+    """
     if not _deepseek.runtime_base_url():
         raise ValueError("DeepSeek API 地址未配置，请先调用配置注入")
-    payload = {
-        "model": _deepseek.runtime_model(),
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-        "stream": False,
-        "temperature": 0.4,
-        "max_tokens": 8192,
-        "response_format": {"type": "json_object"},
-    }
-    payload = _deepseek._apply_runtime_params(payload)
-    # 创作包需要直接返回结构化结果，避免推理内容耗尽输出预算后 content 为空。
-    payload["thinking"] = {"type": "disabled"}
+    started_at = time.monotonic()
     last_exc: Exception | None = None
     max_attempts = 2
+    current_max_tokens = CREATION_PACK_MAX_TOKENS
     for attempt in range(max_attempts):
+        payload = {
+            "model": _deepseek.runtime_model(),
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            "stream": False,
+            "temperature": 0.4,
+            "max_tokens": current_max_tokens,
+            "response_format": {"type": "json_object"},
+        }
+        payload = _deepseek._apply_runtime_params(payload)
+        # 创作包需要直接返回结构化结果，避免推理内容耗尽输出预算后 content 为空。
+        payload["thinking"] = {"type": "disabled"}
         try:
             async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
                 response = await client.post(
@@ -208,9 +225,11 @@ async def _call_creation_pack_ai(
                     raise ValueError("DeepSeek 响应缺少 message")
                 content = message.get("content")
                 if not isinstance(content, str) or not content.strip():
-                    # 诊断：HTTP 200 + 空 content 通常是中转 API 输入超限/被策略拦截的静默行为
+                    # 诊断：HTTP 200 + 空 content 通常是思考型模型 reasoning 吃光输出预算
                     finish_reason = (choices[0] or {}).get("finish_reason")
-                    usage = response_data.get("usage")
+                    usage = response_data.get("usage") or {}
+                    usage_details = usage.get("completion_tokens_details") or {}
+                    reasoning_tokens = usage_details.get("reasoning_tokens")
                     logger.warning(
                         "创作包 AI 返回空 content：finish_reason=%s usage=%s 输入字符 system=%d user=%d",
                         finish_reason,
@@ -218,8 +237,33 @@ async def _call_creation_pack_ai(
                         len(system_prompt),
                         len(user_prompt),
                     )
+                    requested = int(payload.get("max_tokens") or 0)
+                    # 判定依据对齐 opencode 的治理经验：不用 token 计数估算（网关可能
+                    # 重建 usage、reasoning 计入口径不一），只要"length + 空 content"即视为
+                    # 输出预算被思考耗尽，做一次有界的预算升级重试。
+                    reasoning_ate_budget = str(finish_reason or "").lower() == "length"
+                    if (
+                        reasoning_ate_budget
+                        and requested < _CREATION_PACK_BOOST_MAX_TOKENS
+                        and attempt + 1 < max_attempts
+                    ):
+                        boosted = min(
+                            _CREATION_PACK_BOOST_MAX_TOKENS,
+                            requested * _CREATION_PACK_BOOST_FACTOR,
+                        )
+                        logger.warning(
+                            "创作包思考预算升级重试：reasoning_tokens=%s requested=%s boosted=%s",
+                            reasoning_tokens,
+                            requested,
+                            boosted,
+                        )
+                        last_exc = ValueError("DeepSeek 响应 content 为空（思考消耗输出预算）")
+                        current_max_tokens = boosted
+                        raise _BoostRetry()
                     raise ValueError("DeepSeek 响应 content 为空")
                 return _extract_json_object(content)
+        except _BoostRetry:
+            continue
         except httpx.HTTPStatusError as exc:
             status_code = exc.response.status_code
             if status_code in (403, 524) and attempt + 1 < max_attempts:
@@ -231,10 +275,16 @@ async def _call_creation_pack_ai(
         except (httpx.TransportError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
             last_exc = exc
             if attempt + 1 < max_attempts:
-                logger.warning("创作包 AI 调用异常，准备最后一次重试：%s", exc)
+                elapsed = time.monotonic() - started_at
+                # httpcore 的超时异常 str 可能为空串，日志里补上异常类型与耗时便于定位。
+                detail = str(exc).strip() or f"{type(exc).__name__}"
+                logger.warning(
+                    "创作包 AI 调用异常，准备最后一次重试：%s elapsed=%.1fs", detail, elapsed,
+                )
                 await asyncio.sleep(2)
                 continue
-    raise RuntimeError("创作包 AI 调用连续 2 次失败") from last_exc
+    final_detail = "未知错误" if last_exc is None else (str(last_exc).strip() or type(last_exc).__name__)
+    raise RuntimeError(f"创作包 AI 调用连续 {max_attempts} 次失败：{final_detail}") from last_exc
 
 
 def _parse_and_repair(content: str) -> dict[str, Any]:

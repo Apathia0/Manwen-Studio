@@ -115,12 +115,11 @@ def test_writer_retries_empty_content_once_then_raises_structured_error(monkeypa
             max_tokens=8192,
         ))
 
-    # 8192 预算被 8192 reasoning token 吃光 → 升级到 16384；上游 reasoning_tokens 未随预算增长，
-    # 第二轮不再判定为思考吃预算，走原有空正文重试（维持 16384）后仍空 → 抛错。
+    # 每轮都是 length+空正文 → 持续判定思考吃预算，8192→16384→32768 两次升级后仍空 → 抛错。
     assert len(calls) == 3
     assert calls[0]["max_tokens"] == 8192
     assert calls[1]["max_tokens"] == 16384
-    assert calls[2]["max_tokens"] == 16384
+    assert calls[2]["max_tokens"] == 32768
     assert all(item["thinking"] == {"type": "disabled"} for item in calls)
     assert exc_info.value.code == "writer_empty_content"
     assert exc_info.value.retryable is True
