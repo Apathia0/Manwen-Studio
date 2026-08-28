@@ -97,7 +97,9 @@ export default function VideoStoryboardLayout({
   const [screenplayGenerating, setScreenplayGenerating] = useState(false);
   const [assetManagementOpen, setAssetManagementOpen] = useState(false);
   const [videoAgentOpen, setVideoAgentOpen] = useState(false);
-  const [viewMode, setViewMode] = useState<'list' | 'canvas'>('list');
+  // 分镜列表已由画布模式取代；VITE_ENABLE_SHOT_LIST=true 可临时恢复（默认下线）
+  const shotListEnabled = import.meta.env.VITE_ENABLE_SHOT_LIST === 'true';
+  const [viewMode, setViewMode] = useState<'list' | 'canvas'>(shotListEnabled ? 'list' : 'canvas');
   const [canvasDirty, setCanvasDirty] = useState(false);
   const [agentShotId, setAgentShotId] = useState<number | undefined>(undefined);
   const pollTimerRef = useRef<number | null>(null);
@@ -803,11 +805,15 @@ export default function VideoStoryboardLayout({
       <div className="flex min-w-0 flex-1">
         <div className="flex min-w-0 flex-1 flex-col overflow-hidden bg-white">
           <div className="flex h-11 shrink-0 items-center justify-between border-b border-[#d7e3f4] px-3">
-            <div className="inline-flex border border-slate-200 bg-slate-50 p-0.5">
-              <button type="button" onClick={() => void handleViewModeChange('list')} className={`px-3 py-1 text-xs font-medium ${viewMode === 'list' ? 'bg-white text-blue-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>列表</button>
-              <button type="button" onClick={() => void handleViewModeChange('canvas')} className={`px-3 py-1 text-xs font-medium ${viewMode === 'canvas' ? 'bg-white text-blue-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>无限画布</button>
-            </div>
-            {viewMode === 'canvas' && <span className="text-xs text-slate-500">画布与列表工作流可相互配合</span>}
+            {shotListEnabled ? (
+              <div className="inline-flex border border-slate-200 bg-slate-50 p-0.5">
+                <button type="button" onClick={() => void handleViewModeChange('list')} className={`px-3 py-1 text-xs font-medium ${viewMode === 'list' ? 'bg-white text-blue-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>列表</button>
+                <button type="button" onClick={() => void handleViewModeChange('canvas')} className={`px-3 py-1 text-xs font-medium ${viewMode === 'canvas' ? 'bg-white text-blue-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>无限画布</button>
+              </div>
+            ) : (
+              <span className="text-xs font-medium text-slate-700">无限画布</span>
+            )}
+            {viewMode === 'canvas' && shotListEnabled && <span className="text-xs text-slate-500">画布与列表工作流可相互配合</span>}
           </div>
           <div className="min-h-0 min-w-0 flex-1 overflow-hidden">
           {viewMode === 'canvas' ? (
