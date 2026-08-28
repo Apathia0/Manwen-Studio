@@ -220,7 +220,8 @@ function App() {
     [activeStory, chapters, activeChapterId, activeChapter, workspaceMode],
   );
 
-  const isWorkspaceRoute = route === 'workspace';
+  // 漫剧画布工作台与小说工作台一样需要全高内容区（否则画布 h-full 链断裂收成 0 高度）
+  const isWorkspaceRoute = route === 'workspace' || route === 'manga-drama-workspace';
 
   const handleModelConfigRequestHandled = useCallback((requestId: number) => {
     setModelConfigRequest((current) => current?.requestId === requestId ? null : current);
