@@ -1627,42 +1627,35 @@ async def screenplay_split(canvas_id: int, body: VideoCanvasScreenplaySplitReque
     previous_hash = str(config.get("content_hash") or "").strip()
     stale_detected = bool(previous_hash) and previous_hash != content_hash
 
-    from services import deepseek as deepseek_service
+    from services.screenplay_adapt import generate_structured_screenplay
 
     api_key = _canvas_deepseek_api_key(request, db)
     try:
-        shots = await deepseek_service.parse_chapter_to_shots_lite(content, api_key=api_key)
+        structured = await generate_structured_screenplay(content=content, api_key=api_key, max_scenes=SCREENPLAY_SPLIT_MAX_UNITS)
     except UpstreamServiceError as exc:
         raise _translate_upstream_error(exc)
-    if not isinstance(shots, list):
-        shots = []
-    truncated = len(shots) > SCREENPLAY_SPLIT_MAX_UNITS
-    if truncated:
-        shots = shots[:SCREENPLAY_SPLIT_MAX_UNITS]
+    scenes = structured["scenes"]
 
     units: list[dict[str, Any]] = []
-    for index, shot in enumerate(shots, start=1):
-        if not isinstance(shot, dict):
-            continue
+    for index, scene in enumerate(scenes, start=1):
         units.append(
             {
                 "unit_index": index,
-                "shot_index": shot.get("shot_index") or index,
-                "title": str(shot.get("story_summary") or f"视频单元 {index}")[:60],
-                "summary": str(shot.get("story_summary") or ""),
-                "video_prompt": str(shot.get("camera_plan") or shot.get("motion_plan") or ""),
-                "scene_location": shot.get("scene_location"),
-                "time_of_day": shot.get("time_of_day"),
-                "characters": shot.get("characters") or [],
-                "dialogue_or_narration": shot.get("dialogue_or_narration"),
-                "duration_seconds": int(shot.get("duration_seconds") or 5),
-                "duration_requested": shot.get("duration_requested"),
-                "duration_reason": str(shot.get("beat_density") or shot.get("duration_reason") or ""),
-                "transition_to_next": shot.get("transition_to_next"),
+                "scene_id": scene["scene_id"],
+                "title": scene["title"],
+                "location": scene["location"],
+                "time_of_day": scene["time_of_day"],
+                "characters": scene["characters"],
+                "scene_purpose": scene["scene_purpose"],
+                "visual_anchors": scene["visual_anchors"],
+                "beats": scene["beats"],
+                "transition_to_next_scene": scene["transition_to_next_scene"],
+                "duration_seconds": int(scene["duration_seconds"]),
+                "duration_reason": scene["duration_reason"],
             }
         )
     if not units:
-        raise HTTPException(502, "拆分未返回可用视频单元，请稍后重试或更换文本模型")
+        raise HTTPException(502, "拆分未返回可用场景，请稍后重试或更换文本模型")
 
     return {
         "ok": True,
@@ -1670,7 +1663,7 @@ async def screenplay_split(canvas_id: int, body: VideoCanvasScreenplaySplitReque
         "content_hash": content_hash,
         "stale_detected": stale_detected,
         "unit_count": len(units),
-        "truncated": truncated,
+        "truncated": bool(structured.get("truncated")),
         "units": units,
     }
 

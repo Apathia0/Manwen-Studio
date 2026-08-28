@@ -174,8 +174,9 @@ function projectLegacyGraph(graph: VideoCanvasGraph): VideoCanvasGraph {
   const nodeTypeById = new Map(nodes.map((node) => [node.id, node.type]));
   const edges = graph.edges.filter((edge) => nodeIds.has(edge.source) && nodeIds.has(edge.target)).map((edge) => {
     const targetType = nodeTypeById.get(edge.target);
-    const targetHandle = targetType === 'text' ? 'source' : targetType === 'video' && edge.targetHandle === 'image' ? 'image' : targetType === 'image' && edge.targetHandle === 'references' ? 'references' : 'prompt';
-    const sourceHandle = nodeTypeById.get(edge.source) === 'text' ? 'text' : nodeTypeById.get(edge.source) === 'image' ? 'image' : 'video';
+    const sourceType = nodeTypeById.get(edge.source);
+    const targetHandle = targetType === 'text' ? 'source' : targetType === 'screenplay' ? 'source' : targetType === 'scene' ? 'screenplay' : targetType === 'video' && edge.targetHandle === 'image' ? 'image' : targetType === 'image' && edge.targetHandle === 'references' ? 'references' : 'prompt';
+    const sourceHandle = sourceType === 'text' ? 'text' : sourceType === 'screenplay' ? 'screenplay' : sourceType === 'scene' ? 'shot' : sourceType === 'image' ? 'image' : 'video';
     return { ...edge, sourceHandle, targetHandle };
   });
   return { ...graph, nodes, edges };
@@ -915,32 +916,25 @@ export default function VideoCanvasPanel({ storyId, chapterId, workflow = null, 
       }
       const result = await screenplaySplit(targetCanvas.id, nodeId);
       captureHistory();
-      const baseX = sourceNode.position.x + 380;
+      // 起点偏移按源节点实际宽度计算，避免大节点与剧本节点重叠
+      const sourceWidth = Number(sourceNode.data.ui?.width) || 300;
+      const baseX = sourceNode.position.x + sourceWidth + 80;
       const baseY = sourceNode.position.y;
       // v3.1 流程：拆分产物为单个「场景审核聚合节点」，全部场次垂直排列统一审批
       const scenes = result.units.map((unit) => ({
-        scene_id: unit.unit_index,
+        scene_id: unit.scene_id ?? unit.unit_index,
         title: unit.title || `场景 ${unit.unit_index}`,
-        location: unit.scene_location || '',
+        location: unit.location || '',
         time_of_day: unit.time_of_day || '',
         characters: Array.isArray(unit.characters) ? unit.characters.filter((c) => typeof c === 'string') : [],
-        scene_purpose: unit.summary || '',
+        scene_purpose: unit.scene_purpose || '',
+        visual_anchors: unit.visual_anchors || '',
         importance: 'medium',
         approved: false,
         duration_seconds: unit.duration_seconds,
         duration_reason: unit.duration_reason || '',
-        duration_requested: unit.duration_requested ?? null,
-        beats: [
-          {
-            beat_id: 1,
-            type: 'action',
-            importance: 'medium',
-            emotion_shift: '',
-            action: unit.video_prompt || unit.summary || '',
-            dialogue: unit.dialogue_or_narration ?? [],
-            transition_to_next: unit.transition_to_next || '',
-          },
-        ],
+        beats: Array.isArray(unit.beats) ? unit.beats : [],
+        transition_to_next_scene: unit.transition_to_next_scene || '',
       }));
       const sceneNode: CanvasNode = {
         id: `split-${nodeId}-${Math.random().toString(36).slice(2, 8)}`,
@@ -1065,7 +1059,7 @@ export default function VideoCanvasPanel({ storyId, chapterId, workflow = null, 
       <CanvasConnectionLayer nodes={nodes as CanvasSceneNode[]} edges={edges as CanvasSceneEdge[]} catalog={catalog} connecting={interaction.state.connecting} mouseWorld={interaction.state.mouseWorld} connectionTargetNodeId={interaction.state.connectionTargetNodeId} selectedConnectionId={interaction.state.selectedConnectionId} handlers={interaction.handlers} />
       {interaction.state.selectionBox && (() => { const box = interaction.state.selectionBox; const left = Math.min(box.startWorldX, box.currentWorldX); const top = Math.min(box.startWorldY, box.currentWorldY); return <div className="pointer-events-none absolute rounded-lg border-2 border-[#2f80ff]/80 bg-[#2f80ff]/10" style={{ left, top, width: Math.abs(box.currentWorldX - box.startWorldX), height: Math.abs(box.currentWorldY - box.startWorldY) }} />; })()}
       {nodes.map((node) => <CanvasNodeView key={node.id} node={node as CanvasSceneNode} catalogItem={catalog.find((item) => item.type === node.type) || catalog[0]} selected={selectedNodeIds.includes(node.id)} connecting={interaction.state.connecting} connectionTargetNodeId={interaction.state.connectionTargetNodeId} scale={editorViewport.scale} handlers={interaction.handlers} onResize={handleNodeResize} onResizeEnd={handleNodeResizeEnd} onNodeContextMenu={(event, nodeId) => { event.preventDefault(); event.stopPropagation(); setNodeMenu({ x: event.clientX, y: event.clientY, nodeId }); }} renderContent={(nodeView) => { const result = nodeView.data.result as (Record<string, unknown> & { url?: string }) | undefined; const resultUrl = result?.url; const runStatus = nodeRunStatuses.get(nodeView.id); const isBusy = submittingNodeId === nodeView.id || ['awaiting_approval', 'queued', 'running', 'cancel_requested'].includes(String(runStatus || '')); if (resultUrl) return <NodeResultPreview url={resultUrl} isVideo={nodeView.type === 'video'} />; if (isBusy) return <div className="flex h-full w-full items-center justify-center bg-[#202226]" aria-label="生成中"><Loader2 className="h-8 w-8 animate-spin text-[#73a7ff]" /></div>; if (nodeView.type === 'scene') { const config = (nodeView.data.config || {}) as Record<string, unknown>; return (
-  <div className="flex h-full w-full flex-col gap-1.5" onPointerDown={(event) => event.stopPropagation()}>
+  <div className="flex h-full w-full flex-col gap-1.5" data-canvas-no-zoom onPointerDown={(event) => event.stopPropagation()}>
     <div className="min-h-0 flex-1 overflow-hidden">
       <SceneListNodeView
         config={config}
@@ -1090,7 +1084,7 @@ export default function VideoCanvasPanel({ storyId, chapterId, workflow = null, 
   </div>
 ); }
 if (nodeView.type === 'screenplay') { const config = nodeView.data.config || {}; const contentValue = String(config.content ?? config.screenplay ?? ''); return (
-  <div className="flex h-full w-full flex-col gap-2 p-2" onPointerDown={(event) => event.stopPropagation()}>
+  <div className="flex h-full w-full flex-col gap-2 p-2" data-canvas-no-zoom onPointerDown={(event) => event.stopPropagation()}>
     <textarea
       value={contentValue}
       placeholder="输入剧本内容，或通过工具栏「导入小说章节」自动生成…"

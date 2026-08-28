@@ -220,3 +220,205 @@ async def adapt_novel_to_screenplay(
         "source_refs": source_refs,
         "batch_count": batch_count,
     }
+
+
+async def generate_structured_screenplay(
+    *,
+    content: str,
+    api_key: str | None = None,
+    max_scenes: int = 30,
+) -> dict[str, Any]:
+    """把剧本/正文文本转换为带多节拍的结构化剧本（与生产环境剧本审核同构）。
+
+    复用 NOVEL_TO_SHORT_DRAMA_SCREENPLAY prompt 与宽松 JSON 修复链路；
+    返回 {"screenplay_text", "scenes": [{scene_id,title,location,time_of_day,
+    characters,scene_purpose,visual_anchors,beats[],transition_to_next_scene,
+    duration_seconds,duration_reason}]}。
+    """
+    from services import deepseek as deepseek_service
+    from services.video_chapter_prompts import (
+        NOVEL_TO_SHORT_DRAMA_SCREENPLAY_SYSTEM_PROMPT,
+        NOVEL_TO_SHORT_DRAMA_SCREENPLAY_USER_PROMPT_HEADER,
+    )
+
+    text = (content or "").strip()
+    if not text:
+        raise ValueError("内容为空，无法生成结构化剧本")
+
+    payload: dict[str, Any] = {
+        "model": deepseek_service.runtime_model(),
+        "messages": [
+            {"role": "system", "content": NOVEL_TO_SHORT_DRAMA_SCREENPLAY_SYSTEM_PROMPT},
+            {"role": "user", "content": NOVEL_TO_SHORT_DRAMA_SCREENPLAY_USER_PROMPT_HEADER + "\n\n" + text},
+        ],
+        "stream": False,
+        "max_tokens": 32768,
+        "response_format": {"type": "json_object"},
+        "thinking": {"type": "disabled"},
+    }
+    try:
+        async with httpx.AsyncClient(timeout=ADAPT_TIMEOUT_SECONDS) as client:
+            resp = await client.post(
+                f"{deepseek_service.runtime_base_url()}/chat/completions",
+                json=payload,
+                headers=deepseek_service._deepseek_auth_headers(api_key),
+            )
+        resp.raise_for_status()
+        data = deepseek_service._response_json(resp, context="DeepSeek")
+    except httpx.TimeoutException as exc:
+        raise UpstreamServiceError(
+            "剧本结构化响应超时，请稍后重试",
+            retryable=True,
+            provider="DeepSeek",
+            status_code=504,
+            code="screenplay_structure_timeout",
+        ) from exc
+    except httpx.HTTPStatusError as exc:
+        status_code = int(exc.response.status_code)
+        raise UpstreamServiceError(
+            "剧本结构化服务暂时不可用，请稍后重试",
+            retryable=status_code in {408, 409, 425, 429, 500, 502, 503, 504},
+            provider="DeepSeek",
+            status_code=status_code,
+            code="screenplay_structure_failed",
+            diagnostics={"upstream_status_code": status_code},
+        ) from exc
+    except httpx.RequestError as exc:
+        raise UpstreamServiceError(
+            "剧本结构化网络连接失败，请稍后重试",
+            retryable=True,
+            provider="DeepSeek",
+            status_code=502,
+            code="screenplay_structure_network_error",
+        ) from exc
+
+    raw_content = ""
+    choices = data.get("choices")
+    if isinstance(choices, list) and choices and isinstance(choices[0], dict):
+        message = choices[0].get("message") or {}
+        raw_content = message.get("content") if isinstance(message.get("content"), str) else ""
+    if not raw_content.strip():
+        raise UpstreamServiceError(
+            "剧本结构化未返回可用内容，请稍后重试",
+            retryable=True,
+            provider="DeepSeek",
+            status_code=502,
+            code="screenplay_structure_empty",
+        )
+
+    # 复用轻量拆镜同一套宽松 JSON 修复链路（AGENTS.md 陷阱 17）
+    screenplay_json: Any = None
+    try:
+        screenplay_json = deepseek_service._loads_json_lenient(raw_content)
+        if not isinstance(screenplay_json, dict):
+            raise ValueError(f"非 JSON 对象: {type(screenplay_json).__name__}")
+    except Exception:
+        from services.deepseek import _extract_json_object, _repair_broken_json_fields, _repair_truncated_json
+        try:
+            screenplay_json = _extract_json_object(raw_content)
+        except ValueError:
+            repaired = _repair_broken_json_fields(raw_content)
+            if repaired != raw_content:
+                try:
+                    screenplay_json = _extract_json_object(repaired)
+                except ValueError as exc:
+                    raise UpstreamServiceError(
+                        f"剧本 JSON 修复失败: {exc}",
+                        retryable=True,
+                        provider="DeepSeek",
+                        status_code=502,
+                        code="screenplay_structure_parse_failed",
+                    ) from exc
+            else:
+                truncated = _repair_truncated_json(raw_content)
+                if truncated != raw_content:
+                    try:
+                        screenplay_json = _extract_json_object(truncated)
+                    except ValueError as exc:
+                        raise UpstreamServiceError(
+                            f"剧本 JSON 截断修复后仍无法解析: {exc}",
+                            retryable=True,
+                            provider="DeepSeek",
+                            status_code=502,
+                            code="screenplay_structure_parse_failed",
+                        ) from exc
+                else:
+                    raise UpstreamServiceError(
+                        "剧本 JSON 解析错误，且未发现可修复的损坏字段",
+                        retryable=True,
+                        provider="DeepSeek",
+                        status_code=502,
+                        code="screenplay_structure_parse_failed",
+                    )
+
+    raw_scenes = screenplay_json.get("scenes") if isinstance(screenplay_json, dict) else None
+    if not isinstance(raw_scenes, list) or not raw_scenes:
+        raise UpstreamServiceError(
+            "剧本结构化结果缺少 scenes 数组，请重试",
+            retryable=True,
+            provider="DeepSeek",
+            status_code=502,
+            code="screenplay_structure_no_scenes",
+        )
+
+    scenes: list[dict[str, Any]] = []
+    for index, raw_scene in enumerate(raw_scenes, start=1):
+        if not isinstance(raw_scene, dict):
+            continue
+        raw_beats = raw_scene.get("beats")
+        beats: list[dict[str, Any]] = []
+        if isinstance(raw_beats, list):
+            for beat_index, raw_beat in enumerate(raw_beats, start=1):
+                if not isinstance(raw_beat, dict):
+                    continue
+                beats.append(
+                    {
+                        "beat_id": int(raw_beat.get("beat_id") or beat_index),
+                        "type": str(raw_beat.get("type") or "action"),
+                        "importance": str(raw_beat.get("importance") or "medium"),
+                        "emotion_shift": str(raw_beat.get("emotion_shift") or ""),
+                        "action": str(raw_beat.get("action") or ""),
+                        "dialogue": raw_beat.get("dialogue") if raw_beat.get("dialogue") is not None else [],
+                        "transition_to_next": str(raw_beat.get("transition_to_next") or ""),
+                    }
+                )
+        beat_count = max(1, len(beats))
+        # 动态时长：按节拍数估算，上限 15 秒（归一化在视频提交前再做）
+        duration = min(15, max(3, beat_count * 4))
+        scenes.append(
+            {
+                "scene_id": int(raw_scene.get("scene_id") or index),
+                "title": str(raw_scene.get("title") or f"场景 {index}"),
+                "location": str(raw_scene.get("location") or ""),
+                "time_of_day": str(raw_scene.get("time_of_day") or ""),
+                "characters": [str(c) for c in (raw_scene.get("characters") or []) if str(c).strip()],
+                "scene_purpose": str(raw_scene.get("scene_purpose") or ""),
+                "visual_anchors": str(raw_scene.get("visual_anchors") or ""),
+                "beats": beats,
+                "transition_to_next_scene": str(raw_scene.get("transition_to_next_scene") or ""),
+                "duration_seconds": duration,
+                "duration_reason": f"按 {beat_count} 个节拍估算",
+            }
+        )
+        if len(scenes) >= max_scenes:
+            break
+
+    if not scenes:
+        raise UpstreamServiceError(
+            "剧本结构化结果为空，请重试",
+            retryable=True,
+            provider="DeepSeek",
+            status_code=502,
+            code="screenplay_structure_no_scenes",
+        )
+
+    logger.info(
+        "screenplay_structure.done scenes=%s beats_total=%s",
+        len(scenes),
+        sum(len(s["beats"]) for s in scenes),
+    )
+    return {
+        "screenplay_text": str(screenplay_json.get("screenplay") or "") if isinstance(screenplay_json, dict) else "",
+        "scenes": scenes,
+        "truncated": len(raw_scenes) > max_scenes,
+    }

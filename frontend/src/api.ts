@@ -3605,18 +3605,17 @@ export async function createMangaDramaProject(payload: {
 
 export interface ScreenplaySplitUnit {
   unit_index: number;
-  shot_index: number;
+  scene_id: number;
   title: string;
-  summary: string;
-  video_prompt: string;
-  scene_location?: string | null;
-  time_of_day?: string | null;
-  characters?: unknown[];
-  dialogue_or_narration?: unknown;
+  location: string;
+  time_of_day: string;
+  characters: string[];
+  scene_purpose: string;
+  visual_anchors: string;
+  beats: Record<string, unknown>[];
+  transition_to_next_scene: string;
   duration_seconds: number;
-  duration_requested?: number | null;
-  duration_reason?: string;
-  transition_to_next?: string | null;
+  duration_reason: string;
 }
 
 export async function screenplaySplit(canvasId: number, nodeId: string): Promise<{
