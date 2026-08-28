@@ -1,5 +1,5 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent } from 'react';
-import { Bot, Boxes, Check, ChevronLeft, Loader2, PanelLeft, Pencil, Plus, Save, Search, Trash2, Upload, X } from 'lucide-react';
+import { Bot, Boxes, Check, ChevronLeft, FileText, Loader2, PanelLeft, Pencil, Plus, Save, Search, SplitSquareHorizontal, Trash2, Upload, X } from 'lucide-react';
 import {
   applyVideoCanvasPlan,
   cancelVideoCanvasRun,
@@ -10,6 +10,7 @@ import {
   getVideoCanvas,
   getVideoCanvasRun,
   importVideoCanvasListWorkflow,
+  screenplaySplit,
   listVideoCanvasPlans,
   listVideoCanvasNodeCatalog,
   listVideoCanvases,
@@ -54,6 +55,7 @@ import CanvasContextMenu from './video-canvas/CanvasContextMenu';
 import CanvasCreateMenu from './video-canvas/CanvasCreateMenu';
 import CanvasNodePropertyPanel from './video-canvas/CanvasNodePropertyPanel';
 import CanvasBottomToolbar from './video-canvas/CanvasBottomToolbar';
+import ChapterImportDialog from './video-canvas/ChapterImportDialog';
 import AssetReferenceSelector from './AssetReferenceSelector';
 import StyleSelectorModal from './StyleSelectorModal';
 
@@ -74,10 +76,12 @@ type ViewportTransform = { x: number; y: number; k: number };
 type CanvasNodeData = { label?: string; config?: Record<string, unknown>; origin?: Record<string, unknown>; nodeType?: string; ui?: { width?: number; height?: number }; [key: string]: unknown };
 type CanvasNode = { id: string; type: string; position: { x: number; y: number }; data: CanvasNodeData };
 type CanvasEdge = { id: string; source: string; target: string; sourceHandle?: string | null; targetHandle?: string | null; data?: Record<string, unknown> };
+const SCREENPLAY_SPLIT_MAX_UNITS = 30;
 const NODE_WIDTH = 300;
-const CANVAS_NODE_TYPES = new Set(['text', 'image', 'video']);
+const CANVAS_NODE_TYPES = new Set(['text', 'screenplay', 'image', 'video']);
 const CANVAS_CATALOG: VideoCanvasNodeCatalogItem[] = [
   { type: 'text', label: '文本', category: '创作', icon: 'Type', inputs: [{ key: 'source', type: 'any', multiple: true, required: false }], outputs: [{ key: 'text', type: 'any' }] },
+  { type: 'screenplay', label: '剧本', category: '创作', icon: 'FileText', inputs: [{ key: 'source', type: 'any', multiple: true, required: false }], outputs: [{ key: 'screenplay', type: 'any' }] },
   { type: 'image', label: '图片', category: '媒体', icon: 'Image', inputs: [{ key: 'prompt', type: 'any', multiple: true, required: false }, { key: 'references', type: 'any', multiple: true, required: false }], outputs: [{ key: 'image', type: 'any' }] },
   { type: 'video', label: '视频', category: '媒体', icon: 'Film', inputs: [{ key: 'prompt', type: 'any', multiple: true, required: false }, { key: 'image', type: 'any', multiple: true, required: false }], outputs: [{ key: 'video', type: 'any' }] },
 ];
@@ -889,6 +893,73 @@ export default function VideoCanvasPanel({ storyId, chapterId, workflow = null, 
     toast.success('画布节点已自动整理');
   };
   const addNodeFromTool = (type: string) => { const item = catalog.find((entry) => entry.type === type); if (!item) { toast.info('当前画布仅支持文本、图片、视频节点'); return; } captureHistory(); addCatalogNode(item); };
+  const [splittingNodeId, setSplittingNodeId] = useState<string | null>(null);
+  const [importDialogOpen, setImportDialogOpen] = useState(false);
+  // 剧本节点拆分：调用后端，把视频单元组以网格布局落到画布（可撤销，保存走既有确认流）
+  const splitScreenplayNode = async (nodeId: string) => {
+    if (!canvas || splittingNodeId) return;
+    const sourceNode = nodes.find((node) => node.id === nodeId);
+    if (!sourceNode) return;
+    setSplittingNodeId(nodeId);
+    try {
+      const result = await screenplaySplit(canvas.id, nodeId);
+      captureHistory();
+      const baseX = sourceNode.position.x + 380;
+      const baseY = sourceNode.position.y;
+      const newNodes: CanvasNode[] = result.units.map((unit, index) => ({
+        id: `split-${nodeId}-${unit.unit_index}-${Math.random().toString(36).slice(2, 8)}`,
+        type: 'video',
+        position: { x: baseX + Math.floor(index / 4) * 380, y: baseY + (index % 4) * 270 },
+        data: {
+          label: unit.title || `视频单元 ${unit.unit_index}`,
+          nodeType: 'video',
+          config: {
+            prompt: unit.video_prompt || unit.summary || '',
+            duration_seconds: unit.duration_seconds,
+            duration_reason: unit.duration_reason || '',
+            duration_requested: unit.duration_requested ?? null,
+            summary: unit.summary || '',
+            unit_index: unit.unit_index,
+            source_screenplay_node: nodeId,
+          },
+        },
+      }));
+      const newEdges: CanvasEdge[] = newNodes.map((node) => ({
+        id: `e-${nodeId}-${node.id}`,
+        source: nodeId,
+        sourceHandle: 'screenplay',
+        target: node.id,
+        targetHandle: 'prompt',
+      }));
+      setNodes((current) => [...current, ...newNodes]);
+      setEdges((current) => [...current, ...newEdges]);
+      setDirty(true);
+      if (result.stale_detected) toast.warning('剧本内容自上次拆分后已被修改，本次按最新内容拆分');
+      toast.success(`拆分完成：${result.unit_count} 个视频单元${result.truncated ? `（超过上限已截断到 ${SCREENPLAY_SPLIT_MAX_UNITS} 个）` : ''}`);
+    } catch (error) {
+      toast.error(normalizeErrorMessage(error, '剧本拆分失败'));
+    } finally {
+      setSplittingNodeId(null);
+    }
+  };
+  // 章节导入完成：把改写后的剧本落到新剧本节点
+  const handleScreenplayImported = (screenplayText: string, sourceRefs: { story_id: number; chapter_id: number; title: string; content_hash: string }[]) => {
+    captureHistory();
+    const node: CanvasNode = {
+      id: `screenplay-import-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`,
+      type: 'screenplay',
+      position: (() => { const rect = surfaceRef.current?.getBoundingClientRect(); const view = viewportRef.current; return rect ? { x: (rect.width / 2 - view.x) / view.k - 150, y: (rect.height / 2 - view.y) / view.k - 90 } : { x: 300, y: 200 }; })(),
+      data: {
+        label: `剧本（导入 ${sourceRefs.length} 章）`,
+        nodeType: 'screenplay',
+        config: { content: screenplayText, source_refs: sourceRefs, content_hash: '' },
+      },
+    };
+    setNodes((current) => [...current, node]);
+    setDirty(true);
+    setImportDialogOpen(false);
+    toast.success(`已生成剧本节点（${Math.round(screenplayText.length / 100) / 10}k 字），可编辑后点击「AI 拆分」`);
+  };
   const contextMenuState: ContextMenuState = nodeMenu ? { type: 'node', ...nodeMenu } : interaction.state.contextMenu;
   const createMenuPosition = interaction.state.nodeCreatePosition;
   const nodeRunStatuses = new Map((latestRun?.nodes || []).map((runNode) => [runNode.node_id, runNode.status]));
@@ -897,7 +968,27 @@ export default function VideoCanvasPanel({ storyId, chapterId, workflow = null, 
     <CanvasSurface containerRef={surfaceRef} viewport={editorViewport} tool={interaction.state.activeTool} handlers={interaction.handlers} state={interaction.state} onViewportChange={(next) => updateViewport({ x: next.x, y: next.y, k: next.scale })} onDrop={(event, world) => { const type = event.dataTransfer.getData('application/x-storycanvas-node'); const item = catalog.find((entry) => entry.type === type); if (item) { captureHistory(); addCatalogNode(item, world); } }}>
       <CanvasConnectionLayer nodes={nodes as CanvasSceneNode[]} edges={edges as CanvasSceneEdge[]} catalog={catalog} connecting={interaction.state.connecting} mouseWorld={interaction.state.mouseWorld} connectionTargetNodeId={interaction.state.connectionTargetNodeId} selectedConnectionId={interaction.state.selectedConnectionId} handlers={interaction.handlers} />
       {interaction.state.selectionBox && (() => { const box = interaction.state.selectionBox; const left = Math.min(box.startWorldX, box.currentWorldX); const top = Math.min(box.startWorldY, box.currentWorldY); return <div className="pointer-events-none absolute rounded-lg border-2 border-[#2f80ff]/80 bg-[#2f80ff]/10" style={{ left, top, width: Math.abs(box.currentWorldX - box.startWorldX), height: Math.abs(box.currentWorldY - box.startWorldY) }} />; })()}
-      {nodes.map((node) => <CanvasNodeView key={node.id} node={node as CanvasSceneNode} catalogItem={catalog.find((item) => item.type === node.type) || catalog[0]} selected={selectedNodeIds.includes(node.id)} connecting={interaction.state.connecting} connectionTargetNodeId={interaction.state.connectionTargetNodeId} scale={editorViewport.scale} handlers={interaction.handlers} onResize={handleNodeResize} onResizeEnd={handleNodeResizeEnd} onNodeContextMenu={(event, nodeId) => { event.preventDefault(); event.stopPropagation(); setNodeMenu({ x: event.clientX, y: event.clientY, nodeId }); }} renderContent={(nodeView) => { const result = nodeView.data.result as (Record<string, unknown> & { url?: string }) | undefined; const resultUrl = result?.url; const runStatus = nodeRunStatuses.get(nodeView.id); const isBusy = submittingNodeId === nodeView.id || ['awaiting_approval', 'queued', 'running', 'cancel_requested'].includes(String(runStatus || '')); if (resultUrl) return <NodeResultPreview url={resultUrl} isVideo={nodeView.type === 'video'} />; if (isBusy) return <div className="flex h-full w-full items-center justify-center bg-[#202226]" aria-label="生成中"><Loader2 className="h-8 w-8 animate-spin text-[#73a7ff]" /></div>; const mediaKind = nodeView.type === 'image' || nodeView.type === 'video' ? nodeView.type : null; return <div className="flex w-full flex-col items-center justify-center gap-3 px-4 py-2"><span className="text-center text-xs font-medium text-[#aeb6c5]">{String(nodeView.data.label || nodeView.type)}</span>{mediaKind && <button type="button" title={`上传${mediaKind === 'image' ? '图片' : '视频'}到当前节点`} disabled={uploadingNodeAsset} onPointerDown={(event) => event.stopPropagation()} onClick={(event) => { event.stopPropagation(); openNodeFileUpload(nodeView.id, mediaKind); }} className="inline-flex items-center gap-1.5 rounded-lg border border-[#3a3f45] bg-[#2a2e33] px-3 py-1.5 text-xs text-[#aeb6c5] hover:bg-[#353a41] hover:text-white disabled:cursor-wait disabled:opacity-60"><Upload className="h-3.5 w-3.5" />{uploadingNodeId === nodeView.id ? '上传中…' : `上传${mediaKind === 'image' ? '图片' : '视频'}`}</button>}</div>; }} />)}
+      {nodes.map((node) => <CanvasNodeView key={node.id} node={node as CanvasSceneNode} catalogItem={catalog.find((item) => item.type === node.type) || catalog[0]} selected={selectedNodeIds.includes(node.id)} connecting={interaction.state.connecting} connectionTargetNodeId={interaction.state.connectionTargetNodeId} scale={editorViewport.scale} handlers={interaction.handlers} onResize={handleNodeResize} onResizeEnd={handleNodeResizeEnd} onNodeContextMenu={(event, nodeId) => { event.preventDefault(); event.stopPropagation(); setNodeMenu({ x: event.clientX, y: event.clientY, nodeId }); }} renderContent={(nodeView) => { const result = nodeView.data.result as (Record<string, unknown> & { url?: string }) | undefined; const resultUrl = result?.url; const runStatus = nodeRunStatuses.get(nodeView.id); const isBusy = submittingNodeId === nodeView.id || ['awaiting_approval', 'queued', 'running', 'cancel_requested'].includes(String(runStatus || '')); if (resultUrl) return <NodeResultPreview url={resultUrl} isVideo={nodeView.type === 'video'} />; if (isBusy) return <div className="flex h-full w-full items-center justify-center bg-[#202226]" aria-label="生成中"><Loader2 className="h-8 w-8 animate-spin text-[#73a7ff]" /></div>; if (nodeView.type === 'screenplay') { const config = nodeView.data.config || {}; const contentValue = String(config.content ?? config.screenplay ?? ''); return (
+  <div className="flex h-full w-full flex-col gap-2 p-2" onPointerDown={(event) => event.stopPropagation()}>
+    <textarea
+      value={contentValue}
+      placeholder="输入剧本内容，或通过工具栏「导入小说章节」自动生成…"
+      onChange={(event) => { captureHistory(); updateNodeConfig(nodeView.id, 'content', event.target.value); }}
+      className="min-h-0 flex-1 resize-none rounded-lg border border-[#3a3f45] bg-[#23262b] p-2 text-[11px] leading-relaxed text-[#d5dae2] outline-none focus:border-[#73a7ff]"
+    />
+    <button
+      type="button"
+      disabled={splittingNodeId === nodeView.id || !contentValue.trim()}
+      onPointerDown={(event) => event.stopPropagation()}
+      onClick={(event) => { event.stopPropagation(); void splitScreenplayNode(nodeView.id); }}
+      className="inline-flex w-full items-center justify-center gap-1.5 rounded-lg bg-[#73a7ff] px-2 py-1.5 text-[11px] font-medium text-[#111827] hover:bg-[#8db6ff] disabled:cursor-not-allowed disabled:opacity-50"
+    >
+      {splittingNodeId === nodeView.id ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <SplitSquareHorizontal className="h-3.5 w-3.5" />}
+      {splittingNodeId === nodeView.id ? 'AI 拆分中…' : 'AI 拆分为视频单元'}
+    </button>
+  </div>
+); }
+const mediaKind = nodeView.type === 'image' || nodeView.type === 'video' ? nodeView.type : null; return <div className="flex w-full flex-col items-center justify-center gap-3 px-4 py-2"><span className="text-center text-xs font-medium text-[#aeb6c5]">{String(nodeView.data.label || nodeView.type)}</span>{mediaKind && <button type="button" title={`上传${mediaKind === 'image' ? '图片' : '视频'}到当前节点`} disabled={uploadingNodeAsset} onPointerDown={(event) => event.stopPropagation()} onClick={(event) => { event.stopPropagation(); openNodeFileUpload(nodeView.id, mediaKind); }} className="inline-flex items-center gap-1.5 rounded-lg border border-[#3a3f45] bg-[#2a2e33] px-3 py-1.5 text-xs text-[#aeb6c5] hover:bg-[#353a41] hover:text-white disabled:cursor-wait disabled:opacity-60"><Upload className="h-3.5 w-3.5" />{uploadingNodeId === nodeView.id ? '上传中…' : `上传${mediaKind === 'image' ? '图片' : '视频'}`}</button>}</div>; }} />)}
     </CanvasSurface>
       {agentOpen && <aside className="absolute left-4 top-20 z-30 w-72 overflow-hidden rounded-xl border border-white/10 bg-[#1b1d21]/[.98] shadow-2xl"><div className="flex items-center justify-between border-b border-white/[.08] px-3 py-2"><div><p className="text-xs font-semibold">创作计划</p><p className="mt-0.5 text-[10px] text-white/35">确认后可分别同步工作流或应用画布</p></div><button type="button" title="刷新创作计划" onClick={() => void loadCanvasPlans()} className="rounded-md p-1 text-white/45 hover:bg-white/10 hover:text-white"><Loader2 className={`h-3.5 w-3.5 ${plansLoading ? 'animate-spin' : ''}`} /></button></div><div className="max-h-52 overflow-y-auto p-2">{plansLoading ? <p className="p-2 text-xs text-white/40">读取计划中</p> : plans.length ? plans.map((plan) => <div key={plan.id} className="border-b border-white/[.08] px-1 py-2 last:border-0"><div className="flex items-center justify-between"><span className="text-xs text-white/80">计划 #{plan.id}</span><span className={`text-[10px] ${plan.status === 'applied' ? 'text-emerald-300' : plan.status === 'approved' ? 'text-sky-300' : plan.status === 'ready' ? 'text-amber-300' : 'text-white/35'}`}>{plan.status === 'applied' ? '已应用' : plan.status === 'approved' ? '已确认' : plan.status === 'ready' ? '待确认' : '草案'}</span></div><p className="mt-1 text-[10px] text-white/35">镜头 {Array.isArray(plan.shots.shots) ? plan.shots.shots.length : 0} · 资产 {Array.isArray(plan.assets.assets) ? plan.assets.assets.length : 0}</p>{plan.status === 'ready' && <button type="button" disabled={applyingPlanId === plan.id} onClick={() => void confirmCanvasPlan(plan)} className="mt-1.5 rounded bg-white px-2 py-1 text-[10px] font-medium text-[#17191c] disabled:opacity-40">确认计划</button>}{['approved', 'applied'].includes(plan.status) && <div className="mt-1.5 flex gap-1.5">{!plan.workflow_id && <button type="button" disabled={applyingPlanId === plan.id} onClick={() => void syncPlanWorkflow(plan)} className="rounded bg-white/10 px-2 py-1 text-[10px] text-white/85 disabled:opacity-40">同步分镜</button>}{plan.status === 'approved' && <button type="button" disabled={applyingPlanId === plan.id} onClick={() => void applyCanvasPlan(plan)} className="rounded bg-[#73a7ff] px-2 py-1 text-[10px] font-medium text-[#111827] disabled:opacity-40">应用画布</button>}</div>}{plan.workflow_id && <p className="mt-1 text-[10px] text-emerald-300/80">已同步工作流 #{plan.workflow_id}</p>}</div>) : <p className="p-2 text-xs leading-5 text-white/40">向助手描述小说正文、剧本或文本节点后，它会在此创建可审阅计划。</p>}</div></aside>}
       <input ref={nodeUploadInputRef} type="file" accept={nodeUploadAccept} className="hidden" disabled={uploadingNodeAsset} onChange={(event) => void handleNodeFileUpload(event)} />
@@ -933,6 +1024,8 @@ export default function VideoCanvasPanel({ storyId, chapterId, workflow = null, 
       {miniMapOpen && <CanvasMiniMap nodes={nodes.map((node) => ({ id: node.id, position: node.position, width: node.data.ui?.width, height: node.data.ui?.height, type: node.type }))} viewport={editorViewport} viewportSize={canvasSize} onViewportChange={(next) => updateViewport({ x: next.x, y: next.y, k: next.scale })} />}
       <CanvasZoomControls scale={viewport.k} onScaleChange={(k) => updateViewport({ ...viewport, k })} onReset={() => { const rect = surfaceRef.current?.getBoundingClientRect(); updateViewport({ x: rect ? rect.width / 2 : 260, y: rect ? rect.height / 2 : 120, k: 1 }); }} isMiniMapOpen={miniMapOpen} onToggleMiniMap={() => setMiniMapOpen((open) => !open)} />
       <CanvasBottomToolbar scale={viewport.k} supportsAudio={false} onScaleChange={(k) => updateViewport({ ...viewport, k })} onReset={() => { const rect = surfaceRef.current?.getBoundingClientRect(); updateViewport({ x: rect ? rect.width / 2 : 260, y: rect ? rect.height / 2 : 120, k: 1 }); }} onFit={fitAll} onUndo={undo} onRedo={redo} onAutoLayout={autoLayoutCanvas} onOpenAssetManagement={() => onOpenAssetManagement?.()} isAssetManagementDisabled={!chapterId} onTool={(tool) => { if (tool === 'text') addNodeFromTool('text'); else if (tool === 'image') addNodeFromTool('image'); else if (tool === 'video') addNodeFromTool('video'); else if (tool === 'select') { setTool('select'); toast.info('已切换到选择工具'); } else if (tool === 'help') toast.info('空格或中键平移，滚轮缩放，框选多个节点'); }} />
+      <button type="button" onClick={() => setImportDialogOpen(true)} className="absolute right-4 top-4 z-20 inline-flex items-center gap-1.5 rounded-lg border border-[#3a3f45] bg-[#1b1d21]/95 px-3 py-2 text-xs text-[#d5dae2] shadow-lg transition-colors hover:bg-[#2a2e33] hover:text-white"><FileText size={13} /> 导入小说章节</button>
+      {importDialogOpen && canvas && <ChapterImportDialog canvasId={canvas.id} onClose={() => setImportDialogOpen(false)} onImported={handleScreenplayImported} />}
   </div>;
 
   /* 旧 DOM 画布实现保留在版本历史中，Canvas2D 编辑器已在上方返回。 */

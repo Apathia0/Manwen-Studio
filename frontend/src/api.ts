@@ -3603,6 +3603,73 @@ export async function createMangaDramaProject(payload: {
   return res.json();
 }
 
+export interface ScreenplaySplitUnit {
+  unit_index: number;
+  shot_index: number;
+  title: string;
+  summary: string;
+  video_prompt: string;
+  scene_location?: string | null;
+  time_of_day?: string | null;
+  characters?: unknown[];
+  dialogue_or_narration?: unknown;
+  duration_seconds: number;
+  duration_requested?: number | null;
+  duration_reason?: string;
+  transition_to_next?: string | null;
+}
+
+export async function screenplaySplit(canvasId: number, nodeId: string): Promise<{
+  ok: boolean;
+  node_id: string;
+  content_hash: string;
+  stale_detected: boolean;
+  unit_count: number;
+  truncated: boolean;
+  units: ScreenplaySplitUnit[];
+}> {
+  const res = await fetch(`${BASE}/api/video-canvas/canvases/${canvasId}/screenplay-split`, {
+    method: 'POST', headers: apiHeaders(true), body: JSON.stringify({ node_id: nodeId }),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
+  return res.json();
+}
+
+export interface ImportableNovelChapter {
+  chapter_id: number;
+  chapter_number: number;
+  title: string;
+  content_chars: number;
+  has_content: boolean;
+}
+
+export interface ImportableNovelStory {
+  story_id: number;
+  title: string;
+  chapter_count: number;
+  chapters: ImportableNovelChapter[];
+}
+
+export async function listImportableNovelStories(): Promise<{ stories: ImportableNovelStory[] }> {
+  const res = await fetch(`${BASE}/api/manga-drama/importable-stories`, { headers: apiHeaders() });
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
+  return res.json();
+}
+
+export async function importScreenplay(canvasId: number, sources: { story_id: number; chapter_id: number }[]): Promise<{
+  ok: boolean;
+  screenplay_text: string;
+  source_refs: { story_id: number; chapter_id: number; title: string; content_hash: string }[];
+  batch_count: number;
+  content_chars: number;
+}> {
+  const res = await fetch(`${BASE}/api/video-canvas/canvases/${canvasId}/import-screenplay`, {
+    method: 'POST', headers: apiHeaders(true), body: JSON.stringify({ sources }),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
+  return res.json();
+}
+
 export async function createVideoCanvas(payload: {
   story_id: number;
   default_chapter_id?: number | null;
