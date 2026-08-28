@@ -1,7 +1,7 @@
 # 漫剧创作画布化改造开发文档
 
 > 分支：`codex/video-canvas-three-node`（在 codex 分支开发，测试通过后合入 `pro`）
-> 状态：**待审查** — 本文档为实施蓝图，未经确认不写任何业务代码
+> 状态：**v2 待审查** — v1 已获口头确认（Q1-Q5 按默认方案），v2 新增"小说章节导入剧本 + 编辑后拆分"能力（§3.7、§4 阶段 3.5）
 > 日期：2026-08-28
 
 ---
@@ -63,6 +63,8 @@
 | G4 | 提交前无时长档位归一化 | AI 说 7 秒需归一到上游支持的档位 |
 | G5 | 画布 Agent 不能"对话生成剧本" | canvas_screenplay_director 存在但工具链面向既有章节来源，缺"从零对话创作剧本"路径 |
 | G6 | 分镜列表入口未下线 | 需 feature flag 控制 |
+| G7 | 剧本无"用户可自由编辑"环节 | 现有 plan 流是 AI 生成→用户确认，缺"用户改完剧本再拆分"的回路（v2 新增需求核心） |
+| G8 | 章节来源被锁死在画布所属作品 | `_resolve_canvas_source_snapshot` 强制 `chapter.story_id == canvas.story_id`，无法选**其他**小说作品的章节正文作为剧本来源（v2 新增需求核心） |
 
 ---
 
@@ -70,20 +72,33 @@
 
 ### 2.1 用户旅程（改造后）
 
+漫剧项目支持**三种剧本来源**，殊途同归汇入"剧本编辑 → 拆分 → 视频节点组"主流程：
+
 ```
 顶部导航「漫剧创作」（独立菜单，不再藏于小说工作台）
    │
    ▼
-漫剧项目列表（story 的 video 子集或独立 project 概念，见 §3.1 决策）
-   │ 新建项目
-   ▼
-空白画布页（默认挂一个文本节点 + Agent 面板展开）
+漫剧项目列表（story_type='video' 的项目，见 §3.1）
+   │ 新建项目 ── 选择剧本来源（三选一，可跳过后补）
+   │
+   ├─【来源 A：对话创作】──► 空白画布 + Agent 面板
+   │      用户与画布 Agent 对话 → Agent 生成剧本草稿
+   │      → 确认后写入画布「剧本」节点
+   │
+   ├─【来源 B：导入小说章节】──► 章节选择器（跨作品）
+   │      选择用户名下任意小说作品的章节正文（可多选、可排序）
+   │      → 生成画布「剧本」节点（携带章节来源快照与 source_hash）
+   │
+   └─【来源 C：手动粘贴】──► 空白剧本节点，用户直接输入
    │
    ▼
-用户与画布 Agent 对话 → Agent 生成剧本 → 确认后写入画布「剧本」节点
-   │  用户点击剧本节点的「拆分」动作（或对话指令）
-   ▼
-后端按剧本内容动态拆分 → 每个视频单元带建议时长（3-15s）+ 密度理由
+═══ 剧本编辑回路（v2 核心）═══
+   剧本节点可随时自由编辑（节点内编辑器 / Agent 对话修改），
+   编辑产生新版本；拆分永远以当前剧本内容为准
+   │
+   ▼ 用户点击剧本节点「拆分」（或对话指令）
+后端按当前剧本内容动态拆分（复用现有剧本拆分模块）
+   → 每个视频单元带建议时长（3-15s）+ 密度理由
    │  拆分结果以 pending-change 呈现，用户确认
    ▼
 画布自动展开一组「视频」节点（网格布局，横向时间序），
@@ -95,6 +110,8 @@
    ▼
 「合片」节点（concat）按画布连线顺序拼接 → 输出节点导出
 ```
+
+**关键闭环**：拆分不满意 → 回到剧本编辑（改剧本或让 Agent 改）→ 重新拆分 → 旧的视频节点组被新组替换（版本化，可回退）。剧本内容和拆分结果通过 `source_hash` 绑定，剧本变更后旧拆分自动标记过期。
 
 ### 2.2 数据流（复用为主）
 
@@ -199,6 +216,84 @@ def normalize_video_duration(seconds: int, capabilities: dict) -> int:
 - 路由：新增 `RouteKey`（App.tsx 三步走：api.ts 类型 → 组件 → 路由分支，遵循 AGENTS.md 陷阱 7）
 - 旧小说工作台的 video 模式 Tab 保留但加"建议使用漫剧创作"提示
 
+### 3.7 【v2 新增】小说章节导入 → 剧本编辑 → 拆分工作流
+
+#### 3.7.1 现状与差距
+
+现有画布 plan 流**已支持** `chapter` 来源（`_resolve_canvas_source_snapshot` 会重读章节正文并计算 `source_hash`，拒绝客户端伪造），但有两个硬限制：
+
+1. **章节必须属于画布所属作品**：`chapter.story_id != canvas.story_id` 直接拒绝。而新需求是漫剧项目（独立 story）要能选**用户名下任意小说作品**的章节。
+2. **章节正文是"只读来源"**：现有 plan 流把章节正文当冻结快照直接喂给 AI 生成剧本，**用户无法在拆分前修改剧本内容**。
+
+#### 3.7.2 设计：章节作为「剧本素材」导入，而非「执行来源」绑定
+
+核心思路：**把"章节来源"和"剧本内容"解耦**。章节正文导入后落进画布剧本节点，从此剧本节点就是唯一事实源（用户可编辑、Agent 可改写），拆分只认剧本节点内容。章节本身只保留溯源信息（story_id/chapter_id/标题/hash），用于属性面板展示"来自《xxx》第 N 章"。
+
+这样做的好处：
+- **规避跨作品授权难题**：导入是一次性动作（选章时校验所有权），导入后画布与原作品再无运行时耦合，`chapter.story_id == canvas.story_id` 的既有校验**一行不用改**
+- **剧本可编辑天然成立**：导入的正文只是剧本节点的初始内容，后续编辑/再拆分与其他剧本来源（对话创作/手动粘贴）完全同构
+- 原小说作品的章节正文**绝不被修改**（漫剧只读引用，写回原作品不在本期范围）
+
+#### 3.7.3 交互流程
+
+```
+新建漫剧项目（或画布内「添加剧本」）
+   │ 选择「从小说作品导入」
+   ▼
+章节选择器（弹层）
+   ├─ 左栏：用户名下所有 story_type='novel' 的作品列表
+   │        （复用 /api/stories 列表，前端过滤；后端新接口直返 novel 类型亦可）
+   └─ 右栏：选中作品的章节列表（标题/字数/更新时间；支持多选 + 拖拽排序）
+   │  确认导入
+   ▼
+后端 IMPORT-SPLIT 服务（单次 AI 调用，可配置跳过）：
+   1. 逐章读取正文（校验 owner + story_type='novel'）
+   2. 正文 → 漫剧剧本体裁改写（小说叙述 → 场景头/动作行/对白）
+      —— 这是"改编"不是"拆分"，输出完整剧本而非视频单元
+   3. 返回剧本草稿（含来源章节清单）
+   ▼
+剧本节点写入画布（pending-change 确认）：
+   config.content = 改写后的剧本文本
+   config.source_refs = [{story_id, chapter_id, title, hash}]  ← 溯源
+   │
+   ▼
+┌─ 剧本编辑回路（所有来源共用）────────────────┐
+│  用户直接编辑节点文本（双击节点 → 行内编辑器）      │
+│  或对话让 Agent 修改（draft_screenplay 工具）     │
+│  每次保存 → 剧本节点 config.content 更新 + 版本化  │
+└──────────────────────────────────────────┘
+   │ 点「拆分」
+   ▼
+screenplay-split（复用现有拆分模块 + 动态时长，见 §3.3/§3.4）
+   → 拆分前重算剧本内容 hash，与节点上次的 hash 比对
+   → 剧本已变更则提示"剧本已修改，将按最新内容拆分"（旧拆分自动失效）
+```
+
+#### 3.7.4 技术落点
+
+| # | 改动 | 文件 | 说明 |
+|---|------|------|------|
+| T1 | 章节选择数据接口：`GET /api/manga-drama/importable-stories`（用户名下 novel 作品）+ 复用 `GET /api/stories/{id}/chapters` | `routers/video_canvas.py` 或独立 router | 前端选择器数据源；只读，无跨作品写风险 |
+| T2 | `POST /api/video-canvas/canvases/{id}/import-screenplay`：body `{sources:[{story_id,chapter_id}...]}` → 校验所有权 → 逐章读正文 → AI 改写成剧本 → pending-change 返回 | `routers/video_canvas.py` + `deepseek.py` 新函数 `adapt_novel_to_screenplay()` | 服务端重读正文（不信客户端内容，对齐现有 `_resolve_plan_source_snapshot` 安全模式）；正文超长时按章节分批改写后拼接 |
+| T3 | 剧本节点 config 协议扩展：`content` + `source_refs` + `content_hash` | `routers/video_canvas.py`（NODE_CATALOG + 校验） | hash 用于"剧本已变更"检测 |
+| T4 | 剧本节点行内编辑器（双击进入 textarea，Esc/✓ 保存） | `CanvasNodeView.tsx` | 所有文本类节点可复用 |
+| T5 | screenplay-split 前置校验：重算 hash → 比对 → 过期提示 | `routers/video_canvas.py` | |
+| T6 | `adapt_novel_to_screenplay` 的 prompt（小说→剧本改写规范，注入剧本体裁 + 写作质量红线） | `video_chapter_prompts.py` | |
+| T7 | 测试：导入所有权校验（选他人作品章节必须 403/422）、多章节拼接、改写 JSON 解析、hash 过期检测 | `tests/` | |
+
+#### 3.7.5 与现有 plan 流的关系
+
+- **不改不拆**现有 `create_canvas_plan` 的 chapter 来源链路（旧画布仍在用）
+- 新流程走独立端点（T2），产物直接是画布剧本节点，比 plan 流更轻
+- canvas_screenplay_director 的 `resolve_canvas_source` 增加 `source_type="novel_chapter"`（跨作品只读枚举），供 Agent 对话中用户说"把《xxx》第3章改编成剧本"时使用——服务端同样只读校验 + 一次性导入语义
+
+#### 3.7.6 权限与安全红线
+
+- 章节选择器只列**当前登录用户自己**的作品（`owner_user_id == user.id`），无协作/共享场景
+- 导入是纯读取原作品 + 写入漫剧画布，**不触碰原作品任何数据**
+- `source_refs` 中的章节被原作者删除/清空后，画布剧本节点不受影响（内容已落盘，溯源仅展示用）
+- 计费：改写按文本 AI 调用计费（复用 begin_ai_call 埋点，modality=text）
+
 ---
 
 ## 4. 实施计划（6 个阶段，每阶段独立可验证）
@@ -251,6 +346,28 @@ def normalize_video_duration(seconds: int, capabilities: dict) -> int:
 
 **验收**：画布放剧本节点 → 点拆分 → 确认 → 画布出现 N 个视频节点带各自时长、与剧本连线；撤销（Ctrl+Z）可整体回退；拒绝不写图。
 
+### 阶段 3.5：【v2 新增】章节导入 + 剧本编辑回路（2 天）
+
+> 依赖阶段 3 的剧本节点与拆分端点。对应设计 §3.7。
+
+| 任务 | 文件 |
+|------|------|
+| `GET /api/manga-drama/importable-stories`：用户名下 novel 作品列表（含章节计数） | `routers/video_canvas.py` 或新 router |
+| `POST .../import-screenplay`：多章节选择 → 所有权校验 → AI 改写（小说→剧本）→ pending-change | `routers/video_canvas.py` + `deepseek.adapt_novel_to_screenplay()` |
+| `adapt_novel_to_screenplay` prompt：小说叙述→剧本体裁改写规范（场景头/动作行/对白），长文按章分批 | `video_chapter_prompts.py` |
+| 剧本节点 config 协议：`content` + `source_refs` + `content_hash`；校验器同步 | `routers/video_canvas.py` |
+| 剧本节点行内编辑器（双击编辑，保存版本化） | `CanvasNodeView.tsx` |
+| screenplay-split 前置 hash 比对 + "剧本已修改"提示；旧拆分失效标记 | `routers/video_canvas.py` |
+| `resolve_canvas_source` 增加 `novel_chapter` 来源（Agent 对话路径，跨作品只读导入） | `agent_service.py` |
+| 前端章节选择器弹层（左作品右章节、多选排序） | 新 `ChapterImportDialog.tsx` |
+| 测试：跨作品导入所有权校验、多章拼接、hash 过期检测、改写 JSON 解析 | `tests/` |
+
+**验收**：
+1. 导入路径：新建漫剧项目 → 从其他小说作品选 2 章 → 确认 → 画布出现剧本节点（内容为改写后剧本，属性面板显示来源章节）；
+2. 编辑回路：手动改剧本内容 → 点拆分 → 提示按最新内容拆分；拆完再改剧本 → 旧视频节点组标记"剧本已变更"；
+3. 安全校验：构造请求选**他人**作品的章节 → 422 拒绝；
+4. 原小说作品章节正文零改动（DB 前后对比）。
+
 ### 阶段 4：画布 Agent 对话创作剧本（2 天）
 
 | 任务 | 文件 |
@@ -279,7 +396,7 @@ def normalize_video_duration(seconds: int, capabilities: dict) -> int:
 - 版本 manifest bump；codex 分支推送
 - **合并 pro 前 checklist**：全量 pytest、build、手动冒烟（阶段 5 验收单）、用户确认
 
-**总工期估算：约 9 个工作日**（不含用户审查等待）
+**总工期估算：约 11 个工作日**（含阶段 3.5 的 2 天，不含用户审查等待）
 
 ---
 
@@ -290,15 +407,19 @@ def normalize_video_duration(seconds: int, capabilities: dict) -> int:
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | POST | `/api/video-canvas/canvases/{canvas_id}/screenplay-split` | 剧本节点拆分，返回视频单元列表（pending-change，不直接写图） |
+| POST | `/api/video-canvas/canvases/{canvas_id}/import-screenplay` | 【v2】导入小说章节 → AI 改写为剧本 → pending-change（§3.7） |
+| GET | `/api/manga-drama/importable-stories` | 【v2】用户名下可作为剧本素材的小说作品列表 |
 | POST | `/api/manga-drama/projects` | 新建漫剧项目（story_type='video' + 初始画布） |
 | GET | `/api/manga-drama/projects` | 漫剧项目列表 |
 | — | Agent 工具 `draft_screenplay` | 对话式剧本创作 |
+| — | Agent 来源类型 `novel_chapter` | 【v2】resolve_canvas_source 新增跨作品只读导入枚举 |
 
 ### 变更
 
 | 位置 | 变更 |
 |------|------|
 | `NODE_CATALOG` | `screenplay` 从 legacy 提回公开目录 |
+| 剧本节点 config | 【v2】新增 `source_refs` / `content_hash` 字段 |
 | 拆分 prompt | 固定 15 秒 → 动态时长协议 |
 | `video_capabilities` | 新增时长档位配置项（管理后台可配） |
 
@@ -307,6 +428,8 @@ def normalize_video_duration(seconds: int, capabilities: dict) -> int:
 - 全部 `/api/video/chapter-workflows/*` 端点（旧链路兼容）
 - `chapter_video_shot` 表结构与数据
 - 合片/导出/OSS 上传链路
+- 【v2】`_resolve_canvas_source_snapshot` 现有 chapter 校验逻辑一行不改（新需求走独立导入端点）
+- 【v2】原小说作品的章节正文只读，任何路径都不回写
 
 ---
 
@@ -320,28 +443,44 @@ def normalize_video_duration(seconds: int, capabilities: dict) -> int:
 | R4 | rebase pro 冲突超预期 | 中 | 上次盘点冲突面 3+1 个文件，量可控；若 agent_service 冲突大，改为分批 cherry-pick |
 | R5 | 画布节点过多时前端卡顿 | 中 | 拆分上限单次 30 个单元；超出提示分批；DOM 渲染已有 infinite-canvas 惰性先例 |
 | R6 | 用户已在旧模式积累的项目迁移预期 | 低 | 旧项目完全可继续用；不强制迁移 |
+| R7 | 【v2】长章节（万字级）改写超出单次 AI 输出限制 | 中 | `adapt_novel_to_screenplay` 按章节分批调用后拼接；单章超 8000 字再切段，沿用 `_repair_truncated_json` 兜底（陷阱 17） |
+| R8 | 【v2】用户导入后原章节更新，画布剧本与原著脱节 | 低 | 设计使然：导入即解耦，剧本节点是唯一事实源；属性面板展示来源章节供用户自行回查 |
+| R9 | 【v2】改写质量不稳定（小说节奏≠剧本节奏） | 中 | 改写 prompt 给出剧本体裁硬规范（场景头/动作行/对白占比）；输出走剧本编辑回路由用户终审，AI 只出草稿 |
 
 ---
 
 ## 7. 验收总单（合并 pro 前必须全过）
 
-- [ ] 阶段 0-5 全部验收项通过
-- [ ] `pytest` 全绿（含新增动态时长/拆分协议/归一化用例）
+- [ ] 阶段 0-6 全部验收项通过（含 3.5 章节导入与编辑回路）
+- [ ] `pytest` 全绿（含新增动态时长/拆分协议/归一化/跨作品导入校验用例）
 - [ ] `npm run build`（tsc 严格模式）零错误
-- [ ] 漫剧全流程冒烟：新建→对话剧本→拆分→动态时长生成→合片→导出
+- [ ] 漫剧全流程冒烟：
+  - [ ] 路径 A：新建→对话剧本→拆分→动态时长生成→合片→导出
+  - [ ] 路径 B：新建→导入小说章节→改写剧本→手动编辑→再拆分→生成→合片
 - [ ] 旧视频项目回归：打开/合片/导出正常
 - [ ] 画布 18 项交互回归
+- [ ] 【v2】原小说作品数据零改动验证（导入前后 DB 对比）
 - [ ] AGENTS.md 已更新
 - [ ] 用户确认合并
 
 ---
 
-## 8. 待用户确认的决策点
+## 8. 决策记录
 
-| # | 决策 | 默认方案 | 备选 |
-|---|------|---------|------|
-| Q1 | 漫剧项目数据定位 | §3.1 方案 A（story_type 字段） | 方案 B（新表） |
-| Q2 | 分镜列表下线方式 | §3.2 feature flag 默认关 | 物理删除入口 |
-| Q3 | 动态时长范围 | 3-15 秒建议区间 | 更宽（如 2-20s，需确认上游档位） |
-| Q4 | 单次拆分单元上限 | 30 个 | 20 / 50 |
-| Q5 | 剧本体裁模板 | 漫剧短剧三幕式 | 是否需要其他体裁选项 |
+### 8.1 v1 决策（用户已确认：按推荐默认执行）
+
+| # | 决策 | 结论 |
+|---|------|------|
+| Q1 | 漫剧项目数据定位 | ✅ 方案 A：`stories.story_type` 字段（`novel`/`video`） |
+| Q2 | 分镜列表下线方式 | ✅ feature flag `VITE_ENABLE_SHOT_LIST` 默认关，不物理删除 |
+| Q3 | 动态时长范围 | ✅ 3-15 秒建议区间 |
+| Q4 | 单次拆分单元上限 | ✅ 30 个 |
+| Q5 | 剧本体裁模板 | ✅ 漫剧短剧三幕式 |
+
+### 8.2 v2 新增需求（用户 2026-08-28 补充）
+
+| # | 需求 | 设计回应 |
+|---|------|---------|
+| N1 | 创建画布时可选用户已有小说作品章节正文作为剧本来源 | §3.7 章节导入流程（跨作品只读、一次性导入解耦） |
+| N2 | 剧本拆分必须复用现有漫剧工作流的剧本拆分模块 | §3.3/§3.4：`screenplay-split` 直接复用 `split_scenes` + 动态时长 prompt，不另造拆分器 |
+| N3 | 拆分前可自由修改剧本内容，按审批调整后的剧本拆分 | §3.7.3 剧本编辑回路：节点行内编辑 + Agent 改写，hash 比对保证拆分永远基于最新剧本 |
