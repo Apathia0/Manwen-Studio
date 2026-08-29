@@ -156,20 +156,11 @@ DIRECTOR_PROMPT_USER_HEADER = """请为以下视频单元撰写生成提示词�
 按系统指令输出纯 JSON：units[]，每个 unit 带 unit_id + video_prompt（+ 可选 storyboard_prompt / storyboard_json）。"""
 
 
-def _scene_beat_key(scene_id: Any, beat_id: Any) -> str:
-    return f"{scene_id}.{beat_id}"
-
-
-def _iter_scene_beats(scenes: list[dict[str, Any]]):
-    for scene in scenes:
-        scene_id = scene.get("scene_id")
-        for beat in scene.get("beats") or []:
-            if isinstance(beat, dict):
-                yield scene, beat, _scene_beat_key(scene_id, beat.get("beat_id"))
-
-
 def _build_beat_index(scenes: list[dict[str, Any]]) -> tuple[dict[str, str], dict[str, tuple[dict[str, Any], dict[str, Any]]]]:
-    """建立节拍别名索引：beat_id 原样与 "场景ID.节拍ID" 两种写法都可命中同一节拍。"""
+    """建立节拍别名索引：beat_id 原样与 "场景ID.节拍ID" 两种写法都可命中同一节拍。
+
+    规范键统一为 "场景ID.节拍ID"，避免不同场景出现同名 beat_id 时互相覆盖。
+    """
     alias_to_canonical: dict[str, str] = {}
     beats: dict[str, tuple[dict[str, Any], dict[str, Any]]] = {}
     for scene in scenes:
@@ -180,9 +171,9 @@ def _build_beat_index(scenes: list[dict[str, Any]]) -> tuple[dict[str, str], dic
             beat_id = str(beat.get("beat_id") or "").strip()
             if not beat_id:
                 continue
-            canonical = beat_id
+            canonical = f"{scene_id}.{beat_id}"
             beats[canonical] = (scene, beat)
-            for alias in {beat_id, f"{scene_id}.{beat_id}"}:
+            for alias in {beat_id, canonical}:
                 alias_to_canonical.setdefault(alias, canonical)
     return alias_to_canonical, beats
 
@@ -419,6 +410,63 @@ def _validate_segments(unit: dict[str, Any], errors: list[str]) -> None:
         errors.append(f"单元 {unit['unit_id']} 分段时间总和 {cursor:g}s 与时长 {duration}s 不符")
 
 
+def _estimate_unit_duration(beat_entries: list[dict[str, Any]]) -> int:
+    """按节拍动作与对白语速确定性估算时长（动作 3s/个，对白每 3.5 字 1s）。"""
+    seconds = 0.0
+    for beat in beat_entries:
+        if str(beat.get("action") or "").strip():
+            seconds += 3
+        for line in _dialogue_lines(beat.get("dialogue")):
+            seconds += max(2.0, len(line) / 3.5)
+    return int(max(MIN_UNIT_DURATION, min(MAX_UNIT_DURATION, round(seconds) or MIN_UNIT_DURATION)))
+
+
+def _make_remedial_unit(
+    sequence: int,
+    scene_id: str,
+    scene: dict[str, Any],
+    entries: list[tuple[str, dict[str, Any], dict[str, Any]]],
+) -> dict[str, Any]:
+    """为漏覆盖节拍生成确定性补充单元：字段全部来自剧本原文，可审阅可编辑。"""
+    beat_ids = [canonical for canonical, _scene, _beat in entries]
+    beats_only = [beat for _canonical, _scene, beat in entries]
+    dialogue_parts: list[str] = []
+    action_parts: list[str] = []
+    for beat in beats_only:
+        action = str(beat.get("action") or "").strip()
+        if action:
+            action_parts.append(action)
+        for line in _dialogue_lines(beat.get("dialogue")):
+            dialogue_parts.append(line)
+    duration = _estimate_unit_duration(beats_only)
+    characters = [str(c).strip() for c in (scene.get("characters") or []) if str(c or "").strip()]
+    unit: dict[str, Any] = {
+        "unit_id": f"u-r{sequence:03d}",
+        "sequence": sequence,
+        "scene_ids": [scene.get("scene_id", scene_id)],
+        "beat_ids": beat_ids,
+        "title": f"补充单元（{scene.get('title') or f'场景 {scene_id}'}）",
+        "narrative_purpose": str(scene.get("scene_purpose") or "承接场景剧情"),
+        "duration_seconds": duration,
+        "duration_reason": "自动补充：按节拍动作与对白语速估算",
+        "story_summary": "；".join(action_parts) or f"{scene.get('title') or scene_id} 的补充剧情",
+        "dialogue_or_narration": "\n".join(dialogue_parts),
+        "characters": characters,
+        "visual_anchors": _normalize_visual_anchors(scene.get("visual_anchors")),
+        "action_plan": "；".join(action_parts),
+        "camera_plan": "",
+        "emotion_plan": "",
+        "transition_in": "承接上一单元",
+        "transition_out": str(scene.get("transition_to_next_scene") or ""),
+        "continuity": {"from_previous": "承接上一单元画面与情绪", "to_next": "", "anchor": ""},
+        "video_prompt": "",
+        "storyboard_prompt": "",
+        "storyboard_json": None,
+    }
+    unit["video_prompt"] = _fallback_video_prompt(unit, {str(scene.get("scene_id")): scene})
+    return unit
+
+
 def normalize_and_validate_director_plan(
     raw_plan: Any,
     scenes: list[dict[str, Any]],
@@ -427,9 +475,12 @@ def normalize_and_validate_director_plan(
     source_scene_node_id: str,
     source_scene_revision: str,
 ) -> tuple[dict[str, Any] | None, list[str]]:
-    """确定性质量门：归一方案结构并校验剧情覆盖/时长/连续性。
+    """确定性质量门：归一方案结构并**自动修复**可修复问题。
 
-    返回 (normalized_plan | None, errors)。errors 非空表示方案不可用（修复一次后仍失败则放弃）。
+    修复优先于拒绝：节拍漏覆盖自动补单元、时长越界自动钳制、提示词为空自动兜底、
+    对白原文缺失自动回填、分段时间轴断裂自动丢弃（可选字段）。
+    只有结构级失败（非 JSON 对象 / 没有任何有效单元）才返回 errors；
+    其余修复动作全部记入 warnings，随方案返回给用户审阅。
     """
     if not isinstance(raw_plan, dict):
         return None, ["导演编排结果必须是 JSON 对象"]
@@ -446,76 +497,109 @@ def normalize_and_validate_director_plan(
     if not units:
         return None, ["导演编排的视频单元全部无效"]
 
-    errors: list[str] = []
+    # ── 自动修复 1：unit_id 去重 ──
+    seen_ids: set[str] = set()
+    for unit in units:
+        unit_id = unit["unit_id"]
+        if unit_id in seen_ids:
+            unit["unit_id"] = f"{unit_id}-d{len(seen_ids)}"
+            warnings.append(f"检测到重复 unit_id，已重命名为 {unit['unit_id']}")
+        seen_ids.add(unit["unit_id"])
 
-    # sequence 连续性
-    sequences = [unit["sequence"] for unit in units]
-    if len(set(sequences)) != len(sequences):
-        errors.append("视频单元的 sequence 存在重复")
-    expected_sequences = list(range(1, len(units) + 1))
-    if sorted(sequences) != expected_sequences:
-        errors.append("视频单元的 sequence 必须从 1 开始连续递增（当前：" + ",".join(map(str, sorted(sequences))) + "）")
+    # ── 自动修复 2：sequence 重复/跳号 → 按原始顺序重新编号 ──
+    units.sort(key=lambda item: item["sequence"])
+    for position, unit in enumerate(units, start=1):
+        if unit["sequence"] != position:
+            warnings.append(f"单元 {unit['unit_id']} 的 sequence 已由 {unit['sequence']} 修正为 {position}")
+            unit["sequence"] = position
 
-    # unit_id 唯一
-    unit_ids = [unit["unit_id"] for unit in units]
-    if len(set(unit_ids)) != len(unit_ids):
-        errors.append("视频单元的 unit_id 存在重复")
-
-    # beat 覆盖（别名索引兼容 "1.1" 与 "场景ID.1.1" 两种写法）
+    # ── beat 归一：别名 → 规范键；未知引用丢弃；重复覆盖保留首个 ──
     alias_to_canonical, beats = _build_beat_index(scenes)
     covered: dict[str, str] = {}
     for unit in units:
+        normalized_ids: list[str] = []
         for beat_key in unit["beat_ids"]:
             canonical = alias_to_canonical.get(beat_key)
             if canonical is None:
-                errors.append(f"单元 {unit['unit_id']} 引用了不存在的节拍：{beat_key}")
+                warnings.append(f"单元 {unit['unit_id']} 引用了不存在的节拍 {beat_key}，已忽略")
                 continue
             if canonical in covered:
-                errors.append(f"节拍 {canonical} 被多个单元重复覆盖")
+                warnings.append(f"节拍 {canonical} 被多个单元重复覆盖，保留 {covered[canonical]} 的覆盖")
+                continue
             covered[canonical] = unit["unit_id"]
-    missing = sorted(set(beats) - set(covered))
-    if missing:
-        errors.append("以下节拍未被任何单元覆盖：" + "、".join(missing[:12]) + ("…" if len(missing) > 12 else ""))
+            normalized_ids.append(canonical)
+        unit["beat_ids"] = normalized_ids
 
-    # 时长
+    # ── 自动修复 3：未覆盖节拍 → 按场景生成补充单元（确定性字段 + 兜底提示词）──
+    uncovered_by_scene: dict[str, list[tuple[str, dict[str, Any], dict[str, Any]]]] = {}
+    for canonical, (scene, beat) in beats.items():
+        if canonical not in covered:
+            uncovered_by_scene.setdefault(str(scene.get("scene_id")), []).append((canonical, scene, beat))
+    scene_map_by_id = {str(scene.get("scene_id")): scene for scene in scenes}
+    if uncovered_by_scene:
+        next_sequence = len(units) + 1
+        for scene_id, entries in uncovered_by_scene.items():
+            scene = scene_map_by_id.get(scene_id, {})
+            remedial = _make_remedial_unit(next_sequence, scene_id, scene, entries)
+            units.append(remedial)
+            covered.update({canonical: remedial["unit_id"] for canonical, _scene, _beat in entries})
+            next_sequence += 1
+        warnings.append("导演方案未覆盖部分节拍，已自动生成补充单元：" + "、".join(sorted(uncovered_by_scene)))
+
+    # ── 自动修复 4：时长缺失按节拍密度估算，越界钳制 ──
+    canonical_beats_by_unit: dict[str, list[dict[str, Any]]] = {}
+    for canonical, (scene, beat) in beats.items():
+        owner = covered.get(canonical)
+        if owner:
+            canonical_beats_by_unit.setdefault(owner, []).append(beat)
     for unit in units:
         duration = unit.get("duration_seconds")
         if not isinstance(duration, int) or isinstance(duration, bool):
-            errors.append(f"单元 {unit['unit_id']} 缺少有效的 duration_seconds")
+            estimated = _estimate_unit_duration(canonical_beats_by_unit.get(unit["unit_id"]) or [])
+            unit["duration_seconds"] = estimated
+            unit["duration_reason"] = unit["duration_reason"] or "时长缺失，已按节拍动作与对白语速自动估算"
+            warnings.append(f"单元 {unit['unit_id']} 缺少时长，已自动估算为 {estimated}s")
         elif not (MIN_UNIT_DURATION <= duration <= MAX_UNIT_DURATION):
-            errors.append(f"单元 {unit['unit_id']} 的时长 {duration}s 超出 {MIN_UNIT_DURATION}-{MAX_UNIT_DURATION}s 安全区间")
+            clamped = max(MIN_UNIT_DURATION, min(MAX_UNIT_DURATION, duration))
+            warnings.append(f"单元 {unit['unit_id']} 的时长 {duration}s 超出安全区间，已钳制为 {clamped}s")
+            unit["duration_seconds"] = clamped
         if not unit["duration_reason"]:
-            warnings.append(f"单元 {unit['unit_id']} 未说明时长依据")
+            unit["duration_reason"] = f"按 {len(unit['beat_ids']) or 1} 个节拍估算"
 
-    # video_prompt 质量
-    banned_prompt_only = ("保持画面流畅", "画面流畅", "流畅过渡")
+    # ── 自动修复 5：video_prompt 缺失/过短 → 用编排字段兜底 ──
     for unit in units:
         prompt = unit.get("video_prompt") or ""
-        if not prompt:
-            errors.append(f"单元 {unit['unit_id']} 缺少 video_prompt")
-        elif len(prompt) < 12:
-            errors.append(f"单元 {unit['unit_id']} 的 video_prompt 过短，无法用于生成")
-        elif prompt in banned_prompt_only or all(unit.get(field) == "" for field in ("story_summary", "narrative_purpose")) and len(prompt) < 20:
-            errors.append(f"单元 {unit['unit_id']} 的 video_prompt 缺少有效内容")
+        if len(prompt) < 12:
+            fallback = _fallback_video_prompt(unit, scene_map_by_id)
+            if fallback:
+                warnings.append(f"单元 {unit['unit_id']} 的视频提示词缺失或过短，已按编排信息生成基础提示词")
+                unit["video_prompt"] = fallback if not prompt else f"{prompt}。{fallback}"
 
-    # 对白原文保留
+    # ── 自动修复 6：对白原文回填（只增不改）──
     for unit in units:
         merged_text = " ".join(filter(None, [unit.get("dialogue_or_narration"), unit.get("story_summary"), unit.get("video_prompt")]))
-        for beat_key in unit["beat_ids"]:
-            entry = beats.get(alias_to_canonical.get(beat_key, ""))
+        missing_lines: list[str] = []
+        for canonical in unit["beat_ids"]:
+            entry = beats.get(canonical)
             if not entry:
                 continue
-            beat = entry[1]
-            for line in _dialogue_lines(beat.get("dialogue")):
+            for line in _dialogue_lines(entry[1].get("dialogue")):
                 core = line.split("：", 1)[-1].strip()
-                if len(core) >= 6 and core not in merged_text:
-                    errors.append(f"节拍 {beat_key} 的对白原文未保留在单元 {unit['unit_id']} 中：{core[:24]}…")
+                if len(core) >= 6 and core not in merged_text and line not in missing_lines:
+                    missing_lines.append(line)
+        if missing_lines:
+            unit["dialogue_or_narration"] = "\n".join(filter(None, [unit.get("dialogue_or_narration"), *missing_lines]))
+            warnings.append(f"单元 {unit['unit_id']} 缺失的对白原文已自动回填")
 
-    # 分段时间轴
+    # ── 自动修复 7：分段时间轴断裂 → 丢弃可选 storyboard_json ──
     for unit in units:
-        _validate_segments(unit, errors)
+        segment_errors: list[str] = []
+        _validate_segments(unit, segment_errors)
+        if segment_errors:
+            unit["storyboard_json"] = None
+            warnings.append(f"单元 {unit['unit_id']} 的分段时间轴不完整，已丢弃该可选脚本")
 
-    # 连续性承接
+    # ── 连续性承接：缺失仅提示，不阻断 ──
     ordered = sorted(units, key=lambda item: item["sequence"])
     for position, unit in enumerate(ordered):
         continuity = unit["continuity"]
@@ -523,9 +607,6 @@ def normalize_and_validate_director_plan(
             warnings.append(f"单元 {unit['unit_id']} 未说明与上一单元的承接")
         if position < len(ordered) - 1 and not continuity["to_next"]:
             warnings.append(f"单元 {unit['unit_id']} 未说明交给下一单元的衔接")
-
-    if errors:
-        return None, errors
 
     plan = {
         "plan_version": PLAN_VERSION,
@@ -600,7 +681,7 @@ async def orchestrate_scene_video_units(
         )
         if plan is None:
             raise UpstreamServiceError(
-                "导演编排未通过质量校验，请重试",
+                "导演编排仍未生成有效方案（" + "；".join(errors[:5]) + "），请重试或换模型",
                 retryable=True,
                 provider="DeepSeek",
                 status_code=502,
@@ -635,6 +716,10 @@ async def orchestrate_scene_video_units(
             unit["storyboard_prompt"] = storyboard_prompt
         storyboard_json = detail.get("storyboard_json")
         if isinstance(storyboard_json, dict):
+            probe: list[str] = []
             unit["storyboard_json"] = storyboard_json
-            _validate_segments(unit, [])
+            _validate_segments(unit, probe)
+            if probe:
+                unit["storyboard_json"] = None
+                plan["warnings"] = list(dict.fromkeys([*(plan.get("warnings") or []), f"单元 {unit['unit_id']} 镜头阶段返回的时间轴不完整，已丢弃该可选脚本"]))
     return plan

@@ -1802,7 +1802,8 @@ async def compile_scenes(canvas_id: int, body: VideoCanvasCompileScenesRequest, 
             source_scene_revision=scene_revision,
         )
         if normalized_plan is None:
-            raise HTTPException(422, {"message": "导演方案未通过质量校验", "issues": errors[:10]})
+            issues = errors[:10]
+            raise HTTPException(422, {"message": "导演方案不可用（" + "；".join(issues[:5]) + "）", "issues": issues})
 
         compiled.extend(
             _compile_scene_items_from_director_plan(

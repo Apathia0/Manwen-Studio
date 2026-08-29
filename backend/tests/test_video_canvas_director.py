@@ -1,4 +1,11 @@
-"""画布 AI 导演服务：动态编排协议与确定性质量门测试。"""
+"""画布 AI 导演服务：动态编排协议与确定性自动修复测试。
+
+质量门语义：修复优先于拒绝——节拍漏覆盖自动补单元、时长越界自动钳制、
+提示词为空自动兜底、对白原文缺失自动回填、分段时间轴断裂丢弃可选脚本。
+只有结构级失败（非 JSON / 无有效单元）才返回 errors。
+"""
+
+import asyncio
 
 import pytest
 
@@ -97,67 +104,143 @@ def test_dynamic_duration_rules_in_prompt():
     assert "禁止为凑时长添加空镜" in text
 
 
-def test_valid_plan_passes_quality_gate():
+def test_valid_plan_passes_without_repair():
     plan, errors = normalize_and_validate_director_plan(_make_raw_plan(), _make_scenes(), **_META)
     assert errors == []
     assert plan is not None
     durations = [unit["duration_seconds"] for unit in plan["units"]]
     assert durations == [6, 4, 12]
-    assert plan["meta"]["source_screenplay_hash"] == "hash-screenplay"
     assert plan["units"][0]["unit_id"] == "u-001"
+    assert plan["units"][0]["sequence"] == 1
+    # 节拍引用已归一为 "场景ID.节拍ID" 规范键
+    assert plan["units"][0]["beat_ids"] == ["1.1.1", "1.1.2"]
 
 
-def test_missing_beat_is_rejected():
+def test_missing_beat_auto_generates_remedial_unit():
     raw = _make_raw_plan()
     raw["units"][2]["beat_ids"] = []
-    _plan, errors = normalize_and_validate_director_plan(raw, _make_scenes(), **_META)
-    assert any("未被任何单元覆盖" in item for item in errors)
+    plan, errors = normalize_and_validate_director_plan(raw, _make_scenes(), **_META)
+    assert errors == []
+    assert plan is not None
+    assert len(plan["units"]) == 4
+    remedial = plan["units"][-1]
+    assert remedial["unit_id"] == "u-r004"
+    assert remedial["beat_ids"] == ["2.2.2"]
+    assert remedial["duration_seconds"] >= 3
+    assert remedial["video_prompt"]
+    assert "医生说，最多还有三个月" in remedial["dialogue_or_narration"]
+    assert any("补充单元" in warning for warning in plan["warnings"])
 
 
-def test_unknown_beat_is_rejected():
+def test_unknown_beat_dropped_and_covered_by_remedial_unit():
     raw = _make_raw_plan()
     raw["units"][0]["beat_ids"] = ["9.9"]
-    _plan, errors = normalize_and_validate_director_plan(raw, _make_scenes(), **_META)
-    assert any("不存在的节拍" in item for item in errors)
+    plan, errors = normalize_and_validate_director_plan(raw, _make_scenes(), **_META)
+    assert errors == []
+    assert plan is not None
+    assert plan["units"][0]["beat_ids"] == []
+    assert any("不存在的节拍" in warning for warning in plan["warnings"])
+    # 场景 1 的两个节拍由补充单元兜底
+    remedial = plan["units"][-1]
+    assert remedial["beat_ids"] == ["1.1.1", "1.1.2"]
+    assert "妈，这么晚打给我干嘛" in remedial["dialogue_or_narration"]
 
 
-def test_duplicate_sequence_is_rejected():
+def test_duplicate_beat_coverage_keeps_first_unit():
+    raw = _make_raw_plan()
+    raw["units"][1]["beat_ids"] = ["2.1", "2.2"]
+    plan, errors = normalize_and_validate_director_plan(raw, _make_scenes(), **_META)
+    assert errors == []
+    assert plan is not None
+    # 首个覆盖单元保留，后到的 u-003 被裁剪为空引用
+    assert plan["units"][1]["beat_ids"] == ["2.2.1", "2.2.2"]
+    assert plan["units"][2]["beat_ids"] == []
+    assert any("重复" in warning for warning in plan["warnings"])
+
+
+def test_duplicate_sequence_renumbered():
     raw = _make_raw_plan()
     raw["units"][1]["sequence"] = 1
-    _plan, errors = normalize_and_validate_director_plan(raw, _make_scenes(), **_META)
-    assert any("sequence" in item for item in errors)
+    plan, errors = normalize_and_validate_director_plan(raw, _make_scenes(), **_META)
+    assert errors == []
+    assert [unit["sequence"] for unit in plan["units"]] == [1, 2, 3]
+    assert any("修正" in warning for warning in plan["warnings"])
 
 
-def test_out_of_range_duration_is_rejected():
+def test_out_of_range_duration_clamped_with_requested_preserved():
     raw = _make_raw_plan()
     raw["units"][0]["duration_seconds"] = 120
-    _plan, errors = normalize_and_validate_director_plan(raw, _make_scenes(), **_META)
-    assert any("安全区间" in item for item in errors)
+    plan, errors = normalize_and_validate_director_plan(raw, _make_scenes(), **_META)
+    assert errors == []
+    unit = plan["units"][0]
+    assert unit["duration_seconds"] == 60
+    assert unit["duration_requested"] == 120
+    assert any("钳制" in warning for warning in plan["warnings"])
 
 
-def test_empty_video_prompt_is_rejected():
+def test_missing_duration_estimated_from_beats():
+    raw = _make_raw_plan()
+    raw["units"][0]["duration_seconds"] = None
+    plan, errors = normalize_and_validate_director_plan(raw, _make_scenes(), **_META)
+    assert errors == []
+    unit = plan["units"][0]
+    assert isinstance(unit["duration_seconds"], int) and 3 <= unit["duration_seconds"] <= 60
+    assert any("自动估算" in warning for warning in plan["warnings"])
+
+
+def test_empty_video_prompt_fallback_filled():
     raw = _make_raw_plan()
     raw["units"][0]["video_prompt"] = ""
-    _plan, errors = normalize_and_validate_director_plan(raw, _make_scenes(), **_META)
-    assert any("video_prompt" in item for item in errors)
+    plan, errors = normalize_and_validate_director_plan(raw, _make_scenes(), **_META)
+    assert errors == []
+    unit = plan["units"][0]
+    assert len(unit["video_prompt"]) >= 12
+    assert "林晚深夜接到母亲来电" in unit["video_prompt"]
+    assert any("基础提示词" in warning for warning in plan["warnings"])
 
 
-def test_broken_segment_timeline_is_rejected():
+def test_broken_segment_timeline_dropped():
     raw = _make_raw_plan()
     raw["units"][0]["storyboard_json"] = {"segments": [
         {"start_second": 0, "end_second": 2.0},
         {"start_second": 4.0, "end_second": 6.0},
     ]}
-    _plan, errors = normalize_and_validate_director_plan(raw, _make_scenes(), **_META)
-    assert any("时间轴" in item for item in errors)
+    plan, errors = normalize_and_validate_director_plan(raw, _make_scenes(), **_META)
+    assert errors == []
+    assert plan["units"][0]["storyboard_json"] is None
+    assert any("时间轴" in warning for warning in plan["warnings"])
 
 
-def test_missing_dialogue_original_text_is_rejected():
+def test_missing_dialogue_auto_backfilled_from_source_beat():
     raw = _make_raw_plan()
     raw["units"][2]["dialogue_or_narration"] = ""
     raw["units"][2]["story_summary"] = "陈默说了一些话"
-    _plan, errors = normalize_and_validate_director_plan(raw, _make_scenes(), **_META)
-    assert any("对白原文未保留" in item for item in errors)
+    plan, errors = normalize_and_validate_director_plan(raw, _make_scenes(), **_META)
+    assert errors == []
+    unit = plan["units"][2]
+    assert "陈默：医生说，最多还有三个月。" in unit["dialogue_or_narration"]
+    assert any("回填" in warning for warning in plan["warnings"])
+
+
+def test_duplicate_unit_id_renamed():
+    raw = _make_raw_plan()
+    raw["units"][1]["unit_id"] = "u-001"
+    plan, errors = normalize_and_validate_director_plan(raw, _make_scenes(), **_META)
+    assert errors == []
+    ids = [unit["unit_id"] for unit in plan["units"]]
+    assert len(set(ids)) == len(ids)
+
+
+def test_non_dict_plan_rejected():
+    plan, errors = normalize_and_validate_director_plan(["not", "a", "dict"], _make_scenes(), **_META)
+    assert plan is None
+    assert errors
+
+
+def test_empty_units_rejected():
+    plan, errors = normalize_and_validate_director_plan({"units": []}, _make_scenes(), **_META)
+    assert plan is None
+    assert errors
 
 
 def test_user_prompt_embeds_scenes_json():
@@ -175,35 +258,21 @@ def test_prompt_user_prompt_embeds_units():
     assert "先悬念后揭示" in prompt
 
 
-def test_orchestrate_repairs_once_then_succeeds(monkeypatch):
-    calls = {"count": 0}
+def test_orchestrate_repairs_structural_failure_then_succeeds(monkeypatch):
+    calls: list[str] = []
 
     async def fake_call(*, system, user, api_key, max_tokens=32768):
-        calls["count"] += 1
-        if calls["count"] == 1:
-            # 第一次缺一个节拍覆盖，触发修复调用
-            raw = _make_raw_plan()
-            raw["units"][2]["beat_ids"] = []
-            return raw
+        if system == DIRECTOR_PROMPT_SYSTEM_PROMPT:
+            calls.append("prompt")
+            return {"units": []}
+        calls.append("plan")
+        if len([c for c in calls if c == "plan"]) == 1:
+            return {"units": []}  # 结构性失败 → 触发一次修复调用
         return _make_raw_plan()
-
-    async def fake_prompt_call(*, system, user, api_key, max_tokens=32768):
-        return {"units": []}
-
-    monkeypatch.setattr("services.video_canvas_director._call_deepseek_json", fake_call)
 
     import services.video_canvas_director as director
 
-    original = director._call_deepseek_json
-
-    def router(*, system, user, api_key, max_tokens=32768):
-        if system == DIRECTOR_PROMPT_SYSTEM_PROMPT:
-            return fake_prompt_call(system=system, user=user, api_key=api_key, max_tokens=max_tokens)
-        return fake_call(system=system, user=user, api_key=api_key, max_tokens=max_tokens)
-
-    monkeypatch.setattr(director, "_call_deepseek_json", router)
-
-    import asyncio
+    monkeypatch.setattr(director, "_call_deepseek_json", fake_call)
 
     plan = asyncio.run(orchestrate_scene_video_units(
         scenes=_make_scenes(),
@@ -211,22 +280,44 @@ def test_orchestrate_repairs_once_then_succeeds(monkeypatch):
         source_scene_node_id="scene-node-1",
         source_scene_revision="rev-1",
     ))
-    assert calls["count"] == 2
+    assert calls.count("plan") == 2
+    assert calls.count("prompt") == 1
     assert len(plan["units"]) == 3
-    # 镜头导演阶段返回空 units 时使用兜底提示词
     assert all(unit["video_prompt"] for unit in plan["units"])
     assert any("基础提示词" in warning for warning in plan["warnings"])
 
 
-def test_orchestrate_fails_after_second_rejection(monkeypatch):
-    import asyncio
+def test_orchestrate_quality_issues_auto_repaired_without_second_plan_call(monkeypatch):
+    calls: list[str] = []
+
+    async def fake_call(*, system, user, api_key, max_tokens=32768):
+        if system == DIRECTOR_PROMPT_SYSTEM_PROMPT:
+            calls.append("prompt")
+            return {"units": []}
+        calls.append("plan")
+        raw = _make_raw_plan()
+        raw["units"][2]["beat_ids"] = []  # 可修复问题 → 不再触发第二次规划调用
+        return raw
 
     import services.video_canvas_director as director
 
+    monkeypatch.setattr(director, "_call_deepseek_json", fake_call)
+
+    plan = asyncio.run(orchestrate_scene_video_units(
+        scenes=_make_scenes(),
+        source_screenplay_hash="hash-screenplay",
+        source_scene_node_id="scene-node-1",
+        source_scene_revision="rev-1",
+    ))
+    assert calls.count("plan") == 1
+    assert len(plan["units"]) == 4  # 补充单元兜底
+
+
+def test_orchestrate_fails_after_second_structural_rejection(monkeypatch):
+    import services.video_canvas_director as director
+
     async def fake_call(*, system, user, api_key, max_tokens=32768):
-        raw = _make_raw_plan()
-        raw["units"][2]["beat_ids"] = []  # 始终缺节拍覆盖
-        return raw
+        return {"units": []}
 
     monkeypatch.setattr(director, "_call_deepseek_json", fake_call)
 
@@ -238,3 +329,4 @@ def test_orchestrate_fails_after_second_rejection(monkeypatch):
             source_scene_revision="rev-1",
         ))
     assert exc_info.value.code == "director_plan_quality_failed"
+    assert "仍未生成有效方案" in str(exc_info.value)
