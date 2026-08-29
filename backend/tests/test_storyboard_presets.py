@@ -79,7 +79,10 @@ async def test_split_scenes_uses_custom_prompts_and_replaces_page_count(monkeypa
     assert scenes == ["第一页", "第二页"]
     payload = captured_payloads[0]
     assert payload["messages"][0]["content"] == "自定义系统，共 2 页"
-    assert payload["messages"][-1]["content"] == "自定义正文，共 2 页"
+    # v4.5.7 增强：末尾追加【强制页数要求】区块
+    assert payload["messages"][-1]["content"].startswith("自定义正文，共 2 页")
+    assert "【强制页数要求】" in payload["messages"][-1]["content"]
+    assert "必须**恰好包含 2 个元素**" in payload["messages"][-1]["content"]
 
 
 @pytest.mark.asyncio
