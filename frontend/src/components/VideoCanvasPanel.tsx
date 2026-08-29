@@ -134,6 +134,16 @@ function mergeRunOutputs(run: VideoCanvasRun | null, currentNodes: CanvasNode[])
   });
 }
 
+/** 会话级结果 URL 记忆：节点一旦展示过生成结果，任何状态重建（切换画布/刷新/undo）都不再丢失显示 */
+const nodeResultUrlCache = new Map<string, { url: string; isVideo: boolean }>();
+function rememberResultUrl(nodeId: string, url: string, isVideo: boolean) {
+  nodeResultUrlCache.set(nodeId, { url, isVideo });
+  if (nodeResultUrlCache.size > 400) {
+    const firstKey = nodeResultUrlCache.keys().next().value;
+    if (firstKey !== undefined) nodeResultUrlCache.delete(firstKey);
+  }
+}
+
 function NodeResultPreview({ url, isVideo }: { url: string; isVideo: boolean }) {
   const [ready, setReady] = useState(false);
 
@@ -265,8 +275,12 @@ export default function VideoCanvasPanel({ storyId, chapterId, workflow: _workfl
     setCanvas(nextCanvas);
     const layoutNodes = nextCanvas.layout.nodes || {};
     const projectedGraph = projectLegacyGraph(nextCanvas.version.graph);
-    setNodes(mergeRunOutputs(nextCanvas.runs?.[0] || null, toCanvasNodes(projectedGraph).map((node) => ({ ...node, position: layoutNodes[node.id] || node.position }))));
-    setEdges(projectedGraph.edges as CanvasEdge[]);
+    // 合并所有 run 的输出（旧→新），切换/刷新后每个节点的历史结果都能恢复显示
+    let hydratedNodes = toCanvasNodes(projectedGraph).map((node) => ({ ...node, position: layoutNodes[node.id] || node.position }));
+    for (const run of [...(nextCanvas.runs || [])].reverse()) {
+      hydratedNodes = mergeRunOutputs(run, hydratedNodes);
+    }
+    setNodes(hydratedNodes);    setEdges(projectedGraph.edges as CanvasEdge[]);
     setLatestRun(nextCanvas.runs?.[0] || null);
     const savedViewport = nextCanvas.layout.viewport;
     setViewport({ x: savedViewport?.x ?? 260, y: savedViewport?.y ?? 120, k: savedViewport?.zoom ?? 1 });
@@ -1206,7 +1220,7 @@ export default function VideoCanvasPanel({ storyId, chapterId, workflow: _workfl
     <CanvasSurface containerRef={surfaceRef} viewport={editorViewport} tool={interaction.state.activeTool} handlers={interaction.handlers} state={interaction.state} onViewportChange={(next) => updateViewport({ x: next.x, y: next.y, k: next.scale })} onDrop={(event, world) => { const type = event.dataTransfer.getData('application/x-storycanvas-node'); const item = catalog.find((entry) => entry.type === type); if (item) { captureHistory(); addCatalogNode(item, world); } }}>
       <CanvasConnectionLayer nodes={nodes as CanvasSceneNode[]} edges={edges as CanvasSceneEdge[]} catalog={catalog} connecting={interaction.state.connecting} mouseWorld={interaction.state.mouseWorld} connectionTargetNodeId={interaction.state.connectionTargetNodeId} selectedConnectionId={interaction.state.selectedConnectionId} handlers={interaction.handlers} />
       {interaction.state.selectionBox && (() => { const box = interaction.state.selectionBox; const left = Math.min(box.startWorldX, box.currentWorldX); const top = Math.min(box.startWorldY, box.currentWorldY); return <div className="pointer-events-none absolute rounded-lg border-2 border-[#2f80ff]/80 bg-[#2f80ff]/10" style={{ left, top, width: Math.abs(box.currentWorldX - box.startWorldX), height: Math.abs(box.currentWorldY - box.startWorldY) }} />; })()}
-      {nodes.map((node) => <CanvasNodeView key={node.id} node={node as CanvasSceneNode} catalogItem={catalog.find((item) => item.type === node.type) || catalog[0]} selected={selectedNodeIds.includes(node.id)} connecting={interaction.state.connecting} connectionTargetNodeId={interaction.state.connectionTargetNodeId} scale={editorViewport.scale} handlers={interaction.handlers} onResize={handleNodeResize} onResizeEnd={handleNodeResizeEnd} onNodeContextMenu={(event, nodeId) => { event.preventDefault(); event.stopPropagation(); setNodeMenu({ x: event.clientX, y: event.clientY, nodeId }); }} renderContent={(nodeView) => { const result = nodeView.data.result as (Record<string, unknown> & { url?: string }) | undefined; const resultUrl = result?.url; const runStatus = nodeRunStatuses.get(nodeView.id); const isBusy = submittingNodeId === nodeView.id || ['awaiting_approval', 'queued', 'running', 'cancel_requested'].includes(String(runStatus || '')); if (resultUrl) return <NodeResultPreview url={resultUrl} isVideo={nodeView.type === 'video'} />; if (isBusy) return <div className="flex h-full w-full items-center justify-center bg-[#202226]" aria-label="生成中"><Loader2 className="h-8 w-8 animate-spin text-[#73a7ff]" /></div>; if (nodeView.type === 'scene') { const config = (nodeView.data.config || {}) as Record<string, unknown>; return (
+      {nodes.map((node) => <CanvasNodeView key={node.id} node={node as CanvasSceneNode} catalogItem={catalog.find((item) => item.type === node.type) || catalog[0]} selected={selectedNodeIds.includes(node.id)} connecting={interaction.state.connecting} connectionTargetNodeId={interaction.state.connectionTargetNodeId} scale={editorViewport.scale} handlers={interaction.handlers} onResize={handleNodeResize} onResizeEnd={handleNodeResizeEnd} onNodeContextMenu={(event, nodeId) => { event.preventDefault(); event.stopPropagation(); setNodeMenu({ x: event.clientX, y: event.clientY, nodeId }); }} renderContent={(nodeView) => { const result = nodeView.data.result as (Record<string, unknown> & { url?: string }) | undefined; const mediaKindForNode = nodeView.type === 'image' || nodeView.type === 'video'; const resultUrl = (result?.url as string | undefined) || (mediaKindForNode ? nodeResultUrlCache.get(nodeView.id)?.url : undefined) || ''; const runStatus = nodeRunStatuses.get(nodeView.id); const isBusy = submittingNodeId === nodeView.id || ['awaiting_approval', 'queued', 'running', 'cancel_requested'].includes(String(runStatus || '')); if (resultUrl) { rememberResultUrl(nodeView.id, resultUrl, nodeView.type === 'video'); return <NodeResultPreview url={resultUrl} isVideo={nodeView.type === 'video'} />; } if (isBusy) return <div className="flex h-full w-full items-center justify-center bg-[#202226]" aria-label="生成中"><Loader2 className="h-8 w-8 animate-spin text-[#73a7ff]" /></div>; if (nodeView.type === 'scene') { const config = (nodeView.data.config || {}) as Record<string, unknown>; return (
   <div className="flex h-full w-full flex-col gap-1.5" data-canvas-no-zoom>
     <div className="min-h-0 flex-1 overflow-hidden">
       <SceneListNodeView
