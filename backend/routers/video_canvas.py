@@ -39,6 +39,7 @@ from schemas import (
     VideoCanvasCompileScenesRequest,
     VideoCanvasCreate,
     VideoCanvasDirectorPlanRequest,
+    VideoCanvasAssetAnalysisRequest,
     VideoCanvasGraphSave,
     VideoCanvasImportRequest,
     VideoCanvasLayoutSave,
@@ -1745,6 +1746,46 @@ async def create_story_video_asset(story_id: int, body: CreateVideoAssetRequest,
     db.commit()
     db.refresh(asset)
     return _serialize_canvas_asset(asset)
+
+
+@router.post("/api/video-canvas/canvases/{canvas_id}/asset-analysis")
+async def analyze_canvas_assets(canvas_id: int, body: VideoCanvasAssetAnalysisRequest, request: Request, db: Session = Depends(get_db)):
+    """资产分析导演：剧本 → 角色/场景/道具资产清单与绘图提示词（复用生产美术/角色总监服务）。
+
+    返回的资产由前端渲染为画布资产节点：先出参考图，再绑定到分镜/视频节点保证一致性。
+    """
+    user = _require_user(request, db)
+    canvas = _require_canvas(canvas_id, user, db)
+    if body.expected_definition_revision is not None and canvas.definition_revision != body.expected_definition_revision:
+        raise HTTPException(409, {"message": "画布定义已更新，请刷新后再分析", "definition_revision": canvas.definition_revision})
+    graph = _latest_version(canvas.id, db).graph_json or {}
+    node, config = _scene_node_from_graph(graph, body.scene_node_id)
+    if node is None:
+        raise HTTPException(422, "场景节点不存在或类型不正确")
+    if not config.get("approved"):
+        raise HTTPException(422, "场景尚未批准，请先完成剧本审核")
+    scene_items = config.get("scenes")
+    scenes = [item for item in scene_items if isinstance(item, dict)] if isinstance(scene_items, list) else []
+    if not scenes:
+        raise HTTPException(422, "场景节点没有可分析的场景数据")
+
+    _, _, _ = _scene_screenplay_hashes(graph, config, body.scene_node_id)
+    screenplay_node_id, content = _scene_source_screenplay(graph, config, body.scene_node_id)
+
+    from services.video_canvas_director import analyze_scene_assets
+
+    result = await analyze_scene_assets(
+        scenes=scenes,
+        screenplay_text=content,
+        api_key=_canvas_deepseek_api_key(request, db),
+    )
+    return {
+        "ok": True,
+        "scene_node_id": body.scene_node_id,
+        "screenplay_node_id": screenplay_node_id,
+        **result,
+        "definition_revision": canvas.definition_revision,
+    }
 
 
 def _compile_scene_items_from_director_plan(

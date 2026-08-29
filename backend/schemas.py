@@ -1199,6 +1199,12 @@ class VideoCanvasDirectorPlanRequest(BaseModel):
     expected_definition_revision: int | None = Field(default=None, ge=1)
 
 
+class VideoCanvasAssetAnalysisRequest(BaseModel):
+    """画布资产分析请求：剧本 → 角色/场景/道具资产清单与绘图提示词。"""
+    scene_node_id: str = Field(min_length=1, max_length=64)
+    expected_definition_revision: int | None = Field(default=None, ge=1)
+
+
 class VideoCanvasScreenplaySplitRequest(BaseModel):
     """剧本节点 AI 拆分请求：读取节点当前内容，返回视频单元列表（不直接写图）。"""
     node_id: str = Field(min_length=1, max_length=64)

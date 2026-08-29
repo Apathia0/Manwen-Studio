@@ -3678,6 +3678,30 @@ export interface DirectorPlanResult {
   definition_revision: number;
 }
 
+export interface CanvasSceneAsset {
+  role: 'character' | 'scene' | 'prop';
+  name: string;
+  prompt: string;
+  scene_ids: Array<string | number>;
+  unit_count: number;
+}
+
+export async function analyzeCanvasAssets(canvasId: number, sceneNodeId: string, expectedDefinitionRevision?: number): Promise<{
+  ok: boolean;
+  scene_node_id: string;
+  assets: CanvasSceneAsset[];
+  warnings: string[];
+  failed_calls: number;
+  definition_revision: number;
+}> {
+  const res = await fetch(`${BASE}/api/video-canvas/canvases/${canvasId}/asset-analysis`, {
+    method: 'POST', headers: apiHeaders(true),
+    body: JSON.stringify({ scene_node_id: sceneNodeId, ...(expectedDefinitionRevision ? { expected_definition_revision: expectedDefinitionRevision } : {}) }),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
+  return res.json();
+}
+
 export async function generateDirectorPlan(canvasId: number, payload: {
   scene_node_id: string;
   user_constraints?: string;

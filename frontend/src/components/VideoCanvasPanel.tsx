@@ -12,6 +12,7 @@ import {
 
   compileScenes,
   generateDirectorPlan,
+  analyzeCanvasAssets,
   screenplaySplit,
   listVideoCanvasPlans,
   listVideoCanvasNodeCatalog,
@@ -37,6 +38,7 @@ import {
   type VideoStylePreset,
   type DirectorPlan,
   type CompiledSceneUnit,
+  type CanvasSceneAsset,
 } from '../api';
 import { confirm } from '../lib/confirm';
 import { normalizeErrorMessage } from '../lib/errors';
@@ -205,6 +207,7 @@ export default function VideoCanvasPanel({ storyId, chapterId, workflow: _workfl
   const [compilingNodeId, setCompilingNodeId] = useState<string | null>(null);
   const [planBusyNodeId, setPlanBusyNodeId] = useState<string | null>(null);
   const [directorError, setDirectorError] = useState<string | null>(null);
+  const [assetAnalysisNodeId, setAssetAnalysisNodeId] = useState<string | null>(null);
   const [models, setModels] = useState<AiModelItem[]>([]);
   const [canvas, setCanvas] = useState<VideoCanvas | null>(null);
   const [canvasList, setCanvasList] = useState<VideoCanvas[]>([]);
@@ -1060,6 +1063,79 @@ export default function VideoCanvasPanel({ storyId, chapterId, workflow: _workfl
     }
   };
   // 应用导演方案：编译为视频节点组（稳定节点 ID + sequence 布局，重复应用不叠加）
+  // AI 资产分析：剧本 → 角色/场景/道具资产提示词，渲染为画布资产节点（先出参考图，再绑定保证一致性）
+  const analyzeAssetsForNode = async (nodeId: string) => {
+    if (!canvas || assetAnalysisNodeId) return;
+    const sceneNode = nodes.find((node) => node.id === nodeId);
+    if (!sceneNode) return;
+    setAssetAnalysisNodeId(nodeId);
+    try {
+      // 后端按已保存的图读取场景与剧本：分析前先静默保存当前画布
+      let targetCanvas = canvas;
+      if (dirty) {
+        const saved = await saveCanvas(false);
+        if (!saved) return;
+        targetCanvas = saved;
+      }
+      const result = await analyzeCanvasAssets(targetCanvas.id, nodeId, targetCanvas.definition_revision);
+      captureHistory();
+      // 替换本场景已有资产节点（稳定 ID，不叠加）
+      const previousIds = new Set(nodes
+        .filter((node) => node.id !== nodeId && (node.data.config as Record<string, unknown> | undefined)?.source_scene_node === nodeId && (node.data.config as Record<string, unknown>).node_role === 'asset')
+        .map((node) => node.id));
+      const occupied = nodes
+        .filter((node) => !previousIds.has(node.id) && node.id !== nodeId)
+        .map((node) => ({ x: node.position.x, y: node.position.y, width: Number(node.data.ui?.width) || 420, height: Number(node.data.ui?.height) || 236 }));
+      const hits = (rect: { x: number; y: number; width: number; height: number }) => occupied.some((other) => rect.x < other.x + other.width && rect.x + rect.width > other.x && rect.y < other.y + other.height && rect.y + rect.height > other.y);
+      const roleLabels: Record<string, string> = { character: '角色', scene: '场景', prop: '道具' };
+      const baseX = sceneNode.position.x - 440;
+      let cursorY = sceneNode.position.y;
+      const assetNodes: CanvasNode[] = [];
+      for (const asset of result.assets as CanvasSceneAsset[]) {
+        const nameHash = Math.abs([...asset.name].reduce((hash, char) => (hash * 31 + (char.codePointAt(0) || 0)), 7) % 2176782336).toString(36).slice(0, 6);
+        const id = `ast-${nodeId}-${asset.role}-${nameHash}`.slice(0, 64);
+        let pos = { x: baseX, y: cursorY };
+        const rect = { ...pos, width: 320, height: 210 };
+        let guard = 0;
+        while (hits(rect) && guard < 60) {
+          cursorY += 250;
+          pos = { x: baseX, y: cursorY };
+          rect.y = cursorY;
+          guard += 1;
+        }
+        occupied.push({ x: pos.x, y: pos.y, width: 320, height: 210 });
+        cursorY = pos.y + 250;
+        assetNodes.push({
+          id,
+          type: 'image',
+          position: pos,
+          data: {
+            label: `${roleLabels[asset.role] || asset.role}·${asset.name}`,
+            nodeType: 'image',
+            config: {
+              node_role: 'asset',
+              asset_role: asset.role,
+              asset_name: asset.name,
+              source_scene_node: nodeId,
+              prompt: asset.prompt,
+              size: '1024x1024',
+              aspect_ratio: '1:1',
+            },
+          },
+        });
+      }
+      setNodes((current) => [...current.filter((node) => !previousIds.has(node.id)), ...assetNodes]);
+      setEdges((current) => current.filter((edge) => !previousIds.has(edge.source) && !previousIds.has(edge.target)));
+      updateSceneNodeConfig(nodeId, { asset_analysis: result.assets, asset_analysis_stale: false });
+      setDirty(true);
+      const counts = (result.assets as CanvasSceneAsset[]).reduce<Record<string, number>>((acc, asset) => { acc[asset.role] = (acc[asset.role] || 0) + 1; return acc; }, {});
+      toast.success(`资产分析完成：角色 ${counts.character || 0} · 场景 ${counts.scene || 0} · 道具 ${counts.prop || 0}。生成参考图后在分镜/视频节点「选择参考资产」绑定即可保证一致性${result.warnings?.length ? `（${result.warnings.length} 条提示）` : ''}`);
+    } catch (error) {
+      toast.error(normalizeErrorMessage(error, '资产分析失败'));
+    } finally {
+      setAssetAnalysisNodeId(null);
+    }
+  };
   const applyDirectorPlan = async (nodeId: string) => {
     if (!canvas || compilingNodeId) return;
     const sceneNode = nodes.find((node) => node.id === nodeId);
@@ -1235,6 +1311,8 @@ export default function VideoCanvasPanel({ storyId, chapterId, workflow: _workfl
         onGenerateDirectorPlan={() => void generateDirectorPlanForNode(nodeView.id)}
         onApplyDirectorPlan={() => void applyDirectorPlan(nodeView.id)}
         directorPlanStale={Boolean(config.director_plan && config.director_plan_stale)}
+        onAnalyzeAssets={() => void analyzeAssetsForNode(nodeView.id)}
+        assetAnalysisLoading={assetAnalysisNodeId === nodeView.id}
       />
     </div>
     {config.approved ? null : (

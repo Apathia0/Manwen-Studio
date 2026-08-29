@@ -15,6 +15,7 @@ import {
   Sparkles,
   Target,
   ThumbsUp,
+  UserRound,
 } from 'lucide-react';
 import SceneNodeView, { type SceneNodeConfig } from './SceneNodeView';
 
@@ -75,6 +76,9 @@ export interface SceneListNodeViewProps {
   onGenerateDirectorPlan?: () => void;
   onApplyDirectorPlan?: () => void;
   directorPlanStale?: boolean;
+  /** AI 资产分析（角色/场景/道具）：批准后可用 */
+  onAnalyzeAssets?: () => void;
+  assetAnalysisLoading?: boolean;
 }
 
 function displayText(value: unknown): string {
@@ -246,6 +250,8 @@ export default function SceneListNodeView({
   onGenerateDirectorPlan,
   onApplyDirectorPlan,
   directorPlanStale = false,
+  onAnalyzeAssets,
+  assetAnalysisLoading = false,
 }: SceneListNodeViewProps) {
   const scenes = useMemo(() => (Array.isArray(config.scenes) ? config.scenes : []), [config.scenes]);
   const [collapsed, setCollapsed] = useState(false);
@@ -374,8 +380,20 @@ export default function SceneListNodeView({
         </div>
       )}
 
-      {/* 统一审批 */}
+      {/* 统一审批 + 资产分析 */}
       <div className="shrink-0 border-t border-[#3a3f45] bg-[#1b1d21] p-2">
+        {approved && onAnalyzeAssets && (
+          <button
+            type="button"
+            disabled={assetAnalysisLoading}
+            onClick={() => onAnalyzeAssets()}
+            className="mb-1.5 inline-flex w-full items-center justify-center gap-1.5 rounded-lg border border-[#625442] bg-[#f3cf84]/10 px-2 py-1.5 text-[11px] text-[#f3cf84] transition-colors hover:bg-[#f3cf84]/20 disabled:cursor-wait disabled:opacity-50"
+            title="从剧本自动解析角色/场景/道具资产与绘图提示词，生成参考图后绑定到分镜和视频节点保证一致性"
+          >
+            {assetAnalysisLoading ? <Loader2 size={12} className="animate-spin" /> : <UserRound size={12} />}
+            {assetAnalysisLoading ? '资产分析中…' : 'AI 资产分析（角色 / 场景 / 道具）'}
+          </button>
+        )}
         {approved ? (
           <button
             type="button"

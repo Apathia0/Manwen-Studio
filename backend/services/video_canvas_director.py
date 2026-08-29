@@ -856,3 +856,102 @@ async def orchestrate_scene_video_units(
 
     plan["warnings"] = _compact_unit_warnings(plan["warnings"])
     return plan
+
+
+_ASSET_ROLE_ORDER = {"character": 0, "scene": 1, "prop": 2}
+
+
+async def analyze_scene_assets(
+    *,
+    scenes: list[dict[str, Any]],
+    screenplay_text: str,
+    api_key: str | None = None,
+) -> dict[str, Any]:
+    """资产分析导演：复用生产"美术总监/角色设计总监"服务，把剧本自动解析为资产清单与绘图提示词。
+
+    以场景为分析单位逐个调用生产服务，按 (role, name) 跨场景去重合并，
+    输出的资产供画布生成参考图并绑定到分镜/视频节点，保证角色/场景/道具一致性。
+    """
+    from services import deepseek as deepseek_service
+
+    assets: dict[tuple[str, str], dict[str, Any]] = {}
+    warnings: list[str] = []
+    failed_calls = 0
+
+    def _remember(role: str, name: str, prompt: str, scene_id: str) -> None:
+        key = (role, name)
+        existing = assets.get(key)
+        if existing:
+            existing["unit_count"] += 1
+            if scene_id not in existing["scene_ids"]:
+                existing["scene_ids"].append(scene_id)
+            return
+        assets[key] = {"role": role, "name": name, "prompt": prompt, "scene_ids": [scene_id], "unit_count": 1}
+
+    for scene in scenes:
+        scene_id = str(scene.get("scene_id"))
+        scene_label = str(scene.get("title") or scene_id)
+        characters = [str(c).strip() for c in (scene.get("characters") or []) if str(c or "").strip()]
+        beats = [beat for beat in (scene.get("beats") or []) if isinstance(beat, dict)]
+        story_summary = str(scene.get("scene_purpose") or "").strip() or "；".join(
+            str(beat.get("action") or "").strip() for beat in beats if beat.get("action")
+        )[:400]
+        dialogue = "\n".join(line for beat in beats for line in _dialogue_lines(beat.get("dialogue")))[:600]
+        shot_data: dict[str, Any] = {
+            "scene_location": str(scene.get("location") or ""),
+            "time_of_day": str(scene.get("time_of_day") or ""),
+            "story_summary": story_summary,
+            "dialogue_or_narration": dialogue,
+            "characters": characters,
+            "chapter_text": screenplay_text,
+            "source_text_span": f"场景「{scene_label}」",
+            "camera_plan": "",
+            "motion_plan": "",
+            "emotion_plan": "",
+            "key_props": [],
+            "scene_asset_candidates": [],
+        }
+
+        try:
+            scene_prompt, prop_prompts = await deepseek_service.generate_shot_scene_prop_prompts(shot_data, api_key=api_key)
+        except Exception as exc:  # 单场景失败不阻断整体分析
+            failed_calls += 1
+            warnings.append(f"场景「{scene_label}」的场景/道具分析失败（{type(exc).__name__}），已跳过")
+            scene_prompt, prop_prompts = "", []
+        scene_name = str(scene.get("location") or scene_label).strip()
+        if scene_prompt:
+            _remember("scene", scene_name, str(scene_prompt).strip(), scene_id)
+        for prop in prop_prompts or []:
+            if not isinstance(prop, dict):
+                continue
+            name = str(prop.get("name") or "").strip()
+            prompt = str(prop.get("prompt") or "").strip()
+            if name and prompt:
+                _remember("prop", name, prompt, scene_id)
+
+        if characters:
+            try:
+                char_prompts = await deepseek_service.generate_shot_character_prompts_ai(shot_data, "", api_key)
+            except Exception as exc:
+                failed_calls += 1
+                warnings.append(f"场景「{scene_label}」的角色分析失败（{type(exc).__name__}），已跳过")
+                char_prompts = []
+            for entry in char_prompts or []:
+                if not isinstance(entry, dict):
+                    continue
+                name = str(entry.get("name") or "").strip()
+                prompt = str(entry.get("prompt") or "").strip()
+                if name and prompt:
+                    _remember("character", name, prompt, scene_id)
+
+    asset_list = sorted(assets.values(), key=lambda item: (_ASSET_ROLE_ORDER.get(item["role"], 9), item["name"]))
+    if not asset_list:
+        raise UpstreamServiceError(
+            "资产分析未得到任何角色/场景/道具提示词，请重试或检查文本模型配置",
+            retryable=True,
+            provider="DeepSeek",
+            status_code=502,
+            code="asset_analysis_empty",
+            diagnostics={"failed_calls": failed_calls},
+        )
+    return {"assets": asset_list, "warnings": warnings, "failed_calls": failed_calls}

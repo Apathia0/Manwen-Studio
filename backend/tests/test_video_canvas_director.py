@@ -412,3 +412,67 @@ def _run_orchestrate(director):
         scenes=_make_scenes()[:1],
         source_screenplay_hash="h", source_scene_node_id="s", source_scene_revision="r",
     ))
+
+
+def test_asset_analysis_merges_and_dedupes(monkeypatch):
+    from services.video_canvas_director import analyze_scene_assets
+
+    calls = {"scene_prop": 0, "character": 0}
+
+    async def fake_scene_prop(shot_data, api_key=None):
+        calls["scene_prop"] += 1
+        location = shot_data.get("scene_location")
+        return f"{location} 美术设定：昏暗空间，冷色调", [{"name": "玉佩", "prompt": "特写道具提示词"}]
+
+    async def fake_character(shot_data, character_profiles="", api_key=None):
+        calls["character"] += 1
+        prompts = []
+        for name in shot_data.get("characters") or []:
+            prompts.append({"name": name, "prompt": f"{name} 角色三视图提示词"})
+        return prompts
+
+    import services.deepseek as deepseek_service
+    monkeypatch.setattr(deepseek_service, "generate_shot_scene_prop_prompts", fake_scene_prop)
+    monkeypatch.setattr(deepseek_service, "generate_shot_character_prompts_ai", fake_character)
+
+    import asyncio
+    result = asyncio.run(analyze_scene_assets(
+        scenes=_make_scenes(),
+        screenplay_text="剧本全文",
+    ))
+
+    roles = {(asset["role"], asset["name"]) for asset in result["assets"]}
+    # 两个场景同地点 → 场景资产合并为 1；林晚跨场景 → 合并 1
+    assert ("scene", "出租屋") in roles or ("scene", "深夜的未接来电") in roles
+    assert ("character", "林晚") in roles
+    assert ("prop", "玉佩") in roles
+    character_assets = [a for a in result["assets"] if a["role"] == "character" and a["name"] == "林晚"]
+    assert len(character_assets) == 1
+    assert sorted(character_assets[0]["scene_ids"]) == ["1", "2"]
+    assert calls["scene_prop"] == 2 and calls["character"] == 2
+    assert all(asset["prompt"] for asset in result["assets"])
+
+
+def test_asset_analysis_skips_failed_scene(monkeypatch):
+    from services.video_canvas_director import analyze_scene_assets
+
+    async def fake_scene_prop(shot_data, api_key=None):
+        if shot_data.get("scene_location") == "出租屋":
+            raise RuntimeError("boom")
+        return "场景提示词", []
+
+    async def fake_character(shot_data, character_profiles="", api_key=None):
+        return []
+
+    import services.deepseek as deepseek_service
+    monkeypatch.setattr(deepseek_service, "generate_shot_scene_prop_prompts", fake_scene_prop)
+    monkeypatch.setattr(deepseek_service, "generate_shot_character_prompts_ai", fake_character)
+
+    import asyncio
+    result = asyncio.run(analyze_scene_assets(
+        scenes=_make_scenes(),
+        screenplay_text="剧本全文",
+    ))
+    assert any("深夜的未接来电" in warning for warning in result["warnings"])
+    assert result["failed_calls"] == 1
+    assert any(asset["role"] == "scene" for asset in result["assets"])
