@@ -1007,7 +1007,13 @@ async def generate_reference_image(
     ref_type: str = "character",
     ref_labels: list[str] | None = None,
     ref_roles: list[str] | None = None,
+    prefer_local: bool = False,
 ) -> str:
+    """生成参考/故事板图。
+
+    prefer_local=True 时跳过 OSS URL 直传与结果上传 OSS：结果落本地后直接返回本地路径。
+    供画布运行时等以尽快回显为优先的场景使用，避免跨桶直传网络抖动阻塞节点完成。
+    """
     progress_label = f"ref:{output_path.stem}"
     current_prompt = prompt.strip()
     last_err: MangaImageGenerationError | None = None
@@ -1137,7 +1143,7 @@ async def generate_reference_image(
 
             # OSS URL 直传：跳过本地下载
             remote_key = str(output_path.relative_to(OUTPUT_DIR.parent)).replace("\\", "/") if output_path.is_absolute() else str(output_path)
-            oss_url = await run_blocking(_upload_image_url_to_oss, image_entry, remote_key)
+            oss_url = None if prefer_local else await run_blocking(_upload_image_url_to_oss, image_entry, remote_key)
             if oss_url:
                 logger.info("[%s] 角色参考图 OSS 直传成功，跳过本地下载", progress_label)
                 return oss_url
@@ -1149,7 +1155,7 @@ async def generate_reference_image(
             output_path.parent.mkdir(parents=True, exist_ok=True)
             await run_blocking(output_path.write_bytes, image_bytes)
             logger.info("[%s] 角色参考图已保存到 %s", progress_label, output_path)
-            oss_url = await run_blocking(_upload_to_oss_if_enabled, str(output_path))
+            oss_url = None if prefer_local else await run_blocking(_upload_to_oss_if_enabled, str(output_path))
             if oss_url:
                 try:
                     output_path.unlink(missing_ok=True)

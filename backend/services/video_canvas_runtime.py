@@ -538,6 +538,7 @@ async def execute_canvas_run(
                             size=str(config.get("size") or "1920x1080"),
                             ref_image_paths=_local_reference_paths(inputs, canvas, db) or None,
                             ref_type="storyboard" if node_type in {"image", "storyboard"} else "character",
+                            prefer_local=True,
                         )
                         stored_path = _relative_path(str(saved_path), MANGA_OUTPUTS)
                         asset = VideoAsset(story_id=canvas.story_id, chapter_id=run_chapter_id, asset_type="storyboard_frame", name=f"画布 {canvas.name} - {node_id}", file_path=stored_path, provider="image2", prompt=prompt, meta_json={"canvas_id": canvas.id, "run_id": run.id, "node_id": node_id}, usage_scope="story_shared")
