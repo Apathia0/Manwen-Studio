@@ -1154,7 +1154,7 @@ export default function VideoCanvasPanel({ storyId, chapterId, workflow: _workfl
       <CanvasConnectionLayer nodes={nodes as CanvasSceneNode[]} edges={edges as CanvasSceneEdge[]} catalog={catalog} connecting={interaction.state.connecting} mouseWorld={interaction.state.mouseWorld} connectionTargetNodeId={interaction.state.connectionTargetNodeId} selectedConnectionId={interaction.state.selectedConnectionId} handlers={interaction.handlers} />
       {interaction.state.selectionBox && (() => { const box = interaction.state.selectionBox; const left = Math.min(box.startWorldX, box.currentWorldX); const top = Math.min(box.startWorldY, box.currentWorldY); return <div className="pointer-events-none absolute rounded-lg border-2 border-[#2f80ff]/80 bg-[#2f80ff]/10" style={{ left, top, width: Math.abs(box.currentWorldX - box.startWorldX), height: Math.abs(box.currentWorldY - box.startWorldY) }} />; })()}
       {nodes.map((node) => <CanvasNodeView key={node.id} node={node as CanvasSceneNode} catalogItem={catalog.find((item) => item.type === node.type) || catalog[0]} selected={selectedNodeIds.includes(node.id)} connecting={interaction.state.connecting} connectionTargetNodeId={interaction.state.connectionTargetNodeId} scale={editorViewport.scale} handlers={interaction.handlers} onResize={handleNodeResize} onResizeEnd={handleNodeResizeEnd} onNodeContextMenu={(event, nodeId) => { event.preventDefault(); event.stopPropagation(); setNodeMenu({ x: event.clientX, y: event.clientY, nodeId }); }} renderContent={(nodeView) => { const result = nodeView.data.result as (Record<string, unknown> & { url?: string }) | undefined; const resultUrl = result?.url; const runStatus = nodeRunStatuses.get(nodeView.id); const isBusy = submittingNodeId === nodeView.id || ['awaiting_approval', 'queued', 'running', 'cancel_requested'].includes(String(runStatus || '')); if (resultUrl) return <NodeResultPreview url={resultUrl} isVideo={nodeView.type === 'video'} />; if (isBusy) return <div className="flex h-full w-full items-center justify-center bg-[#202226]" aria-label="生成中"><Loader2 className="h-8 w-8 animate-spin text-[#73a7ff]" /></div>; if (nodeView.type === 'scene') { const config = (nodeView.data.config || {}) as Record<string, unknown>; return (
-  <div className="flex h-full w-full flex-col gap-1.5" data-canvas-no-zoom onPointerDown={(event) => event.stopPropagation()}>
+  <div className="flex h-full w-full flex-col gap-1.5" data-canvas-no-zoom>
     <div className="min-h-0 flex-1 overflow-hidden">
       <SceneListNodeView
         config={config}
@@ -1174,7 +1174,7 @@ export default function VideoCanvasPanel({ storyId, chapterId, workflow: _workfl
   </div>
 ); }
 if (nodeView.type === 'screenplay') { const config = nodeView.data.config || {}; const contentValue = String(config.content ?? config.screenplay ?? ''); return (
-  <div className="flex h-full w-full flex-col gap-2 p-2" data-canvas-no-zoom onPointerDown={(event) => event.stopPropagation()}>
+  <div className="flex h-full w-full flex-col gap-2 p-2" data-canvas-no-zoom>
     <textarea
       value={contentValue}
       placeholder="输入剧本内容，或通过工具栏「导入小说章节」自动生成…"

@@ -263,7 +263,7 @@ export default function SceneListNodeView({
   };
 
   return (
-    <div className="flex h-full w-full flex-col overflow-hidden" onPointerDown={(event) => event.stopPropagation()}>
+    <div className="flex h-full w-full flex-col overflow-hidden">
       {/* 头部：剧本审核 + 状态 + 列表展开/收起 */}
       <div className="flex shrink-0 items-center justify-between border-b border-[#3a3f45] bg-[#1b1d21] px-3 py-2">
         <div className="flex items-center gap-2">

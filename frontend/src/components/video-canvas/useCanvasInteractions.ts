@@ -632,6 +632,10 @@ export function useCanvasInteractions(options: UseCanvasInteractionsOptions): { 
   }, []);
 
   const onNodePointerDown = useCallback((event: ReactPointerEvent, nodeId: string) => {
+    const target = event.target as HTMLElement | null;
+    // 参考项目交互模型：拖拽从节点卡片体启动；交互控件（输入框/按钮/链接等）
+    // 自己处理按下事件，不触发节点拖拽（useFieldEditing 等已在控件上阻断冒泡）
+    if (target?.closest('input, textarea, select, button, a, [contenteditable="true"], [data-no-drag]')) return;
     const temporaryTool = event.ctrlKey || isSpacePressed;
     const effectiveTool = temporaryTool ? (tool === 'select' ? 'pan' : 'select') : tool;
     if (event.button === 0 && effectiveTool === 'pan') {
