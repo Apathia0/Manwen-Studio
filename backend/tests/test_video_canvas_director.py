@@ -330,3 +330,85 @@ def test_orchestrate_fails_after_second_structural_rejection(monkeypatch):
         ))
     assert exc_info.value.code == "director_plan_quality_failed"
     assert "仍未生成有效方案" in str(exc_info.value)
+
+
+def test_prompt_stage_requires_multi_grid_storyboard():
+    text = DIRECTOR_PROMPT_SYSTEM_PROMPT
+    assert "单图多格" in text
+    assert "禁止把 storyboard_prompt 写成单一画面" in text
+    assert "左上角标注对应时间段" in text
+
+
+def test_single_frame_storyboard_prompt_rebuilt_to_grid():
+    import services.video_canvas_director as director
+
+    async def fake_call(*, system, user, api_key, max_tokens=32768):
+        if system == DIRECTOR_PROMPT_SYSTEM_PROMPT:
+            return {"units": [{
+                "unit_id": "u-001",
+                "video_prompt": "出租屋内陈玄从床上坐起，镜头特写",
+                "storyboard_prompt": "承接上一单元，陈玄的迷惑表情特写，镜头缓慢推进",  # 单帧文案
+                "storyboard_json": {"segments": [
+                    {"start_second": 0, "end_second": 3.5, "visual_action": "陈玄猛然坐起", "dialogue_or_narration": ""},
+                    {"start_second": 3.5, "end_second": 6, "visual_action": "环顾四周", "dialogue_or_narration": "陈玄：这是哪里？"},
+                ]},
+            }]}
+        raw = _make_raw_plan()
+        raw["units"] = [raw["units"][0]]
+        return raw
+
+    monkey_patched = director
+    monkey_patched_call = fake_call
+    import asyncio
+    original = director._call_deepseek_json
+    director._call_deepseek_json = monkey_patched_call
+    try:
+        plan = asyncio.run(orchestrate_scene_video_units(
+            scenes=_make_scenes()[:1],
+            source_screenplay_hash="h", source_scene_node_id="s", source_scene_revision="r",
+        ))
+    finally:
+        director._call_deepseek_json = original
+
+    prompt = plan["units"][0]["storyboard_prompt"]
+    assert "单图多格" in prompt
+    assert "格1（0-3.5s）" in prompt
+    assert "格2（3.5-6s）" in prompt
+    assert "对白 陈玄：「这是哪里？」" in prompt
+    assert any("不符合多格规范" in warning for warning in plan["warnings"])
+
+
+def test_grid_prompt_with_time_labels_preserved():
+    import services.video_canvas_director as director
+
+    grid_prompt = "一张分镜展示图，格1（0-3s）动作A，格2（3-6s）动作B"
+    raw_plan_unit = {
+        "unit_id": "u-001", "sequence": 1, "scene_ids": [1], "beat_ids": ["1.1", "1.2"],
+        "duration_seconds": 6, "duration_reason": "测试",
+        "story_summary": "概要", "dialogue_or_narration": "林晚：妈，这么晚打给我干嘛？",
+        "video_prompt": "动作与对白完整推进的一个视频单元画面描述",
+        "storyboard_prompt": grid_prompt,
+    }
+
+    async def fake_call(*, system, user, api_key, max_tokens=32768):
+        if system == DIRECTOR_PROMPT_SYSTEM_PROMPT:
+            return {"units": [raw_plan_unit]}
+        raw = _make_raw_plan()
+        raw["units"] = [raw["units"][0]]
+        return raw
+
+    original = director._call_deepseek_json
+    director._call_deepseek_json = fake_call
+    try:
+        plan = _run_orchestrate(director)
+    finally:
+        director._call_deepseek_json = original
+    assert plan["units"][0]["storyboard_prompt"] == grid_prompt
+
+
+def _run_orchestrate(director):
+    import asyncio
+    return asyncio.run(orchestrate_scene_video_units(
+        scenes=_make_scenes()[:1],
+        source_screenplay_hash="h", source_scene_node_id="s", source_scene_revision="r",
+    ))

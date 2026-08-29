@@ -122,7 +122,15 @@ DIRECTOR_PROMPT_SYSTEM_PROMPT = """# ROLE
   4. 对白/旁白原文（如有，用「角色名：「台词」」格式，原样保留）
   5. 与前后单元的衔接提示（承接上一单元的动作惯性/情绪，结尾为下一单元留出动势）
   6. 景别与运镜（推拉摇移跟随内容节奏）
-- storyboard_json（可选）：该单元内部的时间分段脚本，格式：
+- storyboard_prompt：**一张单图多格的故事板分镜展示图**提示词，格式硬性要求：
+  1. 一张横向多格排布的分镜展示图，格数 = 该单元 storyboard_json.segments 分段数（动态 2-6 格，不固定）
+  2. 每格左上角标注对应时间段，如「0-3.5s」「3.5-7s」
+  3. 每格画面 = 该段 visual_action（人物动作、姿态、表情、景别与构图；禁止外貌/服装描写，外观由参考图决定）
+  4. 每格下方渲染该段对白/旁白原文文字：「对白 角色名：「台词」」或「旁白：「xxx」」；无对白的格标注「无对白」
+  5. 所有格子中角色外貌、服装、场景与画风保持一致，与参考图风格统一
+  6. 图片顶部渲染信息条文字：「单元标题」+「总时长 N 秒」
+  ❌ 禁止把 storyboard_prompt 写成单一画面/单帧特写的镜头文案（如"表情特写，镜头缓慢推进"）——那是视频提示词，不是分镜图
+- storyboard_json：该单元内部的时间分段脚本，格式：
   {"segments": [{"start_second": 0, "end_second": 3.5, "story_task": "...", "visual_action": "...", "dialogue_or_narration": "原文或空串", "camera_direction": "..."}]}
   分段数量由内容决定（不固定 3/5/6 段），所有段落的起止时间必须连续并恰好覆盖 [0, duration_seconds]。
 
@@ -136,7 +144,7 @@ DIRECTOR_PROMPT_SYSTEM_PROMPT = """# ROLE
 输出纯 JSON：
 {
   "units": [
-    {"unit_id": "u-001", "video_prompt": "...", "storyboard_prompt": "（可选）", "storyboard_json": {"segments": [...]}}
+    {"unit_id": "u-001", "video_prompt": "...", "storyboard_prompt": "多格分镜展示图提示词", "storyboard_json": {"segments": [...]}}
   ]
 }
 """
@@ -622,29 +630,6 @@ def normalize_and_validate_director_plan(
     return plan, []
 
 
-def _fallback_storyboard_prompt(unit: dict[str, Any], scene_map: dict[str, dict[str, Any]]) -> str:
-    """分镜提示词兜底：用编排字段拼出可直接生成故事板线稿图的提示词。"""
-    scene = scene_map.get(str((unit.get("scene_ids") or [""])[0])) or {}
-    parts: list[str] = ["一张完整的电影级故事板线稿展示图，黑白线条，清晰轮廓，适合后续上色"]
-    location = str(scene.get("location") or "").strip()
-    time_of_day = str(scene.get("time_of_day") or "").strip()
-    if location or time_of_day:
-        parts.append(f"场景环境：{location or '未明确地点'}，{time_of_day or '时间未明确'}，光线与空间布局清晰")
-    action = unit.get("action_plan") or unit.get("story_summary")
-    if action:
-        parts.append(f"核心画面：{action}，人物只表现动作姿态与表情，不描绘外貌服装")
-    if unit.get("emotion_plan"):
-        parts.append(f"情绪氛围：{unit['emotion_plan']}")
-    anchors = [item.get("description") for item in (unit.get("visual_anchors") or []) if isinstance(item, dict) and item.get("description")]
-    if anchors:
-        parts.append("画面锚点：" + "；".join(str(item) for item in anchors[:6]))
-    if unit.get("dialogue_or_narration"):
-        parts.append(f"分镜格下方标注文字「对白：{unit['dialogue_or_narration']}」")
-    if unit.get("camera_plan"):
-        parts.append(f"景别与构图：{unit['camera_plan']}")
-    return "\n".join(parts)
-
-
 def _compact_unit_warnings(warnings: list[str]) -> list[str]:
     """把逐单元重复的警告聚合为一条计数提示，避免提示风暴淹没界面。"""
     unit_pattern = re.compile(r"^单元\s+(\S+)\s+(.+)$")
@@ -670,6 +655,73 @@ def _compact_unit_warnings(warnings: list[str]) -> list[str]:
         out.append(f"{count} 个单元：{key}" if count > 1 else key)
     return out
 
+
+
+_TIME_RANGE_PATTERN = re.compile(r"\d+(?:\.\d+)?\s*(?:s|秒)?\s*[-–—~至]\s*\d+(?:\.\d+)?\s*(?:s|秒)")
+
+
+def _looks_like_grid_prompt(prompt: str) -> bool:
+    """判断分镜提示词是否已是"单图多格"格式：至少出现两处时间段标注。"""
+    return len(_TIME_RANGE_PATTERN.findall(prompt or "")) >= 2
+
+
+def _format_dialogue_label(line: str) -> str:
+    """把剧本对白/旁白行格式化为格下渲染文字。"""
+    text = str(line or "").strip()
+    if not text:
+        return "无对白"
+    if text.startswith("旁白"):
+        rest = text.split("：", 1)[1].strip() if "：" in text else text[2:].strip()
+        return f"旁白：「{rest.strip('「」”')}」"
+    if "：" in text:
+        character, spoken = text.split("：", 1)
+        return f"对白 {character.strip()}：「{spoken.strip().strip('「」”')}」"
+    return f"旁白：「{text.strip('「」”')}」"
+
+
+def _compose_storyboard_grid_prompt(
+    unit: dict[str, Any],
+    scene_map: dict[str, dict[str, Any]],
+    beat_entries: list[dict[str, Any]] | None = None,
+) -> str:
+    """确定性多格分镜提示词：按 segments（或节拍）逐格生成，保证"一张图多格"格式。"""
+    scene = scene_map.get(str((unit.get("scene_ids") or [""])[0])) or {}
+    location = str(scene.get("location") or "").strip()
+    time_of_day = str(scene.get("time_of_day") or "").strip()
+    duration = unit.get("duration_seconds")
+
+    storyboard = unit.get("storyboard_json") if isinstance(unit.get("storyboard_json"), dict) else {}
+    raw_segments = storyboard.get("segments") if isinstance(storyboard.get("segments"), list) else []
+
+    cells: list[tuple[str, str, str]] = []  # (时间标注, 画面, 渲染文字)
+    for segment in raw_segments or []:
+        if not isinstance(segment, dict):
+            continue
+        start = segment.get("start_second")
+        end = segment.get("end_second")
+        label = f"{start:g}-{end:g}s" if isinstance(start, (int, float)) and isinstance(end, (int, float)) else ""
+        visual = str(segment.get("visual_action") or segment.get("story_task") or "").strip()
+        dialogue = _format_dialogue_label(str(segment.get("dialogue_or_narration") or "").strip())
+        cells.append((label, visual, dialogue))
+    if not cells:
+        for beat in beat_entries or []:
+            visual = str(beat.get("action") or "").strip()
+            dialogue = _format_dialogue_label("；".join(_dialogue_lines(beat.get("dialogue"))))
+            cells.append(("", visual, dialogue))
+
+    parts: list[str] = [
+        f"一张完整的电影故事板分镜展示图（单图多格 Storyboard Grid Sheet），横向共 {len(cells)} 格均匀排布，"
+        "整体线稿清晰、构图一致，角色外貌服装严格与参考图一致，禁止任何外貌描写",
+    ]
+    if location or time_of_day:
+        parts.append(f"场景基调：{location or '未明确地点'}，{time_of_day or ''}，光线与空间风格全图统一")
+    title = str(unit.get("title") or unit.get("unit_id") or "")
+    parts.append(f"图片顶部渲染信息条文字：「单元 {title}」+「总时长 {duration if isinstance(duration, int) else '?'} 秒」")
+    for index, (label, visual, dialogue) in enumerate(cells, start=1):
+        header = f"格{index}" + (f"（{label}）" if label else "")
+        parts.append(f"{header}：{visual or '关键动作画面'}；格下方渲染文字「{dialogue}」")
+    parts.append("全图角色妆容、服装、场景道具跨格保持完全一致；每个格子为独立画框，框间留白分隔")
+    return "\n".join(parts)
 
 
 def _fallback_video_prompt(unit: dict[str, Any], scene_map: dict[str, dict[str, Any]]) -> str:
@@ -785,11 +837,22 @@ async def orchestrate_scene_video_units(
                 unit["storyboard_json"] = None
                 plan["warnings"] = list(dict.fromkeys([*(plan.get("warnings") or []), f"单元 {unit['unit_id']} 镜头阶段返回的时间轴不完整，已丢弃该可选脚本"]))
 
-    # 分镜提示词兜底：无论镜头阶段成败，保证每个单元都有可用于生成故事板的提示词
+    # 分镜提示词多格强制：不合格（单帧文案/缺失）一律按分段时间轴确定性重建
+    alias_to_canonical, beats_index = _build_beat_index(scenes)
+    rebuilt_units = 0
     for unit in plan["units"]:
-        if not unit.get("storyboard_prompt"):
-            unit["storyboard_prompt"] = _fallback_storyboard_prompt(unit, scene_map)
-            plan["warnings"] = list(dict.fromkeys([*(plan.get("warnings") or []), f"单元 {unit['unit_id']} 缺少分镜提示词，已生成基础分镜提示词"]))
+        ai_prompt = unit.get("storyboard_prompt") or ""
+        unit_beats = [
+            beats_index[canonical][1]
+            for canonical in (alias_to_canonical.get(beat_key, "") for beat_key in unit.get("beat_ids", []))
+            if canonical in beats_index
+        ]
+        if not _looks_like_grid_prompt(ai_prompt):
+            unit["storyboard_prompt"] = _compose_storyboard_grid_prompt(unit, scene_map, unit_beats)
+            if ai_prompt:
+                rebuilt_units += 1
+    if rebuilt_units:
+        plan["warnings"] = list(dict.fromkeys([*(plan.get("warnings") or []), f"{rebuilt_units} 个单元的分镜提示词不符合多格规范，已按分段时间轴重建"]))
 
     plan["warnings"] = _compact_unit_warnings(plan["warnings"])
     return plan

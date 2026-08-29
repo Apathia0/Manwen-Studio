@@ -1173,6 +1173,8 @@ export default function VideoCanvasPanel({ storyId, chapterId, workflow: _workfl
               node_role: 'storyboard',
               prompt: unit.storyboard_prompt || unit.video_prompt,
               storyboard_json: unit.storyboard_json ?? null,
+              size: '1920x1080',
+              aspect_ratio: '16:9',
             },
           },
         });
