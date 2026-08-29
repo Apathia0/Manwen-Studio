@@ -4769,6 +4769,32 @@ export async function activateShotClip(shotId: number, clipId: number): Promise<
   return { active_clip_id: clipId };
 }
 
+export async function listStoryVideoAssets(storyId: number, assetType?: string): Promise<{ story_id: number; assets: VideoAsset[] }> {
+  const params = assetType ? `?asset_type=${encodeURIComponent(assetType)}` : '';
+  const res = await fetch(`${BASE}/api/stories/${storyId}/video-assets${params}`, {
+    headers: apiHeaders(),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
+  return res.json();
+}
+
+export async function createStoryVideoAsset(storyId: number, payload: {
+  asset_type: string;
+  name: string;
+  file_path: string;
+  provider?: string;
+  prompt?: string;
+  meta?: Record<string, unknown>;
+}): Promise<VideoAsset> {
+  const res = await fetch(`${BASE}/api/stories/${storyId}/video-assets`, {
+    method: 'POST',
+    headers: apiHeaders(true),
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
+  return res.json();
+}
+
 export async function listVideoAssets(chapterId: number, assetType?: string): Promise<{ chapter_id: number; assets: VideoAsset[] }> {
   const params = assetType ? `?asset_type=${encodeURIComponent(assetType)}` : '';
   const res = await fetch(`${BASE}/api/chapters/${chapterId}/video-assets${params}`, {

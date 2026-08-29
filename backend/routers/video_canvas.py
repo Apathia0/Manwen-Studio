@@ -34,6 +34,7 @@ from models import (
     VideoCanvasVersion,
 )
 from schemas import (
+    CreateVideoAssetRequest,
     MangaDramaProjectCreate,
     VideoCanvasCompileScenesRequest,
     VideoCanvasCreate,
@@ -1675,6 +1676,75 @@ def _compile_scene_items_legacy(scene_items: list[dict[str, Any]], config: dict[
             }
         )
     return compiled
+
+
+STORY_ASSET_TYPES = frozenset({"character_reference", "scene_reference", "prop_reference", "style_reference", "image"})
+
+
+def _serialize_canvas_asset(asset: VideoAsset) -> dict[str, Any]:
+    """序列化故事级视频资产（画布/资产管理共用）。"""
+    from routers.video import _serialize_datetime, _to_video_url
+
+    return {
+        "id": asset.id,
+        "story_id": asset.story_id,
+        "chapter_id": asset.chapter_id,
+        "scene_id": asset.scene_id,
+        "shot_id": asset.shot_id,
+        "asset_type": asset.asset_type,
+        "name": asset.name,
+        "file_path": _to_video_url(asset.file_path),
+        "provider": asset.provider,
+        "prompt": asset.prompt or "",
+        "meta": asset.meta_json or {},
+        "created_at": _serialize_datetime(asset.created_at),
+    }
+
+
+@router.get("/api/stories/{story_id}/video-assets")
+async def list_story_video_assets(
+    story_id: int,
+    request: Request,
+    asset_type: str | None = Query(default=None),
+    db: Session = Depends(get_db),
+):
+    """故事级视频资产列表（漫剧项目无章节时复用资产分析管理）。"""
+    user = _require_user(request, db)
+    _require_story(story_id, user, db)
+    query = db.query(VideoAsset).filter(VideoAsset.story_id == story_id, VideoAsset.status == "active")
+    if asset_type:
+        query = query.filter(VideoAsset.asset_type == asset_type)
+    assets = query.order_by(VideoAsset.created_at.desc()).all()
+    return {"story_id": story_id, "assets": [_serialize_canvas_asset(asset) for asset in assets]}
+
+
+@router.post("/api/stories/{story_id}/video-assets", status_code=201)
+async def create_story_video_asset(story_id: int, body: CreateVideoAssetRequest, request: Request, db: Session = Depends(get_db)):
+    """创建故事级资产（chapter_id 为空），上传文件走既有 /video-assets/{id}/replace。"""
+    user = _require_user(request, db)
+    _require_story(story_id, user, db)
+    if body.asset_type not in STORY_ASSET_TYPES:
+        raise HTTPException(422, f"资产类型仅支持：{'、'.join(sorted(STORY_ASSET_TYPES))}")
+
+    from routers.video import _validate_video_asset_storage_path
+
+    asset = VideoAsset(
+        story_id=story_id,
+        chapter_id=None,
+        scene_id=None,
+        shot_id=None,
+        asset_type=body.asset_type,
+        name=body.name,
+        file_path=_validate_video_asset_storage_path(body.file_path),
+        provider=body.provider or "",
+        prompt=body.prompt or "",
+        style_preset=body.style_preset or None,
+        meta_json=body.meta or {},
+    )
+    db.add(asset)
+    db.commit()
+    db.refresh(asset)
+    return _serialize_canvas_asset(asset)
 
 
 def _compile_scene_items_from_director_plan(

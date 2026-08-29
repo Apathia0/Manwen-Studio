@@ -1,14 +1,16 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { createPortal } from 'react-dom';
 import { X, Upload, Trash2, Edit3, Save, Loader2, Image, User, MapPin, Film, Download } from 'lucide-react';
-import { 
-  listVideoAssets, 
+import {
+  listVideoAssets,
   createVideoAsset,
-  deleteVideoAsset, 
-  replaceVideoAsset, 
+  listStoryVideoAssets,
+  createStoryVideoAsset,
+  deleteVideoAsset,
+  replaceVideoAsset,
   updateVideoAsset,
   toPublicVideoAssetUrl,
-  type VideoAsset 
+  type VideoAsset
 } from '../api';
 import { toast } from '../lib/toast';
 import { normalizeErrorMessage } from '../lib/errors';
@@ -16,7 +18,10 @@ import { downloadImagesAsZip, sanitizeFilename } from '../lib/zipDownload';
 import MediaImage from './shared/MediaImage';
 
 interface AssetManagementModalProps {
-  chapterId: number;
+  /** 章节级模式（小说视频工作流）；与 storyId 二选一 */
+  chapterId?: number;
+  /** 故事级模式（漫剧项目无章节，复用同一套资产分析管理） */
+  storyId?: number;
   onClose: () => void;
   onAssetsChanged?: () => void;
 }
@@ -122,7 +127,7 @@ function AssetCard({
   );
 }
 
-export default function AssetManagementModal({ chapterId, onClose, onAssetsChanged }: AssetManagementModalProps) {
+export default function AssetManagementModal({ chapterId, storyId, onClose, onAssetsChanged }: AssetManagementModalProps) {
   const [assets, setAssets] = useState<VideoAsset[]>([]);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<AssetTab>('all');
@@ -143,7 +148,9 @@ export default function AssetManagementModal({ chapterId, onClose, onAssetsChang
   const loadAssets = useCallback(async () => {
     setLoading(true);
     try {
-      const data = await listVideoAssets(chapterId);
+      const data = storyId
+        ? await listStoryVideoAssets(storyId)
+        : await listVideoAssets(chapterId as number);
       setAssets(data.assets || []);
     } catch (e) {
       console.error('加载资产失败:', e);
@@ -151,7 +158,7 @@ export default function AssetManagementModal({ chapterId, onClose, onAssetsChang
     } finally {
       setLoading(false);
     }
-  }, [chapterId]);
+  }, [chapterId, storyId]);
 
   useEffect(() => {
     loadAssets();
@@ -203,12 +210,15 @@ export default function AssetManagementModal({ chapterId, onClose, onAssetsChang
 
     setUploading(true);
     try {
-      const newAsset = await createVideoAsset(chapterId, {
+      const assetPayload = {
         asset_type: uploadType,
         name: uploadName.trim(),
         file_path: '',
         provider: 'manual_upload',
-      });
+      };
+      const newAsset = storyId
+        ? await createStoryVideoAsset(storyId, assetPayload)
+        : await createVideoAsset(chapterId as number, assetPayload);
       
       await replaceVideoAsset(newAsset.id, uploadFile);
       

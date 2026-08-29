@@ -1081,64 +1081,117 @@ export default function VideoCanvasPanel({ storyId, chapterId, workflow: _workfl
         return;
       }
       captureHistory();
-      // 替换本场景此前编译出的导演视频节点（稳定 ID，不叠加重复组）
+      // 替换本场景此前编译出的导演节点（分镜图+视频，稳定 ID，不叠加重复组）
       const previousIds = new Set(nodes
-        .filter((node) => node.type === 'video' && (node.data.config as Record<string, unknown> | undefined)?.source_scene_node === nodeId && (node.data.config as Record<string, unknown>).duration_policy === 'director_dynamic')
+        .filter((node) => node.id !== nodeId && (node.data.config as Record<string, unknown> | undefined)?.source_scene_node === nodeId && (node.data.config as Record<string, unknown>).unit_id)
         .map((node) => node.id));
       const compiled: CompiledSceneUnit[] = result.compiled;
       const anchor = { x: sceneNode.position.x + (Number(sceneNode.data.ui?.width) || 300) + 60, y: sceneNode.position.y };
       const existingRects = nodes
         .filter((node) => !previousIds.has(node.id) && node.id !== nodeId)
-        .map((node) => ({ x: node.position.x, y: node.position.y, width: Number(node.data.ui?.width) || 340, height: Number(node.data.ui?.height) || 220 }));
+        .map((node) => ({ x: node.position.x, y: node.position.y, width: Number(node.data.ui?.width) || 420, height: Number(node.data.ui?.height) || 236 }));
+      // 生成顺序：分镜图（用户先审核画面）→ 图生视频节点
       const positions = layoutDirectorUnits(
         compiled.map((unit) => ({ sequence: unit.sequence, unit_id: unit.unit_id })),
         anchor,
         existingRects,
+        { nodeWidth: 420, nodeHeight: 236, gapX: 40, gapY: 60, maxPerRow: 4 },
       );
-      const newNodes: CanvasNode[] = compiled.map((unit) => ({
-        id: unitNodeId(nodeId, unit.unit_id),
-        type: 'video',
-        position: positions.get(unit.unit_id) || { x: anchor.x, y: anchor.y },
-        data: {
-          label: `${unit.sequence}. ${unit.title || unit.unit_id}`,
-          nodeType: 'video',
-          config: {
-            prompt: unit.video_prompt,
-            storyboard_prompt: unit.storyboard_prompt || '',
-            storyboard_json: unit.storyboard_json ?? null,
-            duration_seconds: unit.duration_seconds,
-            duration_requested: unit.duration_requested ?? null,
-            duration_reason: unit.duration_reason || '',
-            duration_policy: 'director_dynamic',
-            sequence: unit.sequence,
-            unit_id: unit.unit_id,
-            source_scene_node: nodeId,
-            source_scene_ids: unit.source_scene_ids ?? [],
-            source_beat_ids: unit.source_beat_ids ?? [],
-            characters: unit.characters ?? [],
-            visual_anchors: unit.visual_anchors ?? [],
-            transition_in: unit.transition_in || '',
-            transition_out: unit.transition_out || '',
-            continuity: unit.continuity ?? {},
-            director_plan_hash: unit.director_plan_hash || directorPlanHash,
+      const occupied: { x: number; y: number; width: number; height: number }[] = [
+        ...existingRects,
+        ...compiled.map((unit) => { const pos = positions.get(unit.unit_id) || anchor; return { x: pos.x, y: pos.y, width: 420, height: 236 }; }),
+      ];
+      const hits = (rect: { x: number; y: number; width: number; height: number }) => occupied.some((other) => rect.x < other.x + other.width && rect.x + rect.width > other.x && rect.y < other.y + other.height && rect.y + rect.height > other.y);
+      const placeStoryboard = (videoPos: { x: number; y: number }) => {
+        const candidates = [
+          { x: videoPos.x - 456, y: videoPos.y },
+          { x: videoPos.x - 456, y: videoPos.y + 296 },
+          { x: videoPos.x, y: videoPos.y + 296 },
+          { x: videoPos.x + 460, y: videoPos.y },
+        ];
+        for (let step = 2; step <= 8; step += 1) {
+          candidates.push({ x: videoPos.x + 460 * step, y: videoPos.y });
+        }
+        for (const candidate of candidates) {
+          const rect = { ...candidate, width: 420, height: 236 };
+          if (!hits(rect)) {
+            occupied.push(rect);
+            return candidate;
+          }
+        }
+        const fallback = { x: videoPos.x - 456, y: videoPos.y };
+        occupied.push({ ...fallback, width: 420, height: 236 });
+        return fallback;
+      };
+      const newNodes: CanvasNode[] = [];
+      const newEdges: CanvasEdge[] = [];
+      for (const unit of compiled) {
+        const videoId = unitNodeId(nodeId, unit.unit_id);
+        const storyboardId = `${videoId}-sb`;
+        const videoPos = positions.get(unit.unit_id) || anchor;
+        const baseConfig = {
+          duration_seconds: unit.duration_seconds,
+          duration_requested: unit.duration_requested ?? null,
+          duration_reason: unit.duration_reason || '',
+          duration_policy: 'director_dynamic',
+          sequence: unit.sequence,
+          unit_id: unit.unit_id,
+          source_scene_node: nodeId,
+          source_scene_ids: unit.source_scene_ids ?? [],
+          source_beat_ids: unit.source_beat_ids ?? [],
+          characters: unit.characters ?? [],
+          visual_anchors: unit.visual_anchors ?? [],
+          transition_in: unit.transition_in || '',
+          transition_out: unit.transition_out || '',
+          continuity: unit.continuity ?? {},
+          director_plan_hash: unit.director_plan_hash || directorPlanHash,
+        };
+        // 分镜图节点：用户先审图确认画面质量，再图生视频
+        newNodes.push({
+          id: storyboardId,
+          type: 'image',
+          position: placeStoryboard(videoPos),
+          data: {
+            label: `分镜 ${unit.sequence}. ${unit.title || unit.unit_id}`,
+            nodeType: 'image',
+            config: {
+              ...baseConfig,
+              node_role: 'storyboard',
+              prompt: unit.storyboard_prompt || unit.video_prompt,
+              storyboard_json: unit.storyboard_json ?? null,
+            },
           },
-        },
-      }));
-      const newEdges: CanvasEdge[] = newNodes.map((videoNode) => ({
-        id: `e-${nodeId}-${videoNode.id}`,
-        source: nodeId,
-        sourceHandle: 'shot',
-        target: videoNode.id,
-        targetHandle: 'prompt',
-        data: { sequence: Number((videoNode.data.config as Record<string, unknown>).sequence) || 0, unit_id: String((videoNode.data.config as Record<string, unknown>).unit_id || '') },
-      }));
+        });
+        newNodes.push({
+          id: videoId,
+          type: 'video',
+          position: videoPos,
+          data: {
+            label: `${unit.sequence}. ${unit.title || unit.unit_id}`,
+            nodeType: 'video',
+            config: {
+              ...baseConfig,
+              node_role: 'video',
+              prompt: unit.video_prompt,
+              storyboard_prompt: unit.storyboard_prompt || '',
+              storyboard_json: unit.storyboard_json ?? null,
+              storyboard_node: storyboardId,
+            },
+          },
+        });
+        newEdges.push(
+          { id: `e-${nodeId}-${storyboardId}`, source: nodeId, sourceHandle: 'shot', target: storyboardId, targetHandle: 'prompt', data: { sequence: unit.sequence, unit_id: unit.unit_id } },
+          { id: `e-${storyboardId}-${videoId}`, source: storyboardId, sourceHandle: 'image', target: videoId, targetHandle: 'image', data: { sequence: unit.sequence, unit_id: unit.unit_id } },
+          { id: `e-${nodeId}-${videoId}`, source: nodeId, sourceHandle: 'shot', target: videoId, targetHandle: 'prompt', data: { sequence: unit.sequence, unit_id: unit.unit_id } },
+        );
+      }
       setNodes((current) => [...current.filter((node) => !previousIds.has(node.id)), ...newNodes]);
       setEdges((current) => [...current.filter((edge) => !previousIds.has(edge.source) && !previousIds.has(edge.target)), ...newEdges]);
       updateSceneNodeConfig(nodeId, { director_plan_stale: false });
       setDirty(true);
       const normalizedCount = compiled.filter((item) => item.duration_requested != null && item.duration_requested !== item.duration_seconds).length;
       const totalSeconds = compiled.reduce((sum, item) => sum + (Number(item.duration_seconds) || 0), 0);
-      toast.success(`已按导演编排生成 ${compiled.length} 个视频节点（共 ${totalSeconds} 秒${normalizedCount ? `，${normalizedCount} 个时长经模型档位归一` : ''}）`);
+      toast.success(`已生成 ${compiled.length} 张分镜图 + ${compiled.length} 个视频节点（共 ${totalSeconds} 秒${normalizedCount ? `，${normalizedCount} 个时长经模型档位归一` : ''}）。建议先运行分镜图确认画面，再图生视频`);
     } catch (error) {
       toast.error(normalizeErrorMessage(error, '应用导演编排失败'));
     } finally {
@@ -1227,7 +1280,7 @@ const mediaKind = nodeView.type === 'image' || nodeView.type === 'video' ? nodeV
       {createMenuPosition && <CanvasCreateMenu position={screenPoint(createMenuPosition, editorViewport)} onSelect={(type) => { const item = catalog.find((entry) => entry.type === type); if (item && createMenuPosition) { captureHistory(); addCatalogNode(item, createMenuPosition); } interaction.closeCreateMenu(); }} onClose={interaction.closeCreateMenu} />}
       {miniMapOpen && <CanvasMiniMap nodes={nodes.map((node) => ({ id: node.id, position: node.position, width: node.data.ui?.width, height: node.data.ui?.height, type: node.type }))} viewport={editorViewport} viewportSize={canvasSize} onViewportChange={(next) => updateViewport({ x: next.x, y: next.y, k: next.scale })} />}
       <CanvasZoomControls scale={viewport.k} onScaleChange={(k) => updateViewport({ ...viewport, k })} onReset={() => { const rect = surfaceRef.current?.getBoundingClientRect(); updateViewport({ x: rect ? rect.width / 2 : 260, y: rect ? rect.height / 2 : 120, k: 1 }); }} isMiniMapOpen={miniMapOpen} onToggleMiniMap={() => setMiniMapOpen((open) => !open)} />
-      <CanvasBottomToolbar scale={viewport.k} supportsAudio={false} onScaleChange={(k) => updateViewport({ ...viewport, k })} onReset={() => { const rect = surfaceRef.current?.getBoundingClientRect(); updateViewport({ x: rect ? rect.width / 2 : 260, y: rect ? rect.height / 2 : 120, k: 1 }); }} onFit={fitAll} onUndo={undo} onRedo={redo} onAutoLayout={autoLayoutCanvas} onOpenAssetManagement={() => onOpenAssetManagement?.()} isAssetManagementDisabled={!chapterId} onTool={(nextTool) => { if (nextTool === 'select' || nextTool === 'pan') setTool(nextTool); else if (nextTool === 'help') toast.info('空格或中键平移，滚轮缩放，框选多个节点'); }} activeTool={tool} onAddNode={(type) => addNodeFromTool(type)} />
+      <CanvasBottomToolbar scale={viewport.k} supportsAudio={false} onScaleChange={(k) => updateViewport({ ...viewport, k })} onReset={() => { const rect = surfaceRef.current?.getBoundingClientRect(); updateViewport({ x: rect ? rect.width / 2 : 260, y: rect ? rect.height / 2 : 120, k: 1 }); }} onFit={fitAll} onUndo={undo} onRedo={redo} onAutoLayout={autoLayoutCanvas} onOpenAssetManagement={() => onOpenAssetManagement?.()} isAssetManagementDisabled={!chapterId && !onOpenAssetManagement} onTool={(nextTool) => { if (nextTool === 'select' || nextTool === 'pan') setTool(nextTool); else if (nextTool === 'help') toast.info('空格或中键平移，滚轮缩放，框选多个节点'); }} activeTool={tool} onAddNode={(type) => addNodeFromTool(type)} />
       {importDialogOpen && canvas && <ChapterImportDialog canvasId={canvas.id} onClose={() => setImportDialogOpen(false)} onImported={handleScreenplayImported} />}
   </div>;
 

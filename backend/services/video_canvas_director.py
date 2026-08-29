@@ -622,6 +622,56 @@ def normalize_and_validate_director_plan(
     return plan, []
 
 
+def _fallback_storyboard_prompt(unit: dict[str, Any], scene_map: dict[str, dict[str, Any]]) -> str:
+    """分镜提示词兜底：用编排字段拼出可直接生成故事板线稿图的提示词。"""
+    scene = scene_map.get(str((unit.get("scene_ids") or [""])[0])) or {}
+    parts: list[str] = ["一张完整的电影级故事板线稿展示图，黑白线条，清晰轮廓，适合后续上色"]
+    location = str(scene.get("location") or "").strip()
+    time_of_day = str(scene.get("time_of_day") or "").strip()
+    if location or time_of_day:
+        parts.append(f"场景环境：{location or '未明确地点'}，{time_of_day or '时间未明确'}，光线与空间布局清晰")
+    action = unit.get("action_plan") or unit.get("story_summary")
+    if action:
+        parts.append(f"核心画面：{action}，人物只表现动作姿态与表情，不描绘外貌服装")
+    if unit.get("emotion_plan"):
+        parts.append(f"情绪氛围：{unit['emotion_plan']}")
+    anchors = [item.get("description") for item in (unit.get("visual_anchors") or []) if isinstance(item, dict) and item.get("description")]
+    if anchors:
+        parts.append("画面锚点：" + "；".join(str(item) for item in anchors[:6]))
+    if unit.get("dialogue_or_narration"):
+        parts.append(f"分镜格下方标注文字「对白：{unit['dialogue_or_narration']}」")
+    if unit.get("camera_plan"):
+        parts.append(f"景别与构图：{unit['camera_plan']}")
+    return "\n".join(parts)
+
+
+def _compact_unit_warnings(warnings: list[str]) -> list[str]:
+    """把逐单元重复的警告聚合为一条计数提示，避免提示风暴淹没界面。"""
+    unit_pattern = re.compile(r"^单元\s+(\S+)\s+(.+)$")
+    grouped: dict[str, int] = {}
+    group_order: list[str] = []
+    plain: list[str] = []
+    for warning in warnings:
+        text = str(warning or "").strip()
+        if not text:
+            continue
+        match = unit_pattern.match(text)
+        if match:
+            key = match.group(2)
+            if key not in grouped:
+                grouped[key] = 0
+                group_order.append(key)
+            grouped[key] += 1
+        elif text not in plain:
+            plain.append(text)
+    out = list(plain)
+    for key in group_order:
+        count = grouped[key]
+        out.append(f"{count} 个单元：{key}" if count > 1 else key)
+    return out
+
+
+
 def _fallback_video_prompt(unit: dict[str, Any], scene_map: dict[str, dict[str, Any]]) -> str:
     """镜头导演阶段失败时的确定性兜底：用编排字段拼出可用提示词。"""
     parts: list[str] = []
@@ -694,22 +744,34 @@ async def orchestrate_scene_video_units(
     try:
         prompt_user = build_director_prompt_user_prompt(plan)
         prompt_result = await _call_deepseek_json(system=DIRECTOR_PROMPT_SYSTEM_PROMPT, user=prompt_user, api_key=api_key, max_tokens=32768)
-        prompt_map = {
-            str(item.get("unit_id")): item
-            for item in (prompt_result.get("units") or [])
-            if isinstance(item, dict) and str(item.get("unit_id") or "").strip()
+        items = [item for item in (prompt_result.get("units") or []) if isinstance(item, dict)]
+        by_id = {
+            str(item.get("unit_id") or "").strip(): item
+            for item in items
+            if str(item.get("unit_id") or "").strip()
         }
+        # 模型常改写 unit_id：按 id 匹配率过低时退回按顺序一一对应
+        matched = sum(1 for unit in plan["units"] if unit["unit_id"] in by_id)
+        use_positional = matched < max(1, len(plan["units"]) // 2)
+        if use_positional:
+            logger.info("镜头导演 unit_id 匹配率低（%s/%s），按顺序回退匹配", matched, len(plan["units"]))
+        prompt_map = {} if use_positional else by_id
     except UpstreamServiceError as exc:
         logger.warning("镜头导演阶段失败，使用编排字段兜底: %s", exc)
+        items = []
         prompt_map = {}
-    if not prompt_map:
+        use_positional = False
+    if not prompt_map and not (use_positional and len(items) == len(plan["units"])):
         plan["warnings"] = list(dict.fromkeys([*(plan.get("warnings") or []), "镜头提示词阶段失败，已使用编排信息生成基础提示词"]))
 
-    for unit in plan["units"]:
+    for index, unit in enumerate(plan["units"]):
         detail = prompt_map.get(str(unit["unit_id"])) or {}
+        if not detail and use_positional and len(items) == len(plan["units"]):
+            detail = items[index] or {}
         video_prompt = str(detail.get("video_prompt") or "").strip()
         if not video_prompt:
             video_prompt = _fallback_video_prompt(unit, scene_map)
+            plan["warnings"] = list(dict.fromkeys([*(plan.get("warnings") or []), f"单元 {unit['unit_id']} 视频提示词缺失，已生成基础提示词"]))
         unit["video_prompt"] = video_prompt
         storyboard_prompt = str(detail.get("storyboard_prompt") or "").strip()
         if storyboard_prompt:
@@ -722,4 +784,12 @@ async def orchestrate_scene_video_units(
             if probe:
                 unit["storyboard_json"] = None
                 plan["warnings"] = list(dict.fromkeys([*(plan.get("warnings") or []), f"单元 {unit['unit_id']} 镜头阶段返回的时间轴不完整，已丢弃该可选脚本"]))
+
+    # 分镜提示词兜底：无论镜头阶段成败，保证每个单元都有可用于生成故事板的提示词
+    for unit in plan["units"]:
+        if not unit.get("storyboard_prompt"):
+            unit["storyboard_prompt"] = _fallback_storyboard_prompt(unit, scene_map)
+            plan["warnings"] = list(dict.fromkeys([*(plan.get("warnings") or []), f"单元 {unit['unit_id']} 缺少分镜提示词，已生成基础分镜提示词"]))
+
+    plan["warnings"] = _compact_unit_warnings(plan["warnings"])
     return plan

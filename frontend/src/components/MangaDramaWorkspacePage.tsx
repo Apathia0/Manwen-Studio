@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ArrowLeft } from 'lucide-react';
 import VideoCanvasPanel from './VideoCanvasPanel';
-import { getStory, listStylePresets, type Story, type VideoStylePreset } from '../api';
+import AssetManagementModal from './AssetManagementModal';
+import { getStory, listStylePresets, listStoryVideoAssets, type Story, type VideoAsset, type VideoStylePreset } from '../api';
 import { confirm } from '../lib/confirm';
 import { LoadingOverlay } from './ui/LoadingOverlay';
 
@@ -12,14 +13,26 @@ interface MangaDramaWorkspacePageProps {
 
 /**
  * 漫剧创作画布工作台：全屏画布模式，不加载小说章节列表与分镜列表工作流。
- * 复用 VideoCanvasPanel（chapterId 不传 → 画布绑定到项目级）。
+ * 复用 VideoCanvasPanel（chapterId 不传 → 画布绑定到项目级）；
+ * 资产分析管理走故事级资产接口，保证角色/场景/道具跨单元一致性。
  */
 export default function MangaDramaWorkspacePage({ storyId, onBack }: MangaDramaWorkspacePageProps) {
   const [story, setStory] = useState<Story | null>(null);
   const [stylePresets, setStylePresets] = useState<VideoStylePreset[]>([]);
+  const [assets, setAssets] = useState<VideoAsset[]>([]);
+  const [assetManagementOpen, setAssetManagementOpen] = useState(false);
   const [loading, setLoading] = useState(true);
   const [dirty, setDirty] = useState(false);
   const dirtyRef = useRef(false);
+
+  const loadAssets = useCallback(async () => {
+    try {
+      const data = await listStoryVideoAssets(storyId);
+      setAssets(data.assets || []);
+    } catch {
+      setAssets([]);
+    }
+  }, [storyId]);
 
   useEffect(() => {
     let cancelled = false;
@@ -39,8 +52,9 @@ export default function MangaDramaWorkspacePage({ storyId, onBack }: MangaDramaW
         if (!cancelled) setLoading(false);
       }
     })();
+    void loadAssets();
     return () => { cancelled = true; };
-  }, [storyId]);
+  }, [storyId, loadAssets]);
 
   const handleDirtyChange = useCallback((next: boolean) => {
     dirtyRef.current = next;
@@ -86,10 +100,19 @@ export default function MangaDramaWorkspacePage({ storyId, onBack }: MangaDramaW
         <VideoCanvasPanel
           key={canvasKey}
           storyId={storyId}
+          assets={assets}
           stylePresets={stylePresets}
           onDirtyChange={handleDirtyChange}
+          onOpenAssetManagement={() => setAssetManagementOpen(true)}
         />
       </div>
+      {assetManagementOpen && (
+        <AssetManagementModal
+          storyId={storyId}
+          onClose={() => setAssetManagementOpen(false)}
+          onAssetsChanged={() => void loadAssets()}
+        />
+      )}
     </div>
   );
 }
