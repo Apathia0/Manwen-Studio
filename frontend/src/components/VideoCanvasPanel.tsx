@@ -1004,7 +1004,14 @@ export default function VideoCanvasPanel({ storyId, chapterId, workflow: _workfl
     if (!sceneNode) return;
     setCompilingNodeId(nodeId);
     try {
-      const result = await compileScenes(canvas.id, [nodeId]);
+      // 审批状态和场景编辑先保存到最新画布版本，后端编译才能读取 approved=true。
+      let targetCanvas = canvas;
+      if (dirty) {
+        const saved = await saveCanvas(false);
+        if (!saved) return;
+        targetCanvas = saved;
+      }
+      const result = await compileScenes(targetCanvas.id, [nodeId]);
       if (!result.compiled.length) {
         const reason = result.skipped[0]?.reason || '未知原因';
         toast.error(`编译失败：${reason}`);
