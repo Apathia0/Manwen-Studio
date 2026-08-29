@@ -89,6 +89,15 @@ export default function CanvasSurface({ containerRef, viewport, tool, background
       aria-label="无限画布"
       className="relative h-full w-full select-none overflow-hidden bg-[#181818] outline-none"
       style={{ cursor }}
+      onPointerDownCapture={(event) => {
+        const target = event.target as HTMLElement | null;
+        const isEditable = Boolean(target?.closest('input, textarea, select, [contenteditable="true"]'));
+        const shouldPan = event.button === 1 || (event.button === 0 && (tool === 'pan' || event.ctrlKey || state.isSpacePressed));
+        if (shouldPan && !isEditable) {
+          event.stopPropagation();
+          handlers.onCanvasMouseDown(event);
+        }
+      }}
       onPointerDown={handlers.onCanvasMouseDown}
       onDoubleClick={handlers.onCanvasDoubleClick as unknown as (event: ReactMouseEvent<HTMLDivElement>) => void}
       onWheel={handleWheel}

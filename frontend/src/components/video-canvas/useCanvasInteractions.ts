@@ -585,11 +585,14 @@ export function useCanvasInteractions(options: UseCanvasInteractionsOptions): { 
 
   const onCanvasMouseDown = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
     const target = event.target as HTMLElement | null;
-    if (target?.closest('[data-canvas-no-zoom],[data-connection-create-menu]')) return;
     const isBackgroundClick = !target?.closest('[data-node-id],[data-connection-id]');
     const temporaryTool = event.ctrlKey || isSpacePressed;
     const activeTool = temporaryTool ? (tool === 'select' ? 'pan' : 'select') : tool;
     const shouldPan = event.button === 1 || (event.button === 0 && activeTool === 'pan');
+    // Node content normally stops canvas gestures so its own controls can scroll/edit.
+    // The explicit pan tool is the exception: it must also work when pressed on a node.
+    if (!shouldPan && target?.closest('[data-canvas-no-zoom],[data-connection-create-menu]')) return;
+    if (shouldPan && target?.closest('input, textarea, select, [contenteditable="true"]')) return;
     if (shouldPan) {
       event.preventDefault();
       event.currentTarget.setPointerCapture(event.pointerId);
@@ -629,6 +632,12 @@ export function useCanvasInteractions(options: UseCanvasInteractionsOptions): { 
   }, []);
 
   const onNodePointerDown = useCallback((event: ReactPointerEvent, nodeId: string) => {
+    const temporaryTool = event.ctrlKey || isSpacePressed;
+    const effectiveTool = temporaryTool ? (tool === 'select' ? 'pan' : 'select') : tool;
+    if (event.button === 0 && effectiveTool === 'pan') {
+      // Let the bubbling canvas handler start the pan gesture.
+      return;
+    }
     event.stopPropagation();
     // 选择逻辑：Shift/Ctrl/Meta 切换，否则单选
     const nextSelected = new Set(selectedNodeIdsRef.current);
@@ -650,7 +659,7 @@ export function useCanvasInteractions(options: UseCanvasInteractionsOptions): { 
       startY: event.clientY,
       initialSelectedNodes: currentNodes.filter((node) => dragIds.has(node.id)).map((node) => ({ id: node.id, x: node.position.x, y: node.position.y })),
     };
-  }, [onSelectionChange]);
+  }, [isSpacePressed, onSelectionChange, tool]);
 
   const onNodeConnectStart = useCallback((event: ReactMouseEvent, nodeId: string, handleType: 'source' | 'target', handleKey: string) => {
     event.stopPropagation();
