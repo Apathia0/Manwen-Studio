@@ -310,7 +310,7 @@ export default function VideoCanvasPanel({ storyId, chapterId, workflow: _workfl
   useEffect(() => () => onDirtyChange?.(false), [onDirtyChange]);
   useEffect(() => {
     if (!canvas || !latestRun || !['queued', 'running', 'cancel_requested'].includes(latestRun.status)) return undefined;
-    const timer = window.setInterval(() => { void getVideoCanvasRun(canvas.id, latestRun.id).then((result) => { setLatestRun(result.run); setNodes((current) => mergeRunOutputs(result.run, current)); }).catch(() => undefined); }, 3000);
+    const timer = window.setInterval(() => { void getVideoCanvasRun(canvas.id, latestRun.id).then((result) => { setLatestRun(result.run); setNodes((current) => mergeRunOutputs(result.run, current)); }).catch(() => undefined); }, 1500);
     return () => window.clearInterval(timer);
   }, [canvas, latestRun]);
 
