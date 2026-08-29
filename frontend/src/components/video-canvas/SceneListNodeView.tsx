@@ -1,5 +1,21 @@
-import { useMemo, useState } from 'react';
-import { BookOpen, CheckCircle2, ChevronDown, ChevronRight, Clock, FileText, MapPin, ThumbsUp } from 'lucide-react';
+import { useMemo, useState, type ReactNode } from 'react';
+import {
+  AlertTriangle,
+  ArrowRight,
+  BookOpen,
+  CheckCircle2,
+  ChevronDown,
+  ChevronRight,
+  Clock,
+  FileText,
+  Link2,
+  Loader2,
+  MapPin,
+  RotateCw,
+  Sparkles,
+  Target,
+  ThumbsUp,
+} from 'lucide-react';
 import SceneNodeView, { type SceneNodeConfig } from './SceneNodeView';
 
 export interface SceneListConfig {
@@ -9,12 +25,204 @@ export interface SceneListConfig {
   [key: string]: unknown;
 }
 
-interface SceneListNodeViewProps {
+/**
+ * 导演编排的演示类型留在画布组件内，避免把画布 UI 与后端 schema 耦合。
+ * 后端新增字段时仍可通过索引签名透传，组件只依赖当前可视化字段。
+ */
+export interface DirectorPlanContinuity {
+  anchor?: string | null;
+  [key: string]: unknown;
+}
+
+export interface DirectorPlanUnit {
+  sequence?: number | string;
+  unit_index?: number | string;
+  title?: string | null;
+  duration_seconds?: number | null;
+  duration_reason?: string | null;
+  beat_ids?: Array<string | number> | null;
+  narrative_purpose?: string | null;
+  transition_out?: string | null;
+  continuity?: DirectorPlanContinuity | string | null;
+  warnings?: string[] | null;
+  [key: string]: unknown;
+}
+
+export interface DirectorPlan {
+  units?: DirectorPlanUnit[];
+  /** 兼容早期字段名 */
+  sequence?: DirectorPlanUnit[];
+  warnings?: string[] | null;
+  [key: string]: unknown;
+}
+
+function planUnits(plan?: DirectorPlan | null): DirectorPlanUnit[] {
+  if (Array.isArray(plan?.units)) return plan.units;
+  if (Array.isArray(plan?.sequence)) return plan.sequence;
+  return [];
+}
+
+export interface SceneListNodeViewProps {
   config: SceneListConfig;
   /** partial 合并进节点 config */
   onChange: (partial: Record<string, unknown>) => void;
   /** 统一审批 / 撤销（作用整个节点内所有场景） */
   onToggleApproved?: () => void;
+  /** 聚合场景审批后的 AI 导演编排状态与操作 */
+  directorPlan?: DirectorPlan | null;
+  directorPlanLoading?: boolean;
+  directorPlanError?: string | null;
+  onGenerateDirectorPlan?: () => void;
+  onApplyDirectorPlan?: () => void;
+  directorPlanStale?: boolean;
+}
+
+function displayText(value: unknown): string {
+  return String(value ?? '').trim();
+}
+
+function displayList(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.map((item) => displayText(item)).filter(Boolean);
+}
+
+function continuityAnchor(unit: DirectorPlanUnit): string {
+  if (typeof unit.continuity === 'string') return unit.continuity.trim();
+  if (unit.continuity && typeof unit.continuity === 'object') return displayText(unit.continuity.anchor);
+  return '';
+}
+
+function InfoLine({ label, value, icon }: { label: string; value: string; icon?: ReactNode }) {
+  if (!value) return null;
+  return (
+    <div className="flex min-w-0 items-start gap-1.5 text-[10px] leading-4">
+      <span className="flex shrink-0 items-center gap-1 text-[#827d77]">{icon}{label}</span>
+      <span className="min-w-0 text-[#c4beb8]">{value}</span>
+    </div>
+  );
+}
+
+function DirectorPlanPanel({
+  plan,
+  loading,
+  error,
+  stale,
+  onGenerate,
+  onApply,
+}: {
+  plan?: DirectorPlan | null;
+  loading?: boolean;
+  error?: string | null;
+  stale?: boolean;
+  onGenerate?: () => void;
+  onApply?: () => void;
+}) {
+  const sequence = planUnits(plan);
+  const planWarnings = displayList(plan?.warnings);
+  const totalDuration = sequence.reduce((sum, unit) => {
+    const duration = Number(unit.duration_seconds);
+    return Number.isFinite(duration) ? sum + duration : sum;
+  }, 0);
+  const hasPlan = Boolean(plan);
+
+  return (
+    <section className={`mx-2 flex max-h-[47%] shrink-0 flex-col overflow-hidden rounded-xl border ${stale ? 'border-amber-400/35' : 'border-[#4c4641]'} bg-[#211f1d] shadow-[0_10px_28px_rgba(0,0,0,.2)]`} aria-label="AI导演编排">
+      <div className="flex shrink-0 items-center gap-2 border-b border-[#3a3633] px-2.5 py-2">
+        <span className="grid size-6 shrink-0 place-items-center rounded-lg bg-[#f3cf84]/12 text-[#f3cf84]"><Sparkles size={13} /></span>
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-1.5">
+            <h3 className="truncate text-[11px] font-semibold text-[#eee8e1]">AI导演编排</h3>
+            {hasPlan && <span className="rounded-full bg-[#f3cf84]/12 px-1.5 py-0.5 text-[9px] text-[#f3cf84]">已生成</span>}
+          </div>
+          <p className="mt-0.5 truncate text-[9px] text-[#817a74]">
+            {hasPlan ? `${sequence.length} 个视频单元${totalDuration ? ` · ${totalDuration}s` : ''}` : '审批通过后，为场景安排节奏与镜头顺序'}
+          </p>
+        </div>
+        <button
+          type="button"
+          disabled={Boolean(loading)}
+          onPointerDown={(event) => event.stopPropagation()}
+          onClick={() => onGenerate?.()}
+          className="inline-flex shrink-0 items-center gap-1 rounded-lg border border-[#625442] px-2 py-1.5 text-[10px] font-medium text-[#f3cf84] transition hover:border-[#f3cf84]/70 hover:bg-[#f3cf84]/10 disabled:cursor-wait disabled:opacity-50"
+          title={loading ? '正在生成导演编排' : hasPlan ? '根据已批准场景重新生成编排' : '生成AI导演编排'}
+        >
+          {loading ? <Loader2 size={11} className="animate-spin" /> : <RotateCw size={11} />}
+          {loading ? '编排中…' : hasPlan ? '重新编排' : 'AI导演编排'}
+        </button>
+      </div>
+
+      <div className="min-h-0 overflow-y-auto p-2">
+        {error && (
+          <div className="mb-2 flex items-start gap-1.5 rounded-lg border border-rose-400/20 bg-rose-400/8 px-2 py-1.5 text-[10px] leading-4 text-rose-300">
+            <AlertTriangle size={12} className="mt-0.5 shrink-0" />
+            <span>{error}</span>
+          </div>
+        )}
+        {stale && (
+          <div className="mb-2 flex items-start gap-1.5 rounded-lg border border-amber-400/25 bg-amber-400/8 px-2 py-1.5 text-[10px] leading-4 text-amber-200">
+            <AlertTriangle size={12} className="mt-0.5 shrink-0" />
+            <span>方案已过期，请重新编排。场景内容发生变化后，旧方案不能直接应用。</span>
+          </div>
+        )}
+        {loading && !hasPlan ? (
+          <div className="flex items-center justify-center gap-2 py-5 text-[10px] text-[#a39a92]"><Loader2 size={14} className="animate-spin text-[#f3cf84]" />导演正在整理节奏与转场…</div>
+        ) : hasPlan ? (
+          <div className="space-y-2">
+            {sequence.length ? sequence.map((unit, index) => {
+              const sequenceNumber = displayText(unit.sequence ?? unit.unit_index ?? index + 1);
+              const beatIds = displayList(unit.beat_ids);
+              const warnings = displayList(unit.warnings);
+              const anchor = continuityAnchor(unit);
+              return (
+                <article key={`${sequenceNumber}-${index}`} className="relative overflow-hidden rounded-lg border border-[#3b3734] bg-[#292623] p-2.5">
+                  <div className="absolute inset-y-0 left-0 w-0.5 bg-[#f3cf84]/65" />
+                  <div className="flex items-start gap-2">
+                    <span className="grid size-6 shrink-0 place-items-center rounded-md bg-[#f3cf84]/12 font-mono text-[10px] font-semibold text-[#f3cf84]">{sequenceNumber}</span>
+                    <div className="min-w-0 flex-1">
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <h4 className="min-w-0 flex-1 text-[11px] font-semibold text-[#eee8e1]">{displayText(unit.title) || `视频单元 ${sequenceNumber}`}</h4>
+                        {unit.duration_seconds != null && <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-[#73a7ff]/12 px-1.5 py-0.5 text-[10px] font-medium text-[#9fc2ff]"><Clock size={9} />{unit.duration_seconds}s</span>}
+                      </div>
+                      <div className="mt-1.5 space-y-0.5">
+                        <InfoLine label="时长依据" value={displayText(unit.duration_reason)} />
+                        <InfoLine label="节拍" value={beatIds.length ? beatIds.join(' · ') : ''} icon={<Target size={9} />} />
+                        <InfoLine label="叙事目的" value={displayText(unit.narrative_purpose)} />
+                        <InfoLine label="连续性锚点" value={anchor} icon={<Link2 size={9} />} />
+                        <InfoLine label="转场" value={displayText(unit.transition_out)} icon={<ArrowRight size={9} />} />
+                      </div>
+                      {warnings.length > 0 && <div className="mt-2 rounded-md border border-amber-400/15 bg-amber-400/6 px-2 py-1.5 text-[10px] leading-4 text-amber-200"><span className="mr-1 text-amber-300">注意</span>{warnings.join('；')}</div>}
+                    </div>
+                  </div>
+                </article>
+              );
+            }) : <p className="py-3 text-center text-[10px] text-[#817a74]">编排方案没有可展示的视频单元</p>}
+            {planWarnings.length > 0 && <div className="rounded-lg border border-amber-400/15 bg-amber-400/6 px-2 py-1.5 text-[10px] leading-4 text-amber-200"><span className="mr-1 text-amber-300">方案提示</span>{planWarnings.join('；')}</div>}
+          </div>
+        ) : (
+          <div className="rounded-lg border border-dashed border-[#4b4540] bg-[#282522] px-3 py-3 text-center">
+            <p className="text-[10px] leading-4 text-[#a39a92]">让 AI 导演把场景串成可执行的视频节奏，生成后可逐单元检查时长、节拍与连续性。</p>
+            <button type="button" disabled={Boolean(loading)} onPointerDown={(event) => event.stopPropagation()} onClick={() => onGenerate?.()} className="mt-2 inline-flex items-center gap-1.5 rounded-lg bg-[#f3cf84] px-3 py-1.5 text-[10px] font-semibold text-[#30281d] transition hover:bg-[#ffe0a1] disabled:cursor-wait disabled:opacity-50"><Sparkles size={11} />生成导演编排</button>
+          </div>
+        )}
+      </div>
+
+      {hasPlan && (
+        <div className="shrink-0 border-t border-[#3a3633] p-2">
+          <button
+            type="button"
+            disabled={Boolean(stale || loading || !sequence.length)}
+            onPointerDown={(event) => event.stopPropagation()}
+            onClick={() => onApply?.()}
+            title={stale ? '方案已过期，请重新编排' : '应用编排并生成视频节点组'}
+            className="inline-flex w-full items-center justify-center gap-1.5 rounded-lg bg-[#f3cf84] px-2.5 py-2 text-[10px] font-semibold text-[#30281d] transition hover:bg-[#ffe0a1] disabled:cursor-not-allowed disabled:bg-[#4a433b] disabled:text-[#8d8379]"
+          >
+            <CheckCircle2 size={12} />
+            {stale ? '请重新编排后再应用' : '应用编排，生成视频节点组'}
+          </button>
+        </div>
+      )}
+    </section>
+  );
 }
 
 const importanceMeta: Record<string, { label: string; className: string }> = {
@@ -28,7 +236,17 @@ const importanceMeta: Record<string, { label: string; className: string }> = {
  * 左栏来源正文（只读），右栏场景行列表（点击行展开该场景编辑卡），
  * 审批在聚合层统一操作。
  */
-export default function SceneListNodeView({ config, onChange, onToggleApproved }: SceneListNodeViewProps) {
+export default function SceneListNodeView({
+  config,
+  onChange,
+  onToggleApproved,
+  directorPlan,
+  directorPlanLoading = false,
+  directorPlanError = null,
+  onGenerateDirectorPlan,
+  onApplyDirectorPlan,
+  directorPlanStale = false,
+}: SceneListNodeViewProps) {
   const scenes = useMemo(() => (Array.isArray(config.scenes) ? config.scenes : []), [config.scenes]);
   const [collapsed, setCollapsed] = useState(false);
   const [expandedSceneId, setExpandedSceneId] = useState<string | number | null>(null);
@@ -140,7 +358,17 @@ export default function SceneListNodeView({ config, onChange, onToggleApproved }
             )}
             {/* 生产模式同款提示 */}
             {!approved && (
-              <p className="mt-2 text-center text-[10px] text-amber-400/90">请审核并批准剧本后，才能编译视频节点组</p>
+              <p className="mt-2 text-center text-[10px] text-amber-400/90">请审核并批准剧本后，才能编排或编译视频节点组</p>
+            )}
+            {approved && (
+              <DirectorPlanPanel
+                plan={directorPlan}
+                loading={directorPlanLoading}
+                error={directorPlanError}
+                stale={directorPlanStale}
+                onGenerate={onGenerateDirectorPlan}
+                onApply={onApplyDirectorPlan}
+              />
             )}
           </div>
         </div>

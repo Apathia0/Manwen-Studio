@@ -37,6 +37,7 @@ from schemas import (
     MangaDramaProjectCreate,
     VideoCanvasCompileScenesRequest,
     VideoCanvasCreate,
+    VideoCanvasDirectorPlanRequest,
     VideoCanvasGraphSave,
     VideoCanvasImportRequest,
     VideoCanvasLayoutSave,
@@ -1532,19 +1533,223 @@ def _merge_beats_to_video_prompt(config: dict[str, Any]) -> str:
     return "\n".join(parts)
 
 
+def _scene_node_from_graph(graph: dict[str, Any], node_id: str) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    """从画布图中定位场景聚合节点，返回 (node, config)。"""
+    for node in graph.get("nodes") or []:
+        if not isinstance(node, dict) or str(node.get("id") or "") != node_id:
+            continue
+        if str(node.get("type") or "") != "scene":
+            return None, {}
+        return node, dict((node.get("data") or {}).get("config") or {})
+    return None, {}
+
+
+def _scene_config_revision(config: dict[str, Any]) -> str:
+    """场景内容指纹：编辑场景/节拍后变化，用于导演方案失效判定。"""
+    return _source_hash({"scenes": config.get("scenes") or [], "approved": bool(config.get("approved"))})
+
+
+def _scene_source_screenplay(graph: dict[str, Any], config: dict[str, Any], scene_node_id: str) -> tuple[str, str]:
+    """读取场景聚合节点绑定的剧本全文，返回 (screenplay_node_id, content)。"""
+    screenplay_node_id = str(config.get("source_screenplay_node") or "").strip()
+    nodes_by_id = {str(node.get("id") or ""): node for node in graph.get("nodes") or [] if isinstance(node, dict)}
+    if screenplay_node_id:
+        node = nodes_by_id.get(screenplay_node_id)
+        if node and str(node.get("type") or "") == "screenplay":
+            node_config = dict((node.get("data") or {}).get("config") or {})
+            content = str(node_config.get("content") or node_config.get("screenplay") or "").strip()
+            if content:
+                return screenplay_node_id, content
+    # 兜底：取画布中第一个剧本节点（老图未回写绑定字段）
+    for node in graph.get("nodes") or []:
+        if isinstance(node, dict) and str(node.get("type") or "") == "screenplay":
+            node_config = dict((node.get("data") or {}).get("config") or {})
+            content = str(node_config.get("content") or node_config.get("screenplay") or "").strip()
+            if content:
+                return str(node.get("id") or ""), content
+    raise HTTPException(422, f"场景节点 {scene_node_id} 未绑定可用的剧本节点，请先从剧本节点拆分")
+
+
+def _scene_screenplay_hashes(graph: dict[str, Any], config: dict[str, Any], scene_node_id: str) -> tuple[str, str, str]:
+    """返回 (screenplay_node_id, screenplay_hash, scene_revision)。"""
+    screenplay_node_id, content = _scene_source_screenplay(graph, config, scene_node_id)
+    return (
+        screenplay_node_id,
+        _canvas_source_hash("screenplay_node", screenplay_node_id, content),
+        _scene_config_revision(config),
+    )
+
+
+@router.post("/api/video-canvas/canvases/{canvas_id}/director-plan")
+async def create_director_plan(canvas_id: int, body: VideoCanvasDirectorPlanRequest, request: Request, db: Session = Depends(get_db)):
+    """AI 导演编排预览：把已批准场景动态编排为视频单元方案（不写图、不触发生成）。
+
+    方案 hash 绑定当前剧本 hash、场景内容 hash 与画布 revision；任一变更后自动失效。
+    """
+    user = _require_user(request, db)
+    canvas = _require_canvas(canvas_id, user, db)
+    if body.expected_definition_revision is not None and canvas.definition_revision != body.expected_definition_revision:
+        raise HTTPException(409, {"message": "画布定义已更新，请刷新后再编排", "definition_revision": canvas.definition_revision})
+    graph = _latest_version(canvas.id, db).graph_json or {}
+    node, config = _scene_node_from_graph(graph, body.scene_node_id)
+    if node is None:
+        raise HTTPException(422, "场景节点不存在或类型不正确")
+    if not config.get("approved"):
+        raise HTTPException(422, "场景尚未批准，请先完成剧本审核")
+    scene_items = config.get("scenes")
+    scenes = [item for item in scene_items if isinstance(item, dict)] if isinstance(scene_items, list) else []
+    if not scenes:
+        raise HTTPException(422, "场景节点没有可编排的场景数据")
+
+    _, screenplay_hash, scene_revision = _scene_screenplay_hashes(graph, config, body.scene_node_id)
+
+    from services.video_canvas_director import orchestrate_scene_video_units
+
+    api_key = _canvas_deepseek_api_key(request, db)
+    try:
+        plan = await orchestrate_scene_video_units(
+            scenes=scenes,
+            source_screenplay_hash=screenplay_hash,
+            source_scene_node_id=body.scene_node_id,
+            source_scene_revision=scene_revision,
+            api_key=api_key,
+            user_constraints=body.user_constraints,
+        )
+    except UpstreamServiceError as exc:
+        raise _translate_upstream_error(exc)
+
+    units = plan.get("units") or []
+    plan_hash = _source_hash(plan)
+    return {
+        "ok": True,
+        "plan": plan,
+        "plan_hash": plan_hash,
+        "unit_count": len(units),
+        "total_duration_seconds": sum(int(unit.get("duration_seconds") or 0) for unit in units if isinstance(unit, dict)),
+        "source_screenplay_hash": screenplay_hash,
+        "source_scene_node_id": body.scene_node_id,
+        "source_scene_revision": scene_revision,
+        "definition_revision": canvas.definition_revision,
+    }
+
+
+def _compile_scene_items_legacy(scene_items: list[dict[str, Any]], config: dict[str, Any], scene_node_id: str) -> list[dict[str, Any]]:
+    """旧图兼容：无导演方案的聚合节点按场景顺序直出（仅历史画布读取用）。"""
+    from services.video_duration import normalize_video_duration
+
+    compiled: list[dict[str, Any]] = []
+    for scene_index, scene in enumerate(scene_items, start=1):
+        if not isinstance(scene, dict):
+            continue
+        requested = scene.get("duration_seconds")
+        if not isinstance(requested, (int, float)):
+            requested = config.get("duration_seconds")
+        model_name = str(scene.get("model_id") or config.get("model_id") or "")
+        normalized = normalize_video_duration(
+            requested if isinstance(requested, (int, float)) else None,
+            model=model_name,
+            default_seconds=5,
+        )
+        prompt_body = _merge_beats_to_video_prompt(scene if scene is not config else config)
+        video_prompt = str(scene.get("video_prompt") or "").strip()
+        if not video_prompt:
+            location = str(scene.get("location") or "").strip()
+            time_of_day = str(scene.get("time_of_day") or "").strip()
+            header_parts = []
+            if location:
+                header_parts.append(f"场景：{location}")
+            if time_of_day:
+                header_parts.append(f"时间：{time_of_day}")
+            if header_parts:
+                video_prompt = "；".join(header_parts) + "\n" + prompt_body
+            else:
+                video_prompt = prompt_body
+        compiled.append(
+            {
+                "scene_node_id": f"{scene_node_id}#{scene_index}",
+                "title": str(scene.get("title") or f"场景 {scene_index}"),
+                "video_prompt": video_prompt,
+                "duration_seconds": normalized,
+                "duration_requested": requested if isinstance(requested, (int, float)) else None,
+                "characters": scene.get("characters") or [],
+            }
+        )
+    return compiled
+
+
+def _compile_scene_items_from_director_plan(
+    *,
+    plan: dict[str, Any],
+    plan_hash: str,
+    scene_node_id: str,
+    scene_config: dict[str, Any],
+    db: Session,
+) -> list[dict[str, Any]]:
+    """按导演方案编译视频单元 spec：sequence 顺序 + 模型能力时长归一 + 完整元数据。"""
+    from services.video_duration import normalize_video_duration
+
+    # 场景节点绑定的视频模型能力（可选）：归一化只发生在提交边界
+    capabilities = None
+    model_id = scene_config.get("model_id")
+    if isinstance(model_id, int):
+        from models import AiModel
+
+        model = db.get(AiModel, model_id)
+        raw = model.capabilities_json if model else None
+        if isinstance(raw, dict) and isinstance(raw.get("video"), dict):
+            capabilities = raw["video"]
+
+    compiled: list[dict[str, Any]] = []
+    for unit in plan.get("units") or []:
+        if not isinstance(unit, dict):
+            continue
+        requested = unit.get("duration_seconds")
+        requested_int = requested if isinstance(requested, int) and not isinstance(requested, bool) else None
+        normalized = normalize_video_duration(
+            requested_int,
+            capabilities=capabilities if isinstance(capabilities, dict) else None,
+            default_seconds=requested_int or 6,
+        )
+        compiled.append(
+            {
+                "scene_node_id": scene_node_id,
+                "unit_id": str(unit.get("unit_id") or ""),
+                "sequence": int(unit.get("sequence") or 0),
+                "title": str(unit.get("title") or ""),
+                "video_prompt": str(unit.get("video_prompt") or ""),
+                "storyboard_prompt": str(unit.get("storyboard_prompt") or ""),
+                "storyboard_json": unit.get("storyboard_json") if isinstance(unit.get("storyboard_json"), dict) else None,
+                "duration_seconds": normalized,
+                "duration_requested": unit.get("duration_requested") if isinstance(unit.get("duration_requested"), (int, float)) else requested_int,
+                "duration_reason": str(unit.get("duration_reason") or ""),
+                "duration_policy": "director_dynamic",
+                "characters": unit.get("characters") or [],
+                "visual_anchors": unit.get("visual_anchors") or [],
+                "transition_in": str(unit.get("transition_in") or ""),
+                "transition_out": str(unit.get("transition_out") or ""),
+                "continuity": unit.get("continuity") if isinstance(unit.get("continuity"), dict) else {},
+                "source_scene_ids": unit.get("scene_ids") or [],
+                "source_beat_ids": unit.get("beat_ids") or [],
+                "director_plan_hash": plan_hash,
+            }
+        )
+    return compiled
+
+
 @router.post("/api/video-canvas/canvases/{canvas_id}/compile-scenes")
 async def compile_scenes(canvas_id: int, body: VideoCanvasCompileScenesRequest, request: Request, db: Session = Depends(get_db)):
     """把已批准的场景节点编译为视频节点组（pending 形态返回，前端确认后保存画布）。
 
-    每个 approved=true 的场景节点 → 1 个视频节点：节拍合并为三段式 prompt，
-    时长经档位归一化（Seedance 1.x ≤12 等规则）。
+    新路径：必须携带 AI 导演方案；编译前重校验批准状态、剧本/场景 hash、方案 hash 与
+    beat 覆盖，按 sequence 输出完整单元元数据，时长经模型能力归一化。
+    旧图兼容：未携带方案且节点本身是旧单场景形态时走 legacy 直出。
     """
     user = _require_user(request, db)
     canvas = _require_canvas(canvas_id, user, db)
+    if body.expected_definition_revision is not None and canvas.definition_revision != body.expected_definition_revision:
+        raise HTTPException(409, {"message": "画布定义已更新，请刷新后再编译", "definition_revision": canvas.definition_revision})
     graph = _latest_version(canvas.id, db).graph_json or {}
     node_map = {str(node.get("id") or ""): node for node in graph.get("nodes") or [] if isinstance(node, dict)}
-
-    from services.video_duration import normalize_video_duration
 
     compiled: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
@@ -1562,46 +1767,52 @@ async def compile_scenes(canvas_id: int, body: VideoCanvasCompileScenesRequest, 
         if not config.get("approved"):
             skipped.append({"node_id": scene_node_id, "reason": "场景未批准"})
             continue
-        # 聚合结构：config.scenes 为场景列表（统一审批作用整个节点）；
-        # 兼容旧单场景形态（config 本身即场景）
         raw_scenes = config.get("scenes")
-        scene_items = raw_scenes if isinstance(raw_scenes, list) and raw_scenes else [config]
-        for scene_index, scene in enumerate(scene_items, start=1):
-            if not isinstance(scene, dict):
+        scene_items = [item for item in raw_scenes if isinstance(item, dict)] if isinstance(raw_scenes, list) else []
+
+        if body.director_plan is None:
+            # 兼容旧图：仅当节点是旧单场景形态（无 scenes 聚合数组）时允许直出
+            if not scene_items and (config.get("beats") or config.get("title")):
+                compiled.extend(_compile_scene_items_legacy([config], config, scene_node_id))
                 continue
-            requested = scene.get("duration_seconds")
-            if not isinstance(requested, (int, float)):
-                requested = config.get("duration_seconds")
-            model_name = str(scene.get("model_id") or config.get("model_id") or "")
-            normalized = normalize_video_duration(
-                requested if isinstance(requested, (int, float)) else None,
-                model=model_name,
-                default_seconds=5,
+            raise HTTPException(422, "请先执行 AI 导演编排，再编译视频节点组")
+
+        if not scene_items:
+            raise HTTPException(422, "场景节点没有可编译的场景数据")
+
+        # 方案绑定校验：剧本/场景内容变更后旧方案自动失效
+        _, screenplay_hash, scene_revision = _scene_screenplay_hashes(graph, config, scene_node_id)
+        meta = body.director_plan.get("meta") if isinstance(body.director_plan.get("meta"), dict) else {}
+        if str(meta.get("source_screenplay_hash") or "") != screenplay_hash:
+            raise HTTPException(422, "剧本内容已变更，请重新执行 AI 导演编排")
+        if str(meta.get("source_scene_revision") or "") != scene_revision:
+            raise HTTPException(422, "场景内容已变更，请重新执行 AI 导演编排")
+        if str(meta.get("source_scene_node_id") or "") != scene_node_id:
+            raise HTTPException(422, "导演方案与场景节点不匹配")
+        if body.director_plan_hash and body.director_plan_hash != _source_hash(body.director_plan):
+            raise HTTPException(422, "导演方案校验失败，请重新编排")
+
+        from services.video_canvas_director import normalize_and_validate_director_plan
+
+        normalized_plan, errors = normalize_and_validate_director_plan(
+            body.director_plan,
+            scene_items,
+            source_screenplay_hash=screenplay_hash,
+            source_scene_node_id=scene_node_id,
+            source_scene_revision=scene_revision,
+        )
+        if normalized_plan is None:
+            raise HTTPException(422, {"message": "导演方案未通过质量校验", "issues": errors[:10]})
+
+        compiled.extend(
+            _compile_scene_items_from_director_plan(
+                plan=normalized_plan,
+                plan_hash=body.director_plan_hash or _source_hash(body.director_plan),
+                scene_node_id=scene_node_id,
+                scene_config=config,
+                db=db,
             )
-            prompt_body = _merge_beats_to_video_prompt(scene if scene is not config else config)
-            video_prompt = str(scene.get("video_prompt") or "").strip()
-            if not video_prompt:
-                location = str(scene.get("location") or "").strip()
-                time_of_day = str(scene.get("time_of_day") or "").strip()
-                header_parts = []
-                if location:
-                    header_parts.append(f"场景：{location}")
-                if time_of_day:
-                    header_parts.append(f"时间：{time_of_day}")
-                if header_parts:
-                    video_prompt = "；".join(header_parts) + "\n" + prompt_body
-                else:
-                    video_prompt = prompt_body
-            compiled.append(
-                {
-                    "scene_node_id": f"{scene_node_id}#{scene_index}",
-                    "title": str(scene.get("title") or f"场景 {scene_index}"),
-                    "video_prompt": video_prompt,
-                    "duration_seconds": normalized,
-                    "duration_requested": requested if isinstance(requested, (int, float)) else None,
-                    "characters": scene.get("characters") or [],
-                }
-            )
+        )
     if not compiled:
         raise HTTPException(422, {"message": "没有可编译的场景：所选场景均未批准或不存在", "skipped": skipped})
     return {"ok": True, "compiled_count": len(compiled), "skipped": skipped, "compiled": compiled}

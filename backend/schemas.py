@@ -1185,8 +1185,18 @@ class MangaDramaProjectCreate(BaseModel):
 
 
 class VideoCanvasCompileScenesRequest(BaseModel):
-    """已批准场景节点 → 视频节点组编译请求。"""
+    """已批准场景节点 → 视频节点组编译请求（新路径需携带 AI 导演方案）。"""
     scene_node_ids: list[str] = Field(min_length=1, max_length=60)
+    director_plan: dict[str, Any] | None = None
+    director_plan_hash: str | None = Field(default=None, max_length=128)
+    expected_definition_revision: int | None = Field(default=None, ge=1)
+
+
+class VideoCanvasDirectorPlanRequest(BaseModel):
+    """画布 AI 导演编排请求：读取已批准场景，返回可审阅方案（不写图、不生成）。"""
+    scene_node_id: str = Field(min_length=1, max_length=64)
+    user_constraints: str | None = Field(default=None, max_length=2000)
+    expected_definition_revision: int | None = Field(default=None, ge=1)
 
 
 class VideoCanvasScreenplaySplitRequest(BaseModel):

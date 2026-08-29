@@ -11,6 +11,7 @@ import {
   getVideoCanvasRun,
 
   compileScenes,
+  generateDirectorPlan,
   screenplaySplit,
   listVideoCanvasPlans,
   listVideoCanvasNodeCatalog,
@@ -34,6 +35,8 @@ import {
   type VideoCanvasPlan,
   type VideoCanvasRun,
   type VideoStylePreset,
+  type DirectorPlan,
+  type CompiledSceneUnit,
 } from '../api';
 import { confirm } from '../lib/confirm';
 import { normalizeErrorMessage } from '../lib/errors';
@@ -58,6 +61,7 @@ import CanvasNodePropertyPanel from './video-canvas/CanvasNodePropertyPanel';
 import CanvasBottomToolbar from './video-canvas/CanvasBottomToolbar';
 import ChapterImportDialog from './video-canvas/ChapterImportDialog';
 import SceneListNodeView from './video-canvas/SceneListNodeView';
+import { layoutDirectorUnits, unitNodeId } from './video-canvas/directorLayout';
 import AssetReferenceSelector from './AssetReferenceSelector';
 import StyleSelectorModal from './StyleSelectorModal';
 
@@ -189,6 +193,8 @@ export default function VideoCanvasPanel({ storyId, chapterId, workflow: _workfl
   const [splittingNodeId, setSplittingNodeId] = useState<string | null>(null);
   const [importDialogOpen, setImportDialogOpen] = useState(false);
   const [compilingNodeId, setCompilingNodeId] = useState<string | null>(null);
+  const [planBusyNodeId, setPlanBusyNodeId] = useState<string | null>(null);
+  const [directorError, setDirectorError] = useState<string | null>(null);
   const [models, setModels] = useState<AiModelItem[]>([]);
   const [canvas, setCanvas] = useState<VideoCanvas | null>(null);
   const [canvasList, setCanvasList] = useState<VideoCanvas[]>([]);
@@ -992,16 +998,69 @@ export default function VideoCanvasPanel({ storyId, chapterId, workflow: _workfl
     toast.success(`已生成剧本节点（${Math.round(screenplayText.length / 100) / 10}k 字），可编辑后点击「AI 拆分」`);
   };
   // 场景节点字段写回（partial 合并进 config，含 beats 整体替换）
+  // 编辑场景/节拍后导演方案自动过期；生成/应用方案自身的写回不触发过期
   const updateSceneNodeConfig = (nodeId: string, partial: Record<string, unknown>) => {
     captureHistory();
-    setNodes((current) => current.map((node) => node.id === nodeId ? { ...node, data: { ...node.data, config: { ...node.data.config, ...partial } } } : node));
+    setNodes((current) => current.map((node) => {
+      if (node.id !== nodeId) return node;
+      const config = node.data.config || {};
+      const hasPlan = Boolean(config.director_plan_hash);
+      const stale = 'scenes' in partial && hasPlan;
+      return { ...node, data: { ...node.data, config: { ...config, ...partial, ...(stale ? { director_plan_stale: true } : {}) } } };
+    }));
     setDirty(true);
   };
-  // 已批准场景 → 编译为视频节点（落在该场景右侧）
-  const compileSceneNode = async (nodeId: string) => {
+  // AI 导演编排预览：生成可审阅方案并写入场景节点 config（不创建视频节点）
+  const generateDirectorPlanForNode = async (nodeId: string) => {
+    if (!canvas || planBusyNodeId || compilingNodeId) return;
+    const sceneNode = nodes.find((node) => node.id === nodeId);
+    if (!sceneNode) return;
+    setPlanBusyNodeId(nodeId);
+    setDirectorError(null);
+    try {
+      // 后端按已保存的图定位场景和剧本：编排前先静默保存当前画布
+      let targetCanvas = canvas;
+      if (dirty) {
+        const saved = await saveCanvas(false);
+        if (!saved) return;
+        targetCanvas = saved;
+      }
+      const result = await generateDirectorPlan(targetCanvas.id, {
+        scene_node_id: nodeId,
+        expected_definition_revision: targetCanvas.definition_revision,
+      });
+      updateSceneNodeConfig(nodeId, {
+        director_plan: result.plan,
+        director_plan_hash: result.plan_hash,
+        director_plan_stale: false,
+        director_source_screenplay_hash: result.source_screenplay_hash,
+        director_source_scene_revision: result.source_scene_revision,
+      });
+      toast.success(`导演编排完成：${result.unit_count} 个视频单元，共 ${result.total_duration_seconds} 秒。请审阅后应用`);
+    } catch (error) {
+      const message = normalizeErrorMessage(error, '导演编排失败');
+      setDirectorError(message);
+      toast.error(message);
+    } finally {
+      setPlanBusyNodeId(null);
+    }
+  };
+  // 应用导演方案：编译为视频节点组（稳定节点 ID + sequence 布局，重复应用不叠加）
+  const applyDirectorPlan = async (nodeId: string) => {
     if (!canvas || compilingNodeId) return;
     const sceneNode = nodes.find((node) => node.id === nodeId);
     if (!sceneNode) return;
+    const config = (sceneNode.data.config || {}) as Record<string, unknown>;
+    const directorPlan = config.director_plan as DirectorPlan | undefined;
+    const directorPlanHash = typeof config.director_plan_hash === 'string' ? config.director_plan_hash : '';
+    if (!directorPlan || !directorPlanHash) {
+      toast.error('请先执行 AI 导演编排，再生成视频节点组');
+      return;
+    }
+    if (config.director_plan_stale) {
+      toast.error('场景内容已变化，导演方案已过期，请重新编排');
+      return;
+    }
     setCompilingNodeId(nodeId);
     try {
       // 审批状态和场景编辑先保存到最新画布版本，后端编译才能读取 approved=true。
@@ -1011,28 +1070,57 @@ export default function VideoCanvasPanel({ storyId, chapterId, workflow: _workfl
         if (!saved) return;
         targetCanvas = saved;
       }
-      const result = await compileScenes(targetCanvas.id, [nodeId]);
+      const result = await compileScenes(targetCanvas.id, [nodeId], {
+        directorPlan,
+        directorPlanHash,
+        expectedDefinitionRevision: targetCanvas.definition_revision,
+      });
       if (!result.compiled.length) {
         const reason = result.skipped[0]?.reason || '未知原因';
         toast.error(`编译失败：${reason}`);
         return;
       }
       captureHistory();
-      // 多个视频节点按 4 列网格排在场景节点右侧
-      const baseX = sceneNode.position.x + 800;
-      const baseY = sceneNode.position.y;
-      const newNodes: CanvasNode[] = result.compiled.map((compiledItem, index) => ({
-        id: `compiled-${nodeId}-${compiledItem.scene_node_id}-${index}-${Math.random().toString(36).slice(2, 6)}`,
+      // 替换本场景此前编译出的导演视频节点（稳定 ID，不叠加重复组）
+      const previousIds = new Set(nodes
+        .filter((node) => node.type === 'video' && (node.data.config as Record<string, unknown> | undefined)?.source_scene_node === nodeId && (node.data.config as Record<string, unknown>).duration_policy === 'director_dynamic')
+        .map((node) => node.id));
+      const compiled: CompiledSceneUnit[] = result.compiled;
+      const anchor = { x: sceneNode.position.x + (Number(sceneNode.data.ui?.width) || 300) + 60, y: sceneNode.position.y };
+      const existingRects = nodes
+        .filter((node) => !previousIds.has(node.id) && node.id !== nodeId)
+        .map((node) => ({ x: node.position.x, y: node.position.y, width: Number(node.data.ui?.width) || 340, height: Number(node.data.ui?.height) || 220 }));
+      const positions = layoutDirectorUnits(
+        compiled.map((unit) => ({ sequence: unit.sequence, unit_id: unit.unit_id })),
+        anchor,
+        existingRects,
+      );
+      const newNodes: CanvasNode[] = compiled.map((unit) => ({
+        id: unitNodeId(nodeId, unit.unit_id),
         type: 'video',
-        position: { x: baseX + (index % 4) * 380, y: baseY + Math.floor(index / 4) * 270 },
+        position: positions.get(unit.unit_id) || { x: anchor.x, y: anchor.y },
         data: {
-          label: compiledItem.title,
+          label: `${unit.sequence}. ${unit.title || unit.unit_id}`,
           nodeType: 'video',
           config: {
-            prompt: compiledItem.video_prompt,
-            duration_seconds: compiledItem.duration_seconds,
-            duration_requested: compiledItem.duration_requested ?? null,
+            prompt: unit.video_prompt,
+            storyboard_prompt: unit.storyboard_prompt || '',
+            storyboard_json: unit.storyboard_json ?? null,
+            duration_seconds: unit.duration_seconds,
+            duration_requested: unit.duration_requested ?? null,
+            duration_reason: unit.duration_reason || '',
+            duration_policy: 'director_dynamic',
+            sequence: unit.sequence,
+            unit_id: unit.unit_id,
             source_scene_node: nodeId,
+            source_scene_ids: unit.source_scene_ids ?? [],
+            source_beat_ids: unit.source_beat_ids ?? [],
+            characters: unit.characters ?? [],
+            visual_anchors: unit.visual_anchors ?? [],
+            transition_in: unit.transition_in || '',
+            transition_out: unit.transition_out || '',
+            continuity: unit.continuity ?? {},
+            director_plan_hash: unit.director_plan_hash || directorPlanHash,
           },
         },
       }));
@@ -1042,14 +1130,17 @@ export default function VideoCanvasPanel({ storyId, chapterId, workflow: _workfl
         sourceHandle: 'shot',
         target: videoNode.id,
         targetHandle: 'prompt',
+        data: { sequence: Number((videoNode.data.config as Record<string, unknown>).sequence) || 0, unit_id: String((videoNode.data.config as Record<string, unknown>).unit_id || '') },
       }));
-      setNodes((current) => [...current, ...newNodes]);
-      setEdges((current) => [...current, ...newEdges]);
+      setNodes((current) => [...current.filter((node) => !previousIds.has(node.id)), ...newNodes]);
+      setEdges((current) => [...current.filter((edge) => !previousIds.has(edge.source) && !previousIds.has(edge.target)), ...newEdges]);
+      updateSceneNodeConfig(nodeId, { director_plan_stale: false });
       setDirty(true);
-      const normalizedCount = result.compiled.filter((item) => item.duration_requested != null && item.duration_requested !== item.duration_seconds).length;
-      toast.success(`已编译 ${result.compiled.length} 个视频节点${normalizedCount ? `（${normalizedCount} 个时长经档位归一）` : ''}${result.skipped.length ? `，跳过 ${result.skipped.length} 个` : ''}`);
+      const normalizedCount = compiled.filter((item) => item.duration_requested != null && item.duration_requested !== item.duration_seconds).length;
+      const totalSeconds = compiled.reduce((sum, item) => sum + (Number(item.duration_seconds) || 0), 0);
+      toast.success(`已按导演编排生成 ${compiled.length} 个视频节点（共 ${totalSeconds} 秒${normalizedCount ? `，${normalizedCount} 个时长经模型档位归一` : ''}）`);
     } catch (error) {
-      toast.error(normalizeErrorMessage(error, '场景编译失败'));
+      toast.error(normalizeErrorMessage(error, '应用导演编排失败'));
     } finally {
       setCompilingNodeId(null);
     }
@@ -1069,21 +1160,16 @@ export default function VideoCanvasPanel({ storyId, chapterId, workflow: _workfl
         config={config}
         onChange={(partial) => updateSceneNodeConfig(nodeView.id, partial)}
         onToggleApproved={() => updateSceneNodeConfig(nodeView.id, { approved: !config.approved })}
+        directorPlan={(config.director_plan as DirectorPlan) || null}
+        directorPlanLoading={planBusyNodeId === nodeView.id}
+        directorPlanError={directorError}
+        onGenerateDirectorPlan={() => void generateDirectorPlanForNode(nodeView.id)}
+        onApplyDirectorPlan={() => void applyDirectorPlan(nodeView.id)}
+        directorPlanStale={Boolean(config.director_plan && config.director_plan_stale)}
       />
     </div>
-    {config.approved ? (
-      <button
-        type="button"
-        disabled={compilingNodeId === nodeView.id}
-        onPointerDown={(event) => event.stopPropagation()}
-        onClick={(event) => { event.stopPropagation(); void compileSceneNode(nodeView.id); }}
-        className="inline-flex w-full shrink-0 items-center justify-center gap-1.5 rounded-lg bg-emerald-600 px-2 py-1.5 text-[11px] font-medium text-white hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-50"
-      >
-        {compilingNodeId === nodeView.id ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <SplitSquareHorizontal className="h-3.5 w-3.5" />}
-        {compilingNodeId === nodeView.id ? '编译中…' : `编译为视频节点组（${Array.isArray(config.scenes) ? config.scenes.length : 0} 个）`}
-      </button>
-    ) : (
-      <p className="shrink-0 px-1 text-center text-[10px] text-slate-500">统一审批通过后可编译为视频节点组</p>
+    {config.approved ? null : (
+      <p className="shrink-0 px-1 text-center text-[10px] text-slate-500">统一审批通过后可进行 AI 导演编排</p>
     )}
   </div>
 ); }

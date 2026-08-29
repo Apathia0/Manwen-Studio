@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import datetime
+import hashlib
+import json
 import re
 from pathlib import Path
 from typing import Any
@@ -16,6 +18,7 @@ from services.ai.resolver import begin_ai_call, complete_ai_call
 from services.media_locator import ensure_local_media_path
 from services.task_manager import task_manager
 from services.video_compiler import compile_project
+from services.video_duration import normalize_video_duration
 from services.video_generation import fetch_job_result, query_job_status, submit_video_job
 
 
@@ -102,13 +105,25 @@ def _canvas_video_path(value: Any) -> str | None:
 
 
 def _node_inputs(graph: dict[str, Any], node_id: str, outputs: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
-    values: list[dict[str, Any]] = []
+    node_map = {str(node.get("id") or ""): node for node in graph.get("nodes") or [] if isinstance(node, dict)}
+    is_concat = str((node_map.get(node_id) or {}).get("type") or "") == "concat"
+    entries: list[tuple[tuple[int, int], dict[str, Any]]] = []
     for edge in graph.get("edges") or []:
-        if isinstance(edge, dict) and edge.get("target") == node_id and not (isinstance(edge.get("data"), dict) and edge["data"].get("disabled")):
-            value = outputs.get(str(edge.get("source") or ""))
-            if value:
-                values.append(value)
-    return values
+        if not (isinstance(edge, dict) and edge.get("target") == node_id and not (isinstance(edge.get("data"), dict) and edge["data"].get("disabled"))):
+            continue
+        value = outputs.get(str(edge.get("source") or ""))
+        if not value:
+            continue
+        edge_sequence = edge.get("data", {}).get("sequence") if isinstance(edge.get("data"), dict) else None
+        if is_concat:
+            # 合片按显式 sequence 排序（导演编排顺序）：edge.data.sequence 优先，其次上游输出 sequence
+            seq = edge_sequence if isinstance(edge_sequence, int) and not isinstance(edge_sequence, bool) else value.get("sequence")
+            order = (0, seq) if isinstance(seq, int) and not isinstance(seq, bool) else (1, 0)
+            entries.append((order, value))
+        else:
+            entries.append(((1, 0), value))
+    entries.sort(key=lambda item: item[0])
+    return [value for _order, value in entries]
 
 
 def _asset_media_kind(asset: VideoAsset) -> str | None:
@@ -219,6 +234,31 @@ def _configured_reference_inputs(config: dict[str, Any], canvas: VideoCanvas, db
         if not any(str(item.get("url") or "") == normalized_url for item in inputs):
             inputs.append({"url": normalized_url, "media_kind": "image", "style_snapshot": style_snapshot})
     return inputs
+
+
+def _append_director_continuity(prompt: str, config: dict[str, Any]) -> str:
+    """导演动态节点：把连续性/转场锚点以受控格式追加到提示词，保证前后衔接意图不丢失。"""
+    extras: list[str] = []
+    continuity = config.get("continuity")
+    if isinstance(continuity, dict):
+        from_previous = str(continuity.get("from_previous") or "").strip()
+        to_next = str(continuity.get("to_next") or "").strip()
+        anchor = str(continuity.get("anchor") or "").strip()
+        if from_previous:
+            extras.append(f"开头承接上一段：{from_previous}")
+        if to_next:
+            extras.append(f"结尾过渡到下一段：{to_next}")
+        if anchor:
+            extras.append(f"连续性锚点（必须保持）：{anchor}")
+    transition_in = str(config.get("transition_in") or "").strip()
+    transition_out = str(config.get("transition_out") or "").strip()
+    if transition_in and not any(item.startswith("开头承接") for item in extras):
+        extras.append(f"进入方式：{transition_in}")
+    if transition_out and not any(item.startswith("结尾过渡") for item in extras):
+        extras.append(f"离开方式：{transition_out}")
+    if not extras:
+        return prompt
+    return prompt + "\n" + "\n".join(extras)
 
 
 def _apply_style_prompt(prompt: str, config: dict[str, Any], inputs: list[dict[str, Any]]) -> str:
@@ -516,13 +556,26 @@ async def execute_canvas_run(
                         prompt = _apply_style_prompt(prompt, config, inputs)
                         if not prompt or not video_api_key:
                             raise RuntimeError("视频节点缺少提示词或 Video API Key")
+                        # 导演动态时长：提交前按模型能力归一；旧节点保持 15s 兼容默认
+                        duration_policy = str(config.get("duration_policy") or "")
+                        raw_duration = config.get("duration_seconds")
+                        if duration_policy == "director_dynamic":
+                            effective_duration = normalize_video_duration(
+                                raw_duration if isinstance(raw_duration, (int, float)) and not isinstance(raw_duration, bool) else None,
+                                model=resolved_video_model,
+                                capabilities=_video_model_capabilities(config, db),
+                                default_seconds=6,
+                            )
+                            prompt = _append_director_continuity(prompt, config)
+                        else:
+                            effective_duration = int(config.get("duration_seconds") or 15)
                         submission = await submit_video_job(
                             shot_id=run_node.id,
                             provider="canvas",
                             model=resolved_video_model,
                             prompt=prompt,
                             negative_prompt=str(config.get("negative_prompt") or ""),
-                            duration_seconds=int(config.get("duration_seconds") or 15),
+                            duration_seconds=effective_duration,
                             aspect_ratio=str(config.get("aspect_ratio") or "16:9"),
                             size=str(config.get("size") or "720P"),
                             reference_images=await _external_video_reference_urls(inputs, canvas, db),
@@ -547,10 +600,22 @@ async def execute_canvas_run(
                         if not video_path:
                             raise RuntimeError("视频服务未返回可用文件")
                         stored_path = _relative_path(video_path, VIDEO_OUTPUTS)
-                        asset = VideoAsset(story_id=canvas.story_id, chapter_id=run_chapter_id, asset_type="video_clip", name=f"画布 {canvas.name} - {node_id}", file_path=stored_path, provider="canvas", prompt=prompt, meta_json={"canvas_id": canvas.id, "run_id": run.id, "node_id": node_id, "provider_job_id": provider_job_id}, usage_scope="story_shared")
+                        asset = VideoAsset(story_id=canvas.story_id, chapter_id=run_chapter_id, asset_type="video_clip", name=f"画布 {canvas.name} - {node_id}", file_path=stored_path, provider="canvas", prompt=prompt, meta_json={
+                            "canvas_id": canvas.id, "run_id": run.id, "node_id": node_id, "provider_job_id": provider_job_id,
+                            **({"duration_requested": config.get("duration_requested"), "duration_reason": config.get("duration_reason"), "sequence": config.get("sequence"), "unit_id": config.get("unit_id"), "director_plan_hash": config.get("director_plan_hash")} if duration_policy == "director_dynamic" else {}),
+                        }, usage_scope="story_shared")
                         db.add(asset)
                         db.flush()
-                        output = {"asset_id": asset.id, "file_path": stored_path, "url": _static_url(stored_path, VIDEO_OUTPUTS, "/static/video"), "duration_seconds": result.get("duration_seconds") or config.get("duration_seconds")}
+                        output = {"asset_id": asset.id, "file_path": stored_path, "url": _static_url(stored_path, VIDEO_OUTPUTS, "/static/video"), "duration_seconds": result.get("duration_seconds") or effective_duration}
+                        if duration_policy == "director_dynamic":
+                            output.update({
+                                "duration_requested": config.get("duration_requested"),
+                                "duration_effective": effective_duration,
+                                "duration_reason": config.get("duration_reason"),
+                                "sequence": config.get("sequence"),
+                                "unit_id": config.get("unit_id"),
+                                "director_plan_hash": config.get("director_plan_hash"),
+                            })
                 else:
                     clips = [
                         {"video_path": path, "duration_seconds": item.get("duration_seconds") or 0}

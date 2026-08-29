@@ -3634,21 +3634,102 @@ export async function screenplaySplit(canvasId: number, nodeId: string): Promise
   return res.json();
 }
 
-export async function compileScenes(canvasId: number, sceneNodeIds: string[]): Promise<{
+export interface DirectorPlanUnit {
+  unit_id: string;
+  sequence: number;
+  title?: string;
+  narrative_purpose?: string;
+  story_summary?: string;
+  duration_seconds: number;
+  duration_reason?: string;
+  dialogue_or_narration?: string;
+  characters?: string[];
+  visual_anchors?: { type: string; description: string }[];
+  transition_in?: string;
+  transition_out?: string;
+  continuity?: { from_previous?: string; to_next?: string; anchor?: string };
+  storyboard_prompt?: string;
+  storyboard_json?: Record<string, unknown> | null;
+  beat_ids?: string[];
+  scene_ids?: Array<string | number>;
+  warnings?: string[];
+  video_prompt?: string;
+  [key: string]: unknown;
+}
+
+export interface DirectorPlan {
+  plan_version?: number;
+  pacing_strategy?: string;
+  units: DirectorPlanUnit[];
+  warnings?: string[];
+  meta?: { source_screenplay_hash?: string; source_scene_node_id?: string; source_scene_revision?: string };
+  [key: string]: unknown;
+}
+
+export interface DirectorPlanResult {
+  ok: boolean;
+  plan: DirectorPlan;
+  plan_hash: string;
+  unit_count: number;
+  total_duration_seconds: number;
+  source_screenplay_hash: string;
+  source_scene_node_id: string;
+  source_scene_revision: string;
+  definition_revision: number;
+}
+
+export async function generateDirectorPlan(canvasId: number, payload: {
+  scene_node_id: string;
+  user_constraints?: string;
+  expected_definition_revision?: number;
+}): Promise<DirectorPlanResult> {
+  const res = await fetch(`${BASE}/api/video-canvas/canvases/${canvasId}/director-plan`, {
+    method: 'POST', headers: apiHeaders(true), body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
+  return res.json();
+}
+
+export interface CompiledSceneUnit {
+  scene_node_id: string;
+  unit_id: string;
+  sequence: number;
+  title: string;
+  video_prompt: string;
+  storyboard_prompt?: string;
+  storyboard_json?: Record<string, unknown> | null;
+  duration_seconds: number;
+  duration_requested?: number | null;
+  duration_reason?: string;
+  duration_policy?: string;
+  characters?: unknown[];
+  visual_anchors?: unknown[];
+  transition_in?: string;
+  transition_out?: string;
+  continuity?: Record<string, unknown>;
+  source_scene_ids?: Array<string | number>;
+  source_beat_ids?: string[];
+  director_plan_hash?: string;
+}
+
+export async function compileScenes(canvasId: number, sceneNodeIds: string[], options?: {
+  directorPlan?: DirectorPlan | null;
+  directorPlanHash?: string | null;
+  expectedDefinitionRevision?: number;
+}): Promise<{
   ok: boolean;
   compiled_count: number;
   skipped: { node_id: string; reason: string }[];
-  compiled: {
-    scene_node_id: string;
-    title: string;
-    video_prompt: string;
-    duration_seconds: number;
-    duration_requested?: number | null;
-    characters?: unknown[];
-  }[];
+  compiled: CompiledSceneUnit[];
 }> {
   const res = await fetch(`${BASE}/api/video-canvas/canvases/${canvasId}/compile-scenes`, {
-    method: 'POST', headers: apiHeaders(true), body: JSON.stringify({ scene_node_ids: sceneNodeIds }),
+    method: 'POST', headers: apiHeaders(true),
+    body: JSON.stringify({
+      scene_node_ids: sceneNodeIds,
+      ...(options?.directorPlan ? { director_plan: options.directorPlan } : {}),
+      ...(options?.directorPlanHash ? { director_plan_hash: options.directorPlanHash } : {}),
+      ...(options?.expectedDefinitionRevision ? { expected_definition_revision: options.expectedDefinitionRevision } : {}),
+    }),
   });
   if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   return res.json();
