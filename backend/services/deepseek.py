@@ -697,25 +697,32 @@ async def split_scenes(
 
     # 默认漫画模板需要先分析、后压缩输出，避免把策划字段直接带入绘图提示词。
     if (
-        "严格包含4-5个分镜格" in effective_system_prompt
-        or "每页包含4-5个分镜格" in effective_system_prompt
+        "严格包含 4-5 个分镜格" in effective_system_prompt
+        or "每页包含 4-5 个分镜格" in effective_system_prompt
     ):
         scene_prompt += (
             "\n\n【最终成片脚本压缩规则】以上环境、转场、旁白和视觉焦点只在分析阶段使用，"
             "最终 scenes 字符串不得输出‘页首承接’‘核心旁白’‘视觉焦点’‘叙事作用’‘页尾转场’等分析标签。"
-            "每页只保留4-5个连续画格的可视化描述，句子短而有画面感；环境和时间通过画面细节交代，"
-            "转场通过人物动作、视线、道具或构图承接表达。每页最多3条旁白/字幕，每条不超过18个汉字，"
+            "每页只保留 4-5 个连续画格的可视化描述，句子短而有画面感；环境和时间通过画面细节交代，"
+            "转场通过人物动作、视线、道具或构图承接表达。每页最多 3 条旁白/字幕，每条不超过 18 个汉字，"
             "只保留时间跳跃、身份关系、关键因果或不可视化信息；没有必要旁白就不写。对白只保留推动剧情的关键一句，"
             "禁止解释性长段落、参数清单和重复描述，确保文本适合直接交给漫画生图模型。"
         )
+
+    # ===新增：强化页数约束===
+    scene_prompt += (
+        f"\n\n【强制页数要求】你生成的 scenes 数组必须**恰好包含 {page_count} 个元素**！"
+        f"不能多也不能少。每个元素对应一页分镜，用换行分隔不同页的内容。"
+        f"绝对不要合并页面，绝对不要少于或多于{page_count}页。"
+        f"检查输出前数一数数组元素个数，必须是 exactly {page_count}。"
+    )
 
     # 计算上下文总长度，如果过长则在提示词前加入聚焦指令
     total_content_len = sum(len(str(m.get("content") or "")) for m in chat_messages)
     if total_content_len > 3000:
         scene_prompt = (
             "【重要提示】原文内容较长，你必须先通读全文，提取所有关键事件（剧情转折、重要对话、冲突、揭示），"
-            f"然后将这些事件均匀分配到 {page_count} 页中。"
-            "宁可每页信息密度高，也绝不能遗漏任何核心事件。\n\n"
+            f"然后将这些事件均匀分配到 {page_count} 页中。\n\n【再次强调：scenes 数组必须恰好有 {page_count} 个元素】\n\n"
             + scene_prompt
         )
 
@@ -738,9 +745,10 @@ async def split_scenes(
             "response_format": {"type": "json_object"},
         }
 
-        # 超时重试：DeepSeek 服务端偶发慢响应（长 context + 大输出 JSON 推理耗时长），
+        # 超时/瞬态错误重试：DeepSeek 服务端偶发慢响应（长 context + 大输出 JSON 推理耗时长），
         # 单次超时直接失败会中断整次分镜生成。此处退避重试，耗尽后抛 httpx.TimeoutException
         # 交由上层转换为友好错误，与 JSON 解析失败（ValueError）的错误路径区分开。
+        # 网关瞬态 5xx（NewAPI 渠道抖动）同样重试；确定性 4xx（403/欠费等）立即抛出。
         last_exc: httpx.RequestError | None = None
         for attempt in range(_SCENE_SPLIT_TIMEOUT_RETRIES + 1):
             try:
@@ -765,14 +773,31 @@ async def split_scenes(
                     await asyncio.sleep(2 * (attempt + 1))
                     continue
                 break
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code in {500, 502, 503, 504} and attempt < _SCENE_SPLIT_TIMEOUT_RETRIES:
+                    logger.warning(
+                        "分镜生成上游返回 %s，第 %d/%d 次重试",
+                        exc.response.status_code,
+                        attempt + 1,
+                        _SCENE_SPLIT_TIMEOUT_RETRIES,
+                    )
+                    await asyncio.sleep(2 * (attempt + 1))
+                    continue
+                raise
         raise httpx.TimeoutException(f"分镜生成 DeepSeek 请求持续超时：{last_exc}") from last_exc
 
     raw = ""
     last_error: Exception | None = None
     retry_instructions = (
         "",
-        f"重试：严格返回 {{\"scenes\": [...]}}，其中 scenes 必须恰好包含 {page_count} 页。"
-        f"再次强调：必须覆盖原文所有关键事件，不能遗漏任何核心情节。每个格子必须有叙事功能，不能用氛围格凑数。",
+        f"【错误分析】上一轮生成失败：你返回的 scenes 数组元素个数与实际不符。\n\n"
+        f"✅ 正确格式示例（必须恰好 {page_count} 页）：\n"
+        f"`{{\"scenes\": [\"第 1 页：...\", \"第 2 页：...\", ...（共{page_count}个字符串）]}}`\n\n"
+        f"❌ 禁止的错误格式：\n"
+        f"- 不要合并多个页面到一个字符串\n"
+        f"- 不要用换行分隔不同页（要用 JSON 数组元素分隔）\n"
+        f"- scenes 数组长度必须 exactly = {page_count}\n\n"
+        f"现在请严格按照上述格式重新生成，确保返回恰好 {page_count} 个 scene 字符串。",
     )
 
     for idx, extra_instruction in enumerate(retry_instructions):
