@@ -257,6 +257,9 @@ AUTO_MANGA_ASSET_ANALYSIS_VERSION = 2
 AUTO_MANGA_ASSET_CONCURRENCY = max(1, min(4, int(os.getenv("AUTO_MANGA_ASSET_CONCURRENCY", "2") or "2")))
 _CHAPTER_GENERATION_SEMAPHORE = CHAPTER_GENERATION_SEMAPHORE
 _CHAPTER_GENERATION_INTERNAL_HEADER = "x-storycanvas-internal-generation"
+_CHAPTER_BATCH_TASK_HEADER = "x-storycanvas-batch-task-id"
+_CHAPTER_MEMORY_WAIT_TIMEOUT_SECONDS = 330.0
+_CHAPTER_MEMORY_WAIT_POLL_SECONDS = 0.5
 _CHAPTER_GENERATION_INTERNAL_SECRET = secrets.token_urlsafe(32)
 AUTO_MANGA_ASSET_START_INTERVAL_SECONDS = max(
     0,
@@ -4433,12 +4436,14 @@ async def _refresh_chapter_memory(chapter: Chapter, request: Request, db: Sessio
     chapter_handoff = memory_payload.get("chapter_handoff") if isinstance(memory_payload.get("chapter_handoff"), dict) else {}
     story_memory_update = memory_payload.get("story_memory_update") if isinstance(memory_payload.get("story_memory_update"), dict) else {}
     fallback_meta = memory_payload.get("_fallback") if isinstance(memory_payload.get("_fallback"), dict) else None
+    content_fingerprint = hashlib.sha256((chapter.novel_content or "").encode("utf-8")).hexdigest()
     chapter.memory_summary = {
         "chapter_summary": chapter_summary,
         "chapter_handoff": chapter_handoff,
         "summary": chapter_summary.get("summary"),
         "ending_scene": chapter_summary.get("ending_scene"),
         "fallback": fallback_meta,
+        "content_fingerprint": content_fingerprint,
     } if (chapter_summary or chapter_handoff) else None
     chapter.story.story_memory = _merge_story_memory(chapter.story.story_memory, story_memory_update, chapter, chapter_summary)
     sync_story_knowledge_from_legacy(
@@ -4509,12 +4514,14 @@ async def _background_refresh_chapter_memory(
         chapter_handoff = memory_payload.get("chapter_handoff") if isinstance(memory_payload.get("chapter_handoff"), dict) else {}
         story_memory_update = memory_payload.get("story_memory_update") if isinstance(memory_payload.get("story_memory_update"), dict) else {}
         fallback_meta = memory_payload.get("_fallback") if isinstance(memory_payload.get("_fallback"), dict) else None
+        content_fingerprint = hashlib.sha256((chapter.novel_content or "").encode("utf-8")).hexdigest()
         chapter.memory_summary = {
             "chapter_summary": chapter_summary,
             "chapter_handoff": chapter_handoff,
             "summary": chapter_summary.get("summary"),
             "ending_scene": chapter_summary.get("ending_scene"),
             "fallback": fallback_meta,
+            "content_fingerprint": content_fingerprint,
         } if (chapter_summary or chapter_handoff) else None
         chapter.story.story_memory = _merge_story_memory(chapter.story.story_memory, story_memory_update, chapter, chapter_summary)
         sync_story_knowledge_from_legacy(
@@ -4551,6 +4558,7 @@ async def _submit_chapter_memory_refresh(
     content = chapter.novel_content or ""
     if not content.strip() or not api_key:
         return None
+    content_fingerprint = hashlib.sha256(content.encode("utf-8")).hexdigest()
     task_id = f"chapter_memory_{chapter.id}_{uuid.uuid4().hex[:10]}"
     await task_manager.submit_task(
         task_id,
@@ -4559,13 +4567,117 @@ async def _submit_chapter_memory_refresh(
         chapter.id,
         api_key,
         None,
-        hashlib.sha256(content.encode("utf-8")).hexdigest(),
+        content_fingerprint,
         timeout=300,
         max_retries=1,
         story_id=chapter.story_id,
         chapter_id=chapter.id,
+        metadata={
+            "content_fingerprint": content_fingerprint,
+            "running_stage": "summarizing",
+            "running_message": f"正在提取第{getattr(chapter, 'chapter_number', '') or ''}章连续性记忆...",
+        },
     )
     return task_id
+
+
+def _chapter_memory_matches_content(chapter: Chapter) -> bool:
+    content = str(chapter.novel_content or "")
+    memory = chapter.memory_summary if isinstance(chapter.memory_summary, dict) else {}
+    if not content.strip() or not memory:
+        return False
+    fingerprint = hashlib.sha256(content.encode("utf-8")).hexdigest()
+    if str(memory.get("content_fingerprint") or "") != fingerprint:
+        return False
+    chapter_summary = memory.get("chapter_summary")
+    handoff = memory.get("chapter_handoff")
+    return bool(
+        (isinstance(chapter_summary, dict) and chapter_summary)
+        or (isinstance(handoff, dict) and handoff)
+    )
+
+
+async def _ensure_previous_chapter_memory_ready(
+    story_id: int,
+    target_chapter_number: int,
+    api_key: str,
+    *,
+    cancellation_task_id: str | None = None,
+    timeout_seconds: float = _CHAPTER_MEMORY_WAIT_TIMEOUT_SECONDS,
+) -> None:
+    """在创作包提取前确保上一章记忆与当前正文版本一致。"""
+    if target_chapter_number <= 1:
+        return
+
+    deadline = time.monotonic() + timeout_seconds
+    memory_task_id: str | None = None
+    expected_fingerprint = ""
+    previous_number = 0
+
+    while time.monotonic() < deadline:
+        if cancellation_task_id and task_manager.is_cancellation_requested(cancellation_task_id):
+            raise asyncio.CancelledError()
+
+        wait_db = SessionLocal()
+        try:
+            previous = (
+                wait_db.query(Chapter)
+                .filter(
+                    Chapter.story_id == story_id,
+                    Chapter.chapter_number < target_chapter_number,
+                    Chapter.novel_content.isnot(None),
+                    Chapter.status.in_(["completed", "draft", "reviewed"]),
+                )
+                .order_by(Chapter.chapter_number.desc())
+                .first()
+            )
+            if previous is None or not str(previous.novel_content or "").strip():
+                return
+            previous_number = previous.chapter_number
+            expected_fingerprint = hashlib.sha256((previous.novel_content or "").encode("utf-8")).hexdigest()
+            if _chapter_memory_matches_content(previous):
+                return
+
+            matching_task = (
+                wait_db.query(BackgroundTask)
+                .filter(
+                    BackgroundTask.task_type == "chapter_memory_refresh",
+                    BackgroundTask.chapter_id == previous.id,
+                )
+                .order_by(BackgroundTask.created_at.desc())
+                .first()
+            )
+            matching_metadata = matching_task.metadata_json if matching_task and isinstance(matching_task.metadata_json, dict) else {}
+            matching_fingerprint = str(matching_metadata.get("content_fingerprint") or "")
+            task_matches_content = bool(
+                matching_task
+                and (not matching_fingerprint or matching_fingerprint == expected_fingerprint)
+            )
+            if task_matches_content and matching_task.status in ("pending", "running", "retrying", "cancel_requested"):
+                memory_task_id = matching_task.task_id
+            elif task_matches_content and matching_task.status in ("failed", "cancelled", "canceled"):
+                raise HTTPException(status_code=503, detail={
+                    "code": "previous_chapter_memory_failed",
+                    "retryable": True,
+                    "chapter_number": previous_number,
+                    "message": f"第{previous_number}章连续性记忆提取失败，请稍后重试",
+                })
+            else:
+                memory_task_id = await _submit_chapter_memory_refresh(previous, api_key)
+        finally:
+            wait_db.close()
+
+        if not memory_task_id:
+            break
+        await asyncio.sleep(_CHAPTER_MEMORY_WAIT_POLL_SECONDS)
+
+    raise HTTPException(status_code=503, detail={
+        "code": "previous_chapter_memory_not_ready",
+        "retryable": True,
+        "chapter_number": previous_number,
+        "content_fingerprint": expected_fingerprint,
+        "message": f"第{previous_number}章连续性记忆尚未准备完成，请稍后重试",
+    })
 
 
 def _merge_tags(existing, incoming):
@@ -12606,6 +12718,25 @@ def _background_task_belongs_to_user(task: BackgroundTask, user: User, db: Sessi
     return False
 
 
+@app.post("/api/tasks/{task_id}/cancel")
+async def cancel_background_task(task_id: str, request: Request, db: Session = Depends(get_db)):
+    """请求取消当前用户拥有的后台任务。"""
+    user = _require_user(request, db)
+    task = db.query(BackgroundTask).filter(BackgroundTask.task_id == task_id).first()
+    if not task or not _background_task_belongs_to_user(task, user, db):
+        raise HTTPException(404, "任务未找到")
+    if task.status in ("succeeded", "failed", "cancelled", "canceled"):
+        return {"ok": True, "message": "任务已结束", "status": task.status}
+    accepted = task_manager.request_cancellation(task_id)
+    if not accepted:
+        task.status = "cancelled"
+        task.error_message = "用户已取消任务"
+        task.completed_at = datetime.now(timezone.utc).replace(tzinfo=None)
+        task_manager._merge_task_metadata(task, {"stage": "cancelled", "message": "用户已取消任务"})
+        db.commit()
+    return {"ok": True, "message": "已请求停止任务", "status": "cancel_requested" if accepted else "cancelled"}
+
+
 @app.get("/api/tasks/{task_id}")
 async def get_task_status(task_id: str, request: Request, db: Session = Depends(get_db)):
     """查询后台任务状态"""
@@ -13705,7 +13836,9 @@ async def submit_expand_chapters_batch(story_id: int, request: Request, db: Sess
             Chapter.chapter_number == number,
         ).first()
         if chapter is None:
-            raise HTTPException(404, f"第 {number} 章不存在，请先在大纲中创建该章节")
+            # 章节规划可能只存在于 Story.outline，正文首次生成时由单章链路创建记录。
+            chapters.append(None)
+            continue
         if _active_chapter_generation_task(chapter.id, db):
             raise HTTPException(409, f"第 {number} 章正在生成中，请等待完成后再提交批量任务")
         chapters.append(chapter)
@@ -13739,7 +13872,7 @@ async def submit_expand_chapters_batch(story_id: int, request: Request, db: Sess
             "chapter_batch_generation",
             _run_chapter_batch_generation,
             story_id,
-            [chapter.id for chapter in chapters],
+            [chapter.id if chapter is not None else None for chapter in chapters],
             list(ordered_numbers),
             _generation_forward_headers(request),
             timeout=900 * len(chapters),
@@ -13803,11 +13936,51 @@ async def _run_chapter_batch_generation(
 
         _update_progress("generating", f"正在生成第 {index + 1}/{total} 章（第{chapter_number}章）")
 
+        # Chapter 只保存正文及少量元数据，章节规划字段来自 Story.outline。
+        # 从作品大纲读取当前章节卡，构建与单章生成相同的完整请求。
+        db_session = SessionLocal()
+        try:
+            chapter_record = db_session.query(Chapter).filter(Chapter.id == chapter_id_value).first() if chapter_id_value else None
+            story_record = db_session.query(Story).filter(Story.id == batch_story_id).first()
+            if not story_record:
+                chapter_error = f"作品记录不存在（story_id={batch_story_id}）"
+                failed.append({"chapter_number": chapter_number, "reason": chapter_error})
+                _update_progress("failed", f"第{chapter_number}章失败：{chapter_error}")
+                return {
+                    "status": "failed",
+                    "message": chapter_error,
+                    "completed": completed,
+                    "failed": failed,
+                }
+
+            chapter_card = _outline_chapter_scope_for_generation(
+                story_record.outline if isinstance(story_record.outline, dict) else {},
+                chapter_number,
+            ).get("current_chapter_card") or {}
+            chapter_payload = {
+                "chapter_number": chapter_number,
+                "chapter_title": str(chapter_card.get("title") or (chapter_record.title if chapter_record else "") or f"第{chapter_number}章"),
+                "act": chapter_card.get("act", (chapter_record.act if chapter_record else "") or ""),
+                "summary": str(chapter_card.get("summary") or ""),
+                "goal": str(chapter_card.get("goal") or ""),
+                "conflict": str(chapter_card.get("conflict") or ""),
+                "hook": str(chapter_card.get("hook") or ""),
+                "payoff": str(chapter_card.get("payoff") or ""),
+                "highlight": str(chapter_card.get("highlight") or ""),
+                "key_events": chapter_card.get("key_events") if isinstance(chapter_card.get("key_events"), list) else ((chapter_record.key_events if chapter_record else None) or []),
+            }
+        finally:
+            db_session.close()
+
         chapter_error: str | None = None
         for attempt in range(2):  # 失败/超时重试一次
             try:
                 transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
-                internal_headers = {**headers, _CHAPTER_GENERATION_INTERNAL_HEADER: _CHAPTER_GENERATION_INTERNAL_SECRET}
+                internal_headers = {
+                    **headers,
+                    _CHAPTER_GENERATION_INTERNAL_HEADER: _CHAPTER_GENERATION_INTERNAL_SECRET,
+                    _CHAPTER_BATCH_TASK_HEADER: task_id or "",
+                }
                 async with httpx.AsyncClient(
                     transport=transport,
                     base_url="http://localhost",
@@ -13815,7 +13988,7 @@ async def _run_chapter_batch_generation(
                 ) as client:
                     response = await client.post(
                         f"/api/stories/{batch_story_id}/expand-chapter",
-                        json={"chapter_number": chapter_number},
+                        json=chapter_payload,
                         headers=internal_headers,
                     )
                 if response.status_code >= 400:
@@ -13824,11 +13997,27 @@ async def _run_chapter_batch_generation(
                     except Exception:
                         error_payload = response.text
                     detail = error_payload.get("detail") if isinstance(error_payload, dict) else error_payload
+                    detail_code = str(detail.get("code") or "") if isinstance(detail, dict) else ""
+                    retryable_conflict = bool(
+                        response.status_code in (409, 503)
+                        and isinstance(detail, dict)
+                        and detail.get("retryable")
+                        and detail_code in {"knowledge_revision_conflict", "previous_chapter_memory_not_ready"}
+                    )
                     if isinstance(detail, dict):
-                        chapter_error = str(detail.get("message") or detail.get("code") or "正文生成失败")
+                        chapter_error = str(detail.get("message") or detail_code or "正文生成失败")
                     else:
                         chapter_error = str(detail or f"HTTP {response.status_code}")[:500]
-                    raise RuntimeError(chapter_error)
+                    if not retryable_conflict or attempt > 0:
+                        break
+                    if task_id and task_manager.is_cancellation_requested(task_id):
+                        raise asyncio.CancelledError()
+                    _update_progress(
+                        "generating",
+                        f"第{chapter_number}章上下文发生变化，正在重新校验连续性…",
+                    )
+                    await asyncio.sleep(BATCH_CHAPTER_RETRY_DELAY_SECONDS)
+                    continue
                 completed.append(chapter_number)
                 chapter_error = None
                 _update_progress(
@@ -13840,15 +14029,7 @@ async def _run_chapter_batch_generation(
                 raise
             except Exception as exc:
                 chapter_error = str(exc)[:500] or "未知错误"
-                if attempt == 0:
-                    if task_id and task_manager.is_cancellation_requested(task_id):
-                        raise asyncio.CancelledError()
-                    _update_progress(
-                        "generating",
-                        f"第{chapter_number}章生成失败（{chapter_error[:120]}），正在重试…",
-                    )
-                    await asyncio.sleep(BATCH_CHAPTER_RETRY_DELAY_SECONDS)
-                    continue
+                break
 
         if chapter_error is not None:
             # 重试仍失败 → 直接停止整批，返回失败原因（按用户要求：单章失败即停）
@@ -13989,6 +14170,14 @@ async def _expand_chapter_endpoint_impl(story_id: int, request: Request, db: Ses
 
     chapter_info["chapter_number"] = chapter_num_for_query
     deepseek_api_key = _user_deepseek_api_key(request)
+    await _ensure_previous_chapter_memory_ready(
+        story_id,
+        chapter_num_for_query,
+        deepseek_api_key,
+        cancellation_task_id=request.headers.get(_CHAPTER_BATCH_TASK_HEADER),
+    )
+    db.expire_all()
+    story = _require_story_for_user(story_id, user, db)
     pack_chapter, _pack_chapter_info = await _ensure_chapter_creation_pack_ai(
         db,
         story=story,
@@ -14026,6 +14215,13 @@ async def _expand_chapter_endpoint_impl(story_id: int, request: Request, db: Ses
     except ChapterPipelineQualityError as exc:
         quality_gate = _build_chapter_pipeline_error_quality_gate(exc.review)
         raise HTTPException(status_code=422, detail=format_quality_gate_detail(quality_gate)) from exc
+    novel_content = await _ensure_generated_chapter_continuity(
+        chapter_runtime_context,
+        chapter_info,
+        novel_content,
+        request,
+        system_prompt=template_ch_prompt or None,
+    )
     pipeline_result = chapter_runtime_context.get("_last_chapter_pipeline_result") if isinstance(chapter_runtime_context, dict) else {}
     review = pipeline_result.get("review") if isinstance(pipeline_result, dict) else {}
     deterministic_report = review.get("deterministic") if isinstance(review, dict) and isinstance(review.get("deterministic"), dict) else {}

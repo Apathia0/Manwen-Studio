@@ -1,15 +1,17 @@
-import { BarChart3, CheckSquare, FilePlus2, FileText, Loader2, Pencil, Square } from 'lucide-react';
+import { BarChart3, FilePlus2, FileText, Loader2, Pencil } from 'lucide-react';
 import { useMemo, useState } from 'react';
 import {
   assessQuality,
   expandChapter,
   expandChaptersBatch,
   waitForChapterBatch,
+  cancelBackgroundTask,
   type Chapter,
   type ChapterBatchProgress,
 } from '../../api';
 import type { FrameworkChapter } from './types';
 import { STATUS_COLORS, STATUS_LABELS } from './types';
+import BatchGenerateDialog from './BatchGenerateDialog';
 
 interface Props {
   chapters: FrameworkChapter[] | null;
@@ -197,9 +199,9 @@ export default function ChapterListSection({
   const [generatingChapters, setGeneratingChapters] = useState(false);
   const [error, setError] = useState('');
   // 批量生成状态
-  const [selectedForBatch, setSelectedForBatch] = useState<Set<number>>(new Set());
-  const [batchSelectMode, setBatchSelectMode] = useState(false);
+  const [batchDialogOpen, setBatchDialogOpen] = useState(false);
   const [batchRunning, setBatchRunning] = useState(false);
+  const [batchTaskId, setBatchTaskId] = useState<string | null>(null);
   const [batchProgress, setBatchProgress] = useState<ChapterBatchProgress | null>(null);
 
   const hasContent = chapters && chapters.length > 0;
@@ -251,28 +253,38 @@ export default function ChapterListSection({
   };
 
   // ── 批量章节生成 ──────────────────────────────────────────
-  const toggleBatchSelect = (chapterNumber: number) => {
-    setSelectedForBatch((prev) => {
-      const next = new Set(prev);
-      if (next.has(chapterNumber)) next.delete(chapterNumber);
-      else next.add(chapterNumber);
-      return next;
-    });
-  };
-
-  const handleBatchExpand = async () => {
-    if (batchRunning || selectedForBatch.size === 0) return;
-    if (selectedForBatch.size > 10) {
+  const handleBatchExpand = async (chapterNumbers: number[]) => {
+    if (batchRunning || chapterNumbers.length === 0) return;
+    if (chapterNumbers.length > 10) {
       setError('单次批量最多 10 章');
       return;
     }
     setError('');
     setBatchRunning(true);
-    setBatchProgress(null);
+    setBatchProgress({
+      stage: 'queued',
+      message: `批量生成任务已提交，共 ${chapterNumbers.length} 章，正在排队…`,
+      batch_total: chapterNumbers.length,
+      batch_completed: [],
+      batch_failed: [],
+      status: 'pending',
+      error_message: null,
+    });
     try {
-      const submitted = await expandChaptersBatch(storyId, Array.from(selectedForBatch).sort((a, b) => a - b));
-      const finalProgress = await waitForChapterBatch(submitted.task_id, setBatchProgress);
-      if (finalProgress.status === 'failed' || finalProgress.status === 'cancelled') {
+      const submitted = await expandChaptersBatch(storyId, chapterNumbers);
+      setBatchTaskId(submitted.task_id);
+      // 任务已提交后立即关闭选择窗口，后台轮询与左侧进度展示继续进行。
+      setBatchDialogOpen(false);
+      let refreshedCompletedCount = 0;
+      const finalProgress = await waitForChapterBatch(submitted.task_id, (progress) => {
+        setBatchProgress(progress);
+        // 每章完成后立即刷新章节列表，让正文状态和“打开正文”按钮及时回显。
+        if (progress.batch_completed.length > refreshedCompletedCount) {
+          refreshedCompletedCount = progress.batch_completed.length;
+          void onUpdate();
+        }
+      });
+      if (finalProgress.status === 'failed' || finalProgress.status === 'cancelled' || finalProgress.stage === 'failed') {
         const firstFailure = finalProgress.batch_failed[0];
         setError(
           `批量生成${finalProgress.status === 'cancelled' ? '已取消' : '中止'}：${
@@ -285,8 +297,17 @@ export default function ChapterListSection({
       setError(err.message || '批量生成失败');
     } finally {
       setBatchRunning(false);
-      setSelectedForBatch(new Set());
-      setBatchSelectMode(false);
+      setBatchTaskId(null);
+    }
+  };
+
+  const handleCancelBatch = async () => {
+    if (!batchTaskId || !batchRunning) return;
+    try {
+      await cancelBackgroundTask(batchTaskId);
+      setBatchProgress((prev) => prev ? { ...prev, stage: 'cancel_requested', status: 'cancel_requested', message: '正在停止批量生成任务…' } : prev);
+    } catch (err: any) {
+      setError(err.message || '停止批量生成失败');
     }
   };
 
@@ -366,60 +387,22 @@ export default function ChapterListSection({
       <div className="flex items-center justify-between">
         <span className="text-xs text-slate-500">{chapters!.length} 话规划</span>
         <div className="flex items-center gap-1.5">
-          {!batchRunning && (
-            <button
-              onClick={() => {
-                setBatchSelectMode((v) => !v);
-                setSelectedForBatch(new Set());
-              }}
-              className={`inline-flex items-center gap-1 rounded-md border px-2.5 py-1 text-[11px] font-medium transition-colors ${
-                batchSelectMode
-                  ? 'border-blue-300 bg-blue-50 text-blue-700 hover:bg-blue-100'
-                  : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50'
-              }`}
-            >
-              <CheckSquare size={12} />
-              {batchSelectMode ? '退出多选' : '批量生成'}
-            </button>
-          )}
-          <button onClick={() => void handleGenerateChapters()} disabled={generatingChapters || savingPlan} className="inline-flex items-center gap-1 rounded-md border border-slate-200 bg-slate-900 px-2.5 py-1 text-[11px] font-medium text-white hover:bg-slate-800 disabled:opacity-40">
-            {generatingChapters ? <Loader2 size={12} className="animate-spin" /> : <FileText size={12} />}
-            AI 生成章节
+          <button
+            onClick={() => setBatchDialogOpen(true)}
+            disabled={batchRunning}
+            className="inline-flex items-center gap-1 rounded-md border border-blue-200 bg-blue-50 px-2.5 py-1 text-[11px] font-medium text-blue-700 hover:bg-blue-100 transition-colors disabled:opacity-40"
+          >
+            <FileText size={12} />
+            批量生成
           </button>
         </div>
       </div>
 
-      {batchSelectMode && !batchRunning && (
-        <div className="flex flex-wrap items-center gap-2 rounded-lg border border-blue-200 bg-blue-50 px-3 py-2">
-          <span className="text-[11px] text-blue-800">已选 {selectedForBatch.size}/10 章</span>
-          <button
-            onClick={() => setSelectedForBatch(new Set(chapters!.filter((c) => !actualChapterNumbers.has(c.chapter_number)).map((c) => c.chapter_number)))}
-            className="rounded border border-blue-200 bg-white px-2 py-0.5 text-[11px] text-blue-700 hover:bg-blue-50"
-          >
-            全选未生成
-          </button>
-          <button
-            onClick={() => setSelectedForBatch(new Set())}
-            className="rounded border border-slate-200 bg-white px-2 py-0.5 text-[11px] text-slate-600 hover:bg-slate-50"
-          >
-            清空
-          </button>
-          <button
-            onClick={() => void handleBatchExpand()}
-            disabled={selectedForBatch.size === 0}
-            className="ml-auto inline-flex items-center gap-1 rounded-md bg-blue-600 px-3 py-1 text-[11px] font-medium text-white hover:bg-blue-500 disabled:opacity-40"
-          >
-            <FileText size={12} />
-            开始批量生成（{selectedForBatch.size} 章）
-          </button>
-        </div>
-      )}
-
-      {batchRunning && batchProgress && (
+      {batchProgress && (
         <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2">
           <div className="flex items-center gap-2">
-            <Loader2 size={13} className="animate-spin text-amber-600" />
-            <span className="text-xs font-medium text-amber-800">{batchProgress.message || '批量生成进行中…'}</span>
+            {batchRunning && <Loader2 size={13} className="animate-spin text-amber-600" />}
+            <span className="text-xs font-medium text-amber-800">{batchProgress.message || (batchRunning ? '批量生成进行中…' : '批量生成已结束')}</span>
           </div>
           {batchProgress.batch_total > 0 && (
             <div className="mt-1.5 h-1.5 w-full overflow-hidden rounded-full bg-amber-100">
@@ -429,7 +412,15 @@ export default function ChapterListSection({
               />
             </div>
           )}
-          <p className="mt-1 text-[11px] text-amber-700">可关闭页面，任务会在服务器继续执行；串行生成保证章节上下文连贯。</p>
+          <p className="mt-1 text-[11px] text-amber-700">可关闭页面,任务会在服务器继续执行；串行生成保证章节上下文连贯。</p>
+          {batchRunning && batchTaskId && (
+            <button
+              onClick={() => void handleCancelBatch()}
+              className="mt-2 inline-flex items-center gap-1 rounded-md border border-red-200 bg-white px-2.5 py-1 text-[11px] font-medium text-red-700 hover:bg-red-50"
+            >
+              停止生成
+            </button>
+          )}
         </div>
       )}
 
@@ -445,18 +436,6 @@ export default function ChapterListSection({
         return (
           <div key={chapter.chapter_number} className={`rounded-xl border border-slate-200 border-l-4 ${actBorder} bg-slate-50 px-3 py-2`}>
             <div className={`flex items-center gap-2 ${canOpen ? 'cursor-pointer' : ''}`} onClick={() => canOpen && onChapterSelect(chapter.chapter_number)}>
-              {batchSelectMode && !batchRunning && (
-                <button
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    toggleBatchSelect(chapter.chapter_number);
-                  }}
-                  className="shrink-0 text-blue-600 hover:text-blue-800"
-                  title={selectedForBatch.has(chapter.chapter_number) ? '取消选择' : '选择本章'}
-                >
-                  {selectedForBatch.has(chapter.chapter_number) ? <CheckSquare size={15} /> : <Square size={15} className="text-slate-400" />}
-                </button>
-              )}
               <span className="w-14 shrink-0 text-xs font-mono text-slate-500">第{chapter.chapter_number}话</span>
               <span className="min-w-0 flex-1 truncate text-xs font-medium text-slate-700">{chapter.title}</span>
               <StatusBadge status={chapter.status} />
@@ -549,6 +528,16 @@ export default function ChapterListSection({
           </div>
         );
       })}
+
+      <BatchGenerateDialog
+        isOpen={batchDialogOpen}
+        chapters={chapters!}
+        actualChapters={actualChapters}
+        onClose={() => setBatchDialogOpen(false)}
+        onSubmit={handleBatchExpand}
+        batchRunning={batchRunning}
+        batchProgress={batchProgress}
+      />
 
       {error && <p className="px-1 pt-1 text-xs text-red-500">{error}</p>}
     </div>

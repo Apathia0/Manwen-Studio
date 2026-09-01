@@ -1083,6 +1083,7 @@ def test_memory_refresh_submission_accepts_task_manager_metadata(monkeypatch):
     assert submitted["args"][3] == 23
     assert submitted["args"][6] == fingerprint
     assert submitted["kwargs"]["chapter_id"] == 23
+    assert submitted["kwargs"]["metadata"]["content_fingerprint"] == fingerprint
 
     inspect.signature(main._background_refresh_chapter_memory).bind(
         23,
@@ -1094,6 +1095,50 @@ def test_memory_refresh_submission_accepts_task_manager_metadata(monkeypatch):
         chapter_id=23,
         shot_id=None,
     )
+
+
+
+def test_chapter_memory_match_requires_current_content_fingerprint():
+    from types import SimpleNamespace
+    import main
+
+    content = "陈玄走出矿道。"
+    fingerprint = hashlib.sha256(content.encode("utf-8")).hexdigest()
+    chapter = SimpleNamespace(
+        novel_content=content,
+        memory_summary={
+            "content_fingerprint": fingerprint,
+            "chapter_summary": {"summary": "陈玄离开矿道"},
+            "chapter_handoff": {"opening_must_continue": "承接矿道出口"},
+        },
+    )
+
+    assert main._chapter_memory_matches_content(chapter) is True
+    chapter.memory_summary["content_fingerprint"] = "stale"
+    assert main._chapter_memory_matches_content(chapter) is False
+
+
+def test_continuity_correction_skips_when_handoff_signal_is_in_opening(monkeypatch):
+    from types import SimpleNamespace
+    import main
+
+    async def fail_adjust(*args, **kwargs):
+        raise AssertionError("已有衔接信号时不应重写开头")
+
+    monkeypatch.setattr(main, "adjust_chapter_content", fail_adjust)
+    context = {
+        "previous_chapter_handoff": {
+            "ending_location": "城北废弃菜园",
+            "active_conflict": "监测盘正在锁定陈玄",
+            "opening_must_continue": "立即离开菜园",
+            "active_characters": ["陈玄"],
+        },
+    }
+    content = "陈玄站在城北废弃菜园里，抬头看见监测盘仍在转动。"
+    request = SimpleNamespace()
+
+    result = _run(main._ensure_generated_chapter_continuity(context, {}, content, request))
+    assert result == content
 
 
 def test_chapter_memory_disables_thinking_and_retries_invalid_json(monkeypatch):

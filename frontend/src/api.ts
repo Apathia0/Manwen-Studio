@@ -2980,7 +2980,14 @@ export async function waitForChapterBatch(
     if (progress.batch_completed.length !== lastCompletedCount) {
       lastCompletedCount = progress.batch_completed.length;
     }
-    if (progress.status === 'succeeded' || progress.status === 'failed' || progress.status === 'cancelled') {
+    if (
+      progress.status === 'succeeded' ||
+      progress.status === 'failed' ||
+      progress.status === 'cancelled' ||
+      progress.stage === 'failed' ||
+      progress.stage === 'cancelled' ||
+      progress.stage === 'completed'
+    ) {
       return progress;
     }
     await new Promise((resolve) => globalThis.setTimeout(resolve, 3000));
@@ -4276,6 +4283,15 @@ export async function getBackgroundTaskStatus(taskId: string): Promise<Backgroun
     error.status = res.status;
     throw error;
   }
+  return res.json();
+}
+
+export async function cancelBackgroundTask(taskId: string): Promise<{ ok: boolean; message?: string }> {
+  const res = await fetch(`${BASE}/api/tasks/${encodeURIComponent(taskId)}/cancel`, {
+    method: 'POST',
+    headers: apiHeaders(true),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '停止后台任务失败'));
   return res.json();
 }
 
