@@ -7997,12 +7997,31 @@ def _is_internal_chapter_generation_request(request: Request) -> bool:
 
 
 def _active_chapter_generation_task(chapter_id: int, db: Session) -> BackgroundTask | None:
-    """查询指定章节仍在活动状态的正文生成任务。"""
-    return db.query(BackgroundTask).filter(
+    """查询指定章节仍在活动状态的正文生成任务（单章任务或包含该章的批量任务）。"""
+    single = db.query(BackgroundTask).filter(
         BackgroundTask.chapter_id == chapter_id,
         BackgroundTask.task_type == "chapter_generation",
         BackgroundTask.status.in_(("pending", "running", "retrying", "cancel_requested")),
     ).order_by(BackgroundTask.created_at.desc()).first()
+    if single:
+        return single
+    chapter = db.get(Chapter, chapter_id)
+    if chapter is None:
+        return None
+    # 批量任务的 metadata.batch_numbers 包含该章且未完成时，同样视为占用中
+    batch = db.query(BackgroundTask).filter(
+        BackgroundTask.story_id == chapter.story_id,
+        BackgroundTask.task_type == "chapter_batch_generation",
+        BackgroundTask.status.in_(("pending", "running", "retrying", "cancel_requested")),
+    ).order_by(BackgroundTask.created_at.desc()).first()
+    if batch is None:
+        return None
+    metadata = batch.metadata_json if isinstance(batch.metadata_json, dict) else {}
+    batch_numbers = metadata.get("batch_numbers") or []
+    completed = metadata.get("batch_completed") or []
+    if chapter.chapter_number in batch_numbers and chapter.chapter_number not in completed:
+        return batch
+    return None
 
 
 def _reject_external_chapter_generation_conflict(request: Request, chapter_id: int, db: Session) -> None:
@@ -10064,6 +10083,14 @@ async def generate_scenes_endpoint(chapter_id: int, request: Request, db: Sessio
     except ValueError as exc:
         logger.warning("Failed to parse scene split response for chapter %s: %s", chapter_id, exc)
         raise HTTPException(502, "AI 返回无效的场景 JSON，请重试生成场景")
+    except httpx.HTTPStatusError as exc:
+        status_code = exc.response.status_code
+        logger.warning("Scene split upstream HTTP %s for chapter %s", status_code, chapter_id)
+        if status_code in (401, 403):
+            raise HTTPException(502, "上游 AI 渠道拒绝访问，请检查渠道账户状态或联系管理员")
+        if status_code == 429:
+            raise HTTPException(502, "上游 AI 渠道限流，请稍后重试")
+        raise HTTPException(502, "AI 分镜服务暂时不可用，请稍后重试")
     except httpx.TimeoutException as exc:
         logger.warning("Scene split DeepSeek timeout for chapter %s: %s", chapter_id, exc)
         raise HTTPException(502, "AI 分镜服务响应超时，请稍后重试")
@@ -13648,6 +13675,206 @@ async def submit_expand_chapter_task(story_id: int, request: Request, db: Sessio
         headers=_generation_forward_headers(request),
         db=db,
     )
+
+
+BATCH_CHAPTER_GENERATION_MAX = 10
+BATCH_CHAPTER_API_TIMEOUT_SECONDS = 180
+BATCH_CHAPTER_RETRY_DELAY_SECONDS = 5.0
+
+
+@app.post("/api/stories/{story_id}/expand-chapters/batch", status_code=202)
+async def submit_expand_chapters_batch(story_id: int, request: Request, db: Session = Depends(get_db)):
+    """批量串行生成多个章节：排队依次生成保证上下文连贯，后台任务可关闭页面继续执行。"""
+    user = _require_user(request, db)
+    story = _require_story_for_user(story_id, user, db)
+    body = await request.json()
+    chapter_numbers = body.get("chapter_numbers")
+    if not isinstance(chapter_numbers, list) or not chapter_numbers:
+        raise HTTPException(422, "chapter_numbers 不能为空")
+    if any(not isinstance(n, int) or isinstance(n, bool) or n <= 0 for n in chapter_numbers):
+        raise HTTPException(422, "章节号必须是正整数")
+    # 去重并保持用户提交顺序
+    ordered_numbers = list(dict.fromkeys(chapter_numbers))
+    if len(ordered_numbers) > BATCH_CHAPTER_GENERATION_MAX:
+        raise HTTPException(422, f"单次批量最多 {BATCH_CHAPTER_GENERATION_MAX} 章")
+
+    chapters: list[Chapter] = []
+    for number in ordered_numbers:
+        chapter = db.query(Chapter).filter(
+            Chapter.story_id == story_id,
+            Chapter.chapter_number == number,
+        ).first()
+        if chapter is None:
+            raise HTTPException(404, f"第 {number} 章不存在，请先在大纲中创建该章节")
+        if _active_chapter_generation_task(chapter.id, db):
+            raise HTTPException(409, f"第 {number} 章正在生成中，请等待完成后再提交批量任务")
+        chapters.append(chapter)
+
+    # 批量任务本身互斥：同一作品同时只允许一个批量任务在跑
+    active_batch = db.query(BackgroundTask).filter(
+        BackgroundTask.story_id == story_id,
+        BackgroundTask.task_type == "chapter_batch_generation",
+        BackgroundTask.status.in_(("pending", "running", "retrying", "cancel_requested")),
+    ).first()
+    if active_batch:
+        raise HTTPException(409, "该作品已有批量生成任务进行中，请等待完成或取消后再提交")
+
+    # 积分预检：不预扣，逐章生成成功后由内部调用链路自行扣减；失败章不扣费
+    for chapter in chapters:
+        try:
+            _check_and_consume_feature_quota(
+                request, user.id, "chapter.expand.monthly_limit", 1, db,
+                deduct=False, provider_kind="text",
+            )
+        except HTTPException as exc:
+            raise HTTPException(
+                402,
+                f"积分不足：无法完成 {len(chapters)} 章批量生成（检查到第 {chapter.chapter_number} 章时额度不足）。{exc.detail}",
+            ) from exc
+
+    task_id = f"chapter_batch_{story_id}_{uuid.uuid4().hex[:10]}"
+    try:
+        await task_manager.submit_task(
+            task_id,
+            "chapter_batch_generation",
+            _run_chapter_batch_generation,
+            story_id,
+            [chapter.id for chapter in chapters],
+            list(ordered_numbers),
+            _generation_forward_headers(request),
+            timeout=900 * len(chapters),
+            max_retries=0,
+            story_id=story_id,
+            quota_user_id=user.id,
+            metadata={
+                "owner_user_id": user.id,
+                "stage": "queued",
+                "message": "批量生成任务已排队",
+                "batch_total": len(chapters),
+                "batch_numbers": ordered_numbers,
+                "batch_completed": [],
+                "batch_failed": [],
+            },
+        )
+    except IntegrityError:
+        raise HTTPException(409, "批量任务创建冲突，请重试")
+    return {
+        "task_id": task_id,
+        "status": "pending",
+        "story_id": story_id,
+        "total": len(chapters),
+        "chapter_numbers": ordered_numbers,
+        "message": f"批量生成任务已提交，共 {len(chapters)} 章，将按顺序依次生成",
+    }
+
+
+async def _run_chapter_batch_generation(
+    batch_story_id: int,
+    chapter_ids: list[int],
+    chapter_numbers: list[int],
+    headers: dict[str, str],
+    *,
+    task_id: str | None = None,
+    story_id: int | None = None,
+    chapter_id: int | None = None,
+    shot_id: int | None = None,
+) -> dict[str, Any]:
+    """串行批量生成章节：逐章复用现有单章生成链路（创作包→正文→落库→扣费）。"""
+    del chapter_id, shot_id, story_id
+    completed: list[int] = []
+    failed: list[dict[str, Any]] = []
+    total = len(chapter_ids)
+
+    def _update_progress(stage: str, message: str) -> None:
+        if task_id:
+            task_manager.update_task_metadata(
+                task_id,
+                stage=stage,
+                message=message,
+                batch_total=total,
+                batch_completed=completed,
+                batch_failed=failed,
+            )
+
+    for index, (chapter_id_value, chapter_number) in enumerate(zip(chapter_ids, chapter_numbers)):
+        if task_id and task_manager.is_cancellation_requested(task_id):
+            _update_progress("cancelled", f"用户取消：已完成 {len(completed)}/{total} 章，剩余章节未生成")
+            raise asyncio.CancelledError()
+
+        _update_progress("generating", f"正在生成第 {index + 1}/{total} 章（第{chapter_number}章）")
+
+        chapter_error: str | None = None
+        for attempt in range(2):  # 失败/超时重试一次
+            try:
+                transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
+                internal_headers = {**headers, _CHAPTER_GENERATION_INTERNAL_HEADER: _CHAPTER_GENERATION_INTERNAL_SECRET}
+                async with httpx.AsyncClient(
+                    transport=transport,
+                    base_url="http://localhost",
+                    timeout=BATCH_CHAPTER_API_TIMEOUT_SECONDS,
+                ) as client:
+                    response = await client.post(
+                        f"/api/stories/{batch_story_id}/expand-chapter",
+                        json={"chapter_number": chapter_number},
+                        headers=internal_headers,
+                    )
+                if response.status_code >= 400:
+                    try:
+                        error_payload = response.json()
+                    except Exception:
+                        error_payload = response.text
+                    detail = error_payload.get("detail") if isinstance(error_payload, dict) else error_payload
+                    if isinstance(detail, dict):
+                        chapter_error = str(detail.get("message") or detail.get("code") or "正文生成失败")
+                    else:
+                        chapter_error = str(detail or f"HTTP {response.status_code}")[:500]
+                    raise RuntimeError(chapter_error)
+                completed.append(chapter_number)
+                chapter_error = None
+                _update_progress(
+                    "generating",
+                    f"第 {index + 1}/{total} 章完成（第{chapter_number}章），已完成 {len(completed)} 章",
+                )
+                break
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                chapter_error = str(exc)[:500] or "未知错误"
+                if attempt == 0:
+                    if task_id and task_manager.is_cancellation_requested(task_id):
+                        raise asyncio.CancelledError()
+                    _update_progress(
+                        "generating",
+                        f"第{chapter_number}章生成失败（{chapter_error[:120]}），正在重试…",
+                    )
+                    await asyncio.sleep(BATCH_CHAPTER_RETRY_DELAY_SECONDS)
+                    continue
+
+        if chapter_error is not None:
+            # 重试仍失败 → 直接停止整批，返回失败原因（按用户要求：单章失败即停）
+            failed.append({"chapter_number": chapter_number, "reason": chapter_error})
+            _update_progress(
+                "failed",
+                f"第{chapter_number}章重试后仍失败：{chapter_error}。已停止后续章节，已完成 {len(completed)}/{total} 章。",
+            )
+            return {
+                "status": "partial_failed" if completed else "failed",
+                "message": f"批量生成在第{chapter_number}章失败后停止：{chapter_error}",
+                "completed": completed,
+                "failed": failed,
+            }
+
+        # 章间间隔，避免上游限流
+        if index < total - 1:
+            await asyncio.sleep(2)
+
+    _update_progress("completed", f"批量生成完成：成功 {len(completed)}/{total} 章")
+    return {
+        "status": "succeeded",
+        "message": f"批量生成完成，共 {len(completed)} 章",
+        "completed": completed,
+        "failed": failed,
+    }
 
 
 @app.post("/api/stories/{story_id}/expand-chapter", response_model=ChapterOut)

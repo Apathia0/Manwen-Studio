@@ -1,6 +1,13 @@
-import { BarChart3, FilePlus2, FileText, Loader2, Pencil } from 'lucide-react';
+import { BarChart3, CheckSquare, FilePlus2, FileText, Loader2, Pencil, Square } from 'lucide-react';
 import { useMemo, useState } from 'react';
-import { assessQuality, expandChapter, type Chapter } from '../../api';
+import {
+  assessQuality,
+  expandChapter,
+  expandChaptersBatch,
+  waitForChapterBatch,
+  type Chapter,
+  type ChapterBatchProgress,
+} from '../../api';
 import type { FrameworkChapter } from './types';
 import { STATUS_COLORS, STATUS_LABELS } from './types';
 
@@ -189,6 +196,11 @@ export default function ChapterListSection({
   const [savingPlan, setSavingPlan] = useState(false);
   const [generatingChapters, setGeneratingChapters] = useState(false);
   const [error, setError] = useState('');
+  // 批量生成状态
+  const [selectedForBatch, setSelectedForBatch] = useState<Set<number>>(new Set());
+  const [batchSelectMode, setBatchSelectMode] = useState(false);
+  const [batchRunning, setBatchRunning] = useState(false);
+  const [batchProgress, setBatchProgress] = useState<ChapterBatchProgress | null>(null);
 
   const hasContent = chapters && chapters.length > 0;
   const actualChapterNumbers = useMemo(() => new Set(actualChapters.map((chapter) => chapter.chapter_number)), [actualChapters]);
@@ -235,6 +247,46 @@ export default function ChapterListSection({
     } finally {
       setBusyId(null);
       setBusyAction(null);
+    }
+  };
+
+  // ── 批量章节生成 ──────────────────────────────────────────
+  const toggleBatchSelect = (chapterNumber: number) => {
+    setSelectedForBatch((prev) => {
+      const next = new Set(prev);
+      if (next.has(chapterNumber)) next.delete(chapterNumber);
+      else next.add(chapterNumber);
+      return next;
+    });
+  };
+
+  const handleBatchExpand = async () => {
+    if (batchRunning || selectedForBatch.size === 0) return;
+    if (selectedForBatch.size > 10) {
+      setError('单次批量最多 10 章');
+      return;
+    }
+    setError('');
+    setBatchRunning(true);
+    setBatchProgress(null);
+    try {
+      const submitted = await expandChaptersBatch(storyId, Array.from(selectedForBatch).sort((a, b) => a - b));
+      const finalProgress = await waitForChapterBatch(submitted.task_id, setBatchProgress);
+      if (finalProgress.status === 'failed' || finalProgress.status === 'cancelled') {
+        const firstFailure = finalProgress.batch_failed[0];
+        setError(
+          `批量生成${finalProgress.status === 'cancelled' ? '已取消' : '中止'}：${
+            firstFailure ? `第${firstFailure.chapter_number}章失败（${firstFailure.reason}）` : finalProgress.message
+          }`,
+        );
+      }
+      await onUpdate();
+    } catch (err: any) {
+      setError(err.message || '批量生成失败');
+    } finally {
+      setBatchRunning(false);
+      setSelectedForBatch(new Set());
+      setBatchSelectMode(false);
     }
   };
 
@@ -313,11 +365,73 @@ export default function ChapterListSection({
     <div className="space-y-2">
       <div className="flex items-center justify-between">
         <span className="text-xs text-slate-500">{chapters!.length} 话规划</span>
-        <button onClick={() => void handleGenerateChapters()} disabled={generatingChapters || savingPlan} className="inline-flex items-center gap-1 rounded-md border border-slate-200 bg-slate-900 px-2.5 py-1 text-[11px] font-medium text-white hover:bg-slate-800 disabled:opacity-40">
-          {generatingChapters ? <Loader2 size={12} className="animate-spin" /> : <FileText size={12} />}
-          AI 生成章节
-        </button>
+        <div className="flex items-center gap-1.5">
+          {!batchRunning && (
+            <button
+              onClick={() => {
+                setBatchSelectMode((v) => !v);
+                setSelectedForBatch(new Set());
+              }}
+              className={`inline-flex items-center gap-1 rounded-md border px-2.5 py-1 text-[11px] font-medium transition-colors ${
+                batchSelectMode
+                  ? 'border-blue-300 bg-blue-50 text-blue-700 hover:bg-blue-100'
+                  : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50'
+              }`}
+            >
+              <CheckSquare size={12} />
+              {batchSelectMode ? '退出多选' : '批量生成'}
+            </button>
+          )}
+          <button onClick={() => void handleGenerateChapters()} disabled={generatingChapters || savingPlan} className="inline-flex items-center gap-1 rounded-md border border-slate-200 bg-slate-900 px-2.5 py-1 text-[11px] font-medium text-white hover:bg-slate-800 disabled:opacity-40">
+            {generatingChapters ? <Loader2 size={12} className="animate-spin" /> : <FileText size={12} />}
+            AI 生成章节
+          </button>
+        </div>
       </div>
+
+      {batchSelectMode && !batchRunning && (
+        <div className="flex flex-wrap items-center gap-2 rounded-lg border border-blue-200 bg-blue-50 px-3 py-2">
+          <span className="text-[11px] text-blue-800">已选 {selectedForBatch.size}/10 章</span>
+          <button
+            onClick={() => setSelectedForBatch(new Set(chapters!.filter((c) => !actualChapterNumbers.has(c.chapter_number)).map((c) => c.chapter_number)))}
+            className="rounded border border-blue-200 bg-white px-2 py-0.5 text-[11px] text-blue-700 hover:bg-blue-50"
+          >
+            全选未生成
+          </button>
+          <button
+            onClick={() => setSelectedForBatch(new Set())}
+            className="rounded border border-slate-200 bg-white px-2 py-0.5 text-[11px] text-slate-600 hover:bg-slate-50"
+          >
+            清空
+          </button>
+          <button
+            onClick={() => void handleBatchExpand()}
+            disabled={selectedForBatch.size === 0}
+            className="ml-auto inline-flex items-center gap-1 rounded-md bg-blue-600 px-3 py-1 text-[11px] font-medium text-white hover:bg-blue-500 disabled:opacity-40"
+          >
+            <FileText size={12} />
+            开始批量生成（{selectedForBatch.size} 章）
+          </button>
+        </div>
+      )}
+
+      {batchRunning && batchProgress && (
+        <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2">
+          <div className="flex items-center gap-2">
+            <Loader2 size={13} className="animate-spin text-amber-600" />
+            <span className="text-xs font-medium text-amber-800">{batchProgress.message || '批量生成进行中…'}</span>
+          </div>
+          {batchProgress.batch_total > 0 && (
+            <div className="mt-1.5 h-1.5 w-full overflow-hidden rounded-full bg-amber-100">
+              <div
+                className="h-full rounded-full bg-amber-500 transition-all"
+                style={{ width: `${Math.round(((batchProgress.batch_completed.length + batchProgress.batch_failed.length) / batchProgress.batch_total) * 100)}%` }}
+              />
+            </div>
+          )}
+          <p className="mt-1 text-[11px] text-amber-700">可关闭页面，任务会在服务器继续执行；串行生成保证章节上下文连贯。</p>
+        </div>
+      )}
 
       {chapters!.map((chapter) => {
         const actBorder = actColors[String(chapter.act)] || 'border-l-slate-300';
@@ -331,6 +445,18 @@ export default function ChapterListSection({
         return (
           <div key={chapter.chapter_number} className={`rounded-xl border border-slate-200 border-l-4 ${actBorder} bg-slate-50 px-3 py-2`}>
             <div className={`flex items-center gap-2 ${canOpen ? 'cursor-pointer' : ''}`} onClick={() => canOpen && onChapterSelect(chapter.chapter_number)}>
+              {batchSelectMode && !batchRunning && (
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    toggleBatchSelect(chapter.chapter_number);
+                  }}
+                  className="shrink-0 text-blue-600 hover:text-blue-800"
+                  title={selectedForBatch.has(chapter.chapter_number) ? '取消选择' : '选择本章'}
+                >
+                  {selectedForBatch.has(chapter.chapter_number) ? <CheckSquare size={15} /> : <Square size={15} className="text-slate-400" />}
+                </button>
+              )}
               <span className="w-14 shrink-0 text-xs font-mono text-slate-500">第{chapter.chapter_number}话</span>
               <span className="min-w-0 flex-1 truncate text-xs font-medium text-slate-700">{chapter.title}</span>
               <StatusBadge status={chapter.status} />

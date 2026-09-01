@@ -2921,6 +2921,73 @@ export async function expandChapter(
   return waitForChapterGeneration(await res.json(), 'expand_chapter');
 }
 
+export interface ChapterBatchGenerationSubmitResult {
+  task_id: string;
+  status: string;
+  story_id: number;
+  total: number;
+  chapter_numbers: number[];
+  message: string;
+}
+
+export interface ChapterBatchProgress {
+  stage: string;
+  message: string;
+  batch_total: number;
+  batch_completed: number[];
+  batch_failed: Array<{ chapter_number: number; reason: string }>;
+  status: string;
+  error_message?: string | null;
+}
+
+/** 提交批量章节生成任务（串行队列，后台持续执行） */
+export async function expandChaptersBatch(storyId: number, chapterNumbers: number[]): Promise<ChapterBatchGenerationSubmitResult> {
+  const res = await fetch(`${BASE}/api/stories/${storyId}/expand-chapters/batch`, {
+    method: 'POST',
+    headers: apiHeaders(true),
+    body: JSON.stringify({ chapter_numbers: chapterNumbers }),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
+  return res.json();
+}
+
+/** 查询批量章节生成进度（从任务元数据中提取） */
+export async function getChapterBatchProgress(taskId: string): Promise<ChapterBatchProgress> {
+  const status = await getBackgroundTaskStatus(taskId);
+  const metadata = (status.metadata_json || {}) as Record<string, unknown>;
+  return {
+    stage: String(metadata.stage || status.status || ''),
+    message: String(metadata.message || status.message || ''),
+    batch_total: Number(metadata.batch_total || 0),
+    batch_completed: Array.isArray(metadata.batch_completed) ? (metadata.batch_completed as number[]) : [],
+    batch_failed: Array.isArray(metadata.batch_failed) ? (metadata.batch_failed as Array<{ chapter_number: number; reason: string }>) : [],
+    status: status.status,
+    error_message: status.error_message ?? null,
+  };
+}
+
+/** 轮询批量任务直到完成/失败/取消；每章完成时通过 onChapterCompleted 回调通知调用方刷新 UI */
+export async function waitForChapterBatch(
+  taskId: string,
+  onProgress?: (progress: ChapterBatchProgress) => void,
+  timeoutMs: number = 3 * 60 * 60 * 1000,
+): Promise<ChapterBatchProgress> {
+  const deadline = Date.now() + timeoutMs;
+  let lastCompletedCount = -1;
+  while (Date.now() < deadline) {
+    const progress = await getChapterBatchProgress(taskId);
+    if (onProgress) onProgress(progress);
+    if (progress.batch_completed.length !== lastCompletedCount) {
+      lastCompletedCount = progress.batch_completed.length;
+    }
+    if (progress.status === 'succeeded' || progress.status === 'failed' || progress.status === 'cancelled') {
+      return progress;
+    }
+    await new Promise((resolve) => globalThis.setTimeout(resolve, 3000));
+  }
+  throw new Error(`批量生成等待超时，任务 ${taskId} 仍在后台运行`);
+}
+
 export async function rewriteSelection(
   chapterId: number,
   selectedText: string,
