@@ -13,6 +13,7 @@ import {
   compileScenes,
   generateDirectorPlan,
   analyzeCanvasAssets,
+  createNodeContainer,
   screenplaySplit,
   listVideoCanvasPlans,
   listVideoCanvasNodeCatalog,
@@ -88,11 +89,12 @@ const SCREENPLAY_SPLIT_MAX_UNITS = 30;
 const NODE_WIDTH = 300;
 const CANVAS_NODE_TYPES = new Set(['text', 'screenplay', 'scene', 'image', 'video']);
 const CANVAS_CATALOG: VideoCanvasNodeCatalogItem[] = [
-  { type: 'text', label: '文本', category: '创作', icon: 'Type', inputs: [{ key: 'source', type: 'any', multiple: true, required: false }], outputs: [{ key: 'text', type: 'any' }] },
-  { type: 'screenplay', label: '剧本', category: '创作', icon: 'FileText', inputs: [{ key: 'source', type: 'any', multiple: true, required: false }], outputs: [{ key: 'screenplay', type: 'any' }] },
-  { type: 'scene', label: '场景', category: '创作', icon: 'Clapperboard', inputs: [{ key: 'screenplay', type: 'any', multiple: true, required: false }], outputs: [{ key: 'shot', type: 'any' }] },
-  { type: 'image', label: '图片', category: '媒体', icon: 'Image', inputs: [{ key: 'prompt', type: 'any', multiple: true, required: false }, { key: 'references', type: 'any', multiple: true, required: false }], outputs: [{ key: 'image', type: 'any' }] },
-  { type: 'video', label: '视频', category: '媒体', icon: 'Film', inputs: [{ key: 'prompt', type: 'any', multiple: true, required: false }, { key: 'image', type: 'any', multiple: true, required: false }], outputs: [{ key: 'video', type: 'any' }] },
+  { type: 'text', label: '文本', category: '内容', icon: Type, inputs: [{ key: 'content', type: 'text', required: false }], outputs: [{ key: 'text', type: 'text' }] },
+  { type: 'screenplay', label: '剧本', category: '创作', icon: FileText, inputs: [{ key: 'source', type: 'text', required: false }], outputs: [{ key: 'screenplay', type: 'screenplay' }] },
+  { type: 'scene', label: '场景', category: '创作', icon: Clapperboard, inputs: [{ key: 'screenplay', type: 'screenplay', required: false }], outputs: [{ key: 'shot', type: 'shot' }] },
+  { type: 'image', label: '图片', category: '媒体', icon: Image, inputs: [{ key: 'prompt', type: 'text', required: true }, { key: 'references', type: 'image', multiple: true }], outputs: [{ key: 'image', type: 'image' }] },
+  { type: 'video', label: '视频', category: '媒体', icon: Video, inputs: [{ key: 'prompt', type: 'text', required: true }, { key: 'image', type: 'image', multiple: true }], outputs: [{ key: 'video', type: 'video' }] },
+  { type: 'container', label: '资产容器', category: '管理', icon: Folder, inputs: [], outputs: [{ key: 'assets', type: 'any', multiple: true }], executable: false },
 ];
 
 

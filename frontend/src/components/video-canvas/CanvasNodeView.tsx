@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react';
 import type { VideoCanvasNodeCatalogItem, VideoCanvasPort } from '../../api';
 import { nodeSize, portY, type CanvasInteractionHandlers, type CanvasSceneNode, type ConnectionHandle } from './useCanvasInteractions';
+import SceneListNodeView from './SceneListNodeView';
+import ContainerNodeView from './ContainerNodeView';
 
 /**
  * 画布节点视图。
@@ -206,7 +208,25 @@ export default function CanvasNodeView({ node, catalogItem, selected, connecting
         }}
       >
         <div className="relative flex h-full w-full items-center justify-center overflow-hidden rounded-[22px]">
-          {renderContent ? renderContent(node) : <span className="px-3 text-center text-xs font-medium text-gray-300">{node.data.label || catalogItem.label}</span>}
+          {renderContent ? renderContent(node) : (
+            node.data.config?.node_role === 'container' ? (
+              <ContainerNodeView 
+                config={node.data.config as any} 
+                onToggleCollapsed={() => setHovered(!hovered)}
+                collapsed={!hovered}
+              />
+            ) : (
+              node.type === 'scene' ? (
+                <SceneListNodeView
+                  config={(node.data.config || {}) as any}
+                  onChange={() => {}}
+                  hideApproval
+                />
+              ) : (
+                <span className="px-3 text-center text-xs font-medium text-gray-300">{node.data.label || catalogItem.label}</span>
+              )
+            )
+          )}
         </div>
         <ResizeHandle corner="top-left" onMouseDown={handleResizeMouseDown} />
         <ResizeHandle corner="top-right" onMouseDown={handleResizeMouseDown} />
