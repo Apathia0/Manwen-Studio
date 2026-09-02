@@ -1,4 +1,4 @@
-import { Box, CircleHelp, FileText, Focus, Hand, ImagePlus, LayoutTemplate, MousePointer2, Redo2, RotateCcw, Type, Undo2, Video, Volume2, ZoomIn, ZoomOut } from 'lucide-react';
+import { Box, CircleHelp, FileText, Focus, Folder, Hand, ImagePlus, LayoutTemplate, MousePointer2, Redo2, RotateCcw, Type, Undo2, Video, Volume2, ZoomIn, ZoomOut } from 'lucide-react';
 import type { ReactNode } from 'react';
 import type { CanvasTool } from './useCanvasInteractions';
 
@@ -11,6 +11,7 @@ interface Props {
   onRedo: () => void;
   onAutoLayout: () => void;
   onOpenAssetManagement: () => void;
+  onOpenContainerDialog?: () => void;
   isAssetManagementDisabled?: boolean;
   supportsAudio?: boolean;
   onTool: (tool: CanvasTool | 'help') => void;
@@ -22,7 +23,7 @@ function ToolButton({ title, onClick, active, disabled, children }: { title: str
   return <button type="button" title={title} aria-label={title} disabled={disabled} onClick={onClick} className={`flex h-9 w-9 items-center justify-center rounded-lg transition-colors disabled:cursor-not-allowed disabled:opacity-30 ${active ? 'bg-[#423e3a] text-white' : 'text-[#948d87] hover:bg-[#35312e] hover:text-[#eee9e4]'}`}>{children}</button>;
 }
 
-export default function CanvasBottomToolbar({ scale, onScaleChange, onReset, onFit, onUndo, onRedo, onAutoLayout, onOpenAssetManagement, isAssetManagementDisabled = false, supportsAudio = false, onTool, activeTool = 'select', onAddNode }: Props) {
+export default function CanvasBottomToolbar({ scale, onScaleChange, onReset, onFit, onUndo, onRedo, onAutoLayout, onOpenAssetManagement, onOpenContainerDialog, isAssetManagementDisabled = false, supportsAudio = false, onTool, activeTool = 'select', onAddNode }: Props) {
   const chooseTool = (tool: CanvasTool) => { onTool(tool); };
   const addNode = (type: string) => { if (onAddNode) { onAddNode(type); } else { onTool(type as CanvasTool); } };
   return <>
@@ -48,6 +49,7 @@ export default function CanvasBottomToolbar({ scale, onScaleChange, onReset, onF
       <ToolButton title="添加视频节点" onClick={() => addNode('video')}><Video className="h-4 w-4" /></ToolButton>
       <ToolButton title={supportsAudio ? '添加音频节点' : '当前工作流暂不支持音频节点'} disabled={!supportsAudio} onClick={() => addNode('audio')}><Volume2 className="h-4 w-4" /></ToolButton>
       <ToolButton title="自动整理画布" onClick={onAutoLayout}><LayoutTemplate className="h-4 w-4" /></ToolButton>
+      <ToolButton title="创建资产容器" onClick={() => onOpenContainerDialog?.()}><Folder className="h-4 w-4" /></ToolButton>
       <ToolButton title="资产管理" disabled={isAssetManagementDisabled} onClick={onOpenAssetManagement}><Box className="h-4 w-4" /></ToolButton>
     </div>
   </>;

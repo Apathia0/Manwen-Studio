@@ -1,5 +1,5 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent } from 'react';
-import { Bot, Boxes, Check, ChevronLeft, FileText, Loader2, PanelLeft, Pencil, Plus, Save, Search, SplitSquareHorizontal, Trash2, Upload, X } from 'lucide-react';
+import { Bot, Boxes, Check, ChevronLeft, FileText, Folder, Loader2, PanelLeft, Pencil, Plus, Save, Search, SplitSquareHorizontal, Trash2, Upload, X } from 'lucide-react';
 import {
   applyVideoCanvasPlan,
   cancelVideoCanvasRun,
@@ -66,6 +66,7 @@ import ChapterImportDialog from './video-canvas/ChapterImportDialog';
 import SceneListNodeView from './video-canvas/SceneListNodeView';
 import { layoutDirectorUnits, unitNodeId } from './video-canvas/directorLayout';
 import AssetReferenceSelector from './AssetReferenceSelector';
+import ContainerCreationDialog from './video-canvas/ContainerCreationDialog';
 import StyleSelectorModal from './StyleSelectorModal';
 
 const AgentPanel = lazy(() => import('./AgentPanel/AgentPanel'));
@@ -210,6 +211,7 @@ export default function VideoCanvasPanel({ storyId, chapterId, workflow: _workfl
   const [planBusyNodeId, setPlanBusyNodeId] = useState<string | null>(null);
   const [directorError, setDirectorError] = useState<string | null>(null);
   const [assetAnalysisNodeId, setAssetAnalysisNodeId] = useState<string | null>(null);
+  const [containerDialogOpen, setContainerDialogOpen] = useState(false);
   const [models, setModels] = useState<AiModelItem[]>([]);
   const [canvas, setCanvas] = useState<VideoCanvas | null>(null);
   const [canvasList, setCanvasList] = useState<VideoCanvas[]>([]);
@@ -999,6 +1001,28 @@ export default function VideoCanvasPanel({ storyId, chapterId, workflow: _workfl
     }
   };
   // 章节导入完成：把改写后的剧本落到新剧本节点
+  // 创建资产容器：把选中的节点放入容器，自动 Tab 分类 + 矩阵布局
+  const handleCreateContainer = async (name: string, nodeIds: string[]) => {
+    if (!canvas || !nodeIds.length) return;
+    setContainerDialogOpen(false);
+    try {
+      // 先保存当前画布
+      let targetCanvas = canvas;
+      if (dirty) {
+        const saved = await saveCanvas(false);
+        if (!saved) return;
+        targetCanvas = saved;
+      }
+      const result = await createNodeContainer(targetCanvas.id, { name, node_ids: nodeIds });
+      // 刷新画布以加载服务端返回的容器节点和重排后的资产位置
+      const refreshed = await getVideoCanvas(targetCanvas.id);
+      hydrateCanvas(refreshed);
+      toast.success(`已创建资产容器「${name}」：${result.tab_count} 个分类，${result.node_count} 个节点已按矩阵排列`);
+    } catch (error) {
+      toast.error(normalizeErrorMessage(error, '创建资产容器失败'));
+    }
+  };
+
   const handleScreenplayImported = (screenplayText: string, sourceRefs: { story_id: number; chapter_id: number; title: string; content_hash: string }[]) => {
     captureHistory();
     const node: CanvasNode = {
@@ -1376,8 +1400,16 @@ const mediaKind = nodeView.type === 'image' || nodeView.type === 'video' ? nodeV
       {createMenuPosition && <CanvasCreateMenu position={screenPoint(createMenuPosition, editorViewport)} onSelect={(type) => { const item = catalog.find((entry) => entry.type === type); if (item && createMenuPosition) { captureHistory(); addCatalogNode(item, createMenuPosition); } interaction.closeCreateMenu(); }} onClose={interaction.closeCreateMenu} />}
       {miniMapOpen && <CanvasMiniMap nodes={nodes.map((node) => ({ id: node.id, position: node.position, width: node.data.ui?.width, height: node.data.ui?.height, type: node.type }))} viewport={editorViewport} viewportSize={canvasSize} onViewportChange={(next) => updateViewport({ x: next.x, y: next.y, k: next.scale })} />}
       <CanvasZoomControls scale={viewport.k} onScaleChange={(k) => updateViewport({ ...viewport, k })} onReset={() => { const rect = surfaceRef.current?.getBoundingClientRect(); updateViewport({ x: rect ? rect.width / 2 : 260, y: rect ? rect.height / 2 : 120, k: 1 }); }} isMiniMapOpen={miniMapOpen} onToggleMiniMap={() => setMiniMapOpen((open) => !open)} />
-      <CanvasBottomToolbar scale={viewport.k} supportsAudio={false} onScaleChange={(k) => updateViewport({ ...viewport, k })} onReset={() => { const rect = surfaceRef.current?.getBoundingClientRect(); updateViewport({ x: rect ? rect.width / 2 : 260, y: rect ? rect.height / 2 : 120, k: 1 }); }} onFit={fitAll} onUndo={undo} onRedo={redo} onAutoLayout={autoLayoutCanvas} onOpenAssetManagement={() => onOpenAssetManagement?.()} isAssetManagementDisabled={!chapterId && !onOpenAssetManagement} onTool={(nextTool) => { if (nextTool === 'select' || nextTool === 'pan') setTool(nextTool); else if (nextTool === 'help') toast.info('空格或中键平移，滚轮缩放，框选多个节点'); }} activeTool={tool} onAddNode={(type) => addNodeFromTool(type)} />
+      <CanvasBottomToolbar scale={viewport.k} supportsAudio={false} onScaleChange={(k) => updateViewport({ ...viewport, k })} onReset={() => { const rect = surfaceRef.current?.getBoundingClientRect(); updateViewport({ x: rect ? rect.width / 2 : 260, y: rect ? rect.height / 2 : 120, k: 1 }); }} onFit={fitAll} onUndo={undo} onRedo={redo} onAutoLayout={autoLayoutCanvas} onOpenAssetManagement={() => onOpenAssetManagement?.()} onOpenContainerDialog={() => setContainerDialogOpen(true)} isAssetManagementDisabled={!chapterId && !onOpenAssetManagement} onTool={(nextTool) => { if (nextTool === 'select' || nextTool === 'pan') setTool(nextTool); else if (nextTool === 'help') toast.info('空格或中键平移，滚轮缩放，框选多个节点'); }} activeTool={tool} onAddNode={(type) => addNodeFromTool(type)} />
       {importDialogOpen && canvas && <ChapterImportDialog canvasId={canvas.id} onClose={() => setImportDialogOpen(false)} onImported={handleScreenplayImported} />}
+      {containerDialogOpen && (
+        <ContainerCreationDialog
+          availableNodes={nodes.map(n => ({ id: n.id, label: n.data.label, type: n.type }))}
+          onSelectAll={() => { setSelectedNodeIds(nodes.filter(n => ['image', 'video', 'asset', 'video_asset'].includes(n.type)).map(n => n.id)); }}
+          onClose={() => setContainerDialogOpen(false)}
+          onCreate={handleCreateContainer}
+        />
+      )}
   </div>;
 
   /* 旧 DOM 画布实现保留在版本历史中，Canvas2D 编辑器已在上方返回。 */
