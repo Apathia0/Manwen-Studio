@@ -260,6 +260,12 @@ _CHAPTER_GENERATION_INTERNAL_HEADER = "x-storycanvas-internal-generation"
 _CHAPTER_BATCH_TASK_HEADER = "x-storycanvas-batch-task-id"
 _CHAPTER_MEMORY_WAIT_TIMEOUT_SECONDS = 330.0
 _CHAPTER_MEMORY_WAIT_POLL_SECONDS = 0.5
+# 记忆任务自身预算必须显著大于内层 httpx 超时（300s），否则外层 wait_for 会先于内层超时
+# 触发 asyncio.TimeoutError，而该异常被 task_manager 判定为不可重试，直接把任务钉死为 failed。
+_CHAPTER_MEMORY_TASK_TIMEOUT_SECONDS = 900.0
+# 长篇作品单次门禁内允许重新提交失败记忆任务的次数。历史失败任务不再永久封锁生成，
+# 只在连续失败达到该上限后才向用户报错，避免一次瞬时故障把整本书钉死。
+_CHAPTER_MEMORY_MAX_RESUBMITS = 2
 _CHAPTER_GENERATION_INTERNAL_SECRET = secrets.token_urlsafe(32)
 AUTO_MANGA_ASSET_START_INTERVAL_SECONDS = max(
     0,
@@ -4404,9 +4410,10 @@ def _merge_story_memory(existing: dict | None, update: dict | None, chapter: Cha
     return _normalize_story_memory_consistency(memory)
 
 
-async def _refresh_chapter_memory(chapter: Chapter, request: Request, db: Session) -> None:
+async def _refresh_chapter_memory(chapter: Chapter, request: Request, db: Session) -> bool:
+    """同步刷新单章记忆。返回是否真正产出了记忆，供调用方决定是否计费。"""
     if not chapter.novel_content or not chapter.novel_content.strip():
-        return
+        return False
     chapter_id = chapter.id
     chapter_info = {
         "chapter_number": chapter.chapter_number,
@@ -4427,11 +4434,11 @@ async def _refresh_chapter_memory(chapter: Chapter, request: Request, db: Sessio
         )
     except Exception as exc:
         logger.warning("Failed to refresh chapter memory for chapter %s: %s", chapter.id, exc)
-        return
+        return False
 
     chapter = db.get(Chapter, chapter_id)
     if not chapter:
-        return
+        return False
     chapter_summary = memory_payload.get("chapter_summary") if isinstance(memory_payload.get("chapter_summary"), dict) else {}
     chapter_handoff = memory_payload.get("chapter_handoff") if isinstance(memory_payload.get("chapter_handoff"), dict) else {}
     story_memory_update = memory_payload.get("story_memory_update") if isinstance(memory_payload.get("story_memory_update"), dict) else {}
@@ -4452,6 +4459,7 @@ async def _refresh_chapter_memory(chapter: Chapter, request: Request, db: Sessio
         source_chapter_id=chapter.id,
         commit=False,
     )
+    return bool(chapter_summary or chapter_handoff)
 
 
 async def _background_refresh_chapter_memory(
@@ -4568,7 +4576,7 @@ async def _submit_chapter_memory_refresh(
         api_key,
         None,
         content_fingerprint,
-        timeout=300,
+        timeout=_CHAPTER_MEMORY_TASK_TIMEOUT_SECONDS,
         max_retries=1,
         story_id=chapter.story_id,
         chapter_id=chapter.id,
@@ -4613,6 +4621,8 @@ async def _ensure_previous_chapter_memory_ready(
     memory_task_id: str | None = None
     expected_fingerprint = ""
     previous_number = 0
+    resubmit_budget = _CHAPTER_MEMORY_MAX_RESUBMITS
+    failed_task: BackgroundTask | None = None
 
     while time.monotonic() < deadline:
         if cancellation_task_id and task_manager.is_cancellation_requested(cancellation_task_id):
@@ -4656,17 +4666,33 @@ async def _ensure_previous_chapter_memory_ready(
             if task_matches_content and matching_task.status in ("pending", "running", "retrying", "cancel_requested"):
                 memory_task_id = matching_task.task_id
             elif task_matches_content and matching_task.status in ("failed", "cancelled", "canceled"):
-                raise HTTPException(status_code=503, detail={
-                    "code": "previous_chapter_memory_failed",
-                    "retryable": True,
-                    "chapter_number": previous_number,
-                    "message": f"第{previous_number}章连续性记忆提取失败，请稍后重试",
-                })
+                # 已失败的历史任务只代表上一次尝试失败，不能永久封锁本章生成。
+                # 先在预算内重新提交；只有连续失败耗尽预算才把错误抛给用户。
+                if resubmit_budget > 0:
+                    resubmit_budget -= 1
+                    logger.info(
+                        "上一章记忆任务已失败，重新提交 chapter=%s failed_task=%s remaining_resubmits=%s error=%s",
+                        previous.id,
+                        matching_task.task_id,
+                        resubmit_budget,
+                        matching_task.error_message,
+                    )
+                    memory_task_id = await _submit_chapter_memory_refresh(previous, api_key)
+                else:
+                    failed_task = matching_task
+                    memory_task_id = None
             else:
                 memory_task_id = await _submit_chapter_memory_refresh(previous, api_key)
         finally:
             wait_db.close()
 
+        if failed_task is not None:
+            raise HTTPException(status_code=503, detail={
+                "code": "previous_chapter_memory_failed",
+                "retryable": True,
+                "chapter_number": previous_number,
+                "message": f"第{previous_number}章连续性记忆提取失败，请稍后重试",
+            })
         if not memory_task_id:
             break
         await asyncio.sleep(_CHAPTER_MEMORY_WAIT_POLL_SECONDS)
@@ -13809,7 +13835,9 @@ async def submit_expand_chapter_task(story_id: int, request: Request, db: Sessio
 
 
 BATCH_CHAPTER_GENERATION_MAX = 10
-BATCH_CHAPTER_API_TIMEOUT_SECONDS = 180
+# 必须大于 _CHAPTER_MEMORY_WAIT_TIMEOUT_SECONDS（330s）：单章生成内部会先等待上一章记忆就绪，
+# 客户端超时若更短会在服务端仍在推进时就中断连接，把可重试的 503 变成不可重试的 ReadTimeout。
+BATCH_CHAPTER_API_TIMEOUT_SECONDS = 900
 BATCH_CHAPTER_RETRY_DELAY_SECONDS = 5.0
 
 
@@ -14002,7 +14030,11 @@ async def _run_chapter_batch_generation(
                         response.status_code in (409, 503)
                         and isinstance(detail, dict)
                         and detail.get("retryable")
-                        and detail_code in {"knowledge_revision_conflict", "previous_chapter_memory_not_ready"}
+                        and detail_code in {
+                            "knowledge_revision_conflict",
+                            "previous_chapter_memory_not_ready",
+                            "previous_chapter_memory_failed",
+                        }
                     )
                     if isinstance(detail, dict):
                         chapter_error = str(detail.get("message") or detail_code or "正文生成失败")
@@ -14291,6 +14323,7 @@ async def _expand_chapter_endpoint_impl(story_id: int, request: Request, db: Ses
         memory_quota_result.get("usage_event_id"),
     )
     memory_task_id = f"chapter_memory_{chapter.id}_{uuid.uuid4().hex[:10]}"
+    memory_content_fingerprint = hashlib.sha256((chapter.novel_content or "").encode("utf-8")).hexdigest()
     try:
         await task_manager.submit_task(
             memory_task_id,
@@ -14299,14 +14332,19 @@ async def _expand_chapter_endpoint_impl(story_id: int, request: Request, db: Ses
             chapter.id,
             deepseek_api_key,
             memory_billing_ctx,
-            hashlib.sha256((chapter.novel_content or "").encode("utf-8")).hexdigest(),
-            timeout=300,
+            memory_content_fingerprint,
+            timeout=_CHAPTER_MEMORY_TASK_TIMEOUT_SECONDS,
             max_retries=1,
             chapter_id=chapter.id,
             quota_user_id=user.id,
             quota_feature_key="chapter.memory.refresh",
             quota_amount=1,
             quota_usage_event_id=memory_quota_result.get("usage_event_id"),
+            metadata={
+                "content_fingerprint": memory_content_fingerprint,
+                "running_stage": "summarizing",
+                "running_message": f"正在提取第{chapter.chapter_number or ''}章连续性记忆...",
+            },
         )
     except Exception:
         _finish_streaming_platform_points(
@@ -14495,13 +14533,10 @@ async def refresh_all_memories(story_id: int, request: Request, db: Session = De
         .order_by(Chapter.chapter_number)
         .all()
     )
-    # 统计需要刷新的章节数并预检配额
-    needs_refresh = 0
-    for chapter in chapters:
-        memory = chapter.memory_summary if isinstance(chapter.memory_summary, dict) else {}
-        handoff = memory.get("chapter_handoff") if isinstance(memory.get("chapter_handoff"), dict) else {}
-        if not (handoff.get("ending_location") and handoff.get("active_characters")):
-            needs_refresh += 1
+    # 统计需要刷新的章节数并预检配额。
+    # 判定标准必须与生成门禁 _chapter_memory_matches_content 一致：只看 handoff 字段会漏掉
+    # “正文已改但记忆指纹过期”的章节，导致这些章节永远无法通过门禁却又不在刷新范围内。
+    needs_refresh = sum(1 for chapter in chapters if not _chapter_memory_matches_content(chapter))
     if needs_refresh > 0:
         _check_and_consume_feature_quota(
             request, user.id, "ai.text.advanced_calls.monthly_limit",
@@ -14509,15 +14544,16 @@ async def refresh_all_memories(story_id: int, request: Request, db: Session = De
         )
 
     refreshed = 0
+    failed = 0
     for chapter in chapters:
-        memory = chapter.memory_summary if isinstance(chapter.memory_summary, dict) else {}
-        handoff = memory.get("chapter_handoff") if isinstance(memory.get("chapter_handoff"), dict) else {}
-        if handoff.get("ending_location") and handoff.get("active_characters"):
+        if _chapter_memory_matches_content(chapter):
             continue
-        await _refresh_chapter_memory(chapter, request, db)
-        refreshed += 1
+        if await _refresh_chapter_memory(chapter, request, db):
+            refreshed += 1
+        else:
+            failed += 1
     db.commit()
-    # 配额扣减（按实际刷新数量）
+    # 配额扣减（只对真正产出记忆的章节计费，静默失败的章节不扣费）
     if refreshed > 0:
         _check_and_consume_feature_quota(
             request, user.id, "ai.text.advanced_calls.monthly_limit",
@@ -14525,7 +14561,7 @@ async def refresh_all_memories(story_id: int, request: Request, db: Session = De
         )
     for chapter in chapters:
         db.refresh(chapter)
-    return {"refreshed": refreshed, "total": len(chapters)}
+    return {"refreshed": refreshed, "failed": failed, "total": len(chapters)}
 
 
 @app.post("/api/chapters/{chapter_id}/quality-assess")

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import re
 from copy import deepcopy
 from typing import Any
@@ -81,6 +82,9 @@ async def refresh_chapter_memory_for_content(
         "summary": chapter_summary.get("summary"),
         "ending_scene": chapter_summary.get("ending_scene"),
         "fallback": fallback_meta,
+        # 记忆门禁（_chapter_memory_matches_content）以该指纹判定记忆是否对应当前正文版本。
+        # 缺少它会让 Agent 写过的章节永远被视为“记忆未就绪”，反复触发重新提取。
+        "content_fingerprint": hashlib.sha256((novel_content or "").encode("utf-8")).hexdigest(),
     } if (chapter_summary or chapter_handoff) else None
 
     chapter.story.story_memory = merge_story_memory_func(
@@ -201,12 +205,26 @@ def build_story_bible_compact(story_bible: dict | None) -> dict[str, Any]:
     return compact
 
 
+# 连续性记忆进入 prompt 时各列表字段的保留上限（保留最新若干条）。
+# 长篇作品的这些字段会随章节数持续累积，无上限会让上下文和记忆提取请求不断膨胀，
+# 最终在上游侧超时，把该章的 chapter_memory_refresh 任务钉死为 failed。
+_STORY_MEMORY_COMPACT_LIST_LIMITS = {
+    "continuity_facts": 24,
+    "open_loops": 24,
+    "resolved_loops": 24,
+    "long_term_foreshadowing": 30,
+    "volume_summaries": 12,
+    "character_state_snapshots": 5,
+}
+
+
 def build_story_memory_compact(story_memory: dict | None) -> dict[str, Any]:
     """构建连续性记忆的精简版。
 
     与原 main._build_story_memory_compact 行为基本一致，但 recent_chapter_summaries
     只保留最近 1 条（上一章）：创作包/正文 prompt 不需要把所有历史章节摘要都带进来，
     上一章之前的上下文由 previous_chapter 分区覆盖，避免上下文冗余。
+    所有列表字段都有保留上限，避免长篇作品上下文无界增长。
     """
     if not isinstance(story_memory, dict):
         return {}
@@ -220,22 +238,17 @@ def build_story_memory_compact(story_memory: dict | None) -> dict[str, Any]:
         if isinstance(raw, list):
             cleaned = [str(item).strip() for item in raw if str(item).strip()]
             if cleaned:
-                compact[key] = cleaned
+                compact[key] = cleaned[-_STORY_MEMORY_COMPACT_LIST_LIMITS[key]:]
     recent_chapter_summaries = story_memory.get("recent_chapter_summaries")
     if isinstance(recent_chapter_summaries, list):
         compact["recent_chapter_summaries"] = [
             item for item in recent_chapter_summaries
             if isinstance(item, dict)
         ][-1:]
-    long_term = story_memory.get("long_term_foreshadowing")
-    if isinstance(long_term, list) and long_term:
-        compact["long_term_foreshadowing"] = long_term
-    volume_summaries = story_memory.get("volume_summaries")
-    if isinstance(volume_summaries, list) and volume_summaries:
-        compact["volume_summaries"] = volume_summaries
-    snapshots = story_memory.get("character_state_snapshots")
-    if isinstance(snapshots, list) and snapshots:
-        compact["character_state_snapshots"] = snapshots
+    for key in ("long_term_foreshadowing", "volume_summaries", "character_state_snapshots"):
+        raw = story_memory.get(key)
+        if isinstance(raw, list) and raw:
+            compact[key] = raw[-_STORY_MEMORY_COMPACT_LIST_LIMITS[key]:]
     return compact
 
 
