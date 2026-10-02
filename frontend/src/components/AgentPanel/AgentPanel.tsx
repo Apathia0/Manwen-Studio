@@ -85,7 +85,7 @@ export function buildCanvasAgentEffectiveOptions(
 }
 
 /** 自动模式下系统替用户回答“继续”的固定话术（用它区分系统续跑与用户真实输入）。 */
-const AUTO_MODE_CONTINUE_PROMPT = '自动模式已授权，无需确认。请直接执行下一步：把剧本提交为画布节点并继续编排，不要再征求意见。';
+const AUTO_MODE_CONTINUE_PROMPT = '自动模式已授权，无需征求确认。请按你上面说的方案直接执行；只有缺少必须由我提供的信息时才停下来说明缺什么。';
 
 /** 组装 video_canvas 工作流的 Agent 流式请求选项；画布写入模式默认 server（由后端落库并广播 canvas_updated）。 */
 export function buildCanvasChatOptions(
@@ -487,7 +487,7 @@ export default function AgentPanel({
       if (canvasMode && beforeSendRef.current) {
         const ready = await beforeSendRef.current().catch(() => false);
         if (!isCurrent()) return;
-        if (!ready) { sendLockRef.current = false; return; }
+        if (!ready) { sendLockRef.current = false; setSidebarError('画布有未保存的修改且自动保存失败，助手暂时读不到最新内容，请稍后重试'); return; }
       }
       setAutoContinue(true);
       setWaitError('');
@@ -696,7 +696,10 @@ export default function AgentPanel({
   }, [canvasMode, permissionMode, streaming, loadingMessages, approval, pendingTask, canvasBlocked, messages]);
   const lastExternalPromptRef = useRef(0);
   useEffect(() => {
-    if (!externalPrompt || externalPrompt.id === lastExternalPromptRef.current || streaming) return;
+    if (!externalPrompt || externalPrompt.id === lastExternalPromptRef.current) return;
+    // 发送条件还没满足（正在加载历史 / 正在流式 / 画布被占用 / 作品未就绪）时先不消费这条指令：
+    // 条件满足后这个 effect 会因依赖变化重新执行再发送。之前不满足也直接标记已消费，选题材后偶尔就“没反应”了。
+    if (streaming || loadingMessages || canvasBlocked || !storyId) return;
     lastExternalPromptRef.current = externalPrompt.id;
     const mode = externalPrompt.mode;
     if (mode && canvasMode && workflowId) {
@@ -705,7 +708,7 @@ export default function AgentPanel({
       setModeOverrides(current => ({ ...current, [canvasPermissionKey(workflowId, activeConversationId)]: mode, [canvasPermissionKey(workflowId)]: mode }));
     }
     void sendRef.current(externalPrompt.text, mode ? { canvas_permission_mode: mode } : undefined);
-  }, [externalPrompt, streaming]);
+  }, [externalPrompt, streaming, loadingMessages, canvasBlocked, storyId, canvasMode, workflowId, activeConversationId]);
   useEffect(() => {
     if (!canvasMode || !pendingTask || !autoContinue || ['succeeded', 'failed', 'cancelled'].includes(pendingTask.status)) return;
     let active = true;

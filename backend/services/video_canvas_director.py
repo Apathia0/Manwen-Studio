@@ -193,9 +193,9 @@ def _dialogue_lines(dialogue: Any) -> list[str]:
     """把 beat.dialogue 归一为台词文本列表（保留原文）。"""
     lines: list[str] = []
     if isinstance(dialogue, str):
-        text = dialogue.strip()
-        if text:
-            lines.append(text)
+        # 多句对白用换行拼在一起时必须逐行拆开：当成一整行会只在第一个冒号后开始数字数，
+        # 把后面几句的说话人名字和舞台提示也算成念白，对白时长被严重高估。
+        lines.extend(part.strip() for part in dialogue.splitlines() if part.strip())
     elif isinstance(dialogue, list):
         for item in dialogue:
             if isinstance(item, dict):

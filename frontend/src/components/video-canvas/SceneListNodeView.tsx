@@ -1,4 +1,4 @@
-import { useMemo, useState, type ReactNode } from 'react';
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import {
   AlertTriangle,
   ArrowRight,
@@ -18,6 +18,11 @@ import {
   UserRound,
 } from 'lucide-react';
 import SceneNodeView, { type SceneNodeConfig } from './SceneNodeView';
+import { getCanvasSourceChapters, type SourceChapter } from '../../api';
+import { analyzeFidelity, findSourceParagraph, splitParagraphs } from './screenplayFidelity';
+
+/** 小说改写来源章节的引用（随场景节点保存，用来取回原文对照） */
+interface SourceRef { story_id: number; chapter_id: number; title?: string; content_hash?: string }
 
 export interface SceneListConfig {
   scenes?: SceneNodeConfig[];
@@ -64,6 +69,8 @@ function planUnits(plan?: DirectorPlan | null): DirectorPlanUnit[] {
 }
 
 export interface SceneListNodeViewProps {
+  /** 用来取回小说原文做对照；没有画布 ID（预览等场景）时只显示剧本 */
+  canvasId?: number;
   config: SceneListConfig;
   /** partial 合并进节点 config */
   onChange: (partial: Record<string, unknown>) => void;
@@ -250,6 +257,7 @@ const importanceMeta: Record<string, { label: string; className: string }> = {
  * 审批在聚合层统一操作。
  */
 export default function SceneListNodeView({
+  canvasId,
   config,
   onChange,
   onToggleApproved,
@@ -268,6 +276,39 @@ export default function SceneListNodeView({
   const [planOpen, setPlanOpen] = useState(false);
   const [expandedSceneId, setExpandedSceneId] = useState<string | number | null>(null);
   const approved = Boolean(config.approved);
+
+  // ---- 小说原文 | 改写剧本 对照 ----
+  const sourceRefs = useMemo(() => (Array.isArray((config as { source_refs?: unknown }).source_refs) ? ((config as { source_refs: SourceRef[] }).source_refs) : []), [config]);
+  const refsKey = sourceRefs.map((ref) => `${ref.story_id}:${ref.chapter_id}`).join(',');
+  const [chapters, setChapters] = useState<SourceChapter[] | null>(null);
+  const [chaptersError, setChaptersError] = useState('');
+  const [showSource, setShowSource] = useState(true);
+  const [focusParagraph, setFocusParagraph] = useState(-1);
+  const paragraphRefs = useRef<Array<HTMLParagraphElement | null>>([]);
+  useEffect(() => {
+    if (!canvasId || sourceRefs.length === 0) { setChapters(null); return undefined; }
+    let active = true;
+    setChaptersError('');
+    getCanvasSourceChapters(canvasId, sourceRefs.map((ref) => ({ story_id: ref.story_id, chapter_id: ref.chapter_id })))
+      .then((result) => { if (active) setChapters(result.chapters); })
+      .catch((error) => { if (active) { setChapters(null); setChaptersError(error instanceof Error ? error.message : '读取小说原文失败'); } });
+    return () => { active = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [canvasId, refsKey]);
+  const scriptText = String(config.source_content || '');
+  const sourceText = useMemo(() => (chapters || []).map((chapter) => chapter.content).join('\n\n'), [chapters]);
+  const paragraphs = useMemo(() => splitParagraphs(sourceText), [sourceText]);
+  const fidelity = useMemo(() => (sourceText ? analyzeFidelity(scriptText, sourceText) : null), [scriptText, sourceText]);
+  const sourceChanged = Boolean(chapters && chapters.some((chapter) => {
+    const ref = sourceRefs.find((item) => item.chapter_id === chapter.chapter_id);
+    return ref?.content_hash && chapter.content_hash && ref.content_hash !== chapter.content_hash;
+  }));
+  const locate = (text: string) => {
+    const index = findSourceParagraph(text, paragraphs);
+    setFocusParagraph(index);
+    if (index >= 0) paragraphRefs.current[index]?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  };
+  const compareMode = Boolean(fidelity) && showSource;
 
   const updateScene = (index: number, partial: Record<string, unknown>) => {
     const next = scenes.map((scene, i) => (i === index ? { ...scene, ...partial } : scene));
@@ -304,16 +345,63 @@ export default function SceneListNodeView({
       {/* 主体：左来源正文 / 右场景列表 */}
       {!collapsed && (
         <div className="flex min-h-0 flex-1">
-          {/* 左：来源正文（只读） */}
-          <div className="flex w-[38%] min-w-0 flex-col border-r border-[#3a3f45]">
-            <div className="flex shrink-0 items-center gap-1.5 border-b border-[#3a3f45] bg-[#1b1d21] px-2.5 py-1.5">
-              <BookOpen size={11} className="text-[#78818f]" />
-              <span className="text-[10px] font-medium text-[#8b93a1]">来源正文</span>
-            </div>
-            <div className="min-h-0 flex-1 overflow-y-auto p-2.5">
-              <div className="whitespace-pre-wrap text-[11px] leading-relaxed text-[#b3bac6]">
-                {String(config.source_content || '').trim() || '（来源正文未随附，可在剧本节点查看）'}
+          {/* 左一：小说原文（只读，仅小说改写来的剧本有） */}
+          {compareMode && (
+            <div className="flex w-[27%] min-w-0 flex-col border-r border-[#3a3f45]" data-canvas-no-zoom>
+              <div className="flex shrink-0 items-center gap-1.5 border-b border-[#3a3f45] bg-[#1b1d21] px-2.5 py-1.5">
+                <BookOpen size={11} className="text-[#78818f]" />
+                <span className="min-w-0 flex-1 truncate text-[10px] font-medium text-[#8b93a1]">小说原文{chapters && chapters.length > 0 ? ` · ${chapters.map((c) => c.title).join('、')}` : ''}</span>
               </div>
+              {sourceChanged && <div className="shrink-0 bg-amber-500/10 px-2.5 py-1 text-[10px] text-amber-300">原文在改写之后被修改过，下面的对照可能已不准确</div>}
+              <div className="min-h-0 flex-1 overflow-y-auto p-2.5">
+                {paragraphs.map((paragraph, index) => (
+                  <p key={index} ref={(element) => { paragraphRefs.current[index] = element; }}
+                    className={`mb-1.5 whitespace-pre-wrap rounded px-1 text-[11px] leading-relaxed ${focusParagraph === index ? 'bg-[#73a7ff]/20 text-[#e8ebf0]' : 'text-[#9aa3b2]'}`}>{paragraph}</p>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* 左二：改写后的剧本（有原文时逐句标出忠实度，点一句就在左边原文里定位对应段落） */}
+          <div className={`flex ${compareMode ? 'w-[31%]' : 'w-[38%]'} min-w-0 flex-col border-r border-[#3a3f45]`} data-canvas-no-zoom>
+            <div className="flex shrink-0 items-center gap-1.5 border-b border-[#3a3f45] bg-[#1b1d21] px-2.5 py-1.5">
+              <FileText size={11} className="text-[#78818f]" />
+              <span className="min-w-0 flex-1 truncate text-[10px] font-medium text-[#8b93a1]">{fidelity ? '改写剧本' : '来源正文'}</span>
+              {fidelity && (
+                <button type="button" onClick={() => setShowSource((value) => !value)} className="shrink-0 rounded px-1.5 py-0.5 text-[10px] text-[#8b93a1] hover:bg-white/10">
+                  {showSource ? '隐藏原文' : '对照原文'}
+                </button>
+              )}
+            </div>
+            {fidelity && (
+              <div className="shrink-0 space-y-1 border-b border-[#3a3f45] px-2.5 py-1.5 text-[10px] text-[#8b93a1]">
+                <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
+                  <span>台词 {fidelity.dialogueTotal} 条</span>
+                  <span className="text-emerald-400">忠实 {fidelity.dialogueOk}</span>
+                  <span className="text-amber-300">改写 {fidelity.dialogueChanged}</span>
+                  <span className="text-rose-300">原文无此句 {fidelity.dialogueNew}</span>
+                  {fidelity.actionNew > 0 && <span className="text-rose-300">画面描述对不上 {fidelity.actionNew}</span>}
+                </div>
+                {fidelity.newSpeakers.length > 0 && <div className="text-rose-300">原文里没出现过的人物：{fidelity.newSpeakers.join('、')}</div>}
+                <div className="text-[#6f7782]">琥珀色 = 改写了说法，红色 = 原文里找不到对应内容；点一句可在左边原文定位</div>
+              </div>
+            )}
+            {chaptersError && <div className="shrink-0 bg-rose-500/10 px-2.5 py-1 text-[10px] text-rose-300">读取小说原文失败：{chaptersError}</div>}
+            <div className="min-h-0 flex-1 overflow-y-auto p-2.5">
+              {fidelity ? (
+                <div className="space-y-0.5">
+                  {fidelity.lines.map((line, index) => (
+                    <div key={index} onClick={() => line.kind !== 'header' && locate(line.text)} title={line.status === 'new' ? '原文里找不到对应内容，可能是改写时新增的' : line.status === 'changed' ? '改写了说法' : undefined}
+                      className={`rounded px-1.5 py-0.5 text-[11px] leading-relaxed ${line.kind === 'header' ? 'mt-1.5 font-semibold text-[#e8ebf0]' : 'cursor-pointer text-[#b3bac6] hover:bg-white/5'} ${line.status === 'new' ? 'border-l-2 border-rose-400 bg-rose-500/10' : line.status === 'changed' ? 'border-l-2 border-amber-400 bg-amber-500/10' : ''}`}>
+                      {line.text}
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="whitespace-pre-wrap text-[11px] leading-relaxed text-[#b3bac6]">
+                  {scriptText.trim() || '（来源正文未随附，可在剧本节点查看）'}
+                </div>
+              )}
             </div>
           </div>
 

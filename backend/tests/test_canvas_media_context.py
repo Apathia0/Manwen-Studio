@@ -245,3 +245,24 @@ async def test_current_config_asset_mismatch_blocks_attachment(media_root, monke
     result = await media.inspect_media(db, 1, ["image-1"], 1)
     assert result["attachments"] == []
     assert "绑定资产" in result["nodes"][0]["reason"]
+
+
+@pytest.mark.asyncio
+async def test_round_context_only_lists_media_when_nothing_selected(monkeypatch):
+    """每轮不再自动附前 6 张图：没选中节点时只给清单，由助手按需调用 inspect_canvas_media。"""
+    graph = {"nodes": [{"id": f"image-{i}", "type": "image", "data": {"label": f"分镜{i}"}} for i in range(10)] + [{"id": "s", "type": "screenplay", "data": {}}], "edges": []}
+    canvas = SimpleNamespace(id=1, definition_revision=3)
+    monkeypatch.setattr(media, "_latest_graph", lambda db, c: graph)
+    calls = []
+
+    async def fake_inspect(db, canvas_id, node_ids, expected):
+        calls.append(list(node_ids))
+        return {"attachments": [{"node_id": node_ids[0]}], "temporary_paths": [], "summary": "ok"}
+
+    monkeypatch.setattr(media, "inspect_media", fake_inspect)
+    db = SimpleNamespace(get=lambda model, key: canvas)
+    listed = await media.build_canvas_media_context(db, 1, [])
+    assert listed["attachments"] == [] and calls == []
+    assert "共有 10 个图片/视频节点" in listed["summary"] and "image-9" in listed["summary"] and "数量不限" in listed["summary"]
+    selected = await media.build_canvas_media_context(db, 1, ["image-7", "s", "ghost"])
+    assert calls == [["image-7"]] and selected["attachments"] == [{"node_id": "image-7"}]

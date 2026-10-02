@@ -20,7 +20,7 @@ from starlette.background import BackgroundTask as ResponseBackgroundTask
 
 from database import SessionLocal, get_db
 from models import AgentConversation, AgentConversationMessage, AgentPendingChange, CanvasAgentAction, Chapter, ChapterVideoShot, ChapterVideoWorkflow, MangaAsset, MangaImage, Story, VideoAsset, VideoCanvas, VideoCanvasVersion
-from schemas import AgentChatIn, AgentConversationCreateIn, AgentConversationOut, AgentConversationSummaryOut
+from schemas import AgentChatIn, AgentConversationCreateIn, AgentConversationOut, AgentConversationSummaryOut, strip_internal_attachment_notes
 from services.agent_service import (
     AgentPendingChangeKey,
     _chapter_storyboard_text,
@@ -812,9 +812,12 @@ async def agent_chat(
     context_image_attachments: list[dict[str, Any]] = []
     temporary_context_paths: list[Path] = []
     request.state.agent_media_temporary_paths = temporary_context_paths
-    if workflow_type == "video_canvas" and workflow_id:
+    # 点确认卡片、后台任务续接这类运行只是执行已确认的动作，不需要重新看图；每轮自动附 6 张图既费 token 又刷屏。
+    is_structured_followup = bool(body.canvas_approval_id or body.canvas_resume_run_id)
+    if workflow_type == "video_canvas" and workflow_id and not is_structured_followup:
         from services.canvas_media_context import build_canvas_media_context
-        canvas_media = await build_canvas_media_context(db, workflow_id)
+        # 每轮不自动附图：节点内容（含选中节点全文）与生成状态都以文本提供，助手需要视觉验收时再调用 inspect_canvas_media。
+        canvas_media = await build_canvas_media_context(db, workflow_id, [])
         context_image_attachments.extend(canvas_media.get("attachments") or [])
         temporary_context_paths.extend(Path(item) for item in canvas_media.get("temporary_paths") or [])
         story_context += "\n\n## 当前画布真实媒体观察\n" + str(canvas_media.get("summary") or "当前没有可供观察的本地生成产物。")
@@ -929,9 +932,10 @@ async def agent_chat(
         conversation.title = _conversation_title_from_text(content)
 
     attachment_note = ""
-    if attachments:
+    if user_attachments:
+        # 只记录用户自己上传的附件；系统自动附带的画布媒体观察不写进对话记录，避免每条消息都刷一串附件。
         attachment_note = "\n\n" + "\n".join(
-            f"[附件] {item['filename']}（{item['media_kind']}）" for item in attachments
+            f"[附件] {item['filename']}（{item['media_kind']}）" for item in user_attachments
         )
     user_message = AgentConversationMessage(
         conversation_id=persisted_conversation_id,
@@ -959,7 +963,8 @@ async def agent_chat(
     if persisted_summary:
         history_records = [item for item in history_records if item.id > summary_upto_id]
     history_message_ids = [item.id for item in history_records]
-    history = [{"role": item.role, "content": item.content} for item in history_records]
+    # 历史消息里早期写入的“自动附带媒体”记录行不再发给模型（它们是内部查看，不是用户输入）。
+    history = [{"role": item.role, "content": strip_internal_attachment_notes(item.content)} for item in history_records]
     if persisted_summary:
         escaped_summary = persisted_summary.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
         history.insert(0, {

@@ -108,3 +108,31 @@ describe('一键批量生成所需的待生成列表', () => {
     expect(summary.shotsCompiled).toBe(false);
   });
 });
+
+describe('孤儿资产不计入进度', () => {
+  it('旧剧本留下、所属场景已不存在的资产：拆分未完成时“资产”不能显示为已完成', () => {
+    const nodes = [
+      node('sp', 'screenplay', { content: '新剧本' }),
+      node('hero', 'image', { asset_role: 'character', asset_scene_node: 'scene-old' }),
+      node('prop', 'image', { asset_role: 'prop', source_scene_node: 'scene-old' }),
+    ];
+    const summary = computePipeline(nodes, null, true);
+    expect(state(summary, 'split')).toBe('active');
+    expect(state(summary, 'assets')).toBe('pending');
+    expect(summary.pendingImages).toBe(0);
+    expect(summary.pendingAssetIds).toEqual([]);
+  });
+
+  it('属于当前场景的资产、以及用户手动加的无归属资产照常计入', () => {
+    const nodes = [
+      node('sp', 'screenplay', { content: '剧本' }),
+      node('scene-1', 'scene', { approved: true, director_plan: {} }),
+      node('hero', 'image', { asset_role: 'character', asset_scene_node: 'scene-1' }),
+      node('manual', 'image', { asset_role: 'prop' }),
+    ];
+    const summary = computePipeline(nodes, null, false);
+    expect(state(summary, 'assets')).toBe('done');
+    expect(summary.pendingAssetIds.sort()).toEqual(['hero', 'manual']);
+  });
+});
+

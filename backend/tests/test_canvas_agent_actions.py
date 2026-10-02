@@ -376,3 +376,63 @@ def test_request_error_cleans_temporary_media_before_response(tmp_path):
     with pytest.raises(HTTPException):
         asyncio.run(fails(request=request))
     assert not temporary.exists()
+
+
+def test_approved_sync_stage_rewrites_confirmation_so_model_does_not_redo_it(state, monkeypatch):
+    """点确认卡片后，“已在阶段卡片确认，执行此阶段”不能原样交给模型，否则它会把确认当新指令再提一次方案。"""
+    from services import agent_service as agent
+    from services import canvas_stage_gateway
+    from tests.test_agent_media import _agent_sse_response, _install_agent_stream_client
+    context, factory = state
+    monkeypatch.setattr(agent, "SessionLocal", factory)
+
+    async def unused():
+        pytest.fail("提案阶段不能执行")
+
+    proposal = asyncio.run(actions.execute_action(context, "canvas_stage", _args(), unused))["approval"]
+
+    async def gateway(canvas_id, stage, parameters, request, db, **_kwargs):
+        return {"ok": True, "canvas_id": 1, "stage": "screenplay", "node_id": "script-1", "definition_revision": 5, "graph": {"nodes": ["很大的整图"] * 50}}
+
+    monkeypatch.setattr(canvas_stage_gateway, "execute_agent_canvas_stage", gateway)
+    payloads = _install_agent_stream_client(monkeypatch, [_agent_sse_response("剧本已写入画布。", "stop")])
+    monkeypatch.setattr(agent.agent_service, "_build_system_prompt", lambda *_a, **_k: "系统提示")
+
+    async def collect():
+        return [event async for event in agent.agent_service.run_stream(
+            messages=[{"role": "user", "content": "已在阶段卡片确认，执行此阶段。"}], story_context="测试", api_key="test", story_id=3,
+            pending_change_key=agent.AgentPendingChangeKey(user_id=2, story_id=3, conversation_id=5),
+            workflow_type="video_canvas", workflow_id=1, canvas_permission_mode="ask",
+            canvas_approval_id=proposal["id"], canvas_request=object(),
+        )]
+
+    asyncio.run(collect())
+    sent = payloads[0]["messages"]
+    assert "已在阶段卡片确认" not in sent[-1]["content"]
+    assert "系统代述" in sent[-1]["content"] and "不要重复提交" in sent[-1]["content"]
+    assert "很大的整图" not in json.dumps(sent, ensure_ascii=False), "执行结果里的整图不能注入上下文"
+
+
+def test_canvas_tools_use_session_canvas_even_if_model_passes_story_id(state, monkeypatch):
+    """模型常把作品 ID 当画布 ID 传入，导致“画布不存在或无权访问”；执行层按会话画布纠正。"""
+    from services import agent_service as agent
+    context, factory = state
+    monkeypatch.setattr(agent, "SessionLocal", factory)
+    run_context = agent.AgentRunContext(
+        story_id=3, api_key="test", pending_changes=agent.PendingChangesTracker(),
+        pending_change_key=agent.AgentPendingChangeKey(user_id=2, story_id=3, conversation_id=5),
+        workflow_type="video_canvas", workflow_id=1, canvas_permission_mode="ask", canvas_request=object(),
+    )
+    token = agent._AGENT_RUN_CONTEXT.set(run_context)
+    try:
+        result = json.loads(asyncio.run(agent.tool_registry.execute("canvas_stage", {**_args(), "canvas_id": 35})))
+        assert result["awaiting_approval"] is True and result["approval"]["canvas_id"] == 1
+    finally:
+        agent._AGENT_RUN_CONTEXT.reset(token)
+
+
+def test_get_canvas_nodes_is_available_to_canvas_agent():
+    from services import agent_service as agent
+    for skills in (None, ["video_canvas_workflow"], ["canvas_graph_compiler"]):
+        allowed = agent.tool_registry._effective_tool_names("video_canvas", skills)
+        assert "get_canvas_nodes" in allowed and "get_canvas_graph" in allowed, skills

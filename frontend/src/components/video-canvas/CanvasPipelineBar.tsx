@@ -28,7 +28,8 @@ interface Props {
   autoCollapseKey?: string | null;
 }
 
-const COLLAPSE_STORAGE_KEY = 'canvas-pipeline-bar-collapsed';
+// v2：旧版本里任何一次手动折叠都会一直保留，新用户一进来就是收起的、不知道怎么往下走；换新键让所有人重新从“展开”开始
+const COLLAPSE_STORAGE_KEY = 'canvas-pipeline-bar-collapsed-v2';
 const readCollapsed = () => { try { return window.localStorage.getItem(COLLAPSE_STORAGE_KEY) === '1'; } catch { return false; } };
 const writeCollapsed = (value: boolean) => { try { window.localStorage.setItem(COLLAPSE_STORAGE_KEY, value ? '1' : '0'); } catch { /* 存储不可用时只在本次有效 */ } };
 
@@ -53,12 +54,15 @@ const warnButton = 'rounded-md border border-amber-400/50 bg-amber-400/10 px-2.5
 export default function CanvasPipelineBar({ summary, agentBusy, cost, onContinue, onBatch, batchBusy = false, batch = null, inconsistentCount = 0, onUnifyStyle, pipelineRun = null, onRunPipeline, onCancelPipeline, reviewSlot, autoCollapseKey = null }: Props) {
   const [manualCollapsed, setManualCollapsed] = useState(readCollapsed);
   const [peekedKey, setPeekedKey] = useState<string | null>(null);
+  const [announcedBusy, setAnnouncedBusy] = useState(false);
   // 输入框关闭后清掉临时展开记录，下次再打开同一个节点仍会自动收起
   if (autoCollapseKey === null && peekedKey !== null) setPeekedKey(null);
   const { stages, next, failure, pendingImages, pendingVideos, awaitingSceneApproval, pendingAssetIds, pendingShotIds, pendingVideoIds, shotsCompiled } = summary;
   // 还没开始创作时不显示，避免空画布上出现一排灰色阶段。
   const runActive = Boolean(pipelineRun && ACTIVE_RUN.has(pipelineRun.status));
   const runFailed = pipelineRun?.status === 'failed';
+  // 一开始创作（助手 / 后台编排开始工作）就展开流程栏，让用户看到进度和下一步，即使之前手动收起过
+  if ((runActive || agentBusy) && !announcedBusy) { setAnnouncedBusy(true); if (manualCollapsed) setManualCollapsed(false); }
   const runDone = pipelineRun?.status === 'succeeded';
   if (stages[0].state === 'next' && !agentBusy && !failure && !runFailed) return null;
   // 剧本之后的阶段交给服务端运行器（场景会被自动批准）；写剧本需要创作对话，仍交给助手。

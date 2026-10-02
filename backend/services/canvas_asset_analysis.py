@@ -8,9 +8,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import re
 from typing import Any
 
+from services.canvas_style import strip_style_text
 from services.errors import UpstreamServiceError
 from services.screenplay_meta import is_meta_label, strip_meta_beats
 
@@ -24,8 +27,7 @@ MIN_PROP_MENTIONS = 3
 
 ASSET_TRIAGE_SYSTEM_PROMPT = """你是漫剧美术指导兼角色设计总监。阅读完整剧本与分场信息，一次性输出全片视觉规范、角色档案，以及"值得单独生成参考图"的场景与道具。
 输出纯JSON：
-{"style":{"art_style":"画风与材质","palette":"主色调与冷暖关系","lighting":"整体光线逻辑","mood":"情绪基调"},
- "characters":[{"name":"剧本原名","profile":"年龄段、身份、性格气质、体型与发型、标志性服装，80字以内"}],
+{"characters":[{"name":"剧本原名","profile":"年龄段、身份、性格气质、体型与发型、标志性服装，80字以内"}],
  "scenes":[{"name":"地点（时间/天气，仅光线差异明显时才区分）","scene_ids":["1","3"],"prompt":"场景参考图绘图提示词，空镜无人物，80字以内"}],
  "props":[{"name":"剧本原词","scene_ids":["1","2"],"prompt":"道具参考图绘图提示词，单个物体特写，60字以内"}],
  "optional":[{"role":"scene或prop","name":"剧本原词","scene_ids":["2"],"desc":"一句话说明它是什么、为什么有一定价值"}]}
@@ -35,9 +37,44 @@ ASSET_TRIAGE_SYSTEM_PROMPT = """你是漫剧美术指导兼角色设计总监。
 - 只出现一次的普通场景与道具不要放进 scenes 或 props；其中有一定价值的最多挑 10 个放进 optional，其余直接忽略，分镜提示词一句带过即可。
 - 名称必须是剧本里出现过的原词，不要合并成新造词，不要把动作、表情、屏幕内容当作道具。
 - scene_ids 只能使用输入里给出的分场编号。
-- 角色外观剧本没写的，按身份合理设定但必须具体；所有风格必须统一协调。"""
+- 角色外观剧本没写的，按身份合理设定但必须具体。\n- 提示词只描述内容（人物外貌与服装、场景布局与陈设、物体形态与材质细节），绝对不要出现任何画风、渲染、画质或镜头滤镜类词语（如 写实、赛璐璐、水彩、电影感、cinematic、film grain、8k）：画风由用户选定的画风参考图统一控制，不由提示词控制。"""
 
 CHARACTER_CONTEXT_CHARS = 600
+# 主要角色名额；角色提示词每批生成的人数和并发数。
+# 每个角色的三视图提示词很长，一次让模型写完全部角色会撞上输出上限被截断，只剩前几个（路人甲乙反而挤掉了女主）。
+MAX_MAIN_CHARACTERS = 8
+CHARACTER_BATCH_SIZE = 3
+CHARACTER_BATCH_CONCURRENCY = 3
+
+# 群演 / 路人：少年甲、少女乙、中年族人、路人丙…不单独生成资产（分镜里按画面描述）
+_EXTRA_RE = re.compile(
+    r"^(?:[少青中老]年|少女|老者|妇人|路人|村民|族人|众人|人群|侍卫|护卫|士兵|仆人|下人|弟子|宾客|客人|围观者|旁观者)?[甲乙丙丁戊己庚辛壬癸]$"
+    r"|(?:路人|村民|族人|众人|人群|围观者|旁观者|看客|群众)$"
+)
+
+
+def is_extra_character(name: str) -> bool:
+    """群演类角色名（少年甲、中年族人、路人…）：质检不要求它们有角色资产。"""
+    return bool(_EXTRA_RE.search(str(name or "").strip()))
+
+
+def rank_main_characters(names: list[str], text: str) -> tuple[list[str], list[str]]:
+    """把清洗后的角色分成（主要角色, 群演）：按台词条数和出现次数排序，主要角色最多 MAX_MAIN_CHARACTERS 个。
+
+    群演类名字、以及台词不超过 1 句且几乎没出现的小角色算群演。全是群演时退回按重要性取前几个，保证至少有角色资产。"""
+    from services.screenplay_adapt import speaker_label_stats
+
+    dialogue, _ = speaker_label_stats(text)
+
+    def score(name: str) -> int:
+        return dialogue.get(name, 0) * 3 + text.count(name)
+
+    ordered = sorted(names, key=lambda n: (-score(n), names.index(n)))
+    main = [n for n in ordered if not is_extra_character(n) and (dialogue.get(n, 0) >= 2 or text.count(n) >= 4)]
+    if not main:
+        main = [n for n in ordered if not is_extra_character(n)] or ordered
+    main = main[:MAX_MAIN_CHARACTERS]
+    return main, [n for n in names if n not in main]
 
 
 def _scene_brief(scene: dict[str, Any]) -> str:
@@ -115,16 +152,20 @@ async def analyze_scene_assets(
     warnings: list[str] = []
     failed_calls = 0
     scenes = strip_meta_beats(scenes)
-    names = list(dict.fromkeys(
-        str(c).strip() for scene in scenes for c in (scene.get("characters") or []) if str(c or "").strip() and not is_meta_label(str(c))
-    ))
+    from services.screenplay_adapt import clean_character_names
+
+    # 角色名先清洗（去括号提示、去“级别”这类标签词），再按重要性取主要角色；群演不占名额
+    all_names = clean_character_names([c for scene in scenes for c in (scene.get("characters") or [])], screenplay_text)
+    names, extras = rank_main_characters(all_names, screenplay_text)
+    if extras:
+        warnings.append(f"群演类角色（{'、'.join(extras[:6])}{'…' if len(extras) > 6 else ''}）不单独生成角色资产，分镜里按画面描述")
 
     # ① 一次调用：风格 + 角色档案 + 关键场景/道具（含提示词）+ 可选候选
     triage: dict[str, Any] = {}
     try:
         data = await director._call_deepseek_json(
             system=ASSET_TRIAGE_SYSTEM_PROMPT,
-            user=(f"用户已选定画风（所有提示词必须遵循，不要另起风格；style 字段直接沿用它）：{style_hint}\n\n" if style_hint else "") + f"角色：{'、'.join(names) or '无'}\n\n## 分场\n" + "\n".join(_scene_brief(s) for s in scenes) + f"\n\n## 完整剧本\n{screenplay_text}",
+            user=f"角色：{'、'.join(names) or '无'}\n\n## 分场\n" + "\n".join(_scene_brief(s) for s in scenes) + f"\n\n## 完整剧本\n{screenplay_text}",
             api_key=api_key,
             max_tokens=8192,
         )
@@ -132,8 +173,6 @@ async def analyze_scene_assets(
     except Exception as exc:
         warnings.append(f"资产筛选失败（{type(exc).__name__}），本次只提取角色，场景与道具由分镜提示词直接描述")
 
-    style = triage.get("style") if isinstance(triage.get("style"), dict) else {}
-    style_line = style_hint or "；".join(str(style.get(k) or "").strip() for k in ("art_style", "palette", "lighting", "mood") if str(style.get(k) or "").strip())
     profiles = {
         str(item.get("name") or "").strip(): str(item.get("profile") or "").strip()
         for item in triage.get("characters") or []
@@ -142,41 +181,75 @@ async def analyze_scene_assets(
 
     assets: list[dict[str, Any]] = []
 
-    # ② 角色提示词：整部剧只调用一次
+    # ② 角色提示词：分批并发生成，逐批核对是否每个角色都有，缺的单独补一次
     if names:
-        scene_ids_by_name = {n: [str(s.get("scene_id")) for s in scenes if n in [str(c).strip() for c in (s.get("characters") or [])]] for n in names}
-        shot_data = {
-            "scene_location": "",
-            "time_of_day": "",
-            "story_summary": screenplay_text[:CHARACTER_CONTEXT_CHARS],
-            "dialogue_or_narration": "",
-            "characters": names,
-            "chapter_text": screenplay_text,
-            "source_text_span": "全片角色",
-            "camera_plan": "", "motion_plan": "", "emotion_plan": "", "key_props": [], "scene_asset_candidates": [],
-        }
-        profile_text = "\n".join(f"- {n}：{profiles[n]}" for n in names if n in profiles)
-        try:
-            char_prompts = await deepseek_service.generate_shot_character_prompts_ai(shot_data, profile_text, api_key)
-        except Exception as exc:
-            failed_calls += 1
-            warnings.append(f"角色分析失败（{type(exc).__name__}），已跳过")
-            char_prompts = []
-        for entry in char_prompts or []:
-            if not isinstance(entry, dict):
+        from services.screenplay_adapt import base_character_name
+
+        scene_ids_by_name = {n: [str(sc.get("scene_id")) for sc in scenes if n in [base_character_name(str(c)) for c in (sc.get("characters") or [])]] for n in names}
+
+        def shot_data_for(batch: list[str]) -> dict[str, Any]:
+            return {
+                "scene_location": "",
+                "time_of_day": "",
+                "story_summary": screenplay_text[:CHARACTER_CONTEXT_CHARS],
+                "dialogue_or_narration": "",
+                "characters": batch,
+                "chapter_text": screenplay_text,
+                "source_text_span": "全片角色",
+                "camera_plan": "", "motion_plan": "", "emotion_plan": "", "key_props": [], "scene_asset_candidates": [],
+            }
+
+        def profile_text_for(batch: list[str]) -> str:
+            return "\n".join(f"- {n}：{profiles[n]}" for n in batch if n in profiles)
+
+        semaphore = asyncio.Semaphore(CHARACTER_BATCH_CONCURRENCY)
+
+        async def generate(batch: list[str]) -> list[dict[str, Any]] | BaseException:
+            async with semaphore:
+                try:
+                    return await deepseek_service.generate_shot_character_prompts_ai(shot_data_for(batch), profile_text_for(batch), api_key)
+                except Exception as exc:  # noqa: BLE001 - 单批失败不影响其他批，统一在下面核对补漏
+                    return exc
+
+        def collect(into: dict[str, str], batch: list[str], entries: Any) -> None:
+            for entry in entries if isinstance(entries, list) else []:
+                if not isinstance(entry, dict):
+                    continue
+                returned = base_character_name(str(entry.get("name") or ""))
+                prompt = str(entry.get("prompt") or "").strip()
+                owner = next((n for n in batch if n == returned or (returned and (n in returned or returned in n))), None)
+                if owner and prompt and owner not in into:
+                    into[owner] = prompt
+
+        prompts_by_name: dict[str, str] = {}
+        batches = [names[i:i + CHARACTER_BATCH_SIZE] for i in range(0, len(names), CHARACTER_BATCH_SIZE)]
+        for batch, outcome in zip(batches, await asyncio.gather(*(generate(b) for b in batches))):
+            if isinstance(outcome, BaseException):
+                failed_calls += 1
                 continue
-            name = str(entry.get("name") or "").strip()
-            prompt = str(entry.get("prompt") or "").strip()
-            if name and prompt:
-                asset = {"role": "character", "name": name, "prompt": director._with_style(prompt, style_line), "scene_ids": scene_ids_by_name.get(name, []), "unit_count": max(1, len(scene_ids_by_name.get(name, [])))}
-                if name in profiles:
-                    asset["profile"] = profiles[name]
-                assets.append(asset)
+            collect(prompts_by_name, batch, outcome)
+        # 补漏：整批失败或模型少写了某几个角色时，逐个单独再要一次（不计入失败调用数，只看最终有没有）
+        for name in [n for n in names if n not in prompts_by_name]:
+            outcome = await generate([name])
+            if not isinstance(outcome, BaseException):
+                collect(prompts_by_name, [name], outcome)
+        still_missing = [n for n in names if n not in prompts_by_name]
+        if still_missing:
+            warnings.append(f"角色 {'、'.join(still_missing)} 的提示词没有生成成功，可点「重做资产分析」再试一次")
+        if failed_calls and not prompts_by_name:
+            warnings.append("角色分析失败，已跳过")
+        for name in names:
+            if name not in prompts_by_name:
+                continue
+            asset = {"role": "character", "name": name, "prompt": strip_style_text(prompts_by_name[name]), "scene_ids": scene_ids_by_name.get(name, []), "unit_count": max(1, len(scene_ids_by_name.get(name, [])))}
+            if name in profiles:
+                asset["profile"] = profiles[name]
+            assets.append(asset)
 
     # ③ 关键场景/道具：硬规则二次筛选，提示词已在第一步生成
     selected, optional = select_assets(triage, scenes, screenplay_text)
     for item in selected:
-        item["prompt"] = director._with_style(item["prompt"], style_line)
+        item["prompt"] = strip_style_text(item["prompt"])
         assets.append(item)
 
     order = {"character": 0, "scene": 1, "prop": 2}

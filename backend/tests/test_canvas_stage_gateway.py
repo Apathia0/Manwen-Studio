@@ -155,6 +155,26 @@ def test_invalid_snapshot_falls_back_to_database_graph(stage_state):
     assert stage_state.planned[0].target_node_ids == ["second"]
 
 
+def test_split_hides_orphan_assets_left_by_an_old_script(stage_state, monkeypatch):
+    """换了新剧本重新拆分：旧剧本留下、所属场景已不存在的未生成资产收起来；已生成 / 已锁定的不动。"""
+    stage_state.graph["nodes"] = [
+        node("script", "screenplay", content="新剧本"),
+        node("old-hero", "image", asset_role="character", asset_scene_node="scene-gone"),
+        node("old-made", "image", asset_role="character", asset_scene_node="scene-gone", asset_id=9),
+        node("old-locked", "image", asset_role="prop", source_scene_node="scene-gone", locked=True),
+        node("manual", "image", asset_role="prop"),
+    ]
+
+    async def split(canvas_id, body, request, db):
+        return {"units": [{"scene_id": "a"}], "content_hash": "hash", "truncated": False}
+
+    monkeypatch.setattr(api, "screenplay_split", split)
+    execute(stage_state, stage="split", screenplay_node_id="script")
+    saved = {n["id"]: n["data"]["config"] for n in stage_state.saved[0]["nodes"]}
+    assert saved["old-hero"].get("stale") is True
+    assert not saved["old-made"].get("stale") and not saved["old-locked"].get("stale") and not saved["manual"].get("stale")
+
+
 def test_truncated_scene_response_is_never_saved(stage_state, monkeypatch):
     stage_state.graph["nodes"] = [node("script", "screenplay", content="剧本")]
 
@@ -327,7 +347,7 @@ def test_assets_are_laid_out_in_columns_by_kind_below_the_scene(stage_state, mon
     monkeypatch.setattr(api, "analyze_canvas_assets", analyze)
     result = execute(stage_state, stage="assets", scene_node_id="scene-1")
     nodes = {n["data"]["config"].get("asset_name"): n for n in stage_state.saved[0]["nodes"] if n["data"]["config"].get("asset_role")}
-    top = 200 + gateway.ASSET_BLOCK_GAP + 640
+    top = 200 + gateway.ASSET_BLOCK_GAP + gateway.SCENE_DEFAULT_H
     # 资产只占两列：角色 5 个从左到右、从上到下排（2+2+1 共 3 行）
     assert nodes["角色0"]["position"] == {"x": 1000, "y": top}
     assert nodes["角色1"]["position"] == {"x": 1000 + gateway.ASSET_CELL_W, "y": top}
@@ -606,18 +626,18 @@ def test_independent_nodes_can_generate_with_shared_static_context(run_creation_
 # ── 目标总时长预算 ────────────────────────────────────────
 
 def test_screenplay_stage_rejects_script_far_longer_than_target_duration(stage_state):
-    """60 秒只是参考，合理上限 120 秒；852 字的剧本约 150 秒，超过上限必须在剧本阶段拦下并告知字数预算。"""
+    """60 秒只是参考，合理上限 90 秒；852 字的剧本约 150 秒，超过上限必须在剧本阶段拦下并告知字数预算。"""
     long_script = "林夏把煎蛋翻面，蛋边焦卷。" * 70
     with pytest.raises(HTTPException) as error:
         execute(stage_state, stage="screenplay", content=long_script, user_constraints="日式动漫风。时长约60秒，16:9横屏。开场3秒内出现悬念。")
     assert error.value.status_code == 422
-    assert "合理时长上限 120 秒" in str(error.value.detail) and "672 字" in str(error.value.detail)
+    assert "合理时长上限 90 秒" in str(error.value.detail) and "503 字" in str(error.value.detail)
     assert stage_state.saved == [], "被拒绝的剧本不能落库"
 
 
 def test_screenplay_stage_allows_script_longer_than_reference_within_ceiling(stage_state):
-    """参考 60 秒、剧本约 90 秒（在 2 倍上限内）：故事讲完整优先，不拦。"""
-    script = "林夏把煎蛋翻面，蛋边焦卷。" * 40
+    """参考 60 秒、剧本约 80 秒（在 90 秒上限内）：剧情合理时可略微超出，不拦。"""
+    script = "林夏把煎蛋翻面，蛋边焦卷。" * 35
     execute(stage_state, stage="screenplay", content=script, user_constraints="时长约60秒")
     assert stage_state.saved[0]["metadata"]["production_settings"]["target_duration_seconds"] == 60
 

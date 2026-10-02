@@ -4249,6 +4249,29 @@ export async function saveVideoCanvasSnapshot(canvasId: number, payload: {
   const res = await fetch(`${BASE}/api/video-canvas/canvases/${canvasId}/snapshot`, {
     method: 'PUT', headers: apiHeaders(true), body: JSON.stringify(payload),
   });
+  if (!res.ok) {
+    // 带上 HTTP 状态码：调用方要区分“版本冲突 409”（可以自动重发）和其他失败
+    const error = new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE)) as Error & { status?: number };
+    error.status = res.status;
+    throw error;
+  }
+  return res.json();
+}
+
+/** 改写所用的小说原文（章节归属在服务端重新校验，只读）。 */
+export interface SourceChapter {
+  story_id: number;
+  chapter_id: number;
+  title: string;
+  content: string;
+  truncated: boolean;
+  content_hash: string;
+}
+
+export async function getCanvasSourceChapters(canvasId: number, sources: { story_id: number; chapter_id: number }[]): Promise<{ chapters: SourceChapter[] }> {
+  const res = await fetch(`${BASE}/api/video-canvas/canvases/${canvasId}/source-chapters`, {
+    method: 'POST', headers: apiHeaders(true), body: JSON.stringify({ sources }),
+  });
   if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   return res.json();
 }

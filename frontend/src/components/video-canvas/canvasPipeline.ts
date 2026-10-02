@@ -56,7 +56,13 @@ export function computePipeline(nodes: PipelineNode[], run: PipelineRunLike | nu
   const scenes = active.filter((n) => n.type === 'scene');
   const approved = scenes.length > 0 && scenes.every((n) => Boolean(cfg(n).approved));
   const planned = scenes.length > 0 && scenes.every((n) => Boolean(cfg(n).director_plan));
-  const assets = active.filter((n) => n.type === 'image' && ['character', 'scene', 'prop'].includes(String(cfg(n).asset_role || '')));
+  // 资产只算属于当前场景的：旧剧本留下、所属场景已经不存在的“孤儿资产”不计入进度，否则会出现拆分还没完资产先“完成”的错觉
+  const sceneIds = new Set(scenes.map((n) => n.id));
+  const assets = active.filter((n) => {
+    if (n.type !== 'image' || !['character', 'scene', 'prop'].includes(String(cfg(n).asset_role || ''))) return false;
+    const owner = String(cfg(n).asset_scene_node || cfg(n).source_scene_node || '');
+    return !owner || sceneIds.has(owner);
+  });
   const storyboards = active.filter((n) => n.type === 'image' && cfg(n).node_role === 'storyboard');
   const videos = active.filter((n) => n.type === 'video' && cfg(n).source_scene_node);
   const concat = active.filter((n) => n.type === 'concat');

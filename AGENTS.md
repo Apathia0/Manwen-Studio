@@ -1301,6 +1301,11 @@ import MediaImage from './shared/MediaImage';
 | 自动模式 | 同上 `operations_overwrite_existing` | auto 模式下覆盖/删除已有节点内容（`update_node`/`delete_node`）仍强制预览确认；纯新增直接执行 |
 | 追溯回退 | `VideoCanvasVersion` + `GET/POST /api/video-canvas/canvases/{id}/versions[/{no}/diff｜/restore]`；前端 `CanvasVersionHistoryModal` | 恢复 = 以目标版本内容**追加新版本**（`source=restore`），不改写历史；`canvas_stage` 改图同样登记撤回（`_record_canvas_stage_graph_change`） |
 
+**读取画布（对齐 Codex / OpenCode 的“大纲 → 搜索 → 精读 → 改”）**
+- `get_canvas_outline`（≈ ls）：每节点一行，含媒体节点文本生成状态（未生成/已生成/失败/产物已过期），支持类型/状态过滤与分页；`search_canvas_nodes`（≈ grep）：按文字/正则在标题与配置里定位；`get_canvas_nodes`：精读，可用 `fields` 只取部分字段，附生成状态。实现见 `services/canvas_agent_reading.py`。
+- 看图只用于视觉验收：`inspect_canvas_media` 每张图附当前提示词以便对照，数量不限（超出单次容量会提示分批），`detail=low/high`；看过的旧图滚动移出上下文。每轮不自动附图。
+- 新增画布读取工具时必须同时加入 `_VIDEO_CANVAS_WORKFLOW_READ_TOOL_NAMES` 和相关技能 `tool_names`，否则模型调用不到（曾因漏加导致助手反复“先读取画布真实状态”）。
+
 **多模态**
 - 用户上传的图片/视频先经独立预分析（`services/agent_reference_analysis.py`，开启 thinking，无工具），结论写入 `AgentAttachment.metadata_json.reference_analysis`，后续轮次自动注入"参考素材分析"，不再依赖重复传图；主工具循环仍保持 `thinking: disabled`。
 - 图片来源在消息里带标记：`[用户上传的参考素材《xx》]` / `[画布已生成的产物…]`，做风格反推时不得把画布产物当参考。紧急压缩对用户参考图最多保留 5 张（其余 2 张）。

@@ -277,7 +277,7 @@ def test_fallback_classifies_mid_line_speaker_as_dialogue(upstream):
     assert beats[1]["dialogue"] == ["他转过头，说：你来了。"]
     assert beats[2]["source_text"] == "小明：来吧，"
     assert beats[3]["source_text"] == "小红：好的。"
-    assert result["scenes"][0]["characters"] == ["说", "小明", "小红"]
+    assert result["scenes"][0]["characters"] == ["小明", "小红"]  # “说”不是角色，清洗时去掉
     assert result["screenplay_text"] == text
 
 

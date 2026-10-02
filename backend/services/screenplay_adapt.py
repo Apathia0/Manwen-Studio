@@ -47,12 +47,58 @@ def _split_content_chunks(content: str, max_chars: int) -> list[str]:
     return [chunk for chunk in chunks if chunk]
 
 
+def length_requirement_text(target_seconds: int, budget_chars: int) -> str:
+    """喂给改写模型的“篇幅与详略要求”：目标成片时长、字数上限、场景数上限。"""
+    max_scenes = max(2, target_seconds // 30 + 1)
+    return (
+        f"目标成片约 {target_seconds} 秒（短剧单集体量）。剧本正文（去空白）不超过约 {budget_chars} 字，场景不超过 {max_scenes} 个；"
+        "写完自查字数，超出就继续压缩略写部分，不要删掉核心冲突、反转和结尾钩子。"
+    )
+
+
+CONDENSE_SYSTEM_PROMPT = """你是漫剧剧本编辑。把下面的剧本压缩到指定字数以内，保持原有的剧本格式。
+压缩规则：保留核心冲突、情绪转折、关键反转、有传播力的台词和结尾钩子；删除或合并环境与外貌描写、重复的情绪渲染、次要人物对白、过场动作；同地点连续的戏并成一场。
+被删掉的信息如果后面用得上，用一句话交代。不得新增原剧本没有的情节或人物。
+格式：场景头“场景N：地点 / 时间 / 内景或外景”，动作行只写可拍摄的画面，对白“角色名：台词”每句一行。
+直接输出压缩后的剧本，不要任何解释。"""
+
+
+async def _condense_screenplay(text: str, budget_chars: int, api_key: str | None) -> str:
+    """改写结果明显超出预算时的一次压缩；压缩失败或结果不合格就沿用原稿。"""
+    from services import deepseek as deepseek_service
+
+    payload: dict[str, Any] = {
+        "model": deepseek_service.runtime_model(),
+        "messages": [
+            {"role": "system", "content": CONDENSE_SYSTEM_PROMPT},
+            {"role": "user", "content": f"字数上限：{budget_chars}（去空白）。\n\n{text}"},
+        ],
+        "stream": False,
+        "max_tokens": 8192,
+        "thinking": {"type": "disabled"},
+    }
+    try:
+        async with httpx.AsyncClient(timeout=ADAPT_TIMEOUT_SECONDS) as client:
+            resp = await client.post(f"{deepseek_service.runtime_base_url()}/chat/completions", json=payload, headers=deepseek_service._deepseek_auth_headers(api_key))
+        resp.raise_for_status()
+        data = deepseek_service._response_json(resp, context="DeepSeek")
+        condensed = str((((data.get("choices") or [{}])[0]).get("message") or {}).get("content") or "").strip()
+    except Exception:  # noqa: BLE001 - 压缩只是兜底，失败就沿用原稿
+        logger.warning("剧本压缩失败，沿用原稿", exc_info=True)
+        return text
+    size = len(re.sub(r"\s", "", condensed))
+    if not condensed or size >= len(re.sub(r"\s", "", text)) or not re.search(r"(?:^|\n)\s*场景\s*\d*\s*[:：]", condensed):
+        return text
+    return condensed
+
+
 async def _adapt_single_call(
     *,
     chapter_title: str,
     chapter_content: str,
     previous_digest: str,
     api_key: str | None,
+    length_requirement: str = "",
 ) -> str:
     """单批改写调用，返回该批剧本文本。"""
     from services import deepseek as deepseek_service
@@ -70,6 +116,7 @@ async def _adapt_single_call(
                 "content": SCREENPLAY_ADAPT_USER_TEMPLATE.format(
                     chapter_title=chapter_title,
                     previous_digest=previous_digest or "（无，本批为剧本开头）",
+                    length_requirement=length_requirement or "按短剧体量取舍，详写冲突与反转，略写铺垫与环境。",
                     chapter_content=chapter_content,
                 ),
             },
@@ -149,6 +196,7 @@ async def adapt_novel_to_screenplay(
     chapters: list[dict[str, Any]],
     api_key: str | None = None,
     max_chars_per_call: int = 8000,
+    target_seconds: int | None = None,
 ) -> dict[str, Any]:
     """逐章把小说正文改写为剧本并拼接。
 
@@ -158,15 +206,22 @@ async def adapt_novel_to_screenplay(
     if not chapters:
         raise ValueError("至少需要一章正文才能改写剧本")
 
+    from services.video_duration import adapt_chapter_targets, screenplay_char_budget
+
     screenplay_parts: list[str] = []
     source_refs: list[dict[str, Any]] = []
     batch_count = 0
+    # 每章的目标时长 / 字数预算：小说改短剧必须详略取舍，而不是把整章原样搬成剧本
+    usable = [c for c in chapters if str(c.get("content") or "").strip()]
+    chapter_seconds = dict(zip((id(c) for c in usable), adapt_chapter_targets([len(str(c.get("content") or "").strip()) for c in usable], target_seconds)))
 
     for chapter in chapters:
         title = str(chapter.get("title") or "未命名章节")
         content = str(chapter.get("content") or "").strip()
         if not content:
             continue
+        seconds = chapter_seconds.get(id(chapter), 90)
+        chapter_budget = screenplay_char_budget(seconds)
         chunks = _split_content_chunks(content, max_chars_per_call)
         chapter_parts: list[str] = []
         previous_digest = ""
@@ -178,11 +233,14 @@ async def adapt_novel_to_screenplay(
                 len(chunks),
                 len(chunk),
             )
+            share = len(chunk) / max(len(content), 1)
+            chunk_seconds = max(20, round(seconds * share))
             part = await _adapt_single_call(
                 chapter_title=f"{title}（{index}/{len(chunks)}）" if len(chunks) > 1 else title,
                 chapter_content=chunk,
                 previous_digest=previous_digest,
                 api_key=api_key,
+                length_requirement=length_requirement_text(chunk_seconds, screenplay_char_budget(chunk_seconds)),
             )
             chapter_parts.append(part)
             batch_count += 1
@@ -196,7 +254,11 @@ async def adapt_novel_to_screenplay(
                 len(part),
             )
         if chapter_parts:
-            screenplay_parts.append("\n\n".join(chapter_parts))
+            chapter_text = "\n\n".join(chapter_parts)
+            # 改写后仍明显超出预算（模型没有认真取舍）：再压缩一次
+            if len(re.sub(r"\s", "", chapter_text)) > chapter_budget * 1.25:
+                chapter_text = await _condense_screenplay(chapter_text, chapter_budget, api_key)
+            screenplay_parts.append(chapter_text)
             source_refs.append(
                 {
                     "story_id": chapter.get("story_id"),
@@ -556,7 +618,8 @@ def is_plausible_speaker_name(name: str, line_start: bool = True) -> bool:
     它们是画面描述而不是台词，不能当成说话人，否则会多出假角色、台词被当旁白去配音。
     句中（逗号 / 句号之后）出现的名字要求更严：不超过 8 个字且不含“的 / 了 / 着 / 在 / 上 / 下 / 把”等叙述用字。
     """
-    name = name.strip()
+    # 括号里是舞台提示（“萧炎（尴尬地笑了一声）”），不参与“像不像人名”的判断，否则“了 / 着”会把真台词误判成叙述句
+    name = re.sub(r"[（(][^）)]*[）)]", "", name.strip()).strip()
     if not name:
         return False
     if _PRONOUN_START.match(name):
@@ -637,6 +700,113 @@ def _finalize_fallback_beat(beat: dict[str, Any], characters: list[str]) -> dict
         "text": beat["source_text"],
     }
     return beat
+
+
+# ---- 角色名清洗 ----
+_LINE_START_SPEAKER_RE = re.compile(r"(?m)^[ \t]*([^\s：:，。！？]{1,16})[：:]")
+_MID_LINE_LABEL_RE = re.compile(r"[，。！？；][ \t]*([^\s：:，。！？；]{1,16})[：:]")
+_PAREN_RE = re.compile(r"[（(][^）)]*[）)]")
+
+
+def base_character_name(name: str) -> str:
+    """去掉括号里的舞台提示：“测验员（漠然）”→“测验员”。"""
+    return _PAREN_RE.sub("", str(name or "")).strip()
+
+
+def speaker_label_stats(text: str) -> tuple[dict[str, int], set[str]]:
+    """从剧本文本统计：每个角色作为“行首说话人”的台词条数；以及只在句中出现过“X：”标签、从没作为行首说话人的词
+    （如“斗之力，三段！级别：低级”里的“级别”），它们不是角色。"""
+    starts: dict[str, int] = {}
+    for match in _LINE_START_SPEAKER_RE.finditer(text):
+        name = base_character_name(match.group(1))
+        if name:
+            starts[name] = starts.get(name, 0) + 1
+    mids = {base_character_name(m.group(1)) for m in _MID_LINE_LABEL_RE.finditer(text)}
+    return starts, {name for name in mids if name and name not in starts}
+
+
+# 常见的“标签词”：台词里的“级别：低级”“状态：昏迷”不是在说话，这些词也不是角色
+NON_CHARACTER_LABELS = frozenset({
+    "级别", "等级", "品级", "阶位", "境界", "段位", "状态", "类型", "种类", "结果", "时间", "地点", "天气", "位置", "名称", "效果",
+    "备注", "说明", "提示", "目标", "任务", "字幕", "画面", "镜头", "音效", "特效", "动作", "表情", "旁白", "画外音", "内心独白", "说",
+})
+
+
+def clean_character_names(names: list[Any], text: str = "") -> list[str]:
+    """场景 / 资产的角色表清洗：去括号提示（“测验员（漠然）”→“测验员”）、去重、去掉“级别”这类标签词和不像人名的词。"""
+    result: list[str] = []
+    for raw_name in names or []:
+        name = base_character_name(str(raw_name))
+        if len(name) < 2 or name in NON_CHARACTER_LABELS or name in result or is_meta_label(name):
+            continue
+        if not is_plausible_speaker_name(name, line_start=True):
+            continue
+        result.append(name)
+    return result
+
+
+# ---- 超长场景拆分 ----
+MAX_BEATS_PER_SCENE = 24
+TARGET_BEATS_PER_SCENE = 14
+
+
+def _cut_points(beats: list[dict[str, Any]], content: str) -> list[int]:
+    """在节拍序列里选切点（切在第 i 个节拍之前）：尽量落在原文空行（自然段落 / 场面转换）处，每段大致 TARGET 个节拍。"""
+    total = len(beats)
+    parts = max(2, -(-total // TARGET_BEATS_PER_SCENE))
+    ideal = total / parts
+    cuts: list[int] = []
+    previous = 0
+    for k in range(1, parts):
+        center = round(ideal * k)
+        low, high = max(previous + 6, center - 3), min(total - 6, center + 3)
+        best = None
+        for i in range(low, high + 1):
+            gap = content[beats[i - 1]["source_end"]:beats[i]["source_start"]]
+            score = (gap.count("\n") >= 2, -abs(i - center))
+            if best is None or score > best[0]:
+                best = (score, i)
+        cut = best[1] if best else center
+        cuts.append(cut)
+        previous = cut
+    return cuts
+
+
+def _split_oversized_scenes(scenes: list[dict[str, Any]], content: str, max_scenes: int) -> list[dict[str, Any]]:
+    """节拍太多的场景拆成多个场景（地点 / 时间沿用，在原文自然段落处切开）。
+
+    一个场景节拍太多会让导演把整场戏当成一团去编排：镜头数过多、人物和场景资产无法按段落复用、质检不断报警。
+    只拆分、不改写：节拍内容和顺序原样保留，总场景数超过上限时放弃拆分。"""
+    if not any(len(scene.get("beats") or []) > MAX_BEATS_PER_SCENE for scene in scenes):
+        return scenes
+    result: list[dict[str, Any]] = []
+    for scene in scenes:
+        beats = scene.get("beats") or []
+        if len(beats) <= MAX_BEATS_PER_SCENE or any("source_start" not in b or "source_end" not in b for b in beats):
+            result.append(scene)
+            continue
+        bounds = [0, *_cut_points(beats, content), len(beats)]
+        for part_no in range(len(bounds) - 1):
+            chunk = [dict(b) for b in beats[bounds[part_no]:bounds[part_no + 1]]]
+            for number, beat in enumerate(chunk, 1):
+                beat["beat_id"] = number
+            start, end = chunk[0]["source_start"], chunk[-1]["source_end"]
+            text = content[start:end]
+            title = str(scene.get("title") or "")
+            result.append({
+                **scene,
+                "title": title if part_no == 0 else f"{title}（续{part_no}）",
+                "beats": chunk,
+                "characters": [c for c in (scene.get("characters") or []) if base_character_name(str(c)) and base_character_name(str(c)) in text],
+                "duration_seconds": max(3, len(chunk) * 4),
+                "duration_reason": f"按 {len(chunk)} 个原文节拍估算，未删改内容",
+                "source_span": {"start": start, "end": end, "text": text},
+            })
+    if len(result) > max_scenes:
+        return scenes
+    for number, scene in enumerate(result, 1):
+        scene["scene_id"] = number
+    return result
 
 
 def _strip_header_from_action(beat: dict[str, Any]) -> None:
@@ -782,6 +952,9 @@ def _validate_preserved_screenplay(payload: Any, content: str, max_scenes: int) 
             beat["beat_id"] = index
             _strip_header_from_action(beat)
     scenes = _split_scenes_by_headers(scenes, content, max_scenes)
+    for scene in scenes:
+        scene["characters"] = clean_character_names(scene.get("characters") or [], str(scene.get("source_span", {}).get("text") or content))
+    scenes = _split_oversized_scenes(scenes, content, max_scenes)
     return {"screenplay_text": content, "scenes": scenes, "truncated": False, "preserve_source": True,
             "source_span": {"start": 0, "end": len(content), "text": content}}
 

@@ -10,7 +10,8 @@ interface Props {
   canvasId: number;
   /** 把指令交给 AI 助手并立即发送；mode 是开场选定的助手工作模式 */
   onSend: (prompt: string, mode: CanvasPermissionMode) => void;
-  onImportChapter: () => void;
+  /** 导入小说章节；mode 是开场选定的助手工作方式，导入完成后据此自动开启编排 */
+  onImportChapter: (mode: CanvasPermissionMode) => void;
   /** 开局选画风：整张画布统一的画风 */
   style: CanvasStyle | null;
   presets: VideoStylePreset[];
@@ -20,7 +21,17 @@ interface Props {
   /** 开局选画面比例：整部作品的图片、视频节点统一使用，单个节点之后仍可手动改 */
   aspect: string;
   onPickAspect: (aspect: string) => void;
+  /** 开局选分镜时长：flexible 灵活剪切（4~15 秒）/ fixed15 固定 15 秒（视频模型只支持 15 秒时用） */
+  shotMode: ShotDurationMode;
+  onPickShotMode: (mode: ShotDurationMode) => void;
 }
+
+export type ShotDurationMode = 'flexible' | 'fixed15';
+
+const SHOT_MODE_OPTIONS: Array<{ value: ShotDurationMode; title: string; desc: string }> = [
+  { value: 'flexible', title: '灵活剪切', desc: '按剧情节奏 4~15 秒，镜头更利落，也更省视频费用' },
+  { value: 'fixed15', title: '固定 15 秒', desc: '适合只支持 15 秒的视频模型；按内容量装满，不靠拖沓凑时长' },
+];
 
 const ASPECT_OPTIONS = [
   { value: '16:9', label: '横屏', w: 20, h: 12 },
@@ -31,13 +42,13 @@ const ASPECT_OPTIONS = [
 ];
 
 /** 空画布引导：一句话创意、题材模板、导入小说三条起步路径。 */
-export default function CanvasEmptyGuide({ canvasId, onSend, onImportChapter, style, presets, onPickPreset, onOpenStyleModal, onToggleStyle, aspect, onPickAspect }: Props) {
+export default function CanvasEmptyGuide({ canvasId, onSend, onImportChapter, style, presets, onPickPreset, onOpenStyleModal, onToggleStyle, aspect, onPickAspect, shotMode, onPickShotMode }: Props) {
   const [idea, setIdea] = useState('');
   const [mode, setMode] = useState<CanvasPermissionMode>(() => {
     try { const saved = localStorage.getItem(canvasPermissionKey(canvasId)); return saved ? parseCanvasPermissionMode(saved) : 'auto'; } catch { return 'auto'; }
   });
   const styleName = styleActive(style) ? styleDisplay(style).name : '';
-  const send = (prompt: string) => onSend(`${prompt}${styleName ? `画风：${styleName}。` : ''}画面比例：${aspect}。`, mode);
+  const send = (prompt: string) => onSend(`${prompt}${styleName ? `画风：${styleName}。` : ''}画面比例：${aspect}。${shotMode === 'fixed15' ? '分镜时长：每个视频固定15秒（视频模型只支持15秒），请把每场戏写成约15秒的内容量（约80字），每一拍都推进剧情，不要靠重复动作拖时长。' : ''}`, mode);
   return (
     <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center p-6">
       <div className="compact-controls pointer-events-auto w-full max-w-[560px] rounded-2xl border border-[#393633] bg-[#211f1d]/95 p-5 shadow-2xl">
@@ -69,6 +80,18 @@ export default function CanvasEmptyGuide({ canvasId, onSend, onImportChapter, st
                 </button>
               ))}
             </div>
+          </div>
+        </div>
+        <div className="mb-3 rounded-xl border border-[#393633] bg-[#171513] p-3">
+          <div className="mb-2 text-xs font-medium text-[#e1ddd9]">分镜时长 <span className="font-normal text-[#8f8984]">导演拆分镜头时按它控制每个视频的时长</span></div>
+          <div className="grid grid-cols-2 gap-2" role="radiogroup" aria-label="分镜时长">
+            {SHOT_MODE_OPTIONS.map((option) => (
+              <button key={option.value} type="button" role="radio" aria-checked={shotMode === option.value} onClick={() => onPickShotMode(option.value)}
+                className={`rounded-lg border p-2.5 text-left transition ${shotMode === option.value ? 'border-[#73a7ff] bg-[#73a7ff]/10' : 'border-[#4a4540] hover:border-[#73a7ff]'}`}>
+                <div className={`text-xs font-medium ${shotMode === option.value ? 'text-[#9fc2ff]' : 'text-[#e1ddd9]'}`}>{option.title}</div>
+                <div className="mt-0.5 text-[11px] text-[#8b837c]">{option.desc}</div>
+              </button>
+            ))}
           </div>
         </div>
         <div className="mb-3 rounded-xl border border-[#393633] bg-[#171513] p-3">
@@ -106,7 +129,7 @@ export default function CanvasEmptyGuide({ canvasId, onSend, onImportChapter, st
               <div className="mt-0.5 text-[11px] text-[#8b837c]">{template.desc}</div>
             </button>
           ))}
-          <button type="button" onClick={onImportChapter} className="flex items-center gap-2 rounded-lg border border-dashed border-[#4a4540] p-2.5 text-left text-xs text-[#c9c1ba] transition hover:border-[#73a7ff]">
+          <button type="button" onClick={() => onImportChapter(mode)} className="flex items-center gap-2 rounded-lg border border-dashed border-[#4a4540] p-2.5 text-left text-xs text-[#c9c1ba] transition hover:border-[#73a7ff]">
             <FileText className="h-4 w-4 shrink-0" />导入小说章节
           </button>
         </div>

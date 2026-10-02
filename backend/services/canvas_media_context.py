@@ -227,7 +227,7 @@ async def inspect_media(
         else:
             suffix = path.suffix.lower()
             if suffix in IMAGE_SUFFIXES:
-                attachments.append({"filename": label, "media_kind": "image", "content_type": "image/*", "path": str(path)})
+                attachments.append({"filename": label, "media_kind": "image", "content_type": "image/*", "path": str(path), "node_id": node_id})
                 receipt.update({"current": True, "media_kind": "image", "path": str(path)})
                 node_result.update({"current": True, "state": "current", "media_kind": "image", "receipt_id": receipt["receipt_id"], "label": label})
             elif suffix in VIDEO_SUFFIXES:
@@ -237,7 +237,7 @@ async def inspect_media(
                     temporary_paths.append(directory)
                     frames = await asyncio.to_thread(_extract_video_frames, path, Path(directory), info["duration"])
                     for index, frame in enumerate(frames, start=1):
-                        attachments.append({"filename": f"{label} frame={index}/{len(frames)}", "media_kind": "image", "content_type": "image/jpeg", "path": frame})
+                        attachments.append({"filename": f"{label} frame={index}/{len(frames)}", "media_kind": "image", "content_type": "image/jpeg", "path": frame, "node_id": node_id})
                     receipt.update({"current": True, "media_kind": "video_frames", "path": str(path), "frame_paths": frames})
                     node_result.update({"current": True, "state": "current", "media_kind": "video_frames", "receipt_id": receipt["receipt_id"], "label": label, "duration_seconds": info.get("duration")})
                     node_result["observation_limit"] = "关键帧不能证明对白、声线、音频节奏或完整动作连续性。"
@@ -272,12 +272,54 @@ async def inspect_media(
     }
 
 
-async def build_canvas_media_context(db, canvas_id: int) -> dict:
-    """兼容旧调用方：自动挑选当前图像/视频节点，附带少量最新产物。"""
+_MEDIA_NODE_TYPES = {"image", "video", "image_generation", "storyboard", "video_generation"}
+
+
+def _media_node_listing(graph: dict[str, Any], limit: int = 120) -> str:
+    """画布媒体节点清单（只有文字），助手据此按需调用 inspect_canvas_media 看图。"""
+    rows = []
+    for node in graph.get("nodes", []):
+        if not isinstance(node, dict) or node.get("type") not in _MEDIA_NODE_TYPES:
+            continue
+        data = node.get("data") if isinstance(node.get("data"), dict) else {}
+        rows.append(f"- {node.get('id')}（{node.get('type')}）{data.get('label') or ''}")
+    if not rows:
+        return "未找到可观察的画布媒体节点。"
+    shown = rows[:limit]
+    more = f"\n……另有 {len(rows) - limit} 个媒体节点未列出，可用 get_canvas_graph 查看。" if len(rows) > limit else ""
+    return (
+        f"画布共有 {len(rows)} 个图片/视频节点（本轮不自动附图）。了解节点内容和生成状态请用 get_canvas_outline / "
+        "search_canvas_nodes / get_canvas_nodes 文本读取；需要判断画面是否符合提示词、质量是否过关时再调用 "
+        "inspect_canvas_media(node_ids=[...])，数量不限，单次装不下的会提示继续分批查看。\n" + "\n".join(shown) + more
+    )
+
+
+async def build_canvas_media_context(db, canvas_id: int, node_ids: list[str] | None = None) -> dict:
+    """为一轮对话准备画布媒体上下文。
+
+    node_ids=None：兼容旧调用方，自动附带前 6 个媒体节点的最新产物；
+    node_ids=[...]：只附带指定节点（通常是用户当前选中的节点）；
+    node_ids=[]：不附图，只给出媒体节点清单，由助手按需调用 inspect_canvas_media 查看（数量不限）。
+    """
     canvas = db.get(VideoCanvas, canvas_id)
     if not canvas:
         return {"attachments": [], "temporary_paths": [], "summary": "画布不存在"}
     graph = _latest_graph(db, canvas)
+    if node_ids is not None:
+        wanted = [str(item) for item in node_ids if str(item).strip()]
+        listing = _media_node_listing(graph)
+        if not wanted:
+            return {"attachments": [], "temporary_paths": [], "summary": listing}
+        media_ids = {str(node.get("id")) for node in graph.get("nodes", []) if isinstance(node, dict) and node.get("type") in _MEDIA_NODE_TYPES}
+        selected = [item for item in wanted if item in media_ids]
+        if not selected:
+            return {"attachments": [], "temporary_paths": [], "summary": listing}
+        result = await inspect_media(db, canvas_id, selected, canvas.definition_revision)
+        return {
+            "attachments": result["attachments"],
+            "temporary_paths": result["temporary_paths"],
+            "summary": "已附带用户选中节点的画面：\n" + result["summary"] + "\n\n" + listing,
+        }
     node_ids = [
         str(node.get("id"))
         for node in graph.get("nodes", [])

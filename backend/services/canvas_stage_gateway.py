@@ -31,7 +31,10 @@ def _node(graph: dict, kind: str, node_id: Any = None) -> dict:
 def _new_node(graph: dict, kind: str, label: str, config: dict, *, x: float | None = None, y: float = 100) -> dict:
     if x is None:
         x = max((float((n.get("position") or {}).get("x") or 0) for n in graph["nodes"]), default=-400) + 450
-    node = {"id": f"{kind}-{uuid.uuid4().hex[:16]}", "type": kind, "position": {"x": x, "y": y}, "data": {"label": label, "config": config}}
+    data: dict = {"label": label, "config": config}
+    if kind == "scene":
+        data["ui"] = {"width": SCENE_DEFAULT_W, "height": SCENE_DEFAULT_H}
+    node = {"id": f"{kind}-{uuid.uuid4().hex[:16]}", "type": kind, "position": {"x": x, "y": y}, "data": data}
     graph["nodes"].append(node)
     return node
 
@@ -93,7 +96,9 @@ SHOT_COL_W = 500
 SHOT_SCENE_GAP = 200
 # 分镜区与资产块之间至少留的横向间距：分镜永远排在资产块右边，不与它重叠
 SHOT_ASSET_GAP = 160
-SCENE_DEFAULT_W = 680
+# 剧本审核节点要并排放“小说原文 | 改写剧本 | 场景审核”三栏，默认就要足够大，不让用户自己手动拉大
+SCENE_DEFAULT_W = 1280
+SCENE_DEFAULT_H = 800
 _ASSET_ORDER = ("character", "scene", "prop")
 
 
@@ -146,7 +151,7 @@ def _layout_assets_by_kind(graph: dict, scene_node: dict, asset_nodes: list[dict
     只重排本次资产分析涉及的节点；用户之后手动拖动的位置不会被再次覆盖（只在分析时布局一次）。
     """
     position = scene_node.get("position") or {}
-    height = float(((scene_node.get("data") or {}).get("ui") or {}).get("height") or 640)
+    height = float(((scene_node.get("data") or {}).get("ui") or {}).get("height") or SCENE_DEFAULT_H)
     origin_x = float(position.get("x") or 0)
     cursor_y = float(position.get("y") or 0) + height + ASSET_BLOCK_GAP
     for kind in _ASSET_ORDER:
@@ -345,8 +350,8 @@ async def execute_agent_canvas_stage(canvas_id: int, stage: str, parameters: dic
                 budget = screenplay_char_budget(ceiling)
                 raise HTTPException(
                     422,
-                    f"剧本篇幅约需 {estimated:.0f} 秒，超出了短视频的合理时长上限 {ceiling} 秒（参考时长是 {target_seconds} 秒，故事讲完整即可，"
-                    f"不必卡死在这个数）。请精简到约 {budget} 字以内：删减次要对白和重复动作，保留因果交代、钩子、反转与结尾金句。",
+                    f"剧本篇幅约需 {estimated:.0f} 秒，超出了短视频的合理时长上限 {ceiling} 秒（参考时长是 {target_seconds} 秒，短剧单集不宜超出太多）。"
+                    f"请精简到约 {budget} 字以内：删减次要对白和重复动作，保留因果交代、钩子、反转与结尾金句。",
                 )
         # 逻辑审稿：规则查不出“主角凭什么赢”“反转有没有铺垫”，交给文本模型按清单审。
         # 审稿不通过时服务端自己按意见改写重审（最多两轮），不把问题抛给用户或助手；
@@ -388,12 +393,22 @@ async def execute_agent_canvas_stage(canvas_id: int, stage: str, parameters: dic
         if len(existing) > 1:
             raise HTTPException(422, "同一剧本存在多个场景节点，请先明确保留哪一版")
         target = existing[0] if existing else _new_node(graph, "scene", "剧本场景", {})
-        _config(target).update({"scenes": scenes, "approved": False, "scene_count": len(scenes), "source_screenplay_node": screenplay["id"], "source_content": _config(screenplay)["content"]})
+        _config(target).update({"scenes": scenes, "approved": False, "scene_count": len(scenes), "source_screenplay_node": screenplay["id"], "source_content": _config(screenplay)["content"],
+                                  # 小说改写来的剧本：带上来源章节引用，审核节点据此取回小说原文与剧本对照
+                                  "source_refs": list(_config(screenplay).get("source_refs") or [])})
         _config(target).pop("director_plan", None)
         _config(target).pop("director_plan_hash", None)
         for old in graph["nodes"]:
             if _config(old).get("source_scene_node") == target["id"]:
                 _config(old)["stale"] = True
+        # 旧剧本留下的孤儿资产：所属场景节点已经不存在、又还没生成过图 / 没锁定的，收起来，免得占位、混进待生成数量、让进度看起来乱序
+        live_scene_ids = {n["id"] for n in graph["nodes"] if n.get("type") == "scene"}
+        for old in graph["nodes"]:
+            old_config = _config(old)
+            owner = old_config.get("asset_scene_node") or old_config.get("source_scene_node")
+            if old_config.get("asset_role") in _ASSET_ORDER and owner and owner not in live_scene_ids \
+                    and not old_config.get("locked") and not isinstance(old_config.get("asset_id"), int) and not (old.get("data") or {}).get("result"):
+                old_config["stale"] = True
         _config(screenplay)["content_hash"] = split["content_hash"]
         if not existing:
             _connect(graph, screenplay, target, "screenplay", "screenplay")

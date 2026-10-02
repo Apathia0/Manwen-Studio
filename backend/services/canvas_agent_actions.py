@@ -60,6 +60,44 @@ def _proposal_scope_key(args: dict[str, Any]) -> tuple[str, str]:
     return str(first.get("op") or "node_edit"), str(first.get("node_id") or node_spec.get("id") or "")
 
 
+_NON_SEMANTIC_ARG_KEYS = {"summary", "expected_definition_revision", "agent_action_id", "auto_approve_scenes"}
+
+
+def _canonical_args(arguments: Any) -> str:
+    """去掉摘要、版本号等不影响实际效果的字段后的稳定序列化，用于识别重复提交。"""
+    args = dict(arguments or {})
+    for key in _NON_SEMANTIC_ARG_KEYS:
+        args.pop(key, None)
+    if isinstance(args.get("parameters"), dict):
+        args["parameters"] = {k: v for k, v in args["parameters"].items() if k not in _NON_SEMANTIC_ARG_KEYS}
+    return json.dumps(args, ensure_ascii=False, sort_keys=True, default=str)
+
+
+def _already_applied_action(db, canvas, conversation_id: int, name: str, args: dict[str, Any]):
+    """本会话最近已完成、参数完全相同、且之后画布没有再变化的动作：再次提交就是重复执行。"""
+    parameters = args.get("parameters") if isinstance(args.get("parameters"), dict) else {}
+    if parameters.get("regenerate"):
+        return None
+    signature = _canonical_args(args)
+    recent = (
+        db.query(CanvasAgentAction)
+        .filter(
+            CanvasAgentAction.canvas_id == canvas.id,
+            CanvasAgentAction.conversation_id == conversation_id,
+            CanvasAgentAction.tool_name == name,
+            CanvasAgentAction.status == "completed",
+        )
+        .order_by(CanvasAgentAction.id.desc())
+        .limit(10)
+        .all()
+    )
+    for item in recent:
+        result = item.result_json if isinstance(item.result_json, dict) else {}
+        if result.get("definition_revision") == canvas.definition_revision and _canonical_args(item.arguments_json) == signature:
+            return item
+    return None
+
+
 def operation_digest_of(arguments: Any) -> str:
     """提案参数中操作列表的摘要，用于判断两次 apply_canvas_ops 提案是否等价。"""
     return operations_digest((arguments or {}).get("operations"))
@@ -535,6 +573,15 @@ async def execute_action(context, name: str, args: dict[str, Any], call):
                 CanvasAgentAction.status == "pending",
             ).all()
             # 幂等键从全参数 arguments_json 精确匹配放宽为 stage/op+目标节点：同阶段同目标复用，不因 summary 微差重复创建。
+            duplicate = _already_applied_action(db, canvas, context.pending_change_key.conversation_id, name, args)
+            if duplicate is not None:
+                # 用户批准后已经执行过同一改动、画布之后也没变：直接告知模型，避免再弹一次确认卡片形成循环。
+                return {
+                    "ok": True,
+                    "already_applied": True,
+                    "action_id": duplicate.id,
+                    "message": "相同的改动已在用户批准后执行完成，不要重复提交；请继续用户请求中尚未完成的其它步骤，或直接向用户汇报结果。",
+                }
             scope = _proposal_scope_key(args)
             action = next((
                 item for item in pending
@@ -562,6 +609,9 @@ async def execute_action(context, name: str, args: dict[str, Any], call):
                     preview = build_ops_preview(base_graph, args.get("operations") or [])
                     if preview.get("errors"):
                         return {"error": "；".join(preview["errors"]), "preview_errors": preview["errors"]}
+                    if not preview.get("nodes") and not preview.get("edges"):
+                        # 改动已经在画布上（通常是批准执行后又提交了一遍）：没有可确认的变化，不再弹卡片。
+                        return {"ok": True, "no_change": True, "message": "这些改动已经在画布上，无需重复提交；请继续其它未完成的步骤，或向用户汇报结果。"}
                 action = CanvasAgentAction(
                     canvas_id=canvas.id, owner_user_id=canvas.owner_user_id,
                     conversation_id=context.pending_change_key.conversation_id,

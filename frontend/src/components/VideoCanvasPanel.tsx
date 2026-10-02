@@ -81,7 +81,7 @@ import CanvasPipelineBar from './video-canvas/CanvasPipelineBar';
 import CanvasReviewPanel from './video-canvas/CanvasReviewPanel';
 import NodeGenerateCost from './video-canvas/NodeGenerateCost';
 import type { GhostEdge } from './video-canvas/CanvasConnectionLayer';
-import CanvasEmptyGuide from './video-canvas/CanvasEmptyGuide';
+import CanvasEmptyGuide, { type ShotDurationMode } from './video-canvas/CanvasEmptyGuide';
 import NodeCandidates from './video-canvas/NodeCandidates';
 import CanvasAssetPanel from './video-canvas/CanvasAssetPanel';
 import CanvasPlanCapsule from './video-canvas/CanvasPlanCapsule';
@@ -93,7 +93,7 @@ import { buildReferenceEdges, collectAssets, summarizeAssets, type AssetKind } f
 import { nextAssetSlot, planAssetPositions } from './video-canvas/assetLayout';
 import { collectProduction, generationAncestors, planBatchWaves, type BatchEdge, type BatchNode } from './video-canvas/batchPlan';
 import type { BatchProgress } from './video-canvas/CanvasAssetPanel';
-import { computePipeline, formatCostLine } from './video-canvas/canvasPipeline';
+import { computePipeline, continuePrompt, formatCostLine } from './video-canvas/canvasPipeline';
 import SceneListNodeView from './video-canvas/SceneListNodeView';
 import { layoutDirectorUnits, unitNodeId } from './video-canvas/directorLayout';
 import { syncCanvasMediaReferences, collectConnectedReferencePreviews, collectReferenceCandidates } from './video-canvas/canvasReferenceSync';
@@ -253,12 +253,17 @@ export default function VideoCanvasPanel({ storyId, chapterId, workflow: _workfl
   const [catalog, setCatalog] = useState<VideoCanvasNodeCatalogItem[]>([]);
   const [splittingNodeId, setSplittingNodeId] = useState<string | null>(null);
   const [importDialogOpen, setImportDialogOpen] = useState(false);
+  /** 开场引导里点“导入小说章节”时选定的助手工作方式：导入完成后据此自动开启编排 */
+  const importModeRef = useRef<CanvasPermissionMode | null>(null);
   const [compilingNodeId, setCompilingNodeId] = useState<string | null>(null);
   const [planBusyNodeId, setPlanBusyNodeId] = useState<string | null>(null);
   const [directorError, setDirectorError] = useState<string | null>(null);
   const [assetAnalysisNodeId, setAssetAnalysisNodeId] = useState<string | null>(null);
   const [models, setModels] = useState<AiModelItem[]>([]);
   const [canvas, setCanvas] = useState<VideoCanvas | null>(null);
+  /** 始终指向最新的画布状态：保存要用最新的版本号，不能用闭包里捕获的旧值 */
+  const latestCanvasRef = useRef<VideoCanvas | null>(null);
+  useEffect(() => { latestCanvasRef.current = canvas; }, [canvas]);
   const [canvasList, setCanvasList] = useState<VideoCanvas[]>([]);
   const [nodes, setNodes] = useState<CanvasNode[]>([]);
   const [edges, setEdges] = useState<CanvasEdge[]>([]);
@@ -781,7 +786,10 @@ export default function VideoCanvasPanel({ storyId, chapterId, workflow: _workfl
   }, [captureHistory, selectStyle, stylePresets, styleSelectorNodeId]);
 
   const saveCanvas = async (showSuccess = true): Promise<VideoCanvas | null> => {
-    if (!canvas || savingRef.current) return null;
+    // 取“最新”的画布做保存基准，而不是闭包里捕获的那一份：发送前保存会先等进行中的自动保存结束，
+    // 再调用旧闭包里的 saveCanvas，旧闭包里的版本号已经落后一版，必然 409，整次“开始创作”就被取消了。
+    const baseCanvas = latestCanvasRef.current ?? canvas;
+    if (!baseCanvas || savingRef.current) return null;
     savingRef.current = true;
     const epoch = canvasEpochRef.current;
     const saveVersion = changeVersionRef.current;
@@ -791,22 +799,34 @@ export default function VideoCanvasPanel({ storyId, chapterId, workflow: _workfl
     const saveViewport = viewportRef.current;
     setSaving(true);
     try {
-      const graph = toGraph(graphNodes, graphEdges, canvas.version.graph);
       const layout = { nodes: Object.fromEntries(graphNodes.map((node) => [node.id, node.position])), viewport: { x: saveViewport.x, y: saveViewport.y, zoom: saveViewport.k } };
-      const synchronized = await saveVideoCanvasSnapshot(canvas.id, {
-        graph,
+      const submit = (target: VideoCanvas) => saveVideoCanvasSnapshot(target.id, {
+        graph: toGraph(graphNodes, graphEdges, target.version.graph),
         layout,
-        expected_definition_revision: canvas.definition_revision,
-        expected_layout_revision: canvas.layout_revision,
+        expected_definition_revision: target.definition_revision,
+        expected_layout_revision: target.layout_revision,
         client_revision: clientRevisionRef.current,
-        idempotency_key: `canvas-${canvas.id}-${saveSessionRef.current}-client-${clientRevisionRef.current}`,
+        idempotency_key: `canvas-${target.id}-${saveSessionRef.current}-client-${clientRevisionRef.current}`,
       });
+      let synchronized: VideoCanvas;
+      try {
+        synchronized = await submit(baseCanvas);
+      } catch (error) {
+        if ((error as { status?: number }).status !== 409) throw error;
+        // 版本冲突：服务端的版本比本地新。服务端没有本地没见过的节点时（只是版本号落后 / 元数据变化），
+        // 以最新版本号和服务端元数据为底重发一次，本地的节点与连线原样保留；有陌生节点（助手 / 后台编排写入的）则不覆盖，交给用户刷新。
+        const latest = await getVideoCanvas(baseCanvas.id);
+        const localIds = new Set(graphNodes.map((node) => node.id));
+        if ((latest.version.graph.nodes || []).some((node) => !localIds.has(node.id))) throw error;
+        synchronized = await submit(latest);
+      }
+      latestCanvasRef.current = synchronized;
       if (canvasEpochRef.current !== epoch) return null;
       setCanvas((current) => synchronized ? { ...synchronized, layout: synchronized.layout || layout, runs: current?.runs || [] } : current);
       savedEditRef.current = saveEdit;
       if (changeVersionRef.current === saveVersion) {
         setDirty(false);
-        removeCanvasDraft(canvasDraftKey(storyId, chapterId, canvas.id));
+        removeCanvasDraft(canvasDraftKey(storyId, chapterId, baseCanvas.id));
       }
       if (showSuccess) toast.success('画布已保存');
       return synchronized;
@@ -1167,6 +1187,18 @@ export default function VideoCanvasPanel({ storyId, chapterId, workflow: _workfl
     });
     markDirty();
   }, [canvas, markDirty]);
+  // 分镜时长模式（开局选定，存在 metadata.production_settings.shot_duration_mode）：flexible 灵活剪切 / fixed15 固定 15 秒；后端导演据此控制时长。
+  const shotDurationMode: ShotDurationMode = ((canvas?.version.graph.metadata?.production_settings as Record<string, unknown> | undefined)?.shot_duration_mode) === 'fixed15' ? 'fixed15' : 'flexible';
+  const setShotDurationMode = useCallback((next: ShotDurationMode) => {
+    if (!canvas) return;
+    setCanvas((current) => {
+      if (!current) return current;
+      const metadata = current.version.graph.metadata || {};
+      const production = (metadata.production_settings || {}) as Record<string, unknown>;
+      return { ...current, version: { ...current.version, graph: { ...current.version.graph, metadata: { ...metadata, production_settings: { ...production, shot_duration_mode: next } } } } };
+    });
+    markDirty();
+  }, [canvas, markDirty]);
   const setCanvasStyle = useCallback((next: CanvasStyle | null, options: { silent?: boolean } = {}) => {
     if (!canvas || sameStyle(next, readCanvasStyle(canvas.version.graph))) return;
     setCanvas((current) => current ? { ...current, version: { ...current.version, graph: { ...current.version.graph, metadata: { ...(current.version.graph.metadata || {}), canvas_style: next } } } } : current);
@@ -1453,7 +1485,10 @@ export default function VideoCanvasPanel({ storyId, chapterId, workflow: _workfl
   const refreshCanvasRef = useRef(refreshCanvas);
   useEffect(() => { refreshCanvasRef.current = refreshCanvas; });
   // 空画布引导与流水线"继续"都通过助手发送指令；同时展开助手面板让用户看到进展。
+  /** 从开场引导以自动模式开始创作：助手这一轮结束后若后台编排没有自动启动，由前端补启动一次（兜底） */
+  const autoStartWatchRef = useRef<{ sawBusy: boolean } | null>(null);
   const sendToAgent = useCallback((text: string, mode?: CanvasPermissionMode) => {
+    if (mode === 'auto') autoStartWatchRef.current = { sawBusy: false };
     setAgentOpen(true);
     setExternalPrompt((current) => ({ id: (current?.id ?? 0) + 1, text, mode }));
   }, []);
@@ -1508,6 +1543,27 @@ export default function VideoCanvasPanel({ storyId, chapterId, workflow: _workfl
       setPipelineTask(task);
     } catch (error) { toast.error(normalizeErrorMessage(error, '启动自动编排失败')); }
   };
+  const runPipelineRef = useRef(runPipeline);
+  useEffect(() => { runPipelineRef.current = runPipeline; });
+  const pipelineSummaryRef = useRef(pipelineSummary);
+  useEffect(() => { pipelineSummaryRef.current = pipelineSummary; });
+  useEffect(() => {
+    const watch = autoStartWatchRef.current;
+    if (!watch) return undefined;
+    if (agentStreaming) { watch.sawBusy = true; return undefined; }
+    if (!watch.sawBusy || pipelineActive) return undefined;
+    // 助手这一轮已结束。稍等一会儿让它写入的节点同步到画布，再看后台编排是不是已经自己跑起来了；
+    // 没有的话（服务端启动失败、保存冲突等），自动模式不能停在半路，由这里补启动一次。
+    const timer = window.setTimeout(() => {
+      const current = autoStartWatchRef.current;
+      if (!current) return;
+      autoStartWatchRef.current = null;
+      const next = pipelineSummaryRef.current.next;
+      const scriptReady = pipelineSummaryRef.current.stages[0]?.state === 'done';
+      if (scriptReady && next && ['split', 'director', 'assets', 'compile'].includes(next.key)) void runPipelineRef.current();
+    }, 2500);
+    return () => window.clearTimeout(timer);
+  }, [agentStreaming, pipelineActive]);
   const cancelPipeline = async () => {
     if (!canvas) return;
     try { const { task } = await cancelCanvasPipeline(canvas.id); setPipelineTask(task); toast.info('当前这一步完成后会停下，已完成的节点保留'); }
@@ -1961,13 +2017,15 @@ export default function VideoCanvasPanel({ storyId, chapterId, workflow: _workfl
         data: {
           label: `剧本审核（${scenes.length} 场）`,
           nodeType: 'scene',
-          ui: existingScene?.data.ui?.width && existingScene.data.ui.height && existingScene.data.ui.width >= 1100 ? existingScene.data.ui : { width: 1440, height: 920 },
+          ui: existingScene?.data.ui?.width && existingScene.data.ui.height && existingScene.data.ui.width >= 1100 ? existingScene.data.ui : { width: 1280, height: 800 },
           config: {
             scenes,
             approved: false,
             scene_count: scenes.length,
             source_screenplay_node: nodeId,
             source_content_hash: result.content_hash,
+            // 小说改写来的剧本：带上来源章节引用，审核节点据此取回小说原文与剧本对照
+            source_refs: Array.isArray((sourceNode.data.config || {}).source_refs) ? (sourceNode.data.config || {}).source_refs : [],
             // 左栏对照用：拆分时的剧本全文（截断保护，避免图 JSON 过大）
             source_content: (() => {
               const raw = String((sourceNode.data.config || {}).content ?? (sourceNode.data.config || {}).screenplay ?? '');
@@ -2035,7 +2093,19 @@ export default function VideoCanvasPanel({ storyId, chapterId, workflow: _workfl
     setNodes((current) => [...current, node]);
     markDirty();
     setImportDialogOpen(false);
-    toast.success(`已生成剧本节点（${Math.round(screenplayText.length / 100) / 10}k 字），可编辑后点击「AI 拆分」`);
+    const startMode = importModeRef.current;
+    importModeRef.current = null;
+    if (startMode === null) {
+      toast.success(`已生成剧本节点（${Math.round(screenplayText.length / 100) / 10}k 字），可编辑后点击「AI 拆分」`);
+      return;
+    }
+    // 从开场引导导入：不让用户再去找按钮，自动开启后续流程。自动模式交给后台运行器一路编排；
+    // 询问变更模式让助手逐阶段提方案，由用户确认。稍等一拍，让新剧本节点先进入画布并保存。
+    toast.success(`已导入剧本（${Math.round(screenplayText.length / 100) / 10}k 字），正在自动开始编排`);
+    window.setTimeout(() => {
+      if (startMode === 'auto') void runPipelineRef.current();
+      else sendToAgent(continuePrompt('split'), startMode);
+    }, 300);
   };
   // 场景节点字段写回（partial 合并进 config，含 beats 整体替换）
   // 编辑场景/节拍后导演方案自动过期；生成/应用方案自身的写回不触发过期
@@ -2342,7 +2412,9 @@ export default function VideoCanvasPanel({ storyId, chapterId, workflow: _workfl
   <div className="flex h-full w-full flex-col gap-1.5" data-canvas-no-zoom>
     <div className="min-h-0 flex-1 overflow-hidden">
       <SceneListNodeView
-        config={config}
+        canvasId={canvas?.id}
+        // 旧画布的审核节点没有保存来源章节引用：回退到它所属的剧本节点上的引用，旧的小说改写剧本也能对照原文
+        config={config.source_refs ? config : { ...config, source_refs: nodes.find((item) => item.id === String(config.source_screenplay_node || ''))?.data.config?.source_refs }}
         onChange={(partial) => updateSceneNodeConfig(nodeView.id, partial)}
         onToggleApproved={() => updateSceneNodeConfig(nodeView.id, { approved: !config.approved })}
         directorPlan={(config.director_plan as DirectorPlan) || null}
@@ -2417,7 +2489,7 @@ const mediaKind = nodeView.type === 'image' || nodeView.type === 'video' ? nodeV
       {miniMapOpen && <CanvasMiniMap nodes={nodes.map((node) => ({ id: node.id, position: node.position, width: node.data.ui?.width, height: node.data.ui?.height, type: node.type }))} viewport={editorViewport} viewportSize={canvasSize} onViewportChange={(next) => updateViewport({ x: next.x, y: next.y, k: next.scale })} />}
       <CanvasBottomToolbar scale={viewport.k} supportsAudio onScaleChange={(k) => updateViewport({ ...viewport, k })} onReset={() => { const rect = surfaceRef.current?.getBoundingClientRect(); updateViewport({ x: rect ? rect.width / 2 : 260, y: rect ? rect.height / 2 : 120, k: 1 }); }} onFit={fitAll} onUndo={undo} onRedo={redo} onAutoLayout={autoLayoutCanvas} onOpenAssetManagement={() => setAssetPanelOpen((open) => !open)} assetPanelOpen={assetPanelOpen} assetAlert={assetSummary.withoutImage > 0 || assetSummary.missingRefs > 0} onGroup={() => createGroupFromSelection()} canGroup={selectedNodeIds.length >= 2} onToggleMiniMap={() => setMiniMapOpen((open) => !open)} miniMapOpen={miniMapOpen} isAssetManagementDisabled={false} onTool={(nextTool) => { if (nextTool === 'select' || nextTool === 'pan') setTool(nextTool); else if (nextTool === 'help') toast.info('空格或中键平移，滚轮缩放，框选多个节点'); }} activeTool={tool} onAddNode={(type) => addNodeFromTool(type)} />
       {assetPanelOpen && canvas && <CanvasAssetPanel canvasId={canvas.id} entries={assetEntries} candidates={assetCandidates} onAddCandidate={(candidate) => addCandidateAsset(candidate as AssetCandidate & { sceneNodeId?: string })} production={productionEntries} statuses={nodeRunStatuses} batch={batch} canvasStyle={canvasStyle} onPickStyle={() => setCanvasStyleModalOpen(true)} onToggleStyle={toggleCanvasStyle} inconsistentCount={inconsistentIds.length} onUnifyStyle={unifyStyle} busy={running} uploadingNodeId={uploadingNodeId} getGraph={() => toGraph(nodesRef.current, edgesRef.current, canvas.version.graph)} onClose={() => setAssetPanelOpen(false)} onToggleLock={toggleAssetLock} onEditSetting={editAssetSetting} onLinkShots={linkAssetToShots} onFocus={focusNode} onGenerate={(nodeId) => void runCanvas(nodeId)} onUpload={(nodeId) => openNodeFileUpload(nodeId, 'image')} onBatchGenerate={(ids) => void runBatch(ids)} onCancelBatch={() => void cancelBatch()} onOpenLibrary={onOpenAssetManagement} />}
-      {nodes.length === 0 && !loading && <CanvasEmptyGuide canvasId={canvas.id} onSend={sendToAgent} onImportChapter={() => setImportDialogOpen(true)} style={canvasStyle} presets={stylePresets} onPickPreset={(preset) => setCanvasStyle(presetToCanvasStyle(preset), { silent: true })} onOpenStyleModal={() => setCanvasStyleModalOpen(true)} onToggleStyle={toggleCanvasStyle} aspect={canvasAspect} onPickAspect={setCanvasAspect} />}
+      {nodes.length === 0 && !loading && <CanvasEmptyGuide canvasId={canvas.id} onSend={sendToAgent} onImportChapter={(mode) => { importModeRef.current = mode; setImportDialogOpen(true); }} style={canvasStyle} presets={stylePresets} onPickPreset={(preset) => setCanvasStyle(presetToCanvasStyle(preset), { silent: true })} onOpenStyleModal={() => setCanvasStyleModalOpen(true)} onToggleStyle={toggleCanvasStyle} aspect={canvasAspect} onPickAspect={setCanvasAspect} shotMode={shotDurationMode} onPickShotMode={setShotDurationMode} />}
       {nodes.length > 0 && <CanvasPipelineBar summary={pipelineSummary} agentBusy={agentStreaming || pipelineActive} cost={costEstimate} pipelineRun={pipelineTask} onRunPipeline={() => void runPipeline()} onCancelPipeline={() => void cancelPipeline()} onContinue={sendToAgent} onBatch={(ids) => void runBatch(ids)} batchBusy={running || Boolean(batch)} batch={batch} inconsistentCount={inconsistentIds.length} onUnifyStyle={unifyStyle} autoCollapseKey={inspectorNode && supportsNodeInspector(inspectorNode.type) ? inspectorNode.id : null} reviewSlot={<CanvasReviewPanel canvasId={canvas.id} revision={canvas.definition_revision} refreshKey={refreshTick} busy={agentStreaming || pipelineActive || running || Boolean(batch)} onBeforeAction={flushBeforeAgent} onChanged={() => void refreshCanvas()} onRedoStarted={setPipelineTask} onFocusNode={focusNode} onPreviewEdges={setGhostEdges} />} />}
       {batchDialog && <BatchStartDialog info={batchDialog.info} style={canvasStyle} presets={stylePresets} onPickPreset={(preset) => setCanvasStyle(presetToCanvasStyle(preset), { silent: true })} onOpenStyleModal={() => setCanvasStyleModalOpen(true)} onToggleStyle={toggleCanvasStyle} onConfirm={() => batchDialog.resolve(true)} onCancel={() => batchDialog.resolve(false)} />}
       {canvasStyleModalOpen && <StyleSelectorModal isOpen requireReferenceImage onClose={() => { pendingStyleReferenceRef.current = null; setCanvasStyleModalOpen(false); }} presets={stylePresets} selectedStyleName={canvasStyle?.style_snapshot?.name || ''} styleReferenceImageUrl={canvasStyle?.style_reference_url || null} onFileUpload={uploadCanvasStyleReference} onStyleSelect={(styleName) => handleCanvasStyleSelect(styleName)} />}

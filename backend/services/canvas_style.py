@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import re
 from copy import deepcopy
 from typing import Any, Mapping
 
@@ -89,6 +90,21 @@ def apply_canvas_style(node_type: str, config: Mapping[str, Any], style: Mapping
         if style.get(key) is not None:
             result[key] = deepcopy(style[key])
     return result
+
+
+# 提示词里的“风格行”：统一视觉风格 / 画面风格 / 画风 / 风格要求 / Visual style 等开头的整行
+_STYLE_LINE = re.compile(r"(?im)^[ \t]*(?:统一视觉风格|视觉风格|画面风格|整体画风|画风|风格要求|风格预设|visual\s*style|art\s*style)[ \t]*[:：].*(?:\n|$)")
+_STYLE_TAG = re.compile(r"\s*\|?\s*【风格】[^|\n]*")
+
+
+def strip_style_text(prompt: str) -> str:
+    """去掉提示词里的风格文字（风格行、【风格】标签）。
+
+    画风只由风格参考图（图生图）控制，提示词只描述内容；否则旧的风格文字会压过参考图，
+    用户中途更换风格参考图也不起作用。风格预设没有示例图时，运行时会按当前风格动态补一句文字，不依赖这里残留的旧文字。
+    """
+    text = _STYLE_TAG.sub("", _STYLE_LINE.sub("", str(prompt or "")))
+    return re.sub(r"\n{3,}", "\n\n", text).strip()
 
 
 def style_prompt_hint(style: Mapping[str, Any] | None) -> str:

@@ -60,6 +60,34 @@ PROP_ASSET_DIRECTIVE = (
     "纯净浅色背景，光线均匀，展示它的形状、材质、颜色、大小比例和关键细节，不要出现人物或其他物品。"
     "图中不要自己画任何文字、数字、标签或水印（名称标注由系统在图片下方统一加上）。"
 )
+# 画风锚点（风格预设图 / 用户上传的风格图）：图生图控制画风，比提示词里的画风文字可靠得多
+STYLE_ANCHOR_DIRECTIVE = (
+    "\n\n【画风统一·最高优先级】本次附带的“画风参考”图是全片统一画风的锚点：线条与描边、上色或渲染方式、色调与饱和度、"
+    "光影质感、人物与物体的风格化程度（头身比、五官简化程度）必须与它保持一致，像同一部作品里的画面。"
+    "它只决定画风，不决定内容：不要复制其中的人物、服装、物体或构图。提示词里关于画风的文字与参考图冲突时，以参考图为准。"
+)
+
+
+def is_style_anchor(item: Any) -> bool:
+    return isinstance(item, dict) and bool(item.get("style_anchor"))
+
+
+def style_anchors_first(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """图片生成：画风锚点排在所有参考图最前面（稳定排序，其余顺序不变）。"""
+    return sorted(items, key=lambda item: 0 if is_style_anchor(item) else 1)
+
+
+def order_video_references(items: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
+    """视频参考图：画风锚点紧跟第一张（分镜首帧 / 分镜板）之后，降级时不会最先被丢；超过上限时先丢画风锚点，而不是让整条视频任务报错。"""
+    anchors = [item for item in items if is_style_anchor(item)]
+    others = [item for item in items if not is_style_anchor(item)]
+    if not anchors:
+        return list(items)
+    if len(items) > limit:
+        return others
+    return [*others[:1], *anchors, *others[1:]]
+
+
 # 分镜出图时的身份绑定：参考图只提供人物长相，不提供版式。
 STORYBOARD_IDENTITY_DIRECTIVE = (
     "\n\n【人物一致性】画面中出现的人物（{names}）必须严格使用各自对应参考图里的人物："
@@ -475,6 +503,9 @@ def video_reference_entries(inputs: list[dict[str, Any]], db) -> list[tuple[str,
     entries: list[tuple[str, str]] = []
     for item in inputs:
         asset = db.get(VideoAsset, item.get("asset_id")) if isinstance(item.get("asset_id"), int) else None
+        if is_style_anchor(item):
+            entries.append(("style", ""))
+            continue
         entries.append((asset_reference_role(asset), str(asset.name or "") if asset else ""))
     return entries
 
@@ -499,10 +530,12 @@ def build_video_identity_directive(entries: list[tuple[str, str]], token_format:
         return ""
     from services.canvas_storyboard_sheet import video_sheet_description
 
-    kind_label = {"frame": "分镜首帧", "sheet": "分镜板", "character": "角色", "scene": "场景", "prop": "道具", "other": "参考"}
+    kind_label = {"frame": "分镜首帧", "sheet": "分镜板", "character": "角色", "scene": "场景", "prop": "道具", "style": "画风参考", "other": "参考"}
 
     def describe(index: int, role: str, name: str) -> str:
         base = f"{token_format.format(n=index)}：{kind_label[role]}"
+        if role == "style":
+            return f"{base}（画风、色调、光影、渲染质感以这张图为准）"
         if role == "sheet" and sheet_panels:
             return f"{base}（{video_sheet_description(sheet_panels)}）"
         return base + (f"「{name}」" if name and role not in {"frame", "sheet"} else "")
@@ -520,6 +553,11 @@ def build_video_identity_directive(entries: list[tuple[str, str]], token_format:
         rules.append("道具的形状、颜色、材质、大小和细节必须与道具参考图一致，不得变形或替换")
     if "scene" in present:
         rules.append("场景的空间布局、建筑与陈设、材质、光线和氛围必须与场景参考图一致，镜头内不得出现与之矛盾的背景")
+    if "style" in present:
+        style_rule = "本视频的画风、色彩、光影以风格参考图为准，保持画面风格稳定统一"
+        if present & {"frame", "sheet"}:
+            style_rule += "；分镜仅提供构图和动作参考，视频色彩、光影、渲染质感不受分镜影响，完全以风格参考图为准"
+        rules.append(style_rule + "（只取画风，不复制风格参考图里的人物、场景或构图）")
     rules.append(("角色、场景、道具参考图" if "sheet" in present else "参考图") + "仅用于锁定外观，不要复制其中的版式、文字、标注或多视图排布")
     return "\n\n【参考图对应关系】" + mapping + "。\n【一致性约束】" + "；".join(rules) + "。"
 
@@ -580,13 +618,16 @@ def _configured_reference_inputs(config: dict[str, Any], canvas: VideoCanvas, db
         media_kind = _asset_media_kind(asset)
         if media_kind != "image":
             raise RuntimeError("当前视频生成服务仅支持图片参考素材")
-        inputs.append({"asset_id": asset.id, "file_path": asset.file_path, "url": asset.file_path, "media_kind": media_kind})
+        item = {"asset_id": asset.id, "file_path": asset.file_path, "url": asset.file_path, "media_kind": media_kind}
+        if raw_id == style_reference_id:
+            item["style_anchor"] = True  # 用户上传的自定义风格图
+        inputs.append(item)
     style_snapshot = config.get("style_snapshot")
     style_image_url = style_snapshot.get("image_url") if isinstance(style_snapshot, dict) else None
     if isinstance(style_image_url, str) and style_image_url.strip():
         normalized_url = style_image_url.strip()
         if not any(str(item.get("url") or "") == normalized_url for item in inputs):
-            inputs.append({"url": normalized_url, "media_kind": "image", "style_snapshot": style_snapshot})
+            inputs.append({"url": normalized_url, "media_kind": "image", "style_snapshot": style_snapshot, "style_anchor": True})
     return inputs
 
 
@@ -615,7 +656,7 @@ def _append_director_continuity(prompt: str, config: dict[str, Any]) -> str:
     return prompt + "\n" + "\n".join(extras)
 
 
-from services.canvas_style import apply_canvas_style, canvas_style  # noqa: E402
+from services.canvas_style import apply_canvas_style, canvas_style, strip_style_text  # noqa: E402
 
 
 def _apply_style_prompt(prompt: str, config: dict[str, Any], inputs: list[dict[str, Any]]) -> str:
@@ -633,6 +674,9 @@ def _apply_style_prompt(prompt: str, config: dict[str, Any], inputs: list[dict[s
         for snapshot in snapshots
         if str(snapshot.get("prompt_template") or "").strip()
     ]
+    if isinstance(config.get("style_reference_asset_id"), int) or any(isinstance(item, dict) and item.get("style_anchor") for item in inputs):
+        # 有风格参考图：画风只由图控制（图生图），不再附加风格文字，避免文字与参考图冲突
+        style_fragments = ["画风、色彩、光影与线条质感以画风参考图为准"]
     if not style_fragments:
         return prompt
     return f"{prompt}\n\n风格要求：{'；'.join(dict.fromkeys(style_fragments))}"
@@ -1392,19 +1436,23 @@ async def execute_canvas_run(
                         prompt = str(config.get("prompt") or config.get("storyboard_prompt") or "").strip()
                         if not prompt:
                             prompt = _first_input_text(inputs, ("text", "content", "storyboard_prompt", "screenplay", "prompt", "shot"))
-                        prompt = _apply_style_prompt(prompt, config, inputs)
+                        # 节点里可能残留旧的“统一视觉风格”等文字（老画布 / 旧分析结果）：生成前清掉，风格以当前的风格参考图为准
+                        prompt = _apply_style_prompt(strip_style_text(prompt), config, inputs)
                         if not prompt:
                             raise RuntimeError("图像节点缺少提示词")
                         output_path = _node_output_path(MANGA_OUTPUTS, canvas.id, run.id, node_id, ".png")
                         reference_paths, reference_labels, reference_roles = [], [], []
-                        for reference in media_reference_inputs:
+                        for reference in style_anchors_first(media_reference_inputs):
                             paths = _local_reference_paths([reference], canvas, db)
                             asset = db.get(VideoAsset, reference.get("asset_id")) if isinstance(reference.get("asset_id"), int) else None
                             role = str((asset.meta_json or {}).get("asset_role") or "") if asset else "style"
                             if role not in {"character", "scene", "prop", "style"}:
                                 role = {"character_reference": "character", "scene_reference": "scene", "prop_reference": "prop"}.get(asset.asset_type if asset else "", "style")
+                            anchor = is_style_anchor(reference)
+                            if anchor:
+                                role = "style"
                             reference_paths.extend(paths)
-                            reference_labels.extend([asset.name if asset else "画风参考"] * len(paths))
+                            reference_labels.extend([("画风参考" if anchor else (asset.name if asset else "画风参考"))] * len(paths))
                             reference_roles.extend([role] * len(paths))
                         if str(config.get("asset_role") or "") == "character":
                             prompt += CHARACTER_IDENTITY_SHEET_DIRECTIVE
@@ -1415,6 +1463,8 @@ async def execute_canvas_run(
                         elif any(role == "character" for role in reference_roles):
                             names = "、".join(dict.fromkeys(label for label, role in zip(reference_labels, reference_roles) if role == "character" and label))
                             prompt += STORYBOARD_IDENTITY_DIRECTIVE.format(names=names or "各角色")
+                        if any(is_style_anchor(reference) for reference in media_reference_inputs) and "style" in reference_roles:
+                            prompt += STYLE_ANCHOR_DIRECTIVE
                         image_sizes = {"9:16": "1080x1920", "16:9": "1920x1080", "1:1": "1024x1024", "3:4": "1152x1536", "4:3": "1536x1152"}
                         if config.get("reference_mode") == "clean_single_frame":
                             prompt += "\n只生成一张完整的起始画面，无字幕、无边框、无文字、无分格；动作尚未完成，保留视频推进空间。"
@@ -1461,7 +1511,8 @@ async def execute_canvas_run(
                         output = {"asset_id": asset.id, "file_path": asset.file_path, "url": _static_url(asset.file_path, VIDEO_OUTPUTS, "/static/video"), "reused": True}
                     else:
                         prompt = str(config.get("prompt") or "").strip() or _first_input_text(inputs, ("video_prompt", "text", "content", "storyboard_prompt", "prompt", "screenplay"))
-                        prompt = _apply_style_prompt(prompt, config, inputs)
+                        plain_video_prompt = strip_style_text(prompt)
+                        prompt = _apply_style_prompt(plain_video_prompt, config, inputs)
                         if not prompt or not effective_video_api_key:
                             raise RuntimeError("视频节点缺少提示词或 Video API Key")
                         # 时长已在计费前校验；恢复任务使用首次提交时冻结的模型和时长。
@@ -1475,16 +1526,19 @@ async def execute_canvas_run(
                             limits = video_capabilities.get("limits") if isinstance(video_capabilities, dict) else None
                             configured_limit = limits.get("max_reference_images") if isinstance(limits, dict) else None
                             max_reference_images = min(9, configured_limit) if isinstance(configured_limit, int) and configured_limit >= 0 else 9
+                            # 画风锚点紧跟分镜首帧之后；参考图超过上限时先丢画风锚点（提示词里仍有画风文字），不让整条视频任务失败
+                            video_reference_inputs = order_video_references(media_reference_inputs, max_reference_images)
                             reference_images = await _external_video_reference_urls(
-                                media_reference_inputs,
+                                video_reference_inputs,
                                 canvas,
                                 db,
                                 max_reference_images=max_reference_images,
                             )
                             reference_audios = await _external_audio_reference_urls(audio_reference_inputs, canvas, db)
                             # 参考图按输入顺序截断到上游上限，图片序号与提示词里的说明一一对应。
-                            base_prompt = prompt
-                            reference_entries = video_reference_entries(media_reference_inputs, db)[: len(reference_images)]
+                            reference_entries = video_reference_entries(video_reference_inputs, db)[: len(reference_images)]
+                            # 与原视频工作流一致：画风由风格参考图控制，提示词里不再重复风格文字；只有没带上风格图时才退回文字
+                            base_prompt = plain_video_prompt if any(role == "style" for role, _ in reference_entries) else prompt
                             input_mode = "image_to_video" if reference_images else "text_to_video"
                             requested_seed = config.get("seed")
                             seed = requested_seed if isinstance(requested_seed, int) and not isinstance(requested_seed, bool) else None

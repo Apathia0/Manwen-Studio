@@ -15,6 +15,8 @@ from typing import Any
 CHECKPOINTS = ("script", "assets", "storyboard")
 CHECKPOINT_LABELS = {"script": "剧本与拆分", "assets": "角色与资产", "storyboard": "分镜与镜头"}
 REDO_STAGES = ("director", "assets", "compile")
+# 严重程度只是“警告”、但靠从某阶段重做一轮就能修好的问题，自动质检循环也会修一次（每个场景每个阶段最多一轮，不会死循环）
+AUTO_FIX_WARNING_CODES = frozenset({"character_missing_asset"})
 # 上游模型能接受的镜头时长范围（秒）；超出的镜头提交前会被归一化，评审提前提示
 MIN_SHOT_SECONDS = 2
 MAX_SHOT_SECONDS = 15
@@ -93,7 +95,10 @@ def _review_assets(nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
     issues: list[dict[str, Any]] = []
     live = _live(nodes)
     assets = [n for n in live if n.get("type") == "image" and _config(n).get("asset_role") in {"character", "scene", "prop"}]
-    character_names = {str(_config(n).get("asset_name") or "").strip() for n in assets if _config(n).get("asset_role") == "character"}
+    from services.canvas_asset_analysis import is_extra_character
+    from services.screenplay_adapt import NON_CHARACTER_LABELS, base_character_name
+
+    character_names = {base_character_name(str(_config(n).get("asset_name") or "")) for n in assets if _config(n).get("asset_role") == "character"}
     # 分镜里出现、但没有对应角色资产的人物：生成分镜时会凭空长相，跨镜头无法保持一致
     for scene in _live(nodes, "scene"):
         plan = _config(scene).get("director_plan") or {}
@@ -103,7 +108,12 @@ def _review_assets(nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
         # 且在这个分场景的镜头文字里至少出现 2 次的名字当作缺失的角色
         body = " ".join(json.dumps({k: v for k, v in u.items() if k != "characters"}, ensure_ascii=False, default=str) for u in units)
         for unit in units:
-            missing.update(name for name in _names(unit.get("characters")) if name not in character_names and len(name) <= 6 and body.count(name) >= 2)
+            # 群演（少年甲、中年族人…）和“级别”这类标签词不要求有角色资产；“测验员（漠然）”按“测验员”算
+            missing.update(
+                base for base in (base_character_name(name) for name in _names(unit.get("characters")))
+                if base and base not in character_names and len(base) <= 6 and body.count(base) >= 2
+                and not is_extra_character(base) and base not in NON_CHARACTER_LABELS
+            )
         if missing:
             issues.append(_issue("assets", "character_missing_asset", "warning", f"场景「{_label(scene)}」的角色 {'、'.join(sorted(missing))} 没有角色资产，跨镜头形象可能不一致", [scene["id"]], scene_node_id=scene["id"], redo_stage="assets"))
     for asset in assets:
@@ -141,6 +151,8 @@ def _duration_inflation_issues(nodes: list[dict[str, Any]]) -> list[dict[str, An
         content = minimum_seconds(beats) if beats else 0
         if not units or content <= 0 or total < content * INFLATION_RATIO or total - content < INFLATION_MIN_EXTRA_SECONDS:
             continue
+        if (plan.get("production_policy") or {}).get("shot_duration_mode") == "fixed15":
+            continue  # 用户在开场主动选了固定 15 秒，时长偏长是预期内的
         options = [o for o in (plan.get("production_policy") or {}).get("duration_options") or [] if isinstance(o, int)]
         cause = f"这份方案生成时只有 {options[0]} 秒一档，每个镜头都被延展到这个时长" if len(options) == 1 else "镜头被拆得太细或时长分配偏长"
         issues.append(_issue(
@@ -259,7 +271,8 @@ def repair_targets(review: dict[str, Any]) -> dict[tuple[str, str], list[str]]:
     for checkpoint in (review.get("checkpoints") or {}).values():
         for issue in checkpoint.get("issues") or []:
             stage, scene_id = issue.get("redo_stage"), issue.get("scene_node_id")
-            if issue.get("severity") != "error" or stage not in order or not scene_id:
+            fixable_warning = issue.get("severity") == "warning" and issue.get("code") in AUTO_FIX_WARNING_CODES
+            if (issue.get("severity") != "error" and not fixable_warning) or stage not in order or not scene_id:
                 continue
             targets.setdefault((scene_id, stage), []).append(issue["message"])
     # 同一场景里同时需要重做多个阶段时，只保留最靠前的（它会带动后面的阶段重新生成）

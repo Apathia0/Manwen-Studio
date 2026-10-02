@@ -112,13 +112,16 @@ SCREENPLAY_CHARS_PER_SECOND = 5.6
 SCREENPLAY_OVERRUN_RATIO = 1.1
 
 # 用户给的时长只是参考：故事讲完整优先，实际可在参考值的 2 倍内浮动，但不超过短视频的合理上限 3 分钟
-FLEX_DURATION_RATIO = 2.0
+FLEX_DURATION_RATIO = 1.5
+FLEX_DURATION_EXTRA_SECONDS = 20
 SHORT_VIDEO_MAX_SECONDS = 180
 
 
 def target_duration_ceiling(target_seconds: int) -> int:
-    """参考时长对应的“合理上限”（秒）：max(参考+30, 参考×2)，且不超过 3 分钟；参考值本身已超过 3 分钟时以参考值为准。"""
-    flexible = max(target_seconds + 30, target_seconds * FLEX_DURATION_RATIO)
+    """参考时长对应的“合理上限”（秒）：max(参考+20, 参考×1.5)，且不超过 3 分钟；参考值本身已超过 3 分钟时以参考值为准。
+
+    短剧市场的单集一般 1 到 3 分钟：用户给的时长是参考，剧情合理时可以略微超出（60 秒 → 最多 90 秒），但不能超出太多。"""
+    flexible = max(target_seconds + FLEX_DURATION_EXTRA_SECONDS, target_seconds * FLEX_DURATION_RATIO)
     return int(max(target_seconds, min(flexible, SHORT_VIDEO_MAX_SECONDS)))
 
 
@@ -153,6 +156,28 @@ def estimate_screenplay_seconds(text: str | None) -> float:
 
     chars = len(re.sub(r"\s", "", str(text or "")))
     return chars / SCREENPLAY_CHARS_PER_SECOND
+
+
+# 小说章节改写成短剧：一章大约改成 1 到 2.5 分钟（短剧单集的常见体量），多章合计不超过 3 分钟
+ADAPT_MIN_SECONDS_PER_CHAPTER = 45
+ADAPT_MAX_SECONDS_PER_CHAPTER = 150
+ADAPT_NOVEL_CHARS_PER_SCRIPT_SECOND = 25
+
+
+def adapt_chapter_targets(chapter_chars: list[int], total_target_seconds: int | None = None) -> list[int]:
+    """每一章改写后的目标时长（秒）。
+
+    没指定总时长：按章节篇幅估算（约 25 个原文字对应 1 秒成片），单章限制在 45 到 150 秒，多章合计不超过 180 秒；
+    指定了总时长：按各章篇幅占比分配（每章至少 30 秒）。"""
+    if not chapter_chars:
+        return []
+    if total_target_seconds:
+        total_chars = max(sum(chapter_chars), 1)
+        return [max(30, round(total_target_seconds * chars / total_chars)) for chars in chapter_chars]
+    raw = [min(ADAPT_MAX_SECONDS_PER_CHAPTER, max(ADAPT_MIN_SECONDS_PER_CHAPTER, chars / ADAPT_NOVEL_CHARS_PER_SCRIPT_SECOND)) for chars in chapter_chars]
+    if sum(raw) > SHORT_VIDEO_MAX_SECONDS:
+        raw = [max(30.0, v * SHORT_VIDEO_MAX_SECONDS / sum(raw)) for v in raw]
+    return [int(round(v)) for v in raw]
 
 
 def screenplay_char_budget(target_seconds: int) -> int:

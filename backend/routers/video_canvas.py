@@ -1904,7 +1904,7 @@ async def analyze_canvas_assets(canvas_id: int, body: VideoCanvasAssetAnalysisRe
     result = await analyze_scene_assets(
         scenes=scenes,
         screenplay_text=content,
-        style_hint=style_prompt_hint(canvas_style(graph)) or None,
+        style_hint=None,  # 画风只由风格参考图控制，不再把风格文字交给文本模型写进提示词
         api_key=_canvas_deepseek_api_key(request, db),
     )
     return {
@@ -2149,7 +2149,26 @@ async def import_screenplay(canvas_id: int, body: VideoCanvasScreenplayImportReq
     """
     user = _require_user(request, db)
     canvas = _require_canvas(canvas_id, user, db)
+    resolved = _resolve_source_chapters(body, user, db)
 
+    from services.screenplay_adapt import adapt_novel_to_screenplay
+
+    api_key = _canvas_deepseek_api_key(request, db)
+    try:
+        result = await adapt_novel_to_screenplay(chapters=resolved, api_key=api_key, target_seconds=body.target_seconds)
+    except UpstreamServiceError as exc:
+        raise _translate_upstream_error(exc)
+    return {
+        "ok": True,
+        "screenplay_text": result["screenplay_text"],
+        "source_refs": result["source_refs"],
+        "batch_count": result["batch_count"],
+        "content_chars": len(result["screenplay_text"]),
+    }
+
+
+def _resolve_source_chapters(body: "VideoCanvasScreenplayImportRequest", user: Any, db: Session) -> list[dict[str, Any]]:
+    """校验章节归属并重读正文（不信任客户端内容）；导入改写和“取回原文对照”共用。"""
     resolved: list[dict[str, Any]] = []
     seen_chapter_ids: set[int] = set()
     for source in body.sources:
@@ -2173,20 +2192,30 @@ async def import_screenplay(canvas_id: int, body: VideoCanvasScreenplayImportReq
                 "content": content,
             }
         )
+    return resolved
 
-    from services.screenplay_adapt import adapt_novel_to_screenplay
 
-    api_key = _canvas_deepseek_api_key(request, db)
-    try:
-        result = await adapt_novel_to_screenplay(chapters=resolved, api_key=api_key)
-    except UpstreamServiceError as exc:
-        raise _translate_upstream_error(exc)
+@router.post("/api/video-canvas/canvases/{canvas_id}/source-chapters")
+async def get_source_chapters(canvas_id: int, body: VideoCanvasScreenplayImportRequest, request: Request, db: Session = Depends(get_db)):
+    """取回改写所用的小说原文，供剧本审核节点把“改写剧本”和“原文”并排对照（只读，章节归属在服务端重新校验）。"""
+    user = _require_user(request, db)
+    _require_canvas(canvas_id, user, db)
+    from services.screenplay_adapt import chapter_content_hash
+
+    chapters = _resolve_source_chapters(body, user, db)
     return {
         "ok": True,
-        "screenplay_text": result["screenplay_text"],
-        "source_refs": result["source_refs"],
-        "batch_count": result["batch_count"],
-        "content_chars": len(result["screenplay_text"]),
+        "chapters": [
+            {
+                "story_id": item["story_id"],
+                "chapter_id": item["chapter_id"],
+                "title": item["title"],
+                "content": item["content"][:60000],
+                "truncated": len(item["content"]) > 60000,
+                "content_hash": chapter_content_hash(item["content"]),
+            }
+            for item in chapters
+        ],
     }
 
 

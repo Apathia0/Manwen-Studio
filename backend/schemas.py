@@ -4,7 +4,8 @@ import datetime
 from pathlib import Path
 from typing import Any, Literal, Optional
 
-from pydantic import BaseModel, Field, model_validator
+import re
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 # --- Story ---
@@ -263,6 +264,22 @@ class AgentConversationMessageCreateIn(BaseModel):
     chapter_id: Optional[int] = None
 
 
+# 助手为了看图自动附带的媒体（画布产物、章节漫画图、分镜故事版/视频关键帧）属于内部查看，不是用户上传；
+# 早期版本会把它们以“[附件] …”行写进用户消息，这里在读取时统一去掉。用户自己上传的附件行不受影响。
+_INTERNAL_ATTACHMENT_LINE = re.compile(
+    r"^\[附件\] (?:画布媒体观察\[[^\n]*?\]|第\d+张漫画图|分镜\d+故事版|分镜\d+视频关键帧)（(?:image|video)）[ \t]*$\n?",
+    re.MULTILINE,
+)
+
+
+def strip_internal_attachment_notes(text: str | None) -> str:
+    """去掉消息里系统自动附带媒体的“[附件]”记录行。"""
+    raw = str(text or "")
+    if "[附件]" not in raw:
+        return raw
+    return _INTERNAL_ATTACHMENT_LINE.sub("", raw).rstrip()
+
+
 class AgentConversationMessageOut(BaseModel):
     id: int
     conversation_id: int
@@ -271,6 +288,11 @@ class AgentConversationMessageOut(BaseModel):
     created_at: datetime.datetime
 
     model_config = {"from_attributes": True}
+
+    @field_validator("content", mode="before")
+    @classmethod
+    def _hide_internal_attachments(cls, value: object) -> str:
+        return strip_internal_attachment_notes(value if isinstance(value, str) else str(value or ""))
 
 
 class AgentConversationSummaryOut(BaseModel):
@@ -1242,6 +1264,8 @@ class VideoCanvasScreenplayImportSource(BaseModel):
 class VideoCanvasScreenplayImportRequest(BaseModel):
     """小说章节导入：多选章节 → AI 改写为剧本草稿（只读原作品）。"""
     sources: list[VideoCanvasScreenplayImportSource] = Field(min_length=1, max_length=10)
+    # 改写后的目标总时长（秒）；不传则按章节篇幅自动估算（单章 45 到 150 秒，多章合计不超过 180 秒）
+    target_seconds: int | None = Field(default=None, ge=30, le=300)
 
 
 class VideoCanvasCreate(BaseModel):
