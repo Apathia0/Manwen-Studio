@@ -25,8 +25,15 @@ export interface DirectorLayoutOptions {
 
 /** 稳定节点 ID：同一场景同一单元重复应用时身份不变，不产生重复节点组 */
 export function unitNodeId(sceneNodeId: string, unitId: string): string {
+  const safeScene = sceneNodeId.replace(/[^A-Za-z0-9_-]/g, '') || 'scene';
   const safeUnit = unitId.replace(/[^A-Za-z0-9_-]/g, '') || 'unit';
-  return `dir-${sceneNodeId}-${safeUnit}`.slice(0, 64);
+  const suffix = `${safeScene}-${safeUnit}`;
+  if (suffix.length <= 56) return `dir-${suffix}`;
+  // Preserve deterministic identity without silently colliding two long IDs.
+  let hash = 2166136261;
+  for (const char of suffix) hash = Math.imul(hash ^ char.charCodeAt(0), 16777619);
+  const digest = (hash >>> 0).toString(36).padStart(7, '0');
+  return `dir-${suffix.slice(0, 48)}-${digest}`.slice(0, 64);
 }
 
 function intersects(a: DirectorLayoutRect, b: DirectorLayoutRect): boolean {

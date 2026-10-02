@@ -90,7 +90,7 @@ export default function MangaDramaWorkspacePage({ storyId, onBack }: MangaDramaW
             <ArrowLeft size={13} />
             返回项目
           </button>
-          <span className="truncate text-sm font-medium text-slate-900">{story?.title || '漫剧创作'}</span>
+          <span className="truncate text-sm font-medium text-slate-900">{story?.title || '无限画布'}</span>
           <span className="hidden rounded-full bg-blue-50 px-2 py-0.5 text-[10px] font-medium text-blue-600 sm:inline-flex">画布模式</span>
         </div>
         {dirty && <span className="text-[11px] text-amber-500">有未保存修改</span>}
@@ -103,6 +103,7 @@ export default function MangaDramaWorkspacePage({ storyId, onBack }: MangaDramaW
           assets={assets}
           stylePresets={stylePresets}
           onDirtyChange={handleDirtyChange}
+          onAssetsChanged={() => void loadAssets()}
           onOpenAssetManagement={() => setAssetManagementOpen(true)}
         />
       </div>

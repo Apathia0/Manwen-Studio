@@ -360,8 +360,15 @@ def multimodal_content(text: str, attachments: list[dict[str, Any]]) -> list[dic
             raise HTTPException(413, "附件视觉输入总量过大，请减少附件数量或压缩图片")
         return f"data:image/jpeg;base64,{base64.b64encode(encoded_bytes).decode('ascii')}"
 
+    source_labels = {
+        "user_upload": "用户上传的参考素材",
+        "canvas_media": "画布已生成的产物（不是用户提供的参考，做风格反推时不要把它当作参考图）",
+    }
     for item in attachments:
         media_kind = item.get("media_kind")
+        source_label = source_labels.get(str(item.get("source") or ""))
+        if source_label and media_kind in {"image", "video"}:
+            content.append({"type": "text", "text": f"[{source_label}《{item.get('filename')}》]"})
         if media_kind == "image":
             content.append({"type": "image_url", "image_url": {"url": image_data_url(item["path"], item["content_type"])}})
         elif media_kind == "video":
@@ -374,3 +381,15 @@ def multimodal_content(text: str, attachments: list[dict[str, Any]]) -> list[dic
         else:
             content.append({"type": "text", "text": f"[文件《{item['filename']}》] 当前模型无法直接读取该格式，请结合用户说明进行处理。"})
     return content
+
+
+def canvas_observation_content(summary: str, attachments: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """构建画布观察专用多模态消息，图片只进入模型输入，不进入工具文本或 SSE。"""
+    lines = [
+        "## 画布媒体观察附件",
+        "以下图片由服务端在完整工具回执之后追加，均带有 node/run/version/asset 标签。",
+        "请只基于实际附图描述观察结论；旧版、失败或未附图节点不能当作当前画面。",
+    ]
+    if summary:
+        lines.append(summary)
+    return multimodal_content("\n".join(lines), attachments)

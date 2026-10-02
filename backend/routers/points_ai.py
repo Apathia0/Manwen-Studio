@@ -298,9 +298,15 @@ def _validate_lingdong_video_capabilities(video: dict[str, Any]) -> None:
         "resolutions",
         "duration_seconds",
         "max_reference_images",
+        "max_reference_audios",
+        "max_reference_total",
     }
     if set(limits) - allowed_limit_fields:
         raise HTTPException(400, "Lingdong 视频模型 limits 包含不受支持的字段")
+    for audio_limit in ("max_reference_audios", "max_reference_total"):
+        audio_value = limits.get(audio_limit)
+        if audio_value is not None and (not isinstance(audio_value, int) or isinstance(audio_value, bool) or audio_value < 0):
+            raise HTTPException(400, f"Lingdong 视频模型 {audio_limit} 必须是非负整数")
     for key in ("aspect_ratios", "resolutions"):
         value = limits.get(key)
         if value is not None and (
@@ -357,17 +363,31 @@ def _validate_lingdong_video_capabilities(video: dict[str, Any]) -> None:
             "duration_field",
             "duration_as_string",
             "reference_field",
+            "audio_reference_field",
             "resolution_field",
             "ratio_field",
             "resolution_case",
             "size_by_resolution_aspect",
+            "omit_input_mode",
+            "reference_token",
         }
         if set(wire) - allowed_wire_fields:
             raise HTTPException(400, "Lingdong 视频模型 wire 包含不受支持的字段")
+        allowed_audio_fields = {"input_reference", "reference_audio_urls"}
+        if profile == "custom":
+            allowed_audio_fields.add("referenceAudios")
+        if wire.get("audio_reference_field", "input_reference") not in allowed_audio_fields:
+            raise HTTPException(400, "Lingdong audio_reference_field 仅支持 input_reference、reference_audio_urls（custom 档位另支持 referenceAudios）")
+        omit_input_mode = wire.get("omit_input_mode")
+        if omit_input_mode is not None and not isinstance(omit_input_mode, bool):
+            raise HTTPException(400, "Lingdong omit_input_mode 必须是布尔值")
+        reference_token = wire.get("reference_token")
+        if reference_token is not None and (not isinstance(reference_token, str) or "{n}" not in reference_token or len(reference_token) > 20):
+            raise HTTPException(400, "Lingdong reference_token 必须是包含 {n} 的短字符串，例如 @图{n}")
         reference_field = wire.get("reference_field", "input_reference")
         allowed_reference_fields = {"input_reference"}
         if profile == "custom":
-            allowed_reference_fields |= {"reference_images", "reference_videos", "reference_video_urls", "reference_audio_urls"}
+            allowed_reference_fields |= {"reference_images", "reference_videos", "reference_video_urls", "reference_audio_urls", "referenceImages"}
         if reference_field not in allowed_reference_fields:
             raise HTTPException(400, "Lingdong reference_field 必须是受支持的参考素材字段")
         duration_field = wire.get("duration_field")

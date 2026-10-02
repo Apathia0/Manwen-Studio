@@ -1,5 +1,5 @@
 import { useEffect, useRef } from 'react';
-import { FileText, Film, Image, X } from 'lucide-react';
+import { FileText, Film, Image, Music, X } from 'lucide-react';
 
 /**
  * 画布创建节点菜单。
@@ -20,6 +20,8 @@ const NODE_OPTIONS: { type: string; icon: React.ReactNode; title: string; descri
   { type: 'text', icon: <FileText className="h-5 w-5" />, title: '文本节点', description: '文本内容描述' },
   { type: 'image', icon: <Image className="h-5 w-5" />, title: '图片节点' },
   { type: 'video', icon: <Film className="h-5 w-5" />, title: '视频节点' },
+  { type: 'audio', icon: <Music className="h-5 w-5" />, title: '音频节点', description: '上传配音或音乐，连到视频节点作参考' },
+  { type: 'concat', icon: <Film className="h-5 w-5" />, title: '合片节点', description: '连接视频片段制作成片' },
 ];
 
 /** 单个节点选项：图标 + 标题 + 描述，hover 提亮 */

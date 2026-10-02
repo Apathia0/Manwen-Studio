@@ -111,6 +111,9 @@ async def create_video_job(
     api_key: str | None,
     base_url: str | None,
     video_capabilities: dict[str, object] | None,
+    input_mode: str | None = None,
+    seed: int | None = None,
+    audios: list[str] | None = None,
 ) -> dict[str, object]:
     """仅依据 adapter_type 将规范化请求分发给具体视频协议。"""
     adapter = normalize_video_adapter_type(adapter_type)
@@ -122,12 +125,17 @@ async def create_video_job(
             size=size,
             duration_seconds=duration_seconds,
             images=images,
+            input_mode=input_mode,
+            seed=seed,
             api_key=api_key,
             base_url=base_url,
             video_capabilities=video_capabilities,
+            audios=audios or None,
         )
         return _normalize_job_status(result)
 
+    if audios:
+        raise ValueError("当前视频协议不支持音频参考，请更换支持音频参考的视频模型")
     references = list(images or [])
     wire_size = _openai_video_config(
         video_capabilities,

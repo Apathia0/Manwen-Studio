@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from services.video_canvas_runtime import _apply_style_prompt, _asset_static_url, _configured_reference_inputs, _external_video_reference_urls, _local_reference_paths, _node_inputs, _node_output_path, _reference_urls, _reusable_image_asset, _resolved_video_model, _trusted_import_media
+from services.video_canvas_runtime import _apply_style_prompt, _asset_static_url, _configured_reference_inputs, _external_video_reference_urls, _local_reference_paths, _node_inputs, _node_output_path, _reference_urls, _reusable_image_asset, _resolved_video_model, _trusted_import_media, _validate_runtime_graph, _validate_runtime_output_contract, resolve_node_inputs
 from services.agent_service import _resolve_canvas_source_snapshot
 from services import oss
 from routers.video_canvas import _compile_plan_graph, _plan_ready_errors, _plan_shots, _plan_source_stale_error, _resolve_plan_source_snapshot, _run_scope_node_ids, _run_target_chapter_id, _validate_graph
@@ -15,6 +15,41 @@ from routers.video_canvas import _compile_plan_graph, _plan_ready_errors, _plan_
 def test_node_output_path_rejects_path_traversal(tmp_path: Path):
     with pytest.raises(RuntimeError, match="节点 id 不合法"):
         _node_output_path(tmp_path, 1, 2, "../escape", ".png")
+
+
+def test_resolve_node_inputs_keeps_prompt_and_image_ports_separate():
+    graph = {
+        "nodes": [
+            {"id": "text", "type": "text"},
+            {"id": "image", "type": "image"},
+            {"id": "video", "type": "video"},
+        ],
+        "edges": [
+            {"source": "text", "sourceHandle": "text", "target": "video", "targetHandle": "prompt"},
+            {"source": "image", "sourceHandle": "image", "target": "video", "targetHandle": "image"},
+        ],
+    }
+    grouped = resolve_node_inputs(graph, "video", {"text": {"text": "动作"}, "image": {"url": "/static/manga/frame.png"}})
+    assert grouped["prompt"] == [{"text": "动作"}]
+    assert grouped["image"] == [{"url": "/static/manga/frame.png"}]
+
+
+def test_resolve_node_inputs_rejects_missing_active_upstream_output():
+    graph = {"nodes": [{"id": "image", "type": "image"}, {"id": "video", "type": "video"}], "edges": [{"source": "image", "sourceHandle": "image", "target": "video", "targetHandle": "image"}]}
+    with pytest.raises(RuntimeError, match="没有可用输出"):
+        resolve_node_inputs(graph, "video", {})
+
+
+def test_runtime_output_contract_rejects_empty_media_output():
+    graph = {"nodes": [{"id": "video", "type": "video"}], "edges": []}
+    with pytest.raises(RuntimeError, match="未生成视频输出"):
+        _validate_runtime_output_contract(graph, "video", {})
+
+
+def test_runtime_graph_rejects_invalid_port_before_execution():
+    graph = {"nodes": [{"id": "image", "type": "image"}, {"id": "video", "type": "video"}], "edges": [{"source": "image", "sourceHandle": "wrong", "target": "video", "targetHandle": "image"}]}
+    with pytest.raises(RuntimeError, match="端口无效"):
+        _validate_runtime_graph(graph)
 
 
 def test_style_snapshot_is_appended_once_to_prompt():
@@ -169,6 +204,24 @@ def test_canvas_video_reference_urls_include_style_and_manga_assets(monkeypatch,
 
     assert _reference_urls(inputs, canvas, db) == ["/static/manga/style.png"]
     assert _asset_static_url("manga_outputs/style.png") == "/static/manga/style.png"
+
+
+def test_canvas_video_reference_urls_reject_over_limit_before_oss_conversion(monkeypatch):
+    canvas = SimpleNamespace(story_id=3)
+    db = SimpleNamespace(get=lambda *_args: None)
+    received: list[str] = []
+
+    async def prepare_urls(urls: list[str]) -> list[str]:
+        received.extend(urls)
+        return urls
+
+    monkeypatch.setattr("services.video_canvas_runtime.video_api_service.prepare_video_reference_urls", prepare_urls)
+    inputs = [{"url": f"https://cdn.example.com/{index}.png"} for index in range(4)]
+
+    with pytest.raises(RuntimeError, match="最多允许 2 张"):
+        asyncio.run(_external_video_reference_urls(inputs, canvas, db, max_reference_images=2))
+
+    assert received == []
 
 
 def test_canvas_video_reference_urls_are_converted_to_oss_urls(monkeypatch):
@@ -361,3 +414,12 @@ def test_plan_shots_rejects_video_asset_as_image_reference():
 
     with pytest.raises(Exception, match="非图片"):
         _plan_shots(plan, db)
+
+
+def test_static_url_only_reference_is_preserved_for_oss_upload():
+    from services.video_canvas_runtime import _reference_urls
+
+    canvas = SimpleNamespace(story_id=3)
+    db = SimpleNamespace(get=lambda *_args: None)
+    assert _reference_urls([{"url": "/static/manga/generated.png"}], canvas, db) == ["/static/manga/generated.png"]
+    assert _reference_urls([{"url": "/static/video/reference.png"}], canvas, db) == ["/static/video/reference.png"]

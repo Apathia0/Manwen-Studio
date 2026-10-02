@@ -119,9 +119,34 @@ export function isInside(point: Position, node: CanvasSceneNode): boolean {
   return point.x >= node.position.x && point.x <= node.position.x + size.width && point.y >= node.position.y && point.y <= node.position.y + size.height;
 }
 
-/** 端口是否可连接：输出 → 输入、不同节点、数据类型一致 */
+/** 端口是否可连接：输出 → 输入，类型一致或任一端口接收任意类型 */
 export function canConnectPorts(source: { side: 'input' | 'output'; dataType: string }, target: { side: 'input' | 'output'; dataType: string } | null): boolean {
-  return Boolean(target && source.side === 'output' && target.side === 'input' && source.dataType === target.dataType);
+  return Boolean(target && source.side === 'output' && target.side === 'input' && (source.dataType === target.dataType || source.dataType === 'any' || target.dataType === 'any'));
+}
+
+/**
+ * 按 output→input 方向校验一条待创建连线的端口类型，与后端 _validate_graph 规则对齐。
+ * 同节点、未知节点/目录/端口一律拒绝；端口类型经 catalog 解析后交给 canConnectPorts。
+ */
+export function canCreateConnection(
+  nodes: CanvasSceneNode[],
+  catalog: VideoCanvasNodeCatalogItem[],
+  sourceNodeId: string,
+  sourceHandleKey: string,
+  targetNodeId: string,
+  targetHandleKey: string,
+): boolean {
+  if (sourceNodeId === targetNodeId) return false;
+  const sourceNode = nodes.find((node) => node.id === sourceNodeId);
+  const targetNode = nodes.find((node) => node.id === targetNodeId);
+  if (!sourceNode || !targetNode) return false;
+  const sourceSpec = catalog.find((item) => item.type === sourceNode.type);
+  const targetSpec = catalog.find((item) => item.type === targetNode.type);
+  if (!sourceSpec || !targetSpec) return false;
+  const sourcePort = sourceSpec.outputs.find((port) => port.key === sourceHandleKey);
+  const targetPort = targetSpec.inputs.find((port) => port.key === targetHandleKey);
+  if (!sourcePort || !targetPort) return false;
+  return canConnectPorts({ side: 'output', dataType: sourcePort.type }, { side: 'input', dataType: targetPort.type });
 }
 
 /** 规范化连线方向：返回 { fromNodeId, toNodeId }，同节点返回 null */
@@ -225,6 +250,58 @@ export interface UseCanvasInteractionsOptions {
   onCopyNodes?: (ids: string[]) => void;
   /** 粘贴已复制节点回调 */
   onPasteNodes?: () => void;
+  onResizeStart?: () => void;
+}
+
+/** 按端口、节点内部、扩展区域的顺序确定连线落点。 */
+export function connectionDropTarget(world: Position, scale: number, nodes: CanvasSceneNode[], catalog: VideoCanvasNodeCatalogItem[], current: ConnectionHandle): { nodeId: string | null; handleKey: string | null; isNearNode: boolean } {
+    const padding = CONNECTION_NODE_HIT_PADDING / scale;
+    const handleRadius = CONNECTION_HANDLE_HIT_RADIUS / scale;
+    let isNearNode = false;
+    let bestNodeId: string | null = null;
+    let bestHandleKey: string | null = null;
+    let bestPriority = Number.POSITIVE_INFINITY;
+
+    [...nodes].reverse().forEach((node) => {
+      const item = catalog.find((entry) => entry.type === node.type);
+      if (!item) return;
+      const size = nodeSize(node);
+      // 连线从输出端口出发 → 目标是输入端口；从输入端口出发 → 目标是输出端口
+      const ports = current.handleType === 'source' ? item.inputs : item.outputs;
+      ports.forEach((port, index) => {
+        const anchor = current.handleType === 'source'
+          ? { x: node.position.x, y: node.position.y + portY(index, ports.length, size.height) }
+          : { x: node.position.x + size.width, y: node.position.y + portY(index, ports.length, size.height) };
+        const dx = world.x - anchor.x;
+        const dy = world.y - anchor.y;
+        if (dx * dx + dy * dy <= handleRadius * handleRadius) {
+          isNearNode = true;
+          if (node.id === current.nodeId) return;
+          if (0 < bestPriority) {
+            bestNodeId = node.id;
+            bestHandleKey = port.key;
+            bestPriority = 0;
+          }
+        }
+      });
+      // 节点内部 / 扩展区域命中
+      // 组框（container）不吃内部/扩展落点：让位给框内子节点与画布空白，
+      // 组框只能通过其端口（上面的优先级 0）成为连线目标。
+      if (node.type === 'container') return;
+      const hitsInside = world.x >= node.position.x && world.x <= node.position.x + size.width && world.y >= node.position.y && world.y <= node.position.y + size.height;
+      const hitsExpanded = world.x >= node.position.x - padding && world.x <= node.position.x + size.width + padding && world.y >= node.position.y - padding && world.y <= node.position.y + size.height + padding;
+      if (!hitsInside && !hitsExpanded) return;
+      isNearNode = true;
+      if (node.id === current.nodeId) return;
+      const priority = hitsInside ? 1 : 2;
+      if (priority < bestPriority) {
+        bestNodeId = node.id;
+        bestHandleKey = ports[0]?.key || null;
+        bestPriority = priority;
+      }
+    });
+
+    return { nodeId: bestNodeId, handleKey: bestHandleKey, isNearNode };
 }
 
 // ===== hook =====
@@ -251,6 +328,7 @@ export function useCanvasInteractions(options: UseCanvasInteractionsOptions): { 
     onNodeCreate,
     onCopyNodes,
     onPasteNodes,
+    onResizeStart,
   } = options;
 
   // refs 保存最新值，避免全局监听闭包过期
@@ -359,50 +437,17 @@ export function useCanvasInteractions(options: UseCanvasInteractionsOptions): { 
     const rect = containerRef.current?.getBoundingClientRect() || null;
     const world = screenToCanvas(clientX, clientY, rect, viewportRef.current);
     const scale = Math.max(viewportRef.current.scale, 0.05);
-    const padding = CONNECTION_NODE_HIT_PADDING / scale;
-    const handleRadius = CONNECTION_HANDLE_HIT_RADIUS / scale;
-    let isNearNode = false;
-    let bestNodeId: string | null = null;
-    let bestHandleKey: string | null = null;
-    let bestPriority = Number.POSITIVE_INFINITY;
-
-    [...nodesRef.current].reverse().forEach((node) => {
-      const item = catalogRef.current.find((entry) => entry.type === node.type);
-      if (!item) return;
-      const size = nodeSize(node);
-      // 连线从输出端口出发 → 目标是输入端口；从输入端口出发 → 目标是输出端口
-      const ports = current.handleType === 'source' ? item.inputs : item.outputs;
-      ports.forEach((port, index) => {
-        const anchor = current.handleType === 'source'
-          ? { x: node.position.x, y: node.position.y + portY(index, ports.length, size.height) }
-          : { x: node.position.x + size.width, y: node.position.y + portY(index, ports.length, size.height) };
-        const dx = world.x - anchor.x;
-        const dy = world.y - anchor.y;
-        if (dx * dx + dy * dy <= handleRadius * handleRadius) {
-          isNearNode = true;
-          if (node.id === current.nodeId) return;
-          if (1 < bestPriority) {
-            bestNodeId = node.id;
-            bestHandleKey = port.key;
-            bestPriority = 1;
-          }
-        }
-      });
-      // 节点内部 / 扩展区域命中
-      const hitsInside = world.x >= node.position.x && world.x <= node.position.x + size.width && world.y >= node.position.y && world.y <= node.position.y + size.height;
-      const hitsExpanded = world.x >= node.position.x - padding && world.x <= node.position.x + size.width + padding && world.y >= node.position.y - padding && world.y <= node.position.y + size.height + padding;
-      if (!hitsInside && !hitsExpanded) return;
-      isNearNode = true;
-      if (node.id === current.nodeId) return;
-      const priority = hitsInside ? 0 : 2;
-      if (priority < bestPriority) {
-        bestNodeId = node.id;
-        bestHandleKey = ports[0]?.key || null;
-        bestPriority = priority;
+    const target = connectionDropTarget(world, scale, nodesRef.current, catalogRef.current, current);
+    // 类型不兼容的落点视为未命中：不高亮、不吸附、抬起时不创建连线（保留 isNearNode 以走取消分支）
+    if (target.nodeId && target.handleKey) {
+      const [sourceNodeId, sourceHandleKey, targetNodeId, targetHandleKey] = current.handleType === 'source'
+        ? [current.nodeId, current.handleKey, target.nodeId, target.handleKey]
+        : [target.nodeId, target.handleKey, current.nodeId, current.handleKey];
+      if (!canCreateConnection(nodesRef.current, catalogRef.current, sourceNodeId, sourceHandleKey, targetNodeId, targetHandleKey)) {
+        return { nodeId: null, handleKey: null, isNearNode: target.isNearNode };
       }
-    });
-
-    return { nodeId: bestNodeId, handleKey: bestHandleKey, isNearNode };
+    }
+    return target;
   }, [containerRef]);
 
   // 完成节点拖拽：应用最终位移
@@ -632,6 +677,7 @@ export function useCanvasInteractions(options: UseCanvasInteractionsOptions): { 
   }, []);
 
   const onNodePointerDown = useCallback((event: ReactPointerEvent, nodeId: string) => {
+    if (event.button !== 0) return;
     const target = event.target as HTMLElement | null;
     // 参考项目交互模型：拖拽从节点卡片体启动；交互控件（输入框/按钮/链接等）
     // 自己处理按下事件，不触发节点拖拽（useFieldEditing 等已在控件上阻断冒泡）
@@ -668,9 +714,9 @@ export function useCanvasInteractions(options: UseCanvasInteractionsOptions): { 
   const onNodeConnectStart = useCallback((event: ReactMouseEvent, nodeId: string, handleType: 'source' | 'target', handleKey: string) => {
     event.stopPropagation();
     const current = connectingRef.current;
-    // 连线进行中点击目标输入端口 → 直接完成连线
+    // 连线进行中点击目标输入端口 → 直接完成连线（类型不兼容时仅结束连线，不创建）
     if (handleType === 'target' && current && current.handleType === 'source') {
-      if (current.nodeId !== nodeId) {
+      if (current.nodeId !== nodeId && canCreateConnection(nodesRef.current, catalogRef.current, current.nodeId, current.handleKey, nodeId, handleKey)) {
         onCreateConnection(current.nodeId, current.handleKey, nodeId, handleKey);
       }
       setConnecting(null);
@@ -697,9 +743,13 @@ export function useCanvasInteractions(options: UseCanvasInteractionsOptions): { 
       return;
     }
     if (current.handleType === 'source' && handleType === 'target') {
-      onCreateConnection(current.nodeId, current.handleKey, nodeId, handleKey);
+      if (canCreateConnection(nodesRef.current, catalogRef.current, current.nodeId, current.handleKey, nodeId, handleKey)) {
+        onCreateConnection(current.nodeId, current.handleKey, nodeId, handleKey);
+      }
     } else if (current.handleType === 'target' && handleType === 'source') {
-      onCreateConnection(nodeId, handleKey, current.nodeId, current.handleKey);
+      if (canCreateConnection(nodesRef.current, catalogRef.current, nodeId, handleKey, current.nodeId, current.handleKey)) {
+        onCreateConnection(nodeId, handleKey, current.nodeId, current.handleKey);
+      }
     }
     setConnecting(null);
     connectingRef.current = null;
@@ -723,8 +773,9 @@ export function useCanvasInteractions(options: UseCanvasInteractionsOptions): { 
 
   const onNodeResizeStart = useCallback((nodeId: string) => {
     void nodeId;
+    onResizeStart?.();
     setHoveredNodeId(null);
-  }, []);
+  }, [onResizeStart]);
 
   const onToolbarAction = useCallback((action: CanvasToolbarAction, nodeId?: string) => {
     if (action === 'duplicate' && nodeId) onDuplicateNode?.(nodeId);

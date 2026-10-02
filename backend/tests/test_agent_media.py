@@ -319,6 +319,25 @@ def test_compatible_upstream_view_keeps_one_system_and_tool_groups_atomic():
     assert "[[agent_context nonce=test-nonce kind=history]]" in synthetic[1]["content"]
     assert "_agent_synthetic_context" not in synthetic[1]
 
+    multimodal = agent_service_module._messages_for_compatible_upstream(
+        [
+            {"role": "system", "content": "主规则"},
+            {
+                "role": "user",
+                "_agent_synthetic_context": "canvas_media_observation",
+                "content": [
+                    {"type": "text", "text": "观察说明"},
+                    {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,abc"}},
+                ],
+            },
+        ],
+        "test-nonce",
+    )
+    assert isinstance(multimodal[1]["content"], list)
+    assert multimodal[1]["content"][1]["text"] == "观察说明"
+    assert multimodal[1]["content"][2]["image_url"]["url"] == "data:image/jpeg;base64,abc"
+    assert "_agent_synthetic_context" not in multimodal[1]
+
 
 def test_agent_compression_threshold_includes_exact_128k(monkeypatch):
     monkeypatch.setattr(
@@ -1394,6 +1413,7 @@ async def test_agent_uses_learned_model_output_capability(monkeypatch):
     ]
 
     assert payloads[0]["max_tokens"] == 2048
+    assert payloads[0]["thinking"] == {"type": "disabled"}
     assert json.loads(next(event for event in events if event["event"] == "done")["data"])["content"] == "已完成"
 
 
@@ -1603,5 +1623,6 @@ async def test_agent_history_compression_payload_sets_token_limit(monkeypatch):
     )
 
     assert summary == "摘要"
-    assert payloads[0]["max_tokens"] == 2048
+    assert payloads[0]["max_tokens"] == 3072
+    assert payloads[0]["thinking"] == {"type": "disabled"}
     assert "max_completion_tokens" not in payloads[0]

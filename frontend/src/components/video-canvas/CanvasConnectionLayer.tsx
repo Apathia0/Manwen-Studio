@@ -1,5 +1,6 @@
 import { useMemo, type MouseEvent as ReactMouseEvent } from 'react';
 import type { VideoCanvasNodeCatalogItem } from '../../api';
+import { isMembershipEdge } from './containerGroup';
 import { nodeSize, portY, type CanvasInteractionHandlers, type CanvasSceneEdge, type CanvasSceneNode, type ConnectionHandle, type Position } from './useCanvasInteractions';
 
 /**
@@ -87,7 +88,11 @@ function ActiveConnectionPath({ connecting, sourceNode, sourceCatalogItem, mouse
   return <path d={pathD} stroke={SELECTION_BLUE} strokeWidth="2" fill="none" strokeDasharray="5,5" />;
 }
 
+/** 智能连线预览：将新增（绿色虚线）/ 将移除（红色虚线）的连线，仅用于叠加显示，不是真实连线。 */
+export interface GhostEdge { key: string; source: string; target: string; sourceHandle?: string; targetHandle?: string; kind: 'add' | 'remove' }
+
 export interface CanvasConnectionLayerProps {
+  ghostEdges?: GhostEdge[];
   nodes: CanvasSceneNode[];
   edges: CanvasSceneEdge[];
   catalog: VideoCanvasNodeCatalogItem[];
@@ -98,7 +103,7 @@ export interface CanvasConnectionLayerProps {
   handlers: CanvasInteractionHandlers;
 }
 
-export default function CanvasConnectionLayer({ nodes, edges, catalog, connecting, mouseWorld, connectionTargetNodeId, selectedConnectionId, handlers }: CanvasConnectionLayerProps) {
+export default function CanvasConnectionLayer({ nodes, edges, catalog, connecting, mouseWorld, connectionTargetNodeId, selectedConnectionId, handlers, ghostEdges = [] }: CanvasConnectionLayerProps) {
   const nodeById = useMemo(() => new Map(nodes.map((node) => [node.id, node])), [nodes]);
   const catalogByType = useMemo(() => new Map(catalog.map((item) => [item.type, item])), [catalog]);
   const targetNode = connecting && connectionTargetNodeId ? (nodeById.get(connectionTargetNodeId) ?? null) : null;
@@ -107,6 +112,7 @@ export default function CanvasConnectionLayer({ nodes, edges, catalog, connectin
   return (
     <svg className="absolute left-0 top-0" width="1" height="1" style={{ overflow: 'visible', pointerEvents: 'none' }}>
       {edges.map((edge) => {
+        if (isMembershipEdge(edge, nodes)) return null; // 组内成员边不绘制
         const fromNode = nodeById.get(edge.source);
         const toNode = nodeById.get(edge.target);
         if (!fromNode || !toNode) return null;
@@ -123,6 +129,16 @@ export default function CanvasConnectionLayer({ nodes, edges, catalog, connectin
             onContextMenu={(event) => handlers.onConnectionContextMenu(event, edge.id)}
           />
         );
+      })}
+      {ghostEdges.map((ghost) => {
+        const fromNode = nodeById.get(ghost.source);
+        const toNode = nodeById.get(ghost.target);
+        if (!fromNode || !toNode) return null;
+        const from = portAnchor(fromNode, catalogByType.get(fromNode.type), 'output', ghost.sourceHandle);
+        const to = portAnchor(toNode, catalogByType.get(toNode.type), 'input', ghost.targetHandle);
+        const curvature = Math.max(Math.abs(to.x - from.x) * 0.5, CURVATURE_MIN);
+        const color = ghost.kind === 'add' ? '#34d399' : '#f87171';
+        return <path key={`ghost-${ghost.kind}-${ghost.key}`} d={`M ${from.x} ${from.y} C ${from.x + curvature} ${from.y}, ${to.x - curvature} ${to.y}, ${to.x} ${to.y}`} stroke={color} strokeWidth="3" strokeDasharray="8,6" fill="none" style={{ pointerEvents: 'none', filter: `drop-shadow(0 0 6px ${color}88)` }} />;
       })}
       {connecting && sourceNode ? (
         <ActiveConnectionPath

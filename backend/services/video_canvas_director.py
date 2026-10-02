@@ -32,7 +32,9 @@ MAX_UNIT_DURATION = 60
 
 DIRECTOR_PLAN_SYSTEM_PROMPT = """# ROLE
 
-你是短剧导演兼剪辑总监，负责把已审核的分场剧本编排成一组"视频单元"（每个单元 = 一条最终成片里的连续视频片段）。
+你是剧情导演兼剪辑总监，负责把已审核的分场剧本编排成一组"视频单元"（每个单元 = 一条最终成片里的连续视频片段）。
+
+先依据用户约束确定电影、漫剧或短剧创作规格。电影重人物目标、选择后果与视听留白；短剧重单集冲突、信息递进与集尾悬念；漫剧重清晰画面、声画节奏及角色资产一致性。未指定体裁时按漫剧处理并在 pacing_strategy 中说明假设，禁止把短剧规则强加给明确要求的电影。
 
 你的职责边界：
 - 只做节奏编排：决定把哪些节拍（Beat）合并进同一个视频单元、在哪里切开、每个单元多少秒。
@@ -58,7 +60,7 @@ DIRECTOR_PLAN_SYSTEM_PROMPT = """# ROLE
 4. 场景/地点跳转；
 5. 信息揭示或反转需要独立成镜以强化节奏。
 
-# 短剧节奏要求
+# 短剧/漫剧默认节奏要求（电影以用户创作约束优先）
 
 - 第一个单元必须快速建立钩子（冲突、悬念或异常），禁止以静态环境铺垫开场。
 - 单元切换点优先落在：动作完成点、台词收尾点、情绪转折点、场景切换点。
@@ -137,6 +139,7 @@ DIRECTOR_PROMPT_SYSTEM_PROMPT = """# ROLE
 # 硬性要求
 
 - 对白/旁白必须原样保留，禁止改写、缩写、翻译。
+- unit_id 必须原样保留且每个输入单元只输出一次，禁止改名、合并或把其他单元的剧情移入。
 - 禁止输出角色外貌描述。
 - 禁止元响应（"好的""以下是"等开场白）；直接输出 JSON。
 - 视频提示词必须与该单元的 story_summary、narrative_purpose 一致，不得新增剧情。
@@ -232,7 +235,7 @@ def _normalize_visual_anchors(value: Any) -> list[dict[str, str]]:
 def build_director_plan_user_prompt(scenes: list[dict[str, Any]], user_constraints: str | None = None) -> str:
     import json as _json
 
-    constraints = f"## 用户节奏约束\n\n{user_constraints.strip()}\n\n" if user_constraints and user_constraints.strip() else ""
+    constraints = f"## 用户创作规格与节奏约束\n\n{user_constraints.strip()}\n\n" if user_constraints and user_constraints.strip() else ""
     return DIRECTOR_PLAN_USER_HEADER.format(
         user_constraints=constraints,
         scenes_json=_json.dumps(scenes, ensure_ascii=False, indent=2),
@@ -250,10 +253,28 @@ def build_director_prompt_user_prompt(plan: dict[str, Any]) -> str:
         for unit in plan.get("units") or []
         if isinstance(unit, dict)
     ]
-    return DIRECTOR_PROMPT_USER_HEADER.format(
+    constraints = str(plan.get("creative_constraints") or "").strip()
+    return (f"## 用户创作规格与节奏约束\n\n{constraints}\n\n" if constraints else "") + DIRECTOR_PROMPT_USER_HEADER.format(
         pacing_strategy=str(plan.get("pacing_strategy") or ""),
         units_json=_json.dumps(units, ensure_ascii=False, indent=2),
     )
+
+
+def _director_http_error(status_code: int) -> tuple[str, bool, str]:
+    """导演调用文本模型返回非 2xx 时的 (给用户看的提示, 是否值得自动重试, 错误码)。
+
+    欠费、密钥无效、没有权限、模型不存在这类问题重试没有意义，必须说清楚是什么问题、去哪里处理；
+    只有限流和上游暂时故障才提示稍后重试。
+    """
+    if status_code == 402:
+        return "文本模型额度不足（上游返回 402 Payment Required）：请到中转站为文本模型充值，或在后台「积分与 AI 渠道」换一个可用的文本渠道后，再点重试", False, "director_plan_insufficient_balance"
+    if status_code in {401, 403}:
+        return f"文本模型的 API Key 无效或没有权限（上游返回 {status_code}）：请到后台「积分与 AI 渠道」检查文本渠道的密钥", False, "director_plan_unauthorized"
+    if status_code == 404:
+        return "文本模型不存在或渠道地址不对（上游返回 404）：请到后台「积分与 AI 渠道」检查文本渠道的地址和模型标识", False, "director_plan_model_not_found"
+    if status_code == 429:
+        return "文本模型请求太频繁或额度被限流（上游返回 429），稍等一会儿再试", True, "director_plan_rate_limited"
+    return "导演编排服务暂时不可用，请稍后重试", status_code in {408, 409, 425, 500, 502, 503, 504}, "director_plan_failed"
 
 
 async def _call_deepseek_json(*, system: str, user: str, api_key: str | None, max_tokens: int = 32768) -> dict[str, Any]:
@@ -284,12 +305,13 @@ async def _call_deepseek_json(*, system: str, user: str, api_key: str | None, ma
         raise UpstreamServiceError("导演编排响应超时，请稍后重试", retryable=True, provider="DeepSeek", status_code=504, code="director_plan_timeout") from exc
     except httpx.HTTPStatusError as exc:
         status_code = int(exc.response.status_code)
+        message, retryable, code = _director_http_error(status_code)
         raise UpstreamServiceError(
-            "导演编排服务暂时不可用，请稍后重试",
-            retryable=status_code in {408, 409, 425, 429, 500, 502, 503, 504},
+            message,
+            retryable=retryable,
             provider="DeepSeek",
             status_code=status_code,
-            code="director_plan_failed",
+            code=code,
             diagnostics={"upstream_status_code": status_code},
         ) from exc
     except httpx.RequestError as exc:
@@ -792,38 +814,48 @@ async def orchestrate_scene_video_units(
             )
 
     # 阶段二：镜头导演补提示词（失败时用编排字段确定性兜底，不浪费阶段一结果）
+    plan["creative_constraints"] = str(user_constraints or "").strip()
     scene_map = {str(scene.get("scene_id")): scene for scene in scenes}
     try:
         prompt_user = build_director_prompt_user_prompt(plan)
         prompt_result = await _call_deepseek_json(system=DIRECTOR_PROMPT_SYSTEM_PROMPT, user=prompt_user, api_key=api_key, max_tokens=32768)
         items = [item for item in (prompt_result.get("units") or []) if isinstance(item, dict)]
-        by_id = {
-            str(item.get("unit_id") or "").strip(): item
-            for item in items
-            if str(item.get("unit_id") or "").strip()
-        }
-        # 模型常改写 unit_id：按 id 匹配率过低时退回按顺序一一对应
-        matched = sum(1 for unit in plan["units"] if unit["unit_id"] in by_id)
-        use_positional = matched < max(1, len(plan["units"]) // 2)
-        if use_positional:
-            logger.info("镜头导演 unit_id 匹配率低（%s/%s），按顺序回退匹配", matched, len(plan["units"]))
-        prompt_map = {} if use_positional else by_id
+        # 仅按唯一稳定 ID 交接；模型重排或改名时绝不按位置猜测对应关系。
+        prompt_map = {}
+        duplicate_ids: set[str] = set()
+        for item in items:
+            unit_id = str(item.get("unit_id") or "").strip()
+            if not unit_id:
+                continue
+            if unit_id in prompt_map:
+                duplicate_ids.add(unit_id)
+            prompt_map[unit_id] = item
+        for unit_id in duplicate_ids:
+            prompt_map.pop(unit_id, None)
     except UpstreamServiceError as exc:
         logger.warning("镜头导演阶段失败，使用编排字段兜底: %s", exc)
-        items = []
         prompt_map = {}
-        use_positional = False
-    if not prompt_map and not (use_positional and len(items) == len(plan["units"])):
+    if not prompt_map:
         plan["warnings"] = list(dict.fromkeys([*(plan.get("warnings") or []), "镜头提示词阶段失败，已使用编排信息生成基础提示词"]))
 
-    for index, unit in enumerate(plan["units"]):
+    alias_to_canonical, beats_index = _build_beat_index(scenes)
+    for unit in plan["units"]:
         detail = prompt_map.get(str(unit["unit_id"])) or {}
-        if not detail and use_positional and len(items) == len(plan["units"]):
-            detail = items[index] or {}
         video_prompt = str(detail.get("video_prompt") or "").strip()
         if not video_prompt:
             video_prompt = _fallback_video_prompt(unit, scene_map)
             plan["warnings"] = list(dict.fromkeys([*(plan.get("warnings") or []), f"单元 {unit['unit_id']} 视频提示词缺失，已生成基础提示词"]))
+        # 最终生成提示词直接补入来源对白，不能只验证第一阶段的中间字段。
+        source_lines = list(dict.fromkeys(
+            line
+            for beat_key in unit.get("beat_ids", [])
+            if (canonical := alias_to_canonical.get(beat_key, "")) in beats_index
+            for line in _dialogue_lines(beats_index[canonical][1].get("dialogue"))
+        ))
+        missing_lines = [line for line in source_lines if line not in video_prompt]
+        if missing_lines:
+            video_prompt += "\n\n对白/旁白原文（必须逐句保留，不改写、不省略）：\n" + "\n".join(missing_lines)
+            plan["warnings"] = list(dict.fromkeys([*(plan.get("warnings") or []), f"单元 {unit['unit_id']} 最终提示词已补齐来源对白原文"]))
         unit["video_prompt"] = video_prompt
         storyboard_prompt = str(detail.get("storyboard_prompt") or "").strip()
         if storyboard_prompt:
@@ -858,7 +890,9 @@ async def orchestrate_scene_video_units(
     return plan
 
 
-_ASSET_ROLE_ORDER = {"character": 0, "scene": 1, "prop": 2}
+def _with_style(prompt: str, style_line: str) -> str:
+    """把全片统一画风追加到资产提示词，保证角色/场景/道具风格协调。"""
+    return f"{prompt}\n统一视觉风格：{style_line}" if style_line else prompt
 
 
 async def analyze_scene_assets(
@@ -866,92 +900,12 @@ async def analyze_scene_assets(
     scenes: list[dict[str, Any]],
     screenplay_text: str,
     api_key: str | None = None,
+    style_hint: str | None = None,
 ) -> dict[str, Any]:
-    """资产分析导演：复用生产"美术总监/角色设计总监"服务，把剧本自动解析为资产清单与绘图提示词。
+    """资产分析入口：只提取角色与"高度出现、有重要性"的场景/道具，其余作为可选候选。
 
-    以场景为分析单位逐个调用生产服务，按 (role, name) 跨场景去重合并，
-    输出的资产供画布生成参考图并绑定到分镜/视频节点，保证角色/场景/道具一致性。
+    实现见 services.canvas_asset_analysis（一次筛选调用 + 一次角色调用，取代逐场景反复调用）。
     """
-    from services import deepseek as deepseek_service
+    from services.canvas_asset_analysis import analyze_scene_assets as _analyze
 
-    assets: dict[tuple[str, str], dict[str, Any]] = {}
-    warnings: list[str] = []
-    failed_calls = 0
-
-    def _remember(role: str, name: str, prompt: str, scene_id: str) -> None:
-        key = (role, name)
-        existing = assets.get(key)
-        if existing:
-            existing["unit_count"] += 1
-            if scene_id not in existing["scene_ids"]:
-                existing["scene_ids"].append(scene_id)
-            return
-        assets[key] = {"role": role, "name": name, "prompt": prompt, "scene_ids": [scene_id], "unit_count": 1}
-
-    for scene in scenes:
-        scene_id = str(scene.get("scene_id"))
-        scene_label = str(scene.get("title") or scene_id)
-        characters = [str(c).strip() for c in (scene.get("characters") or []) if str(c or "").strip()]
-        beats = [beat for beat in (scene.get("beats") or []) if isinstance(beat, dict)]
-        story_summary = str(scene.get("scene_purpose") or "").strip() or "；".join(
-            str(beat.get("action") or "").strip() for beat in beats if beat.get("action")
-        )[:400]
-        dialogue = "\n".join(line for beat in beats for line in _dialogue_lines(beat.get("dialogue")))[:600]
-        shot_data: dict[str, Any] = {
-            "scene_location": str(scene.get("location") or ""),
-            "time_of_day": str(scene.get("time_of_day") or ""),
-            "story_summary": story_summary,
-            "dialogue_or_narration": dialogue,
-            "characters": characters,
-            "chapter_text": screenplay_text,
-            "source_text_span": f"场景「{scene_label}」",
-            "camera_plan": "",
-            "motion_plan": "",
-            "emotion_plan": "",
-            "key_props": [],
-            "scene_asset_candidates": [],
-        }
-
-        try:
-            scene_prompt, prop_prompts = await deepseek_service.generate_shot_scene_prop_prompts(shot_data, api_key=api_key)
-        except Exception as exc:  # 单场景失败不阻断整体分析
-            failed_calls += 1
-            warnings.append(f"场景「{scene_label}」的场景/道具分析失败（{type(exc).__name__}），已跳过")
-            scene_prompt, prop_prompts = "", []
-        scene_name = str(scene.get("location") or scene_label).strip()
-        if scene_prompt:
-            _remember("scene", scene_name, str(scene_prompt).strip(), scene_id)
-        for prop in prop_prompts or []:
-            if not isinstance(prop, dict):
-                continue
-            name = str(prop.get("name") or "").strip()
-            prompt = str(prop.get("prompt") or "").strip()
-            if name and prompt:
-                _remember("prop", name, prompt, scene_id)
-
-        if characters:
-            try:
-                char_prompts = await deepseek_service.generate_shot_character_prompts_ai(shot_data, "", api_key)
-            except Exception as exc:
-                failed_calls += 1
-                warnings.append(f"场景「{scene_label}」的角色分析失败（{type(exc).__name__}），已跳过")
-                char_prompts = []
-            for entry in char_prompts or []:
-                if not isinstance(entry, dict):
-                    continue
-                name = str(entry.get("name") or "").strip()
-                prompt = str(entry.get("prompt") or "").strip()
-                if name and prompt:
-                    _remember("character", name, prompt, scene_id)
-
-    asset_list = sorted(assets.values(), key=lambda item: (_ASSET_ROLE_ORDER.get(item["role"], 9), item["name"]))
-    if not asset_list:
-        raise UpstreamServiceError(
-            "资产分析未得到任何角色/场景/道具提示词，请重试或检查文本模型配置",
-            retryable=True,
-            provider="DeepSeek",
-            status_code=502,
-            code="asset_analysis_empty",
-            diagnostics={"failed_calls": failed_calls},
-        )
-    return {"assets": asset_list, "warnings": warnings, "failed_calls": failed_calls}
+    return await _analyze(scenes=scenes, screenplay_text=screenplay_text, api_key=api_key, style_hint=style_hint)

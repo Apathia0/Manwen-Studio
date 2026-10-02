@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState, type MouseEvent as ReactMouse
 import type { VideoCanvasNodeCatalogItem, VideoCanvasPort } from '../../api';
 import { nodeSize, portY, type CanvasInteractionHandlers, type CanvasSceneNode, type ConnectionHandle } from './useCanvasInteractions';
 import SceneListNodeView from './SceneListNodeView';
-import ContainerNodeView from './ContainerNodeView';
+import ContainerNodeView, { type ContainerNodeConfig } from './ContainerNodeView';
 
 /**
  * 画布节点视图。
@@ -184,6 +184,55 @@ export default function CanvasNodeView({ node, catalogItem, selected, connecting
     event.stopPropagation();
   };
 
+  const isGroupFrame = node.type === 'container' || node.data.config?.node_role === 'container';
+
+  const ports = (
+    <>
+      {catalogItem.inputs.length > 0 ? (
+        <PortList side="left" ports={catalogItem.inputs} node={node} height={size.height} visible={isActive || isConnecting} highlighted={isConnecting && isConnectionTarget} handlers={handlers} />
+      ) : null}
+      {catalogItem.outputs.length > 0 ? (
+        <PortList side="right" ports={catalogItem.outputs} node={node} height={size.height} visible={isActive || isConnecting} highlighted={isConnecting && isConnectionTarget} handlers={handlers} />
+      ) : null}
+    </>
+  );
+
+  // 组框：无卡片实体，根元素 pointer-events-none（框内空白可拉框选/穿透），
+  // 仅标题栏与端口可交互；固定 z-[5] 保证永远画在成员节点之下。
+  if (isGroupFrame) {
+    return (
+      <div
+        data-node-id={node.id}
+        className="node-element absolute z-[5] select-none"
+        style={{
+          transform: `translate(${node.position.x}px, ${node.position.y}px)`,
+          width: size.width,
+          height: size.height,
+          contain: 'layout style',
+          pointerEvents: 'none',
+        }}
+        onPointerDown={(event: ReactPointerEvent<HTMLDivElement>) => handlers.onNodePointerDown(event, node.id)}
+        onDragStart={(event) => event.preventDefault()}
+        onContextMenu={handleNodeContextMenu}
+      >
+        <div
+          className="absolute inset-0 rounded-3xl border-2 transition-colors"
+          style={{
+            borderColor: selected ? SELECTION_BLUE : 'rgba(47,128,255,.4)',
+            background: selected ? 'rgba(47,128,255,.06)' : 'rgba(255,255,255,.02)',
+            boxShadow: selected ? `0 0 0 1px ${SELECTION_BLUE}55` : undefined,
+          }}
+        />
+        <div className="absolute inset-x-0 top-0">
+          {renderContent ? renderContent(node) : (
+            <ContainerNodeView config={(node.data.config || {}) as unknown as ContainerNodeConfig} />
+          )}
+        </div>
+        {ports}
+      </div>
+    );
+  }
+
   return (
     <div
       data-node-id={node.id}
@@ -197,6 +246,8 @@ export default function CanvasNodeView({ node, catalogItem, selected, connecting
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
       onPointerDown={(event: ReactPointerEvent<HTMLDivElement>) => handlers.onNodePointerDown(event, node.id)}
+      // 内容图片默认可被浏览器原生拖拽，原生拖拽会派发 pointercancel 打断画布自己的节点拖拽
+      onDragStart={(event) => event.preventDefault()}
       onContextMenu={handleNodeContextMenu}
     >
       <div
@@ -209,22 +260,13 @@ export default function CanvasNodeView({ node, catalogItem, selected, connecting
       >
         <div className="relative flex h-full w-full items-center justify-center overflow-hidden rounded-[22px]">
           {renderContent ? renderContent(node) : (
-            node.data.config?.node_role === 'container' ? (
-              <ContainerNodeView 
-                config={node.data.config as any} 
-                onToggleCollapsed={() => setHovered(!hovered)}
-                collapsed={!hovered}
+            node.type === 'scene' ? (
+              <SceneListNodeView
+                config={(node.data.config || {}) as any}
+                onChange={() => {}}
               />
             ) : (
-              node.type === 'scene' ? (
-                <SceneListNodeView
-                  config={(node.data.config || {}) as any}
-                  onChange={() => {}}
-                  hideApproval
-                />
-              ) : (
-                <span className="px-3 text-center text-xs font-medium text-gray-300">{node.data.label || catalogItem.label}</span>
-              )
+              <span className="px-3 text-center text-xs font-medium text-gray-300">{node.data.label || catalogItem.label}</span>
             )
           )}
         </div>
@@ -234,12 +276,7 @@ export default function CanvasNodeView({ node, catalogItem, selected, connecting
         <ResizeHandle corner="bottom-right" onMouseDown={handleResizeMouseDown} />
       </div>
 
-      {catalogItem.inputs.length > 0 ? (
-        <PortList side="left" ports={catalogItem.inputs} node={node} height={size.height} visible={isActive || isConnecting} highlighted={isConnecting && isConnectionTarget} handlers={handlers} />
-      ) : null}
-      {catalogItem.outputs.length > 0 ? (
-        <PortList side="right" ports={catalogItem.outputs} node={node} height={size.height} visible={isActive || isConnecting} highlighted={isConnecting && isConnectionTarget} handlers={handlers} />
-      ) : null}
+      {ports}
     </div>
   );
 }

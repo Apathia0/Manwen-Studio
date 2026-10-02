@@ -54,19 +54,19 @@ export default function ChangesBanner({ changes, storyId, conversationId, runId,
 
   return (
     <>
-      <div className="border-t border-blue-200 bg-blue-50/60 px-4 py-2.5">
-        <div className="flex items-center justify-between">
+      <div className="compact-controls @container border-t border-blue-200 bg-blue-50/60 px-3 py-2.5">
+        <div className="flex flex-col gap-2 @md:flex-row @md:items-center @md:justify-between">
           <div className="flex items-center gap-2 min-w-0">
             <span className="w-2 h-2 rounded-full bg-blue-500 animate-pulse shrink-0" />
             <span className="text-xs text-blue-600 truncate">
               已保存 <span className="font-semibold">{changes.length}</span> 项修改，可查看或撤回
             </span>
           </div>
-          <div className="flex items-center gap-2 shrink-0 ml-3">
+          <div className="grid grid-cols-3 gap-1.5 @md:ml-3 @md:flex @md:shrink-0 @md:items-center">
             <button
               onClick={() => setShowDiff(true)}
               disabled={busy !== null}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-blue-100 hover:bg-blue-200 disabled:opacity-50 text-blue-700 text-xs font-medium transition-colors"
+              className="flex items-center justify-center gap-1 whitespace-nowrap px-2.5 py-1.5 rounded-lg bg-blue-100 hover:bg-blue-200 disabled:opacity-50 text-blue-700 text-xs font-medium transition-colors"
             >
               <Eye size={14} />
               查看对比
@@ -74,7 +74,7 @@ export default function ChangesBanner({ changes, storyId, conversationId, runId,
             <button
               onClick={handleConfirm}
               disabled={busy !== null}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-600 disabled:opacity-50 text-white text-xs font-medium transition-colors"
+              className="flex items-center justify-center gap-1 whitespace-nowrap px-2.5 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-600 disabled:opacity-50 text-white text-xs font-medium transition-colors"
             >
               {busy === 'confirming' ? (
                 <Loader2 size={14} className="animate-spin" />
@@ -86,7 +86,7 @@ export default function ChangesBanner({ changes, storyId, conversationId, runId,
             <button
               onClick={handleRollback}
               disabled={busy !== null}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-red-100 hover:bg-red-200 disabled:opacity-50 text-red-600 text-xs font-medium transition-colors"
+              className="flex items-center justify-center gap-1 whitespace-nowrap px-2.5 py-1.5 rounded-lg bg-red-100 hover:bg-red-200 disabled:opacity-50 text-red-600 text-xs font-medium transition-colors"
             >
               {busy === 'rolling' ? (
                 <Loader2 size={14} className="animate-spin" />

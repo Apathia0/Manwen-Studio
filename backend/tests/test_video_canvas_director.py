@@ -51,6 +51,61 @@ def _make_scenes() -> list[dict]:
     ]
 
 
+@pytest.mark.parametrize("changed_ids", [False, True])
+def test_prompt_handoff_uses_stable_ids_and_preserves_final_dialogue(monkeypatch, changed_ids):
+    from services import video_canvas_director as director
+
+    async def fake_call(*, system, **kwargs):
+        if system == DIRECTOR_PLAN_SYSTEM_PROMPT:
+            return _make_raw_plan()
+        return {"units": [
+            {"unit_id": f"changed-{index}" if changed_ids else unit["unit_id"], "video_prompt": f"唯一镜头标记-{unit['unit_id']}"}
+            for index, unit in enumerate(reversed(_make_raw_plan()["units"]))
+        ]}
+
+    monkeypatch.setattr(director, "_call_deepseek_json", fake_call)
+    plan = asyncio.run(orchestrate_scene_video_units(scenes=_make_scenes(), **_META))
+    for unit in plan["units"]:
+        if changed_ids:
+            assert "唯一镜头标记" not in unit["video_prompt"]
+        else:
+            assert f"唯一镜头标记-{unit['unit_id']}" in unit["video_prompt"]
+        assert unit["dialogue_or_narration"] in unit["video_prompt"]
+
+
+def test_duplicate_prompt_ids_fall_back_instead_of_choosing_arbitrary_detail(monkeypatch):
+    from services import video_canvas_director as director
+
+    async def fake_call(*, system, **kwargs):
+        if system == DIRECTOR_PLAN_SYSTEM_PROMPT:
+            return _make_raw_plan()
+        return {"units": [
+            {"unit_id": "u-001", "video_prompt": "错误场景甲"},
+            {"unit_id": "u-001", "video_prompt": "错误场景乙"},
+        ]}
+
+    monkeypatch.setattr(director, "_call_deepseek_json", fake_call)
+    plan = asyncio.run(orchestrate_scene_video_units(scenes=_make_scenes(), **_META))
+    assert "错误场景" not in plan["units"][0]["video_prompt"]
+
+
+def test_film_constraints_reach_both_director_stages(monkeypatch):
+    from services import video_canvas_director as director
+
+    seen_prompts = []
+    constraints = "电影短片，开场保留安静的观察镜头，不要强行反转。"
+
+    async def fake_call(*, system, user, **kwargs):
+        seen_prompts.append(user)
+        return _make_raw_plan() if system == DIRECTOR_PLAN_SYSTEM_PROMPT else {"units": []}
+
+    monkeypatch.setattr(director, "_call_deepseek_json", fake_call)
+    plan = asyncio.run(orchestrate_scene_video_units(scenes=_make_scenes(), user_constraints=constraints, **_META))
+    assert len(seen_prompts) == 2
+    assert all(constraints in prompt for prompt in seen_prompts)
+    assert plan["creative_constraints"] == constraints
+
+
 _META = {
     "source_screenplay_hash": "hash-screenplay",
     "source_scene_node_id": "scene-node-1",
@@ -412,67 +467,3 @@ def _run_orchestrate(director):
         scenes=_make_scenes()[:1],
         source_screenplay_hash="h", source_scene_node_id="s", source_scene_revision="r",
     ))
-
-
-def test_asset_analysis_merges_and_dedupes(monkeypatch):
-    from services.video_canvas_director import analyze_scene_assets
-
-    calls = {"scene_prop": 0, "character": 0}
-
-    async def fake_scene_prop(shot_data, api_key=None):
-        calls["scene_prop"] += 1
-        location = shot_data.get("scene_location")
-        return f"{location} 美术设定：昏暗空间，冷色调", [{"name": "玉佩", "prompt": "特写道具提示词"}]
-
-    async def fake_character(shot_data, character_profiles="", api_key=None):
-        calls["character"] += 1
-        prompts = []
-        for name in shot_data.get("characters") or []:
-            prompts.append({"name": name, "prompt": f"{name} 角色三视图提示词"})
-        return prompts
-
-    import services.deepseek as deepseek_service
-    monkeypatch.setattr(deepseek_service, "generate_shot_scene_prop_prompts", fake_scene_prop)
-    monkeypatch.setattr(deepseek_service, "generate_shot_character_prompts_ai", fake_character)
-
-    import asyncio
-    result = asyncio.run(analyze_scene_assets(
-        scenes=_make_scenes(),
-        screenplay_text="剧本全文",
-    ))
-
-    roles = {(asset["role"], asset["name"]) for asset in result["assets"]}
-    # 两个场景同地点 → 场景资产合并为 1；林晚跨场景 → 合并 1
-    assert ("scene", "出租屋") in roles or ("scene", "深夜的未接来电") in roles
-    assert ("character", "林晚") in roles
-    assert ("prop", "玉佩") in roles
-    character_assets = [a for a in result["assets"] if a["role"] == "character" and a["name"] == "林晚"]
-    assert len(character_assets) == 1
-    assert sorted(character_assets[0]["scene_ids"]) == ["1", "2"]
-    assert calls["scene_prop"] == 2 and calls["character"] == 2
-    assert all(asset["prompt"] for asset in result["assets"])
-
-
-def test_asset_analysis_skips_failed_scene(monkeypatch):
-    from services.video_canvas_director import analyze_scene_assets
-
-    async def fake_scene_prop(shot_data, api_key=None):
-        if shot_data.get("scene_location") == "出租屋":
-            raise RuntimeError("boom")
-        return "场景提示词", []
-
-    async def fake_character(shot_data, character_profiles="", api_key=None):
-        return []
-
-    import services.deepseek as deepseek_service
-    monkeypatch.setattr(deepseek_service, "generate_shot_scene_prop_prompts", fake_scene_prop)
-    monkeypatch.setattr(deepseek_service, "generate_shot_character_prompts_ai", fake_character)
-
-    import asyncio
-    result = asyncio.run(analyze_scene_assets(
-        scenes=_make_scenes(),
-        screenplay_text="剧本全文",
-    ))
-    assert any("深夜的未接来电" in warning for warning in result["warnings"])
-    assert result["failed_calls"] == 1
-    assert any(asset["role"] == "scene" for asset in result["assets"])

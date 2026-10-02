@@ -667,6 +667,10 @@ def _migrate_agent_pending_changes(target_engine=None):
                 conn.execute(text("ALTER TABLE agent_conversations ADD COLUMN active_run_id VARCHAR(64)"))
             if "active_run_started_at" not in conversation_cols:
                 conn.execute(text("ALTER TABLE agent_conversations ADD COLUMN active_run_started_at TIMESTAMP"))
+            if "history_summary" not in conversation_cols:
+                conn.execute(text("ALTER TABLE agent_conversations ADD COLUMN history_summary TEXT"))
+            if "history_summary_upto_message_id" not in conversation_cols:
+                conn.execute(text("ALTER TABLE agent_conversations ADD COLUMN history_summary_upto_message_id INTEGER"))
             conn.execute(text(
                 "CREATE INDEX IF NOT EXISTS agent_conversations_active_run_id_idx "
                 "ON agent_conversations (active_run_id)"
@@ -1111,6 +1115,7 @@ def _migrate_video_canvas_tables(target_engine=None) -> None:
         "video_canvas_sync_records",
         "video_canvas_runs",
         "video_canvas_run_nodes",
+        "canvas_agent_actions",
     )
     for table_name in canvas_table_names:
         table = Base.metadata.tables.get(table_name)

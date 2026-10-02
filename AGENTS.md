@@ -1290,6 +1290,28 @@ import MediaImage from './shared/MediaImage';
 
 ---
 
+## ⚠️ 画布 Agent：多模态 / 改动审阅 / 追溯回退（2026-10 新增）
+
+#### 22. 画布助手改节点必须"定位准确 + 预览确认 + 可追溯"
+| 能力 | 实现位置 | 规则 |
+|------|---------|------|
+| 节点定位 | `agent_router.py` 注入 `describe_selected_nodes`；前端 `getCanvasSelectedNodeIds` 上送 `canvas_selected_node_ids` | 用户说"这个节点"只以选中节点为准；`get_canvas_nodes` 精确读取，`update_node` 可带 `expected_fingerprint`，节点读取后被改动则拒绝 |
+| 改动预览 | `services/canvas_ops_preview.py`（`diff_graphs`/`build_ops_preview`）；提案 `result_json.preview`；前端 `CanvasPreviewDiff` | 提案创建时按"修改前后图差异"生成逐节点逐字段对比；用户编辑提案后（`PUT /canvas-actions/{id}`）必须重算预览 |
+| 提案幂等 | `canvas_agent_actions.execute_action` | `apply_canvas_ops` 同目标但 operations 不同 → 旧提案标 `superseded` 并按新内容重提案；相同则复用 |
+| 自动模式 | 同上 `operations_overwrite_existing` | auto 模式下覆盖/删除已有节点内容（`update_node`/`delete_node`）仍强制预览确认；纯新增直接执行 |
+| 追溯回退 | `VideoCanvasVersion` + `GET/POST /api/video-canvas/canvases/{id}/versions[/{no}/diff｜/restore]`；前端 `CanvasVersionHistoryModal` | 恢复 = 以目标版本内容**追加新版本**（`source=restore`），不改写历史；`canvas_stage` 改图同样登记撤回（`_record_canvas_stage_graph_change`） |
+
+**多模态**
+- 用户上传的图片/视频先经独立预分析（`services/agent_reference_analysis.py`，开启 thinking，无工具），结论写入 `AgentAttachment.metadata_json.reference_analysis`，后续轮次自动注入"参考素材分析"，不再依赖重复传图；主工具循环仍保持 `thinking: disabled`。
+- 图片来源在消息里带标记：`[用户上传的参考素材《xx》]` / `[画布已生成的产物…]`，做风格反推时不得把画布产物当参考。紧急压缩对用户参考图最多保留 5 张（其余 2 张）。
+- 可选独立视觉模型：环境变量 `AGENT_VISION_BASE_URL` / `AGENT_VISION_MODEL` / `AGENT_VISION_API_KEY`；配置后主模型即使不支持视觉，也凭分析文本继续（图片不再进入主模型输入）。
+
+**上下文压缩与输出预算**
+- 输入达到预算 70% 即用 AI 摘要折叠旧历史（每次运行最多一次），100% 才走确定性紧急截断。
+- 摘要持久化到 `agent_conversations.history_summary` / `history_summary_upto_message_id`；下一轮只读取该 id 之后的消息，不再每轮重新摘要。摘要模板保留画布要素（节点 ID、提案状态、版本号、参考风格结论）。摘要请求关闭 thinking，空摘要视为失败走确定性压缩。
+- `estimate_messages_tokens` 每张图按 `IMAGE_TOKEN_ESTIMATE=1100` 计入。
+- 视频画布未学习到模型输出上限时，起始 `max_tokens` 不低于 8192（被上游拒绝会自动减半并学习）。
+
 ## Sisyphus Agent 工作文件
 
 `.sisyphus/` 目录包含部署记录和修复报告：

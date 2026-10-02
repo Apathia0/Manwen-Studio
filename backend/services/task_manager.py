@@ -73,6 +73,14 @@ class TaskManager:
         finally:
             db.close()
 
+    def _task_type(self, task_id: str) -> str | None:
+        db = SessionLocal()
+        try:
+            task = db.query(BackgroundTask).filter(BackgroundTask.task_id == task_id).first()
+            return task.task_type if task else None
+        finally:
+            db.close()
+
     def _mark_task_running(self, task_id: str, metadata: dict[str, Any] | None = None) -> None:
         db = SessionLocal()
         try:
@@ -346,6 +354,34 @@ class TaskManager:
                 )
             else:
                 self._mark_task_succeeded(task_id, result)
+                # Canvas Agent continuation is a durable side effect of a successful
+                # run.  Keep it out of the task result classification so a callback
+                # failure can never turn a paid/finished run into a retry or failure.
+                if task_type := self._task_type(task_id):
+                    if task_type == "video_canvas_run":
+                        try:
+                            from services.canvas_agent_actions import (
+                                continue_canvas_stage_after_run,
+                                dispatch_queued_canvas_action,
+                            )
+                            continuation = continue_canvas_stage_after_run(task_id, result)
+                            queued_action_id = (
+                                continuation.get("action_id")
+                                if isinstance(continuation, dict)
+                                and continuation.get("status") == "queued"
+                                and continuation.get("idempotent") is not True
+                                else None
+                            )
+                            if queued_action_id:
+                                dispatch_task = asyncio.create_task(
+                                    dispatch_queued_canvas_action(int(queued_action_id))
+                                )
+                                dispatch_task.add_done_callback(
+                                    lambda done: done.exception()
+                                    if not done.cancelled() else None
+                                )
+                        except Exception:
+                            logger.exception("持久化画布 Agent 续接失败 task_id=%s", task_id)
 
     def refund_quota(
         self,

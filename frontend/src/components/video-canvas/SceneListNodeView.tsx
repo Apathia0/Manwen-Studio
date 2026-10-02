@@ -113,7 +113,13 @@ function DirectorPlanPanel({
   stale,
   onGenerate,
   onApply,
+  open = false,
+  onToggleOpen,
+  grow = 1,
 }: {
+  open?: boolean;
+  onToggleOpen?: () => void;
+  grow?: number;
   plan?: DirectorPlan | null;
   loading?: boolean;
   error?: string | null;
@@ -130,8 +136,9 @@ function DirectorPlanPanel({
   const hasPlan = Boolean(plan);
 
   return (
-    <section className={`mx-2 flex max-h-[47%] shrink-0 flex-col overflow-hidden rounded-xl border ${stale ? 'border-amber-400/35' : 'border-[#4c4641]'} bg-[#211f1d] shadow-[0_10px_28px_rgba(0,0,0,.2)]`} aria-label="AI导演编排">
-      <div className="flex shrink-0 items-center gap-2 border-b border-[#3a3633] px-2.5 py-2">
+    <section style={open ? { flexGrow: grow } : undefined} className={`flex min-w-0 flex-col overflow-hidden rounded-xl ${open ? 'min-h-[160px] basis-0' : 'shrink-0'} border ${stale ? 'border-amber-400/35' : 'border-[#4c4641]'} bg-[#211f1d] shadow-[0_10px_28px_rgba(0,0,0,.2)]`} aria-label="AI导演编排">
+      <div className={`flex shrink-0 items-center gap-2 px-2.5 py-2 ${open ? 'border-b border-[#3a3633]' : ''}`}>
+        <button type="button" onPointerDown={(event) => event.stopPropagation()} onClick={onToggleOpen} aria-expanded={open} title={open ? '收起导演编排' : '展开导演编排'} className="flex min-w-0 flex-1 items-center gap-2 text-left">
         <span className="grid size-6 shrink-0 place-items-center rounded-lg bg-[#f3cf84]/12 text-[#f3cf84]"><Sparkles size={13} /></span>
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-1.5">
@@ -142,6 +149,8 @@ function DirectorPlanPanel({
             {hasPlan ? `${sequence.length} 个视频单元${totalDuration ? ` · ${totalDuration}s` : ''}` : '审批通过后，为场景安排节奏与镜头顺序'}
           </p>
         </div>
+        {open ? <ChevronDown size={13} className="shrink-0 text-[#817a74]" /> : <ChevronRight size={13} className="shrink-0 text-[#817a74]" />}
+        </button>
         <button
           type="button"
           disabled={Boolean(loading)}
@@ -155,7 +164,7 @@ function DirectorPlanPanel({
         </button>
       </div>
 
-      <div className="min-h-0 overflow-y-auto p-2">
+      {open && <div className="min-h-0 flex-1 overflow-y-auto p-2">
         {error && (
           <div className="mb-2 flex items-start gap-1.5 rounded-lg border border-rose-400/20 bg-rose-400/8 px-2 py-1.5 text-[10px] leading-4 text-rose-300">
             <AlertTriangle size={12} className="mt-0.5 shrink-0" />
@@ -208,9 +217,9 @@ function DirectorPlanPanel({
             <button type="button" disabled={Boolean(loading)} onPointerDown={(event) => event.stopPropagation()} onClick={() => onGenerate?.()} className="mt-2 inline-flex items-center gap-1.5 rounded-lg bg-[#f3cf84] px-3 py-1.5 text-[10px] font-semibold text-[#30281d] transition hover:bg-[#ffe0a1] disabled:cursor-wait disabled:opacity-50"><Sparkles size={11} />生成导演编排</button>
           </div>
         )}
-      </div>
+      </div>}
 
-      {hasPlan && (
+      {open && hasPlan && (
         <div className="shrink-0 border-t border-[#3a3633] p-2">
           <button
             type="button"
@@ -255,6 +264,8 @@ export default function SceneListNodeView({
 }: SceneListNodeViewProps) {
   const scenes = useMemo(() => (Array.isArray(config.scenes) ? config.scenes : []), [config.scenes]);
   const [collapsed, setCollapsed] = useState(false);
+  const [scenesOpen, setScenesOpen] = useState(false);
+  const [planOpen, setPlanOpen] = useState(false);
   const [expandedSceneId, setExpandedSceneId] = useState<string | number | null>(null);
   const approved = Boolean(config.approved);
 
@@ -306,8 +317,15 @@ export default function SceneListNodeView({
             </div>
           </div>
 
-          {/* 右：场景行列表 + 展开编辑 */}
-          <div className="min-w-0 flex-1 overflow-y-auto p-2">
+          {/* 右：两张可折叠卡片（默认收起），同时展开时按 4:6 分配高度 */}
+          <div className="flex min-h-0 min-w-0 flex-1 flex-col gap-2 p-2">
+            <section style={scenesOpen ? { flexGrow: approved && planOpen ? 4 : 1 } : undefined} className={`flex min-w-0 flex-col overflow-hidden rounded-xl border border-[#35393f] bg-[#1c1e22] ${scenesOpen ? 'min-h-[140px] basis-0' : 'shrink-0'}`}>
+              <button type="button" onClick={() => setScenesOpen((value) => !value)} aria-expanded={scenesOpen} title={scenesOpen ? '收起场景审核' : '展开场景审核'} className={`flex w-full shrink-0 items-center gap-2 px-2.5 py-2 text-left hover:bg-white/5 ${scenesOpen ? 'border-b border-[#35393f]' : ''}`}>
+                <FileText size={13} className="text-[#8b93a1]" />
+                <span className="min-w-0 flex-1 truncate text-[11px] font-semibold text-[#e8ebf0]">场景审核 <span className="font-normal text-[#78818f]">· {scenes.length} 场</span></span>
+                {scenesOpen ? <ChevronDown size={13} className="shrink-0 text-[#78818f]" /> : <ChevronRight size={13} className="shrink-0 text-[#78818f]" />}
+              </button>
+              {scenesOpen && <div className="min-h-0 flex-1 overflow-y-auto p-2">
             {scenes.length === 0 ? (
               <p className="py-6 text-center text-xs text-[#78818f]">暂无场景</p>
             ) : (
@@ -362,9 +380,11 @@ export default function SceneListNodeView({
                 })}
               </div>
             )}
+              </div>}
+            </section>
             {/* 生产模式同款提示 */}
             {!approved && (
-              <p className="mt-2 text-center text-[10px] text-amber-400/90">请审核并批准剧本后，才能编排或编译视频节点组</p>
+              <p className="text-center text-[10px] text-amber-400/90">请审核并批准剧本后，才能编排或编译视频节点组</p>
             )}
             {approved && (
               <DirectorPlanPanel
@@ -372,8 +392,11 @@ export default function SceneListNodeView({
                 loading={directorPlanLoading}
                 error={directorPlanError}
                 stale={directorPlanStale}
-                onGenerate={onGenerateDirectorPlan}
+                onGenerate={() => { setPlanOpen(true); onGenerateDirectorPlan?.(); }}
                 onApply={onApplyDirectorPlan}
+                open={planOpen}
+                onToggleOpen={() => setPlanOpen((value) => !value)}
+                grow={scenesOpen ? 6 : 1}
               />
             )}
           </div>

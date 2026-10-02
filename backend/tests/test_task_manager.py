@@ -588,6 +588,31 @@ class TestTaskManager:
         assert task_manager.is_cancellation_requested("chapter_video_12_videos")
         assert not task_manager.is_cancellation_requested("chapter_video_13_videos")
 
+    def test_completion_callback_persists_canvas_continuation_after_success(self, task_manager, monkeypatch):
+        calls = []
+        monkeypatch.setattr(task_manager, "_task_type", lambda task_id: "video_canvas_run")
+        monkeypatch.setattr(task_manager, "_mark_task_succeeded", lambda task_id, result: calls.append((task_id, result)))
+        monkeypatch.setattr("services.canvas_agent_actions.continue_canvas_stage_after_run", lambda task_id, result: calls.append(("continuation", task_id, result)))
+
+        class CompletedTask:
+            @staticmethod
+            def cancelled():
+                return False
+
+            @staticmethod
+            def exception():
+                return None
+
+            @staticmethod
+            def result():
+                return {"run_id": 9, "status": "succeeded"}
+
+        task_manager._on_task_complete("canvas-task", CompletedTask())
+        assert calls == [
+            ("canvas-task", {"run_id": 9, "status": "succeeded"}),
+            ("continuation", "canvas-task", {"run_id": 9, "status": "succeeded"}),
+        ]
+
     def test_completion_callback_treats_workflow_failure_as_failed(self, task_manager, monkeypatch):
         failed: list[tuple[str, str]] = []
         succeeded: list[str] = []

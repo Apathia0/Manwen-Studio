@@ -268,6 +268,9 @@ class AgentConversation(Base):
     title: Mapped[str] = mapped_column(String(255), nullable=False, default="新对话")
     active_run_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     active_run_started_at: Mapped[datetime.datetime | None] = mapped_column(DateTime, nullable=True)
+    # 持久化的历史摘要：覆盖 id <= history_summary_upto_message_id 的全部消息，后续轮次只需读取其后的消息。
+    history_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    history_summary_upto_message_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
 
@@ -1010,6 +1013,25 @@ class VideoCanvasPlan(Base):
     applied_canvas_revision: Mapped[int | None] = mapped_column(Integer, nullable=True)
     workflow_sync_revision: Mapped[int | None] = mapped_column(Integer, nullable=True)
     revision: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    created_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
+class CanvasAgentAction(Base):
+    """画布助手阶段提案、精确授权及执行记录；不存储认证凭据。"""
+    __tablename__ = "canvas_agent_actions"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    canvas_id: Mapped[int] = mapped_column(Integer, ForeignKey("video_canvases.id", ondelete="CASCADE"), nullable=False, index=True)
+    conversation_id: Mapped[int] = mapped_column(Integer, ForeignKey("agent_conversations.id", ondelete="CASCADE"), nullable=False, index=True)
+    owner_user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    permission_mode: Mapped[str] = mapped_column(String(16), nullable=False)
+    stage: Mapped[str] = mapped_column(String(32), nullable=False)
+    tool_name: Mapped[str] = mapped_column(String(64), nullable=False)
+    summary: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    arguments_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    expected_definition_revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String(24), nullable=False, default="pending")
+    result_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
 

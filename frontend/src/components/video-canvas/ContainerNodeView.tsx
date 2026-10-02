@@ -1,110 +1,96 @@
-import { Folder, FolderOpen, ChevronDown, ChevronRight, UserRound, MapPin, Box } from 'lucide-react';
-import { useState, type ReactNode } from 'react';
+import { Group as GroupIcon, Ungroup } from 'lucide-react';
+import { useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from 'react';
 
 export interface ContainerNodeConfig {
   node_role?: string;
   node_label: string;
-  tabs: Array<{ title: string; color: string; nodes: string[] }>;
+  member_ids?: string[];
+  /** 旧文件夹式容器的分组数据，仅用于兼容读取成员数 */
+  tabs?: Array<{ title: string; color: string; nodes: string[] }>;
   matrix_layout?: boolean;
 }
 
 interface Props {
   config: ContainerNodeConfig;
-  onToggleCollapsed?: () => void;
-  collapsed?: boolean;
+  /** 实际成员数（由画布解析传入；缺省时回退 config 统计） */
+  memberCount?: number;
+  onRename?: (name: string) => void;
+  onUngroup?: () => void;
 }
 
-export default function ContainerNodeView({ config, onToggleCollapsed, collapsed = false }: Props): ReactNode {
-  if (!config.tabs || config.tabs.length === 0) {
-    return <div className="flex h-full w-full items-center justify-center text-xs text-[#78818f]">暂无资产</div>;
-  }
+/**
+ * 节点组标题栏。组框外观（边框/底色/层级）由 CanvasNodeView 绘制，
+ * 本组件只渲染顶部标题条：
+ * - 拖动标题条 = 拖动整个组（pointerdown 冒泡到节点根）；
+ * - 双击名称内联改名；
+ * - 右侧「解散」按钮移除组框（子节点保留）。
+ * 根元素 pointer-events-auto：在 pointer-events-none 的组框根内重新可交互。
+ */
+export default function ContainerNodeView({ config, memberCount, onRename, onUngroup }: Props): ReactNode {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState('');
+  const fallbackCount = (config.member_ids?.length ?? 0) || (config.tabs?.reduce((sum, tab) => sum + tab.nodes.length, 0) ?? 0);
+  const count = memberCount ?? fallbackCount;
+  const label = config.node_label || '节点组';
 
-  const tabs = config.tabs;
-  const [activeTab, setActiveTab] = useState<string>(tabs[0].title);
+  const startEdit = (event: { stopPropagation(): void }) => {
+    if (!onRename) return;
+    event.stopPropagation();
+    setDraft(label);
+    setEditing(true);
+  };  const commit = () => {
+    setEditing(false);
+    const next = draft.trim();
+    if (next && next !== label) onRename?.(next);
+  };
 
-  // Tab bar
-  const tabBar = (
-    <div className="flex shrink-0 items-center gap-1 border-b border-[#35393f] bg-[#1a1c20] px-2.5 py-1.5">
-      {tabs.map((tab, idx) => (
-        <button
-          key={idx}
-          type="button"
-          onClick={() => setActiveTab(tab.title)}
-          className={`inline-flex items-center gap-1 rounded-md px-2 py-1 text-[10px] transition-colors ${
-            activeTab === tab.title ? 'bg-white/10 text-white' : 'text-[#78818f] hover:text-white/80'
-          }`}
-          style={{
-            borderTop: `2px solid ${tab.color}`,
-          }}
-        >
-          {tab.color === '#73a7ff' && <UserRound size={10} />}
-          {tab.color === '#34d399' && <MapPin size={10} />}
-          {tab.color === '#f59e0b' && <Box size={10} />}
-          <span>{tab.title}</span>
-          <span className="rounded-full bg-[#25282e] px-1.5 py-0.5 text-[9px]">{tab.nodes.length}</span>
-        </button>
-      ))}
-    </div>
-  );
+  const cancel = () => setEditing(false);
 
-  // Matrix grid
-  const matrixGrid = (
-    <div className="overflow-y-auto p-2">
-      <div className="grid grid-cols-3 gap-[18px]" style={{ width: 'max-content' }}>
-        {(() => {
-          const activeNodes = tabs.find(t => t.title === activeTab)?.nodes || [];
-          const roleLabels: Record<string, string> = { character: '角色', scene: '场景', prop: '道具', other: '其他' };
-          const nodeRows = [];
-          for (let i = 0; i < activeNodes.length; i++) {
-            const rowIdx = Math.floor(i / 3);
-            const colIdx = i % 3;
-            nodeRows.push(
-              <div
-                key={activeNodes[i]}
-                className="relative h-16 min-w-[150px] rounded-md border border-[#2d3138] bg-[#202226] px-2 py-1.5 text-left text-[10px] text-[#aeb3be]"
-                style={{ gridColumnStart: colIdx + 1, gridRowStart: rowIdx + 1 }}
-              >
-                <div className="truncate flex items-center gap-1">
-                  <Folder size={10} className="shrink-0 text-[#6b7280]" />
-                  <span className="truncate">{activeNodes[i]}</span>
-                </div>
-              </div>
-            );
-          }
-          return nodeRows;
-        })()}
-      </div>
-    </div>
-  );
+  const handleKeyDown = (event: ReactKeyboardEvent<HTMLInputElement>) => {
+    event.stopPropagation();
+    if (event.key === 'Enter') commit();
+    if (event.key === 'Escape') cancel();
+  };
 
   return (
-    <div className="flex h-full w-full flex-col overflow-hidden rounded-xl border border-[#35393f] bg-[#1e2025] shadow-[0_8px_24px_rgba(0,0,0,.15)]">
-      {/* Header */}
-      <div className="flex shrink-0 items-center justify-between border-b border-[#35393f] bg-[#1a1c20] px-3 py-2">
-        <div className="flex items-center gap-2">
-          {collapsed ? <FolderOpen size={14} className="text-[#78818f]" /> : <Folder size={14} className="text-[#78818f]" />}
-          <span className="truncate text-xs font-medium text-[#e8ebf0]">{config.node_label || '资产容器'}</span>
-          <span className="rounded-full bg-[#2a2e33] px-2 py-0.5 text-[10px] text-[#8b93a1]">
-            {tabs.reduce((sum, t) => sum + t.nodes.length, 0)} 个资产
-          </span>
-        </div>
-        {onToggleCollapsed && (
-          <button
-            type="button"
-            onClick={onToggleCollapsed}
-            className="rounded-lg p-1.5 text-[#78818f] hover:bg-white/5 hover:text-white"
-            title={collapsed ? "展开容器" : "收起容器"}
-          >
-            {collapsed ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-          </button>
-        )}
-      </div>
-
-      {!collapsed && (
-        <>
-          {tabBar}
-          {matrixGrid}
-        </>
+    <div
+      className="pointer-events-auto flex h-9 w-full cursor-move items-center gap-2 rounded-t-2xl border-b border-[#2f80ff]/25 bg-[#1a2233]/90 px-3 backdrop-blur"
+    >
+      <GroupIcon className="h-3.5 w-3.5 shrink-0 text-[#73a7ff]" />
+      {editing ? (
+        <input
+          autoFocus
+          value={draft}
+          onChange={(event) => setDraft(event.target.value)}
+          onBlur={commit}
+          onKeyDown={handleKeyDown}
+          onPointerDown={(event) => event.stopPropagation()}
+          maxLength={64}
+          aria-label="节点组名称"
+          className="min-w-0 flex-1 rounded border border-[#2f80ff]/50 bg-[#10141c] px-1.5 py-0.5 text-xs text-white outline-none"
+        />
+      ) : (
+        <span
+          className="min-w-0 flex-1 truncate text-xs font-semibold text-[#dbe7ff]"
+          onDoubleClick={(event) => { event.stopPropagation(); startEdit(event); }}
+        >
+          {label}
+        </span>
+      )}
+      <span className="shrink-0 rounded-full bg-[#2f80ff]/20 px-2 py-0.5 text-[10px] text-[#9ec5ff]">
+        {count} 个成员
+      </span>
+      {onUngroup && (
+        <button
+          type="button"
+          title="解散节点组（保留子节点）"
+          aria-label="解散节点组"
+          onPointerDown={(event) => event.stopPropagation()}
+          onClick={(event) => { event.stopPropagation(); onUngroup(); }}
+          className="grid size-6 shrink-0 place-items-center rounded text-[#8aa7d6] transition hover:bg-white/10 hover:text-white"
+        >
+          <Ungroup className="h-3.5 w-3.5" />
+        </button>
       )}
     </div>
   );

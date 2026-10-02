@@ -61,7 +61,7 @@ export default function MangaDramaListPage({ onOpenProject }: MangaDramaListPage
             <Clapperboard size={18} />
           </span>
           <div>
-            <h1 className="text-lg font-semibold text-slate-900">漫剧创作</h1>
+            <h1 className="text-lg font-semibold text-slate-900">无限画布</h1>
             <p className="text-xs text-slate-500">从画布编排剧本、分镜与视频，独立于小说与漫画工作台</p>
           </div>
         </div>

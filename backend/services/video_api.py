@@ -179,6 +179,21 @@ def _video_capability_config(video_capabilities: dict | None) -> tuple[str | Non
     return profile, video_capabilities
 
 
+def _audio_reference_field(capabilities: dict, audio_count: int, image_count: int) -> str:
+    """校验并返回音频参考的上游字段；模型未声明 max_reference_audios 时一律拒绝。"""
+    limits = capabilities.get("limits") if isinstance(capabilities, dict) else None
+    limits = limits if isinstance(limits, dict) else {}
+    max_audios = limits.get("max_reference_audios")
+    if not isinstance(max_audios, int) or isinstance(max_audios, bool) or max_audios <= 0:
+        raise ValueError("当前视频模型未声明音频参考能力，请在模型能力中配置 limits.max_reference_audios，或移除音频节点")
+    if audio_count > max_audios:
+        raise ValueError(f"音频参考数量超过当前视频模型限制（最多 {max_audios} 个）")
+    max_total = limits.get("max_reference_total")
+    if isinstance(max_total, int) and not isinstance(max_total, bool) and max_total > 0 and audio_count + image_count > max_total:
+        raise ValueError(f"参考素材总数超过当前视频模型限制（最多 {max_total} 个，图片与音频合计）")
+    return _wire_field(capabilities, "audio_reference_field", "input_reference", {"input_reference", "reference_audio_urls", "referenceAudios"})
+
+
 def _validate_video_capability_limits(
     *,
     capabilities: dict,
@@ -220,18 +235,25 @@ def _validate_video_capability_limits(
     return duration_seconds
 
 
-def _validate_video_input_mode(*, capabilities: dict, reference_count: int) -> None:
-    """校验模型声明的文生或图生视频输入模式。"""
+def _validate_video_input_mode(*, capabilities: dict, reference_count: int, input_mode: str | None = None) -> str:
+    """校验模型声明的文生或图生视频输入模式并返回规范值。"""
+    requested = input_mode or ("image_to_video" if reference_count else "text_to_video")
+    if requested not in {"image_to_video", "text_to_video"}:
+        raise ValueError("视频输入模式无效")
+    if reference_count and requested != "image_to_video":
+        raise ValueError("存在参考图时必须使用 image_to_video")
+    if not reference_count and requested != "text_to_video":
+        raise ValueError("没有参考图时必须使用 text_to_video")
     input_modes = capabilities.get("input_modes")
     if not isinstance(input_modes, list):
-        return
-    requested = "image_to_video" if reference_count else "text_to_video"
+        return requested
     aliases = {
         "image_to_video": {"image_to_video", "image"},
         "text_to_video": {"text_to_video", "text"},
     }
     if not any(mode in aliases[requested] for mode in input_modes):
         raise ValueError("当前视频模型不支持该输入模式")
+    return requested
 
 
 def validate_legacy_model_duration(
@@ -270,6 +292,37 @@ def _wire_field(capabilities: dict, key: str, default: str, allowed: set[str]) -
     value = wire.get(key, default) if isinstance(wire, dict) else default
     if not isinstance(value, str) or value not in allowed:
         raise ValueError(f"视频模型 wire.{key} 配置无效")
+    return value
+
+
+def apply_reference_tokens(prompt: str, count: int, token_format: str) -> str:
+    """把提示词里的参考图引用统一成上游要求的写法，并保证 1..count 每个都出现。
+
+    上游规则（以 `@图N` 为例）：referenceImages 给了 N 张，提示词里就必须写到 @图N，一一对应，宁多勿少；
+    只写 @图1 而数组有第 2 项，会被整单拒绝。画布里用户点缩略图插入的是 @图片N，这里一并转成上游写法。
+    """
+    import re
+
+    def token(n: int) -> str:
+        return token_format.format(n=n)
+
+    converted = re.sub(r"@(?:图片|图)(\d+)", lambda m: token(int(m.group(1))), prompt)
+    missing = [n for n in range(1, count + 1) if token(n) not in converted]
+    if missing:
+        converted = converted.rstrip() + "\n参考素材：" + "、".join(token(n) for n in missing)
+    return converted
+
+
+def _optional_seed_field(capabilities: dict) -> str | None:
+    """仅在模型能力明确声明时写入随机种子，避免臆测供应商协议。"""
+    wire = capabilities.get("wire") if isinstance(capabilities, dict) else None
+    if not isinstance(wire, dict) or "seed_field" not in wire:
+        return None
+    value = wire.get("seed_field")
+    if value is None:
+        return None
+    if not isinstance(value, str) or value not in {"seed", "random_seed"}:
+        raise ValueError("视频模型 wire.seed_field 配置无效")
     return value
 
 
@@ -353,34 +406,40 @@ def _is_valid_url(s: str) -> bool:
 
 
 async def prepare_video_reference_urls(images: list[str]) -> list[str]:
-    """将参考图解析为上游可访问 URL，本地输入必须成功上传 OSS。"""
+    """将参考图解析为上游可访问 URL，本地输入必须成功上传 OSS。
+
+    已经是公网链接的直接使用，不会重新上传；输出顺序与输入顺序严格一致（提示词里的 @图片N 依赖它）。
+    """
     if not images:
         return []
-    oss_urls: list[str] = []
-    local_paths: list[str] = []
+    resolved: list[str | None] = []
+    pending: list[tuple[int, str]] = []
     for image in images:
         normalized = image.strip()
         if normalized.lower().startswith(("http://", "https://")):
-            oss_urls.append(normalized)
-        elif normalized.startswith("/static/manga/"):
-            local_paths.append(str(_MANGA_OUTPUTS_DIR / normalized[len("/static/manga/"):]))
+            resolved.append(normalized)
+            continue
+        if normalized.startswith("/static/manga/"):
+            local_path = str(_MANGA_OUTPUTS_DIR / normalized[len("/static/manga/"):])
         elif normalized.startswith("/static/video/"):
-            local_paths.append(str(_VIDEO_OUTPUTS_DIR / normalized[len("/static/video/"):]))
+            local_path = str(_VIDEO_OUTPUTS_DIR / normalized[len("/static/video/"):])
         else:
-            local_paths.append(normalized)
-    if local_paths:
+            local_path = normalized
+        pending.append((len(resolved), local_path))
+        resolved.append(None)
+    if pending:
         from . import oss as oss_service
 
         if not oss_service.is_enabled():
             oss_service.auto_configure_from_db()
         if oss_service.is_enabled():
-            for local_path in local_paths:
+            for index, local_path in pending:
                 try:
                     oss_url = await run_blocking(oss_service.upload_file, local_path)
                     if oss_url:
-                        oss_urls.append(oss_url)
+                        resolved[index] = oss_url
                         logger.info(
-                            "[video] 本地参考图上 OSS 成功: %s → %s",
+                            "[video] 本地参考图已有云端链接: %s → %s",
                             local_path,
                             safe_media_url_for_log(oss_url),
                         )
@@ -388,13 +447,13 @@ async def prepare_video_reference_urls(images: list[str]) -> list[str]:
                         logger.warning("[video] 本地参考图上 OSS 返回空: %s", local_path)
                 except Exception as exc:
                     logger.warning("[video] 本地参考图上 OSS 失败: %s — %s", local_path, exc)
-    if len(oss_urls) != len(images):
+    if any(url is None for url in resolved):
         raise UpstreamServiceError(
             "部分本地参考图无法上传到 OSS，已停止提交视频任务",
             retryable=False,
             provider="Video",
         )
-    return oss_urls
+    return [url for url in resolved if url is not None]
 
 
 def extract_video_url(payload: dict) -> str:
@@ -456,12 +515,16 @@ async def create_video_job(
     api_key: str | None = None,
     base_url: str | None = None,
     video_capabilities: dict | None = None,
+    input_mode: str | None = None,
+    seed: int | None = None,
+    audios: list[str] | None = None,
 ) -> dict:
     """创建视频生成任务 (POST /v1/videos - LingDong API)."""
     if not prompt.strip():
         raise ValueError("prompt 不能为空")
 
     model = model or runtime_model()
+    explicit_input_mode = input_mode is not None
     payload_profile, capabilities = _video_capability_config(video_capabilities)
     validate_legacy_model_duration(
         model=model,
@@ -470,6 +533,7 @@ async def create_video_job(
     )
     if aspect_ratio not in ALLOWED_ASPECT_RATIOS:
         aspect_ratio = "16:9"
+    audio_field = _audio_reference_field(capabilities, len(audios), len(images or [])) if audios else None
 
     # 未声明 profile 时，完整保留既有的模型名称推断和默认值。
     model_lower = model.lower()
@@ -486,9 +550,10 @@ async def create_video_job(
         duration_seconds=duration_seconds,
         reference_count=len(images or []),
     )
-    _validate_video_input_mode(
+    input_mode = _validate_video_input_mode(
         capabilities=capabilities,
         reference_count=len(images or []),
+        input_mode=input_mode,
     )
 
     headers = _auth_headers(api_key, base_url=base_url, model=model)
@@ -572,6 +637,15 @@ async def create_video_job(
         else:
             payload["orientation"] = _aspect_to_orientation(aspect_ratio)
 
+    wire_config = capabilities.get("wire") if isinstance(capabilities.get("wire"), dict) else {}
+    if explicit_input_mode and not wire_config.get("omit_input_mode"):
+        input_mode_field = _wire_field(capabilities, "input_mode_field", "input_mode", {"input_mode", "input_type"})
+        payload[input_mode_field] = input_mode
+    if seed is not None:
+        seed_field = _optional_seed_field(capabilities)
+        if seed_field:
+            payload[seed_field] = seed
+
     if images:
         # ── 自动将本地图片上传到 OSS，确保第三方 API 可访问 ──
         oss_urls: list[str] = []
@@ -622,7 +696,7 @@ async def create_video_job(
                 capabilities,
                 "reference_field",
                 "input_reference",
-                {"input_reference", "reference_images", "reference_videos", "reference_video_urls", "reference_audio_urls"},
+                {"input_reference", "reference_images", "reference_videos", "reference_video_urls", "reference_audio_urls", "referenceImages"},
             )
             payload[reference_field] = oss_urls if reference_field != "input_reference" else "|".join(oss_urls)
             ref_log = "|".join(safe_media_url_for_log(item) for item in oss_urls)
@@ -631,7 +705,23 @@ async def create_video_job(
         else:
             logger.warning("[video] 所有参考图均为本地路径且 OSS 上传失败，本次任务无参考图")
 
-    reference_payload = payload.get("reference_images") or payload.get("input_reference") or ""
+    if audios and audio_field:
+        audio_urls = await prepare_video_reference_urls(list(audios))
+        if audio_field == "input_reference":
+            existing = payload.get("input_reference")
+            if existing is not None and not isinstance(existing, str):
+                raise ValueError("音频参考与图片参考不能同时占用不同格式的 input_reference")
+            payload["input_reference"] = "|".join([*([existing] if existing else []), *audio_urls])
+        else:
+            payload[audio_field] = audio_urls
+        logger.info("[video] 音频参考 %d 个（字段 %s）", len(audio_urls), audio_field)
+
+    token_format = wire_config.get("reference_token")
+    if images and isinstance(token_format, str) and "{n}" in token_format:
+        reference_count = len(oss_urls)
+        payload["prompt"] = apply_reference_tokens(payload["prompt"], reference_count, token_format)
+
+    reference_payload = payload.get("referenceImages") or payload.get("reference_images") or payload.get("input_reference") or ""
     reference_values = reference_payload if isinstance(reference_payload, list) else str(reference_payload).split("|")
     ref_preview = "|".join(
         safe_media_url_for_log(item)
@@ -674,6 +764,18 @@ async def create_video_job(
 
             if status == 401:
                 raise MissingApiKeyError("Video API Key 无效或未配置")
+            # 上游已接收任务、生成后明确返回“生成失败”的 5xx 是确定性失败（内容审核、素材 / 参数不被接受等），
+            # 原样重试只会再等一轮同样的结果（每轮可能 1 分钟以上）并可能重复消耗，直接如实报告。
+            if status >= 500 and ("fail_to_fetch_task" in body_text or "生成失败" in body_text):
+                logger.warning("[video] 上游生成失败（不重试）：prompt 前 600 字=%s", prompt[:600])
+                raise UpstreamServiceError(
+                    "视频生成失败：上游模型已接收任务但生成失败，且没有给出具体原因。"
+                    "常见原因：提示词或参考图触发内容审核、参考图过多或过大、时长 / 分辨率组合不被该模型接受。"
+                    f"可先减少参考图或简化提示词后重试。上游返回：{body_text[:300]}",
+                    retryable=False,
+                    provider="Video",
+                    status_code=status,
+                )
             if status == 429 or status >= 500:
                 if attempt < MAX_RETRIES:
                     await asyncio.sleep(RETRY_DELAY)

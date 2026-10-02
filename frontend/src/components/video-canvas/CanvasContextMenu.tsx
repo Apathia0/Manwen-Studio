@@ -1,5 +1,6 @@
 import { useEffect } from 'react';
 import { Plus, Trash2 } from 'lucide-react';
+import { clampOverlayPosition } from './overlayPlacement';
 
 /**
  * 画布右键菜单状态（节点菜单 / 连线菜单）。
@@ -61,11 +62,17 @@ export default function CanvasContextMenu({ menu, onClose, onDuplicateNode, onDe
   if (!menu) return null;
 
   const isNode = menu.type === 'node';
+  const menuPosition = clampOverlayPosition(
+    { x: menu.x, y: menu.y },
+    { width: 176, height: isNode ? 72 : 40 },
+    { width: window.innerWidth, height: window.innerHeight },
+    { top: 8, right: 8, bottom: 8, left: 8 },
+  );
 
   return (
     <div
       className="fixed z-[80] min-w-44 overflow-hidden rounded-xl border border-[#393633] bg-[#211f1d] py-1 shadow-2xl"
-      style={{ left: menu.x, top: menu.y }}
+      style={{ left: menuPosition.x, top: menuPosition.y }}
       // 阻止事件冒泡到画布，避免触发画布框选 / 平移
       onPointerDown={(event) => event.stopPropagation()}
       onMouseDown={(event) => event.stopPropagation()}

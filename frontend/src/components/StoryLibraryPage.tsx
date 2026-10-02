@@ -157,7 +157,7 @@ export default function StoryLibraryPage({
     <div>
       <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
         <div>
-          <h2 className="text-xl font-semibold">作品首页</h2>
+          <h2 className="text-xl font-semibold">小说作品</h2>
           <p className="text-sm text-slate-600">管理你的小说项目，并从这里进入创作工作台。</p>
         </div>
         <div className="flex gap-2">

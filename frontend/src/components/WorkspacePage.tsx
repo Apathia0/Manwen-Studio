@@ -17,7 +17,7 @@ const WORKSPACE_TABS: Array<{
 }> = [
   { key: 'novel', label: '小说创作', description: '框架、章节与 AI 写作', icon: PenLine },
   { key: 'manga', label: '漫画创作', description: '将当前章节转为漫画', icon: Image },
-  { key: 'video', label: '视频创作', description: '剧本、分镜与视频成片', icon: Clapperboard },
+  { key: 'video', label: '漫剧工作流', description: '剧本、分镜与视频成片', icon: Clapperboard },
 ];
 
 /** 创作工作台页面 */
@@ -87,16 +87,18 @@ export function WorkspacePage({
               );
             })}
           </div>
-          <div className={`flex min-w-0 flex-wrap items-center gap-2 ${workspaceMode === 'novel' ? 'xl:hidden' : ''}`}>
-            <button
-              type="button"
-              onClick={() => setKnowledgeOpen(true)}
-              className="inline-flex h-9 items-center gap-1.5 rounded-md border border-[#d7e3f4] bg-white px-3 text-xs font-medium text-slate-600 transition hover:bg-[#eef5ff] hover:text-[#1d4ed8]"
-            >
-              <Database size={13} />
-              作品设定中心
-            </button>
-          </div>
+          {workspaceMode === 'novel' && (
+            <div className="flex min-w-0 flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setKnowledgeOpen(true)}
+                className="inline-flex h-9 items-center gap-1.5 rounded-md border border-[#d7e3f4] bg-white px-3 text-xs font-medium text-slate-600 transition hover:bg-[#eef5ff] hover:text-[#1d4ed8]"
+              >
+                <Database size={13} />
+                作品设定中心
+              </button>
+            </div>
+          )}
         </div>
       </div>
 
