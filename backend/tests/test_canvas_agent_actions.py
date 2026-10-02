@@ -382,7 +382,7 @@ def test_approved_sync_stage_rewrites_confirmation_so_model_does_not_redo_it(sta
     """点确认卡片后，“已在阶段卡片确认，执行此阶段”不能原样交给模型，否则它会把确认当新指令再提一次方案。"""
     from services import agent_service as agent
     from services import canvas_stage_gateway
-    from tests.test_agent_media import _agent_sse_response, _install_agent_stream_client
+    from test_agent_media import _agent_sse_response, _install_agent_stream_client
     context, factory = state
     monkeypatch.setattr(agent, "SessionLocal", factory)
 
