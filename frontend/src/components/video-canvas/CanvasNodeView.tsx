@@ -105,6 +105,7 @@ export default function CanvasNodeView({ node, catalogItem, selected, connecting
   const isConnecting = connecting !== null;
   const isConnectionTarget = connectionTargetNodeId === node.id;
   const isActive = selected || hovered;
+  const resizeUpRef = useRef<((event: MouseEvent) => void) | null>(null);
 
   const handleResizeMove = useCallback((event: MouseEvent) => {
     if (!resizeRef.current.isResizing) return;
@@ -144,9 +145,17 @@ export default function CanvasNodeView({ node, catalogItem, selected, connecting
   const handleResizeUp = useCallback(() => {
     resizeRef.current.isResizing = false;
     window.removeEventListener('mousemove', handleResizeMove);
-    window.removeEventListener('mouseup', handleResizeUp);
+    const resizeUp = resizeUpRef.current;
+    if (resizeUp) window.removeEventListener('mouseup', resizeUp);
     onResizeEnd(node.id);
   }, [handleResizeMove, node.id, onResizeEnd]);
+
+  useEffect(() => {
+    resizeUpRef.current = handleResizeUp;
+    return () => {
+      if (resizeUpRef.current === handleResizeUp) resizeUpRef.current = null;
+    };
+  }, [handleResizeUp]);
 
   const handleResizeMouseDown = (event: ReactMouseEvent, corner: ResizeCorner) => {
     event.stopPropagation();
