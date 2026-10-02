@@ -4,7 +4,8 @@ import datetime
 from pathlib import Path
 from typing import Any, Literal, Optional
 
-from pydantic import BaseModel, Field, model_validator
+import re
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 # --- Story ---
@@ -125,6 +126,7 @@ class StoryOut(BaseModel):
     story_memory: Optional[dict[str, Any]] = None
     onboarding_completed: bool = False
     source_type: str = "manual"
+    story_type: str = "novel"
     import_context_completed: bool = True
     has_character_profiles: bool = False
     has_ref_image: bool = False
@@ -189,13 +191,14 @@ class ChatMessageOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
-AgentWorkflowType = Literal["novel", "manga", "video"]
+AgentWorkflowType = Literal["novel", "manga", "video", "video_canvas"]
 AgentSkillName = Literal[
     "chapter_writer",
     "framework_designer",
     "manga_workflow",
     "quality_reviewer",
     "video_workflow",
+    "video_canvas_workflow",
     "deconstruction_reader",
 ]
 
@@ -211,11 +214,27 @@ class AgentChatIn(BaseModel):
     session_id: Optional[str] = None
     enabled_skills: Optional[list[AgentSkillName]] = None
     attachment_ids: Optional[list[str]] = None
+    canvas_permission_mode: Literal["plan", "auto", "ask"] = "ask"
+    canvas_approval_id: Optional[int] = Field(default=None, gt=0)
+    canvas_revision_approval_id: Optional[int] = Field(default=None, gt=0)
+    canvas_resume_run_id: Optional[int] = Field(default=None, gt=0)
+    # 浏览器随消息上送的画布实时图（含未保存修改）；仅用于读取上下文，写入仍以数据库版本锁为准。
+    canvas_graph: Optional[dict[str, Any]] = None
+    canvas_graph_write_mode: Literal["local", "server"] = "local"
+    canvas_client_revision: int = Field(default=0, ge=0)
+    # 用户在画布上当前选中的节点 ID，助手据此定位“这个节点”，避免凭标题猜测改错目标。
+    canvas_selected_node_ids: Optional[list[str]] = Field(default=None, max_length=20)
 
     @model_validator(mode="after")
     def validate_workflow_context(self):
+        if sum(value is not None for value in (self.canvas_approval_id, self.canvas_revision_approval_id, self.canvas_resume_run_id)) > 1:
+            raise ValueError("阶段批准、修改和续接不能同时请求")
+        if any(value is not None for value in (self.canvas_approval_id, self.canvas_revision_approval_id, self.canvas_resume_run_id)) and self.workflow_type != "video_canvas":
+            raise ValueError("阶段操作仅可用于画布会话")
         if self.workflow_type == "video" and (self.workflow_id is None or not self.chapter_id):
             raise ValueError("视频工作流必须提供 workflow_id 和 chapter_id")
+        if self.workflow_type == "video_canvas" and self.workflow_id is None:
+            raise ValueError("视频画布必须提供 workflow_id")
         if self.workflow_type == "manga" and not self.chapter_id:
             raise ValueError("漫画工作流必须提供 chapter_id")
         return self
@@ -232,6 +251,8 @@ class AgentConversationCreateIn(BaseModel):
     def validate_workflow_context(self):
         if self.workflow_type == "video" and (self.workflow_id is None or self.chapter_id is None):
             raise ValueError("视频工作流必须提供 workflow_id 和 chapter_id")
+        if self.workflow_type == "video_canvas" and self.workflow_id is None:
+            raise ValueError("视频画布必须提供 workflow_id")
         if self.workflow_type == "manga" and self.chapter_id is None:
             raise ValueError("漫画工作流必须提供 chapter_id")
         return self
@@ -243,6 +264,22 @@ class AgentConversationMessageCreateIn(BaseModel):
     chapter_id: Optional[int] = None
 
 
+# 助手为了看图自动附带的媒体（画布产物、章节漫画图、分镜故事版/视频关键帧）属于内部查看，不是用户上传；
+# 早期版本会把它们以“[附件] …”行写进用户消息，这里在读取时统一去掉。用户自己上传的附件行不受影响。
+_INTERNAL_ATTACHMENT_LINE = re.compile(
+    r"^\[附件\] (?:画布媒体观察\[[^\n]*?\]|第\d+张漫画图|分镜\d+故事版|分镜\d+视频关键帧)（(?:image|video)）[ \t]*$\n?",
+    re.MULTILINE,
+)
+
+
+def strip_internal_attachment_notes(text: str | None) -> str:
+    """去掉消息里系统自动附带媒体的“[附件]”记录行。"""
+    raw = str(text or "")
+    if "[附件]" not in raw:
+        return raw
+    return _INTERNAL_ATTACHMENT_LINE.sub("", raw).rstrip()
+
+
 class AgentConversationMessageOut(BaseModel):
     id: int
     conversation_id: int
@@ -251,6 +288,11 @@ class AgentConversationMessageOut(BaseModel):
     created_at: datetime.datetime
 
     model_config = {"from_attributes": True}
+
+    @field_validator("content", mode="before")
+    @classmethod
+    def _hide_internal_attachments(cls, value: object) -> str:
+        return strip_internal_attachment_notes(value if isinstance(value, str) else str(value or ""))
 
 
 class AgentConversationSummaryOut(BaseModel):
@@ -1167,6 +1209,158 @@ class ChapterVideoWorkflowStatusOut(BaseModel):
     next_retry_at: str | None = None
 
 
+# ─── 视频无限画布 Schemas ────────────────────────────────
+
+
+class MangaDramaProjectCreate(BaseModel):
+    """漫剧创作项目：story_type=video 的作品 + 初始空白画布一次创建。"""
+    title: str = Field(default="未命名漫剧", min_length=1, max_length=255)
+    description: str | None = Field(default=None, max_length=2000)
+    canvas_name: str = Field(default="主画布", min_length=1, max_length=255)
+    idempotency_key: str | None = Field(default=None, min_length=8, max_length=100)
+
+
+class VideoCanvasCompileScenesRequest(BaseModel):
+    """已批准场景节点 → 视频节点组编译请求（新路径需携带 AI 导演方案）。"""
+    scene_node_ids: list[str] = Field(min_length=1, max_length=60)
+    director_plan: dict[str, Any] | None = None
+    director_plan_hash: str | None = Field(default=None, max_length=128)
+    video_model_id: int | None = Field(default=None, ge=1)
+    expected_definition_revision: int | None = Field(default=None, ge=1)
+
+
+class VideoCanvasCostEstimateRequest(BaseModel):
+    """画布生成成本预估：可带浏览器当前图（含未保存修改），不带则用已保存版本。"""
+    target_node_ids: list[str] = Field(default_factory=list, max_length=500)
+    # 要强制重新生成的节点（如“再生成一个”）：预估时不按“定义未变可复用”计为 0 积分
+    rerun_node_ids: list[str] = Field(default_factory=list, max_length=500)
+    graph: dict[str, Any] | None = None
+
+
+class VideoCanvasDirectorPlanRequest(BaseModel):
+    """画布 AI 导演编排请求：读取已批准场景，返回可审阅方案（不写图、不生成）。"""
+    scene_node_id: str = Field(min_length=1, max_length=64)
+    user_constraints: str | None = Field(default=None, max_length=2000)
+    video_model_id: int | None = Field(default=None, ge=1)
+    expected_definition_revision: int | None = Field(default=None, ge=1)
+
+
+class VideoCanvasAssetAnalysisRequest(BaseModel):
+    """画布资产分析请求：剧本 → 角色/场景/道具资产清单与绘图提示词。"""
+    scene_node_id: str = Field(min_length=1, max_length=64)
+    expected_definition_revision: int | None = Field(default=None, ge=1)
+
+
+class VideoCanvasScreenplaySplitRequest(BaseModel):
+    """剧本节点 AI 拆分请求：读取节点当前内容，返回视频单元列表（不直接写图）。"""
+    node_id: str = Field(min_length=1, max_length=64)
+
+
+class VideoCanvasScreenplayImportSource(BaseModel):
+    story_id: int
+    chapter_id: int
+
+
+class VideoCanvasScreenplayImportRequest(BaseModel):
+    """小说章节导入：多选章节 → AI 改写为剧本草稿（只读原作品）。"""
+    sources: list[VideoCanvasScreenplayImportSource] = Field(min_length=1, max_length=10)
+    # 改写后的目标总时长（秒）；不传则按章节篇幅自动估算（单章 45 到 150 秒，多章合计不超过 180 秒）
+    target_seconds: int | None = Field(default=None, ge=30, le=300)
+
+
+class VideoCanvasCreate(BaseModel):
+    story_id: int
+    default_chapter_id: int | None = None
+    name: str = Field(default="未命名画布", min_length=1, max_length=255)
+    description: str | None = Field(default=None, max_length=2000)
+    idempotency_key: str | None = Field(default=None, min_length=8, max_length=100)
+
+
+class VideoCanvasUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=255)
+    description: str | None = Field(default=None, max_length=2000)
+    status: Literal["draft", "archived"] | None = None
+
+
+class VideoCanvasGraphSave(BaseModel):
+    graph: dict[str, Any]
+    expected_definition_revision: int = Field(ge=1)
+    change_summary: str | None = Field(default=None, max_length=500)
+    source: Literal["manual", "import", "agent"] = "manual"
+
+
+class VideoCanvasVersionRestore(BaseModel):
+    expected_definition_revision: int = Field(ge=1)
+
+
+class VideoCanvasLayoutSave(BaseModel):
+    layout: dict[str, Any]
+    expected_layout_revision: int = Field(ge=1)
+
+
+class VideoCanvasSnapshotSave(BaseModel):
+    graph: dict[str, Any]
+    layout: dict[str, Any]
+    expected_definition_revision: int = Field(ge=1)
+    expected_layout_revision: int = Field(ge=1)
+    client_revision: int = Field(default=0, ge=0)
+    idempotency_key: str | None = Field(default=None, max_length=128)
+
+
+class VideoCanvasPlanCreate(BaseModel):
+    chapter_id: int | None = None
+    source_snapshot_json: dict[str, Any] | None = None
+    screenplay_json: dict[str, Any] | None = None
+    shot_json: dict[str, Any] | None = None
+    asset_json: dict[str, Any] | None = None
+    canvas_json: dict[str, Any] | None = None
+    execution_json: dict[str, Any] | None = None
+
+
+class VideoCanvasPlanUpdate(BaseModel):
+    status: Literal["draft", "ready"] | None = None
+    source_snapshot_json: dict[str, Any] | None = None
+    screenplay_json: dict[str, Any] | None = None
+    shot_json: dict[str, Any] | None = None
+    asset_json: dict[str, Any] | None = None
+    canvas_json: dict[str, Any] | None = None
+    execution_json: dict[str, Any] | None = None
+    expected_revision: int = Field(ge=1)
+
+
+class VideoCanvasPlanConfirmRequest(BaseModel):
+    confirmed: Literal[True] = True
+    expected_revision: int = Field(ge=1)
+
+
+class VideoCanvasPlanApplyRequest(BaseModel):
+    expected_plan_revision: int = Field(ge=1)
+    expected_definition_revision: int = Field(ge=1)
+
+
+class VideoCanvasPlanWorkflowSyncRequest(BaseModel):
+    expected_plan_revision: int = Field(ge=1)
+
+
+class VideoCanvasImportRequest(BaseModel):
+    source_workflow_id: int
+    mode: Literal["preview", "merge"] = "merge"
+    expected_definition_revision: int | None = Field(default=None, ge=1)
+    idempotency_key: str | None = Field(default=None, min_length=8, max_length=100)
+
+
+class VideoCanvasRunRequest(BaseModel):
+    target_node_ids: list[str] = Field(default_factory=list, max_length=100)
+    expected_definition_revision: int = Field(ge=1)
+    idempotency_key: str | None = Field(default=None, min_length=8, max_length=100)
+    rerun_node_ids: list[str] = Field(default_factory=list, max_length=100)
+
+
+class VideoCanvasRunConfirmRequest(BaseModel):
+    """确认画布运行计划；生成节点在此步骤后才允许派发。"""
+    confirmed: Literal[True] = True
+
+
 class ChapterWorkflowStageActionRequest(BaseModel):
     """分阶段操作请求——用于手动触发拆镜/故事版/视频阶段"""
     shot_ids: list[int] = Field(default_factory=list)
@@ -1190,3 +1384,18 @@ class RegenerateShotRequest(BaseModel):
 
 # Resolve forward references
 ChapterOut.model_rebuild()
+
+class VideoCanvasContainerCreateRequest(BaseModel):
+    """创建资产容器请求。"""
+    name: str = Field(default="资产容器", min_length=1, max_length=64)
+    node_ids: list[str] = Field(min_length=1, max_length=50)
+    expected_definition_revision: int = Field(ge=1)
+
+
+class VideoCanvasContainerOut(BaseModel):
+    """容器节点输出结构（运行时读取）。"""
+    container_id: str
+    label: str
+    tabs: list[dict[str, Any]]
+    matrix_layout: bool
+    nodes: list[dict[str, Any]]  # 包含所有子节点的完整信息

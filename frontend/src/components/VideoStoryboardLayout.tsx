@@ -751,6 +751,7 @@ export default function VideoStoryboardLayout({
   }
 
   return (
+    <>
     <div className="relative flex h-full min-h-0 flex-col bg-white sm:flex-row">
       <ChapterListPanel
         chapters={chapterInfos}
@@ -823,6 +824,7 @@ export default function VideoStoryboardLayout({
             </button>
           }
         />
+        </div>
       </div>
 
       {/* AI 视频工作流助手 — 桌面内嵌右栏，移动端全屏抽屉 */}
@@ -870,6 +872,6 @@ export default function VideoStoryboardLayout({
         handleStyleChange(styleName, refUrl);
       }}
     />
-  </div>
+    </>
   );
 }

@@ -15,6 +15,17 @@ def _tool_names(**kwargs) -> set[str]:
     }
 
 
+def test_canvas_default_and_screenplay_skills_can_write_confirmed_draft():
+    default_skills = agent_service.infer_agent_skills(
+        user_text="确认，把剧本放到画布", workflow_type="video_canvas", explicit_skills=None,
+    )
+    for skills in (default_skills, ["canvas_screenplay_director"]):
+        names = _tool_names(mode="agent", workflow_type="video_canvas", enabled_skills=skills)
+        assert {"get_canvas_graph", "get_canvas_node_catalog", "apply_canvas_ops", "draft_screenplay"} <= names
+        assert "update_chapter_content" not in names
+        assert "create_video_asset" not in names
+
+
 def _context(**overrides):
     values = {
         "story_id": 1,

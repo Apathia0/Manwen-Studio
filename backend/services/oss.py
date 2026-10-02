@@ -13,12 +13,16 @@ from __future__ import annotations
 import logging
 import os
 import tempfile
+import time
 from pathlib import Path
+from typing import Any
 
 from .ai.channels import validate_remote_media_url
 from .media_logging import safe_media_url_for_log
 
 logger = logging.getLogger("oss_service")
+# oss2 把“对象不存在”（上传前的存在性查询）也按 info 记成 Exception，日志里像报错但其实正常
+logging.getLogger("oss2.api").setLevel(logging.WARNING)
 
 # 运行时配置
 _runtime_enabled: bool = False
@@ -66,13 +70,25 @@ def is_enabled() -> bool:
     )
 
 
+# 同一配置只创建一次客户端并确认一次 Bucket：之前每次上传 / 查询都会多发一次 create_bucket 请求
+_client_cache: dict[tuple[str, str, str], Any] = {}
+# 本进程内已确认在云端的文件：(对象键, 大小, 修改时间) → 公网链接。同一个文件再次引用时连查询都省掉。
+_uploaded_urls: dict[tuple[str, int, int], str] = {}
+_UPLOADED_URLS_MAX = 5000
+
+
 def _get_client():
-    """懒加载 oss2 客户端。"""
+    """懒加载并缓存 oss2 客户端。"""
     import oss2
 
+    cache_key = (_runtime_endpoint, _runtime_bucket, _runtime_access_key_id)
+    cached = _client_cache.get(cache_key)
+    if cached is not None:
+        return cached
     auth = oss2.Auth(_runtime_access_key_id, _runtime_access_key_secret)
     bucket = oss2.Bucket(auth, _runtime_endpoint, _runtime_bucket)
     bucket.create_bucket()  # 如果 Bucket 不存在则创建（幂等）
+    _client_cache[cache_key] = bucket
     return bucket
 
 
@@ -80,8 +96,12 @@ def upload_file(
     local_path: str | Path,
     remote_key: str | None = None,
     content_type: str | None = None,
+    reuse_existing: bool = True,
 ) -> str | None:
     """上传本地文件到 OSS，返回公网可访问 URL。
+
+    reuse_existing=True 时先查对象是否已在云端且大小一致：是就直接返回已有链接，不重复上传。
+    对象键默认由文件相对路径生成（生成图的路径带运行 ID 和随机名，同一路径就是同一张图）。
 
     Args:
         local_path: 本地文件路径
@@ -94,7 +114,6 @@ def upload_file(
     if not is_enabled():
         logger.debug("OSS 未启用，跳过上传: %s", local_path)
         return None
-
     local_path = Path(local_path)
     if not local_path.exists():
         logger.warning("OSS 上传失败，文件不存在: %s", local_path)
@@ -103,8 +122,28 @@ def upload_file(
     if not remote_key:
         remote_key = _default_remote_key(local_path)
 
+    stat = local_path.stat()
+    fingerprint = (remote_key, stat.st_size, stat.st_mtime_ns)
+    if reuse_existing and fingerprint in _uploaded_urls:
+        return _uploaded_urls[fingerprint]
+
+    def remember(url: str) -> str:
+        if len(_uploaded_urls) >= _UPLOADED_URLS_MAX:
+            _uploaded_urls.pop(next(iter(_uploaded_urls)))
+        _uploaded_urls[fingerprint] = url
+        return url
+
     try:
         bucket = _get_client()
+        if reuse_existing:
+            try:
+                existing_size = int(bucket.get_object_meta(remote_key).headers.get("Content-Length") or -1)
+            except Exception:  # noqa: BLE001 - 对象不存在或查询失败都按“需要上传”处理
+                existing_size = -1
+            if existing_size == local_path.stat().st_size:
+                url = _build_public_url(remote_key)
+                logger.info("OSS 已存在同名同大小对象，直接复用: %s -> %s", local_path.name, url)
+                return remember(url)
         headers: dict[str, str] = {}
         if content_type:
             headers["Content-Type"] = content_type
@@ -120,9 +159,49 @@ def upload_file(
         bucket.put_object_from_file(remote_key, str(local_path), headers=headers)
         url = _build_public_url(remote_key)
         logger.info("OSS 上传成功: %s -> %s", local_path.name, url)
-        return url
+        return remember(url)
     except Exception as exc:
         logger.error("OSS 上传失败 %s: %s", local_path, exc)
+        return None
+
+
+def create_browser_upload_signature(
+    object_key: str,
+    *,
+    expires_seconds: int = 900,
+) -> dict[str, Any] | None:
+    """为浏览器生成一次受限的 OSS PUT 上传地址。"""
+    if not is_enabled() or not _is_safe_object_key(object_key):
+        return None
+    try:
+        expires_seconds = max(60, min(int(expires_seconds), 3600))
+        upload_url = _get_client().sign_url("PUT", object_key, expires_seconds, slash_safe=True)
+        return {
+            "object_key": object_key,
+            "upload_url": upload_url,
+            "public_url": _build_public_url(object_key),
+            "expires_at": int(time.time()) + expires_seconds,
+        }
+    except Exception as exc:
+        logger.warning("生成浏览器直传签名失败: %s", type(exc).__name__)
+        return None
+
+
+def get_object_metadata(object_key: str) -> dict[str, Any] | None:
+    """读取已直传对象的受控元数据，供业务接口在落库前确认。"""
+    if not is_enabled() or not _is_safe_object_key(object_key):
+        return None
+    try:
+        response = _get_client().get_object_meta(object_key)
+        headers = response.headers
+        return {
+            "content_length": int(headers.get("Content-Length") or 0),
+            "content_type": str(headers.get("Content-Type") or ""),
+            "etag": str(headers.get("ETag") or "").strip('"'),
+            "public_url": _build_public_url(object_key),
+        }
+    except Exception as exc:
+        logger.warning("读取直传对象元数据失败: %s", type(exc).__name__)
         return None
 
 
@@ -218,6 +297,12 @@ def _default_remote_key(local_path: Path) -> str:
         return rel.as_posix()
     except ValueError:
         return local_path.name
+
+
+def _is_safe_object_key(object_key: str) -> bool:
+    """拒绝路径穿越和绝对路径，避免签名被用于范围外对象。"""
+    key = str(object_key or "").replace("\\", "/")
+    return bool(key and not key.startswith("/") and ".." not in key.split("/"))
 
 
 def _build_public_url(remote_key: str) -> str:

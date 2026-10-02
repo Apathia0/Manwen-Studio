@@ -27,6 +27,8 @@ class Story(Base):
     knowledge_revision: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
     onboarding_completed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     source_type: Mapped[str] = mapped_column(String(20), nullable=False, default="manual")
+    # 作品类型：novel=小说（默认）；video=漫剧创作项目（画布工作台）
+    story_type: Mapped[str] = mapped_column(String(20), nullable=False, default="novel", server_default="novel")
     import_context_completed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     video_style_preset_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("video_style_presets.id"), nullable=True)
     storyboard_preset_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("storyboard_prompt_presets.id"), nullable=True, index=True)
@@ -266,6 +268,9 @@ class AgentConversation(Base):
     title: Mapped[str] = mapped_column(String(255), nullable=False, default="新对话")
     active_run_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     active_run_started_at: Mapped[datetime.datetime | None] = mapped_column(DateTime, nullable=True)
+    # 持久化的历史摘要：覆盖 id <= history_summary_upto_message_id 的全部消息，后续轮次只需读取其后的消息。
+    history_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    history_summary_upto_message_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
 
@@ -918,6 +923,176 @@ class VideoProject(Base):
     output_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
     created_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
+# ── 视频无限画布（独立于章节线性工作流） ────────────────────
+
+
+class VideoCanvas(Base):
+    """用户自由编排的视频节点画布。"""
+    __tablename__ = "video_canvases"
+    __table_args__ = (
+        UniqueConstraint("owner_user_id", "creation_idempotency_key", name="uq_video_canvas_creation_idempotency"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    owner_user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    story_id: Mapped[int] = mapped_column(Integer, ForeignKey("stories.id"), nullable=False, index=True)
+    default_chapter_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("chapters.id"), nullable=True, index=True)
+    name: Mapped[str] = mapped_column(String(255), nullable=False, default="未命名画布")
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    creation_idempotency_key: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="draft")
+    definition_revision: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    layout_revision: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    created_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
+class VideoCanvasVersion(Base):
+    """画布定义的不可变快照。"""
+    __tablename__ = "video_canvas_versions"
+    __table_args__ = (
+        UniqueConstraint("canvas_id", "version_no", name="uq_video_canvas_version"),
+        Index("ix_video_canvas_versions_canvas_version", "canvas_id", "version_no"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    canvas_id: Mapped[int] = mapped_column(Integer, ForeignKey("video_canvases.id", ondelete="CASCADE"), nullable=False, index=True)
+    version_no: Mapped[int] = mapped_column(Integer, nullable=False)
+    graph_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    source: Mapped[str] = mapped_column(String(30), nullable=False, default="manual")
+    change_summary: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    created_by_user_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("users.id"), nullable=True)
+    created_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class VideoCanvasLayout(Base):
+    """与执行定义分离的画布布局。"""
+    __tablename__ = "video_canvas_layouts"
+    __table_args__ = (UniqueConstraint("canvas_id", name="uq_video_canvas_layout"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    canvas_id: Mapped[int] = mapped_column(Integer, ForeignKey("video_canvases.id", ondelete="CASCADE"), nullable=False, index=True)
+    layout_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    revision: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    updated_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
+class VideoCanvasPlan(Base):
+    """视频画布计划的可确认执行快照。"""
+    __tablename__ = "video_canvas_plans"
+    __table_args__ = (
+        Index("ix_video_canvas_plans_canvas_status_updated", "canvas_id", "status", "updated_at"),
+        Index("ix_video_canvas_plans_owner_status_created", "owner_user_id", "status", "created_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    owner_user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    canvas_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("video_canvases.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    story_id: Mapped[int] = mapped_column(Integer, ForeignKey("stories.id"), nullable=False, index=True)
+    chapter_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("chapters.id"), nullable=True, index=True)
+    status: Mapped[str] = mapped_column(String(30), nullable=False, default="draft")
+    source_snapshot_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    screenplay_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    shot_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    asset_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    canvas_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    execution_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    workflow_id: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey("chapter_video_workflows.id"),
+        nullable=True,
+        index=True,
+    )
+    applied_canvas_revision: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    workflow_sync_revision: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    revision: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    created_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
+class CanvasAgentAction(Base):
+    """画布助手阶段提案、精确授权及执行记录；不存储认证凭据。"""
+    __tablename__ = "canvas_agent_actions"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    canvas_id: Mapped[int] = mapped_column(Integer, ForeignKey("video_canvases.id", ondelete="CASCADE"), nullable=False, index=True)
+    conversation_id: Mapped[int] = mapped_column(Integer, ForeignKey("agent_conversations.id", ondelete="CASCADE"), nullable=False, index=True)
+    owner_user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    permission_mode: Mapped[str] = mapped_column(String(16), nullable=False)
+    stage: Mapped[str] = mapped_column(String(32), nullable=False)
+    tool_name: Mapped[str] = mapped_column(String(64), nullable=False)
+    summary: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    arguments_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    expected_definition_revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String(24), nullable=False, default="pending")
+    result_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
+class VideoCanvasSyncRecord(Base):
+    """列表工作流导入与后续拉取更新的审计记录。"""
+    __tablename__ = "video_canvas_sync_records"
+    __table_args__ = (Index("ix_video_canvas_sync_canvas_source", "canvas_id", "source_workflow_id"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    canvas_id: Mapped[int] = mapped_column(Integer, ForeignKey("video_canvases.id", ondelete="CASCADE"), nullable=False, index=True)
+    source_workflow_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("chapter_video_workflows.id"), nullable=True)
+    action: Mapped[str] = mapped_column(String(30), nullable=False, default="import")
+    idempotency_key: Mapped[str | None] = mapped_column(String(100), nullable=True, unique=True)
+    before_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    after_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    result_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    created_by_user_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("users.id"), nullable=True)
+    created_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class VideoCanvasRun(Base):
+    """绑定冻结版本的画布运行记录。"""
+    __tablename__ = "video_canvas_runs"
+    __table_args__ = (
+        Index("ix_video_canvas_runs_canvas_created", "canvas_id", "created_at"),
+        UniqueConstraint("canvas_id", "idempotency_key", name="uq_video_canvas_run_idempotency"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    canvas_id: Mapped[int] = mapped_column(Integer, ForeignKey("video_canvases.id", ondelete="CASCADE"), nullable=False, index=True)
+    canvas_version_id: Mapped[int] = mapped_column(Integer, ForeignKey("video_canvas_versions.id"), nullable=False)
+    idempotency_key: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    status: Mapped[str] = mapped_column(String(30), nullable=False, default="queued")
+    scope_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    plan_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    requested_by_user_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("users.id"), nullable=True)
+    created_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now())
+    completed_at: Mapped[datetime.datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class VideoCanvasRunNode(Base):
+    """画布运行中单个节点的不可变输入输出和状态。"""
+    __tablename__ = "video_canvas_run_nodes"
+    __table_args__ = (UniqueConstraint("run_id", "node_id", "attempt", name="uq_video_canvas_run_node_attempt"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    run_id: Mapped[int] = mapped_column(Integer, ForeignKey("video_canvas_runs.id", ondelete="CASCADE"), nullable=False, index=True)
+    node_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    node_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    attempt: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    status: Mapped[str] = mapped_column(String(30), nullable=False, default="queued")
+    input_snapshot_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    output_snapshot_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    task_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    # 生成节点的预扣用量事件。任务异常退出时据此释放尚未结算的预留。
+    billing_usage_event_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    started_at: Mapped[datetime.datetime | None] = mapped_column(DateTime, nullable=True)
+    completed_at: Mapped[datetime.datetime | None] = mapped_column(DateTime, nullable=True)
 
 
 class BackgroundTask(Base):

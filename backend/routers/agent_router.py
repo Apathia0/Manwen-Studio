@@ -6,6 +6,9 @@ import shutil
 import sys
 import tempfile
 import uuid
+from services.canvas_ops_preview import describe_selected_nodes
+from services.canvas_style import describe_canvas_aspect, describe_canvas_style
+from functools import wraps
 from pathlib import Path
 from typing import Any
 
@@ -16,8 +19,8 @@ from sse_starlette.sse import EventSourceResponse
 from starlette.background import BackgroundTask as ResponseBackgroundTask
 
 from database import SessionLocal, get_db
-from models import AgentConversation, AgentConversationMessage, AgentPendingChange, Chapter, ChapterVideoShot, ChapterVideoWorkflow, MangaAsset, MangaImage, Story, VideoAsset
-from schemas import AgentChatIn, AgentConversationCreateIn, AgentConversationOut, AgentConversationSummaryOut
+from models import AgentConversation, AgentConversationMessage, AgentPendingChange, CanvasAgentAction, Chapter, ChapterVideoShot, ChapterVideoWorkflow, MangaAsset, MangaImage, Story, VideoAsset, VideoCanvas, VideoCanvasVersion
+from schemas import AgentChatIn, AgentConversationCreateIn, AgentConversationOut, AgentConversationSummaryOut, strip_internal_attachment_notes
 from services.agent_service import (
     AgentPendingChangeKey,
     _chapter_storyboard_text,
@@ -33,6 +36,14 @@ from services.agent_media import _extract_video_frames, _probe_video
 from services.errors import public_error_message
 from services.redaction import redact_sensitive_text
 from services.agent_media import multimodal_content, resolve_attachments, save_attachment
+from services.agent_reference_analysis import (
+    analyze_reference_media,
+    format_reference_context,
+    is_visual_attachment,
+    load_conversation_reference_analyses,
+    persist_reference_analysis,
+)
+from services.deepseek import _deepseek_auth_headers, runtime_base_url, runtime_model
 from services.media_locator import ensure_local_media_path
 from services.story_knowledge import build_agent_story_manifest
 
@@ -51,6 +62,83 @@ _release_db_transaction = _main._release_db_transaction
 _check_and_consume_advanced_text_quota = _main._check_and_consume_advanced_text_quota
 _detach_pending_platform_points = _main._detach_pending_platform_points
 _finish_streaming_platform_points = _main._finish_streaming_platform_points
+
+
+def _cleanup_media_on_request_error(handler):
+    """响应构造前失败时回收临时关键帧；成功响应仍由流的后台清理回收。"""
+    @wraps(handler)
+    async def wrapped(*args, **kwargs):
+        request = kwargs.get("request") or next((item for item in args if isinstance(item, Request)), None)
+        try:
+            return await handler(*args, **kwargs)
+        except BaseException:
+            for path in getattr(getattr(request, "state", None), "agent_media_temporary_paths", []):
+                shutil.rmtree(path, ignore_errors=True)
+            raise
+    return wrapped
+
+
+@router.get("/canvas-actions")
+async def list_canvas_actions(story_id: int, conversation_id: int, request: Request, db: Session = Depends(get_db)):
+    from services.canvas_agent_actions import serialize_action, serialize_waiting_tasks
+    user = _require_user(request, db)
+    _require_story_for_user(story_id, user, db)
+    _require_conversation(db, conversation_id=conversation_id, story_id=story_id, user_id=user.id)
+    actions = db.query(CanvasAgentAction).join(VideoCanvas, VideoCanvas.id == CanvasAgentAction.canvas_id).filter(
+        CanvasAgentAction.conversation_id == conversation_id,
+        CanvasAgentAction.owner_user_id == user.id,
+        VideoCanvas.story_id == story_id,
+        VideoCanvas.owner_user_id == user.id,
+    ).order_by(CanvasAgentAction.id.desc()).all()
+    waiting_tasks = serialize_waiting_tasks(actions)
+    return {
+        "actions": [serialize_action(item) for item in actions],
+        # Keep the legacy first item while exposing every recoverable waiting run.
+        "pending_task": waiting_tasks[0] if waiting_tasks else None,
+        "pending_tasks": waiting_tasks,
+    }
+
+
+@router.put("/canvas-actions/{action_id}")
+async def update_canvas_action(story_id: int, action_id: int, request: Request, db: Session = Depends(get_db)):
+    from services.canvas_agent_actions import serialize_action
+    user = _require_user(request, db)
+    _require_story_for_user(story_id, user, db)
+    action = db.query(CanvasAgentAction).filter(CanvasAgentAction.id == action_id, CanvasAgentAction.owner_user_id == user.id).with_for_update().first()
+    canvas = db.get(VideoCanvas, action.canvas_id) if action else None
+    if not action or not canvas or canvas.story_id != story_id or canvas.owner_user_id != user.id:
+        raise HTTPException(404, "阶段提案不存在")
+    _require_conversation(db, conversation_id=action.conversation_id, story_id=story_id, user_id=user.id)
+    if action.status != "pending" or canvas.definition_revision != action.expected_definition_revision:
+        raise HTTPException(409, "提案已执行或画布已变更，请重新提出阶段计划")
+    body = await request.json()
+    parameters = body.get("parameters") if isinstance(body, dict) else None
+    if not isinstance(parameters, dict):
+        raise HTTPException(422, "阶段参数必须是对象")
+    args = dict(action.arguments_json)
+    if action.tool_name == "canvas_stage":
+        args["parameters"] = parameters
+    else:
+        if not isinstance(parameters.get("operations"), list):
+            raise HTTPException(422, "节点编辑提案需要operations数组")
+        args["operations"] = parameters["operations"]
+    action.arguments_json = args
+    action.summary = str(body.get("summary") or action.summary)
+    if action.tool_name == "apply_canvas_ops":
+        # 用户改过操作后，旧预览已过期：基于最新已保存版本重新生成前后对比。
+        from services.canvas_ops_preview import build_ops_preview
+        latest = (
+            db.query(VideoCanvasVersion)
+            .filter(VideoCanvasVersion.canvas_id == canvas.id)
+            .order_by(VideoCanvasVersion.version_no.desc())
+            .first()
+        )
+        preview = build_ops_preview(latest.graph_json if latest else {"nodes": [], "edges": []}, args["operations"])
+        if preview.get("errors"):
+            raise HTTPException(422, "；".join(preview["errors"]))
+        action.result_json = {**(action.result_json or {}), "preview": preview}
+    db.commit()
+    return {"approval": serialize_action(action)}
 
 
 @router.post("/attachments")
@@ -520,6 +608,10 @@ def create_conversation(
         workflow = db.get(ChapterVideoWorkflow, body.workflow_id)
         if not workflow or workflow.story_id != story_id:
             raise HTTPException(422, "视频工作流不存在或不属于当前作品")
+    if body.workflow_type == "video_canvas":
+        canvas = db.get(VideoCanvas, body.workflow_id)
+        if not canvas or canvas.story_id != story_id or canvas.owner_user_id != user.id:
+            raise HTTPException(422, "视频画布不存在或不属于当前作品")
 
     conversation = AgentConversation(
         story_id=story_id,
@@ -562,7 +654,42 @@ def delete_conversation(
     return {"ok": True}
 
 
+_CANVAS_GRAPH_SNAPSHOT_MAX_NODES = 2000
+_CANVAS_GRAPH_SNAPSHOT_MAX_EDGES = 5000
+
+
+def _sanitize_canvas_graph_snapshot(payload: Any) -> dict[str, Any] | None:
+    """校验浏览器随消息上送的画布实时图快照；不合格返回 None 以回退数据库图。
+
+    只做结构与数量上限校验（防超大/畸形 body），内容不落库、不参与版本锁。
+    """
+    if not isinstance(payload, dict):
+        return None
+    nodes = payload.get("nodes")
+    edges = payload.get("edges", [])
+    if not isinstance(nodes, list) or not isinstance(edges, list):
+        return None
+    if len(nodes) > _CANVAS_GRAPH_SNAPSHOT_MAX_NODES or len(edges) > _CANVAS_GRAPH_SNAPSHOT_MAX_EDGES:
+        return None
+    for node in nodes:
+        if not isinstance(node, dict) or not isinstance(node.get("id"), str) or not isinstance(node.get("type"), str):
+            return None
+    for edge in edges:
+        if not isinstance(edge, dict) or not isinstance(edge.get("source"), str) or not isinstance(edge.get("target"), str):
+            return None
+    sanitized: dict[str, Any] = {"nodes": nodes, "edges": edges}
+    # 画风、画面比例、生产设置都在 metadata 里，分组在 groups 里；快照会作为阶段写库的基图，丢了它们就会把这些设置抹掉。
+    if isinstance(payload.get("metadata"), dict):
+        sanitized["metadata"] = payload["metadata"]
+    if isinstance(payload.get("groups"), list):
+        sanitized["groups"] = payload["groups"]
+    if "schema_version" in payload:
+        sanitized["schema_version"] = payload["schema_version"]
+    return sanitized
+
+
 @router.post("/chat")
+@_cleanup_media_on_request_error
 async def agent_chat(
     story_id: int,
     body: AgentChatIn,
@@ -602,6 +729,10 @@ async def agent_chat(
         conversation_id=persisted_conversation_id,
     )
 
+    user_attachments = attachments
+    for item in user_attachments:
+        item["source"] = "user_upload"
+
     current_chapter = None
     current_chapter_id = body.chapter_id
     if current_chapter_id:
@@ -627,10 +758,83 @@ async def agent_chat(
     workflow_type = body.workflow_type
     workflow_id = body.workflow_id
     shot_id = body.shot_id
+    canvas_graph_snapshot: dict[str, Any] | None = None
+
+    if workflow_type == "video_canvas" and workflow_id:
+        canvas = db.get(VideoCanvas, workflow_id)
+        if not canvas or canvas.story_id != story_id or canvas.owner_user_id != user.id:
+            raise HTTPException(422, "视频画布不存在或不属于当前作品")
+        client_graph = _sanitize_canvas_graph_snapshot(body.canvas_graph)
+        if client_graph is not None:
+            # 读路径优先浏览器实时快照（含未保存修改），不再读数据库图。
+            graph = client_graph
+            canvas_graph_snapshot = client_graph
+            graph_source_label = "浏览器实时快照（含未保存修改）"
+        else:
+            version = (
+                db.query(VideoCanvasVersion)
+                .filter(VideoCanvasVersion.canvas_id == canvas.id)
+                .order_by(VideoCanvasVersion.version_no.desc())
+                .first()
+            )
+            graph = version.graph_json if version else {"nodes": [], "edges": []}
+            if not isinstance(graph, dict):
+                graph = {"nodes": [], "edges": []}
+            graph_source_label = "已保存版本"
+        nodes = graph.get("nodes") if isinstance(graph, dict) else []
+        edges = graph.get("edges") if isinstance(graph, dict) else []
+        node_summary = [
+            {
+                "id": node.get("id"),
+                "type": node.get("type"),
+                "label": (node.get("data") or {}).get("label"),
+            }
+            for node in nodes[:80]
+            if isinstance(node, dict)
+        ]
+        story_context += (
+            "\n\n## 当前视频无限画布\n"
+            f"画布 ID: {canvas.id}\n"
+            f"名称: {canvas.name}\n"
+            f"定义版本: {canvas.definition_revision}\n"
+            f"图来源: {graph_source_label}\n"
+            f"节点数: {len(nodes) if isinstance(nodes, list) else 0}\n"
+            f"连线数: {len(edges) if isinstance(edges, list) else 0}\n"
+            f"节点摘要: {json.dumps(node_summary, ensure_ascii=False)}\n"
+            f"{describe_canvas_style(graph)}\n"
+            f"{describe_canvas_aspect(graph)}\n"
+            f"{describe_selected_nodes(graph, body.canvas_selected_node_ids or []) if isinstance(graph, dict) else ''}\n"
+            "该画布与列表分镜工作流独立。可以给出节点、连线、资产和风格建议；"
+            "实际制作使用canvas_stage，权限由本轮plan/ask/auto模式在服务端控制。"
+        )
 
     # 漫画工作流自动附带当前章节的已生成图片，用户无需重复上传即可让视觉模型检查画面。
     context_image_attachments: list[dict[str, Any]] = []
     temporary_context_paths: list[Path] = []
+    request.state.agent_media_temporary_paths = temporary_context_paths
+    # 点确认卡片、后台任务续接这类运行只是执行已确认的动作，不需要重新看图；每轮自动附 6 张图既费 token 又刷屏。
+    is_structured_followup = bool(body.canvas_approval_id or body.canvas_resume_run_id)
+    if workflow_type == "video_canvas" and workflow_id and not is_structured_followup:
+        from services.canvas_media_context import build_canvas_media_context
+        # 每轮不自动附图：节点内容（含选中节点全文）与生成状态都以文本提供，助手需要视觉验收时再调用 inspect_canvas_media。
+        canvas_media = await build_canvas_media_context(db, workflow_id, [])
+        context_image_attachments.extend(canvas_media.get("attachments") or [])
+        temporary_context_paths.extend(Path(item) for item in canvas_media.get("temporary_paths") or [])
+        story_context += "\n\n## 当前画布真实媒体观察\n" + str(canvas_media.get("summary") or "当前没有可供观察的本地生成产物。")
+        story_context += "\n只能报告实际可见画面；视频关键帧不能证明对白、声线或连续动作，不得虚报已听过音轨或完整审片。"
+        for item in canvas_media.get("attachments") or []:
+            item.setdefault("source", "canvas_media")
+        # 本会话此前上传并已分析的参考素材：图片本身不再重复传给模型，沿用持久化的风格分析结论。
+        story_context += format_reference_context(
+            load_conversation_reference_analyses(
+                db,
+                owner_user_id=user.id,
+                story_id=story_id,
+                conversation_id=persisted_conversation_id,
+                exclude_ids=[str(item.get("id")) for item in user_attachments],
+            ),
+            title="参考素材分析（本会话此前上传）",
+        )
     if workflow_type == "manga" and current_chapter:
         backend_root = Path(__file__).resolve().parent.parent
         manga_images = (
@@ -728,9 +932,10 @@ async def agent_chat(
         conversation.title = _conversation_title_from_text(content)
 
     attachment_note = ""
-    if attachments:
+    if user_attachments:
+        # 只记录用户自己上传的附件；系统自动附带的画布媒体观察不写进对话记录，避免每条消息都刷一串附件。
         attachment_note = "\n\n" + "\n".join(
-            f"[附件] {item['filename']}（{item['media_kind']}）" for item in attachments
+            f"[附件] {item['filename']}（{item['media_kind']}）" for item in user_attachments
         )
     user_message = AgentConversationMessage(
         conversation_id=persisted_conversation_id,
@@ -747,13 +952,26 @@ async def agent_chat(
         _release_agent_run(persisted_conversation_id, run_id)
         raise
 
+    summary_upto_id = int(conversation.history_summary_upto_message_id or 0)
+    persisted_summary = str(conversation.history_summary or "").strip() if summary_upto_id else ""
     history_records = (
         db.query(AgentConversationMessage)
         .filter(AgentConversationMessage.conversation_id == persisted_conversation_id)
         .order_by(AgentConversationMessage.created_at.asc(), AgentConversationMessage.id.asc())
         .all()
     )
-    history = [{"role": item.role, "content": item.content} for item in history_records]
+    if persisted_summary:
+        history_records = [item for item in history_records if item.id > summary_upto_id]
+    history_message_ids = [item.id for item in history_records]
+    # 历史消息里早期写入的“自动附带媒体”记录行不再发给模型（它们是内部查看，不是用户输入）。
+    history = [{"role": item.role, "content": strip_internal_attachment_notes(item.content)} for item in history_records]
+    if persisted_summary:
+        escaped_summary = persisted_summary.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        history.insert(0, {
+            "role": "user",
+            "_agent_synthetic_context": "history",
+            "content": "## 对话历史摘要\n\n" + escaped_summary,
+        })
     if attachments and history:
         # 数据库存储纯文本，发送给模型时为最后一条用户消息附加多模态结构。
         history[-1]["content"] = multimodal_content(content, attachments)
@@ -831,10 +1049,61 @@ async def agent_chat(
             finally:
                 write_db.close()
 
+        def persist_history_summary(summary_text: str, upto_message_id: int) -> None:
+            """压缩产生的摘要落库，后续轮次直接复用，避免每轮重新调用模型摘要。"""
+            summary_db = SessionLocal()
+            try:
+                target = summary_db.get(AgentConversation, persisted_conversation_id)
+                if target is None or int(target.history_summary_upto_message_id or 0) >= upto_message_id:
+                    return
+                target.history_summary = summary_text
+                target.history_summary_upto_message_id = upto_message_id
+                summary_db.commit()
+            except Exception as exc:
+                summary_db.rollback()
+                logger.warning("历史摘要持久化失败，已忽略: %s", exc)
+            finally:
+                summary_db.close()
+
+        run_story_context = story_context
         try:
+            if workflow_type == "video_canvas" and any(is_visual_attachment(item) for item in user_attachments):
+                # 带思考的独立预分析：结论持久化到附件元数据，供后续轮次复用；失败则按原路径继续。
+                yield {"event": "status", "data": json.dumps({"message": "正在分析参考素材…"}, ensure_ascii=False)}
+                analysis_result = await analyze_reference_media(
+                    user_attachments,
+                    user_text=content,
+                    api_key=deepseek_api_key,
+                    base_url=runtime_base_url(),
+                    model=runtime_model(),
+                    headers_factory=_deepseek_auth_headers,
+                )
+                if analysis_result:
+                    visual_items = [item for item in user_attachments if is_visual_attachment(item)]
+                    analysis_db = SessionLocal()
+                    try:
+                        persist_reference_analysis(analysis_db, [str(item["id"]) for item in visual_items], analysis_result["analysis"])
+                    except Exception as exc:
+                        analysis_db.rollback()
+                        logger.warning("参考素材分析持久化失败，已忽略: %s", exc)
+                    finally:
+                        analysis_db.close()
+                    run_story_context += format_reference_context(
+                        [{
+                            "filename": "、".join(str(item.get("filename")) for item in visual_items),
+                            "media_kind": visual_items[0].get("media_kind", "image"),
+                            "analysis": analysis_result["analysis"],
+                        }],
+                        title="参考素材分析（本轮上传）",
+                    )
+                    if analysis_result["used_vision_model"] and history:
+                        # 已配置独立视觉模型：主模型可能不支持视觉，改用分析文本，不再传图。
+                        history[-1]["content"] = content + "\n\n（参考素材已由视觉模型分析，结论见上下文。）"
             async for event in agent_service.run_stream(
                 messages=history,
-                story_context=story_context,
+                story_context=run_story_context,
+                history_message_ids=history_message_ids,
+                on_history_compressed=persist_history_summary,
                 api_key=deepseek_api_key,
                 story_id=story_id,
                 pending_change_key=pending_change_key,
@@ -843,6 +1112,14 @@ async def agent_chat(
                 shot_id=shot_id,
                 chapter_id=body.chapter_id,
                 enabled_skills=body.enabled_skills,
+                canvas_permission_mode=body.canvas_permission_mode,
+                canvas_approval_id=body.canvas_approval_id,
+                canvas_revision_approval_id=body.canvas_revision_approval_id,
+                canvas_resume_run_id=body.canvas_resume_run_id,
+                canvas_request=request,
+                canvas_graph_snapshot=canvas_graph_snapshot,
+                canvas_graph_write_mode=body.canvas_graph_write_mode if workflow_type == "video_canvas" else "server",
+                canvas_client_revision=body.canvas_client_revision if workflow_type == "video_canvas" else 0,
                 run_id=run_id,
                 db=db,
             ):
@@ -928,6 +1205,9 @@ async def agent_chat(
         except Exception as exc:
             logger.exception("Agent stream failed")
             public_message = public_error_message(exc, "AI 助手执行失败，请稍后重试")
+            if isinstance(exc, HTTPException) and isinstance(exc.detail, str) and any("\u4e00" <= ch <= "\u9fff" for ch in exc.detail):
+                # 业务校验类 HTTPException 的中文原因本身就是给用户看的，不要被 409 等通用文案掩盖。
+                public_message = exc.detail
             error_code = str(getattr(exc, "code", "agent_stream_failed") or "agent_stream_failed")
             settle_billing(success=bool(collected), error_code=None if collected else "stream_failed")
             if not assistant_saved:

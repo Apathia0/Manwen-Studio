@@ -360,8 +360,15 @@ def multimodal_content(text: str, attachments: list[dict[str, Any]]) -> list[dic
             raise HTTPException(413, "附件视觉输入总量过大，请减少附件数量或压缩图片")
         return f"data:image/jpeg;base64,{base64.b64encode(encoded_bytes).decode('ascii')}"
 
+    source_labels = {
+        "user_upload": "用户上传的参考素材",
+        "canvas_media": "画布已生成的产物（不是用户提供的参考，做风格反推时不要把它当作参考图）",
+    }
     for item in attachments:
         media_kind = item.get("media_kind")
+        source_label = source_labels.get(str(item.get("source") or ""))
+        if source_label and media_kind in {"image", "video"}:
+            content.append({"type": "text", "text": f"[{source_label}《{item.get('filename')}》]"})
         if media_kind == "image":
             content.append({"type": "image_url", "image_url": {"url": image_data_url(item["path"], item["content_type"])}})
         elif media_kind == "video":
@@ -373,4 +380,70 @@ def multimodal_content(text: str, attachments: list[dict[str, Any]]) -> list[dic
             content.append({"type": "text", "text": f"[文件《{item['filename']}》内容]\n{item['text_excerpt']}"})
         else:
             content.append({"type": "text", "text": f"[文件《{item['filename']}》] 当前模型无法直接读取该格式，请结合用户说明进行处理。"})
+    return content
+
+
+def _observation_max_edge(image_count: int) -> int:
+    """一次看的图越多，单张分辨率越低，让同样的容量装下更多画面（审查构图、人物、道具足够）。"""
+    if image_count <= 6:
+        return 1600
+    if image_count <= 16:
+        return 1024
+    return 768
+
+
+def _encode_observation_image(path: str, max_edge: int) -> bytes:
+    with Image.open(Path(path)) as image:
+        image = image.convert("RGB")
+        image.thumbnail((max_edge, max_edge))
+        output = BytesIO()
+        image.save(output, format="JPEG", quality=80, optimize=True)
+    return output.getvalue()
+
+
+def canvas_observation_content(summary: str, attachments: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """构建画布观察专用多模态消息，图片只进入模型输入，不进入工具文本或 SSE。
+
+    助手主动查看的图片数量不设上限：单条消息装不下时，超出部分不附图并在消息里列出节点，
+    由助手再次调用 inspect_canvas_media 分批查看；不会像用户附件那样因超量直接报错中断。
+    """
+    lines = [
+        "## 画布媒体观察附件",
+        "以下图片由服务端在完整工具回执之后追加，每张图前都标注了 node/run/version/asset。",
+        "请只基于实际附图描述观察结论；旧版、失败或未附图节点不能当作当前画面。",
+    ]
+    if summary:
+        lines.append(summary)
+    content: list[dict[str, Any]] = [{"type": "text", "text": "\n".join(lines)}]
+    max_edge = _observation_max_edge(len(attachments))
+    detail = str((attachments[0] or {}).get("detail") or "auto") if attachments else "auto"
+    if detail == "low":
+        max_edge = 768
+    elif detail == "high":
+        max_edge = 1600
+    total_bytes = 0
+    deferred: list[str] = []
+    for item in attachments:
+        node_ref = str(item.get("node_id") or item.get("filename") or "")
+        try:
+            encoded = _encode_observation_image(str(item["path"]), max_edge)
+        except Exception:
+            content.append({"type": "text", "text": f"[{item.get('filename')}] 图片文件无法读取，本次未附图。"})
+            continue
+        if total_bytes + len(encoded) > MAX_MULTIMODAL_BYTES:
+            if node_ref and node_ref not in deferred:
+                deferred.append(node_ref)
+            continue
+        total_bytes += len(encoded)
+        excerpt = str(item.get("prompt_excerpt") or "").strip()
+        label = f"[{item.get('filename')}]" + (f" 当前提示词：{excerpt}" if excerpt else "")
+        content.append({"type": "text", "text": label})
+        content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64.b64encode(encoded).decode('ascii')}"}})
+    if deferred:
+        content.append({
+            "type": "text",
+            "text": "本条消息的附图已达单次容量，以下节点这次没有附图："
+            + "、".join(deferred)
+            + "。需要的话请再次调用 inspect_canvas_media 传入这些节点继续查看（总数量不限，可分多批）。",
+        })
     return content

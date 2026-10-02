@@ -40,6 +40,15 @@ button {
   }
 }
 
+/* 画布浮层里的紧凑控件：上面的全局 16px 规则没有放进样式分层，会压过 Tailwind 的字号类。
+   revert-layer 让这些控件回到类名指定的字号（没有指定时回落到基础样式）。 */
+.compact-controls input,
+.compact-controls select,
+.compact-controls textarea,
+.compact-controls button {
+  font-size: revert-layer;
+}
+
 /* Custom scrollbar */
 ::-webkit-scrollbar {
   width: 8px;

@@ -3,6 +3,7 @@ import { ChevronLeft, ChevronRight, Images, Inbox, Play, X } from 'lucide-react'
 import { listAssets, type CrossStoryAsset } from '../api';
 import { toast } from '../lib/toast';
 import { Button } from './ui';
+import MediaImage from './shared/MediaImage';
 
 /** 每页加载条数 */
 const PAGE_SIZE = 24;
@@ -59,10 +60,9 @@ function AssetCard({ asset, onOpen }: { asset: CrossStoryAsset; onOpen: () => vo
             </div>
           </>
         ) : (
-          <img
+          <MediaImage
             src={asset.url}
             alt={asset.name}
-            loading="lazy"
             className="aspect-square w-full object-cover transition duration-300 group-hover:scale-105"
           />
         )}
@@ -161,7 +161,7 @@ function PreviewModal({ asset, canNavigate, onClose, onPrev, onNext }: PreviewMo
         {asset.media_type === 'video' ? (
           <video src={asset.url} controls autoPlay playsInline className="max-h-[72vh] w-full bg-black object-contain md:rounded-lg" />
         ) : (
-          <img src={asset.url} alt={asset.name} className="max-h-[72vh] w-auto max-w-full object-contain md:rounded-lg" />
+          <MediaImage src={asset.url} alt={asset.name} className="max-h-[72vh] w-auto max-w-full object-contain md:rounded-lg" />
         )}
         <div className="mt-3 px-4 text-center text-white">
           <div className="text-sm font-medium">{asset.name}</div>

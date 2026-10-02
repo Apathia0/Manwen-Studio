@@ -22,6 +22,7 @@ venv/
 .venv-backend/
 .codegraph/
 test_*.py
+.playwright-mcp
 # ─── Node ───
 node_modules/
 frontend/node_modules/
@@ -68,12 +69,28 @@ backend/tests/
 !backend/tests/
 backend/tests/*
 !backend/tests/test_chapter_generation_length_policy.py
+!backend/tests/test_video_duration_normalization.py
+!backend/tests/test_screenplay_adapt.py
 !backend/tests/test_onboarding.py
 !backend/tests/test_agent_content_sanitization.py
 !backend/tests/test_agent_api_validation_pending_runs.py
 !backend/tests/test_agent_multimodal_errors.py
 !backend/tests/test_agent_policy_boundaries.py
 !backend/tests/test_story_knowledge.py
+!backend/tests/test_video_canvas_runtime.py
+!backend/tests/test_video_canvas_director.py
+!backend/tests/test_video_canvas_containers.py
+!backend/tests/test_video_canvas_execution_recovery.py
+!backend/tests/test_video_canvas_recovery_api.py
+!backend/tests/test_video_canvas_graph.py
+!backend/tests/test_video_chapter_pipeline.py
+!backend/tests/test_video_compiler.py
+!backend/tests/test_canvas_stage_gateway.py
+!backend/tests/test_canvas_media_context.py
+!backend/tests/test_canvas_agent_actions.py
+!backend/tests/test_canvas_director_quality.py
+!backend/tests/test_screenplay_preserve.py
+!backend/tests/test_canvas_visual_review.py
 !backend/tests/test_storyboard_presets.py
 !backend/tests/test_storyboard_user_presets.py
 !backend/tests/test_agent_video_mutations.py
@@ -114,8 +131,11 @@ lorevista-mobile/dist/
 *.md
 !README.md
 !AGENTS.md
+!THIRD_PARTY_NOTICES.md
 !deploy/docker/RELEASE_AND_UPDATE.md
 !deploy/docker/FAQ.md
+!docs/video-canvas-workflow-development.md
+!docs/manga-drama-canvas-plan.md
 !docs/superpowers/**/*.md
 !backend/references/writing/*.md
 

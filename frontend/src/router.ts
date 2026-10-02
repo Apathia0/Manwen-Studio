@@ -5,6 +5,8 @@ export type RouteKey =
   | 'register'
   | 'pricing'
   | 'stories'
+  | 'manga-drama'
+  | 'manga-drama-workspace'
   | 'creation-studio'
   | 'model-catalog'
   | 'onboarding'
@@ -36,6 +38,8 @@ export const ROUTE_PATHS: Record<RouteKey, string> = {
   register: '/register',
   pricing: '/pricing',
   stories: '/stories',
+  'manga-drama': '/manga-drama',
+  'manga-drama-workspace': '/manga-drama/workspace',
   'creation-studio': '/creation-studio',
   'model-catalog': '/model-catalog',
   onboarding: '/onboarding',
@@ -68,7 +72,14 @@ const PATH_TO_ROUTE: Record<string, RouteKey> = Object.fromEntries(
 export function pathToRouteKey(pathname: string): RouteKey {
   if (/^\/deconstruction\/(\d+|new)$/.test(pathname)) return 'deconstruction-library';
   if (/^\/workspace\/\d+$/.test(pathname)) return 'workspace';
+  if (/^\/manga-drama\/workspace\/\d+$/.test(pathname)) return 'manga-drama-workspace';
   return PATH_TO_ROUTE[pathname] ?? 'landing';
+}
+
+/** 从 /manga-drama/workspace/:storyId 解析漫剧项目 ID（无匹配返回 null） */
+export function parseMangaDramaStoryId(pathname: string): number | null {
+  const match = pathname.match(/^\/manga-drama\/workspace\/(\d+)$/);
+  return match ? Number(match[1]) : null;
 }
 
 /** 从 /deconstruction/:id 解析拆书工作 ID；/deconstruction/new 返回 -1（新建模式）；无匹配返回 0 = 列表页 */

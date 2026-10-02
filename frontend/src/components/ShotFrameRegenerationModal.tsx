@@ -219,9 +219,10 @@ function ShotFrameRegenerationModal({
                     ref={imageRef}
                     src={imageSrc}
                     alt={title}
-                    onLoad={() => {
-                      setImageLoaded(true);
-                      syncCanvasSize();
+                    onLoad={(event) => {
+                      const image = event.currentTarget;
+                      const finish = () => { setImageLoaded(true); syncCanvasSize(); };
+                      if (typeof image.decode === 'function') void image.decode().catch(() => undefined).finally(finish); else finish();
                     }}
                     draggable={false}
                     className={`block max-h-[72vh] max-w-full rounded-2xl object-contain shadow-2xl ${imageLoaded ? 'opacity-100' : 'opacity-0'}`}

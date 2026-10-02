@@ -267,7 +267,7 @@ export function PointsAiAdminPage() {
   const [applyingPrices, setApplyingPrices] = useState(false);
   const [capabilitiesModelId, setCapabilitiesModelId] = useState<number | null>(null);
   const [capabilitiesDraft, setCapabilitiesDraft] = useState('');
-  const [selectedVideoPreset, setSelectedVideoPreset] = useState<VideoAdapterType | ''>('');
+  const [selectedVideoPreset, setSelectedVideoPreset] = useState<VideoAdapterType | 'custom' | ''>('');
   const [priceForm, setPriceForm] = useState({
     billing_type: 'per_1m_tokens',
     points: DEFAULT_TEXT_POINTS_PER_1M_TOKENS,
@@ -1395,6 +1395,10 @@ export function PointsAiAdminPage() {
                       value={selectedVideoPreset}
                       aria-label="应用视频参数预设"
                       onChange={(event) => {
+                        if (event.target.value === 'custom') {
+                          setSelectedVideoPreset('custom');
+                          return;
+                        }
                         if (!isVideoAdapterType(event.target.value)) return;
                         setSelectedVideoPreset(event.target.value);
                         const draft = applyVideoModelCapabilitiesPreset(
@@ -1413,6 +1417,7 @@ export function PointsAiAdminPage() {
                       }}
                     >
                       <option value="">请选择视频参数预设</option>
+                      <option value="custom">自定义参数配置</option>
                       {VIDEO_ADAPTER_PRESETS.map((preset) => (
                         <option key={preset.id} value={preset.id}>{preset.label}</option>
                       ))}

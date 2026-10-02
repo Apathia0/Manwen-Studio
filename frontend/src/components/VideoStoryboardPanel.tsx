@@ -12,6 +12,7 @@ import {
 } from '../api';
 import { ImageRedrawModal } from './shared/ImageRedrawModal';
 import ImageZoomView from './shared/ImageZoomView';
+import MediaImage from './shared/MediaImage';
 import AssetReferenceSelector from './AssetReferenceSelector';
 import { toast } from '../lib/toast';
 import { readResponseError } from '../lib/errors';
@@ -204,7 +205,7 @@ function AssetCard3({
               className="relative group w-10 h-10 rounded-lg overflow-hidden border border-slate-200 bg-slate-100 shrink-0"
               title={a.name}
             >
-              <img src={toAssetUrl(a.file_path)} alt={a.name} className="w-full h-full object-cover" />
+              <MediaImage src={toAssetUrl(a.file_path)} alt={a.name} className="w-full h-full object-cover" />
               {a.is_master && <span className="absolute top-0 left-0 px-0.5 rounded-br bg-blue-500 text-[6px] text-white">主</span>}
               {onDirectDeleteAsset && (
                 <button
@@ -330,7 +331,7 @@ function MultiAssetWorkbench({
                   }`}
                 >
                   {item.isAsset && item.imageSrc ? (
-                    <img src={item.imageSrc} alt="" className="w-7 h-7 rounded object-cover shrink-0" />
+                    <MediaImage src={item.imageSrc} alt="" className="w-7 h-7 rounded object-cover shrink-0" />
                   ) : (
                     <Sparkles size={14} className="text-violet-400 shrink-0" />
                   )}
@@ -1312,7 +1313,7 @@ export default function VideoStoryboardPanel({
 
       {viewImage && (
         <div className="fixed inset-0 z-[65] bg-black/80 flex items-center justify-center cursor-zoom-out" onClick={() => setViewImage(null)}>
-          <img src={viewImage} alt="预览" className="max-h-[90vh] max-w-[90vw] object-contain rounded-xl shadow-2xl" />
+          <MediaImage src={viewImage} alt="预览" className="max-h-[90vh] max-w-[90vw] object-contain rounded-xl shadow-2xl" />
         </div>
       )}
 

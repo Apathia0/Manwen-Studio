@@ -539,6 +539,79 @@ export interface Story {
   created_at: string;
 }
 
+/** Novel autopilot data stored in the story bible or supplied by a host workflow. */
+export interface CreativeProfile {
+  platform_mode: string;
+  audience_mode: string;
+  genre: string;
+  custom_genre?: string;
+  pace_mode: string;
+  target_length: string;
+  creation_goal: string;
+}
+
+export interface OpeningPlanResponse {
+  book_hook: string;
+  chapter_1_hook: string;
+  chapter_3_hook: string;
+  chapter_10_payoff: string;
+  chapter_20_climax: string;
+  opening_notes: string[];
+}
+
+export interface VolumeItem {
+  id: string;
+  title: string;
+  summary: string;
+  goal: string;
+  core_conflict: string;
+  climax: string;
+  ending_hook: string;
+  chapter_start: number;
+  chapter_end: number;
+  linked_phase: string;
+}
+
+export interface ChapterGoalCard {
+  chapter_number: number;
+  goal: string;
+  plot_progress: string[];
+  relationship_change: string[];
+  hook: string;
+  payoff: string;
+  scene_suggestions: string[];
+}
+
+export type ConsistencyIssueSeverity = 'high' | 'medium' | 'low' | string;
+
+export interface ConsistencyIssue {
+  type: string;
+  severity: ConsistencyIssueSeverity;
+  message: string;
+  suggestion?: string;
+  chapter_number?: number | null;
+}
+
+export interface ConsistencyCheckResponse {
+  issues: ConsistencyIssue[];
+}
+
+export interface WritingMonitorResponse {
+  current_stage: string;
+  current_volume?: string | null;
+  inactive_characters: string[];
+  pace_alerts: string[];
+  next_recommendations: string[];
+}
+
+export interface PublishingPackageResponse {
+  titles: string[];
+  summary: string;
+  selling_points: string[];
+  platform_tags: string[];
+  submission_notes: string;
+}
+
 export type StoryKnowledgeKind = 'resource' | 'entity' | 'fact' | 'plot_thread';
 
 export interface StoryKnowledgeCategory {
@@ -720,7 +793,7 @@ export interface AgentConversation {
   messages: AgentConversationMessage[];
 }
 
-export type AgentWorkflowType = 'novel' | 'manga' | 'video';
+export type AgentWorkflowType = 'novel' | 'manga' | 'video' | 'video_canvas';
 
 export interface AgentWorkflowContext {
   workflow_type?: AgentWorkflowType | null;
@@ -3053,6 +3126,55 @@ export async function getMangaExportManifest(chapterId: number): Promise<MangaEx
   return res.json();
 }
 
+export type CanvasPermissionMode = 'plan' | 'auto' | 'ask';
+/** 画布变更预览中单个字段的前后对比。 */
+export interface CanvasPreviewFieldChange { field: string; before: unknown; after: unknown }
+export interface CanvasPreviewNodeItem {
+  op: 'add_node' | 'update_node' | 'delete_node';
+  node_id: string;
+  label: string;
+  type?: string;
+  changes: CanvasPreviewFieldChange[];
+}
+export interface CanvasPreviewEdgeItem { op: 'add_edge' | 'delete_edge'; source: string; target: string; source_label: string; target_label: string }
+/** 助手提出的画布改动在写入前的预览（由后端按修改前后的图差异生成）。 */
+export interface CanvasOpsPreview {
+  nodes: CanvasPreviewNodeItem[];
+  edges: CanvasPreviewEdgeItem[];
+  summary: { added_nodes: number; updated_nodes: number; deleted_nodes: number; added_edges: number; deleted_edges: number };
+  errors?: string[];
+}
+export interface CanvasAgentApproval {
+  id: number;
+  preview?: CanvasOpsPreview | null;
+  canvas_id?: number;
+  permission_mode?: CanvasPermissionMode;
+  result?: { pending_task?: CanvasAgentPendingTask };
+  stage: string;
+  summary: string;
+  parameters: Record<string, unknown>;
+  expected_definition_revision?: number;
+  status: string;
+}
+export interface CanvasAgentPendingTask { canvas_id: number; run_id: number; status: string; permission_mode?: CanvasPermissionMode }
+export interface CanvasAgentRequestOptions {
+  canvas_permission_mode?: CanvasPermissionMode;
+  canvas_approval_id?: number;
+  canvas_revision_approval_id?: number;
+  canvas_resume_run_id?: number;
+  /** 浏览器实时画布图快照（含未保存修改），仅随 video_canvas 工作流上送，后端读取时优先于数据库图 */
+  canvas_graph?: VideoCanvasGraph;
+  canvas_graph_write_mode?: 'local' | 'server';
+  canvas_client_revision?: number;
+  /** 用户在画布上当前选中的节点 ID，助手据此定位“这个节点” */
+  canvas_selected_node_ids?: string[];
+}
+export async function getCanvasAgentActions(storyId: number, conversationId: number): Promise<{ actions: CanvasAgentApproval[]; pending_task?: CanvasAgentPendingTask | null }> {
+  const res = await fetch(`${BASE}/api/stories/${storyId}/agent/canvas-actions?conversation_id=${conversationId}`, { headers: apiHeaders() });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '读取待审批阶段失败'));
+  return res.json();
+}
+
 export function agentChatStream(
   storyId: number,
   conversationId: number,
@@ -3068,8 +3190,13 @@ export function agentChatStream(
     onToolCall?: (toolCall: { id: string; name: string; args: any; status: 'running' }) => void;
     onToolResult?: (toolCall: { id: string; name: string; args: any; status: 'success' | 'error'; summary?: string }) => void;
     onDone?: (content: string, pendingChanges?: any[], runId?: string) => void;
+    onStagePending?: (approval: CanvasAgentApproval) => void;
+    onWaiting?: (task: CanvasAgentPendingTask) => void;
+    onStatus?: (message: string) => void;
+    onCanvasUpdated?: (payload?: { canvas_id?: number; write_mode?: 'local' | 'server'; graph?: VideoCanvasGraph; operations?: unknown[]; client_revision?: number; source?: string }) => void;
     onError?: (error: { message: string; code?: string }) => void;
   },
+  canvasOptions?: CanvasAgentRequestOptions,
 ): AbortController {
   const controller = new AbortController();
   const toolCalls = new Map<string, { id: string; name: string; args: any; status: 'running' | 'success' | 'error'; summary?: string }>();
@@ -3077,7 +3204,7 @@ export function agentChatStream(
   fetch(`${BASE}/api/stories/${storyId}/agent/chat`, {
     method: 'POST',
     headers: apiHeaders(true),
-    body: JSON.stringify({ conversation_id: conversationId, message: content, chapter_id: chapterId, workflow_type: workflowType, workflow_id: workflowId, shot_id: shotId, enabled_skills: enabledSkills, attachment_ids: attachmentIds }),
+    body: JSON.stringify({ conversation_id: conversationId, message: content, chapter_id: chapterId, workflow_type: workflowType, workflow_id: workflowId, shot_id: shotId, enabled_skills: enabledSkills, attachment_ids: attachmentIds, ...(workflowType === 'video_canvas' ? canvasOptions : {}) }),
     signal: controller.signal,
   })
     .then(async (res) => {
@@ -3149,8 +3276,18 @@ export function agentChatStream(
               };
               toolCalls.set(key, toolCall);
               callbacks?.onToolResult?.(toolCall);
+            } else if (currentEvent === 'stage_pending' && data.approval) {
+              callbacks?.onStagePending?.(data.approval);
+            } else if (currentEvent === 'status' && typeof data.message === 'string') {
+              callbacks?.onStatus?.(data.message);
+            } else if (currentEvent === 'waiting' && data.pending_task) {
+              callbacks?.onWaiting?.(data.pending_task);
+            } else if (currentEvent === 'canvas_updated') {
+              callbacks?.onCanvasUpdated?.(data);
             } else if (currentEvent === 'done') {
               terminalEventReceived = true;
+              if (data.approval) callbacks?.onStagePending?.(data.approval);
+              if (data.pending_task) callbacks?.onWaiting?.(data.pending_task);
               callbacks?.onDone?.(data.content ?? '', data.pending_changes, data.run_id);
             } else if (currentEvent === 'error' || data.error) {
               terminalEventReceived = true;
@@ -3542,6 +3679,799 @@ export interface ChapterVideoWorkflowStatus {
   retry_count?: number;
   max_retries?: number;
   next_retry_at?: string | null;
+}
+
+export interface VideoCanvasPort {
+  key: string;
+  type: string;
+  required?: boolean;
+  multiple?: boolean;
+}
+
+export interface VideoCanvasNodeCatalogItem {
+  type: string;
+  label: string;
+  category: string;
+  icon?: string;
+  inputs: VideoCanvasPort[];
+  outputs: VideoCanvasPort[];
+  executable?: boolean;
+}
+
+export interface VideoCanvasGraphNode {
+  id: string;
+  type: string;
+  position: { x: number; y: number };
+  data: {
+    label?: string;
+    config?: Record<string, unknown>;
+    origin?: Record<string, unknown>;
+    [key: string]: unknown;
+  };
+}
+
+export interface VideoCanvasGraphEdge {
+  id: string;
+  source: string;
+  target: string;
+  sourceHandle?: string | null;
+  targetHandle?: string | null;
+  data?: Record<string, unknown>;
+}
+
+export interface VideoCanvasGraph {
+  schema_version: number;
+  nodes: VideoCanvasGraphNode[];
+  edges: VideoCanvasGraphEdge[];
+  groups?: unknown[];
+  metadata?: Record<string, unknown>;
+}
+
+export interface VideoCanvasRunNode {
+  id: number;
+  node_id: string;
+  node_type: string;
+  attempt: number;
+  status: string;
+  input_snapshot?: Record<string, unknown> | null;
+  output_snapshot?: Record<string, unknown> | null;
+  error_message?: string | null;
+}
+
+export interface VideoCanvasRun {
+  id: number;
+  canvas_id: number;
+  canvas_version_id: number;
+  status: string;
+  scope: Record<string, unknown>;
+  plan: { topological_order?: string[]; warnings?: Array<{ message?: string }> };
+  error_message?: string | null;
+  created_at: string;
+  completed_at?: string | null;
+  nodes: VideoCanvasRunNode[];
+}
+
+export interface VideoCanvas {
+  id: number;
+  story_id: number;
+  default_chapter_id?: number | null;
+  name: string;
+  description?: string | null;
+  status: 'draft' | 'archived';
+  definition_revision: number;
+  layout_revision: number;
+  created_at: string;
+  updated_at: string;
+  version: { id: number; version_no: number; graph: VideoCanvasGraph; source: string };
+  layout: { nodes?: Record<string, { x: number; y: number }>; viewport?: { x: number; y: number; zoom: number } };
+  runs?: VideoCanvasRun[];
+}
+
+export interface VideoCanvasPlan {
+  id: number;
+  canvas_id: number;
+  story_id: number;
+  chapter_id?: number | null;
+  status: 'draft' | 'ready' | 'approved' | 'applied';
+  revision: number;
+  source_snapshot: Record<string, unknown>;
+  screenplay: Record<string, unknown>;
+  shots: Record<string, unknown>;
+  assets: Record<string, unknown>;
+  canvas: Record<string, unknown>;
+  execution: Record<string, unknown>;
+  workflow_id?: number | null;
+  applied_canvas_revision?: number | null;
+  workflow_sync_revision?: number | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export async function listVideoCanvasNodeCatalog(): Promise<{ node_types: VideoCanvasNodeCatalogItem[] }> {
+  const res = await fetch(`${BASE}/api/video-canvas/node-catalog`, { headers: apiHeaders() });
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
+  return res.json();
+}
+
+/* ─── 漫剧创作项目（story_type=video） ─── */
+
+export interface MangaDramaProject {
+  story_id: number;
+  title: string;
+  description?: string | null;
+  cover_image?: string | null;
+  created_at?: string | null;
+  canvases: VideoCanvas[];
+}
+
+export async function listMangaDramaProjects(): Promise<{ projects: MangaDramaProject[] }> {
+  const res = await fetch(`${BASE}/api/manga-drama/projects`, { headers: apiHeaders() });
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
+  return res.json();
+}
+
+export async function createMangaDramaProject(payload: {
+  title?: string;
+  description?: string | null;
+  canvas_name?: string;
+  idempotency_key?: string;
+}): Promise<{ story_id: number; story_title: string; canvas: VideoCanvas }> {
+  const res = await fetch(`${BASE}/api/manga-drama/projects`, {
+    method: 'POST', headers: apiHeaders(true), body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
+  return res.json();
+}
+
+export interface ScreenplaySplitUnit {
+  unit_index: number;
+  scene_id: number;
+  title: string;
+  location: string;
+  time_of_day: string;
+  characters: string[];
+  scene_purpose: string;
+  visual_anchors: string;
+  beats: Record<string, unknown>[];
+  transition_to_next_scene: string;
+  duration_seconds: number;
+  duration_reason: string;
+}
+
+export async function screenplaySplit(canvasId: number, nodeId: string): Promise<{
+  ok: boolean;
+  node_id: string;
+  content_hash: string;
+  stale_detected: boolean;
+  unit_count: number;
+  truncated: boolean;
+  units: ScreenplaySplitUnit[];
+}> {
+  const res = await fetch(`${BASE}/api/video-canvas/canvases/${canvasId}/screenplay-split`, {
+    method: 'POST', headers: apiHeaders(true), body: JSON.stringify({ node_id: nodeId }),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
+  return res.json();
+}
+
+export interface DirectorPlanUnit {
+  unit_id: string;
+  sequence: number;
+  title?: string;
+  narrative_purpose?: string;
+  story_summary?: string;
+  duration_seconds: number;
+  duration_reason?: string;
+  dialogue_or_narration?: string;
+  characters?: string[];
+  visual_anchors?: { type: string; description: string }[];
+  transition_in?: string;
+  transition_out?: string;
+  continuity?: { from_previous?: string; to_next?: string; anchor?: string };
+  storyboard_prompt?: string;
+  storyboard_json?: Record<string, unknown> | null;
+  beat_ids?: string[];
+  scene_ids?: Array<string | number>;
+  warnings?: string[];
+  video_prompt?: string;
+  [key: string]: unknown;
+}
+
+export interface DirectorPlan {
+  plan_version?: number;
+  pacing_strategy?: string;
+  units: DirectorPlanUnit[];
+  warnings?: string[];
+  meta?: { source_screenplay_hash?: string; source_scene_node_id?: string; source_scene_revision?: string };
+  [key: string]: unknown;
+}
+
+export interface DirectorPlanResult {
+  ok: boolean;
+  plan: DirectorPlan;
+  plan_hash: string;
+  unit_count: number;
+  total_duration_seconds: number;
+  source_screenplay_hash: string;
+  source_scene_node_id: string;
+  source_scene_revision: string;
+  definition_revision: number;
+}
+
+export interface CanvasSceneAsset {
+  role: 'character' | 'scene' | 'prop';
+  name: string;
+  prompt: string;
+  scene_ids: Array<string | number>;
+  unit_count: number;
+  /** 角色档案（仅角色） */
+  profile?: string;
+}
+
+/** 未入选的场景/道具：出现次数少，默认在分镜提示词里一句带过，用户可按需单独生成 */
+export interface AssetCandidate {
+  role: 'scene' | 'prop';
+  name: string;
+  scene_ids: Array<string | number>;
+  desc: string;
+}
+
+export async function analyzeCanvasAssets(canvasId: number, sceneNodeId: string, expectedDefinitionRevision?: number): Promise<{
+  ok: boolean;
+  scene_node_id: string;
+  assets: CanvasSceneAsset[];
+  candidates?: AssetCandidate[];
+  warnings: string[];
+  failed_calls: number;
+  definition_revision: number;
+}> {
+  const res = await fetch(`${BASE}/api/video-canvas/canvases/${canvasId}/asset-analysis`, {
+    method: 'POST', headers: apiHeaders(true),
+    body: JSON.stringify({ scene_node_id: sceneNodeId, ...(expectedDefinitionRevision ? { expected_definition_revision: expectedDefinitionRevision } : {}) }),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
+  return res.json();
+}
+
+export async function generateDirectorPlan(canvasId: number, payload: {
+  scene_node_id: string;
+  user_constraints?: string;
+  expected_definition_revision?: number;
+}): Promise<DirectorPlanResult> {
+  const res = await fetch(`${BASE}/api/video-canvas/canvases/${canvasId}/director-plan`, {
+    method: 'POST', headers: apiHeaders(true), body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
+  return res.json();
+}
+
+export interface CompiledSceneUnit {
+  reference_mode?: string;
+  source_beats?: unknown[];
+  scene_node_id: string;
+  unit_id: string;
+  sequence: number;
+  title: string;
+  video_prompt: string;
+  storyboard_prompt?: string;
+  storyboard_json?: Record<string, unknown> | null;
+  duration_seconds: number;
+  duration_requested?: number | null;
+  duration_reason?: string;
+  duration_policy?: string;
+  characters?: unknown[];
+  visual_anchors?: unknown[];
+  transition_in?: string;
+  transition_out?: string;
+  continuity?: Record<string, unknown>;
+  source_scene_ids?: Array<string | number>;
+  source_beat_ids?: string[];
+  director_plan_hash?: string;
+}
+
+export async function compileScenes(canvasId: number, sceneNodeIds: string[], options?: {
+  directorPlan?: DirectorPlan | null;
+  directorPlanHash?: string | null;
+  expectedDefinitionRevision?: number;
+}): Promise<{
+  ok: boolean;
+  compiled_count: number;
+  skipped: { node_id: string; reason: string }[];
+  compiled: CompiledSceneUnit[];
+}> {
+  const res = await fetch(`${BASE}/api/video-canvas/canvases/${canvasId}/compile-scenes`, {
+    method: 'POST', headers: apiHeaders(true),
+    body: JSON.stringify({
+      scene_node_ids: sceneNodeIds,
+      ...(options?.directorPlan ? { director_plan: options.directorPlan } : {}),
+      ...(options?.directorPlanHash ? { director_plan_hash: options.directorPlanHash } : {}),
+      ...(options?.expectedDefinitionRevision ? { expected_definition_revision: options.expectedDefinitionRevision } : {}),
+    }),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
+  return res.json();
+}
+
+export interface ImportableNovelChapter {
+  chapter_id: number;
+  chapter_number: number;
+  title: string;
+  content_chars: number;
+  has_content: boolean;
+}
+
+export interface ImportableNovelStory {
+  story_id: number;
+  title: string;
+  chapter_count: number;
+  chapters: ImportableNovelChapter[];
+}
+
+export async function listImportableNovelStories(): Promise<{ stories: ImportableNovelStory[] }> {
+  const res = await fetch(`${BASE}/api/manga-drama/importable-stories`, { headers: apiHeaders() });
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
+  return res.json();
+}
+
+export async function importScreenplay(canvasId: number, sources: { story_id: number; chapter_id: number }[]): Promise<{
+  ok: boolean;
+  screenplay_text: string;
+  source_refs: { story_id: number; chapter_id: number; title: string; content_hash: string }[];
+  batch_count: number;
+  content_chars: number;
+}> {
+  const res = await fetch(`${BASE}/api/video-canvas/canvases/${canvasId}/import-screenplay`, {
+    method: 'POST', headers: apiHeaders(true), body: JSON.stringify({ sources }),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
+  return res.json();
+}
+
+export async function createVideoCanvas(payload: {
+  story_id: number;
+  default_chapter_id?: number | null;
+  name?: string;
+  description?: string | null;
+  idempotency_key?: string;
+}): Promise<VideoCanvas> {
+  const res = await fetch(`${BASE}/api/video-canvas/canvases`, {
+    method: 'POST', headers: apiHeaders(true), body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
+  return res.json();
+}
+
+export async function listVideoCanvases(storyId: number, chapterId?: number): Promise<{ canvases: VideoCanvas[] }> {
+  const params = chapterId ? `?chapter_id=${chapterId}` : '';
+  const res = await fetch(`${BASE}/api/video-canvas/stories/${storyId}/canvases${params}`, { headers: apiHeaders() });
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
+  return res.json();
+}
+
+export interface CanvasCostItem {
+  node_id: string;
+  label: string;
+  modality: 'image' | 'video';
+  model_id: number | null;
+  model_name: string | null;
+  video_seconds: number | null;
+  points: number | null;
+  priced: boolean;
+}
+
+export interface CanvasCostEstimate {
+  /** platform=平台积分；user_key=自带 API Key（平台不扣积分） */
+  credential_mode: 'platform' | 'user_key';
+  image_count: number;
+  video_count: number;
+  video_seconds: number;
+  reused_count: number;
+  items: CanvasCostItem[];
+  warnings: string[];
+  total_points: number | null;
+  available_points: number | null;
+  sufficient: boolean | null;
+}
+
+/** 生成前的成本预估（只读）；可带浏览器当前图以包含未保存修改。 */
+export interface CanvasPipelineStep {
+  stage: string;
+  label: string;
+  target: string;
+  status: 'running' | 'succeeded' | 'failed';
+  attempts: number;
+  error: string | null;
+}
+
+/** 服务端自动编排任务：拆分 → 导演 → 资产 → 分镜编排，在后台运行，失败自动重试。 */
+export interface CanvasPipelineTask {
+  task_id: string;
+  status: string;
+  stage: string | null;
+  message: string | null;
+  error: string | null;
+  steps: CanvasPipelineStep[];
+  auto_fixes: string[];
+  created_at: string | null;
+  completed_at: string | null;
+}
+
+export async function getCanvasPipeline(canvasId: number): Promise<{ task: CanvasPipelineTask | null }> {
+  const res = await fetch(`${BASE}/api/video-canvas/canvases/${canvasId}/pipeline`, { headers: apiHeaders() });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '获取自动编排进度失败'));
+  return res.json();
+}
+
+export async function startCanvasPipeline(canvasId: number, userConstraints?: string): Promise<{ task: CanvasPipelineTask | null; already_running: boolean }> {
+  const res = await fetch(`${BASE}/api/video-canvas/canvases/${canvasId}/pipeline`, {
+    method: 'POST', headers: apiHeaders(true), body: JSON.stringify(userConstraints ? { user_constraints: userConstraints } : {}),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '启动自动编排失败'));
+  return res.json();
+}
+
+export async function cancelCanvasPipeline(canvasId: number): Promise<{ task: CanvasPipelineTask | null }> {
+  const res = await fetch(`${BASE}/api/video-canvas/canvases/${canvasId}/pipeline/cancel`, { method: 'POST', headers: apiHeaders(true) });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '取消自动编排失败'));
+  return res.json();
+}
+
+export type ReviewCheckpointKey = 'script' | 'assets' | 'storyboard';
+export type RedoStage = 'director' | 'assets' | 'compile';
+
+export interface CanvasReviewIssue {
+  id: string;
+  checkpoint: ReviewCheckpointKey;
+  code: string;
+  severity: 'error' | 'warning';
+  message: string;
+  node_ids: string[];
+  scene_node_id: string | null;
+  /** 能靠"从该阶段重做这个场景"修复的问题才有值 */
+  redo_stage: RedoStage | null;
+  /** 一键即可修好、不需要重做阶段的问题；bind_references = 给视频节点补连角色参考图 */
+  action?: 'bind_references' | null;
+}
+
+export interface CanvasReviewCheckpoint {
+  key: ReviewCheckpointKey;
+  label: string;
+  status: 'pending' | 'blocked' | 'ready' | 'approved';
+  error_count: number;
+  warning_count: number;
+  issues: CanvasReviewIssue[];
+  fingerprint: string;
+  approved_at: string | null;
+}
+
+export interface CanvasReview {
+  checkpoints: Record<ReviewCheckpointKey, CanvasReviewCheckpoint>;
+  issue_count: number;
+  error_count: number;
+  ready_to_generate: boolean;
+}
+
+export interface CanvasRedoPreview {
+  scene_node_id: string;
+  scene_label: string;
+  from_stage: RedoStage;
+  asset_count: number;
+  shot_count: number;
+  /** 其中已生成过图片/视频、重做后需要重新生成（重新计费）的数量 */
+  generated_count: number;
+  kept_locked_count: number;
+  node_ids: string[];
+}
+
+export async function getCanvasReview(canvasId: number): Promise<{ review: CanvasReview; definition_revision: number }> {
+  const res = await fetch(`${BASE}/api/video-canvas/canvases/${canvasId}/review`, { headers: apiHeaders() });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '获取质检结果失败'));
+  return res.json();
+}
+
+export async function approveCanvasCheckpoint(canvasId: number, checkpoint: ReviewCheckpointKey): Promise<{ review: CanvasReview; definition_revision: number }> {
+  const res = await fetch(`${BASE}/api/video-canvas/canvases/${canvasId}/review/approve`, { method: 'POST', headers: apiHeaders(true), body: JSON.stringify({ checkpoint }) });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '确认失败'));
+  return res.json();
+}
+
+export interface SmartConnectEdge { key: string; edge_id: string | null; source: string; target: string; source_handle: string; target_handle: string; source_label: string; target_label: string }
+export interface SmartConnectIssue { severity: 'error' | 'warning' | 'info'; code: string; message: string; node_ids: string[] }
+export interface SmartConnectResult { applied: boolean; changed: boolean; added: SmartConnectEdge[]; removed: SmartConnectEdge[]; issues: SmartConnectIssue[]; definition_revision: number }
+
+/** 智能连线：apply=false 只预览，apply=true 才写入新版本。不触发生成、不扣费。 */
+export async function smartConnectCanvas(canvasId: number, apply: boolean, skip: { added?: string[]; removed?: string[] } = {}): Promise<SmartConnectResult> {
+  const res = await fetch(`${BASE}/api/video-canvas/canvases/${canvasId}/smart-connect`, { method: 'POST', headers: apiHeaders(true), body: JSON.stringify({ apply, skip_added: skip.added ?? [], skip_removed: skip.removed ?? [] }) });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '智能连线失败'));
+  return res.json();
+}
+
+/** 每个节点最近一次成功生成的产出（不受“最近 20 次运行”限制），用于补全节点图片 / 视频回显。 */
+export async function getCanvasNodeResults(canvasId: number): Promise<{ results: Record<string, { asset_id?: number; file_path?: string; url: string; duration_seconds?: number; reused?: boolean }> }> {
+  const res = await fetch(`${BASE}/api/video-canvas/canvases/${canvasId}/node-results`, { headers: apiHeaders() });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '获取节点结果失败'));
+  return res.json();
+}
+
+export async function bindCanvasReferences(canvasId: number): Promise<{ added: number; definition_revision: number; review: CanvasReview }> {
+  const res = await fetch(`${BASE}/api/video-canvas/canvases/${canvasId}/bind-references`, { method: 'POST', headers: apiHeaders(true) });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '补连参考图失败'));
+  return res.json();
+}
+
+export async function previewCanvasRedo(canvasId: number, sceneNodeId: string, fromStage: RedoStage): Promise<CanvasRedoPreview> {
+  const query = new URLSearchParams({ scene_node_id: sceneNodeId, from_stage: fromStage });
+  const res = await fetch(`${BASE}/api/video-canvas/canvases/${canvasId}/redo-preview?${query}`, { headers: apiHeaders() });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '获取重做影响失败'));
+  return res.json();
+}
+
+export async function redoCanvasScene(canvasId: number, sceneNodeId: string, fromStage: RedoStage, userConstraints?: string, videoModelId?: number | null): Promise<{ task: CanvasPipelineTask | null; summary: CanvasRedoPreview; definition_revision: number }> {
+  const res = await fetch(`${BASE}/api/video-canvas/canvases/${canvasId}/redo`, {
+    method: 'POST', headers: apiHeaders(true),
+    body: JSON.stringify({ scene_node_id: sceneNodeId, from_stage: fromStage, ...(userConstraints ? { user_constraints: userConstraints } : {}), ...(videoModelId ? { video_model_id: videoModelId } : {}) }),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '局部重做失败'));
+  return res.json();
+}
+
+export async function estimateVideoCanvasCost(canvasId: number, payload: { target_node_ids?: string[]; rerun_node_ids?: string[]; graph?: VideoCanvasGraph }, signal?: AbortSignal): Promise<CanvasCostEstimate> {
+  const res = await fetch(`${BASE}/api/video-canvas/canvases/${canvasId}/cost-estimate`, {
+    method: 'POST', headers: apiHeaders(true), body: JSON.stringify({ target_node_ids: payload.target_node_ids ?? [], rerun_node_ids: payload.rerun_node_ids ?? [], graph: payload.graph ?? null }), signal,
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '成本预估失败'));
+  return res.json();
+}
+
+export interface CanvasNodeCandidate {
+  asset_id: number;
+  url: string;
+  run_id: number;
+  created_at: string | null;
+  duration_seconds?: number | null;
+  is_current: boolean;
+}
+
+/** 节点的历史生成结果（候选）。 */
+export async function listVideoCanvasNodeCandidates(canvasId: number, nodeId: string): Promise<{ node_id: string; candidates: CanvasNodeCandidate[] }> {
+  const res = await fetch(`${BASE}/api/video-canvas/canvases/${canvasId}/nodes/${encodeURIComponent(nodeId)}/candidates`, { headers: apiHeaders() });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '获取候选结果失败'));
+  return res.json();
+}
+
+export async function getVideoCanvas(canvasId: number): Promise<VideoCanvas> {
+  const res = await fetch(`${BASE}/api/video-canvas/canvases/${canvasId}`, { headers: apiHeaders() });
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
+  return res.json();
+}
+
+export async function deleteVideoCanvas(canvasId: number): Promise<{ ok: boolean; canvas_id: number }> {
+  const res = await fetch(`${BASE}/api/video-canvas/canvases/${canvasId}`, {
+    method: 'DELETE', headers: apiHeaders(true),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
+  return res.json();
+}
+
+export async function updateVideoCanvas(canvasId: number, payload: { name?: string; description?: string | null }): Promise<VideoCanvas> {
+  const res = await fetch(`${BASE}/api/video-canvas/canvases/${canvasId}`, {
+    method: 'PATCH', headers: apiHeaders(true), body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
+  return res.json();
+}
+
+export async function listVideoCanvasPlans(canvasId: number): Promise<{ plans: VideoCanvasPlan[] }> {
+  const res = await fetch(`${BASE}/api/video-canvas/canvases/${canvasId}/plans`, { headers: apiHeaders() });
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
+  return res.json();
+}
+
+export async function getVideoCanvasPlan(canvasId: number, planId: number): Promise<VideoCanvasPlan> {
+  const res = await fetch(`${BASE}/api/video-canvas/canvases/${canvasId}/plans/${planId}`, { headers: apiHeaders() });
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
+  return res.json();
+}
+
+export async function updateVideoCanvasPlan(canvasId: number, planId: number, payload: {
+  expected_revision: number;
+  status?: 'draft' | 'ready';
+  source_snapshot_json?: Record<string, unknown>;
+  screenplay_json?: Record<string, unknown>;
+  shot_json?: Record<string, unknown>;
+  asset_json?: Record<string, unknown>;
+  canvas_json?: Record<string, unknown>;
+  execution_json?: Record<string, unknown>;
+}): Promise<VideoCanvasPlan> {
+  const res = await fetch(`${BASE}/api/video-canvas/canvases/${canvasId}/plans/${planId}`, {
+    method: 'PUT', headers: apiHeaders(true), body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
+  return res.json();
+}
+
+export async function confirmVideoCanvasPlan(canvasId: number, planId: number, expectedRevision: number): Promise<VideoCanvasPlan> {
+  const res = await fetch(`${BASE}/api/video-canvas/canvases/${canvasId}/plans/${planId}/confirm`, {
+    method: 'POST', headers: apiHeaders(true), body: JSON.stringify({ confirmed: true, expected_revision: expectedRevision }),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
+  return res.json();
+}
+
+export async function applyVideoCanvasPlan(canvasId: number, planId: number, payload: {
+  expected_plan_revision: number;
+  expected_definition_revision: number;
+}): Promise<{ canvas: VideoCanvas; plan: VideoCanvasPlan; validation: { warnings?: Array<{ message?: string }> } }> {
+  const res = await fetch(`${BASE}/api/video-canvas/canvases/${canvasId}/plans/${planId}/apply`, {
+    method: 'POST', headers: apiHeaders(true), body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
+  return res.json();
+}
+
+export async function syncVideoCanvasPlanWorkflow(canvasId: number, planId: number, expectedPlanRevision: number): Promise<{
+  plan: VideoCanvasPlan;
+  workflow_id: number;
+  shot_count: number;
+}> {
+  const res = await fetch(`${BASE}/api/video-canvas/canvases/${canvasId}/plans/${planId}/sync-workflow`, {
+    method: 'POST', headers: apiHeaders(true), body: JSON.stringify({ expected_plan_revision: expectedPlanRevision }),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
+  return res.json();
+}
+
+export async function saveVideoCanvasSnapshot(canvasId: number, payload: {
+  graph: VideoCanvasGraph;
+  layout: VideoCanvas['layout'];
+  expected_definition_revision: number;
+  expected_layout_revision: number;
+  client_revision?: number;
+  idempotency_key?: string;
+}): Promise<VideoCanvas> {
+  const res = await fetch(`${BASE}/api/video-canvas/canvases/${canvasId}/snapshot`, {
+    method: 'PUT', headers: apiHeaders(true), body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    // 带上 HTTP 状态码：调用方要区分“版本冲突 409”（可以自动重发）和其他失败
+    const error = new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE)) as Error & { status?: number };
+    error.status = res.status;
+    throw error;
+  }
+  return res.json();
+}
+
+/** 改写所用的小说原文（章节归属在服务端重新校验，只读）。 */
+export interface SourceChapter {
+  story_id: number;
+  chapter_id: number;
+  title: string;
+  content: string;
+  truncated: boolean;
+  content_hash: string;
+}
+
+export async function getCanvasSourceChapters(canvasId: number, sources: { story_id: number; chapter_id: number }[]): Promise<{ chapters: SourceChapter[] }> {
+  const res = await fetch(`${BASE}/api/video-canvas/canvases/${canvasId}/source-chapters`, {
+    method: 'POST', headers: apiHeaders(true), body: JSON.stringify({ sources }),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
+  return res.json();
+}
+
+/** 画布版本历史条目。 */
+export interface VideoCanvasVersionSummary {
+  id: number;
+  version_no: number;
+  source: string;
+  change_summary: string | null;
+  created_by_user_id: number | null;
+  created_at: string | null;
+  node_count: number;
+  edge_count: number;
+  is_current: boolean;
+}
+
+export async function listVideoCanvasVersions(canvasId: number, limit = 30): Promise<{ definition_revision: number; versions: VideoCanvasVersionSummary[] }> {
+  const res = await fetch(`${BASE}/api/video-canvas/canvases/${canvasId}/versions?limit=${limit}`, { headers: apiHeaders() });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '读取画布版本历史失败'));
+  return res.json();
+}
+
+/** 预览“恢复到某版本”会带来的变化（前=当前图，后=目标版本）。 */
+export async function diffVideoCanvasVersion(canvasId: number, versionNo: number): Promise<{ version_no: number; current_version_no: number; diff: CanvasOpsPreview }> {
+  const res = await fetch(`${BASE}/api/video-canvas/canvases/${canvasId}/versions/${versionNo}/diff`, { headers: apiHeaders() });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '读取版本差异失败'));
+  return res.json();
+}
+
+/** 恢复到历史版本：以目标版本内容追加新版本，不改写历史。 */
+export async function restoreVideoCanvasVersion(canvasId: number, versionNo: number, expectedDefinitionRevision: number): Promise<VideoCanvas> {
+  const res = await fetch(`${BASE}/api/video-canvas/canvases/${canvasId}/versions/${versionNo}/restore`, {
+    method: 'POST', headers: apiHeaders(true), body: JSON.stringify({ expected_definition_revision: expectedDefinitionRevision }),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '恢复画布版本失败'));
+  return res.json();
+}
+
+export async function saveVideoCanvasGraph(canvasId: number, payload: {
+  graph: VideoCanvasGraph;
+  expected_definition_revision: number;
+  change_summary?: string;
+  source?: 'manual' | 'import' | 'agent';
+}): Promise<VideoCanvas & { validation?: { warnings?: Array<{ message?: string }> } }> {
+  const res = await fetch(`${BASE}/api/video-canvas/canvases/${canvasId}/graph`, {
+    method: 'PUT', headers: apiHeaders(true), body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
+  return res.json();
+}
+
+export async function saveVideoCanvasLayout(canvasId: number, payload: {
+  layout: VideoCanvas['layout'];
+  expected_layout_revision: number;
+}): Promise<{ layout: VideoCanvas['layout']; layout_revision: number }> {
+  const res = await fetch(`${BASE}/api/video-canvas/canvases/${canvasId}/layout`, {
+    method: 'PUT', headers: apiHeaders(true), body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
+  return res.json();
+}
+
+export async function importVideoCanvasListWorkflow(canvasId: number, payload: {
+  source_workflow_id: number;
+  mode: 'preview' | 'merge';
+  expected_definition_revision?: number;
+  idempotency_key?: string;
+}): Promise<{ canvas?: VideoCanvas; result?: { added_node_count: number; added_edge_count: number }; graph?: VideoCanvasGraph; node_count?: number; edge_count?: number }> {
+  const res = await fetch(`${BASE}/api/video-canvas/canvases/${canvasId}/imports/list-workflow`, {
+    method: 'POST', headers: apiHeaders(true), body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
+  return res.json();
+}
+
+export async function validateVideoCanvas(canvasId: number): Promise<{ valid: boolean; errors: Array<{ message: string }>; warnings: Array<{ message: string }> }> {
+  const res = await fetch(`${BASE}/api/video-canvas/canvases/${canvasId}/validate`, {
+    method: 'POST', headers: apiHeaders(true),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
+  return res.json();
+}
+
+export async function runVideoCanvas(canvasId: number, payload: {
+  target_node_ids: string[];
+  expected_definition_revision: number;
+  idempotency_key?: string;
+  rerun_node_ids?: string[];
+}): Promise<{ idempotent?: boolean; run: VideoCanvasRun; validation: { warnings?: Array<{ message?: string }> } }> {
+  const res = await fetch(`${BASE}/api/video-canvas/canvases/${canvasId}/runs`, {
+    method: 'POST', headers: apiHeaders(true), body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
+  return res.json();
+}
+
+export async function confirmVideoCanvasRun(canvasId: number, runId: number): Promise<{ run: VideoCanvasRun }> {
+  const res = await fetch(`${BASE}/api/video-canvas/canvases/${canvasId}/runs/${runId}/confirm`, {
+    method: 'POST', headers: apiHeaders(true), body: JSON.stringify({ confirmed: true }),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
+  return res.json();
+}
+
+export async function cancelVideoCanvasRun(canvasId: number, runId: number): Promise<{ run: VideoCanvasRun }> {
+  const res = await fetch(`${BASE}/api/video-canvas/canvases/${canvasId}/runs/${runId}/cancel`, {
+    method: 'POST', headers: apiHeaders(true),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
+  return res.json();
+}
+
+export async function getVideoCanvasRun(canvasId: number, runId: number): Promise<{ run: VideoCanvasRun }> {
+  const res = await fetch(`${BASE}/api/video-canvas/canvases/${canvasId}/runs/${runId}`, { headers: apiHeaders() });
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
+  return res.json();
 }
 
 export async function generateScreenplay(chapterId: number, payload: {
@@ -4370,6 +5300,32 @@ export async function activateShotClip(shotId: number, clipId: number): Promise<
   return { active_clip_id: clipId };
 }
 
+export async function listStoryVideoAssets(storyId: number, assetType?: string): Promise<{ story_id: number; assets: VideoAsset[] }> {
+  const params = assetType ? `?asset_type=${encodeURIComponent(assetType)}` : '';
+  const res = await fetch(`${BASE}/api/stories/${storyId}/video-assets${params}`, {
+    headers: apiHeaders(),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
+  return res.json();
+}
+
+export async function createStoryVideoAsset(storyId: number, payload: {
+  asset_type: string;
+  name: string;
+  file_path: string;
+  provider?: string;
+  prompt?: string;
+  meta?: Record<string, unknown>;
+}): Promise<VideoAsset> {
+  const res = await fetch(`${BASE}/api/stories/${storyId}/video-assets`, {
+    method: 'POST',
+    headers: apiHeaders(true),
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
+  return res.json();
+}
+
 export async function listVideoAssets(chapterId: number, assetType?: string): Promise<{ chapter_id: number; assets: VideoAsset[] }> {
   const params = assetType ? `?asset_type=${encodeURIComponent(assetType)}` : '';
   const res = await fetch(`${BASE}/api/chapters/${chapterId}/video-assets${params}`, {
@@ -4466,6 +5422,27 @@ export async function resetChapterWorkflow(workflowId: number): Promise<{ ok: bo
 }
 
 export async function replaceVideoAsset(assetId: number, file: File): Promise<{ ok: boolean; asset: { id: number; file_path: string; revision: number } }> {
+  let direct: { object_key: string; url: string } | null = null;
+  try {
+    direct = await uploadMediaDirectly(file, 'video_asset');
+  } catch (error) {
+    // 本地开发常因 OSS 未配置 CORS 而无法直传，此时退回后端 multipart 上传。
+    console.warn('浏览器直传不可用，已改用服务端上传', error);
+  }
+  if (direct) {
+    try {
+      const res = await fetch(`${BASE}/api/video-assets/${assetId}/replace`, {
+        method: 'POST',
+        headers: apiHeaders(true),
+        body: JSON.stringify({ object_key: direct.object_key, filename: file.name }),
+      });
+      if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
+      return res.json();
+    } catch (error) {
+      // 直传对象已完成但绑定失败时，同样回退到服务端 multipart 上传。
+      console.warn('直传资产绑定失败，已改用服务端上传', error);
+    }
+  }
   const formData = new FormData();
   formData.append('file', file);
   const res = await fetch(`${BASE}/api/video-assets/${assetId}/replace`, {
@@ -4475,6 +5452,31 @@ export async function replaceVideoAsset(assetId: number, file: File): Promise<{ 
   });
   if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   return res.json();
+}
+
+type DirectUploadScope = 'video_asset' | 'manga_asset' | 'style_reference' | 'storyboard' | 'video' | 'creation_studio';
+
+async function uploadMediaDirectly(file: File, scope: DirectUploadScope): Promise<{ object_key: string; url: string } | null> {
+  const intent = await fetch(`${BASE}/api/media-uploads/presign`, {
+    method: 'POST',
+    headers: apiHeaders(true),
+    body: JSON.stringify({ scope, filename: file.name, content_type: file.type, size: file.size }),
+  });
+  // 兼容尚未部署直传路由的后端，继续使用原有服务端 multipart 上传。
+  if (intent.status === 404) return null;
+  if (!intent.ok) throw new Error(await readErrorMessage(intent, '获取直传凭证失败'));
+  const data = await intent.json() as { mode: 'direct' | 'server'; object_key?: string; upload_url?: string };
+  if (data.mode !== 'direct' || !data.object_key || !data.upload_url) return null;
+  const upload = await fetch(data.upload_url, { method: 'PUT', body: file });
+  if (!upload.ok) throw new Error('文件直传对象存储失败');
+  const complete = await fetch(`${BASE}/api/media-uploads/complete`, {
+    method: 'POST',
+    headers: apiHeaders(true),
+    body: JSON.stringify({ scope, object_key: data.object_key }),
+  });
+  if (!complete.ok) throw new Error(await readErrorMessage(complete, '确认直传文件失败'));
+  const result = await complete.json() as { object_key: string; public_url: string };
+  return { object_key: result.object_key, url: result.public_url };
 }
 
 export async function regenerateVideoAsset(assetId: number, prompt?: string, mask?: string, stylePreset?: string): Promise<{ ok: boolean; asset: { id: number; file_path: string; revision: number; style_preset?: string | null } }> {
@@ -6592,5 +7594,23 @@ export async function deleteCreationStudioJob(jobId: number): Promise<{ ok: bool
     headers: apiHeaders(),
   });
   if (!res.ok) throw new Error(await readErrorMessage(res, '删除生成记录失败'));
+  return res.json();
+}
+
+export interface CanvasContainerTab {
+  title: string;
+  color: string;
+  nodes: string[];
+}
+
+export async function createNodeContainer(canvasId: number, payload: {
+  name: string;
+  node_ids: string[];
+  expected_definition_revision: number;
+}): Promise<{ ok: boolean; container_id: string; tab_count: number; node_count: number }> {
+  const res = await fetch(`${BASE}/api/video-canvas/canvases/${canvasId}/containers/create`, {
+    method: 'POST', headers: apiHeaders(true), body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   return res.json();
 }

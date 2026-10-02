@@ -76,6 +76,7 @@ const 字段中文: Record<string, string> = {
   prop_reference_ids: '道具引用',
   creative_brief: '创意简报',
   writing_guidance: '写作指导',
+  graph_json: '画布图',
 };
 
 const 类型色: Record<string, string> = {
@@ -85,6 +86,7 @@ const 类型色: Record<string, string> = {
   story_bible: 'border-l-purple-400',
   video_shot: 'border-l-violet-400',
   video_workflow: 'border-l-indigo-400',
+  video_canvas_graph: 'border-l-cyan-400',
 };
 
 function formatChangeValue(value: unknown): string {

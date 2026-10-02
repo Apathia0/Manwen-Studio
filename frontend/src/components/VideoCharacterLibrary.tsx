@@ -12,6 +12,7 @@ import {
   type ImageRedrawMode,
 } from '../api';
 import { ImageRedrawModal } from './shared/ImageRedrawModal';
+import MediaImage from './shared/MediaImage';
 import { ChevronLeft, ChevronRight, X } from 'lucide-react';
 import { confirm } from '../lib/confirm';
 import { normalizeErrorMessage } from '../lib/errors';
@@ -318,12 +319,10 @@ export default function VideoCharacterLibrary({ storyId }: Props) {
               <div className="space-y-1">
                 <div className="text-[11px] text-slate-400 font-medium">参考图预览</div>
                 <div className="relative group w-32 h-32">
-                  <img
+                  <MediaImage
                     src={selectedVersion.ref_asset_url}
                     alt={selectedName}
                     className="w-32 h-32 rounded-lg border border-[#d7e3f4] object-cover cursor-pointer"
-                    loading="lazy"
-                    decoding="async"
                     onClick={() => setPreviewOpen(true)}
                   />
                   {/* hover 遮罩 */}
@@ -392,11 +391,9 @@ export default function VideoCharacterLibrary({ storyId }: Props) {
             </div>
 
             <div className="flex flex-1 items-center justify-center overflow-auto p-6">
-              <img
+              <MediaImage
                 src={selectedVersion.ref_asset_url}
                 alt={selectedName}
-                loading="lazy"
-                decoding="async"
                 className={`mx-auto h-auto object-contain rounded-xl shadow-2xl ${
                   lightboxZoom === 1
                     ? 'max-w-[92%] max-h-none'

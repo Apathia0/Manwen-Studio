@@ -654,12 +654,10 @@ export default function HomePage({ onSelectStory }: Props) {
                       key={img.filename}
                       className="relative group aspect-square rounded-lg overflow-hidden border border-gray-700 bg-gray-950"
                     >
-                      <img
+                      <MediaImage
                         src={refImageUrl(img.image_path)}
                         alt={img.filename}
                         className="w-full h-full object-cover"
-                        loading="lazy"
-                        decoding="async"
                       />
                       <div className="absolute inset-0 bg-black/0 group-hover:bg-black/40 transition-colors flex items-end p-2 pointer-events-none">
                         <span className="text-[10px] text-white/80 bg-black/60 px-1.5 py-0.5 rounded">

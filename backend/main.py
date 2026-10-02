@@ -243,6 +243,7 @@ from services.chapter_generation_runtime import (
 from services.knowledge_ai_sync import sync_story_knowledge_with_ai
 from services.creation_studio import _public_media_url
 from routers.video import router as video_router, _to_video_url
+from routers.video_canvas import router as video_canvas_router
 from routers.deconstruction import router as deconstruction_router
 from routers.deconstruct_library import router as deconstruct_library_router
 
@@ -328,9 +329,24 @@ async def lifespan(app: FastAPI):
                 logger.warning("已终止 %s 个因服务重启中断的创作台任务", interrupted_count)
         except Exception as exc:
             logger.warning("创作台中断任务清理失败: %s", exc)
+        # 画布生成运行：先记下重启前仍在跑的，任务管理器把它们标记中断并结算后，再自动恢复
+        resumable_canvas_runs: list[dict[str, int]] = []
+        try:
+            from services.canvas_run_resume import collect_resumable_runs
+
+            resumable_canvas_runs = collect_resumable_runs(db)
+        except Exception as exc:
+            logger.warning("收集待恢复的画布运行失败: %s", exc)
         interrupted_task_count = task_manager.fail_interrupted_tasks()
         if interrupted_task_count:
             logger.warning("已终止 %s 个因服务重启中断的后台任务", interrupted_task_count)
+        if resumable_canvas_runs:
+            from services.canvas_run_resume import resume_interrupted_canvas_runs
+
+            logger.info("将自动恢复 %s 个被重启打断的画布运行", len(resumable_canvas_runs))
+            _canvas_resume_task = asyncio.create_task(resume_interrupted_canvas_runs(resumable_canvas_runs))
+            _background_startup_tasks.add(_canvas_resume_task)
+            _canvas_resume_task.add_done_callback(_background_startup_tasks.discard)
         SYSTEM_READY = True
         try:
             init_gateways()
@@ -386,6 +402,8 @@ INSTALL_STATUS: dict[str, Any] = {
     "database_reachable": None,
 }
 INSTALL_REQUIRES_RESTART = False
+# 启动时派生的后台任务（如自动恢复画布运行）：持有引用，避免被垃圾回收提前取消
+_background_startup_tasks: set = set()
 SYSTEM_READY = False
 
 
@@ -6468,7 +6486,8 @@ def create_story(body: StoryCreate, request: Request, db: Session = Depends(get_
 @app.get("/api/stories", response_model=list[StoryOut])
 def list_stories(request: Request, db: Session = Depends(get_db)):
     user = _require_user(request, db)
-    query = db.query(Story).filter(Story.owner_user_id == user.id)
+    # 无限画布项目（story_type=video）独立管理，不出现在小说作品列表
+    query = db.query(Story).filter(Story.owner_user_id == user.id, Story.story_type != "video")
     return query.order_by(Story.created_at.desc()).all()
 
 
@@ -15862,6 +15881,7 @@ from routers.points_ai import router as points_ai_router
 from routers.creation_studio import router as creation_studio_router
 
 app.include_router(video_router)
+app.include_router(video_canvas_router)
 app.include_router(agent_router)
 app.include_router(deconstruction_router)
 app.include_router(deconstruct_library_router)

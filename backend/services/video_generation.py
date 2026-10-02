@@ -61,9 +61,10 @@ async def submit_video_job(
     seed: int | None = None,
     api_key: str | None = None,
     base_url: str | None = None,
-    input_mode: str = "text_to_video",
+    input_mode: str | None = None,
     video_capabilities: dict[str, Any] | None = None,
     adapter_type: str = video_adapter.VIDEO_ADAPTER_LINGDONG,
+    reference_audios: list[str] | None = None,
     **kwargs,
 ) -> dict[str, Any]:
     """提交视频生成任务，根据 provider 分发到不同后端。
@@ -72,12 +73,16 @@ async def submit_video_job(
       - comfyui → 本地 ComfyUI
       - 其他 → New API 兼容端点
     """
+    input_mode = input_mode or ("image_to_video" if reference_images else "text_to_video")
     if provider == "comfyui":
+        if reference_audios:
+            raise ValueError("ComfyUI 视频通道不支持音频参考")
         result = await video_comfyui.submit_job(
             input_mode=input_mode,
             prompt=prompt,
             model=model,
             reference_images=reference_images,
+            seed=seed,
             duration_seconds=duration_seconds,
             base_url=base_url,
         )
@@ -92,9 +97,12 @@ async def submit_video_job(
             size=str(kwargs.get("size") or default_resolution or "720P"),
             duration_seconds=duration_seconds,
             images=reference_images or None,
+            input_mode=input_mode,
+            seed=seed,
             api_key=api_key,
             base_url=base_url,
             video_capabilities=video_capabilities,
+            audios=reference_audios or None,
         )
         result["provider_job_id"] = (
             result.get("provider_job_id") or result.get("task_id") or result.get("id") or ""

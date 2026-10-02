@@ -8,6 +8,7 @@ import {
   type VideoStylePreset,
 } from '../../api';
 import { Film } from 'lucide-react';
+import MediaImage from '../shared/MediaImage';
 import { toast } from '../../lib/toast';
 import { confirm } from '../../lib/confirm';
 import { readResponseError } from '../../lib/errors';
@@ -230,7 +231,7 @@ export default function StylePresetManager() {
                   {uploading ? '上传中...' : '选择图片'}
                 </button>
                 {(previewUrl || formData.image_url) && (
-                  <img
+                  <MediaImage
                     src={toStyleImageUrl(previewUrl || formData.image_url)}
                     alt="预览"
                     className="h-10 w-10 rounded object-cover"
@@ -288,13 +289,10 @@ export default function StylePresetManager() {
             >
               <div className="aspect-[4/3] bg-slate-100">
                 {preset.image_url ? (
-                  <img
+                  <MediaImage
                     src={toStyleImageUrl(preset.image_url)}
                     alt={preset.name}
                     className="h-full w-full object-cover"
-                    onError={(e) => {
-                      (e.target as HTMLImageElement).style.display = 'none';
-                    }}
                   />
                 ) : (
                   <div className="flex h-full items-center justify-center text-slate-400">

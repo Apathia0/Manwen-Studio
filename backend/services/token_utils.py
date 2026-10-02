@@ -22,6 +22,12 @@ logger = logging.getLogger(__name__)
 # Agent 会话按 128K Token 阈值触发历史压缩。
 TOKEN_LIMIT = 128_000
 TOKEN_COMPRESS_THRESHOLD = 128_000
+# 单张图片（最长边缩放到 1600px 的 JPEG）进入视觉模型后的保守 token 估算
+IMAGE_TOKEN_ESTIMATE = 1_100
+# 紧急压缩时最多保留的普通视觉输入张数；带“用户上传的参考素材”标记的图片单独放宽，避免用户参考图被静默丢弃
+EMERGENCY_MAX_IMAGES = 2
+EMERGENCY_MAX_USER_IMAGES = 5
+USER_UPLOAD_MARKER = "[用户上传的参考素材"
 TOKEN_FORCE_COMPRESS_THRESHOLD = 128_000
 
 
@@ -66,6 +72,9 @@ def estimate_messages_tokens(messages: list[dict]) -> int:
         elif isinstance(content, list):
             for item in content:
                 if isinstance(item, dict):
+                    if item.get("type") == "image_url":
+                        total += IMAGE_TOKEN_ESTIMATE
+                        continue
                     total += estimate_tokens(str(item.get("text", "")))
                 else:
                     total += estimate_tokens(str(item))
@@ -447,6 +456,8 @@ def build_history_summary_prompt(old_messages: list[dict]) -> str:
 5. 当前任务的进展状态
 6. 未解决的问题和待办事项
 7. AI 调用的工具和结果摘要
+8. 画布要素（若涉及）：被讨论或修改的节点（ID/标题/改动要点）、已批准/待确认/被作废或撤回的提案、最近的画布版本号
+9. 用户上传的参考素材及其风格分析结论（画风、色彩、光影、镜头、风格关键词），以及用户确认过的风格方向
 
 对话历史：
 {history_text}
@@ -473,7 +484,7 @@ def _truncate_middle(text: str, max_chars: int) -> str:
 
 
 def _emergency_compact_content(content: Any, *, max_chars: int) -> Any:
-    """压缩单条文本或多模态内容，最多保留两张当前视觉输入。"""
+    """压缩单条文本或多模态内容，最多保留 EMERGENCY_MAX_IMAGES 张当前视觉输入。"""
     if isinstance(content, str):
         return _truncate_middle(content, max_chars)
     if not isinstance(content, list):
@@ -481,17 +492,29 @@ def _emergency_compact_content(content: Any, *, max_chars: int) -> Any:
 
     compacted: list[dict[str, Any]] = []
     image_count = 0
+    user_image_count = 0
+    next_image_is_user_upload = False
     remaining_text_chars = max_chars
     for item in content:
         if not isinstance(item, dict):
             continue
         if item.get("type") == "image_url":
-            if image_count < 2:
+            if next_image_is_user_upload and user_image_count < EMERGENCY_MAX_USER_IMAGES:
+                compacted.append(item)
+                user_image_count += 1
+            elif not next_image_is_user_upload and image_count < EMERGENCY_MAX_IMAGES:
                 compacted.append(item)
                 image_count += 1
             continue
         if item.get("type") == "text":
             text = str(item.get("text") or "")
+            if text.startswith(USER_UPLOAD_MARKER):
+                # 来源标记很短且决定后续图片的归属，必须原样保留。
+                compacted.append(item)
+                next_image_is_user_upload = True
+                continue
+            if text.startswith("[") and "《" in text[:30]:
+                next_image_is_user_upload = False
             if remaining_text_chars <= 0:
                 continue
             next_text = _truncate_middle(text, remaining_text_chars)

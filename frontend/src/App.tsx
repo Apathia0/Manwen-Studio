@@ -3,6 +3,7 @@ import {
   BarChart3,
   BookOpen,
   Brush,
+  Clapperboard,
   CreditCard,
   Home,
   Library,
@@ -26,6 +27,7 @@ import {
   ADMIN_ROUTES,
   PUBLIC_ROUTES,
   parseDeconstructionWorkId,
+  parseMangaDramaStoryId,
   parseWorkspaceStoryId,
   pathToRouteKey,
   routeToPath,
@@ -36,6 +38,8 @@ import { LoadingOverlay } from './components/ui/LoadingOverlay';
 import { RouteLoadingFallback } from './components/ui/RouteLoadingFallback';
 import PublicLanding from './components/PublicLanding';
 import StoryLibraryPage from './components/StoryLibraryPage';
+import MangaDramaListPage from './components/MangaDramaListPage';
+import MangaDramaWorkspacePage from './components/MangaDramaWorkspacePage';
 import ImportGuidancePage from './components/ImportGuidancePage';
 import OnboardingPage from './components/OnboardingPage';
 import TemplateManagePage from './components/TemplateManagePage';
@@ -109,10 +113,11 @@ const LS_WORKSPACE_MODE = 'storycanvas.workspaceMode';
 const LS_NAV_COLLAPSED = 'storycanvas.navCollapsed';
 
 const USER_NAV: ShellNavItem[] = [
-  { key: 'stories', label: '作品', icon: Home },
+  { key: 'stories', label: '小说作品', icon: Home },
+  { key: 'manga-drama', label: '无限画布', icon: Clapperboard },
+  { key: 'workspace', label: '作品工作台', icon: Brush },
   { key: 'creation-studio', label: '创作台', icon: Sparkles },
   { key: 'model-catalog', label: '模型广场', icon: Cpu },
-  { key: 'workspace', label: '作品工作台', icon: Brush },
   { key: 'deconstruction-library', label: '拆书库', icon: BookOpen },
   { key: 'account', label: '账户与积分', icon: UserCircle2 },
   { key: 'pricing', label: '积分套餐', icon: CreditCard },
@@ -136,6 +141,19 @@ const ADMIN_NAV: ShellNavItem[] = [
 /** 已登录用户访问这些公开路由时重定向到作品库 */
 const LOGGED_IN_REDIRECT_ROUTES: RouteKey[] = ['landing', 'login', 'register', 'forgot-password'];
 
+// 记住最近一次打开的工作台地址（小说工作台或画布创作台），侧栏「作品工作台」直接回到它
+const LAST_WORKSPACE_PATH_KEY = 'storycanvas:last-workspace-path';
+const WORKSPACE_PATH_RE = /^\/(?:workspace|manga-drama\/workspace)\/\d+\/?$/;
+function readLastWorkspacePath(): string | null {
+  try {
+    const value = window.localStorage.getItem(LAST_WORKSPACE_PATH_KEY);
+    return value && WORKSPACE_PATH_RE.test(value) ? value : null;
+  } catch { return null; }
+}
+function writeLastWorkspacePath(path: string) {
+  try { window.localStorage.setItem(LAST_WORKSPACE_PATH_KEY, path); } catch { /* 存储不可用时只是少了记忆，不影响使用 */ }
+}
+
 function App() {
   const location = useLocation();
   const navigate = useNavigate();
@@ -144,6 +162,7 @@ function App() {
   const route: RouteKey = useMemo(() => pathToRouteKey(location.pathname), [location.pathname]);
   const deconWorkId = useMemo(() => parseDeconstructionWorkId(location.pathname), [location.pathname]);
   const workspaceStoryId = useMemo(() => parseWorkspaceStoryId(location.pathname), [location.pathname]);
+  const mangaDramaStoryId = useMemo(() => parseMangaDramaStoryId(location.pathname), [location.pathname]);
 
   const setRoute = useCallback((key: RouteKey) => {
     navigate(routeToPath(key));
@@ -214,7 +233,8 @@ function App() {
     [activeStory, chapters, activeChapterId, activeChapter, workspaceMode],
   );
 
-  const isWorkspaceRoute = route === 'workspace';
+  // 漫剧画布工作台与小说工作台一样需要全高内容区（否则画布 h-full 链断裂收成 0 高度）
+  const isWorkspaceRoute = route === 'workspace' || route === 'manga-drama-workspace';
 
   const handleModelConfigRequestHandled = useCallback((requestId: number) => {
     setModelConfigRequest((current) => current?.requestId === requestId ? null : current);
@@ -223,9 +243,18 @@ function App() {
   /** 统一导航入口：移动底部导航 / 桌面侧栏 / 页面内跳转共用 */
   const handleNavigate = useCallback((key: string) => {
     const routeKey = key as RouteKey;
-    if (routeKey === 'workspace' && !activeStory) {
-      navigate('/stories');
-      return;
+    if (routeKey === 'workspace') {
+      // 回到最近用过的工作台：可能是小说工作台，也可能是画布创作台；从没打开过才让用户去选
+      const lastPath = readLastWorkspacePath();
+      if (lastPath) {
+        navigate(lastPath);
+        return;
+      }
+      if (!activeStory) {
+        toast.info('请先在「小说作品」或「无限画布」里打开一个作品');
+        navigate('/stories');
+        return;
+      }
     }
     if (routeKey === 'deconstruction-library') {
       navigate('/deconstruction');
@@ -301,6 +330,11 @@ function App() {
     void refreshOrders();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session]);
+
+  // 进入任一工作台就记下地址，侧栏「作品工作台」回到它
+  useEffect(() => {
+    if (WORKSPACE_PATH_RE.test(location.pathname)) writeLastWorkspacePath(location.pathname);
+  }, [location.pathname]);
 
   /** 深链支持：/workspace/:storyId 直接定位作品工作台 */
   useEffect(() => {
@@ -682,7 +716,7 @@ function App() {
   if (LOGGED_IN_REDIRECT_ROUTES.includes(route)) {
     return <Navigate to="/stories" replace />;
   }
-  if (route === 'workspace' && !activeStory) {
+  if (route === 'workspace' && !activeStory && workspaceStoryId == null) {
     return <Navigate to="/stories" replace />;
   }
   if ((route === 'onboarding' || route === 'import-guidance') && !onboardingStory && !importGuidanceStory) {
@@ -707,6 +741,12 @@ function App() {
           }}
           loadingWorkspace={loadingWorkspace}
         />
+      )}
+      {route === 'manga-drama' && (
+        <MangaDramaListPage onOpenProject={(storyId) => navigate(`/manga-drama/workspace/${storyId}`)} />
+      )}
+      {route === 'manga-drama-workspace' && mangaDramaStoryId && (
+        <MangaDramaWorkspacePage storyId={mangaDramaStoryId} onBack={() => navigate('/manga-drama')} />
       )}
       {route === 'deconstruction-library' && deconWorkId !== 0 ? (
         <DeconstructionWorkPage

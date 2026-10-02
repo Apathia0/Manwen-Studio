@@ -205,6 +205,36 @@ async def test_openai_materialize_downloads_native_content(monkeypatch, tmp_path
 
 
 @pytest.mark.asyncio
+async def test_lingdong_dispatch_forwards_input_mode_and_seed(monkeypatch):
+    captured = {}
+
+    async def fake_create(**kwargs):
+        captured.update(kwargs)
+        return {"task_id": "relay-1", "status": "queued"}
+
+    monkeypatch.setattr(video_api, "create_video_job", fake_create)
+
+    result = await video_adapter.create_video_job(
+        adapter_type=VIDEO_ADAPTER_LINGDONG,
+        model="sora-relay",
+        prompt="测试中转",
+        aspect_ratio="16:9",
+        size="720P",
+        duration_seconds=10,
+        images=["https://cdn.example.com/a.png"],
+        input_mode="image_to_video",
+        seed=123,
+        api_key="relay-key",
+        base_url="https://relay.example.com/v1",
+        video_capabilities={"payload_profile": "sora_v2", "wire": {"size_by_resolution_aspect": {"720P|16:9": "1280x720"}}},
+    )
+
+    assert captured["input_mode"] == "image_to_video"
+    assert captured["seed"] == 123
+    assert result["task_id"] == "relay-1"
+
+
+@pytest.mark.asyncio
 async def test_lingdong_dispatch_preserves_pipe_reference(monkeypatch):
     captured = {}
 
@@ -649,3 +679,79 @@ async def test_concurrent_lingdong_downloads_use_independent_temp_files(monkeypa
     assert results[0] == results[1]
     assert Path(results[0]).read_bytes() in {b"1-complete", b"2-complete"}
     assert not list(Path(results[0]).parent.glob("*.tmp"))
+
+
+# ---------------- 上游官方字段写法（referenceImages / @图N）通过模型参数 JSON 配置 ----------------
+
+DUBAI_STYLE_CAPABILITIES = {
+    "payload_profile": "custom",
+    "limits": {"duration_seconds": {"min": 4, "max": 15}, "max_reference_images": 9, "aspect_ratios": ["16:9", "9:16"], "resolutions": ["720P"], "max_reference_audios": 3},
+    "wire": {
+        "duration_field": "duration", "ratio_field": "ratio", "resolution_field": "resolution", "resolution_case": "lower",
+        "reference_field": "referenceImages", "audio_reference_field": "referenceAudios", "omit_input_mode": True, "reference_token": "@图{n}",
+    },
+}
+
+
+async def _captured_payload(monkeypatch, **overrides):
+    captured = {}
+
+    def handler(method, url, kwargs):
+        captured["json"] = kwargs.get("json")
+        return type("R", (), {"is_success": True, "status_code": 200, "json": lambda self: {"task_id": "t-1", "status": "queued"}})()
+
+    monkeypatch.setattr(video_api.httpx, "AsyncClient", lambda *a, **k: _Client(handler))
+    args = dict(
+        model="xinyao-2.0-720p-TJ", prompt="连续镜头。@图片2 站在碑前", aspect_ratio="16:9", size="720P", duration_seconds=13,
+        images=["https://cdn.example.com/a.jpg", "https://cdn.example.com/b.jpg", "https://cdn.example.com/c.jpg"],
+        api_key="k", base_url="https://relay.example.com/v1", video_capabilities=DUBAI_STYLE_CAPABILITIES, input_mode="image_to_video",
+    )
+    args.update(overrides)
+    await video_api.create_video_job(**args)
+    return captured["json"]
+
+
+@pytest.mark.asyncio
+async def test_wire_config_sends_only_the_official_fields_with_a_reference_array(monkeypatch):
+    payload = await _captured_payload(monkeypatch)
+    assert payload["referenceImages"] == ["https://cdn.example.com/a.jpg", "https://cdn.example.com/b.jpg", "https://cdn.example.com/c.jpg"]  # 数组，不是 | 拼成的一个字符串
+    assert payload["duration"] == 13 and payload["ratio"] == "16:9" and payload["resolution"] == "720p"
+    assert set(payload) == {"model", "prompt", "duration", "ratio", "resolution", "referenceImages"}  # 没有 size / orientation / input_mode / input_reference
+
+
+@pytest.mark.asyncio
+async def test_prompt_mentions_every_reference_as_at_tu_n(monkeypatch):
+    payload = await _captured_payload(monkeypatch)
+    prompt = payload["prompt"]
+    assert "@图2 站在碑前" in prompt and "@图片" not in prompt  # 画布里的 @图片N 转成上游写法
+    assert all(f"@图{n}" in prompt for n in (1, 2, 3))  # 缺的 @图1、@图3 自动补上，一一对应
+
+
+@pytest.mark.asyncio
+async def test_audio_references_use_the_official_array_field(monkeypatch):
+    payload = await _captured_payload(monkeypatch, audios=["https://cdn.example.com/v.mp3"])
+    assert payload["referenceAudios"] == ["https://cdn.example.com/v.mp3"]
+
+
+def test_reference_token_helper_is_idempotent_and_ordered():
+    text = video_api.apply_reference_tokens("@图片1 走向 @图3", 3, "@图{n}")
+    assert text.startswith("@图1 走向 @图3") and text.endswith("参考素材：@图2")
+    assert video_api.apply_reference_tokens(text, 3, "@图{n}") == text
+
+
+def test_admin_save_validator_accepts_the_official_wire_style_but_still_rejects_typos():
+    from fastapi import HTTPException
+
+    from routers.points_ai import _validate_model_capabilities
+
+    wrapped = {"schema_version": 1, "video": DUBAI_STYLE_CAPABILITIES}
+    _validate_model_capabilities(wrapped, "video", "lingdong_video")
+    with pytest.raises(HTTPException, match="video 对象"):
+        _validate_model_capabilities(DUBAI_STYLE_CAPABILITIES, "video", "lingdong_video")  # 只贴内层会被拒
+    for patch in ({"omit_input_mode": "yes"}, {"reference_token": "@图"}, {"reference_field": "referenceImagez"}):
+        bad = {"schema_version": 1, "video": {**DUBAI_STYLE_CAPABILITIES, "wire": {**DUBAI_STYLE_CAPABILITIES["wire"], **patch}}}
+        with pytest.raises(HTTPException):
+            _validate_model_capabilities(bad, "video", "lingdong_video")
+    legacy = {"schema_version": 1, "video": {**DUBAI_STYLE_CAPABILITIES, "payload_profile": "legacy_lingdong"}}
+    with pytest.raises(HTTPException):
+        _validate_model_capabilities(legacy, "video", "lingdong_video")  # referenceImages 只在 custom 档位放行

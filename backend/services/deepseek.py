@@ -4561,6 +4561,26 @@ async def parse_chapter_to_shots_lite(
     return all_shots
 
 
+def _normalize_shot_duration_fields(shot_data: dict) -> int:
+    """归一化 shot_data 中的建议时长，并把原始值/理由写回 dict。
+
+    - duration_seconds：AI 建议值经 normalize_video_duration 归一后写回
+    - duration_requested：存在原始建议值时保留原始值（供日志/回显）
+    - duration_reason：缺失时置空串
+    返回归一后的时长。
+    """
+    from services.video_duration import normalize_video_duration
+
+    raw = shot_data.get("duration_seconds")
+    normalized = normalize_video_duration(raw)
+    shot_data["duration_seconds"] = normalized
+    if raw is not None:
+        shot_data["duration_requested"] = raw
+    if shot_data.get("duration_reason") is None:
+        shot_data["duration_reason"] = ""
+    return normalized
+
+
 def is_valid_storyboard_prompt(text: str) -> tuple[bool, str]:
     """校验故事板导演生成的提示词是否有效（无元响应、格式完整）。
 
@@ -4697,7 +4717,7 @@ async def generate_shot_storyboard_prompt(
         motion_plan=shot_data.get("motion_plan"),
         emotion_plan=shot_data.get("emotion_plan"),
         style_preset=shot_data.get("style_preset"),
-        duration_seconds=shot_data.get("duration_seconds", 15),
+        duration_seconds=_normalize_shot_duration_fields(shot_data),
         source_text_span=shot_data.get("source_text_span"),
         shot_context=shot_data.get("shot_context"),
         shot_segments_content=shot_segments_content,
@@ -4815,7 +4835,7 @@ def generate_shot_storyboard_content(
         motion_plan=shot_data.get("motion_plan"),
         emotion_plan=shot_data.get("emotion_plan"),
         style_preset=shot_data.get("style_preset"),
-        duration_seconds=shot_data.get("duration_seconds", 15),
+        duration_seconds=_normalize_shot_duration_fields(shot_data),
         source_text_span=shot_data.get("source_text_span"),
         screenplay_context=shot_data.get("screenplay_context"),
     )

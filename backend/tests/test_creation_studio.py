@@ -906,6 +906,71 @@ async def test_video_reference_payload_uses_input_reference(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_custom_video_payload_uses_configured_newapi_fields(monkeypatch):
+    captured: dict = {}
+
+    class FakeResponse:
+        is_success = True
+        status_code = 200
+        text = ""
+
+        @staticmethod
+        def json():
+            return {"task_id": "task-grok", "status": "queued"}
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+        async def post(self, url, json, headers):
+            captured.update(json)
+            return FakeResponse()
+
+    monkeypatch.setattr(video_api.httpx, "AsyncClient", FakeClient)
+
+    await video_api.create_video_job(
+        model="grok-imagine-video-1.5",
+        prompt="人物自然回头，镜头缓慢推进",
+        aspect_ratio="16:9",
+        size="720P",
+        duration_seconds=15,
+        images=["https://cdn.example.com/reference.png"],
+        api_key="test-key",
+        base_url="https://example.com",
+        video_capabilities={
+            "payload_profile": "custom",
+            "limits": {
+                "aspect_ratios": ["16:9"],
+                "resolutions": ["720P"],
+                "duration_seconds": {"allowed": [15]},
+            },
+            "wire": {
+                "duration_field": "duration",
+                "resolution_field": "resolution",
+                "resolution_case": "lower",
+                "ratio_field": "aspect_ratio",
+                "reference_field": "reference_images",
+            },
+        },
+    )
+
+    assert captured == {
+        "model": "grok-imagine-video-1.5",
+        "prompt": "人物自然回头，镜头缓慢推进",
+        "duration": 15,
+        "aspect_ratio": "16:9",
+        "resolution": "720p",
+        "reference_images": ["https://cdn.example.com/reference.png"],
+    }
+
+
+@pytest.mark.asyncio
 async def test_legacy_video_payload_uses_configured_resolution_and_ratio_fields(monkeypatch):
     captured: dict = {}
 

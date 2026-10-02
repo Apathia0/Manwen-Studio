@@ -155,10 +155,7 @@ export function DesktopAppShell({
             onDeconstructionClick={onDeconstructionClick}
           />
           {isAdmin && (
-            <>
-              <div className={`mb-3 mt-6 border-t border-[#d7e3f4] ${navCollapsed ? '' : 'lg:border-t-0 lg:px-2 lg:text-xs lg:font-semibold lg:uppercase lg:tracking-[0.18em] lg:text-slate-400'}`}>
-                {!navCollapsed ? <span className="hidden lg:inline">运营配置</span> : null}
-              </div>
+            <div className="mt-6 border-t border-[#d7e3f4] pt-3">
               <SideNav
                 items={adminNavItems}
                 activeKey={activeKey}
@@ -166,7 +163,7 @@ export function DesktopAppShell({
                 collapsed={navCollapsed}
                 sectionLabel="运营配置"
               />
-            </>
+            </div>
           )}
         </aside>
         <main className="min-h-0 overflow-y-auto bg-transparent">{children}</main>

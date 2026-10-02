@@ -77,6 +77,7 @@ def _patch_workflow(
     model: str | None = None,
     reference_image: str | None = None,
     duration_seconds: int = 5,
+    seed: int | None = None,
 ) -> dict[str, Any]:
     """修补工作流模板中的节点入参。
 
@@ -120,6 +121,12 @@ def _patch_workflow(
             inputs["int"] = duration_seconds * 8
             patch_count += 1
 
+        if seed is not None and title in {"Seed", "随机种子", "种子"}:
+            seed_key = "seed" if "seed" in inputs else "int" if "int" in inputs else None
+            if seed_key:
+                inputs[seed_key] = seed
+                patch_count += 1
+
     logger.info(
         "ComfyUI 工作流已修补 %d 个节点 (prompt_len=%d model=%s ref=%s dur=%ds)",
         patch_count, len(prompt), model or "default",
@@ -151,6 +158,7 @@ async def submit_job(
     prompt: str,
     model: str | None = None,
     reference_images: list[str] | None = None,
+    seed: int | None = None,
     duration_seconds: int = 5,
     workflow_name: str | None = None,
     base_url: str | None = None,
@@ -173,6 +181,7 @@ async def submit_job(
         model=model,
         reference_image=ref_img,
         duration_seconds=duration_seconds,
+        seed=seed,
     )
 
     payload = {

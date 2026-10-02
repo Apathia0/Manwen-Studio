@@ -194,7 +194,10 @@ export default function ImageZoomView({
       setZoom(fitZoom);
     }
 
-    setImgStatus('loaded');
+    // 图片解码完成后整体渲染，避免浏览器渐进式逐帧渲染
+    const finish = () => setImgStatus('loaded');
+    if (typeof img.decode === 'function') void img.decode().catch(() => undefined).finally(finish);
+    else finish();
   }, []);
 
   const handleImageError = useCallback(() => {

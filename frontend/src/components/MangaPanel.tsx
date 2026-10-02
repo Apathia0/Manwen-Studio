@@ -3,6 +3,7 @@ import { BookOpen, ChevronUp, ChevronDown, Download, ImageIcon, Loader2, Sparkle
 import { useMemo as useMemoValue } from 'react';
 import { createPortal } from 'react-dom';
 import { ImageRedrawModal } from './shared/ImageRedrawModal';
+import MediaImage from './shared/MediaImage';
 import ImageZoomView from './shared/ImageZoomView';
 import StyleSelectorModal from './StyleSelectorModal';
 import StoryboardPresetModal from './StoryboardPresetModal';
@@ -2047,12 +2048,10 @@ const [downloadStatus, setDownloadStatus] = useState('');
                                       >
                                         <div className="overflow-hidden rounded-md border border-emerald-900/40 bg-[#08111d]">
                                           {refLoadStates[refImage.image_path] === 'ready' ? (
-                                            <img
+                                            <MediaImage
                                               src={refLoadSrcs[refImage.image_path] || refImageSrc(refImage.image_path)}
                                               alt={`${card.name} 角色参考图`}
                                               className="h-[240px] w-full object-contain bg-[#08111d] transition-transform group-hover:scale-[1.01]"
-                                              loading="lazy"
-                                              decoding="async"
                                             />
                                           ) : (
                                             <div className="flex h-[240px] w-full items-center justify-center bg-[linear-gradient(180deg,_#08111d_0%,_#111827_100%)] text-emerald-200/80">
@@ -2443,12 +2442,10 @@ const [downloadStatus, setDownloadStatus] = useState('');
                              hover:border-[#d9dfd7] transition-colors"
                   onClick={() => openMangaRedraw(image_number)}
                 >
-                  <img
+                  <MediaImage
                     src={resolvedImgSrc}
                     alt={`Panel ${image_number}`}
                     className={`h-full w-full object-cover ${isRegenerating ? 'opacity-30' : ''}`}
-                    loading="lazy"
-                    decoding="async"
                   />
                   <div className="absolute top-3 left-3 px-2 py-0.5 bg-black/70 rounded text-[10px] text-slate-700 font-mono">
                     {image_number}/{imageCount}
@@ -2725,12 +2722,10 @@ const [downloadStatus, setDownloadStatus] = useState('');
                         className="block h-full w-full"
                       >
                         {refLoadStates[img.image_path] === 'ready' ? (
-                          <img
+                          <MediaImage
                             src={refLoadSrcs[img.image_path] || refImageSrc(img.image_path)}
                             alt={img.filename}
                             className="w-full h-full object-cover transition-transform group-hover:scale-[1.03]"
-                            loading="lazy"
-                            decoding="async"
                           />
                         ) : (
                           <div className="flex h-full w-full items-center justify-center bg-[linear-gradient(180deg,_#0f172a_0%,_#111827_100%)] text-white/70">
@@ -2939,7 +2934,7 @@ const [downloadStatus, setDownloadStatus] = useState('');
               <div className="mb-4">
                 {charRefModalImage ? (
                   <div className="relative">
-                    <img
+                    <MediaImage
                       src={refLoadSrcs[charRefModalImage.image_path] || refImageSrc(charRefModalImage.image_path)}
                       alt={`${charRefModalCharName} 参考图`}
                       className="w-full h-48 object-contain rounded-lg border border-[#d7e3f4]"

@@ -43,6 +43,7 @@ import {
 import { toast } from '../lib/toast';
 import { normalizeErrorMessage } from '../lib/errors';
 import ImageZoomView from './shared/ImageZoomView';
+import MediaImage from './shared/MediaImage';
 
 const AgentPanel = lazy(() => import('./AgentPanel/AgentPanel'));
 
@@ -184,7 +185,7 @@ function useAssetMediaUrl(publicUrl: string, mediaType: CreationStudioMediaKind)
 function AssetThumbnail({ asset }: { asset: CreationStudioAsset }) {
   const [src] = useAssetMediaUrl(asset.public_url, 'image');
   return src
-    ? <img src={src} alt={asset.original_name || '参考图片'} className="h-full w-full object-cover" />
+    ? <MediaImage src={src} alt={asset.original_name || '参考图片'} className="h-full w-full object-cover" />
     : <span className="grid h-full w-full place-items-center text-slate-300"><Loader2 size={14} className="animate-spin" /></span>;
 }
 
@@ -1053,10 +1054,10 @@ export function CreationStudioPage({ storyId, chapterId, storyTitle, chapterTitl
         </div>
       </div>
       {assistantOpen ? (
-        <aside className="absolute inset-y-14 right-2 z-30 flex w-[380px] min-h-0 flex-col overflow-hidden rounded-xl border border-[#d7e3f4] bg-white/95 shadow-[0_18px_42px_rgba(15,23,42,0.2)] backdrop-blur-xl max-sm:inset-x-2 max-sm:w-auto">
+        <aside className="fixed inset-y-0 right-0 z-30 flex w-[380px] min-h-0 flex-col overflow-hidden border-l border-[#d7e3f4] bg-white shadow-[-8px_0_24px_rgba(15,23,42,0.12)] max-sm:w-[min(92vw,380px)]">
           <header className="flex shrink-0 items-center justify-between border-b border-[#d7e3f4] px-4 py-3 text-sm font-semibold text-slate-800">
             <span className="flex items-center gap-2"><Bot size={16} className="text-blue-600" />创作台 AI 助手</span>
-            <button type="button" onClick={() => setAssistantOpen(false)} className="rounded-md px-2 py-1 text-xs text-slate-400 hover:bg-slate-100 hover:text-slate-700">关闭</button>
+            <button type="button" onClick={() => setAssistantOpen(false)} className="rounded-md px-2 py-1 text-xs text-slate-400 hover:bg-slate-100 hover:text-slate-700" aria-label="收起 AI 助手">收起</button>
           </header>
           <div className="min-h-0 flex-1">
             {storyId ? (
