@@ -272,7 +272,9 @@ export default function VideoCanvasPanel({ storyId, chapterId, workflow: _workfl
   const [selectedNodeIds, setSelectedNodeIds] = useState<string[]>([]);
   // 发送给助手时取最新选中的节点（回调不应随选中变化重建）。
   const selectedNodeIdsRef = useRef<string[]>([]);
-  selectedNodeIdsRef.current = selectedNodeIds;
+  useEffect(() => {
+    selectedNodeIdsRef.current = selectedNodeIds;
+  }, [selectedNodeIds]);
   const [versionHistoryOpen, setVersionHistoryOpen] = useState(false);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
