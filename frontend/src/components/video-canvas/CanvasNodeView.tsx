@@ -245,7 +245,7 @@ export default function CanvasNodeView({ node, catalogItem, selected, connecting
   return (
     <div
       data-node-id={node.id}
-      className={`node-element absolute flex select-none flex-col transition-shadow duration-200 ${selected ? 'z-50' : 'z-10'}`}
+      className={`node-element absolute flex select-none flex-col transition-shadow duration-200 ${selected ? 'z-50' : 'z-10'} ${node.data.config?.stale ? 'opacity-45' : ''}`}
       style={{
         transform: `translate(${node.position.x}px, ${node.position.y}px)`,
         width: size.width,

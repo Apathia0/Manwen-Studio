@@ -647,3 +647,29 @@ def test_screenplay_stage_accepts_script_within_budget_and_records_target(stage_
 def test_screenplay_stage_without_target_duration_keeps_old_behaviour(stage_state):
     execute(stage_state, stage="screenplay", content="很长的剧本" * 300, user_constraints="日式动漫风，开场3秒内出现冲突，每10到15秒一次反转")
     assert "target_duration_seconds" not in stage_state.saved[0]["metadata"]["production_settings"]
+
+
+def test_reanalysis_updates_matches_in_place_and_clears_leftover_placeholders(stage_state, monkeypatch):
+    """重做资产分析：对得上（同类型同名字）的原地更新、保留位置和已生成的图；这次没有的旧资产——没生成过图的移除，生成过图的保留；不重复新建。"""
+    stage_state.graph = _scene_graph(True)
+    stage_state.graph["nodes"] += [
+        node("hero", "image", asset_role="character", asset_name="萧炎", asset_scene_node="scene-1", asset_id=5, prompt="旧提示词"),
+        node("extra", "image", asset_role="character", asset_name="路人甲", asset_scene_node="scene-1"),
+        node("made", "image", asset_role="prop", asset_name="旧道具", asset_scene_node="scene-1", asset_id=7),
+        node("shot", "image", node_role="storyboard", source_scene_node="scene-1", unit_id="u1"),
+    ]
+    stage_state.graph["nodes"][-4]["position"] = {"x": 777, "y": 888}
+    stage_state.graph["edges"] = [{"id": "e1", "source": "extra", "target": "shot", "sourceHandle": "image", "targetHandle": "references"}]
+
+    async def analyze(canvas_id, body, request, db):
+        return {"assets": [{"role": "character", "name": "萧炎", "prompt": "新提示词", "scene_ids": ["a"]}], "candidates": [], "warnings": [], "failed_calls": 0}
+
+    monkeypatch.setattr(api, "analyze_canvas_assets", analyze)
+    execute(stage_state, stage="assets", scene_node_id="scene-1")
+    saved = {n["id"]: n for n in stage_state.saved[0]["nodes"]}
+    assert "extra" not in saved, "没生成过图的旧资产被移除"
+    assert saved["made"]["data"]["config"].get("stale") is True, "生成过图的旧资产保留但标记过期"
+    hero = saved["hero"]
+    assert hero["position"] == {"x": 777, "y": 888} and hero["data"]["config"]["prompt"] == "新提示词" and "asset_id" not in hero["data"]["config"]
+    assert [n for n in saved.values() if n["data"]["config"].get("asset_name") == "萧炎"] == [hero], "没有重复新建同名资产"
+    assert stage_state.saved[0]["edges"] == [], "被移除节点的连线一并清掉"
