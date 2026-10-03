@@ -18,6 +18,15 @@ interface AgentInputProps {
   onPermissionModeChange?: (mode: CanvasPermissionMode) => void;
 }
 
+/** 输入框按内容自适应高度（有最小 / 最大高度限制）。 */
+function autoResize(el: HTMLTextAreaElement) {
+  el.style.height = 'auto';
+  // 助手面板关闭（display:none）时 scrollHeight 为 0，写入 0px 会让输入框没有可点击区域；
+  // 此时保持 auto 默认行高，待面板可见后的下一次测量再撑开。
+  if (!el.getClientRects().length) return;
+  el.style.height = `${el.scrollHeight}px`;
+}
+
 /** 各权限模式在菜单中展示的图标 */
 const MODE_ICON: Record<string, typeof Lightbulb> = { plan: Lightbulb, auto: Rocket, ask: Hand };
 
@@ -55,14 +64,6 @@ export default function AgentInput({
       document.removeEventListener('keydown', handleKeyDown);
     };
   }, [modeMenuOpen]);
-
-  const autoResize = (el: HTMLTextAreaElement) => {
-    el.style.height = 'auto';
-    // 助手面板关闭（display:none）时 scrollHeight 为 0，写入 0px 会让输入框没有可点击区域；
-    // 此时保持 auto 默认行高，待面板可见后的下一次测量再撑开。
-    if (!el.getClientRects().length) return;
-    el.style.height = `${el.scrollHeight}px`;
-  };
 
   const handlePaste = useCallback((event: React.ClipboardEvent<HTMLTextAreaElement>) => {
     const pastedFiles = Array.from(event.clipboardData.items)
@@ -102,6 +103,21 @@ export default function AgentInput({
     }
   }, [value]);
 
+  // 面板宽度变化（拖拽 / 折叠展开 / 首次布局完成）会改变自动换行，高度要跟着重新测量，
+  // 否则在窄宽度下量出来的高度会一直留着，输入框显得又高又空。
+  useEffect(() => {
+    const el = textareaRef.current;
+    if (!el || typeof ResizeObserver === 'undefined') return;
+    let lastWidth = el.clientWidth;
+    const observer = new ResizeObserver(() => {
+      if (el.clientWidth === lastWidth) return;
+      lastWidth = el.clientWidth;
+      autoResize(el);
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
+
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
@@ -123,9 +139,9 @@ export default function AgentInput({
         onPaste={handlePaste}
         placeholder={placeholder}
         disabled={disabled}
-        rows={3}
+        rows={2}
         className="block w-full min-w-0 resize-none bg-transparent px-1.5 py-1 text-sm leading-6 text-gray-700 placeholder-gray-400 outline-none disabled:opacity-50"
-        style={{ minHeight: '88px', maxHeight: '240px', overflow: 'auto' }}
+        style={{ minHeight: '60px', maxHeight: '200px', overflow: 'auto' }}
       />
       <div ref={modeMenuRef} className="relative mt-1.5 flex items-center justify-between gap-2 border-t border-slate-100 pt-2">
         <div className="flex min-w-0 items-center gap-1.5">
