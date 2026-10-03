@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
 from typing import Any
@@ -40,6 +41,25 @@ ASSET_TRIAGE_SYSTEM_PROMPT = """你是漫剧美术指导兼角色设计总监。
 - 角色外观剧本没写的，按身份合理设定但必须具体。\n- 提示词只描述内容（人物外貌与服装、场景布局与陈设、物体形态与材质细节），绝对不要出现任何画风、渲染、画质或镜头滤镜类词语（如 写实、赛璐璐、水彩、电影感、cinematic、film grain、8k）：画风由用户选定的画风参考图统一控制，不由提示词控制。"""
 
 CHARACTER_CONTEXT_CHARS = 600
+
+LEAN_CHARACTER_SYSTEM_PROMPT = """你是影视角色造型师。为每个角色写一段给图片模型用的外貌描述，中文，每个角色 100 到 200 字。
+只写客观可见、能画出来的外貌：性别与年龄段、身高体型、脸型五官、肤色、发型发色、服装（内外层分别写颜色、材质、款式）、鞋、随身配饰和标志性特征；剧本明确写了的伤痕、污渍、病态也要写。
+绝对不要写：性格、背景故事、MBTI、人生弧光、画风、渲染、画质、摄影或镜头词汇（如 写实、电影感、赛璐璐、8k、masterpiece）、设定板、三视图、版式、背景、文字标注。画风、版式由系统统一控制，不在你这里。
+外貌必须具体且与剧本一致（剧本没写的按身份合理设定），不同角色之间要有清楚的区分（体型、发型、服装颜色）。同一个角色的描述要像一个真实存在的人，不要用“美丽”“帅气”这类空话。
+输出 JSON：{"character_prompts": [{"name": "角色原名", "prompt": "外貌描述"}]}，每个给定角色都要有一条，name 与给定名字完全一致。"""
+
+
+async def generate_character_prompts(shot_data: dict[str, Any], character_profiles: str, api_key: str | None) -> list[dict[str, Any]]:
+    """角色外貌提示词（精简版）：只写可见外貌，不带设定板黑话 / 画风词 / 版式描述，输出短，一批 3 个也不会被截断。"""
+    from services import video_canvas_director as director
+
+    user = json.dumps(
+        {"角色": list(shot_data.get("characters") or []), "角色档案": character_profiles, "剧本": str(shot_data.get("chapter_text") or "")[:6000]},
+        ensure_ascii=False,
+    )
+    data = await director._call_deepseek_json(system=LEAN_CHARACTER_SYSTEM_PROMPT, user=user, api_key=api_key, max_tokens=3072)
+    entries = data.get("character_prompts") if isinstance(data, dict) else None
+    return [e for e in entries if isinstance(e, dict)] if isinstance(entries, list) else []
 # 主要角色名额；角色提示词每批生成的人数和并发数。
 # 每个角色的三视图提示词很长，一次让模型写完全部角色会撞上输出上限被截断，只剩前几个（路人甲乙反而挤掉了女主）。
 MAX_MAIN_CHARACTERS = 8
@@ -207,7 +227,7 @@ async def analyze_scene_assets(
         async def generate(batch: list[str]) -> list[dict[str, Any]] | BaseException:
             async with semaphore:
                 try:
-                    return await deepseek_service.generate_shot_character_prompts_ai(shot_data_for(batch), profile_text_for(batch), api_key)
+                    return await generate_character_prompts(shot_data_for(batch), profile_text_for(batch), api_key)
                 except Exception as exc:  # noqa: BLE001 - 单批失败不影响其他批，统一在下面核对补漏
                     return exc
 

@@ -49,6 +49,30 @@ CHARACTER_IDENTITY_SHEET_DIRECTIVE = (
     "同一角色在所有视图中脸型、发型、服装、配饰、体型严格一致；"
     "图中不要自己画任何文字（名称标注由系统在图片下方统一加上）、不要档案表格、不要色板、不要服装拆解、不要多余表情格和背景场景。"
 )
+_SLIM_DROP_LINE = re.compile(r"^\s*(?:生日|体重|职业|MBTI|Big Five|关键词|角色弧光|性格|表情系统)\s*[:：]")
+_SLIM_DROP_PARAGRAPH = re.compile(r"^\s*(?:LEFT PANEL|RIGHT PANEL|Professional character design sheet|Accurate anatomy)", re.I)
+
+
+def slim_character_prompt(prompt: str) -> str:
+    """旧版角色提示词（来自漫画 / 视频工作流的整页设定板模板）精简成只剩外貌的内容。
+
+    那种模板里有大段“设定板、信息栏、表情格、服装分解图、masterpiece、8k professional rendering”之类的版式和画质黑话，
+    会把模型推向插画风的设定稿，压过风格参考图，还和后面“只画干净的三视图”的版式要求互相矛盾。
+    只去掉明确无关的段落和行（版式面板、画质套话、性格 / MBTI 等非外貌条目），外貌和服装描述原样保留。"""
+    text = str(prompt or "")
+    if "FINAL IMAGE PROMPT" not in text and "LEFT PANEL" not in text:
+        return text
+    kept: list[str] = []
+    for paragraph in re.split(r"\n\s*\n", text):
+        if _SLIM_DROP_PARAGRAPH.match(paragraph.strip()):
+            continue
+        lines = [line for line in paragraph.split("\n") if not _SLIM_DROP_LINE.match(line)]
+        cleaned = "\n".join(lines).strip()
+        if cleaned:
+            kept.append(cleaned)
+    return "\n\n".join(kept)
+
+
 # 场景 / 道具资产图的版式：画面干净、主体明确，后面会被当作参考图使用；名称标注同样由系统统一加在图片下方
 SCENE_ASSET_DIRECTIVE = (
     "\n\n【版式要求，优先于前文任何版式描述】这是一张场景参考图：横向 16:9 的空镜，画面里没有任何人物，"
@@ -62,7 +86,9 @@ PROP_ASSET_DIRECTIVE = (
 )
 # 画风锚点（风格预设图 / 用户上传的风格图）：图生图控制画风，比提示词里的画风文字可靠得多
 STYLE_ANCHOR_DIRECTIVE = (
-    "\n\n【画风统一·最高优先级】本次附带的“画风参考”图是全片统一画风的锚点：线条与描边、上色或渲染方式、色调与饱和度、"
+    "\n\n【画风统一·最高优先级】本次附带的“画风参考”图是全片统一画风的锚点。首先是渲染媒介必须与参考图一致："
+    "参考图是真实摄影 / 电影画面时，人物必须是真人质感（真实的皮肤纹理、自然的光影和比例），不要画成插画、概念设定图、3D 渲染、动漫或游戏立绘；"
+    "参考图是插画 / 动漫 / 3D 时同理保持同一种媒介。然后是线条与描边、上色或渲染方式、色调与饱和度、"
     "光影质感、人物与物体的风格化程度（头身比、五官简化程度）必须与它保持一致，像同一部作品里的画面。"
     "它只决定画风，不决定内容：不要复制其中的人物、服装、物体或构图。提示词里关于画风的文字与参考图冲突时，以参考图为准。"
 )
@@ -1437,6 +1463,8 @@ async def execute_canvas_run(
                         if not prompt:
                             prompt = _first_input_text(inputs, ("text", "content", "storyboard_prompt", "screenplay", "prompt", "shot"))
                         # 节点里可能残留旧的“统一视觉风格”等文字（老画布 / 旧分析结果）：生成前清掉，风格以当前的风格参考图为准
+                        if str(config.get("asset_role") or "") == "character":
+                            prompt = slim_character_prompt(prompt)
                         prompt = _apply_style_prompt(strip_style_text(prompt), config, inputs)
                         if not prompt:
                             raise RuntimeError("图像节点缺少提示词")
