@@ -20,6 +20,7 @@ _VIDEO_STATUS_MAP = {
     "success": "completed",
     "failed": "failed",
     "failure": "failed",
+    "error": "failed",
     "cancelled": "failed",
     "canceled": "failed",
     "not_found": "failed",
@@ -40,10 +41,17 @@ def normalize_video_adapter_type(
     return normalized
 
 
-def _normalize_job_status(result: dict[str, object]) -> dict[str, object]:
-    """将供应商状态收敛为稳定的四态，同时保留原始状态。"""
+def _normalize_job_status(result: dict[str, object], *, submitted: bool = False) -> dict[str, object]:
+    """将供应商状态收敛为稳定的四态，同时保留原始状态。
+
+    submitted=True 表示这是“提交任务”的返回：部分网关提交成功时只回 task_id 不带 status，
+    此时按排队处理交给后续轮询，不能当成未知状态直接判失败。"""
     normalized = dict(result)
     upstream_status = str(result.get("upstream_status") or result.get("status") or "").strip()
+    if submitted and not upstream_status and str(result.get("task_id") or "").strip():
+        normalized["upstream_status"] = ""
+        normalized["status"] = "queued"
+        return normalized
     status = _VIDEO_STATUS_MAP.get(upstream_status.lower())
     normalized["upstream_status"] = upstream_status
     if status is None:
@@ -132,7 +140,7 @@ async def create_video_job(
             video_capabilities=video_capabilities,
             audios=audios or None,
         )
-        return _normalize_job_status(result)
+        return _normalize_job_status(result, submitted=True)
 
     if audios:
         raise ValueError("当前视频协议不支持音频参考，请更换支持音频参考的视频模型")
@@ -154,7 +162,7 @@ async def create_video_job(
         api_key=api_key,
         base_url=base_url,
     )
-    return _normalize_job_status(dict(result))
+    return _normalize_job_status(dict(result), submitted=True)
 
 
 async def query_video_job(

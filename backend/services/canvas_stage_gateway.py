@@ -464,6 +464,16 @@ async def execute_agent_canvas_stage(canvas_id: int, stage: str, parameters: dic
                     update["profile"] = asset["profile"]
                 _config(asset_node).update(update)
                 ids.append(asset_node["id"])
+            # 这次分析里已经没有的旧资产：没生成过图、没锁定的直接移除（连同连线），不在画布上留空壳；生成过图的保留，已标记过期。
+            leftover = [
+                n for n in graph["nodes"]
+                if _config(n).get("asset_scene_node") == target["id"] and _config(n).get("asset_role") in _ASSET_ORDER and n["id"] not in ids
+                and not _config(n).get("locked") and not isinstance(_config(n).get("asset_id"), int) and not (n.get("data") or {}).get("result")
+            ]
+            if leftover:
+                gone = {n["id"] for n in leftover}
+                graph["nodes"] = [n for n in graph["nodes"] if n["id"] not in gone]
+                graph["edges"] = [e for e in graph.get("edges", []) if e.get("source") not in gone and e.get("target") not in gone]
             # 新建的资产节点按类别分栏；已存在的（含用户挪动过的）保持原位置。
             fresh = [n for n in graph["nodes"] if n["id"] in ids and n["id"] in created_asset_ids]
             _layout_assets_by_kind(graph, target, fresh)

@@ -90,7 +90,7 @@ import BatchStartDialog, { type BatchStartInfo } from './video-canvas/BatchStart
 import StyleControl from './video-canvas/StyleControl';
 import { anyFollowsCanvasStyle, inconsistentNodeIds, presetToCanvasStyle, styleKeyOfConfig, readCanvasStyle, referenceToCanvasStyle, sameStyle, type CanvasStyle } from './video-canvas/canvasStyle';
 import { buildReferenceEdges, collectAssets, summarizeAssets, type AssetKind } from './video-canvas/assetLibrary';
-import { nextAssetSlot, planAssetPositions } from './video-canvas/assetLayout';
+import { nextAssetSlot } from './video-canvas/assetLayout';
 import { computeAutoLayout } from './video-canvas/autoLayout';
 import { collectProduction, generationAncestors, planBatchWaves, type BatchEdge, type BatchNode } from './video-canvas/batchPlan';
 import type { BatchProgress } from './video-canvas/CanvasAssetPanel';
@@ -2196,41 +2196,78 @@ export default function VideoCanvasPanel({ storyId, chapterId, workflow: _workfl
       }
       const result = await analyzeCanvasAssets(targetCanvas.id, nodeId, targetCanvas.definition_revision);
       captureHistory();
-      // 替换本场景已有资产节点（稳定 ID，不叠加）；已锁定的资产原样保留。
-      const previousNodes = nodes.filter((node) => node.id !== nodeId && (node.data.config as Record<string, unknown> | undefined)?.source_scene_node === nodeId && (node.data.config as Record<string, unknown>).node_role === 'asset');
-      const lockedIds = new Set(previousNodes.filter((node) => Boolean((node.data.config as Record<string, unknown>).locked)).map((node) => node.id));
-      const previousById = new Map(previousNodes.map((node) => [node.id, node]));
-      const replaceIds = new Set(previousNodes.filter((node) => !lockedIds.has(node.id)).map((node) => node.id));
+      // 按（类型, 名称）对上本场景已有的资产节点——不管是流水线、助手还是上次手动分析创建的：
+      // 对得上的原地更新（保留位置、连线、已生成的图，只有提示词变了才清掉旧图）；
+      // 对不上的旧节点：没生成过图、没锁定的直接移除（含以前重复分析残留的），生成过的标记过期并保留；新增的追加到各自那一列的末尾。
+      const assetKinds = ['character', 'scene', 'prop'];
+      const cfgOf = (node: CanvasNode) => (node.data.config || {}) as Record<string, unknown>;
+      const previousNodes = nodes.filter((node) => node.id !== nodeId && node.type === 'image' && assetKinds.includes(String(cfgOf(node).asset_role || '')) && (cfgOf(node).asset_scene_node === nodeId || cfgOf(node).source_scene_node === nodeId));
+      const keyOf = (role: unknown, name: unknown) => `${String(role)}:${String(name).trim()}`;
+      const previousByKey = new Map<string, CanvasNode>();
+      for (const node of previousNodes) {
+        const key = keyOf(cfgOf(node).asset_role, cfgOf(node).asset_name);
+        const existing = previousByKey.get(key);
+        if (!existing || (cfgOf(existing).stale && !cfgOf(node).stale)) previousByKey.set(key, node);
+      }
       const roleLabels: Record<string, string> = { character: '角色', scene: '场景', prop: '道具' };
-      const drafts = (result.assets as CanvasSceneAsset[]).map((asset) => {
+      const sceneBox = { position: sceneNode.position, width: Number(sceneNode.data.ui?.width) || undefined };
+      const placed: Array<{ kind: AssetKind; position: { x: number; y: number } }> = previousNodes.filter((node) => !cfgOf(node).stale).map((node) => ({ kind: cfgOf(node).asset_role as AssetKind, position: node.position }));
+      const matchedIds = new Set<string>();
+      const updatedById = new Map<string, CanvasNode>();
+      const createdNodes: CanvasNode[] = [];
+      for (const asset of result.assets as CanvasSceneAsset[]) {
+        const sceneIds = (asset.scene_ids || []).map(String);
+        const matched = previousByKey.get(keyOf(asset.role, asset.name));
+        if (matched) {
+          matchedIds.add(matched.id);
+          const config = cfgOf(matched);
+          const locked = Boolean(config.locked);
+          const promptChanged = !locked && config.prompt !== asset.prompt;
+          const nextConfig: Record<string, unknown> = {
+            ...config, asset_role: asset.role, asset_name: asset.name, asset_scene_node: nodeId, source_scene_node: nodeId, scene_ids: sceneIds, stale: false,
+            ...(locked ? {} : { prompt: asset.prompt }),
+            ...(asset.profile && !config.profile_edited ? { profile: asset.profile } : {}),
+          };
+          if (promptChanged) delete nextConfig.asset_id;
+          updatedById.set(matched.id, { ...matched, data: { ...matched.data, config: nextConfig, ...(promptChanged ? { result: undefined } : {}) } });
+          continue;
+        }
         const nameHash = Math.abs([...asset.name].reduce((hash, char) => (hash * 31 + (char.codePointAt(0) || 0)), 7) % 2176782336).toString(36).slice(0, 6);
-        return { asset, id: `ast-${nodeId}-${asset.role}-${nameHash}`.slice(0, 64) };
-      }).filter((draft) => !lockedIds.has(draft.id));
-      // 新资产按 角色 / 场景 / 道具 分栏排在场景节点下方；分析过的节点保持原位置。
-      const positions = planAssetPositions({ position: sceneNode.position, width: Number(sceneNode.data.ui?.width) || undefined }, drafts.filter((draft) => !previousById.has(draft.id)).map((draft) => ({ id: draft.id, kind: draft.asset.role })));
-      const assetNodes: CanvasNode[] = drafts.map(({ asset, id }) => ({
-        id,
-        type: 'image',
-        position: previousById.get(id)?.position || positions.get(id) || sceneNode.position,
-        data: {
-          label: `${roleLabels[asset.role] || asset.role}·${asset.name}`,
-          nodeType: 'image',
-          config: {
-            node_role: 'asset',
-            asset_role: asset.role,
-            asset_name: asset.name,
-            asset_scene_node: nodeId,
-            source_scene_node: nodeId,
-            scene_ids: (asset.scene_ids || []).map(String),
-            ...(asset.profile ? { profile: asset.profile } : {}),
-            prompt: asset.prompt,
-            size: '1024x1024',
-            aspect_ratio: '1:1',
+        const position = nextAssetSlot(sceneBox, asset.role as AssetKind, placed);
+        placed.push({ kind: asset.role as AssetKind, position });
+        createdNodes.push({
+          id: `ast-${nodeId}-${asset.role}-${nameHash}`.slice(0, 64),
+          type: 'image',
+          position,
+          data: {
+            label: `${roleLabels[asset.role] || asset.role}·${asset.name}`,
+            nodeType: 'image',
+            config: {
+              node_role: 'asset',
+              asset_role: asset.role,
+              asset_name: asset.name,
+              asset_scene_node: nodeId,
+              source_scene_node: nodeId,
+              scene_ids: sceneIds,
+              ...(asset.profile ? { profile: asset.profile } : {}),
+              prompt: asset.prompt,
+              size: '1024x1024',
+              aspect_ratio: '1:1',
+            },
           },
-        },
-      }));
-      setNodes((current) => [...current.filter((node) => !replaceIds.has(node.id)), ...assetNodes]);
-      setEdges((current) => current.filter((edge) => !replaceIds.has(edge.source) && !replaceIds.has(edge.target)));
+        });
+      }
+      const removedIds = new Set<string>();
+      const staleIds = new Set<string>();
+      for (const node of previousNodes) {
+        if (matchedIds.has(node.id) || cfgOf(node).locked) continue;
+        if (nodeHasResult(node)) { if (!cfgOf(node).stale) staleIds.add(node.id); } else removedIds.add(node.id);
+      }
+      setNodes((current) => [
+        ...current.filter((node) => !removedIds.has(node.id)).map((node) => updatedById.get(node.id) ?? (staleIds.has(node.id) ? { ...node, data: { ...node.data, config: { ...node.data.config, stale: true } } } : node)),
+        ...createdNodes.filter((node) => !current.some((item) => item.id === node.id)),
+      ]);
+      setEdges((current) => current.filter((edge) => !removedIds.has(edge.source) && !removedIds.has(edge.target)));
       updateSceneNodeConfig(nodeId, { asset_analysis: result.assets, asset_analysis_stale: false, asset_candidates: result.candidates || [] });
       markDirty();
       const counts = (result.assets as CanvasSceneAsset[]).reduce<Record<string, number>>((acc, asset) => { acc[asset.role] = (acc[asset.role] || 0) + 1; return acc; }, {});

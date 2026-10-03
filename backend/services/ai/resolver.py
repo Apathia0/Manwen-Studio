@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import uuid
 import datetime
 from decimal import Decimal
@@ -21,6 +23,21 @@ from services.points.pricing import (
     quantize_points,
     reserve_points_from_estimate,
 )
+
+
+# 视频按次计价时，一次预留可能覆盖多个片段（旧章节工作流一次批量生成多个镜头）。
+# 调用方只知道总秒数，片段数通过这个上下文变量传给 begin_ai_call；按秒计价的模型不受影响。
+_video_clip_count_var: contextvars.ContextVar[int] = contextvars.ContextVar("video_clip_count", default=1)
+
+
+@contextlib.contextmanager
+def video_clip_count(count: int):
+    """在 with 块内发起的视频计费预留，按 count 个片段计次（仅对按次计价的视频模型生效）。"""
+    token = _video_clip_count_var.set(max(1, int(count or 1)))
+    try:
+        yield
+    finally:
+        _video_clip_count_var.reset(token)
 
 
 def _positive_int(value: Any, default: int) -> int:
@@ -211,6 +228,8 @@ def begin_ai_call(
             raise HTTPException(400, "该模型尚未配置积分价格")
         ek = estimate_kwargs or {}
         call_count = max(1, int(ek.get("call_count") or 1))
+        if modality == "video":
+            call_count = max(call_count, _video_clip_count_var.get())
         estimated = estimate_points(
             billing_type=price.billing_type,
             price_config=price.price_config_json,
@@ -243,6 +262,9 @@ def begin_ai_call(
             )
         elif price.billing_type == "per_call":
             reservation_estimate = quantize_points(estimated * call_count)
+            if modality == "video":
+                # 视频按次计价：预估也按片段数放大，与按次结算（单价 × 片段数）口径一致。
+                estimated = reservation_estimate
         streaming = bool(ek.get("streaming")) and modality == "text"
         reserved = Decimal("0") if streaming else reserve_points_from_estimate(reservation_estimate)
         price_snap = price_snapshot(price.billing_type, price.price_config_json, price.id)

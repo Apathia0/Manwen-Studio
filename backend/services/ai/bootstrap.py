@@ -171,9 +171,10 @@ def ensure_default_channels_and_models(db: Session) -> None:
             from services.ai.catalog import get_active_price
 
             active = get_active_price(db, model.id)
+            # 管理员可能已把默认视频模型改成按次计价（固定时长的模型），只补缺失的价格，不覆盖按次价格。
             need_per_second = (
                 active is None
-                or (active.billing_type or "") != "per_second"
+                or (active.billing_type or "") not in {"per_second", "per_call"}
             )
             if need_per_second:
                 now = datetime.datetime.utcnow()

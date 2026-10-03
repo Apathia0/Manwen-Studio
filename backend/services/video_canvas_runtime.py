@@ -733,10 +733,6 @@ def _is_video_media_url(url: str) -> bool:
     return path.endswith(_VIDEO_REFERENCE_SUFFIXES)
 
 
-VIDEO_REFERENCE_MAX_SIDE = 1536
-VIDEO_REFERENCE_JPEG_QUALITY = 88
-
-
 _LABEL_FONT_CANDIDATES = (
     # Windows
     "C:/Windows/Fonts/msyh.ttc", "C:/Windows/Fonts/msyhbd.ttc", "C:/Windows/Fonts/simhei.ttf", "C:/Windows/Fonts/simsun.ttc",
@@ -811,44 +807,9 @@ def stamp_asset_label_bar(image_path: str | Path, label: str) -> bool:
         return False
 
 
-def make_video_reference_copy(local_path: str | Path, label: str = "") -> str | None:
-    """为视频参考图生成一份压缩副本（长边 ≤1536 的 JPEG，通常 150~400KB），原图不动。
-
-    视频上游要在境内拉取参考图，2MB 以上的整张 PNG（多视图设定表）经常下载超时 / 失败，
-    而人物外貌特征在 1536 像素下已经足够清晰。透明背景铺白。副本跟随原图的修改时间更新。
-    """
-    from PIL import Image
-
-    source = Path(local_path)
-    if not source.is_file():
-        return None
-    # 标注内容变了（改名、改用途）要产生新文件，不能沿用旧缓存；无标注时保持原来的文件名
-    tag = f"-{hashlib.sha1(label.encode('utf-8')).hexdigest()[:8]}" if label else ""
-    target = source.with_name(f"{source.stem}.vref{tag}.jpg")
-    try:
-        if target.is_file() and target.stat().st_mtime >= source.stat().st_mtime:
-            return str(target)
-        with Image.open(source) as image:
-            image.load()
-            if image.mode in {"RGBA", "LA"} or (image.mode == "P" and "transparency" in image.info):
-                rgba = image.convert("RGBA")
-                flat = Image.new("RGB", rgba.size, (255, 255, 255))
-                flat.paste(rgba, mask=rgba.getchannel("A"))
-                image = flat
-            else:
-                image = image.convert("RGB")
-            image.thumbnail((VIDEO_REFERENCE_MAX_SIDE, VIDEO_REFERENCE_MAX_SIDE), Image.LANCZOS)
-            if label:
-                image = _add_label_bar(image, label)
-            image.save(target, "JPEG", quality=VIDEO_REFERENCE_JPEG_QUALITY, optimize=True)
-        return str(target)
-    except Exception:  # noqa: BLE001 - 压缩失败时退回用原图，不阻断提交
-        logger.warning("生成视频参考图压缩副本失败：%s", source, exc_info=True)
-        return None
-
-
 async def _ensure_asset_oss_urls(inputs: list[dict[str, Any]], canvas: VideoCanvas, db) -> None:
-    """给还没有云端链接的图片资产补传一次，并把 oss_url 记入资产元数据（旧资产、上传失败过的资产走这里兜底）。"""
+    """提交视频前确保每个图片资产有云端外链：已有外链（生成时直传记下的 oss_url，或资产本身就在云端）直接复用，
+    只有旧资产、当时 OSS 未启用或上传失败的才补传一次原图，并把外链记回资产，之后再被引用不会再传。"""
     changed = False
     for value in inputs:
         asset_id = value.get("asset_id")
@@ -856,40 +817,21 @@ async def _ensure_asset_oss_urls(inputs: list[dict[str, Any]], canvas: VideoCanv
         if not asset or asset.story_id != canvas.story_id or asset.status != "active" or _asset_media_kind(asset) != "image":
             continue
         meta = dict(getattr(asset, "meta_json", None) or {})
-        has_full = str(meta.get("oss_url") or "").lower().startswith(("http://", "https://"))
-        label = reference_label_text(asset_reference_role(asset), str(getattr(asset, "name", "") or ""))
-        has_video_copy = (
-            str(meta.get("oss_video_ref_url") or "").lower().startswith(("http://", "https://"))
-            and str(meta.get("oss_video_ref_label") or "") == label
-        )
-        if has_full and has_video_copy:
+        if str(meta.get("oss_url") or "").lower().startswith(("http://", "https://")):
             continue
         file_path = str(asset.file_path or "").strip()
         if file_path.lower().startswith(("http://", "https://")):
-            if not has_full:
-                meta["oss_url"] = file_path
-                asset.meta_json = meta
-                changed = True
-            continue
-        local_paths = _local_reference_paths([value], canvas, db)
-        if not local_paths:
-            continue
-        if not has_full:
+            meta["oss_url"] = file_path
+        else:
+            local_paths = _local_reference_paths([value], canvas, db)
+            if not local_paths:
+                continue
             oss_url = await _upload_generated_image_to_oss(local_paths[0])
-            if oss_url:
-                meta["oss_url"] = oss_url
-                changed = True
-        if not has_video_copy:
-            from services.blocking import run_blocking
-
-            copy_path = await run_blocking(make_video_reference_copy, local_paths[0], "" if meta.get("labeled") else label)
-            copy_url = await _upload_generated_image_to_oss(copy_path) if copy_path else None
-            if copy_url:
-                meta["oss_video_ref_url"] = copy_url
-                meta["oss_video_ref_label"] = label
-                changed = True
-        if changed:
-            asset.meta_json = meta
+            if not oss_url:
+                continue
+            meta["oss_url"] = oss_url
+        asset.meta_json = meta
+        changed = True
     if changed:
         db.commit()
 
@@ -928,7 +870,7 @@ def _reference_urls(inputs: list[dict[str, Any]], canvas: VideoCanvas, db) -> li
             if asset and asset.story_id == canvas.story_id and asset.status == "active" and _asset_media_kind(asset) == "image":
                 # 生成时已上传到 OSS 的图直接用公网地址，提交视频时不必重复上传
                 meta = getattr(asset, "meta_json", None) or {}
-                oss_url = str(meta.get("oss_video_ref_url") or meta.get("oss_url") or "").strip()
+                oss_url = str(meta.get("oss_url") or "").strip()
                 chosen = oss_url if oss_url.lower().startswith(("http://", "https://")) else _asset_static_url(asset.file_path)
         if not chosen:
             reused_url = str(value.get("_media_url") or "").strip()
@@ -1527,9 +1469,13 @@ async def execute_canvas_run(
                             asset_labeled = await run_blocking(stamp_asset_label_bar, str(saved_path), reference_label_text(asset_role_value, str(config.get("asset_name") or "")))
                         stored_path = _relative_path(str(saved_path), MANGA_OUTPUTS)
                         asset_kind = {"character": "character_reference", "scene": "scene_reference", "prop": "prop_reference"}.get(str(config.get("asset_role")), "storyboard_frame")
-                        asset = VideoAsset(story_id=canvas.story_id, chapter_id=run_chapter_id, asset_type=asset_kind, name=str(config.get("asset_name") or f"画布 {canvas.name} - {node_id}"), file_path=stored_path, provider="image2", prompt=prompt, meta_json={"canvas_id": canvas.id, "run_id": run.id, "node_id": node_id, "asset_role": config.get("asset_role"), "storyboard_sheet": is_storyboard_sheet, "labeled": asset_labeled, **({"oss_url": oss_url} if (oss_url := await _upload_generated_image_to_oss(saved_path)) else {})}, usage_scope="story_shared")
+                        asset = VideoAsset(story_id=canvas.story_id, chapter_id=run_chapter_id, asset_type=asset_kind, name=str(config.get("asset_name") or f"画布 {canvas.name} - {node_id}"), file_path=stored_path, provider="image2", prompt=prompt, meta_json={"canvas_id": canvas.id, "run_id": run.id, "node_id": node_id, "asset_role": config.get("asset_role"), "storyboard_sheet": is_storyboard_sheet, "labeled": asset_labeled}, usage_scope="story_shared")
                         db.add(asset)
                         db.flush()
+                        # 生成完成就把原图直传 OSS 并记下外链：之后提交视频、再次被引用都先查这个外链，不会重复上传。
+                        # 本地原图仍是主副本（画布展示、图生图参考都读本地）。
+                        if oss_url := await _upload_generated_image_to_oss(saved_path):
+                            asset.meta_json = {**(asset.meta_json or {}), "oss_url": oss_url}
                         output = {"asset_id": asset.id, "file_path": stored_path, "url": _static_url(stored_path, MANGA_OUTPUTS, "/static/manga")}
                 elif node_type in {"video", "video_generation"}:
                     if trusted_import_url:

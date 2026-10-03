@@ -282,6 +282,7 @@ export function PointsAiAdminPage() {
     modality: 'text',
     initial_points: DEFAULT_TEXT_POINTS_PER_1M_TOKENS,
     initial_output_points: DEFAULT_TEXT_POINTS_PER_1M_TOKENS,
+    video_billing_type: 'per_second',
     sort_order: 0,
     user_visible: true,
     capabilities_json: '{}',
@@ -410,6 +411,7 @@ export function PointsAiAdminPage() {
       modality: 'text',
       initial_points: DEFAULT_TEXT_POINTS_PER_1M_TOKENS,
       initial_output_points: DEFAULT_TEXT_POINTS_PER_1M_TOKENS,
+      video_billing_type: 'per_second',
       sort_order: 0,
       user_visible: true,
       capabilities_json: '{}',
@@ -433,10 +435,13 @@ export function PointsAiAdminPage() {
         ? textPrices.input
         : readPrice(
             model.active_price?.price_config_json,
-            model.modality === 'video' ? 'points_per_second' : 'points_per_image',
+            model.modality === 'video'
+              ? model.active_price?.billing_type === 'per_call' ? 'points_per_call' : 'points_per_second'
+              : 'points_per_image',
             defaultPointsForModality(model.modality),
           ),
       initial_output_points: textPrices.output,
+      video_billing_type: model.active_price?.billing_type === 'per_call' ? 'per_call' : 'per_second',
       sort_order: model.sort_order,
       user_visible: model.user_visible,
       capabilities_json: JSON.stringify(
@@ -586,7 +591,7 @@ export function PointsAiAdminPage() {
       });
       setPricingModelId(null);
       await reload();
-      toast.success(model.modality === 'video' ? '视频按秒价格已更新' : '模型价格已更新');
+      toast.success(model.modality === 'video' ? (billingType === 'per_call' ? '视频按次价格已更新' : '视频按秒价格已更新') : '模型价格已更新');
     } catch (error) {
       toast.error(error instanceof Error ? error.message : '定价失败');
     } finally {
@@ -1225,7 +1230,7 @@ export function PointsAiAdminPage() {
                           </div>
                           <p className="mt-1 text-xs text-slate-500">
                             <StatusLabel active={model.user_visible} activeText="用户可见" inactiveText="已隐藏" /> ·{' '}
-                            {model.active_price ? model.active_price.billing_type : '未定价'}
+                            {model.active_price ? formatModelPrice(model.active_price) : '未定价'}
                           </p>
                         </div>
                         <div className="flex shrink-0 flex-wrap gap-2">
@@ -1295,6 +1300,14 @@ export function PointsAiAdminPage() {
                       {pricingModelId === model.id ? (
                         <div className="mt-3 flex flex-col gap-3 border-l-2 border-blue-500 bg-blue-50/60 p-3 sm:flex-row sm:items-end">
                           <div className="grid min-w-0 flex-1 gap-3 sm:grid-cols-2">
+                            {model.modality === 'video' ? (
+                              <Field label="计价方式" hint="固定时长、整条按次收费的模型选「按次」">
+                                <Select value={priceForm.billing_type === 'per_call' ? 'per_call' : 'per_second'} onChange={(event) => setPriceForm({ ...priceForm, billing_type: event.target.value })}>
+                                  <option value="per_second">按秒计价（时长 × 单价）</option>
+                                  <option value="per_call">按次计价（每个视频固定价）</option>
+                                </Select>
+                              </Field>
+                            ) : null}
                             <Field label={model.modality === 'video' ? priceForm.billing_type === 'per_call' ? '每次积分价' : '每秒积分价' : model.modality === 'image' ? '每张积分价' : '每百万输入 Token 积分价'}>
                               <Input type="number" min="0" step="0.0001" value={priceForm.points} onChange={(event) => setPriceForm({ ...priceForm, points: Number(event.target.value) })} />
                             </Field>
@@ -1471,9 +1484,17 @@ export function PointsAiAdminPage() {
                 ) : null}
                 {!editingModelId ? (
                   <>
+                    {modelForm.modality === 'video' ? (
+                      <Field label="计价方式" hint="固定时长、整条按次收费的模型选「按次」">
+                        <Select value={modelForm.video_billing_type} onChange={(event) => setModelForm({ ...modelForm, video_billing_type: event.target.value })}>
+                          <option value="per_second">按秒计价（时长 × 单价）</option>
+                          <option value="per_call">按次计价（每个视频固定价）</option>
+                        </Select>
+                      </Field>
+                    ) : null}
                     <Field
                       label={modelForm.modality === 'text' ? '初始输入积分价' : '初始积分价'}
-                      hint={modelForm.modality === 'video' ? '积分 / 秒' : modelForm.modality === 'image' ? '积分 / 张' : '积分 / 百万输入 Token'}
+                      hint={modelForm.modality === 'video' ? (modelForm.video_billing_type === 'per_call' ? '积分 / 次' : '积分 / 秒') : modelForm.modality === 'image' ? '积分 / 张' : '积分 / 百万输入 Token'}
                     >
                       <Input type="number" min="0" step="0.0001" value={modelForm.initial_points} onChange={(event) => setModelForm({ ...modelForm, initial_points: Number(event.target.value) })} />
                     </Field>
@@ -1552,16 +1573,18 @@ export function PointsAiAdminPage() {
                     });
                     const billingType =
                       initialModality === 'video'
-                        ? 'per_second'
+                        ? modelForm.video_billing_type === 'per_call' ? 'per_call' : 'per_second'
                         : initialModality === 'image'
                           ? 'per_image'
                           : 'per_1m_tokens';
                     const priceConfig =
                       initialModality === 'video'
-                        ? {
-                            points_per_second: initialPoints,
-                            estimate_default_seconds: 15,
-                          }
+                        ? billingType === 'per_call'
+                          ? { points_per_call: initialPoints }
+                          : {
+                              points_per_second: initialPoints,
+                              estimate_default_seconds: 15,
+                            }
                         : initialModality === 'image'
                           ? { points_per_image: initialPoints }
                           : {
