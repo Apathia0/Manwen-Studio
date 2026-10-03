@@ -87,9 +87,8 @@ NODE_H = 236
 ASSET_CELL_W = 460
 ASSET_CELL_H = 290
 # 资产块只占两列：角色 / 场景 / 道具三类按顺序纵向分段堆叠（不再三类并排占三列），把横向空间留给分镜和视频
-ASSET_COLUMNS = 2
-ASSET_KIND_GAP = 50
-ASSET_BLOCK_GAP = 120
+# 资产三栏：角色一列、道具一列、场景一列，放在场景审核节点右侧、分镜区左侧（自左向右：剧本 → 场景审核 → 资产 → 分镜 → 视频）
+ASSET_SCENE_GAP = 160
 # 分镜：每个镜头一行，分镜图在左、视频在右，整体在场景节点右侧自上而下排列
 SHOT_ROW_H = 300
 SHOT_COL_W = 500
@@ -100,6 +99,7 @@ SHOT_ASSET_GAP = 160
 SCENE_DEFAULT_W = 1280
 SCENE_DEFAULT_H = 800
 _ASSET_ORDER = ("character", "scene", "prop")
+_ASSET_COLUMN_ORDER = ("character", "prop", "scene")
 
 
 def _rect(node: dict) -> tuple[float, float, float, float]:
@@ -145,23 +145,22 @@ def _layout_shots(graph: dict, scene_node: dict, pairs: list[tuple[int, dict, di
 
 
 def _layout_assets_by_kind(graph: dict, scene_node: dict, asset_nodes: list[dict]) -> None:
-    """资产放在场景节点下方，紧凑的两列网格：角色、场景、道具三类按顺序纵向分段，每段内从左到右、从上到下排。
+    """资产按类型分三栏：角色一列、道具一列、场景一列，自上而下排，放在场景审核节点右侧。
 
-    不再让三类各占一列横向铺开（三列约 1700 像素宽，会和右侧的分镜 / 视频区撞在一起）。
+    分镜 / 视频区排在资产三栏的右边（见 _layout_shots），整体自左向右：剧本 → 场景审核 → 资产 → 分镜 → 视频。
     只重排本次资产分析涉及的节点；用户之后手动拖动的位置不会被再次覆盖（只在分析时布局一次）。
     """
     position = scene_node.get("position") or {}
-    height = float(((scene_node.get("data") or {}).get("ui") or {}).get("height") or SCENE_DEFAULT_H)
-    origin_x = float(position.get("x") or 0)
-    cursor_y = float(position.get("y") or 0) + height + ASSET_BLOCK_GAP
-    for kind in _ASSET_ORDER:
+    width = float(((scene_node.get("data") or {}).get("ui") or {}).get("width") or SCENE_DEFAULT_W)
+    top = float(position.get("y") or 0)
+    cursor_x = float(position.get("x") or 0) + width + ASSET_SCENE_GAP
+    for kind in _ASSET_COLUMN_ORDER:
         group = [n for n in asset_nodes if _config(n).get("asset_role") == kind]
         if not group:
             continue
-        for index, node in enumerate(group):
-            row, column = divmod(index, ASSET_COLUMNS)
-            node["position"] = {"x": origin_x + column * ASSET_CELL_W, "y": cursor_y + row * ASSET_CELL_H}
-        cursor_y += -(-len(group) // ASSET_COLUMNS) * ASSET_CELL_H + ASSET_KIND_GAP
+        for row, node in enumerate(group):
+            node["position"] = {"x": cursor_x, "y": top + row * ASSET_CELL_H}
+        cursor_x += ASSET_CELL_W
     _avoid_overlaps(graph, asset_nodes)
 
 
