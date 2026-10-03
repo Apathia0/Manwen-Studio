@@ -19,6 +19,7 @@ import {
 import { normalizeErrorMessage } from '../../lib/errors';
 import type { GhostEdge } from './CanvasConnectionLayer';
 import { toast } from '../../lib/toast';
+import { confirm } from '../../lib/confirm';
 
 interface Props {
   canvasId: number;
@@ -121,17 +122,28 @@ export default function CanvasReviewPanel({ canvasId, revision, refreshKey = 0, 
     if (!(await onBeforeAction())) return;
     setWorking(true);
     setOpen(null);
-    try { setSkipped(new Set()); setConnectPlan(await smartConnectCanvas(canvasId, false)); }
+    try {
+      const plan = await smartConnectCanvas(canvasId, false);
+      // 大批量移除风险：移除项默认全部不勾选，用户必须逐项或明确确认才会应用
+      setSkipped(plan.risky_removal ? new Set(plan.removed.map((item) => `remove:${item.key}`)) : new Set());
+      setConnectPlan(plan);
+    }
     catch (error) { toast.error(normalizeErrorMessage(error, '智能连线失败')); }
     finally { setWorking(false); }
   };
   const applyConnect = async () => {
     if (working || !connectPlan) return;
+    const removing = connectPlan.removed.filter((item) => !skipped.has(`remove:${item.key}`));
+    if (connectPlan.risky_removal && removing.length > 0) {
+      const accepted = await confirm({ title: '确认移除大量连线', message: `这次会移除 ${removing.length} 条连线，其中大部分是编排时建好的资产连线。移除后需要重新编排才能恢复（也可以在版本历史里恢复）。确定要移除吗？`, confirmText: `移除 ${removing.length} 条`, danger: true });
+      if (!accepted) return;
+    }
     setWorking(true);
     try {
       const result = await smartConnectCanvas(canvasId, true, {
         added: connectPlan.added.filter((item) => skipped.has(`add:${item.key}`)).map((item) => item.key),
         removed: connectPlan.removed.filter((item) => skipped.has(`remove:${item.key}`)).map((item) => item.key),
+        confirmRisky: Boolean(connectPlan.risky_removal && removing.length > 0),
       });
       toast.success(`智能连线完成：新增 ${result.added.length} 条，移除 ${result.removed.length} 条`);
       setConnectPlan(null);
@@ -205,6 +217,7 @@ export default function CanvasReviewPanel({ canvasId, revision, refreshKey = 0, 
               <span className="text-xs font-semibold text-[#e1ddd9]">智能连线报告</span>
               <button type="button" onClick={() => setConnectPlan(null)} className="text-[#7d756e] hover:text-[#e1ddd9]" aria-label="收起"><ChevronUp className="h-4 w-4" /></button>
             </div>
+            {connectPlan.risky_removal && <p className="mb-2 rounded-md border border-rose-400/40 bg-rose-500/10 px-2 py-1.5 text-[11px] leading-4 text-rose-200">警告：这次会一次性移除大量编排好的资产连线，通常说明资产节点出了问题。移除项已默认取消勾选；如果确实要移除，请手动勾选后再应用。</p>}
             <p className="mb-2 text-[11px] leading-4 text-[#a79f98]">
               将新增 <b className="text-emerald-300">{connectPlan.added.length}</b> 条 · 将移除 <b className="text-rose-300">{connectPlan.removed.length}</b> 条 · 提示 {connectPlan.issues.length} 条。
               画布上<span className="text-emerald-300">绿色虚线</span>是将新增的连线，<span className="text-rose-300">红色虚线</span>是将移除的连线；取消勾选的变更不会应用。

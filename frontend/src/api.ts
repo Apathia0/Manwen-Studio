@@ -4094,11 +4094,11 @@ export async function approveCanvasCheckpoint(canvasId: number, checkpoint: Revi
 
 export interface SmartConnectEdge { key: string; edge_id: string | null; source: string; target: string; source_handle: string; target_handle: string; source_label: string; target_label: string }
 export interface SmartConnectIssue { severity: 'error' | 'warning' | 'info'; code: string; message: string; node_ids: string[] }
-export interface SmartConnectResult { applied: boolean; changed: boolean; added: SmartConnectEdge[]; removed: SmartConnectEdge[]; issues: SmartConnectIssue[]; definition_revision: number }
+export interface SmartConnectResult { applied: boolean; changed: boolean; risky_removal?: boolean; added: SmartConnectEdge[]; removed: SmartConnectEdge[]; issues: SmartConnectIssue[]; definition_revision: number }
 
 /** 智能连线：apply=false 只预览，apply=true 才写入新版本。不触发生成、不扣费。 */
-export async function smartConnectCanvas(canvasId: number, apply: boolean, skip: { added?: string[]; removed?: string[] } = {}): Promise<SmartConnectResult> {
-  const res = await fetch(`${BASE}/api/video-canvas/canvases/${canvasId}/smart-connect`, { method: 'POST', headers: apiHeaders(true), body: JSON.stringify({ apply, skip_added: skip.added ?? [], skip_removed: skip.removed ?? [] }) });
+export async function smartConnectCanvas(canvasId: number, apply: boolean, skip: { added?: string[]; removed?: string[]; confirmRisky?: boolean } = {}): Promise<SmartConnectResult> {
+  const res = await fetch(`${BASE}/api/video-canvas/canvases/${canvasId}/smart-connect`, { method: 'POST', headers: apiHeaders(true), body: JSON.stringify({ apply, skip_added: skip.added ?? [], skip_removed: skip.removed ?? [], confirm_risky: skip.confirmRisky === true }) });
   if (!res.ok) throw new Error(await readErrorMessage(res, '智能连线失败'));
   return res.json();
 }
