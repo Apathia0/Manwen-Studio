@@ -91,6 +91,7 @@ import StyleControl from './video-canvas/StyleControl';
 import { anyFollowsCanvasStyle, inconsistentNodeIds, presetToCanvasStyle, styleKeyOfConfig, readCanvasStyle, referenceToCanvasStyle, sameStyle, type CanvasStyle } from './video-canvas/canvasStyle';
 import { buildReferenceEdges, collectAssets, summarizeAssets, type AssetKind } from './video-canvas/assetLibrary';
 import { nextAssetSlot, planAssetPositions } from './video-canvas/assetLayout';
+import { computeAutoLayout } from './video-canvas/autoLayout';
 import { collectProduction, generationAncestors, planBatchWaves, type BatchEdge, type BatchNode } from './video-canvas/batchPlan';
 import type { BatchProgress } from './video-canvas/CanvasAssetPanel';
 import { computePipeline, continuePrompt, formatCostLine } from './video-canvas/canvasPipeline';
@@ -108,6 +109,7 @@ import {
 } from './video-canvas/containerGroup';
 import { clampOverlayPosition, computeFocusViewport } from './video-canvas/overlayPlacement';
 import { supportsNodeInspector } from './video-canvas/inspectorGate';
+import { mergeCanvasGraphs } from './video-canvas/canvasMerge';
 import { canvasDraftKey, isNewerCanvasDraft, readCanvasDraft, writeCanvasDraft, removeCanvasDraft } from './video-canvas/canvasDraftStore';
 import AssetReferenceSelector from './AssetReferenceSelector';
 import StyleSelectorModal from './StyleSelectorModal';
@@ -151,6 +153,14 @@ function toCanvasNodes(graph: VideoCanvasGraph): CanvasNode[] {
     position: node.position || { x: 0, y: 0 },
     data: { ...node.data, nodeType: node.type },
   }));
+}
+
+/** 开场卡片设置的画布级设置（画幅、固定15秒）：同步记在引用里，不依赖 React 状态的更新时序；所有外发的图都叠加它们。 */
+function withGuideSettings(graph: VideoCanvasGraph, settings: Record<string, string>): VideoCanvasGraph {
+  if (Object.keys(settings).length === 0) return graph;
+  const metadata = (graph.metadata || {}) as Record<string, unknown>;
+  const production = { ...((metadata.production_settings || {}) as Record<string, unknown>), ...settings };
+  return { ...graph, metadata: { ...metadata, production_settings: production } } as VideoCanvasGraph;
 }
 
 function toGraph(nodes: CanvasNode[], edges: CanvasEdge[], base: VideoCanvasGraph): VideoCanvasGraph {
@@ -263,7 +273,12 @@ export default function VideoCanvasPanel({ storyId, chapterId, workflow: _workfl
   const [canvas, setCanvas] = useState<VideoCanvas | null>(null);
   /** 始终指向最新的画布状态：保存要用最新的版本号，不能用闭包里捕获的旧值 */
   const latestCanvasRef = useRef<VideoCanvas | null>(null);
+  const guideSettingsRef = useRef<Record<string, string>>({});
   useEffect(() => { latestCanvasRef.current = canvas; }, [canvas]);
+  const guideCanvasIdRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (canvas && guideCanvasIdRef.current !== canvas.id) { guideCanvasIdRef.current = canvas.id; guideSettingsRef.current = {}; }
+  }, [canvas]);
   const [canvasList, setCanvasList] = useState<VideoCanvas[]>([]);
   const [nodes, setNodes] = useState<CanvasNode[]>([]);
   const [edges, setEdges] = useState<CanvasEdge[]>([]);
@@ -803,7 +818,7 @@ export default function VideoCanvasPanel({ storyId, chapterId, workflow: _workfl
     try {
       const layout = { nodes: Object.fromEntries(graphNodes.map((node) => [node.id, node.position])), viewport: { x: saveViewport.x, y: saveViewport.y, zoom: saveViewport.k } };
       const submit = (target: VideoCanvas) => saveVideoCanvasSnapshot(target.id, {
-        graph: toGraph(graphNodes, graphEdges, target.version.graph),
+        graph: withGuideSettings(toGraph(graphNodes, graphEdges, target.version.graph), guideSettingsRef.current),
         layout,
         expected_definition_revision: target.definition_revision,
         expected_layout_revision: target.layout_revision,
@@ -811,20 +826,46 @@ export default function VideoCanvasPanel({ storyId, chapterId, workflow: _workfl
         idempotency_key: `canvas-${target.id}-${saveSessionRef.current}-client-${clientRevisionRef.current}`,
       });
       let synchronized: VideoCanvas;
+      let mergedFromServer = false;
       try {
         synchronized = await submit(baseCanvas);
       } catch (error) {
         if ((error as { status?: number }).status !== 409) throw error;
-        // 版本冲突：服务端的版本比本地新。服务端没有本地没见过的节点时（只是版本号落后 / 元数据变化），
-        // 以最新版本号和服务端元数据为底重发一次，本地的节点与连线原样保留；有陌生节点（助手 / 后台编排写入的）则不覆盖，交给用户刷新。
+        // 版本冲突：服务端的图比本地新（后台编排 / 助手 / 其他窗口改过）。绝不能拿本地旧图覆盖——
+        // 曾经因此把后台刚生成的整批资产冲掉。做三方合并：以上次同步的图为基准，分别合入本地和服务端各自的修改。
         const latest = await getVideoCanvas(baseCanvas.id);
-        const localIds = new Set(graphNodes.map((node) => node.id));
-        if ((latest.version.graph.nodes || []).some((node) => !localIds.has(node.id))) throw error;
-        synchronized = await submit(latest);
+        const localGraph = withGuideSettings(toGraph(graphNodes, graphEdges, baseCanvas.version.graph), guideSettingsRef.current);
+        const { graph: mergedGraph, conflicts } = mergeCanvasGraphs(baseCanvas.version.graph, localGraph, latest.version.graph);
+        synchronized = await saveVideoCanvasSnapshot(latest.id, {
+          graph: mergedGraph,
+          layout,
+          expected_definition_revision: latest.definition_revision,
+          expected_layout_revision: latest.layout_revision,
+          client_revision: clientRevisionRef.current,
+          idempotency_key: `canvas-${latest.id}-${saveSessionRef.current}-merge-${latest.definition_revision}-${clientRevisionRef.current}`,
+        });
+        mergedFromServer = true;
+        if (conflicts.length) toast.info(`后台更新和你的修改有 ${conflicts.length} 处冲突，已以后台为准：${conflicts.slice(0, 3).join('、')}${conflicts.length > 3 ? '…' : ''}`);
       }
       latestCanvasRef.current = synchronized;
+      if (mergedFromServer && canvasEpochRef.current === epoch && changeVersionRef.current === saveVersion) {
+        // 合并后的图里带有后台的新内容：本地节点和连线也要换成合并结果，否则下一次保存又会冲突
+        applyServerCanvas({ ...synchronized, layout: synchronized.layout || layout, runs: baseCanvas.runs || [] });
+        savedEditRef.current = saveEdit;
+        if (showSuccess) toast.success('画布已保存');
+        return synchronized;
+      }
       if (canvasEpochRef.current !== epoch) return null;
-      setCanvas((current) => synchronized ? { ...synchronized, layout: synchronized.layout || layout, runs: current?.runs || [] } : current);
+      setCanvas((current) => {
+        if (!synchronized) return current;
+        const next = { ...synchronized, layout: synchronized.layout || layout, runs: current?.runs || [] };
+        if (changeVersionRef.current === saveVersion || !current) return next;
+        // 保存进行期间用户又改了开场设置（画幅、固定15秒、画风）：服务端返回的是保存前的版本，不能把这些设置冲掉
+        const localMetadata = (current.version.graph.metadata || {}) as Record<string, unknown>;
+        const serverMetadata = (next.version.graph.metadata || {}) as Record<string, unknown>;
+        const production = { ...((serverMetadata.production_settings || {}) as Record<string, unknown>), ...((localMetadata.production_settings || {}) as Record<string, unknown>) };
+        return { ...next, version: { ...next.version, graph: { ...next.version.graph, metadata: { ...serverMetadata, ...(localMetadata.canvas_style !== undefined ? { canvas_style: localMetadata.canvas_style } : {}), production_settings: production } } } };
+      });
       savedEditRef.current = saveEdit;
       if (changeVersionRef.current === saveVersion) {
         setDirty(false);
@@ -976,7 +1017,7 @@ export default function VideoCanvasPanel({ storyId, chapterId, workflow: _workfl
       .filter((node) => (node.data.config as Record<string, unknown> | undefined)?.asset_scene_node === sceneNode.id)
       .map((node) => ({ kind: (node.data.config as Record<string, unknown>).asset_role as AssetKind, position: node.position }))
       .filter((item) => item.kind === 'character' || item.kind === 'scene' || item.kind === 'prop');
-    const position = nextAssetSlot({ position: sceneNode.position, height: Number(sceneNode.data.ui?.height) || undefined }, kind, existingAssets);
+    const position = nextAssetSlot({ position: sceneNode.position, width: Number(sceneNode.data.ui?.width) || undefined }, kind, existingAssets);
     const prompt = kind === 'scene' ? `空镜场景参考图：${candidate.name}。${candidate.desc}。无人物，画面统一。` : `道具参考图：${candidate.name}。${candidate.desc}。单个物体特写，干净背景。`;
     captureHistory();
     setNodes((current) => [...current, {
@@ -1181,6 +1222,7 @@ export default function VideoCanvasPanel({ storyId, chapterId, workflow: _workfl
   const canvasAspect = String(((canvas?.version.graph.metadata?.production_settings as Record<string, unknown> | undefined)?.aspect_ratio) || '16:9');
   const setCanvasAspect = useCallback((next: string) => {
     if (!canvas) return;
+    guideSettingsRef.current = { ...guideSettingsRef.current, aspect_ratio: next };
     setCanvas((current) => {
       if (!current) return current;
       const metadata = current.version.graph.metadata || {};
@@ -1193,6 +1235,7 @@ export default function VideoCanvasPanel({ storyId, chapterId, workflow: _workfl
   const shotDurationMode: ShotDurationMode = ((canvas?.version.graph.metadata?.production_settings as Record<string, unknown> | undefined)?.shot_duration_mode) === 'fixed15' ? 'fixed15' : 'flexible';
   const setShotDurationMode = useCallback((next: ShotDurationMode) => {
     if (!canvas) return;
+    guideSettingsRef.current = { ...guideSettingsRef.current, shot_duration_mode: next };
     setCanvas((current) => {
       if (!current) return current;
       const metadata = current.version.graph.metadata || {};
@@ -1928,52 +1971,31 @@ export default function VideoCanvasPanel({ storyId, chapterId, workflow: _workfl
     // 组框不参与分层排版：位置/尺寸由成员推导，整理后由 refit 自动贴回
     const currentNodes = nodesRef.current.filter((node) => node.type !== 'container');
     if (!currentNodes.length) return;
-    const nodeById = new Map(currentNodes.map((node) => [node.id, node]));
-    const incomingCount = new Map(currentNodes.map((node) => [node.id, 0]));
-    const children = new Map(currentNodes.map((node) => [node.id, [] as string[]]));
-    for (const edge of edgesRef.current) {
-      if (!nodeById.has(edge.source) || !nodeById.has(edge.target)) continue;
-      children.get(edge.source)?.push(edge.target);
-      incomingCount.set(edge.target, (incomingCount.get(edge.target) || 0) + 1);
-    }
-    const layers = new Map<string, number>();
-    const queue = currentNodes.filter((node) => (incomingCount.get(node.id) || 0) === 0).map((node) => node.id);
-    for (const nodeId of queue) layers.set(nodeId, 0);
-    for (let cursor = 0; cursor < queue.length; cursor += 1) {
-      const nodeId = queue[cursor];
-      const layer = layers.get(nodeId) || 0;
-      for (const childId of children.get(nodeId) || []) {
-        layers.set(childId, Math.max(layers.get(childId) || 0, layer + 1));
-        const remaining = (incomingCount.get(childId) || 1) - 1;
-        incomingCount.set(childId, remaining);
-        if (remaining === 0) queue.push(childId);
-      }
-    }
-    for (const node of currentNodes) if (!layers.has(node.id)) layers.set(node.id, 0);
-    const columns = new Map<number, CanvasNode[]>();
-    for (const node of currentNodes) {
-      const layer = layers.get(node.id) || 0;
-      const column = columns.get(layer) || [];
-      column.push(node);
-      columns.set(layer, column);
-    }
-    const positions = new Map<string, { x: number; y: number }>();
-    let x = 120;
-    for (const [, column] of [...columns.entries()].sort(([left], [right]) => left - right)) {
-      let y = 120;
-      const columnWidth = Math.max(...column.map((node) => nodeSize(node).width));
-      for (const node of column.sort((left, right) => left.position.y - right.position.y)) {
-        positions.set(node.id, { x, y });
-        y += nodeSize(node).height + 60;
-      }
-      x += columnWidth + 120;
-    }
+    // 排版规则见 video-canvas/autoLayout.ts：流程节点按连线分层，资产按类型分三栏（角色一列、道具一列、场景一列）
+    const positions = computeAutoLayout(
+      currentNodes.map((node) => ({ id: node.id, type: node.type, width: nodeSize(node).width, height: nodeSize(node).height, x: node.position.x, y: node.position.y, assetRole: String(node.data.config?.asset_role || '') })),
+      edgesRef.current.map((edge) => ({ source: edge.source, target: edge.target })),
+    );
     captureHistory();
     setNodes((current) => current.map((node) => ({ ...node, position: positions.get(node.id) || node.position })));
     markDirty();
     toast.success('画布节点已自动整理');
   };
   const addNodeFromTool = (type: string) => { const item = catalog.find((entry) => entry.type === type); if (!item) { toast.info('当前画布仅支持文本、图片、视频节点'); return; } captureHistory(); addCatalogNode(item); };
+  // 在剧本审核节点里手动编辑剧本：写回剧本节点和审核节点的对照文本，并标记“场景还是按旧剧本拆的”
+  const editScreenplayFromReview = (sceneNodeId: string, text: string) => {
+    const scene = nodesRef.current.find((node) => node.id === sceneNodeId);
+    if (!scene) return;
+    const screenplayId = String(scene.data.config?.source_screenplay_node || '');
+    captureHistory();
+    setNodes((current) => current.map((node) => {
+      if (screenplayId && node.id === screenplayId) return { ...node, data: { ...node.data, config: { ...node.data.config, content: text } } };
+      if (node.id === sceneNodeId) return { ...node, data: { ...node.data, config: { ...node.data.config, source_content: text, script_edited: true, ...(node.data.config?.director_plan ? { director_plan_stale: true } : {}) } } };
+      return node;
+    }));
+    markDirty();
+    toast.success('剧本已修改。场景还是按旧剧本拆的，点“按最新剧本重新拆分”更新');
+  };
   // 剧本节点拆分：调用后端，把视频单元组以网格布局落到画布（可撤销，保存走既有确认流）
   const splitScreenplayNode = async (nodeId: string) => {
     if (!canvas || splittingNodeId) return;
@@ -2185,7 +2207,7 @@ export default function VideoCanvasPanel({ storyId, chapterId, workflow: _workfl
         return { asset, id: `ast-${nodeId}-${asset.role}-${nameHash}`.slice(0, 64) };
       }).filter((draft) => !lockedIds.has(draft.id));
       // 新资产按 角色 / 场景 / 道具 分栏排在场景节点下方；分析过的节点保持原位置。
-      const positions = planAssetPositions({ position: sceneNode.position, height: Number(sceneNode.data.ui?.height) || undefined }, drafts.filter((draft) => !previousById.has(draft.id)).map((draft) => ({ id: draft.id, kind: draft.asset.role })));
+      const positions = planAssetPositions({ position: sceneNode.position, width: Number(sceneNode.data.ui?.width) || undefined }, drafts.filter((draft) => !previousById.has(draft.id)).map((draft) => ({ id: draft.id, kind: draft.asset.role })));
       const assetNodes: CanvasNode[] = drafts.map(({ asset, id }) => ({
         id,
         type: 'image',
@@ -2415,6 +2437,8 @@ export default function VideoCanvasPanel({ storyId, chapterId, workflow: _workfl
     <div className="min-h-0 flex-1 overflow-hidden">
       <SceneListNodeView
         canvasId={canvas?.id}
+        onEditScreenplay={(text) => editScreenplayFromReview(nodeView.id, text)}
+        onResplit={() => { const screenplayId = String(config.source_screenplay_node || ''); if (screenplayId) void splitScreenplayNode(screenplayId); }}
         // 旧画布的审核节点没有保存来源章节引用：回退到它所属的剧本节点上的引用，旧的小说改写剧本也能对照原文
         config={config.source_refs ? config : { ...config, source_refs: nodes.find((item) => item.id === String(config.source_screenplay_node || ''))?.data.config?.source_refs }}
         onChange={(partial) => updateSceneNodeConfig(nodeView.id, partial)}
@@ -2512,7 +2536,7 @@ const mediaKind = nodeView.type === 'image' || nodeView.type === 'video' ? nodeV
       </div>
       <div className={`min-h-0 flex-1 overflow-hidden ${agentOpen ? 'flex' : 'hidden'}`}>
         <div className="flex h-full min-h-0 flex-1">
-          <Suspense fallback={<div className="p-4 text-sm text-[#948b84]">正在加载 AI 助手...</div>}><AgentPanel key={canvas.id} storyId={storyId} chapterId={chapterId} workflowType="video_canvas" workflowId={canvas.id} getCanvasGraph={() => toGraph(nodesRef.current, edgesRef.current, canvas.version.graph)} onBeforeSend={flushBeforeAgent} onStreamingChange={setAgentStreaming} externalPrompt={externalPrompt} getCanvasClientRevision={() => clientRevisionRef.current} getCanvasSelectedNodeIds={() => selectedNodeIdsRef.current} onLocalCanvasGraph={applyLocalCanvasGraph} onContentUpdated={() => void refreshCanvas()} /></Suspense>
+          <Suspense fallback={<div className="p-4 text-sm text-[#948b84]">正在加载 AI 助手...</div>}><AgentPanel key={canvas.id} storyId={storyId} chapterId={chapterId} workflowType="video_canvas" workflowId={canvas.id} getCanvasGraph={() => withGuideSettings(toGraph(nodesRef.current, edgesRef.current, canvas.version.graph), guideSettingsRef.current)} onBeforeSend={flushBeforeAgent} onStreamingChange={setAgentStreaming} externalPrompt={externalPrompt} getCanvasClientRevision={() => clientRevisionRef.current} getCanvasSelectedNodeIds={() => selectedNodeIdsRef.current} onLocalCanvasGraph={applyLocalCanvasGraph} onContentUpdated={() => void refreshCanvas()} /></Suspense>
         </div>
       </div>
     </aside>

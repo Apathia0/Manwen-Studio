@@ -737,7 +737,8 @@ def clean_character_names(names: list[Any], text: str = "") -> list[str]:
     result: list[str] = []
     for raw_name in names or []:
         name = base_character_name(str(raw_name))
-        if len(name) < 2 or name in NON_CHARACTER_LABELS or name in result or is_meta_label(name):
+        # 人名 / 角色称呼一般不超过 6 个字；更长的多半是被误判成说话人的描述句（“魔石碑亮起五个大字”）
+        if len(name) < 2 or len(name) > 6 or name in NON_CHARACTER_LABELS or name in result or is_meta_label(name):
             continue
         if not is_plausible_speaker_name(name, line_start=True):
             continue

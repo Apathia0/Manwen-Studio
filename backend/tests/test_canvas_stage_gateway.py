@@ -347,16 +347,11 @@ def test_assets_are_laid_out_in_columns_by_kind_below_the_scene(stage_state, mon
     monkeypatch.setattr(api, "analyze_canvas_assets", analyze)
     result = execute(stage_state, stage="assets", scene_node_id="scene-1")
     nodes = {n["data"]["config"].get("asset_name"): n for n in stage_state.saved[0]["nodes"] if n["data"]["config"].get("asset_role")}
-    top = 200 + gateway.ASSET_BLOCK_GAP + gateway.SCENE_DEFAULT_H
-    # 资产只占两列：角色 5 个从左到右、从上到下排（2+2+1 共 3 行）
-    assert nodes["角色0"]["position"] == {"x": 1000, "y": top}
-    assert nodes["角色1"]["position"] == {"x": 1000 + gateway.ASSET_CELL_W, "y": top}
-    assert nodes["角色4"]["position"] == {"x": 1000, "y": top + 2 * gateway.ASSET_CELL_H}
-    # 场景段、道具段依次排在角色段下方（不再并排占第三、第四列）
-    scene_y = top + 3 * gateway.ASSET_CELL_H + gateway.ASSET_KIND_GAP
-    assert nodes["宴会厅"]["position"] == {"x": 1000, "y": scene_y}
-    assert nodes["工牌"]["position"] == {"x": 1000, "y": scene_y + gateway.ASSET_CELL_H + gateway.ASSET_KIND_GAP}
-    assert max(n["position"]["x"] for n in nodes.values()) + gateway.NODE_W <= 1000 + gateway.ASSET_COLUMNS * gateway.ASSET_CELL_W
+    # 角色一列、道具一列、场景一列：在场景审核节点右侧，自上而下，与场景节点顶部对齐
+    column_x = 1000 + gateway.SCENE_DEFAULT_W + gateway.ASSET_SCENE_GAP
+    assert [nodes[f"角色{i}"]["position"] for i in range(5)] == [{"x": column_x, "y": 200 + i * gateway.ASSET_CELL_H} for i in range(5)]
+    assert nodes["工牌"]["position"] == {"x": column_x + gateway.ASSET_CELL_W, "y": 200}
+    assert nodes["宴会厅"]["position"] == {"x": column_x + 2 * gateway.ASSET_CELL_W, "y": 200}
     # 可选候选保存在场景节点上
     scene_config = next(n for n in stage_state.saved[0]["nodes"] if n["id"] == "scene-1")["data"]["config"]
     assert scene_config["asset_candidates"][0]["name"] == "售货机"

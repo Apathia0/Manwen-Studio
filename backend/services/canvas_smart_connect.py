@@ -115,7 +115,12 @@ def plan_smart_connect(graph: dict[str, Any], db=None) -> dict[str, Any]:
     before = deepcopy(graph or {})
     after = deepcopy(before)
     _repair_structure(after)
-    _bind_assets(after, db)
+    live_assets = [n for n in _live(after) if n.get("type") == "image" and _config(n).get("asset_role") in {"character", "scene", "prop"}]
+    stale_assets = [n for n in after.get("nodes") or [] if isinstance(n, dict) and n.get("type") == "image" and _config(n).get("asset_role") in {"character", "scene", "prop"} and _config(n).get("stale")]
+    # 画布上一个存活的资产都没有（全部失效）时，重算资产连线只会得出“全部移除”：这时不动资产连线，只提示用户先处理资产
+    protected_by_stale_assets = not live_assets and bool(stale_assets)
+    if not protected_by_stale_assets:
+        _bind_assets(after, db)
 
     nodes = {n["id"]: n for n in after.get("nodes") or [] if isinstance(n, dict)}
     old_keys = {_edge_key(e): e for e in before.get("edges") or [] if isinstance(e, dict)}
@@ -132,4 +137,11 @@ def plan_smart_connect(graph: dict[str, Any], db=None) -> dict[str, Any]:
     before_nodes = {n["id"]: n for n in before.get("nodes") or [] if isinstance(n, dict)}
     added = [describe(e, nodes) for key, e in new_keys.items() if key not in old_keys]
     removed = [describe(e, before_nodes) for key, e in old_keys.items() if key not in new_keys]
-    return {"graph": after, "added": added, "removed": removed, "issues": _health_issues(after, db), "changed": bool(added or removed)}
+    issues = _health_issues(after, db)
+    if protected_by_stale_assets:
+        issues.insert(0, {"severity": "warning", "code": "assets_all_stale", "message": "画布上的角色 / 场景 / 道具资产全部处于失效状态，已保留现有的资产连线不做改动。请先重做资产分析，或在版本历史里恢复到资产还存活的版本", "node_ids": []})
+    # 大批量移除属于高风险：旧的资产连线（系统生成的）一次被移除超过三成且不少于 5 条，预览里默认不勾选，应用前还要二次确认
+    old_asset_edges = [e for e in before.get("edges") or [] if isinstance(e, dict) and (e.get("data") or {}).get("agent_asset_binding")]
+    removed_asset_edges = [r for r in removed if any(e.get("source") == r["source"] and e.get("target") == r["target"] and (e.get("data") or {}).get("agent_asset_binding") for e in old_asset_edges)]
+    risky_removal = len(old_asset_edges) >= 5 and len(removed_asset_edges) > 0.3 * len(old_asset_edges)
+    return {"graph": after, "added": added, "removed": removed, "issues": issues, "changed": bool(added or removed), "risky_removal": risky_removal}

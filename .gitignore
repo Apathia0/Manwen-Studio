@@ -59,6 +59,9 @@ promo-video/renders/
 *~
 .DS_Store
 Thumbs.db
+# Windows 保留设备名幽灵条目（`> nul` 误在 frontend/ 下创建，文件系统上不可删除）
+frontend/nul
+nul
 .spec-workflow/
 
 # ─── Misc test files ───

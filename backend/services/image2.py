@@ -731,7 +731,10 @@ def _reference_role_instruction(role: str, label: str, index: int) -> str:
     if normalized_role == "style":
         return (
             f"Reference image {index} is ART STYLE reference '{display_label}'. "
-            "Match visible character stylization and proportions, facial simplification, shape language, line weight, shading, "
+            "First match its RENDERING MEDIUM exactly: if it looks like a real photograph or live-action film still, every person must look like a real photographed human "
+            "(natural skin texture, realistic proportions, natural lighting and film color grading) and must NOT be drawn as an illustration, concept art, 3D render, anime or game character; "
+            "if it is an illustration, anime or 3D image, keep that same medium. "
+            "Then match visible character stylization and proportions, facial simplification, shape language, line weight, shading, "
             "palette, texture, brush grain, lighting, panel layout and speech-bubble treatment; do not copy its characters, "
             "character identity, clothing, specific objects or scene layout."
         )
