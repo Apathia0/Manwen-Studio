@@ -355,6 +355,37 @@ async def test_adapter_query_treats_unknown_status_as_nonrecoverable_failure(mon
 
 
 @pytest.mark.asyncio
+async def test_lingdong_submit_with_task_id_but_empty_status_is_queued(monkeypatch):
+    """部分网关提交成功只回 task_id 不带 status：应按排队去轮询，不能判成“未知状态”失败。"""
+    async def fake_create(**kwargs):
+        return {"task_id": "task_abc", "status": ""}
+
+    monkeypatch.setattr(video_api, "create_video_job", fake_create)
+    result = await video_adapter.create_video_job(
+        adapter_type=VIDEO_ADAPTER_LINGDONG, model="video-model", prompt="测试", aspect_ratio="16:9", size="720P",
+        duration_seconds=5, images=None, api_key="k", base_url="https://api.example.com/v1", video_capabilities=None,
+    )
+    assert result["status"] == "queued"
+    assert result["task_id"] == "task_abc"
+    assert "error" not in result
+
+
+@pytest.mark.asyncio
+async def test_lingdong_query_with_empty_status_is_still_a_failure(monkeypatch):
+    """查询时状态为空仍判失败（只有提交返回才放行为排队）。"""
+    async def fake_query(*args, **kwargs):
+        return {"task_id": "task_abc", "status": ""}
+
+    monkeypatch.setattr(video_api, "query_video_job", fake_query)
+    result = await video_adapter.query_video_job("task_abc", adapter_type=VIDEO_ADAPTER_LINGDONG, api_key="k", base_url="https://api.example.com/v1", model="m")
+    assert result["status"] == "failed"
+
+
+def test_status_map_treats_error_as_failed():
+    assert video_adapter._normalize_job_status({"task_id": "t", "status": "error"})["status"] == "failed"
+
+
+@pytest.mark.asyncio
 async def test_openai_error_redacts_api_key_bearer_and_labeled_secrets(monkeypatch):
     api_key = "current-secret-key"
     leaked = f"key={api_key} Authorization: Bearer other-token token=third-secret"

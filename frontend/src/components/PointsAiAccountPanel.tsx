@@ -261,6 +261,11 @@ function getPriceSummary(model: AiModelItem, mode: CredentialMode) {
     }
     return estimatedPoints == null ? '按视频时长计费' : `默认时长约 ${estimatedPoints} 积分`;
   }
+  if (billingType === 'per_call' && model.modality === 'video') {
+    const perCall = model.price?.price_config.points_per_call;
+    const points = typeof perCall === 'number' ? perCall : estimatedPoints;
+    return points == null ? '按次计费' : `${points} 积分/次 · 不论时长`;
+  }
   if (estimatedPoints == null) return '按实际用量计费';
   if (billingType === 'per_image') return `预计 ${estimatedPoints} 积分/张`;
   if (billingType === 'per_1m_tokens') {

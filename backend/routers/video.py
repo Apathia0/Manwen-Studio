@@ -5305,6 +5305,10 @@ async def replace_video_asset(asset_id: int, request: Request, db: Session = Dep
     asset.name = filename
     asset.asset_type = category
     asset.revision = (asset.revision or 0) + 1
+    # 文件换了：旧图的云端链接 / 压缩副本 / 名称标注标记都已失效，不清掉的话视频会继续引用旧图。
+    stale_meta = {key: value for key, value in (asset.meta_json or {}).items() if key not in {"oss_url", "oss_video_ref_url", "oss_video_ref_label", "labeled"}}
+    if stale_meta != (asset.meta_json or {}):
+        asset.meta_json = stale_meta
     db.commit()
     db.refresh(asset)
 
@@ -8624,15 +8628,20 @@ def _reserve_video_billing(
     *,
     user_id: int,
     video_seconds: int,
+    clip_count: int = 1,
     detach: bool = True,
 ) -> dict:
-    quota_result = _check_and_consume_quota_wrapper(
-        user_id,
-        "video.generate.count.monthly_limit",
-        video_seconds,
-        db,
-        deduct=False,
-    )
+    from services.ai.resolver import video_clip_count
+
+    # clip_count 只对按次计价的视频模型生效（批量生成多个镜头时按镜头数计次）；按秒计价仍用 video_seconds。
+    with video_clip_count(clip_count):
+        quota_result = _check_and_consume_quota_wrapper(
+            user_id,
+            "video.generate.count.monthly_limit",
+            video_seconds,
+            db,
+            deduct=False,
+        )
     if detach:
         import main as main_mod
 
@@ -8743,6 +8752,7 @@ async def _run_billed_media_task(
         return result
 
     actual_units = max(0, int(billing_units or 0))
+    actual_call_count: int | None = None  # 按次计价的视频模型：成功片段数；None 表示沿用预留时的次数
     if isinstance(result, dict) and billing_modality == "image":
         actual_units = max(0, int(result.get("shot_count") or 0))
     elif isinstance(result, dict) and billing_modality == "video" and kwargs.get("workflow_id"):
@@ -8755,11 +8765,12 @@ async def _run_billed_media_task(
             shot_ids = kwargs.get("shot_ids")
             if shot_ids:
                 query = query.filter(ChapterVideoShot.id.in_(shot_ids))
+            succeeded_shots = [shot for shot in query.all() if shot.id not in failed_ids]
             actual_units = sum(
                 max(1, min(MAX_VIDEO_DURATION_SECONDS, int(shot.duration_seconds or DEFAULT_VIDEO_DURATION_SECONDS)))
-                for shot in query.all()
-                if shot.id not in failed_ids
+                for shot in succeeded_shots
             )
+            actual_call_count = len(succeeded_shots)
         finally:
             billing_db.close()
 
@@ -8773,6 +8784,7 @@ async def _run_billed_media_task(
             success=True,
             image_count=actual_units if billing_modality == "image" else 0,
             video_seconds=actual_units if billing_modality == "video" else 0,
+            actual_call_count=actual_call_count if billing_modality == "video" else None,
         )
     finally:
         billing_db.close()
@@ -10450,6 +10462,7 @@ async def api_generate_videos(
         db,
         user_id=user.id,
         video_seconds=total_duration,
+        clip_count=len(billed_shots),
         detach=False,
     )
     update_chapter_workflow_status(workflow_id, "generating_videos")

@@ -724,6 +724,60 @@ def test_video_per_call_success_charges_without_duration(
     assert account.reserved_points == Decimal("0.0000")
 
 
+def test_video_per_call_batch_reserves_by_clip_count_and_settles_successful_clips():
+    """按次计价的视频模型：批量生成 4 个镜头预留 4 次，其中 1 个失败只结算 3 次，与每个镜头的秒数无关。"""
+    from services.ai.resolver import video_clip_count
+
+    db, user, model = _billing_session(billing_type="per_call", price_config={"points_per_call": 2}, modality="video")
+    with video_clip_count(4):
+        ctx = begin_ai_call(
+            db, user_id=user.id, modality="video", task_type="video.generate", credential_mode="platform",
+            model_id=model.id, request_id="video-batch-per-call", estimate_kwargs={"video_seconds": 60},
+        )
+    assert ctx.estimated_points == Decimal("8.0000")
+    assert ctx.reserved_points == Decimal("8.0000")
+
+    complete_ai_call(db, ctx, success=True, video_seconds=45, actual_call_count=3)
+    event = db.get(AiUsageEvent, ctx.usage_event_id)
+    account = db.query(PointsAccount).filter_by(user_id=user.id).one()
+    assert event.settled_points == Decimal("6.0000")
+    assert account.available_points == Decimal("14.0000")
+    assert account.reserved_points == Decimal("0.0000")
+
+
+def test_video_clip_count_does_not_change_per_second_price():
+    """按秒计价的视频模型不受片段数影响，仍按总秒数计费。"""
+    from services.ai.resolver import video_clip_count
+
+    db, user, model = _billing_session(billing_type="per_second", price_config={"points_per_second": 0.2}, modality="video")
+    with video_clip_count(4):
+        ctx = begin_ai_call(
+            db, user_id=user.id, modality="video", task_type="video.generate", credential_mode="platform",
+            model_id=model.id, request_id="video-batch-per-second", estimate_kwargs={"video_seconds": 60},
+        )
+    assert ctx.estimated_points == Decimal("12.0000")
+
+
+def test_bootstrap_keeps_admin_configured_per_call_video_price():
+    """默认视频模型被管理员改成按次计价后，启动种子不能把它改回按秒。"""
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    db = sessionmaker(bind=engine, expire_on_commit=False)()
+    ensure_default_channels_and_models(db)
+    db.commit()
+    video_model = db.query(AiModel).filter(AiModel.modality == "video").first()
+    active = get_active_price(db, video_model.id)
+    active.valid_to = datetime.datetime.utcnow()
+    db.add(AiModelPrice(model_id=video_model.id, billing_type="per_call", price_config_json={"points_per_call": 9}, valid_from=datetime.datetime.utcnow()))
+    db.commit()
+
+    ensure_default_channels_and_models(db)
+    db.commit()
+    price = get_active_price(db, video_model.id)
+    assert price.billing_type == "per_call"
+    assert price.price_config_json == {"points_per_call": 9}
+
+
 def test_per_call_zero_actual_calls_releases_full_reservation():
     db, user, model = _billing_session()
     ctx = begin_ai_call(

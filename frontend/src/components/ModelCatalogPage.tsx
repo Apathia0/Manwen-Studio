@@ -53,6 +53,12 @@ function getPriceLines(model: AiModelItem): string[] {
     ].filter(Boolean);
   }
   const estimated = formatNumber(model.estimated_points);
+  if (price.billing_type === 'per_call' && model.modality === 'video') {
+    const points = formatNumber(config.points_per_call) || estimated;
+    const allowed = model.video_capabilities?.limits?.duration_seconds?.allowed;
+    const fixedSeconds = allowed?.length === 1 ? `（固定 ${allowed[0]} 秒）` : '';
+    return [points ? `${points} 积分 / 次${fixedSeconds}` : '按次计费', '不论时长，每个视频按次收费'];
+  }
   return [estimated ? `预计 ${estimated} 积分 / 次` : '按实际用量计费'];
 }
 
