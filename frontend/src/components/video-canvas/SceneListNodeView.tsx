@@ -71,6 +71,10 @@ function planUnits(plan?: DirectorPlan | null): DirectorPlanUnit[] {
 export interface SceneListNodeViewProps {
   /** 用来取回小说原文做对照；没有画布 ID（预览等场景）时只显示剧本 */
   canvasId?: number;
+  /** 手动编辑改写后的剧本：保存时把新剧本写回剧本节点；不传则剧本只读 */
+  onEditScreenplay?: (text: string) => void;
+  /** 剧本改过之后，按最新剧本重新拆分场景 */
+  onResplit?: () => void;
   config: SceneListConfig;
   /** partial 合并进节点 config */
   onChange: (partial: Record<string, unknown>) => void;
@@ -258,6 +262,8 @@ const importanceMeta: Record<string, { label: string; className: string }> = {
  */
 export default function SceneListNodeView({
   canvasId,
+  onEditScreenplay,
+  onResplit,
   config,
   onChange,
   onToggleApproved,
@@ -309,6 +315,17 @@ export default function SceneListNodeView({
     if (index >= 0) paragraphRefs.current[index]?.scrollIntoView({ block: 'center', behavior: 'smooth' });
   };
   const compareMode = Boolean(fidelity) && showSource;
+  // ---- 手动编辑剧本 ----
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState('');
+  const scriptEdited = Boolean((config as { script_edited?: unknown }).script_edited);
+  const startEdit = () => { setDraft(scriptText); setEditing(true); };
+  const saveEdit = () => {
+    const next = draft.replace(/\s+$/g, '');
+    if (!next.trim()) return;
+    if (next !== scriptText) onEditScreenplay?.(next);
+    setEditing(false);
+  };
 
   const updateScene = (index: number, partial: Record<string, unknown>) => {
     const next = scenes.map((scene, i) => (i === index ? { ...scene, ...partial } : scene));
@@ -367,13 +384,28 @@ export default function SceneListNodeView({
             <div className="flex shrink-0 items-center gap-1.5 border-b border-[#3a3f45] bg-[#1b1d21] px-2.5 py-1.5">
               <FileText size={11} className="text-[#78818f]" />
               <span className="min-w-0 flex-1 truncate text-[10px] font-medium text-[#8b93a1]">{fidelity ? '改写剧本' : '来源正文'}</span>
-              {fidelity && (
+              {fidelity && !editing && (
                 <button type="button" onClick={() => setShowSource((value) => !value)} className="shrink-0 rounded px-1.5 py-0.5 text-[10px] text-[#8b93a1] hover:bg-white/10">
                   {showSource ? '隐藏原文' : '对照原文'}
                 </button>
               )}
+              {onEditScreenplay && !editing && (
+                <button type="button" onClick={startEdit} className="shrink-0 rounded px-1.5 py-0.5 text-[10px] text-[#9fc2ff] hover:bg-white/10">编辑剧本</button>
+              )}
+              {editing && (
+                <>
+                  <button type="button" onClick={saveEdit} className="shrink-0 rounded bg-[#73a7ff] px-2 py-0.5 text-[10px] font-medium text-[#111827] hover:bg-[#8db6ff]">保存</button>
+                  <button type="button" onClick={() => setEditing(false)} className="shrink-0 rounded px-1.5 py-0.5 text-[10px] text-[#8b93a1] hover:bg-white/10">取消</button>
+                </>
+              )}
             </div>
-            {fidelity && (
+            {scriptEdited && !editing && (
+              <div className="flex shrink-0 items-center gap-2 bg-amber-500/10 px-2.5 py-1 text-[10px] text-amber-200">
+                <span className="min-w-0 flex-1">剧本已修改，右边的场景还是按修改前的剧本拆的</span>
+                {onResplit && <button type="button" onClick={onResplit} className="shrink-0 rounded bg-amber-400/20 px-1.5 py-0.5 font-medium hover:bg-amber-400/30">按最新剧本重新拆分</button>}
+              </div>
+            )}
+            {fidelity && !editing && (
               <div className="shrink-0 space-y-1 border-b border-[#3a3f45] px-2.5 py-1.5 text-[10px] text-[#8b93a1]">
                 <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
                   <span>台词 {fidelity.dialogueTotal} 条</span>
@@ -387,6 +419,13 @@ export default function SceneListNodeView({
               </div>
             )}
             {chaptersError && <div className="shrink-0 bg-rose-500/10 px-2.5 py-1 text-[10px] text-rose-300">读取小说原文失败：{chaptersError}</div>}
+            {editing ? (
+              <div className="flex min-h-0 flex-1 flex-col gap-1 p-2">
+                <p className="shrink-0 text-[10px] text-[#8b93a1]">按剧本格式写：场景头“场景N：地点 / 时间 / 内外”，动作行写画面，对白“角色：台词”。保存后需要重新拆分场景。</p>
+                <textarea value={draft} onChange={(event) => setDraft(event.target.value)} spellCheck={false}
+                  className="min-h-0 flex-1 resize-none rounded-md border border-[#4a4540] bg-[#171513] p-2 text-white outline-none focus:border-[#73a7ff]" style={{ fontSize: 12, lineHeight: 1.7 }} />
+              </div>
+            ) : (
             <div className="min-h-0 flex-1 overflow-y-auto p-2.5">
               {fidelity ? (
                 <div className="space-y-0.5">
@@ -403,6 +442,7 @@ export default function SceneListNodeView({
                 </div>
               )}
             </div>
+            )}
           </div>
 
           {/* 右：两张可折叠卡片（默认收起），同时展开时按 4:6 分配高度 */}
