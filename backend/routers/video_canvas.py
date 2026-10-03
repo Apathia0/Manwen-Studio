@@ -2636,6 +2636,7 @@ def smart_connect_video_canvas(canvas_id: int, request: Request, body: dict[str,
     apply = bool((body or {}).get("apply"))
     skip_added = {str(k) for k in (body or {}).get("skip_added") or []}
     skip_removed = {str(k) for k in (body or {}).get("skip_removed") or []}
+    confirm_risky = bool((body or {}).get("confirm_risky"))
     canvas = _lock_canvas(canvas_id, user, db)
     graph = deepcopy(_latest_version(canvas.id, db).graph_json or {})
     plan = plan_smart_connect(graph, db)
@@ -2646,7 +2647,10 @@ def smart_connect_video_canvas(canvas_id: int, request: Request, body: dict[str,
         applied_added = [a for a in plan["added"] if a["key"] not in skip_added]
         applied_removed = [r for r in plan["removed"] if r["key"] not in skip_removed]
         if not applied_added and not applied_removed:
-            return {"applied": False, "added": plan["added"], "removed": plan["removed"], "issues": plan["issues"], "changed": plan["changed"], "definition_revision": revision}
+            return {"applied": False, "added": plan["added"], "removed": plan["removed"], "issues": plan["issues"], "changed": plan["changed"], "risky_removal": plan.get("risky_removal", False), "definition_revision": revision}
+        if plan.get("risky_removal") and applied_removed and not confirm_risky:
+            # 大批量移除必须由用户在预览里明确确认，防止一键把编排好的资产连线整批清掉
+            raise HTTPException(409, {"message": f"这次会移除 {len(applied_removed)} 条连线（大批量移除），需要在预览里明确确认后才能应用", "risky_removal": True})
         plan = {**plan, "graph": chosen, "added": applied_added, "removed": applied_removed}
         validation = _validate_graph(plan["graph"])
         if validation["errors"]:
@@ -2655,7 +2659,7 @@ def smart_connect_video_canvas(canvas_id: int, request: Request, body: dict[str,
         db.add(VideoCanvasVersion(canvas_id=canvas.id, version_no=revision, graph_json=plan["graph"], source="manual", change_summary=f"智能连线：新增 {len(plan['added'])} 条，移除 {len(plan['removed'])} 条", created_by_user_id=user.id))
         canvas.definition_revision = revision
         db.commit()
-    return {"applied": apply and plan["changed"], "added": plan["added"], "removed": plan["removed"], "issues": plan["issues"], "changed": plan["changed"], "definition_revision": revision}
+    return {"applied": apply and plan["changed"], "added": plan["added"], "removed": plan["removed"], "issues": plan["issues"], "changed": plan["changed"], "risky_removal": plan.get("risky_removal", False), "definition_revision": revision}
 
 
 @router.get("/api/video-canvas/canvases/{canvas_id}/redo-preview")
