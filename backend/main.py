@@ -17,8 +17,10 @@ from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from types import SimpleNamespace
 from email.message import EmailMessage
 from pathlib import Path
+from stat import S_ISREG
 from typing import Any, Callable
 
+from services import media_derivatives
 from services.writing_utils import build_chapter_generation_prompt
 from services.framework_utils import (
     _build_current_snapshot_data,
@@ -611,13 +613,44 @@ async def _value_error_handler(request: Request, exc: ValueError):
 
 
 class GeneratedMediaStaticFiles(StaticFiles):
-    """公开旧媒体目录，但强制隔离创作台的鉴权素材。"""
+    """公开旧媒体目录，但强制隔离创作台的鉴权素材。
+
+    额外提供：
+    - `?w=<宽度>`：按需生成并缓存 WebP 缩略图（见 services/media_derivatives.py），失败回退原图；
+    - 成功响应带长缓存头：生成的媒体文件名带随机后缀，浏览器与 nginx 都可以放心缓存；
+      即使极少数原地覆盖，`stale-while-revalidate` 也会在下一次访问时刷新。
+    """
+
+    _CACHE_CONTROL = "public, max-age=86400, stale-while-revalidate=604800"
 
     async def get_response(self, path: str, scope):
         normalized = os.path.normpath(f"/{path}").replace("\\", "/").lstrip("/")
-        if normalized in {"creative_studio", "agent_attachments"} or normalized.startswith(("creative_studio/", "agent_attachments/")):
+        if (
+            normalized in {"creative_studio", "agent_attachments", media_derivatives.DERIVED_DIRNAME}
+            or normalized.startswith(("creative_studio/", "agent_attachments/", f"{media_derivatives.DERIVED_DIRNAME}/"))
+        ):
             return Response(status_code=404)
-        return await super().get_response(path, scope)
+
+        response = None
+        width = media_derivatives.parse_width(
+            dict(parse_qsl(scope.get("query_string", b"").decode("latin-1"))).get("w")
+        )
+        if width and scope.get("method") in {"GET", "HEAD"} and media_derivatives.is_derivable(normalized):
+            full_path, stat_result = self.lookup_path(path)
+            if stat_result is not None and S_ISREG(stat_result.st_mode):
+                root = Path(self.directory)
+                derived = await media_derivatives.get_derivative(Path(full_path), root, width)
+                if derived is not None:
+                    response = self.file_response(str(derived), derived.stat(), scope)
+                    # 不依赖系统 mimetypes 对 .webp 的登记，显式声明类型
+                    if response.status_code in {200, 206}:
+                        response.headers["content-type"] = "image/webp"
+        if response is None:
+            response = await super().get_response(path, scope)
+
+        if response.status_code in {200, 206, 304}:
+            response.headers["Cache-Control"] = self._CACHE_CONTROL
+        return response
 
 
 # Serve generated manga images as static files

@@ -154,9 +154,11 @@ function WelcomeScreen({
       </div>
       <h3 className="mb-2 text-lg font-semibold text-gray-800">AI 创作助手</h3>
       <p className="mb-6 max-w-sm text-sm leading-relaxed text-gray-500">
-        {storyTitle
-          ? `正在创作《${storyTitle}》${chapterTitle ? ` · ${chapterTitle}` : ''}，让 AI 帮你分析、润色和推进创作。`
-          : '选择一部小说后，AI 助手会在这里保留历史对话，并持续协助创作。'}
+        {workflowType === 'video_canvas'
+          ? '直接对话就能读取画布、分析问题、改写节点和推进生成。每次改动都会先出预览，由你确认后才落地。'
+          : storyTitle
+            ? `正在创作《${storyTitle}》${chapterTitle ? ` · ${chapterTitle}` : ''}，让 AI 帮你分析、润色和推进创作。`
+            : '选择一部小说后，AI 助手会在这里保留历史对话，并持续协助创作。'}
       </p>
       <div className="w-full max-w-md">
         <QuickActions onAction={onAction} disabled={disabled} workflowType={workflowType} />

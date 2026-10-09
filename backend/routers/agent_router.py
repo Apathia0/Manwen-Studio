@@ -6,6 +6,7 @@ import shutil
 import sys
 import tempfile
 import uuid
+from services.canvas_agent_digest import describe_canvas_digest
 from services.canvas_ops_preview import describe_selected_nodes
 from services.canvas_style import describe_canvas_aspect, describe_canvas_style
 from functools import wraps
@@ -804,6 +805,7 @@ async def agent_chat(
             f"{describe_canvas_style(graph)}\n"
             f"{describe_canvas_aspect(graph)}\n"
             f"{describe_selected_nodes(graph, body.canvas_selected_node_ids or []) if isinstance(graph, dict) else ''}\n"
+            f"{describe_canvas_digest(graph)}\n"
             "该画布与列表分镜工作流独立。可以给出节点、连线、资产和风格建议；"
             "实际制作使用canvas_stage，权限由本轮plan/ask/auto模式在服务端控制。"
         )

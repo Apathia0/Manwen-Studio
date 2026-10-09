@@ -468,7 +468,8 @@ async def execute_agent_canvas_stage(canvas_id: int, stage: str, parameters: dic
             leftover = [
                 n for n in graph["nodes"]
                 if _config(n).get("asset_scene_node") == target["id"] and _config(n).get("asset_role") in _ASSET_ORDER and n["id"] not in ids
-                and not _config(n).get("locked") and not isinstance(_config(n).get("asset_id"), int) and not (n.get("data") or {}).get("result")
+                and not _config(n).get("locked") and not _config(n).get("manual_added")
+                and not isinstance(_config(n).get("asset_id"), int) and not (n.get("data") or {}).get("result")
             ]
             if leftover:
                 gone = {n["id"] for n in leftover}

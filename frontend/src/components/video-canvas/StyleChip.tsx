@@ -20,7 +20,7 @@ export default function StyleChip({ style, onClick, compact = false }: Props) {
       className={`inline-flex items-center gap-1.5 rounded-md border ${compact ? 'px-1.5 py-0.5 text-[11px]' : 'px-2 py-1 text-xs'} ${style ? (enabled ? 'border-[#4a4540] text-[#e1ddd9] hover:border-[#73a7ff]' : 'border-[#393633] text-[#7d756e] hover:border-[#73a7ff]') : 'border-amber-400/50 bg-amber-400/10 text-amber-200 hover:bg-amber-400/20'}`}
     >
       {imageUrl
-        ? <span className={`h-4 w-4 shrink-0 overflow-hidden rounded ${style && !enabled ? 'opacity-40 grayscale' : ''}`}><MediaImage src={imageUrl} alt={name} className="h-full w-full object-cover" /></span>
+        ? <span className={`h-4 w-4 shrink-0 overflow-hidden rounded ${style && !enabled ? 'opacity-40 grayscale' : ''}`}><MediaImage src={imageUrl} alt={name} width={96} className="h-full w-full object-cover" /></span>
         : <Palette className="h-3.5 w-3.5 shrink-0" />}
       <span className="max-w-[9rem] truncate">画风：{name}{style && !enabled && '（已关闭）'}</span>
     </button>

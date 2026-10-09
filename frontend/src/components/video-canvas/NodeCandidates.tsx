@@ -36,7 +36,7 @@ export default function NodeCandidates({ canvasId, nodeId, isVideo, refreshKey, 
             className={`relative h-16 w-24 shrink-0 cursor-pointer overflow-hidden rounded-md border ${isCurrent ? 'border-[#73a7ff]' : 'border-[#3b3734] hover:border-[#7d756e]'}`}>
             {isVideo
               ? <video src={candidate.url} muted preload="metadata" disablePictureInPicture disableRemotePlayback tabIndex={-1} className="pointer-events-none h-full w-full object-cover" />
-              : <MediaImage src={candidate.url} alt="候选结果" className="h-full w-full object-cover" />}
+              : <MediaImage src={candidate.url} alt="候选结果" width={240} className="h-full w-full object-cover" />}
             {isCurrent && <span className="absolute right-1 top-1 grid h-4 w-4 place-items-center rounded-full bg-[#73a7ff] text-[#111827]"><Check className="h-3 w-3" /></span>}
           </button>
           );

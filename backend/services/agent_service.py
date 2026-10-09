@@ -1385,7 +1385,7 @@ skill_registry.register(SkillDef(
     description="读取画布图与节点目录，辅助完成轻量节点编辑",
     icon="🧩",
     tool_names=[
-        "get_canvas_graph", "get_canvas_nodes", "get_canvas_outline", "search_canvas_nodes", "get_canvas_node_catalog", "apply_canvas_ops",
+        "get_canvas_graph", "get_canvas_nodes", "get_canvas_outline", "search_canvas_nodes", "get_canvas_node_catalog", "apply_canvas_ops", "add_canvas_assets",
         "get_chapter_full", "get_all_chapters_summary", "get_story_bible",
         "get_character_profiles", "get_scenes", "resolve_story_context", "search_story_knowledge",
     ],
@@ -1416,7 +1416,7 @@ skill_registry.register(SkillDef(
     display_name="剧本与分镜导演",
     description="将已冻结来源整理为可审阅的剧本、镜头和连续性计划；支持对话式创作漫剧剧本草稿",
     icon="🎬",
-    tool_names=["get_canvas_graph", "get_canvas_nodes", "get_canvas_outline", "search_canvas_nodes", "get_canvas_node_catalog", "apply_canvas_ops", "resolve_canvas_source", "draft_screenplay", "create_canvas_plan", "get_canvas_plans", "update_canvas_plan", "get_chapter_full", "get_story_bible", "get_character_profiles", "get_scenes", "resolve_story_context", "search_story_knowledge"],
+    tool_names=["get_canvas_graph", "get_canvas_nodes", "get_canvas_outline", "search_canvas_nodes", "get_canvas_node_catalog", "apply_canvas_ops", "add_canvas_assets", "resolve_canvas_source", "draft_screenplay", "create_canvas_plan", "get_canvas_plans", "update_canvas_plan", "get_chapter_full", "get_story_bible", "get_character_profiles", "get_scenes", "resolve_story_context", "search_story_knowledge"],
     system_prompt_fragment=(
         "输出场景、节拍、镜头目的、角色状态、景别运镜、动作、情绪、转场和连续性风险。通过 canvas_stage 在当前权限下推进，禁止绕过授权。"
         "对话创作剧本时：用户描述故事想法后直接撰写完整剧本（场景头/动作行/对白体裁），调用 draft_screenplay 规范化后展示给用户；"
@@ -1431,8 +1431,8 @@ skill_registry.register(SkillDef(
     display_name="资产导演",
     description="从镜头计划提取角色、场景、道具和风格资产，并规划复用关系",
     icon="🖼️",
-    tool_names=["get_canvas_graph", "get_canvas_nodes", "get_canvas_outline", "search_canvas_nodes", "create_canvas_plan", "get_canvas_plans", "update_canvas_plan", "get_chapter_full", "get_character_profiles", "get_scenes", "resolve_story_context", "search_story_knowledge"],
-    system_prompt_fragment="为每个镜头区分角色、场景、道具和风格参考，说明复用或新增及绑定理由；通过canvas_stage资产阶段按当前权限执行或提案。核对角色身份、服装状态及场景一致性。",
+    tool_names=["get_canvas_graph", "get_canvas_nodes", "get_canvas_outline", "search_canvas_nodes", "add_canvas_assets", "create_canvas_plan", "get_canvas_plans", "update_canvas_plan", "get_chapter_full", "get_character_profiles", "get_scenes", "resolve_story_context", "search_story_knowledge"],
+    system_prompt_fragment="为每个镜头区分角色、场景、道具和风格参考，说明复用或新增及绑定理由。首次整批分析资产用canvas_stage资产阶段；补建或调整个别资产（含把候选资产变成节点）用add_canvas_assets，一次提案即可，不要再跑资产阶段。核对角色身份、服装状态及场景一致性。",
     context_profile="video_canvas",
     required_resource_types=("角色档案", "场景资料", "章节正文"),
 ))
@@ -2107,6 +2107,7 @@ _VIDEO_WORKFLOW_READ_TOOL_NAMES = {
 }
 _VIDEO_CANVAS_WORKFLOW_TOOL_NAMES = {
     "canvas_stage",
+    "add_canvas_assets",
     "get_canvas_status",
     "list_canvas_sources",
     "get_canvas_graph",
@@ -2536,7 +2537,7 @@ class ToolRegistry:
         if enabled_skills is not None:
             allowed &= skill_registry.get_tool_set(enabled_skills)
             if workflow_type == "video_canvas" and any(name in {"video_canvas_workflow", "canvas_source_director", "canvas_screenplay_director", "canvas_asset_director", "canvas_graph_compiler"} for name in enabled_skills):
-                allowed |= {"canvas_stage", "get_canvas_status", "list_canvas_sources", "inspect_canvas_media", "get_canvas_graph", "get_canvas_nodes", "get_canvas_outline", "search_canvas_nodes"} & set(self._tools)
+                allowed |= {"canvas_stage", "add_canvas_assets", "get_canvas_status", "list_canvas_sources", "inspect_canvas_media", "get_canvas_graph", "get_canvas_nodes", "get_canvas_outline", "search_canvas_nodes"} & set(self._tools)
         return allowed
 
     def get_tool_specs(
@@ -2664,6 +2665,13 @@ class ToolRegistry:
             if context and context.pending_changes:
                 tracker_checkpoint = context.pending_changes.checkpoint()
         try:
+            assets_report = None
+            if context and context.workflow_type == "video_canvas" and name == "add_canvas_assets":
+                translated = _translate_add_canvas_assets(context, args)
+                if "args" not in translated:
+                    return json.dumps(translated, ensure_ascii=False)
+                assets_report = translated["report"]
+                name, args, info = "apply_canvas_ops", translated["args"], self._tools["apply_canvas_ops"]
             if context and context.workflow_type == "video_canvas" and name in {"apply_canvas_ops", "canvas_stage"}:
                 from services.canvas_agent_actions import execute_action
                 # 剔除模型可能伪造的快照入参，只信服务端上下文中的浏览器快照。
@@ -2676,6 +2684,14 @@ class ToolRegistry:
                     result = await execute_action(context, name, args, lambda: info["handler"](**args))
             else:
                 result = await info["handler"](**args)
+            if assets_report is not None:
+                if isinstance(result, str):
+                    try:
+                        result = json.loads(result)
+                    except ValueError:
+                        pass
+                if isinstance(result, dict):
+                    result["assets_report"] = assets_report
             if revision_guard_token is not None and agent_knowledge_revision_guard_is_stale():
                 if context and tracker_checkpoint is not None:
                     context.pending_changes.restore(tracker_checkpoint)
@@ -5815,6 +5831,34 @@ def _brief_canvas_result(result: Any, *, max_chars: int = 600) -> str:
     return text if len(text) <= max_chars else text[:max_chars] + "…"
 
 
+def _describe_applied_ops(tool_name: str, args: Any) -> str:
+    """批准后实际写入了什么（来自已批准提案的操作列表），让助手汇报时有据可依，而不是凭印象。"""
+    if tool_name != "apply_canvas_ops" or not isinstance(args, dict):
+        return ""
+    operations = args.get("operations")
+    if not isinstance(operations, list):
+        return ""
+    added: list[str] = []
+    counts = {"update_node": 0, "delete_node": 0, "add_edge": 0, "delete_edge": 0}
+    for op in operations:
+        if not isinstance(op, dict):
+            continue
+        name = op.get("op")
+        if name == "add_node":
+            node = op.get("node") if isinstance(op.get("node"), dict) else {}
+            data = node.get("data") if isinstance(node.get("data"), dict) else {}
+            added.append(str(data.get("label") or node.get("id") or node.get("type") or "节点"))
+        elif name in counts:
+            counts[name] += 1
+    parts: list[str] = []
+    if added:
+        parts.append(f"新增节点 {len(added)} 个（{'、'.join(added[:12])}{'等' if len(added) > 12 else ''}）")
+    for key, label in (("update_node", "更新节点"), ("delete_node", "删除节点"), ("add_edge", "新增连线"), ("delete_edge", "删除连线")):
+        if counts[key]:
+            parts.append(f"{label} {counts[key]} 个" if "节点" in label else f"{label} {counts[key]} 条")
+    return ("实际写入：" + "；".join(parts) + "。") if parts else ""
+
+
 _CANVAS_GRAPH_FULL_MAX_CHARS = 12000
 
 
@@ -6133,13 +6177,19 @@ def _apply_canvas_ops_to_graph(graph: dict, operations: list, catalog: dict) -> 
                 errors.append(f"add_edge 操作 {index} 的连线 id {edge_id!r} 已存在")
                 continue
             edge_ids.add(edge_id)
-            edges.append({
+            new_edge = {
                 "id": edge_id,
                 "source": source,
                 "target": target,
                 "sourceHandle": str(edge_spec.get("sourceHandle") or "").strip() or None,
                 "targetHandle": str(edge_spec.get("targetHandle") or "").strip() or None,
-            })
+            }
+            # 只放行服务端约定的两个标记，不让模型随意往连线里塞数据
+            raw_edge_data = edge_spec.get("data") if isinstance(edge_spec.get("data"), dict) else {}
+            edge_data = {key: raw_edge_data[key] for key in ("agent_asset_binding", "sequence") if key in raw_edge_data}
+            if edge_data:
+                new_edge["data"] = edge_data
+            edges.append(new_edge)
         elif op_name == "delete_edge":
             edge_id = str(op.get("edge_id") or "").strip()
             if edge_id not in edge_ids:
@@ -6169,12 +6219,13 @@ def _apply_canvas_ops_to_graph(graph: dict, operations: list, catalog: dict) -> 
                 "type": "boolean",
                 "description": "为 true 时只校验不执行，返回预览结果而不写入数据库（默认 false）",
             },
+            "summary": {"type": "string", "description": "可选：一句话说明这次改动（显示在确认卡片上）"},
         },
         "required": ["canvas_id", "operations", "expected_definition_revision"],
     },
     workflow_types=["video_canvas"],
 )
-async def apply_canvas_ops(canvas_id: int, operations: list, expected_definition_revision: int, dry_run: bool = False) -> dict:
+async def apply_canvas_ops(canvas_id: int, operations: list, expected_definition_revision: int, dry_run: bool = False, summary: str | None = None) -> dict:
     """直接应用画布编辑操作，不调用 AI。"""
     db = SessionLocal()
     try:
@@ -6279,6 +6330,72 @@ async def apply_canvas_ops(canvas_id: int, operations: list, expected_definition
         }
     finally:
         db.close()
+
+
+@tool_registry.register(
+    name="add_canvas_assets",
+    description=(
+        "补建画布资产节点（角色/场景/道具）：把场景节点 asset_candidates 里的候选资产（如“剑”“书”），或用户点名的新资产，"
+        "一次建成资产图节点，并自动连到文字里提到它的分镜/视频节点。只新增缺少的节点：已存在的同名资产会跳过，不重新分析、不扣费。"
+        "补建/调整个别资产一律用它，不要用 canvas_stage(assets)（那是整批重新分析，候选资产不会因此建出节点）。"
+        "ask 模式下只出一张确认卡片；建好的只是节点，出图仍由用户在资产面板或画布提交。"
+        "返回 assets_report：added（实际新增）、skipped（跳过及原因）；以它为准向用户汇报，不要凭印象说“已完成”。"
+    ),
+    is_write=True,
+    parameters={
+        "type": "object",
+        "properties": {
+            "canvas_id": {"type": "integer", "description": "当前画布 ID"},
+            "assets": {
+                "type": "array",
+                "description": "要补建的资产列表，如 [{\"name\": \"剑\", \"role\": \"prop\"}, {\"name\": \"燕赤霞\", \"role\": \"character\", \"description\": \"中年道士，青衫，背负长剑\"}]。role 取 character/scene/prop，名字在候选资产里时可省略；description 可选，缺省取候选里的描述。",
+                "items": {"type": "object"},
+            },
+            "scene_node_id": {"type": "string", "description": "可选：资产归属的场景审核节点 ID；画布只有一个场景节点时可省略"},
+            "summary": {"type": "string", "description": "可选：一句话说明（显示在确认卡片上）"},
+        },
+        "required": ["canvas_id", "assets"],
+    },
+    workflow_types=["video_canvas"],
+)
+async def add_canvas_assets(canvas_id: int, assets: list, scene_node_id: str | None = None, summary: str | None = None) -> dict:
+    """占位入口：实际调用在 ToolRegistry.execute 里被翻译成 apply_canvas_ops（走同一套预览、确认与撤回链路）。"""
+    return {"error": "add_canvas_assets 必须在画布 Agent 会话内通过权限门禁执行"}
+
+
+def _translate_add_canvas_assets(context, args: dict) -> dict[str, Any]:
+    """把 add_canvas_assets 翻译为 apply_canvas_ops 的参数；无事可做或出错时直接返回可回给模型的结果。"""
+    from services.canvas_asset_ops import build_asset_operations
+
+    canvas_id = context.workflow_id
+    with SessionLocal() as db:
+        canvas = _require_current_video_canvas(db, canvas_id)
+        if not canvas:
+            return {"error": "视频画布不存在或无权访问"}
+        snapshot = context.canvas_graph_snapshot
+        if isinstance(snapshot, dict) and isinstance(snapshot.get("nodes"), list) and not context.canvas_snapshot_consumed:
+            graph = snapshot
+        else:
+            latest = _latest_canvas_version_row(canvas_id)
+            graph = (latest.graph_json if latest else None) or {"nodes": [], "edges": []}
+        revision = canvas.definition_revision
+    built = build_asset_operations(graph, args.get("assets"), args.get("scene_node_id"))
+    if built.get("error"):
+        return {"error": built["error"]}
+    report = {"added": built["added"], "skipped": built["skipped"], "scene_node_id": built["scene_node_id"]}
+    if not built["operations"]:
+        return {"ok": True, "no_change": True, "assets_report": report,
+                "message": "没有需要新增的资产节点（都已存在或无法识别，见 assets_report.skipped）。据实向用户说明，不要重复提交。"}
+    names = "、".join(item["name"] for item in built["added"])
+    return {
+        "args": {
+            "canvas_id": canvas_id,
+            "operations": built["operations"],
+            "expected_definition_revision": revision,
+            "summary": str(args.get("summary") or f"补建资产：{names}"),
+        },
+        "report": report,
+    }
 
 
 def _serialize_canvas_plan_for_agent(plan: VideoCanvasPlan) -> dict[str, Any]:
@@ -8483,7 +8600,7 @@ class AgentService:
                         yield {"event": "done", "data": json.dumps({"content": approved_result.get("error") or "已执行批准的阶段，正在等待后台完成。", **approved_result, "pending_changes": []}, ensure_ascii=False)}
                         return
                     approval_note = (
-                        f"（系统代述）用户已在确认卡片上批准提案#{canvas_approval_id}（{approved_tool}），系统已执行完成，结果：{_brief_canvas_result(approved_result)}。"
+                        f"（系统代述）用户已在确认卡片上批准提案#{canvas_approval_id}（{approved_tool}），系统已执行完成，结果：{_brief_canvas_result(approved_result)}。{_describe_applied_ops(approved_tool, approved_args)}"
                         "这条确认不是新需求：不要重新读取整张画布，也不要重复提交同一改动。"
                         "若用户最初的请求里还有未完成的明确步骤，直接继续下一步（只用 get_canvas_nodes 读取相关节点）；否则用一两句话汇报结果后结束。"
                     )
@@ -8493,7 +8610,7 @@ class AgentService:
             if workflow_type == "video_canvas":
                 system_prompt += (
                     f"\n\n当前画布权限模式：{canvas_permission_mode}。"
-                    "ask（询问变更模式）每个阶段先通过canvas_stage提交提案，未收到结构化批准不可执行，允许用户反复修改；"
+                    "ask（询问变更模式）推进流水线阶段时先通过canvas_stage提交提案，未收到结构化批准不可执行，允许用户反复修改；""单个或少量节点/资产的增删改不属于流水线阶段：直接用apply_canvas_ops或add_canvas_assets一次提交，只会出一张确认卡片；"
                     "auto（自动模式）已经授权自主推进原任务：绝不向用户征求意见、不贴草稿问“是否确认”，缺信息时自己选最合理的默认继续，只有服务端明确返回无法自行解决的阻塞才停下说明。权限由工具服务端核验，模型不能修改。"
                     "auto模式的交付边界：只自动完成screenplay→split→director→assets→compile（场景批准由服务端代办），把节点编排完整展示给用户后停止；"
                     "禁止调用images/videos/concat，出图与视频生成任务由用户在画布上自行提交。编排完成后简要汇报节点结构并提示用户提交生成，不要反复读取状态。"
@@ -8512,6 +8629,17 @@ class AgentService:
                     "4. 用户上传了参考图/视频时，先依据“参考素材分析”（若有）理解其风格，再把风格要点融入各节点提示词：保持原节点的主体与剧情，只替换/补充画风、色彩、光影、镜头、材质等风格描述；分析结论会自动保存，后续轮次可直接复用。\n"
                     "5. 读取画布按“大纲 → 搜索 → 精读 → 修改”进行，像读代码库一样，不要靠看图了解画布：先 get_canvas_outline 看节点清单与生成状态；用 search_canvas_nodes 按文字定位节点；用 get_canvas_nodes（可带 fields）精读目标节点；用 apply_canvas_ops 修改。节点有没有出图、是否失败或过期，大纲和精读里都有文本状态。\n"
                     "6. 只有需要判断画面是否符合提示词、人物是否一致、质量是否过关时才调用 inspect_canvas_media 看图（每张图会附上当前提示词便于对照），节点数量不限、可一次传多个，看很多张时用 detail=low；提示“这次没有附图”的节点再调用一次继续看。看过的旧图会移出上下文，先把观察结论写下来再继续。"
+                )
+                system_prompt += (
+                    "\n\n## 高效协作规则（减少来回确认与重复读取）\n"
+                    "1. 先看上下文里的“画布要点”（阶段进度、资产清单与出图状态、未建节点的候选资产），能据此回答的不要再调用读取工具；只读取要修改的那几个节点。\n"
+                    "2. 用户说“继续/下一步/确认/先补资产”这类延续语时，沿用上一轮已经给出的清单或计划直接执行，不要重新做一遍全面检查，也不要把已经列出的问题再复述一遍。\n"
+                    "3. 选对工具：补建/调整个别资产（含把候选资产变成节点）用 add_canvas_assets；改节点内容、连线用 apply_canvas_ops；只有按流水线推进阶段才用 canvas_stage。"
+                    "canvas_stage(assets) 是整批重新分析，只处理分析入选的资产，已识别的候选资产不会因此建出节点，不能用来补单个资产。\n"
+                    "4. 意图明确就直接做，不要抛“选项一/选项二”让用户二选一；只有缺少无法合理默认的关键信息时，才问一个具体问题。已有明确选项倾向时给出推荐并直接执行推荐项。\n"
+                    "5. 写入后必须核对工具返回的真实结果（assets_report.added/skipped、节点数变化、warnings）再汇报；结果与目标不符时，先换对的工具自行补救一次，仍不行才如实说明原因，禁止把没做成的事说成已完成。\n"
+                    "6. 同一个目标一轮里最多触发一次确认卡片：能合并的改动（多个资产、多个节点）放进同一次调用。\n"
+                    "7. 汇报用结论加要点，不要复述工具调用过程和每个读取步骤。"
                 )
                 system_prompt += "\n\n始终使用简体中文回复用户（包括说明自己正在做什么的过程性文字），不要输出英文句子；代码、节点 ID 等标识可保留原样。调用工具前不需要写过程说明，需要说明时只用一句中文。"
                 if canvas_permission_mode == "auto":
@@ -9212,7 +9340,7 @@ class AgentService:
                             result_str = error_msg
 
                         stage_result = json.loads(result_str) if result_str.startswith("{") else {}
-                        if workflow_type == "video_canvas" and name in {"canvas_stage", "apply_canvas_ops"} and isinstance(stage_result, dict) and stage_result.get("ok"):
+                        if workflow_type == "video_canvas" and name in {"canvas_stage", "apply_canvas_ops", "add_canvas_assets"} and isinstance(stage_result, dict) and stage_result.get("ok"):
                             update_payload = {"canvas_id": workflow_id}
                             if stage_result.get("write_mode") == "local":
                                 update_payload.update({"source": "browser", "write_mode": "local", "client_revision": stage_result.get("client_revision"), "graph": stage_result.get("graph"), "operations": stage_result.get("operations", [])})
