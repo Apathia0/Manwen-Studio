@@ -25,6 +25,7 @@ import {
 import { useDeviceMode } from './lib/useMediaQuery';
 import {
   ADMIN_ROUTES,
+  GUEST_VIEWABLE_ROUTES,
   PUBLIC_ROUTES,
   parseDeconstructionWorkId,
   parseMangaDramaStoryId,
@@ -68,6 +69,7 @@ import { UserAccountUsagePage } from './components/UserAccountUsagePage';
 import { PointsAiAdminPage } from './components/admin/PointsAiAdminPage';
 import { CreationStudioPage } from './components/CreationStudioPage';
 import { ModelCatalogPage } from './components/ModelCatalogPage';
+import { ModelCatalogPublicPage } from './components/ModelCatalogPublicPage';
 import { TasksPage } from './components/TasksPage';
 import { DesktopAppShell, type ShellNavItem } from './components/shell/DesktopAppShell';
 import { TabletAppShell } from './components/shell/TabletAppShell';
@@ -407,7 +409,8 @@ function App() {
     } catch {
       clearAuthToken();
       setSession(null);
-      if (route !== 'install') navigate('/');
+      // 访客可浏览的页面（套餐、模型广场）直接打开时保留在原页
+      if (route !== 'install' && !GUEST_VIEWABLE_ROUTES.includes(route)) navigate('/');
     }
   }
 
@@ -699,6 +702,15 @@ function App() {
     if (!session && route === 'pricing') {
       return <PricingPublicPage onBack={() => navigate('/')} onRegister={() => navigate('/register')} />;
     }
+  if (!session && route === 'model-catalog') {
+    return (
+      <ModelCatalogPublicPage
+        onBack={() => navigate('/')}
+        onLogin={() => navigate('/login')}
+        onRegister={() => navigate('/register')}
+      />
+    );
+  }
   if (!session) {
     if (PUBLIC_ROUTES.includes(route)) {
       return (
@@ -707,6 +719,7 @@ function App() {
           onLogin={() => navigate('/login')}
           onRegister={() => navigate('/register')}
           onPricing={() => navigate('/pricing')}
+          onModelCatalog={() => navigate('/model-catalog')}
         />
       );
     }
@@ -991,13 +1004,23 @@ function PublicSite({
   onLogin,
   onRegister,
   onPricing,
+  onModelCatalog,
 }: {
   platform: PublicPlatformSettings;
   onLogin: () => void;
   onRegister: () => void;
   onPricing: () => void;
+  onModelCatalog: () => void;
 }) {
-  return <PublicLanding platform={platform} onLogin={onLogin} onRegister={onRegister} onPricing={onPricing} />;
+  return (
+    <PublicLanding
+      platform={platform}
+      onLogin={onLogin}
+      onRegister={onRegister}
+      onPricing={onPricing}
+      onModelCatalog={onModelCatalog}
+    />
+  );
 }
 
 export default App;

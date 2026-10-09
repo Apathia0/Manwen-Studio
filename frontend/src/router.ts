@@ -103,6 +103,9 @@ export function routeToPath(key: RouteKey): string {
 /** 公开路由（未登录可访问）：安装/落地/登录/注册/找回密码/公开定价 */
 export const PUBLIC_ROUTES: RouteKey[] = ['install', 'landing', 'login', 'register', 'forgot-password', 'pricing'];
 
+/** 未登录访客可浏览的路由：直接打开时不因未登录被重定向回首页 */
+export const GUEST_VIEWABLE_ROUTES: RouteKey[] = ['pricing', 'model-catalog'];
+
 /** 管理员专属路由 */
 export const ADMIN_ROUTES: RouteKey[] = [
   'plan-config',

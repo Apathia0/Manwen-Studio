@@ -2,7 +2,8 @@ import { useCallback, useEffect, useMemo, useState, type ComponentType } from 'r
 import { CircleDollarSign, FileImage, RefreshCw, Sparkles, Type, Video } from 'lucide-react';
 import {
   getAiModels,
-  type AiModelItem,
+  getPublicAiModels,
+  type PublicAiModelItem as AiModelItem,
 } from '../api';
 import { toast } from '../lib/toast';
 import { Button } from './ui';
@@ -85,7 +86,7 @@ function getCapabilityItems(model: AiModelItem): string[] {
   return result.length ? result : ['视频生成'];
 }
 
-export function ModelCatalogPage() {
+export function ModelCatalogPage({ publicMode = false }: { publicMode?: boolean }) {
   const [models, setModels] = useState<AiModelItem[]>([]);
   const [activeModality, setActiveModality] = useState<ModelModality>('text');
   const [loading, setLoading] = useState(true);
@@ -93,14 +94,15 @@ export function ModelCatalogPage() {
   const loadCatalog = useCallback(async () => {
     setLoading(true);
     try {
-      const modelResult = await getAiModels();
+      // 未登录访客走公开接口，已登录用户沿用原接口
+      const modelResult = publicMode ? await getPublicAiModels() : await getAiModels();
       setModels(modelResult.models || []);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : '模型目录加载失败');
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [publicMode]);
 
   useEffect(() => {
     void loadCatalog();
