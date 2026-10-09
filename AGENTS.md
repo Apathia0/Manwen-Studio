@@ -1109,6 +1109,12 @@ import MediaImage from './shared/MediaImage';
 
 **验证方法**：生成图片回显时打开浏览器控制台 Network 观察，或断网重试——图片应整体淡入，不会出现从上到下/分块逐步渲染。
 
+**画布/列表缩略图规范（回显提速）**：
+- 本站 `/static/manga`、`/static/video` 下的图片支持 `?w=<96|240|480|720|1280|1920>`，后端 `services/media_derivatives.py` 按需生成 WebP 并缓存到 `<静态根>/.derived/`（原图 mtime 更新自动重建，失败回退原图）。
+- 前端用 `lib/mediaVariant.ts` 的 `mediaVariantUrl / pickMediaWidth`；`MediaImage` 传 `width` 即用缩略图（失败自动退回原图→带参数重试）；画布节点用 `lib/useProgressiveImage.ts`（预加载+decode 后才切换、视口外不加载）；放大查看（`MediaLightbox`）先显示 1280 预览再无缝换原图。
+- 新增画布/列表类图片展示时必须传 `width`；只有需要原图像素的场景（下载、灯箱、图生图参考）才用原图。生成图片落盘后调用 `media_derivatives.prewarm` 预热 480 档。
+- 静态图片响应带 `Cache-Control: public, max-age=86400, stale-while-revalidate=604800`；web 容器 nginx 对图片启用 `proxy_cache`（视频不缓存，避免 Range 请求被拉全量）。`.derived` 目录对外 404，禁止在部署时清理。
+
 ---
 
 ## ⚠️ 已修复 Bug 记录（2026-06-12 批次）
@@ -1305,6 +1311,12 @@ import MediaImage from './shared/MediaImage';
 - `get_canvas_outline`（≈ ls）：每节点一行，含媒体节点文本生成状态（未生成/已生成/失败/产物已过期），支持类型/状态过滤与分页；`search_canvas_nodes`（≈ grep）：按文字/正则在标题与配置里定位；`get_canvas_nodes`：精读，可用 `fields` 只取部分字段，附生成状态。实现见 `services/canvas_agent_reading.py`。
 - 看图只用于视觉验收：`inspect_canvas_media` 每张图附当前提示词以便对照，数量不限（超出单次容量会提示分批），`detail=low/high`；看过的旧图滚动移出上下文。每轮不自动附图。
 - 新增画布读取工具时必须同时加入 `_VIDEO_CANVAS_WORKFLOW_READ_TOOL_NAMES` 和相关技能 `tool_names`，否则模型调用不到（曾因漏加导致助手反复“先读取画布真实状态”）。
+
+**高效协作（减少来回确认 / 重复读取）**
+- 每轮上下文自带「画布要点」（`services/canvas_agent_digest.py`）：阶段进度、资产清单与出图状态、未建节点的候选资产；助手能据此回答就不再调读取工具。
+- 补建/调整个别资产用 `add_canvas_assets`（`services/canvas_asset_ops.py`）：把 `asset_candidates` 里的候选或用户点名的新资产一次建成资产节点，并按“镜头文字里提到才连”的规则自动连到分镜/视频；执行时翻译为 `apply_canvas_ops`，沿用同一套预览、确认（ask 模式只出一张卡）与撤回；返回 `assets_report.added/skipped` 供据实汇报。**不要用 `canvas_stage(assets)` 补单个资产**：它是整批重新分析，候选资产不会因此建出节点（曾因此反复“确认→什么都没加”）。
+- `add_edge` 操作允许携带 `data.agent_asset_binding / sequence`（仅此两个键），使资产自动连线之后仍能被资产阶段识别重建。
+- 系统提示词的「高效协作规则」要求：延续语（继续/下一步/确认）沿用上一轮清单；意图明确不抛二选一；写入后核对真实结果再汇报；同一目标一轮最多一张确认卡。新增写入类画布工具时，必须同步加入 `_VIDEO_CANVAS_WORKFLOW_TOOL_NAMES`、相关技能 `tool_names` 以及 `canvas_updated` 事件判断。
 
 **多模态**
 - 用户上传的图片/视频先经独立预分析（`services/agent_reference_analysis.py`，开启 thinking，无工具），结论写入 `AgentAttachment.metadata_json.reference_analysis`，后续轮次自动注入"参考素材分析"，不再依赖重复传图；主工具循环仍保持 `thinking: disabled`。

@@ -269,7 +269,7 @@ export default function CanvasAssetPanel({
             <div className="flex gap-2.5">
               <Checkbox checked={selected.has(entry.nodeId)} onChange={() => toggle(entry.nodeId)} label={`选择 ${entry.name}`} />
               <div className={`grid shrink-0 place-items-center overflow-hidden rounded-md border border-[#393633] bg-[#211f1d] text-[10px] text-[#6f6862] ${entry.kind === 'character' ? 'h-20 w-16' : 'h-16 w-24'}`}>
-                {entry.imageUrl ? <button type="button" title="点击放大查看" onClick={() => setPreview({ url: entry.imageUrl, title: entry.name, isVideo: false })} className="h-full w-full cursor-zoom-in"><MediaImage src={entry.imageUrl} alt={entry.name} className="h-full w-full object-cover" /></button> : '暂无图片'}
+                {entry.imageUrl ? <button type="button" title="点击放大查看" onClick={() => setPreview({ url: entry.imageUrl, title: entry.name, isVideo: false })} className="h-full w-full cursor-zoom-in"><MediaImage src={entry.imageUrl} alt={entry.name} width={480} className="h-full w-full object-cover" /></button> : '暂无图片'}
               </div>
               <div className="min-w-0 flex-1">
                 <div className="flex items-center justify-between gap-1">
@@ -312,7 +312,7 @@ export default function CanvasAssetPanel({
             <Checkbox checked={selected.has(entry.nodeId)} onChange={() => toggle(entry.nodeId)} label={`选择 ${entry.title}`} />
             <div className="grid h-12 w-20 shrink-0 place-items-center overflow-hidden rounded-md border border-[#393633] bg-[#211f1d] text-[10px] text-[#6f6862]">
               {entry.mediaUrl
-                ? <button type="button" title="点击放大查看" onClick={() => setPreview({ url: entry.mediaUrl, title: entry.title, isVideo: entry.kind === 'video' })} className="h-full w-full cursor-zoom-in">{entry.kind === 'video' ? <video src={entry.mediaUrl} muted preload="metadata" disablePictureInPicture disableRemotePlayback tabIndex={-1} className="pointer-events-none h-full w-full object-cover" /> : <MediaImage src={entry.mediaUrl} alt={entry.title} className="h-full w-full object-cover" />}</button>
+                ? <button type="button" title="点击放大查看" onClick={() => setPreview({ url: entry.mediaUrl, title: entry.title, isVideo: entry.kind === 'video' })} className="h-full w-full cursor-zoom-in">{entry.kind === 'video' ? <video src={entry.mediaUrl} muted preload="metadata" disablePictureInPicture disableRemotePlayback tabIndex={-1} className="pointer-events-none h-full w-full object-cover" /> : <MediaImage src={entry.mediaUrl} alt={entry.title} width={480} className="h-full w-full object-cover" />}</button>
                 : '暂无'}
             </div>
             <div className="min-w-0 flex-1">
@@ -331,7 +331,7 @@ export default function CanvasAssetPanel({
               <span>可选资产 <span className="text-[#8f8984]">{visibleCandidates.length}</span></span>
               <span className="text-[10px] text-[#7d756e]">{candidatesOpen ? '收起' : '展开'}</span>
             </button>
-            <p className="mt-1 text-[10px] leading-4 text-[#7d756e]">这些场景和道具出现次数少，已在分镜提示词里一句带过。需要保证它们前后一致时，再单独生成。</p>
+            <p className="mt-1 text-[10px] leading-4 text-[#7d756e]">这些角色、场景和道具出现次数少，已在分镜提示词里一句带过。后续还会再出现、需要保证前后一致时，点「添加」再单独生成。</p>
             {candidatesOpen && (
               <ul className="mt-2 space-y-1.5">
                 {visibleCandidates.map((item) => (

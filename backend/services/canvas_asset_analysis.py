@@ -62,7 +62,9 @@ async def generate_character_prompts(shot_data: dict[str, Any], character_profil
     return [e for e in entries if isinstance(e, dict)] if isinstance(entries, list) else []
 # 主要角色名额；角色提示词每批生成的人数和并发数。
 # 每个角色的三视图提示词很长，一次让模型写完全部角色会撞上输出上限被截断，只剩前几个（路人甲乙反而挤掉了女主）。
-MAX_MAIN_CHARACTERS = 8
+MAX_MAIN_CHARACTERS = 12
+# 次要角色（台词少、出场少）放进“可选资产”的上限；不丢弃，需要时一键补建
+MAX_MINOR_CANDIDATES = 12
 CHARACTER_BATCH_SIZE = 3
 CHARACTER_BATCH_CONCURRENCY = 3
 
@@ -74,14 +76,19 @@ _EXTRA_RE = re.compile(
 
 
 def is_extra_character(name: str) -> bool:
-    """群演类角色名（少年甲、中年族人、路人…）：质检不要求它们有角色资产。"""
+    """群演类角色名（少年甲、中年族人、路人…）：这类泛称不单独生成资产，质检也不要求它们有角色资产。"""
     return bool(_EXTRA_RE.search(str(name or "").strip()))
 
 
-def rank_main_characters(names: list[str], text: str) -> tuple[list[str], list[str]]:
-    """把清洗后的角色分成（主要角色, 群演）：按台词条数和出现次数排序，主要角色最多 MAX_MAIN_CHARACTERS 个。
+def split_characters(names: list[str], text: str, appearances: dict[str, int] | None = None) -> tuple[list[str], list[str], list[str]]:
+    """把清洗后的角色分成（主要角色, 次要角色, 群演）。
 
-    群演类名字、以及台词不超过 1 句且几乎没出现的小角色算群演。全是群演时退回按重要性取前几个，保证至少有角色资产。"""
+    判断依据是“有没有名有姓、有没有台词”，而不是本集出场次数：短剧单集里一个角色可能只露一两次脸，
+    但他有名字、有台词，后面的集数还会再出现，必须有资产才能前后一致。
+    - 群演：只有泛称（少年甲、路人、族人…），不建资产，分镜里按画面描述；
+    - 主要角色：有名字且（有至少 1 句台词，或在剧本里出现 2 次及以上，或出现在 2 个及以上分场的出场名单里），按重要性排序，最多 MAX_MAIN_CHARACTERS 个；
+    - 次要角色：有名字但既没台词又几乎没出现，或超出名额的部分，进“可选资产”由用户决定，不直接丢弃。
+    全是群演时退回按重要性取前几个，保证至少有角色资产。"""
     from services.screenplay_adapt import speaker_label_stats
 
     dialogue, _ = speaker_label_stats(text)
@@ -90,11 +97,21 @@ def rank_main_characters(names: list[str], text: str) -> tuple[list[str], list[s
         return dialogue.get(name, 0) * 3 + text.count(name)
 
     ordered = sorted(names, key=lambda n: (-score(n), names.index(n)))
-    main = [n for n in ordered if not is_extra_character(n) and (dialogue.get(n, 0) >= 2 or text.count(n) >= 4)]
-    if not main:
-        main = [n for n in ordered if not is_extra_character(n)] or ordered
-    main = main[:MAX_MAIN_CHARACTERS]
-    return main, [n for n in names if n not in main]
+    named = [n for n in ordered if not is_extra_character(n)]
+    seen_in = appearances or {}
+    primary = [n for n in named if dialogue.get(n, 0) >= 1 or text.count(n) >= 2 or seen_in.get(n, 0) >= 2]
+    if not primary:
+        primary = named[:MAX_MAIN_CHARACTERS] or ordered[:MAX_MAIN_CHARACTERS]
+    main = primary[:MAX_MAIN_CHARACTERS]
+    minor = [n for n in named if n not in main]
+    extras = [n for n in names if n not in main and n not in minor]
+    return main, minor, extras
+
+
+def rank_main_characters(names: list[str], text: str) -> tuple[list[str], list[str]]:
+    """兼容旧调用：返回（主要角色, 其余）。其余 = 次要角色 + 群演。"""
+    main, minor, extras = split_characters(names, text)
+    return main, [n for n in names if n in minor or n in extras]
 
 
 def _scene_brief(scene: dict[str, Any]) -> str:
@@ -176,9 +193,15 @@ async def analyze_scene_assets(
 
     # 角色名先清洗（去括号提示、去“级别”这类标签词），再按重要性取主要角色；群演不占名额
     all_names = clean_character_names([c for scene in scenes for c in (scene.get("characters") or [])], screenplay_text)
-    names, extras = rank_main_characters(all_names, screenplay_text)
+    from services.screenplay_adapt import base_character_name as _base_name
+
+    # 每个角色出现在几个分场的出场名单里：跨分场出现的有名角色是剧情里的“常驻人物”，即使台词少也要有资产
+    appearances = {n: sum(1 for sc in scenes if n in {_base_name(str(c)) for c in (sc.get("characters") or [])}) for n in all_names}
+    names, minor_names, extras = split_characters(all_names, screenplay_text, appearances)
     if extras:
-        warnings.append(f"群演类角色（{'、'.join(extras[:6])}{'…' if len(extras) > 6 else ''}）不单独生成角色资产，分镜里按画面描述")
+        warnings.append(f"群演类角色（{'、'.join(extras[:6])}{'…' if len(extras) > 6 else ''}）只有泛称，不单独生成角色资产，分镜里按画面描述")
+    if minor_names:
+        warnings.append(f"次要角色（{'、'.join(minor_names[:6])}{'…' if len(minor_names) > 6 else ''}）台词和出场都很少，已放进“可选资产”，后续集数会再出现时可一键添加")
 
     # ① 一次调用：风格 + 角色档案 + 关键场景/道具（含提示词）+ 可选候选
     triage: dict[str, Any] = {}
@@ -267,7 +290,13 @@ async def analyze_scene_assets(
             assets.append(asset)
 
     # ③ 关键场景/道具：硬规则二次筛选，提示词已在第一步生成
+    from services.screenplay_adapt import base_character_name
     selected, optional = select_assets(triage, scenes, screenplay_text)
+    # 次要角色也列进候选（带出场分场与一句话说明），不因“本集露脸少”就从资产体系里消失
+    for name in minor_names[:MAX_MINOR_CANDIDATES]:
+        scene_ids = [str(sc.get("scene_id")) for sc in scenes if name in [base_character_name(str(c)) for c in (sc.get("characters") or [])]]
+        profile = profiles.get(name, "")
+        optional.append({"role": "character", "name": name, "scene_ids": scene_ids, "desc": profile or f"次要角色「{name}」，台词和出场较少；后续集数会再出现时建议补建，保证形象一致"})
     for item in selected:
         item["prompt"] = strip_style_text(item["prompt"])
         assets.append(item)

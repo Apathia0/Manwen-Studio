@@ -3,6 +3,7 @@ import { X, Upload, Check, Loader2, Film } from 'lucide-react';
 import type { VideoStylePreset } from '../api';
 import { uploadStyleReferenceImage } from '../api';
 import MediaImage from './shared/MediaImage';
+import { toast } from '../lib/toast';
 
 interface StyleSelectorModalProps {
   isOpen: boolean;
@@ -72,6 +73,7 @@ export default function StyleSelectorModal({
 
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
+    e.target.value = '';
     if (!file) return;
 
     if (!onFileUpload && !workflowId) {
@@ -92,6 +94,7 @@ export default function StyleSelectorModal({
       setLocalSelectedStyle('');
     } catch (err) {
       console.error('上传风格参考图失败:', err);
+      toast.error(err instanceof Error && err.message ? `上传风格参考图失败：${err.message}` : '上传风格参考图失败，请重试');
     } finally {
       setUploading(false);
     }

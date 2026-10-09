@@ -86,6 +86,8 @@ import NodeCandidates from './video-canvas/NodeCandidates';
 import CanvasAssetPanel from './video-canvas/CanvasAssetPanel';
 import CanvasPlanCapsule from './video-canvas/CanvasPlanCapsule';
 import MediaLightbox from './video-canvas/MediaLightbox';
+import { pickMediaWidth, type MediaWidth } from '../lib/mediaVariant';
+import { useProgressiveImage } from '../lib/useProgressiveImage';
 import BatchStartDialog, { type BatchStartInfo } from './video-canvas/BatchStartDialog';
 import StyleControl from './video-canvas/StyleControl';
 import { anyFollowsCanvasStyle, inconsistentNodeIds, presetToCanvasStyle, styleKeyOfConfig, readCanvasStyle, referenceToCanvasStyle, sameStyle, type CanvasStyle } from './video-canvas/canvasStyle';
@@ -221,10 +223,31 @@ function rememberResultUrl(canvasId: number, nodeId: string, url: string, isVide
   }
 }
 
-function NodeResultPreview({ url, isVideo, interactive = true, onExpand, onNaturalSize }: { url: string; isVideo: boolean; /** 视频播放控件是否可操作；节点未选中时关闭，让按下的手势交给节点（可直接拖动 / 选中） */ interactive?: boolean; onExpand?: () => void; onNaturalSize?: (width: number, height: number) => void }) {
-  const [ready, setReady] = useState(false);
+function NodeResultPreview({ url, isVideo, interactive = true, displayWidth = NODE_WIDTH, onExpand, onNaturalSize }: { url: string; isVideo: boolean; /** 视频播放控件是否可操作；节点未选中时关闭，让按下的手势交给节点（可直接拖动 / 选中） */ interactive?: boolean; /** 节点在屏幕上的显示宽度（CSS 像素），用来挑选缩略图档位；只升不降，避免缩放时反复换图 */ displayWidth?: number; onExpand?: () => void; onNaturalSize?: (width: number, height: number) => void }) {
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const [near, setNear] = useState(false);
+  const wantedWidth = pickMediaWidth(displayWidth);
+  const [bucket, setBucket] = useState<MediaWidth>(wantedWidth);
+  const effectiveWidth = wantedWidth > bucket ? wantedWidth : bucket;
+  useEffect(() => { if (wantedWidth > bucket) setBucket(wantedWidth); }, [wantedWidth, bucket]);
 
-  useEffect(() => { setReady(false); }, [url]);
+  // 视口外的节点不发请求：靠近视口（预留 800px）才开始加载，加载后保持不卸载
+  useEffect(() => {
+    const element = rootRef.current;
+    if (isVideo || near) return undefined;
+    if (!element || typeof IntersectionObserver === 'undefined') { setNear(true); return undefined; }
+    const observer = new IntersectionObserver((entries) => { if (entries.some((entry) => entry.isIntersecting)) { setNear(true); observer.disconnect(); } }, { rootMargin: '800px' });
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [isVideo, near]);
+
+  // 节点展示用缩略图（后端按需生成 WebP）；放大查看再加载原图。缩略图保持原图宽高比，节点适配比例不受影响
+  const image = useProgressiveImage(isVideo ? null : url, effectiveWidth, near);
+  const naturalSizeRef = useRef(onNaturalSize);
+  useEffect(() => { naturalSizeRef.current = onNaturalSize; });
+  const naturalWidth = image.naturalSize?.width;
+  const naturalHeight = image.naturalSize?.height;
+  useEffect(() => { if (naturalWidth && naturalHeight) naturalSizeRef.current?.(naturalWidth, naturalHeight); }, [naturalWidth, naturalHeight]);
 
   const expandButton = onExpand && (
     <button type="button" title="放大查看" aria-label="放大查看" onPointerDown={(event) => event.stopPropagation()} onDoubleClick={(event) => event.stopPropagation()} onClick={(event) => { event.stopPropagation(); onExpand(); }}
@@ -234,16 +257,14 @@ function NodeResultPreview({ url, isVideo, interactive = true, onExpand, onNatur
     <video src={url} draggable={false} className={`h-full w-full bg-black object-contain ${interactive ? '' : 'pointer-events-none'}`} controls disablePictureInPicture disableRemotePlayback preload="metadata" onLoadedMetadata={(event) => onNaturalSize?.(event.currentTarget.videoWidth, event.currentTarget.videoHeight)} />
     {expandButton}
   </>;
-  return <>
-    {!ready && <div className="absolute inset-0 animate-pulse bg-[#2a2e33]" />}
-    <img src={url} alt="生成结果" draggable={false} decoding="async" onDoubleClick={(event) => { event.stopPropagation(); onExpand?.(); }} className={`h-full w-full bg-[#15171a] object-contain transition-opacity duration-200 ${ready ? 'opacity-100' : 'opacity-0'}`} onLoad={(event) => {
-      const image = event.currentTarget;
-      onNaturalSize?.(image.naturalWidth, image.naturalHeight);
-      const complete = () => setReady(true);
-      if (typeof image.decode === 'function') void image.decode().catch(() => undefined).finally(complete); else complete();
-    }} onError={() => setReady(true)} />
+  return <div ref={rootRef} className="absolute inset-0">
+    {image.src
+      ? <img src={image.src} alt="生成结果" draggable={false} onDoubleClick={(event) => { event.stopPropagation(); onExpand?.(); }} className="h-full w-full bg-[#15171a] object-contain" />
+      : image.failed
+        ? <button type="button" onPointerDown={(event) => event.stopPropagation()} onClick={(event) => { event.stopPropagation(); image.retry(); }} className="absolute inset-0 flex flex-col items-center justify-center gap-1.5 bg-[#23262b] text-[11px] text-[#9aa4af] hover:text-white"><RefreshCw className="h-4 w-4" /><span>图片加载失败，点击重试</span></button>
+        : <div className="absolute inset-0 flex flex-col items-center justify-center gap-1.5 bg-gradient-to-br from-[#2a2e33] via-[#3a4048] to-[#2a2e33] text-[11px] text-[#8b95a1] animate-pulse"><Loader2 className="h-5 w-5 animate-spin" /><span>图片加载中</span></div>}
     {expandButton}
-  </>;
+  </div>;
 }
 
 function createNode(item: VideoCanvasNodeCatalogItem, position: { x: number; y: number }): CanvasNode {
@@ -306,7 +327,8 @@ export default function VideoCanvasPanel({ storyId, chapterId, workflow: _workfl
   const [refreshTick, setRefreshTick] = useState(0);
   const [trackedRuns, setTrackedRuns] = useState<VideoCanvasRun[]>([]);
   const isDesktop = useIsDesktop();
-  const [agentOpen, setAgentOpen] = useState(false);
+  // 进入画布默认展开助手（桌面端侧栏）；手机端助手是全屏浮层，默认收起以免挡住画布
+  const [agentOpen, setAgentOpen] = useState(isDesktop);
   const [plans, setPlans] = useState<VideoCanvasPlan[]>([]);
   const [plansLoading, setPlansLoading] = useState(false);
   const [applyingPlanId, setApplyingPlanId] = useState<number | null>(null);
@@ -416,6 +438,10 @@ export default function VideoCanvasPanel({ storyId, chapterId, workflow: _workfl
     return () => { window.clearTimeout(timer); observer.disconnect(); };
   }, [loading]);
 
+  // 素材列表会在上传风格图、资产分析等操作后整体换新引用；hydrateCanvas / applyServerCanvas 只通过 ref 读取最新值，
+  // 绝不能把 assets 放进它们的依赖——否则 load 随之换引用，整张画布被重新加载（弹窗和未提交的状态一并丢失）。
+  const assetsRef = useRef(assets);
+  useEffect(() => { assetsRef.current = assets; });
   const hydrateCanvas = useCallback((nextCanvas: VideoCanvas) => {
     savedEditRef.current = contentEditRef.current;
     canvasEpochRef.current += 1;
@@ -442,7 +468,7 @@ export default function VideoCanvasPanel({ storyId, chapterId, workflow: _workfl
     const projectedEdges = projectedGraph.edges as CanvasEdge[];
     let hydratedNodes = toCanvasNodes(projectedGraph).map((node) => ({ ...node, position: layoutNodes[node.id] || node.position }));
     for (const run of [...(nextCanvas.runs || [])].reverse()) {
-      hydratedNodes = mergeRunOutputs(run, hydratedNodes, projectedEdges, assets);
+      hydratedNodes = mergeRunOutputs(run, hydratedNodes, projectedEdges, assetsRef.current);
     }
     setNodes(hydratedNodes);    setEdges(projectedEdges);
     setLatestRun(nextCanvas.runs?.[0] || null);
@@ -451,7 +477,7 @@ export default function VideoCanvasPanel({ storyId, chapterId, workflow: _workfl
     setViewport({ x: savedViewport?.x ?? 260, y: savedViewport?.y ?? 120, k: savedViewport?.zoom ?? 1 });
     setSelectedNodeId(null);
     setSelectedNodeIds([]);
-  }, [assets]);
+  }, []);
 
   const load = useCallback(async () => {
     const requestId = ++loadRequestRef.current;
@@ -489,8 +515,6 @@ export default function VideoCanvasPanel({ storyId, chapterId, workflow: _workfl
   useEffect(() => () => onDirtyChange?.(false), [onDirtyChange]);
   // 进行中的运行都要轮询。依赖只取画布 ID 和"进行中运行 ID 列表"：画布对象 / 运行对象每次保存或刷新都会换新引用，
   // 若依赖它们，定时器会被反复重置，期间生成完成的结果就迟迟不回显到节点上。
-  const assetsRef = useRef(assets);
-  useEffect(() => { assetsRef.current = assets; });
   const trackRuns = useCallback((runs: VideoCanvasRun[]) => {
     setTrackedRuns((current) => {
       const byId = new Map(current.map((run) => [run.id, run]));
@@ -1018,20 +1042,21 @@ export default function VideoCanvasPanel({ storyId, chapterId, workflow: _workfl
       .map((node) => ({ kind: (node.data.config as Record<string, unknown>).asset_role as AssetKind, position: node.position }))
       .filter((item) => item.kind === 'character' || item.kind === 'scene' || item.kind === 'prop');
     const position = nextAssetSlot({ position: sceneNode.position, width: Number(sceneNode.data.ui?.width) || undefined }, kind, existingAssets);
-    const prompt = kind === 'scene' ? `空镜场景参考图：${candidate.name}。${candidate.desc}。无人物，画面统一。` : `道具参考图：${candidate.name}。${candidate.desc}。单个物体特写，干净背景。`;
+    const kindLabel = kind === 'character' ? '角色' : kind === 'scene' ? '场景' : '道具';
+    const prompt = kind === 'character' ? `角色设定参考图：${candidate.name}。${candidate.desc}。全身正面站姿，干净背景，画面风格统一。` : kind === 'scene' ? `空镜场景参考图：${candidate.name}。${candidate.desc}。无人物，画面统一。` : `道具参考图：${candidate.name}。${candidate.desc}。单个物体特写，干净背景。`;
     captureHistory();
     setNodes((current) => [...current, {
       id,
       type: 'image',
       position,
       data: {
-        label: `${kind === 'scene' ? '场景' : '道具'}·${candidate.name}`,
+        label: `${kindLabel}·${candidate.name}`,
         nodeType: 'image',
-        config: { node_role: 'asset', asset_role: kind, asset_name: candidate.name, asset_scene_node: sceneNode.id, source_scene_node: sceneNode.id, scene_ids: (candidate.scene_ids || []).map(String), prompt, size: '1920x1080', aspect_ratio: '16:9' },
+        config: { node_role: 'asset', manual_added: true, asset_role: kind, asset_name: candidate.name, asset_scene_node: sceneNode.id, source_scene_node: sceneNode.id, scene_ids: (candidate.scene_ids || []).map(String), prompt, size: '1920x1080', aspect_ratio: '16:9' },
       },
     }]);
     markDirty();
-    toast.success(`已添加${kind === 'scene' ? '场景' : '道具'}资产「${candidate.name}」，可在资产面板生成图片`);
+    toast.success(`已添加${kindLabel}资产「${candidate.name}」，可在资产面板生成图片`);
   }, [captureHistory, markDirty]);
   const toggleAssetLock = useCallback((nodeId: string) => {
     captureHistory();
@@ -1447,7 +1472,7 @@ export default function VideoCanvasPanel({ storyId, chapterId, workflow: _workfl
     const localPositions = new Map(nodesRef.current.map((node) => [node.id, node.position]));
     const layoutNodes = next.layout.nodes || {};
     let merged = toCanvasNodes(projected).map((node) => ({ ...node, position: localPositions.get(node.id) || layoutNodes[node.id] || node.position }));
-    for (const run of [...(next.runs || [])].reverse()) merged = mergeRunOutputs(run, merged, projectedEdges, assets);
+    for (const run of [...(next.runs || [])].reverse()) merged = mergeRunOutputs(run, merged, projectedEdges, assetsRef.current);
     const alive = new Set(merged.map((node) => node.id));
     setCanvas(next);
     setNodes(merged);
@@ -1459,7 +1484,7 @@ export default function VideoCanvasPanel({ storyId, chapterId, workflow: _workfl
     setCanvasList((current) => current.map((item) => item.id === next.id ? next : item));
     setDirty(false);
     savedEditRef.current = contentEditRef.current;
-  }, [assets]);
+  }, []);
   // 本地有没有还没保存的节点/连线修改（只平移视口不算）。有的话绝不能用服务端画布覆盖本地。
   const hasUnsavedContent = () => contentEditRef.current !== savedEditRef.current;
   // 发给助手前先把未保存的修改存到服务端，助手才能看到和操作同一份画布。
@@ -2469,7 +2494,7 @@ export default function VideoCanvasPanel({ storyId, chapterId, workflow: _workfl
     <CanvasSurface containerRef={surfaceRef} viewport={editorViewport} tool={interaction.state.activeTool} handlers={interaction.handlers} state={interaction.state} onViewportChange={(next) => updateViewport({ x: next.x, y: next.y, k: next.scale })} onDrop={(event, world) => { const type = event.dataTransfer.getData('application/x-storycanvas-node'); const item = catalog.find((entry) => entry.type === type); if (item) { captureHistory(); addCatalogNode(item, world); } }}>
       <CanvasConnectionLayer ghostEdges={ghostEdges} nodes={nodes as CanvasSceneNode[]} edges={edges as CanvasSceneEdge[]} catalog={catalog} connecting={interaction.state.connecting} mouseWorld={interaction.state.mouseWorld} connectionTargetNodeId={interaction.state.connectionTargetNodeId} selectedConnectionId={interaction.state.selectedConnectionId} handlers={interaction.handlers} />
       {interaction.state.selectionBox && (() => { const box = interaction.state.selectionBox; const left = Math.min(box.startWorldX, box.currentWorldX); const top = Math.min(box.startWorldY, box.currentWorldY); return <div className="pointer-events-none absolute rounded-lg border-2 border-[#2f80ff]/80 bg-[#2f80ff]/10" style={{ left, top, width: Math.abs(box.currentWorldX - box.startWorldX), height: Math.abs(box.currentWorldY - box.startWorldY) }} />; })()}
-      {orderNodesForRender(nodes, edges).map((node) => <CanvasNodeView key={node.id} node={node as CanvasSceneNode} catalogItem={catalog.find((item) => item.type === node.type) || catalog[0]} selected={selectedNodeIds.includes(node.id)} connecting={interaction.state.connecting} connectionTargetNodeId={interaction.state.connectionTargetNodeId} scale={editorViewport.scale} handlers={interaction.handlers} onResize={handleNodeResize} onResizeEnd={handleNodeResizeEnd} onNodeContextMenu={(event, nodeId) => { event.preventDefault(); event.stopPropagation(); setNodeMenu({ x: event.clientX, y: event.clientY, nodeId }); }} renderContent={(nodeView) => { const result = nodeView.data.result as (Record<string, unknown> & { url?: string }) | undefined; const mediaKindForNode = nodeView.type === 'image' || nodeView.type === 'video' || nodeView.type === 'concat'; const resultUrl = (result?.url as string | undefined) || (mediaKindForNode ? nodeResultUrlCache.get(`${canvas.id}:${nodeView.id}`)?.url : undefined) || ''; const runStatus = nodeRunStatuses.get(nodeView.id); const isBusy = submittingNodeId === nodeView.id || ['awaiting_approval', 'queued', 'running', 'cancel_requested'].includes(String(runStatus || '')); if (resultUrl) { rememberResultUrl(canvas.id, nodeView.id, resultUrl, nodeView.type !== 'image'); const preview = <NodeResultPreview url={resultUrl} isVideo={nodeView.type !== 'image'} interactive={selectedNodeIds.includes(nodeView.id)} onExpand={() => setNodePreview({ url: resultUrl, isVideo: nodeView.type !== 'image', title: String(nodeView.data.label || '') })} onNaturalSize={(width, height) => fitNodeToMedia(nodeView.id, resultUrl, width, height)} />; if (!isBusy) return preview; return <div className="relative h-full w-full" aria-busy="true">{preview}<div className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-2 bg-black/60 backdrop-blur-[1px]" aria-label="重新生成中"><Loader2 className="h-8 w-8 animate-spin text-[#73a7ff]" /><span className="rounded-full bg-black/55 px-2.5 py-0.5 text-[11px] text-[#d8e4ff]">{nodeView.type === 'image' ? '重新生成中…' : '视频重新生成中，旧视频暂时保留'}</span></div></div>; } if (isBusy) return <div className="flex h-full w-full items-center justify-center bg-[#202226]" aria-label="生成中"><Loader2 className="h-8 w-8 animate-spin text-[#73a7ff]" /></div>; if (nodeView.type === 'scene') { const config = (nodeView.data.config || {}) as Record<string, unknown>; return (
+      {orderNodesForRender(nodes, edges).map((node) => <CanvasNodeView key={node.id} node={node as CanvasSceneNode} catalogItem={catalog.find((item) => item.type === node.type) || catalog[0]} selected={selectedNodeIds.includes(node.id)} connecting={interaction.state.connecting} connectionTargetNodeId={interaction.state.connectionTargetNodeId} scale={editorViewport.scale} handlers={interaction.handlers} onResize={handleNodeResize} onResizeEnd={handleNodeResizeEnd} onNodeContextMenu={(event, nodeId) => { event.preventDefault(); event.stopPropagation(); setNodeMenu({ x: event.clientX, y: event.clientY, nodeId }); }} renderContent={(nodeView) => { const result = nodeView.data.result as (Record<string, unknown> & { url?: string }) | undefined; const mediaKindForNode = nodeView.type === 'image' || nodeView.type === 'video' || nodeView.type === 'concat'; const resultUrl = (result?.url as string | undefined) || (mediaKindForNode ? nodeResultUrlCache.get(`${canvas.id}:${nodeView.id}`)?.url : undefined) || ''; const runStatus = nodeRunStatuses.get(nodeView.id); const isBusy = submittingNodeId === nodeView.id || ['awaiting_approval', 'queued', 'running', 'cancel_requested'].includes(String(runStatus || '')); if (resultUrl) { rememberResultUrl(canvas.id, nodeView.id, resultUrl, nodeView.type !== 'image'); const preview = <NodeResultPreview url={resultUrl} isVideo={nodeView.type !== 'image'} interactive={selectedNodeIds.includes(nodeView.id)} displayWidth={(Number((nodeView.data.ui as { width?: number } | undefined)?.width) || NODE_WIDTH) * editorViewport.scale} onExpand={() => setNodePreview({ url: resultUrl, isVideo: nodeView.type !== 'image', title: String(nodeView.data.label || '') })} onNaturalSize={(width, height) => fitNodeToMedia(nodeView.id, resultUrl, width, height)} />; if (!isBusy) return preview; return <div className="relative h-full w-full" aria-busy="true">{preview}<div className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-2 bg-black/60 backdrop-blur-[1px]" aria-label="重新生成中"><Loader2 className="h-8 w-8 animate-spin text-[#73a7ff]" /><span className="rounded-full bg-black/55 px-2.5 py-0.5 text-[11px] text-[#d8e4ff]">{nodeView.type === 'image' ? '重新生成中…' : '视频重新生成中，旧视频暂时保留'}</span></div></div>; } if (isBusy) return <div className="flex h-full w-full items-center justify-center bg-[#202226]" aria-label="生成中"><Loader2 className="h-8 w-8 animate-spin text-[#73a7ff]" /></div>; if (nodeView.type === 'scene') { const config = (nodeView.data.config || {}) as Record<string, unknown>; return (
   <div className="flex h-full w-full flex-col gap-1.5" data-canvas-no-zoom>
     <div className="min-h-0 flex-1 overflow-hidden">
       <SceneListNodeView

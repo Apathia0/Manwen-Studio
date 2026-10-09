@@ -3910,7 +3910,7 @@ export interface CanvasSceneAsset {
 
 /** 未入选的场景/道具：出现次数少，默认在分镜提示词里一句带过，用户可按需单独生成 */
 export interface AssetCandidate {
-  role: 'scene' | 'prop';
+  role: 'character' | 'scene' | 'prop';
   name: string;
   scene_ids: Array<string | number>;
   desc: string;

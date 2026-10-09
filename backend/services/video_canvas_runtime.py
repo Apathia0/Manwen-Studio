@@ -1468,6 +1468,10 @@ async def execute_canvas_run(
 
                             asset_labeled = await run_blocking(stamp_asset_label_bar, str(saved_path), reference_label_text(asset_role_value, str(config.get("asset_name") or "")))
                         stored_path = _relative_path(str(saved_path), MANGA_OUTPUTS)
+                        # 标注/贴字都已写完，先把画布节点用的缩略图生成好：节点拿到结果时缩略图已就绪，首屏不用等转换。
+                        from services import media_derivatives
+
+                        await media_derivatives.prewarm(saved_path, (MANGA_OUTPUTS, VIDEO_OUTPUTS))
                         asset_kind = {"character": "character_reference", "scene": "scene_reference", "prop": "prop_reference"}.get(str(config.get("asset_role")), "storyboard_frame")
                         asset = VideoAsset(story_id=canvas.story_id, chapter_id=run_chapter_id, asset_type=asset_kind, name=str(config.get("asset_name") or f"画布 {canvas.name} - {node_id}"), file_path=stored_path, provider="image2", prompt=prompt, meta_json={"canvas_id": canvas.id, "run_id": run.id, "node_id": node_id, "asset_role": config.get("asset_role"), "storyboard_sheet": is_storyboard_sheet, "labeled": asset_labeled}, usage_scope="story_shared")
                         db.add(asset)

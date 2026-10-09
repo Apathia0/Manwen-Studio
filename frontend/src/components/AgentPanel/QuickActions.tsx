@@ -1,4 +1,4 @@
-import { BookOpen, PenLine, ClipboardList, BarChart3, User, Search, Film, GitBranch, Clock, UserCheck, Sparkles } from 'lucide-react';
+import { BookOpen, PenLine, ClipboardList, BarChart3, User, Search, Film, GitBranch, Clock, UserCheck, Sparkles, Layers, Palette } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import type { AgentWorkflowType } from '../../api';
 
@@ -87,6 +87,47 @@ const 视频动作列表: 快捷动作[] = [
   },
 ];
 
+// 画布模式（漫剧创作）：围绕画布上的节点与流水线，而不是小说章节。
+// 都是「先读取、先分析、改动先预览」的只读起手式，避免一点卡片就直接改画布。
+const 画布动作列表: 快捷动作[] = [
+  {
+    图标: Layers,
+    标题: '梳理画布进度',
+    描述: '各阶段完成情况与下一步',
+    提示词: '请先读取当前画布大纲，告诉我剧本、拆分、导演、资产、分镜、出图、视频、合片各阶段的完成情况，以及接下来最该做的一步。先不要修改画布。',
+  },
+  {
+    图标: GitBranch,
+    标题: '检查镜头连续性',
+    描述: '角色、场景、情绪是否连贯',
+    提示词: '请读取画布上的场景与镜头，检查角色、场景和情绪是否存在不连续或冲突，列出问题和修改建议。先不要修改画布。',
+  },
+  {
+    图标: PenLine,
+    标题: '优化选中节点',
+    描述: '改写提示词，先预览再确认',
+    提示词: '请读取我当前选中的节点，优化它的提示词（画面、运镜、动作连续性），先给出改动预览，等我确认后再落地。',
+  },
+  {
+    图标: UserCheck,
+    标题: '检查角色与资产',
+    描述: '资产是否齐全、是否已出图',
+    提示词: '请检查画布里的角色、场景、道具资产是否齐全、是否都已生成图片，以及有没有节点引用缺失，给我一份问题清单。先不要修改画布。',
+  },
+  {
+    图标: Palette,
+    标题: '统一画面风格',
+    描述: '找出与画布风格不一致的节点',
+    提示词: '请检查画布各节点的画面风格是否与画布风格一致，列出不一致的节点并给出统一方案，先不要修改画布。',
+  },
+  {
+    图标: Clock,
+    标题: '检查视频时长',
+    描述: '时长是否匹配模型与节奏',
+    提示词: '请检查各视频节点的时长是否符合所选视频模型支持的档位和剧情节奏，给出需要调整的节点和建议。先不要修改画布。',
+  },
+];
+
 interface 快捷动作属性 {
   onAction: (prompt: string) => void;
   disabled?: boolean;
@@ -94,7 +135,7 @@ interface 快捷动作属性 {
 }
 
 export default function QuickActions({ onAction, disabled, workflowType }: 快捷动作属性) {
-  const 当前列表 = workflowType === 'video' ? 视频动作列表 : 动作列表;
+  const 当前列表 = workflowType === 'video_canvas' ? 画布动作列表 : workflowType === 'video' ? 视频动作列表 : 动作列表;
 
   return (
     <div className="grid grid-cols-2 gap-3">
