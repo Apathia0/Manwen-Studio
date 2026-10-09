@@ -7065,6 +7065,17 @@ export async function getAiModels(modality?: string): Promise<{ models: AiModelI
   return res.json();
 }
 
+/** 模型广场展示用的模型信息（不含渠道与密钥配置状态） */
+export type PublicAiModelItem = Omit<AiModelItem, 'channel_id' | 'platform_configured'>;
+
+/** 获取公开模型广场数据（无需登录） */
+export async function getPublicAiModels(modality?: string): Promise<{ models: PublicAiModelItem[] }> {
+  const q = modality ? `?modality=${encodeURIComponent(modality)}` : '';
+  const res = await fetch(`${BASE}/api/public/ai-models${q}`, { headers: apiHeaders() });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '获取模型列表失败'));
+  return res.json();
+}
+
 export async function getAiChannels(): Promise<{ channels: AiChannelItem[] }> {
   const res = await fetch(`${BASE}/api/ai/channels`, { headers: apiHeaders() });
   if (!res.ok) throw new Error(await readErrorMessage(res, '获取 AI 渠道失败'));

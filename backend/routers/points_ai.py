@@ -994,6 +994,19 @@ def list_models(request: Request, modality: str | None = None, db: Session = Dep
     return {"models": [ai_catalog.serialize_model_for_user(db, m) for m in models]}
 
 
+@router.get("/api/public/ai-models")
+def list_public_models(modality: str | None = None, db: Session = Depends(get_db)):
+    """模型广场公开接口：无需登录，仅返回展示所需字段，不暴露渠道与密钥配置状态。"""
+    models = ai_catalog.list_user_visible_models(db, modality=modality)
+    items = []
+    for m in models:
+        item = ai_catalog.serialize_model_for_user(db, m)
+        item.pop("channel_id", None)
+        item.pop("platform_configured", None)
+        items.append(item)
+    return {"models": items}
+
+
 @router.post("/api/ai/estimate")
 def estimate(body: EstimateIn, request: Request, db: Session = Depends(get_db)):
     user = _require_user(request, db)
