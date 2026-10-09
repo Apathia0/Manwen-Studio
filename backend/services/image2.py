@@ -239,13 +239,49 @@ def _runtime_base_url() -> str:
     return runtime_base_url()
 
 
+# 上游图片接口（gpt-image-2 系列）的尺寸约束：宽高都必须是 16 的倍数、单边不超过 3840、总像素在 655360~8294400 之间。
+# 1920x1080 这类常见的“视频分辨率”不满足（1080 不是 16 的倍数）会被直接 400 拒绝，所以统一在这里对齐。
+IMAGE_SIZE_STEP = 16
+IMAGE_MAX_EDGE = 3840
+IMAGE_MIN_PIXELS = 655_360
+IMAGE_MAX_PIXELS = 8_294_400
+
+
+def _snap_size_to_step(width: int, height: int) -> tuple[int, int]:
+    """把宽高对齐到 16 的倍数（四舍五入，1080→1088），并收进上游允许的边长与像素范围，宽高比尽量保持。"""
+    step = IMAGE_SIZE_STEP
+
+    def snap(value: float) -> int:
+        return max(step, int(value / step + 0.5) * step)
+
+    def floor_step(value: float) -> int:
+        return max(step, int(value // step) * step)
+
+    w, h = snap(width), snap(height)
+    scale = 1.0
+    if max(w, h) > IMAGE_MAX_EDGE:
+        scale = IMAGE_MAX_EDGE / max(w, h)
+    if w * h * scale * scale > IMAGE_MAX_PIXELS:
+        scale = min(scale, (IMAGE_MAX_PIXELS / (w * h)) ** 0.5)
+    if scale < 1.0:
+        return floor_step(w * scale), floor_step(h * scale)
+    if w * h < IMAGE_MIN_PIXELS:
+        up = (IMAGE_MIN_PIXELS / (w * h)) ** 0.5
+        return snap(w * up + step - 1), snap(h * up + step - 1)
+    return w, h
+
+
 def _normalize_image_size(size: str | None) -> str:
     runtime = _runtime_settings()
     candidate = str(size or getattr(runtime, "size", DEFAULT_IMAGE_SIZE) or "").strip() or DEFAULT_IMAGE_SIZE
     if IMAGE2_SIZE_PATTERN.match(candidate):
-        return candidate
+        width, height = (int(part) for part in candidate.split("x"))
+        snapped_w, snapped_h = _snap_size_to_step(width, height)
+        if (snapped_w, snapped_h) != (width, height):
+            logger.info("图片尺寸 %s 不符合上游要求（宽高需为 %s 的倍数），已调整为 %sx%s", candidate, IMAGE_SIZE_STEP, snapped_w, snapped_h)
+        return f"{snapped_w}x{snapped_h}"
     logger.warning("尺寸格式 %s 不合法，回退到 %s", candidate, DEFAULT_IMAGE_SIZE)
-    return DEFAULT_IMAGE_SIZE
+    return _normalize_image_size(DEFAULT_IMAGE_SIZE) if candidate != DEFAULT_IMAGE_SIZE else DEFAULT_IMAGE_SIZE
 
 
 def _base_image_payload(prompt: str, size: str | None) -> dict[str, str | int]:
