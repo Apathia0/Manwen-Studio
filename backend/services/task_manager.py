@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 from functools import wraps
 from datetime import datetime, timedelta, timezone
 from typing import Callable, Any, Optional
@@ -24,10 +25,21 @@ def _iso(dt: datetime | None) -> str | None:
 class TaskManager:
     """Lightweight background task manager with retries and persisted status."""
 
-    def __init__(self, max_concurrent: int = 5):
+    def __init__(self, max_concurrent: int = 5, per_type_limits: dict[str, int] | None = None):
+        self._max_concurrent = max_concurrent
         self._semaphore = asyncio.Semaphore(max_concurrent)
+        # 个别任务类型有自己的并发名额：视频画布运行会一直轮询上游直到视频生成完（可能几分钟到更久），
+        # 若和其它任务共用同一个小名额池，5 个视频就会占满全站所有后台任务，后面的任务只能无声地排队。
+        self._type_limits = {task_type: limit for task_type, limit in (per_type_limits or {}).items() if limit > 0}
+        self._type_semaphores = {task_type: asyncio.Semaphore(limit) for task_type, limit in self._type_limits.items()}
         self._running_tasks: dict[str, asyncio.Task] = {}
         self._cancellation_flags: dict[str, bool] = {}
+
+    def _slot_for(self, task_type: str) -> tuple[asyncio.Semaphore, int]:
+        """该类型任务使用的并发名额及其上限。"""
+        if task_type in self._type_semaphores:
+            return self._type_semaphores[task_type], self._type_limits[task_type]
+        return self._semaphore, self._max_concurrent
 
     def _should_retry_exception(self, exc: Exception) -> bool:
         retryable = getattr(exc, "retryable", None)
@@ -574,9 +586,14 @@ class TaskManager:
             quota_usage_event_id,
         )
 
+        slot, slot_limit = self._slot_for(task_type)
+
         @self.with_retry(max_retries=max_retries, task_id=task_id)
         async def _wrapped_task():
-            async with self._semaphore:
+            if slot.locked():
+                # 名额已满时任务只是在等位，没有任何报错；留一条日志，排查“提交了却没动静”时能看到它在排队
+                logger.info("Task %s（%s）并发名额已满（上限 %s），排队等待", task_id, task_type, slot_limit)
+            async with slot:
                 try:
                     self._mark_task_running(
                         task_id,
@@ -741,4 +758,7 @@ class TaskManager:
 
 
 # Global singleton
-task_manager = TaskManager(max_concurrent=5)
+task_manager = TaskManager(
+    max_concurrent=5,
+    per_type_limits={"video_canvas_run": int(os.getenv("VIDEO_CANVAS_RUN_MAX_CONCURRENT", "12"))},
+)

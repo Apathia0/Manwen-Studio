@@ -6,6 +6,7 @@ import copy
 import datetime
 import hashlib
 import json
+import logging
 import re
 import uuid
 from copy import deepcopy
@@ -62,6 +63,8 @@ from schemas import (
     VideoCanvasUpdate,
 )
 
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -2957,6 +2960,7 @@ async def confirm_video_canvas_run(
             )
         except Exception:
             # 派发失败不应吞掉用户已经确认的计划，恢复到可重新确认的状态。
+            logger.exception("画布 %s 运行 %s 派发到后台任务失败，已恢复为待确认", canvas_id, run.id)
             db.rollback()
             retry_run = db.query(VideoCanvasRun).filter(
                 VideoCanvasRun.id == run.id,
@@ -2973,6 +2977,7 @@ async def confirm_video_canvas_run(
                     retry_node.task_id = None
                 db.commit()
             raise
+        logger.info("画布 %s 运行 %s 已提交到后台任务 %s（待生成节点 %s 个）", canvas_id, run.id, task_id, len(generation_nodes))
         db.refresh(run)
     return {"run": _serialize_run(run, db)}
 

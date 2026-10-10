@@ -228,6 +228,8 @@ export interface UseCanvasInteractionsOptions {
   canRedo?: boolean;
   /** 视口变化回调（缩放 / 平移） */
   onViewportChange: (next: CanvasViewport) => void;
+  /** 读取最新视口（含手势中尚未提交到 React 状态的中间值）；不传则用 viewport 属性 */
+  getViewport?: () => CanvasViewport;
   /** 选择变化回调 */
   onSelectionChange: (ids: string[]) => void;
   /** 节点移动回调（initialNodes 为拖拽起点数组，delta 为相对起点的总位移，世界坐标） */
@@ -312,6 +314,7 @@ export function useCanvasInteractions(options: UseCanvasInteractionsOptions): { 
     nodes,
     catalog,
     viewport,
+    getViewport,
     selectedNodeIds,
     tool = 'select',
     canUndo = false,
@@ -339,6 +342,10 @@ export function useCanvasInteractions(options: UseCanvasInteractionsOptions): { 
   useEffect(() => { nodesRef.current = nodes; }, [nodes]);
   useEffect(() => { catalogRef.current = catalog; }, [catalog]);
   useEffect(() => { viewportRef.current = viewport; }, [viewport]);
+  // 手势中视口只写 DOM、停手才提交：读取视口一律先取实时值，避免缩放后立刻框选 / 连线 / 平移时坐标换算过期
+  const getViewportRef = useRef(getViewport);
+  useEffect(() => { getViewportRef.current = getViewport; });
+  const liveViewport = useCallback((): CanvasViewport => getViewportRef.current?.() ?? viewportRef.current, []);
   useEffect(() => { selectedNodeIdsRef.current = selectedNodeIds; }, [selectedNodeIds]);
 
   // 交互状态
@@ -404,7 +411,7 @@ export function useCanvasInteractions(options: UseCanvasInteractionsOptions): { 
       const dx = event.clientX - panStateRef.current.startX;
       const dy = event.clientY - panStateRef.current.startY;
       if (Math.abs(dx) > 3 || Math.abs(dy) > 3) panStateRef.current.hasMoved = true;
-      const next = { x: panStateRef.current.initialX + dx, y: panStateRef.current.initialY + dy, scale: viewportRef.current.scale };
+      const next = { x: panStateRef.current.initialX + dx, y: panStateRef.current.initialY + dy, scale: liveViewport().scale };
       if (rafRef.current) return;
       rafRef.current = requestAnimationFrame(() => {
         rafRef.current = null;
@@ -430,13 +437,14 @@ export function useCanvasInteractions(options: UseCanvasInteractionsOptions): { 
       window.removeEventListener('pointercancel', handlePointerUp);
       document.body.style.cursor = '';
     };
-  }, [onSelectionChange, onViewportChange]);
+  }, [liveViewport, onSelectionChange, onViewportChange]);
 
   // 连线拖拽时的 3 级吸附目标计算
   const getConnectionDropTarget = useCallback((clientX: number, clientY: number, current: ConnectionHandle): { nodeId: string | null; handleKey: string | null; isNearNode: boolean } => {
     const rect = containerRef.current?.getBoundingClientRect() || null;
-    const world = screenToCanvas(clientX, clientY, rect, viewportRef.current);
-    const scale = Math.max(viewportRef.current.scale, 0.05);
+    const currentViewport = liveViewport();
+    const world = screenToCanvas(clientX, clientY, rect, currentViewport);
+    const scale = Math.max(currentViewport.scale, 0.05);
     const target = connectionDropTarget(world, scale, nodesRef.current, catalogRef.current, current);
     // 类型不兼容的落点视为未命中：不高亮、不吸附、抬起时不创建连线（保留 isNearNode 以走取消分支）
     if (target.nodeId && target.handleKey) {
@@ -448,13 +456,13 @@ export function useCanvasInteractions(options: UseCanvasInteractionsOptions): { 
       }
     }
     return target;
-  }, [containerRef]);
+  }, [containerRef, liveViewport]);
 
   // 完成节点拖拽：应用最终位移
   const finishNodeDrag = useCallback((clientX?: number, clientY?: number) => {
     if (rafRef.current) { cancelAnimationFrame(rafRef.current); rafRef.current = null; }
     if (!dragRef.current.isDraggingNode) return;
-    const currentViewport = viewportRef.current;
+    const currentViewport = liveViewport();
     const dx = clientX == null ? 0 : (clientX - dragRef.current.startX) / currentViewport.scale;
     const dy = clientY == null ? 0 : (clientY - dragRef.current.startY) / currentViewport.scale;
     const initialPositions = dragRef.current.initialSelectedNodes;
@@ -464,11 +472,11 @@ export function useCanvasInteractions(options: UseCanvasInteractionsOptions): { 
     dragRef.current.isDraggingNode = false;
     dragRef.current.hasMoved = false;
     dragRef.current.initialSelectedNodes = [];
-  }, [onNodeMove]);
+  }, [liveViewport, onNodeMove]);
 
   // 全局鼠标移动：节点拖拽 + 连线吸附
   const handleGlobalMouseMove = useCallback((event: MouseEvent) => {
-    const currentViewport = viewportRef.current;
+    const currentViewport = liveViewport();
     if (dragRef.current.isDraggingNode) {
       const dx = (event.clientX - dragRef.current.startX) / currentViewport.scale;
       const dy = (event.clientY - dragRef.current.startY) / currentViewport.scale;
@@ -489,7 +497,7 @@ export function useCanvasInteractions(options: UseCanvasInteractionsOptions): { 
       setConnectionTargetNodeId(dropTarget.nodeId);
       setMouseWorld(screenToCanvas(event.clientX, event.clientY, containerRef.current?.getBoundingClientRect() || null, currentViewport));
     }
-  }, [containerRef, getConnectionDropTarget, onNodeMove]);
+  }, [containerRef, getConnectionDropTarget, liveViewport, onNodeMove]);
 
   // 全局指针移动：框选
   const handleGlobalPointerMove = useCallback((event: PointerEvent) => {
@@ -500,7 +508,7 @@ export function useCanvasInteractions(options: UseCanvasInteractionsOptions): { 
       setSelectionBox(null);
       return;
     }
-    const world = screenToCanvas(event.clientX, event.clientY, containerRef.current?.getBoundingClientRect() || null, viewportRef.current);
+    const world = screenToCanvas(event.clientX, event.clientY, containerRef.current?.getBoundingClientRect() || null, liveViewport());
     const rectX = Math.min(currentSelection.startWorldX, world.x);
     const rectY = Math.min(currentSelection.startWorldY, world.y);
     const rectW = Math.abs(world.x - currentSelection.startWorldX);
@@ -515,7 +523,7 @@ export function useCanvasInteractions(options: UseCanvasInteractionsOptions): { 
     selectionBoxRef.current = nextSelectionBox;
     setSelectionBox(nextSelectionBox);
     onSelectionChange([...nextSelected]);
-  }, [containerRef, onSelectionChange]);
+  }, [containerRef, liveViewport, onSelectionChange]);
 
   // 全局鼠标抬起：完成拖拽 / 框选 / 连线
   const handleGlobalMouseUp = useCallback((event: MouseEvent) => {
@@ -539,7 +547,7 @@ export function useCanvasInteractions(options: UseCanvasInteractionsOptions): { 
         connectingRef.current = null;
       } else {
         // 空白处释放 → 触发创建菜单
-        const world = screenToCanvas(event.clientX, event.clientY, containerRef.current?.getBoundingClientRect() || null, viewportRef.current);
+        const world = screenToCanvas(event.clientX, event.clientY, containerRef.current?.getBoundingClientRect() || null, liveViewport());
         setMouseWorld(world);
         setNodeCreatePosition(world);
         setConnecting(null);
@@ -548,7 +556,7 @@ export function useCanvasInteractions(options: UseCanvasInteractionsOptions): { 
       connectionTargetNodeIdRef.current = null;
       setConnectionTargetNodeId(null);
     }
-  }, [containerRef, finishNodeDrag, getConnectionDropTarget, onCreateConnection]);
+  }, [containerRef, finishNodeDrag, getConnectionDropTarget, liveViewport, onCreateConnection]);
 
   // 注册全局监听
   useEffect(() => {
@@ -641,7 +649,7 @@ export function useCanvasInteractions(options: UseCanvasInteractionsOptions): { 
     if (shouldPan) {
       event.preventDefault();
       event.currentTarget.setPointerCapture(event.pointerId);
-      panStateRef.current = { isPanning: true, startX: event.clientX, startY: event.clientY, initialX: viewportRef.current.x, initialY: viewportRef.current.y, hasMoved: false, startedOnBackground: isBackgroundClick };
+      panStateRef.current = { isPanning: true, startX: event.clientX, startY: event.clientY, initialX: liveViewport().x, initialY: liveViewport().y, hasMoved: false, startedOnBackground: isBackgroundClick };
       setIsPanning(true);
       document.body.style.cursor = 'grabbing';
       return;
@@ -652,23 +660,23 @@ export function useCanvasInteractions(options: UseCanvasInteractionsOptions): { 
       setContextMenu(null);
       setNodeCreatePosition(null);
       setHoveredNodeId(null);
-      const world = screenToCanvas(event.clientX, event.clientY, containerRef.current?.getBoundingClientRect() || null, viewportRef.current);
+      const world = screenToCanvas(event.clientX, event.clientY, containerRef.current?.getBoundingClientRect() || null, liveViewport());
       const nextSelectionBox = { startWorldX: world.x, startWorldY: world.y, currentWorldX: world.x, currentWorldY: world.y, additive: event.shiftKey, initialSelectedNodeIds: event.shiftKey ? [...selectedNodeIdsRef.current] : [] };
       selectionBoxRef.current = nextSelectionBox;
       setSelectionBox(nextSelectionBox);
       if (!event.shiftKey) onSelectionChange([]);
       setSelectedConnectionId(null);
     }
-  }, [containerRef, isSpacePressed, onSelectionChange, tool]);
+  }, [containerRef, isSpacePressed, liveViewport, onSelectionChange, tool]);
 
   const onCanvasDoubleClick = useCallback((event: ReactMouseEvent<HTMLDivElement>) => {
     const target = event.target as HTMLElement | null;
     if (target?.closest('[data-canvas-no-zoom],[data-node-id],[data-connection-id]')) return;
     setContextMenu(null);
-    const world = screenToCanvas(event.clientX, event.clientY, containerRef.current?.getBoundingClientRect() || null, viewportRef.current);
+    const world = screenToCanvas(event.clientX, event.clientY, containerRef.current?.getBoundingClientRect() || null, liveViewport());
     setNodeCreatePosition(world);
     onNodeCreate?.(world);
-  }, [containerRef, onNodeCreate]);
+  }, [containerRef, liveViewport, onNodeCreate]);
 
   const onContextMenu = useCallback((event: ReactMouseEvent) => {
     if ((event.target as HTMLElement).closest('[data-node-id]')) return;
@@ -725,13 +733,13 @@ export function useCanvasInteractions(options: UseCanvasInteractionsOptions): { 
       setConnectionTargetNodeId(null);
       return;
     }
-    setMouseWorld(screenToCanvas(event.clientX, event.clientY, containerRef.current?.getBoundingClientRect() || null, viewportRef.current));
+    setMouseWorld(screenToCanvas(event.clientX, event.clientY, containerRef.current?.getBoundingClientRect() || null, liveViewport()));
     setConnecting({ nodeId, handleType, handleKey });
     connectingRef.current = { nodeId, handleType, handleKey };
     connectionTargetNodeIdRef.current = null;
     setConnectionTargetNodeId(null);
     setSelectedConnectionId(null);
-  }, [containerRef, onCreateConnection]);
+  }, [containerRef, liveViewport, onCreateConnection]);
 
   const onNodeConnectFinish = useCallback((event: ReactMouseEvent, nodeId: string, handleType: 'source' | 'target', handleKey: string) => {
     event.stopPropagation();

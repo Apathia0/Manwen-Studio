@@ -1412,8 +1412,12 @@ async def execute_canvas_run(
                             raise RuntimeError("图像节点缺少提示词")
                         output_path = _node_output_path(MANGA_OUTPUTS, canvas.id, run.id, node_id, ".png")
                         reference_paths, reference_labels, reference_roles = [], [], []
+                        sent_paths: set[str] = set()
                         for reference in style_anchors_first(media_reference_inputs):
-                            paths = _local_reference_paths([reference], canvas, db)
+                            # 同一张图可能从多条连线 / 配置里重复引入：按文件只带一次（画风锚点优先），
+                            # 否则同一个角色会被当作 2 张参考图上传，请求体翻倍、提示词里的参考图编号也跟着重复
+                            paths = [path for path in _local_reference_paths([reference], canvas, db) if path not in sent_paths]
+                            sent_paths.update(paths)
                             asset = db.get(VideoAsset, reference.get("asset_id")) if isinstance(reference.get("asset_id"), int) else None
                             role = str((asset.meta_json or {}).get("asset_role") or "") if asset else "style"
                             if role not in {"character", "scene", "prop", "style"}:
@@ -1675,6 +1679,7 @@ async def execute_canvas_run(
                 db.commit()
                 raise
             except Exception as exc:
+                logger.exception("画布 %s 运行 %s 的节点 %s（%s）执行失败：%s", canvas.id, run.id, node_id, node_type, exc)
                 if billing_event_id:
                     complete_ai_call_by_usage_event(db, billing_event_id, success=False, error_code=type(exc).__name__)
                     run_node.billing_usage_event_id = None

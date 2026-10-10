@@ -413,3 +413,33 @@ async def test_director_without_target_has_no_budget_rule(monkeypatch):
     monkeypatch.setattr(old, "_call_deepseek_json", call)
     result = await direct(SCENES, POLICY, user_constraints="日式动漫风")
     assert "总时长预算" not in calls[0]["system"] and result["target_duration_seconds"] is None
+
+
+def test_image_runtime_sends_each_reference_file_only_once(monkeypatch, tmp_path):
+    """同一张参考图从多处被引入时只上传一次：之前每个角色被当成 2 张参考图，请求体翻倍、提示词里的图片编号也重复。"""
+    from services import video_canvas_runtime as runtime
+    from tests.test_video_canvas_execution_recovery import _execution_fixture, _run
+
+    image_node = {"id": "shot", "type": "image", "data": {"config": {
+        "prompt": "角色甲站在书房门边", "aspect_ratio": "16:9", "reference_asset_ids": [10, 11, 12, 10, 11],
+    }}}
+    run, records, commits, charges, assets = _execution_fixture(monkeypatch, [image_node])
+    for identifier, name, role in [(10, "甲", "character"), (11, "书房", "scene"), (12, "信件", "prop")]:
+        path = tmp_path / f"reference-{identifier}.png"
+        path.write_bytes(b"reference")
+        assets[identifier] = SimpleNamespace(
+            id=identifier, name=name, story_id=5, status="active", file_path=str(path),
+            asset_type=f"{role}_reference", meta_json={"asset_role": role},
+        )
+    captured = []
+
+    async def generate(**kwargs):
+        captured.append(kwargs)
+        return str(tmp_path / "result.png")
+
+    monkeypatch.setattr(runtime, "MANGA_OUTPUTS", tmp_path)
+    monkeypatch.setattr(runtime.image2_service, "generate_reference_image", generate)
+    assert _run()["status"] == "succeeded"
+    call = captured[0]
+    assert len(call["ref_image_paths"]) == len(set(call["ref_image_paths"])) == 3
+    assert len(call["ref_labels"]) == len(call["ref_roles"]) == 3

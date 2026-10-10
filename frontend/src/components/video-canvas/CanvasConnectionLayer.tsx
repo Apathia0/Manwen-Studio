@@ -1,4 +1,4 @@
-import { useMemo, type MouseEvent as ReactMouseEvent } from 'react';
+import { memo, useEffect, useMemo, useRef, type MouseEvent as ReactMouseEvent } from 'react';
 import type { VideoCanvasNodeCatalogItem } from '../../api';
 import { isMembershipEdge } from './containerGroup';
 import { nodeSize, portY, type CanvasInteractionHandlers, type CanvasSceneEdge, type CanvasSceneNode, type ConnectionHandle, type Position } from './useCanvasInteractions';
@@ -103,7 +103,22 @@ export interface CanvasConnectionLayerProps {
   handlers: CanvasInteractionHandlers;
 }
 
-export default function CanvasConnectionLayer({ nodes, edges, catalog, connecting, mouseWorld, connectionTargetNodeId, selectedConnectionId, handlers, ghostEdges = [] }: CanvasConnectionLayerProps) {
+const EMPTY_GHOST_EDGES: GhostEdge[] = [];
+
+/**
+ * 连线很多时（几百条），面板里与连线无关的重渲染（批量生成进度、运行状态轮询等）不该重算所有路径：
+ * 只在节点 / 连线 / 目录 / 选中 / 连线预览变化时才重渲染。事件处理器通过 ref 取最新值，不参与比较。
+ */
+function sameLayerProps(prev: CanvasConnectionLayerProps, next: CanvasConnectionLayerProps) {
+  return prev.nodes === next.nodes && prev.edges === next.edges && prev.catalog === next.catalog
+    && prev.connecting === next.connecting && prev.mouseWorld === next.mouseWorld
+    && prev.connectionTargetNodeId === next.connectionTargetNodeId && prev.selectedConnectionId === next.selectedConnectionId
+    && prev.ghostEdges === next.ghostEdges;
+}
+
+function CanvasConnectionLayer({ nodes, edges, catalog, connecting, mouseWorld, connectionTargetNodeId, selectedConnectionId, handlers, ghostEdges = EMPTY_GHOST_EDGES }: CanvasConnectionLayerProps) {
+  const handlersRef = useRef(handlers);
+  useEffect(() => { handlersRef.current = handlers; });
   const nodeById = useMemo(() => new Map(nodes.map((node) => [node.id, node])), [nodes]);
   const catalogByType = useMemo(() => new Map(catalog.map((item) => [item.type, item])), [catalog]);
   const targetNode = connecting && connectionTargetNodeId ? (nodeById.get(connectionTargetNodeId) ?? null) : null;
@@ -125,8 +140,8 @@ export default function CanvasConnectionLayer({ nodes, edges, catalog, connectin
             from={from}
             to={to}
             active={selectedConnectionId === edge.id}
-            onSelect={() => handlers.onConnectionClick(edge.id)}
-            onContextMenu={(event) => handlers.onConnectionContextMenu(event, edge.id)}
+            onSelect={() => handlersRef.current.onConnectionClick(edge.id)}
+            onContextMenu={(event) => handlersRef.current.onConnectionContextMenu(event, edge.id)}
           />
         );
       })}
@@ -153,3 +168,5 @@ export default function CanvasConnectionLayer({ nodes, edges, catalog, connectin
     </svg>
   );
 }
+
+export default memo(CanvasConnectionLayer, sameLayerProps);
