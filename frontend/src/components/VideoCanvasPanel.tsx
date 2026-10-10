@@ -67,7 +67,7 @@ import {
   type CanvasViewport,
   type ContextMenuState,
 } from './video-canvas/useCanvasInteractions';
-import CanvasSurface from './video-canvas/CanvasSurface';
+import CanvasSurface, { type CanvasSurfaceViewportApi } from './video-canvas/CanvasSurface';
 import { nodeSize } from './video-canvas/useCanvasInteractions';
 import CanvasConnectionLayer from './video-canvas/CanvasConnectionLayer';
 import CanvasNodeView from './video-canvas/CanvasNodeView';
@@ -86,6 +86,7 @@ import NodeCandidates from './video-canvas/NodeCandidates';
 import CanvasAssetPanel from './video-canvas/CanvasAssetPanel';
 import CanvasPlanCapsule from './video-canvas/CanvasPlanCapsule';
 import MediaLightbox from './video-canvas/MediaLightbox';
+import { enqueueRun, queuedNodeIds, type QueuedRun } from './video-canvas/runSubmitQueue';
 import { pickMediaWidth, type MediaWidth } from '../lib/mediaVariant';
 import { useProgressiveImage } from '../lib/useProgressiveImage';
 import BatchStartDialog, { type BatchStartInfo } from './video-canvas/BatchStartDialog';
@@ -319,6 +320,10 @@ export default function VideoCanvasPanel({ storyId, chapterId, workflow: _workfl
   const [nodeUploadAccept, setNodeUploadAccept] = useState('image/*');
   const [running, setRunning] = useState(false);
   const [submittingNodeId, setSubmittingNodeId] = useState<string | null>(null);
+  // 提交队列：一次提交要几秒，期间再点别的节点的“生成”不能丢，排队后依次自动提交
+  const submitInFlightRef = useRef<QueuedRun | null>(null);
+  const submitQueueRef = useRef<QueuedRun[]>([]);
+  const [queuedSubmitIds, setQueuedSubmitIds] = useState<string[]>([]);
   const [latestRun, setLatestRun] = useState<VideoCanvasRun | null>(null);
   // 同时在跑的所有运行：每次点生成都是一次独立运行，不能只跟踪最新一次，否则先提交的节点会丢失加载状态和结果回显。
   const [ghostEdges, setGhostEdges] = useState<GhostEdge[]>([]);
@@ -918,8 +923,22 @@ export default function VideoCanvasPanel({ storyId, chapterId, workflow: _workfl
   }, [persistLocalDraft]);
 
   const runCanvas = async (targetNodeId?: string, forceRerun = false, retried = false) => {
-    if (!canvas || running) return;
+    if (!canvas) return;
+    if (submitInFlightRef.current && !retried) {
+      // 正在提交别的节点：排到队尾，之前这里直接 return，既不提交也没有任何提示
+      const request: QueuedRun = { targetNodeId, forceRerun };
+      const result = enqueueRun(submitQueueRef.current, request, submitInFlightRef.current);
+      submitQueueRef.current = result.queue;
+      setQueuedSubmitIds(queuedNodeIds(result.queue));
+      toast.info(result.added ? `已加入提交队列（前面还有 ${result.ahead} 个），会依次自动提交` : '这个节点已经在提交队列里了');
+      return;
+    }
+    if (running && !submitInFlightRef.current) {
+      toast.info('正在处理其它生成任务，请稍后再试');
+      return;
+    }
     const epoch = canvasEpochRef.current;
+    submitInFlightRef.current = { targetNodeId, forceRerun };
     setRunning(true);
     setSubmittingNodeId(targetNodeId || null);
     try {
@@ -971,7 +990,16 @@ export default function VideoCanvasPanel({ storyId, chapterId, workflow: _workfl
         }
       }
       toast.error(message);
-    } finally { setRunning(false); setSubmittingNodeId(null); }
+    } finally {
+      submitInFlightRef.current = null;
+      setRunning(false);
+      setSubmittingNodeId(null);
+      // 队列里的下一个继续提交；画布已切换（epoch 变化）时丢弃旧画布的排队项
+      const next = submitQueueRef.current.shift();
+      if (canvasEpochRef.current !== epoch) submitQueueRef.current = [];
+      setQueuedSubmitIds(queuedNodeIds(submitQueueRef.current));
+      if (next && canvasEpochRef.current === epoch) window.setTimeout(() => void runCanvasRef.current(next.targetNodeId, next.forceRerun), 120);
+    }
   };
   const runCanvasRef = useRef(runCanvas);
   useEffect(() => { runCanvasRef.current = runCanvas; });
@@ -1838,6 +1866,8 @@ export default function VideoCanvasPanel({ storyId, chapterId, workflow: _workfl
     window.setTimeout(() => { void saveCanvas(false); }, 0);
   }, [markDirty, persistLocalDraft, saveCanvas]);
 
+  // 画布容器的命令式视口接口：缩放 / 平移手势只直接改 DOM，停手才提交 React 状态，连线很多时才不会逐帧重渲染整棵画布
+  const viewportApiRef = useRef<CanvasSurfaceViewportApi | null>(null);
   const interaction = useCanvasInteractions({
     containerRef: surfaceRef,
     nodes: nodes as CanvasSceneNode[],
@@ -1847,7 +1877,8 @@ export default function VideoCanvasPanel({ storyId, chapterId, workflow: _workfl
     tool,
     canUndo: historyFlags.canUndo,
     canRedo: historyFlags.canRedo,
-    onViewportChange: (next) => updateViewport({ x: next.x, y: next.y, k: next.scale }),
+    getViewport: () => viewportApiRef.current?.getViewport() ?? { x: viewportRef.current.x, y: viewportRef.current.y, scale: viewportRef.current.k },
+    onViewportChange: (next) => { if (viewportApiRef.current) viewportApiRef.current.setViewport(next); else updateViewport({ x: next.x, y: next.y, k: next.scale }); },
     onSelectionChange: (ids) => { moveCaptureRef.current = false; dragOriginsRef.current = null; setSelectedNodeIds(ids); setSelectedNodeId(ids.length === 1 ? ids[0] : null); },
     onNodeMove: handleNodeMove,
     onCreateConnection: createConnection,
@@ -2493,10 +2524,10 @@ export default function VideoCanvasPanel({ storyId, chapterId, workflow: _workfl
   const canvasOptions = canvasList.some((item) => item.id === canvas.id) ? canvasList : [canvas, ...canvasList];
   return <div className="relative flex h-full min-h-0 min-w-0 overflow-hidden bg-[#181818] text-white">
     <div className="relative min-h-0 min-w-0 flex-1">
-    <CanvasSurface containerRef={surfaceRef} viewport={editorViewport} tool={interaction.state.activeTool} handlers={interaction.handlers} state={interaction.state} onViewportChange={(next) => updateViewport({ x: next.x, y: next.y, k: next.scale })} onDrop={(event, world) => { const type = event.dataTransfer.getData('application/x-storycanvas-node'); const item = catalog.find((entry) => entry.type === type); if (item) { captureHistory(); addCatalogNode(item, world); } }}>
+    <CanvasSurface containerRef={surfaceRef} viewportApiRef={viewportApiRef} viewport={editorViewport} tool={interaction.state.activeTool} handlers={interaction.handlers} state={interaction.state} onViewportChange={(next) => updateViewport({ x: next.x, y: next.y, k: next.scale })} onDrop={(event, world) => { const type = event.dataTransfer.getData('application/x-storycanvas-node'); const item = catalog.find((entry) => entry.type === type); if (item) { captureHistory(); addCatalogNode(item, world); } }}>
       <CanvasConnectionLayer ghostEdges={ghostEdges} nodes={nodes as CanvasSceneNode[]} edges={edges as CanvasSceneEdge[]} catalog={catalog} connecting={interaction.state.connecting} mouseWorld={interaction.state.mouseWorld} connectionTargetNodeId={interaction.state.connectionTargetNodeId} selectedConnectionId={interaction.state.selectedConnectionId} handlers={interaction.handlers} />
       {interaction.state.selectionBox && (() => { const box = interaction.state.selectionBox; const left = Math.min(box.startWorldX, box.currentWorldX); const top = Math.min(box.startWorldY, box.currentWorldY); return <div className="pointer-events-none absolute rounded-lg border-2 border-[#2f80ff]/80 bg-[#2f80ff]/10" style={{ left, top, width: Math.abs(box.currentWorldX - box.startWorldX), height: Math.abs(box.currentWorldY - box.startWorldY) }} />; })()}
-      {orderNodesForRender(nodes, edges).map((node) => <CanvasNodeView key={node.id} node={node as CanvasSceneNode} catalogItem={catalog.find((item) => item.type === node.type) || catalog[0]} selected={selectedNodeIds.includes(node.id)} connecting={interaction.state.connecting} connectionTargetNodeId={interaction.state.connectionTargetNodeId} scale={editorViewport.scale} handlers={interaction.handlers} onResize={handleNodeResize} onResizeEnd={handleNodeResizeEnd} onNodeContextMenu={(event, nodeId) => { event.preventDefault(); event.stopPropagation(); setNodeMenu({ x: event.clientX, y: event.clientY, nodeId }); }} renderContent={(nodeView) => { const result = nodeView.data.result as (Record<string, unknown> & { url?: string }) | undefined; const mediaKindForNode = nodeView.type === 'image' || nodeView.type === 'video' || nodeView.type === 'concat'; const resultUrl = (result?.url as string | undefined) || (mediaKindForNode ? nodeResultUrlCache.get(`${canvas.id}:${nodeView.id}`)?.url : undefined) || ''; const runStatus = nodeRunStatuses.get(nodeView.id); const isBusy = submittingNodeId === nodeView.id || ['awaiting_approval', 'queued', 'running', 'cancel_requested'].includes(String(runStatus || '')); if (resultUrl) { rememberResultUrl(canvas.id, nodeView.id, resultUrl, nodeView.type !== 'image'); const preview = <NodeResultPreview url={resultUrl} isVideo={nodeView.type !== 'image'} interactive={selectedNodeIds.includes(nodeView.id)} displayWidth={(Number((nodeView.data.ui as { width?: number } | undefined)?.width) || NODE_WIDTH) * editorViewport.scale} onExpand={() => setNodePreview({ url: resultUrl, isVideo: nodeView.type !== 'image', title: String(nodeView.data.label || '') })} onNaturalSize={(width, height) => fitNodeToMedia(nodeView.id, resultUrl, width, height)} />; if (!isBusy) return preview; return <div className="relative h-full w-full" aria-busy="true">{preview}<div className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-2 bg-black/60 backdrop-blur-[1px]" aria-label="重新生成中"><Loader2 className="h-8 w-8 animate-spin text-[#73a7ff]" /><span className="rounded-full bg-black/55 px-2.5 py-0.5 text-[11px] text-[#d8e4ff]">{nodeView.type === 'image' ? '重新生成中…' : '视频重新生成中，旧视频暂时保留'}</span></div></div>; } if (isBusy) return <div className="flex h-full w-full items-center justify-center bg-[#202226]" aria-label="生成中"><Loader2 className="h-8 w-8 animate-spin text-[#73a7ff]" /></div>; if (nodeView.type === 'scene') { const config = (nodeView.data.config || {}) as Record<string, unknown>; return (
+      {orderNodesForRender(nodes, edges).map((node) => <CanvasNodeView key={node.id} node={node as CanvasSceneNode} catalogItem={catalog.find((item) => item.type === node.type) || catalog[0]} selected={selectedNodeIds.includes(node.id)} connecting={interaction.state.connecting} connectionTargetNodeId={interaction.state.connectionTargetNodeId} scale={editorViewport.scale} handlers={interaction.handlers} onResize={handleNodeResize} onResizeEnd={handleNodeResizeEnd} onNodeContextMenu={(event, nodeId) => { event.preventDefault(); event.stopPropagation(); setNodeMenu({ x: event.clientX, y: event.clientY, nodeId }); }} renderContent={(nodeView) => { const result = nodeView.data.result as (Record<string, unknown> & { url?: string }) | undefined; const mediaKindForNode = nodeView.type === 'image' || nodeView.type === 'video' || nodeView.type === 'concat'; const resultUrl = (result?.url as string | undefined) || (mediaKindForNode ? nodeResultUrlCache.get(`${canvas.id}:${nodeView.id}`)?.url : undefined) || ''; const runStatus = nodeRunStatuses.get(nodeView.id); const isBusy = submittingNodeId === nodeView.id || queuedSubmitIds.includes(nodeView.id) || ['awaiting_approval', 'queued', 'running', 'cancel_requested'].includes(String(runStatus || '')); if (resultUrl) { rememberResultUrl(canvas.id, nodeView.id, resultUrl, nodeView.type !== 'image'); const preview = <NodeResultPreview url={resultUrl} isVideo={nodeView.type !== 'image'} interactive={selectedNodeIds.includes(nodeView.id)} displayWidth={(Number((nodeView.data.ui as { width?: number } | undefined)?.width) || NODE_WIDTH) * editorViewport.scale} onExpand={() => setNodePreview({ url: resultUrl, isVideo: nodeView.type !== 'image', title: String(nodeView.data.label || '') })} onNaturalSize={(width, height) => fitNodeToMedia(nodeView.id, resultUrl, width, height)} />; if (!isBusy) return preview; return <div className="relative h-full w-full" aria-busy="true">{preview}<div className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-2 bg-black/60 backdrop-blur-[1px]" aria-label="重新生成中"><Loader2 className="h-8 w-8 animate-spin text-[#73a7ff]" /><span className="rounded-full bg-black/55 px-2.5 py-0.5 text-[11px] text-[#d8e4ff]">{nodeView.type === 'image' ? '重新生成中…' : '视频重新生成中，旧视频暂时保留'}</span></div></div>; } if (isBusy) return <div className="flex h-full w-full items-center justify-center bg-[#202226]" aria-label="生成中"><Loader2 className="h-8 w-8 animate-spin text-[#73a7ff]" /></div>; if (nodeView.type === 'scene') { const config = (nodeView.data.config || {}) as Record<string, unknown>; return (
   <div className="flex h-full w-full flex-col gap-1.5" data-canvas-no-zoom>
     <div className="min-h-0 flex-1 overflow-hidden">
       <SceneListNodeView

@@ -1,4 +1,7 @@
 import asyncio
+import weakref
+import random
+import contextlib
 import base64
 import contextvars
 import io
@@ -8,6 +11,7 @@ import os
 import re
 import time
 import uuid
+from typing import Any
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -72,11 +76,41 @@ OUTPUT_DIR = Path(__file__).resolve().parent.parent / "manga_outputs"
 
 IMAGE2_SIZE_PATTERN = re.compile(r"^\d{1,5}x\d{1,5}$")
 
-MAX_RETRIES = 3
+MAX_RETRIES = 4
 RETRY_DELAY = 5
+# 上游网关 5xx（500 Upstream gateway error / 502 Bad Gateway / 503 cpu overloaded）按次数拉长等待：
+# 固定 5 秒重试会让多路并发请求同时、反复撞上正在过载的网关，3 次都在半分钟内用完；这里依次等约 8 / 20 / 45 秒并加随机抖动错开。
+UPSTREAM_BACKOFF_SECONDS = (8, 20, 45, 60)
+# 同一时刻最多向图片上游发起的生成 / 编辑请求数（每个请求最多带 10 张参考图，约几 MB）；0 表示不限制
+IMAGE_API_MAX_CONCURRENCY = max(0, int(os.getenv("IMAGE_API_MAX_CONCURRENCY", "3")))
 
 
 DEFAULT_IMAGE_SIZE = "1920x1080"
+
+
+def retry_delay_seconds(attempt: int, error: "MangaImageGenerationError | None" = None) -> float:
+    """第 attempt 次失败后等多久再重试：上游 5xx 指数退避并加抖动，其它可重试错误沿用固定间隔。"""
+    if error is not None and getattr(error, "code", "") == "upstream_server_error":
+        base = float(UPSTREAM_BACKOFF_SECONDS[min(max(attempt, 1) - 1, len(UPSTREAM_BACKOFF_SECONDS) - 1)])
+        message = str(getattr(error, "provider_message", "") or "").lower()
+        if getattr(error, "status_code", None) == 503 or "overload" in message:
+            base *= 1.5  # 明确过载时多等一会儿，给网关留出恢复时间
+        return base + random.uniform(0, base * 0.3)
+    return float(RETRY_DELAY)
+
+
+_UPSTREAM_SEMAPHORES: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Semaphore]" = weakref.WeakKeyDictionary()
+
+
+def _upstream_slot():
+    """图片上游并发闸门：按事件循环各持一个信号量，超出上限的请求排队等待，而不是一起压向上游。"""
+    if IMAGE_API_MAX_CONCURRENCY <= 0:
+        return contextlib.nullcontext()
+    loop = asyncio.get_running_loop()
+    semaphore = _UPSTREAM_SEMAPHORES.get(loop)
+    if semaphore is None:
+        semaphore = _UPSTREAM_SEMAPHORES[loop] = asyncio.Semaphore(IMAGE_API_MAX_CONCURRENCY)
+    return semaphore
 
 DOWNLOAD_RETRIES = 3
 DOWNLOAD_RETRY_DELAY = 3
@@ -1036,7 +1070,7 @@ def _encode_image_to_data_uri(file_path: str, max_size: int = 512) -> str | None
             return None
 
 
-async def generate_reference_image(
+async def _generate_reference_image_unbounded(
     prompt: str,
     output_path: Path,
     *,
@@ -1236,12 +1270,20 @@ async def generate_reference_image(
             last_err.provider_message,
         )
         if attempt < MAX_RETRIES and last_err.retryable:
-            await asyncio.sleep(RETRY_DELAY)
+            delay = retry_delay_seconds(attempt, last_err)
+            logger.info("[%s] %.0f 秒后重试（第 %s/%s 次）", progress_label, delay, attempt + 1, MAX_RETRIES)
+            await asyncio.sleep(delay)
             continue
         break
 
     assert last_err is not None
     raise last_err
+
+
+async def generate_reference_image(*args: Any, **kwargs: Any) -> str:
+    """生成参考/故事板图（含并发闸门，见 IMAGE_API_MAX_CONCURRENCY）。参数见 _generate_reference_image_unbounded。"""
+    async with _upstream_slot():
+        return await _generate_reference_image_unbounded(*args, **kwargs)
 
 
 async def generate_cover_image(
@@ -1327,7 +1369,9 @@ async def generate_cover_image(
             last_err.provider_message,
         )
         if attempt < MAX_RETRIES and last_err.retryable:
-            await asyncio.sleep(RETRY_DELAY)
+            delay = retry_delay_seconds(attempt, last_err)
+            logger.info("[%s] %.0f 秒后重试（第 %s/%s 次）", progress_label, delay, attempt + 1, MAX_RETRIES)
+            await asyncio.sleep(delay)
             continue
         break
 
@@ -1494,7 +1538,9 @@ async def edit_existing_image(
             last_err.provider_message,
         )
         if attempt < MAX_RETRIES and last_err.retryable:
-            await asyncio.sleep(RETRY_DELAY)
+            delay = retry_delay_seconds(attempt, last_err)
+            logger.info("[%s] %.0f 秒后重试（第 %s/%s 次）", progress_label, delay, attempt + 1, MAX_RETRIES)
+            await asyncio.sleep(delay)
             continue
         break
 
@@ -1796,8 +1842,9 @@ async def generate_manga_image(
                     continue
 
             if attempt < max_attempts and last_err.retryable:
-                logger.info("[%s] %s秒后重试...", progress_label, RETRY_DELAY)
-                await asyncio.sleep(RETRY_DELAY)
+                delay = retry_delay_seconds(attempt, last_err)
+                logger.info("[%s] %.0f 秒后重试...", progress_label, delay)
+                await asyncio.sleep(delay)
                 continue
             break
 
