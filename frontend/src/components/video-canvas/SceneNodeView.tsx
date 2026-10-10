@@ -72,6 +72,8 @@ export interface SceneNodeViewProps {
   onToggleApproved?: () => void;
   /** 在聚合审核节点内使用时隐藏单场景批准按钮（审批统一在聚合层） */
   hideApproval?: boolean;
+  /** 嵌在场景审核列表的展开行里：不再自带卡片外框、编号 / 批准徽标和折叠箭头，始终展开，只保留可编辑的内容 */
+  embedded?: boolean;
 }
 
 /** dialogue 渲染为行数组：兼容 string / string[] / {character,line}[] */
@@ -157,9 +159,10 @@ export function editingTextToVisualAnchors(text: string): { type: string; descri
   return items;
 }
 
-export default function SceneNodeView({ config, onChange, onToggleApproved, hideApproval }: SceneNodeViewProps) {
+export default function SceneNodeView({ config, onChange, onToggleApproved, hideApproval, embedded = false }: SceneNodeViewProps) {
   const { editingField, setEditingField, makeInputProps, makeTextareaProps } = useFieldEditing();
   const [expanded, setExpanded] = useState(!config.approved);
+  const open = embedded || expanded;
 
   const sceneId = config.scene_id ?? '?';
   const beats = Array.isArray(config.beats) ? config.beats : [];
@@ -189,18 +192,22 @@ export default function SceneNodeView({ config, onChange, onToggleApproved, hide
   };
 
   return (
-    <div className="w-full max-h-[420px] rounded-xl border border-[#3a3f45] bg-[#202226] shadow-sm overflow-hidden flex flex-col">
+    <div className={embedded ? 'w-full flex flex-col' : 'w-full max-h-[420px] rounded-xl border border-[#3a3f45] bg-[#202226] shadow-sm overflow-hidden flex flex-col'}>
       {/* ── 卡片头部：点击整体展开/收起 ── */}
       <div
-        onClick={() => setExpanded((prev) => !prev)}
-        className="flex items-center justify-between w-full px-3 py-2.5 hover:bg-[#26292e]/70 transition-colors cursor-pointer shrink-0"
+        onClick={embedded ? undefined : () => setExpanded((prev) => !prev)}
+        className={embedded ? 'flex items-center w-full px-1 py-2 shrink-0' : 'flex items-center justify-between w-full px-3 py-2.5 hover:bg-[#26292e]/70 transition-colors cursor-pointer shrink-0'}
       >
-        <div className="flex items-center gap-2 min-w-0 flex-1">
-          <span className="shrink-0 inline-flex items-center justify-center w-6 h-6 rounded-lg bg-[#73a7ff]/12 text-xs font-semibold text-[#73a7ff]">
-            {sceneId}
-          </span>
+        <div className={`flex items-center gap-2 min-w-0 flex-1 ${embedded ? 'flex-wrap' : ''}`}>
+          {!embedded && (
+            <span className="shrink-0 inline-flex items-center justify-center w-6 h-6 rounded-lg bg-[#73a7ff]/12 text-xs font-semibold text-[#73a7ff]">
+              {sceneId}
+            </span>
+          )}
           {/* 标题：点击编辑 */}
-          {isEditing(fieldKey('title')) ? (
+          {/* 嵌在场景列表里时，行标题已经显示了标题，这里不再重复 */}
+          {!embedded && (
+            isEditing(fieldKey('title')) ? (
             <input
               {...makeInputProps(fieldKey('title'), (v) => commitInput({ title: v }), config.title || '')}
               className="text-sm font-medium text-[#e8ebf0] border border-[#73a7ff]/60 rounded px-1.5 py-0.5 bg-[#2a2e33] outline-none min-w-[120px]"
@@ -213,6 +220,7 @@ export default function SceneNodeView({ config, onChange, onToggleApproved, hide
             >
               {config.title || `场景 ${sceneId}`}
             </span>
+          )
           )}
           {/* 地点：点击编辑 */}
           {isEditing(fieldKey('location')) ? (
@@ -246,27 +254,29 @@ export default function SceneNodeView({ config, onChange, onToggleApproved, hide
               {config.time_of_day || '点击设置时间'}
             </span>
           )}
-          {headerImportance && (
+          {headerImportance && !embedded && (
             <span className={`inline-flex items-center gap-0.5 rounded-full px-1.5 py-0.5 text-[10px] font-medium shrink-0 ${importanceColors[headerImportance] || 'bg-[#2a2e33] text-[#8b93a1]'}`}>
               <Tag size={9} />
               {importanceLabels[headerImportance] || headerImportance}
             </span>
           )}
-          {approved && (
+          {approved && !embedded && (
             <span className="inline-flex items-center gap-1 rounded-full bg-emerald-500/15 px-2 py-0.5 text-[10px] font-medium text-emerald-400 shrink-0">
               <CheckCircle2 size={11} />
               已批准
             </span>
           )}
         </div>
-        <span className="shrink-0 ml-2">
-          {expanded ? <ChevronDown size={16} className="text-[#78818f]" /> : <ChevronRight size={16} className="text-[#78818f]" />}
-        </span>
+        {!embedded && (
+          <span className="shrink-0 ml-2">
+            {expanded ? <ChevronDown size={16} className="text-[#78818f]" /> : <ChevronRight size={16} className="text-[#78818f]" />}
+          </span>
+        )}
       </div>
 
       {/* ── 展开内容 ── */}
-      {expanded && (
-        <div className="px-3 pb-3 border-t border-[#3a3f45] overflow-y-auto flex-1 min-h-0">
+      {open && (
+        <div className={embedded ? 'px-1 pb-2 border-t border-[#35393f]' : 'px-3 pb-3 border-t border-[#3a3f45] overflow-y-auto flex-1 min-h-0'}>
           {/* 角色标签 — 点击编辑（逗号分隔） */}
           <div className="flex flex-wrap items-center gap-1.5 mt-3 mb-2">
             <UserRound size={12} className="text-[#78818f] shrink-0" />

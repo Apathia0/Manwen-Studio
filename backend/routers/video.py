@@ -5506,6 +5506,19 @@ async def regenerate_video_asset(
 
 # 鈹€鈹€鈹€ Video Style Preset Endpoints 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 
+def _ensure_style_preset_name_available(db: Session, name: str | None, *, exclude_id: int | None = None) -> None:
+    """风格预设名称不能为空，也不能与其他预设重名：多处业务（章节风格、分镜、视频流水线）按名称查找预设，
+    重名会让“选了 A 却用到 B”。已有的历史重名数据不受影响（只在改名或新增时校验）。"""
+    cleaned = str(name or "").strip()
+    if not cleaned:
+        raise HTTPException(422, "风格名称不能为空")
+    query = db.query(VideoStylePreset).filter(sa_func.lower(VideoStylePreset.name) == cleaned.lower())
+    if exclude_id is not None:
+        query = query.filter(VideoStylePreset.id != exclude_id)
+    if query.first() is not None:
+        raise HTTPException(409, f"已存在同名风格预设「{cleaned}」，请换一个名称")
+
+
 @router.get("/api/video-style-presets")
 async def list_video_style_presets(
     request: Request,
@@ -5513,7 +5526,7 @@ async def list_video_style_presets(
 ):
     presets = (
         db.query(VideoStylePreset)
-        .order_by(VideoStylePreset.sort_order.asc())
+        .order_by(VideoStylePreset.sort_order.asc(), VideoStylePreset.id.asc())
         .all()
     )
     return {
@@ -5580,6 +5593,7 @@ async def create_video_style_preset(
     db: Session = Depends(get_db),
 ):
     user = _require_user(request, db)
+    _ensure_style_preset_name_available(db, body.name)
 
     preset = VideoStylePreset(
         name=body.name,
@@ -5619,6 +5633,8 @@ async def update_video_style_preset(
         raise HTTPException(404, "视频风格预设未找到")
 
     update_data = body.model_dump(exclude_unset=True)
+    if "name" in update_data:
+        _ensure_style_preset_name_available(db, update_data["name"], exclude_id=preset_id)
     logger.info(
         "更新风格预设 %s: received fields=%s image_url=%s",
         preset_id,

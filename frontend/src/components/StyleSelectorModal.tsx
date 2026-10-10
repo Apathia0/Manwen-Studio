@@ -10,12 +10,15 @@ interface StyleSelectorModalProps {
   onClose: () => void;
   presets: VideoStylePreset[];
   selectedStyleName: string;
+  /** 已选预设的 ID：预设名称可能重复，有 ID 时按 ID 判断选中，避免同名预设一起高亮 */
+  selectedPresetId?: number | null;
   styleReferenceImageUrl: string | null;
   workflowId?: number | null;
   /** 漫画模式要求预设必须有真实参考图；视频模式仍可使用文字预设。 */
   requireReferenceImage?: boolean;
   onFileUpload?: (file: File) => Promise<string>;
-  onStyleSelect: (styleName: string, referenceImageUrl: string | null) => void;
+  /** presetId：选中内置预设时为其 ID，使用自定义参考图或未选择时为 null */
+  onStyleSelect: (styleName: string, referenceImageUrl: string | null, presetId?: number | null) => void;
 }
 
 function toStyleImageUrl(filePath?: string | null): string {
@@ -40,6 +43,7 @@ export default function StyleSelectorModal({
   onClose,
   presets,
   selectedStyleName,
+  selectedPresetId = null,
   styleReferenceImageUrl,
   workflowId,
   requireReferenceImage = false,
@@ -49,6 +53,7 @@ export default function StyleSelectorModal({
   const [activeCategory, setActiveCategory] = useState('all');
   const [uploading, setUploading] = useState(false);
   const [localSelectedStyle, setLocalSelectedStyle] = useState(selectedStyleName);
+  const [localSelectedPresetId, setLocalSelectedPresetId] = useState<number | null>(selectedPresetId);
   const [localReferenceUrl, setLocalReferenceUrl] = useState(styleReferenceImageUrl);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -56,10 +61,14 @@ export default function StyleSelectorModal({
   useEffect(() => {
     if (!isOpen) return;
     setLocalSelectedStyle(selectedStyleName);
+    setLocalSelectedPresetId(selectedPresetId);
     setLocalReferenceUrl(styleReferenceImageUrl);
-  }, [isOpen, selectedStyleName, styleReferenceImageUrl]);
+  }, [isOpen, selectedStyleName, selectedPresetId, styleReferenceImageUrl]);
 
   if (!isOpen) return null;
+
+  const firstPresetIdByName = new Map<string, number>();
+  for (const item of presets) if (!firstPresetIdByName.has(item.name)) firstPresetIdByName.set(item.name, item.id);
 
   const filteredPresets = activeCategory === 'all'
     ? presets
@@ -68,6 +77,7 @@ export default function StyleSelectorModal({
   const handlePresetClick = (preset: VideoStylePreset) => {
     if (requireReferenceImage && !preset.image_url) return;
     setLocalSelectedStyle(preset.name);
+    setLocalSelectedPresetId(preset.id);
     setLocalReferenceUrl(null); // 使用内置预设时清除自定义参考图
   };
 
@@ -92,6 +102,7 @@ export default function StyleSelectorModal({
       }
       setLocalReferenceUrl(url);
       setLocalSelectedStyle('');
+      setLocalSelectedPresetId(null);
     } catch (err) {
       console.error('上传风格参考图失败:', err);
       toast.error(err instanceof Error && err.message ? `上传风格参考图失败：${err.message}` : '上传风格参考图失败，请重试');
@@ -101,12 +112,13 @@ export default function StyleSelectorModal({
   };
 
   const handleConfirm = () => {
-    onStyleSelect(localSelectedStyle, localReferenceUrl);
+    onStyleSelect(localSelectedStyle, localReferenceUrl, localReferenceUrl ? null : localSelectedPresetId);
     onClose();
   };
 
   const handleCancel = () => {
     setLocalSelectedStyle(selectedStyleName);
+    setLocalSelectedPresetId(selectedPresetId);
     setLocalReferenceUrl(styleReferenceImageUrl);
     onClose();
   };
@@ -218,7 +230,10 @@ export default function StyleSelectorModal({
             <div className="mb-3 text-sm font-medium text-slate-700">内置风格预设</div>
             <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 md:grid-cols-4">
               {filteredPresets.map((preset) => {
-                const isSelected = localSelectedStyle === preset.name && !localReferenceUrl;
+                // 有 ID 按 ID 判断；只有名称（旧调用方）时同名预设只认第一个，避免多个预设一起高亮
+                const isSelected = !localReferenceUrl && (localSelectedPresetId != null
+                  ? preset.id === localSelectedPresetId
+                  : Boolean(localSelectedStyle) && preset.id === firstPresetIdByName.get(localSelectedStyle));
                 return (
                   <button
                     key={preset.id}

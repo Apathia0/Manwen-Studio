@@ -311,3 +311,154 @@ def test_named_character_in_several_scenes_is_main_even_without_lines():
     # 只在一个分场露脸、没台词、只提到一次：进可选资产
     main, minor, _ = split_characters(["顾沉", "陈磊"], text, {"顾沉": 3, "陈磊": 1})
     assert minor == ["陈磊"]
+
+
+# ── “真实角色名 + 动作描述”被误当成角色（苏砚侧身让开）──────────────────────────
+
+_SU_TEXT = (
+    "苏砚：请进。\n苏砚：夜里风大。\n苏砚：这里没有别人。\n苏砚侧身让开：姑娘请。\n"
+    "苏砚沉默片刻：我信你。\n小倩：多谢公子。\n小倩：我不会害你。\n苏砚秋：兄长，该走了。\n苏砚秋：莫要耽搁。\n"
+)
+
+
+def test_action_phrases_are_folded_into_the_real_character():
+    from services.canvas_asset_analysis import find_variant_aliases
+
+    names = ["苏砚", "苏砚侧身让开", "苏砚沉默片刻", "小倩", "苏砚秋"]
+    aliases = find_variant_aliases(names, _SU_TEXT)
+
+    assert aliases == {"苏砚侧身让开": "苏砚", "苏砚沉默片刻": "苏砚"}
+    # 只多 1 个字、且有自己台词的（苏砚秋）是另一个人，不能并掉
+    assert "苏砚秋" not in aliases
+
+
+def test_longer_real_name_with_own_dialogue_is_not_folded():
+    from services.canvas_asset_analysis import find_variant_aliases
+
+    text = "李明：你好。\n李明：再见。\n李明华：我来了。\n李明华：你们好。\n"
+    assert find_variant_aliases(["李明", "李明华"], text) == {}
+
+
+def test_analysis_does_not_create_assets_for_action_phrase_names(monkeypatch):
+    import asyncio
+
+    from services import canvas_asset_analysis as analysis
+    from services import video_canvas_director as director
+
+    async def fake_triage(**kwargs):
+        return {"characters": [], "scenes": [], "props": [], "optional": []}
+
+    async def fake_prompts(shot_data, profiles, api_key):
+        return [{"name": name, "prompt": f"{name}的外貌"} for name in shot_data["characters"]]
+
+    monkeypatch.setattr(director, "_call_deepseek_json", fake_triage)
+    monkeypatch.setattr(analysis, "generate_character_prompts", fake_prompts)
+    scenes = [
+        {"scene_id": "1", "location": "书房", "characters": ["苏砚", "苏砚侧身让开", "小倩"], "beats": []},
+        {"scene_id": "2", "location": "院子", "characters": ["苏砚", "苏砚沉默片刻", "小倩"], "beats": []},
+        {"scene_id": "3", "location": "门口", "characters": ["苏砚侧身让开", "苏砚沉默片刻", "苏砚秋"], "beats": []},
+    ]
+
+    result = asyncio.run(analysis.analyze_scene_assets(scenes=scenes, screenplay_text=_SU_TEXT))
+
+    names = {a["name"] for a in result["assets"] if a["role"] == "character"}
+    assert names == {"苏砚", "小倩", "苏砚秋"}
+    su = next(a for a in result["assets"] if a["name"] == "苏砚")
+    assert su["scene_ids"] == ["1", "2", "3"], "变体出现的分场并入真实角色"
+    assert any("苏砚侧身让开→苏砚" in w for w in result["warnings"])
+
+
+def test_quality_review_does_not_ask_for_assets_of_action_phrase_names():
+    from services.canvas_quality_review import _review_assets
+
+    asset = {"id": "a1", "type": "image", "data": {"label": "苏砚", "config": {"asset_role": "character", "asset_name": "苏砚", "prompt": "外貌", "asset_scene_node": "s1"}}}
+    scene = {"id": "s1", "type": "scene", "data": {"label": "场景", "config": {"director_plan": {"units": [
+        {"characters": ["苏砚侧身让开"], "title": "苏砚侧身让开，小倩进门", "video_prompt": "苏砚侧身让开"},
+        {"characters": ["苏砚侧身让开"], "title": "镜头二", "video_prompt": "苏砚侧身让开 苏砚侧身让开"},
+    ]}}}}
+
+    issues = _review_assets([asset, scene])
+
+    assert not [i for i in issues if i.get("code") == "character_missing_asset"]
+
+
+# ── 迁移列表模式“模型通读正文认人物”：名册校正 ───────────────────────────────
+
+_ZHOU_TEXT = (
+    "苏砚：这位车夫，劳驾。\n车夫勒马：吁——客官到了。\n车夫收了银子，咧嘴一笑。\n车夫：谢客官。\n"
+    "院外议论：听说周府出事了。\n院外议论：可不是嘛。\n掌柜擦着汗：客官里面请。\n掌柜：小店简陋。\n"
+    "周氏：谁在外面喧哗？\n周氏：把人带进来。\n苏砚：夫人见谅。\n账房：账目在此。\n"
+)
+
+
+def _roster_scenes():
+    return [
+        {"scene_id": "1", "location": "路口", "characters": ["苏砚", "车夫", "车夫勒马"], "beats": []},
+        {"scene_id": "2", "location": "客栈", "characters": ["苏砚", "掌柜", "掌柜擦着汗", "院外议论"], "beats": []},
+        {"scene_id": "3", "location": "周府", "characters": ["苏砚", "周氏", "账房", "院外议论"], "beats": []},
+    ]
+
+
+def _run_analysis(monkeypatch, triage):
+    import asyncio
+
+    from services import canvas_asset_analysis as analysis
+    from services import video_canvas_director as director
+
+    async def fake_triage(**kwargs):
+        return triage
+
+    async def fake_prompts(shot_data, profiles, api_key):
+        return [{"name": name, "prompt": f"{name}的外貌"} for name in shot_data["characters"]]
+
+    monkeypatch.setattr(director, "_call_deepseek_json", fake_triage)
+    monkeypatch.setattr(analysis, "generate_character_prompts", fake_prompts)
+    return asyncio.run(analysis.analyze_scene_assets(scenes=_roster_scenes(), screenplay_text=_ZHOU_TEXT))
+
+
+def test_without_model_help_action_variants_and_crowd_labels_are_not_assets(monkeypatch):
+    result = _run_analysis(monkeypatch, {"characters": [], "scenes": [], "props": [], "optional": []})
+
+    built = {a["name"] for a in result["assets"] if a["role"] == "character"}
+    # 车夫的台词挂在“车夫勒马：”上，合并后“车夫”才是正常主要角色，而不是被降级
+    assert {"苏砚", "车夫", "掌柜", "周氏", "账房"} <= built
+    assert "车夫勒马" not in built and "掌柜擦着汗" not in built and "院外议论" not in built
+    assert not any(c["name"] in {"车夫", "掌柜"} for c in result["candidates"])
+
+
+def test_model_roster_merges_variants_and_removes_non_persons(monkeypatch):
+    triage = {"roster": {
+        "characters": [
+            {"name": "车夫", "aliases": ["车夫勒马"], "importance": "minor"},
+            {"name": "账房先生", "aliases": ["账房"], "importance": "minor"},   # 规范名不在候选里但与别名有包含关系，且原文里没有 → 拒绝
+            {"name": "苏砚", "aliases": ["周氏"], "importance": "main"},         # 把两个不同的人并到一起 → 拒绝
+        ],
+        "not_person": ["院外议论", "周氏", "凭空捏造"],                         # 周氏有 2 句台词：模型误判也不能删；院外议论由群演规则兜底；凭空捏造不在候选里
+    }}
+    result = _run_analysis(monkeypatch, triage)
+
+    built = {a["name"] for a in result["assets"] if a["role"] == "character"}
+    assert "车夫勒马" not in built and "车夫" in built
+    assert "苏砚" in built and "周氏" in built, "把两个不同的人并到一起、或误删有多句台词的真人物，都不采纳"
+    assert "院外议论" not in built
+    assert "账房" in built, "无法印证的规范名不采纳，保持原样"
+    assert "凭空捏造" not in built
+
+
+def test_roster_parser_rejects_unverifiable_claims():
+    from services.canvas_asset_analysis import parse_character_roster
+
+    text = "苏砚：你好。\n苏砚：再见。\n苏砚：好的。\n路人乙议论：真热闹。\n"
+    triage = {"roster": {
+        "characters": [
+            {"name": "苏砚", "aliases": ["苏砚沉默片刻", "路人乙议论"], "importance": "main"},
+            {"name": "凭空捏造", "aliases": ["苏砚沉默片刻"], "importance": "main"},
+        ],
+        "not_person": ["苏砚", "路人乙议论", "不在候选里"],
+    }}
+    parsed = parse_character_roster(triage, ["苏砚", "苏砚沉默片刻", "路人乙议论"], text)
+
+    assert parsed["aliases"] == {"苏砚沉默片刻": "苏砚"}          # “路人乙议论”与“苏砚”没有包含关系，不合并
+    assert parsed["not_person"] == {"路人乙议论"}                  # 苏砚有 3 句台词，不会被误删；候选外的忽略
+    assert parsed["main"] == {"苏砚"}
+    assert parse_character_roster({}, ["苏砚"], text)["aliases"] == {}

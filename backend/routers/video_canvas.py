@@ -13,6 +13,7 @@ from collections import defaultdict, deque
 from typing import Any
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
+from pydantic import BaseModel, Field
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -1200,6 +1201,70 @@ async def list_manga_drama_projects(request: Request, db: Session = Depends(get_
             }
         )
     return {"projects": items}
+
+
+class MangaDramaProjectUpdate(BaseModel):
+    title: str | None = Field(default=None, max_length=120)
+    description: str | None = Field(default=None, max_length=2000)
+
+
+def _require_manga_drama_story(story_id: int, user: User, db: Session) -> Story:
+    """漫剧项目 = 当前用户 story_type='video' 的作品；其它作品不允许经这里改动，避免误删小说/漫画。"""
+    story = db.get(Story, story_id)
+    if not story or story.owner_user_id != user.id or story.story_type != "video":
+        raise HTTPException(404, "漫剧项目不存在")
+    return story
+
+
+@router.patch("/api/manga-drama/projects/{story_id}")
+async def update_manga_drama_project(story_id: int, body: MangaDramaProjectUpdate, request: Request, db: Session = Depends(get_db)):
+    """重命名 / 修改简介。"""
+    user = _require_user(request, db)
+    story = _require_manga_drama_story(story_id, user, db)
+    if body.title is not None:
+        title = body.title.strip()
+        if not title:
+            raise HTTPException(422, "项目名称不能为空")
+        story.title = title
+    if body.description is not None:
+        story.description = body.description.strip()
+    db.commit()
+    return {"story_id": story.id, "title": story.title, "description": story.description}
+
+
+@router.delete("/api/manga-drama/projects/{story_id}")
+async def delete_manga_drama_project(story_id: int, request: Request, db: Session = Depends(get_db)):
+    """删除漫剧项目及其全部画布、版本、运行记录和助手会话。
+
+    通用的删除作品接口不会清理画布相关表（外键会拒绝），所以先在这里按依赖顺序清掉画布数据，
+    再复用作品删除逻辑清理资产、会话、任务等。有进行中的生成任务时拒绝删除，避免删掉正在计费的任务。"""
+    from models import CanvasAgentAction
+
+    user = _require_user(request, db)
+    story = _require_manga_drama_story(story_id, user, db)
+    canvas_ids = [row[0] for row in db.query(VideoCanvas.id).filter(VideoCanvas.story_id == story.id).all()]
+    if canvas_ids:
+        running = (
+            db.query(VideoCanvasRun.id)
+            .filter(VideoCanvasRun.canvas_id.in_(canvas_ids), VideoCanvasRun.status.in_(("queued", "running", "cancel_requested")))
+            .first()
+        )
+        if running:
+            raise HTTPException(409, "项目里还有正在生成的任务，请先在画布里停止后再删除")
+        run_ids = [row[0] for row in db.query(VideoCanvasRun.id).filter(VideoCanvasRun.canvas_id.in_(canvas_ids)).all()]
+        if run_ids:
+            db.query(VideoCanvasRunNode).filter(VideoCanvasRunNode.run_id.in_(run_ids)).delete(synchronize_session=False)
+        db.query(VideoCanvasRun).filter(VideoCanvasRun.canvas_id.in_(canvas_ids)).delete(synchronize_session=False)
+        db.query(VideoCanvasSyncRecord).filter(VideoCanvasSyncRecord.canvas_id.in_(canvas_ids)).delete(synchronize_session=False)
+        db.query(VideoCanvasPlan).filter(VideoCanvasPlan.canvas_id.in_(canvas_ids)).delete(synchronize_session=False)
+        db.query(CanvasAgentAction).filter(CanvasAgentAction.canvas_id.in_(canvas_ids)).delete(synchronize_session=False)
+        db.query(VideoCanvasLayout).filter(VideoCanvasLayout.canvas_id.in_(canvas_ids)).delete(synchronize_session=False)
+        db.query(VideoCanvasVersion).filter(VideoCanvasVersion.canvas_id.in_(canvas_ids)).delete(synchronize_session=False)
+        db.query(VideoCanvas).filter(VideoCanvas.id.in_(canvas_ids)).delete(synchronize_session=False)
+        db.flush()
+    import main as main_module  # 延迟导入：main 在启动时才加载本路由，顶层导入会循环
+
+    return main_module.delete_story(story.id, request, db)
 
 
 @router.post("/api/manga-drama/projects", status_code=201)

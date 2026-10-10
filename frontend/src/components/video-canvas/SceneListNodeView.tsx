@@ -10,7 +10,6 @@ import {
   FileText,
   Link2,
   Loader2,
-  MapPin,
   RotateCw,
   Sparkles,
   Target,
@@ -463,6 +462,10 @@ export default function SceneListNodeView({
                   const isExpanded = expandedSceneId === sceneKey;
                   const importance = String(scene.importance || 'medium');
                   const meta = importanceMeta[importance] || importanceMeta.medium;
+                  const location = String(scene.location || '').trim();
+                  const baseTitle = String(scene.title || `场景 ${index + 1}`);
+                  // 标题只有编号（场景1）时补上地点；已经带地点的标题不重复
+                  const rowTitle = location && !baseTitle.includes(location) ? `${baseTitle}: ${location}` : baseTitle;
                   return (
                     <div key={sceneKey} className={`overflow-hidden rounded-lg border ${isExpanded ? 'border-[#73a7ff]/40' : 'border-[#35393f]'} bg-[#202226]`}>
                       {/* 场景行（收起态） */}
@@ -474,14 +477,9 @@ export default function SceneListNodeView({
                         <span className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-md bg-[#73a7ff]/15 text-[10px] font-semibold text-[#73a7ff]">
                           {scene.scene_id ?? index + 1}
                         </span>
-                        <span className="min-w-0 flex-1 truncate text-[11px] font-medium text-[#e8ebf0]">
-                          {String(scene.title || `场景 ${index + 1}`)}
+                        <span className="min-w-0 flex-1 truncate text-[11px] font-medium text-[#e8ebf0]" title={rowTitle}>
+                          {rowTitle}
                         </span>
-                        {scene.location && (
-                          <span className="hidden shrink-0 items-center gap-0.5 text-[10px] text-[#78818f] sm:inline-flex">
-                            <MapPin size={9} />{String(scene.location).slice(0, 12)}
-                          </span>
-                        )}
                         {scene.time_of_day && (
                           <span className="hidden shrink-0 items-center gap-0.5 text-[10px] text-[#78818f] sm:inline-flex">
                             <Clock size={9} />{String(scene.time_of_day).slice(0, 8)}
@@ -495,10 +493,11 @@ export default function SceneListNodeView({
 
                       {/* 展开的场景编辑卡 */}
                       {isExpanded && (
-                        <div className="border-t border-[#35393f] p-1.5">
+                        <div className="border-t border-[#35393f] px-2.5">
                           <SceneNodeView
                             config={scene}
                             hideApproval
+                            embedded
                             onChange={(partial) => updateScene(index, partial)}
                           />
                         </div>
