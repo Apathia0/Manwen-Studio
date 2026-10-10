@@ -113,6 +113,8 @@ def _review_assets(nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 base for base in (base_character_name(name) for name in _names(unit.get("characters")))
                 if base and base not in character_names and len(base) <= 6 and body.count(base) >= 2
                 and not is_extra_character(base) and base not in NON_CHARACTER_LABELS
+                # “苏砚侧身让开”这类“真实角色名 + 动作描述”不是新角色，已由“苏砚”的资产覆盖
+                and not any(len(known) >= 2 and base.startswith(known) and len(base) - len(known) >= 2 for known in character_names)
             )
         if missing:
             issues.append(_issue("assets", "character_missing_asset", "warning", f"场景「{_label(scene)}」的角色 {'、'.join(sorted(missing))} 没有角色资产，跨镜头形象可能不一致", [scene["id"]], scene_node_id=scene["id"], redo_stage="assets"))
@@ -136,9 +138,70 @@ INFLATION_RATIO = 1.6
 INFLATION_MIN_EXTRA_SECONDS = 30
 
 
+# 内容下限的节奏系数：合理上限 = 下限 ×1.5，紧凑 = 下限 ×1.3（再夹到视频模型支持的最短/最长时长）
+PACING_RELAXED = 1.5
+PACING_TIGHT = 1.3
+# 偏长超过合理范围这么多（且至少这么多秒）才提示
+INFLATION_OVER_RELAXED_RATIO = 1.08
+INFLATION_OVER_RELAXED_MIN_SECONDS = 15
+# 相邻两个短镜头可合并的条件：都不超过这个时长，且内容下限之和不超过这个值
+MERGE_MAX_UNIT_SECONDS = 8
+MERGE_MAX_NEED_SECONDS = 8.5
+
+
+def _unit_content_seconds(unit: dict[str, Any]) -> float:
+    """镜头自带节拍的内容下限（台词语速 + 动作步骤）；没有节拍信息返回 0。"""
+    from services.canvas_director_quality import minimum_seconds
+
+    beats = [item["beat"] for item in unit.get("source_beats") or [] if isinstance(item, dict) and isinstance(item.get("beat"), dict)]
+    return float(minimum_seconds(beats)) if beats else 0.0
+
+
+def audit_plan_durations(units: list[dict[str, Any]], options: list[int]) -> dict[str, Any] | None:
+    """导演方案的时长审计：合理范围、偏长的镜头、可合并的相邻短镜头。镜头没有节拍信息时返回 None（沿用旧的整体比例判断）。"""
+    import math
+
+    if not units or not options:
+        return None
+    needs = [_unit_content_seconds(u) for u in units]
+    if sum(1 for n in needs if n > 0) < max(1, len(units) * 0.8):
+        return None
+    # 模型只有单一时长档位（如只能出 15 秒）时，合理范围按通用的 4~15 秒算：这正是要提示用户“被延展了”的情况
+    low, high = (min(options), max(options)) if len(set(options)) > 1 else (4, 15)
+
+    def clamp(value: float) -> int:
+        return int(min(high, max(low, math.ceil(value))))
+
+    durations = [float(u.get("duration_seconds") or 0) for u in units]
+    relaxed = [clamp(n * PACING_RELAXED) for n in needs]
+    tight = [clamp(n * PACING_TIGHT) for n in needs]
+    over = sorted(
+        ({"sequence": u.get("sequence"), "title": str(u.get("title") or ""), "seconds": d, "need": n, "excess": d - r}
+         for u, d, n, r in zip(units, durations, needs, relaxed) if d - r >= 3),
+        key=lambda item: -item["excess"],
+    )
+    merges: list[dict[str, Any]] = []
+    index = 0
+    while index < len(units) - 1:
+        a, b = units[index], units[index + 1]
+        if (a.get("scene_ids") == b.get("scene_ids") and durations[index] <= MERGE_MAX_UNIT_SECONDS and durations[index + 1] <= MERGE_MAX_UNIT_SECONDS
+                and needs[index] > 0 and needs[index + 1] > 0 and needs[index] + needs[index + 1] <= MERGE_MAX_NEED_SECONDS):
+            merged = clamp((needs[index] + needs[index + 1]) * PACING_TIGHT)
+            saving = durations[index] + durations[index + 1] - merged
+            if saving >= 2:
+                merges.append({"first": a.get("sequence"), "second": b.get("sequence"), "saving": saving})
+                index += 2
+                continue
+        index += 1
+    return {
+        "total": sum(durations), "relaxed_total": sum(relaxed), "tight_total": sum(tight),
+        "over": over, "merges": merges,
+    }
+
+
 def _duration_inflation_issues(nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """导演方案的总时长远超剧本内容本身需要的时长：常见于所选视频模型只有单一时长档位（例如只能出 15 秒），
-    每个镜头都被“延展”到这个固定时长。提示用户换支持多档时长的模型后重做导演编排。"""
+    """导演方案的总时长偏离内容节奏：按每个镜头自带的节拍算内容下限，给出合理范围，并指出偏长的镜头与可合并的相邻短镜头。
+    常见原因是所选视频模型只有单一时长档位（例如只能出 15 秒），每个镜头都被“延展”到这个固定时长。"""
     from services.canvas_director_quality import minimum_seconds
 
     issues: list[dict[str, Any]] = []
@@ -146,14 +209,33 @@ def _duration_inflation_issues(nodes: list[dict[str, Any]]) -> list[dict[str, An
         config = _config(scene)
         plan = config.get("director_plan") or {}
         units = [u for u in plan.get("units") or [] if isinstance(u, dict)]
-        beats = [b for item in config.get("scenes") or [] if isinstance(item, dict) for b in item.get("beats") or [] if isinstance(b, dict)]
-        total = sum(float(u.get("duration_seconds") or 0) for u in units)
-        content = minimum_seconds(beats) if beats else 0
-        if not units or content <= 0 or total < content * INFLATION_RATIO or total - content < INFLATION_MIN_EXTRA_SECONDS:
-            continue
-        if (plan.get("production_policy") or {}).get("shot_duration_mode") == "fixed15":
+        policy = plan.get("production_policy") or {}
+        if not units or policy.get("shot_duration_mode") == "fixed15":
             continue  # 用户在开场主动选了固定 15 秒，时长偏长是预期内的
-        options = [o for o in (plan.get("production_policy") or {}).get("duration_options") or [] if isinstance(o, int)]
+        options = [o for o in policy.get("duration_options") or [] if isinstance(o, int)]
+        total = sum(float(u.get("duration_seconds") or 0) for u in units)
+        audit = audit_plan_durations(units, options)
+        if audit is not None:
+            if total - audit["relaxed_total"] < INFLATION_OVER_RELAXED_MIN_SECONDS or total < audit["relaxed_total"] * INFLATION_OVER_RELAXED_RATIO:
+                continue
+            cause = f"这份方案生成时只有 {options[0]} 秒一档，每个镜头都被延展到这个时长" if len(options) == 1 else "镜头被拆得太细或个别镜头时长分配偏长"
+            parts = [
+                f"场景「{_label(scene)}」导演方案共 {len(units)} 个镜头、合计 {round(total)} 秒；按内容节奏合理范围约 {round(audit['tight_total'])}–{round(audit['relaxed_total'])} 秒，"
+                f"偏长约 {round(total - audit['relaxed_total'])}–{round(total - audit['tight_total'])} 秒（{cause}）。"
+            ]
+            if audit["over"]:
+                parts.append("时长偏长的镜头：" + "；".join(f"第 {o['sequence']} 镜「{o['title']}」{round(o['seconds'])} 秒（内容约 {round(o['need'])} 秒）" for o in audit["over"][:3]) + "。")
+            if audit["merges"]:
+                saved = round(sum(m["saving"] for m in audit["merges"]))
+                parts.append("可合并的相邻短镜头：" + "、".join(f"{m['first']}+{m['second']}" for m in audit["merges"][:6]) + f"（合并后约省 {saved} 秒）。")
+            parts.append("可手动缩短或合并这些镜头，也可以重做导演编排。")
+            issues.append(_issue("storyboard", "duration_inflated", "warning", "".join(parts), [scene["id"]], scene_node_id=scene["id"], redo_stage="director"))
+            continue
+        # 镜头没有节拍信息（旧画布）：沿用整体比例判断
+        beats = [b for item in config.get("scenes") or [] if isinstance(item, dict) for b in item.get("beats") or [] if isinstance(b, dict)]
+        content = minimum_seconds(beats) if beats else 0
+        if content <= 0 or total < content * INFLATION_RATIO or total - content < INFLATION_MIN_EXTRA_SECONDS:
+            continue
         cause = f"这份方案生成时只有 {options[0]} 秒一档，每个镜头都被延展到这个时长" if len(options) == 1 else "镜头被拆得太细或时长分配偏长"
         issues.append(_issue(
             "storyboard", "duration_inflated", "warning",
@@ -170,11 +252,14 @@ def _review_storyboard(nodes: list[dict[str, Any]], edges: list[dict[str, Any]])
     storyboards = [n for n in live if n.get("type") == "image" and _config(n).get("node_role") == "storyboard"]
     videos = [n for n in live if n.get("type") == "video" and _config(n).get("unit_id")]
     scene_ids = {n["id"] for n in _live(nodes, "scene")}
-    per_scene: dict[str, int] = {}
+    # 一个场景审核节点装着整部剧本的多个分场，镜头数要按“分场”统计（source_scene_ids），不能按节点统计，
+    # 否则 30 个镜头分在 8 个分场里也会被报“一个场景被拆成 30 个镜头”
+    per_scene: dict[tuple[str, str], list[str]] = {}
     for shot in videos:
         config = _config(shot)
         scene_id = str(config.get("source_scene_node") or "")
-        per_scene[scene_id] = per_scene.get(scene_id, 0) + 1
+        scene_key = ",".join(str(i) for i in (config.get("source_scene_ids") or []))
+        per_scene.setdefault((scene_id, scene_key), []).append(shot["id"])
         if not str(config.get("prompt") or "").strip():
             issues.append(_issue("storyboard", "shot_empty_prompt", "error", f"{_label(shot)} 没有视频提示词", [shot["id"]], scene_node_id=scene_id or None, redo_stage="compile"))
         seconds = config.get("duration_seconds")
@@ -200,9 +285,10 @@ def _review_storyboard(nodes: list[dict[str, Any]], edges: list[dict[str, Any]])
             issues.append(_issue("storyboard", "storyboard_empty_prompt", "error", f"{_label(shot)} 没有分镜提示词", [shot["id"]], scene_node_id=config.get("source_scene_node"), redo_stage="compile"))
             continue
     issues.extend(_duration_inflation_issues(nodes))
-    for scene_id, count in per_scene.items():
-        if count > MAX_SHOTS_PER_SCENE and scene_id in scene_ids:
-            issues.append(_issue("storyboard", "too_many_shots", "warning", f"一个场景被拆成 {count} 个镜头（建议不超过 {MAX_SHOTS_PER_SCENE}），生成成本和一致性风险较高", [scene_id], scene_node_id=scene_id))
+    for (scene_id, scene_key), shot_ids in per_scene.items():
+        if len(shot_ids) > MAX_SHOTS_PER_SCENE and scene_id in scene_ids:
+            where = f"分场 {scene_key}" if scene_key else "一个场景"
+            issues.append(_issue("storyboard", "too_many_shots", "warning", f"{where}被拆成 {len(shot_ids)} 个镜头（建议不超过 {MAX_SHOTS_PER_SCENE}），生成成本和一致性风险较高", shot_ids[:6], scene_node_id=scene_id))
     return issues
 
 

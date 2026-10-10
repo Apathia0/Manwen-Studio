@@ -1318,6 +1318,19 @@ import MediaImage from './shared/MediaImage';
 - `add_edge` 操作允许携带 `data.agent_asset_binding / sequence`（仅此两个键），使资产自动连线之后仍能被资产阶段识别重建。
 - 系统提示词的「高效协作规则」要求：延续语（继续/下一步/确认）沿用上一轮清单；意图明确不抛二选一；写入后核对真实结果再汇报；同一目标一轮最多一张确认卡。新增写入类画布工具时，必须同步加入 `_VIDEO_CANVAS_WORKFLOW_TOOL_NAMES`、相关技能 `tool_names` 以及 `canvas_updated` 事件判断。
 
+**资产提取规则（`services/canvas_asset_analysis.py` / `screenplay_adapt.clean_character_names`）**
+- 角色名清洗会把“人名 + 动作”（周万贯摔账册、周氏赶来）合并回本名：它是另一个已知名字加后缀，且自己没当过说话人或后缀含动作用字；`_ACTION_CHARS` 是动作用字表。
+- 角色分三档（`split_characters`）：主要角色 = 有名字且（有台词，或剧本出现 ≥2 次，或出现在 ≥2 个分场的出场名单）；次要角色进“可选资产”（不丢弃）；只有泛称（少年甲、路人、族人）才是群演。主要角色上限 `MAX_MAIN_CHARACTERS`。
+- 场景以剧本拆分出的地点为准（`location_groups`）：每个不同地点都建场景资产，“东院 / 周府东院”这类包含关系合并取更完整的名字，上限 `MAX_SCENE_ASSETS`；模型漏掉或没给提示词的地点用拆分里的时间、概要兜底出提示词。**不要再要求场景“出现 2 次”才入选**——短剧一集里的地点大多只出现一次。道具仍要求跨分场出现或被反复提及。
+- 手动补建的资产带 `manual_added`，重做资产分析不会清掉。
+
+**导演编排的节奏与收口（灵活剪切模式）**
+- 目标是“连贯、高质量、无水时长、紧凑但故事完整”，成本只是副产品。规则在 `services/canvas_creative_guide.py` 的 `DIRECTOR_PLANNING_GUIDE`（时长与镜头划分）与 `DIRECTOR_SHOT_GUIDE`（时间段要有叙事内容、单段尽量不超 6 秒），**必须与程序口径一致**：内容下限 = 动作秒数与对白秒数的较大者（可重叠，不相加）；时长取不小于下限的最短档位、至多多留约 30% 呼吸；特效/反应镜头不得额外加时长。
+- 程序收口（`canvas_director_quality.py` 的 `merge_short_units` + `tighten_durations`，在 `direct()` 里先于镜头时间轴生成）：合并同分场相邻短镜头（跨分场、含 importance=high 节拍、单段对白≥50 字、刻意硬切手法的不合并），再把超过“内容×1.3”的时长收紧；只缩短、不加长，收口后必须仍通过 `validate_plan`，否则回退到模型原方案。
+- 内容估算用 `_content_seconds`：比校验口径（`minimum_seconds`）多给“逗号连着的多个动作”留时间，只会更宽，避免把真有两个动作的镜头压得过短。固定 15 秒模式沿用 `merge_underfilled_units`，不受影响。
+- 导演编排的拆分/校验保护（真实模型预演得出）：① 超容量拆分（`repair_units`→`_describe_split_part`）后每个部分必须有自己的标题/摘要/衔接，否则镜头阶段的模型会把别的镜头的台词写进本镜、容量超了校验不过、退回“保守分镜”；② `repair_shot_timelines` 剔除属于其它镜头的台词；③ `validate_plan` 校验时间轴里台词顺序与原文一致；④ 固定 15 秒超容量拆分按内容均衡（`_balanced_partition`，不劈开连续对话、不留过薄镜头），避免“13.4 秒 + 4 秒”的尾巴；⑤ 灵活模式 `split_overstuffed_units`：节拍 >6 或内容 >最大时长×80% 的镜头均衡拆开（模型在提示词“默认合并”下会把 9 个节拍塞进 15 秒）；⑥ 自动拆场（`screenplay_adapt._cut_points`）不切在连续对话/未回答的提问中间；⑦ 收尾 `tidy_after_pacing` / `refresh_stale_duration_reasons`：拆分标题统一重新编号、删掉模型写的过时“共 N 个单元/总时长”、重写与最终时长对不上的时长理由。
+- `craft_warnings` 会提示“台词撑不满的 >7 秒单段”（慢推凑时长）；质检的 `duration_inflated` 给出合理范围、偏长镜头与可合并镜头对，`too_many_shots` 按真实分场统计。
+
 **多模态**
 - 用户上传的图片/视频先经独立预分析（`services/agent_reference_analysis.py`，开启 thinking，无工具），结论写入 `AgentAttachment.metadata_json.reference_analysis`，后续轮次自动注入"参考素材分析"，不再依赖重复传图；主工具循环仍保持 `thinking: disabled`。
 - 图片来源在消息里带标记：`[用户上传的参考素材《xx》]` / `[画布已生成的产物…]`，做风格反推时不得把画布产物当参考。紧急压缩对用户参考图最多保留 5 张（其余 2 张）。

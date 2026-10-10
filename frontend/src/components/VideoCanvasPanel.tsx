@@ -818,9 +818,10 @@ export default function VideoCanvasPanel({ storyId, chapterId, workflow: _workfl
     if (!styleSelectorNodeId) return Promise.reject(new Error('未选择风格节点'));
     return uploadNodeStyleReference(styleSelectorNodeId, file);
   }, [styleSelectorNodeId, uploadNodeStyleReference]);
-  const handleStyleModalSelect = useCallback((styleName: string) => {
+  const handleStyleModalSelect = useCallback((styleName: string, _referenceUrl?: string | null, presetId?: number | null) => {
     if (!styleSelectorNodeId) return;
-    const preset = stylePresets.find((item) => item.name === styleName);
+    // 预设名称可能重复：优先按弹窗回传的 ID 取预设
+    const preset = presetId != null ? stylePresets.find((item) => item.id === presetId) : stylePresets.find((item) => item.name === styleName);
     if (!preset) return;
     captureHistory();
     selectStyle(styleSelectorNodeId, preset.id);
@@ -1301,8 +1302,9 @@ export default function VideoCanvasPanel({ storyId, chapterId, workflow: _workfl
     onAssetsChanged?.();
     return url;
   }, [chapterId, onAssetsChanged, storyId]);
-  const handleCanvasStyleSelect = useCallback((styleName: string) => {
-    const preset = stylePresets.find((item) => item.name === styleName);
+  const handleCanvasStyleSelect = useCallback((styleName: string, presetId?: number | null) => {
+    // 预设名称可能重复：优先按弹窗回传的 ID 取预设，不能只按名称找到第一个同名预设
+    const preset = presetId != null ? stylePresets.find((item) => item.id === presetId) : stylePresets.find((item) => item.name === styleName);
     if (preset) setCanvasStyle(presetToCanvasStyle(preset));
     else if (pendingStyleReferenceRef.current) setCanvasStyle(pendingStyleReferenceRef.current);
     pendingStyleReferenceRef.current = null;
@@ -2564,6 +2566,7 @@ const mediaKind = nodeView.type === 'image' || nodeView.type === 'video' ? nodeV
           onClose={() => setStyleSelectorNodeId(null)}
           presets={stylePresets}
           selectedStyleName={selectedPreset?.name || String((config.style_snapshot as Record<string, unknown> | null)?.name || '')}
+          selectedPresetId={selectedPreset?.id ?? null}
           styleReferenceImageUrl={String(config.style_reference_url || '') || null}
           onFileUpload={handleStyleModalFileUpload}
           onStyleSelect={handleStyleModalSelect}
@@ -2580,7 +2583,7 @@ const mediaKind = nodeView.type === 'image' || nodeView.type === 'video' ? nodeV
       {nodes.length === 0 && !loading && <CanvasEmptyGuide canvasId={canvas.id} onSend={sendToAgent} onImportChapter={(mode) => { importModeRef.current = mode; setImportDialogOpen(true); }} style={canvasStyle} presets={stylePresets} onPickPreset={(preset) => setCanvasStyle(presetToCanvasStyle(preset), { silent: true })} onOpenStyleModal={() => setCanvasStyleModalOpen(true)} onToggleStyle={toggleCanvasStyle} aspect={canvasAspect} onPickAspect={setCanvasAspect} shotMode={shotDurationMode} onPickShotMode={setShotDurationMode} />}
       {nodes.length > 0 && <CanvasPipelineBar summary={pipelineSummary} agentBusy={agentStreaming || pipelineActive} cost={costEstimate} pipelineRun={pipelineTask} onRunPipeline={() => void runPipeline()} onCancelPipeline={() => void cancelPipeline()} onContinue={sendToAgent} onBatch={(ids) => void runBatch(ids)} batchBusy={running || Boolean(batch)} batch={batch} inconsistentCount={inconsistentIds.length} onUnifyStyle={unifyStyle} autoCollapseKey={inspectorNode && supportsNodeInspector(inspectorNode.type) ? inspectorNode.id : null} reviewSlot={<CanvasReviewPanel canvasId={canvas.id} revision={canvas.definition_revision} refreshKey={refreshTick} busy={agentStreaming || pipelineActive || running || Boolean(batch)} onBeforeAction={flushBeforeAgent} onChanged={() => void refreshCanvas()} onRedoStarted={setPipelineTask} onFocusNode={focusNode} onPreviewEdges={setGhostEdges} />} />}
       {batchDialog && <BatchStartDialog info={batchDialog.info} style={canvasStyle} presets={stylePresets} onPickPreset={(preset) => setCanvasStyle(presetToCanvasStyle(preset), { silent: true })} onOpenStyleModal={() => setCanvasStyleModalOpen(true)} onToggleStyle={toggleCanvasStyle} onConfirm={() => batchDialog.resolve(true)} onCancel={() => batchDialog.resolve(false)} />}
-      {canvasStyleModalOpen && <StyleSelectorModal isOpen requireReferenceImage onClose={() => { pendingStyleReferenceRef.current = null; setCanvasStyleModalOpen(false); }} presets={stylePresets} selectedStyleName={canvasStyle?.style_snapshot?.name || ''} styleReferenceImageUrl={canvasStyle?.style_reference_url || null} onFileUpload={uploadCanvasStyleReference} onStyleSelect={(styleName) => handleCanvasStyleSelect(styleName)} />}
+      {canvasStyleModalOpen && <StyleSelectorModal isOpen requireReferenceImage onClose={() => { pendingStyleReferenceRef.current = null; setCanvasStyleModalOpen(false); }} presets={stylePresets} selectedStyleName={canvasStyle?.style_snapshot?.name || ''} selectedPresetId={canvasStyle?.style_preset_id ?? null} styleReferenceImageUrl={canvasStyle?.style_reference_url || null} onFileUpload={uploadCanvasStyleReference} onStyleSelect={(styleName, _url, presetId) => handleCanvasStyleSelect(styleName, presetId)} />}
       {nodePreview && <MediaLightbox url={nodePreview.url} isVideo={nodePreview.isVideo} title={nodePreview.title} onClose={() => setNodePreview(null)} />}
       {versionHistoryOpen && canvas && <CanvasVersionHistoryModal canvasId={canvas.id} onRestored={reloadAfterVersionRestore} onClose={() => setVersionHistoryOpen(false)} />}
       {importDialogOpen && canvas && <ChapterImportDialog canvasId={canvas.id} onClose={() => setImportDialogOpen(false)} onImported={handleScreenplayImported} />}

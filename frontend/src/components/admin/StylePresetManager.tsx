@@ -155,7 +155,8 @@ export default function StylePresetManager() {
   const startCreate = () => {
     setEditPreset(null);
     setIsCreating(true);
-    setFormData({ name: '', category: 'realistic', image_url: '', prompt_template: '', sort_order: presets.length });
+    // 排序号取当前最大值 + 1：不能用数量，内置风格占用 1~8，用数量会与已有风格撞号
+    setFormData({ name: '', category: 'realistic', image_url: '', prompt_template: '', sort_order: presets.reduce((max, item) => Math.max(max, item.sort_order || 0), 0) + 1 });
     setPreviewUrl('');
   };
 

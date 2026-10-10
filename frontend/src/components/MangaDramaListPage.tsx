@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
-import { Clapperboard, Plus, RefreshCcw, ArrowRight } from 'lucide-react';
-import { createMangaDramaProject, listMangaDramaProjects, type MangaDramaProject } from '../api';
+import { Clapperboard, Plus, RefreshCcw, ArrowRight, Pencil, Trash2, X } from 'lucide-react';
+import { createMangaDramaProject, deleteMangaDramaProject, listMangaDramaProjects, updateMangaDramaProject, type MangaDramaProject } from '../api';
+import { confirm } from '../lib/confirm';
 import { toast } from '../lib/toast';
 
 interface MangaDramaListPageProps {
@@ -16,8 +17,66 @@ function formatDate(value?: string | null): string {
   }
 }
 
+/** 编辑项目名称与简介的小弹窗 */
+function EditProjectDialog({ project, onClose, onSaved }: { project: MangaDramaProject; onClose: () => void; onSaved: (next: { title: string; description: string }) => void }) {
+  const [title, setTitle] = useState(project.title);
+  const [description, setDescription] = useState(project.description || '');
+  const [saving, setSaving] = useState(false);
+
+  const save = async () => {
+    const nextTitle = title.trim();
+    if (!nextTitle) { toast.error('项目名称不能为空'); return; }
+    setSaving(true);
+    try {
+      const saved = await updateMangaDramaProject(project.story_id, { title: nextTitle, description: description.trim() });
+      onSaved({ title: saved.title, description: saved.description || '' });
+      toast.success('项目信息已保存');
+      onClose();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : '保存项目信息失败');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-900/40 p-4 backdrop-blur-sm" onClick={onClose}>
+      <div role="dialog" aria-modal="true" aria-label="编辑漫剧项目" className="w-full max-w-md rounded-2xl border border-[#d7e3f4] bg-white p-5 shadow-xl" onClick={(event) => event.stopPropagation()}>
+        <div className="mb-4 flex items-center justify-between">
+          <h2 className="text-base font-semibold text-slate-900">编辑项目</h2>
+          <button type="button" aria-label="关闭" onClick={onClose} className="rounded-full p-1.5 text-slate-400 hover:bg-slate-100 hover:text-slate-600"><X size={16} /></button>
+        </div>
+        <label className="mb-1.5 block text-xs font-medium text-slate-600">项目名称</label>
+        <input
+          autoFocus
+          value={title}
+          maxLength={120}
+          onChange={(event) => setTitle(event.target.value)}
+          onKeyDown={(event) => { if (event.key === 'Enter') void save(); if (event.key === 'Escape') onClose(); }}
+          className="w-full rounded-lg border border-[#d7e3f4] px-3 py-2 text-sm text-slate-800 outline-none focus:border-blue-400"
+        />
+        <label className="mb-1.5 mt-4 block text-xs font-medium text-slate-600">简介（可选）</label>
+        <textarea
+          value={description}
+          maxLength={500}
+          rows={3}
+          onChange={(event) => setDescription(event.target.value)}
+          placeholder="一句话说明这部漫剧讲什么"
+          className="w-full resize-none rounded-lg border border-[#d7e3f4] px-3 py-2 text-sm text-slate-800 outline-none focus:border-blue-400"
+        />
+        <div className="mt-5 flex justify-end gap-2">
+          <button type="button" onClick={onClose} className="rounded-lg border border-slate-200 px-4 py-2 text-xs text-slate-600 hover:bg-slate-50">取消</button>
+          <button type="button" onClick={() => void save()} disabled={saving} className="rounded-lg bg-blue-600 px-4 py-2 text-xs font-medium text-white hover:bg-blue-700 disabled:opacity-50">{saving ? '保存中…' : '保存'}</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function MangaDramaListPage({ onOpenProject }: MangaDramaListPageProps) {
   const [projects, setProjects] = useState<MangaDramaProject[]>([]);
+  const [editing, setEditing] = useState<MangaDramaProject | null>(null);
+  const [deletingId, setDeletingId] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState(false);
   const [newTitle, setNewTitle] = useState('');
@@ -52,8 +111,35 @@ export default function MangaDramaListPage({ onOpenProject }: MangaDramaListPage
     }
   }, [newTitle, onOpenProject]);
 
+  const handleDelete = useCallback(async (project: MangaDramaProject) => {
+    const ok = await confirm({
+      title: '删除漫剧项目',
+      message: `确定删除「${project.title}」吗？项目里的 ${project.canvases.length} 个画布、版本记录、资产和助手对话都会一并删除，且无法恢复。`,
+      confirmText: '删除',
+      danger: true,
+    });
+    if (!ok) return;
+    setDeletingId(project.story_id);
+    try {
+      await deleteMangaDramaProject(project.story_id);
+      setProjects((current) => current.filter((item) => item.story_id !== project.story_id));
+      toast.success(`已删除「${project.title}」`);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : '删除项目失败');
+    } finally {
+      setDeletingId(null);
+    }
+  }, []);
+
   return (
     <div className="mx-auto flex w-full max-w-6xl flex-col gap-5 px-4 py-6 max-md:px-3 max-md:py-4">
+      {editing && (
+        <EditProjectDialog
+          project={editing}
+          onClose={() => setEditing(null)}
+          onSaved={(next) => setProjects((current) => current.map((item) => (item.story_id === editing.story_id ? { ...item, ...next } : item)))}
+        />
+      )}
       {/* 顶部标题栏 */}
       <div className="flex items-center justify-between gap-3">
         <div className="flex items-center gap-2.5">
@@ -136,17 +222,40 @@ export default function MangaDramaListPage({ onOpenProject }: MangaDramaListPage
       ) : (
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
           {projects.map((project) => (
-            <button
+            <div
               key={project.story_id}
-              type="button"
-              onClick={() => onOpenProject(project.story_id)}
-              className="group flex flex-col gap-2.5 rounded-xl border border-[#d7e3f4] bg-white p-4 text-left shadow-sm transition-all hover:-translate-y-0.5 hover:shadow-md"
+              role="button"
+              tabIndex={0}
+              aria-busy={deletingId === project.story_id}
+              onClick={() => { if (deletingId !== project.story_id) onOpenProject(project.story_id); }}
+              onKeyDown={(event) => { if (event.target === event.currentTarget && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); onOpenProject(project.story_id); } }}
+              className={`group flex cursor-pointer flex-col gap-2.5 rounded-xl border border-[#d7e3f4] bg-white p-4 text-left shadow-sm transition-all hover:-translate-y-0.5 hover:shadow-md focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-300 ${deletingId === project.story_id ? 'pointer-events-none opacity-50' : ''}`}
             >
               <div className="flex items-start justify-between gap-2">
                 <span className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-blue-50 text-blue-600">
                   <Clapperboard size={16} />
                 </span>
-                <ArrowRight size={15} className="mt-1.5 text-slate-300 transition-colors group-hover:text-blue-500" />
+                <div className="flex items-center gap-0.5">
+                  <button
+                    type="button"
+                    title="编辑名称与简介"
+                    aria-label={`编辑项目 ${project.title}`}
+                    onClick={(event) => { event.stopPropagation(); setEditing(project); }}
+                    className="rounded-md p-1.5 text-slate-400 transition-colors hover:bg-blue-50 hover:text-blue-600 md:opacity-60 md:group-hover:opacity-100 md:group-focus-within:opacity-100"
+                  >
+                    <Pencil size={14} />
+                  </button>
+                  <button
+                    type="button"
+                    title="删除项目"
+                    aria-label={`删除项目 ${project.title}`}
+                    onClick={(event) => { event.stopPropagation(); void handleDelete(project); }}
+                    className="rounded-md p-1.5 text-slate-400 transition-colors hover:bg-rose-50 hover:text-rose-600 md:opacity-60 md:group-hover:opacity-100 md:group-focus-within:opacity-100"
+                  >
+                    <Trash2 size={14} />
+                  </button>
+                  <ArrowRight size={15} className="ml-1 text-slate-300 transition-colors group-hover:text-blue-500" />
+                </div>
               </div>
               <div>
                 <h3 className="truncate text-sm font-medium text-slate-900">{project.title}</h3>
@@ -156,7 +265,7 @@ export default function MangaDramaListPage({ onOpenProject }: MangaDramaListPage
                 <span>{project.canvases.length} 个画布</span>
                 <span>{formatDate(project.created_at)}</span>
               </div>
-            </button>
+            </div>
           ))}
         </div>
       )}

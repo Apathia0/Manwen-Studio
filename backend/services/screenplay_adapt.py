@@ -732,8 +732,47 @@ NON_CHARACTER_LABELS = frozenset({
 })
 
 
+# 动作 / 状态用字：人名后面跟着这些字，多半是“人名 + 动作”的描述（周万贯摔账册、周氏赶来），不是另一个角色
+_ACTION_CHARS = frozenset("摔赶来去走跑跪拍拿看笑哭怒喊叫冲站坐推拉打抓扔倒进出回起抱握捡丢点摇叹惊怔愣盯瞪指递接送扶拦挡躲逃追闯跳踢踹撞砸掀撕抢夺拽拖背扛举抬放摆撑靠躺睡醒怕慌愁恼")
+
+
+def _merge_action_suffixed_names(names: list[str], text: str) -> list[str]:
+    """把“人名 + 动作”合并回真正的人名：周万贯摔账册 → 周万贯，周氏赶来 → 周氏。
+
+    判断：它是另一个已知名字（角色表里的别的名字、或剧本里作为说话人出现过的名字）加上一段后缀，
+    并且它自己没有当过说话人，或者后缀里含有动作用字。找不到现成的名字时，只在“前 2~4 个字在剧本里
+    还单独出现过、后缀又含动作用字”时才截断，避免把真名误砍。"""
+    if not names:
+        return names
+    dialogue, _ = speaker_label_stats(text) if text else ({}, set())
+    known = set(names) | {base_character_name(n) for n, count in dialogue.items() if count >= 1}
+
+    def canonical(name: str) -> str:
+        bases = sorted((b for b in known if len(b) >= 2 and len(b) < len(name) and name.startswith(b)), key=len)
+        for base in bases:
+            suffix = name[len(base):]
+            if dialogue.get(name, 0) == 0 or any(ch in _ACTION_CHARS for ch in suffix):
+                return base
+        if text and dialogue.get(name, 0) == 0 and any(ch in _ACTION_CHARS for ch in name[2:]):
+            for size in (2, 3, 4):
+                if size >= len(name):
+                    break
+                head, suffix = name[:size], name[size:]
+                if any(ch in _ACTION_CHARS for ch in suffix) and text.count(head) > text.count(name):
+                    return head
+        return name
+
+    merged: list[str] = []
+    for name in names:
+        final = canonical(name)
+        if final not in merged:
+            merged.append(final)
+    return merged
+
+
 def clean_character_names(names: list[Any], text: str = "") -> list[str]:
-    """场景 / 资产的角色表清洗：去括号提示（“测验员（漠然）”→“测验员”）、去重、去掉“级别”这类标签词和不像人名的词。"""
+    """场景 / 资产的角色表清洗：去括号提示（“测验员（漠然）”→“测验员”）、去重、去掉“级别”这类标签词和不像人名的词，
+    并把“周万贯摔账册 / 周氏赶来”这类“人名 + 动作”合并回真正的人名。"""
     result: list[str] = []
     for raw_name in names or []:
         name = base_character_name(str(raw_name))
@@ -743,12 +782,52 @@ def clean_character_names(names: list[Any], text: str = "") -> list[str]:
         if not is_plausible_speaker_name(name, line_start=True):
             continue
         result.append(name)
-    return result
+    return _merge_action_suffixed_names(result, text)
+
+
+_BARE_SCENE_TITLE_RE = re.compile(r"^\s*场[景次]\s*\d*\s*$")
+
+
+def normalize_scene_titles(scenes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """场景标题统一带上地点：“场景1” → “场景1: 古道”。
+
+    标题来自模型，同一份剧本这次可能返回“场景1: 古道”、下次只返回“场景1”，界面上就时有时无地点名。
+    这里按拆分出的地点确定性补齐：只处理“只有编号、没有名字”的标题（空标题、场景1、场次 2），
+    模型已经给出完整名字的标题保持不动。"""
+    for scene in scenes:
+        location = str(scene.get("location") or "").strip()
+        title = str(scene.get("title") or "").strip()
+        if not location:
+            continue
+        if not title or _BARE_SCENE_TITLE_RE.match(title):
+            label = title or f"场景 {scene.get('scene_id')}"
+            scene["title"] = f"{label}: {location}"
+    return scenes
 
 
 # ---- 超长场景拆分 ----
 MAX_BEATS_PER_SCENE = 24
 TARGET_BEATS_PER_SCENE = 14
+
+
+def _beat_dialogue_lines(beat: dict[str, Any]) -> list[str]:
+    dialogue = beat.get("dialogue")
+    if isinstance(dialogue, str):
+        return [line for line in dialogue.splitlines() if line.strip()]
+    lines: list[str] = []
+    for item in dialogue or []:
+        text = (item.get("text") or item.get("line") or item.get("content")) if isinstance(item, dict) else item
+        if str(text or "").strip():
+            lines.append(str(text).strip())
+    return lines
+
+
+def _cuts_dialogue_thread(beats: list[dict[str, Any]], index: int) -> bool:
+    """在第 index 个节拍之前切开，会不会把一段连续对话劈成两半：前后两个节拍都有台词，或上一句是还没得到回答的提问。"""
+    before, after = _beat_dialogue_lines(beats[index - 1]), _beat_dialogue_lines(beats[index])
+    if before and after:
+        return True
+    return bool(before) and before[-1].rstrip("」”\"' ").endswith(("？", "?"))
 
 
 def _cut_points(beats: list[dict[str, Any]], content: str) -> list[int]:
@@ -764,7 +843,8 @@ def _cut_points(beats: list[dict[str, Any]], content: str) -> list[int]:
         best = None
         for i in range(low, high + 1):
             gap = content[beats[i - 1]["source_end"]:beats[i]["source_start"]]
-            score = (gap.count("\n") >= 2, -abs(i - center))
+            # 优先级：作者留的空行 > 不切在连续对话中间（问答、对峙被切开会让两句话落在不同的镜头里）> 离中心近
+            score = (gap.count("\n") >= 2, not _cuts_dialogue_thread(beats, i), -abs(i - center))
             if best is None or score > best[0]:
                 best = (score, i)
         cut = best[1] if best else center
@@ -955,6 +1035,7 @@ def _validate_preserved_screenplay(payload: Any, content: str, max_scenes: int) 
     scenes = _split_scenes_by_headers(scenes, content, max_scenes)
     for scene in scenes:
         scene["characters"] = clean_character_names(scene.get("characters") or [], str(scene.get("source_span", {}).get("text") or content))
+    scenes = normalize_scene_titles(scenes)
     scenes = _split_oversized_scenes(scenes, content, max_scenes)
     return {"screenplay_text": content, "scenes": scenes, "truncated": False, "preserve_source": True,
             "source_span": {"start": 0, "end": len(content), "text": content}}

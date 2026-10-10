@@ -1,4 +1,5 @@
 import { normalizeErrorMessage, readResponseError } from './lib/errors';
+import { summarizeToolResult } from './lib/agentToolSummary';
 
 const BASE = '';
 const DEFAULT_API_ERROR_MESSAGE = '请求失败，请稍后重试';
@@ -3247,26 +3248,8 @@ export function agentChatStream(
                 (item) => item.name === String(data.name || 'tool') && item.status === 'running',
               );
               const key = existingEntry?.id ?? `${String(data.name || 'tool')}:${toolCalls.size}`;
-              const rawResult = data.result;
-              let status: 'success' | 'error' = 'success';
-              let summary = '';
-              if (typeof rawResult === 'string') {
-                summary = rawResult;
-                try {
-                  const parsed = JSON.parse(rawResult);
-                  if (parsed && typeof parsed === 'object' && 'error' in parsed) {
-                    status = 'error';
-                    summary = String((parsed as { error?: unknown }).error || '执行失败');
-                  }
-                } catch {
-                  // keep plain string summary
-                }
-              } else if (rawResult && typeof rawResult === 'object' && 'error' in rawResult) {
-                status = 'error';
-                summary = String((rawResult as { error?: unknown }).error || '执行失败');
-              } else if (rawResult !== undefined) {
-                summary = typeof rawResult === 'string' ? rawResult : JSON.stringify(rawResult);
-              }
+              // 工具返回是给模型看的 JSON（整张画布图等），只提取一句对用户有意义的摘要，绝不原样展示
+              const { status, summary } = summarizeToolResult(String(data.name || existingEntry?.name || 'tool'), data.result);
               const toolCall = {
                 id: key,
                 name: String(data.name || existingEntry?.name || 'tool'),
@@ -3821,6 +3804,21 @@ export async function createMangaDramaProject(payload: {
   });
   if (!res.ok) throw new Error(await readErrorMessage(res, DEFAULT_API_ERROR_MESSAGE));
   return res.json();
+}
+
+/** 重命名 / 修改简介 */
+export async function updateMangaDramaProject(storyId: number, payload: { title?: string; description?: string }): Promise<{ story_id: number; title: string; description?: string | null }> {
+  const res = await fetch(`${BASE}/api/manga-drama/projects/${storyId}`, {
+    method: 'PATCH', headers: apiHeaders(true), body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '保存项目信息失败'));
+  return res.json();
+}
+
+/** 删除漫剧项目及其全部画布、版本、资产和助手会话（有进行中的生成任务时服务端会拒绝） */
+export async function deleteMangaDramaProject(storyId: number): Promise<void> {
+  const res = await fetch(`${BASE}/api/manga-drama/projects/${storyId}`, { method: 'DELETE', headers: apiHeaders() });
+  if (!res.ok) throw new Error(await readErrorMessage(res, '删除项目失败'));
 }
 
 export interface ScreenplaySplitUnit {

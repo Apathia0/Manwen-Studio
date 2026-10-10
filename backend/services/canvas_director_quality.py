@@ -23,6 +23,19 @@ FLEXIBLE_MODE = "flexible"
 FIXED_FILL_FLOOR = 7.0
 FIXED_FILL_CAP = 13.0
 FIXED_UNDERFILLED_WARN = 5.0
+# 灵活剪切模式的收口：时长 = 内容下限 × 1.3 向上取整的最小可用秒数（留约 30% 呼吸，不灌水也不压缩叙事）
+FLEX_PACING = 1.3
+# 相邻短镜头可合并的条件：各自内容下限不超过 6.5 秒，合并后内容下限不超过 9.5 秒、不超过 4 个节拍
+MERGE_UNIT_NEED_MAX = 6.5
+MERGE_COMBINED_NEED_MAX = 9.5
+MERGE_MAX_BEATS = 4
+# 拆分后内容不足这么多秒的“过薄”镜头要尽量避免（只剩一两句台词或一个小动作）
+THIN_UNIT_SECONDS = 4.0
+# 塞得过满的镜头：节拍超过这个数，或内容超过“最大时长 × 这个比例”（留 20% 呼吸），就均衡拆开
+OVERSTUFF_MAX_BEATS = 6
+OVERSTUFF_FILL = 0.8
+# 导演刻意选择的硬切手法：这类边界不合并
+_HARD_CUT_TECHNIQUES = ("时空跳转", "遮挡转场", "蒙太奇")
 
 
 def shot_duration_mode(graph):
@@ -213,8 +226,109 @@ def normalize_beat_refs(plan, index):
     return plan
 
 
-def repair_units(plan, scenes, options):
-    """确定性修复：按原文顺序重排节拍归属，补齐遗漏/去重，跨场景或超容量时拆开，时长不足则上调档位（不改动叙事内容）。"""
+def _describe_split_part(part, beats, number, total):
+    """一个单元因超容量被拆成几个镜头后，每个部分要有自己的标题、摘要和衔接。
+
+    拆分只改了节拍归属，若各部分继续共用原来的摘要，镜头阶段的模型会看到“两个镜头都要讲同一段剧情”，
+    把别的镜头的台词也写进自己的时间轴（容量超了、校验不过，只能退回保守分镜），还会出现标题和时长理由完全相同的碎镜头。"""
+    from services.video_canvas_director import _dialogue_lines
+
+    pieces = []
+    for beat in beats:
+        action = str(beat.get("action") or "").strip()
+        if action:
+            pieces.append(action)
+        pieces.extend(_dialogue_lines(beat.get("dialogue")))
+    summary = "；".join(pieces)
+    part["story_summary"] = (summary[:96] + "…") if len(summary) > 97 else summary
+    title = re.sub(r"(?:（\d+/\d+）)+$", "", str(part.get("title") or "").strip())
+    part["title"] = f"{title}（{number}/{total}）" if title else f"片段（{number}/{total}）"
+    purpose = str(part.get("narrative_purpose") or "").strip()
+    part["narrative_purpose"] = f"{purpose}（本镜只覆盖这一场戏的第 {number}/{total} 段）" if purpose else f"同一场戏的第 {number}/{total} 段"
+    part["duration_reason"] = "按本镜自己的节拍内容量取档位"
+    continuity = dict(part.get("continuity") or {})
+    if number > 1:
+        part["transition_in"] = "同一场戏连续进行：承接上一镜结束时的动作、视线与情绪"
+        continuity["from_previous"] = "承接上一镜末尾的画面状态（同一场戏的下半段）"
+        part["transition_technique"] = part.get("transition_technique") or "景别递进"
+    if number < total:
+        part["transition_out"] = "同一场戏继续：留一个动作或台词悬念给下一镜"
+        continuity["to_next"] = "留给下一镜继续同一场戏"
+    part["continuity"] = continuity
+
+
+def _balanced_partition(keys, index, parts, cap):
+    """把连续的节拍切成 parts 段，使“最拥挤的一段”内容最少；优先不切在连续对话中间。找不到合法切法返回 None。
+
+    固定 15 秒模式里，一场戏的内容略超过一个镜头的容量时，贪心装填会得到“13.4 秒 + 4.0 秒”：后一个镜头只有一两句台词
+    却占满 15 秒，是最典型的水镜头。均衡切开（例如各约 9 秒）两个镜头都有戏可演。"""
+    from services.video_canvas_director import _dialogue_lines
+
+    n = len(keys)
+    if parts < 2 or n < parts:
+        return None
+    beats = [index[k][1] for k in keys]
+    has_dialogue = [bool(_dialogue_lines(b.get("dialogue"))) for b in beats]
+    seconds = lambda a, b: minimum_seconds(beats[a:b])
+    # 一段的“负荷”= 内容秒数 + 节拍数的一半：节拍很多的镜头即使内容秒数不高，画面也更仓促
+    load = lambda a, b: seconds(a, b) + 0.5 * (b - a)
+    thin = lambda a, b: 1 if seconds(a, b) < THIN_UNIT_SECONDS else 0
+    inf = float("inf")
+    best = {}
+
+    def solve(start, remaining):
+        """从 start 起切成 remaining 段的最优方案：((代价次数, 最大负荷, 负荷平方和), 切点列表)。
+        代价次数 = 切在连续对话中间的次数 + 内容不足 THIN_UNIT_SECONDS 的“过薄”段数。"""
+        if (start, remaining) in best:
+            return best[(start, remaining)]
+        if remaining == 1:
+            cost = seconds(start, n)
+            result = ((thin(start, n), load(start, n), load(start, n) ** 2), []) if cost <= cap else ((inf, inf, inf), [])
+        else:
+            result = ((inf, inf, inf), [])
+            for cut in range(start + 1, n - remaining + 2):
+                if seconds(start, cut) > cap:
+                    break
+                tail, cuts = solve(cut, remaining - 1)
+                if tail[0] == inf:
+                    continue
+                thread = 1 if has_dialogue[cut - 1] and has_dialogue[cut] else 0
+                head_load = load(start, cut)
+                score = (tail[0] + thread + thin(start, cut), max(head_load, tail[1]), head_load ** 2 + tail[2])
+                if score < result[0]:
+                    result = (score, [cut, *cuts])
+        best[(start, remaining)] = result
+        return result
+
+    score, cuts = solve(0, parts)
+    if score[0] == inf:
+        return None
+    bounds = [0, *cuts, n]
+    return [keys[bounds[i]:bounds[i + 1]] for i in range(parts)]
+
+
+def _balance_runs(runs, index, cap):
+    """同一个单元、同一场戏里因超容量被拆成的几段，改成内容均衡的几段（段数不变）。"""
+    out, i = [], 0
+    scene_of = lambda run: str(index[run[1][0]][0]["scene_id"])
+    while i < len(runs):
+        j = i
+        while j + 1 < len(runs) and runs[j + 1][0] == runs[i][0] and scene_of(runs[j + 1]) == scene_of(runs[i]):
+            j += 1
+        group = runs[i:j + 1]
+        if len(group) >= 2:
+            parts = _balanced_partition([k for _, run in group for k in run], index, len(group), cap)
+            if parts:
+                group = [(group[0][0], part) for part in parts]
+        out.extend(group)
+        i = j + 1
+    return out
+
+
+def repair_units(plan, scenes, options, balance_cap=None):
+    """确定性修复：按原文顺序重排节拍归属，补齐遗漏/去重，跨场景或超容量时拆开，时长不足则上调档位（不改动叙事内容）。
+
+    balance_cap：固定 15 秒模式传入单镜头内容上限，超容量拆分时按内容均衡切开，避免留下只有一两句台词的尾巴镜头。"""
     index = source_index(scenes, max(options))
     if not isinstance(plan, dict) or not isinstance(plan.get("units"), list):
         return plan
@@ -239,6 +353,8 @@ def repair_units(plan, scenes, options):
             runs[-1][1].append(key)
         else:
             runs.append((owner[key], [key]))
+    if balance_cap:
+        runs = _balance_runs(runs, index, balance_cap)
     per_owner = {}
     for i, _ in runs:
         per_owner[i] = per_owner.get(i, 0) + 1
@@ -249,6 +365,8 @@ def repair_units(plan, scenes, options):
         if per_owner[i] > 1 and used[i] > 1:
             part["unit_id"] = f"{units[i].get('unit_id')}_{used[i]}"
         part["beat_ids"] = run
+        if per_owner[i] > 1:
+            _describe_split_part(part, [index[k][1] for k in run], used[i], per_owner[i])
         need = minimum_seconds([index[k][1] for k in run])
         seconds = part.get("duration_seconds")
         valid = isinstance(seconds, int) and not isinstance(seconds, bool) and seconds in options and seconds >= need
@@ -294,6 +412,7 @@ def repair_shot_timelines(plan, scenes, options):
     if not isinstance(plan, dict):
         return plan
     index = source_index(scenes, max(options))
+    all_lines = {line.strip() for _scene, beat in index.values() for line in _dialogue_lines(beat.get("dialogue"))}
     for unit in plan.get("units") or []:
         segs = (unit.get("storyboard_json") or {}).get("segments") if isinstance(unit, dict) and isinstance(unit.get("storyboard_json"), dict) else None
         total = unit.get("duration_seconds") if isinstance(unit, dict) else None
@@ -301,6 +420,15 @@ def repair_shot_timelines(plan, scenes, options):
         if not isinstance(segs, list) or not segs or not isinstance(total, (int, float)) or isinstance(total, bool) \
                 or not all(isinstance(g, dict) for g in segs) or not isinstance(refs, list) or any(k not in index for k in refs if isinstance(k, str)):
             continue
+        # 模型常把相邻镜头的台词也写进本镜的时间轴（本镜装不下、还会和下一镜重复）：只保留本镜节拍里的台词
+        own = {line.strip() for key in refs for line in _dialogue_lines(index[key][1].get("dialogue"))}
+        foreign = all_lines - own
+        if foreign:
+            for g in segs:
+                lines = str(g.get("dialogue_or_narration") or "").splitlines()
+                kept = [ln for ln in lines if ln.strip() not in foreign]
+                if len(kept) != len(lines):
+                    g["dialogue_or_narration"] = "\n".join(kept)
         rendered = "\n".join(str(g.get("dialogue_or_narration") or "") for g in segs)
         for key in refs:
             for line in _dialogue_lines(index[key][1].get("dialogue")):
@@ -428,6 +556,16 @@ def validate_plan(raw, scenes, policy, *, require_shots=False, partial=False):
             for line in _dialogue_lines(beat.get("dialogue")):
                 if line not in rendered:
                     errors.append(f"{uid}时间轴缺少原对白：{line}")
+        # 台词出现的先后必须和原文一致，顺序错了故事就讲乱了（例如先说“人活一世”再说“恨过”）
+        cursor_at = 0
+        for beat in beats:
+            for line in _dialogue_lines(beat.get("dialogue")):
+                found = rendered.find(line, cursor_at)
+                if found < 0:
+                    if line in rendered:
+                        errors.append(f"{uid}时间轴里的台词顺序与原文不一致：「{line[:20]}」应排在前面台词之后")
+                    continue
+                cursor_at = found + len(line)
     if not partial and seen != ordered:
         errors.append("节拍必须按原文顺序完整覆盖一次，禁止遗漏、重复或将补漏节拍追加末尾")
     return list(dict.fromkeys(errors))
@@ -554,6 +692,209 @@ def merge_underfilled_units(plan, scenes, options):
         unit["sequence"] = position
     plan["units"] = merged
     return removed
+
+
+def _content_seconds(beats):
+    """收口用的内容秒数：在校验口径（minimum_seconds）之上，给“一句动作里连着多个动作”多留时间。
+
+    校验只按“然后/接着/随后/；”切分动作，逗号连着的动作（“破镜映出他蓬头垢面，他猛将镜子踢碎”）会被算成一个、只给 3 秒，
+    收紧时长时据此会把真实有两个动作的镜头压得过短。这里对多分句的动作节拍多留 2 秒（封顶，不逐句累加），只会比校验口径更宽，不会更紧。"""
+    base = minimum_seconds(beats)
+    action_seconds = 0.0
+    for beat in beats:
+        text = str(beat.get("action") or "")
+        if not text.strip():
+            continue
+        steps = max(1, len([p for p in re.split(_ACTION_SPLIT, text) if p.strip()]))
+        clauses = len([p for p in re.split(r"[，,、]", text) if len(re.sub(r"[。！？!?\s]", "", p)) >= 3])
+        # 多分句只加 2 秒、不再逐句累加：描述性的长句（“镜丝低头，铜镜发亮，镜中映出……”）是同一个画面的揭示，不是一串动作
+        action_seconds += max(3 * steps, 5 if clauses >= 2 else 3)
+    return max(base, action_seconds, speech_seconds(beats))
+
+
+_SPLIT_SUFFIX = re.compile(r"（(\d+)/(\d+)）$")
+_STALE_COUNTS = re.compile(r"[，,；;]?\s*(?:全剧)?共\s*\d+\s*个(?:单元|镜头)(?:[，,]\s*总时长约?\s*\d+\s*秒)?[。.]?")
+
+
+_REASON_PICKED_SECONDS = re.compile(r"取\s*(\d+)\s*秒")
+
+
+def refresh_stale_duration_reasons(plan, scenes, options):
+    """模型写的“时长理由”里常有“取16秒”之类的具体数字，而最终时长可能已被程序改成档位内的值（超出档位、被收紧……）。
+    理由里写的秒数和实际时长对不上的，改成按真实内容重新写，避免用户看到“理由说 16 秒、节点却是 10 秒”。"""
+    if not isinstance(plan, dict):
+        return 0
+    index = source_index(scenes, max(options))
+    refreshed = 0
+    for unit in plan.get("units") or []:
+        reason = str(unit.get("duration_reason") or "")
+        seconds = unit.get("duration_seconds")
+        match = _REASON_PICKED_SECONDS.search(reason)
+        if not match or not isinstance(seconds, int) or isinstance(seconds, bool) or int(match.group(1)) == seconds:
+            continue
+        beats = [index[k][1] for k in unit.get("beat_ids") or [] if k in index]
+        if beats:
+            unit["duration_reason"] = f"内容约 {minimum_seconds(beats):.1f} 秒，按内容节奏取 {seconds} 秒"
+            refreshed += 1
+    return refreshed
+
+
+def tidy_after_pacing(plan):
+    """收口之后的收尾：1) 拆分出来的镜头按“同一场戏的相邻片段”统一重新编号（（1/3）（2/3）…），
+    只剩一个的去掉后缀，避免被合并走另一半后留下孤零零的“（2/2）”或层层叠加的后缀；
+    2) 模型自己写在 pacing_strategy 里的“共 N 个单元、总时长约 X 秒”收口后已不准确，删掉这类数字。"""
+    if not isinstance(plan, dict):
+        return
+    units = [u for u in plan.get("units") or [] if isinstance(u, dict)]
+    suffix = re.compile(r"(?:（\d+/\d+）)+$")
+    stems = [suffix.sub("", str(u.get("title") or "")) for u in units]
+    index = 0
+    while index < len(units):
+        stop = index + 1
+        while stop < len(units) and stems[stop] == stems[index] and suffix.search(str(units[stop].get("title") or "")) \
+                and units[stop].get("scene_ids") == units[index].get("scene_ids"):
+            stop += 1
+        if suffix.search(str(units[index].get("title") or "")):
+            size = stop - index
+            for number, unit in enumerate(units[index:stop], 1):
+                unit["title"] = f"{stems[index]}（{number}/{size}）" if size > 1 else stems[index]
+        index = stop
+    strategy = plan.get("pacing_strategy")
+    if isinstance(strategy, str) and _STALE_COUNTS.search(strategy):
+        plan["pacing_strategy"] = _STALE_COUNTS.sub("", strategy).strip(" ，,；;")
+
+
+def _paced_duration(need, options):
+    """内容下限 × FLEX_PACING 向上取整后，不小于它的最短可用档位；超出最大档位时取最大档。"""
+    target = max(math.ceil(need), math.ceil(need * FLEX_PACING - 1e-9))
+    bigger = [o for o in sorted(options) if o >= target]
+    return bigger[0] if bigger else max(options)
+
+
+def merge_short_units(plan, scenes, options):
+    """灵活模式的确定性收口：同一分场内相邻的短镜头合并成一个，减少碎镜头与不必要的切点，让一段戏更连贯。
+
+    只合并 beat_ids（叙事内容不增不减、顺序不变）。不合并的情形：跨分场、含高潮/反转节拍（importance=high）、
+    单段对白/旁白不少于 50 字、导演刻意用了硬切手法，或合并后内容超过容量。返回合并掉的镜头数。"""
+    if not isinstance(plan, dict) or not isinstance(plan.get("units"), list) or len(set(options)) <= 1:
+        return 0
+    from services.video_canvas_director import _dialogue_lines
+
+    index = source_index(scenes, max(options))
+    beats_of = lambda unit: [index[k][1] for k in unit["beat_ids"] if k in index]
+    need_of = lambda unit: _content_seconds(beats_of(unit))
+    scene_of = lambda unit: str(index[unit["beat_ids"][0]][0]["scene_id"])
+
+    def blocked(unit):
+        for beat in beats_of(unit):
+            if str(beat.get("importance") or "").strip().lower() == "high":
+                return True
+            if any(len(line.split("：", 1)[-1]) >= 50 for line in _dialogue_lines(beat.get("dialogue"))):
+                return True
+        return False
+
+    merged, removed = [], 0
+    for unit in plan["units"]:
+        previous = merged[-1] if merged else None
+        if (
+            previous and previous.get("beat_ids") and unit.get("beat_ids")
+            and all(k in index for k in previous["beat_ids"] + unit["beat_ids"])
+            and scene_of(previous) == scene_of(unit)
+            and need_of(previous) <= MERGE_UNIT_NEED_MAX and need_of(unit) <= MERGE_UNIT_NEED_MAX
+            and len(previous["beat_ids"]) + len(unit["beat_ids"]) <= MERGE_MAX_BEATS
+            and _content_seconds(beats_of(previous) + beats_of(unit)) <= MERGE_COMBINED_NEED_MAX
+            and not blocked(previous) and not blocked(unit)
+            and str(unit.get("transition_technique") or "").strip() not in _HARD_CUT_TECHNIQUES
+        ):
+            previous["beat_ids"] = previous["beat_ids"] + unit["beat_ids"]
+            for key in ("story_summary", "narrative_purpose"):
+                parts = [str(previous.get(key) or "").strip(), str(unit.get(key) or "").strip()]
+                previous[key] = "；".join(dict.fromkeys(p for p in parts if p))
+            titles = [str(previous.get("title") or "").strip(), str(unit.get("title") or "").strip()]
+            previous["title"] = "·".join(dict.fromkeys(t for t in titles if t))[:24]
+            previous["transition_out"] = unit.get("transition_out") or previous.get("transition_out")
+            continuity = dict(previous.get("continuity") or {})
+            continuity["to_next"] = (unit.get("continuity") or {}).get("to_next", continuity.get("to_next", ""))
+            previous["continuity"] = continuity
+            previous["closing_shot_scale"] = unit.get("closing_shot_scale") or previous.get("closing_shot_scale")
+            need = need_of(previous)
+            previous["duration_seconds"] = _paced_duration(need, options)
+            previous["duration_reason"] = f"合并相邻短镜头：内容约 {need:.1f} 秒，按内容节奏取 {previous['duration_seconds']} 秒"
+            removed += 1
+            continue
+        merged.append(unit)
+    for position, unit in enumerate(merged, 1):
+        unit["sequence"] = position
+    plan["units"] = merged
+    return removed
+
+
+def split_overstuffed_units(plan, scenes, options):
+    """灵活模式的确定性保护：把塞得过满的镜头按内容均衡拆开，避免一个镜头里挤了七八个节拍、每个只有一两秒。
+
+    判定：节拍数超过 OVERSTUFF_MAX_BEATS，或内容（动作与对白）超过最大时长的 80%。拆法与超容量拆分一致（不劈开连续对话、
+    各部分内容均衡），每个部分重新写自己的摘要与衔接。返回多拆出的镜头数。"""
+    if not isinstance(plan, dict) or not isinstance(plan.get("units"), list) or len(set(options)) <= 1:
+        return 0
+    index = source_index(scenes, max(options))
+    cap = max(options) * OVERSTUFF_FILL
+    result, extra = [], 0
+    for unit in plan["units"]:
+        keys = list(unit.get("beat_ids") or [])
+        if not keys or any(k not in index for k in keys):
+            result.append(unit)
+            continue
+        need = _content_seconds([index[k][1] for k in keys])
+        if need <= cap and len(keys) <= OVERSTUFF_MAX_BEATS:
+            result.append(unit)
+            continue
+        wanted = min(len(keys), max(2, math.ceil(need / cap), math.ceil(len(keys) / OVERSTUFF_MAX_BEATS)))
+        parts = None
+        for count in range(wanted, min(len(keys), wanted + 2) + 1):
+            parts = _balanced_partition(keys, index, count, cap)
+            if parts:
+                break
+        if not parts:
+            result.append(unit)
+            continue
+        for number, part in enumerate(parts, 1):
+            piece = deepcopy(unit)
+            piece["beat_ids"] = part
+            if number > 1:
+                piece["unit_id"] = f"{unit.get('unit_id')}_s{number}"
+            beats = [index[k][1] for k in part]
+            _describe_split_part(piece, beats, number, len(parts))
+            piece["duration_seconds"] = _paced_duration(_content_seconds(beats), options)
+            result.append(piece)
+        extra += len(parts) - 1
+    for position, item in enumerate(result, 1):
+        item["sequence"] = position
+    plan["units"] = result
+    return extra
+
+
+def tighten_durations(plan, scenes, options):
+    """灵活模式的确定性收口：镜头时长超过“内容下限 × 1.3”的，收紧到内容需要的最短档位（不会低于内容下限）。
+
+    模型常把“动作秒数 + 对白秒数”相加、或为特效/反应镜头多留时间，导致镜头里出现空转的“水时长”。
+    返回 {"count": 被收紧的镜头数, "saved": 共收紧的秒数}。"""
+    result = {"count": 0, "saved": 0}
+    if not isinstance(plan, dict) or not isinstance(plan.get("units"), list) or len(set(options)) <= 1:
+        return result
+    index = source_index(scenes, max(options))
+    for unit in plan["units"]:
+        beats = [index[k][1] for k in unit.get("beat_ids") or [] if k in index]
+        seconds = unit.get("duration_seconds")
+        if not beats or isinstance(seconds, bool) or not isinstance(seconds, int):
+            continue
+        need = _content_seconds(beats)
+        target = _paced_duration(need, options)
+        if need <= max(options) and need <= target < seconds:
+            unit["duration_seconds"] = target
+            unit["duration_reason"] = f"内容约 {need:.1f} 秒，按内容节奏取 {target} 秒（原 {seconds} 秒偏长，已收紧）"
+            result["count"] += 1
+            result["saved"] += seconds - target
+    return result
 
 
 def underfilled_warnings(plan, scenes, options):
@@ -726,11 +1067,27 @@ async def direct(scenes, policy, *, api_key=None, user_constraints=None, **sourc
         notes.append("导演编排多次未通过校验，已按原文自动分组（保守方案），可在节点中调整。校验问题：" + "；".join((errors or [])[:3]))
         return candidate
 
-    plan = await request_valid(planning, payload, lambda p: validate_plan(repair_units(p, scenes, policy["duration_options"]), scenes, policy), plan_fallback)
+    balance_cap = FIXED_FILL_CAP if fixed else None
+    plan = await request_valid(planning, payload, lambda p: validate_plan(repair_units(p, scenes, policy["duration_options"], balance_cap), scenes, policy), plan_fallback)
     if fixed:
         merged_count = merge_underfilled_units(plan, scenes, policy["duration_options"])
         if merged_count:
             notes.append(f"固定 15 秒模式：已把内容过少的相邻镜头合并了 {merged_count} 处，避免靠拖长动作凑时长")
+    else:
+        # 灵活剪切：先合并碎镜头，再按内容收紧时长；收口后必须仍通过校验（动作/对白装得下、节拍完整覆盖），否则放弃收口、保留模型原方案
+        before_pacing = deepcopy(plan)
+        split_count = split_overstuffed_units(plan, scenes, policy["duration_options"])
+        merged_count = merge_short_units(plan, scenes, policy["duration_options"])
+        tightened = tighten_durations(plan, scenes, policy["duration_options"])
+        if (split_count or merged_count or tightened["count"]) and validate_plan(plan, scenes, policy):
+            plan = before_pacing
+        else:
+            if split_count:
+                notes.append(f"已把塞得过满的镜头拆开了 {split_count} 处（节拍太多或内容占满时长，视频模型演不下来），每段都有自己的摘要与衔接")
+            if merged_count:
+                notes.append(f"已把内容很少的相邻镜头合并了 {merged_count} 处，让一段戏更连贯、少一次无谓的切点")
+            if tightened["count"]:
+                notes.append(f"已按内容节奏收紧 {tightened['count']} 个镜头的时长（共约 {tightened['saved']} 秒），避免出现空转的水镜头；所有对白与动作仍完整保留")
     index = source_index(scenes)
     for unit in plan["units"]:
         unit["scene_ids"] = list(dict.fromkeys(index[k][0]["scene_id"] for k in unit["beat_ids"]))
@@ -821,6 +1178,8 @@ segments各项含start_second/end_second、visual_action、camera_direction（�
             )
     if fixed:
         notes.extend(underfilled_warnings(plan, scenes, policy["duration_options"]))
+    tidy_after_pacing(plan)
+    refresh_stale_duration_reasons(plan, scenes, policy["duration_options"])
     plan["production_policy"] = policy  # craft_warnings 要据此判断是否固定 15 秒模式，必须先写入
     plan.update(plan_version=2, production_policy=policy, creative_constraints=user_constraints or "", warnings=[*notes, *craft_warnings(plan)], meta=source_meta, total_duration_seconds=total_seconds, target_duration_seconds=target_seconds)
     return plan

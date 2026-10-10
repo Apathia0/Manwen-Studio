@@ -1685,16 +1685,9 @@ def _normalize_video_style_names(target_engine=None):
         "水彩手画风": "水彩手绘风",
         "科技赛模风": "科技赛博风",
     }
-    canonical_by_sort_order = {
-        1: "写实电影感",
-        2: "日式动漫风",
-        3: "3A游戏渲染",
-        4: "水墨国风",
-        5: "水彩手绘风",
-        6: "暗黑哥特风",
-        7: "复古胶片感",
-        8: "科技赛博风",
-    }
+    # 注意：这里只按“已知的错别字 → 正确名称”精确替换，绝不能按 sort_order 强制改名：
+    # 排序号不是身份，管理员新增的风格排序号可能与内置风格相同（内置为 1~8），按排序号改名会在每次启动/热更新时
+    # 把用户自己起的名字（如“聊斋”）悄悄改回内置名（如“科技赛博风”）。
 
     db_engine = target_engine or engine
     try:
@@ -1702,12 +1695,6 @@ def _normalize_video_style_names(target_engine=None):
         tables = set(insp.get_table_names())
         with db_engine.begin() as conn:
             _prepare_migration_conn(conn)
-            if "video_style_presets" in tables:
-                for sort_order, canonical_name in canonical_by_sort_order.items():
-                    conn.execute(
-                        text("UPDATE video_style_presets SET name = :name WHERE sort_order = :sort_order"),
-                        {"sort_order": sort_order, "name": canonical_name},
-                    )
             for old_name, new_name in aliases.items():
                 if "video_style_presets" in tables:
                     conn.execute(
