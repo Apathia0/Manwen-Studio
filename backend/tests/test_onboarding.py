@@ -751,3 +751,136 @@ class TestGenerateOnboardingResponseNormalization:
             "synthesis": "",
         }
         assert result["understanding_depth"] == 0
+
+
+class TestBuildStoryBibleStructure:
+    """build_story_bible 对 creative_brief 缺失的重试与兜底。
+
+    背景：AI 在 JSON mode 下可能返回合法 JSON 但漏掉 creative_brief 键，
+    导致 onboarding/confirm 端点校验失败（502「AI 返回的 Story Bible 结构不完整」）。
+    """
+
+    def _setup_module_globals(self):
+        """设置 deepseek 模块全局变量，供 runtime_base_url/runtime_model 读取。"""
+        import services.deepseek as ds
+        ds.DEEPSEEK_BASE_URL = "https://api.deepseek.com"
+        ds.DEEPSEEK_MODEL = "deepseek-chat"
+
+    @staticmethod
+    def _brief() -> dict[str, str]:
+        return {
+            "one_line_premise": "程序员卷入诡异契约事件",
+            "genre": "都市诡异",
+            "audience": "悬疑网文读者",
+        }
+
+    @staticmethod
+    def _raw_input() -> dict[str, str]:
+        return {
+            "raw_idea": "程序员卷入诡异契约事件",
+            "raw_length_goal": "长篇连载",
+            "raw_must_keep": "保留契约代价设定",
+        }
+
+    @staticmethod
+    def _mock_response(inner: dict[str, object]) -> MagicMock:
+        """构造 DeepSeek chat/completions 响应 mock。"""
+        resp = MagicMock()
+        resp.text = json.dumps({
+            "choices": [{"message": {"content": json.dumps(inner, ensure_ascii=False)}}]
+        })
+        resp.status_code = 200
+        return resp
+
+    @staticmethod
+    def _mock_client_with_responses(responses: list[MagicMock]) -> MagicMock:
+        """构造按顺序返回多个响应的 AsyncClient mock。"""
+        mock_client_instance = MagicMock()
+        mock_client_instance.post = AsyncMock(side_effect=responses)
+        mock_class = MagicMock()
+        mock_class.return_value.__aenter__ = AsyncMock(return_value=mock_client_instance)
+        mock_class.return_value.__aexit__ = AsyncMock(return_value=False)
+        return mock_class
+
+    @pytest.mark.asyncio
+    async def test_missing_creative_brief_triggers_retry(self):
+        """AI 漏掉 creative_brief 时应触发修复重试，而非直接返回残缺结构。"""
+        self._setup_module_globals()
+        from services.deepseek import build_story_bible
+
+        incomplete = {
+            "story_bible": {
+                "raw_input": {"raw_idea": "程序员卷入诡异契约事件"},
+                "writing_guidance": {"opening_strategy": "以契约触发事件开篇"},
+            }
+        }
+        complete = {
+            "story_bible": {
+                "raw_input": {"raw_idea": "程序员卷入诡异契约事件"},
+                "creative_brief": self._brief(),
+                "writing_guidance": {"opening_strategy": "以契约触发事件开篇"},
+            }
+        }
+        client_class = self._mock_client_with_responses([
+            self._mock_response(incomplete),
+            self._mock_response(complete),
+        ])
+
+        with patch("services.deepseek.httpx.AsyncClient", client_class):
+            result = await build_story_bible(
+                self._brief(), self._raw_input(), api_key="test-key",
+            )
+
+        post_mock = client_class.return_value.__aenter__.return_value.post
+        assert post_mock.await_count == 2
+        assert result["creative_brief"] == self._brief()
+        assert result["writing_guidance"] == {"opening_strategy": "以契约触发事件开篇"}
+
+    @pytest.mark.asyncio
+    async def test_backfills_creative_brief_after_final_attempt(self):
+        """两轮都缺 creative_brief 时应回填入参创意卡，保证返回结构可用。"""
+        self._setup_module_globals()
+        from services.deepseek import build_story_bible
+
+        incomplete = {
+            "story_bible": {
+                "raw_input": {"raw_idea": "程序员卷入诡异契约事件"},
+                "writing_guidance": {"opening_strategy": "以契约触发事件开篇"},
+            }
+        }
+        client_class = self._mock_client_with_responses([
+            self._mock_response(incomplete),
+            self._mock_response(incomplete),
+        ])
+
+        with patch("services.deepseek.httpx.AsyncClient", client_class):
+            result = await build_story_bible(
+                self._brief(), self._raw_input(), api_key="test-key",
+            )
+
+        assert result["creative_brief"] == self._brief()
+
+    @pytest.mark.asyncio
+    async def test_ai_creative_brief_kept_when_present(self):
+        """AI 正常返回 creative_brief 时应原样保留，不被入参覆盖，也不触发重试。"""
+        self._setup_module_globals()
+        from services.deepseek import build_story_bible
+
+        ai_brief = dict(self._brief(), one_line_premise="AI 重新提炼的一句话")
+        complete = {
+            "story_bible": {
+                "raw_input": {"raw_idea": "程序员卷入诡异契约事件"},
+                "creative_brief": ai_brief,
+                "writing_guidance": {"opening_strategy": "以契约触发事件开篇"},
+            }
+        }
+        client_class = self._mock_client_with_responses([self._mock_response(complete)])
+
+        with patch("services.deepseek.httpx.AsyncClient", client_class):
+            result = await build_story_bible(
+                self._brief(), self._raw_input(), api_key="test-key",
+            )
+
+        post_mock = client_class.return_value.__aenter__.return_value.post
+        assert post_mock.await_count == 1
+        assert result["creative_brief"] == ai_brief

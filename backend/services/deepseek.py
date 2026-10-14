@@ -4239,7 +4239,7 @@ async def build_story_bible(
         for attempt in range(2):
             if attempt:
                 payload["messages"] = [
-                    {"role": "system", "content": "请修复上一轮输出，只返回一个完整、有效的 JSON 对象，顶层必须包含 story_bible。不要 Markdown、解释或前后缀。"},
+                    {"role": "system", "content": "请修复上一轮输出，只返回一个完整、有效的 JSON 对象，顶层必须包含 story_bible，且 story_bible 内必须包含 creative_brief 对象。不要 Markdown、解释或前后缀。"},
                     {"role": "user", "content": str(content)[:24000]},
                 ]
             resp = await client.post(
@@ -4254,6 +4254,18 @@ async def build_story_bible(
                 result = _extract_json_object(str(content))
                 bible = result.get("story_bible", result)
                 if isinstance(bible, dict):
+                    if isinstance(bible.get("creative_brief"), dict):
+                        return bible
+                    # AI 在 JSON mode 下也可能漏字段：首轮触发修复重试，末轮用入参创意卡回填，
+                    # 保证调用方（onboarding/confirm 等）拿到含 creative_brief 的完整结构。
+                    if attempt == 0:
+                        raise ValueError("Story Bible 缺少 creative_brief 对象")
+                    bible["creative_brief"] = (
+                        creative_brief if isinstance(creative_brief, dict) else {}
+                    )
+                    logger.warning(
+                        "[story_bible] AI 连续两轮未返回 creative_brief，已用入参创意卡回填"
+                    )
                     return bible
                 raise ValueError("Story Bible 顶层结果不是 JSON 对象")
             except (ValueError, TypeError, AttributeError) as exc:
