@@ -1,0 +1,16 @@
+StoryCanvas（曼文工坊）
+Copyright 2026 libohan-ha
+
+This product is licensed under the Apache License, Version 2.0.
+See the LICENSE file for the full license text.
+
+---
+
+本项目包含或依赖的第三方组件，均遵循其各自的许可协议，版权归各自所有者所有。
+完整清单请参见：
+
+- Python 依赖：backend/requirements.txt
+- Node 依赖：frontend/package.json、frontend/package-lock.json
+
+如你分发本项目的修改版本，请在保留本 NOTICE 的同时，
+一并保留上述依赖中要求的版权与许可声明。

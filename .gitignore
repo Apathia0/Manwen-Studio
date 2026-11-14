@@ -1,11 +1,48 @@
-# ─── Environment & Secrets ───
+# ─────────────────────────────────────────────────────────────
+#  Secrets & environment
+# ─────────────────────────────────────────────────────────────
 .env
+.env.*
+!.env.example
 backend/.env
+backend/.env.*
+!backend/.env.example
+# 编辑器/脚本生成的 .env 备份，极易误带真实密钥
+*.env.bak*
+*.env.env.bak*
+*.env.bak.*
+.env.local
+.env.production
+.env.development
 
-# ─── Python ───
+# 凭据文件
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+secrets.json
+credentials.json
+service-account*.json
+
+# 授权服务真实配置（模板 *.example 保留）
+auth/config/database.php
+auth/config/contact.php
+auth/install.lock
+
+# ─────────────────────────────────────────────────────────────
+#  Nested repo —— auth/ 是独立仓库，作为子目录提交会变成失效的 gitlink
+# ─────────────────────────────────────────────────────────────
+/auth/
+
+# ─────────────────────────────────────────────────────────────
+#  Python
+# ─────────────────────────────────────────────────────────────
 __pycache__/
 *.py[cod]
 *.pyo
+*.pyd
 *.egg-info/
 dist/
 build/
@@ -13,36 +50,72 @@ build/
 *.sqlite3
 venv/
 .venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
 
-# ─── Node ───
+# ─────────────────────────────────────────────────────────────
+#  Node
+# ─────────────────────────────────────────────────────────────
 node_modules/
 frontend/node_modules/
+storycanvas-mobile-next/node_modules/
+dist/
+.vite/
+*.tsbuildinfo
 
-# ─── Generated outputs (large images/data) ───
+# ─────────────────────────────────────────────────────────────
+#  Generated outputs / media cache（体积巨大，严禁提交）
+# ─────────────────────────────────────────────────────────────
 backend/manga_outputs/
 backend/video_outputs/
 backend/regen_assets/
-test_novel_output.md
-test_ref_C.png
+backend/.media_cache/
+docs/promo-video/
+promo-video/renders/
+promo-video/node_modules/
 
-# ─── Sisyphus agent working files ───
+# 大体积媒体文件（按需保留示例）
+*.mp4
+*.mov
+*.wav
+*.mp3
+*.psd
+*.ai
+
+# ─────────────────────────────────────────────────────────────
+#  Agent / 工具工作目录（含本机路径、任务日志，不应公开）
+# ─────────────────────────────────────────────────────────────
 .sisyphus/
+.superpowers/
+.zcode/
+.claude/
+.playwright-mcp/
+.spec-workflow/
+.test_screens/
+# 本地工作区数据与记忆日志
+.workbuddy/
 
-# ─── Runtime logs ───
+# ─────────────────────────────────────────────────────────────
+#  Runtime
+# ─────────────────────────────────────────────────────────────
 *.log
 *.err
+logs/
+*.pid
 
-# ─── Archives ───
+# ─────────────────────────────────────────────────────────────
+#  Archives
+# ─────────────────────────────────────────────────────────────
 *.tar.gz
 *.zip
+releases/
 
-# ─── Random generated images ───
-docs/*.jpg
-
-# ─── Generated renders ───
-promo-video/renders/
-
-# ─── IDE & OS ───
+# ─────────────────────────────────────────────────────────────
+#  IDE & OS
+# ─────────────────────────────────────────────────────────────
 .vscode/
 .idea/
 *.swp
@@ -50,18 +123,35 @@ promo-video/renders/
 *~
 .DS_Store
 Thumbs.db
-.spec-workflow/
+desktop.ini
 
-# ─── Misc test files ───
-test/
-releases/
-test_*.py
-test_*.png
-test_*.txt
+# Windows 保留名误创建的文件（如 `dir > nul` 事故）
+nul
+NUL
+
+# ─────────────────────────────────────────────────────────────
+#  杂项测试产物
+# ─────────────────────────────────────────────────────────────
+# 仅忽略根目录的临时调试脚本，tests/ 下的正式测试必须提交
+/test/
+/test_*.py
+/test_*.png
+/test_*.txt
+/test_novel_output.md
+/test_ref_C.png
 generate_image.py
 微信图片_*
 agent-ui-prototype.html
+docs/*.jpg
 
-# ─── MD files (except README) ───
+# ─────────────────────────────────────────────────────────────
+#  文档：默认只公开 README / SECURITY / CONTRIBUTING
+#  其余 .md（AI 草稿、内部规划、小说正文）不进入开源仓库
+# ─────────────────────────────────────────────────────────────
 *.md
 !README.md
+!SECURITY.md
+!CONTRIBUTING.md
+!CHANGELOG.md
+!LICENSE
+!LICENSE.md
